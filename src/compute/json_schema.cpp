@@ -542,6 +542,26 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     return c;
 }
 
+// Rewrite every REF in the subtree whose ref_name is a key in `rename` to the
+// mapped name. Used to namespace a tool's hoisted $defs (#1002 stage 2).
+static void rewrite_refs(SchemaNode* node, const std::map<std::string, std::string>& rename) {
+    if (!node)
+        return;
+    if (node->type == SchemaType::REF) {
+        auto it = rename.find(node->ref_name);
+        if (it != rename.end())
+            node->ref_name = it->second;
+    }
+    for (auto& [n, prop] : node->properties)
+        rewrite_refs(prop.get(), rename);
+    if (node->items)
+        rewrite_refs(node->items.get(), rename);
+    for (auto& sub : node->any_of)
+        rewrite_refs(sub.get(), rename);
+    for (auto& [n, def] : node->defs)
+        rewrite_refs(def.get(), rename);
+}
+
 std::unique_ptr<SchemaNode> build_tool_call_schema(
     const std::vector<std::pair<std::string, std::string>>& tools) {
     if (tools.empty())
@@ -562,17 +582,29 @@ std::unique_ptr<SchemaNode> build_tool_call_schema(
         const SchemaNode* res = params ? resolve_schema_ref(params.get(), params.get()) : nullptr;
         // Enforceable structure only: a free-form object dead-ends the key
         // phase (see the free_form route in ConstraintManager::prepare).
-        const bool enforceable =
-            res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
-                    (res->type == SchemaType::ENUM && !res->enum_values.empty()));
+        const bool enforceable = res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
+                                         (res->type == SchemaType::ENUM && !res->enum_values.empty()));
         if (!enforceable)
             return nullptr;
-        // $defs inside a parameter schema would resolve against the TOOL_CALL
-        // root (whose defs hold the per-tool schemas, not the nested models) —
-        // decline instead of enforcing a wrong grammar. Stage-2 candidate:
-        // hoist per-tool defs under a prefixed namespace.
-        if (!params->defs.empty())
-            return nullptr;
+        // Hoist any per-tool $defs into the TOOL_CALL root (#1002 stage 2).
+        // REF resolution in schema_constrain.cu always searches the TOOL_CALL
+        // root's defs, so a tool's nested models (pydantic/zod emit $defs+$ref
+        // for every nested model) must live there. The namespace key
+        // "<tool>/<def>" carries a '/', which parse_json_schema forbids in any
+        // $ref-derived name (and no function name contains one), so a hoisted
+        // key can never collide with a tool name or another tool's hoisted def.
+        // "#" self-refs (recursive root schema) rewrite to the tool name, whose
+        // root->defs entry IS this param schema — so `arguments` chases it back.
+        if (!params->defs.empty()) {
+            std::map<std::string, std::string> rename;
+            rename["#"] = name;
+            for (auto& [def_name, def_schema] : params->defs)
+                rename[def_name] = name + "/" + def_name;
+            rewrite_refs(params.get(), rename);  // recurses into params->defs too
+            for (auto& [def_name, def_schema] : params->defs)
+                root->defs.emplace_back(name + "/" + def_name, std::move(def_schema));
+            params->defs.clear();
+        }
         name_enum->enum_values.push_back(name);
         root->defs.emplace_back(name, std::move(params));
     }

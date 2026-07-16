@@ -41,9 +41,9 @@ TEST(RegexNfaTest, Literal) {
     ASSERT_TRUE(n.compile("abc"));
     EXPECT_FALSE(n.start_set().empty());
     EXPECT_TRUE(n.accepts(nfa_run(n, "abc")));
-    EXPECT_TRUE(nfa_run(n, "abx").empty());        // diverges at 3rd char
-    EXPECT_FALSE(n.accepts(nfa_run(n, "ab")));     // prefix alive but not accepting
-    EXPECT_TRUE(nfa_run(n, "x").empty());          // wrong first char dies
+    EXPECT_TRUE(nfa_run(n, "abx").empty());     // diverges at 3rd char
+    EXPECT_FALSE(n.accepts(nfa_run(n, "ab")));  // prefix alive but not accepting
+    EXPECT_TRUE(nfa_run(n, "x").empty());       // wrong first char dies
 }
 
 TEST(RegexNfaTest, CharClassRange) {
@@ -51,7 +51,7 @@ TEST(RegexNfaTest, CharClassRange) {
     ASSERT_TRUE(n.compile("[A-Z]"));
     EXPECT_FALSE(n.start_set().empty());
     EXPECT_TRUE(n.accepts(nfa_run(n, "D")));
-    EXPECT_TRUE(nfa_run(n, "d").empty());          // lowercase not in class
+    EXPECT_TRUE(nfa_run(n, "d").empty());  // lowercase not in class
 }
 
 TEST(RegexNfaTest, CountedRepeat) {
@@ -60,9 +60,9 @@ TEST(RegexNfaTest, CountedRepeat) {
     EXPECT_FALSE(n.start_set().empty());
     EXPECT_FALSE(n.step(n.start_set(), 'D').empty());  // first char must survive
     EXPECT_TRUE(n.accepts(nfa_run(n, "DEU")));
-    EXPECT_FALSE(n.accepts(nfa_run(n, "DE")));     // only 2 — not yet accepting
-    EXPECT_TRUE(nfa_run(n, "DEUX").empty());       // 4th char dies
-    EXPECT_TRUE(nfa_run(n, "Dx").empty());         // 2nd char wrong class
+    EXPECT_FALSE(n.accepts(nfa_run(n, "DE")));  // only 2 — not yet accepting
+    EXPECT_TRUE(nfa_run(n, "DEUX").empty());    // 4th char dies
+    EXPECT_TRUE(nfa_run(n, "Dx").empty());      // 2nd char wrong class
 }
 
 TEST(RegexNfaTest, Anchored) {
@@ -80,8 +80,7 @@ TEST(RegexNfaTest, Anchored) {
 TEST(SchemaConstrainTest, PatternEnforcementMasksCorrectly) {
     SKIP_IF_NO_CUDA();
 
-    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "code",
-                                     ":",     "}",   "D",    "DEU", "abc"};
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "code", ":", "}", "D", "DEU", "abc"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
     tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
@@ -110,7 +109,8 @@ TEST(SchemaConstrainTest, PatternEnforcementMasksCorrectly) {
     auto allowed = [&](int i) { return h[i] > -1e30f; };
     int n_allowed = 0;
     for (int i = 0; i < vocab; i++)
-        if (allowed(i)) n_allowed++;
+        if (allowed(i))
+            n_allowed++;
 
     EXPECT_GT(n_allowed, 0) << "over-masking regression: every token forbidden in STRING_PATTERN";
     EXPECT_TRUE(allowed(8)) << "'D' (uppercase, pattern-alive) must be allowed";
@@ -325,7 +325,8 @@ TEST(SchemaConstrainTest, IntegerDigitRunCappedForcesClose) {
 TEST(SchemaConstrainTest, EnumAndIntegerComboTokensValidated) {
     SKIP_IF_NO_CUDA();
     //          0       1     2      3   4    5            6    7      8       9      10     11    12     13
-    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "sentiment", ":", "\"en\"", "\":\"", "\"x", "5", "5.", "5.0", "}"};
+    std::vector<std::string> toks = {"<unk>",  "<s>",   "</s>", "{", "\"", "sentiment", ":",
+                                     "\"en\"", "\":\"", "\"x",  "5", "5.", "5.0",       "}"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
     tok.load_vocab(toks, scores, 1, 2);
@@ -399,9 +400,8 @@ TEST(SchemaConstrainTest, MaxItemsMasksCommaAtCap) {
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
     tok.load_vocab(toks, scores, 1, 2);
-    auto schema = parse_json_schema(
-        R"({"type":"object","properties":{"t":{"type":"array","maxItems":2,)"
-        R"("items":{"type":"string"}}},"required":["t"]})");
+    auto schema = parse_json_schema(R"({"type":"object","properties":{"t":{"type":"array","maxItems":2,)"
+                                    R"("items":{"type":"string"}}},"required":["t"]})");
     ASSERT_TRUE(schema != nullptr);
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
@@ -423,16 +423,14 @@ TEST(SchemaConstrainTest, EnumItemsArrayCappedAtCardinality) {
     Tokenizer tok;
     tok.load_vocab(toks, scores, 1, 2);
     // Two-member enum, NO maxItems: effective cap = 2 (see effective_max_items).
-    auto schema = parse_json_schema(
-        R"({"type":"object","properties":{"t":{"type":"array",)"
-        R"("items":{"type":"string","enum":["a","aa"]}}},"required":["t"]})");
+    auto schema = parse_json_schema(R"({"type":"object","properties":{"t":{"type":"array",)"
+                                    R"("items":{"type":"string","enum":["a","aa"]}}},"required":["t"]})");
     ASSERT_TRUE(schema != nullptr);
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     drive_array(sc, 2);
     auto capped = schema_allowed(sc, static_cast<int>(toks.size()));
-    EXPECT_FALSE(capped[kTokComma])
-        << "enum-items array without maxItems must cap at the enum cardinality";
+    EXPECT_FALSE(capped[kTokComma]) << "enum-items array without maxItems must cap at the enum cardinality";
     EXPECT_TRUE(capped[kTokCloseBracket]) << "']' must stay legal at the cap";
 }
 
@@ -442,9 +440,8 @@ TEST(SchemaConstrainTest, MinItemsBlocksPrematureClose) {
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
     tok.load_vocab(toks, scores, 1, 2);
-    auto schema = parse_json_schema(
-        R"({"type":"object","properties":{"t":{"type":"array","minItems":2,)"
-        R"("items":{"type":"string"}}},"required":["t"]})");
+    auto schema = parse_json_schema(R"({"type":"object","properties":{"t":{"type":"array","minItems":2,)"
+                                    R"("items":{"type":"string"}}},"required":["t"]})");
     ASSERT_TRUE(schema != nullptr);
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
@@ -540,15 +537,84 @@ TEST(SchemaConstrainTest, ToolCallEnvelopeAndNameBinding) {
 TEST(SchemaConstrainTest, ToolCallBuilderRejectsUnenforceable) {
     // Free-form parameters (no properties) → decline.
     EXPECT_TRUE(build_tool_call_schema({{"t", R"({"type":"object"})"}}) == nullptr);
-    // $defs inside a parameter schema → decline (would resolve wrongly).
+    // Unresolvable $ref → parse fails → decline (would enforce a wrong grammar).
     EXPECT_TRUE(build_tool_call_schema(
-                    {{"t", R"({"type":"object","properties":{"i":{"$ref":"#/$defs/I"}},)"
-                           R"("$defs":{"I":{"type":"integer"}}})"}}) == nullptr);
+                    {{"t", R"({"type":"object","properties":{"i":{"$ref":"#/$defs/Missing"}}})"}}) ==
+                nullptr);
     // Empty tool list → decline.
     EXPECT_TRUE(build_tool_call_schema({}) == nullptr);
     // Well-formed → builds.
     EXPECT_TRUE(build_tool_call_schema(
                     {{"t", R"({"type":"object","properties":{"i":{"type":"integer"}}})"}}) != nullptr);
+    // $defs inside a parameter schema → now HOISTED (stage 2), builds. The
+    // ToolCallHoistedDefsEnforced test proves the nested keys are enforced.
+    EXPECT_TRUE(build_tool_call_schema(
+                    {{"t", R"({"type":"object","properties":{"i":{"$ref":"#/$defs/I"}},)"
+                           R"("required":["i"],"$defs":{"I":{"type":"object",)"
+                           R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})"}}) != nullptr);
+}
+
+// A tool whose parameter schema uses $defs+$ref (the pydantic/zod norm for any
+// nested model) is now enforceable (#1002 stage 2): the nested defs are hoisted
+// into the TOOL_CALL root under a "<tool>/<def>" namespace and the refs rewired,
+// so the chosen tool's arguments constrain down through the nested model.
+TEST(SchemaConstrainTest, ToolCallHoistedDefsEnforced) {
+    SKIP_IF_NO_CUDA();
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>"};
+    std::string chars = "<>tol_ca\n{\"nme:d,rguspx1}/z";
+    for (char c : chars)
+        toks.push_back(std::string(1, c));
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    // One tool "add" whose only argument "pt" is a nested $def-referenced model
+    // Point = {"x": integer}. Two ref layers: root object → $ref Point → object.
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"add", R"({"type":"object","properties":{"pt":{"$ref":"#/$defs/Point"}},)"
+                R"("required":["pt"],"$defs":{"Point":{"type":"object",)"
+                R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})"},
+    };
+    auto schema = build_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr) << "a tool with $defs must now build (hoisting)";
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.reset();
+
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+    feed("<tool_call>\n{\"name\":\"add\",\"arguments\":{\"");
+    // Only the tool's own parameter "pt" may open the arguments object.
+    auto at_arg_key = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_arg_key[id('p')]) << "tool parameter 'pt' must be legal";
+    EXPECT_FALSE(at_arg_key[id('x')]) << "the nested key must not leak to the arguments level";
+
+    feed("pt\":{\"");
+    // Inside pt's value we are now in the hoisted Point model: only 'x' is a key.
+    auto at_nested = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_nested[id('x')]) << "hoisted nested model's key must be enforced";
+    EXPECT_FALSE(at_nested[id('z')]) << "a non-member nested key must be masked";
+    EXPECT_FALSE(at_nested[id('p')]) << "the parent key must not be reachable inside the nested model";
+
+    feed("x\":1}}}");  // close Point, arguments, and the tool-call body
+    // Body complete → close literal forced.
+    auto at_close = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_close[id('\n')]) << "close literal must be legal after the body";
+    EXPECT_FALSE(at_close[id('{')]);
+
+    feed("\n</tool_call>");
+    auto at_done = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_done[2]) << "EOS must be allowed after the envelope closes";
 }
 
 // ---------------------------------------------------------------------------
@@ -561,10 +627,9 @@ TEST(SchemaConstrainTest, ToolCallBuilderRejectsUnenforceable) {
 // grammar). No CUDA needed.
 TEST(SchemaConstrainTest, RefDefsParseAndResolve) {
     // pydantic-style nested model
-    auto a = parse_json_schema(
-        R"({"type":"object","properties":{"inner":{"$ref":"#/$defs/Inner"}},)"
-        R"("required":["inner"],"$defs":{"Inner":{"type":"object",)"
-        R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})");
+    auto a = parse_json_schema(R"({"type":"object","properties":{"inner":{"$ref":"#/$defs/Inner"}},)"
+                               R"("required":["inner"],"$defs":{"Inner":{"type":"object",)"
+                               R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})");
     ASSERT_TRUE(a != nullptr);
     ASSERT_EQ(a->properties.size(), 1u);
     const SchemaNode* inner_ref = a->properties[0].second.get();
@@ -576,9 +641,8 @@ TEST(SchemaConstrainTest, RefDefsParseAndResolve) {
     EXPECT_EQ(inner->properties[0].first, "x");
 
     // "definitions" spelling + clone preserves refs/defs
-    auto b = parse_json_schema(
-        R"({"definitions":{"S":{"type":"string"}},"type":"object",)"
-        R"("properties":{"s":{"$ref":"#/definitions/S"}}})");
+    auto b = parse_json_schema(R"({"definitions":{"S":{"type":"string"}},"type":"object",)"
+                               R"("properties":{"s":{"$ref":"#/definitions/S"}}})");
     ASSERT_TRUE(b != nullptr);
     auto b2 = b->clone();
     const SchemaNode* s_res = resolve_schema_ref(b2.get(), b2->properties[0].second.get());
@@ -586,26 +650,19 @@ TEST(SchemaConstrainTest, RefDefsParseAndResolve) {
     EXPECT_EQ(s_res->type, SchemaType::STRING);
 
     // root self-ref "#"
-    auto c = parse_json_schema(
-        R"({"type":"object","properties":{"next":{"$ref":"#"}},"required":[]})");
+    auto c = parse_json_schema(R"({"type":"object","properties":{"next":{"$ref":"#"}},"required":[]})");
     ASSERT_TRUE(c != nullptr);
     EXPECT_EQ(resolve_schema_ref(c.get(), c->properties[0].second.get()), c.get());
 
     // unresolvable name → parse fails
-    EXPECT_EQ(parse_json_schema(
-                  R"({"type":"object","properties":{"a":{"$ref":"#/$defs/Missing"}}})"),
+    EXPECT_EQ(parse_json_schema(R"({"type":"object","properties":{"a":{"$ref":"#/$defs/Missing"}}})"),
               nullptr);
     // external / deep-pointer refs → parse fails
-    EXPECT_EQ(parse_json_schema(
-                  R"({"properties":{"a":{"$ref":"https://example.com/s.json"}}})"),
-              nullptr);
-    EXPECT_EQ(parse_json_schema(
-                  R"({"properties":{"a":{"$ref":"#/properties/b"}}})"),
-              nullptr);
+    EXPECT_EQ(parse_json_schema(R"({"properties":{"a":{"$ref":"https://example.com/s.json"}}})"), nullptr);
+    EXPECT_EQ(parse_json_schema(R"({"properties":{"a":{"$ref":"#/properties/b"}}})"), nullptr);
     // pure ref->ref cycle → parse fails (no structure to terminate resolution)
-    EXPECT_EQ(parse_json_schema(
-                  R"({"$ref":"#/$defs/A","$defs":{"A":{"$ref":"#/$defs/B"},)"
-                  R"("B":{"$ref":"#/$defs/A"}}})"),
+    EXPECT_EQ(parse_json_schema(R"({"$ref":"#/$defs/A","$defs":{"A":{"$ref":"#/$defs/B"},)"
+                                R"("B":{"$ref":"#/$defs/A"}}})"),
               nullptr);
 }
 
@@ -618,10 +675,9 @@ TEST(SchemaConstrainTest, RefNestedModelEnforced) {
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
     tok.load_vocab(toks, scores, 1, 2);
-    auto schema = parse_json_schema(
-        R"({"type":"object","properties":{"inner":{"$ref":"#/$defs/Inner"}},)"
-        R"("required":["inner"],"$defs":{"Inner":{"type":"object",)"
-        R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})");
+    auto schema = parse_json_schema(R"({"type":"object","properties":{"inner":{"$ref":"#/$defs/Inner"}},)"
+                                    R"("required":["inner"],"$defs":{"Inner":{"type":"object",)"
+                                    R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})");
     ASSERT_TRUE(schema != nullptr);
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
@@ -651,10 +707,9 @@ TEST(SchemaConstrainTest, RecursiveSchemaEnforced) {
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
     tok.load_vocab(toks, scores, 1, 2);
-    auto schema = parse_json_schema(
-        R"({"$ref":"#/$defs/Node","$defs":{"Node":{"type":"object",)"
-        R"("properties":{"v":{"type":"integer"},"kids":{"type":"array",)"
-        R"("items":{"$ref":"#/$defs/Node"}}},"required":["v"]}}})");
+    auto schema = parse_json_schema(R"({"$ref":"#/$defs/Node","$defs":{"Node":{"type":"object",)"
+                                    R"("properties":{"v":{"type":"integer"},"kids":{"type":"array",)"
+                                    R"("items":{"$ref":"#/$defs/Node"}}},"required":["v"]}}})");
     ASSERT_TRUE(schema != nullptr);
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
@@ -763,9 +818,10 @@ TEST(SchemaConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
 // continuation must spell next. Pure probe: never advances the FSM.
 // ---------------------------------------------------------------------------
 
-//                                                0        1      2      3    4     5    6    7    8    9    10   11   12
-static const std::vector<std::string> kForcedToks = {
-    "<unk>", "<s>", "</s>", "{", "\"", "c", "o", "d", "e", ":", "}", "x", "y"};
+//                                                0        1      2      3    4     5    6    7    8    9 10
+//                                                11   12
+static const std::vector<std::string> kForcedToks = {"<unk>", "<s>", "</s>", "{", "\"", "c", "o",
+                                                     "d",     "e",   ":",    "}", "x",  "y"};
 
 // In-place init (SchemaConstrainer owns raw device buffers — not movable).
 static void init_forced_sc(Tokenizer& tok, SchemaConstrainer& sc, const char* schema_json) {
@@ -826,8 +882,7 @@ TEST(SchemaForcedTextTest, CompletesFullyDeterminedDocument) {
     Tokenizer tok;
     // Single-value enum: the ENTIRE document {"code":"x"} is forced.
     SchemaConstrainer sc;
-    init_forced_sc(tok, sc,
-        R"({"type":"object","properties":{"code":{"enum":["x"]}},"required":["code"]})");
+    init_forced_sc(tok, sc, R"({"type":"object","properties":{"code":{"enum":["x"]}},"required":["code"]})");
 
     std::string text;
     EXPECT_GT(sc.forced_text(text, 96), 0);
@@ -840,7 +895,7 @@ TEST(SchemaForcedTextTest, StopsAtEnumChoiceAfterCommonPrefix) {
     Tokenizer tok;
     SchemaConstrainer sc;
     init_forced_sc(tok, sc,
-        R"({"type":"object","properties":{"code":{"enum":["xxo","xxc"]}},"required":["code"]})");
+                   R"({"type":"object","properties":{"code":{"enum":["xxo","xxc"]}},"required":["code"]})");
 
     std::string text;
     EXPECT_GT(sc.forced_text(text, 96), 0);
@@ -852,7 +907,8 @@ TEST(SchemaForcedTextTest, StopsAtKeyChoice) {
     SKIP_IF_NO_CUDA();
     Tokenizer tok;
     SchemaConstrainer sc;
-    init_forced_sc(tok, sc,
+    init_forced_sc(
+        tok, sc,
         R"({"type":"object","properties":{"cx":{"type":"string"},"ox":{"type":"string"}},"required":["cx","ox"]})");
 
     std::string text;
@@ -865,7 +921,7 @@ TEST(SchemaForcedTextTest, BooleanValueStopsAtChoice) {
     Tokenizer tok;
     SchemaConstrainer sc;
     init_forced_sc(tok, sc,
-        R"({"type":"object","properties":{"code":{"type":"boolean"}},"required":["code"]})");
+                   R"({"type":"object","properties":{"code":{"type":"boolean"}},"required":["code"]})");
 
     std::string text;
     EXPECT_GT(sc.forced_text(text, 96), 0);
@@ -876,8 +932,7 @@ TEST(SchemaForcedTextTest, NullLiteralForcedThroughClose) {
     SKIP_IF_NO_CUDA();
     Tokenizer tok;
     SchemaConstrainer sc;
-    init_forced_sc(tok, sc,
-        R"({"type":"object","properties":{"code":{"type":"null"}},"required":["code"]})");
+    init_forced_sc(tok, sc, R"({"type":"object","properties":{"code":{"type":"null"}},"required":["code"]})");
 
     std::string text;
     EXPECT_GT(sc.forced_text(text, 96), 0);
