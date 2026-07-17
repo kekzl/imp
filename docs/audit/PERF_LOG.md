@@ -4,6 +4,46 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-17 · Post-launch error checks (399 sites) + KV prefix-hash double-free fix — decode neutral
+
+Hardening WI-1/WI-2 (branch hardening/launch-checks-and-kv-churn, baseline
+`docs/audit/DISPATCH_BASELINE_2026_07_17.md`):
+`IMP_CUDA_CHECK_LAUNCH()` (cudaPeekAtLastError — logs at the launch site, does
+NOT clear, downstream propagation unchanged) after 399 previously-unchecked
+kernel launches in 82 .cu files, plus the KVCacheManager stale-prefix-hash
+double-free fix (below). Perf gate, same harness as the Phase-0 baseline
+(median of 5 isolated trials, spec-OFF, healthy clocks sampled 2902/13801):
+
+```
+docker run --rm --gpus all -e CUBLAS_WORKSPACE_CONFIG=:4096:8 -v $HOME/models:/models imp:test \
+  imp-cli --model /models/Qwen3-Coder-30B-A3B-Instruct-FP4 --bench --bench-pp 512 --bench-reps 10 \
+  --set speculative.ngram=false
+```
+
+| Metric | Baseline (same day) | After | Δ |
+|---|---|---|---|
+| tg256 @pp512 (graphs ON) | 402.59 | 402.90 | **+0.08% (noise)** |
+| pp512 | 19,739 | 20,304 | within restart variance |
+
+No-graphs decode (informational, no before-arm — debug path only): 118.8/126.7/122.1
+tok/s over 3 trials; theoretical check overhead <0.1 ms on an 8.4 ms wall step.
+
+**KV double-free root cause** (found by the new `LeakUnderSustainedChurn` test —
+free-count exceeded pool size, 34>32): `rollback()` and
+`rollback_partial_allocation()` freed hash-REGISTERED blocks to ref 0 without
+erasing `block_hash_to_id_`/`block_id_to_hash_`; a later same-prefix
+`allocate_blocks_with_prefix` hit the stale entry, took the "actively
+referenced — share it" branch and `inc_ref`'d a block sitting in the free
+list → the next free pushed it into the free list a second time. Production
+trigger: KV-pool pressure during prefix-cache allocation (scheduler
+`prefill_allocate_kv_blocks_` → partial-rollback → client retries same
+prefix) = silent cross-request KV corruption. Fix:
+`free_block_dropping_stale_hash()` in both rollback paths (erase hash entries
+when the free drops ref to 0; shared blocks keep their entry) + a loud WARN
+guard in the reuse path that treats a ref==0 non-cached hash hit as a miss.
+Validation: 45/45 KVCacheManager tests (incl. 200-cycle churn), PrefixCacheE2E
+4/4 with Qwen3-4B Q8_0, full GPU suite 0 failures.
+
 ## 2026-07-07 · Token-tiled FP8 split-K decode attention (hd=128) — long-ctx decode +51%
 
 `paged_attention_splitk_fp8_pipeline_kernel` was the top GPU-time consumer at
