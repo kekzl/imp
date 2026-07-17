@@ -240,6 +240,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                         sys = "You are a helpful assistant.";
                     sys += tool_prompt;
                     ctx.params.chat_msgs.insert(ctx.params.chat_msgs.begin(), {"system", sys});
+                    if (ctx.params.cache_prefix_messages >= 0)
+                        ctx.params.cache_prefix_messages++;  // boundary shifts with the insert
                 }
             }
             ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs,
@@ -265,6 +267,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                         sys = "You are a helpful assistant.";
                     sys += tool_prompt;
                     ctx.params.chat_msgs.insert(ctx.params.chat_msgs.begin(), {"system", sys});
+                    if (ctx.params.cache_prefix_messages >= 0)
+                        ctx.params.cache_prefix_messages++;  // boundary shifts with the insert
                 }
             }
         }
@@ -276,6 +280,24 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         for (const auto& m : ctx.params.chat_msgs)
             raw += m.content + "\n";
         ctx.snap.tokens = ctx.snap.tok->encode(raw);
+    }
+
+    // cache_control per-breakpoint boundary (#1046): re-render the leading
+    // messages up to the marked block and count tokens — the engine then pins
+    // only that many prompt tokens (rounded down to full KV blocks) instead
+    // of the whole prompt. Render jitter vs. the full prompt (generation
+    // prompt, template joins) is at most ~a block; pins are eviction
+    // protection, not correctness state, so approximate is fine.
+    if (ctx.params.cache_prompt && ctx.params.cache_prefix_messages > 0 &&
+        ctx.params.cache_prefix_messages < static_cast<int>(ctx.params.chat_msgs.size()) &&
+        ctx.snap.have_template) {
+        std::vector<imp::ChatMessage> prefix_msgs(
+            ctx.params.chat_msgs.begin(),
+            ctx.params.chat_msgs.begin() + ctx.params.cache_prefix_messages);
+        ctx.snap.pin_prefix_tokens = static_cast<int>(
+            ctx.snap.chat_tpl
+                .apply(*ctx.snap.tok, prefix_msgs, ctx.snap.suppress_thinking, force_thinking)
+                .size());
     }
 
     // Thinking-state pipeline (single source of truth = the rendered prompt):
@@ -447,6 +469,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->top_k = ctx.params.top_k;
     req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
     req->pin_kv_prefix = ctx.params.cache_prompt;
+    req->pin_kv_prefix_tokens = ctx.snap.pin_prefix_tokens;
     req->spec_ngram_override = ctx.params.spec_ngram_override;
     req->prediction_tokens = ctx.snap.prediction_tokens;
     req->min_p = ctx.params.min_p;

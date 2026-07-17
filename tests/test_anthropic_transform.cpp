@@ -4,8 +4,11 @@
 // cache_control contract: ANY cache_control marker in the request (system
 // blocks, message content blocks, tool definitions) sets the internal
 // "cache_prompt" flag on the converted OpenAI body, which the server maps to
-// prompt-KV pinning. Position is irrelevant — imp's prefix cache is
-// block-granular and automatic; the marker only requests eviction protection.
+// prompt-KV pinning. Since #1046 the LAST marked system/message block also
+// emits "cache_prefix_messages" (count of leading converted messages forming
+// the cacheable prefix) so the pin covers only the tokens before the
+// breakpoint; a marker on tools keeps the whole-prompt pin. TTL tiers are
+// accepted but not modeled (no billing distinction locally).
 
 #include "anthropic.h"
 
@@ -70,6 +73,97 @@ TEST(AnthropicCacheControl, PlainStringSystemNoCachePrompt) {
     req["system"] = "plain string system";
     json oai = anthropic_to_openai_body(req);
     EXPECT_FALSE(oai.contains("cache_prompt"));
+}
+
+// --- per-breakpoint boundary (#1046) ----------------------------------------
+
+TEST(AnthropicCacheControl, SystemMarkerBoundaryAfterSystemMessage) {
+    json req = base_request();
+    req["system"] = json::array({
+        json{{"type", "text"}, {"text", "big system"}, {"cache_control", json{{"type", "ephemeral"}}}},
+    });
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_TRUE(oai.value("cache_prompt", false));
+    // Converted messages: [system, user] — prefix = 1 leading message.
+    EXPECT_EQ(oai.value("cache_prefix_messages", -1), 1);
+}
+
+TEST(AnthropicCacheControl, MessageMarkerBoundaryAfterThatMessage) {
+    json req = base_request();
+    req["system"] = json::array({json{{"type", "text"}, {"text", "sys"}}});
+    req["messages"] = json::array({
+        json{{"role", "user"},
+             {"content", json::array({json{{"type", "text"},
+                                           {"text", "stable context"},
+                                           {"cache_control", json{{"type", "ephemeral"}}}}})}},
+        json{{"role", "assistant"}, {"content", "ok"}},
+        json{{"role", "user"}, {"content", "new question"}},
+    });
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_TRUE(oai.value("cache_prompt", false));
+    // Converted: [system, user(marked), assistant, user] — prefix = 2.
+    EXPECT_EQ(oai.value("cache_prefix_messages", -1), 2);
+}
+
+TEST(AnthropicCacheControl, LastMarkerWins) {
+    json req = base_request();
+    req["system"] = json::array({
+        json{{"type", "text"}, {"text", "sys"}, {"cache_control", json{{"type", "ephemeral"}}}},
+    });
+    req["messages"] = json::array({
+        json{{"role", "user"}, {"content", "turn 1"}},
+        json{{"role", "user"},
+             {"content", json::array({json{{"type", "text"},
+                                           {"text", "turn 2"},
+                                           {"cache_control", json{{"type", "ephemeral"}}}}})}},
+        json{{"role", "user"}, {"content", "turn 3"}},
+    });
+    json oai = anthropic_to_openai_body(req);
+    // Converted: [system, user, user(marked), user] — last marker → prefix = 3.
+    EXPECT_EQ(oai.value("cache_prefix_messages", -1), 3);
+}
+
+TEST(AnthropicCacheControl, ToolsMarkerKeepsWholePromptPin) {
+    json req = base_request();
+    req["system"] = json::array({
+        json{{"type", "text"}, {"text", "sys"}, {"cache_control", json{{"type", "ephemeral"}}}},
+    });
+    req["tools"] = json::array({
+        json{{"name", "t"},
+             {"description", "d"},
+             {"input_schema", json{{"type", "object"}}},
+             {"cache_control", json{{"type", "ephemeral"}}}},
+    });
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_TRUE(oai.value("cache_prompt", false));
+    // Tools render into the system preamble — no message boundary is emitted.
+    EXPECT_FALSE(oai.contains("cache_prefix_messages"));
+}
+
+TEST(AnthropicCacheControl, TtlFieldAccepted) {
+    json req = base_request();
+    req["system"] = json::array({
+        json{{"type", "text"},
+             {"text", "sys"},
+             {"cache_control", json{{"type", "ephemeral"}, {"ttl", "1h"}}}},
+    });
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_TRUE(oai.value("cache_prompt", false));
+    EXPECT_EQ(oai.value("cache_prefix_messages", -1), 1);
+}
+
+TEST(AnthropicCacheControl, MarkerOnLastMessageCoversWholePrompt) {
+    json req = base_request();
+    req["messages"] = json::array({
+        json{{"role", "user"},
+             {"content", json::array({json{{"type", "text"},
+                                           {"text", "hi"},
+                                           {"cache_control", json{{"type", "ephemeral"}}}}})}},
+    });
+    json oai = anthropic_to_openai_body(req);
+    // Boundary == total converted messages: the handler treats a boundary
+    // that spans all messages as a whole-prompt pin (no truncated render).
+    EXPECT_EQ(oai.value("cache_prefix_messages", -1), 1);
 }
 
 // --- usage accounting -------------------------------------------------------

@@ -204,6 +204,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // Prompt KV pinning: Anthropic cache_control (mapped to "cache_prompt"
     // by anthropic_to_openai_body) or a direct llama.cpp-style field.
     ctx.params.cache_prompt = body.value("cache_prompt", false);
+    if (body.contains("cache_prefix_messages") && body["cache_prefix_messages"].is_number_integer())
+        ctx.params.cache_prefix_messages = body["cache_prefix_messages"].get<int>();
 
     // Per-request speculative-decode override (imp extension). Absent → leave
     // tri-state at -1 (server default). Present bool → force on/off.

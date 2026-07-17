@@ -1,0 +1,7 @@
+# UBSan runtime suppressions (UBSAN_OPTIONS=suppressions=tools/sanitizers/ubsan.supp)
+#
+# Vendored stb_image_resize2 performs intentional unaligned scalar int stores
+# on x86 (`*(int*)(output-4) = ...` in the encode path) — upstream design, not
+# an imp bug, and a vendored bump would not remove it (issue #1047). Do NOT
+# hand-patch the vendored header.
+alignment:stb_image_resize2.h

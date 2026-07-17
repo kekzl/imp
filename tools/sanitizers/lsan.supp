@@ -1,0 +1,10 @@
+# LeakSanitizer suppressions (LSAN_OPTIONS=suppressions=tools/sanitizers/lsan.supp)
+#
+# One-time allocations inside the NVIDIA userspace driver stack (no imp frames
+# in the traces; ~50 KB across a handful of allocations). Not actionable in imp.
+leak:libcuda.so
+leak:libnvidia
+# Driver-stack allocations whose module was dlclose'd before the LSan scan —
+# frames show only "<unknown module>". A real imp leak always carries at
+# least one symbolized imp frame, so this cannot mask engine leaks.
+leak:<unknown module>
