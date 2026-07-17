@@ -14,26 +14,29 @@
 
 namespace imp {
 
-namespace {
+void KVCacheManager::free_block_dropping_stale_hash(int block_id) {
+    if (block_id >= 0 && cache_->ref_count(block_id) == 1) {
+        auto hit = block_id_to_hash_.find(block_id);
+        if (hit != block_id_to_hash_.end()) {
+            block_hash_to_id_.erase(hit->second);
+            block_id_to_hash_.erase(hit);
+        }
+    }
+    cache_->free_block(block_id);
+}
 
-// Rollback a partial block allocation: free blocks added after original_size,
-// trim the blocks/hashes vectors, and erase the sequence entries if empty.
-static void rollback_partial_allocation(KVCache* cache, std::unordered_map<int, std::vector<int>>& seq_blocks,
-                                        std::unordered_map<int, std::vector<size_t>>& seq_block_hashes,
-                                        int seq_id, std::vector<int>& blocks, std::vector<size_t>& hashes,
-                                        size_t original_size) {
+void KVCacheManager::rollback_partial_allocation(int seq_id, std::vector<int>& blocks,
+                                                 std::vector<size_t>& hashes, size_t original_size) {
     for (size_t j = original_size; j < blocks.size(); ++j) {
-        cache->free_block(blocks[j]);
+        free_block_dropping_stale_hash(blocks[j]);
     }
     blocks.resize(original_size);
     hashes.resize(original_size);
     if (blocks.empty()) {
-        seq_blocks.erase(seq_id);
-        seq_block_hashes.erase(seq_id);
+        seq_blocks_.erase(seq_id);
+        seq_block_hashes_.erase(seq_id);
     }
 }
-
-}  // anonymous namespace
 
 // ─── Construction / destruction ──────────────────────────────────────
 
@@ -497,6 +500,16 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
 
             // Check if this block already exists in the hash table.
             auto hit = reuse_open ? block_hash_to_id_.find(block_hash) : block_hash_to_id_.end();
+            if (hit != block_hash_to_id_.end() && cache_->ref_count(hit->second) == 0 &&
+                cached_blocks_map_.find(hit->second) == cached_blocks_map_.end()) {
+                // Stale entry: the mapped block is free-listed (ref 0, not
+                // cached). Reusing it would double-own the block. Drop the
+                // entry loudly and treat as a miss.
+                IMP_LOG_WARN("prefix cache: stale hash entry for free block %d — dropping", hit->second);
+                block_id_to_hash_.erase(hit->second);
+                block_hash_to_id_.erase(hit);
+                hit = block_hash_to_id_.end();
+            }
             if (hit != block_hash_to_id_.end()) {
                 int cached_block = hit->second;
 
@@ -527,8 +540,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
             int block_id = allocate_block_with_eviction();
             if (block_id < 0) {
                 // Rollback everything we allocated/shared in this call.
-                rollback_partial_allocation(cache_.get(), seq_blocks_, seq_block_hashes_, seq_id, blocks,
-                                            hashes, original_size);
+                rollback_partial_allocation(seq_id, blocks, hashes, original_size);
                 return -1;
             }
 
@@ -541,8 +553,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
             // Partial block or prefix caching disabled — plain allocation.
             int block_id = allocate_block_with_eviction();
             if (block_id < 0) {
-                rollback_partial_allocation(cache_.get(), seq_blocks_, seq_block_hashes_, seq_id, blocks,
-                                            hashes, original_size);
+                rollback_partial_allocation(seq_id, blocks, hashes, original_size);
                 return -1;
             }
 
@@ -945,8 +956,10 @@ void KVCacheManager::rollback(int seq_id, int new_seq_len) {
     int blocks_needed = (new_seq_len + cache_->block_size() - 1) / cache_->block_size();
     while (static_cast<int>(blocks.size()) > blocks_needed) {
         // -1 sentinels (StreamingLLM evicted middle slots) need no free.
+        // Hash-registered blocks must leave the prefix-hash table when this
+        // free drops them to ref 0 (stale entry = double-ownership bug).
         if (blocks.back() >= 0)
-            cache_->free_block(blocks.back());
+            free_block_dropping_stale_hash(blocks.back());
         blocks.pop_back();
     }
 
