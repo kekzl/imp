@@ -452,6 +452,7 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
             quantize_fp16_mxfp4_strided_kernel<<<k_blocks, 256, 0, stream>>>(
                 K_head, kv_row_stride, static_cast<uint8_t*>(s_ws.k_packed), static_cast<uint8_t*>(s_ws.k_sf),
                 seq_kv, hd, n_k_tiles);
+            IMP_CUDA_CHECK_LAUNCH();
 
             // ---- Process each Q head in this GQA group ----
             for (int h_local = 0; h_local < gqa_ratio; h_local++) {
@@ -463,6 +464,7 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
                 quantize_fp16_mxfp4_strided_kernel<<<q_blocks, 256, 0, stream>>>(
                     Q_head, q_row_stride, static_cast<uint8_t*>(s_ws.q_packed),
                     static_cast<uint8_t*>(s_ws.q_sf), seq_q, hd, n_k_tiles);
+                IMP_CUDA_CHECK_LAUNCH();
 
                 // MXFP4 GEMM: S[seq_q, seq_kv] = Q_mxfp4 @ K_mxfp4^T
                 bool ok = gemm_mxfp4_cutlass_sm120(s_ws.q_packed, s_ws.q_sf, k_weight, S, seq_q, seq_kv, hd,
@@ -475,6 +477,7 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
                 // Scale + softcap + causal mask + softmax
                 mxfp4_attn_softmax_kernel<<<seq_q, sm_threads, 0, stream>>>(S, seq_q, seq_kv, /*q_offset=*/0,
                                                                             scale, softcap, causal);
+                IMP_CUDA_CHECK_LAUNCH();
 
                 // P·V via cuBLAS: O[seq_q, hd] = S[seq_q, seq_kv] @ V[seq_kv, hd]
                 //

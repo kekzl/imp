@@ -1,5 +1,6 @@
 #include "compute/reduce.h"
 #include "compute/warp_reduce.cuh"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -359,9 +360,11 @@ void reduce_sum(const Tensor& input, Tensor& output, int dim, cudaStream_t strea
             const half* d_input = static_cast<const half*>(input.data);
             reduce_sum_last_dim_fp16_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(d_input, d_output,
                                                                                  reduce_size);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             const float* d_input = static_cast<const float*>(input.data);
             reduce_sum_last_dim_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(d_input, d_output, reduce_size);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     } else {
         // General case: reduce along arbitrary dimension
@@ -371,10 +374,12 @@ void reduce_sum(const Tensor& input, Tensor& output, int dim, cudaStream_t strea
             reduce_sum_general_fp16_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(d_input, d_output,
                                                                                   outer_size, reduce_size,
                                                                                   inner_size);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             const float* d_input = static_cast<const float*>(input.data);
             reduce_sum_general_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(d_input, d_output, outer_size,
                                                                              reduce_size, inner_size);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 }
@@ -394,9 +399,11 @@ void reduce_max(const Tensor& input, Tensor& output, int dim, cudaStream_t strea
             const half* d_input = static_cast<const half*>(input.data);
             reduce_max_last_dim_fp16_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(d_input, d_output,
                                                                                  reduce_size);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             const float* d_input = static_cast<const float*>(input.data);
             reduce_max_last_dim_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(d_input, d_output, reduce_size);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     } else {
         int num_output = outer_size * inner_size;
@@ -405,10 +412,12 @@ void reduce_max(const Tensor& input, Tensor& output, int dim, cudaStream_t strea
             reduce_max_general_fp16_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(d_input, d_output,
                                                                                   outer_size, reduce_size,
                                                                                   inner_size);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             const float* d_input = static_cast<const float*>(input.data);
             reduce_max_general_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(d_input, d_output, outer_size,
                                                                              reduce_size, inner_size);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 }

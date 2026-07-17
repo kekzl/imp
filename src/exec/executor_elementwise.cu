@@ -433,6 +433,7 @@ void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t st
         int blocks = static_cast<int>((n4 + threads - 1) / threads);
         device_copy_v4_kernel<<<blocks, threads, 0, stream>>>(static_cast<const uint4*>(src),
                                                               static_cast<uint4*>(dst), n4);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
     cudaError_t e = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, stream);
@@ -481,6 +482,7 @@ void add_bias(Tensor& out, const Tensor& bias, cudaStream_t stream) {
     broadcast_add_bias_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<half*>(out.data),
                                                                    static_cast<const half*>(bias.data), rows,
                                                                    cols);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused 3-way bias add: applies up to 3 biases in a single kernel launch.
@@ -549,6 +551,7 @@ void add_bias_3way(Tensor& out_a, const Tensor& bias_a, Tensor& out_b, const Ten
         bias_b.data ? static_cast<const half*>(bias_b.data) : nullptr, cols_b,
         bias_c.data ? static_cast<half*>(out_c.data) : nullptr,
         bias_c.data ? static_cast<const half*>(bias_c.data) : nullptr, cols_c, rows);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused residual add + RMSNorm: hidden += residual; output = rmsnorm(hidden, weight).
@@ -616,6 +619,7 @@ void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual, const Tensor& 
                                                        static_cast<const half*>(weight.data),
                                                        static_cast<half*>(output.data), d_model, eps,
                                                        weight_offset);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused add-store + RMSNorm in-place: hidden = rmsnorm(a + b, weight).
@@ -683,6 +687,7 @@ void add_rmsnorm_inplace(const Tensor& a, const Tensor& b, Tensor& hidden, const
                                                       static_cast<half*>(hidden.data),
                                                       static_cast<const half*>(weight.data), d_model, eps,
                                                       weight_offset);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused RMSNorm + residual add: output = rmsnorm(input, weight) + residual.
@@ -748,6 +753,7 @@ void rmsnorm_add_residual(const Tensor& input, const Tensor& weight, const Tenso
                                                        static_cast<const half*>(residual.data),
                                                        static_cast<half*>(output.data), d_model, eps,
                                                        weight_offset);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Create a view of the first n_tokens rows from a [max_tokens, cols] buffer.

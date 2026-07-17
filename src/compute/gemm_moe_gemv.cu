@@ -1,5 +1,6 @@
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
+#include "core/logging.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -86,6 +87,7 @@ void gemv_q6k_moe_decode(const void* packed_weights, const int32_t* expert_indic
     gemv_q6k_moe_decode_kernel<<<top_k * blocks_per_expert, kGemvThreads, 0, stream>>>(
         static_cast<const uint8_t*>(packed_weights), expert_indices, x, y, rows, K, expert_stride_bytes,
         x_stride, blocks_per_expert);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 __global__ void gemv_q8_0_moe_decode_kernel(const uint8_t* __restrict__ packed_weights,
@@ -133,6 +135,7 @@ void gemv_q8_0_moe_decode(const void* packed_weights, const int32_t* expert_indi
     gemv_q8_0_moe_decode_kernel<<<top_k * blocks_per_expert, kGemvThreads, 0, stream>>>(
         static_cast<const uint8_t*>(packed_weights), expert_indices, x, y, rows, K, expert_stride_bytes,
         x_stride, blocks_per_expert);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +184,7 @@ __global__ void gemv_gate_fp32_kernel(const half* __restrict__ W, const half* __
 
 void gemv_gate_fp32(const half* W, const half* x, float* y, int M, int K, cudaStream_t stream) {
     gemv_gate_fp32_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // FP32-input variant: avoids FP16 truncation of router input for MoE precision.
@@ -218,6 +222,7 @@ __global__ void gemv_gate_fp32_fp32input_kernel(const half* __restrict__ W, cons
 
 void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y, int M, int K, cudaStream_t stream) {
     gemv_gate_fp32_fp32input_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +319,7 @@ void gemv_q6k_moe_gate_up_fused(const void* gate_weights, const void* up_weights
     gemv_q6k_moe_gate_up_fused_kernel<<<grid, kGemvThreads, 0, stream>>>(
         static_cast<const uint8_t*>(gate_weights), static_cast<const uint8_t*>(up_weights), expert_indices, x,
         y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes, x_stride, blocks_per_expert);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 __global__ void gemv_q8_0_moe_gate_up_fused_kernel(const uint8_t* __restrict__ gate_weights,
@@ -371,6 +377,7 @@ void gemv_q8_0_moe_gate_up_fused(const void* gate_weights, const void* up_weight
     gemv_q8_0_moe_gate_up_fused_kernel<<<grid, kGemvThreads, 0, stream>>>(
         static_cast<const uint8_t*>(gate_weights), static_cast<const uint8_t*>(up_weights), expert_indices, x,
         y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes, x_stride, blocks_per_expert);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

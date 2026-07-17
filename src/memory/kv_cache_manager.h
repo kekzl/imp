@@ -311,6 +311,19 @@ public:
     static size_t compute_block_hash(std::span<const int32_t> tokens, size_t parent_hash);
 
 private:
+    // Free a block that is about to leave its owning sequence. When this
+    // free drops the ref count to 0, the block's prefix-hash entries are
+    // erased first — a stale hash->id entry on a free-listed block lets a
+    // later prefix match inc_ref a block the allocator still hands out
+    // (double ownership -> free-list duplicates). See LeakUnderSustainedChurn.
+    void free_block_dropping_stale_hash(int block_id);
+
+    // Rollback a partial block allocation: free blocks added after
+    // original_size, trim the blocks/hashes vectors, and erase the
+    // sequence entries if empty.
+    void rollback_partial_allocation(int seq_id, std::vector<int>& blocks, std::vector<size_t>& hashes,
+                                     size_t original_size);
+
     // Underlying block-level cache (owns the memory pool).
     std::unique_ptr<KVCache> cache_;
 

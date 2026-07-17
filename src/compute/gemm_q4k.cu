@@ -12,6 +12,7 @@
 
 #include "compute/gemm_q4k.h"
 #include "compute/gemm.h"
+#include "core/logging.h"
 
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -546,6 +547,7 @@ static void launch_dense_dp4a(const void* packed_weight, const block_q8_1* q8_ba
     gemm_qk_dp4a_dense_kernel<BT><<<grid, block, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(packed_weight), q8_base, d8_base,
         output, M, K, N, q8_per_row);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +581,7 @@ static void launch_dp4a(const void* packed_weight, const block_q8_1* q8_base, co
     gemm_qk_dp4a_moe_fused_kernel<BT><<<grid, block, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(packed_weight), q8_base, d8_base,
         static_cast<half*>(c_base), offsets, K, N, weight_stride, q8_per_row);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +604,7 @@ static void launch_scalar(const void* packed_weights, const void* activations, v
         static_cast<const half*>(activations),
         static_cast<half*>(output),
         d_offsets, N, K, expert_stride_bytes, n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------

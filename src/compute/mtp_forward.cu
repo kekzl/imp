@@ -405,11 +405,13 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
         mtp_mrope_kernel<false><<<n_heads, kBlock, 0, stream>>>(
             static_cast<__half*>(d_q), n_heads, head_dim, rope_dim, theta, sec0, sec1, sec2,
             pos, pos, pos, inv_scaling, ext_factor, attn_factor, corr_dim_0, corr_dim_1);
+        IMP_CUDA_CHECK_LAUNCH();
     }
     if (n_kv_heads > 0 && d_k) {
         mtp_mrope_kernel<true><<<n_kv_heads, kBlock, 0, stream>>>(
             static_cast<__half*>(d_k), n_kv_heads, head_dim, rope_dim, theta, sec0, sec1, sec2,
             pos, pos, pos, inv_scaling, ext_factor, attn_factor, corr_dim_0, corr_dim_1);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -636,6 +638,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             static_cast<const __half*>(ws.d_h_norm),
             static_cast<__half*>(ws.d_fc_in),
             hidden_dim);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Step 4: fc_out = fc @ fc_in  ([hidden_dim, 2*hidden_dim] x [2*hidden_dim] = [hidden_dim])
@@ -762,6 +765,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     static_cast<__half*>(ws.d_k_cache),
                     static_cast<__half*>(ws.d_v_cache),
                     pos, nkv, hdh);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             // 5.A.4.b — softmax attention scan over [0, pos+1)
             //   shared mem: seq_len * sizeof(float). Cap with the kernel's
@@ -779,6 +783,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     static_cast<const __half*>(ws.d_v_cache),
                     static_cast<__half*>(ws.d_attn_out),
                     seq_len, nh, nkv, hdh, ws.max_seq_len, scale);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             // 5.A.4.c — silu(gate) * attn_out (in-place)
             {
@@ -788,6 +793,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     static_cast<__half*>(ws.d_attn_out),
                     static_cast<const __half*>(ws.d_q_full),
                     nh, hdh);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             ws.mtp_pos = pos + 1;
         } else {
@@ -799,6 +805,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 static_cast<const __half*>(ws.d_v_proj),
                 static_cast<__half*>(ws.d_attn_out),
                 nh, nkv, hdh);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         // 5.A.5 — o_proj @ d_attn_out → d_attn_residual
         {
@@ -816,6 +823,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 static_cast<__half*>(ws.d_fc_out),
                 static_cast<const __half*>(ws.d_attn_residual),
                 hd);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         // (K is computed for shape symmetry but unused in the M=1, no-history MVP.)
         (void)mtp.k_proj;
@@ -1000,6 +1008,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     static_cast<__half*>(ws.d_moe_out),
                     static_cast<const __half*>(ws.d_shared_out),
                     hd);
+                IMP_CUDA_CHECK_LAUNCH();
             }
         }
         // Copy d_moe_out → d_fc_out (overwrite) so downstream RMSNorm reads the
@@ -1047,9 +1056,11 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         if (nvfp4_lm) {
             mtp_argmax_kernel<<<1, 256, 0, stream>>>(
                 static_cast<const float*>(ws.d_logits_f32), vocab_size, d_out_token);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             mtp_argmax_kernel<<<1, 256, 0, stream>>>(
                 static_cast<const __half*>(ws.d_logits), vocab_size, d_out_token);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         return true;
     }
@@ -1067,9 +1078,11 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         if (nvfp4_lm) {
             mtp_topk_kernel<<<1, 256, 0, stream>>>(
                 static_cast<const float*>(ws.d_logits_f32), vocab_size, w, ws.d_topk);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             mtp_topk_kernel<<<1, 256, 0, stream>>>(
                 static_cast<const __half*>(ws.d_logits), vocab_size, w, ws.d_topk);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         if (cudaMemcpyAsync(out_topk_ids, ws.d_topk, w * sizeof(int),
                             cudaMemcpyDeviceToHost, stream) != cudaSuccess)
@@ -1093,9 +1106,11 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
     if (nvfp4_lm) {
         mtp_argmax_kernel<<<1, 256, 0, stream>>>(
             static_cast<const float*>(ws.d_logits_f32), vocab_size, d_idx);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         mtp_argmax_kernel<<<1, 256, 0, stream>>>(
             static_cast<const __half*>(ws.d_logits), vocab_size, d_idx);
+        IMP_CUDA_CHECK_LAUNCH();
     }
     if (cudaMemcpyAsync(out_token_id, d_idx, sizeof(int),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess) {

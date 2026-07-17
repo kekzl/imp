@@ -1,6 +1,7 @@
 #include "compute/sampling.h"
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cmath>
 #include <cfloat>
@@ -57,6 +58,7 @@ void apply_min_p(float* logits, int vocab_size, float min_p, cudaStream_t stream
 
     float log_min_p = logf(min_p);
     apply_min_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(logits, vocab_size, log_min_p);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ===========================================================================
@@ -205,6 +207,7 @@ void apply_typical_p(float* logits, int vocab_size, float typical_p, cudaStream_
         return;
 
     apply_typical_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(logits, vocab_size, typical_p);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

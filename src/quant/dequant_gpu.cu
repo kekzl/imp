@@ -738,6 +738,7 @@ void dequant_gpu_fp8(const void* src, void* dst, QType qtype, int rows, int cols
             dequant_q6k_to_fp8_kernel<<<total_blocks, 128, 0, stream>>>(static_cast<const uint8_t*>(src),
                                                                         static_cast<uint8_t*>(dst),
                                                                         total_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         }
         default:
@@ -755,6 +756,7 @@ void dequant_gpu_fp8(const void* src, void* dst, QType qtype, int rows, int cols
     case QType::QTYPE:                                                                                    \
         KERNEL<<<blocks, threads, 0, stream>>>(static_cast<const uint8_t*>(src), static_cast<half*>(dst), \
                                                rows, cols);                                               \
+        IMP_CUDA_CHECK_LAUNCH();                                                                          \
         break;
 
 void dequant_gpu(const void* src, void* dst, QType qtype, int rows, int cols, cudaStream_t stream) {
@@ -772,6 +774,7 @@ void dequant_gpu(const void* src, void* dst, QType qtype, int rows, int cols, cu
             dequant_q6k_v2_kernel<<<total_q6k_blocks, 128, 0, stream>>>(static_cast<const uint8_t*>(src),
                                                                         static_cast<half*>(dst),
                                                                         total_q6k_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         }
 

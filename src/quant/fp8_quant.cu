@@ -214,9 +214,11 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream) {
     // First-level reduction: per-block absmax.
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input.data), d_block_maxes,
                                                           n);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Second-level reduction: reduce block results to a single scalar.
     absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(d_block_maxes, d_result, grid);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Copy result back to host.
     float absmax = 0.0f;
@@ -265,13 +267,16 @@ void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, 
     // Pass 1: absmax reduction
     absmax_reduce_kernel<<<reduce_grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input_fp16),
                                                                  d_block_maxes, n);
+    IMP_CUDA_CHECK_LAUNCH();
 
     absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(d_block_maxes, d_absmax, reduce_grid);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Pass 2: fused scale computation + quantize (reads absmax from device)
     calibrate_quantize_fp8_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input_fp16),
                                                                    static_cast<uint8_t*>(output_fp8),
                                                                    d_absmax, d_scale_out, n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---- quantize_fp8_rows_async ----------------------------------------------
@@ -325,6 +330,7 @@ void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows,
     quantize_fp8_rows_kernel<<<rows, 256, 0, stream>>>(static_cast<const half*>(input_fp16),
                                                        static_cast<uint8_t*>(output_fp8), K,
                                                        d_row_scales);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---- quantize_fp16_to_fp8_e4m3 (Tensor API) ------------------------------
@@ -371,8 +377,10 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_sca
 
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input.data), d_block_maxes,
                                                           n);
+    IMP_CUDA_CHECK_LAUNCH();
 
     absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(d_block_maxes, d_scale_device, grid);
+    IMP_CUDA_CHECK_LAUNCH();
 
     float absmax = 0.0f;
     IMP_CUDA_CHECK_LOG(

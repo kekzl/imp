@@ -1011,6 +1011,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                                                      config_.ignore_eos ? 1 : 0, d_penalty_ring_,
                                                      penalty_prefix_len_, d_penalty_count_,
                                                      d_step_limit_, d_burst_done_mapped_, handle_);
+        IMP_CUDA_CHECK_LAUNCH();
 
         // 5c. End capture
         cudaGraph_t captured_body = nullptr;
@@ -1311,6 +1312,7 @@ __global__ void pipeline_advance_kernel(int* __restrict__ d_pos, int* __restrict
 
 void launch_pipeline_advance(int* d_pos, int* d_ctx, cudaStream_t stream) {
     pipeline_advance_kernel<<<1, 1, 0, stream>>>(d_pos, d_ctx);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

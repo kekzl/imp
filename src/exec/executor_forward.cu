@@ -296,6 +296,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
         scale_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<half*>(h.data),
                                                           __float2half(cfg.embed_scale), total);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Replace vision token positions with vision embeddings (multimodal)
@@ -320,6 +321,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         int blocks = static_cast<int>((total + threads - 1) / threads);
         fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
             static_cast<const half*>(h.data), static_cast<float*>(view_tokens(fp32_hidden_, n).data), total);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Dump FP32 accumulator for decode debugging
@@ -437,6 +439,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
                 scale_fp16_by_fp16ptr_kernel<<<blocks, threads, 0, stream>>>(
                     static_cast<half*>(h.data), static_cast<const half*>(ly.layer_out_scale.data), total);
+                IMP_CUDA_CHECK_LAUNCH();
                 // Also scale the FP32 residual accumulator so next layer's
                 // attention sees the correctly-scaled residual stream.
                 // Without this the FP32 accum grows unbounded (layer_out_scale
@@ -446,6 +449,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                     scale_fp32_by_fp16ptr_kernel<<<blocks_f32, threads, 0, stream>>>(
                         static_cast<float*>(view_tokens(fp32_hidden_, n).data),
                         static_cast<const half*>(ly.layer_out_scale.data), total);
+                    IMP_CUDA_CHECK_LAUNCH();
                 }
                 if (debug_forward_enabled()) {
                     float sval = 0.0f;
@@ -515,6 +519,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             int blocks = static_cast<int>((total + threads - 1) / threads);
             fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(h.data),
                                                                 static_cast<float*>(fp32_h.data), total);
+            IMP_CUDA_CHECK_LAUNCH();
         }
 
         // Layer-diff dump: Snapshot C — end-of-layer state (input to next layer).
@@ -552,6 +557,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 state.kv_manager->d_residual_fc_ptr(),
                 slot,
                 state.kv_manager->residual_n_tokens());
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 
@@ -569,6 +575,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
             static_cast<const float*>(view_tokens(fp32_hidden_, n).data), static_cast<half*>(h.data), n,
             cfg.d_model);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // ---- Step 3+4: Final RMSNorm + LM head projection ----
@@ -857,6 +864,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         logit_softcap_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<float*>(logits_out.data),
                                                                   cfg.final_logit_softcap,
                                                                   1.0f / cfg.final_logit_softcap, n_logits);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // ---- Profile summary ----

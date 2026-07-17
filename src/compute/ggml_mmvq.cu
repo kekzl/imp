@@ -3,6 +3,7 @@
 // Self-contained: no ggml header dependencies.
 
 #include "ggml_mmvq.h"
+#include "core/logging.h"
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cstdio>
@@ -523,6 +524,7 @@ void ggml_mmvq_q4k(const void* W, const half* x, half* y, int M, int N, int K, v
         const int threads = 256;
         const int nblk = (total_q8_blocks + threads - 1) / threads;
         quantize_fp16_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
+        IMP_CUDA_CHECK_LAUNCH();
         // (Q8_1 quantization verified correct — debug dumps removed)
     }
     {
@@ -530,6 +532,7 @@ void ggml_mmvq_q4k(const void* W, const half* x, half* y, int M, int N, int K, v
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
         mmvq_kernel<MMVQTag::Q4_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -547,6 +550,7 @@ void ggml_mmvq_q5_1(const void* W, const half* x, half* y, int M, int N, int K, 
         const int threads = 256;
         const int blocks = (total_q8_blocks + threads - 1) / threads;
         quantize_fp16_to_q8_1_ggml_kernel<<<blocks, threads, 0, stream>>>(x, x_q8, M * K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // MMVQ kernel: grid(N, M), block(32, 4)
@@ -555,6 +559,7 @@ void ggml_mmvq_q5_1(const void* W, const half* x, half* y, int M, int N, int K, 
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
         mmvq_kernel<MMVQTag::Q5_1><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -572,12 +577,14 @@ void ggml_mmvq_q4k_f32(const void* W, const float* x, half* y, int M, int N, int
         const int threads = 256;
         const int nblk = (total_q8_blocks + threads - 1) / threads;
         quantize_fp32_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
     {
         constexpr int nwarps = 4;
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
         mmvq_kernel<MMVQTag::Q4_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -597,12 +604,14 @@ void ggml_mmvq_q5k(const void* W, const half* x, half* y, int M, int N, int K, v
         const int threads = 256;
         const int nblk = (total_q8_blocks + threads - 1) / threads;
         quantize_fp16_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
     {
         constexpr int nwarps = 4;
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
         mmvq_kernel<MMVQTag::Q5_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -619,12 +628,14 @@ void ggml_mmvq_q8_0(const void* W, const half* x, half* y, int M, int N, int K, 
         const int threads = 256;
         const int nblk = (total_q8_blocks + threads - 1) / threads;
         quantize_fp16_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
     {
         constexpr int nwarps = 4;
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
         mmvq_kernel<MMVQTag::Q8_0><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 

@@ -321,9 +321,11 @@ static void launch_topk_topp_multiblock(const float* d_logits, int vocab_size, i
 
     topk_partial_kernel<<<SAMPLE_NBLOCKS, BLOCK_SIZE, smem1, stream>>>(
         d_logits, vocab_size, top_k, inv_temperature, block_max, block_sum, cand_val, cand_idx);
+    IMP_CUDA_CHECK_LAUNCH();
     topk_finalize_kernel<<<1, BLOCK_SIZE, smem2, stream>>>(top_k, top_p, inv_temperature, seed,
                                                            SAMPLE_NBLOCKS, block_max, block_sum, cand_val,
                                                            cand_idx, d_result);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k, int vocab_size,
@@ -337,7 +339,9 @@ void launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k,
                    static_cast<size_t>(max_top_k) * (sizeof(float) + sizeof(int));
     dim3 grid1(SAMPLE_NBLOCKS, n_rows);
     topk_partial_rows_kernel<<<grid1, BLOCK_SIZE, smem1, stream>>>(d_rows, vocab_size);
+    IMP_CUDA_CHECK_LAUNCH();
     topk_finalize_rows_kernel<<<n_rows, BLOCK_SIZE, smem2, stream>>>(d_rows, SAMPLE_NBLOCKS);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ============================================================================
@@ -598,6 +602,7 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
     // Phase 1: global max (result in d_max_sum[0]). atomicMax on the int-bitcast
     // of the max is order-independent and exact, so it is already deterministic.
     softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, sc.d_max_sum);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Phase 2: sum of exp — reads max from device memory (no D2H sync).
     // The default multi-block kernel sums via cross-block FP atomicAdd, whose
@@ -606,10 +611,12 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
     if (deterministic) {
         softmax_sum_device_max_single_block_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
             d_logits, vocab_size, inv_temperature, sc.d_max_sum, sc.d_max_sum + 1);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
                                                                                inv_temperature, sc.d_max_sum,
                                                                                sc.d_max_sum + 1);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Step 2: Compute probabilities reading max/sum from device memory (no D2H sync)
@@ -617,6 +624,7 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
     softmax_to_pairs_device_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
                                                                            inv_temperature, sc.d_max_sum,
                                                                            sc.d_keys_in, sc.d_vals_in);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Step 3: extract top_k via DeviceTopK (unsorted), then sort just those k.
     // Much faster than a full radix sort over the whole vocab when k << vocab.
@@ -654,6 +662,7 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
     // Step 4: Top-p filter + sample from sorted top-k
     topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(sc.d_keys_out, sc.d_vals_out, top_k, top_p, seed,
                                                         d_result);
+    IMP_CUDA_CHECK_LAUNCH();
 
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));

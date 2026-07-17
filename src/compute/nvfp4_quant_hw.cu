@@ -279,6 +279,7 @@ bool nvfp4_quant_hw_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, i
                                          stride_bz_input, stride_h_input, stride_seq_input, stride_bz_output,
                                          stride_h_output, stride_seq_output, stride_bz_output_sf,
                                          stride_h_output_sf, stride_seq_output_sf);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         nvfp4_quant_hw_kernel<64, BLOCK_SIZE>
             <<<grid, block, 0, stream>>>(d_input, d_nvfp4, d_sf, batch_size, n_heads, n_tokens,
@@ -310,6 +311,7 @@ bool nvfp4_dequant_hw_fp16(const uint8_t* d_nvfp4, const uint8_t* d_sf, half* d_
                                          stride_bz_input, stride_h_input, stride_seq_input, stride_bz_output,
                                          stride_h_output, stride_seq_output, stride_bz_input_sf,
                                          stride_h_input_sf, stride_seq_input_sf);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         nvfp4_dequant_hw_kernel<64, BLOCK_SIZE>
             <<<grid, block, 0, stream>>>(d_nvfp4, d_sf, d_output, batch_size, n_heads, n_tokens,

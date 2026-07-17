@@ -1147,6 +1147,7 @@ void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int 
     dim3 block(128);
     paged_attention_reduce_kernel<<<grid, block, 0, stream>>>(partial, O, n_heads, head_dim, num_splits,
                                                               /*attn_sinks=*/nullptr);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,6 +1530,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
             dim3 block2(128);
             paged_attention_reduce_kernel<<<grid2, block2, 0, stream>>>(
                 partial, reinterpret_cast<half*>(O.data), n_heads, head_dim, num_splits, sinks_h);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 
@@ -1661,6 +1663,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                 reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data), block_tables,
                 context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale, max_context_len,
                 max_num_blocks, n_q_per_kv, warps_per_q, sliding_window, n_sinks, softcap, sinks_h);
+            IMP_CUDA_CHECK_LAUNCH();
         } else if (!used_cluster) {
             // MHA fallback for n_q_per_kv > MAX_Q_PER_KV without cluster
             goto mha_fallback;
@@ -1687,7 +1690,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),                \
         reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data), block_tables,        \
         context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len, max_num_blocks, \
-        sliding_window, n_sinks, softcap)
+        sliding_window, n_sinks, softcap);                                                                 \
+    IMP_CUDA_CHECK_LAUNCH()
 
         switch (head_dim) {
             case 64:
@@ -1713,6 +1717,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                     reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),
                     block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, vhd, block_size,
                     scale, max_context_len, max_num_blocks, sliding_window, n_sinks, softcap);
+                IMP_CUDA_CHECK_LAUNCH();
                 break;
         }
 #undef LAUNCH_MHA

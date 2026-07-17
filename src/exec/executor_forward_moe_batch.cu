@@ -739,6 +739,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                 fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
                     static_cast<const half*>(gate_logits_tmp.data),
                     static_cast<float*>(gate_logits_f32.data), numel);
+                IMP_CUDA_CHECK_LAUNCH();
             } else {
                 IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(gate_logits_f32.data, gate_logits_tmp.data,
                                                    static_cast<size_t>(numel) * sizeof(float),
@@ -790,6 +791,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
         scale_fp32_kernel<<<blocks_s, threads_s, 0, stream>>>(
             static_cast<float*>(routing.expert_weights.data), cfg.expert_weights_scale, n_weights);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Gemma-4: per-expert output scale absorbed into routing weights.
@@ -802,6 +804,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
             static_cast<float*>(routing.expert_weights.data),
             static_cast<const int32_t*>(routing.expert_indices.data),
             static_cast<const half*>(ly.expert_down_scale.data), static_cast<int>(n_weights));
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 

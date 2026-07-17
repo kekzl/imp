@@ -144,11 +144,13 @@ void moe_gather(const Tensor& input, const MoeRoutingResult& routing, Tensor& ga
         half* d_gathered = static_cast<half*>(gathered.data);
         moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(d_input, d_sorted, d_gathered,
                                                                         total_tokens, d_model);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         const float* d_input = static_cast<const float*>(input.data);
         float* d_gathered = static_cast<float*>(gathered.data);
         moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(d_input, d_sorted, d_gathered,
                                                                         total_tokens, d_model);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -184,28 +186,33 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing, T
             moe_scatter_deterministic_kernel_impl<<<n_tokens, BLOCK_SIZE, 0, stream>>>(
                 d_expert_out, d_sorted_token_ids, d_sorted_flat_idx, d_expert_weights, d_output, total_tokens,
                 n_tokens, d_model);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             const float* d_expert_out = static_cast<const float*>(expert_output.data);
             moe_scatter_deterministic_kernel_impl<<<n_tokens, BLOCK_SIZE, 0, stream>>>(
                 d_expert_out, d_sorted_token_ids, d_sorted_flat_idx, d_expert_weights, d_output, total_tokens,
                 n_tokens, d_model);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         return;
     }
 
     // Zero the output first (scatter-add accumulates into it)
     zero_float_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_output, total_out_elems);
+    IMP_CUDA_CHECK_LAUNCH();
 
     if (expert_output.qtype == QType::F16) {
         const half* d_expert_out = static_cast<const half*>(expert_output.data);
         moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(d_expert_out, d_sorted_token_ids,
                                                                          d_sorted_flat_idx, d_expert_weights,
                                                                          d_output, total_tokens, d_model);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         const float* d_expert_out = static_cast<const float*>(expert_output.data);
         moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(d_expert_out, d_sorted_token_ids,
                                                                          d_sorted_flat_idx, d_expert_weights,
                                                                          d_output, total_tokens, d_model);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -241,6 +248,7 @@ void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_w
                                                                      static_cast<const half*>(residual),
                                                                      static_cast<half*>(output), d_model,
                                                                      top_k);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ============================================================================
@@ -282,6 +290,7 @@ void moe_scatter_fused_residual(const void* expert_output, const int32_t* token_
     moe_scatter_fused_residual_kernel<<<n_tokens, threads, 0, stream>>>(
         static_cast<const half*>(expert_output), token_to_expanded, expert_weights,
         static_cast<const half*>(residual), static_cast<half*>(output), d_model, top_k);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // FP32-input variant: expert_output is float* (not half*).
@@ -314,6 +323,7 @@ void moe_scatter_fused_residual_fp32in(const void* expert_output_fp32, const int
     moe_scatter_fused_residual_fp32in_kernel<<<n_tokens, threads, 0, stream>>>(
         static_cast<const float*>(expert_output_fp32), token_to_expanded, expert_weights,
         static_cast<const half*>(residual), static_cast<half*>(output), d_model, top_k);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ============================================================================
@@ -366,6 +376,7 @@ void moe_add_logit_bias(float* logits_f32, const void* bias_fp16, int n, int ne,
     int blocks = static_cast<int>((total + threads - 1) / threads);
     moe_add_logit_bias_kernel<<<blocks, threads, 0, stream>>>(
         logits_f32, static_cast<const half*>(bias_fp16), total, ne);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void moe_add_expert_bias_indexed(void* buf_fp16, const void* bias_fp16, const int32_t* expert_indices,
@@ -377,6 +388,7 @@ void moe_add_expert_bias_indexed(void* buf_fp16, const void* bias_fp16, const in
     int blocks = static_cast<int>((total + threads - 1) / threads);
     moe_add_expert_bias_indexed_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<half*>(buf_fp16), static_cast<const half*>(bias_fp16), expert_indices, total, dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void moe_add_expert_bias_sorted(void* buf_fp16, const void* bias_fp16, const int32_t* expert_offsets,
@@ -388,6 +400,7 @@ void moe_add_expert_bias_sorted(void* buf_fp16, const void* bias_fp16, const int
     int blocks = static_cast<int>((total + threads - 1) / threads);
     moe_add_expert_bias_sorted_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<half*>(buf_fp16), static_cast<const half*>(bias_fp16), expert_offsets, ne, total, dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

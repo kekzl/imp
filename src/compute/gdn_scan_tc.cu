@@ -1,4 +1,5 @@
 #include "compute/gdn_internal.cuh"
+#include "core/logging.h"
 #include <mma.h>
 
 namespace imp {
@@ -684,6 +685,7 @@ void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, cons
         gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
             grouped_layout);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
     gdn_scan_fused_f32(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,
@@ -711,6 +713,7 @@ void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, con
         gdn_scan_chunkwise_wy_tc2_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
             grouped_layout);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
     gdn_scan_fused_f32(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,

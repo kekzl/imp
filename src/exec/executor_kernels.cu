@@ -104,6 +104,7 @@ void attn_gate_split_interleaved(const void* src, void* q_dst, void* gate_dst, i
         attn_gate_split_interleaved_kernel<half><<<grid, threads, 0, stream>>>(
             static_cast<const half*>(src), static_cast<half*>(q_dst), static_cast<half*>(gate_dst), n_tokens,
             nh, hd, q_out_dim);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         // FP32 fallback — uses uint32_t reinterpret since templated half→FP32
         // dispatch requires another instantiation. For now log + fall through

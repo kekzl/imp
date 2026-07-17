@@ -1,6 +1,7 @@
 #include "compute/softmax.h"
 #include "compute/warp_reduce.cuh"
 #include "core/tensor.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -179,11 +180,13 @@ void softmax(const Tensor& input, Tensor& output, cudaStream_t stream) {
             softmax_fp32_kernel<<<grid, block, 0, stream>>>(static_cast<const float*>(input.data),
                                                             static_cast<float*>(output.data),
                                                             static_cast<int>(cols));
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         case QType::F16:
             softmax_fp16_kernel<<<grid, block, 0, stream>>>(static_cast<const __half*>(input.data),
                                                             static_cast<__half*>(output.data),
                                                             static_cast<int>(cols));
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         default:
             break;

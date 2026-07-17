@@ -489,6 +489,7 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_,
                                                                 d_token_allow_, d_allowed_mask_, vocab_size,
                                                                 n_classified, /*use_token_allow=*/true);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

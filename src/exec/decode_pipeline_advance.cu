@@ -57,6 +57,7 @@ void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot
         n_rows, reinterpret_cast<const char*>(slot_tokens), slot_stride_bytes, d_token_ids,
         d_positions, d_context_lens, d_block_tables, n_patches, d_patch_offsets, d_patch_values,
         d_hist_base, hist_stride, d_hist_pos);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

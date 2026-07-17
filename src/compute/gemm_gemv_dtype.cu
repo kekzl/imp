@@ -1,5 +1,6 @@
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
+#include "core/logging.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -304,6 +305,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
                 const float* x_ptr = static_cast<const float*>(x.data) + (int64_t)b * K;
                 float* y_ptr = static_cast<float*>(y.data) + (int64_t)b * M;
                 gemv_fp32_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
+                IMP_CUDA_CHECK_LAUNCH();
                 break;
             }
             case QType::F16: {
@@ -311,6 +313,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
                 const half* x_ptr = static_cast<const half*>(x.data) + (int64_t)b * K;
                 half* y_ptr = static_cast<half*>(y.data) + (int64_t)b * M;
                 gemv_fp16_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
+                IMP_CUDA_CHECK_LAUNCH();
                 break;
             }
             case QType::BF16: {
@@ -318,6 +321,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
                 const __nv_bfloat16* x_ptr = static_cast<const __nv_bfloat16*>(x.data) + (int64_t)b * K;
                 __nv_bfloat16* y_ptr = static_cast<__nv_bfloat16*>(y.data) + (int64_t)b * M;
                 gemv_bf16_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
+                IMP_CUDA_CHECK_LAUNCH();
                 break;
             }
             default: {
@@ -497,6 +501,7 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __res
 
 void gemv_q6k(const void* W, const half* x, half* y, int M, int K, cudaStream_t stream) {
     gemv_q6k_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(W), x, y, M, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +541,7 @@ __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __re
 
 void gemv_q8_0(const void* W, const half* x, half* y, int M, int K, cudaStream_t stream) {
     gemv_q8_0_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(W), x, y, M, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +556,7 @@ void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y, float scale, cudaStre
         <<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(A.data),
                                                       static_cast<const half*>(x.data),
                                                       static_cast<half*>(y.data), M, K, scale, nullptr);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float* d_row_scales,
@@ -562,6 +569,7 @@ void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float*
                                                       static_cast<const half*>(x.data),
                                                       static_cast<half*>(y.data), M, K, 0.0f,
                                                       d_row_scales);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

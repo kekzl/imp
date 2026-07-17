@@ -240,6 +240,7 @@ void mmq_q4k_imma_tile(const int8_t* X_s8, const __half* x_scale, const float* x
     dim3 block(kThreadsPerCTA, 1, 1);
     mmq_q4k_imma_tile_kernel<<<grid, block, 0, stream>>>(
         X_s8, x_scale, x_rowsum, W_s8, eff_alpha, eff_beta, out, M, N, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // =============================================================================
@@ -298,6 +299,7 @@ void quantize_fp16_to_int8_subblock(const __half* X_fp16, int M, int K, int8_t* 
     dim3 block(32, 1, 1);
     quantize_fp16_to_int8_subblock_kernel<<<grid, block, 0, stream>>>(X_fp16, M, K, X_s8, x_scale,
                                                                      x_rowsum);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // =============================================================================

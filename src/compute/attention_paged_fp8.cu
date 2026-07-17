@@ -640,7 +640,8 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                                                  reinterpret_cast<const uint8_t*>(V_cache.data), partial, \
                                                  block_tables, context_lens, batch_size, n_heads,         \
                                                  n_kv_heads, block_size, scale, kv_scale, max_num_blocks, \
-                                                 num_splits, sliding_window, softcap)
+                                                 num_splits, sliding_window, softcap);                    \
+    IMP_CUDA_CHECK_LAUNCH()
 
             switch (head_dim) {
                 case 64:
@@ -671,7 +672,8 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                                                 reinterpret_cast<const uint8_t*>(V_cache.data), partial,     \
                                                 block_tables, context_lens, batch_size, n_heads, n_kv_heads, \
                                                 block_size, scale, kv_scale, max_num_blocks, num_splits,     \
-                                                sliding_window, softcap)
+                                                sliding_window, softcap);                                    \
+    IMP_CUDA_CHECK_LAUNCH()
 
             switch (head_dim) {
                 case 64:
@@ -711,7 +713,8 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                                               reinterpret_cast<const uint8_t*>(V_cache.data),               \
                                               reinterpret_cast<half*>(O.data), block_tables, context_lens,  \
                                               batch_size, n_heads, n_kv_heads, block_size, scale, kv_scale, \
-                                              max_context_len, max_num_blocks, sliding_window, softcap)
+                                              max_context_len, max_num_blocks, sliding_window, softcap);  \
+    IMP_CUDA_CHECK_LAUNCH()
 
         switch (head_dim) {
             case 64:

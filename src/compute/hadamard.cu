@@ -195,6 +195,7 @@ void hadamard_transform_fp16(const half* input, half* output, int M, int K, int 
             int blocks_per_cta = warps_per_cta;
             int grid = (total_blocks + blocks_per_cta - 1) / blocks_per_cta;
             hadamard_warp_kernel<16><<<grid, warps_per_cta * 32, 0, stream>>>(input, output, M, K);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         }
         case 32: {
@@ -202,16 +203,19 @@ void hadamard_transform_fp16(const half* input, half* output, int M, int K, int 
             int blocks_per_cta = warps_per_cta;
             int grid = (total_blocks + blocks_per_cta - 1) / blocks_per_cta;
             hadamard_warp_kernel<32><<<grid, warps_per_cta * 32, 0, stream>>>(input, output, M, K);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         }
         case 64: {
             // One CTA (64 threads) per block.
             hadamard_64_kernel<<<total_blocks, 64, 0, stream>>>(input, output, M, K);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         }
         case 128: {
             // One CTA (128 threads) per block.
             hadamard_128_kernel<<<total_blocks, 128, 0, stream>>>(input, output, M, K);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         }
         default:

@@ -1,5 +1,7 @@
 #include "compute/gemm_moe_fused.h"
 
+#include "core/logging.h"
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdio>
@@ -167,6 +169,7 @@ void gemm_q6k_fused_moe_prefill(const void* packed_weights, const void* activati
                                                                   static_cast<const half*>(activations),
                                                                   static_cast<half*>(output), d_offsets, N, K,
                                                                   expert_stride_bytes, n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

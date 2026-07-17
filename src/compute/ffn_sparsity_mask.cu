@@ -1,5 +1,6 @@
 #include "compute/ffn_sparsity_mask.h"
 #include "compute/gemm.h"
+#include "core/logging.h"
 #include "runtime/pdl.h"
 
 #include <cuda_runtime.h>
@@ -127,6 +128,7 @@ void build_swiglu_block_mask(const __half* gate, const __half* up, uint32_t* mas
     const int n_blocks = K >> 5;
     const size_t smem = static_cast<size_t>(n_blocks) * sizeof(unsigned int);
     build_swiglu_block_mask_kernel<THREADS><<<1, THREADS, smem, stream>>>(gate, up, mask, K, threshold);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void gemv_q8_0_q8_1_residual_masked(const void* W, const block_q8_1* q8_1, const float* d8,

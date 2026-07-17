@@ -1660,6 +1660,7 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         if (s_d_kmean != nullptr) {
             mxfp4_k_channel_mean_kernel<<<batch_size * n_kv_heads, 128, 0, stream>>>(
                 reinterpret_cast<const half*>(K.data), s_d_kmean, seq_kv, n_kv_heads, head_dim);
+            IMP_CUDA_CHECK_LAUNCH();
             d_kmean = s_d_kmean;
         }
     }
@@ -1705,15 +1706,18 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
             dim3 qmg(num_q_tiles, batch_size * n_heads);
             mxfp4_tile_mean_kernel<<<qmg, 128, 0, stream>>>(reinterpret_cast<const half*>(Q.data), d_qmean,
                                                             seq_q, n_heads, head_dim, Bq);
+            IMP_CUDA_CHECK_LAUNCH();
             dim3 kmg(n_kv_tiles, batch_size * n_kv_heads);
             mxfp4_tile_mean_kernel<<<kmg, 128, 0, stream>>>(reinterpret_cast<const half*>(K.data),
                                                             d_kmean_tiles, seq_kv, n_kv_heads, head_dim,
                                                             MX_Bkv);
+            IMP_CUDA_CHECK_LAUNCH();
             dim3 sg(num_q_tiles, batch_size * n_heads);
             const size_t sel_smem = (size_t)(head_dim + n_kv_tiles) * sizeof(float);
             mxfp4_promote_select_kernel<<<sg, 128, sel_smem, stream>>>(
                 d_qmean, d_kmean_tiles, s_d_promote, n_heads, n_kv_heads, num_q_tiles, n_kv_tiles, Bq, seq_q,
                 q_offset, causal, promote_budget, head_dim);
+            IMP_CUDA_CHECK_LAUNCH();
             d_promote = s_d_promote;
         }
     }
@@ -1758,6 +1762,7 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                                             reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,    \
                                             n_heads, n_kv_heads, scale, causal, sliding_window, softcap,   \
                                             q_offset, d_kmean, d_promote, n_kv_tiles);                     \
+        IMP_CUDA_CHECK_LAUNCH();                                                                           \
     } while (0)
 
 // Promote variants only instantiated for head_dim 64/128 (see the pre-pass
@@ -1938,15 +1943,18 @@ bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fr
             dim3 qmg(num_q_tiles, n_heads);
             mxfp4_tile_mean_kernel<<<qmg, 128, 0, stream>>>(reinterpret_cast<const half*>(Q.data), d_qmean,
                                                             seq_q, n_heads, head_dim, Bq);
+            IMP_CUDA_CHECK_LAUNCH();
             dim3 kmg(n_kv_tiles, n_kv_heads);
             mxfp4_tile_mean_paged_kernel<<<kmg, 128, 0, stream>>>(k_data, k_scales, block_table,
                                                                   block_size, seq_kv, n_kv_heads,
                                                                   head_dim, MX_Bkv, d_kmean_tiles);
+            IMP_CUDA_CHECK_LAUNCH();
             dim3 sg(num_q_tiles, n_heads);
             const size_t sel_smem = (size_t)(head_dim + n_kv_tiles) * sizeof(float);
             mxfp4_promote_select_kernel<<<sg, 128, sel_smem, stream>>>(
                 d_qmean, d_kmean_tiles, s_d_promote_paged, n_heads, n_kv_heads, num_q_tiles, n_kv_tiles, Bq,
                 seq_q, q_offset, causal, promote_budget, head_dim);
+            IMP_CUDA_CHECK_LAUNCH();
             d_promote = s_d_promote_paged;
         }
     }
@@ -1986,6 +1994,7 @@ bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fr
             reinterpret_cast<const half*>(Q.data), k_fresh, v_fresh, reinterpret_cast<half*>(O.data),    \
             batch_size, seq_q, seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap,      \
             q_offset, /*d_kmean=*/nullptr, d_promote, n_kv_tiles, pkv);                                  \
+        IMP_CUDA_CHECK_LAUNCH();                                                                         \
     } while (0)
 
     // Promote is always instantiated: current-chunk tiles ride the promoted

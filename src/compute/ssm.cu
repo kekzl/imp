@@ -24,6 +24,7 @@ void silu_inplace(Tensor& x, cudaStream_t stream) {
     int blocks = static_cast<int>((n + threads - 1) / threads);
     if (x.qtype == QType::F16) {
         silu_inplace_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<half*>(x.data), n);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -47,6 +48,7 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream) {
     int blocks = static_cast<int>((n + threads - 1) / threads);
     if (x.qtype == QType::F16) {
         relu_sqr_inplace_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<half*>(x.data), n);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -74,6 +76,7 @@ void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t str
         sigmoid_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(a.data),
                                                                 static_cast<const half*>(b.data),
                                                                 static_cast<half*>(out.data), n);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -94,6 +97,7 @@ void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t
         elementwise_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(a.data),
                                                                     static_cast<const half*>(b.data),
                                                                     static_cast<half*>(out.data), n);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -173,6 +177,7 @@ void ssm_conv1d_decode_f32_silu(void* conv_state, const Tensor& x_in, const Tens
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         x_out_f32, channels, conv_kernel);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
@@ -185,6 +190,7 @@ void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weigh
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         static_cast<half*>(x_out.data), channels, conv_kernel);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +263,7 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weig
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         static_cast<half*>(x_out.data), n_tokens, channels, conv_kernel, d_real_n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +329,7 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         x_out_f32, n_tokens, channels, conv_kernel, d_real_n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -486,10 +494,13 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C, const h
     bool fused = (z != nullptr);
 
 #define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V)                                                                   \
-    ssm_scan_kernel<H_FP16_V, FUSE_V>                                                                       \
-        <<<n_heads, threads, smem_bytes, stream>>>(x, B, C, dt, A_log, D, dt_bias, h_state, y, z, n_tokens, \
-                                                   n_heads, head_dim_ssm, state_size, n_groups, s_tiles,    \
-                                                   d_real_n)
+    do {                                                                                                    \
+        ssm_scan_kernel<H_FP16_V, FUSE_V>                                                                   \
+            <<<n_heads, threads, smem_bytes, stream>>>(x, B, C, dt, A_log, D, dt_bias, h_state, y, z,       \
+                                                       n_tokens, n_heads, head_dim_ssm, state_size,         \
+                                                       n_groups, s_tiles, d_real_n);                        \
+        IMP_CUDA_CHECK_LAUNCH();                                                                            \
+    } while (0)
 
     if (fp16) {
         if (fused)
@@ -587,6 +598,7 @@ void group_rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, int n_gro
                                                                static_cast<const half*>(weight.data),
                                                                static_cast<half*>(out.data), total_dim,
                                                                n_groups, eps);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

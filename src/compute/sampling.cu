@@ -156,6 +156,7 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     }
 
     argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
+    IMP_CUDA_CHECK_LAUNCH();
 
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
@@ -177,7 +178,9 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result, cudaStream_t stre
 
     argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
                                                                      partial_idxs);
+    IMP_CUDA_CHECK_LAUNCH();
     argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
+    IMP_CUDA_CHECK_LAUNCH();
 
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
@@ -199,7 +202,9 @@ void sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t s
 
     argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
                                                                      partial_idxs);
+    IMP_CUDA_CHECK_LAUNCH();
     argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ===========================================================================
@@ -217,7 +222,9 @@ void sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_ma
 
     argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
                                                                      partial_idxs);
+    IMP_CUDA_CHECK_LAUNCH();
     argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Async copy to mapped pinned memory — no sync needed.
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));

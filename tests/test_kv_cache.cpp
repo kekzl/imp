@@ -1086,6 +1086,56 @@ TEST(KVCacheManagerTest, EvictAllCachedBlocksPoolIntegrity) {
     EXPECT_EQ(mgr->num_free_blocks(), 8);  // All returned to free pool
 }
 
+// Leak-under-churn regression: sustained allocate / prefix-register / rollback /
+// free / evict cycles. After every full drain the pool must return EXACTLY to
+// baseline — any monotonic drift in free/cached/reclaimable/active counters is
+// a leak or double-free in the block bookkeeping.
+TEST(KVCacheManagerTest, LeakUnderSustainedChurn) {
+    SKIP_IF_NO_CUDA();
+
+    constexpr int kPoolBlocks = 32;
+    constexpr int kCycles = 200;
+    auto mgr = MakeManager(kPoolBlocks);
+    mgr->set_prefix_caching_enabled(true);
+
+    for (int cycle = 0; cycle < kCycles; ++cycle) {
+        const int seq_base = cycle * 3;
+        // 3 sequences per cycle with overlapping prefixes (8 rotating prefix
+        // families) and varying lengths (32..80 tokens = 2..5 blocks).
+        for (int s = 0; s < 3; ++s) {
+            const int seq_id = seq_base + s;
+            const int n_tokens = 32 + ((cycle + s) % 4) * 16;
+            std::vector<int32_t> tokens(n_tokens);
+            std::iota(tokens.begin(), tokens.end(), (cycle % 8) * 1000);
+            int reused = mgr->allocate_blocks_with_prefix(seq_id, tokens);
+            if (reused < 0) {
+                // Pool pressure: reclaim cached blocks and retry once.
+                while (mgr->evict_cached_block()) {
+                }
+                reused = mgr->allocate_blocks_with_prefix(seq_id, tokens);
+            }
+            ASSERT_GE(reused, 0) << "alloc failed after evict-all, cycle " << cycle;
+            mgr->register_block_hashes(seq_id, tokens);
+            // Interleave speculative-style rollbacks (partial-block frees).
+            if ((cycle + s) % 5 == 0)
+                mgr->rollback(seq_id, n_tokens / 2);
+        }
+        for (int s = 0; s < 3; ++s)
+            mgr->free_sequence(seq_base + s);
+
+        // Every 10th cycle: drain the cache and assert exact pool baseline.
+        if (cycle % 10 == 9) {
+            while (mgr->evict_cached_block()) {
+            }
+            ASSERT_EQ(mgr->num_cached_blocks(), 0) << "cycle " << cycle;
+            ASSERT_EQ(mgr->num_free_blocks(), kPoolBlocks) << "cycle " << cycle;
+            ASSERT_EQ(mgr->num_reclaimable_cached_blocks(), 0) << "cycle " << cycle;
+            ASSERT_EQ(mgr->num_active_sequences(), 0) << "cycle " << cycle;
+            ASSERT_EQ(mgr->total_allocated_blocks(), 0) << "cycle " << cycle;
+        }
+    }
+}
+
 // ============================================================================
 // Edge case tests
 // ============================================================================

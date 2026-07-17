@@ -12,6 +12,7 @@
 // =============================================================================
 
 #include "compute/nvfp4_quant_ref.h"
+#include "core/logging.h"
 #include <cuda_fp8.h>
 #include <cstdint>
 
@@ -148,6 +149,7 @@ void nvfp4_quant_linear_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_s
     const int groups = (n_elements + 15) / 16;
     const int blocks = (groups + threads - 1) / threads;
     nvfp4_quant_linear_kernel<<<blocks, threads, 0, stream>>>(d_input, d_nvfp4, d_sf, n_elements);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void nvfp4_dequant_linear_fp16(const uint8_t* d_nvfp4, const uint8_t* d_sf, half* d_output, int n_elements,
@@ -156,6 +158,7 @@ void nvfp4_dequant_linear_fp16(const uint8_t* d_nvfp4, const uint8_t* d_sf, half
     const int groups = (n_elements + 15) / 16;
     const int blocks = (groups + threads - 1) / threads;
     nvfp4_dequant_linear_kernel<<<blocks, threads, 0, stream>>>(d_nvfp4, d_sf, d_output, n_elements);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

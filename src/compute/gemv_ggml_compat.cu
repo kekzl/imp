@@ -154,6 +154,7 @@ void gemv_q4k_ggml_compat(const uint8_t* W, const half* x, half* y, int rows, in
     size_t smem = q8_blocks * (sizeof(float) + 32);  // Q8Block per block
     int threads = 32;                                // one warp per row
     gemv_q4k_ggml_compat_kernel<<<rows, threads, smem, stream>>>(W, x, y, rows, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

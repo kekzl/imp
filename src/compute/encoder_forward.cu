@@ -186,6 +186,7 @@ bool encoder_embed(const Model& model, EncoderWorkspace& ws, const int32_t* toke
         const int64_t total = static_cast<int64_t>(n) * d;
         encoder_add_type_kernel<<<static_cast<int>((total + block - 1) / block), block, 0, stream>>>(
             static_cast<__half*>(ws.d_h), static_cast<const __half*>(model.token_types_.data), n, d);
+        IMP_CUDA_CHECK_LAUNCH();
     }
     Tensor none{};
     layernorm_residual(h, none, model.tok_emb_norm_, model.tok_emb_norm_bias_, h, ws.ln_eps, stream);
@@ -225,7 +226,9 @@ bool encoder_embed(const Model& model, EncoderWorkspace& ws, const int32_t* toke
     // Mean pool + L2 normalize + D2H.
     encoder_mean_pool_kernel<<<(d + 255) / 256, 256, 0, stream>>>(
         static_cast<const __half*>(ws.d_h), ws.d_pooled, n, d);
+    IMP_CUDA_CHECK_LAUNCH();
     encoder_l2_normalize_kernel<<<1, 256, 0, stream>>>(ws.d_pooled, d);
+    IMP_CUDA_CHECK_LAUNCH();
     cudaMemcpyAsync(out_host, ws.d_pooled, d * sizeof(float), cudaMemcpyDeviceToHost, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }

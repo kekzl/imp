@@ -530,6 +530,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
 
     // ---- Step 1: Extract patches ----
     extract_patches_kernel<<<np, 256, 0, stream>>>(d_pixels, d_patches_, img, img, ps, grid, grid, patch_dim);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // ---- Step 2: Patch embedding: patches @ patch_embd_w^T + bias -> hidden ----
     // patch_embd_w: [hidden_size, patch_dim]
@@ -542,6 +543,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
         int total = np * hd;
         add_bias_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
             d_hidden_, static_cast<const half*>(model_->patch_embd_b.data), np, hd);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // ---- Step 3: Add position embeddings ----
@@ -549,6 +551,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
         int total = np * hd;
         add_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
             d_hidden_, static_cast<const half*>(model_->position_embd.data), d_hidden_, total);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // ---- Step 4: Transformer layers ----
@@ -559,6 +562,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
         vision_layernorm_kernel<<<np, 256, 0, stream>>>(d_hidden_, static_cast<const half*>(lw.ln1_w.data),
                                                         static_cast<const half*>(lw.ln1_b.data), d_residual_,
                                                         hd, eps);
+        IMP_CUDA_CHECK_LAUNCH();
 
         // Q, K, V projections
         vision_gemm(d_residual_, static_cast<const half*>(lw.wq.data), d_q_, np, hd, hd, 1.0f, 0.0f, stream);
@@ -571,12 +575,15 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             add_bias_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_q_,
                                                                      static_cast<const half*>(lw.bq.data), np,
                                                                      hd);
+            IMP_CUDA_CHECK_LAUNCH();
             add_bias_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_k_,
                                                                      static_cast<const half*>(lw.bk.data), np,
                                                                      hd);
+            IMP_CUDA_CHECK_LAUNCH();
             add_bias_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_v_,
                                                                      static_cast<const half*>(lw.bv.data), np,
                                                                      hd);
+            IMP_CUDA_CHECK_LAUNCH();
         }
 
         // Multi-head attention via batched GEMM
@@ -627,6 +634,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
         // Non-causal softmax
         int total_rows = nh * np;
         softmax_2d_kernel<<<total_rows, 256, 0, stream>>>(d_attn_scores_, np);
+        IMP_CUDA_CHECK_LAUNCH();
 
         // attn_out = scores @ V
         {
@@ -663,6 +671,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             add_bias_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_residual_,
                                                                      static_cast<const half*>(lw.bo.data), np,
                                                                      hd);
+            IMP_CUDA_CHECK_LAUNCH();
         }
 
         // Residual add: hidden += attn_output
@@ -670,12 +679,14 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             int total = np * hd;
             add_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_hidden_, d_residual_, d_hidden_,
                                                                         total);
+            IMP_CUDA_CHECK_LAUNCH();
         }
 
         // Pre-FFN LayerNorm
         vision_layernorm_kernel<<<np, 256, 0, stream>>>(d_hidden_, static_cast<const half*>(lw.ln2_w.data),
                                                         static_cast<const half*>(lw.ln2_b.data), d_residual_,
                                                         hd, eps);
+        IMP_CUDA_CHECK_LAUNCH();
 
         // FFN up: residual @ ffn_up_w^T + bias -> ffn
         vision_gemm(d_residual_, static_cast<const half*>(lw.ffn_up_w.data), d_ffn_, np, ff, hd, 1.0f, 0.0f,
@@ -684,12 +695,14 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             int total = np * ff;
             add_bias_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
                 d_ffn_, static_cast<const half*>(lw.ffn_up_b.data), np, ff);
+            IMP_CUDA_CHECK_LAUNCH();
         }
 
         // GELU activation
         {
             int total = np * ff;
             gelu_tanh_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_ffn_, total);
+            IMP_CUDA_CHECK_LAUNCH();
         }
 
         // FFN down: ffn @ ffn_down_w^T + bias -> residual
@@ -699,6 +712,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             int total = np * hd;
             add_bias_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
                 d_residual_, static_cast<const half*>(lw.ffn_down_b.data), np, hd);
+            IMP_CUDA_CHECK_LAUNCH();
         }
 
         // Residual add: hidden += ffn_output
@@ -706,6 +720,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             int total = np * hd;
             add_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_hidden_, d_residual_, d_hidden_,
                                                                         total);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 
@@ -715,6 +730,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
                                                         static_cast<const half*>(model_->post_norm_w.data),
                                                         static_cast<const half*>(model_->post_norm_b.data),
                                                         d_hidden_, hd, eps);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // ---- Step 6: Average pool 4x4 spatial ----
@@ -727,6 +743,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
 
     avg_pool_spatial_kernel<<<n_pooled, 256, 0, stream>>>(d_hidden_, d_pooled_, grid, grid, hd, pool_factor,
                                                           out_h, out_w);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // ---- Step 7: Multimodal projector ----
     // RMSNorm -> Linear -> RMSNorm
@@ -735,6 +752,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
     if (model_->mm_pre_norm_w.data) {
         vision_rmsnorm_kernel<<<n_pooled, 256, 0, stream>>>(
             d_pooled_, static_cast<const half*>(model_->mm_pre_norm_w.data), d_pooled_, hd, eps);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Linear projection: [256, 1152] @ mm_proj_w^T + bias -> [256, d_model]
@@ -745,12 +763,14 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
         int total = n_pooled * lm_d_model_;
         add_bias_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
             d_output, static_cast<const half*>(model_->mm_proj_b.data), n_pooled, lm_d_model_);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Post-projection RMSNorm
     if (model_->mm_post_norm_w.data) {
         vision_rmsnorm_kernel<<<n_pooled, 256, 0, stream>>>(
             d_output, static_cast<const half*>(model_->mm_post_norm_w.data), d_output, lm_d_model_, eps);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     return true;
@@ -778,6 +798,7 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
 
     // ---- Patch embed (no bias) ----
     extract_patches_kernel<<<np, 256, 0, stream>>>(d_pixels, d_patches_, img, img, ps, grid, grid, patch_dim);
+    IMP_CUDA_CHECK_LAUNCH();
     vision_gemm(d_patches_, static_cast<const half*>(model_->patch_embd_w.data), d_hidden_, np, hd, patch_dim,
                 1.0f, 0.0f, stream);
 
@@ -788,6 +809,7 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
         axial_pos_add_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
             d_hidden_, static_cast<const half*>(model_->position_embd.data), d_pos_x_, d_pos_y_, np, hd,
             pos_size);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // ---- 27 transformer layers ----
@@ -798,6 +820,7 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
         // pre-attention RMSNorm (full-width, weighted)
         vision_rmsnorm_opt_kernel<<<np, 256, 0, stream>>>(
             d_hidden_, static_cast<const half*>(lw.ln1_w.data), d_residual_, hd, eps);
+        IMP_CUDA_CHECK_LAUNCH();
 
         // Q, K, V projections (no bias)
         vision_gemm(d_residual_, static_cast<const half*>(lw.wq.data), d_q_, np, hd, hd, 1.0f, 0.0f, stream);
@@ -807,18 +830,23 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
         // per-head q/k RMSNorm (weighted [head_dim]) → 2D RoPE; per-head v RMSNorm (weightless)
         vision_rmsnorm_opt_kernel<<<rows, 64, 0, stream>>>(
             d_q_, static_cast<const half*>(lw.q_norm.data), d_q_, head_dim, eps);
+        IMP_CUDA_CHECK_LAUNCH();
         vision_rmsnorm_opt_kernel<<<rows, 64, 0, stream>>>(
             d_k_, static_cast<const half*>(lw.k_norm.data), d_k_, head_dim, eps);
+        IMP_CUDA_CHECK_LAUNCH();
         {
             int pairs = (head_dim / 2) / 2;
             int total = np * nh * pairs;
             int blocks = (total + 127) / 128;
             vision_rope2d_neox_kernel<<<blocks, 128, 0, stream>>>(d_q_, d_pos_x_, d_pos_y_, np, nh, head_dim,
                                                                   rope_base);
+            IMP_CUDA_CHECK_LAUNCH();
             vision_rope2d_neox_kernel<<<blocks, 128, 0, stream>>>(d_k_, d_pos_x_, d_pos_y_, np, nh, head_dim,
                                                                   rope_base);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         vision_rmsnorm_opt_kernel<<<rows, 64, 0, stream>>>(d_v_, nullptr, d_v_, head_dim, eps);
+        IMP_CUDA_CHECK_LAUNCH();
 
         // attention: scores = Q @ K^T, kq_scale = 1.0 (q/k-norm controls magnitude)
         {
@@ -833,6 +861,7 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
                                        CUBLAS_GEMM_DEFAULT);
         }
         softmax_2d_kernel<<<nh * np, 256, 0, stream>>>(d_attn_scores_, np);
+        IMP_CUDA_CHECK_LAUNCH();
         {
             auto handle = get_vision_cublas_handle();
             cublasSetStream(handle, stream);
@@ -850,15 +879,18 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
         // sandwich: post-attention RMSNorm BEFORE residual add
         vision_rmsnorm_opt_kernel<<<np, 256, 0, stream>>>(
             d_residual_, static_cast<const half*>(lw.attn_post_norm.data), d_residual_, hd, eps);
+        IMP_CUDA_CHECK_LAUNCH();
         {
             int total = np * hd;
             add_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_hidden_, d_residual_, d_hidden_,
                                                                         total);
+            IMP_CUDA_CHECK_LAUNCH();
         }
 
         // pre-FFN RMSNorm → GeGLU(up, gate) → down
         vision_rmsnorm_opt_kernel<<<np, 256, 0, stream>>>(
             d_hidden_, static_cast<const half*>(lw.ln2_w.data), d_residual_, hd, eps);
+        IMP_CUDA_CHECK_LAUNCH();
         vision_gemm(d_residual_, static_cast<const half*>(lw.ffn_up_w.data), d_ffn_, np, ff, hd, 1.0f, 0.0f,
                     stream);
         vision_gemm(d_residual_, static_cast<const half*>(lw.ffn_gate_w.data), d_gate_, np, ff, hd, 1.0f, 0.0f,
@@ -866,17 +898,21 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
         {
             int total = np * ff;
             gelu_tanh_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_gate_, total);
+            IMP_CUDA_CHECK_LAUNCH();
             mul_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_gate_, d_ffn_, d_ffn_, total);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         vision_gemm(d_ffn_, static_cast<const half*>(lw.ffn_down_w.data), d_residual_, np, hd, ff, 1.0f, 0.0f,
                     stream);
         // sandwich: post-FFN RMSNorm BEFORE residual add
         vision_rmsnorm_opt_kernel<<<np, 256, 0, stream>>>(
             d_residual_, static_cast<const half*>(lw.ffn_post_norm.data), d_residual_, hd, eps);
+        IMP_CUDA_CHECK_LAUNCH();
         {
             int total = np * hd;
             add_tensors_kernel<<<(total + 255) / 256, 256, 0, stream>>>(d_hidden_, d_residual_, d_hidden_,
                                                                         total);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 
@@ -886,6 +922,7 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
     int n_pooled = out_h * out_w;
     avg_pool_spatial_kernel<<<n_pooled, 256, 0, stream>>>(d_hidden_, d_pooled_, grid, grid, hd, pool, out_h,
                                                           out_w);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // ---- Fused FP32 tail: ×√hd → (x-std_bias)*std_scale → pre-projection RMSNorm.
     // Gemma vision activations reach ~3000; ×√hd would overflow FP16 if stored, so
@@ -893,6 +930,7 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
     gemma4v_tail_norm_kernel<<<n_pooled, 256, hd * sizeof(float), stream>>>(
         d_pooled_, static_cast<const half*>(model_->std_bias.data),
         static_cast<const half*>(model_->std_scale.data), d_pooled_, hd, sqrtf(static_cast<float>(hd)), eps);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // ---- Linear projection ----
     vision_gemm(d_pooled_, static_cast<const half*>(model_->mm_proj_w.data), d_output, n_pooled, lm_d_model_,
@@ -910,6 +948,7 @@ void launch_replace_vision_embeddings(half* hidden, const int32_t* token_ids, co
     replace_vision_embeddings_v2_kernel<<<n_vision_tokens, 256, 0, stream>>>(hidden, token_ids, vision_emb,
                                                                              vision_token_id, n_tokens,
                                                                              d_model, n_vision_tokens);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp
