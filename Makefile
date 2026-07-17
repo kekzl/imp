@@ -14,7 +14,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize coverage
+.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -270,6 +270,26 @@ CLANG_FORMAT_FILES = $$(find src include tools tests -name '*.cpp' -o -name '*.h
 # 2026-06-04 on the WSL2 dev host). Run this target on a native-Linux GPU
 # host (e.g. a future self-hosted CI runner). Listed here so the invocation
 # is documented and ready, not because it runs on the dev box.
+# Host-code ASan+UBSan over the CPU test binaries (test-core, test-text).
+# Works on WSL2 (host-side sanitizers only — nvcc-compiled device code is NOT
+# sanitized, see IMP_SANITIZERS in CMakeLists.txt). Suppressions live in
+# tools/sanitizers/: vendored-stb unaligned stores (UBSan, #1047) and NVIDIA
+# driver one-time allocations (LSan). Build tree persists in a named docker
+# volume so re-runs are incremental.
+asan:
+	docker build --target builder $(BUILD_ARGS) $(DEP_ARGS) -t imp:builder .
+	docker run --rm --gpus all -v $(PWD):/src -v imp-asan-build:/basan -w /src imp:builder bash -c '\
+	  cmake -B /basan -S /src -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DIMP_SANITIZERS=ON \
+	        -DIMP_BUILD_TOOLS=OFF -DIMP_BUILD_BENCH=OFF -DIMP_BUILD_SERVER=OFF > /basan/configure.log && \
+	  cmake --build /basan --target test-core test-text -j$$(nproc) && \
+	  for b in test-core test-text; do \
+	    echo "== ASan+UBSan: $$b =="; \
+	    UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1:suppressions=/src/tools/sanitizers/ubsan.supp \
+	    ASAN_OPTIONS=detect_leaks=1 \
+	    LSAN_OPTIONS=suppressions=/src/tools/sanitizers/lsan.supp \
+	    /basan/$$b || exit 1; \
+	  done'
+
 sanitize:
 	docker build --target builder $(BUILD_ARGS) -t imp:sanitize .
 	@for b in test-attention test-quant test-kv; do \
