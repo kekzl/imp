@@ -22,6 +22,7 @@
 
 #include <random>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using imp::ChatTemplateFamily;
@@ -235,7 +236,7 @@ TEST(ToolStreamFilterChatML, StreamedArgsHandleStringsEscapesAndAngles) {
         EXPECT_EQ(r.calls[0].arguments, args_json);
         ASSERT_EQ(r.delta_concats.size(), 1u);
         EXPECT_EQ(r.delta_concats[0], args_json);
-        EXPECT_NO_THROW(json::parse(r.calls[0].arguments)) << "chunk=" << chunk;
+        EXPECT_NO_THROW(std::ignore = json::parse(r.calls[0].arguments)) << "chunk=" << chunk;
         EXPECT_EQ(r.content, "");
     }
 }
