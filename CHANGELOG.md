@@ -4,6 +4,65 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-07-17
+
+Hardening release: a latent KV prefix-cache corruption fix plus a
+diagnostics/robustness sweep. Decode measured neutral at every step
+(Qwen3-Coder-30B NVFP4 spec-OFF tg256 402.6 ± 0.3 tok/s across all A/Bs;
+`docs/audit/PERF_LOG.md`). Baseline snapshot and the claim-verification
+matrix for the external hardening brief that seeded the campaign:
+`docs/audit/DISPATCH_BASELINE_2026_07_17.md`.
+
+### Fixed
+- **KV prefix-cache block double-ownership after rollback** (PR #1044):
+  `rollback()` and the partial-allocation rollback freed hash-registered
+  blocks to ref 0 without erasing the `block_hash_to_id_` entries; a later
+  same-prefix allocation hit the stale entry, took the "actively
+  referenced — share it" branch and `inc_ref`'d a block sitting in the free
+  list, so the next free pushed it into the free list twice
+  (`num_free_blocks` exceeded the pool; silent cross-request KV corruption).
+  Production trigger: KV-pool pressure during prefix-cache allocation
+  followed by a same-prefix client retry — prefix caching is default-on.
+  Both rollback paths now drop the hash entries when a free reaches ref 0,
+  and the reuse path treats a ref==0 non-cached hash hit as a loud miss.
+  Found by the new `LeakUnderSustainedChurn` regression test (200 sustained
+  alloc/prefix/rollback/free/evict cycles with exact pool-baseline
+  assertions).
+- **Sticky CUDA error after the expected graph exec-update fallback**
+  (PR #1048): a failed `cudaGraphExecUpdate` (topology changed) is a
+  handled reinstantiate path, but the stale per-thread error lingered until
+  engine teardown's leak net cleared it with a WARN. Cleared at the
+  fallback site.
+- Last two compiler warnings cleared — a full rebuild is now 0 warnings
+  under `-Wall -Wextra -Wpedantic` (PR #1044).
+
+### Added
+- **Post-launch CUDA error checks at 399 kernel-launch sites** (PR #1044):
+  new `IMP_CUDA_CHECK_LAUNCH()` (cudaPeekAtLastError-based — logs file:line
+  at the launch site without clearing the sticky error, so downstream
+  `IMP_CUDA_CHECK_*` propagation is unchanged). Launch-config failures now
+  surface where they happen instead of at the next synchronizing call;
+  coverage went from ~1% to 100% of `<<<>>>` sites in src/.
+- **RAII owners for CUDA graph handles** (PR #1045): `CudaGraph` /
+  `CudaGraphExec` move-only wrappers (`core/cuda_raii.h`), adopted by
+  `CudaGraphCapture`, `CudaGraphConditionalRunner`, the per-bucket
+  spec-verify graphs and the spec-capture locals — every manual
+  destroy+null pair replaced, error/throw paths structurally leak-safe,
+  semantics preserved 1:1.
+- **`cache_control` per-breakpoint pin boundary** (#1046, PR #1049): the
+  LAST marked system/message block now bounds the prompt-KV pin instead of
+  always pinning the whole prompt (internal `cache_prefix_messages` →
+  truncated re-render → token boundary, rounded down to full blocks).
+  Tighter pins reduce pin-budget pressure in multi-turn agent loops. A
+  marker on tools keeps the whole-prompt pin; TTL tiers are accepted but
+  not modeled. Additive — unmarked requests unchanged. 7 new contract
+  tests.
+- **`make asan`** (#1047, PR #1049): reproducible host-code ASan+UBSan run
+  over the CPU test binaries, WSL2-capable (unlike compute-sanitizer).
+  Suppressions in `tools/sanitizers/` cover vendored-stb intentional
+  unaligned stores and NVIDIA driver one-time allocations. Baseline: 0
+  imp-code findings.
+
 ## [0.19.1] - 2026-07-17
 
 ### Added
