@@ -2,6 +2,7 @@
 #include "compute/warp_reduce.cuh"
 #include "runtime/pdl.h"
 #include "core/tensor.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -567,6 +568,7 @@ void layernorm_residual(const Tensor& x, const Tensor& residual, const Tensor& w
         static_cast<const __half*>(x.data),
         residual.data ? static_cast<const __half*>(residual.data) : nullptr, weight.data, w_f32,
         bias.data, b_f32, static_cast<__half*>(out.data), d, eps);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

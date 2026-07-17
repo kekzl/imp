@@ -29,6 +29,7 @@
 //    inner loop produces 32 low nibbles then 32 high nibbles.)
 
 #include "compute/mmq_q4k_imma_layout.h"
+#include "core/logging.h"
 
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -143,6 +144,7 @@ void mmq_q4k_imma_reorder(const void* q4k_blocks, int N, int K, int8_t* w_sym_s8
     dim3 block(32, 1, 1);
     mmq_q4k_imma_reorder_kernel<<<grid, block, 0, stream>>>(
         static_cast<const uint8_t*>(q4k_blocks), N, K, w_sym_s8, eff_alpha, eff_beta);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

@@ -599,6 +599,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
                                                                       d_expert_indices, d_expert_weights,
                                                                       use_sigmoid, normalize_weights,
                                                                       static_cast<const half*>(score_bias));
+    IMP_CUDA_CHECK_LAUNCH();
 
     // ---- Fused count + scan + scatter (single kernel) ----
     size_t smem_permute = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
@@ -606,11 +607,13 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
         moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(
             d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
             d_expert_offsets, nullptr);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(d_expert_indices, n_tokens, top_k,
                                                                           n_experts, d_sorted_token_ids,
                                                                           d_sorted_flat_idx, d_expert_offsets,
                                                                           nullptr);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // ---- Fill result struct ----
@@ -712,6 +715,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
                                                                       d_expert_indices, d_expert_weights,
                                                                       use_sigmoid, normalize_weights,
                                                                       static_cast<const half*>(score_bias));
+    IMP_CUDA_CHECK_LAUNCH();
 
     if (!skip_sorting) {
         int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
@@ -721,12 +725,14 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
             moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
                 d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
                 d_expert_offsets, buffers.token_to_expanded);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_expert_indices, n_tokens, top_k,
                                                                             n_experts, d_sorted_token_ids,
                                                                             d_sorted_flat_idx,
                                                                             d_expert_offsets,
                                                                             buffers.token_to_expanded);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 
@@ -760,6 +766,7 @@ void moe_gate_topk_fused(const void* W_gate, const void* x, int n_experts, int d
                                                                  buffers.expert_weights, use_sigmoid,
                                                                  normalize_weights,
                                                                  static_cast<const half*>(score_bias));
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Fill result struct (no ownership — memory belongs to buffers)
     result.owns_memory = false;

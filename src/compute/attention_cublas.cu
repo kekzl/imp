@@ -385,6 +385,7 @@ static inline void launch_build_attn_ptrs(void** d_ptrs, int n_heads, const void
         d_ptrs + 2 * n_heads, reinterpret_cast<const char*>(base_A), stride_A_bytes,
         reinterpret_cast<const char*>(base_B), stride_B_bytes, reinterpret_cast<char*>(base_C),
         stride_C_bytes, gqa_ratio, n_heads);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -487,10 +488,13 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
             int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
             int block = 256;
             int grid_sc = static_cast<int>((total + block - 1) / block);
-            if (use_fp32_s)
+            if (use_fp32_s) {
                 softcap_fp32_kernel<<<grid_sc, block, 0, stream>>>(S_f32, total, softcap);
-            else
+                IMP_CUDA_CHECK_LAUNCH();
+            } else {
                 softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
+                IMP_CUDA_CHECK_LAUNCH();
+            }
         }
 
         // Softmax (FP32 or FP16)
@@ -505,9 +509,11 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                 // + fp32_to_fp16_kernel pair (saves one full pass over the tensor).
                 causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(
                     S_f32, S_prob, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
+                IMP_CUDA_CHECK_LAUNCH();
             } else {
                 causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
                     S_base, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
+                IMP_CUDA_CHECK_LAUNCH();
             }
         }
 
@@ -546,10 +552,13 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
             int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
             int block = 256;
             int grid_sc = static_cast<int>((total + block - 1) / block);
-            if (use_fp32_s)
+            if (use_fp32_s) {
                 softcap_fp32_kernel<<<grid_sc, block, 0, stream>>>(S_f32, total, softcap);
-            else
+                IMP_CUDA_CHECK_LAUNCH();
+            } else {
                 softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
+                IMP_CUDA_CHECK_LAUNCH();
+            }
         }
 
         // Softmax
@@ -562,9 +571,11 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                 // Fused FP32 softmax + downcast (see MHA path above).
                 causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(
                     S_f32, S_prob, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
+                IMP_CUDA_CHECK_LAUNCH();
             } else {
                 causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
                     S_base, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
+                IMP_CUDA_CHECK_LAUNCH();
             }
         }
 

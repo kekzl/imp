@@ -1107,7 +1107,8 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
                                                 reinterpret_cast<const uint8_t*>(V_cache.data), K_scales,  \
                                                 V_scales, partial, block_tables, context_lens, batch_size, \
                                                 n_heads, n_kv_heads, block_size, scale, max_num_blocks,    \
-                                                num_splits, sliding_window, softcap)
+                                                num_splits, sliding_window, softcap);                      \
+    IMP_CUDA_CHECK_LAUNCH()
 
         switch (head_dim) {
             case 64:
@@ -1153,7 +1154,8 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
         residual_active_multiseq ? d_residual_counts : nullptr,                                               \
         residual_active_multiseq ? d_residual_write_idxes : nullptr,                                          \
         residual_active_multiseq ? d_residual_fc_per_slot : nullptr,                                          \
-        residual_active_multiseq ? d_residual_widx_per_slot : nullptr)
+        residual_active_multiseq ? d_residual_widx_per_slot : nullptr);                                       \
+    IMP_CUDA_CHECK_LAUNCH()
             switch (head_dim) {
                 case 64:  LAUNCH_RESIDUAL_REDUCE(64);  break;
                 case 128: LAUNCH_RESIDUAL_REDUCE(128); break;
@@ -1188,7 +1190,8 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
         residual_active_multiseq ? residual_seq_stride_elems : 0,                                              \
         residual_active_multiseq ? d_residual_seq_slots : nullptr,                                             \
         residual_active_multiseq ? d_residual_counts : nullptr,                                                \
-        residual_active_multiseq ? d_residual_write_idxes : nullptr)
+        residual_active_multiseq ? d_residual_write_idxes : nullptr);                                          \
+    IMP_CUDA_CHECK_LAUNCH()
 
         switch (head_dim) {
             case 64:

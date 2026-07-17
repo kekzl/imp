@@ -245,6 +245,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
             logit_softcap_fp32_kernel<<<blocks, threads, 0, stream>>>(
                 static_cast<float*>(lg.data), cfg.final_logit_softcap,
                 1.0f / cfg.final_logit_softcap, total);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         consume(lg, c, csz);
     }
@@ -267,6 +268,7 @@ void GraphExecutor::perplexity_nll_partial(const int32_t* d_tokens, int n_total,
                                 perplexity_nll_kernel<<<csz, 256, 0, stream>>>(
                                     static_cast<const float*>(lg.data), d_tokens, chunk_start + row0,
                                     n_total, V, d_nll, d_match);
+                                IMP_CUDA_CHECK_LAUNCH();
                             });
 }
 
@@ -418,6 +420,7 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         }
         verify_hist_count_kernel<<<(V + 255) / 256, 256, 0, stream>>>(d_hist, n_hist, V,
                                                                       verify_pen_counts_);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // allow_cutlass=false: verify logits decide (and emit) the accepted batch=1
@@ -430,11 +433,14 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
             verify_penalties_kernel<<<pgrid, 256, 0, stream>>>(
                 static_cast<float*>(lg.data), row0, V, verify_pen_counts_, d_draft, rep_pen,
                 freq_pen, pres_pen);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         dim3 grid(csz, kArgmaxSplits);
         rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(
             static_cast<const float*>(lg.data), V, pvals, pidxs);
+        IMP_CUDA_CHECK_LAUNCH();
         rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + row0);
+        IMP_CUDA_CHECK_LAUNCH();
     });
 }
 

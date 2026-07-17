@@ -273,6 +273,7 @@ bool mmq_q4k_hmma_gemm(const void* A_fp16, const void* B_q4k, void* C_fp16,
         static_cast<const uint8_t*>(B_q4k),
         static_cast<__half*>(C_fp16),
         M, N, K);
+    IMP_CUDA_CHECK_LAUNCH();
 
     return true;
 }

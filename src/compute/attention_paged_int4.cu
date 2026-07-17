@@ -556,7 +556,8 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
                                                  reinterpret_cast<const uint8_t*>(V_cache.data), K_scales,  \
                                                  V_scales, partial, block_tables, context_lens, batch_size, \
                                                  n_heads, n_kv_heads, block_size, scale, max_num_blocks,    \
-                                                 num_splits, sliding_window, softcap)
+                                                 num_splits, sliding_window, softcap);                      \
+    IMP_CUDA_CHECK_LAUNCH()
 
             switch (head_dim) {
                 case 64:
@@ -584,7 +585,8 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
                                                 reinterpret_cast<const uint8_t*>(V_cache.data), K_scales,  \
                                                 V_scales, partial, block_tables, context_lens, batch_size, \
                                                 n_heads, n_kv_heads, block_size, scale, max_num_blocks,    \
-                                                num_splits, sliding_window, softcap)
+                                                num_splits, sliding_window, softcap);                      \
+    IMP_CUDA_CHECK_LAUNCH()
 
             switch (head_dim) {
                 case 64:
@@ -619,7 +621,8 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
         reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),               \
         reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales, reinterpret_cast<half*>(O.data), \
         block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len,     \
-        max_num_blocks, sliding_window, softcap)
+        max_num_blocks, sliding_window, softcap);                                                            \
+    IMP_CUDA_CHECK_LAUNCH()
 
         switch (head_dim) {
             case 64:

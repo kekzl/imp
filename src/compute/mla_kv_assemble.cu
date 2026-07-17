@@ -11,6 +11,7 @@
 // V output: [n_tokens, n_heads, v_head_dim]
 
 #include "compute/mla_kv_assemble.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
@@ -118,6 +119,7 @@ void mla_assemble_kv(const half* kv_b, const half* k_rope,
         reinterpret_cast<__half*>(K_out),
         reinterpret_cast<__half*>(V_out),
         n_heads, nope_dim, v_head_dim, rope_dim, v_dst_hd);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void mla_reorder_q(half* q_data, int n_tokens, int n_heads,
@@ -129,6 +131,7 @@ void mla_reorder_q(half* q_data, int n_tokens, int n_heads,
     mla_reorder_q_kernel<<<grid, 64, smem, stream>>>(
         reinterpret_cast<__half*>(q_data),
         n_heads, nope_dim, rope_dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void mla_compact_attn_output(const half* src, half* dst,
@@ -142,6 +145,7 @@ void mla_compact_attn_output(const half* src, half* dst,
         reinterpret_cast<const __half*>(src),
         reinterpret_cast<__half*>(dst),
         n_heads, head_dim, v_head_dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

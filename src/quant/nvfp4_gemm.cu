@@ -236,6 +236,7 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
             const int grid = static_cast<int>((total + block - 1) / block);
             nvfp4_fp32_to_fp16_kernel<<<grid, block, 0, stream>>>(
                 static_cast<const float*>(y32), reinterpret_cast<half*>(C.data), total);
+            IMP_CUDA_CHECK_LAUNCH();
             return;
         }
         // Scratch unavailable (capture-active without workspace): fall through —

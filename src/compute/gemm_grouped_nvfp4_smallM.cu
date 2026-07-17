@@ -590,6 +590,7 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
         (const void* const*)d_A, (const void* const*)d_SFA,
         (const void* const*)d_B, (const void* const*)d_SFB,
         d_D, dev_alpha, d_M, N, K);
+    IMP_CUDA_CHECK_LAUNCH();
 
     cudaFreeAsync(d_A, stream);   cudaFreeAsync(d_SFA, stream);
     cudaFreeAsync(d_B, stream);   cudaFreeAsync(d_SFB, stream);
@@ -621,6 +622,7 @@ extern "C" void smallM_smoke_single_mma(
     float* d_out, const uint32_t* a, const uint32_t* b,
     uint32_t sfa, uint32_t sfb, cudaStream_t stream) {
     imp_test::smallM_smoke_single_mma_kernel<<<1, 32, 0, stream>>>(d_out, a, b, sfa, sfb);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 #endif  // SMALLM_TEST_HOOKS
 
@@ -920,6 +922,7 @@ bool gemm_grouped_nvfp4_smallM(
             (const void* const*)d_A, (const void* const*)d_SFA,
             (const void* const*)d_B, (const void* const*)d_SFB,
             d_D, dev_alpha, d_M, d_descs, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     };
 
     using IC2  = std::integral_constant<int, 2>;

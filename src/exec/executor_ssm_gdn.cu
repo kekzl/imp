@@ -364,6 +364,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         int blocks = static_cast<int>((total + threads - 1) / threads);
         fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(xBC_out.data), conv_f32,
                                                             total);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Per-element dump: post-conv1d post-SiLU FP32 scan input.
@@ -529,6 +530,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 fp32_to_fp16_kernel<<<blocks_, threads_, 0, stream>>>(y_fp32_postnorm,
                                                                       static_cast<__half*>(y_buf.data),
                                                                       total);
+                IMP_CUDA_CHECK_LAUNCH();
             }
         } else if (use_ref) {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
@@ -621,6 +623,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         fp32_plus_fp16_to_fp16<<<blocks, threads, 0, stream>>>(static_cast<const float*>(fp32_out),
                                                                static_cast<const __half*>(r.data),
                                                                static_cast<__half*>(h.data), total);
+        IMP_CUDA_CHECK_LAUNCH();
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
     } else {
         gemm_via_handle_(ly.ssm_out_id, y_buf, out_buf, ctx);

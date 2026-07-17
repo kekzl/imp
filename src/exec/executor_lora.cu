@@ -91,10 +91,12 @@ void GraphExecutor::lora_delta_(const LoraWeights& w, const void* x, void* y, in
         float* t = static_cast<float*>(lora_scratch_);
         lora_gemv_a_kernel<<<w.r, 256, 0, stream>>>(static_cast<const half*>(w.A),
                                                     static_cast<const half*>(x), t, w.r, w.K);
+        IMP_CUDA_CHECK_LAUNCH();
         int threads = 256;
         int blocks = (w.N + threads - 1) / threads;
         lora_gemv_b_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(w.B), t,
                                                            static_cast<half*>(y), s, w.N, w.r);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
     // Prefill: t = x · A^T  (gemm computes C = alpha · A_in @ B_w^T + beta · C

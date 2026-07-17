@@ -488,6 +488,7 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
         constrain_mask_allow_kernel<<<b, t, 0, stream>>>(d_logits, d_token_categories_, d_token_allow_,
                                                          d_allowed_mask_, vocab_size,
                                                          /*n_classified=*/vocab_size_, /*use_allow=*/true);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
 
@@ -539,6 +540,7 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
                                                                 d_allowed_mask_, vocab_size,
                                                                 /*n_classified=*/vocab_size_,
                                                                 need_token_allow_);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 #include "quant/dequant_gptq.h"
+#include "core/logging.h"
 #include <cuda_fp16.h>
 #include <cstdint>
 
@@ -64,6 +65,7 @@ void dequant_gptq4(half* out, const int32_t* qweight, const int32_t* qzeros, con
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (K + block.y - 1) / block.y);
     dequant_gptq4_kernel<<<grid, block, 0, stream>>>(out, qweight, qzeros, scales, g_idx, N, K, group_size);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

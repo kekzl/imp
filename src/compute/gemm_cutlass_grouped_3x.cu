@@ -574,6 +574,7 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
         args.d_B_ptrs, args.d_SFB_ptrs,
         args.base_D,
         N, K, n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // ----- Build Arguments -----
     typename GrpGemm::Arguments arguments;

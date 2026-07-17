@@ -1,4 +1,5 @@
 #include "compute/gdn_internal.cuh"
+#include "core/logging.h"
 
 namespace imp {
 
@@ -508,6 +509,7 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
             gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut><<<n_heads, HD, smem, stream>>>(
                 conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
                 grouped_layout);
+            IMP_CUDA_CHECK_LAUNCH();
             return;
         }
         if (head_dim_ssm == 64 && state_size == 64) {
@@ -517,6 +519,7 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
             gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut><<<n_heads, HD, smem, stream>>>(
                 conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
                 grouped_layout);
+            IMP_CUDA_CHECK_LAUNCH();
             return;
         }
     }
@@ -605,6 +608,7 @@ void gdn_scan_chunkwise_wy_f32(const float* conv_f32, int conv_channels, const h
         gdn_scan_chunkwise_wy_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups, conv_channels,
             grouped_layout);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
     // Unsupported shape — fall back to the sequential kernel for safety.

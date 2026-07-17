@@ -391,6 +391,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                                        state.positions, nh, hd,
                                                                        layer_rope_theta, inv_scaling, pairs,
                                                                        cfg.rope_neox, longrope_freqs);
+            IMP_CUDA_CHECK_LAUNCH();
             rope_k_deferred = true;
         } else {
             // Separate path: QK-norm (if present) + RoPE on both Q and K.
@@ -679,11 +680,13 @@ after_attention:
                     static_cast<const float*>(po_fp32_buf), static_cast<const half*>(ly.post_attn_norm.data),
                     static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), model_->config().d_model,
                     eps, norm_w_off_);
+                IMP_CUDA_CHECK_LAUNCH();
             } else {
                 rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                     static_cast<const half*>(po.data), static_cast<const half*>(ly.post_attn_norm.data),
                     static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), model_->config().d_model,
                     eps, norm_w_off_);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);

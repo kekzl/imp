@@ -182,10 +182,12 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
                 embedding_lookup_vec_kernel<float>
                     <<<n_tokens, block, 0, stream>>>(static_cast<const float*>(table.data), token_ids,
                                                      static_cast<float*>(out.data), d_model);
+                IMP_CUDA_CHECK_LAUNCH();
             } else {
                 embedding_lookup_scalar_kernel<float>
                     <<<n_tokens, block, 0, stream>>>(static_cast<const float*>(table.data), token_ids,
                                                      static_cast<float*>(out.data), d_model);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             break;
         }
@@ -194,10 +196,12 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
                 embedding_lookup_vec_kernel<__half>
                     <<<n_tokens, block, 0, stream>>>(static_cast<const __half*>(table.data), token_ids,
                                                      static_cast<__half*>(out.data), d_model);
+                IMP_CUDA_CHECK_LAUNCH();
             } else {
                 embedding_lookup_scalar_kernel<__half>
                     <<<n_tokens, block, 0, stream>>>(static_cast<const __half*>(table.data), token_ids,
                                                      static_cast<__half*>(out.data), d_model);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             break;
         }
@@ -205,6 +209,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
             embedding_lookup_vec_kernel<uint16_t>
                 <<<n_tokens, block, 0, stream>>>(static_cast<const uint16_t*>(table.data), token_ids,
                                                  static_cast<uint16_t*>(out.data), d_model);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         }
         default:
@@ -228,6 +233,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
         embedding_lookup_q8_0_kernel<<<n_tokens, block, 0, stream>>>(static_cast<const uint8_t*>(table.data),
                                                                      token_ids, static_cast<half*>(out.data),
                                                                      d_model);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
 
@@ -235,6 +241,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
         embedding_lookup_q6k_kernel<<<n_tokens, block, 0, stream>>>(static_cast<const uint8_t*>(table.data),
                                                                     token_ids, static_cast<half*>(out.data),
                                                                     d_model);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
 
@@ -309,6 +316,7 @@ void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id
         embedding_lookup_fp16_device_kernel<<<1, block, 0, stream>>>(static_cast<const __half*>(table.data),
                                                                      d_token_id,
                                                                      static_cast<__half*>(out.data), d_model);
+        IMP_CUDA_CHECK_LAUNCH();
     } else if (table.qtype == QType::F32) {
         // For FP32 tables, fall back to regular path with a device-to-host copy
         // (FP32 embedding tables are uncommon in quantized models)
@@ -329,6 +337,7 @@ void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id
         embedding_lookup_q8_0_device_kernel<<<1, block, 0, stream>>>(static_cast<const uint8_t*>(table.data),
                                                                      d_token_id, static_cast<half*>(out.data),
                                                                      d_model);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
 
@@ -336,6 +345,7 @@ void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id
         embedding_lookup_q6k_device_kernel<<<1, block, 0, stream>>>(static_cast<const uint8_t*>(table.data),
                                                                     d_token_id, static_cast<half*>(out.data),
                                                                     d_model);
+        IMP_CUDA_CHECK_LAUNCH();
         return;
     }
 

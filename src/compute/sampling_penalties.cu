@@ -110,6 +110,7 @@ __global__ void force_single_token_kernel(float* logits, int vocab_size, int32_t
 void force_single_token(float* logits, int vocab_size, int32_t keep_token, cudaStream_t stream) {
     int blocks = (vocab_size + 255) / 256;
     force_single_token_kernel<<<blocks, 256, 0, stream>>>(logits, vocab_size, keep_token);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void apply_penalties(float* logits, int vocab_size, const int32_t* token_ids, int n_tokens,
@@ -124,6 +125,7 @@ void apply_penalties(float* logits, int vocab_size, const int32_t* token_ids, in
     apply_penalties_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(logits, token_ids, n_tokens, vocab_size,
                                                               repetition_penalty, frequency_penalty,
                                                               presence_penalty);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void apply_penalties_device_count(float* logits, int vocab_size, const int32_t* token_ids,
@@ -138,6 +140,7 @@ void apply_penalties_device_count(float* logits, int vocab_size, const int32_t* 
                                                                            repetition_penalty,
                                                                            frequency_penalty,
                                                                            presence_penalty);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ===========================================================================
@@ -251,6 +254,7 @@ void apply_dry_penalty(float* d_logits, int vocab_size, const int32_t* host_toke
 
     int grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
     apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_logits, s_dry_tokens_buf, s_dry_values_buf, n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ===========================================================================
@@ -400,6 +404,7 @@ static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, 
 
     mirostat_v2_sample_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, *mu, inv_temperature, seed,
                                                             d_result, d_surprise);
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Read results
     int32_t h_result = 0;

@@ -520,6 +520,7 @@ void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cach
     paged_attention_splitk_fp8_tile_kernel<kTileHeadDim><<<grid, block, kBlockSmemBytes, stream>>>(
         Q, K_cache, V_cache, partial_out, block_tables, context_lens, batch_size, n_heads, n_kv_heads,
         block_size, scale, kv_scale, max_num_blocks, num_splits, sliding_window, softcap);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Split count for the GQA variant's geometry: with grid.y = n_kv_heads (G x
@@ -567,6 +568,7 @@ void paged_attention_splitk_fp8_tile_gqa_launch(const half* Q, const uint8_t* K_
     paged_attention_splitk_fp8_tile_gqa_kernel<kTileHeadDim><<<grid, block, 0, stream>>>(
         Q, K_cache, V_cache, partial_out, block_tables, context_lens, batch_size, n_heads, n_kv_heads,
         block_size, scale, kv_scale, max_num_blocks, num_splits, sliding_window, softcap);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

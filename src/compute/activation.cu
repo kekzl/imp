@@ -1,6 +1,7 @@
 #include "compute/activation.h"
 #include "runtime/pdl.h"
 #include "core/tensor.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -274,11 +275,13 @@ static void dispatch_gated_activation(const Tensor& gate, const Tensor& up, Tens
                 fp32_vec4<<<grid, block, 0, stream>>>(static_cast<const float*>(gate.data),
                                                       static_cast<const float*>(up.data),
                                                       static_cast<float*>(out.data), n);
+                IMP_CUDA_CHECK_LAUNCH();
             } else {
                 const int grid = static_cast<int>((n + block - 1) / block);
                 fp32_scalar<<<grid, block, 0, stream>>>(static_cast<const float*>(gate.data),
                                                         static_cast<const float*>(up.data),
                                                         static_cast<float*>(out.data), n);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             break;
         case QType::F16: {
@@ -292,6 +295,7 @@ static void dispatch_gated_activation(const Tensor& gate, const Tensor& up, Tens
                 fp16_kernel<<<grid, block, 0, stream>>>(static_cast<const __half*>(gate.data),
                                                         static_cast<const __half*>(up.data),
                                                         static_cast<__half*>(out.data), n);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             break;
         }
@@ -348,10 +352,12 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream) {
                 const int grid = static_cast<int>((n / 4 + block - 1) / block);
                 gelu_fp32_vec4_kernel<<<grid, block, 0, stream>>>(static_cast<const float*>(x.data),
                                                                   static_cast<float*>(out.data), n);
+                IMP_CUDA_CHECK_LAUNCH();
             } else {
                 const int grid = static_cast<int>((n + block - 1) / block);
                 gelu_fp32_kernel<<<grid, block, 0, stream>>>(static_cast<const float*>(x.data),
                                                              static_cast<float*>(out.data), n);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             break;
         case QType::F16: {
@@ -359,6 +365,7 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream) {
             const int grid = static_cast<int>((half_n + block - 1) / block);
             gelu_fp16_kernel<<<grid, block, 0, stream>>>(static_cast<const __half*>(x.data),
                                                          static_cast<__half*>(out.data), n);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         }
         default:
@@ -433,6 +440,7 @@ void shared_expert_gate_scale(const void* x_fp16, const void* W_fp16, void* y_fp
     shared_expert_gate_scale_kernel<<<n, block, 0, stream>>>(static_cast<const __half*>(x_fp16),
                                                              static_cast<const __half*>(W_fp16),
                                                              static_cast<__half*>(y_fp16_inout), d_model, d);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // --------------------------------------------------------------------------

@@ -57,6 +57,7 @@
                 static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size_d, n,
                 state.max_blocks_per_seq, state.n_sequences, nkv, hd, layer_rope_theta, inv_scaling, pairs,
                 cfg.rope_neox, longrope_freqs);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             write_kv_cache(layer, state, stream);
         }

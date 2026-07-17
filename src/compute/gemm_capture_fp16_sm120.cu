@@ -322,6 +322,7 @@ bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N
         gemm_fp16_kernel<64, 2><<<grid, block, smem_bytes, stream>>>(
             reinterpret_cast<const __half*>(A), reinterpret_cast<const __half*>(B),
             reinterpret_cast<__half*>(D), M, N, K, alpha, beta);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         gemm_fp16_kernel<128, 2><<<grid, block, smem_bytes, stream>>>(
             reinterpret_cast<const __half*>(A), reinterpret_cast<const __half*>(B),

@@ -1,5 +1,6 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm.h"  // block_q8_1, quantize_fp16_to_q8_1
+#include "core/logging.h"
 
 #include <cuda_fp16.h>
 #include <cstdio>
@@ -233,6 +234,7 @@ void gemm_q6k_moe_fused(const void* packed_weight, const block_q8_1* q8_base, co
                                                                    q8_base, d8_base,
                                                                    static_cast<half*>(c_base), offsets, K, N,
                                                                    weight_stride, q8_per_row);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

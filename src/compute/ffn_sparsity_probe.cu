@@ -102,6 +102,7 @@ void probe_ffn_silu_sparsity(int layer, const __half* gate, const __half* up, in
 
     constexpr int kThreads = 256;
     probe_silu_kernel<<<1, kThreads, 0, stream>>>(layer, gate, up, K, g_state.d_counters);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void flush_ffn_sparsity_probe_log() {

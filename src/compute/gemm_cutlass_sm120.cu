@@ -434,6 +434,7 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& d
         convert_scales_sfatom_kernel<<<blocks, threads, 0, stream>>>(
             reinterpret_cast<const uint8_t*>(src.micro_scales), reinterpret_cast<uint8_t*>(d_sf),
             static_cast<int>(N), static_cast<int>(K), n_k_tiles);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     dst.data = src.packed_data;  // borrowed pointer (not owned)
@@ -465,6 +466,7 @@ void convert_nvfp4_to_cutlass_borrowed(const NvFP4QuantResult& src, CutlassNvFP4
     convert_scales_sfatom_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(src.micro_scales), reinterpret_cast<uint8_t*>(sf_dst),
         static_cast<int>(N), static_cast<int>(K), n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
 
     dst.data = src.packed_data;  // borrowed pointer (not owned)
     dst.scale_factors = sf_dst;  // borrowed slab sub-region
@@ -508,6 +510,7 @@ void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfa
     convert_scales_sfatom_moe_kernel<<<grid, threads, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(src_native_ms), reinterpret_cast<uint8_t*>(dst_sfatom_sf), N, K,
         n_k_tiles, native_stride, sfatom_stride);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
@@ -529,6 +532,7 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* 
     quantize_fp16_nvfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_data),
         reinterpret_cast<uint8_t*>(dst_sf), M, K, n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, uint8_t* const* d_sfa_bases,
@@ -549,6 +553,7 @@ void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, 
         reinterpret_cast<const half*>(src_fp16), /*gather=*/nullptr,
         reinterpret_cast<uint8_t*>(dst_packed), d_sfa_bases,
         d_offsets, expanded, K, ne, n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
@@ -574,6 +579,7 @@ void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
         reinterpret_cast<const half*>(src_fp16), sorted_token_ids,
         reinterpret_cast<uint8_t*>(dst_packed), d_sfa_bases,
         d_offsets, expanded, K, ne, n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +686,7 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
             fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<0>
                 <<<blocks, threads, 0, stream>>>(gate_p, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
                                                  ne, n_k_tiles);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         case FFNActivation::GEGLU:
             IMP_CHECK(gate_p != nullptr,
@@ -687,11 +694,13 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
             fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<1>
                 <<<blocks, threads, 0, stream>>>(gate_p, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
                                                  ne, n_k_tiles);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
         case FFNActivation::RELU_SQR:
             fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<2>
                 <<<blocks, threads, 0, stream>>>(nullptr, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
                                                  ne, n_k_tiles);
+            IMP_CUDA_CHECK_LAUNCH();
             break;
     }
 }

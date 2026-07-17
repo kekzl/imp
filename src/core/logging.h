@@ -87,6 +87,20 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
         }                                                                            \
     } while (0)
 
+// Post-launch check: place immediately after a kernel `<<<>>>` launch. Surfaces
+// launch-time failures (invalid configuration, missing kernel image, OOM at
+// launch) at the launch site instead of at the next synchronizing call.
+// Uses cudaPeekAtLastError() so the sticky error is NOT cleared — existing
+// downstream IMP_CUDA_CHECK_* handling still sees and propagates it.
+#define IMP_CUDA_CHECK_LAUNCH()                                                      \
+    do {                                                                             \
+        cudaError_t err_ = cudaPeekAtLastError();                                    \
+        if (err_ != cudaSuccess) {                                                   \
+            IMP_LOG_ERROR("CUDA kernel launch failed at %s:%d — %s", __FILE__,       \
+                          __LINE__, cudaGetErrorString(err_));                       \
+        }                                                                            \
+    } while (0)
+
 // Check + return void: for void-returning functions.
 #define IMP_CUDA_CHECK_VOID(call)                                                    \
     do {                                                                             \

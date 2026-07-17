@@ -268,6 +268,7 @@ void vhead_tiled_to_grouped(const half* src, half* dst, int n_tokens, int n_head
     int blocks = (total + threads - 1) / threads;
     vhead_tiled_to_grouped_kernel<<<blocks, threads, 0, stream>>>(src, dst, n_tokens, n_heads, head_dim,
                                                                   n_groups);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // FP32 variant for conv1d-SiLU output (= scan V input). Same math as FP16,
@@ -302,6 +303,7 @@ void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int 
     int blocks = (total + threads - 1) / threads;
     vhead_tiled_to_grouped_f32_kernel<<<blocks, threads, 0, stream>>>(src, dst, n_tokens, n_heads, head_dim,
                                                                       n_groups);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -325,10 +327,12 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
         gdn_scan_fused_kernel<128, 128, half>
             <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
                                              n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
+        IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         gdn_scan_fused_kernel<64, 64, half>
             <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Fallback: per-token loop (for unsupported HD/SS sizes). The host
         // loop cannot bound itself by a device-side length — reject padded
@@ -345,6 +349,7 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
                 row + 2 * BC_size, row + BC_size, row, alpha + t * n_heads, beta + t * n_heads, A_log,
                 dt_bias, h_state, y + t * inner, nullptr, n_heads, head_dim_ssm, state_size, n_groups,
                 grouped_layout);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 }
@@ -360,10 +365,12 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
         gdn_scan_fused_kernel<128, 128, float>
             <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
                                              n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
+        IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         gdn_scan_fused_kernel<64, 64, float>
             <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         if (d_real_n != nullptr)
             throw std::runtime_error("gdn_scan_fused_fp32out: padded verify chunk unsupported for HD=" +
@@ -382,6 +389,7 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
                 row + 2 * BC_size, row + BC_size, row, alpha + t * n_heads, beta + t * n_heads, A_log,
                 dt_bias, h_state, scratch_dev + t * inner, nullptr, n_heads, head_dim_ssm, state_size,
                 n_groups, grouped_layout);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         // Convert FP16 scratch → FP32. Simple elementwise cast kernel not
         // present; do it via cuda memcpy + cast on device via small kernel.
@@ -567,6 +575,7 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half
                                                                        n_groups, head_dim_ssm, state_size,
                                                                        conv_channels, grouped_layout,
                                                                        d_real_n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // FP32-input variant: reads y as FP32, writes FP16. Used together with
@@ -612,6 +621,7 @@ void gdn_rmsnorm_gated_silu_fp32in(half* y_fp16_out, const float* y_fp32_in, con
     dim3 grid(n_tokens, n_heads);
     gdn_rmsnorm_gated_silu_fp32in_kernel<<<grid, head_dim, smem, stream>>>(y_fp16_out, y_fp32_in, gate,
                                                                            weight, eps, n_heads, head_dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // FP32-in, FP32-out: keeps full precision through gated norm so ssm_out GEMM
@@ -657,6 +667,7 @@ void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in,
     dim3 grid(n_tokens, n_heads);
     gdn_rmsnorm_gated_silu_fp32inout_kernel<<<grid, head_dim, smem, stream>>>(y_fp32_out, y_fp32_in, gate,
                                                                               weight, eps, n_heads, head_dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused RMSNormGated + SiLU
@@ -665,6 +676,7 @@ void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float
     size_t smem = head_dim * sizeof(float);
     dim3 grid(n_tokens, n_heads);
     gdn_rmsnorm_gated_silu_kernel<<<grid, head_dim, smem, stream>>>(y, gate, weight, eps, n_heads, head_dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -745,6 +757,7 @@ void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const h
     gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(x, B, C, alpha, beta, A_log, dt_bias,
                                                                     h_state, y, z, n_heads, head_dim_ssm,
                                                                     state_size, n_groups, grouped_layout);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void gdn_scan_prefill_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
@@ -761,6 +774,7 @@ void gdn_scan_prefill_f32(const float* x, const float* B, const float* C, const 
                                                                         h_state, y + t * inner, nullptr,
                                                                         n_heads, head_dim_ssm, state_size,
                                                                         n_groups, grouped_layout);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 

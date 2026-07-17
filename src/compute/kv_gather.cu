@@ -1,4 +1,5 @@
 #include "compute/kv_gather.h"
+#include "core/logging.h"
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime.h>
@@ -130,6 +131,7 @@ void paged_kv_gather_fp16(half* dst, const half* src, const int* block_table, in
     int threads = 256;  // 8 tokens × 32 lanes; works for hd up to 256 with stride-32, OK for hd=512 too
     paged_kv_gather_fp16_kernel<<<grid, threads, 0, stream>>>(dst, src, block_table, n_past,
                                                               block_size, nkv, hd, d_n_past);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void paged_kv_gather_fp8_to_fp16(half* dst, const __nv_fp8_e4m3* src, const int* block_table,
@@ -143,6 +145,7 @@ void paged_kv_gather_fp8_to_fp16(half* dst, const __nv_fp8_e4m3* src, const int*
     paged_kv_gather_fp8_to_fp16_kernel<<<grid, threads, 0, stream>>>(dst, src, block_table, kv_scale,
                                                                       n_past, block_size, nkv, hd,
                                                                       d_n_past);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // NVFP4 → FP16 dequant gather. Same TOKENS_PER_BLOCK / threads_per_token grid
@@ -229,6 +232,7 @@ void paged_kv_gather_nvfp4_to_fp16(half* dst, const uint8_t* src_packed,
     int threads = 256;
     paged_kv_gather_nvfp4_to_fp16_kernel<<<grid, threads, 0, stream>>>(
         dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd, d_n_past);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +316,7 @@ void paged_kv_gather_mxfp4_kv_to_fp16(half* dst, const uint8_t* src_packed,
     int threads = 256;
     paged_kv_gather_mxfp4_kv_to_fp16_kernel<<<grid, threads, 0, stream>>>(
         dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd, d_n_past);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // INT4 → FP16 dequant gather. Symmetric 4-bit, per-head FP16 scale.
@@ -392,6 +397,7 @@ void paged_kv_gather_int4_to_fp16(half* dst, const uint8_t* src_packed,
     int threads = 256;
     paged_kv_gather_int4_to_fp16_kernel<<<grid, threads, 0, stream>>>(
         dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd, d_n_past);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Chunk append at device-computed row offset (see kv_gather.h). n ≤ ~65 rows,
@@ -411,6 +417,7 @@ void kv_chunk_append_fp16(half* dst, const half* src, const int* d_past_len, int
     if (n <= 0 || row_elems <= 0)
         return;
     kv_chunk_append_fp16_kernel<<<n, 256, 0, stream>>>(dst, src, d_past_len, row_elems);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

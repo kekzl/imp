@@ -527,6 +527,7 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
             reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K.data),                \
             reinterpret_cast<const half*>(V.data), reinterpret_cast<half*>(O.data), batch_size, seq_q,   \
             seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap, q_offset, sinks);       \
+        IMP_CUDA_CHECK_LAUNCH();                                                                         \
     } while (0)
 
     if (Bq == 128) {
@@ -1081,6 +1082,7 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
             reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K.data),                   \
             reinterpret_cast<const half*>(V.data), reinterpret_cast<half*>(O.data), batch_size, seq_q,      \
             seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap, q_offset);                 \
+        IMP_CUDA_CHECK_LAUNCH();                                                                            \
     } while (0)
 
     if (Bq == 128) {
@@ -2013,8 +2015,10 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
             const int64_t kn = (int64_t)batch_size * seq_kv * n_kv_heads * head_dim;
             fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(Q.data), qn,
                                                           s_d_amax);
+            IMP_CUDA_CHECK_LAUNCH();
             fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(K.data), kn,
                                                           s_d_amax + 1);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
@@ -2023,6 +2027,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                                         reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv, n_heads,
                                         n_kv_heads, scale, causal, sliding_window, softcap, q_offset,
                                         fp8_scaled ? s_d_amax : nullptr, d_kv_len);
+    IMP_CUDA_CHECK_LAUNCH();
     return true;
 }
 

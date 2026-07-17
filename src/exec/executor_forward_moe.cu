@@ -263,6 +263,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
                 int thr = 256;
                 int blk = static_cast<int>((total + thr - 1) / thr);
                 scale_fp32_kernel<<<blk, thr, 0, stream>>>(fp32_router, inv_sqrt_d, total);
+                IMP_CUDA_CHECK_LAUNCH();
             }
             // Gate GEMV directly from FP32 router → FP32 logits (no FP16 truncation).
             // Writes to moe_.gate_logits — same buffer the topk gating reads from.
@@ -288,6 +289,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
             float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(ctx.d));
             scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(static_cast<half*>(router_in.data),
                                                                   __float2half(inv_sqrt_d), total_elems);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 
@@ -645,6 +647,7 @@ void GraphExecutor::moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeF
             fp32_to_fp16_kernel<<<blocks, threads, 0, stream>>>(
                 static_cast<const float*>(moe_.scatter_out.data),
                 static_cast<half*>(ctx.h.data), numel);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ctx.h.data, moe_.scatter_out.data,
                                                static_cast<size_t>(numel) * sizeof(float),
@@ -724,6 +727,7 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
             static_cast<const half*>(ctx.h.data), static_cast<const half*>(ly.post_ffn_norm.data),
             static_cast<float*>(fp32_h.data), static_cast<half*>(ctx.h.data), cfg.d_model, ctx.eps,
             norm_w_off_);
+        IMP_CUDA_CHECK_LAUNCH();
         if (layer == 0) {
             char buf[64];
             snprintf(buf, sizeof(buf), "L%d_combined_post_post_ffn_norm_fp32accum", layer);

@@ -257,6 +257,7 @@ static void quantize_fp16_to_nvfp4_moe_native_impl(
         dim3 block(256);
         nvfp4_moe_native_absmax_kernel<<<grid, block, 0, stream>>>(
             src_fp16, d_expert_offsets, K, d_absmax);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Optional pass 1.5: write per-expert tensor_scales = absmax/6 to caller buffer.
@@ -265,6 +266,7 @@ static void quantize_fp16_to_nvfp4_moe_native_impl(
         int blocks = (n_experts + threads - 1) / threads;
         nvfp4_moe_native_finalize_scales_kernel<<<blocks, threads, 0, stream>>>(
             d_absmax, d_tensor_scales_opt, n_experts);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Pass 2: quantize (one CTA-x per expert, CTA-y slices for parallelism).
@@ -278,6 +280,7 @@ static void quantize_fp16_to_nvfp4_moe_native_impl(
             d_expert_offsets,
             d_absmax,
             K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_packed_dev, stream));
@@ -343,6 +346,7 @@ void compute_moe_alpha_device(
     int blocks  = (n_experts + threads - 1) / threads;
     moe_alpha_mul_kernel<<<blocks, threads, 0, stream>>>(
         d_act_scales, d_weight_scales, d_alpha_out, n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +374,7 @@ void compute_M_per_from_offsets_device(
     int blocks  = (n_experts + threads - 1) / threads;
     moe_compute_M_per_kernel<<<blocks, threads, 0, stream>>>(
         d_expert_offsets, d_M_per_out, n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +437,7 @@ void compact_alpha_active(
               n_experts);
     compact_alpha_active_kernel<<<1, 256, 0, stream>>>(
         d_alpha, d_M_per, d_alpha_compact, d_na_out, n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +511,7 @@ void compute_sfa_offsets_device(
               n_experts);
     compute_sfa_offsets_kernel<<<1, 256, 0, stream>>>(
         d_M_per, d_sfa_offsets_out, n_experts, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +541,7 @@ void build_sfa_bases_device(
     int blocks  = (n_experts + threads - 1) / threads;
     build_sfa_bases_kernel<<<blocks, threads, 0, stream>>>(
         d_sfa_bases_out, static_cast<uint8_t*>(base_sf), d_sfa_offsets, n_experts);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +601,7 @@ void bzero_sfa_active(
     bzero_sfa_active_kernel<<<static_cast<int>(blocks_needed), kThreads, 0, stream>>>(
         static_cast<uint8_t*>(dst), d_sfa_offsets, n_experts,
         static_cast<int64_t>(max_bytes));
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

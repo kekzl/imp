@@ -2,6 +2,7 @@
 #include "compute/gemv_dp4a_traits.cuh"
 #include "runtime/pdl.h"
 #include "model/model_config.h"  // QType
+#include "core/logging.h"
 
 #include <cuda_fp16.h>
 #include <cstdio>
@@ -145,6 +146,7 @@ void quantize_fp16_to_q8_1(const half* x, block_q8_1* q8_1_out, float* d8_out, i
         return;
     fused_act_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(x, nullptr, q8_1_out, d8_out, K,
                                                                 IdentityAct{});
+    IMP_CUDA_CHECK_LAUNCH();
 
     // Pad to the next Q6_K block boundary (256 elements = 8 Q8_1 blocks).
     // When K is not a multiple of 256, the dp4a GEMV reads ceil(K/256)*8
@@ -168,6 +170,7 @@ void swiglu_quantize_q8_1(const half* gate, const half* up, block_q8_1* q8_out, 
         return;
     fused_act_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(gate, up, q8_out, d8_out, total_elements,
                                                                 SwiGLUAct{});
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused GEGLU + Q8_1 quantization.
@@ -181,6 +184,7 @@ void geglu_quantize_q8_1(const half* gate, const half* up, block_q8_1* q8_out, f
         return;
     fused_act_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(gate, up, q8_out, d8_out, total_elements,
                                                                 GeGLUAct{});
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused relu² + Q8_1 quantization.
@@ -194,6 +198,7 @@ void relu_sqr_quantize_q8_1(const half* input, block_q8_1* q8_out, float* d8_out
         return;
     fused_act_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(input, nullptr, q8_out, d8_out,
                                                                 total_elements, ReLUSqrAct{});
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +300,7 @@ void rmsnorm_quantize_q8_1(const half* x, const half* weight, block_q8_1* q8_out
     const int threads = 1024;
     rmsnorm_quantize_q8_1_kernel<<<1, threads, 0, stream>>>(x, weight, q8_out, d8_out, norm_out, d_model, eps,
                                                             weight_offset);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 // ===========================================================================
 // dp4a GEMV template instantiations (consolidated from 33 hand-written kernels)

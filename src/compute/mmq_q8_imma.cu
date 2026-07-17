@@ -440,6 +440,7 @@ bool ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capt
     const int total = N * static_cast<int>(subs);
     q8_split_kernel<<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const uint8_t*>(src),
                                                              w.qs, w.sc, total);
+    IMP_CUDA_CHECK_LAUNCH();
     g_weights[src] = w;
     return true;
 }
@@ -454,6 +455,7 @@ bool ensure_q6k(const void* src, size_t n_blocks, cudaStream_t stream, bool capt
     const size_t total = n_blocks * 105;
     q6k_repack_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(
         static_cast<const uint8_t*>(src), r.blocks, n_blocks);
+    IMP_CUDA_CHECK_LAUNCH();
     g_q6k[src] = r;
     return true;
 }
@@ -506,6 +508,7 @@ void quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
     const int blocks = min(2048, (total_warps + 7) / 8);
     quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_act.xs8, g_act.xscale,
                                                          g_act.xrowsum);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __half* x_f16,
@@ -535,14 +538,17 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
             mmq_imma_q4k_raw_kernel<32, false><<<grid, kThreads, 0, stream>>>(
                 g_act.xs8, g_act.xscale, g_act.xrowsum, w4, out_f16, M, N, K, d_offsets,
                 w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         } else if (beta == 1.0f) {
             mmq_imma_q4k_raw_kernel<128, true><<<grid, kThreads, 0, stream>>>(
                 g_act.xs8, g_act.xscale, g_act.xrowsum, w4, out_f16, M, N, K, d_offsets,
                 w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             mmq_imma_q4k_raw_kernel<128, false><<<grid, kThreads, 0, stream>>>(
                 g_act.xs8, g_act.xscale, g_act.xrowsum, w4, out_f16, M, N, K, d_offsets,
                 w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         return true;
     }
@@ -553,14 +559,17 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
             mmq_imma_q51_raw_kernel<32, false><<<grid, kThreads, 0, stream>>>(
                 g_act.xs8, g_act.xscale, g_act.xrowsum, w5, out_f16, M, N, K, d_offsets,
                 w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         } else if (beta == 1.0f) {
             mmq_imma_q51_raw_kernel<128, true><<<grid, kThreads, 0, stream>>>(
                 g_act.xs8, g_act.xscale, g_act.xrowsum, w5, out_f16, M, N, K, d_offsets,
                 w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             mmq_imma_q51_raw_kernel<128, false><<<grid, kThreads, 0, stream>>>(
                 g_act.xs8, g_act.xscale, g_act.xrowsum, w5, out_f16, M, N, K, d_offsets,
                 w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         return true;
     }
@@ -585,16 +594,19 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
                 <<<grid, kThreads, q6k_smem_bytes(32), stream>>>(g_act.xs8, g_act.xscale, w6,
                                                                  out_f16, M, N, K, d_offsets,
                                                                  w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         } else if (beta == 1.0f) {
             mmq_imma_q6k_raw_kernel<128, true>
                 <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_act.xs8, g_act.xscale, w6,
                                                                   out_f16, M, N, K, d_offsets,
                                                                   w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             mmq_imma_q6k_raw_kernel<128, false>
                 <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_act.xs8, g_act.xscale, w6,
                                                                   out_f16, M, N, K, d_offsets,
                                                                   w_stride_blocks);
+            IMP_CUDA_CHECK_LAUNCH();
         }
         return true;
     }
@@ -622,9 +634,11 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
                 mmq_imma_kernel<32, false, false, true><<<sgrid, kThreads, 0, stream>>>(
                     g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K,
                     nullptr, w_stride, wsc_stride, g_splitk.buf, ks_per_split);
+                IMP_CUDA_CHECK_LAUNCH();
                 const int total = static_cast<int>(slice);
                 mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
                     g_splitk.buf, used, total, out_f16, beta == 1.0f ? 1 : 0);
+                IMP_CUDA_CHECK_LAUNCH();
                 return true;
             }
         }
@@ -635,14 +649,17 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
         mmq_imma_kernel<32, false, false><<<grid, kThreads, 0, stream>>>(
             g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
             w_stride, wsc_stride);
+        IMP_CUDA_CHECK_LAUNCH();
     } else if (beta == 1.0f) {
         mmq_imma_kernel<128, true, false><<<grid, kThreads, 0, stream>>>(
             g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
             w_stride, wsc_stride);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         mmq_imma_kernel<128, false, false><<<grid, kThreads, 0, stream>>>(
             g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
             w_stride, wsc_stride);
+        IMP_CUDA_CHECK_LAUNCH();
     }
     return true;
 }

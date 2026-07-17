@@ -51,6 +51,7 @@ void GraphExecutor::pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t str
     const int blocks = (d_model + threads - 1) / threads;
     hidden_pool_sum_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<const __half*>(hidden.data), n_tokens, d_model, d_out);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream) {
@@ -426,6 +427,7 @@ void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceStat
             int blocks = (state.n_banned_tokens + kBanThreads - 1) / kBanThreads;
             ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(lp, d_banned_cache_,
                                                                   state.n_banned_tokens, vocab);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
     // Apply logit bias
@@ -672,6 +674,7 @@ void GraphExecutor::masked_sample_async(const InferenceState& state, const Tenso
         int blocks = (state.n_d_banned_tokens + kBanThreads - 1) / kBanThreads;
         ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(lp, state.d_banned_tokens,
                                                               state.n_d_banned_tokens, vocab);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Grammar constraint mask (host-computed this step, uploaded stream-ordered).
@@ -720,6 +723,7 @@ void GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d
         int blocks = (state.n_d_banned_tokens + kBanThreads - 1) / kBanThreads;
         ban_logits_kernel<<<blocks, kBanThreads, 0, stream>>>(
             lp, state.d_banned_tokens, state.n_d_banned_tokens, vocab);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Repetition / frequency / presence penalties — device counter grows each

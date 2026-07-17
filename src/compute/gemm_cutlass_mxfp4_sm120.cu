@@ -222,6 +222,7 @@ void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src, CutlassMxFP4Wei
         reinterpret_cast<const uint8_t*>(src.micro_scales), reinterpret_cast<uint8_t*>(d_sf),
         reinterpret_cast<uint8_t*>(d_linear_sf), src.tensor_scale, static_cast<int>(N), static_cast<int>(K),
         n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
 
     dst.data = src.packed_data;
     dst.scale_factors = d_sf;
@@ -294,6 +295,7 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4We
     build_mxfp4_scales_kernel<<<grid, threads, 0, stream>>>(scale_src, static_cast<uint8_t*>(d_sf),
                                                             static_cast<uint8_t*>(d_linear_sf), total_blocks,
                                                             blocks_per_row, n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
 
     dst.data = raw_gpu;  // data at start of buffer (contiguous packed nibbles)
     dst.scale_factors = d_sf;
@@ -368,6 +370,7 @@ void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, voi
                                                              static_cast<half*>(dst_fp16),
                                                              static_cast<int>(N), static_cast<int>(K),
                                                              blocks_per_row);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Forward declaration (defined below in activation quantization section)
@@ -417,6 +420,7 @@ void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src, CutlassMxFP4We
     quantize_fp16_mxfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const half*>(scratch_fp16), reinterpret_cast<uint8_t*>(d_packed),
         reinterpret_cast<uint8_t*>(d_sf), static_cast<int>(N), static_cast<int>(K), n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
 
     dst.data = d_packed;
     dst.scale_factors = d_sf;
@@ -557,6 +561,7 @@ void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* 
     quantize_fp16_mxfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const half*>(src_fp16), reinterpret_cast<uint8_t*>(dst_data),
         reinterpret_cast<uint8_t*>(dst_sf), M, K, n_k_tiles);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------

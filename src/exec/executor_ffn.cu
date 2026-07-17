@@ -413,6 +413,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(fo.data), static_cast<const half*>(ly.post_ffn_norm.data),
                 static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), cfg.d_model, eps, norm_w_off_);
+            IMP_CUDA_CHECK_LAUNCH();
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && q8 != nullptr &&
                    qscratch_.d8_buf != nullptr && is_dp4a_qtype(ly.w_down.qtype)) {
             // Post-norm FP32 accum decode: fused activation→Q8_1 + GEMV + fused post-norm.
@@ -432,6 +433,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(fo.data), static_cast<const half*>(ly.post_ffn_norm.data),
                 static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), cfg.d_model, eps, norm_w_off_);
+            IMP_CUDA_CHECK_LAUNCH();
         } else {
             // Non-dp4a paths: activation must produce FP16 intermediate in so.
             switch (cfg.ffn_activation) {
@@ -469,6 +471,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                         static_cast<const half*>(fo.data), static_cast<const half*>(ly.post_ffn_norm.data),
                         static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), cfg.d_model, eps,
                         norm_w_off_);
+                    IMP_CUDA_CHECK_LAUNCH();
                 } else if (has_post_ffn_norm) {
                     // Post-FFN norm + residual: h = rmsnorm(fo) + r
                     // Fused: 2 ops → 1 kernel

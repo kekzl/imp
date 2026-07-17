@@ -413,6 +413,7 @@ bool flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V
                                             reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,   \
                                             n_heads, n_kv_heads, scale, causal, sliding_window, softcap,  \
                                             q_offset);                                                    \
+        IMP_CUDA_CHECK_LAUNCH();                                                                          \
     } while (0)
 
     // Select Br and compute grid

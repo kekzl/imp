@@ -76,6 +76,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), nvfp4_block_stride,
             nvfp4_scale_block_stride, nkv, hd, kv_block_size, n, state.max_blocks_per_seq,
             state.n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
     } else if (use_mxfp4_kv) {
         // MXFP4-KV quantized KV cache write — identical layout to NVFP4 but UE8M0 scales
         Tensor kv = view_tokens(k_, n);
@@ -91,6 +92,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), mxfp4_block_stride,
             mxfp4_scale_block_stride, nkv, hd, kv_block_size, n, state.max_blocks_per_seq,
             state.n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
     } else if (use_int4) {
         // INT4 quantized KV cache write — 2 values packed per byte, per-head scales
         Tensor kv = view_tokens(k_, n);
@@ -105,6 +107,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), int4_block_stride, scale_block_stride, nkv,
             hd, kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
     } else if (use_int8) {
         // INT8 quantized KV cache write path with per-head scales.
         Tensor kv = view_tokens(k_, n);
@@ -119,6 +122,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), block_stride, scale_block_stride, nkv, hd,
             kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
     } else if (use_fp8) {
         // FP8 E4M3 quantized KV cache write path with online calibration.
         //
@@ -178,6 +182,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             block_tables, static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
             static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), inv_scale, block_stride, row_elems,
             kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Standard FP16 KV cache write path — fused K+V in single launch.
         //
@@ -195,6 +200,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // ─── Phase 3c: BitDecoding residual write-through (decode only) ────────
@@ -255,6 +261,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                             src_k_base, src_v_base,
                             static_cast<half*>(base_k), static_cast<half*>(base_v),
                             state.kv_manager->d_residual_widx_ptr(), slot, slot_elems);
+                        IMP_CUDA_CHECK_LAUNCH();
                         // No host advance_residual: ring state lives on device, advanced
                         // once per step by advance_residual_state_kernel in forward_logits.
                     }
@@ -286,6 +293,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                 dim3 grid_multi(n, 2);
                 residual_kv_write_multi_kernel<<<grid_multi, kThreads, 0, stream>>>(
                     src_k_base, src_v_base, d_k_ptrs, d_v_ptrs, slot_elems);
+                IMP_CUDA_CHECK_LAUNCH();
                 cudaFreeAsync(d_k_ptrs, stream);
                 cudaFreeAsync(d_v_ptrs, stream);
                 for (int s = 0; s < n; s++) {

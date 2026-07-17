@@ -462,10 +462,12 @@ void gemv_mxfp4_kpar(const CutlassMxFP4Weight& W, const half* x, half* y, int N,
         gemv_mxfp4_multirow_kernel<kMRWarps>
             <<<mr_blocks, kMRThreads, 0, stream>>>(static_cast<const uint8_t*>(W.data),
                                                    static_cast<const uint8_t*>(W.linear_scales), x, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         gemv_mxfp4_kpar_kernel<<<N, kKparThreads, 0, stream>>>(static_cast<const uint8_t*>(W.data),
                                                                static_cast<const uint8_t*>(W.linear_scales),
                                                                x, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -477,9 +479,11 @@ void gemv_mxfp4_kpar_fp32(const CutlassMxFP4Weight& W, const half* x, float* y, 
         gemv_mxfp4_multirow_fp32_kernel<kMRWarps>
             <<<mr_blocks, kMRThreads, 0, stream>>>(static_cast<const uint8_t*>(W.data),
                                                    static_cast<const uint8_t*>(W.linear_scales), x, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     } else {
         gemv_mxfp4_kpar_fp32_kernel<<<N, kKparThreads, 0, stream>>>(
             static_cast<const uint8_t*>(W.data), static_cast<const uint8_t*>(W.linear_scales), x, y, N, K);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
@@ -492,6 +496,7 @@ void gemv_mxfp4_qkv_fused(const CutlassMxFP4Weight& wq, const CutlassMxFP4Weight
         static_cast<const uint8_t*>(wk.data), static_cast<const uint8_t*>(wk.linear_scales),
         static_cast<const uint8_t*>(wv.data), static_cast<const uint8_t*>(wv.linear_scales), x, yq, yk, yv,
         q_rows, k_rows, v_rows, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void gemv_mxfp4_gate_up_fused(const CutlassMxFP4Weight& wg, const CutlassMxFP4Weight& wu, const half* x,
@@ -500,6 +505,7 @@ void gemv_mxfp4_gate_up_fused(const CutlassMxFP4Weight& wg, const CutlassMxFP4We
         static_cast<const uint8_t*>(wg.data), static_cast<const uint8_t*>(wg.linear_scales),
         static_cast<const uint8_t*>(wu.data), static_cast<const uint8_t*>(wu.linear_scales), x, yg, yu, rows,
         K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void gemv_mxfp4_residual(const CutlassMxFP4Weight& W, const half* x, half* y, const half* residual, int N,
@@ -507,6 +513,7 @@ void gemv_mxfp4_residual(const CutlassMxFP4Weight& W, const half* x, half* y, co
     gemv_mxfp4_residual_kernel<<<N, kKparThreads, 0, stream>>>(static_cast<const uint8_t*>(W.data),
                                                                static_cast<const uint8_t*>(W.linear_scales),
                                                                x, y, residual, N, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void gemv_mxfp4_swiglu_residual(const CutlassMxFP4Weight& W, const half* gate, const half* up, half* y,
@@ -515,6 +522,7 @@ void gemv_mxfp4_swiglu_residual(const CutlassMxFP4Weight& W, const half* gate, c
                                                                       static_cast<const uint8_t*>(
                                                                           W.linear_scales),
                                                                       gate, up, y, residual, N, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void gemv_mxfp4_geglu_residual(const CutlassMxFP4Weight& W, const half* gate, const half* up, half* y,
@@ -523,6 +531,7 @@ void gemv_mxfp4_geglu_residual(const CutlassMxFP4Weight& W, const half* gate, co
                                                                      static_cast<const uint8_t*>(
                                                                          W.linear_scales),
                                                                      gate, up, y, residual, N, K);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // One-time L1 cache carveout for MXFP4 GEMV kernels (bandwidth-bound, no SMEM).

@@ -1,6 +1,7 @@
 // MLA absorbed-decode kernels (Phase 3, opt-in). See mla_absorb.h.
 
 #include "compute/mla_absorb.h"
+#include "core/logging.h"
 
 namespace imp {
 
@@ -39,6 +40,7 @@ void mla_latent_cache_write(const half* latent, const half* k_assembled, half* c
         reinterpret_cast<const __half*>(latent), reinterpret_cast<const __half*>(k_assembled),
         reinterpret_cast<__half*>(cache), positions, n_tokens, n_heads, head_dim, rope_dim,
         kv_lora_rank, max_seq);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +175,7 @@ void mla_absorbed_decode(const half* q, const half* kv_b, const half* cache, hal
         reinterpret_cast<const __half*>(q), reinterpret_cast<const __half*>(kv_b),
         reinterpret_cast<const __half*>(cache), reinterpret_cast<__half*>(out), scores, context_lens,
         n_heads, head_dim, rope_dim, nope_dim, kv_lora_rank, v_head_dim, max_seq, scale);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp
