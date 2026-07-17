@@ -5,6 +5,8 @@
 #include <vector>
 #include <cstdint>
 
+#include "core/cuda_raii.h"
+
 namespace imp {
 
 class GraphExecutor;
@@ -48,9 +50,9 @@ public:
     void abort_capture();
 
 private:
-    cudaGraph_t graph_ = nullptr;
-    cudaGraphExec_t graph_exec_ = nullptr;
-    cudaStream_t capture_stream_ = nullptr;
+    CudaGraph graph_;
+    CudaGraphExec graph_exec_;
+    cudaStream_t capture_stream_ = nullptr;  // non-owning (engine's stream)
     bool captured_ = false;
 };
 
@@ -265,11 +267,11 @@ public:
 
     void cleanup();
 
-    bool is_setup() const { return exec_ != nullptr; }
+    bool is_setup() const { return static_cast<bool>(exec_); }
 
 private:
-    cudaGraph_t graph_ = nullptr;
-    cudaGraphExec_t exec_ = nullptr;
+    CudaGraph graph_;
+    CudaGraphExec exec_;
     cudaGraphConditionalHandle handle_{};
 
     // Device-side state (allocated by setup, freed by cleanup)

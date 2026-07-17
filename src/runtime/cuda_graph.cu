@@ -203,13 +203,15 @@ bool CudaGraphCapture::end_capture() {
         return false;
     }
 
-    cudaError_t err = cudaStreamEndCapture(capture_stream_, &graph_);
+    cudaGraph_t raw_graph = nullptr;
+    cudaError_t err = cudaStreamEndCapture(capture_stream_, &raw_graph);
     graph_diag::g_phase = graph_diag::Phase::NORMAL;
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("CudaGraphCapture: end_capture failed: %s", cudaGetErrorString(err));
         capture_stream_ = nullptr;
         return false;
     }
+    graph_.reset(raw_graph);
 
     // Convert kernel→kernel edges to PDL edges for tail/head overlap
     if (pdl::is_available()) {
@@ -221,14 +223,15 @@ bool CudaGraphCapture::end_capture() {
     graph_diag::log_kernel_nodes(graph_, "capture.plain");
     graph_diag::dump_graph(graph_, "capture.plain");
 
-    err = cudaGraphInstantiate(&graph_exec_, graph_, 0);
+    cudaGraphExec_t raw_exec = nullptr;
+    err = cudaGraphInstantiate(&raw_exec, graph_, 0);
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("CudaGraphCapture: instantiate failed: %s", cudaGetErrorString(err));
-        cudaGraphDestroy(graph_);
-        graph_ = nullptr;
+        graph_.reset();
         capture_stream_ = nullptr;
         return false;
     }
+    graph_exec_.reset(raw_exec);
 
     captured_ = true;
     capture_stream_ = nullptr;
@@ -251,10 +254,7 @@ bool CudaGraphCapture::replay(cudaStream_t stream) {
 }
 
 void CudaGraphCapture::drop_graph_keep_exec() {
-    if (graph_) {
-        cudaGraphDestroy(graph_);
-        graph_ = nullptr;
-    }
+    graph_.reset();
     capture_stream_ = nullptr;
     // graph_exec_ stays valid; captured_ stays true since the exec is usable.
 }
@@ -264,14 +264,16 @@ bool CudaGraphCapture::end_capture_and_update() {
         return false;
     }
 
-    cudaGraph_t new_graph = nullptr;
-    cudaError_t err = cudaStreamEndCapture(capture_stream_, &new_graph);
+    cudaGraph_t raw_new = nullptr;
+    cudaError_t err = cudaStreamEndCapture(capture_stream_, &raw_new);
     graph_diag::g_phase = graph_diag::Phase::NORMAL;
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("CudaGraphCapture: end_capture failed: %s", cudaGetErrorString(err));
         capture_stream_ = nullptr;
         return false;
     }
+    CudaGraph new_graph;
+    new_graph.reset(raw_new);
 
     // Log node composition (gated by diagnostics.graph_diag in imp.conf). Symmetric
     // with the end_capture() / ConditionalRunner paths so prefill/decode graphs are
@@ -287,33 +289,29 @@ bool CudaGraphCapture::end_capture_and_update() {
 
     // Fast path: try to update existing exec in place. Avoids destroying and
     // re-allocating the graph mem pool.
-    if (graph_exec_ != nullptr) {
+    if (graph_exec_) {
         cudaGraphExecUpdateResultInfo info;
         cudaError_t ue = cudaGraphExecUpdate(graph_exec_, new_graph, &info);
         if (ue == cudaSuccess && info.result == cudaGraphExecUpdateSuccess) {
-            if (graph_)
-                cudaGraphDestroy(graph_);
-            graph_ = new_graph;
+            graph_ = std::move(new_graph);
             captured_ = true;
             capture_stream_ = nullptr;
             return true;
         }
         // Update failed (topology changed) — fall through to reinstantiate.
-        cudaGraphExecDestroy(graph_exec_);
-        graph_exec_ = nullptr;
+        graph_exec_.reset();
     }
 
-    if (graph_)
-        cudaGraphDestroy(graph_);
-    graph_ = new_graph;
-    err = cudaGraphInstantiate(&graph_exec_, graph_, 0);
+    graph_ = std::move(new_graph);
+    cudaGraphExec_t raw_exec = nullptr;
+    err = cudaGraphInstantiate(&raw_exec, graph_, 0);
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("CudaGraphCapture: instantiate failed: %s", cudaGetErrorString(err));
-        cudaGraphDestroy(graph_);
-        graph_ = nullptr;
+        graph_.reset();
         capture_stream_ = nullptr;
         return false;
     }
+    graph_exec_.reset(raw_exec);
 
     captured_ = true;
     capture_stream_ = nullptr;
@@ -349,15 +347,9 @@ void abort_stream_capture(cudaStream_t stream) {
 }
 
 void CudaGraphCapture::reset() {
-    bool had_exec = (graph_exec_ != nullptr);
-    if (graph_exec_) {
-        cudaGraphExecDestroy(graph_exec_);
-        graph_exec_ = nullptr;
-    }
-    if (graph_) {
-        cudaGraphDestroy(graph_);
-        graph_ = nullptr;
-    }
+    bool had_exec = static_cast<bool>(graph_exec_);
+    graph_exec_.reset();
+    graph_.reset();
     capture_stream_ = nullptr;
     captured_ = false;
     // Release the per-device graph memory pool. Without this, instantiated
@@ -930,7 +922,8 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
 
         // ---- Construct CUDA graph with conditional WHILE node ----
         // 1. Create top-level graph
-        err = cudaGraphCreate(&graph_, 0);
+        cudaGraph_t raw_graph = nullptr;
+        err = cudaGraphCreate(&raw_graph, 0);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR(
                 "ConditionalRunner: cudaGraphCreate failed: %s — falling back to "
@@ -939,6 +932,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                 cudaGetErrorString(err));
             goto fail;
         }
+        graph_.reset(raw_graph);
 
         // 2. Create conditional handle (default value = 1 = "continue looping")
         err = cudaGraphConditionalHandleCreate(&handle_, graph_, 1, cudaGraphCondAssignDefault);
@@ -1038,7 +1032,8 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         graph_diag::dump_graph(graph_, "capture.cond_top");
 
         // 6. Instantiate the top-level graph
-        err = cudaGraphInstantiate(&exec_, graph_, 0);
+        cudaGraphExec_t raw_exec = nullptr;
+        err = cudaGraphInstantiate(&raw_exec, graph_, 0);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR(
                 "ConditionalRunner: graph instantiation failed: %s — falling back "
@@ -1046,6 +1041,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                 cudaGetErrorString(err));
             goto fail;
         }
+        exec_.reset(raw_exec);
 
         IMP_LOG_INFO("ConditionalRunner: graph built (max_steps=%d)", config_.max_steps);
     }
@@ -1205,15 +1201,9 @@ void CudaGraphConditionalRunner::cleanup() {
         launched_ = false;
     }
 
-    bool had_exec = (exec_ != nullptr);
-    if (exec_) {
-        cudaGraphExecDestroy(exec_);
-        exec_ = nullptr;
-    }
-    if (graph_) {
-        cudaGraphDestroy(graph_);
-        graph_ = nullptr;
-    }
+    bool had_exec = static_cast<bool>(exec_);
+    exec_.reset();
+    graph_.reset();
 
     if (d_token_id_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_token_id_));
