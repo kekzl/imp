@@ -120,10 +120,7 @@ bool Engine::spec_capture_ready_(int ctx_padded) {
 }
 
 void Engine::free_spec_graphs_() {
-    for (auto& [len, g] : spec_graphs_) {
-        if (g.exec)
-            IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(g.exec));
-    }
+    // SpecVerifyGraph::exec is a CudaGraphExec — clear() destroys the handles.
     spec_graphs_.clear();
 }
 
@@ -187,21 +184,23 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         what = "(non-std exception)";
     }
     gemm_set_lt_capture_allowed(false);
-    cudaGraph_t graph = nullptr;
-    err = cudaStreamEndCapture(stream, &graph);
-    if (forward_threw || err != cudaSuccess || graph == nullptr) {
+    cudaGraph_t raw_graph = nullptr;
+    err = cudaStreamEndCapture(stream, &raw_graph);
+    CudaGraph graph;
+    graph.reset(raw_graph);
+    if (forward_threw || err != cudaSuccess || !graph) {
         IMP_LOG_WARN("[spec-capture] capture failed: %s%s%s",
                      err != cudaSuccess ? cudaGetErrorString(err) : "(forward threw)",
                      forward_threw ? " — " : "", forward_threw ? what.c_str() : "");
-        if (graph)
-            cudaGraphDestroy(graph);
         cudaGetLastError();
         doom_check("capture");
         return false;
     }
-    cudaGraphExec_t exec = nullptr;
-    err = cudaGraphInstantiate(&exec, graph, 0);
-    cudaGraphDestroy(graph);
+    cudaGraphExec_t raw_exec = nullptr;
+    err = cudaGraphInstantiate(&raw_exec, graph, 0);
+    CudaGraphExec exec;
+    exec.reset(raw_exec);
+    graph.reset();
     if (err != cudaSuccess) {
         IMP_LOG_WARN("[spec-capture] instantiate failed: %s", cudaGetErrorString(err));
         cudaGetLastError();
@@ -212,11 +211,10 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
     if (err != cudaSuccess) {
         IMP_LOG_WARN("[spec-capture] first launch failed: %s", cudaGetErrorString(err));
         cudaGetLastError();
-        cudaGraphExecDestroy(exec);
         doom_check("first launch");
         return false;
     }
-    slot.exec = exec;
+    slot.exec = std::move(exec);
     spec_capture_failures_ = 0;
     IMP_LOG_INFO("[spec-capture] verify chunk graph cached (n_tokens=%d, ctx_tier=%d, rec_slot=%d)",
                  state.n_tokens, state.ctx_capacity, rec_slot);
@@ -254,12 +252,16 @@ void Engine::spec_capture_probe_forward_(InferenceState& state, Tensor& logits_o
         forward_threw = true;
         what = "(non-std exception)";
     }
-    cudaGraph_t graph = nullptr;
-    err = cudaStreamEndCapture(stream, &graph);
+    cudaGraph_t raw_graph = nullptr;
+    err = cudaStreamEndCapture(stream, &raw_graph);
+    CudaGraph graph;
+    graph.reset(raw_graph);
     bool ran = false;
-    if (!forward_threw && err == cudaSuccess && graph != nullptr) {
-        cudaGraphExec_t exec = nullptr;
-        err = cudaGraphInstantiate(&exec, graph, 0);
+    if (!forward_threw && err == cudaSuccess && graph) {
+        cudaGraphExec_t raw_exec = nullptr;
+        err = cudaGraphInstantiate(&raw_exec, graph, 0);
+        CudaGraphExec exec;
+        exec.reset(raw_exec);
         if (err == cudaSuccess) {
             err = cudaGraphLaunch(exec, stream);
             if (err == cudaSuccess) {
@@ -269,7 +271,6 @@ void Engine::spec_capture_probe_forward_(InferenceState& state, Tensor& logits_o
                 IMP_LOG_WARN("[spec-capture-probe] graph launch failed: %s",
                              cudaGetErrorString(err));
             }
-            cudaGraphExecDestroy(exec);
         } else {
             IMP_LOG_WARN("[spec-capture-probe] instantiate failed: %s", cudaGetErrorString(err));
         }
@@ -278,8 +279,6 @@ void Engine::spec_capture_probe_forward_(InferenceState& state, Tensor& logits_o
                      err != cudaSuccess ? cudaGetErrorString(err) : "(forward threw)",
                      forward_threw ? " forward exception: " : "", forward_threw ? what : "");
     }
-    if (graph != nullptr)
-        cudaGraphDestroy(graph);
     cudaGetLastError();
     IMP_LOG_INFO("[spec-capture-probe] chunk n_tokens=%d %s (launched %ld/%ld)", state.n_tokens,
                  ran ? "CAPTURED+LAUNCHED" : "eager fallback", launched, probes);

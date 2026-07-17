@@ -4,6 +4,22 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-17 · CUDA-graph RAII owners (WI-3) — decode neutral
+
+`CudaGraph`/`CudaGraphExec` move-only owners in core/cuda_raii.h; adopted by
+CudaGraphCapture, CudaGraphConditionalRunner, SpecVerifyGraph and the
+spec-capture locals — every manual `cudaGraphDestroy`/`cudaGraphExecDestroy`
++ null-out pair replaced by reset()/move, throw paths structurally safe.
+Semantics preserved 1:1 (exec-update fast path, drop_graph_keep_exec,
+mem-trim-on-reset). Validation: GPU suite 0 fail, capture/green-ctx tests
+11/11, DegenerationTest 5/5, verify-fast OK. Decode (same harness as
+baseline, 5 trials, spec-OFF Coder-30B): tg256 402.59 -> 402.92 (+0.08%,
+noise). Note: the "Engine teardown: cleared a leaked CUDA error (graph
+update constraint)" WARN in the Degeneration battery is PRE-EXISTING
+(reproduced on unmodified main, same day) — the ExecUpdate->reinstantiate
+fallback has always left the sticky error for the teardown net; candidate
+one-line follow-up: clear it at the fallback site.
+
 ## 2026-07-17 · Post-launch error checks (399 sites) + KV prefix-hash double-free fix — decode neutral
 
 Hardening WI-1/WI-2 (branch hardening/launch-checks-and-kv-churn, baseline

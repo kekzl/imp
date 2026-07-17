@@ -714,7 +714,7 @@ private:
     // forward reads all growing lengths from device (InferenceState
     // ctx_capacity mode), so a graph stays valid across context growth.
     struct SpecVerifyGraph {
-        cudaGraphExec_t exec = nullptr;
+        CudaGraphExec exec;  // RAII: destroyed on map erase/clear
         int eager_uses = 0;  // first use per slot runs eager (algo warmup)
     };
     // Keyed by (padded chunk length, ctx tier, recurrent slot). The tier
