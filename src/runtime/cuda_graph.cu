@@ -299,6 +299,10 @@ bool CudaGraphCapture::end_capture_and_update() {
             return true;
         }
         // Update failed (topology changed) — fall through to reinstantiate.
+        // Clear the sticky per-thread error the failed update left behind:
+        // this fallback is expected and handled, but the stale error used to
+        // linger until engine teardown's leak net cleared it (WARN noise).
+        (void)cudaGetLastError();
         graph_exec_.reset();
     }
 
