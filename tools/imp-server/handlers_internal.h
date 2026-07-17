@@ -43,6 +43,11 @@ struct ChatRequestParams {
     // mapped by anthropic_to_openai_body; also a direct llama.cpp-style
     // "cache_prompt" body field on the OpenAI route).
     bool cache_prompt = false;
+    // cache_control breakpoint boundary (#1046): number of leading chat
+    // messages that form the cacheable prefix (-1 = whole prompt). Set by
+    // anthropic_to_openai_body ("cache_prefix_messages"); shifted when a
+    // system message is injected in front (tool-prompt fallback).
+    int cache_prefix_messages = -1;
     // Per-request n-gram speculation override (tri-state): -1 = server default,
     // 0 = force off, 1 = force on. From the imp extension body field
     // "speculative" (bool). Lets code-gen calls opt into speculation while
@@ -110,6 +115,11 @@ struct ChatStateSnapshot {
     // Tokenized Predicted-Outputs text (params.prediction_text) — encoded here
     // because the tokenizer only exists inside the snapshot stage.
     std::vector<int32_t> prediction_tokens;
+    // cache_control breakpoint boundary in TOKENS (#1046): -1 = pin the whole
+    // prompt; >=0 = pin only the first N prompt tokens' full KV blocks.
+    // Computed by re-rendering the leading params.cache_prefix_messages
+    // messages (tokenizer lives in the snapshot stage).
+    int pin_prefix_tokens = -1;
 };
 
 // Top-level context bundling params + snap + transients.

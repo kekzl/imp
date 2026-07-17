@@ -127,6 +127,9 @@ struct Request {
     // (Anthropic cache_control / OpenAI-route cache_prompt). Pinned blocks
     // survive eviction until the pin budget recycles them (FIFO).
     bool pin_kv_prefix = false;
+    // Pin boundary in tokens (#1046): -1 = whole prompt; >=0 = pin only the
+    // first N prompt tokens' full blocks (Anthropic cache_control breakpoint).
+    int pin_kv_prefix_tokens = -1;
 
     // SSE streaming request: the client consumes tokens as they are produced.
     // Streaming runs the async conditional graph loop like everything else:

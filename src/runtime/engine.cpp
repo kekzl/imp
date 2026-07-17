@@ -522,10 +522,13 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         }
         // cache_control / cache_prompt: protect the prompt's full blocks
         // from eviction (must happen before free_sequence — pinning needs
-        // the live block table).
+        // the live block table). A breakpoint boundary (#1046) caps the pin
+        // to the prompt tokens before the last cache_control marker.
         if (req->pin_kv_prefix) {
-            int full_blocks = static_cast<int>(req->input_tokens.size()) /
-                              kv_manager_->kv_cache()->block_size();
+            int pin_tokens = static_cast<int>(req->input_tokens.size());
+            if (req->pin_kv_prefix_tokens >= 0 && req->pin_kv_prefix_tokens < pin_tokens)
+                pin_tokens = req->pin_kv_prefix_tokens;
+            int full_blocks = pin_tokens / kv_manager_->kv_cache()->block_size();
             if (full_blocks > 0)
                 kv_manager_->pin_prefix(req->id, full_blocks);
         }

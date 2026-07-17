@@ -283,27 +283,31 @@ std::string flatten_system(const json& system_field) {
 
 }  // namespace
 
-// Any cache_control marker anywhere in the request? Anthropic allows it on
-// system blocks, message content blocks, and tool definitions. imp maps the
-// marker to prompt-KV pinning (block-granular prefix cache), so the marker's
-// exact position doesn't matter — any marker pins the request's prompt
-// prefix against eviction.
-static bool has_cache_control(const json& anth) {
-    auto any_block = [](const json& blocks) {
-        if (!blocks.is_array())
-            return false;
-        for (const auto& b : blocks)
-            if (b.is_object() && b.contains("cache_control"))
-                return true;
+// Any cache_control marker in this block array? Anthropic allows markers on
+// system blocks, message content blocks, and tool definitions. The `ttl`
+// field ("5m"/"1h") is accepted but not modeled — pins recycle via the FIFO
+// pin budget; there is no billing distinction locally.
+static bool blocks_have_cache_marker(const json& blocks) {
+    if (!blocks.is_array())
         return false;
-    };
-    if (anth.contains("system") && any_block(anth["system"]))
+    for (const auto& b : blocks)
+        if (b.is_object() && b.contains("cache_control"))
+            return true;
+    return false;
+}
+
+// Any cache_control marker anywhere in the request? imp maps markers to
+// prompt-KV pinning (block-granular prefix cache). The LAST marked
+// system/message block additionally defines a per-breakpoint pin boundary
+// (see anthropic_to_openai_body, #1046).
+static bool has_cache_control(const json& anth) {
+    if (anth.contains("system") && blocks_have_cache_marker(anth["system"]))
         return true;
-    if (anth.contains("tools") && any_block(anth["tools"]))
+    if (anth.contains("tools") && blocks_have_cache_marker(anth["tools"]))
         return true;
     if (anth.contains("messages") && anth["messages"].is_array()) {
         for (const auto& m : anth["messages"])
-            if (m.is_object() && m.contains("content") && any_block(m["content"]))
+            if (m.is_object() && m.contains("content") && blocks_have_cache_marker(m["content"]))
                 return true;
     }
     return false;
@@ -370,11 +374,18 @@ json anthropic_to_openai_body(const json& anth) {
     // Messages -------------------------------------------------------------
     json oai_messages = json::array();
 
+    // cache_control breakpoint tracking: after converting a marked system/
+    // message block, remember how many converted messages form the cacheable
+    // prefix. The LAST marker wins (Anthropic caches everything before it).
+    int cache_prefix_msgs = -1;
+
     // Prepend system as a role=system message. `system` is a top-level
     // field in Anthropic, not part of messages.
     std::string system_text = flatten_system(anth.value("system", json(nullptr)));
     if (!system_text.empty()) {
         oai_messages.push_back({{"role", "system"}, {"content", system_text}});
+        if (anth.contains("system") && blocks_have_cache_marker(anth["system"]))
+            cache_prefix_msgs = static_cast<int>(oai_messages.size());
     }
 
     if (anth.contains("messages") && anth["messages"].is_array()) {
@@ -387,6 +398,8 @@ json anthropic_to_openai_body(const json& anth) {
                 // tool_result carriers; push_user_turn splits them.
                 push_user_turn(oai_messages, m);
             }
+            if (m.is_object() && m.contains("content") && blocks_have_cache_marker(m["content"]))
+                cache_prefix_msgs = static_cast<int>(oai_messages.size());
         }
     }
     oai["messages"] = std::move(oai_messages);
@@ -408,9 +421,18 @@ json anthropic_to_openai_body(const json& anth) {
     }
 
     // cache_control → prompt-KV pinning (internal "cache_prompt" field,
-    // same name the OpenAI route accepts directly).
-    if (has_cache_control(anth))
+    // same name the OpenAI route accepts directly). Per-breakpoint
+    // granularity (#1046): the last marked system/message block bounds the
+    // pin to the prompt tokens before it ("cache_prefix_messages" = count of
+    // leading converted messages). A marker on tools keeps the whole-prompt
+    // pin — tools render into the system preamble, which is not expressible
+    // as a message boundary.
+    if (has_cache_control(anth)) {
         oai["cache_prompt"] = true;
+        bool tools_marked = anth.contains("tools") && blocks_have_cache_marker(anth["tools"]);
+        if (!tools_marked && cache_prefix_msgs > 0)
+            oai["cache_prefix_messages"] = cache_prefix_msgs;
+    }
 
     return oai;
 }
