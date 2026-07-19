@@ -513,10 +513,16 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     //    token first; only completing tokens pay the full simulation.
     const bool xml_raw = (phase == SchemaPhase::XML_RAW_VALUE);
     const bool xml_raw_open = xml_raw && top().xml_value_open;
+    // The envelope phases and the XML body's VALUE_START are the same
+    // full-vocab-delegation regime (category 0xFFFF) with a 1-2 char legal
+    // set — include them in the first-byte prefilter.
     const bool xml_tag_phase =
         phase == SchemaPhase::XML_FN_OPEN || phase == SchemaPhase::XML_FN_NAME ||
         phase == SchemaPhase::XML_PARAMS || phase == SchemaPhase::XML_PARAM_KEY ||
-        (xml_raw && !top().xml_value_open);
+        (xml_raw && !top().xml_value_open) ||
+        phase == SchemaPhase::ENVELOPE_OPEN || phase == SchemaPhase::ENVELOPE_CLOSE ||
+        (phase == SchemaPhase::VALUE_START && top().node &&
+         top().node->type == SchemaType::XML_TOOL_CALL);
     bool first_ok[256];
     if (xml_tag_phase) {
         for (int c = 0; c < 256; c++) {
