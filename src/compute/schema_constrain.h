@@ -36,6 +36,13 @@ enum class SchemaPhase : uint8_t {
     ENUM_VALUE,          // Inside an enum string (constrained to exact matches)
     ENVELOPE_OPEN,       // Forcing the tool-call open literal (e.g. "<tool_call>\n")
     ENVELOPE_CLOSE,      // Forcing the tool-call close literal (e.g. "\n</tool_call>")
+    // Qwen-Coder XML tool-call body (SchemaType::XML_TOOL_CALL). One frame
+    // carries the whole body; parameter values are raw text, not JSON.
+    XML_FN_OPEN,    // Forcing the "<function=" literal (literal_target/pos)
+    XML_FN_NAME,    // Unquoted tool-name enum in the tag, closed by '>'
+    XML_PARAMS,     // Matching "\n<parameter=" vs "\n</function>" (key_buffer)
+    XML_PARAM_KEY,  // Unquoted parameter-key enum in the tag, closed by '>'
+    XML_RAW_VALUE,  // Raw value text until the "\n</parameter>" delimiter
     DONE
 };
 
@@ -66,7 +73,19 @@ struct SchemaFrame {
 
     // TOOL_CALL frames: the tool name chosen by the completed "name" enum —
     // "arguments" resolves against the root defs entry of this name.
+    // XML_TOOL_CALL frames: the name from the completed <function=NAME> tag —
+    // parameter keys/required resolve against the same defs entry.
     std::string chosen_tool;
+
+    // XML_TOOL_CALL frames only. Dedicated state instead of overloading
+    // literal_pos/string_len: xml_tool caches the chosen tool's resolved
+    // parameter schema (bound once when the name tag closes — the lookup is
+    // per-char otherwise), xml_delim_match tracks the "\n</parameter>" match
+    // inside a raw value, xml_value_open flags the forced value-opening
+    // newline as consumed.
+    const SchemaNode* xml_tool = nullptr;
+    int xml_delim_match = 0;
+    bool xml_value_open = false;
 
     // True right after a ',' inside an object: a key is now mandatory, so the
     // object may not close (`}`) until another key/value is emitted — prevents

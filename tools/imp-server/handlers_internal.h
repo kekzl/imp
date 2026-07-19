@@ -84,6 +84,9 @@ struct ChatRequestParams {
     // is the bare parameter schema (the body is the arguments object), not a
     // TOOL_CALL {"name","arguments"} wrapper.
     bool tool_constraint_bare_args = false;
+    // Qwen-Coder XML dialect (template teaches <function=/<parameter= bodies):
+    // enforce with the XML grammar, never the JSON body FSM.
+    bool tool_constraint_xml = false;
     // Messages + image
     std::vector<imp::ChatMessage> chat_msgs;
     std::vector<uint8_t> image_data;

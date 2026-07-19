@@ -170,6 +170,7 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
     stop_token_ids_.clear();
     use_jinja_ = false;
     mentions_thinking_ = false;  // resolved below once the Jinja engine is up
+    tool_xml_dialect_ = false;
 
     // Try Jinja2 rendering if template string provided
     if (!jinja_str.empty()) {
@@ -193,6 +194,16 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             mentions_thinking_ = jinja_str.find("enable_thinking") != std::string::npos;
             if (!mentions_thinking_ && jinja_str.find("<think>") != std::string::npos)
                 mentions_thinking_ = probe_render_mentions_think(tokenizer);
+            // Qwen-Coder / Qwen3.6 XML tool-call dialect: the template teaches
+            // <function=NAME><parameter=KEY> bodies inside <tool_call> (raw-text
+            // values, not JSON). Constrained tool enforcement must use the XML
+            // grammar on these templates — the JSON body FSM masks raw newlines
+            // and mangles multi-line arguments. The source-substring hit is only
+            // a prefilter; the probe render proves the RENDERED prompt actually
+            // teaches the dialect (see probe_render_teaches_xml_tools).
+            tool_xml_dialect_ = jinja_str.find("<parameter=") != std::string::npos &&
+                                jinja_str.find("<function=") != std::string::npos &&
+                                probe_render_teaches_xml_tools(tokenizer);
         } else {
             IMP_LOG_WARN("Jinja2 parse failed (%s), falling back to hardcoded template",
                          tpl->error().c_str());
@@ -818,6 +829,41 @@ bool ChatTemplate::probe_render_mentions_think(const Tokenizer& tok) const {
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
     std::string rendered = jinja_tpl_->render(ctx);
     return rendered.find("<think>") != std::string::npos;
+}
+
+// Render a dummy tools conversation and report whether the RENDERED prompt
+// teaches the Qwen-Coder XML calling convention inside the ChatML
+// <tool_call> envelope. A raw source-substring match is not evidence: a
+// template may mention the markers in a comment, an example, or an untaken
+// branch while actually prompting JSON bodies — and Seed-OSS-style templates
+// pair the XML body with a non-<tool_call> envelope the enforcement's gate
+// and forced literals would then contradict.
+bool ChatTemplate::probe_render_teaches_xml_tools(const Tokenizer& tok) const {
+    if (!jinja_tpl_)
+        return false;
+    jinja::Value::Array tools_arr;
+    tools_arr.push_back(jinja::Value::object({
+        {"type", jinja::Value(std::string("function"))},
+        {"function",
+         jinja::Value::object({
+             {"name", jinja::Value(std::string("probe_fn"))},
+             {"description", jinja::Value(std::string("probe"))},
+             {"parameters",
+              json_string_to_value(R"({"type":"object","properties":{"p":{"type":"string"}}})")},
+         })},
+    }));
+    jinja::Context ctx;
+    std::vector<ChatMessage> probe{{"user", "hi"}};
+    ctx["messages"] = jinja::Value(build_jinja_messages(probe, /*suppress_thinking=*/false));
+    ctx["tools"] = jinja::Value(std::move(tools_arr));
+    ctx["tool_choice"] = jinja::Value(std::string("auto"));
+    ctx["add_generation_prompt"] = jinja::Value(true);
+    ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
+    ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
+    std::string rendered = jinja_tpl_->render(ctx);
+    return rendered.find("<function=") != std::string::npos &&
+           rendered.find("<parameter=") != std::string::npos &&
+           rendered.find("<tool_call>") != std::string::npos;
 }
 
 // ---------------------------------------------------------------------------

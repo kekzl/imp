@@ -189,6 +189,11 @@ struct Request {
     // `<function=NAME>{args}</function>` body is the arguments object), not a
     // TOOL_CALL {"name","arguments"} wrapper.
     bool tool_constraint_bare_args = false;
+    // Qwen-Coder XML dialect: the body inside <tool_call> is
+    // `<function=NAME><parameter=KEY>raw value</parameter>...</function>`
+    // (raw-text values) — enforce with the XML_TOOL_CALL grammar instead of
+    // the JSON body FSM (which masks raw newlines and mangles code arguments).
+    bool tool_constraint_xml = false;
 
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;

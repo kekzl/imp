@@ -195,7 +195,8 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
 bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
                                           const std::string& envelope_open, const std::string& envelope_close,
                                           Tokenizer* tokenizer, bool thinking_open, bool optional,
-                                          ChatTemplateFamily tpl_family, bool parallel, bool bare_args) {
+                                          ChatTemplateFamily tpl_family, bool parallel, bool bare_args,
+                                          bool xml) {
     active_json_ = false;
     active_schema_ = false;
 
@@ -231,6 +232,8 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
             return false;
         }
         schema = std::move(parsed);
+    } else if (xml) {
+        schema = build_xml_tool_call_schema(tools);
     } else {
         schema = build_tool_call_schema(tools);
     }
@@ -239,11 +242,12 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
         return false;
     }
 
-    // Cache key: envelope + per-tool (name, schema). The mode (forced vs
-    // optional) is NOT keyed — it only changes the envelope/gate config applied
-    // by the setters below, not the expensive vocab classification, so a forced
-    // and an optional request over the same tools share the classified tables.
-    const std::string key = tool_call_key(tools, envelope_open, envelope_close);
+    // Cache key: envelope + per-tool (name, schema) + body dialect. The mode
+    // (forced vs optional) is NOT keyed — it only changes the envelope/gate
+    // config applied by the setters below, not the expensive vocab
+    // classification, so a forced and an optional request over the same tools
+    // share the classified tables.
+    const std::string key = tool_call_key(tools, envelope_open, envelope_close, xml);
 
     const int32_t think_close = detect_think_close(tokenizer);
     // Thinking models deliberate inside <think>; the envelope is enforced right
@@ -283,9 +287,9 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
     }
     schema_constrainer_->reset();
     active_schema_ = true;
-    IMP_LOG_INFO("ConstraintManager: enforcing %s tool call (%zu tool(s), envelope %zu+%zu chars)",
-                 optional ? "optional (strict)" : "forced", tools.size(), envelope_open.size(),
-                 envelope_close.size());
+    IMP_LOG_INFO("ConstraintManager: enforcing %s tool call (%zu tool(s), %s body, envelope %zu+%zu chars)",
+                 optional ? "optional (strict)" : "forced", tools.size(), xml ? "XML" : "JSON",
+                 envelope_open.size(), envelope_close.size());
     return true;
 }
 

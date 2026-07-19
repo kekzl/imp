@@ -111,7 +111,10 @@ ToolTagScan scan_tool_tag(const std::string& buf, imp::ChatTemplateFamily family
 bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std::string& fn_name,
                             ParsedToolCall& tc);
 
+// xml (ChatML family only): render prior calls in the Qwen-Coder XML shape
+// (<function=NAME><parameter=KEY> raw-text values) the template teaches,
+// instead of the ChatML JSON body.
 std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const json& tool_calls,
-                                         const std::string& content);
+                                         const std::string& content, bool xml = false);
 
 std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg);

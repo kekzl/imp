@@ -49,17 +49,23 @@ public:
     // bare_args (Llama3 `<function=NAME>{args}</function>`): the constraint root
     // is the single tool's bare parameter schema (the body is the arguments
     // object), not a TOOL_CALL {"name","arguments"} wrapper.
+    // xml (Qwen-Coder / Qwen3.6 templates): the body inside <tool_call> is the
+    // XML dialect (<function=NAME><parameter=KEY> with raw-text values) — the
+    // XML_TOOL_CALL grammar enforces it (see build_xml_tool_call_schema).
     bool prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
                            const std::string& envelope_open, const std::string& envelope_close,
                            Tokenizer* tokenizer, bool thinking_open, bool optional = false,
                            ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML, bool parallel = true,
-                           bool bare_args = false);
+                           bool bare_args = false, bool xml = false);
 
     // Cache/pool key for a tool-call constraint — shared by the engine's
-    // constraint pool lookup and the internal classified-table cache.
+    // constraint pool lookup and the internal classified-table cache. The body
+    // dialect is part of the key: the same tool set builds a different grammar
+    // (JSON TOOL_CALL vs XML) per dialect.
     static std::string tool_call_key(const std::vector<std::pair<std::string, std::string>>& tools,
-                                     const std::string& envelope_open, const std::string& envelope_close) {
-        std::string key = "tool-call:" + envelope_open + "\x1f" + envelope_close;
+                                     const std::string& envelope_open, const std::string& envelope_close,
+                                     bool xml = false) {
+        std::string key = (xml ? "xml-tool-call:" : "tool-call:") + envelope_open + "\x1f" + envelope_close;
         for (auto& [name, params] : tools)
             key += "\x1f" + name + "\x1e" + params;
         return key;

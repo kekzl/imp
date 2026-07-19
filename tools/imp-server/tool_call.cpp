@@ -201,7 +201,14 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
 
     json args = json::object();
     size_t pos = fn_end + 1;
-    size_t fn_close = body.find("</function>", pos);
+    // Newline-anchored close tags first — the constrained-decode grammar
+    // (schema_constrain.cu XML phases) only recognizes "\n</parameter>" /
+    // "\n</function>" as delimiters, so a raw value may legally CONTAIN a
+    // bare close tag (code writing about tool calls). The unanchored find is
+    // kept as a fallback for sloppy unconstrained output.
+    size_t fn_close = body.find("\n</function>", pos);
+    if (fn_close == std::string::npos)
+        fn_close = body.find("</function>", pos);
     size_t scan_end = (fn_close == std::string::npos) ? body.size() : fn_close;
     while (pos < scan_end) {
         size_t pk = body.find("<parameter=", pos);
@@ -214,7 +221,12 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
         std::string key = body.substr(pk, pk_end - pk);
         trim(key);
         size_t val_start = pk_end + 1;
-        size_t pv_end = body.find("</parameter>", val_start);
+        size_t pv_end = body.find("\n</parameter>", val_start);
+        size_t pv_adv = 13;
+        if (pv_end == std::string::npos || pv_end > scan_end) {
+            pv_end = body.find("</parameter>", val_start);
+            pv_adv = 12;
+        }
         if (pv_end == std::string::npos || pv_end > scan_end)
             break;
         std::string val = body.substr(val_start, pv_end - val_start);
@@ -242,7 +254,7 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
             jv = val;
         }
         args[key] = std::move(jv);
-        pos = pv_end + 12;
+        pos = pv_end + pv_adv;
     }
     tc.arguments = dump_safe(args);
     return true;
@@ -786,7 +798,7 @@ static std::string json_to_gemma_value(const json& v) {
 }
 
 std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const json& tool_calls,
-                                         const std::string& content) {
+                                         const std::string& content, bool xml) {
     std::string result;
     if (!content.empty() && content != "null") {
         result = content;
@@ -821,6 +833,19 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
             result += "{";
             result += args_body;
             result += "}<tool_call|>";
+        } else if (xml) {
+            // Qwen-Coder XML dialect — mirror the template's tool_calls
+            // branch: raw-text values, non-strings stringified.
+            result += "\n<tool_call>\n<function=" + name + ">\n";
+            json args_json = json::parse(args, nullptr, false);
+            if (!args_json.is_discarded() && args_json.is_object()) {
+                for (auto it = args_json.begin(); it != args_json.end(); ++it) {
+                    std::string val = it.value().is_string() ? it.value().get<std::string>()
+                                                             : dump_safe(it.value());
+                    result += "<parameter=" + it.key() + ">\n" + val + "\n</parameter>\n";
+                }
+            }
+            result += "</function>\n</tool_call>";
         } else {
             // ChatML format
             json call_obj = {{"name", name}, {"arguments", json::parse(args, nullptr, false)}};

@@ -4,6 +4,27 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Qwen-Coder XML tool-call grammar**: `tool_choice=required`/forced and
+  `strict:true` on templates teaching the `<function=NAME>`/`<parameter=KEY>`
+  raw-text dialect (Qwen3-Coder, Qwen3.6) are now enforced by a dedicated
+  XML grammar in the schema FSM instead of the ChatML JSON body FSM, which
+  masked raw newlines and collapsed multi-line code arguments to one line
+  (measured 0/3 → 3/3 compiling `write_file` contents on Coder-30B).
+  Dialect detection probe-renders the template; parallel/strict re-arm and
+  jump-ahead work as on the JSON dialect.
+
+### Fixed
+- **Tool-call enforcement now derives from the post-load template**: the
+  constraint was collected before `ensure_model_loaded`, so auto-load-on-
+  first-request and cross-model requests baked a grammar from the previous
+  (or no) template.
+- **Multi-turn tool replay on XML templates**: prior assistant `tool_calls`
+  re-render in the XML shape the model emits, not the ChatML JSON body.
+- **Qwen XML parser anchoring**: `</parameter>`/`</function>` close tags are
+  matched newline-anchored first, so raw values may contain bare close-tag
+  text without truncating arguments.
+
 ## [0.19.2] - 2026-07-17
 
 Hardening release: a latent KV prefix-cache corruption fix plus a

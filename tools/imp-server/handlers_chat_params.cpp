@@ -247,9 +247,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // dialect comes from tpl_family, captured below into the request.
 
     // Snapshot template family (may be re-snapshotted under lock in the orchestrator)
+    bool tool_xml_dialect = false;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         ctx.snap.tpl_family = state.have_template ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+        tool_xml_dialect = state.have_template && state.chat_tpl.tool_xml_dialect();
     }
 
     // logprobs on a constrained request drops it out of the ConstrainedPipeline
@@ -262,42 +264,12 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
             "fast path for eager decode (expect ~2x slower decode)");
     }
 
-    // Enforced tool calling (#1002): tool_choice=required / forced function on
-    // the ChatML <tool_call> dialect constrains generation to one tool-call
-    // envelope via the schema FSM. Empty result = prompt-hint fallback.
-    if (ctx.params.has_tools) {
-        ctx.params.tool_constraint_tools = collect_tool_constraint(ctx.snap.tpl_family, ctx.params.tools,
-                                                                   ctx.params.tool_choice);
-        if (!ctx.params.tool_constraint_tools.empty()) {
-            ctx.params.tool_envelope_open = "<tool_call>\n";
-            ctx.params.tool_envelope_close = "\n</tool_call>";
-        } else {
-            // No forced/required constraint — try strict optional (OpenAI
-            // strict:true with a model-chosen call): the envelope is not forced,
-            // the body FSM engages only if the model opens a tool call (#1002).
-            ctx.params.tool_constraint_tools = collect_strict_tool_constraint(ctx.snap.tpl_family,
-                                                                              ctx.params.tools,
-                                                                              ctx.params.tool_choice);
-            if (!ctx.params.tool_constraint_tools.empty()) {
-                ctx.params.tool_constraint_optional = true;
-                ctx.params.tool_envelope_open = "<tool_call>\n";
-                ctx.params.tool_envelope_close = "\n</tool_call>";
-            }
-        }
-        // Llama3 `<function=NAME>{args}</function>` forced function: constrain the
-        // bare parameter schema with a per-tool envelope (#1002). Only when the
-        // ChatML paths above found nothing (different family).
-        if (ctx.params.tool_constraint_tools.empty()) {
-            auto [ln, lparams] = collect_llama3_forced_tool(ctx.snap.tpl_family, ctx.params.tools,
-                                                            ctx.params.tool_choice);
-            if (!ln.empty()) {
-                ctx.params.tool_constraint_tools = {{ln, lparams}};
-                ctx.params.tool_constraint_bare_args = true;
-                ctx.params.tool_envelope_open = "<function=" + ln + ">";
-                ctx.params.tool_envelope_close = "</function>";
-            }
-        }
-    }
+    // Enforced tool calling (#1002) is collected POST-snapshot in
+    // handlers_chat_core (collect_tool_enforcement): the request may auto-load
+    // or name a different model, and the constraint dialect must come from the
+    // template that will actually render this prompt — the parse-time family
+    // above is a pre-load best guess (fine for message flattening, wrong to
+    // bake a grammar from).
 
     // Convert JSON messages to ChatMessage vector, extracting image data if present
     for (const auto& msg : messages) {
@@ -318,13 +290,21 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.chat_msgs.push_back({"tool", content});
             }
         } else if (role == "assistant" && msg.contains("tool_calls")) {
-            // Assistant message with tool_calls — reconstruct model output format
+            // Assistant message with tool_calls — reconstruct model output
+            // format. On XML-dialect templates (Qwen-Coder) prior calls must
+            // replay in the XML shape the model itself emits, not the ChatML
+            // JSON body — a JSON replay teaches the model the wrong dialect
+            // for its NEXT call, exactly what the armed XML grammar forbids.
+            // (Parse-time dialect: flattening happens pre-model-load; a
+            // cross-model first request may replay in the previous template's
+            // dialect — moving message conversion post-snapshot is the deeper
+            // fix, tracked in the PR.)
             std::string content_str;
             if (msg.contains("content") && !msg["content"].is_null()) {
                 content_str = msg["content"].get<std::string>();
             }
             std::string reconstructed = reconstruct_tool_call_output(ctx.snap.tpl_family, msg["tool_calls"],
-                                                                     content_str);
+                                                                     content_str, tool_xml_dialect);
             ctx.params.chat_msgs.push_back({"assistant", reconstructed});
         } else if (msg.contains("content") && msg["content"].is_array()) {
             // OpenAI multimodal format: content is array of parts

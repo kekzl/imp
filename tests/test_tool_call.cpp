@@ -380,3 +380,40 @@ TEST(ToolCallReconstruct, SkipsEntryWithoutFunction) {
     json calls = json::array({{{"id", "x"}}});  // no "function" key
     EXPECT_EQ(reconstruct_tool_call_output(ChatTemplateFamily::CHATML, calls, "keep"), "keep");
 }
+
+// Qwen-Coder XML dialect (xml=true): prior calls replay in the shape the
+// template's own tool_calls branch renders — raw multi-line string values,
+// non-strings stringified — never the ChatML JSON body (a JSON replay teaches
+// the model the wrong dialect for its next call).
+TEST(ToolCallReconstruct, XmlDialectWrapsCall) {
+    json calls = json::array(
+        {{{"function",
+           {{"name", "write_file"},
+            {"arguments", "{\"path\":\"/tmp/x.py\",\"content\":\"line1\\nline2\",\"limit\":3}"}}}}});
+    std::string out = reconstruct_tool_call_output(ChatTemplateFamily::CHATML, calls, "", /*xml=*/true);
+    EXPECT_NE(out.find("<tool_call>\n<function=write_file>\n"), std::string::npos);
+    EXPECT_NE(out.find("<parameter=path>\n/tmp/x.py\n</parameter>\n"), std::string::npos);
+    // Raw value — the newline stays a newline, not an escape.
+    EXPECT_NE(out.find("<parameter=content>\nline1\nline2\n</parameter>\n"), std::string::npos);
+    EXPECT_NE(out.find("<parameter=limit>\n3\n</parameter>\n"), std::string::npos);
+    EXPECT_NE(out.find("</function>\n</tool_call>"), std::string::npos);
+    EXPECT_EQ(out.find("{\"name\""), std::string::npos) << "no JSON body on the XML dialect";
+}
+
+// The enforced grammar only ends a value at "\n</parameter>" — a raw value may
+// legally CONTAIN a bare close tag (code writing about tool calls). The parser
+// must anchor on the newline form first and keep such text inside the value.
+TEST(ToolCallQwen36Xml, BareCloseTagInsideValueStaysValueText) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call("<function=f>\n"
+                                      "<parameter=doc>\n"
+                                      "call format: </parameter> and </function> inline\n"
+                                      "</parameter>\n"
+                                      "<parameter=n>\n42\n</parameter>\n"
+                                      "</function>",
+                                      tc));
+    EXPECT_EQ(tc.name, "f");
+    json args = json::parse(tc.arguments);
+    EXPECT_EQ(args["doc"], "call format: </parameter> and </function> inline");
+    EXPECT_EQ(args["n"], 42);
+}
