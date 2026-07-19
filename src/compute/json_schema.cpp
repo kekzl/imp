@@ -567,19 +567,36 @@ static void rewrite_refs(SchemaNode* node, const std::map<std::string, std::stri
 // root under the "<tool>/<def>" namespace, and records (tool name, parameter
 // schema) in root->defs. `names` receives the tool names in order. Returns
 // false when any tool is unenforceable (caller declines the whole set).
+// xml: the Qwen-Coder XML dialect writes names/keys UNQUOTED inside
+// <function=NAME>/<parameter=KEY> tags and can only express object
+// properties — an ENUM params schema (legal for the JSON dialect, where
+// "arguments" IS the enum string) has no XML representation, and a name/key
+// containing '<', '>' or a newline can never complete its tag.
+static bool xml_tag_name_ok(const std::string& s) {
+    return s.find_first_of("<>\n") == std::string::npos;
+}
+
 static bool collect_tool_defs(const std::vector<std::pair<std::string, std::string>>& tools,
-                              SchemaNode* root, std::vector<std::string>& names) {
+                              SchemaNode* root, std::vector<std::string>& names, bool xml) {
     for (auto& [name, params_json] : tools) {
         if (name.empty())
+            return false;
+        if (xml && !xml_tag_name_ok(name))
             return false;
         auto params = parse_json_schema(params_json);
         const SchemaNode* res = params ? resolve_schema_ref(params.get(), params.get()) : nullptr;
         // Enforceable structure only: a free-form object dead-ends the key
         // phase (see the free_form route in ConstraintManager::prepare).
-        const bool enforceable = res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
-                                         (res->type == SchemaType::ENUM && !res->enum_values.empty()));
+        const bool enforceable =
+            res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
+                    (!xml && res->type == SchemaType::ENUM && !res->enum_values.empty()));
         if (!enforceable)
             return false;
+        if (xml) {
+            for (auto& [key, _] : res->properties)
+                if (!xml_tag_name_ok(key))
+                    return false;
+        }
         // Hoist any per-tool $defs into the TOOL_CALL root (#1002 stage 2).
         // REF resolution in schema_constrain.cu always searches the TOOL_CALL
         // root's defs, so a tool's nested models (pydantic/zod emit $defs+$ref
@@ -616,7 +633,7 @@ std::unique_ptr<SchemaNode> build_tool_call_schema(
     root->additional_properties = false;
 
     std::vector<std::string> names;
-    if (!collect_tool_defs(tools, root.get(), names))
+    if (!collect_tool_defs(tools, root.get(), names, /*xml=*/false))
         return nullptr;
 
     auto name_enum = std::make_unique<SchemaNode>();
@@ -642,7 +659,7 @@ std::unique_ptr<SchemaNode> build_xml_tool_call_schema(
     root->additional_properties = false;
 
     std::vector<std::string> names;
-    if (!collect_tool_defs(tools, root.get(), names))
+    if (!collect_tool_defs(tools, root.get(), names, /*xml=*/true))
         return nullptr;
 
     // The tool name lives in the <function=NAME> tag — an unquoted enum on the

@@ -77,6 +77,16 @@ struct SchemaFrame {
     // parameter keys/required resolve against the same defs entry.
     std::string chosen_tool;
 
+    // XML_TOOL_CALL frames only. Dedicated state instead of overloading
+    // literal_pos/string_len: xml_tool caches the chosen tool's resolved
+    // parameter schema (bound once when the name tag closes — the lookup is
+    // per-char otherwise), xml_delim_match tracks the "\n</parameter>" match
+    // inside a raw value, xml_value_open flags the forced value-opening
+    // newline as consumed.
+    const SchemaNode* xml_tool = nullptr;
+    int xml_delim_match = 0;
+    bool xml_value_open = false;
+
     // True right after a ',' inside an object: a key is now mandatory, so the
     // object may not close (`}`) until another key/value is emitted — prevents
     // trailing commas (`{"a":1,}`).

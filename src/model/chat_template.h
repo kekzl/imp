@@ -166,6 +166,7 @@ private:
 
     // Jinja2-based apply: render template, split on control tokens, encode
     bool probe_render_mentions_think(const Tokenizer& tok) const;
+    bool probe_render_teaches_xml_tools(const Tokenizer& tok) const;
     std::vector<int32_t> apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
                                      bool add_generation_prompt = true, bool suppress_thinking = false,
                                      bool force_thinking = false) const;

@@ -630,6 +630,45 @@ TEST(SchemaConstrainTest, XmlToolCallEmptyValue) {
     EXPECT_TRUE(at_done[2]) << "an empty value must be a legal, closable call";
 }
 
+// A model may also close an empty value with a SINGLE newline —
+// '<parameter=k>\n</parameter>' — the forced value-opening newline doubles as
+// the delimiter start (the tracker is seeded). Without that, the close tag is
+// swallowed as value text and the value never closes (EOS stays masked to
+// max_tokens).
+TEST(SchemaConstrainTest, XmlToolCallEmptyValueSingleNewline) {
+    SKIP_IF_NO_CUDA();
+    std::string chars;
+    auto toks = xml_test_vocab(chars);
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
+    };
+    auto schema = build_xml_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.reset();
+
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+    feed("<tool_call>\n<function=sum>\n<parameter=vals>\n</parameter>\n</function>\n</tool_call>");
+    auto at_done = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_done[2]) << "the single-newline empty-value close must be accepted";
+}
+
 // Strict OPTIONAL on the XML dialect: free text passes until the model opens
 // <tool_call>; then the XML body FSM engages (never the JSON body).
 TEST(SchemaConstrainTest, XmlToolCallStrictOptionalEnforced) {
@@ -765,6 +804,21 @@ TEST(SchemaConstrainTest, XmlBuilderGates) {
                     {{"t", R"({"type":"object","properties":{"i":{"$ref":"#/$defs/I"}},)"
                            R"("required":["i"],"$defs":{"I":{"type":"object",)"
                            R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})"}}) != nullptr);
+    // XML-only gates. An ENUM params schema is expressible for the JSON
+    // dialect ("arguments" IS the enum string) but has no XML representation
+    // — enforcing it would silently drop the argument.
+    EXPECT_TRUE(build_tool_call_schema({{"t", R"({"enum":["on","off"]})"}}) != nullptr);
+    EXPECT_TRUE(build_xml_tool_call_schema({{"t", R"({"enum":["on","off"]})"}}) == nullptr);
+    // Names/keys are written UNQUOTED inside <function=NAME>/<parameter=KEY>
+    // tags — a '>', '<' or newline could never complete its tag (the FSM
+    // would dead-end mid-call and force a truncated EOS).
+    EXPECT_TRUE(build_xml_tool_call_schema(
+                    {{"a>b", R"({"type":"object","properties":{"i":{"type":"integer"}}})"}}) == nullptr);
+    EXPECT_TRUE(build_xml_tool_call_schema(
+                    {{"t", R"({"type":"object","properties":{"a>b":{"type":"integer"}}})"}}) == nullptr);
+    EXPECT_TRUE(build_xml_tool_call_schema(
+                    {{"t", "{\"type\":\"object\",\"properties\":{\"a\\nb\":{\"type\":\"integer\"}}}"}}) ==
+                nullptr);
 }
 
 }  // namespace

@@ -72,6 +72,57 @@ void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_
 // context, and starts timing. Returns true if OK; sets res with 400/503 and
 // returns false on failure (model not loaded, prompt too long, vision lock
 // timeout, image processing failure).
+// Enforced tool calling (#1002): derive the FSM constraint from the
+// POST-SNAPSHOT template (family + body dialect). Runs after
+// ensure_model_loaded so an auto-loaded or switched model gets the grammar
+// its own template teaches; the parse-time family is never baked in.
+static void collect_tool_enforcement_(ChatRequestContext& ctx) {
+    if (!ctx.params.has_tools)
+        return;
+    // tool_choice=required / forced function on the ChatML <tool_call>
+    // dialect. Empty result = prompt-hint fallback.
+    ctx.params.tool_constraint_tools = collect_tool_constraint(ctx.snap.tpl_family, ctx.params.tools,
+                                                               ctx.params.tool_choice);
+    if (!ctx.params.tool_constraint_tools.empty()) {
+        ctx.params.tool_envelope_open = "<tool_call>\n";
+        ctx.params.tool_envelope_close = "\n</tool_call>";
+    } else {
+        // No forced/required constraint — try strict optional (OpenAI
+        // strict:true with a model-chosen call): the envelope is not forced,
+        // the body FSM engages only if the model opens a tool call (#1002).
+        ctx.params.tool_constraint_tools = collect_strict_tool_constraint(ctx.snap.tpl_family,
+                                                                          ctx.params.tools,
+                                                                          ctx.params.tool_choice);
+        if (!ctx.params.tool_constraint_tools.empty()) {
+            ctx.params.tool_constraint_optional = true;
+            ctx.params.tool_envelope_open = "<tool_call>\n";
+            ctx.params.tool_envelope_close = "\n</tool_call>";
+        }
+    }
+    // Qwen-Coder / Qwen3.6 XML templates: same <tool_call> envelope and
+    // selection logic, but the BODY grammar is the XML dialect
+    // (<function=NAME><parameter=KEY> with raw-text values) — flag it so the
+    // engine builds the XML FSM instead of the JSON body FSM, which masks raw
+    // newlines and mangles multi-line (code) arguments.
+    if (!ctx.params.tool_constraint_tools.empty() &&
+        ctx.snap.tpl_family == imp::ChatTemplateFamily::CHATML && ctx.snap.have_template &&
+        ctx.snap.chat_tpl.tool_xml_dialect())
+        ctx.params.tool_constraint_xml = true;
+    // Llama3 `<function=NAME>{args}</function>` forced function: constrain the
+    // bare parameter schema with a per-tool envelope (#1002). Only when the
+    // ChatML paths above found nothing (different family).
+    if (ctx.params.tool_constraint_tools.empty()) {
+        auto [ln, lparams] = collect_llama3_forced_tool(ctx.snap.tpl_family, ctx.params.tools,
+                                                        ctx.params.tool_choice);
+        if (!ln.empty()) {
+            ctx.params.tool_constraint_tools = {{ln, lparams}};
+            ctx.params.tool_constraint_bare_args = true;
+            ctx.params.tool_envelope_open = "<function=" + ln + ">";
+            ctx.params.tool_envelope_close = "</function>";
+        }
+    }
+}
+
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx) {
     // Snapshot all state fields needed for request processing under lock.
     // This protects against concurrent model load/unload invalidating pointers.
@@ -103,6 +154,14 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.has_vision_request = !ctx.params.image_data.empty() && state.ctx &&
                                       state.ctx->engine->has_vision();
     }
+
+    // Enforced tool calling (#1002): tool_choice=required / forced function /
+    // strict:true constrains generation via the schema FSM (JSON or XML body
+    // per the template's dialect). Collected HERE, after ensure_model_loaded:
+    // the request may have auto-loaded or switched the model, so the grammar
+    // must derive from the template that actually renders this prompt — the
+    // parse-time family in handlers_chat_params is a pre-load best guess.
+    collect_tool_enforcement_(ctx);
 
     // Channel models (Gemma-4) are more susceptible to sampling-driven
     // degeneration on casual prompts than DeepSeek-style reasoning models.
@@ -224,7 +283,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         if (ctx.snap.tokens.empty()) {
             IMP_LOG_INFO("Jinja2 tools path failed, falling back to text-based tool prompt");
             // The text fallback advertises the ChatML JSON body — an armed XML
-            // body constraint would fight the prompt. Drop to the hint.
+            // body constraint would fight the prompt. Drop to the hint (not to
+            // the JSON FSM: an XML-finetuned model would fight that grammar
+            // too). bare_args is never set on this path (xml implies the
+            // ChatML collectors matched, see collect_tool_enforcement_).
             if (ctx.params.tool_constraint_xml) {
                 ctx.params.tool_constraint_xml = false;
                 ctx.params.tool_constraint_tools.clear();

@@ -268,15 +268,26 @@ TEST(ChatTemplateInitTest, ChatMLSuccess) {
 TEST(ChatTemplateInitTest, ToolXmlDialectDetected) {
     // Qwen-Coder / Qwen3.6 templates teach <function=NAME>/<parameter=KEY>
     // tool bodies — the XML grammar must be selected for enforcement there,
-    // and ONLY there (plain ChatML JSON templates keep the JSON body FSM).
+    // and ONLY there. Detection is a probe RENDER with a dummy tool: the
+    // rendered prompt must actually teach the dialect (a template that merely
+    // mentions the markers in a comment must not arm the XML grammar).
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate xml_tpl;
     EXPECT_TRUE(xml_tpl.init(
         ChatTemplateFamily::CHATML, tok,
         "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
+        "{% if tools %}\nIf you call a function reply as:\n<tool_call>\n<function=example_fn>\n"
+        "<parameter=example_param>\nvalue\n</parameter>\n</function>\n</tool_call>\n{% endif %}"));
+    EXPECT_TRUE(xml_tpl.tool_xml_dialect());
+
+    // The markers only inside a jinja comment: never rendered → not the dialect.
+    ChatTemplate comment_tpl;
+    EXPECT_TRUE(comment_tpl.init(
+        ChatTemplateFamily::CHATML, tok,
+        "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
         "{# tools: <tool_call>\n<function=example_fn>\n<parameter=example_param>\nvalue\n"
         "</parameter>\n</function>\n</tool_call> #}"));
-    EXPECT_TRUE(xml_tpl.tool_xml_dialect());
+    EXPECT_FALSE(comment_tpl.tool_xml_dialect());
 
     ChatTemplate json_tpl;
     EXPECT_TRUE(json_tpl.init(
