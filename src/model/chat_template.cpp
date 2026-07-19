@@ -170,6 +170,7 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
     stop_token_ids_.clear();
     use_jinja_ = false;
     mentions_thinking_ = false;  // resolved below once the Jinja engine is up
+    tool_xml_dialect_ = false;
 
     // Try Jinja2 rendering if template string provided
     if (!jinja_str.empty()) {
@@ -193,6 +194,13 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             mentions_thinking_ = jinja_str.find("enable_thinking") != std::string::npos;
             if (!mentions_thinking_ && jinja_str.find("<think>") != std::string::npos)
                 mentions_thinking_ = probe_render_mentions_think(tokenizer);
+            // Qwen-Coder / Qwen3.6 XML tool-call dialect: the template teaches
+            // <function=NAME><parameter=KEY> bodies inside <tool_call> (raw-text
+            // values, not JSON). Constrained tool enforcement must use the XML
+            // grammar on these templates — the JSON body FSM masks raw newlines
+            // and mangles multi-line arguments.
+            tool_xml_dialect_ = jinja_str.find("<parameter=") != std::string::npos &&
+                                jinja_str.find("<function=") != std::string::npos;
         } else {
             IMP_LOG_WARN("Jinja2 parse failed (%s), falling back to hardcoded template",
                          tpl->error().c_str());

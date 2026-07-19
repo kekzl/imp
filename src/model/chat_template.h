@@ -92,6 +92,11 @@ public:
     // True when a raw Jinja template is driving rendering (mentions_thinking
     // is only meaningful evidence in that case).
     bool has_jinja() const { return use_jinja_; }
+    // True when the Jinja template teaches the Qwen-Coder / Qwen3.6 XML
+    // tool-call body (<function=NAME><parameter=KEY> with raw-text values)
+    // instead of the ChatML JSON body — selects the XML grammar for
+    // constrained tool enforcement.
+    bool tool_xml_dialect() const { return tool_xml_dialect_; }
     bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
     bool supports_tools() const;
     const std::string& default_system_message() const { return default_system_message_; }
@@ -157,6 +162,7 @@ private:
     std::shared_ptr<jinja::Template> jinja_tpl_;
     bool use_jinja_ = false;
     bool mentions_thinking_ = false;
+    bool tool_xml_dialect_ = false;
 
     // Jinja2-based apply: render template, split on control tokens, encode
     bool probe_render_mentions_think(const Tokenizer& tok) const;

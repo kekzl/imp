@@ -27,3 +27,8 @@ timestamp	name	family	quant	path	pp512_tps	tg128_tps	status
 2026-07-12T18:30:59Z	Gemma-3-12B	dense	Q4_K_M	gemma-3-12b-it-Q4_K_M.gguf	4385.12	74.33	ok
 2026-07-12T18:31:28Z	Phi-4-reasoning	dense	NVFP4	Phi-4-reasoning-plus-NVFP4	23625.73	204.22	ok
 2026-07-12T18:31:46Z	Nemotron-3-Nano-30B	hybrid	NVFP4	Nemotron-3-Nano-30B-A3B-NVFP4	10009.04	129.68	ok
+2026-07-19T07:28:00Z	Qwen3-8B	dense	Q8_0	Qwen3-8B-Q8_0.gguf	12360.55	298.98	ok
+2026-07-19T07:28:19Z	Qwen3-8B	dense	NVFP4	Qwen3-8B-NVFP4-cortecs	37071.92	281.40	ok
+2026-07-19T07:28:42Z	Qwen3-14B	dense	Q6_K	Qwen3-14B-Q6_K.gguf	7343.79	161.83	ok
+2026-07-19T07:29:08Z	Qwen3-14B	dense	NVFP4	Qwen3-14B-NVFP4	19191.21	229.10	ok
+2026-07-19T07:29:32Z	Qwen3-30B-A3B	moe	NVFP4	Qwen3-30B-A3B-NVFP4-Modelopt	22401.31	368.65	ok

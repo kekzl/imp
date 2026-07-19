@@ -562,22 +562,16 @@ static void rewrite_refs(SchemaNode* node, const std::map<std::string, std::stri
         rewrite_refs(def.get(), rename);
 }
 
-std::unique_ptr<SchemaNode> build_tool_call_schema(
-    const std::vector<std::pair<std::string, std::string>>& tools) {
-    if (tools.empty())
-        return nullptr;
-
-    auto root = std::make_unique<SchemaNode>();
-    root->type = SchemaType::TOOL_CALL;
-    root->required = {"name", "arguments"};
-    root->additional_properties = false;
-
-    auto name_enum = std::make_unique<SchemaNode>();
-    name_enum->type = SchemaType::ENUM;
-
+// Shared per-tool loop for both tool-call roots: parses every parameter
+// schema, applies the enforceability gates, hoists per-tool $defs into the
+// root under the "<tool>/<def>" namespace, and records (tool name, parameter
+// schema) in root->defs. `names` receives the tool names in order. Returns
+// false when any tool is unenforceable (caller declines the whole set).
+static bool collect_tool_defs(const std::vector<std::pair<std::string, std::string>>& tools,
+                              SchemaNode* root, std::vector<std::string>& names) {
     for (auto& [name, params_json] : tools) {
         if (name.empty())
-            return nullptr;
+            return false;
         auto params = parse_json_schema(params_json);
         const SchemaNode* res = params ? resolve_schema_ref(params.get(), params.get()) : nullptr;
         // Enforceable structure only: a free-form object dead-ends the key
@@ -585,7 +579,7 @@ std::unique_ptr<SchemaNode> build_tool_call_schema(
         const bool enforceable = res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
                                          (res->type == SchemaType::ENUM && !res->enum_values.empty()));
         if (!enforceable)
-            return nullptr;
+            return false;
         // Hoist any per-tool $defs into the TOOL_CALL root (#1002 stage 2).
         // REF resolution in schema_constrain.cu always searches the TOOL_CALL
         // root's defs, so a tool's nested models (pydantic/zod emit $defs+$ref
@@ -605,9 +599,29 @@ std::unique_ptr<SchemaNode> build_tool_call_schema(
                 root->defs.emplace_back(name + "/" + def_name, std::move(def_schema));
             params->defs.clear();
         }
-        name_enum->enum_values.push_back(name);
+        names.push_back(name);
         root->defs.emplace_back(name, std::move(params));
     }
+    return true;
+}
+
+std::unique_ptr<SchemaNode> build_tool_call_schema(
+    const std::vector<std::pair<std::string, std::string>>& tools) {
+    if (tools.empty())
+        return nullptr;
+
+    auto root = std::make_unique<SchemaNode>();
+    root->type = SchemaType::TOOL_CALL;
+    root->required = {"name", "arguments"};
+    root->additional_properties = false;
+
+    std::vector<std::string> names;
+    if (!collect_tool_defs(tools, root.get(), names))
+        return nullptr;
+
+    auto name_enum = std::make_unique<SchemaNode>();
+    name_enum->type = SchemaType::ENUM;
+    name_enum->enum_values = std::move(names);
 
     root->properties.emplace_back("name", std::move(name_enum));
     // "arguments" placeholder — resolved dynamically against defs via the
@@ -615,6 +629,25 @@ std::unique_ptr<SchemaNode> build_tool_call_schema(
     auto args_placeholder = std::make_unique<SchemaNode>();
     args_placeholder->type = SchemaType::OBJECT;
     root->properties.emplace_back("arguments", std::move(args_placeholder));
+    return root;
+}
+
+std::unique_ptr<SchemaNode> build_xml_tool_call_schema(
+    const std::vector<std::pair<std::string, std::string>>& tools) {
+    if (tools.empty())
+        return nullptr;
+
+    auto root = std::make_unique<SchemaNode>();
+    root->type = SchemaType::XML_TOOL_CALL;
+    root->additional_properties = false;
+
+    std::vector<std::string> names;
+    if (!collect_tool_defs(tools, root.get(), names))
+        return nullptr;
+
+    // The tool name lives in the <function=NAME> tag — an unquoted enum on the
+    // root itself; parameter keys/required come from defs[chosen_tool].
+    root->enum_values = std::move(names);
     return root;
 }
 

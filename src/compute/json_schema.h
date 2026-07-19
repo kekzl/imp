@@ -115,6 +115,14 @@ enum class SchemaType {
     // free placeholder)]; defs = [(tool name, parameter schema)]. Built
     // programmatically via build_tool_call_schema(), never parsed from JSON.
     TOOL_CALL,
+    // Qwen-Coder XML tool-call body:
+    //   <function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n...</function>
+    // The name lives in the tag (enum_values = tool names), parameter keys
+    // come from the chosen tool's properties (defs = [(tool name, parameter
+    // schema)], same layout as TOOL_CALL), and parameter VALUES are raw text
+    // delimited by "\n</parameter>" — never JSON. Built programmatically via
+    // build_xml_tool_call_schema(), never parsed from JSON.
+    XML_TOOL_CALL,
 };
 
 struct SchemaNode {
@@ -179,6 +187,13 @@ const SchemaNode* resolve_schema_ref(const SchemaNode* root, const SchemaNode* n
 // parameter schema would dead-end the key phase, so the builder returns
 // nullptr and the caller falls back to prompt-hint-only tool choice.
 std::unique_ptr<SchemaNode> build_tool_call_schema(
+    const std::vector<std::pair<std::string, std::string>>& tools);
+
+// Same contract for the Qwen-Coder XML dialect: an XML_TOOL_CALL root whose
+// enum_values are the tool names and whose defs carry each tool's parameter
+// schema (keys + required drive the FSM; values are raw text). Same
+// enforceability gates as build_tool_call_schema.
+std::unique_ptr<SchemaNode> build_xml_tool_call_schema(
     const std::vector<std::pair<std::string, std::string>>& tools);
 
 }  // namespace imp

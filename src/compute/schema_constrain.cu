@@ -37,6 +37,52 @@ static int effective_max_items(const SchemaNode* root, const SchemaNode* array_n
 }
 
 // ---------------------------------------------------------------------------
+// Qwen-Coder XML tool-call body (SchemaType::XML_TOOL_CALL):
+//   <function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n...</function>
+// Tags are literal, the name/keys are unquoted enums, and VALUES are raw text
+// (multi-line, unescaped) ending at the "\n</parameter>" delimiter.
+// ---------------------------------------------------------------------------
+
+static const char* const kXmlFnOpen = "<function=";
+static const std::string kXmlParamOpen = "\n<parameter=";
+static const std::string kXmlFnClose = "\n</function>";
+static const std::string kXmlParamDelim = "\n</parameter>";
+
+// Delimiter tracker for the raw-value phase: the KMP step over `target` —
+// given the match length so far and the next char, return the new length.
+// Chars are never rejected (any text is a legal value); a dead partial match
+// falls back to the longest border and re-tries, so values containing partial
+// delimiters ("\n</param" + more text, "\n\n</parameter>") track correctly.
+static int xml_delim_step(const std::string& target, int len, char c) {
+    while (true) {
+        if (len < static_cast<int>(target.size()) && c == target[len])
+            return len + 1;
+        if (len == 0)
+            return 0;
+        int border = 0;
+        for (int k = len - 1; k > 0; k--) {
+            if (target.compare(0, k, target, len - k, k) == 0) {
+                border = k;
+                break;
+            }
+        }
+        len = border;
+    }
+}
+
+// The chosen tool's parameter schema for an XML body frame (root defs entry,
+// same layout as TOOL_CALL's dynamic "arguments" binding).
+static const SchemaNode* xml_tool_params(const SchemaNode* root, const std::string& chosen) {
+    if (!root)
+        return nullptr;
+    for (auto& [name, params] : root->defs) {
+        if (name == chosen)
+            return resolve_schema_ref(root, params.get());
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 
@@ -66,6 +112,16 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
         std::string text = tok.decode_token(i);
         token_texts_[i] = text;
         token_categories_[i] = classify_token(text);
+        // classify_token gives MIXED text+control tokens (code tokens like
+        // "):\n    def" — raw newline plus printable text) NO category at all,
+        // and the mask kernel requires category AND allow, so they could never
+        // pass any phase — including the XML raw-value phase whose whole point
+        // is multi-line text, and envelope literals spanning "\n</". Tag them
+        // CAT_STRING_CHAR: the per-token simulation (token_allow) stays the
+        // source of truth everywhere this constrainer unmasks, so JSON string
+        // phases still reject their raw control chars char-by-char.
+        if (token_categories_[i] == 0 && !text.empty())
+            token_categories_[i] = CAT_STRING_CHAR;
     }
 
     // Upload to GPU
@@ -395,6 +451,14 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             // legality is fully decided by the per-token simulation.
             return 0xFFFF;
 
+        case SchemaPhase::XML_FN_OPEN:
+        case SchemaPhase::XML_FN_NAME:
+        case SchemaPhase::XML_PARAMS:
+        case SchemaPhase::XML_PARAM_KEY:
+        case SchemaPhase::XML_RAW_VALUE:
+            // XML tags and raw values span categories — same delegation.
+            return 0xFFFF;
+
         case SchemaPhase::DONE:
             return CAT_WHITESPACE;
     }
@@ -435,12 +499,27 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     //    enum / key strings still simulate (prefix & regex constraints).
     need_token_allow_ = true;
     const bool free_string = (top().phase == SchemaPhase::STRING_VALUE);
+    // XML raw values: EOS must not stop generation mid-call (its rendered text
+    // — "<|im_end|>" — would pass the anything-goes value simulation), and a
+    // token without a newline can neither start nor extend the "\n</parameter>"
+    // delimiter, so with no match in progress it is plain value text — skip
+    // its simulation (mirrors the in-string shortcut).
+    const bool xml_raw = (top().phase == SchemaPhase::XML_RAW_VALUE);
+    const bool xml_raw_plain = xml_raw && top().string_len > 0 && top().literal_pos == 0;
     for (int i = 0; i < vocab_size_; i++) {
         if ((token_categories_[i] & cat_mask) == 0) {
             token_allow_[i] = 0;  // masked by category — simulation irrelevant
             continue;
         }
+        if (xml_raw && std::find(eos_tokens_.begin(), eos_tokens_.end(), i) != eos_tokens_.end()) {
+            token_allow_[i] = 0;
+            continue;
+        }
         const std::string& text = token_texts_[i];
+        if (xml_raw_plain && !text.empty() && text.find('\n') == std::string::npos) {
+            token_allow_[i] = 1;
+            continue;
+        }
         if (free_string && !text.empty()) {
             bool plain = true;
             for (char c : text) {
@@ -696,6 +775,52 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 if (f.literal_pos < static_cast<int>(f.literal_target.size()))
                     cands = f.literal_target[f.literal_pos];
                 break;
+            case SchemaPhase::XML_FN_OPEN:
+                if (f.literal_pos < static_cast<int>(f.literal_target.size()))
+                    cands = f.literal_target[f.literal_pos];
+                break;
+            case SchemaPhase::XML_FN_NAME: {
+                // Next chars of tool names matching the buffer; '>' iff a
+                // matching name is already complete.
+                if (!f.node)
+                    return static_cast<int>(out.size());
+                for (const auto& v : f.node->enum_values) {
+                    if (v.size() < f.enum_buffer.size() ||
+                        v.compare(0, f.enum_buffer.size(), f.enum_buffer) != 0)
+                        continue;
+                    cands += v.size() == f.enum_buffer.size() ? '>' : v[f.enum_buffer.size()];
+                }
+                break;
+            }
+            case SchemaPhase::XML_PARAMS: {
+                // Superset of both tag targets' next char — sim_advance
+                // filters by required/param availability.
+                if (f.key_buffer.size() < kXmlParamOpen.size())
+                    cands += kXmlParamOpen[f.key_buffer.size()];
+                if (f.key_buffer.size() < kXmlFnClose.size())
+                    cands += kXmlFnClose[f.key_buffer.size()];
+                break;
+            }
+            case SchemaPhase::XML_PARAM_KEY: {
+                const SchemaNode* tool = xml_tool_params(schema_.get(), f.chosen_tool);
+                if (!tool)
+                    return static_cast<int>(out.size());
+                cands = ">";
+                for (const auto& [name, prop] : tool->properties) {
+                    (void)prop;
+                    if (f.emitted_keys.count(name))
+                        continue;
+                    if (name.size() > f.key_buffer.size() &&
+                        name.compare(0, f.key_buffer.size(), f.key_buffer) == 0)
+                        cands += name[f.key_buffer.size()];
+                }
+                break;
+            }
+            case SchemaPhase::XML_RAW_VALUE:
+                if (f.string_len != 0)
+                    return static_cast<int>(out.size());  // free text — never force
+                cands = "\n";  // the forced value-opening newline
+                break;
             default:
                 // ARRAY_OPEN (item-start vs ']' choice), STRING_VALUE /
                 // STRING_PATTERN / STRING_ESCAPE (open-ended), NUMBER_VALUE
@@ -867,6 +992,16 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                         if (stk.size() >= kMaxSchemaStackDepth)
                             return false;
                         f.phase = SchemaPhase::OBJECT_OPEN;
+                        return true;
+                    }
+                    return false;
+                case SchemaType::XML_TOOL_CALL:
+                    // Qwen-Coder XML body — the <function= tag opens it (any
+                    // leading whitespace was consumed by `space` above).
+                    if (c == '<') {
+                        f.phase = SchemaPhase::XML_FN_OPEN;
+                        f.literal_target = kXmlFnOpen;
+                        f.literal_pos = 1;
                         return true;
                     }
                     return false;
@@ -1187,6 +1322,125 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 return true;
             }
             return false;
+        }
+
+        case SchemaPhase::XML_FN_OPEN: {
+            if (f.literal_pos < static_cast<int>(f.literal_target.size()) &&
+                c == f.literal_target[f.literal_pos]) {
+                f.literal_pos++;
+                if (f.literal_pos == static_cast<int>(f.literal_target.size())) {
+                    f.phase = SchemaPhase::XML_FN_NAME;
+                    f.enum_buffer.clear();
+                }
+                return true;
+            }
+            return false;
+        }
+
+        case SchemaPhase::XML_FN_NAME: {
+            if (c == '>') {
+                bool exact = false;
+                if (f.node) {
+                    for (auto& v : f.node->enum_values)
+                        if (v == f.enum_buffer) {
+                            exact = true;
+                            break;
+                        }
+                }
+                if (!exact)
+                    return false;  // the tag closes only on a complete tool name
+                f.chosen_tool = f.enum_buffer;
+                f.phase = SchemaPhase::XML_PARAMS;
+                f.key_buffer.clear();
+                return true;
+            }
+            if (!f.node || !is_valid_enum_prefix(f.node->enum_values, f.enum_buffer + c))
+                return false;
+            f.enum_buffer += c;
+            return true;
+        }
+
+        case SchemaPhase::XML_PARAMS: {
+            // On a fresh line: "\n<parameter=" while unemitted params remain,
+            // "\n</function>" once the required set is emitted.
+            const SchemaNode* tool = xml_tool_params(schema_.get(), f.chosen_tool);
+            if (!tool)
+                return false;
+            bool can_param = false;
+            for (auto& [pname, _] : tool->properties) {
+                if (!f.emitted_keys.count(pname)) {
+                    can_param = true;
+                    break;
+                }
+            }
+            bool can_close = true;
+            for (auto& req : tool->required) {
+                if (!f.emitted_keys.count(req)) {
+                    can_close = false;
+                    break;
+                }
+            }
+            const std::string next = f.key_buffer + c;
+            const bool param_pfx = can_param && kXmlParamOpen.compare(0, next.size(), next) == 0;
+            const bool close_pfx = can_close && kXmlFnClose.compare(0, next.size(), next) == 0;
+            if (!param_pfx && !close_pfx)
+                return false;
+            f.key_buffer = next;
+            if (param_pfx && next.size() == kXmlParamOpen.size()) {
+                f.phase = SchemaPhase::XML_PARAM_KEY;
+                f.key_buffer.clear();
+            } else if (close_pfx && next.size() == kXmlFnClose.size()) {
+                stk.pop_back();  // body complete — the envelope frame takes over
+                sim_fixup_parent(stk);
+            }
+            return true;
+        }
+
+        case SchemaPhase::XML_PARAM_KEY: {
+            const SchemaNode* tool = xml_tool_params(schema_.get(), f.chosen_tool);
+            if (!tool)
+                return false;
+            if (c == '>') {
+                bool complete = false;
+                for (auto& [pname, _] : tool->properties) {
+                    if (!f.emitted_keys.count(pname) && pname == f.key_buffer) {
+                        complete = true;
+                        break;
+                    }
+                }
+                if (!complete)
+                    return false;
+                f.emitted_keys.insert(f.key_buffer);
+                f.key_buffer.clear();
+                f.phase = SchemaPhase::XML_RAW_VALUE;
+                f.literal_target = kXmlParamDelim;
+                f.literal_pos = 0;   // delimiter match length
+                f.string_len = 0;    // forced value-opening newline not yet seen
+                return true;
+            }
+            if (!is_valid_key_prefix(tool, f.key_buffer + c, f.emitted_keys))
+                return false;
+            f.key_buffer += c;
+            return true;
+        }
+
+        case SchemaPhase::XML_RAW_VALUE: {
+            if (f.string_len == 0) {
+                // The value region opens with a forced newline: <parameter=KEY>\n
+                if (c != '\n')
+                    return false;
+                f.string_len = 1;
+                return true;
+            }
+            // Any char is legal value text; only the delimiter tracker moves.
+            f.literal_pos = xml_delim_step(f.literal_target, f.literal_pos, c);
+            if (f.literal_pos == static_cast<int>(f.literal_target.size())) {
+                // "\n</parameter>" complete — back to the tag choice.
+                f.phase = SchemaPhase::XML_PARAMS;
+                f.key_buffer.clear();
+                f.literal_pos = 0;
+            }
+            return true;
         }
 
         case SchemaPhase::DONE:

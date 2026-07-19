@@ -400,5 +400,372 @@ TEST(SchemaConstrainTest, Llama3BareArgsForcedEnvelope) {
     EXPECT_TRUE(at_done[2]) << "EOS forced after the envelope closes";
 }
 
+// ---------------------------------------------------------------------------
+// Qwen-Coder XML tool calls (#1002 follow-up): the body is
+//   <function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n...</function>
+// inside the ChatML <tool_call> envelope. Parameter VALUES are raw text
+// (multi-line, unescaped) delimited by "\n</parameter>" — the reason the JSON
+// body FSM must never engage on this dialect (it masked raw newlines and
+// produced single-line code, see the PR).
+// ---------------------------------------------------------------------------
+
+static std::vector<std::string> xml_test_vocab(std::string& chars) {
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>"};
+    chars = "<>=/\ntol_cafunirdepmshvx{1";
+    for (char c : chars)
+        toks.push_back(std::string(1, c));
+    return toks;
+}
+
+TEST(SchemaConstrainTest, XmlToolCallForcedGrammar) {
+    SKIP_IF_NO_CUDA();
+    std::string chars;
+    auto toks = xml_test_vocab(chars);
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    // "read" has a required param (path) and an optional one (limit); "sum"
+    // exists to prove name-enum narrowing and cross-tool key isolation.
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"read", R"({"type":"object","properties":{"path":{"type":"string"},)"
+                 R"("limit":{"type":"integer"}},"required":["path"]})"},
+        {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
+    };
+    auto schema = build_xml_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.reset();
+
+    auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    // 1. Envelope forced; no JSON body anywhere.
+    auto at_start = allowed();
+    EXPECT_TRUE(at_start[id('<')]) << "envelope open must be legal";
+    EXPECT_FALSE(at_start[id('{')]) << "JSON body must not open on the XML dialect";
+
+    feed("<tool_call>\n");
+    auto at_body = allowed();
+    EXPECT_TRUE(at_body[id('<')]) << "the <function= tag must open the body";
+    EXPECT_FALSE(at_body[id('{')]) << "no JSON body inside the XML envelope";
+
+    // 2. Name enum: 'r'(read) / 's'(sum) legal, 'x' not; '>' only on a full name.
+    feed("<function=");
+    auto at_name = allowed();
+    EXPECT_TRUE(at_name[id('r')]);
+    EXPECT_TRUE(at_name[id('s')]);
+    EXPECT_FALSE(at_name[id('x')]) << "non-tool names must be masked";
+    EXPECT_FALSE(at_name[id('>')]) << "the name tag may not close on an empty name";
+
+    feed("rea");
+    auto at_partial = allowed();
+    EXPECT_TRUE(at_partial[id('d')]);
+    EXPECT_FALSE(at_partial[id('>')]) << "'rea' is not a complete tool name";
+
+    feed("d");
+    auto at_full = allowed();
+    EXPECT_TRUE(at_full[id('>')]) << "'read' is complete — the tag may close";
+    EXPECT_FALSE(at_full[id('x')]) << "'readx' is not a tool-name prefix";
+
+    // 3. Params: "\n<parameter=" is mandatory while required params are missing.
+    feed(">");
+    auto at_params = allowed();
+    EXPECT_TRUE(at_params[id('\n')]);
+    EXPECT_FALSE(at_params[id('<')]) << "param/close tags start on a fresh line";
+
+    feed("\n<");
+    auto at_tag = allowed();
+    EXPECT_TRUE(at_tag[id('p')]) << "<parameter= must be available";
+    EXPECT_FALSE(at_tag[id('/')]) << "</function> is illegal while required 'path' is missing";
+
+    // 4. Key enum: the chosen tool's keys only.
+    feed("parameter=");
+    auto at_key = allowed();
+    EXPECT_TRUE(at_key[id('p')]) << "'path' must be legal";
+    EXPECT_TRUE(at_key[id('l')]) << "'limit' must be legal";
+    EXPECT_FALSE(at_key[id('v')]) << "the OTHER tool's parameter must be masked";
+
+    feed("path");
+    auto at_keyend = allowed();
+    EXPECT_TRUE(at_keyend[id('>')]);
+
+    // 5. Raw value: forced leading newline, then ANY text — including raw
+    // newlines (the whole point of the XML dialect) — until \n</parameter>.
+    feed(">");
+    auto at_vopen = allowed();
+    EXPECT_TRUE(at_vopen[id('\n')]) << "the value region opens with a forced newline";
+    EXPECT_FALSE(at_vopen[id('x')]);
+
+    feed("\n");
+    auto at_value = allowed();
+    EXPECT_TRUE(at_value[id('x')]) << "raw value content must be legal";
+    EXPECT_TRUE(at_value[id('\n')]) << "raw newlines must be legal inside the value";
+    EXPECT_TRUE(at_value[id('{')]) << "braces are plain text inside the value";
+    EXPECT_FALSE(at_value[2]) << "EOS must be masked mid-value (the call must complete)";
+
+    feed("x/h\n1");
+    EXPECT_TRUE(allowed()[id('x')]) << "still inside the raw value";
+
+    // 6. Delimiter closes the param; the next tag needs its fresh line.
+    feed("\n</parameter>");
+    auto at_after = allowed();
+    EXPECT_TRUE(at_after[id('\n')]);
+    EXPECT_FALSE(at_after[id('x')]) << "value text may not continue past the delimiter";
+
+    // 7. Required satisfied → both another param and the function close are legal.
+    feed("\n<");
+    auto at_choice = allowed();
+    EXPECT_TRUE(at_choice[id('p')]) << "'limit' is still available";
+    EXPECT_TRUE(at_choice[id('/')]) << "required params emitted — the body may close";
+
+    // 8. Close: </function> then the forced envelope close, then EOS.
+    feed("/function>");
+    auto at_close = allowed();
+    EXPECT_TRUE(at_close[id('\n')]) << "envelope close literal must follow";
+    EXPECT_FALSE(at_close[id('<')]);
+
+    feed("\n</tool_call>");
+    auto at_done = allowed();
+    EXPECT_TRUE(at_done[2]) << "EOS forced after the envelope closes";
+    EXPECT_FALSE(at_done[id('<')]) << "no trailing text after the close literal";
+}
+
+// The delimiter matcher must survive value text that CONTAINS partial
+// delimiters ("\n</param" + more text) and still close on the real one later.
+TEST(SchemaConstrainTest, XmlToolCallRawValueDelimiterOverlap) {
+    SKIP_IF_NO_CUDA();
+    std::string chars;
+    auto toks = xml_test_vocab(chars);
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
+    };
+    auto schema = build_xml_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.reset();
+
+    auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    feed("<tool_call>\n<function=sum>\n<parameter=vals>\n");
+    // A partial delimiter that dies ("\n</param" + 'x') keeps the value open.
+    feed("a\n</param");
+    auto mid = allowed();
+    EXPECT_TRUE(mid[id('x')]) << "a dead partial delimiter is plain value text";
+    feed("x");
+    EXPECT_TRUE(allowed()[id('x')]) << "still inside the raw value after the dead match";
+
+    // An extra newline directly before the delimiter must re-anchor the match.
+    feed("\n\n</parameter>");
+    auto after = allowed();
+    EXPECT_TRUE(after[id('\n')]) << "the delimiter must close the param";
+    EXPECT_FALSE(after[id('x')]) << "no value text after the delimiter";
+
+    feed("\n</function>\n</tool_call>");
+    EXPECT_TRUE(allowed()[2]) << "EOS forced after the envelope closes";
+}
+
+// An empty value renders as <parameter=k>\n\n</parameter> (forced newline, no
+// content, delimiter) — the FSM must accept the immediate close.
+TEST(SchemaConstrainTest, XmlToolCallEmptyValue) {
+    SKIP_IF_NO_CUDA();
+    std::string chars;
+    auto toks = xml_test_vocab(chars);
+    auto id = [&](char c) {
+        for (size_t i = 3; i < toks.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
+    };
+    auto schema = build_xml_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.reset();
+
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+    feed("<tool_call>\n<function=sum>\n<parameter=vals>\n\n</parameter>\n</function>\n</tool_call>");
+    auto at_done = schema_allowed(sc, static_cast<int>(toks.size()));
+    EXPECT_TRUE(at_done[2]) << "an empty value must be a legal, closable call";
+}
+
+// Strict OPTIONAL on the XML dialect: free text passes until the model opens
+// <tool_call>; then the XML body FSM engages (never the JSON body).
+TEST(SchemaConstrainTest, XmlToolCallStrictOptionalEnforced) {
+    SKIP_IF_NO_CUDA();
+    std::string chars;
+    auto toks = xml_test_vocab(chars);
+    const int opener_id = static_cast<int>(toks.size());
+    toks.push_back("<tool_call>");
+    const int free_id = static_cast<int>(toks.size());
+    toks.push_back("FREE");
+    auto id = [&](char c) {
+        for (size_t i = 3; i < 3 + chars.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
+    };
+    auto schema = build_xml_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.set_strict_optional_envelope(true);
+    sc.set_preamble_with_tools(-1, 512, {opener_id}, {}, "<tool_call>", "</tool_call>",
+                               /*thinking_open=*/false, /*strict_tool=*/true);
+    sc.reset();
+
+    auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    // Free generation: nothing forced.
+    auto at_free = allowed();
+    EXPECT_TRUE(at_free[free_id]) << "free text must pass — no tool call is forced";
+
+    // Opener → the XML body FSM engages.
+    sc.update(opener_id);
+    sc.update(id('\n'));
+    auto at_body = allowed();
+    EXPECT_TRUE(at_body[id('<')]) << "the <function= tag must open the body";
+    EXPECT_FALSE(at_body[id('{')]) << "the JSON body must NOT engage on the XML dialect";
+    EXPECT_FALSE(at_body[free_id]) << "free text is masked once the body FSM engaged";
+
+    feed("<function=sum>\n<parameter=vals>\nx\n</parameter>\n</function>");
+    auto at_close = allowed();
+    EXPECT_TRUE(at_close[id('\n')]) << "close literal '\\n</tool_call>' forced";
+    EXPECT_FALSE(at_close[free_id]);
+
+    feed("\n</tool_call>");
+    auto at_done = allowed();
+    EXPECT_TRUE(at_done[2]) << "EOS forced after the tool call closes";
+    EXPECT_FALSE(at_done[free_id]) << "no trailing free text (parallel off)";
+}
+
+// parallel_tool_calls on the XML dialect: the gate re-arms after each call.
+TEST(SchemaConstrainTest, XmlToolCallStrictParallelReArms) {
+    SKIP_IF_NO_CUDA();
+    std::string chars;
+    auto toks = xml_test_vocab(chars);
+    const int opener_id = static_cast<int>(toks.size());
+    toks.push_back("<tool_call>");
+    const int free_id = static_cast<int>(toks.size());
+    toks.push_back("FREE");
+    auto id = [&](char c) {
+        for (size_t i = 3; i < 3 + chars.size(); i++)
+            if (toks[i][0] == c)
+                return static_cast<int>(i);
+        ADD_FAILURE() << "missing token for char " << c;
+        return 0;
+    };
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, 1, 2);
+
+    std::vector<std::pair<std::string, std::string>> tools = {
+        {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
+    };
+    auto schema = build_xml_tool_call_schema(tools);
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    ASSERT_TRUE(sc.init(tok, std::move(schema)));
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    sc.set_strict_optional_envelope(true);
+    sc.set_allow_parallel(true);
+    sc.set_preamble_with_tools(-1, 512, {opener_id}, {}, "<tool_call>", "</tool_call>",
+                               /*thinking_open=*/false, /*strict_tool=*/true);
+    sc.reset();
+
+    auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
+    auto feed = [&](const std::string& s) {
+        for (char c : s)
+            sc.update(id(c));
+    };
+
+    sc.update(opener_id);
+    feed("\n<function=sum>\n<parameter=vals>\nx\n</parameter>\n</function>\n</tool_call>");
+
+    auto at_between = allowed();
+    EXPECT_TRUE(at_between[free_id]) << "after a call the model may emit more (parallel)";
+    EXPECT_TRUE(at_between[2]) << "EOS is also legal — the model may stop";
+
+    sc.update(opener_id);
+    sc.update(id('\n'));
+    auto at_body2 = allowed();
+    EXPECT_TRUE(at_body2[id('<')]) << "second XML body must open with <function=";
+    EXPECT_FALSE(at_body2[free_id]) << "free text masked inside the second body";
+
+    feed("<function=sum>\n<parameter=vals>\nx\n</parameter>\n</function>\n</tool_call>");
+    EXPECT_TRUE(allowed()[2]) << "EOS legal after the second call";
+}
+
+TEST(SchemaConstrainTest, XmlBuilderGates) {
+    // Same enforceability gates as the JSON builder: free-form params,
+    // unresolvable $refs and an empty tool list decline to the prompt hint.
+    EXPECT_TRUE(build_xml_tool_call_schema({}) == nullptr);
+    EXPECT_TRUE(build_xml_tool_call_schema({{"t", R"({"type":"object"})"}}) == nullptr);
+    EXPECT_TRUE(build_xml_tool_call_schema(
+                    {{"t", R"({"type":"object","properties":{"i":{"$ref":"#/$defs/Missing"}}})"}}) ==
+                nullptr);
+    EXPECT_TRUE(build_xml_tool_call_schema(
+                    {{"t", R"({"type":"object","properties":{"i":{"type":"integer"}}})"}}) != nullptr);
+    // Per-tool $defs parse and hoist exactly like the JSON path.
+    EXPECT_TRUE(build_xml_tool_call_schema(
+                    {{"t", R"({"type":"object","properties":{"i":{"$ref":"#/$defs/I"}},)"
+                           R"("required":["i"],"$defs":{"I":{"type":"object",)"
+                           R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})"}}) != nullptr);
+}
+
 }  // namespace
 }  // namespace imp

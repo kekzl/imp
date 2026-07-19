@@ -223,6 +223,15 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         // If Jinja2 tools render failed, fall back to text-based tool prompt injection
         if (ctx.snap.tokens.empty()) {
             IMP_LOG_INFO("Jinja2 tools path failed, falling back to text-based tool prompt");
+            // The text fallback advertises the ChatML JSON body — an armed XML
+            // body constraint would fight the prompt. Drop to the hint.
+            if (ctx.params.tool_constraint_xml) {
+                ctx.params.tool_constraint_xml = false;
+                ctx.params.tool_constraint_tools.clear();
+                ctx.params.tool_envelope_open.clear();
+                ctx.params.tool_envelope_close.clear();
+                ctx.params.tool_constraint_optional = false;
+            }
             std::string tool_prompt = build_tool_prompt(ctx.snap.tpl_family, ctx.params.tools,
                                                         ctx.params.tool_choice);
             if (!tool_prompt.empty()) {
@@ -496,6 +505,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tool_constraint_optional = ctx.params.tool_constraint_optional;
     req->tool_constraint_parallel = ctx.params.parallel_tool_calls;
     req->tool_constraint_bare_args = ctx.params.tool_constraint_bare_args;
+    req->tool_constraint_xml = ctx.params.tool_constraint_xml;
     req->tpl_family = ctx.snap.tpl_family;
     req->logit_bias = ctx.params.logit_bias;
     req->think_budget = ctx.params.think_budget;

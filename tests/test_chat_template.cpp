@@ -265,6 +265,31 @@ TEST(ChatTemplateInitTest, ChatMLSuccess) {
     EXPECT_EQ(tpl.stop_token_ids()[0], IM_END);
 }
 
+TEST(ChatTemplateInitTest, ToolXmlDialectDetected) {
+    // Qwen-Coder / Qwen3.6 templates teach <function=NAME>/<parameter=KEY>
+    // tool bodies — the XML grammar must be selected for enforcement there,
+    // and ONLY there (plain ChatML JSON templates keep the JSON body FSM).
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate xml_tpl;
+    EXPECT_TRUE(xml_tpl.init(
+        ChatTemplateFamily::CHATML, tok,
+        "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
+        "{# tools: <tool_call>\n<function=example_fn>\n<parameter=example_param>\nvalue\n"
+        "</parameter>\n</function>\n</tool_call> #}"));
+    EXPECT_TRUE(xml_tpl.tool_xml_dialect());
+
+    ChatTemplate json_tpl;
+    EXPECT_TRUE(json_tpl.init(
+        ChatTemplateFamily::CHATML, tok,
+        "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"));
+    EXPECT_FALSE(json_tpl.tool_xml_dialect());
+
+    // No jinja at all → never the XML dialect.
+    ChatTemplate plain;
+    EXPECT_TRUE(plain.init(ChatTemplateFamily::CHATML, tok));
+    EXPECT_FALSE(plain.tool_xml_dialect());
+}
+
 TEST(ChatTemplateInitTest, ChatMLMissingTokensFallsBack) {
     // Tokenizer without <|im_start|> / <|im_end|>
     Tokenizer tok;

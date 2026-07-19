@@ -247,9 +247,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // dialect comes from tpl_family, captured below into the request.
 
     // Snapshot template family (may be re-snapshotted under lock in the orchestrator)
+    bool tool_xml_dialect = false;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         ctx.snap.tpl_family = state.have_template ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+        tool_xml_dialect = state.have_template && state.chat_tpl.tool_xml_dialect();
     }
 
     // logprobs on a constrained request drops it out of the ConstrainedPipeline
@@ -284,6 +286,14 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.tool_envelope_close = "\n</tool_call>";
             }
         }
+        // Qwen-Coder / Qwen3.6 XML templates: same <tool_call> envelope and
+        // selection logic, but the BODY grammar is the XML dialect
+        // (<function=NAME><parameter=KEY> with raw-text values) — flag it so
+        // the engine builds the XML FSM instead of the JSON body FSM, which
+        // masks raw newlines and mangles multi-line (code) arguments.
+        if (!ctx.params.tool_constraint_tools.empty() &&
+            ctx.snap.tpl_family == imp::ChatTemplateFamily::CHATML && tool_xml_dialect)
+            ctx.params.tool_constraint_xml = true;
         // Llama3 `<function=NAME>{args}</function>` forced function: constrain the
         // bare parameter schema with a per-tool envelope (#1002). Only when the
         // ChatML paths above found nothing (different family).
