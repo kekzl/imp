@@ -23,7 +23,7 @@ Single-user-class hardware, single GPU, latency-first. Not a datacenter throughp
 Ranked, non-negotiable order:
 
 1. **Decode throughput (tok/s) at batch=1** on RTX 5090 — primary metric. Must lead llama.cpp, vLLM, SGLang, ExLlamaV3, MLC-LLM on every supported architecture and quant combination we ship.
-2. **Prefill throughput (tok/s) at batch=1** on RTX 5090 — must match or beat llama.cpp on dense **NVFP4/SafeTensors** (GGUF prefill is best-effort, ceiling is architectural — see release bar 3); must close the MoE gap to vLLM (re-measured ~1.4× single-seq 2026-05-31; remaining levers: prefill attention + grouped-GEMM occupancy scheduler #558).
+2. **Prefill throughput (tok/s) at batch=1** on RTX 5090 — must match or beat llama.cpp on dense **NVFP4/SafeTensors** (GGUF prefill is best-effort, ceiling is architectural — see release bar 3). The MoE gap to vLLM is **closed** — imp now *leads* vLLM single-seq on MoE prefill (re-measured 2026-06-13: MoE pp4096 +4%, pp2048 +27%; re-verified 2026-07-22: Coder-30B pp512 ≈ 19.4k tok/s vs vLLM ~18.5k). The old #558 grouped-GEMM occupancy scheduler is retired as a lever (grouped-GEMM beyond ~41% roofline is structural, FA2 prefill attention shipped as the win — see `docs/roadmap.md`).
 3. **Time-to-first-token (TTFT)** at realistic prompt lengths (512, 2048, 8192, 32k) — must be competitive with vLLM despite our batch=1 focus.
 4. **VRAM efficiency** — must fit larger models than competitors at equivalent quality (NVFP4, FP8 KV, paged cache). 32 GB on a 5090 should serve everything up to ~70B dense at usable quality.
 5. **Quality** — perplexity and downstream eval parity with llama.cpp at the same quant. No silent quality regressions for speed.
@@ -166,7 +166,7 @@ A release is shippable when, on RTX 5090:
    First systematic cross-engine measurement 2026-07-12 (`docs/audit/ppl_parity_2026_07_12.md`): with the LM-head opt-out imp is at parity (−0.8%…+0.2%) with llama.cpp on every comparable GGUF hero.
 2. Decode tok/s leads llama.cpp by ≥5% on every hero model.
 3. Prefill tok/s ≥ llama.cpp on every dense **NVFP4/SafeTensors** hero. GGUF prefill is explicitly best-effort: the Q4K-MMQ experiment (2026-05-28) showed imp's GGUF prefill ceiling is architectural (ties cuBLAS at ~4.3% of peak; llama.cpp's MMQ leads 1.3-2.4×) — the old "≥ llama.cpp on every dense GGUF hero" bar was permanently violated as written and is dropped (realignment 2026-06-06, #550).
-4. Prefill tok/s ≥ 70% of vLLM single-seq on every MoE hero (measured ~1.4× gap 2026-05-31; the remaining levers are prefill attention and the grouped-GEMM launch/occupancy scheduler, #558).
+4. Prefill tok/s ≥ 70% of vLLM single-seq on every MoE hero — **EXCEEDED**: MoE prefill now leads vLLM single-seq (+4–27%, re-measured 2026-06-13; re-verified 2026-07-22, Coder-30B pp512 ≈ 19.4k). #558 is closed — see `docs/roadmap.md` (grouped-GEMM occupancy is structural, FA2 prefill attention shipped as the win).
 5. No host syncs on the decode hot path (CI-enforced).
 6. OpenAI **and Anthropic** API compliance suites green.
 7. **Agentic surface green:** tool-call + `json_schema` constrained-decode batteries pass (valid, terminating JSON under degenerate sampler state); reasoning/`think_budget` and gpt-oss Harmony parsing correct; prefix cache + long-context KV defaults coherent across a multi-turn agent session; vision interleaves with text.
