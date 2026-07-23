@@ -11,6 +11,7 @@
 #include "runtime/constraint_manager.h"
 #include "runtime/config.h"
 #include "runtime/suffix_draft.h"
+#include "runtime/token_recycle_draft.h"
 #include "runtime/vram_budget.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
@@ -771,6 +772,14 @@ private:
     // Erased when the request finishes.
     SuffixDraftIndex& spec_suffix_index_(const Request& req);
     std::unordered_map<int, SuffixDraftIndex> spec_suffix_idx_;
+    // Token-Recycling adjacency table (speculative.token_recycling):
+    // engine-scoped, cross-request, lazily sized to the model vocab.
+    // Fed in step_spec_verify_ (prompt bigrams once, then new output
+    // tokens incrementally); drafts a linear successor chain when the
+    // suffix/n-gram/MTP sources come up empty.
+    TokenRecycleTable& spec_recycle_table_();
+    void spec_recycle_feed_(Request& req);
+    std::unique_ptr<TokenRecycleTable> spec_recycle_;
     // Device/pinned staging for the verify chunk (lazy-init, K+1 capacity).
     int32_t* d_spec_tokens_ = nullptr;
     int* d_spec_positions_ = nullptr;
@@ -779,6 +788,10 @@ private:
     int* d_spec_context_len_ = nullptr;
     int32_t* d_spec_argmax_ = nullptr;
     int32_t* h_spec_argmax_ = nullptr;  // pinned, chunk_cap entries
+    // Token-Recycling top-M harvest (speculative.token_recycling): per-row
+    // top-M logit ids from the verify chunk, chunk_cap * kRowwiseTopMMax.
+    int32_t* d_spec_topm_ = nullptr;
+    int32_t* h_spec_topm_ = nullptr;  // pinned
     // #964 decode-attention verify route (dense, eager): per-row context lens
     // [chunk_cap] and row-replicated block tables [chunk_cap * table_cap] so
     // the chunk's attention runs the batched-decode split-K kernels — row i

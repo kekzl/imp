@@ -271,6 +271,10 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
 }
 
 KVCache::~KVCache() {
+    if (d_copy_meta_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_copy_meta_));
+        d_copy_meta_ = nullptr;
+    }
     if (scale_pool_) {
         if (alloc_)
             alloc_->free(scale_pool_);
@@ -489,6 +493,90 @@ size_t KVCache::scale_block_bytes(int layer) const {
         return layer_scale_block_bytes_[layer];
     }
     return scale_block_bytes_;
+}
+
+// ── copy_blocks_device ───────────────────────────────────────────────
+namespace {
+
+struct KVCopyPairs {
+    int src[KVCache::kCopyMaxPairs];
+    int dst[KVCache::kCopyMaxPairs];
+};
+
+// grid: (n_layers, 4, n_pairs); blockIdx.y section: 0=K, 1=V, 2=K-scales,
+// 3=V-scales. meta layout per layer: {k_off, v_off, block_bytes,
+// k_scale_off, v_scale_off, scale_bytes}.
+__global__ void kv_block_copy_kernel(char* pool, char* spool, const size_t* __restrict__ meta,
+                                     KVCopyPairs pairs) {
+    const size_t* m = meta + 6ull * blockIdx.x;
+    const int sec = blockIdx.y;
+    char* base = (sec < 2) ? pool : spool;
+    if (base == nullptr)
+        return;
+    const size_t bytes = (sec < 2) ? m[2] : m[5];
+    if (bytes == 0)
+        return;
+    const size_t off = (sec == 0) ? m[0] : (sec == 1) ? m[1] : (sec == 2) ? m[3] : m[4];
+    const char* s = base + off + static_cast<size_t>(pairs.src[blockIdx.z]) * bytes;
+    char* d = base + off + static_cast<size_t>(pairs.dst[blockIdx.z]) * bytes;
+    const bool vec_ok = bytes % 16 == 0 && (reinterpret_cast<uintptr_t>(s) % 16 == 0) &&
+                        (reinterpret_cast<uintptr_t>(d) % 16 == 0);
+    if (vec_ok) {
+        const uint4* s4 = reinterpret_cast<const uint4*>(s);
+        uint4* d4 = reinterpret_cast<uint4*>(d);
+        for (size_t i = threadIdx.x; i < bytes / 16; i += blockDim.x)
+            d4[i] = s4[i];
+    } else {
+        for (size_t i = threadIdx.x; i < bytes; i += blockDim.x)
+            d[i] = s[i];
+    }
+}
+
+}  // namespace
+
+void KVCache::copy_blocks_device(const int* srcs, const int* dsts, int n_pairs,
+                                 cudaStream_t stream) {
+    if (n_pairs <= 0 || !srcs || !dsts)
+        return;
+    if (n_pairs > kCopyMaxPairs)
+        n_pairs = kCopyMaxPairs;
+    if (!d_copy_meta_) {
+        std::vector<size_t> meta(6ull * n_layers_);
+        for (int l = 0; l < n_layers_; ++l) {
+            size_t* m = meta.data() + 6ull * l;
+            if (layer_is_swa(l)) {
+                // Separate id space — never copied here (route excludes SWA).
+                m[2] = m[5] = 0;
+                continue;
+            }
+            m[0] = static_cast<char*>(k_ptr(l, 0)) - static_cast<char*>(pool_);
+            m[1] = static_cast<char*>(v_ptr(l, 0)) - static_cast<char*>(pool_);
+            m[2] = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
+            if (scale_pool_ && k_scale_ptr(l, 0)) {
+                m[3] = static_cast<char*>(k_scale_ptr(l, 0)) - static_cast<char*>(scale_pool_);
+                m[4] = static_cast<char*>(v_scale_ptr(l, 0)) - static_cast<char*>(scale_pool_);
+                m[5] = scale_block_bytes(l);
+            } else {
+                m[3] = m[4] = m[5] = 0;
+            }
+        }
+        if (cudaMalloc(&d_copy_meta_, meta.size() * sizeof(size_t)) != cudaSuccess) {
+            d_copy_meta_ = nullptr;
+            return;
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_copy_meta_, meta.data(), meta.size() * sizeof(size_t),
+                                      cudaMemcpyHostToDevice));
+    }
+    KVCopyPairs pairs{};
+    for (int i = 0; i < n_pairs; ++i) {
+        pairs.src[i] = srcs[i];
+        pairs.dst[i] = dsts[i];
+    }
+    dim3 grid(n_layers_, scale_pool_ ? 4 : 2, n_pairs);
+    kv_block_copy_kernel<<<grid, 256, 0, stream>>>(static_cast<char*>(pool_),
+                                                   static_cast<char*>(scale_pool_),
+                                                   static_cast<const size_t*>(d_copy_meta_), pairs);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

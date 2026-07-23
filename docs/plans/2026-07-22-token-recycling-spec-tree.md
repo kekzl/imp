@@ -1,7 +1,12 @@
 # Token-Recycling multi-candidate speculative decode for reasoning/agentic text
 
-**Status:** proposed (2026-07-22). Multi-week. The one durable lever left for
->10% single-stream decode, per the 2026-07-22 ceiling campaign.
+**Status:** milestones 1–3 implemented 2026-07-23 (flag-gated
+`speculative.token_recycling`, default OFF; route (a) multi-candidate via
+per-candidate private KV blocks — no mask needed). Measured: accept lifted
+0 → 1.7–2.0 emitted/verify on reasoning, but net-neutral at today's verify
+step cost (~2x a decode step). **Blocked on cheapening the verify step**
+(M≤17 CUTLASS GEMMs → multirow GEMV overlay + per-verify sync/staging cuts);
+see docs/audit/PERF_AUDIT_2026_07_23.md for the full decomposition.
 
 ## Motivation (measured, not assumed)
 

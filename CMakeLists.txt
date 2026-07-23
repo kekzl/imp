@@ -197,6 +197,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/activation.cu
     src/compute/embedding.cu
     src/compute/sampling.cu
+    src/compute/rowwise_topm.cu
     src/compute/sampling_topk_topp.cu
     src/compute/sampling_penalties.cu
     src/compute/sampling_filters.cu
@@ -277,6 +278,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_sampling_stop.cpp
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
+    src/runtime/token_recycle_draft.cpp
     src/vision/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
@@ -529,6 +531,7 @@ if(IMP_BUILD_TESTS)
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp
         tests/test_suffix_draft.cpp
+        tests/test_token_recycle_draft.cpp
         tests/test_routing_decision.cpp
         tests/test_think_stop_logic.cpp
         tests/test_stream_pipeline.cpp
@@ -589,6 +592,7 @@ if(IMP_BUILD_TESTS)
         tests/test_reduce.cu
         tests/test_softmax.cu
         tests/test_sampling.cu
+        tests/test_rowwise_topm.cu
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
         tests/test_mmq_q4k_imma_layout.cu
@@ -650,6 +654,7 @@ if(IMP_BUILD_TESTS)
         tests/test_fp8_kv_cache.cu
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
+        tests/test_kv_block_copy.cu
         tests/test_green_ctx.cu
         tests/test_capture_abort.cu
         tests/test_prefix_cache_equiv.cpp

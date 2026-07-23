@@ -297,6 +297,10 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.verify_nvfp4_gemm", cfg.speculative.verify_nvfp4_gemm);
     B("speculative.moe", cfg.speculative.moe);
     I("speculative.k", cfg.speculative.k);
+    B("speculative.token_recycling", cfg.speculative.token_recycling);
+    I("speculative.recycle_slots", cfg.speculative.recycle_slots);
+    I("speculative.recycle_depth", cfg.speculative.recycle_depth);
+    I("speculative.recycle_width", cfg.speculative.recycle_width);
     B("speculative.suffix", cfg.speculative.suffix);
     I("speculative.suffix_k_max", cfg.speculative.suffix_k_max);
     I("speculative.min_match", cfg.speculative.min_match);

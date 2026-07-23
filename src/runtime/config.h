@@ -782,6 +782,27 @@ struct RuntimeConfig {
         // trial spread). Batch-1 behavior unchanged. Kill switch for A/B.
         bool batch_rr = true;
         int k = 16;          // draft tokens per verify step (verify cost is ~flat in k)
+        // Token-Recycling adjacency drafting (ACL 2025, arXiv 2408.08696;
+        // plan docs/plans/2026-07-22-token-recycling-spec-tree.md):
+        // engine-scoped cross-request `token -> top-M successors` table fed
+        // from emitted bigrams and the model's own verify-chunk top-K
+        // logits. Fires on unigram context, so it drafts on fresh
+        // reasoning/agentic prose where suffix/n-gram matching finds
+        // nothing (measured 0 drafts on reasoning, 2026-07-22/23). Runs as
+        // a fallback AFTER suffix/n-gram and MTP; lossless via the greedy
+        // argmax verify. Default off until the reasoning A/B proves it.
+        bool token_recycling = false;
+        int recycle_slots = 8;  // successors kept per token (MRU/rank order)
+        int recycle_depth = 8;  // max linear draft length per verify step
+        // Multi-candidate verify (route (a) of the spec-tree plan): when the
+        // decode-attn route is available (dense, non-MLA/SWA/MoE/hybrid, no
+        // penalties/MTP), verify `recycle_width` adjacency candidates in one
+        // chunk — each candidate gets its own t0 row and private copies of
+        // the KV blocks its rows write (per-row block tables), so no token
+        // mask is needed and the argmax accept stays lossless. Rows are
+        // capped at the 17 bucket (width * (1+depth) <= 17), i.e. width 4
+        // -> depth 3. 1 = linear drafting only.
+        int recycle_width = 4;
         // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
         // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
         // backward scan per verify step) with frequency-voted continuations

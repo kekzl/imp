@@ -41,6 +41,7 @@
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
 #include "runtime/suffix_draft.h"
+#include "compute/rowwise_topm.h"
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -60,6 +61,13 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
               cudaMalloc(&d_spec_chunk_len_, sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
               cudaMallocHost(&h_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
+              // Token-Recycling top-M harvest — sized to the kernel cap so a
+              // recycle_slots config change never needs a re-alloc (tiny).
+              cudaMalloc(&d_spec_topm_,
+                         static_cast<size_t>(chunk_cap) * kRowwiseTopMMax * sizeof(int32_t)) ==
+                  cudaSuccess &&
+              cudaMallocHost(&h_spec_topm_, static_cast<size_t>(chunk_cap) * kRowwiseTopMMax *
+                                                sizeof(int32_t)) == cudaSuccess &&
               // SWA-group mirror (kv_cache.swa_sizing): same capacity as the
               // main table. Allocated unconditionally so a mid-session gate
               // flip can't leave it null; tiny (max_blocks ints).
@@ -141,6 +149,8 @@ void Engine::free_spec_buffers_() {
     if (d_spec_chunk_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_chunk_len_));
     if (d_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_argmax_));
     if (h_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_argmax_));
+    if (d_spec_topm_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_topm_));
+    if (h_spec_topm_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_topm_));
     d_spec_tokens_ = nullptr;
     d_spec_positions_ = nullptr;
     d_spec_block_table_ = nullptr;
@@ -152,6 +162,8 @@ void Engine::free_spec_buffers_() {
     d_spec_chunk_len_ = nullptr;
     d_spec_argmax_ = nullptr;
     h_spec_argmax_ = nullptr;
+    d_spec_topm_ = nullptr;
+    h_spec_topm_ = nullptr;
     spec_chunk_cap_ = 0;
     spec_block_table_cap_ = 0;
 }
@@ -295,6 +307,34 @@ SuffixDraftIndex& Engine::spec_suffix_index_(const Request& req) {
     return it->second;
 }
 
+TokenRecycleTable& Engine::spec_recycle_table_() {
+    if (!spec_recycle_) {
+        const auto& scfg = runtime_config_.speculative;
+        spec_recycle_ = std::make_unique<TokenRecycleTable>(model_->config_.vocab_size,
+                                                            std::max(1, scfg.recycle_slots));
+    }
+    return *spec_recycle_;
+}
+
+// Ingest this request's not-yet-seen tokens into the engine-scoped
+// adjacency table: prompt bigrams once (spec_recycle_fed == 0), then the
+// new output tokens (every emit path — verify accepts, loop bursts,
+// plain steps — lands in output_tokens, so one cursor covers them all).
+void Engine::spec_recycle_feed_(Request& req) {
+    TokenRecycleTable& tr = spec_recycle_table_();
+    const auto& out = req.output_tokens;
+    if (req.spec_recycle_fed == 0) {
+        const auto& in = req.input_tokens;
+        for (size_t i = 1; i < in.size(); ++i)
+            tr.observe_pair(in[i - 1], in[i]);
+        if (!in.empty() && !out.empty())
+            tr.observe_pair(in.back(), out.front());
+    }
+    for (int i = std::max(1, req.spec_recycle_fed); i < static_cast<int>(out.size()); ++i)
+        tr.observe_pair(out[i - 1], out[i]);
+    req.spec_recycle_fed = static_cast<int>(out.size());
+}
+
 bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft) {
     const auto& scfg = runtime_config_.speculative;
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
@@ -355,15 +395,63 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         draft = mtp_take_draft_(*req);
         draft_from_mtp = !draft.empty();
     }
+    // Token-Recycling fallback: adjacency draft from the last emitted token.
+    // Fires on unigram context — exactly the fresh reasoning/agentic prose
+    // where the suffix/n-gram sources measured 0 drafts (2026-07-22/23).
+    // Preferred shape is the multi-candidate chunk (route (a), `mc` below):
+    // `recycle_width` candidates verified at once lift the per-step accept
+    // where a single linear chain measured below the verify break-even
+    // (1.55-1.9 emitted/verify vs ~1.9x step cost, 2026-07-23). Falls back
+    // to the linear chain when the decode-attn route (or its gates) is
+    // unavailable. Same shallow-depth economics as above for the linear
+    // form: at long context a depth-1 chain does not pay for the verify.
+    std::vector<std::vector<int32_t>> mc;  // multi-candidate rows (route a)
+    int mc_depth = 0;
+    if (runtime_config_.speculative.token_recycling) {
+        spec_recycle_feed_(*req);
+        const bool penalties_active = req->repetition_penalty != 1.0f ||
+                                      req->frequency_penalty != 0.0f ||
+                                      req->presence_penalty != 0.0f;
+        // Route (a) preconditions: per-row block tables exist only on the
+        // decode-attn verify route; the grouped rows are incompatible with
+        // the linear-draft penalty replication and the MTP row consumer.
+        const bool mc_route_ok = scfg.verify_decode_attn && ssm_state_ == nullptr &&
+                                 !model_->profile().is_moe && !model_->config().is_mla() &&
+                                 !swa_sizing_active_ && !penalties_active &&
+                                 !mtp_spec_decode_enabled();
+        if (draft.empty()) {
+            const int width = std::min(8, std::max(1, scfg.recycle_width));
+            // Row budget: width * (1 + depth) <= 17 (the mid capture bucket)
+            // keeps the per-row context walks at linear-chunk cost.
+            const int depth_cap = std::max(1, 17 / std::max(2, width) - 1);
+            const int depth = std::min({std::max(1, scfg.recycle_depth), depth_cap, k});
+            auto cands = spec_recycle_table_().draft_candidates(
+                req->output_tokens.back(), width, depth);
+            if (mc_route_ok && width > 1 && cands.size() > 1) {
+                mc = std::move(cands);
+                mc_depth = 0;
+                for (const auto& c : mc)
+                    mc_depth = std::max(mc_depth, static_cast<int>(c.size()));
+            } else if (!cands.empty()) {
+                draft = std::move(cands.front());
+                if (static_cast<int>(draft.size()) < 2 && scfg.shallow_draft_ctx > 0 &&
+                    req->context_len() > scfg.shallow_draft_ctx && ssm_state_ == nullptr &&
+                    !(model_->profile().is_moe && scfg.moe &&
+                      model_->profile().moe_experts_nvfp4))
+                    draft.clear();
+            }
+        }
+    }
+    const bool mc_on = !mc.empty();
     // #1003 batch-RR economics: at batch > 1 the WHOLE batch waits for the
     // verify forward (~1.4-2.6x a decode step) while only this request
     // benefits — a shallow draft is net-negative (measured -10% aggregate at
     // batch 4 on shallow drafts). Soft-decline below the caller's depth
     // floor: no miss accounting, no give-up pressure — the request decodes
     // batched this step and gets its next turn with a hopefully deeper draft.
-    if (min_draft > 0 && static_cast<int>(draft.size()) < min_draft)
+    if (min_draft > 0 && (mc_on ? mc_depth : static_cast<int>(draft.size())) < min_draft)
         return false;
-    if (draft.empty()) {
+    if (draft.empty() && !mc_on) {
         spec_stats_.miss_steps++;
         if (++req->spec_consecutive_misses >= scfg.give_up_after && scfg.give_up_after > 0 &&
             !req->spec_ngram_given_up) {
@@ -384,10 +472,15 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         return false;  // no usable draft — normal decode step
     }
 
-    // Verify chunk = [t0, d1..dK]: t0 is the last emitted (not yet forwarded)
-    // token; positions p0..p0+K with p0 = context_len-1.
+    // Verify chunk. Linear: [t0, d1..dK], positions p0..p0+K. Multi-candidate
+    // (route a): mc.size() candidate groups of (1 + mc_depth) rows each —
+    // every candidate re-forwards t0 itself (its KV lands in the candidate's
+    // PRIVATE block copy, see the mc staging below), so no row is shared and
+    // no token-level mask is needed. K doubles as the stats/economics depth
+    // (winner-depth proxy in mc mode — the verify cost is ~flat in rows).
     const int32_t t0 = req->output_tokens.back();
-    int K = static_cast<int>(draft.size());
+    const int mc_rows_per_cand = mc_on ? (1 + mc_depth) : 0;
+    int K = mc_on ? mc_depth : static_cast<int>(draft.size());
     const int p0 = req->context_len() - 1;
 
     // attn_scores_ capacity clamp (same rule as chunked prefill):
@@ -397,14 +490,25 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         if (s_cap > 0) {
             const int64_t cap2 = static_cast<int64_t>(s_cap) * s_cap;
             const int64_t ctx_end = static_cast<int64_t>(p0) + 1 + K;
-            while (K > 0 && static_cast<int64_t>(K + 1) * ctx_end > cap2) --K;
-            if (K <= 0) {
-                spec_stats_.miss_steps++;
-                return false;
+            if (mc_on) {
+                // The grouped chunk doesn't shrink gracefully — decline the
+                // step instead (only reachable at extreme context).
+                const int64_t rows = static_cast<int64_t>(mc.size()) * mc_rows_per_cand;
+                if (rows * ctx_end > cap2) {
+                    spec_stats_.miss_steps++;
+                    return false;
+                }
+            } else {
+                while (K > 0 && static_cast<int64_t>(K + 1) * ctx_end > cap2) --K;
+                if (K <= 0) {
+                    spec_stats_.miss_steps++;
+                    return false;
+                }
             }
         }
     }
-    const int chunk_len = K + 1;
+    const int chunk_len =
+        mc_on ? static_cast<int>(mc.size()) * mc_rows_per_cand : K + 1;
     // Graph-captured verify (#847): pad the chunk up to its bucket length so
     // one cached graph serves every draft length in the bucket. Pad rows
     // (copies of t0 at positions after every real row) are causally invisible
@@ -431,11 +535,22 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
 
     const int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
 
+    // mc: per-candidate PRIVATE blocks for the block indices the candidate
+    // rows write (positions p0..p0+mc_depth). They are ordinary appended
+    // table entries beyond blocks_needed — the per-row tables below alias
+    // them in place of the canonical entries, and the post-accept rollback
+    // frees them like any other rejected-draft block.
+    const int mc_bp = mc_on ? p0 / kv_bs : 0;
+    const int mc_n_priv = mc_on ? (p0 + mc_depth) / kv_bs - mc_bp + 1 : 0;
+    const int mc_priv_base = blocks_needed;
+    const int blocks_target =
+        blocks_needed + (mc_on ? static_cast<int>(mc.size()) * mc_n_priv : 0);
+
     // KV blocks for all chunk positions (mirror step_decode's append loop).
     // On allocation failure, trim back to the pre-step valid length (p0 KV
     // entries: t0 has not been forwarded yet) and fall through to the normal
     // decode path.
-    while (static_cast<int>(kv_manager_->block_table(req->id).size()) < blocks_needed) {
+    while (static_cast<int>(kv_manager_->block_table(req->id).size()) < blocks_target) {
         int new_block = kv_manager_->append_block(req->id);
         if (new_block < 0) {
             // KV exhausted. The old evict_lru fallback freed a LIVE sequence (no
@@ -478,14 +593,26 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         return false;
     }
 
-    // Upload chunk metadata.
-    std::vector<int32_t> h_tokens;
-    h_tokens.reserve(chunk_pad);
-    h_tokens.push_back(t0);
-    h_tokens.insert(h_tokens.end(), draft.begin(), draft.begin() + K);
-    h_tokens.resize(chunk_pad, t0);  // bucket padding
-    std::vector<int> h_positions(chunk_pad);
-    for (int i = 0; i < chunk_pad; ++i) h_positions[i] = p0 + i;
+    // Upload chunk metadata. mc: candidate c's rows are
+    // [t0, cand_c...] at positions p0..p0+len_c; short candidates and the
+    // bucket padding fill with t0 rows whose argmax is never consulted (their
+    // KV writes land in dead slots — private-block tails past the accepted
+    // length, or canonical slots past the rollback point).
+    std::vector<int32_t> h_tokens(chunk_pad, t0);
+    std::vector<int> h_positions(chunk_pad, p0);
+    if (mc_on) {
+        for (size_t c = 0; c < mc.size(); ++c) {
+            const int r0 = static_cast<int>(c) * mc_rows_per_cand;
+            for (int j = 0; j < mc_rows_per_cand; ++j) {
+                h_positions[r0 + j] = p0 + j;
+                if (j > 0 && j - 1 < static_cast<int>(mc[c].size()))
+                    h_tokens[r0 + j] = mc[c][j - 1];
+            }
+        }
+    } else {
+        for (int i = 0; i < K; ++i) h_tokens[1 + i] = draft[i];
+        for (int i = 0; i < chunk_pad; ++i) h_positions[i] = p0 + i;
+    }
 
     auto check = [&](cudaError_t err, const char* op) {
         if (err != cudaSuccess) {
@@ -558,15 +685,42 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         std::vector<int> h_row_lens(chunk_pad);
         // Pad rows (i >= chunk_len, capture-bucket fill) attend a single
         // token: their output is never read, and a 1-token walk keeps the
-        // per-row KV traffic at real-chunk cost.
-        for (int i = 0; i < chunk_pad; ++i)
-            h_row_lens[i] = (i < chunk_len) ? (p0 + i + 1) : 1;
+        // per-row KV traffic at real-chunk cost. mc: row (c, j) attends
+        // p0+j+1 tokens through the candidate's aliased table; rows past a
+        // short candidate's length are pads too.
+        if (mc_on) {
+            for (int i = 0; i < chunk_pad; ++i) {
+                if (i >= chunk_len) {
+                    h_row_lens[i] = 1;
+                    continue;
+                }
+                const int c = i / mc_rows_per_cand;
+                const int j = i % mc_rows_per_cand;
+                const bool real = j == 0 || j - 1 < static_cast<int>(mc[c].size());
+                h_row_lens[i] = real ? (p0 + j + 1) : 1;
+            }
+        } else {
+            for (int i = 0; i < chunk_pad; ++i)
+                h_row_lens[i] = (i < chunk_len) ? (p0 + i + 1) : 1;
+        }
         h_spec_row_tables_.assign(
             static_cast<size_t>(chunk_pad) * spec_block_table_cap_, 0);
         for (int i = 0; i < chunk_pad; ++i)
             std::copy(block_table.begin(), block_table.end(),
                       h_spec_row_tables_.begin() +
                           static_cast<size_t>(i) * spec_block_table_cap_);
+        // mc: alias each candidate's written block indices [mc_bp ..
+        // mc_bp + mc_n_priv) to its private appended blocks — reads of the
+        // committed prefix stay canonical, writes are candidate-isolated.
+        if (mc_on) {
+            for (int i = 0; i < chunk_len; ++i) {
+                const int c = i / mc_rows_per_cand;
+                int32_t* row = h_spec_row_tables_.data() +
+                               static_cast<size_t>(i) * spec_block_table_cap_;
+                for (int t = 0; t < mc_n_priv; ++t)
+                    row[mc_bp + t] = block_table[mc_priv_base + c * mc_n_priv + t];
+            }
+        }
         if (check(cudaMemcpyAsync(d_spec_row_ctx_lens_, h_row_lens.data(),
                                   chunk_pad * sizeof(int), cudaMemcpyHostToDevice, stream),
                   "row ctx lens H2D") &&
@@ -588,6 +742,29 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
         // On H2D failure the state keeps the plain single-sequence chunk
         // fields and the FA2 prefill path serves the forward (correct, slow).
+    }
+    if (mc_on) {
+        // The grouped chunk is only correct with per-row tables engaged.
+        if (!state.chunk_decode_attn) {
+            kv_manager_->rollback(req->id, p0);
+            spec_stats_.miss_steps++;
+            return false;
+        }
+        // Seed each candidate's private partial block with the committed
+        // rows of the canonical one (positions [mc_bp*kv_bs, p0) — t0 is
+        // forwarded by the candidate itself). A block-aligned p0 has no
+        // committed rows in mc_bp; the private block starts fresh.
+        if (p0 % kv_bs != 0) {
+            int srcs[KVCache::kCopyMaxPairs];
+            int dsts[KVCache::kCopyMaxPairs];
+            const int n_pairs =
+                std::min(static_cast<int>(mc.size()), KVCache::kCopyMaxPairs);
+            for (int c = 0; c < n_pairs; ++c) {
+                srcs[c] = block_table[mc_bp];
+                dsts[c] = block_table[mc_priv_base + c * mc_n_priv];
+            }
+            kv_cache_raw_->copy_blocks_device(srcs, dsts, n_pairs, stream);
+        }
     }
 
     // Hybrid (SSM/GDN): bind the recurrent state and preserve the committed
@@ -656,14 +833,28 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         n_hist = pstate.n_penalty_tokens;
     }
 
-    // Greedy token for every chunk position, D2H, host compare.
+    // Greedy token for every chunk position, D2H, host compare. With
+    // token_recycling the same lm-head pass also harvests each row's top-M
+    // logit ids for the adjacency table (the model's own successor
+    // candidates — Token Recycling's feed signal).
+    const int recycle_m =
+        runtime_config_.speculative.token_recycling
+            ? std::min({std::max(1, runtime_config_.speculative.recycle_slots),
+                        kRowwiseTopMMax})
+            : 0;
     executor_->greedy_argmax_all(chunk_len, d_spec_argmax_, stream, d_hist, n_hist,
                                  d_spec_tokens_ + 1, req->repetition_penalty,
-                                 req->frequency_penalty, req->presence_penalty);
-    const bool argmax_ok =
+                                 req->frequency_penalty, req->presence_penalty,
+                                 recycle_m > 0 ? d_spec_topm_ : nullptr, recycle_m);
+    bool argmax_ok =
         check(cudaMemcpyAsync(h_spec_argmax_, d_spec_argmax_, chunk_len * sizeof(int32_t),
-                              cudaMemcpyDeviceToHost, stream), "argmax D2H") &&
-        check(cudaStreamSynchronize(stream), "verify sync");
+                              cudaMemcpyDeviceToHost, stream), "argmax D2H");
+    if (argmax_ok && recycle_m > 0)
+        argmax_ok = check(cudaMemcpyAsync(h_spec_topm_, d_spec_topm_,
+                                          static_cast<size_t>(chunk_len) * recycle_m *
+                                              sizeof(int32_t),
+                                          cudaMemcpyDeviceToHost, stream), "topm D2H");
+    argmax_ok = argmax_ok && check(cudaStreamSynchronize(stream), "verify sync");
     if (!argmax_ok) {
         // No tokens were emitted; leave the request exactly as before the
         // step (the chunk forward advanced hybrid state — restore it).
@@ -677,8 +868,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
 
     if (getenv("IMP_SPEC_TRACE")) {
         std::string s = "[verify] p0=" + std::to_string(p0) + " t0=" + std::to_string(t0) +
-                        " draft=[";
-        for (int j = 0; j < K; ++j) s += std::to_string(draft[j]) + (j + 1 < K ? "," : "");
+                        (mc_on ? " mc_cands=" + std::to_string(mc.size()) : "") + " draft=[";
+        const auto& dref = mc_on ? mc[0] : draft;
+        for (size_t j = 0; j < dref.size(); ++j)
+            s += std::to_string(dref[j]) + (j + 1 < dref.size() ? "," : "");
         s += "] argmax=[";
         for (int j = 0; j < chunk_len; ++j)
             s += std::to_string(h_spec_argmax_[j]) + (j + 1 < chunk_len ? "," : "");
@@ -686,12 +879,35 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         IMP_LOG_INFO("%s", s.c_str());
     }
 
-    // Accept the longest matching prefix and emit tokens through the same
-    // per-token bookkeeping as the eager decode path.
+    // Accept and emit through the same per-token bookkeeping as the eager
+    // decode path. mc: pick the candidate with the longest matching prefix
+    // first (ties -> higher adjacency rank), then run the shared emit loop
+    // over that candidate's rows.
+    int mc_row0 = 0;                     // row offset of the winning group
+    const std::vector<int32_t>* acc = &draft;  // tokens the emit loop verifies against
+    if (mc_on) {
+        int best_c = 0, best_m = -1;
+        for (size_t c = 0; c < mc.size(); ++c) {
+            const int r0 = static_cast<int>(c) * mc_rows_per_cand;
+            int m = 0;
+            while (m < static_cast<int>(mc[c].size()) && h_spec_argmax_[r0 + m] == mc[c][m])
+                ++m;
+            if (m > best_m) {
+                best_m = m;
+                best_c = static_cast<int>(c);
+            }
+        }
+        mc_row0 = best_c * mc_rows_per_cand;
+        acc = &mc[best_c];
+    }
+    // Linear: K (attn-scores clamp may have trimmed the staged chunk below
+    // draft.size()). mc: the winning candidate's full length.
+    const int acc_len = mc_on ? static_cast<int>(acc->size()) : K;
     int matched = 0;  // accepted draft tokens (their KV entries are valid)
     int emitted = 0;
-    for (int j = 0; j < chunk_len; ++j) {
-        const int32_t tokj = h_spec_argmax_[j];
+    for (int j = 0; j + mc_row0 < chunk_len; ++j) {
+        if (mc_on && j > acc_len) break;  // stay inside the winning group
+        const int32_t tokj = h_spec_argmax_[mc_row0 + j];
         req->output_tokens.push_back(tokj);
         track_think_state(*req, tokj);
         emitted++;
@@ -706,13 +922,52 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             finish_request(req);
             break;
         }
-        if (j >= K || tokj != draft[j]) break;  // bonus token reached or draft diverged
+        if (j >= acc_len || tokj != (*acc)[j]) break;  // bonus reached or draft diverged
         matched++;
         // Entering a budgeted think block mid-chunk: the budget forcing lives
         // in the loop/eager path — stop extending; the accepted prefix stays.
         if (req->think_budget > 0.0f && req->in_think_block) break;
     }
     kv_manager_->touch(req->id);
+
+    // mc: materialize the winner's KV — copy its private block(s) covering
+    // the accepted span [p0, p0+matched] back over the canonical entries,
+    // then sync before the rollback below frees the private blocks (a freed
+    // block re-allocated by a concurrent prefill on another stream must not
+    // race the in-flight copy).
+    if (mc_on && req->status != RequestStatus::FINISHED) {
+        const int mc_best_c = mc_row0 / mc_rows_per_cand;
+        int srcs[KVCache::kCopyMaxPairs];
+        int dsts[KVCache::kCopyMaxPairs];
+        int n_pairs = std::min((p0 + matched) / kv_bs - mc_bp + 1, KVCache::kCopyMaxPairs);
+        for (int t = 0; t < n_pairs; ++t) {
+            srcs[t] = block_table[mc_priv_base + mc_best_c * mc_n_priv + t];
+            dsts[t] = block_table[mc_bp + t];
+        }
+        kv_cache_raw_->copy_blocks_device(srcs, dsts, n_pairs, stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    }
+
+    // Token-Recycling: feed the model's own top-M successor candidates for
+    // every real chunk row into the adjacency table — rejected rows
+    // included (the prediction is the model's, valid regardless of
+    // acceptance; that breadth is what makes the next draft fire).
+    if (recycle_m > 0) {
+        TokenRecycleTable& tr = spec_recycle_table_();
+        for (int j = 0; j < chunk_len; ++j) {
+            int32_t tok;
+            if (mc_on) {
+                const int c = j / mc_rows_per_cand;
+                const int r = j % mc_rows_per_cand;
+                if (r > static_cast<int>(mc[c].size()))
+                    continue;  // pad row of a short candidate
+                tok = (r == 0) ? t0 : mc[c][r - 1];
+            } else {
+                tok = (j == 0) ? t0 : draft[j - 1];
+            }
+            tr.observe_topk(tok, h_spec_topm_ + static_cast<size_t>(j) * recycle_m, recycle_m);
+        }
+    }
 
     // MTP bookkeeping runs BEFORE the hybrid re-forward below — it consumes
     // this chunk's hidden rows, which the re-forward overwrites.
