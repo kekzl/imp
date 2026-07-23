@@ -816,6 +816,14 @@ struct RuntimeConfig {
         // pay for the 2x-costlier chunk; linear bucket-4 chunks ride the
         // single-sweep batched GEMV instead.
         int recycle_width = 1;
+        // Verify-in-loop (#1055 phase 2): run the token-recycling
+        // draft->verify->accept cycle as a conditional CUDA-graph WHILE
+        // loop (device drafting from the device adjacency table, host only
+        // drains the ring) instead of the eager per-step verify — removes
+        // the ~1.3 ms/step scheduler/API tax. Requires token_recycling;
+        // dense decode-attn-route models, greedy, no penalties (v1).
+        // Falls back to the eager path on any capture failure.
+        bool recycle_loop = false;
         // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
         // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
         // backward scan per verify step) with frequency-voted continuations

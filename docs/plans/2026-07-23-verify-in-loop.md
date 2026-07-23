@@ -1,6 +1,24 @@
 # Verify-in-loop: conditional-graph token-recycling verify (#1055)
 
-**Status:** phase 1 built 2026-07-23 — device adjacency table
+**Status: PHASE 2 BUILT AND MEASURED 2026-07-23** — `TrVerifyLoopRunner`
+(`src/runtime/tr_verify_loop.{h,cu}`) + engine wiring
+(`src/runtime/engine_tr_loop.cpp`) behind `speculative.recycle_loop`
+(default OFF). The riskiest unknown resolved positive: the capture-mode
+verify forward captures cleanly inside a conditional WHILE body under
+Relaxed mode (161 body edges PDL-converted). Measured (Qwen3-14B-NVFP4,
+byte-identical greedy output on all three reasoning prompts):
+CLI cold-start 162→281 / 163→321 / 162→224 tok/s (**+38–97%**); warm
+server agent-loop 163.9→194.7 (**+19%**, single turns +40%). Build
+lessons: (a) bake the ctx tier for the FULL remaining generation or every
+burst re-instantiates (first probe: 91 rebuilds/256 tokens); (b) on a
+miss-exit, launch the async decode burst DIRECTLY and suppress the eager
+host-table TR fallback — leaving the backoff window to the eager
+fallthrough cost 51 stray 10-ms verifies per 1024 tokens; (c) the
+one-block-per-row top-M harvest kernel was 1.4 ms/iteration at 151k
+vocab — now two-stage split (32 splits + merge, `rowwise_topm_reserve`
+before capture). Phase-1 notes follow.
+
+**Phase 1 (superseded):** device adjacency table
 (`src/compute/token_recycle_device.{h,cu}`, semantics pinned equal to the
 host table) and the complete loop-body tail kernel `tr_verify_step`
 (accept + ring emission + EOS/stop/budget/ceiling exits + adjacency feed +

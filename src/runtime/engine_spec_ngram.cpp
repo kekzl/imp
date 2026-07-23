@@ -147,6 +147,12 @@ int Engine::recurrent_slot_for_(int req_id) const {
 void Engine::free_spec_buffers_() {
     // Captured verify graphs bake these buffer pointers — drop them first.
     free_spec_graphs_();
+    // The verify-loop graph bakes them too (#1055); it recaptures lazily.
+    if (tr_loop_runner_.is_setup()) {
+        tr_loop_runner_.finish(nullptr);
+        tr_loop_runner_.cleanup();
+        tr_loop_req_ = nullptr;
+    }
     if (spec_state_scratch_) {
         IMP_CUDA_CHECK_LOG(cudaFree(spec_state_scratch_));
         spec_state_scratch_ = nullptr;
@@ -422,7 +428,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // form: at long context a depth-1 chain does not pay for the verify.
     std::vector<std::vector<int32_t>> mc;  // multi-candidate rows (route a)
     int mc_depth = 0;
-    if (runtime_config_.speculative.token_recycling) {
+    // With the verify loop on (#1055 phase 2) the DEVICE table drafts inside
+    // the loop; the eager host-table fallback here would run duplicate
+    // 10-ms verifies in the loop's backoff windows (measured) — stay out.
+    if (runtime_config_.speculative.token_recycling &&
+        !runtime_config_.speculative.recycle_loop) {
         spec_recycle_feed_(*req);
         const bool penalties_active = req->repetition_penalty != 1.0f ||
                                       req->frequency_penalty != 0.0f ||

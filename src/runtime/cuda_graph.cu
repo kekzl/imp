@@ -24,7 +24,7 @@ namespace imp {
 // CUTLASS collective scheduler is suspected to deadlock on, and is a strict
 // superset of capturable behaviors — the decode fast path that previously
 // worked under "global" continues to work under "relaxed".
-static cudaStreamCaptureMode get_capture_mode() {
+cudaStreamCaptureMode get_capture_mode() {
     static cudaStreamCaptureMode cached = []() {
         const std::string& mode = process_diag_graph_capture_mode();
         const bool prefill_graph = process_diag_prefill_graph_enabled();
@@ -63,7 +63,7 @@ static cudaStreamCaptureMode get_capture_mode() {
 // ---------------------------------------------------------------------------
 // apply_pdl_edges — convert kernel→kernel edges to PDL edges in a graph
 // ---------------------------------------------------------------------------
-static int apply_pdl_edges(cudaGraph_t graph) {
+int apply_pdl_edges(cudaGraph_t graph) {
     if (!graph)
         return 0;
 

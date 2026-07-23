@@ -488,6 +488,14 @@ recycle_slots        = 8
 recycle_depth        = 3
 recycle_width        = 1
 recycle_min_streak   = 1
+# Verify-in-loop (#1055 phase 2): run the whole draft->verify->accept
+# cycle as a conditional CUDA-graph WHILE loop (device drafting, host only
+# drains tokens). Requires token_recycling. Measured on Qwen3-14B-NVFP4
+# reasoning (2026-07-23, byte-identical greedy output): +38-97% cold
+# single-request, +19% warm multi-turn server. v1 scope: dense
+# decode-attn-route models, greedy, no penalties; anything else falls
+# back to the eager paths.
+recycle_loop         = false
 # Suffix-indexed drafting (SuffixDecoding-style): hash-indexed suffix
 # matching instead of a per-step backward scan, continuations picked by
 # frequency vote across all occurrences, and adaptive draft length — a

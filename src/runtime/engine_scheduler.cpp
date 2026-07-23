@@ -1113,12 +1113,25 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         return;
     }
 
+    // Verify-in-loop (#1055): an in-flight conditional verify burst owns
+    // the decode stream — drain it (think tracking + stop handling happen
+    // in the resume, like the async loop's).
+    if (tr_loop_in_flight_()) {
+        if (step_tr_loop_resume_(dec_stream))
+            return;
+    }
+
     // n-gram (prompt-lookup) speculation: when a draft is available, the
     // verify step replaces this decode step entirely (it allocates its own
     // KV blocks and emits accepted tokens). Falls through to the normal
     // path on a draft miss or when any gate fails.
     if (decode_batch.size() == 1 && spec_ngram_enabled_(*decode_batch[0])) {
         spec_maybe_rearm_(*decode_batch[0]);
+        // Verify-in-loop launch (#1055): preferred over the eager per-step
+        // verify when eligible; any decline falls through unchanged.
+        if (runtime_config_.speculative.recycle_loop &&
+            try_launch_tr_verify_loop_(decode_batch[0], dec_stream))
+            return;
         if (spec_ngram_gates_ok_(*decode_batch[0])) {
             if (step_spec_verify_(decode_batch[0], dec_stream))
                 return;

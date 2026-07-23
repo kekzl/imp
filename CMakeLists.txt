@@ -280,6 +280,8 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
     src/runtime/token_recycle_draft.cpp
+    src/runtime/tr_verify_loop.cu
+    src/runtime/engine_tr_loop.cpp
     src/vision/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
