@@ -187,12 +187,21 @@ today, ~11–13 ms reachable):
 1. **Small-M NVFP4 GEMM efficiency — same root as issue #1055.** The
    M≤128 CUTLASS class runs at ~half effective bandwidth; fixing it serves
    the verify chunk AND the short-prompt prefill (~3–4 ms at pp128).
-2. **Exempt head/embed weights from the prefill-capture dequant gate**
-   (only layer weights can hit the captured M>1 fallback) → re-enables
-   prefill graphs on 14B/Coder/Nemotron/35B ST heroes, saves the eager
-   launch-gap share (~2–3 ms at pp128, more on launch-overhead-sensitive
-   WSL2 days; failure mode if wrong is a loud capture abort, not silent
-   corruption).
+2. ~~Exempt head/embed weights from the prefill-capture dequant gate~~ —
+   **BUILT AND REFUTED (same day, reverted).** The gate's stated reason IS
+   wrong (the ~1.5 GiB lm_head dequant target blocks capture although the
+   captured prefill runs the lm_head at M=1 only — the exemption worked and
+   capture engaged cleanly), but enabling capture on ST-native NVFP4 models
+   measured net-NEGATIVE to neutral: interleaved A/B on 14B-NVFP4, 8–30
+   reps, `runtime.prefill_graph` on/off — pp128 15.3–23.6 ms (on) vs
+   12.6–15.3 ms (off); with a capture hysteresis added (capture only on
+   repeated geometry) still 13.3 vs 12.8 ms at 30 reps. Root cause: the
+   NVFP4-ST eager prefill issues only ~240 CUTLASS launches, so graph
+   replay saves nothing, while capture/instantiate costs ~3–9 ms whenever
+   the geometry or engine resets (every CLI/bench rep; 13 instantiates in a
+   10-rep run). GGUF (Q8) keeps a marginal capture win (25.0 vs 26.3 ms at
+   pp128) — its default stays as-is. The misleading WARN is cosmetic; the
+   real short-prompt lever is the small-M GEMM path (item 1 / issue #1055).
 3. Coder-30B pp128 anomaly (24.3 ms > pp512's 21.5 ms): grouped-GEMM
    tokens-per-expert collapse at small batch — needs its own scoping.
 4. Multi-turn TTFT is already served by the prefix cache (23× flat,
