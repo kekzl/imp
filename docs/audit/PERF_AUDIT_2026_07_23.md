@@ -204,6 +204,23 @@ net-positive if the verify ratio drops below ~1.3× (then ≈ +8–15% at the
 measured accept), which is the remaining host-overhead / small-M-CUTLASS
 work on #1055.
 
+**Verify-ratio close-out (third tranche):** permanent `ms/verify` telemetry
+added to the `[spec-ngram]` line — ground truth says the bucket-3 verify
+wall is **7.8–8.0 ms = 1.30–1.35× a decode step** (the earlier 1.53× was a
+flawed tg-derived estimate); the issue-#1055 ≤1.4× criterion is met by the
+GEMV route alone. Consolidated pinned staging (one H2D for tokens/
+positions/row-lens/scalars instead of six pageable copies, pinned row
+tables, one combined argmax+topm D2H) lands in the noise (wall unchanged,
+tg 320→331) — the wall is GPU-dominated. A verify-burst chain (verify →
+draft → verify without returning to the scheduler) measured **−14% and was
+reverted** (it disrupts the miss-burst pattern; misses 10→19). The
+remaining effective gap is ~1.3 ms/step of eager-loop scheduler/API tax
+between verifies — structural, needs verify-in-loop. CUTLASS small-M for
+buckets ≥5 scoped, not built: both shipped tiles are M=128 (cooperative
+128×128×128, small-N pingpong 128×64×128) and the SfAtom scale layout is
+built from 128-row atoms — a smaller-M instantiation is its own
+compile-and-sweep session.
+
 **TR verdict (cold single-request): still accept-limited.** Linear chain
 first-hop hit ≈ 0.44, deeper hops collapse → emitted ≈ 1.4/verify vs the
 now-1.5× break-even; streak-gating trades recall for precision without net

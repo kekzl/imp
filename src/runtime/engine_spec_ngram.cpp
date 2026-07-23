@@ -45,6 +45,7 @@
 
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 namespace imp {
@@ -53,34 +54,45 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     if (spec_chunk_cap_ >= chunk_cap && spec_block_table_cap_ >= max_blocks)
         return true;
     free_spec_buffers_();
-    bool ok = cudaMalloc(&d_spec_tokens_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
-              cudaMalloc(&d_spec_positions_, chunk_cap * sizeof(int)) == cudaSuccess &&
+    // #1055 consolidated staging: tokens/positions/row-ctx-lens (chunk_cap
+    // each) + {ctx_len, past_len, chunk_len} live in ONE device block with a
+    // PINNED host twin — a single small H2D per verify step instead of six
+    // (pageable-source async copies stage through a driver buffer on WSL2).
+    // The captured graphs bake the sub-pointers; the block is allocated once
+    // per capacity, so they stay stable. Same trick for argmax+topm D2H.
+    const size_t stage_ints = 3ull * chunk_cap + 3;
+    const size_t out_ints = static_cast<size_t>(chunk_cap) * (1 + kRowwiseTopMMax);
+    bool ok = cudaMalloc(&d_spec_stage_, stage_ints * sizeof(int32_t)) == cudaSuccess &&
+              cudaMallocHost(&h_spec_stage_, stage_ints * sizeof(int32_t)) == cudaSuccess &&
+              cudaMalloc(&d_spec_argmax_, out_ints * sizeof(int32_t)) == cudaSuccess &&
+              cudaMallocHost(&h_spec_argmax_, out_ints * sizeof(int32_t)) == cudaSuccess &&
               cudaMalloc(&d_spec_block_table_, max_blocks * sizeof(int)) == cudaSuccess &&
-              cudaMalloc(&d_spec_context_len_, sizeof(int)) == cudaSuccess &&
-              cudaMalloc(&d_spec_past_len_, sizeof(int)) == cudaSuccess &&
-              cudaMalloc(&d_spec_chunk_len_, sizeof(int)) == cudaSuccess &&
-              cudaMalloc(&d_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
-              cudaMallocHost(&h_spec_argmax_, chunk_cap * sizeof(int32_t)) == cudaSuccess &&
-              // Token-Recycling top-M harvest — sized to the kernel cap so a
-              // recycle_slots config change never needs a re-alloc (tiny).
-              cudaMalloc(&d_spec_topm_,
-                         static_cast<size_t>(chunk_cap) * kRowwiseTopMMax * sizeof(int32_t)) ==
-                  cudaSuccess &&
-              cudaMallocHost(&h_spec_topm_, static_cast<size_t>(chunk_cap) * kRowwiseTopMMax *
-                                                sizeof(int32_t)) == cudaSuccess &&
               // SWA-group mirror (kv_cache.swa_sizing): same capacity as the
               // main table. Allocated unconditionally so a mid-session gate
               // flip can't leave it null; tiny (max_blocks ints).
               cudaMalloc(&d_spec_block_table_swa_, max_blocks * sizeof(int)) == cudaSuccess &&
               // #964 decode-attention verify route staging (see engine.h).
-              cudaMalloc(&d_spec_row_ctx_lens_, chunk_cap * sizeof(int)) == cudaSuccess &&
               cudaMalloc(&d_spec_row_block_tables_,
-                         static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int)) == cudaSuccess;
+                         static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int)) ==
+                  cudaSuccess &&
+              cudaMallocHost(&h_spec_row_tables_pinned_,
+                             static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int32_t)) ==
+                  cudaSuccess;
     if (!ok) {
         IMP_LOG_WARN("spec-ngram: buffer allocation failed — speculation disabled this step");
         free_spec_buffers_();
         return false;
     }
+    // Sub-pointer layout (all int32): [tokens | positions | row_ctx_lens |
+    // ctx_len, past_len, chunk_len] and [argmax | topm].
+    d_spec_tokens_ = d_spec_stage_;
+    d_spec_positions_ = d_spec_stage_ + chunk_cap;
+    d_spec_row_ctx_lens_ = d_spec_stage_ + 2ull * chunk_cap;
+    d_spec_context_len_ = d_spec_stage_ + 3ull * chunk_cap;
+    d_spec_past_len_ = d_spec_context_len_ + 1;
+    d_spec_chunk_len_ = d_spec_context_len_ + 2;
+    d_spec_topm_ = d_spec_argmax_ + chunk_cap;
+    h_spec_topm_ = h_spec_argmax_ + chunk_cap;
     spec_chunk_cap_ = chunk_cap;
     spec_block_table_cap_ = max_blocks;
     return true;
@@ -90,14 +102,16 @@ void Engine::log_spec_stats_() const {
     if (spec_stats_.verify_steps + spec_stats_.miss_steps == 0)
         return;
     IMP_LOG_INFO("[spec-ngram] verify_steps=%lld miss_steps=%lld drafted=%lld accepted=%lld "
-                 "(%.1f%%) emitted=%lld (%.2f tok/verify)",
+                 "(%.1f%%) emitted=%lld (%.2f tok/verify, %.2f ms/verify)",
                  spec_stats_.verify_steps, spec_stats_.miss_steps, spec_stats_.drafted,
                  spec_stats_.accepted,
                  spec_stats_.drafted ? 100.0 * spec_stats_.accepted / spec_stats_.drafted : 0.0,
                  spec_stats_.emitted,
                  spec_stats_.verify_steps
                      ? static_cast<double>(spec_stats_.emitted) / spec_stats_.verify_steps
-                     : 0.0);
+                     : 0.0,
+                 spec_stats_.verify_steps ? spec_stats_.verify_wall_ms / spec_stats_.verify_steps
+                                          : 0.0);
 }
 
 // Hybrid verify: scratch slab holding the committed recurrent state across
@@ -138,25 +152,26 @@ void Engine::free_spec_buffers_() {
         spec_state_scratch_ = nullptr;
         spec_state_scratch_bytes_ = 0;
     }
-    if (d_spec_tokens_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_tokens_));
-    if (d_spec_positions_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_positions_));
+    // d_spec_tokens_/positions_/row_ctx_lens_/context_len_/past_len_/
+    // chunk_len_ are sub-pointers into d_spec_stage_; d_spec_topm_ into
+    // d_spec_argmax_ — only the block heads are freed.
+    if (d_spec_stage_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_stage_));
+    if (h_spec_stage_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_stage_));
     if (d_spec_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_));
     if (d_spec_block_table_swa_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_swa_));
-    if (d_spec_row_ctx_lens_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_row_ctx_lens_));
     if (d_spec_row_block_tables_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_row_block_tables_));
-    if (d_spec_context_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_context_len_));
-    if (d_spec_past_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_past_len_));
-    if (d_spec_chunk_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_chunk_len_));
+    if (h_spec_row_tables_pinned_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_row_tables_pinned_));
     if (d_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_argmax_));
     if (h_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_argmax_));
-    if (d_spec_topm_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_topm_));
-    if (h_spec_topm_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_topm_));
+    d_spec_stage_ = nullptr;
+    h_spec_stage_ = nullptr;
     d_spec_tokens_ = nullptr;
     d_spec_positions_ = nullptr;
     d_spec_block_table_ = nullptr;
     d_spec_block_table_swa_ = nullptr;
     d_spec_row_ctx_lens_ = nullptr;
     d_spec_row_block_tables_ = nullptr;
+    h_spec_row_tables_pinned_ = nullptr;
     d_spec_context_len_ = nullptr;
     d_spec_past_len_ = nullptr;
     d_spec_chunk_len_ = nullptr;
@@ -484,6 +499,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // PRIVATE block copy, see the mc staging below), so no row is shared and
     // no token-level mask is needed. K doubles as the stats/economics depth
     // (winner-depth proxy in mc mode — the verify cost is ~flat in rows).
+    const auto verify_t0 = std::chrono::steady_clock::now();
     const int32_t t0 = req->output_tokens.back();
     const int mc_rows_per_cand = mc_on ? (1 + mc_depth) : 0;
     int K = mc_on ? mc_depth : static_cast<int>(draft.size());
@@ -599,26 +615,42 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         return false;
     }
 
-    // Upload chunk metadata. mc: candidate c's rows are
-    // [t0, cand_c...] at positions p0..p0+len_c; short candidates and the
-    // bucket padding fill with t0 rows whose argmax is never consulted (their
-    // KV writes land in dead slots — private-block tails past the accepted
-    // length, or canonical slots past the rollback point).
-    std::vector<int32_t> h_tokens(chunk_pad, t0);
-    std::vector<int> h_positions(chunk_pad, p0);
+    // Stage chunk metadata into the pinned block and upload with ONE H2D
+    // (#1055): [tokens | positions | row_ctx_lens | ctx_len, past_len,
+    // chunk_len]. mc: candidate c's rows are [t0, cand_c...] at positions
+    // p0..p0+len_c; short candidates and the bucket padding fill with t0
+    // rows whose argmax is never consulted (their KV writes land in dead
+    // slots — private-block tails past the accepted length, or canonical
+    // slots past the rollback point). Row ctx lens: real rows attend
+    // p0+i+1 (per-row causality), pads attend 1 token — consumed only on
+    // the decode-attn route, harmless otherwise.
+    const int cap = spec_chunk_cap_;
+    int32_t* h_tokens = h_spec_stage_;
+    int32_t* h_positions = h_spec_stage_ + cap;
+    int32_t* h_row_lens = h_spec_stage_ + 2ull * cap;
+    for (int i = 0; i < chunk_pad; ++i) {
+        h_tokens[i] = t0;
+        h_positions[i] = mc_on ? p0 : p0 + i;
+        h_row_lens[i] = 1;
+    }
     if (mc_on) {
         for (size_t c = 0; c < mc.size(); ++c) {
             const int r0 = static_cast<int>(c) * mc_rows_per_cand;
             for (int j = 0; j < mc_rows_per_cand; ++j) {
                 h_positions[r0 + j] = p0 + j;
+                const bool real = j == 0 || j - 1 < static_cast<int>(mc[c].size());
+                h_row_lens[r0 + j] = real ? (p0 + j + 1) : 1;
                 if (j > 0 && j - 1 < static_cast<int>(mc[c].size()))
                     h_tokens[r0 + j] = mc[c][j - 1];
             }
         }
     } else {
         for (int i = 0; i < K; ++i) h_tokens[1 + i] = draft[i];
-        for (int i = 0; i < chunk_pad; ++i) h_positions[i] = p0 + i;
+        for (int i = 0; i < chunk_len; ++i) h_row_lens[i] = p0 + i + 1;
     }
+    h_spec_stage_[3ull * cap] = ctx_len;
+    h_spec_stage_[3ull * cap + 1] = p0;
+    h_spec_stage_[3ull * cap + 2] = chunk_len;
 
     auto check = [&](cudaError_t err, const char* op) {
         if (err != cudaSuccess) {
@@ -627,23 +659,15 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
         return true;
     };
-    if (!check(cudaMemcpyAsync(d_spec_tokens_, h_tokens.data(), chunk_pad * sizeof(int32_t),
-                               cudaMemcpyHostToDevice, stream), "tokens H2D") ||
-        !check(cudaMemcpyAsync(d_spec_positions_, h_positions.data(), chunk_pad * sizeof(int),
-                               cudaMemcpyHostToDevice, stream), "positions H2D") ||
+    if (!check(cudaMemcpyAsync(d_spec_stage_, h_spec_stage_,
+                               (3ull * cap + 3) * sizeof(int32_t), cudaMemcpyHostToDevice,
+                               stream), "stage H2D") ||
         !check(cudaMemcpyAsync(d_spec_block_table_, block_table.data(), n_blocks * sizeof(int),
                                cudaMemcpyHostToDevice, stream), "block table H2D") ||
         (swa_sizing_active_ && !swa_block_table.empty() &&
          !check(cudaMemcpyAsync(d_spec_block_table_swa_, swa_block_table.data(),
                                 static_cast<int>(swa_block_table.size()) * sizeof(int),
-                                cudaMemcpyHostToDevice, stream), "swa block table H2D")) ||
-        !check(cudaMemcpyAsync(d_spec_context_len_, &ctx_len, sizeof(int), cudaMemcpyHostToDevice,
-                               stream), "context len H2D") ||
-        (capture_on &&
-         (!check(cudaMemcpyAsync(d_spec_past_len_, &p0, sizeof(int), cudaMemcpyHostToDevice,
-                                 stream), "past len H2D") ||
-          !check(cudaMemcpyAsync(d_spec_chunk_len_, &chunk_len, sizeof(int),
-                                 cudaMemcpyHostToDevice, stream), "chunk len H2D"))))
+                                cudaMemcpyHostToDevice, stream), "swa block table H2D")))
         return false;
 
     // Forward the chunk through the standard continuation-prefill path.
@@ -688,32 +712,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // across CTAs) instead of the small-M prefill FA2 tile + full-context
     // FP16 KV gather (557 vs ~44 us/layer at 16k, nsys 2026-07-12).
     if (decode_attn_route) {
-        std::vector<int> h_row_lens(chunk_pad);
-        // Pad rows (i >= chunk_len, capture-bucket fill) attend a single
-        // token: their output is never read, and a 1-token walk keeps the
-        // per-row KV traffic at real-chunk cost. mc: row (c, j) attends
-        // p0+j+1 tokens through the candidate's aliased table; rows past a
-        // short candidate's length are pads too.
-        if (mc_on) {
-            for (int i = 0; i < chunk_pad; ++i) {
-                if (i >= chunk_len) {
-                    h_row_lens[i] = 1;
-                    continue;
-                }
-                const int c = i / mc_rows_per_cand;
-                const int j = i % mc_rows_per_cand;
-                const bool real = j == 0 || j - 1 < static_cast<int>(mc[c].size());
-                h_row_lens[i] = real ? (p0 + j + 1) : 1;
-            }
-        } else {
-            for (int i = 0; i < chunk_pad; ++i)
-                h_row_lens[i] = (i < chunk_len) ? (p0 + i + 1) : 1;
-        }
-        h_spec_row_tables_.assign(
-            static_cast<size_t>(chunk_pad) * spec_block_table_cap_, 0);
+        // Row ctx lens were staged with the chunk metadata above (pads and
+        // short-candidate tails attend 1 token: their output is never read,
+        // and a 1-token walk keeps the per-row KV traffic at real-chunk
+        // cost). Only the row-replicated tables remain — pinned staging,
+        // one H2D of the used region.
         for (int i = 0; i < chunk_pad; ++i)
             std::copy(block_table.begin(), block_table.end(),
-                      h_spec_row_tables_.begin() +
+                      h_spec_row_tables_pinned_ +
                           static_cast<size_t>(i) * spec_block_table_cap_);
         // mc: alias each candidate's written block indices [mc_bp ..
         // mc_bp + mc_n_priv) to its private appended blocks — reads of the
@@ -721,17 +727,15 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         if (mc_on) {
             for (int i = 0; i < chunk_len; ++i) {
                 const int c = i / mc_rows_per_cand;
-                int32_t* row = h_spec_row_tables_.data() +
+                int32_t* row = h_spec_row_tables_pinned_ +
                                static_cast<size_t>(i) * spec_block_table_cap_;
                 for (int t = 0; t < mc_n_priv; ++t)
                     row[mc_bp + t] = block_table[mc_priv_base + c * mc_n_priv + t];
             }
         }
-        if (check(cudaMemcpyAsync(d_spec_row_ctx_lens_, h_row_lens.data(),
-                                  chunk_pad * sizeof(int), cudaMemcpyHostToDevice, stream),
-                  "row ctx lens H2D") &&
-            check(cudaMemcpyAsync(d_spec_row_block_tables_, h_spec_row_tables_.data(),
-                                  h_spec_row_tables_.size() * sizeof(int32_t),
+        if (check(cudaMemcpyAsync(d_spec_row_block_tables_, h_spec_row_tables_pinned_,
+                                  static_cast<size_t>(chunk_pad) * spec_block_table_cap_ *
+                                      sizeof(int32_t),
                                   cudaMemcpyHostToDevice, stream),
                   "row block tables H2D")) {
             state.chunk_decode_attn = true;
@@ -852,15 +856,16 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                                  d_spec_tokens_ + 1, req->repetition_penalty,
                                  req->frequency_penalty, req->presence_penalty,
                                  recycle_m > 0 ? d_spec_topm_ : nullptr, recycle_m);
+    // One D2H covers [argmax | topm] (contiguous block, #1055); without the
+    // harvest only the argmax prefix is copied.
+    const size_t d2h_ints =
+        recycle_m > 0
+            ? static_cast<size_t>(spec_chunk_cap_) + static_cast<size_t>(chunk_len) * recycle_m
+            : static_cast<size_t>(chunk_len);
     bool argmax_ok =
-        check(cudaMemcpyAsync(h_spec_argmax_, d_spec_argmax_, chunk_len * sizeof(int32_t),
-                              cudaMemcpyDeviceToHost, stream), "argmax D2H");
-    if (argmax_ok && recycle_m > 0)
-        argmax_ok = check(cudaMemcpyAsync(h_spec_topm_, d_spec_topm_,
-                                          static_cast<size_t>(chunk_len) * recycle_m *
-                                              sizeof(int32_t),
-                                          cudaMemcpyDeviceToHost, stream), "topm D2H");
-    argmax_ok = argmax_ok && check(cudaStreamSynchronize(stream), "verify sync");
+        check(cudaMemcpyAsync(h_spec_argmax_, d_spec_argmax_, d2h_ints * sizeof(int32_t),
+                              cudaMemcpyDeviceToHost, stream), "argmax D2H") &&
+        check(cudaStreamSynchronize(stream), "verify sync");
     if (!argmax_ok) {
         // No tokens were emitted; leave the request exactly as before the
         // step (the chunk forward advanced hybrid state — restore it).
@@ -1020,6 +1025,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     spec_stats_.drafted += K;
     spec_stats_.accepted += matched;
     spec_stats_.emitted += emitted;
+    spec_stats_.verify_wall_ms +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0)
+            .count();
     // (request-end stats logging lives in finish_request)
 
     // Acceptance economics: structured-but-mutating content (number tables,
