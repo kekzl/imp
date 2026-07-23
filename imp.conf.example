@@ -474,16 +474,20 @@ k                    = 16
 # Token-Recycling adjacency drafting (arXiv 2408.08696): engine-scoped
 # `token -> top-M successors` table fed from emitted bigrams and the
 # model's own verify-chunk top-K logits; drafts where suffix/n-gram find
-# nothing (fresh reasoning prose). recycle_width > 1 verifies that many
-# candidates per chunk on the dense decode-attn route (per-candidate
-# private KV blocks, lossless argmax accept). EXPERIMENTAL: measured
-# accept 1.7-2.0 emitted/verify on reasoning (2026-07-23) — at the
-# current ~2x verify-step cost that is net-neutral; default OFF until
-# the verify step gets cheaper (see docs/audit/PERF_AUDIT_2026_07_23.md).
+# nothing (fresh reasoning prose). recycle_depth 3 keeps the chunk in
+# capture bucket 4 = one batched-GEMV weight sweep (#1055);
+# recycle_min_streak only drafts re-confirmed successors (precision gate);
+# recycle_width > 1 verifies that many candidates per chunk (measured: the
+# accept lift does not pay for the bigger chunk — keep 1). EXPERIMENTAL,
+# default OFF: cold-start accept on fresh reasoning measures ~1.4
+# emitted/verify vs the ~1.5x verify break-even (2026-07-23, single
+# request; the cross-request warm table is the open question — see
+# docs/audit/PERF_AUDIT_2026_07_23.md).
 token_recycling      = false
 recycle_slots        = 8
-recycle_depth        = 8
-recycle_width        = 4
+recycle_depth        = 3
+recycle_width        = 1
+recycle_min_streak   = 1
 # Suffix-indexed drafting (SuffixDecoding-style): hash-indexed suffix
 # matching instead of a per-step backward scan, continuations picked by
 # frequency vote across all occurrences, and adaptive draft length — a

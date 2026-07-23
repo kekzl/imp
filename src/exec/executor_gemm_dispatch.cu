@@ -120,11 +120,16 @@ static void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& w
 // shared activation scratch). Every earlier-return route in gemm_via_handle_
 // must answer false here.
 // ---------------------------------------------------------------------------
-bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id) const {
+bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
     if (id == kInvalidTensorID)
         return false;
     const auto& h = registry_.handle(id);
     if (h.primary_tier != StorageTier::CUTLASS_NVFP4)
+        return false;
+    // #1055: small-M verify chunks divert to the batched NVFP4 GEMV overlay
+    // (native branch in gemm_via_handle_) — no CUTLASS activation quant.
+    if (cur_spec_verify_ && runtime_config().speculative.verify_nvfp4_gemm && M <= 4 &&
+        h.source_data != nullptr && h.source_scales != nullptr)
         return false;
     StorageTier prefill =
         (h.prefill_tier != StorageTier::Undefined) ? h.prefill_tier : h.primary_tier;
@@ -275,17 +280,45 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // read NVFP4 directly via the CUTLASS prefill block below (and the
         // prefill_routes_cutlass_nvfp4_ mirror above must stay in sync with
         // every earlier return here — dequantable sources answer false there).
-        if (ctx.spec_verify_small_m && ctx.beta == 0.0f && M <= 33 &&
+        if (ctx.spec_verify_small_m && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 &&
             h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
             auto it = ctx.wcache->nvfp4.find(h.source_data);
             if (it != ctx.wcache->nvfp4.end()) {
-                gemm_nvfp4_batched(it->second, reinterpret_cast<const half*>(input.data),
-                                   reinterpret_cast<half*>(output.data),
-                                   static_cast<int>(h.shape[0]), static_cast<int>(h.shape[1]),
-                                   M, ctx.stream);
+                // beta=1 (o/down residual add, #1055): accumulate variant —
+                // previously these two fell through to the per-chunk dequant
+                // path the overlay exists to avoid.
+                auto& fn = (ctx.beta == 1.0f) ? gemm_nvfp4_batched_acc : gemm_nvfp4_batched;
+                fn(it->second, reinterpret_cast<const half*>(input.data),
+                   reinterpret_cast<half*>(output.data), static_cast<int>(h.shape[0]),
+                   static_cast<int>(h.shape[1]), M, ctx.stream);
                 return;
             }
+        }
+        // #1055: native ST-NVFP4 verify chunks. The CUTLASS prefill block
+        // below serves them correctly but at ~51% of the weight-sweep
+        // bandwidth for tiny M (measured 200 launches x 39-51 us per bucket-17
+        // verify). The batched GEMV reads the weight once per MR=4 activation
+        // tile, so it only wins in the single-tile regime — hard cap M <= 4
+        // (bucket 3 + the 4-row edge); larger chunks stay on CUTLASS (5+
+        // weight sweeps at M=17 would be ~3.5x worse). Same weight + linear
+        // micro-scales the M=1 decode GEMV reads (source_data/source_scales),
+        // so verify rows stay in the decode kernel family (argmax parity).
+        if (ctx.spec_verify_small_m && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
+            input.qtype == QType::F16 && output.qtype == QType::F16 &&
+            h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.source_data != nullptr &&
+            h.source_scales != nullptr && !dequant_gpu_supported(h.source_qtype)) {
+            NvFP4QuantResult nv;
+            nv.packed_data = const_cast<void*>(h.source_data);
+            nv.micro_scales = h.source_scales;
+            nv.tensor_scale = h.source_tensor_scale;
+            nv.N = h.shape[0];
+            nv.K = h.shape[1] * 2;
+            auto& fn = (ctx.beta == 1.0f) ? gemm_nvfp4_batched_acc : gemm_nvfp4_batched;
+            fn(nv, reinterpret_cast<const half*>(input.data),
+               reinterpret_cast<half*>(output.data), static_cast<int>(nv.N),
+               static_cast<int>(nv.K), M, ctx.stream);
+            return;
         }
 
         // Q4_K HMMA GEMM: in-SMEM dequant + FP16 HMMA m16n8k16 tile kernel.

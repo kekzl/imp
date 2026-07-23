@@ -158,6 +158,52 @@ that lands.
 
 ---
 
+## Lever #2 build results (issue #1055, same branch, second session)
+
+**Correction to the premise:** the batched GEMV (`gemv_nvfp4_kpar_mb_*`)
+reads the weight once per **MR=4 activation tile**, not once per chunk —
+at M=17 that is 5 weight sweeps ≈ 3.5× worse than CUTLASS. The GEMV route
+only wins in the single-tile regime. What shipped:
+
+1. **Native ST-NVFP4 verify chunks at M≤4 route to the batched GEMV**
+   (`executor_gemm_dispatch.cu`, sibling of the #1001 GGUF overlay; same
+   weight + linear micro-scales the M=1 decode GEMV reads). New MR=3 tile
+   instantiation (bucket 3 previously paid `<2>+<1>` = two sweeps), new
+   `gemm_nvfp4_batched_acc` (beta=1) so the o/down residual GEMMs route
+   too; GGUF overlay extended to beta=1 as well. `prefill_routes_
+   cutlass_nvfp4_` mirror kept in sync. Buckets ≥5 stay CUTLASS by design.
+2. **Capture bucket 4** added (chunk 4 = one MR=4 sweep; previously padded
+   into bucket 5 = two sweeps).
+3. mc copy-back sync skipped in single-stream steady state; TR defaults
+   re-tuned (depth 3 / width 1 / new `recycle_min_streak` precision gate).
+
+**Measured (Qwen3-14B-NVFP4, drift-day, all A/Bs interleaved same-session,
+kill-switch `speculative.verify_nvfp4_gemm`):**
+
+| workload | before | after |
+|---|---|---|
+| bench k=2 (bucket-3 verifies, capture on) | 239 | **320 tok/s (+34%)** |
+| bench k=16 (3-tok suffix drafts → now bucket 4) | 304 | **353 tok/s (+16%)** |
+| verify step (bucket 3, ctx ~600) | 12.3 ms | **9.2 ms** (ratio vs decode 2.05× → 1.53×) |
+| TR forced on reasoning (was bucket 17) | 112–129 | 165–166 (≈ spec-off) |
+| Q6_K GGUF k=2 (beta-1 overlay) | 158.9 | 158.6 (neutral) |
+
+Greedy output stays byte-identical (spec-off vs suffix vs TR); full GPU
+suite + verify-fast green (decode-gate FAIL on the morning run = the known
+cross-day drift, 279 vs pin 288 at healthy clocks, identical pre-change).
+
+**TR verdict (cold single-request): still accept-limited.** Linear chain
+first-hop hit ≈ 0.44, deeper hops collapse → emitted ≈ 1.4/verify vs the
+now-1.5× break-even; streak-gating trades recall for precision without net
+gain; multi-candidate at bucket 4 (2×depth-1) measured 151 tok/s (worse).
+The reasoning +15% needs either sub-1.3× verify cost (remaining: ~2.5 ms
+host + non-GEMM GPU per step) or a warm cross-request table (server agent
+loops — unmeasured; the CLI cold-start is the worst case). TR default
+stays OFF; the #1055 verify-cost work benefits the DEFAULT suffix path
+wherever drafts are ≤3 tokens (+16–34% measured above).
+
+---
+
 ## TTFT addendum (same session): the short-prompt floor
 
 Prefill wall by prompt size, warm engine, 5 reps (healthy host):

@@ -425,15 +425,21 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             // keeps the per-row context walks at linear-chunk cost.
             const int depth_cap = std::max(1, 17 / std::max(2, width) - 1);
             const int depth = std::min({std::max(1, scfg.recycle_depth), depth_cap, k});
-            auto cands = spec_recycle_table_().draft_candidates(
-                req->output_tokens.back(), width, depth);
-            if (mc_route_ok && width > 1 && cands.size() > 1) {
-                mc = std::move(cands);
-                mc_depth = 0;
-                for (const auto& c : mc)
-                    mc_depth = std::max(mc_depth, static_cast<int>(c.size()));
-            } else if (!cands.empty()) {
-                draft = std::move(cands.front());
+            if (mc_route_ok && width > 1) {
+                auto cands = spec_recycle_table_().draft_candidates(
+                    req->output_tokens.back(), width, depth);
+                if (cands.size() > 1) {
+                    mc = std::move(cands);
+                    mc_depth = 0;
+                    for (const auto& c : mc)
+                        mc_depth = std::max(mc_depth, static_cast<int>(c.size()));
+                } else if (!cands.empty()) {
+                    draft = std::move(cands.front());
+                }
+            } else {
+                draft = spec_recycle_table_().draft_linear(
+                    req->output_tokens.back(), depth,
+                    std::max(0, scfg.recycle_min_streak));
                 if (static_cast<int>(draft.size()) < 2 && scfg.shallow_draft_ctx > 0 &&
                     req->context_len() > scfg.shallow_draft_ctx && ssm_state_ == nullptr &&
                     !(model_->profile().is_moe && scfg.moe &&
@@ -931,10 +937,15 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     kv_manager_->touch(req->id);
 
     // mc: materialize the winner's KV — copy its private block(s) covering
-    // the accepted span [p0, p0+matched] back over the canonical entries,
-    // then sync before the rollback below frees the private blocks (a freed
-    // block re-allocated by a concurrent prefill on another stream must not
-    // race the in-flight copy).
+    // the accepted span [p0, p0+matched] back over the canonical entries.
+    // The rollback below frees the private blocks; a freed block re-used by
+    // work on ANOTHER stream (a concurrent prefill on pf_stream) must not
+    // race the in-flight copy, so sync first — but only when such a stream
+    // can exist. Single-stream steady state (batch=1, no prefill queued —
+    // the CLI/agent case) skips the sync: every later consumer of the pool
+    // enqueues on this same stream, which is ordered after the copy.
+    // (WSL2 measures cudaStreamSynchronize at 1-4 ms — per verify step that
+    // sync alone was a double-digit share of the TR verify cost.)
     if (mc_on && req->status != RequestStatus::FINISHED) {
         const int mc_best_c = mc_row0 / mc_rows_per_cand;
         int srcs[KVCache::kCopyMaxPairs];
@@ -945,7 +956,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             dsts[t] = block_table[mc_bp + t];
         }
         kv_cache_raw_->copy_blocks_device(srcs, dsts, n_pairs, stream);
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+        const bool other_stream_may_reuse =
+            !sched_prefill_batch_.empty() || sched_decode_batch_.size() > 1;
+        if (other_stream_may_reuse)
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     }
 
     // Token-Recycling: feed the model's own top-M successor candidates for

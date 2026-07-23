@@ -33,9 +33,11 @@ public:
     void observe_topk(int32_t token, const int32_t* ids, int n);
 
     // Follow the front-slot successor chain from t0 for up to k tokens.
-    // Stops early when a token has no successors. Cycles are allowed —
-    // bounded by k; the lossless verify is the safety net.
-    std::vector<int32_t> draft_linear(int32_t t0, int k) const;
+    // Stops early when a token has no successors, or (min_streak > 0) when
+    // its front slot has not been CONFIRMED min_streak times — a verify step
+    // costs ~1.4x a decode step, so precision beats recall (#1055). Cycles
+    // are allowed — bounded by k; the lossless verify is the safety net.
+    std::vector<int32_t> draft_linear(int32_t t0, int k, int min_streak = 0) const;
 
     // Multi-candidate draft (route (a) of the spec-tree plan): up to
     // `width` candidates, one per recorded successor of t0 (rank order);
@@ -52,6 +54,7 @@ public:
 
 private:
     bool valid_(int32_t tok) const { return tok >= 0 && tok < vocab_; }
+    bool promote_(int32_t prev, int32_t next);
     int32_t* row_(int32_t tok) { return succ_.data() + static_cast<size_t>(tok) * slots_; }
     const int32_t* row_(int32_t tok) const {
         return succ_.data() + static_cast<size_t>(tok) * slots_;
@@ -60,6 +63,9 @@ private:
     int vocab_;
     int slots_;
     std::vector<int32_t> succ_;  // vocab_ * slots_, -1 = empty
+    // Consecutive re-confirmations of the front slot: observe_pair bumps it
+    // when `next` already IS the front, resets it when the front changes.
+    std::vector<uint8_t> streak_;  // vocab_
 };
 
 }  // namespace imp

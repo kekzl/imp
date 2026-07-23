@@ -793,7 +793,16 @@ struct RuntimeConfig {
         // argmax verify. Default off until the reasoning A/B proves it.
         bool token_recycling = false;
         int recycle_slots = 8;  // successors kept per token (MRU/rank order)
-        int recycle_depth = 8;  // max linear draft length per verify step
+        // Linear draft length. Default 3 -> chunk 4 -> capture bucket 4 =
+        // exactly one batched-GEMV weight sweep (M=4, #1055); deeper chains
+        // pad into bucket 5+ and pay a second sweep.
+        int recycle_depth = 3;
+        // Precision gate (#1055): only draft hops whose front slot was
+        // re-confirmed at least this many times (bigram repeated / model
+        // top-1 stable). A verify step costs ~1.4x a decode step while a
+        // miss just rides the async-loop burst — precision beats recall.
+        // 0 = draft on any known successor.
+        int recycle_min_streak = 1;
         // Multi-candidate verify (route (a) of the spec-tree plan): when the
         // decode-attn route is available (dense, non-MLA/SWA/MoE/hybrid, no
         // penalties/MTP), verify `recycle_width` adjacency candidates in one
@@ -801,8 +810,12 @@ struct RuntimeConfig {
         // the KV blocks its rows write (per-row block tables), so no token
         // mask is needed and the argmax accept stays lossless. Rows are
         // capped at the 17 bucket (width * (1+depth) <= 17), i.e. width 4
-        // -> depth 3. 1 = linear drafting only.
-        int recycle_width = 4;
+        // -> depth 3. Default 1 (linear): at bucket 17 the chunk GEMMs run
+        // CUTLASS at ~51% effective bandwidth (measured 2026-07-23) — the
+        // multi-candidate accept lift (2.0 vs 1.44 emitted/verify) does not
+        // pay for the 2x-costlier chunk; linear bucket-4 chunks ride the
+        // single-sweep batched GEMV instead.
+        int recycle_width = 1;
         // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
         // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
         // backward scan per verify step) with frequency-voted continuations

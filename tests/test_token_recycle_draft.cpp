@@ -137,4 +137,56 @@ TEST(TokenRecycle, CandidatesEmptyOnUnseenRoot) {
     EXPECT_TRUE(t.draft_candidates(9, 4, 3).empty());
 }
 
+// Streak gating (#1055): a verify step costs ~1.4x a decode step, so drafts
+// should only fire on CONFIRMED bigrams — the front slot must have repeated
+// at least min_streak times. Fresh (streak-0) successors extend nothing.
+TEST(TokenRecycle, StreakGateBlocksUnconfirmedBigram) {
+    TokenRecycleTable t(100, 4);
+    t.observe_pair(1, 2);  // first sighting: streak 0
+    EXPECT_TRUE(t.draft_linear(1, 4, /*min_streak=*/1).empty());
+    t.observe_pair(1, 2);  // repeat confirms: streak 1
+    auto d = t.draft_linear(1, 4, 1);
+    ASSERT_EQ(d.size(), 1u);  // 2 has no confirmed successor -> chain ends
+    EXPECT_EQ(d[0], 2);
+}
+
+TEST(TokenRecycle, StreakResetsOnBrandNewSuccessor) {
+    TokenRecycleTable t(100, 4);
+    t.observe_pair(1, 2);
+    t.observe_pair(1, 2);  // streak 1
+    t.observe_pair(1, 3);  // brand-new successor -> streak resets
+    EXPECT_TRUE(t.draft_linear(1, 4, 1).empty());
+}
+
+TEST(TokenRecycle, StreakCountsNonConsecutiveRepeats) {
+    TokenRecycleTable t(100, 4);
+    t.observe_pair(1, 2);
+    t.observe_pair(1, 3);  // interleaved successor
+    t.observe_pair(1, 2);  // 2 re-observed -> confirmed despite the gap
+    auto d = t.draft_linear(1, 4, 1);
+    ASSERT_EQ(d.size(), 1u);
+    EXPECT_EQ(d[0], 2);
+}
+
+TEST(TokenRecycle, MinStreakZeroKeepsOldBehavior) {
+    TokenRecycleTable t(100, 4);
+    t.observe_pair(1, 2);
+    auto d = t.draft_linear(1, 4, 0);
+    ASSERT_EQ(d.size(), 1u);
+    EXPECT_EQ(d[0], 2);
+}
+
+TEST(TokenRecycle, StreakGateAppliesPerHop) {
+    TokenRecycleTable t(100, 4);
+    t.observe_pair(1, 2);
+    t.observe_pair(1, 2);  // 1->2 confirmed
+    t.observe_pair(2, 3);
+    t.observe_pair(2, 3);  // 2->3 confirmed
+    t.observe_pair(3, 4);  // 3->4 unconfirmed
+    auto d = t.draft_linear(1, 8, 1);
+    ASSERT_EQ(d.size(), 2u);  // stops before the unconfirmed hop
+    EXPECT_EQ(d[0], 2);
+    EXPECT_EQ(d[1], 3);
+}
+
 }  // namespace

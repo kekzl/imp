@@ -721,7 +721,7 @@ private:
     // dedupe at the QKV / gate-up call sites — must be CONSERVATIVE: a
     // false negative just re-quantizes; a false positive would skip with a
     // stale scratch.
-    bool prefill_routes_cutlass_nvfp4_(TensorID id) const;
+    bool prefill_routes_cutlass_nvfp4_(TensorID id, int M) const;
     // MoE forward-pass phase helpers. The per-call locals live in the
     // MoeFfnContext struct declared just above the GraphExecutor class.
     void moe_ffn_phase1_setup_(int layer, cudaStream_t stream);

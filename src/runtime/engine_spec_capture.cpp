@@ -76,7 +76,9 @@ int Engine::spec_capture_bucket_(int chunk_len) const {
     // draft padded to 9 rows baked 5 splits instead of 21 and the per-CTA
     // KV walk grew 4x (251 vs 65 us/layer at 16k). Finer buckets keep the
     // baked split geometry close to the real chunk; pad rows attend 1 token.
-    for (int b : {3, 5, 9, 17, 33}) {
+    // 4 = the token-recycling depth-3 chunk (#1055): exactly one batched-GEMV
+    // weight sweep (MR=4); padding it into 5 pays a second sweep.
+    for (int b : {3, 4, 5, 9, 17, 33}) {
         if (chunk_len <= b && b <= cap)
             return b;
     }
