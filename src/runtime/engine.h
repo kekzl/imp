@@ -781,24 +781,30 @@ private:
     void spec_recycle_feed_(Request& req);
     std::unique_ptr<TokenRecycleTable> spec_recycle_;
     // Device/pinned staging for the verify chunk (lazy-init, K+1 capacity).
+    // #1055: tokens/positions/row-ctx-lens + the 3 length scalars live in ONE
+    // device block (d_spec_stage_) with a pinned host twin — one H2D per
+    // step; the named pointers below are stable sub-pointers into it.
+    // Same layout trick for [argmax | topm] — one D2H per step.
+    int32_t* d_spec_stage_ = nullptr;
+    int32_t* h_spec_stage_ = nullptr;  // pinned twin of d_spec_stage_
     int32_t* d_spec_tokens_ = nullptr;
     int* d_spec_positions_ = nullptr;
     int* d_spec_block_table_ = nullptr;
     int* d_spec_block_table_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
     int* d_spec_context_len_ = nullptr;
-    int32_t* d_spec_argmax_ = nullptr;
-    int32_t* h_spec_argmax_ = nullptr;  // pinned, chunk_cap entries
+    int32_t* d_spec_argmax_ = nullptr;  // head of the [argmax | topm] block
+    int32_t* h_spec_argmax_ = nullptr;  // pinned, [argmax | topm] twin
     // Token-Recycling top-M harvest (speculative.token_recycling): per-row
     // top-M logit ids from the verify chunk, chunk_cap * kRowwiseTopMMax.
-    int32_t* d_spec_topm_ = nullptr;
-    int32_t* h_spec_topm_ = nullptr;  // pinned
+    int32_t* d_spec_topm_ = nullptr;  // = d_spec_argmax_ + chunk_cap
+    int32_t* h_spec_topm_ = nullptr;  // = h_spec_argmax_ + chunk_cap
     // #964 decode-attention verify route (dense, eager): per-row context lens
     // [chunk_cap] and row-replicated block tables [chunk_cap * table_cap] so
     // the chunk's attention runs the batched-decode split-K kernels — row i
     // becomes a same-KV "sequence" with ctx p0+1+i (causality via lengths).
-    int* d_spec_row_ctx_lens_ = nullptr;
+    int* d_spec_row_ctx_lens_ = nullptr;  // sub-pointer into d_spec_stage_
     int* d_spec_row_block_tables_ = nullptr;
-    std::vector<int32_t> h_spec_row_tables_;  // host staging, reused per step
+    int32_t* h_spec_row_tables_pinned_ = nullptr;  // pinned staging, chunk_cap * table_cap
     int spec_chunk_cap_ = 0;
     int spec_block_table_cap_ = 0;
     // Hybrid (SSM/GDN) verify: device scratch holding the committed
@@ -816,6 +822,7 @@ private:
         long long drafted = 0;       // draft tokens proposed
         long long accepted = 0;      // draft tokens accepted
         long long emitted = 0;       // tokens emitted by verify steps
+        double verify_wall_ms = 0;   // host wall inside step_spec_verify_ (verify steps only)
     };
     SpecStats spec_stats_{};
 

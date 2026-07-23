@@ -239,8 +239,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     // gate's dispatch quantizes it into the activation
                     // scratch, up skips the re-quantize (act-quant hint).
                     GemmContext up_ctx = ctx;
-                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.w_gate_id) &&
-                        prefill_routes_cutlass_nvfp4_(ly.w_up_id)) {
+                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.w_gate_id, n) &&
+                        prefill_routes_cutlass_nvfp4_(ly.w_up_id, n)) {
                         up_ctx = ctx.with_act_quant_hint(no.data, n,
                                                          static_cast<int>(no.shape[1]));
                     }

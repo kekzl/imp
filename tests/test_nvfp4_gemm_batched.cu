@@ -114,5 +114,62 @@ TEST_F(GemmNvfp4Batched, MatchesDequantRefAtNarrowDims) {
     run_case(704, 2816, 7);
 }
 
+// Accumulate (beta=1) variant for the o/down residual-add GEMMs (#1055):
+// y must end as W@x + y_prev, matching cuBLAS beta=1 semantics.
+TEST_F(GemmNvfp4Batched, AccumulateAddsIntoOutput) {
+    const int N = 1024, K = 2048, M = 3;
+    std::vector<half> h_w(static_cast<size_t>(N) * K);
+    std::vector<half> h_a(static_cast<size_t>(M) * K);
+    std::vector<half> h_res(static_cast<size_t>(M) * N);
+    for (size_t i = 0; i < h_w.size(); ++i)
+        h_w[i] = __float2half(((static_cast<int>(i * 13u) % 27) - 13) * 0.01f);
+    for (size_t i = 0; i < h_a.size(); ++i)
+        h_a[i] = __float2half(((static_cast<int>(i * 7u) % 23) - 11) * 0.02f);
+    for (size_t i = 0; i < h_res.size(); ++i)
+        h_res[i] = __float2half(((static_cast<int>(i * 5u) % 19) - 9) * 0.05f);
+
+    half *d_w = nullptr, *d_a = nullptr, *d_y = nullptr, *d_y_ref = nullptr;
+    cudaMalloc(&d_w, h_w.size() * sizeof(half));
+    cudaMalloc(&d_a, h_a.size() * sizeof(half));
+    cudaMalloc(&d_y, h_res.size() * sizeof(half));
+    cudaMalloc(&d_y_ref, h_res.size() * sizeof(half));
+    cudaMemcpy(d_w, h_w.data(), h_w.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_a, h_a.data(), h_a.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_y, h_res.data(), h_res.size() * sizeof(half), cudaMemcpyHostToDevice);
+
+    int64_t wshape[2] = {N, K};
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
+    NvFP4QuantResult qr;
+    quantize_fp16_to_nvfp4(w_t, qr, stream_);
+    cudaStreamSynchronize(stream_);
+
+    gemm_nvfp4_batched_acc(qr, d_a, d_y, N, K, M, stream_);
+    cudaStreamSynchronize(stream_);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+    // Reference: plain batched into a zero buffer, then add residual on host.
+    cudaMemsetAsync(d_y_ref, 0, h_res.size() * sizeof(half), stream_);
+    gemm_nvfp4_batched(qr, d_a, d_y_ref, N, K, M, stream_);
+    cudaStreamSynchronize(stream_);
+
+    std::vector<half> h_y(h_res.size()), h_y_ref(h_res.size());
+    cudaMemcpy(h_y.data(), d_y, h_y.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_y_ref.data(), d_y_ref, h_y_ref.size() * sizeof(half), cudaMemcpyDeviceToHost);
+
+    float max_abs_diff = 0.0f;
+    for (size_t i = 0; i < h_y.size(); ++i) {
+        float want = __half2float(h_y_ref[i]) + __half2float(h_res[i]);
+        float got = __half2float(h_y[i]);
+        max_abs_diff = std::max(max_abs_diff, std::fabs(got - want));
+    }
+    EXPECT_LT(max_abs_diff, 0.05f) << "accumulate variant diverges from ref + residual";
+
+    free_nvfp4_result(qr);
+    cudaFree(d_w);
+    cudaFree(d_a);
+    cudaFree(d_y);
+    cudaFree(d_y_ref);
+}
+
 }  // namespace
 }  // namespace imp

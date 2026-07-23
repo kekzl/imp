@@ -435,6 +435,11 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
             pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<4>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
                         pd, ms, ts, xm, ym, N_out, K);
             used = 4;
+        } else if (rem == 3) {
+            // Bucket-3 verify lm_head: one sweep instead of <2>+<1> (#1055).
+            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<3>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
+                        pd, ms, ts, xm, ym, N_out, K);
+            used = 3;
         } else if (rem >= 2) {
             pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<2>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
                         pd, ms, ts, xm, ym, N_out, K);
@@ -450,8 +455,9 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
 
 // FP16-output twin of gemv_nvfp4_kpar_mb_fp32_kernel for spec-verify chunk
 // GEMMs (#998): one block per weight row n, the row decoded once and reused
-// across the MR activation rows of this launch.
-template <int MR>
+// across the MR activation rows of this launch. kAcc adds into the existing
+// output (cuBLAS beta=1 semantics) for the o/down residual-add GEMMs (#1055).
+template <int MR, bool kAcc = false>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
     const half* __restrict__ x, half* __restrict__ y, int N_out, int K) {
@@ -508,8 +514,12 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
 #pragma unroll
     for (int m = 0; m < MR; ++m) {
         float total = reduce_kpar(acc[m], tid, warp_sums);
-        if (tid == 0)
-            y[(int64_t)m * N_out + n] = __float2half(total);
+        if (tid == 0) {
+            half* yp = y + (int64_t)m * N_out + n;
+            if (kAcc)
+                total += __half2float(*yp);
+            *yp = __float2half(total);
+        }
         __syncthreads();  // reuse warp_sums for the next activation row
     }
 }
@@ -531,6 +541,12 @@ void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N
             pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<4>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
                         pd, ms, ts, xm, ym, N_out, K);
             used = 4;
+        } else if (rem == 3) {
+            // Dedicated 3-row tile: capture bucket 3 (the k=2 verify chunk)
+            // otherwise pays TWO weight sweeps (<2> + <1>) — #1055.
+            pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<3>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
+                        pd, ms, ts, xm, ym, N_out, K);
+            used = 3;
         } else if (rem >= 2) {
             pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<2>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
                         pd, ms, ts, xm, ym, N_out, K);
@@ -538,6 +554,39 @@ void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N
         } else {
             pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<1>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
                         pd, ms, ts, xm, ym, N_out, K);
+            used = 1;
+        }
+        done += used;
+    }
+}
+
+// beta=1 twin: y[m,n] += A[n,:] @ x[m,:] (o/down residual-add verify GEMMs).
+void gemm_nvfp4_batched_acc(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
+                            int n_act, cudaStream_t stream) {
+    const auto* pd = reinterpret_cast<const uint8_t*>(A.packed_data);
+    const auto* ms = reinterpret_cast<const uint8_t*>(A.micro_scales);
+    const float ts = A.tensor_scale;
+    int done = 0;
+    while (done < n_act) {
+        const int rem = n_act - done;
+        const half* xm = x + (int64_t)done * K;
+        half* ym = y + (int64_t)done * N_out;
+        int used;
+        if (rem >= 4) {
+            pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<4, true>, dim3(N_out), dim3(kKparThreads),
+                        size_t(0), stream, pd, ms, ts, xm, ym, N_out, K);
+            used = 4;
+        } else if (rem == 3) {
+            pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<3, true>, dim3(N_out), dim3(kKparThreads),
+                        size_t(0), stream, pd, ms, ts, xm, ym, N_out, K);
+            used = 3;
+        } else if (rem >= 2) {
+            pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<2, true>, dim3(N_out), dim3(kKparThreads),
+                        size_t(0), stream, pd, ms, ts, xm, ym, N_out, K);
+            used = 2;
+        } else {
+            pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<1, true>, dim3(N_out), dim3(kKparThreads),
+                        size_t(0), stream, pd, ms, ts, xm, ym, N_out, K);
             used = 1;
         }
         done += used;

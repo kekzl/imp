@@ -2,11 +2,16 @@
 
 **Status:** milestones 1–3 implemented 2026-07-23 (flag-gated
 `speculative.token_recycling`, default OFF; route (a) multi-candidate via
-per-candidate private KV blocks — no mask needed). Measured: accept lifted
-0 → 1.7–2.0 emitted/verify on reasoning, but net-neutral at today's verify
-step cost (~2x a decode step). **Blocked on cheapening the verify step**
-(M≤17 CUTLASS GEMMs → multirow GEMV overlay + per-verify sync/staging cuts);
-see docs/audit/PERF_AUDIT_2026_07_23.md for the full decomposition.
+per-candidate private KV blocks — no mask needed). Verify cost cut the same
+day (#1055 first tranche: single-sweep batched-GEMV route for chunks ≤4,
+2.05× → 1.53× a decode step; bench k=2 +34%). Measured end state: accept
+1.44 cold / **1.77 warm** (server agent-loop, plateaus immediately) vs the
+~1.5× break-even → **neutral in both cold and warm cases — the warm-table
+hypothesis is refuted for this class**. Route (b) (true tree mask) is NOT
+warranted by these accept numbers (kill criterion §Risks: <1.3 applies to
+the deeper-hop accept, which collapses to ~0.05). TR stays default-off;
+re-evaluate only if the remaining #1055 work pushes the verify ratio below
+~1.3×. Full numbers: docs/audit/PERF_AUDIT_2026_07_23.md.
 
 ## Motivation (measured, not assumed)
 

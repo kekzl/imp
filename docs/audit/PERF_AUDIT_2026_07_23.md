@@ -155,3 +155,129 @@ verify step to ~1.2× a decode step drops break-even accept to ~1.2 — the
 measured TR accept of 1.7–2.0 then yields **+40–65% decode on reasoning**
 without any drafter improvement. Token-Recycling stays default-off until
 that lands.
+
+---
+
+## Lever #2 build results (issue #1055, same branch, second session)
+
+**Correction to the premise:** the batched GEMV (`gemv_nvfp4_kpar_mb_*`)
+reads the weight once per **MR=4 activation tile**, not once per chunk —
+at M=17 that is 5 weight sweeps ≈ 3.5× worse than CUTLASS. The GEMV route
+only wins in the single-tile regime. What shipped:
+
+1. **Native ST-NVFP4 verify chunks at M≤4 route to the batched GEMV**
+   (`executor_gemm_dispatch.cu`, sibling of the #1001 GGUF overlay; same
+   weight + linear micro-scales the M=1 decode GEMV reads). New MR=3 tile
+   instantiation (bucket 3 previously paid `<2>+<1>` = two sweeps), new
+   `gemm_nvfp4_batched_acc` (beta=1) so the o/down residual GEMMs route
+   too; GGUF overlay extended to beta=1 as well. `prefill_routes_
+   cutlass_nvfp4_` mirror kept in sync. Buckets ≥5 stay CUTLASS by design.
+2. **Capture bucket 4** added (chunk 4 = one MR=4 sweep; previously padded
+   into bucket 5 = two sweeps).
+3. mc copy-back sync skipped in single-stream steady state; TR defaults
+   re-tuned (depth 3 / width 1 / new `recycle_min_streak` precision gate).
+
+**Measured (Qwen3-14B-NVFP4, drift-day, all A/Bs interleaved same-session,
+kill-switch `speculative.verify_nvfp4_gemm`):**
+
+| workload | before | after |
+|---|---|---|
+| bench k=2 (bucket-3 verifies, capture on) | 239 | **320 tok/s (+34%)** |
+| bench k=16 (3-tok suffix drafts → now bucket 4) | 304 | **353 tok/s (+16%)** |
+| verify step (bucket 3, ctx ~600) | 12.3 ms | **9.2 ms** (ratio vs decode 2.05× → 1.53×) |
+| TR forced on reasoning (was bucket 17) | 112–129 | 165–166 (≈ spec-off) |
+| Q6_K GGUF k=2 (beta-1 overlay) | 158.9 | 158.6 (neutral) |
+
+Greedy output stays byte-identical (spec-off vs suffix vs TR); full GPU
+suite + verify-fast green (decode-gate FAIL on the morning run = the known
+cross-day drift, 279 vs pin 288 at healthy clocks, identical pre-change).
+
+**Warm cross-request table MEASURED (server agent-loop, 10-turn growing
+conversation, 400 tok/turn, think-budget 0, prefix cache on):** spec-off
+163.9 tok/s · TR (suffix off) 163.1 · default suffix 165.7. The warm table
+lifts TR accept from 1.44 (cold CLI) to **1.77 emitted/verify — and
+plateaus immediately** (flat across all 10 turns / 4000 tokens, ~18% of
+output via verifies, no doom). At the current ~1.5× verify cost that is
+exactly break-even → neutral. **The "warm table = win condition"
+hypothesis is refuted for this model/workload class**; TR only becomes
+net-positive if the verify ratio drops below ~1.3× (then ≈ +8–15% at the
+measured accept), which is the remaining host-overhead / small-M-CUTLASS
+work on #1055.
+
+**Verify-ratio close-out (third tranche):** permanent `ms/verify` telemetry
+added to the `[spec-ngram]` line — ground truth says the bucket-3 verify
+wall is **7.8–8.0 ms = 1.30–1.35× a decode step** (the earlier 1.53× was a
+flawed tg-derived estimate); the issue-#1055 ≤1.4× criterion is met by the
+GEMV route alone. Consolidated pinned staging (one H2D for tokens/
+positions/row-lens/scalars instead of six pageable copies, pinned row
+tables, one combined argmax+topm D2H) lands in the noise (wall unchanged,
+tg 320→331) — the wall is GPU-dominated. A verify-burst chain (verify →
+draft → verify without returning to the scheduler) measured **−14% and was
+reverted** (it disrupts the miss-burst pattern; misses 10→19). The
+remaining effective gap is ~1.3 ms/step of eager-loop scheduler/API tax
+between verifies — structural, needs verify-in-loop. CUTLASS small-M for
+buckets ≥5 scoped, not built: both shipped tiles are M=128 (cooperative
+128×128×128, small-N pingpong 128×64×128) and the SfAtom scale layout is
+built from 128-row atoms — a smaller-M instantiation is its own
+compile-and-sweep session.
+
+**TR verdict (cold single-request): still accept-limited.** Linear chain
+first-hop hit ≈ 0.44, deeper hops collapse → emitted ≈ 1.4/verify vs the
+now-1.5× break-even; streak-gating trades recall for precision without net
+gain; multi-candidate at bucket 4 (2×depth-1) measured 151 tok/s (worse).
+The reasoning +15% needs either sub-1.3× verify cost (remaining: ~2.5 ms
+host + non-GEMM GPU per step) or a warm cross-request table (server agent
+loops — unmeasured; the CLI cold-start is the worst case). TR default
+stays OFF; the #1055 verify-cost work benefits the DEFAULT suffix path
+wherever drafts are ≤3 tokens (+16–34% measured above).
+
+---
+
+## TTFT addendum (same session): the short-prompt floor
+
+Prefill wall by prompt size, warm engine, 5 reps (healthy host):
+
+| pp | 14B-NVFP4 | Coder-30B-FP4 |
+|---|---|---|
+| 32 | 18.8 ms (1.7k tok/s) | 14.7 ms |
+| 128 | 12.0 ms (10.6k) | **24.3 ms** (5.3k) |
+| 512 | 19.8 ms (25.8k) | 21.5 ms (23.8k) |
+| 2048 | 62.0 ms (33.0k) | 40.3 ms (50.8k) |
+
+Short prompts — the agentic incremental-turn case — sit on a **~12–25 ms
+floor** while the same GEMM work at pp2048 streams at 33–50k tok/s; two
+anomalies (14B pp32 > pp128; Coder pp128 > pp512) mark path-selection
+effects, not noise. Decomposition at 14B pp128 (nsys): ~9 ms GPU in M=128
+CUTLASS NVFP4 GEMMs at ~51% of the weight-sweep bandwidth bound (4.6 ms
+ideal) + ~2.5–10 ms host/launch gaps — **prefill graph capture is disabled
+on every ST-native NVFP4 hero** because the workspace gate treats the
+~1.5 GiB fp16 dequant target of the **lm_head** as capture-blocking
+(`executor_workspace_buffers.cu` kCap=512 MiB check sets
+`nvfp4_dequant_uncapturable_`), even though prefill only ever runs the
+lm_head at M=1 (last position) and never through the M>1 dequant fallback.
+
+TTFT levers, ranked (short-prompt TTFT ≈ prefill + 1 decode step ≈ 18–30 ms
+today, ~11–13 ms reachable):
+
+1. **Small-M NVFP4 GEMM efficiency — same root as issue #1055.** The
+   M≤128 CUTLASS class runs at ~half effective bandwidth; fixing it serves
+   the verify chunk AND the short-prompt prefill (~3–4 ms at pp128).
+2. ~~Exempt head/embed weights from the prefill-capture dequant gate~~ —
+   **BUILT AND REFUTED (same day, reverted).** The gate's stated reason IS
+   wrong (the ~1.5 GiB lm_head dequant target blocks capture although the
+   captured prefill runs the lm_head at M=1 only — the exemption worked and
+   capture engaged cleanly), but enabling capture on ST-native NVFP4 models
+   measured net-NEGATIVE to neutral: interleaved A/B on 14B-NVFP4, 8–30
+   reps, `runtime.prefill_graph` on/off — pp128 15.3–23.6 ms (on) vs
+   12.6–15.3 ms (off); with a capture hysteresis added (capture only on
+   repeated geometry) still 13.3 vs 12.8 ms at 30 reps. Root cause: the
+   NVFP4-ST eager prefill issues only ~240 CUTLASS launches, so graph
+   replay saves nothing, while capture/instantiate costs ~3–9 ms whenever
+   the geometry or engine resets (every CLI/bench rep; 13 instantiates in a
+   10-rep run). GGUF (Q8) keeps a marginal capture win (25.0 vs 26.3 ms at
+   pp128) — its default stays as-is. The misleading WARN is cosmetic; the
+   real short-prompt lever is the small-M GEMM path (item 1 / issue #1055).
+3. Coder-30B pp128 anomaly (24.3 ms > pp512's 21.5 ms): grouped-GEMM
+   tokens-per-expert collapse at small batch — needs its own scoping.
+4. Multi-turn TTFT is already served by the prefix cache (23× flat,
+   2026-07-15); long-context TTFT (8k–64k) is pinned and healthy (#1022).

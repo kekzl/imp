@@ -46,6 +46,9 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
 // FP32 LM-head variant above.
 void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
                         int n_act, cudaStream_t stream);
+// beta=1 twin: y += A @ x (o/down residual-add verify GEMMs, #1055).
+void gemm_nvfp4_batched_acc(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
+                            int n_act, cudaStream_t stream);
 
 // Fused QKV: 3 weight matrices, shared input, separate outputs
 void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk, const NvFP4QuantResult& wv,
