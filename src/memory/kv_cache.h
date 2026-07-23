@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -67,6 +68,16 @@ public:
     // Returns scale_block_bytes_ for the standard path.
     size_t scale_block_bytes(int layer) const;
 
+    // Whole-block D2D copy across all layers (+ scale regions when present):
+    // dsts[i] becomes a byte-identical copy of srcs[i]. One kernel launch,
+    // pairs passed by value (no H2D staging). Multi-candidate spec-verify
+    // staging (speculative.token_recycling, route (a)): each candidate gets
+    // a private copy of the committed partial block, the winner's block is
+    // copied back. SWA layer groups are skipped (separate id space; the
+    // multi-candidate route excludes SWA models).
+    static constexpr int kCopyMaxPairs = 16;
+    void copy_blocks_device(const int* srcs, const int* dsts, int n_pairs, cudaStream_t stream);
+
     // Capacity queries
     int num_free_blocks() const;
     int total_blocks() const;
@@ -110,6 +121,11 @@ private:
     // Layout: 2x blocks per layer (K scales region + V scales region).
     void* scale_pool_ = nullptr;
     size_t scale_block_bytes_ = 0;  // block_size * n_kv_heads * sizeof(half)
+
+    // copy_blocks_device per-layer offset table (lazy device upload):
+    // 6 size_t per layer {k_off, v_off, block_bytes, k_scale_off,
+    // v_scale_off, scale_bytes}; offsets relative to pool_/scale_pool_.
+    void* d_copy_meta_ = nullptr;
 
     // ── SWA block group state (per-layer ctor only) ──────────────────
     // layer_is_swa_[l] = 1 → layer l's region has swa_max_blocks_ capacity and

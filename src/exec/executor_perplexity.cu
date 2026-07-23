@@ -24,6 +24,7 @@
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
 #include "compute/layernorm.h"
+#include "compute/rowwise_topm.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm.h"
@@ -383,7 +384,8 @@ __global__ void verify_penalties_kernel(float* __restrict__ logits, int row0, in
 
 void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
                                       const int32_t* d_hist, int n_hist, const int32_t* d_draft,
-                                      float rep_pen, float freq_pen, float pres_pen) {
+                                      float rep_pen, float freq_pen, float pres_pen,
+                                      int32_t* d_topm, int topm) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
         return;
     }
@@ -441,6 +443,9 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         IMP_CUDA_CHECK_LAUNCH();
         rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + row0);
         IMP_CUDA_CHECK_LAUNCH();
+        if (d_topm && topm > 0)
+            rowwise_topm(static_cast<const float*>(lg.data), csz, V, topm,
+                         d_topm + static_cast<int64_t>(row0) * topm, stream);
     });
 }
 

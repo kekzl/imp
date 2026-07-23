@@ -151,10 +151,15 @@ public:
     // so row j additionally penalizes d_draft[0..j-1] — the same set the
     // eager path would have accumulated by that step. repeat_last_n != 0 is
     // the caller's responsibility to gate (window semantics not replicated).
+    // d_topm/topm (optional): additionally write each row's top-M logit ids
+    // (best first, post-penalty — same distribution the argmax decides on)
+    // to d_topm[row * topm + rank]. Harvested by the Token-Recycling
+    // adjacency drafter (speculative.token_recycling).
     void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
                            const int32_t* d_hist = nullptr, int n_hist = 0,
                            const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
-                           float freq_pen = 0.0f, float pres_pen = 0.0f);
+                           float freq_pen = 0.0f, float pres_pen = 0.0f,
+                           int32_t* d_topm = nullptr, int topm = 0);
 
     // Materialize the LM-head projection of hidden_[0..n_rows) into d_out
     // ([n_rows, vocab_size] fp32) — same batched re-projection as

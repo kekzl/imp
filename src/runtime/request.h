@@ -71,6 +71,10 @@ struct Request {
     // tables) re-trips the acceptance economics after every re-arm window —
     // once doomed, give-up is final for this request.
     bool spec_acceptance_doomed = false;
+    // Token-Recycling feed cursor (speculative.token_recycling): output
+    // tokens up to this index are already ingested into the engine's
+    // adjacency table; prompt bigrams are fed once when it is 0.
+    int spec_recycle_fed = 0;
     // Per-request n-gram speculation override (tri-state): -1 = use the global
     // speculative.ngram default, 0 = force OFF, 1 = force ON. Lets a code-gen
     // request opt into speculation while a short tool-arg generation skips it
