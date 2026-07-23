@@ -192,6 +192,18 @@ Greedy output stays byte-identical (spec-off vs suffix vs TR); full GPU
 suite + verify-fast green (decode-gate FAIL on the morning run = the known
 cross-day drift, 279 vs pin 288 at healthy clocks, identical pre-change).
 
+**Warm cross-request table MEASURED (server agent-loop, 10-turn growing
+conversation, 400 tok/turn, think-budget 0, prefix cache on):** spec-off
+163.9 tok/s · TR (suffix off) 163.1 · default suffix 165.7. The warm table
+lifts TR accept from 1.44 (cold CLI) to **1.77 emitted/verify — and
+plateaus immediately** (flat across all 10 turns / 4000 tokens, ~18% of
+output via verifies, no doom). At the current ~1.5× verify cost that is
+exactly break-even → neutral. **The "warm table = win condition"
+hypothesis is refuted for this model/workload class**; TR only becomes
+net-positive if the verify ratio drops below ~1.3× (then ≈ +8–15% at the
+measured accept), which is the remaining host-overhead / small-M-CUTLASS
+work on #1055.
+
 **TR verdict (cold single-request): still accept-limited.** Linear chain
 first-hop hit ≈ 0.44, deeper hops collapse → emitted ≈ 1.4/verify vs the
 now-1.5× break-even; streak-gating trades recall for precision without net
