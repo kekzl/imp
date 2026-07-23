@@ -4,6 +4,31 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- **SWA-aware KV sizing is now tri-state `auto|on|off` (default `auto`)**:
+  auto takes the sliding-window KV savings (gpt-oss ~2×, gemma-3/4 ~5-6× KV
+  tokens; measured −14% peak VRAM on gpt-oss-20b at 131K context) only when
+  prefix caching is off, so the server keeps warm-prefix TTFT untouched;
+  `on` keeps the old force semantics (disables prefix caching), legacy
+  bools still parse. One-shot imp-cli runs (`--prompt` / `--bench`) now
+  disable prefix caching (a single-generation process never re-sees a
+  prefix), which makes them qualify for the auto savings — `--bench` pins
+  `swa_sizing=off` to keep baseline semantics. The sized path is
+  numerically exact: PPL bit-parity vs full-length KV on gemma-3-12b and
+  gpt-oss-20b (deterministic_gemm A/B; without pinned GEMM algorithms
+  gpt-oss PPL is restart-volatile by ±20% on the gate corpus, which is a
+  measurement artifact, not a path difference). The sized decode route is
+  per-path deterministic but a different FP-summation order than full-length
+  KV (split-K over fewer blocks), so greedy near-ties can resolve
+  differently — the same accepted cross-path property as the existing
+  kernel-route dispatches (#957). Retrieval validated: needle at 10% depth
+  of a 77K-token prompt retrieved exactly on gemma-3-12b with sizing
+  active, followed by a coherent 575-token generation across window trims.
+- **Auto `max_seq_len` ceiling raised 64K → 128K** (#1004): coding-agent
+  transcripts run 50-150K tokens; VRAM and the model's declared context
+  still bound the auto pick, so this only extends models that declare (and
+  can hold) more than 64K.
+
 ### Added
 - **Qwen-Coder XML tool-call grammar**: `tool_choice=required`/forced and
   `strict:true` on templates teaching the `<function=NAME>`/`<parameter=KEY>`

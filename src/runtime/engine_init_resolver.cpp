@@ -593,9 +593,9 @@ void Engine::init_resolve_quant_flags_() {
 
 // Auto-detect max_seq_len. Runs AFTER model-specific overrides (Gemma-4
 // forces FP16 KV etc.) so the per-token cost reflects the actual dtype
-// that will be allocated. Auto ceiling is kAutoMaxSeqLenCap (64K) — bounded
+// that will be allocated. Auto ceiling is kAutoMaxSeqLenCap (128K) — bounded
 // further by what VRAM affords and what the model declares. A model that
-// declares MORE than 64K needs an explicit `--max-seq-len` / runtime.max_seq_len
+// declares MORE than 128K needs an explicit `--max-seq-len` / runtime.max_seq_len
 // override to exceed the auto cap (documented in imp.conf.example); the manual
 // path bypasses the auto resolver entirely (short-circuit below).
 void Engine::init_compute_max_seq_len_() {
@@ -625,10 +625,13 @@ void Engine::init_compute_max_seq_len_() {
         }
         // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers hold
         // only a fixed trailing window, so they don't scale with context —
-        // count only global layers for the per-token cost. (The final gate is
-        // resolved in init_kv_cache; if it declines there the budget clamps
-        // conservatively, never OOMs.)
-        if (runtime_config_.kv_cache.swa_sizing) {
+        // count only global layers for the per-token cost. Mirror the
+        // auto-mode prefix-caching yield (use_prefix_caching is final before
+        // this resolver runs). (The final gate is resolved in init_kv_cache;
+        // if it declines there the budget clamps conservatively, never OOMs.)
+        const auto swa_mode = runtime_config_.kv_cache.swa_sizing_mode();
+        if (swa_mode == SwaSizingMode::On ||
+            (swa_mode == SwaSizingMode::Auto && !config_.use_prefix_caching)) {
             int swa_layers = 0;
             for (int l = 0; l < mcfg.n_layers; l++)
                 if (layer_swa_window(mcfg, model_->profile(), l) > 0)
@@ -668,11 +671,12 @@ void Engine::init_compute_max_seq_len_() {
         // Agentic workloads (tool loops, accumulating history, large file
         // context) routinely exceed 16K and run a single long sequence rather
         // than many short ones, so a high per-request ceiling is the right
-        // default. Cap lifted 16K → 64K; max_by_vram still bounds it to what
-        // VRAM honestly affords and model_ctx to what the model supports, so
-        // this only raises the ceiling on models that declare (and can hold)
-        // more than 16K.
-        constexpr int kAutoMaxSeqLenCap = 65536;
+        // default. Cap lifted 16K → 64K → 128K (#1004: coding-agent
+        // transcripts run 50–150K tokens); max_by_vram still bounds it to
+        // what VRAM honestly affords and model_ctx to what the model
+        // supports, so this only raises the ceiling on models that declare
+        // (and can hold) more than 64K.
+        constexpr int kAutoMaxSeqLenCap = 131072;
         config_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
         IMP_LOG_INFO(
             "max_seq_len: auto → %d (model=%d, vram_cap=%d, auto_cap=%d, kv=%zu B/tok, attn_layers=%d/%d)",

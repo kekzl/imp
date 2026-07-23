@@ -71,6 +71,28 @@ int main(int argc, char** argv) {
                 capture_set = true;
         if (!capture_set)
             runtime_cfg.speculative.capture = false;
+        // SWA-aware KV sizing changes the KV layout and forces spec verify
+        // eager on SWA models — keep the canonical baseline on full-length
+        // KV. An explicit --set kv_cache.swa_sizing=… still wins.
+        bool swa_set = false;
+        for (const auto& ov : args.config_overrides)
+            if (ov.rfind("kv_cache.swa_sizing", 0) == 0)
+                swa_set = true;
+        if (!swa_set)
+            runtime_cfg.kv_cache.swa_sizing = "off";
+    }
+    // One-shot runs (--prompt / --bench) never re-see a prefix: the process
+    // exits after a single generation, so prefix caching only costs hashing
+    // and blocks the swa_sizing=auto KV savings on SWA models. Interactive
+    // mode keeps it (turn N+1 reuses turn N's prefix). --prefix-caching or
+    // an explicit --set server.prefix_cache=… still wins.
+    if (!args.interactive && !args.prefix_caching) {
+        bool pc_set = false;
+        for (const auto& ov : args.config_overrides)
+            if (ov.rfind("server.prefix_cache", 0) == 0)
+                pc_set = true;
+        if (!pc_set)
+            runtime_cfg.server.prefix_cache = false;
     }
     // Cache the few diagnostic / runtime-mode flags that are read from free
     // functions (kernel diagnostics, CUDA-graph capture mode, PDL gate)

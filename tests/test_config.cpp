@@ -27,9 +27,31 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
     EXPECT_EQ(cfg.runtime.cuda_graphs, "auto");
     EXPECT_TRUE(cfg.runtime.warmup);  // default ON: greedy request-order independence (docs/determinism.md)
     EXPECT_EQ(cfg.kv_cache.dtype, "auto");
+    EXPECT_EQ(cfg.kv_cache.swa_sizing, "auto");
+    EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Auto);
     EXPECT_EQ(cfg.moe.expert_overhead_pct, 10);
     EXPECT_FALSE(cfg.gdn.fp32_scan);
     EXPECT_EQ(cfg.diagnostics.exit_layer, -1);
+}
+
+// kv_cache.swa_sizing tri-state: "auto"/"on"/"off" plus legacy bool literals
+// (the key was a bool until 2026-07-24 — existing imp.conf files keep parsing).
+TEST(RuntimeConfigTest, SwaSizingTriState) {
+    RuntimeConfig cfg;
+    cfg.apply_overrides({"kv_cache.swa_sizing=on"});
+    EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::On);
+    cfg.apply_overrides({"kv_cache.swa_sizing=off"});
+    EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Off);
+    cfg.apply_overrides({"kv_cache.swa_sizing=auto"});
+    EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Auto);
+    // Legacy bool spellings map to On/Off.
+    cfg.apply_overrides({"kv_cache.swa_sizing=true"});
+    EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::On);
+    cfg.apply_overrides({"kv_cache.swa_sizing=false"});
+    EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Off);
+    // Unknown value falls back to Off (never silently forces sizing on).
+    cfg.apply_overrides({"kv_cache.swa_sizing=banana"});
+    EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Off);
 }
 
 // The long-context FP8-KV quality gate (kv_cache.dtype=auto): only arch families
