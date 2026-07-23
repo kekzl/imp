@@ -155,3 +155,45 @@ verify step to ~1.2× a decode step drops break-even accept to ~1.2 — the
 measured TR accept of 1.7–2.0 then yields **+40–65% decode on reasoning**
 without any drafter improvement. Token-Recycling stays default-off until
 that lands.
+
+---
+
+## TTFT addendum (same session): the short-prompt floor
+
+Prefill wall by prompt size, warm engine, 5 reps (healthy host):
+
+| pp | 14B-NVFP4 | Coder-30B-FP4 |
+|---|---|---|
+| 32 | 18.8 ms (1.7k tok/s) | 14.7 ms |
+| 128 | 12.0 ms (10.6k) | **24.3 ms** (5.3k) |
+| 512 | 19.8 ms (25.8k) | 21.5 ms (23.8k) |
+| 2048 | 62.0 ms (33.0k) | 40.3 ms (50.8k) |
+
+Short prompts — the agentic incremental-turn case — sit on a **~12–25 ms
+floor** while the same GEMM work at pp2048 streams at 33–50k tok/s; two
+anomalies (14B pp32 > pp128; Coder pp128 > pp512) mark path-selection
+effects, not noise. Decomposition at 14B pp128 (nsys): ~9 ms GPU in M=128
+CUTLASS NVFP4 GEMMs at ~51% of the weight-sweep bandwidth bound (4.6 ms
+ideal) + ~2.5–10 ms host/launch gaps — **prefill graph capture is disabled
+on every ST-native NVFP4 hero** because the workspace gate treats the
+~1.5 GiB fp16 dequant target of the **lm_head** as capture-blocking
+(`executor_workspace_buffers.cu` kCap=512 MiB check sets
+`nvfp4_dequant_uncapturable_`), even though prefill only ever runs the
+lm_head at M=1 (last position) and never through the M>1 dequant fallback.
+
+TTFT levers, ranked (short-prompt TTFT ≈ prefill + 1 decode step ≈ 18–30 ms
+today, ~11–13 ms reachable):
+
+1. **Small-M NVFP4 GEMM efficiency — same root as issue #1055.** The
+   M≤128 CUTLASS class runs at ~half effective bandwidth; fixing it serves
+   the verify chunk AND the short-prompt prefill (~3–4 ms at pp128).
+2. **Exempt head/embed weights from the prefill-capture dequant gate**
+   (only layer weights can hit the captured M>1 fallback) → re-enables
+   prefill graphs on 14B/Coder/Nemotron/35B ST heroes, saves the eager
+   launch-gap share (~2–3 ms at pp128, more on launch-overhead-sensitive
+   WSL2 days; failure mode if wrong is a loud capture abort, not silent
+   corruption).
+3. Coder-30B pp128 anomaly (24.3 ms > pp512's 21.5 ms): grouped-GEMM
+   tokens-per-expert collapse at small batch — needs its own scoping.
+4. Multi-turn TTFT is already served by the prefix cache (23× flat,
+   2026-07-15); long-context TTFT (8k–64k) is pinned and healthy (#1022).
