@@ -21,6 +21,9 @@
 
 namespace imp {
 
+// kv_cache.swa_sizing tri-state (legacy bool literals map to On/Off).
+enum class SwaSizingMode { Off, On, Auto };
+
 struct RuntimeConfig {
     struct Runtime {
         bool deterministic_gemm = false;
@@ -164,11 +167,24 @@ struct RuntimeConfig {
         // window in a small dedicated block group instead of full-length KV
         // (~2x more KV tokens on gpt-oss, ~5-6x on gemma-3). Auto-disabled
         // (logged) for models without SWA layers, INT8/INT4 KV, hybrids,
-        // MLA, StreamingLLM, green contexts, and deterministic mode; prefix
-        // caching is forced off while active (freed window blocks cannot
-        // back prefix reuse — snapshot-based reuse is a follow-up).
-        // Default off until validated across the SWA model zoo.
-        bool swa_sizing = false;
+        // MLA, StreamingLLM, green contexts, and deterministic mode.
+        // Numerically exact: PPL bit-parity vs full-length KV on gemma-3-12b
+        // and gpt-oss-20b (deterministic_gemm A/B, 2026-07-24).
+        // Tri-state: "auto" enables the savings only when prefix caching is
+        // off (one-shot imp-cli runs), so serving keeps warm-prefix TTFT;
+        // "on" forces sizing and disables prefix caching (freed window
+        // blocks cannot back prefix reuse — snapshot-based reuse is a
+        // follow-up); "off" disables. Legacy bools map to on/off.
+        std::string swa_sizing = "auto";
+
+        SwaSizingMode swa_sizing_mode() const {
+            if (swa_sizing == "auto")
+                return SwaSizingMode::Auto;
+            if (swa_sizing == "on" || swa_sizing == "true" || swa_sizing == "True" ||
+                swa_sizing == "1" || swa_sizing == "yes")
+                return SwaSizingMode::On;
+            return SwaSizingMode::Off;
+        }
     } kv_cache;
 
     // Runtime RoPE-scaling override — stretch a model's usable context past

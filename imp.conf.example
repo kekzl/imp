@@ -74,12 +74,12 @@ decode_pipeline      = true
 # (docs/determinism.md). ON by default; set false in dev/CI where init time
 # matters more than reproducibility.
 warmup               = true
-# Override the model's max_seq_len (0 = auto-detect). Auto-detection caps at 64K
-# (bounded further by VRAM and the model's declared context). A model that
-# declares MORE than 64K needs this set explicitly to run past 64K — the auto
-# path never selects above the 64K ceiling. Long-context TTFT grows with the
-# attention math (Qwen3-14B Q6_K measured ~3.7s at 32K, ~10s at 64K), so raise
-# it deliberately for long-transcript / agentic workloads.
+# Override the model's max_seq_len (0 = auto-detect). Auto-detection caps at
+# 128K (bounded further by VRAM and the model's declared context). A model that
+# declares MORE than 128K needs this set explicitly to run past 128K — the auto
+# path never selects above the 128K ceiling. Long-context TTFT grows with the
+# attention math (Qwen3-14B Q6_K measured ~3.7s at 32K, ~10s at 64K), so cap
+# it deliberately if long-transcript TTFT matters more than reach.
 max_seq_len          = 0
 # Hard VRAM budget for this process in MiB (0 = uncapped). Every sizing
 # decision (weight caches, KV clamp, expert offload, workspaces, upload
@@ -126,11 +126,13 @@ bitdecoding_residual_tokens = 0
 # the full max_seq_len fits in VRAM that otherwise capped short.
 # Auto-disabled (logged) for models without SWA layers, INT8/INT4 KV, hybrids,
 # MLA, StreamingLLM, green contexts, and deterministic mode.
-# TRADEOFF — kept OPT-IN: prefix caching is forced off while active (freed
-# window blocks can't back prefix reuse), which costs agentic TTFT on repeated
-# prompts. Enable it for long single-sequence contexts where KV VRAM is the
-# bottleneck; leave it off when the prefix cache earns its keep.
-swa_sizing                  = false
+# Tri-state: "auto" (default) takes the savings only when prefix caching is
+# off — one-shot imp-cli runs qualify automatically; the server (prefix_cache
+# = true) keeps warm-prefix TTFT and full-length KV. "on" forces sizing and
+# disables prefix caching (freed window blocks can't back prefix reuse —
+# snapshot-based reuse is a follow-up); use it for long single-sequence
+# contexts where KV VRAM is the bottleneck. "off" disables entirely.
+swa_sizing                  = auto
 
 [rope]
 # Runtime RoPE-scaling override: stretch a model's usable context past its

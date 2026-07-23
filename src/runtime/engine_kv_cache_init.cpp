@@ -106,7 +106,8 @@ bool Engine::init_kv_cache() {
     swa_sizing_active_ = false;
     swa_window_max_ = 0;
     int n_swa_layers = 0;
-    if (runtime_config_.kv_cache.swa_sizing) {
+    const SwaSizingMode swa_mode = runtime_config_.kv_cache.swa_sizing_mode();
+    if (swa_mode != SwaSizingMode::Off) {
         const auto& prof = model_->profile();
         for (int i = 0; i < mcfg.n_layers; i++) {
             if (kv_layer_map[i] < 0)
@@ -134,8 +135,12 @@ bool Engine::init_kv_cache() {
             off_reason = "green contexts (cross-stream block reuse unordered)";
         else if (runtime_config_.runtime.deterministic)
             off_reason = "deterministic mode (unbounded graph loop would be burst-chunked)";
+        else if (swa_mode == SwaSizingMode::Auto && config_.use_prefix_caching)
+            off_reason = "auto mode yields to prefix caching (freed window blocks cannot back "
+                         "prefix reuse; set kv_cache.swa_sizing=on to force the KV savings)";
         if (off_reason) {
-            IMP_LOG_INFO("kv_cache.swa_sizing=true ignored: %s", off_reason);
+            IMP_LOG_INFO("kv_cache.swa_sizing=%s ignored: %s",
+                         runtime_config_.kv_cache.swa_sizing.c_str(), off_reason);
             swa_window_max_ = 0;
             n_swa_layers = 0;
         } else {
@@ -153,11 +158,13 @@ bool Engine::init_kv_cache() {
                                  ? runtime_config_.runtime.decode_burst
                                  : 512;
             swa_burst_cap_tokens_ = std::max(chunk_peak, burst_peak);
-            // Prefix caching cannot reuse freed window blocks — force it off
+            // Prefix caching cannot reuse freed window blocks. Auto mode
+            // yielded above, so only an explicit "on" reaches this point —
+            // honor the forced opt-in by disabling prefix caching
             // (snapshot-based SWA reuse is a follow-up).
             if (config_.use_prefix_caching) {
                 config_.use_prefix_caching = false;
-                IMP_LOG_INFO("kv_cache.swa_sizing: prefix caching disabled (freed window "
+                IMP_LOG_INFO("kv_cache.swa_sizing=on: prefix caching disabled (freed window "
                              "blocks cannot back prefix reuse)");
             }
             // StreamingLLM auto-enable frees middle blocks of the GLOBAL
