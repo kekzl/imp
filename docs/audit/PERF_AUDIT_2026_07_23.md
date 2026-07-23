@@ -221,7 +221,21 @@ buckets ≥5 scoped, not built: both shipped tiles are M=128 (cooperative
 built from 128-row atoms — a smaller-M instantiation is its own
 compile-and-sweep session.
 
-**TR verdict (cold single-request): still accept-limited.** Linear chain
+**VERIFY-IN-LOOP LANDED (same day, #1055 phase 2) — the durable lever
+delivers.** Running the whole draft→verify→accept cycle as a conditional
+CUDA-graph WHILE loop (device drafting from the device adjacency table,
+bucket-4 capture-mode chunk forward, device accept/stage kernel; host only
+drains a mapped ring) removes both the eager per-step host tax AND lifts
+the in-loop accept (the table harvests top-M EVERY iteration). Measured,
+byte-identical greedy output (Qwen3-14B-NVFP4): cold single-request
+reasoning **+38–97%** across three prompts (162→281, 163→321, 162→224
+tok/s); warm 10-turn server agent-loop **+19%** total (163.9→194.7,
+single turns +40%). Flag `speculative.recycle_loop`, default off pending
+a default-flip matrix (multi-model + degen + long-run soak). The earlier
+eager-mode accept ceiling (below) is thereby superseded for loop-eligible
+configs.
+
+**TR verdict (cold single-request, EAGER mode): still accept-limited.** Linear chain
 first-hop hit ≈ 0.44, deeper hops collapse → emitted ≈ 1.4/verify vs the
 now-1.5× break-even; streak-gating trades recall for precision without net
 gain; multi-candidate at bucket 4 (2×depth-1) measured 151 tok/s (worse).

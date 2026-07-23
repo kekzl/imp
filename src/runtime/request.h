@@ -75,6 +75,9 @@ struct Request {
     // tokens up to this index are already ingested into the engine's
     // adjacency table; prompt bigrams are fed once when it is 0.
     int spec_recycle_fed = 0;
+    // Verify-in-loop: prompt+output pairs already seeded into the DEVICE
+    // adjacency table (once per request, at first loop launch).
+    bool tr_dev_prompt_fed = false;
     // Per-request n-gram speculation override (tri-state): -1 = use the global
     // speculative.ngram default, 0 = force OFF, 1 = force ON. Lets a code-gen
     // request opt into speculation while a short tool-arg generation skips it

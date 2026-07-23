@@ -62,7 +62,8 @@ struct TrLoopView {
     int32_t* ring = nullptr;               // mapped device ptr, [token capacity]
     int32_t* ring_count_mapped = nullptr;  // mapped publish counter (host-visible)
     int32_t* emit_count = nullptr;         // device authoritative counter
-    int32_t* exit_reason = nullptr;        // 0=continue 1=miss 2=stop 3=budget 4=ctx-ceiling
+    int32_t* exit_reason = nullptr;        // mapped: 0=running 1=miss 2=stop 3=budget 4=ctx-ceiling
+    const int32_t* token_limit = nullptr;  // device scalar (re-seeded per launch, rearm-able)
 };
 
 struct TrLoopParams {
@@ -73,7 +74,6 @@ struct TrLoopParams {
     int32_t eos_id = -1;
     const int32_t* stop_ids = nullptr;  // device, optional
     int n_stop_ids = 0;
-    int token_limit = 0;                // total ring tokens allowed this burst
     int ctx_ceiling = 0;                // p0' + chunk_pad must stay <= this
 };
 

@@ -122,13 +122,14 @@ __global__ void tr_verify_step_kernel(TrLoopView v, TrLoopParams p,
 
     const int L = *v.chunk_len;
     const int p0 = *v.past_len;
+    const int token_limit = *v.token_limit;
     int count = *v.emit_count;
     int emitted = 0;
     int exit_reason = 0;
     int32_t last = v.tokens[0];
 
     for (int j = 0; j < L; ++j) {
-        if (count + emitted >= p.token_limit) {
+        if (count + emitted >= token_limit) {
             exit_reason = 3;  // budget
             break;
         }
@@ -180,7 +181,7 @@ __global__ void tr_verify_step_kernel(TrLoopView v, TrLoopParams p,
     __threadfence_system();
     *v.ring_count_mapped = count;
 
-    if (exit_reason == 0 && count >= p.token_limit)
+    if (exit_reason == 0 && count >= token_limit)
         exit_reason = 3;
 
     const int new_p0 = p0 + emitted;
@@ -217,6 +218,9 @@ __global__ void tr_verify_step_kernel(TrLoopView v, TrLoopParams p,
             *v.ctx_len = new_p0 + p.chunk_pad;
         }
     }
+    // exit_reason may live in mapped memory (the host polls it) — publish
+    // it after everything else, fenced like the ring counter.
+    __threadfence_system();
     *v.exit_reason = exit_reason;
     if (kHasHandle && exit_reason != 0)
         cudaGraphSetConditional(handle, 0);

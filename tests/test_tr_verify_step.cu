@@ -27,6 +27,7 @@ protected:
         cudaMalloc(&d_argmax_, kPad * sizeof(int32_t));
         cudaMalloc(&d_topm_, kPad * kM * sizeof(int32_t));
         cudaMalloc(&d_emit_count_, sizeof(int32_t));
+        cudaMalloc(&d_token_limit_, sizeof(int32_t));
         cudaMalloc(&d_exit_reason_, sizeof(int32_t));
         cudaHostAlloc(&h_ring_, 64 * sizeof(int32_t), cudaHostAllocMapped);
         cudaHostGetDevicePointer(&d_ring_, h_ring_, 0);
@@ -42,6 +43,7 @@ protected:
         cudaFree(d_argmax_);
         cudaFree(d_topm_);
         cudaFree(d_emit_count_);
+        cudaFree(d_token_limit_);
         cudaFree(d_exit_reason_);
         cudaFreeHost(h_ring_);
         cudaFreeHost(h_count_);
@@ -63,6 +65,7 @@ protected:
         v.ring_count_mapped = d_count_mapped_;
         v.emit_count = d_emit_count_;
         v.exit_reason = d_exit_reason_;
+        v.token_limit = d_token_limit_;
         return v;
     }
 
@@ -73,9 +76,13 @@ protected:
         p.min_streak = 0;
         p.topm = kM;
         p.eos_id = 99;
-        p.token_limit = 64;
         p.ctx_ceiling = 4096;
+        set_token_limit(64);
         return p;
+    }
+
+    void set_token_limit(int32_t v) {
+        cudaMemcpyAsync(d_token_limit_, &v, sizeof(int32_t), cudaMemcpyHostToDevice, stream_);
     }
 
     // Host-side stage of the first chunk (the launch-time seed).
@@ -119,6 +126,7 @@ protected:
     int32_t* d_argmax_ = nullptr;
     int32_t* d_topm_ = nullptr;
     int32_t* d_emit_count_ = nullptr;
+    int32_t* d_token_limit_ = nullptr;
     int32_t* d_exit_reason_ = nullptr;
     int32_t* h_ring_ = nullptr;
     int32_t* d_ring_ = nullptr;
@@ -202,7 +210,7 @@ TEST_F(TrVerifyStep, TokenLimitExits) {
     seed_chunk(1, {2, 3}, 10);
     set_argmax({2, 3, 4, 0});
     auto p = params();
-    p.token_limit = 2;  // only 2 tokens allowed
+    set_token_limit(2);  // only 2 tokens allowed
     tr_verify_step(view(), p, true, stream_);
     cudaStreamSynchronize(stream_);
     EXPECT_EQ(*h_count_, 2);      // truncated at the budget
