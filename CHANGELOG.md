@@ -35,9 +35,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   window of the sliding-window layers into a device LRU store (same pattern
   as the hybrid recurrent-state snapshots) and restores it at admission on
   a prefix-cache hit, so warm multi-turn reuse works with the windowed-KV
-  savings. Opt-in budget in MiB (0 = off: `swa_sizing=auto` keeps yielding
-  to prefix caching). Reuse is capped at snapshot boundaries (one per
-  prefill end).
+  savings. Snapshots are also saved at request finish over the same span
+  the finish path hash-registers, so the next agent turn reuses the whole
+  previous transcript (generated tokens included) — measured on a growing
+  6-turn transcript: cache-hit coverage identical to full-length-KV prefix
+  caching. Opt-in budget in MiB, default 0 (kept opt-in by measurement: the
+  pack/copy path costs ~50-90 ms warm TTFT per turn, which only pays for
+  itself at 16K+ contexts where the windowed-KV savings buy real reach).
 - **Qwen-Coder XML tool-call grammar**: `tool_choice=required`/forced and
   `strict:true` on templates teaching the `<function=NAME>`/`<parameter=KEY>`
   raw-text dialect (Qwen3-Coder, Qwen3.6) are now enforced by a dedicated
