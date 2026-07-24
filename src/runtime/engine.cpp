@@ -525,6 +525,11 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             forwarded.insert(forwarded.end(), req->input_tokens.begin(), req->input_tokens.end());
             forwarded.insert(forwarded.end(), req->output_tokens.begin(), req->output_tokens.end() - 1);
             kv_manager_->register_block_hashes(req->id, forwarded);
+            // SWA window snapshot over the SAME span: without it the hashed
+            // generated blocks are unusable under SWA sizing (the next turn's
+            // reuse limit stops at the last snapshot boundary — the prefill
+            // end). Must run before free_sequence recycles the window blocks.
+            maybe_save_swa_snapshot_span_(req->id, forwarded, stream_);
         } else {
             kv_manager_->register_block_hashes(req->id, req->input_tokens);
         }

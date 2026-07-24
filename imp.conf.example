@@ -136,11 +136,17 @@ swa_sizing                  = auto
 # SWA window snapshots: device budget (MiB) for packed windowed-layer KV
 # snapshots, which make prefix caching valid UNDER swa_sizing — the snapshot
 # restores the trailing window at the reuse boundary, analogous to the
-# recurrent_snapshot_mb store for hybrids. One snapshot per prefill end, LRU
-# within the budget. With a budget set, swa_sizing=auto no longer yields to
-# prefix caching and the server gets both: the KV savings AND warm-prefix
-# reuse capped at snapshot boundaries. 0 = off (auto yields, on force-
-# disables prefix caching).
+# recurrent_snapshot_mb store for hybrids. Saved at each prefill end AND at
+# request finish (so the next agent turn reuses the whole previous
+# transcript, generated tokens included), LRU within the budget. With a
+# budget set, swa_sizing=auto no longer yields to prefix caching and the
+# server gets both: the KV savings AND warm-prefix reuse.
+# WHEN TO ENABLE (measured 2026-07-24, gemma-3-12b): cache-hit coverage is
+# identical to full-length-KV prefix caching, but each save/restore costs
+# ~50-90 ms warm TTFT per turn (window pack + store copy). Worth it for
+# LONG contexts (16K+), where windowed layers stop scaling with context and
+# VRAM headroom buys real reach; leave off for short-turn serving. 0 = off
+# (auto yields to prefix caching, on force-disables it).
 swa_snapshot_mb             = 0
 
 [rope]

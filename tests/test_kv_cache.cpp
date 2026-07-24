@@ -1684,6 +1684,68 @@ TEST(KVCacheManagerTest, SwaSnapshotPackRestoreRoundtrip) {
     EXPECT_EQ(mgr.kv_cache()->num_free_swa_blocks(), 16);
 }
 
+// Generation-end saves pack at the block-FLOOR of the live context; with a
+// non-block-aligned slack the lowest slack block can already be trimmed.
+// The pack must tolerate holes below the read-relevant boundary (zero-fill)
+// and the restore must reproduce the live blocks byte-identically.
+TEST(KVCacheManagerTest, SwaSnapshotFinishPackToleratesTrimmedSlack) {
+    SKIP_IF_NO_CUDA();
+
+    const int bs = 16;
+    std::vector<int> nkv(2, 4), hd(2, 64);
+    std::vector<char> is_swa = {1, 0};
+    auto cache = std::make_unique<KVCache>(2, nkv, hd, QType::F16, 256, bs, nullptr, is_swa,
+                                           /*swa_max*/ 16);
+    KVCache* raw = cache.get();
+    KVCacheManager mgr(std::move(cache));
+    mgr.enable_swa_sizing(/*window*/ 2 * bs, /*slack*/ 17);  // slack NOT block-aligned
+    ASSERT_TRUE(mgr.enable_swa_snapshots());
+
+    // Live context 170 tokens (11-block table): live span starts at block
+    // (170-49)/16 = 7. The finish save packs at floor(170/16)*16 = 160,
+    // where first_live(160) = (160-49)/16 = 6 — slot 6 is a trimmed hole
+    // below the read boundary (160-32)/16 - 1 = 7.
+    ASSERT_TRUE(mgr.allocate_blocks(0, 11));
+    ASSERT_TRUE(mgr.swa_prepare(0, 170));
+    std::vector<int> swa0 = mgr.swa_block_table(0);
+    EXPECT_EQ(swa0[6], -1) << "slot 6 must be a hole for this scenario";
+    const size_t kvb = raw->block_bytes(0);
+    std::vector<char> pat(kvb);
+    for (int b = 7; b < 10; ++b) {
+        ASSERT_GE(swa0[b], 0);
+        std::fill(pat.begin(), pat.end(), static_cast<char>(0x40 + b));
+        ASSERT_EQ(cudaMemcpy(raw->k_ptr(0, swa0[b]), pat.data(), kvb, cudaMemcpyHostToDevice),
+                  cudaSuccess);
+    }
+    void* slab = nullptr;
+    ASSERT_EQ(cudaMalloc(&slab, mgr.swa_snapshot_bytes()), cudaSuccess);
+    ASSERT_TRUE(mgr.swa_snapshot_pack(0, 160, slab, nullptr));
+    ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+
+    ASSERT_TRUE(mgr.allocate_blocks(1, 10));
+    ASSERT_TRUE(mgr.swa_snapshot_restore(1, 160, slab, nullptr));
+    ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+    const auto& swa1 = mgr.swa_block_table(1);
+    std::vector<char> got(kvb);
+    // Tolerated slot restores as zeros (never read: below the window of any
+    // continuation query at >= 160).
+    ASSERT_GE(swa1[6], 0);
+    ASSERT_EQ(cudaMemcpy(got.data(), raw->k_ptr(0, swa1[6]), kvb, cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    EXPECT_EQ(got.front(), 0);
+    EXPECT_EQ(got.back(), 0);
+    for (int b = 7; b < 10; ++b) {
+        ASSERT_GE(swa1[b], 0);
+        ASSERT_EQ(cudaMemcpy(got.data(), raw->k_ptr(0, swa1[b]), kvb, cudaMemcpyDeviceToHost),
+                  cudaSuccess);
+        EXPECT_EQ(got.front(), static_cast<char>(0x40 + b));
+        EXPECT_EQ(got.back(), static_cast<char>(0x40 + b));
+    }
+    cudaFree(slab);
+    mgr.free_sequence(0);
+    mgr.free_sequence(1);
+}
+
 // Restore on an exhausted SWA group fails cleanly: partial allocations are
 // released and the caller can fall back to a full prefill.
 TEST(KVCacheManagerTest, SwaSnapshotRestoreExhaustionRollsBack) {

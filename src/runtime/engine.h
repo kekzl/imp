@@ -18,6 +18,7 @@
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
 #include "memory/recurrent_snapshot_store.h"
+#include <span>
 #include "memory/layer_offload.h"
 #include "memory/vram_allocator.h"
 #include "exec/executor.h"
@@ -991,6 +992,8 @@ private:
     int swa_prefix_reuse_limit_(Request& req);
     int snapshot_end_(const Request& req) const;  // hybrid or SWA save position, 0 = none
     void maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream);
+    void maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
+                                       cudaStream_t stream);
     void finish_request(std::shared_ptr<Request>& req);
 
     // ── step() sub-phases ─────────────────────────────────────────────

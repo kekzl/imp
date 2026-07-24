@@ -936,6 +936,24 @@ bool KVCacheManager::swa_snapshot_copy_(int seq_id, int upto_tokens, void* slab,
     if (it == seq_swa_blocks_.end() || static_cast<int>(it->second.size()) < end_b)
         return false;
     const auto& swa = it->second;
+    // Generation-end saves pack at the block-FLOOR of the live context, so
+    // the lowest slack blocks may already be trimmed. Restore-time queries
+    // at positions >= upto never read below floor((upto - window)/bs); keep
+    // one extra boundary block (the #963 floor/ceil lesson) and zero-fill
+    // tolerated holes below that — a masked position contributes exactly 0
+    // regardless of KV bytes, and zeros can never produce NaN scores.
+    const int needed_start =
+        std::max(first, (upto_tokens - swa_window_) / bs - 1);
+    bool zero_filled = false;
+    if (to_slab) {
+        for (int b = first; b < needed_start; ++b) {
+            if (swa[b] < 0) {
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(slab, 0, swa_snap_bytes_, stream));
+                zero_filled = true;
+                break;
+            }
+        }
+    }
     int n = 0;
     char* slab_c = static_cast<char*>(slab);
     for (size_t j = 0; j < swa_snap_layers_.size(); ++j) {
@@ -949,8 +967,11 @@ bool KVCacheManager::swa_snapshot_copy_(int seq_id, int upto_tokens, void* slab,
         char* vs_area = ks_area + static_cast<size_t>(swa_snap_win_blocks_) * scb;
         for (int i = 0; i < count; ++i) {
             const int id = swa[first + i];
-            if (id < 0)
-                return false;  // hole inside the live window — invariant broken
+            if (id < 0) {
+                if (to_slab && zero_filled && first + i < needed_start)
+                    continue;  // tolerated trimmed slack block — stays zero
+                return false;  // hole inside the read-relevant window
+            }
             auto put = [&](void* cache_ptr, char* area, size_t bytes) {
                 if (!bytes)
                     return;

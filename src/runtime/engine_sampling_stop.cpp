@@ -426,25 +426,41 @@ int Engine::snapshot_end_(const Request& req) const {
 }
 
 void Engine::maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream) {
-    if (!swa_snapshots_ || !swa_snapshots_->enabled() || !swa_snap_slab_ || snap_end <= 0)
+    (void)snap_end;  // recomputed from the span (block floor)
+    maybe_save_swa_snapshot_span_(req.id, std::span<const int32_t>(req.input_tokens), stream);
+}
+
+// Core save: snapshot the seq's live window at the block-floor of `tokens`.
+// Called at the prefill snapshot boundary (tokens = the prompt) and at
+// request finish (tokens = prompt + generated-minus-final, the same span
+// finish_request_release_ registers block hashes for) — the finish save is
+// what lets the NEXT agent turn reuse the whole previous transcript instead
+// of only up to the last prefill end.
+void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
+                                           cudaStream_t stream) {
+    if (!swa_snapshots_ || !swa_snapshots_->enabled() || !swa_snap_slab_)
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    const int snap_end = (static_cast<int>(tokens.size()) / bs) * bs;
+    if (snap_end <= 0)
+        return;
     size_t key = 0;
     for (int b = 0; b < snap_end / bs; ++b) {
-        key = KVCacheManager::compute_block_hash(
-            std::span<const int32_t>(req.input_tokens).subspan(static_cast<size_t>(b) * bs, bs), key);
+        key = KVCacheManager::compute_block_hash(tokens.subspan(static_cast<size_t>(b) * bs, bs),
+                                                 key);
     }
     if (swa_snapshots_->contains(key))
         return;  // identical prefix already snapshotted (e.g. it was just restored)
-    if (!kv_manager_->swa_snapshot_pack(req.id, snap_end, swa_snap_slab_, stream))
-        return;  // window not fully resident (shouldn't happen mid-prefill)
+    if (!kv_manager_->swa_snapshot_pack(seq_id, snap_end, swa_snap_slab_, stream))
+        return;  // read-relevant window not fully resident
     if (swa_snapshots_->save(key, snap_end, swa_snap_slab_, stream)) {
         // Same visibility rule as the recurrent save: the slab pack + store
         // copy must complete before decode (possibly on another stream)
-        // mutates the window blocks. One sync per prefill.
+        // mutates the window blocks — and at finish, before free_sequence
+        // recycles them. One sync per save.
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        IMP_LOG_DEBUG("SwaSnapshot: saved %d-token window for req %d (%d/%d slots)", snap_end,
-                      req.id, swa_snapshots_->size(), swa_snapshots_->capacity());
+        IMP_LOG_DEBUG("SwaSnapshot: saved %d-token window for seq %d (%d/%d slots)", snap_end,
+                      seq_id, swa_snapshots_->size(), swa_snapshots_->capacity());
     }
 }
 
