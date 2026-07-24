@@ -78,6 +78,17 @@ public:
     // Get max tokens to finish (force-close open structures near limit)
     int closing_tokens_needed() const { return static_cast<int>(state_stack_.size()); }
 
+    // Strict-simulate `text` from the current state without mutating it —
+    // true iff every char is a legal grammar continuation. Public for the
+    // FSM unit tests; apply_mask uses it for whole-token validation.
+    bool sim_token_valid(const std::string& text);
+
+    // Advance the FSM over raw text (tests use this to reach mid-document
+    // states; the decode path goes through update()).
+    void advance_text(const std::string& text) {
+        for (char c : text) advance_char(c);
+    }
+
     // Allow the model to emit a free-form preamble before strict JSON
     // enforcement starts. close_token>=0 enables close-token mode (reasoning
     // models with </think>); close_token<0 + max_tokens>0 enables budget-only
@@ -136,10 +147,6 @@ private:
 
     // Compute allowed category mask from current FSM state
     uint16_t compute_allowed_mask() const;
-
-    // Whole-token strict validation: snapshot the FSM, advance over the
-    // token text, restore. True iff every char is a legal continuation.
-    bool sim_token_valid(const std::string& text);
 
     // Advance FSM by one character
     bool advance_char(char c);

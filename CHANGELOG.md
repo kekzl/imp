@@ -61,6 +61,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   jump-ahead work as on the JSON dialect.
 
 ### Fixed
+- **Schema-less `json_object` FSM emitted structurally invalid JSON** (#1067):
+  every container close popped its own stack continuation but then resumed
+  in the *grandparent's* context, and number/literal ends popped without a
+  matching push — after a nested array closed inside an object the FSM
+  believed it was in an array, accepting `,"bare-string"` + `]]` (and
+  rejecting valid nested documents like `{"a":{"b":1},"c":2}`). Openers now
+  push their continuation and every close pops-and-uses it; covered by
+  `JsonConstrainFsmTest` and the degen_suite constrained category on
+  Qwen3-14B-NVFP4. json_schema mode (separate FSM) was never affected.
 - **Tool-call enforcement now derives from the post-load template**: the
   constraint was collected before `ensure_model_loaded`, so auto-load-on-
   first-request and cross-model requests baked a grammar from the previous

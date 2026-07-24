@@ -193,12 +193,18 @@ bool JsonConstrainer::advance_char(char c) {
     ws_run_ = 0;
 
     switch (current_state_) {
+        // Stack discipline: every opener pushes its CONTINUATION — the state
+        // the parser resumes in after the construct closes — and every close
+        // pops and *uses* it (empty stack -> DONE). The old code popped the
+        // continuation but then peeked the grandparent's entry instead, so a
+        // nested array closing inside an object left the FSM in array
+        // context, accepting `,"bare-string"` + `]]` (#1067).
         case JsonState::START:
+            // Root construct: continuation after it closes is DONE, which the
+            // empty-stack fallback in the close handlers provides — no push.
             if (c == '{') {
-                state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::OBJECT_START;
             } else if (c == '[') {
-                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::ARRAY_START;
             } else {
                 return false;
@@ -210,9 +216,9 @@ bool JsonConstrainer::advance_char(char c) {
                 current_state_ = JsonState::IN_STRING;
                 state_stack_.push_back(JsonState::AFTER_KEY);
             } else if (c == '}') {
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
             } else {
                 return false;
             }
@@ -227,11 +233,13 @@ bool JsonConstrainer::advance_char(char c) {
             break;
 
         case JsonState::AFTER_COLON:
+            // Every value form pushes AFTER_VALUE — scalars too: their end
+            // handlers pop the continuation, so a missing push here made
+            // them steal the enclosing container's entry.
             if (c == '"') {
                 state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::IN_STRING;
             } else if (c == '{') {
-                // Push the AFTER_VALUE to restore after nested object
                 state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::OBJECT_START;
             } else if (c == '[') {
@@ -240,16 +248,20 @@ bool JsonConstrainer::advance_char(char c) {
             } else if (c == 't') {
                 target_literal_ = "true";
                 partial_literal_ = "t";
+                state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::IN_LITERAL;
             } else if (c == 'f') {
                 target_literal_ = "false";
                 partial_literal_ = "f";
+                state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::IN_LITERAL;
             } else if (c == 'n') {
                 target_literal_ = "null";
                 partial_literal_ = "n";
+                state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::IN_LITERAL;
             } else if ((c >= '0' && c <= '9') || c == '-') {
+                state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::IN_NUMBER;
             } else {
                 return false;
@@ -261,9 +273,9 @@ bool JsonConstrainer::advance_char(char c) {
                 // Next key in object
                 current_state_ = JsonState::OBJECT_START;
             } else if (c == '}') {
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
             } else {
                 return false;
             }
@@ -271,9 +283,9 @@ bool JsonConstrainer::advance_char(char c) {
 
         case JsonState::ARRAY_START:
             if (c == ']') {
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
             } else if (c == '"') {
                 state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::IN_STRING;
@@ -286,16 +298,20 @@ bool JsonConstrainer::advance_char(char c) {
             } else if (c == 't') {
                 target_literal_ = "true";
                 partial_literal_ = "t";
+                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::IN_LITERAL;
             } else if (c == 'f') {
                 target_literal_ = "false";
                 partial_literal_ = "f";
+                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::IN_LITERAL;
             } else if (c == 'n') {
                 target_literal_ = "null";
                 partial_literal_ = "n";
+                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::IN_LITERAL;
             } else if ((c >= '0' && c <= '9') || c == '-') {
+                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::IN_NUMBER;
             } else {
                 return false;
@@ -306,9 +322,9 @@ bool JsonConstrainer::advance_char(char c) {
             if (c == ',') {
                 current_state_ = JsonState::ARRAY_START;
             } else if (c == ']') {
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
             } else {
                 return false;
             }
