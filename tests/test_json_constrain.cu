@@ -95,6 +95,54 @@ TEST(JsonConstrainTest, ClassifyNumbers) {
 }
 
 // ===========================================================================
+// FSM grammar tests (#1067) — a container close must restore the continuation
+// pushed at its matching opener. The old code popped it and *peeked the
+// grandparent's* continuation instead, so after `[..., {"k": [..]` the `]`
+// left the FSM in array context and it accepted `,"bare-string"` + `]]`.
+// ===========================================================================
+TEST(JsonConstrainFsmTest, Issue1067NestedArrayCloseKeepsObjectContext) {
+    JsonConstrainer c;
+    // Exact shape from the degen_suite repro: object inside array, whose last
+    // value is an array — then a dangling key and ']]' closing the '{'.
+    EXPECT_FALSE(c.sim_token_valid(
+        "[\"_classifications\",{\"sentiment\":\"positive\","
+        "\"topics\":[\"phone\",\"camera\"],\"score\"  ]]"));
+}
+
+TEST(JsonConstrainFsmTest, ValidNestedDocumentsAccepted) {
+    JsonConstrainer c;
+    EXPECT_TRUE(c.sim_token_valid("[\"a\",{\"k\":\"v\",\"t\":[\"x\",\"y\"],\"n\":1}]"));
+    EXPECT_TRUE(c.sim_token_valid("{\"a\":{\"b\":1},\"c\":2}"));
+    EXPECT_TRUE(c.sim_token_valid("{\"a\":[true,false,null],\"b\":{\"c\":[1,2.5e3]}}"));
+    EXPECT_TRUE(c.sim_token_valid("[[1,2],[3,4]]"));
+    EXPECT_TRUE(c.sim_token_valid("[{\"a\":1},{\"b\":2}]"));
+}
+
+TEST(JsonConstrainFsmTest, MismatchedClosersRejected) {
+    JsonConstrainer c;
+    EXPECT_FALSE(c.sim_token_valid("{\"a\":1]"));
+    EXPECT_FALSE(c.sim_token_valid("[1}"));
+    EXPECT_FALSE(c.sim_token_valid("[[1,2]]]"));
+    EXPECT_FALSE(c.sim_token_valid("{\"a\":{\"b\":1}}}"));
+}
+
+TEST(JsonConstrainFsmTest, TrailingContentAfterRootRejected) {
+    JsonConstrainer c;
+    EXPECT_FALSE(c.sim_token_valid("{\"a\":1}{"));
+    EXPECT_FALSE(c.sim_token_valid("[1] 2"));
+}
+
+TEST(JsonConstrainFsmTest, MidDocumentStateAfterNestedArrayClose) {
+    JsonConstrainer c;
+    c.advance_text("{\"t\":[1,2]");
+    // Back in the object after the nested array closed: ']' is illegal, a
+    // comma must be followed by a key (not a bare value).
+    EXPECT_FALSE(c.sim_token_valid("]"));
+    EXPECT_TRUE(c.sim_token_valid(",\"k\":3}"));
+    EXPECT_FALSE(c.sim_token_valid(",5"));
+}
+
+// ===========================================================================
 // Test 9: GPU mask kernel — constrain_mask_kernel masks invalid tokens
 // ===========================================================================
 TEST(JsonConstrainTest, MaskAllowsValidTokens) {
