@@ -28,6 +28,11 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   transcripts run 50-150K tokens; VRAM and the model's declared context
   still bound the auto pick, so this only extends models that declare (and
   can hold) more than 64K.
+- **`speculative.recycle_loop` auto-disables on GGUF-source models** (with a
+  log line): the bucket-4 verify chunk forward rides the dequant prefill
+  path there, so every verify pays source dequant — measured −9.5%
+  (Qwen3-8B-Q8) and −28.8% (Qwen3-14B-Q6K) vs spec-off, while the ST-NVFP4
+  route wins +38–97%. See issue #1060 for the flip-matrix data.
 
 ### Added
 - **SWA window snapshots (`kv_cache.swa_snapshot_mb`)**: prefix caching and

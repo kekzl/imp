@@ -47,6 +47,17 @@ bool Engine::try_launch_tr_verify_loop_(std::shared_ptr<Request>& req, cudaStrea
     if (tr_loop_doomed_ || !scfg.recycle_loop || !scfg.token_recycling ||
         !config_.use_cuda_graphs || !scfg.capture || mtp_spec_decode_enabled())
         return false;
+    // Native-ST-NVFP4 only: on GGUF-source models the bucket-4 verify chunk
+    // forward rides the dequant prefill path — every verify pays source
+    // dequant, and the loop regresses instead of winning (measured
+    // 2026-07-24: -9.5% Qwen3-8B-Q8, -28.8% Qwen3-14B-Q6K vs spec-off; the
+    // +38-97% wins are on the ST-NVFP4 small-M verify route, #1055).
+    if (!model_->config().is_nvfp4_prequant) {
+        tr_loop_doomed_ = true;
+        IMP_LOG_INFO("recycle_loop: disabled — GGUF-source model pays source dequant per "
+                     "verify chunk (see issue #1060, measured -9.5%%/-28.8%%)");
+        return false;
+    }
     if (tr_loop_runner_.launch_in_flight())
         return false;
     // v1 gates: greedy, no penalties / logit shaping / constraints / budget
