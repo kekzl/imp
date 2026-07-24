@@ -142,11 +142,14 @@ swa_sizing                  = auto
 # budget set, swa_sizing=auto no longer yields to prefix caching and the
 # server gets both: the KV savings AND warm-prefix reuse.
 # WHEN TO ENABLE (measured 2026-07-24, gemma-3-12b): cache-hit coverage is
-# identical to full-length-KV prefix caching, but each save/restore costs
-# ~50-90 ms warm TTFT per turn (window pack + store copy). Worth it for
-# LONG contexts (16K+), where windowed layers stop scaling with context and
-# VRAM headroom buys real reach; leave off for short-turn serving. 0 = off
-# (auto yields to prefix caching, on force-disables it).
+# identical to full-length-KV prefix caching, and the snapshot machinery
+# itself is ~free (~0.1 ms enqueue per save/restore, <=1 ms finish sync).
+# The tradeoff is the sized attention route: ~+50-100 ms warm TTFT per turn
+# at SHORT contexts (1-2K), but FASTER prefill at long ones (+8% at 13K,
+# growing with context as windowed layers stop scaling) plus the KV VRAM
+# savings. Enable for long-context workloads (~8K+); leave off for
+# short-turn serving. 0 = off (auto yields to prefix caching, on
+# force-disables it).
 swa_snapshot_mb             = 0
 
 [rope]

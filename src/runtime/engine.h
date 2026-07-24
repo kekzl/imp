@@ -993,7 +993,7 @@ private:
     int snapshot_end_(const Request& req) const;  // hybrid or SWA save position, 0 = none
     void maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream);
     void maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
-                                       cudaStream_t stream);
+                                       cudaStream_t stream, bool hard_sync);
     void finish_request(std::shared_ptr<Request>& req);
 
     // ── step() sub-phases ─────────────────────────────────────────────
