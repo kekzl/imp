@@ -427,7 +427,8 @@ int Engine::snapshot_end_(const Request& req) const {
 
 void Engine::maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream) {
     (void)snap_end;  // recomputed from the span (block floor)
-    maybe_save_swa_snapshot_span_(req.id, std::span<const int32_t>(req.input_tokens), stream);
+    maybe_save_swa_snapshot_span_(req.id, std::span<const int32_t>(req.input_tokens), stream,
+                                  /*hard_sync=*/false);
 }
 
 // Core save: snapshot the seq's live window at the block-floor of `tokens`.
@@ -437,7 +438,7 @@ void Engine::maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStre
 // what lets the NEXT agent turn reuse the whole previous transcript instead
 // of only up to the last prefill end.
 void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
-                                           cudaStream_t stream) {
+                                           cudaStream_t stream, bool hard_sync) {
     if (!swa_snapshots_ || !swa_snapshots_->enabled() || !swa_snap_slab_)
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
@@ -451,16 +452,37 @@ void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> 
     }
     if (swa_snapshots_->contains(key))
         return;  // identical prefix already snapshotted (e.g. it was just restored)
+    const auto t0 = std::chrono::steady_clock::now();
     if (!kv_manager_->swa_snapshot_pack(seq_id, snap_end, swa_snap_slab_, stream))
         return;  // read-relevant window not fully resident
     if (swa_snapshots_->save(key, snap_end, swa_snap_slab_, stream)) {
-        // Same visibility rule as the recurrent save: the slab pack + store
-        // copy must complete before decode (possibly on another stream)
-        // mutates the window blocks — and at finish, before free_sequence
-        // recycles them. One sync per save.
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        IMP_LOG_DEBUG("SwaSnapshot: saved %d-token window for seq %d (%d/%d slots)", snap_end,
-                      seq_id, swa_snapshots_->size(), swa_snapshots_->capacity());
+        const auto t1 = std::chrono::steady_clock::now();
+        // Sync policy (measured 2026-07-24: the prefill-boundary sync waited
+        // ~50 ms on in-flight prefill compute and was the entire warm-TTFT
+        // cost of the feature; enqueue is ~0.1 ms):
+        //  - prefill-boundary save (hard_sync=false): NO sync needed. SWA
+        //    blocks are private to this sequence; the only later writers are
+        //    this request's own later chunks (same stream, ordered) and its
+        //    decode steps — which start only after the host read the first
+        //    sampled token via a D2H on this same stream, enqueued after the
+        //    pack. Stream order + host causality make the pack complete
+        //    before any writer can touch the window. Store-buffer recycling
+        //    is stream-ordered too (all snapshot copies ride pf_stream).
+        //  - finish save (hard_sync=true): free_sequence recycles the window
+        //    blocks immediately after we return; a third request already in
+        //    decode can grab and write them on ANOTHER stream with no
+        //    ordering against the pack. Sync — measured ~1 ms (idle stream).
+        if (hard_sync)
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+        const auto t2 = std::chrono::steady_clock::now();
+        // Permanent telemetry (ms/verify precedent): one line per save —
+        // rare (<= 2 per request) and the only way to attribute warm-TTFT
+        // cost between the enqueue half and the sync half.
+        IMP_LOG_INFO("SwaSnapshot: saved %d-token window for seq %d (%d/%d slots, "
+                     "enqueue %.2f ms + sync %.2f ms)",
+                     snap_end, seq_id, swa_snapshots_->size(), swa_snapshots_->capacity(),
+                     std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                     std::chrono::duration<double, std::milli>(t2 - t1).count());
     }
 }
 

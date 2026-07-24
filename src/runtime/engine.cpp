@@ -528,8 +528,10 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             // SWA window snapshot over the SAME span: without it the hashed
             // generated blocks are unusable under SWA sizing (the next turn's
             // reuse limit stops at the last snapshot boundary — the prefill
-            // end). Must run before free_sequence recycles the window blocks.
-            maybe_save_swa_snapshot_span_(req->id, forwarded, stream_);
+            // end). Must run before free_sequence recycles the window blocks;
+            // hard_sync because those blocks are re-allocatable the moment
+            // free_sequence returns (writers on other streams).
+            maybe_save_swa_snapshot_span_(req->id, forwarded, stream_, /*hard_sync=*/true);
         } else {
             kv_manager_->register_block_hashes(req->id, req->input_tokens);
         }

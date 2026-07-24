@@ -40,8 +40,12 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   previous transcript (generated tokens included) — measured on a growing
   6-turn transcript: cache-hit coverage identical to full-length-KV prefix
   caching. Opt-in budget in MiB, default 0 (kept opt-in by measurement: the
-  pack/copy path costs ~50-90 ms warm TTFT per turn, which only pays for
-  itself at 16K+ contexts where the windowed-KV savings buy real reach).
+  snapshot machinery is ~free — ~0.1 ms enqueue, and the prefill-boundary
+  save needs no stream sync at all (SWA blocks are sequence-private; the
+  first-token D2H orders every later writer behind the pack) — but the
+  sized attention route trades ~+50-100 ms warm TTFT per turn at 1-2K
+  contexts for faster prefill at long ones (+8% at 13K) plus the KV
+  savings; per-save/restore ms telemetry logs at INFO).
 - **Qwen-Coder XML tool-call grammar**: `tool_choice=required`/forced and
   `strict:true` on templates teaching the `<function=NAME>`/`<parameter=KEY>`
   raw-text dialect (Qwen3-Coder, Qwen3.6) are now enforced by a dedicated

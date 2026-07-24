@@ -777,6 +777,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // prefix is unusable (windowed layers would attend holes) — treat a
         // failed restore like a swa_prepare failure below.
         if (req->swa_restore && offset > 0 && offset == req->cached_tokens) {
+            const auto rt0 = std::chrono::steady_clock::now();
             const auto& entry = *req->swa_restore;
             const bool ok = entry.data && entry.n_tokens == offset && swa_snapshots_ &&
                             swa_snapshots_->entry_bytes() == kv_manager_->swa_snapshot_bytes() &&
@@ -790,7 +791,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 req->status = RequestStatus::CANCELLED;
                 return;
             }
-            IMP_LOG_DEBUG("SwaSnapshot: restored %d-token window for req %d", offset, req->id);
+            IMP_LOG_INFO("SwaSnapshot: restored %d-token window for req %d (enqueue %.2f ms)",
+                         offset, req->id,
+                         std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - rt0)
+                             .count());
         }
         kv_manager_->swa_trim(req->id, offset);
         if (!kv_manager_->swa_prepare(req->id, offset, ctx_len)) {
