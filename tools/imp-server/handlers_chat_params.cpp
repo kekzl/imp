@@ -120,7 +120,17 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
 
     ctx.params.min_p = body.value("min_p", 0.0f);
     ctx.params.typical_p = body.value("typical_p", 1.0f);
-    ctx.params.repetition_penalty = body.value("repetition_penalty", 1.05f);
+    // recycle_loop opt-in (#1060 server penalty story): the mild 1.05
+    // anti-repetition default would gate the verify loop off for every
+    // request that never asked for penalties — the operator's explicit
+    // speculative.recycle_loop opt-in wins over the implicit default.
+    // Explicit repetition_penalty values (and the harmony-channel override
+    // below, gpt-oss is MoE-excluded from the loop anyway) still apply.
+    const float default_rep_pen = (state.runtime_config.speculative.recycle_loop &&
+                                   state.runtime_config.speculative.token_recycling)
+                                      ? 1.0f
+                                      : 1.05f;
+    ctx.params.repetition_penalty = body.value("repetition_penalty", default_rep_pen);
     ctx.params.frequency_penalty = body.value("frequency_penalty", 0.0f);
     ctx.params.presence_penalty = body.value("presence_penalty", 0.0f);
     ctx.params.repeat_last_n = body.value("repeat_last_n", 0);

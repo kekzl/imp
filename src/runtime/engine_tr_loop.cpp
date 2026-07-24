@@ -23,9 +23,11 @@
 #include "runtime/engine.h"
 #include "runtime/request.h"
 #include "compute/rowwise_topm.h"
+#include "runtime/think_stop_logic.h"
 
 #include <cuda_runtime.h>
 #include <chrono>
+#include <climits>
 #include <thread>
 #include <vector>
 
@@ -60,15 +62,37 @@ bool Engine::try_launch_tr_verify_loop_(std::shared_ptr<Request>& req, cudaStrea
     }
     if (tr_loop_runner_.launch_in_flight())
         return false;
-    // v1 gates: greedy, no penalties / logit shaping / constraints / budget
-    // forcing — the in-loop argmax is penalty-free by construction.
+    // v1 gates: greedy, no penalties / logit shaping / constraints — the
+    // in-loop argmax is penalty-free by construction.
     const bool greedy = req->temperature <= 0.0f || req->top_k == 1;
     if (!greedy || req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
         req->presence_penalty != 0.0f || req->dry_multiplier != 0.0f || req->mirostat != 0 ||
         !req->logit_bias.empty() || req->logprobs || req->json_mode ||
-        !req->json_schema.empty() || !req->tool_constraint_tools.empty() || req->constraints ||
-        req->think_budget > 0.0f)
+        !req->json_schema.empty() || !req->tool_constraint_tools.empty() || req->constraints)
         return false;
+    // Think budget (design: "no think-budget-IN-think"): forcing injects a
+    // host-side think-end exactly at the budget boundary, which the
+    // autonomous loop cannot do. Instead of gating the whole request, cap
+    // the burst so the loop exits AT the boundary — the host recount then
+    // forces on the drained tokens. Out of think (or budget spent →
+    // decline), forcing cannot fire and the loop runs uncapped. The server
+    // default think_budget=0.5 previously kept the loop off for every
+    // server request (#1060 server story).
+    int think_cap = INT_MAX;
+    if (req->think_budget > 0.0f && think_end_id_ >= 0) {
+        bool thinking = false;
+        const int n_reason = think_logic::count_reasoning_tokens(
+            req->output_tokens, think_start_id_, think_end_id_, req->started_in_think, thinking);
+        if (thinking) {
+            const int frac_limit = static_cast<int>(req->max_tokens * req->think_budget);
+            const int reserve_limit =
+                static_cast<int>(req->max_tokens) - think_logic::kMaxAnswerReserve;
+            const int think_limit = frac_limit > reserve_limit ? frac_limit : reserve_limit;
+            think_cap = think_limit - n_reason;
+            if (think_cap <= 0)
+                return false;  // forcing is due now — the host path handles it
+        }
+    }
     // Dense decode-attn route only (the per-row block tables are the
     // mask-free multi-row mechanism the chunk forward relies on).
     if (!scfg.verify_decode_attn || ssm_state_ != nullptr || model_->profile().is_moe ||
@@ -93,6 +117,8 @@ bool Engine::try_launch_tr_verify_loop_(std::shared_ptr<Request>& req, cudaStrea
     int token_limit = remaining;
     if (scfg.burst > 0 && token_limit > scfg.burst)
         token_limit = scfg.burst;
+    if (token_limit > think_cap)
+        token_limit = think_cap;
     if (token_limit < 8)
         return false;  // not worth a launch
 
