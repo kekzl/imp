@@ -135,9 +135,11 @@ bool Engine::init_kv_cache() {
             off_reason = "green contexts (cross-stream block reuse unordered)";
         else if (runtime_config_.runtime.deterministic)
             off_reason = "deterministic mode (unbounded graph loop would be burst-chunked)";
-        else if (swa_mode == SwaSizingMode::Auto && config_.use_prefix_caching)
+        else if (swa_mode == SwaSizingMode::Auto && config_.use_prefix_caching &&
+                 runtime_config_.kv_cache.swa_snapshot_mb <= 0)
             off_reason = "auto mode yields to prefix caching (freed window blocks cannot back "
-                         "prefix reuse; set kv_cache.swa_sizing=on to force the KV savings)";
+                         "prefix reuse; set kv_cache.swa_snapshot_mb to combine, or "
+                         "kv_cache.swa_sizing=on to force the KV savings)";
         if (off_reason) {
             IMP_LOG_INFO("kv_cache.swa_sizing=%s ignored: %s",
                          runtime_config_.kv_cache.swa_sizing.c_str(), off_reason);
@@ -158,14 +160,16 @@ bool Engine::init_kv_cache() {
                                  ? runtime_config_.runtime.decode_burst
                                  : 512;
             swa_burst_cap_tokens_ = std::max(chunk_peak, burst_peak);
-            // Prefix caching cannot reuse freed window blocks. Auto mode
-            // yielded above, so only an explicit "on" reaches this point —
-            // honor the forced opt-in by disabling prefix caching
-            // (snapshot-based SWA reuse is a follow-up).
-            if (config_.use_prefix_caching) {
+            // Prefix caching cannot reuse freed window blocks on its own.
+            // With a SWA snapshot budget the two coexist (the store below
+            // restores the window at the reuse boundary); without one, only
+            // an explicit "on" reaches this point — honor the forced opt-in
+            // by disabling prefix caching.
+            if (config_.use_prefix_caching && runtime_config_.kv_cache.swa_snapshot_mb <= 0) {
                 config_.use_prefix_caching = false;
                 IMP_LOG_INFO("kv_cache.swa_sizing=on: prefix caching disabled (freed window "
-                             "blocks cannot back prefix reuse)");
+                             "blocks cannot back prefix reuse; set kv_cache.swa_snapshot_mb "
+                             "to combine)");
             }
             // StreamingLLM auto-enable frees middle blocks of the GLOBAL
             // table — redundant and conflicting here.
@@ -332,6 +336,41 @@ bool Engine::init_kv_cache() {
                     "server.recurrent_snapshot_mb=%d)",
                     budget_mb);
             }
+        }
+    }
+
+    // SWA window snapshots (kv_cache.swa_snapshot_mb): under SWA sizing,
+    // global-layer KV blocks alone cannot back a prefix-cache hit — the
+    // windowed layers' earlier blocks were trailing-freed, so the reused
+    // prefix would leave their window as holes. The store keeps the packed
+    // window at each prefill-end prefix hash and restores it at admission.
+    // Without a working store the coexistence the gate allowed is invalid —
+    // fall back to prefix caching off (mirrors the hybrid rule above).
+    if (swa_sizing_active_ && kv_manager_->prefix_caching_enabled()) {
+        const int budget_mb = runtime_config_.kv_cache.swa_snapshot_mb;
+        if (budget_mb > 0 && kv_manager_->enable_swa_snapshots()) {
+            const size_t slab_bytes = kv_manager_->swa_snapshot_bytes();
+            if (cudaMalloc(&swa_snap_slab_, slab_bytes) == cudaSuccess) {
+                swa_snapshots_ = std::make_unique<RecurrentSnapshotStore>();
+                swa_snapshots_->init(slab_bytes, static_cast<size_t>(budget_mb) << 20);
+                if (swa_snapshots_->enabled()) {
+                    scheduler_->set_prefix_reuse_limit(
+                        [this](Request& r) { return swa_prefix_reuse_limit_(r); });
+                    IMP_LOG_INFO("SWA snapshots: %d MiB budget, %zu KiB/snapshot, capacity %d",
+                                 budget_mb, slab_bytes >> 10, swa_snapshots_->capacity());
+                } else {
+                    swa_snapshots_.reset();
+                    IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));
+                    swa_snap_slab_ = nullptr;
+                }
+            }
+        }
+        if (!swa_snapshots_) {
+            kv_manager_->set_prefix_caching_enabled(false);
+            config_.use_prefix_caching = false;
+            IMP_LOG_INFO("Prefix caching disabled under SWA sizing (snapshot store off — "
+                         "kv_cache.swa_snapshot_mb=%d)",
+                         budget_mb);
         }
     }
 

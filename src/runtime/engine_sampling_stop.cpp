@@ -380,5 +380,73 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
     }
 }
 
+// ─── SWA window snapshots (prefix caching under SWA sizing) ─────────────
+//
+// Same admission/save pattern as the hybrid pair above, but the restorable
+// state is the packed windowed-layer KV (the trailing window at the reuse
+// boundary) instead of a recurrent slab. Hybrid models are excluded from
+// SWA sizing, so at most one of the two snapshot stores is live.
+
+int Engine::swa_prefix_reuse_limit_(Request& req) {
+    req.swa_restore.reset();
+    if (!swa_snapshots_ || !swa_snapshots_->enabled())
+        return 0;
+    // Restoring means starting prefill at offset > 0 — a chunked continuation.
+    if (!supports_chunked_prefill_())
+        return 0;
+    if (req.vision_emb || req.image || vision_.has_input())
+        return 0;
+    const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    const int total = static_cast<int>(req.input_tokens.size());
+    std::vector<size_t> hashes;
+    int cached = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes);
+    // At least one token must remain to forward (the model needs logits).
+    int max_b = std::min(cached, (total - 1) / bs);
+    for (int b = max_b; b >= 1; --b) {
+        auto entry = swa_snapshots_->find(hashes[b - 1]);
+        if (entry && entry->n_tokens == b * bs) {
+            req.swa_restore = std::move(entry);
+            return b;
+        }
+    }
+    return 0;
+}
+
+int Engine::snapshot_end_(const Request& req) const {
+    if (ssm_state_)
+        return hybrid_snapshot_end_(req);
+    if (!swa_snapshots_ || !swa_snapshots_->enabled())
+        return 0;
+    if (!supports_chunked_prefill_())
+        return 0;
+    if (req.vision_emb || req.image || vision_.has_input())
+        return 0;
+    const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    return (static_cast<int>(req.input_tokens.size()) / bs) * bs;
+}
+
+void Engine::maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream) {
+    if (!swa_snapshots_ || !swa_snapshots_->enabled() || !swa_snap_slab_ || snap_end <= 0)
+        return;
+    const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    size_t key = 0;
+    for (int b = 0; b < snap_end / bs; ++b) {
+        key = KVCacheManager::compute_block_hash(
+            std::span<const int32_t>(req.input_tokens).subspan(static_cast<size_t>(b) * bs, bs), key);
+    }
+    if (swa_snapshots_->contains(key))
+        return;  // identical prefix already snapshotted (e.g. it was just restored)
+    if (!kv_manager_->swa_snapshot_pack(req.id, snap_end, swa_snap_slab_, stream))
+        return;  // window not fully resident (shouldn't happen mid-prefill)
+    if (swa_snapshots_->save(key, snap_end, swa_snap_slab_, stream)) {
+        // Same visibility rule as the recurrent save: the slab pack + store
+        // copy must complete before decode (possibly on another stream)
+        // mutates the window blocks. One sync per prefill.
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+        IMP_LOG_DEBUG("SwaSnapshot: saved %d-token window for req %d (%d/%d slots)", snap_end,
+                      req.id, swa_snapshots_->size(), swa_snapshots_->capacity());
+    }
+}
+
 
 }  // namespace imp

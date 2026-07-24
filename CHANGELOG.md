@@ -30,6 +30,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   can hold) more than 64K.
 
 ### Added
+- **SWA window snapshots (`kv_cache.swa_snapshot_mb`)**: prefix caching and
+  SWA-aware KV sizing now combine — the engine packs each prefill-end
+  window of the sliding-window layers into a device LRU store (same pattern
+  as the hybrid recurrent-state snapshots) and restores it at admission on
+  a prefix-cache hit, so warm multi-turn reuse works with the windowed-KV
+  savings. Opt-in budget in MiB (0 = off: `swa_sizing=auto` keeps yielding
+  to prefix caching). Reuse is capped at snapshot boundaries (one per
+  prefill end).
 - **Qwen-Coder XML tool-call grammar**: `tool_choice=required`/forced and
   `strict:true` on templates teaching the `<function=NAME>`/`<parameter=KEY>`
   raw-text dialect (Qwen3-Coder, Qwen3.6) are now enforced by a dedicated

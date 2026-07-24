@@ -748,12 +748,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         is_last_chunk = false;
     }
 
-    // Recurrent-state snapshot boundary (hybrid prefix caching): end a chunk
+    // Snapshot boundary (hybrid recurrent state / SWA window): end a chunk
     // exactly at the largest block-aligned prompt position so the state there
     // can be captured — the snapshot is only restorable where reused KV
     // blocks cover the whole prefix, and only full blocks are cacheable. The
     // extra tail chunk is at most block_size-1 tokens.
-    const int snap_end = hybrid_snapshot_end_(*req);
+    const int snap_end = snapshot_end_(*req);
     if (snap_end > offset && snap_end < offset + chunk_len) {
         chunk_len = snap_end - offset;
         is_last_chunk = false;
@@ -771,6 +771,27 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // the window its queries/continuation-gathers read back into. Trimming of
     // blocks that fell out of the window happens after the chunk commits.
     if (swa_sizing_active_) {
+        // SWA snapshot restore (prefix-cache hit): fill the window blocks at
+        // exactly the reused-prefix boundary BEFORE the continuation chunk's
+        // gathers read them. Without the restored window the reused global
+        // prefix is unusable (windowed layers would attend holes) — treat a
+        // failed restore like a swa_prepare failure below.
+        if (req->swa_restore && offset > 0 && offset == req->cached_tokens) {
+            const auto& entry = *req->swa_restore;
+            const bool ok = entry.data && entry.n_tokens == offset && swa_snapshots_ &&
+                            swa_snapshots_->entry_bytes() == kv_manager_->swa_snapshot_bytes() &&
+                            kv_manager_->swa_snapshot_restore(req->id, offset, entry.data,
+                                                              pf_stream);
+            req->swa_restore.reset();
+            if (!ok) {
+                IMP_LOG_WARN("SwaSnapshot: restore failed for req %d at %d tokens — cancelling",
+                             req->id, offset);
+                kv_manager_->free_sequence(req->id);
+                req->status = RequestStatus::CANCELLED;
+                return;
+            }
+            IMP_LOG_DEBUG("SwaSnapshot: restored %d-token window for req %d", offset, req->id);
+        }
         kv_manager_->swa_trim(req->id, offset);
         if (!kv_manager_->swa_prepare(req->id, offset, ctx_len)) {
             kv_manager_->free_sequence(req->id);
@@ -947,9 +968,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         IMP_LOG_DEBUG("Chunked prefill: req %d chunk [%d, %d) of %d", req->id, offset, offset + chunk_len,
                       total_input);
         // The chunk ended exactly at the snapshot boundary — capture the
-        // recurrent state now, before the next chunk advances it.
-        if (snap_end > 0 && req->prefill_offset == snap_end)
+        // recurrent state / SWA window now, before the next chunk advances it.
+        if (snap_end > 0 && req->prefill_offset == snap_end) {
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
+            maybe_save_swa_snapshot_(*req, snap_end, pf_stream);
+        }
     } else if (req->embedding_request) {
         // Embedding request (#1005): last chunk — forward, pool, finish.
         // No sampling, no DECODING transition; the request rides the normal
@@ -1034,9 +1057,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
 
         // Block-aligned prompt: the snapshot boundary coincides with the last
         // chunk's end — capture after the forward (the sampling above only
-        // reads logits, never the recurrent state).
-        if (snap_end == total_input)
+        // reads logits, never the recurrent state; the SWA window blocks are
+        // not mutated until the first decode step).
+        if (snap_end == total_input) {
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
+            maybe_save_swa_snapshot_(*req, snap_end, pf_stream);
+        }
 
         if (req->mirostat == 2)
             req->mirostat_mu = state.mirostat_mu;

@@ -130,6 +130,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("kv_cache.bitdecoding_residual_tokens", cfg.kv_cache.bitdecoding_residual_tokens);
     B("kv_cache.bitdecoding_qk", cfg.kv_cache.bitdecoding_qk);
     S("kv_cache.swa_sizing", cfg.kv_cache.swa_sizing);
+    I("kv_cache.swa_snapshot_mb", cfg.kv_cache.swa_snapshot_mb);
 
     // [rope]
     S("rope.scaling", cfg.rope.scaling);

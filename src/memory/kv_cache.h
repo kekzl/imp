@@ -78,12 +78,27 @@ public:
     static constexpr int kCopyMaxPairs = 16;
     void copy_blocks_device(const int* srcs, const int* dsts, int n_pairs, cudaStream_t stream);
 
+    // Generic batched D2D copy: one kernel launch executes n independent
+    // {src, dst, bytes} copies (SWA window snapshot pack/restore). Descs must
+    // be device-resident; 16-byte-aligned fast path, byte fallback otherwise.
+    struct CopyDesc {
+        const void* src;
+        void* dst;
+        size_t bytes;
+    };
+    static void batched_copy_device(const CopyDesc* d_descs, int n, cudaStream_t stream);
+
     // Capacity queries
     int num_free_blocks() const;
     int total_blocks() const;
 
     // Accessors
     size_t block_bytes() const;
+    // Per-layer block bytes (per-layer ctor); falls back to the scalar.
+    size_t block_bytes(int layer) const {
+        return layer_block_bytes_.empty() ? block_bytes_
+                                          : layer_block_bytes_[static_cast<size_t>(layer)];
+    }
     int block_size() const { return block_size_; }
     int n_layers() const;
     int n_kv_heads() const;

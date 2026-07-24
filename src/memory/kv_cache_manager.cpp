@@ -43,6 +43,14 @@ void KVCacheManager::rollback_partial_allocation(int seq_id, std::vector<int>& b
 KVCacheManager::KVCacheManager(std::unique_ptr<KVCache> cache) : cache_(std::move(cache)) {}
 
 KVCacheManager::~KVCacheManager() {
+    if (h_swa_descs_) {
+        cudaFreeHost(h_swa_descs_);
+        h_swa_descs_ = nullptr;
+    }
+    if (d_swa_descs_) {
+        cudaFree(d_swa_descs_);
+        d_swa_descs_ = nullptr;
+    }
     if (residual_pool_ && residual_alloc_) {
         residual_alloc_->free(residual_pool_);
         residual_pool_ = nullptr;
@@ -857,6 +865,173 @@ const std::vector<int>& KVCacheManager::swa_block_table(int seq_id) const {
     if (it == seq_swa_blocks_.end())
         return empty;
     return it->second;
+}
+
+// ─── SWA window snapshots (prefix caching for SWA-sized models) ──────
+
+bool KVCacheManager::enable_swa_snapshots() {
+    if (swa_window_ <= 0 || !cache_->swa_enabled())
+        return false;
+    if (swa_snap_bytes_ > 0)
+        return true;  // already enabled
+    const int bs = cache_->block_size();
+    swa_snap_layers_.clear();
+    for (int l = 0; l < cache_->n_layers(); ++l)
+        if (cache_->layer_is_swa(l))
+            swa_snap_layers_.push_back(l);
+    if (swa_snap_layers_.empty())
+        return false;
+    // Max live blocks per layer at any block-aligned position: the trailing
+    // window plus slack, ceil-aligned, plus the partial boundary block.
+    swa_snap_win_blocks_ = (swa_window_ + swa_slack_ + bs - 1) / bs + 1;
+    // Slab layout per dense layer j: [K slots][V slots][K scale][V scale],
+    // each region swa_snap_win_blocks_ entries of the layer's byte sizes.
+    swa_snap_layer_off_.clear();
+    size_t off = 0;
+    for (int l : swa_snap_layers_) {
+        swa_snap_layer_off_.push_back(off);
+        const size_t kvb = cache_->block_bytes(l);
+        const size_t scb = cache_->k_scale_ptr(l, 0) ? cache_->scale_block_bytes(l) : 0;
+        off += static_cast<size_t>(swa_snap_win_blocks_) * 2 * (kvb + scb);
+    }
+    swa_snap_bytes_ = off;
+    const int cap =
+        static_cast<int>(swa_snap_layers_.size()) * swa_snap_win_blocks_ * 4;
+    if (cudaMallocHost(reinterpret_cast<void**>(&h_swa_descs_),
+                       static_cast<size_t>(cap) * sizeof(KVCache::CopyDesc)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_swa_descs_),
+                   static_cast<size_t>(cap) * sizeof(KVCache::CopyDesc)) != cudaSuccess) {
+        IMP_LOG_WARN("KVCacheManager: SWA snapshot desc alloc failed — snapshots disabled");
+        if (h_swa_descs_) {
+            cudaFreeHost(h_swa_descs_);
+            h_swa_descs_ = nullptr;
+        }
+        swa_snap_bytes_ = 0;
+        return false;
+    }
+    swa_desc_cap_ = cap;
+    IMP_LOG_INFO("KVCacheManager: SWA snapshots enabled (%zu KiB/snapshot, %d layers x %d blocks)",
+                 swa_snap_bytes_ >> 10, static_cast<int>(swa_snap_layers_.size()),
+                 swa_snap_win_blocks_);
+    return true;
+}
+
+int KVCacheManager::swa_first_live_block(int upto_tokens) const {
+    const int bs = cache_->block_size();
+    const long long dead = static_cast<long long>(upto_tokens) - swa_window_ - swa_slack_;
+    return dead > 0 ? static_cast<int>(dead / bs) : 0;
+}
+
+bool KVCacheManager::swa_snapshot_copy_(int seq_id, int upto_tokens, void* slab, bool to_slab,
+                                        cudaStream_t stream) {
+    const int bs = cache_->block_size();
+    if (upto_tokens <= 0 || upto_tokens % bs != 0)
+        return false;
+    const int end_b = upto_tokens / bs;
+    const int first = swa_first_live_block(upto_tokens);
+    const int count = end_b - first;
+    if (count <= 0 || count > swa_snap_win_blocks_)
+        return false;
+    auto it = seq_swa_blocks_.find(seq_id);
+    if (it == seq_swa_blocks_.end() || static_cast<int>(it->second.size()) < end_b)
+        return false;
+    const auto& swa = it->second;
+    int n = 0;
+    char* slab_c = static_cast<char*>(slab);
+    for (size_t j = 0; j < swa_snap_layers_.size(); ++j) {
+        const int l = swa_snap_layers_[j];
+        const size_t kvb = cache_->block_bytes(l);
+        const size_t scb = cache_->k_scale_ptr(l, 0) ? cache_->scale_block_bytes(l) : 0;
+        char* base = slab_c + swa_snap_layer_off_[j];
+        char* k_area = base;
+        char* v_area = base + static_cast<size_t>(swa_snap_win_blocks_) * kvb;
+        char* ks_area = v_area + static_cast<size_t>(swa_snap_win_blocks_) * kvb;
+        char* vs_area = ks_area + static_cast<size_t>(swa_snap_win_blocks_) * scb;
+        for (int i = 0; i < count; ++i) {
+            const int id = swa[first + i];
+            if (id < 0)
+                return false;  // hole inside the live window — invariant broken
+            auto put = [&](void* cache_ptr, char* area, size_t bytes) {
+                if (!bytes)
+                    return;
+                KVCache::CopyDesc& d = h_swa_descs_[n++];
+                char* slab_ptr = area + static_cast<size_t>(i) * bytes;
+                d.src = to_slab ? cache_ptr : static_cast<void*>(slab_ptr);
+                d.dst = to_slab ? static_cast<void*>(slab_ptr) : cache_ptr;
+                d.bytes = bytes;
+            };
+            put(cache_->k_ptr(l, id), k_area, kvb);
+            put(cache_->v_ptr(l, id), v_area, kvb);
+            if (scb) {
+                put(cache_->k_scale_ptr(l, id), ks_area, scb);
+                put(cache_->v_scale_ptr(l, id), vs_area, scb);
+            }
+        }
+    }
+    if (n == 0 || n > swa_desc_cap_)
+        return false;
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_swa_descs_, h_swa_descs_,
+                                       static_cast<size_t>(n) * sizeof(KVCache::CopyDesc),
+                                       cudaMemcpyHostToDevice, stream));
+    KVCache::batched_copy_device(d_swa_descs_, n, stream);
+    return true;
+}
+
+bool KVCacheManager::swa_snapshot_pack(int seq_id, int upto_tokens, void* slab,
+                                       cudaStream_t stream) {
+    if (swa_snap_bytes_ == 0 || !slab)
+        return false;
+    return swa_snapshot_copy_(seq_id, upto_tokens, slab, /*to_slab=*/true, stream);
+}
+
+bool KVCacheManager::swa_snapshot_restore(int seq_id, int upto_tokens, const void* slab,
+                                          cudaStream_t stream) {
+    if (swa_snap_bytes_ == 0 || !slab)
+        return false;
+    const int bs = cache_->block_size();
+    if (upto_tokens <= 0 || upto_tokens % bs != 0)
+        return false;
+    const int end_b = upto_tokens / bs;
+    auto git = seq_blocks_.find(seq_id);
+    if (git == seq_blocks_.end() || static_cast<int>(git->second.size()) < end_b)
+        return false;
+    auto& swa = seq_swa_blocks_[seq_id];
+    if (swa.size() < git->second.size())
+        swa.resize(git->second.size(), -1);
+    const int first = swa_first_live_block(upto_tokens);
+    std::vector<int> fresh;
+    fresh.reserve(static_cast<size_t>(end_b - first));
+    for (int b = first; b < end_b; ++b) {
+        if (swa[b] >= 0)
+            continue;  // already prepared (shouldn't happen on a fresh seq)
+        int id = cache_->allocate_swa_block();
+        if (id < 0) {
+            for (int f : fresh)
+                cache_->free_swa_block(f);
+            for (int b2 = first; b2 < end_b; ++b2)
+                if (std::find(fresh.begin(), fresh.end(), swa[b2]) != fresh.end())
+                    swa[b2] = -1;
+            IMP_LOG_WARN("KVCacheManager: SWA snapshot restore failed (group exhausted) — "
+                         "seq %d falls back to full prefill",
+                         seq_id);
+            return false;
+        }
+        swa[b] = id;
+        fresh.push_back(id);
+    }
+    int& cursor = swa_trim_cursor_[seq_id];
+    cursor = std::max(cursor, first);
+    if (!swa_snapshot_copy_(seq_id, upto_tokens, const_cast<void*>(slab), /*to_slab=*/false,
+                            stream)) {
+        for (int b = first; b < end_b; ++b) {
+            if (swa[b] >= 0 && std::find(fresh.begin(), fresh.end(), swa[b]) != fresh.end()) {
+                cache_->free_swa_block(swa[b]);
+                swa[b] = -1;
+            }
+        }
+        return false;
+    }
+    return true;
 }
 
 // ─── Speculative decoding rollback ───────────────────────────────────
