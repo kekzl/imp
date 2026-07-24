@@ -200,6 +200,18 @@ The Qwen3-8B defaults cell was re-measured 2026-07-12 on `f3c228a0` after
 | Qwen3.6-35B-A3B | NVFP4 | 14 887 | **264.3** | IMA crash (#963/#967), then 72.7 streaming (#969) |
 | Qwen3.6-35B-A3B | Q4_K_M (GGUF) | 9 436 (pp16384) | **234.2** | 69.6 under streaming + silent OOB reads (#967/#969) |
 
+**128K single-chunk prefill reference** (2026-07-24, commit `d8bc45a8`, CUDA
+13.3, healthy-host clocks sampled during the run — 13 801 MHz mem / ~575 W):
+Qwen3-14B **NVFP4** `pp131072 = 3 792 tok/s` (34.6 s TTFT), command
+`imp-cli --model Qwen3-14B-NVFP4 --bench --bench-pp 131072 --bench-reps 5
+--prefill-chunk-size 0 --max-tokens 1 --temperature 0 --max-seq-len 140000`.
+The auto `max_seq_len` ceiling is 128K since `d8bc45a8`. The Q6_K GGUF
+north-star model cannot host this measurement on 32 GB (its KV pool tops out
+near 75K tokens beside the dual GGUF+NVFP4 weight residency), which is why
+the CI TTFT gate band in `tests/perf_baseline_north_star.json` ends at
+pp65536 — the 64K row is that model's VRAM-feasible ceiling, not a coverage
+gap.
+
 What the first sweep found and what fixed it:
 
 - **#963/#967**: StreamingLLM's middle-block eviction retained the window

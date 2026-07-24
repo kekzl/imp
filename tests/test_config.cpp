@@ -52,6 +52,10 @@ TEST(RuntimeConfigTest, SwaSizingTriState) {
     // Unknown value falls back to Off (never silently forces sizing on).
     cfg.apply_overrides({"kv_cache.swa_sizing=banana"});
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Off);
+    // SWA snapshot budget: off by default, plain int binder.
+    EXPECT_EQ(RuntimeConfig{}.kv_cache.swa_snapshot_mb, 0);
+    cfg.apply_overrides({"kv_cache.swa_snapshot_mb=512"});
+    EXPECT_EQ(cfg.kv_cache.swa_snapshot_mb, 512);
 }
 
 // The long-context FP8-KV quality gate (kv_cache.dtype=auto): only arch families

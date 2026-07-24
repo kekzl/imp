@@ -130,6 +130,10 @@ struct Request {
     // matches a stored snapshot. Restored into the request's recurrent slot
     // on the first prefill chunk instead of zeroing (engine_sampling_stop).
     std::shared_ptr<const struct RecurrentSnapshotEntry> recurrent_restore;
+    // SWA window snapshot (kv_cache.swa_snapshot_mb): packed windowed-layer
+    // KV at exactly `cached_tokens`, restored into fresh SWA blocks on the
+    // first prefill chunk so a prefix-cache hit is valid under SWA sizing.
+    std::shared_ptr<const struct RecurrentSnapshotEntry> swa_restore;
     // Pin this request's full prompt blocks in the prefix cache at finish
     // (Anthropic cache_control / OpenAI-route cache_prompt). Pinned blocks
     // survive eviction until the pin budget recycles them (FIFO).

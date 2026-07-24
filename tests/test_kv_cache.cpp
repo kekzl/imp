@@ -1616,6 +1616,107 @@ TEST(KVCacheManagerTest, SwaRollback) {
     EXPECT_EQ(static_cast<int>(mgr.block_table(0).size()), 5);
 }
 
+// SWA window snapshots (kv_cache.swa_snapshot_mb): pack the live window of a
+// sequence into a slab, restore it into a fresh sequence with a reused
+// global prefix — the restored blocks must be byte-identical, private, and
+// placed at the same positional slots with holes before the window.
+TEST(KVCacheManagerTest, SwaSnapshotPackRestoreRoundtrip) {
+    SKIP_IF_NO_CUDA();
+
+    const int bs = 16;
+    const int n_layers = 2;
+    std::vector<int> nkv(n_layers, 4), hd(n_layers, 64);
+    std::vector<char> is_swa = {1, 0};
+    auto cache = std::make_unique<KVCache>(n_layers, nkv, hd, QType::F16, 256, bs, nullptr, is_swa,
+                                           /*swa_max*/ 16);
+    KVCache* raw = cache.get();
+    KVCacheManager mgr(std::move(cache));
+    mgr.enable_swa_sizing(/*window*/ 2 * bs, /*slack*/ bs);
+    ASSERT_TRUE(mgr.enable_swa_snapshots());
+    ASSERT_GT(mgr.swa_snapshot_bytes(), 0u);
+    // first live block at 160 tokens: (160 - 32 - 16) / 16 = 7.
+    EXPECT_EQ(mgr.swa_first_live_block(160), 7);
+
+    // Sequence 0: 10 global blocks (160 tokens), live window blocks 7..9.
+    ASSERT_TRUE(mgr.allocate_blocks(0, 10));
+    ASSERT_TRUE(mgr.swa_prepare(0, 160));
+    std::vector<int> swa0 = mgr.swa_block_table(0);
+    const size_t kvb = raw->block_bytes(0);
+    std::vector<char> pat(kvb);
+    for (int b = 7; b < 10; ++b) {
+        std::fill(pat.begin(), pat.end(), static_cast<char>(0x40 + b));
+        ASSERT_EQ(cudaMemcpy(raw->k_ptr(0, swa0[b]), pat.data(), kvb, cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        std::fill(pat.begin(), pat.end(), static_cast<char>(0x60 + b));
+        ASSERT_EQ(cudaMemcpy(raw->v_ptr(0, swa0[b]), pat.data(), kvb, cudaMemcpyHostToDevice),
+                  cudaSuccess);
+    }
+    void* slab = nullptr;
+    ASSERT_EQ(cudaMalloc(&slab, mgr.swa_snapshot_bytes()), cudaSuccess);
+    ASSERT_TRUE(mgr.swa_snapshot_pack(0, 160, slab, nullptr));
+    ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+
+    // Fresh sequence 1 whose global prefix [0, 160) was reused: restore.
+    ASSERT_TRUE(mgr.allocate_blocks(1, 10));
+    ASSERT_TRUE(mgr.swa_snapshot_restore(1, 160, slab, nullptr));
+    ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+    const auto& swa1 = mgr.swa_block_table(1);
+    ASSERT_EQ(static_cast<int>(swa1.size()), 10);
+    for (int b = 0; b < 7; ++b)
+        EXPECT_EQ(swa1[b], -1) << "pre-window block " << b << " must stay a hole";
+    std::vector<char> got(kvb);
+    for (int b = 7; b < 10; ++b) {
+        ASSERT_GE(swa1[b], 0);
+        EXPECT_NE(swa1[b], swa0[b]) << "restored block must be a private fresh allocation";
+        ASSERT_EQ(cudaMemcpy(got.data(), raw->k_ptr(0, swa1[b]), kvb, cudaMemcpyDeviceToHost),
+                  cudaSuccess);
+        EXPECT_EQ(got.front(), static_cast<char>(0x40 + b));
+        EXPECT_EQ(got.back(), static_cast<char>(0x40 + b));
+        ASSERT_EQ(cudaMemcpy(got.data(), raw->v_ptr(0, swa1[b]), kvb, cudaMemcpyDeviceToHost),
+                  cudaSuccess);
+        EXPECT_EQ(got.front(), static_cast<char>(0x60 + b));
+    }
+    // Continuation prepare extends the restored table without touching it.
+    ASSERT_TRUE(mgr.swa_prepare(1, 160, 176));
+    cudaFree(slab);
+    mgr.free_sequence(0);
+    mgr.free_sequence(1);
+    EXPECT_EQ(mgr.kv_cache()->num_free_swa_blocks(), 16);
+}
+
+// Restore on an exhausted SWA group fails cleanly: partial allocations are
+// released and the caller can fall back to a full prefill.
+TEST(KVCacheManagerTest, SwaSnapshotRestoreExhaustionRollsBack) {
+    SKIP_IF_NO_CUDA();
+
+    const int bs = 16;
+    std::vector<int> nkv(2, 4), hd(2, 64);
+    std::vector<char> is_swa = {1, 0};
+    // Group of 4: seq 0's window takes 3, leaving only 1 free.
+    auto cache = std::make_unique<KVCache>(2, nkv, hd, QType::F16, 256, bs, nullptr, is_swa,
+                                           /*swa_max*/ 4);
+    KVCacheManager mgr(std::move(cache));
+    mgr.enable_swa_sizing(2 * bs, bs);
+    ASSERT_TRUE(mgr.enable_swa_snapshots());
+
+    ASSERT_TRUE(mgr.allocate_blocks(0, 10));
+    ASSERT_TRUE(mgr.swa_prepare(0, 160));
+    void* slab = nullptr;
+    ASSERT_EQ(cudaMalloc(&slab, mgr.swa_snapshot_bytes()), cudaSuccess);
+    ASSERT_TRUE(mgr.swa_snapshot_pack(0, 160, slab, nullptr));
+    ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+
+    const int free_before = mgr.kv_cache()->num_free_swa_blocks();
+    ASSERT_EQ(free_before, 1);
+    ASSERT_TRUE(mgr.allocate_blocks(1, 10));
+    EXPECT_FALSE(mgr.swa_snapshot_restore(1, 160, slab, nullptr));
+    EXPECT_EQ(mgr.kv_cache()->num_free_swa_blocks(), free_before)
+        << "failed restore must release its partial allocations";
+    cudaFree(slab);
+    mgr.free_sequence(0);
+    mgr.free_sequence(1);
+}
+
 // Regression for #963: StreamingLLM middle-block eviction must retain the
 // block containing the decode kernels' window start. The paged decode
 // kernels compute window_start_block = floor((ctx_len - window) /

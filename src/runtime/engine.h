@@ -527,6 +527,10 @@ private:
     // shared history (see docs — dense models need KV blocks only; hybrids
     // additionally need the recurrent state at the skip boundary).
     std::unique_ptr<RecurrentSnapshotStore> recurrent_snapshots_;
+    // SWA window snapshots (kv_cache.swa_snapshot_mb): packed windowed-layer
+    // KV per prefix hash — makes prefix caching valid under SWA sizing.
+    std::unique_ptr<RecurrentSnapshotStore> swa_snapshots_;
+    void* swa_snap_slab_ = nullptr;  // pack/save scratch, swa_snapshot_bytes()
     // Hybrid decode fairness: round-robin rotation state for the batch-1
     // recurrent decode (quantum-based; see step_decode).
     int hybrid_active_req_ = -1;    // request id currently holding the decode slice
@@ -981,6 +985,12 @@ private:
     int hybrid_prefix_reuse_limit_(Request& req);
     int hybrid_snapshot_end_(const Request& req) const;  // block-aligned save position, 0 = none
     void maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cudaStream_t stream);
+    // SWA window snapshots (kv_cache.swa_snapshot_mb, engine_sampling_stop.cpp):
+    // same admission/save pattern as the hybrid pair, but the state is the
+    // packed windowed-layer KV instead of the recurrent slab.
+    int swa_prefix_reuse_limit_(Request& req);
+    int snapshot_end_(const Request& req) const;  // hybrid or SWA save position, 0 = none
+    void maybe_save_swa_snapshot_(const Request& req, int snap_end, cudaStream_t stream);
     void finish_request(std::shared_ptr<Request>& req);
 
     // ── step() sub-phases ─────────────────────────────────────────────

@@ -170,6 +170,28 @@ public:
     // Empty vector if unknown seq or SWA sizing disabled.
     const std::vector<int>& swa_block_table(int seq_id) const;
 
+    // ── SWA window snapshots (prefix caching for SWA-sized models) ───
+    //
+    // A snapshot is the packed KV content of the live SWA window blocks at
+    // a block-aligned position P: for each SWA layer, blocks
+    // [swa_first_live_block(P), P/bs). Restoring it into a fresh sequence
+    // makes a prefix-cache hit at P valid for windowed layers (their
+    // earlier blocks were trailing-freed and cannot back reuse).
+    // enable_swa_snapshots() precomputes the slab layout and allocates the
+    // copy-desc staging; must be called after enable_swa_sizing.
+    bool enable_swa_snapshots();
+    // Fixed slab size (bytes) of one snapshot; 0 until enabled.
+    size_t swa_snapshot_bytes() const { return swa_snap_bytes_; }
+    int swa_first_live_block(int upto_tokens) const;
+    // Pack seq's live window blocks at exactly upto_tokens into slab
+    // (device, >= swa_snapshot_bytes()). False if a needed block is a hole.
+    bool swa_snapshot_pack(int seq_id, int upto_tokens, void* slab, cudaStream_t stream);
+    // Allocate window blocks for a sequence whose global prefix [0, upto)
+    // was reused from the prefix cache and fill them from slab. Table slots
+    // before the window stay -1 holes. False on SWA-group exhaustion
+    // (allocated blocks are released; caller falls back to full prefill).
+    bool swa_snapshot_restore(int seq_id, int upto_tokens, const void* slab, cudaStream_t stream);
+
     // ── Speculative decoding rollback ────────────────────────────────
 
     // Truncate a sequence's block table to fit `new_seq_len` tokens.
@@ -340,6 +362,20 @@ private:
     std::unordered_map<int, int> swa_trim_cursor_;
     int swa_window_ = 0;  // 0 = SWA sizing disabled
     int swa_slack_ = 0;
+
+    // ── SWA snapshot state (enable_swa_snapshots) ────────────────────
+    std::vector<int> swa_snap_layers_;      // SWA layer indices, ascending
+    std::vector<size_t> swa_snap_layer_off_;  // slab byte offset per dense idx
+    int swa_snap_win_blocks_ = 0;           // max live blocks per layer
+    size_t swa_snap_bytes_ = 0;             // total slab bytes
+    KVCache::CopyDesc* h_swa_descs_ = nullptr;  // pinned staging
+    KVCache::CopyDesc* d_swa_descs_ = nullptr;
+    int swa_desc_cap_ = 0;
+    // Build pack (to_slab=true) or restore (to_slab=false) descs for the
+    // seq's SWA table slots [swa_first_live_block(upto), upto/bs) across
+    // all SWA layers and run them in one launch.
+    bool swa_snapshot_copy_(int seq_id, int upto_tokens, void* slab, bool to_slab,
+                            cudaStream_t stream);
 
     // ── LRU tracking ─────────────────────────────────────────────────
     // Doubly-linked list of seq_ids; most recently used at the *tail*.

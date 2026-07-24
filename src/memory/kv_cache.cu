@@ -579,4 +579,37 @@ void KVCache::copy_blocks_device(const int* srcs, const int* dsts, int n_pairs,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
+// ── batched_copy_device ──────────────────────────────────────────────
+// One CTA per desc; uint4 fast path when src/dst/bytes are 16-byte aligned
+// (block and scale regions are — pool offsets are multiples of the block
+// byte sizes), byte loop otherwise.
+
+static __global__ void kv_batched_copy_kernel(const KVCache::CopyDesc* descs, int n) {
+    const int d = blockIdx.x;
+    if (d >= n)
+        return;
+    const char* src = static_cast<const char*>(descs[d].src);
+    char* dst = static_cast<char*>(descs[d].dst);
+    const size_t bytes = descs[d].bytes;
+    const bool aligned = ((reinterpret_cast<uintptr_t>(src) | reinterpret_cast<uintptr_t>(dst) |
+                           bytes) & 15u) == 0;
+    if (aligned) {
+        const uint4* s = reinterpret_cast<const uint4*>(src);
+        uint4* t = reinterpret_cast<uint4*>(dst);
+        const size_t n16 = bytes / 16;
+        for (size_t i = threadIdx.x; i < n16; i += blockDim.x)
+            t[i] = s[i];
+    } else {
+        for (size_t i = threadIdx.x; i < bytes; i += blockDim.x)
+            dst[i] = src[i];
+    }
+}
+
+void KVCache::batched_copy_device(const CopyDesc* d_descs, int n, cudaStream_t stream) {
+    if (!d_descs || n <= 0)
+        return;
+    kv_batched_copy_kernel<<<n, 256, 0, stream>>>(d_descs, n);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 }  // namespace imp

@@ -177,6 +177,15 @@ struct RuntimeConfig {
         // follow-up); "off" disables. Legacy bools map to on/off.
         std::string swa_sizing = "auto";
 
+        // SWA window snapshots: device budget (MiB) for packed windowed-layer
+        // KV snapshots — what makes prefix caching valid under SWA sizing
+        // (freed window blocks cannot back reuse; the snapshot restores the
+        // trailing window at the reuse boundary, like the recurrent-state
+        // snapshots do for hybrids). One snapshot per prefill end, LRU.
+        // 0 = off: swa_sizing=auto then yields to prefix caching, and
+        // swa_sizing=on force-disables it.
+        int swa_snapshot_mb = 0;
+
         SwaSizingMode swa_sizing_mode() const {
             if (swa_sizing == "auto")
                 return SwaSizingMode::Auto;

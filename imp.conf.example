@@ -133,6 +133,15 @@ bitdecoding_residual_tokens = 0
 # snapshot-based reuse is a follow-up); use it for long single-sequence
 # contexts where KV VRAM is the bottleneck. "off" disables entirely.
 swa_sizing                  = auto
+# SWA window snapshots: device budget (MiB) for packed windowed-layer KV
+# snapshots, which make prefix caching valid UNDER swa_sizing — the snapshot
+# restores the trailing window at the reuse boundary, analogous to the
+# recurrent_snapshot_mb store for hybrids. One snapshot per prefill end, LRU
+# within the budget. With a budget set, swa_sizing=auto no longer yields to
+# prefix caching and the server gets both: the KV savings AND warm-prefix
+# reuse capped at snapshot boundaries. 0 = off (auto yields, on force-
+# disables prefix caching).
+swa_snapshot_mb             = 0
 
 [rope]
 # Runtime RoPE-scaling override: stretch a model's usable context past its
