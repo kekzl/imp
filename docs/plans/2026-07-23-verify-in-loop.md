@@ -1,5 +1,24 @@
 # Verify-in-loop: conditional-graph token-recycling verify (#1055)
 
+> **UPDATE 2026-07-25 — the win below is NOT reproducible; the flag is a
+> measured loss on everything since tried.** A nine-class sweep (planning,
+> math, repetitive, reasoning self-talk, enumeration, templated code, free
+> prose, long explanation, chain-over-list; Qwen3-14B-NVFP4, 1024-tok greedy,
+> interleaved, healthy host at 2835-2880 MHz SM / 13801 MHz mem / ~510 W)
+> found **no** class where the loop beats the same configuration with the loop
+> off. Isolated against eager `token_recycling` (same flags, loop off) it costs
+> a consistent **5.6-8.3%**; the loop demonstrably runs in those arms
+> ("verify loop built" appears, three graph instantiations per 1024 tokens).
+> An era-image bisect on 2026-07-25 rules out a regression from #1059-#1066,
+> so the numbers below were real — but the prompt class that produced them was
+> never recorded and has not been re-found. `speculative.recycle_loop_min_emit`
+> (#1060) bounds the damage to −0.3..−3.0% rather than creating a win.
+> **Do not extend the flag's reach (MoE, constrained decoding) before a win is
+> reproduced first.** Note also that the "byte-identical" claim below holds for
+> those three prompts, not in general: a 2026-07-25 server-route check found the
+> ungated loop diverging from loop-off on one prompt (greedy near-ties flipping,
+> the #957 FP-summation-order class; output stays coherent).
+
 **Status: PHASE 2 BUILT AND MEASURED 2026-07-23** — `TrVerifyLoopRunner`
 (`src/runtime/tr_verify_loop.{h,cu}`) + engine wiring
 (`src/runtime/engine_tr_loop.cpp`) behind `speculative.recycle_loop`

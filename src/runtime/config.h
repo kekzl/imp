@@ -848,15 +848,30 @@ struct RuntimeConfig {
         // the ~1.3 ms/step scheduler/API tax. Requires token_recycling;
         // dense decode-attn-route models, greedy, no penalties (v1).
         // Falls back to the eager path on any capture failure.
+        //
+        // EXPERIMENTAL, and the measured expectation is a LOSS. The +38-97%
+        // recorded at #1055 came from a prompt class that has never been
+        // pinned down: a 2026-07-25 sweep over nine classes (planning, math,
+        // repetitive, reasoning self-talk, enumeration, templated code, free
+        // prose, long explanation, chain-over-list; Qwen3-14B-NVFP4,
+        // 1024-tok greedy, interleaved, healthy host) found NO class where
+        // the loop beats the same config with the loop off — isolated
+        // against eager token_recycling it costs a consistent 5.6-8.3%.
+        // An era-image bisect (2026-07-25) rules out a regression from
+        // #1059-#1066, so the old win was real but is not reproducible from
+        // the record. Do not enable expecting a speedup, and do not extend
+        // the flag's reach (e.g. to MoE) before a win is reproduced first.
         bool recycle_loop = false;
         // Verify-in-loop economics guard (#1060): after a 4-miss-exit sample,
         // an average of fewer than this many tokens emitted per miss-exit
         // burst dooms the loop FOR THE REQUEST — the launch + rollback +
         // miss-burst detour of a relaunch cycle cannot amortize below it.
-        // This is what separates the two measured arms: reasoning prose runs
-        // long bursts (+38-97%), generic prose exits after ~1 token and paid
-        // that detour for the whole generation (-6..-9%, the #1060 flip
-        // refutation). 0 disables the guard (raw-economics measurement).
+        // It bounds the damage rather than producing a win: a cold table
+        // exits after ~1 token and would otherwise pay that detour for the
+        // whole generation (-6..-9%, the #1060 flip refutation). The guard
+        // cuts that to -0.3..-3.0%, but the residual is the one-time
+        // loop-graph instantiation, which is paid before the guard can
+        // judge. 0 disables the guard (raw-economics measurement).
         float recycle_loop_min_emit = 4.0f;
         // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
         // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
