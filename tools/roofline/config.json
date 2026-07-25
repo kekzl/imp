@@ -1,5 +1,5 @@
 {
-  "config_version": 4,
+  "config_version": 5,
   "comment": "Pinned roofline measurement config. Changing counters/shapes bumps config_version \u2014 runs are only comparable within the same version.",
   "gpu": {
     "name": "NVIDIA GeForce RTX 5090 (GB202, sm_120a)",
@@ -25,25 +25,7 @@
     "clock_control": "base",
     "launch_count": 120,
     "skip_fraction": 0.45,
-    "replay_comment": "Multi-pass kernel replay needs a device-memory backup, and on this WSL2 consumer driver that dies with a driver-resource error the moment a TMA-using kernel (cuBLAS nvjet_*, CUTLASS sm120) is profiled. Application replay is no alternative for prefill: cuBLAS re-autotunes per process, kernel sequences differ across passes -> ncu 'Skipped'. PREFILL therefore runs several SINGLE-PASS ncu invocations per cell (prefill_groups; max ~6 plain counters per pass, only ONE sm__ops_path_* per pass). DECODE has no TMA kernels in the hot path and keeps one multi-pass kernel-replay invocation with the full decode_metrics set.",
-    "prefill_groups": {
-      "base": [
-        "gpu__time_duration.sum",
-        "dram__bytes.sum",
-        "gpc__cycles_elapsed.avg.per_second",
-        "sm__warps_active.avg.pct_of_peak_sustained_active",
-        "l1tex__t_sector_hit_rate.pct"
-      ],
-      "sass": [
-        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
-        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
-        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
-        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum",
-        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum",
-        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum"
-      ],
-      "sass_comment": "SASS counters tolerate no companion counter (even gpu__time_duration flips the pass count and TMA kernels die on multi-pass replay) \u2014 the group carries no time; class time comes from the base group (identical --launch-skip/--launch-count window)."
-    },
+    "replay_comment": "Multi-pass kernel replay needs a device-memory backup, and on this WSL2 consumer driver that dies with a driver-resource error the moment a TMA-using kernel (cuBLAS nvjet_*, CUTLASS sm120) is profiled. Application replay is no alternative for prefill: cuBLAS re-autotunes per process, kernel sequences differ across passes -> ncu 'Skipped'. BOTH phases therefore run several SINGLE-PASS ncu invocations per cell (metric_groups; max ~6 plain counters per pass, only ONE sm__ops_path_* per pass). Decode used to be exempt on the assumption that it has no TMA kernels in the hot path \u2014 WRONG: the nvfp4-hybrid decode cell wedged indefinitely on 2026-07-25 (GPU idle at 3%, container unhealthy, killed by hand) because CUTLASS grouped GEMM runs there too. dense/moe survived, which is why the assumption held for so long.",
     "tc_groups_comment": "One sm__ops_path counter per single-pass invocation (each rides with time+bytes so the invocation yields a self-contained FLOP rate). Per model family only the dtypes that can occur in imp's hot path are measured; FLOP counts are workload-deterministic, so TC + SASS groups run on restart 0 only \u2014 restarts 1/2 re-measure only the base group (time/bytes variance).",
     "tc_groups_by_family": {
       "gguf-q8": [
@@ -73,28 +55,27 @@
       "gemm_grouped_nvfp4"
     ],
     "fp4_flops_per_tensor_inst": 16384,
-    "decode_metrics": [
-      "gpu__time_duration.sum",
-      "dram__bytes.sum",
-      "gpc__cycles_elapsed.avg.per_second",
-      "sm__warps_active.avg.pct_of_peak_sustained_active",
-      "l1tex__t_sector_hit_rate.pct",
-      "sm__ops_path_tensor_src_fp4_fp6_dst_fp16.sum",
-      "sm__ops_path_tensor_src_fp4_fp6_dst_fp32.sum",
-      "sm__ops_path_tensor_src_fp8_dst_fp16.sum",
-      "sm__ops_path_tensor_src_fp8_dst_fp32.sum",
-      "sm__ops_path_tensor_src_fp16_dst_fp16.sum",
-      "sm__ops_path_tensor_src_fp16_dst_fp32.sum",
-      "sm__ops_path_tensor_src_int8.sum",
-      "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
-      "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
-      "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
-      "sm__sass_thread_inst_executed_op_hfma_pred_on.sum",
-      "sm__sass_thread_inst_executed_op_hadd_pred_on.sum",
-      "sm__sass_thread_inst_executed_op_hmul_pred_on.sum"
-    ],
     "timeout_s": 900,
-    "timeout_comment": "Per ncu group. A healthy decode pass is ~2 min; the old 3600 s meant a wedged pass (observed on nvfp4-hybrid decode, GPU idle at 3%) stalled the sweep for an hour. On timeout the named container is force-removed and the cell is marked failed."
+    "timeout_comment": "Per ncu group. A healthy decode pass is ~2 min; the old 3600 s meant a wedged pass (observed on nvfp4-hybrid decode, GPU idle at 3%) stalled the sweep for an hour. On timeout the named container is force-removed and the cell is marked failed.",
+    "metric_groups": {
+      "base": [
+        "gpu__time_duration.sum",
+        "dram__bytes.sum",
+        "gpc__cycles_elapsed.avg.per_second",
+        "sm__warps_active.avg.pct_of_peak_sustained_active",
+        "l1tex__t_sector_hit_rate.pct"
+      ],
+      "sass": [
+        "sm__sass_thread_inst_executed_op_ffma_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_fadd_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_fmul_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_hfma_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_hadd_pred_on.sum",
+        "sm__sass_thread_inst_executed_op_hmul_pred_on.sum"
+      ],
+      "sass_comment": "SASS counters tolerate no companion counter (even gpu__time_duration flips the pass count and TMA kernels die on multi-pass replay) \u2014 the group carries no time; class time comes from the base group (identical --launch-skip/--launch-count window).",
+      "groups_comment": "Single-pass metric groups for BOTH phases. Multi-pass kernel replay needs a device-memory backup that dies (or wedges) on TMA-using kernels on this WSL2 consumer driver; decode used to run all 18 metrics in one multi-pass invocation, which is why the nvfp4-hybrid decode cell hung indefinitely (2026-07-25) while dense/moe happened to survive. Same grouping as prefill: each invocation stays single-pass."
+    }
   },
   "nsys": {
     "binary": "/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/nsys",
