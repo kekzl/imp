@@ -4,6 +4,33 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Generative property batteries for both constrained-decode FSMs**, running in
+  the CPU `unit` lane. The constrained-decode surface has shipped seven grammar
+  bugs (#517, #650, #761, #850, #1002, #1014, #1067), every one found by a
+  symptom and none by a test, while GOAL.md release bar 7 makes "valid,
+  terminating JSON under any sampler state" a release blocker. The existing
+  batteries are example-based *and* live in the GPU lane, so CI — which has no
+  GPU runner — never guarded this class on a pull request.
+  `test_json_constrain_property.cpp` generates random JSON and checks the
+  schema-less FSM against **nlohmann/json as an independent oracle**;
+  `test_schema_constrain_property.cpp` co-generates a schema plus a conforming
+  document (nlohmann does not validate schemas, so conformance is known by
+  construction) and checks both directions. Shared invariants: accept every
+  valid/conforming document, accept every prefix of one, never enter a dead-end
+  state with no legal continuation (release bar 7 as an invariant), and reject
+  structurally impossible continuations — swapped closers, trailing content
+  after the root, objects missing required properties, arrays below `minItems`,
+  values outside an `enum`.
+  Both batteries were validated by mutation, not just by passing: against the
+  pre-#1068 FSM three json_object properties fail (reproducing the #1067
+  signature `[{"k0":true]]`), and with the `minItems` check disabled exactly
+  `RejectsArrayBelowMinItems` fails.
+  `SchemaConstrainer` gains `init_grammar_for_test()` (installs the grammar
+  without the tokenizer classification and device buffers that only `apply_mask`
+  needs) and `token_legal()` becomes public — the same test-hook treatment
+  #1068 gave `JsonConstrainer::sim_token_valid`.
+
 ### Changed
 - **`speculative.recycle_loop` now gives up per request when it is not paying
   for itself** (#1060 follow-up). A cold adjacency table exits the verify loop

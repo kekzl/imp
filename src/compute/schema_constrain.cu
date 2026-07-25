@@ -90,6 +90,17 @@ SchemaConstrainer::~SchemaConstrainer() {
         IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
 }
 
+bool SchemaConstrainer::init_grammar_for_test(std::unique_ptr<SchemaNode> schema) {
+    schema_ = std::move(schema);
+    if (!schema_)
+        return false;
+    // No tokenizer classification and no device buffers: token_legal() walks
+    // the frame stack only, which is all the CPU grammar battery needs.
+    reset();
+    initialized_ = true;
+    return true;
+}
+
 bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> schema) {
     schema_ = std::move(schema);
     if (!schema_)

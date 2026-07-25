@@ -530,6 +530,11 @@ if(IMP_BUILD_TESTS)
         tests/test_safetensors_loader.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
+        # Generative FSM battery for the schema-less json_object grammar. Lives
+        # in the CPU lane on purpose: the FSM is CUDA-free without init(), and
+        # every past grammar bug escaped CI because its tests need a GPU.
+        tests/test_json_constrain_property.cpp
+        tests/test_schema_constrain_property.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp

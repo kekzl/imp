@@ -106,6 +106,14 @@ public:
     // Initialize with tokenizer (classifies all tokens) and schema.
     bool init(const Tokenizer& tok, std::unique_ptr<SchemaNode> schema);
 
+    // Grammar-only init for the CPU FSM tests: installs the schema and the
+    // frame stack, skipping the tokenizer classification and the device
+    // buffers that only apply_mask needs. Lets the generative battery run in
+    // the `unit` lane — the grammar bugs this surface has shipped (#761, #850,
+    // #1014) all escaped CI, which has no GPU runner. Not for engine use:
+    // apply_mask/update by token id require the full init above.
+    bool init_grammar_for_test(std::unique_ptr<SchemaNode> schema);
+
     // Apply logit mask before sampling.
     void apply_mask(float* d_logits, int vocab_size, cudaStream_t stream);
 
@@ -123,6 +131,14 @@ public:
     // fires. The caller drafts the canonical tokenization of this text and
     // verifies by sampling (see the constrained-pipeline jump-ahead).
     int forced_text(std::string& out, int max_chars) const;
+
+    // True iff emitting the whole token keeps the schema satisfiable: every
+    // char is a legal transition and nothing trails past the root close. This
+    // catches multi-char tokens that span phase transitions (`{}`, `":"`,
+    // `"Why`, integer `0.98`) which the first-char category mask misses.
+    // Public for the FSM unit tests; apply_mask uses it for whole-token
+    // validation.
+    bool token_legal(const std::string& text) const;
 
     // Reset for a new generation with the same schema.
     void reset();
@@ -238,12 +254,6 @@ private:
     // (on stack_) and per-token mask simulation (on a cloned stack), so there
     // is one source of truth for the schema grammar.
     bool sim_advance(std::vector<SchemaFrame>& stk, char c) const;
-
-    // True iff emitting the whole token keeps the schema satisfiable: every
-    // char is a legal transition and nothing trails past the root close. This
-    // catches multi-char tokens that span phase transitions (`{}`, `":"`,
-    // `"Why`, integer `0.98`) which the first-char category mask misses.
-    bool token_legal(const std::string& text) const;
 
     // Find property schema by key name
     const SchemaNode* find_property(const SchemaNode* obj, const std::string& key) const;
