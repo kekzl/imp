@@ -12,7 +12,6 @@
 #include "runtime/config.h"
 #include "runtime/suffix_draft.h"
 #include "runtime/token_recycle_draft.h"
-#include "runtime/tr_verify_loop.h"
 #include "runtime/vram_budget.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
@@ -786,20 +785,9 @@ private:
     TokenRecycleTable& spec_recycle_table_();
     void spec_recycle_feed_(Request& req);
     std::unique_ptr<TokenRecycleTable> spec_recycle_;
-    // Verify-in-loop (#1055 phase 2, speculative.recycle_loop): device
-    // adjacency table + conditional-graph verify loop. engine_tr_loop.cpp.
-    bool try_launch_tr_verify_loop_(std::shared_ptr<Request>& req, cudaStream_t stream);
-    bool step_tr_loop_resume_(cudaStream_t stream);
-    bool tr_loop_in_flight_() const;
-    void tr_loop_teardown_();
-    TrDeviceTable spec_tr_dev_{};
-    TrVerifyLoopRunner tr_loop_runner_;
-    std::shared_ptr<Request> tr_loop_req_;  // request the in-flight burst belongs to
-    int tr_loop_initial_p0_ = 0;            // context anchor at burst launch
-    bool tr_loop_doomed_ = false;           // capture failed once — never retry
-    int tr_loop_backoff_req_ = -1;          // miss-exit backoff (see engine_tr_loop.cpp)
-    size_t tr_loop_backoff_out_ = 0;
-    size_t tr_loop_launch_out_ = 0;  // output size at burst launch (economics)
+    // (Verify-in-loop / speculative.recycle_loop removed 2026-07-25: measured a
+    // loss on every prompt class tried — see CHANGELOG. The eager
+    // token-recycling drafter above stays.)
     // Device/pinned staging for the verify chunk (lazy-init, K+1 capacity).
     // #1055: tokens/positions/row-ctx-lens + the 3 length scalars live in ONE
     // device block (d_spec_stage_) with a pinned host twin — one H2D per

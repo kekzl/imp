@@ -144,7 +144,6 @@ Engine::~Engine() {
         d_pipe_hist_ = nullptr;
     }
     log_spec_stats_();
-    tr_loop_teardown_();
     free_spec_buffers_();
     if (prefill_pool_) {
         vram_alloc_.free(prefill_pool_);
@@ -452,7 +451,6 @@ void Engine::invalidate_graphs() {
     free_spec_graphs_();
     // Verify-in-loop (#1055): an in-flight burst must complete before its
     // baked buffers/KV go away; the runner recaptures lazily afterwards.
-    tr_loop_teardown_();
 
     // #874 safety net: if an exception unwound past an active prefill-chunk
     // capture, the prefill stream is still in capture state and every later

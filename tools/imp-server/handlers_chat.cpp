@@ -119,13 +119,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     bool echo = body.value("echo", false);
     float min_p = body.value("min_p", 0.0f);
     float typical_p = body.value("typical_p", 1.0f);
-    // Default follows the recycle_loop opt-in rule (see
-    // parse_chat_request_params — operator opt-in beats the implicit 1.05).
-    float repetition_penalty = body.value(
-        "repetition_penalty", (state.runtime_config.speculative.recycle_loop &&
-                               state.runtime_config.speculative.token_recycling)
-                                  ? 1.0f
-                                  : 1.05f);
+    float repetition_penalty = body.value("repetition_penalty", 1.05f);
     float frequency_penalty = body.value("frequency_penalty", 0.0f);
     float presence_penalty = body.value("presence_penalty", 0.0f);
     int repeat_last_n = body.value("repeat_last_n", 0);

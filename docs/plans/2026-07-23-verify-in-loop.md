@@ -1,5 +1,14 @@
 # Verify-in-loop: conditional-graph token-recycling verify (#1055)
 
+> **REMOVED 2026-07-25 — the feature is gone from the tree.** After the sweep
+> below found no winning prompt class, `speculative.recycle_loop`,
+> `recycle_loop_min_emit`, `TrVerifyLoopRunner`, the device adjacency table and
+> the engine wiring were deleted (~1.5k LOC; see CHANGELOG "Removed"). The eager
+> `speculative.token_recycling` drafter stays. This document is kept as the
+> design record and the measurement history — the reuse map and the build
+> lessons below (ctx-tier baking, miss-exit backoff, two-stage top-M harvest)
+> are the parts worth re-reading if anyone revisits conditional-graph verify.
+>
 > **UPDATE 2026-07-25 — the win below is NOT reproducible; the flag is a
 > measured loss on everything since tried.** A nine-class sweep (planning,
 > math, repetitive, reasoning self-talk, enumeration, templated code, free
