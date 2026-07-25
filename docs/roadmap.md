@@ -21,6 +21,26 @@ The engine is past the raw-speed land-grab; current work is making it boringly r
 - **Model-support debt burn-down** -- last hard crash (gemma-3-12b GGUF decode IMA) fixed in #959; remaining blockers under "Known limitations".
 - **MLA family expansion** -- DeepSeek-V2-Lite is validated (#802/#803 latent-KV decode, opt-in); DeepSeek-V3 / GLM / Kimi / Ling reuse the same path once weights are staged locally.
 
+## Open gaps to the mission (assessed 2026-07-26)
+
+A ranked audit of what still separates imp from "best agentic engine on a 5090". This is a gap list, not a schedule -- nothing here is committed. The raw-speed half of [`GOAL.md`](GOAL.md) is met (batch=1 decode leads llama.cpp by +13-48% on every hero in the 2026-07-12 re-sweep, MoE prefill leads vLLM single-seq, cross-engine PPL parity measured). Every item below sits on the *agentic* half of the mission.
+
+1. **No first-party NVFP4 quantizer.** `tools/` contains no converter -- imp only consumes third-party Modelopt / llm-compressor checkpoints. One root cause, three symptoms: (a) a model without an NVFP4 upload falls back to the GGUF path, whose prefill ceiling is architectural (llama.cpp leads 1.3-2.4x -- see release bar 3 in `GOAL.md`); (b) checkpoint quality is outside our control -- Gemma-4-26B NVFP4 reads ~+48% prose PPL vs UD-Q4_K_M, checkpoint-intrinsic across both compute paths ([`supported-models.md`](supported-models.md), audit 2026-07-13); (c) support for a new model is gated on a third party uploading one. An offline BF16 -> NVFP4 SafeTensors quantizer with calibration (AWQ / SmoothQuant class) addresses coverage, prefill and quality in a single artifact. Highest leverage-per-effort item on this list.
+
+2. **Vision stops at Gemma.** `src/vision/` is SigLIP/CLIP for `gemma3` + `gemma4v` and nothing else -- no Qwen3-VL, InternVL or Pixtral. Screenshot / computer-use agents are exactly the workload the mission names, and there is currently no model for them on this engine. Qwen3-VL needs dynamic resolution + M-RoPE in the encoder, so this is encoder work, not weight mapping.
+
+3. **One server, one model.** `tools/imp-server/handlers.cpp` returns 404 when a request names a model other than the loaded one; auto-load only fires from an empty state. Real agent harnesses run big+small side by side (router, sub-agents, autocomplete), so an external swapper is required today. The parts already exist -- auto-load, `/admin/suspend`+`/admin/resume` (#954), warm weight cache (#956); what is missing is an eviction policy and a route. Smallest effort, largest day-to-day effect.
+
+4. **Constrained decoding is JSON-only.** The FSMs cover `json_schema`, `json_object` and the XML tool dialect; there is no GBNF / regex / EBNF grammar surface (vLLM and SGLang ship xgrammar, llama.cpp ships GBNF). Agents that need to pin a diff format, SQL or a tool DSL fall back to prompting. `/v1/rerank` is likewise absent while `/v1/embeddings` ships -- RAG agents use both.
+
+5. **Speculation has no tree and no trained draft head.** No EAGLE / Medusa / multi-candidate path exists in the tree. Prompt-lookup n-gram only drafts spans that already appear in the context, so it contributes nothing on free-form reasoning output, and the verify-in-loop experiment was removed after a nine-class sweep found no prompt class where it won (see `CHANGELOG.md`, Unreleased). Per the 2026-07-22 ceiling review this is the only durable batch=1 performance lever left, and the route to the 175 tok/s north-star milestone.
+
+6. **Context is VRAM-capped with no host spill.** No KV offload to host RAM and no general layer offload (only the MoE expert cache). The auto ceiling is 128K since #1004, but Q6_K on 32 GB tops out near 75K in practice ([`BENCHMARKS.md`](BENCHMARKS.md)); past that StreamingLLM evicts, which is silent context loss rather than a longer window.
+
+7. **Agentic quality is unmeasured against competitors.** `tools/analysis/degen_suite.py`, `tools/agent_bench.py` and the NIAH harness exist, but no cross-engine number is published for tool-call accuracy or format compliance over a long session. Release bar 7 declares the agentic surface green against our own batteries only. "42% faster" is provable today; "breaks tool calls less often" is not.
+
+Explicitly **not** gaps: continuous batching, prefix caching, per-request LoRA, embeddings, the OpenAI / Anthropic / Responses APIs, `/metrics`, suspend/resume, and the sampler surface (DRY, mirostat, typical_p, logit_bias) all ship today. Multi-GPU remains a non-goal.
+
 ## Performance work
 
 The batch=1 *competitive campaigns* are closed as programs -- every lever they left open either shipped or was refuted by measurement -- but targeted wins keep landing where new levers appear:
