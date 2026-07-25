@@ -78,6 +78,14 @@ struct Request {
     // Verify-in-loop: prompt+output pairs already seeded into the DEVICE
     // adjacency table (once per request, at first loop launch).
     bool tr_dev_prompt_fed = false;
+    // Verify-in-loop economics (#1060): miss-exit bursts and the tokens they
+    // emitted. A cold/draft-poor context exits the loop after ~1 token, pays
+    // the graph-launch + rollback + miss-burst detour, and relaunches — the
+    // cycle that made the default-ON arm lose on generic prose. Sticky
+    // give-up once the average falls below speculative.recycle_loop_min_emit.
+    int tr_loop_miss_bursts = 0;
+    int tr_loop_miss_emitted = 0;
+    bool tr_loop_given_up = false;
     // Per-request n-gram speculation override (tri-state): -1 = use the global
     // speculative.ngram default, 0 = force OFF, 1 = force ON. Lets a code-gen
     // request opt into speculation while a short tool-arg generation skips it

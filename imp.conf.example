@@ -516,6 +516,13 @@ recycle_min_streak   = 1
 # decode-attn-route models, greedy, no penalties; anything else falls
 # back to the eager paths.
 recycle_loop         = false
+# Verify-in-loop economics guard (#1060): after a 4-miss-exit sample, fewer
+# than this many tokens emitted per miss-exit burst on average dooms the
+# loop for the request. A cold adjacency table exits the loop after ~1
+# token and pays the launch + rollback + miss-burst detour on every
+# relaunch — that cycle, not the loop itself, is what cost -6..-9% on
+# generic prompts. 0 disables the guard (raw-economics measurement).
+recycle_loop_min_emit = 4.0
 # Suffix-indexed drafting (SuffixDecoding-style): hash-indexed suffix
 # matching instead of a per-step backward scan, continuations picked by
 # frequency vote across all occurrences, and adaptive draft length — a

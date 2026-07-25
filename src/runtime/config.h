@@ -849,6 +849,15 @@ struct RuntimeConfig {
         // dense decode-attn-route models, greedy, no penalties (v1).
         // Falls back to the eager path on any capture failure.
         bool recycle_loop = false;
+        // Verify-in-loop economics guard (#1060): after a 4-miss-exit sample,
+        // an average of fewer than this many tokens emitted per miss-exit
+        // burst dooms the loop FOR THE REQUEST — the launch + rollback +
+        // miss-burst detour of a relaunch cycle cannot amortize below it.
+        // This is what separates the two measured arms: reasoning prose runs
+        // long bursts (+38-97%), generic prose exits after ~1 token and paid
+        // that detour for the whole generation (-6..-9%, the #1060 flip
+        // refutation). 0 disables the guard (raw-economics measurement).
+        float recycle_loop_min_emit = 4.0f;
         // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
         // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
         // backward scan per verify step) with frequency-voted continuations
