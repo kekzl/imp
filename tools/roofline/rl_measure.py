@@ -187,7 +187,32 @@ def check_gpu_free():
             + "\n  ".join(procs + gpu_containers))
 
 
+def check_profilers(cfg):
+    """Abort when a configured profiler binary is missing. The paths are pinned
+    to an exact toolkit version, so a host-side Nsight upgrade silently breaks
+    them: the binary is bind-mounted into the container, a missing source path
+    makes docker fail the container with rc=127, and every ncu pass dies while
+    the nsys passes keep succeeding. That failure only surfaces as a
+    'cells with errors' line after the whole sweep (hours), and the run is
+    written with no ncu data at all — found the hard way when ncu 2026.2.0 ->
+    2026.2.1 left `roofline measure` producing nsys-only runs."""
+    missing = [f"{tool}: {cfg[tool]['binary']}"
+               for tool in ("ncu", "nsys")
+               if not os.path.exists(cfg[tool]["binary"])]
+    if missing:
+        import glob
+        hints = []
+        for tool, root in (("ncu", "/opt/nvidia/nsight-compute"),
+                           ("nsys", "/opt/nvidia/nsight-systems")):
+            found = sorted(glob.glob(f"{root}/*"))
+            if found:
+                hints.append(f"  installed {tool} versions: {', '.join(os.path.basename(f) for f in found)}")
+        raise SystemExit("profiler binary missing (fix tools/roofline/config.json):\n  "
+                         + "\n  ".join(missing) + ("\n" + "\n".join(hints) if hints else ""))
+
+
 def measure(cfg, restarts, model_keys, shape_keys, note="", dry_run=False):
+    check_profilers(cfg)
     if not dry_run:
         check_gpu_free()
     classify = build_classifier(cfg)

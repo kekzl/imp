@@ -21,7 +21,7 @@
     }
   },
   "ncu": {
-    "binary": "/opt/nvidia/nsight-compute/2026.2.0/ncu",
+    "binary": "/opt/nvidia/nsight-compute/2026.2.1/ncu",
     "clock_control": "base",
     "launch_count": 120,
     "skip_fraction": 0.45,
