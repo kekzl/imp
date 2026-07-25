@@ -117,21 +117,21 @@ def measure_cell(cfg, classify, raw_dir, model_key, shape_key, restart, dry_run=
     cell["ncu_launch_skip"] = skip
     cell["ncu_launch_count"] = launch_count
 
-    if shape["phase"] == "decode":
-        groups = {"full": cfg["ncu"]["decode_metrics"]}
+    # Both phases use single-pass metric groups: one multi-pass invocation wedges
+    # on TMA-using kernels on this WSL2 driver (decode used to do that and hung
+    # the nvfp4-hybrid cell indefinitely — see config.json groups_comment).
+    groups = {k: v for k, v in cfg["ncu"]["metric_groups"].items()
+              if not k.endswith("_comment")}
+    if restart == 0:
+        # TC ops + SASS FLOP counts are workload-deterministic — restart 0 only.
+        for m in cfg["ncu"]["tc_groups_by_family"][model["family"]]:
+            if "tensor_src_" in m:
+                gname = "tc_" + m.split("tensor_src_")[1].rsplit(".", 1)[0]
+            else:
+                gname = "tc_pipe"
+            groups[gname] = cfg["ncu"]["tc_group_base"] + [m]
     else:
-        groups = {k: v for k, v in cfg["ncu"]["prefill_groups"].items()
-                  if not k.endswith("_comment")}
-        if restart == 0:
-            # TC ops + SASS FLOP counts are workload-deterministic — restart 0 only.
-            for m in cfg["ncu"]["tc_groups_by_family"][model["family"]]:
-                if "tensor_src_" in m:
-                    gname = "tc_" + m.split("tensor_src_")[1].rsplit(".", 1)[0]
-                else:
-                    gname = "tc_pipe"
-                groups[gname] = cfg["ncu"]["tc_group_base"] + [m]
-        else:
-            groups = {"base": groups["base"]}
+        groups = {"base": groups["base"]}
 
     cell["ncu_groups"] = {}
     for gname, metrics in groups.items():
