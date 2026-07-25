@@ -4,6 +4,23 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- **`speculative.recycle_loop` is documented as a measured loss** and marked
+  experimental in `imp.conf.example` / `config.h`. A nine-class sweep
+  (planning, math, repetitive, reasoning self-talk, enumeration, templated
+  code, free prose, long explanation, chain-over-list; Qwen3-14B-NVFP4,
+  1024-tok greedy, interleaved, healthy host) found **no** prompt class where
+  the loop beats the same configuration with the loop off; isolated against
+  eager `token_recycling` it costs a consistent **5.6–8.3%**, and the loop
+  verifiably runs in those arms. The +38–97% recorded at #1055 was real (an
+  era-image bisect rules out a regression from #1059–#1066) but came from a
+  prompt class that was never recorded and has not been re-found. No code
+  behaviour changes — the flag was and stays default-OFF; this replaces the
+  speedup claim the config docs still advertised, and adds an explicit
+  do-not-extend note (the MoE reach was investigated on 2026-07-25 and
+  dropped: the loop is never even reached there, because the async graph loop
+  owns the whole generation once the eager drafter finds nothing).
+
 ### Added
 - **Generative property batteries for both constrained-decode FSMs**, running in
   the CPU `unit` lane. The constrained-decode surface has shipped seven grammar
@@ -77,8 +94,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - **`speculative.recycle_loop` auto-disables on GGUF-source models** (with a
   log line): the bucket-4 verify chunk forward rides the dequant prefill
   path there, so every verify pays source dequant — measured −9.5%
-  (Qwen3-8B-Q8) and −28.8% (Qwen3-14B-Q6K) vs spec-off, while the ST-NVFP4
-  route wins +38–97%. See issue #1060 for the flip-matrix data.
+  (Qwen3-8B-Q8) and −28.8% (Qwen3-14B-Q6K) vs spec-off. (The ST-NVFP4 route
+  was recorded at +38–97% at the time; see the 2026-07-25 entry below — that
+  win has since failed to reproduce.) See issue #1060 for the flip-matrix data.
 
 ### Added
 - **SWA window snapshots (`kv_cache.swa_snapshot_mb`)**: prefix caching and
