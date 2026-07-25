@@ -4,6 +4,7 @@ import csv
 import gzip
 import io
 import os
+import re
 import subprocess
 
 
@@ -70,6 +71,12 @@ def parse_csv_gz(csv_gz_path, metric_names):
     return launches
 
 
+def container_name(out_base_name):
+    """Deterministic container name per ncu group, so a timeout can clean up."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", out_base_name)
+    return f"roofline_ncu_{safe}"
+
+
 def docker_ncu_cmd(cfg, kernel_regex, launch_skip, launch_count, out_host_dir,
                    out_base_name, imp_cli_args, metrics, extra_env=None):
     d = cfg["docker"]
@@ -79,6 +86,9 @@ def docker_ncu_cmd(cfg, kernel_regex, launch_skip, launch_count, out_host_dir,
         env_flags += ["-e", f"{k}={v}"]
     return [
         "docker", "run", "--rm", "--gpus", "all", "--privileged",
+        # Named so a wedged pass can be force-removed on timeout (see
+        # rl_measure._run_cmd) — an orphaned container keeps the GPU.
+        "--name", container_name(out_base_name),
         "-u", f"{os.getuid()}:{os.getgid()}", "-w", "/tmp",
         "-v", f"{d['models_mount']}:/models",
         "-v", f"{out_host_dir}:/out",

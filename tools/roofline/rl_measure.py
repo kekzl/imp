@@ -21,9 +21,29 @@ def _log(msg):
     sys.stdout.flush()
 
 
-def _run_cmd(cmd, timeout=1800):
+def _run_cmd(cmd, timeout=1800, container=None):
+    """Run a measurement command, returning (CompletedProcess, seconds).
+
+    A timeout is reported as rc=124 rather than raised: an ncu pass that wedges
+    must cost one cell, not the whole sweep. `container` names the docker
+    container to force-remove on timeout — killing the `docker run` CLIENT does
+    NOT stop the container, so without this it keeps holding the GPU and every
+    following cell dies on "a driver resource was unavailable". Both failure
+    modes were observed 2026-07-25: an nvfp4-hybrid decode pass wedged with the
+    GPU idle at 3% and sat there until it was killed by hand."""
     t0 = time.time()
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        if container:
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True, text=True)
+
+        def _dec(v):
+            return v.decode(errors="replace") if isinstance(v, bytes) else (v or "")
+
+        p = subprocess.CompletedProcess(
+            cmd, returncode=124, stdout=_dec(e.stdout),
+            stderr=f"TIMEOUT after {timeout}s (container {container or '?'} force-removed)")
     dt = time.time() - t0
     return p, dt
 
@@ -124,7 +144,8 @@ def measure_cell(cfg, classify, raw_dir, model_key, shape_key, restart, dry_run=
         # unavailable" when ncu sessions run back-to-back — transient, recovers
         # after a pause. Retry with backoff before declaring the group failed.
         for attempt in range(3):
-            p, dt = _run_cmd(ncu_cmd, timeout=3600)
+            p, dt = _run_cmd(ncu_cmd, timeout=cfg['ncu'].get('timeout_s', 900),
+                             container=rl_ncu.container_name(gbase))
             ok = p.returncode == 0 and os.path.exists(rep_path)
             transient = "resource was unavailable" in (p.stdout + p.stderr) \
                 or p.returncode == 9
