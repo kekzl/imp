@@ -17,7 +17,7 @@ struct InferenceState;
 // net for exception paths that unwound past an active capture (#874).
 void abort_stream_capture(cudaStream_t stream);
 
-// Shared graph-capture helpers (also used by TrVerifyLoopRunner):
+// Shared graph-capture helpers:
 // the process-wide capture mode (relaxed by default — global deadlocks the
 // CUTLASS grouped GEMM), and the kernel→kernel PDL edge rewrite.
 cudaStreamCaptureMode get_capture_mode();

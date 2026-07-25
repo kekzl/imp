@@ -4,23 +4,32 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
-### Changed
-- **`speculative.recycle_loop` is documented as a measured loss** and marked
-  experimental in `imp.conf.example` / `config.h`. A nine-class sweep
-  (planning, math, repetitive, reasoning self-talk, enumeration, templated
-  code, free prose, long explanation, chain-over-list; Qwen3-14B-NVFP4,
-  1024-tok greedy, interleaved, healthy host) found **no** prompt class where
-  the loop beats the same configuration with the loop off; isolated against
-  eager `token_recycling` it costs a consistent **5.6–8.3%**, and the loop
-  verifiably runs in those arms. The +38–97% recorded at #1055 was real (an
-  era-image bisect rules out a regression from #1059–#1066) but came from a
-  prompt class that was never recorded and has not been re-found. No code
-  behaviour changes — the flag was and stays default-OFF; this replaces the
-  speedup claim the config docs still advertised, and adds an explicit
-  do-not-extend note (the MoE reach was investigated on 2026-07-25 and
-  dropped: the loop is never even reached there, because the async graph loop
-  owns the whole generation once the eager drafter finds nothing).
+### Removed
+- **`speculative.recycle_loop` (verify-in-loop) removed entirely**, together
+  with `recycle_loop_min_emit`, the device adjacency table
+  (`compute/token_recycle_device.*`), `TrVerifyLoopRunner`
+  (`runtime/tr_verify_loop.*`) and the engine wiring
+  (`runtime/engine_tr_loop.cpp`) — ~1.5k LOC. The feature never paid: a
+  nine-class sweep (planning, math, repetitive, reasoning self-talk,
+  enumeration, templated code, free prose, long explanation, chain-over-list;
+  Qwen3-14B-NVFP4, 1024-tok greedy, interleaved, healthy host) found **no**
+  prompt class where the loop beat the same configuration with the loop off;
+  isolated against the eager token-recycling drafter it cost a consistent
+  **5.6-8.3%**. The +38-97% recorded at #1055 was real (an era-image bisect
+  ruled out a regression from #1059-#1066) but came from a prompt class that
+  was never recorded and could not be re-found. The per-request economics
+  guard added earlier in this cycle bounded the damage to -0.3..-3.0% without
+  ever producing a win, and extending the flag to MoE proved impossible in
+  any case: the loop is never reached there, because `step_async_graph_resume()`
+  precedes `step_decode()` and the async graph loop owns the whole generation
+  once the eager drafter finds nothing.
+  **The eager `speculative.token_recycling` drafter is unaffected and stays**
+  (measured neutral, -1.3..+2.0%). A stale `speculative.recycle_loop` key in an
+  existing `imp.conf` is ignored with a warning, not an error. The server's
+  default `repetition_penalty` is now unconditionally 1.05 (the 1.0 special
+  case existed only to keep requests eligible for the loop).
 
+### Changed
 ### Added
 - **Generative property batteries for both constrained-decode FSMs**, running in
   the CPU `unit` lane. The constrained-decode surface has shipped seven grammar
@@ -49,25 +58,6 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   #1068 gave `JsonConstrainer::sim_token_valid`.
 
 ### Changed
-- **`speculative.recycle_loop` now gives up per request when it is not paying
-  for itself** (#1060 follow-up). A cold adjacency table exits the verify loop
-  after ~1 token, pays the graph-launch + KV-rollback + miss-burst detour and
-  relaunches; that cycle — not the loop body — is what cost −6…−9% on generic
-  prompts and refuted the default flip. After a 4-miss-exit sample, an average
-  below `speculative.recycle_loop_min_emit` (default 4.0, 0 disables the guard)
-  hands the request back to the async graph loop, mirroring the eager-TR
-  `acceptance_poor` and `mtp_econ_min_emit` guards that already existed.
-  Measured on Qwen3-14B-NVFP4 (1024-tok greedy, 3 trials, interleaved, healthy
-  host: 2835-2880 MHz SM / 13801 MHz mem / ~510 W): the loss against loop-off
-  shrinks from −7.8% / −6.2% / −13.0% to −0.3% / −2.7% / −3.0% on
-  planning / math / repetitive prompts. **The flag stays default-OFF**: no
-  prompt class measured *faster* with the loop than without it, so this is
-  damage control for opt-in users, not a flip enabler. The residual cost is
-  the one-time loop-graph instantiation, which is paid before the guard can
-  judge. Note that switching paths mid-generation can flip greedy near-ties
-  (the #957 FP-summation-order class), so output stays coherent but is not
-  guaranteed bit-identical to a run that never entered the loop — the same
-  property the existing n-gram give-up already has.
 - **SWA-aware KV sizing is now tri-state `auto|on|off` (default `auto`)**:
   auto takes the sliding-window KV savings (gpt-oss ~2×, gemma-3/4 ~5-6× KV
   tokens; measured −14% peak VRAM on gpt-oss-20b at 131K context) only when
@@ -91,13 +81,6 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   transcripts run 50-150K tokens; VRAM and the model's declared context
   still bound the auto pick, so this only extends models that declare (and
   can hold) more than 64K.
-- **`speculative.recycle_loop` auto-disables on GGUF-source models** (with a
-  log line): the bucket-4 verify chunk forward rides the dequant prefill
-  path there, so every verify pays source dequant — measured −9.5%
-  (Qwen3-8B-Q8) and −28.8% (Qwen3-14B-Q6K) vs spec-off. (The ST-NVFP4 route
-  was recorded at +38–97% at the time; see the 2026-07-25 entry below — that
-  win has since failed to reproduce.) See issue #1060 for the flip-matrix data.
-
 ### Added
 - **SWA window snapshots (`kv_cache.swa_snapshot_mb`)**: prefix caching and
   SWA-aware KV sizing now combine — the engine packs each prefill-end

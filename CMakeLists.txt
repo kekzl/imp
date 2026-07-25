@@ -198,7 +198,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/embedding.cu
     src/compute/sampling.cu
     src/compute/rowwise_topm.cu
-    src/compute/token_recycle_device.cu
     src/compute/sampling_topk_topp.cu
     src/compute/sampling_penalties.cu
     src/compute/sampling_filters.cu
@@ -280,8 +279,6 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
     src/runtime/token_recycle_draft.cpp
-    src/runtime/tr_verify_loop.cu
-    src/runtime/engine_tr_loop.cpp
     src/vision/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
@@ -601,8 +598,6 @@ if(IMP_BUILD_TESTS)
         tests/test_softmax.cu
         tests/test_sampling.cu
         tests/test_rowwise_topm.cu
-        tests/test_token_recycle_device.cu
-        tests/test_tr_verify_step.cu
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
         tests/test_mmq_q4k_imma_layout.cu

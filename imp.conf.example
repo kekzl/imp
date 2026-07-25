@@ -508,32 +508,6 @@ recycle_slots        = 8
 recycle_depth        = 3
 recycle_width        = 1
 recycle_min_streak   = 1
-# Verify-in-loop (#1055 phase 2): run the whole draft->verify->accept
-# cycle as a conditional CUDA-graph WHILE loop (device drafting, host only
-# drains tokens). Requires token_recycling. v1 scope: dense
-# decode-attn-route models, greedy, no penalties; anything else falls back
-# to the eager paths.
-#
-# EXPERIMENTAL — the measured expectation is a LOSS, leave it off. The
-# +38-97% recorded on Qwen3-14B-NVFP4 reasoning (2026-07-23) came from a
-# prompt class that was never pinned down: a nine-class sweep on 2026-07-25
-# (planning, math, repetitive, reasoning self-talk, enumeration, templated
-# code, free prose, long explanation, chain-over-list; 1024-tok greedy,
-# interleaved, healthy host) found no class where the loop beats the same
-# config with the loop off — isolated against eager token_recycling it
-# costs a consistent 5.6-8.3%. An era-image bisect rules out a regression
-# from #1059-#1066, so the old win was real but is not reproducible from
-# the record.
-recycle_loop         = false
-# Verify-in-loop economics guard (#1060): after a 4-miss-exit sample, fewer
-# than this many tokens emitted per miss-exit burst on average dooms the
-# loop for the request. A cold adjacency table exits the loop after ~1
-# token and pays the launch + rollback + miss-burst detour on every
-# relaunch — that cycle is what cost -6..-9% on generic prompts. The guard
-# cuts it to -0.3..-3.0%; it bounds damage, it does not create a win (the
-# residual is the one-time loop-graph instantiation, paid before the guard
-# can judge). 0 disables the guard (raw-economics measurement).
-recycle_loop_min_emit = 4.0
 # Suffix-indexed drafting (SuffixDecoding-style): hash-indexed suffix
 # matching instead of a per-step backward scan, continuations picked by
 # frequency vote across all occurrences, and adaptive draft length — a
