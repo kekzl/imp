@@ -85,7 +85,11 @@ inline HoldbackDecision holdback_decision(const std::string& pending, size_t max
         size_t safe = pending.size() - max_stop_len + 1;
         if (safe > pending.size())
             safe = pending.size();  // max_stop_len == 0 -> never escape the buffer
-        d.flush_len = safe;
+        // The cut is a byte offset, so it can land inside a multi-byte character
+        // even when `pending` itself is well-formed — pull it back to the last
+        // codepoint boundary, or the delta ships half a character (which
+        // dump_safe then turns into U+FFFD: "größer" -> "gr??ßer").
+        d.flush_len = utf8_complete_len(pending.substr(0, safe));
     }
     return d;
 }

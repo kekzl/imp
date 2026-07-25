@@ -1,6 +1,7 @@
 #include "args.h"
 #include "handlers.h"
 #include "utils.h"
+#include "webui_asset.h"  // generated: IMP_WEBUI_HTML
 #include "model/hf_hub.h"
 #include "runtime/config.h"
 #include "runtime/process_diag.h"
@@ -197,6 +198,12 @@ int main(int argc, char** argv) {
     // CORS preflight
     svr.Options(R"(.*)", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
 
+    // Web UI — embedded at build time (see cmake/embed_webui.cmake), so the
+    // server has no asset directory to locate.
+    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(IMP_WEBUI_HTML, "text/html; charset=utf-8");
+    });
+
     svr.Get("/health", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_health(req, res, state);
     });
@@ -309,6 +316,7 @@ int main(int argc, char** argv) {
 
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
+    printf("  GET    /                    web UI — open this in a browser\n");
     printf("  GET    /health\n");
     printf("  GET    /v1/models            (vLLM max_model_len + llama.cpp meta.n_ctx_train)\n");
     printf("  GET    /props               llama.cpp-compatible context probe (n_ctx)\n");

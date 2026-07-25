@@ -449,7 +449,19 @@ if(IMP_BUILD_SERVER)
     set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(nlohmann_json)
 
+    # Web UI: generated header, regenerated whenever the page changes.
+    set(IMP_WEBUI_PAGE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server/webui/index.html)
+    set(IMP_WEBUI_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/webui_asset.h)
+    add_custom_command(
+        OUTPUT ${IMP_WEBUI_HEADER}
+        COMMAND ${CMAKE_COMMAND} -DIN=${IMP_WEBUI_PAGE} -DOUT=${IMP_WEBUI_HEADER}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_webui.cmake
+        DEPENDS ${IMP_WEBUI_PAGE} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_webui.cmake
+        COMMENT "Embedding web UI into imp-server"
+        VERBATIM)
+
     add_executable(imp-server
+        ${IMP_WEBUI_HEADER}
         tools/imp-server/main.cpp
         tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
@@ -469,7 +481,8 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/batching_engine.cpp
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
-    target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                                  ${CMAKE_CURRENT_BINARY_DIR}/generated)
     # Optional gcov instrumentation of the server TUs only (the CUDA imp lib is
     # left uninstrumented — nvcc can't take --coverage). Measures real line
     # coverage of tools/imp-server/ over an E2E run. Off by default.

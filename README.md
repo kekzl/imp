@@ -109,6 +109,9 @@ curl -s http://localhost:8080/v1/chat/completions \
   -d '{"model":"your-model.gguf","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
 ```
 
+Or open <http://localhost:8080> in a browser: the server ships a small chat UI
+that streams the answer and plots inter-token latency while it is written.
+
 Or build from source (tracks `main` instead of the latest release):
 
 ```bash

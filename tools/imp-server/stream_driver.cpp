@@ -71,6 +71,11 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     imp::server::StreamReasoningSplitter think_split(think_start_phase, ctx.snap.think_start_id,
                                                      ctx.snap.think_end_id);
 
+    // Rejoins characters the tokenizer split across two tokens, before any
+    // consumer sees the piece — the think splitter and tool filter match on raw
+    // bytes, so half a character must never reach them either.
+    Utf8Stitch utf8_stitch;
+
     // Gemma-4 channel filter state: when we see <|channel> or <channel|>,
     // skip tokens until the next newline (the channel header).
     bool channel_header_active = false;
@@ -234,7 +239,9 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             auto t_first = std::chrono::high_resolution_clock::now();
             out.ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
         }
-        std::string piece = snap_tok->decode_token(token);
+        // A token can end mid-character; hold the partial bytes until the next
+        // one completes them, or the delta ships half a character as U+FFFD.
+        std::string piece = utf8_stitch.feed(snap_tok->decode_token(token));
 
         // gpt-oss Harmony channel routing. Markers arrive as atomic
         // special-token pieces.

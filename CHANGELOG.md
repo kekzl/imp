@@ -4,6 +4,34 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- **Web UI at `GET /`** — `imp-server` now serves a single-page chat client.
+  It streams over the existing SSE endpoint (no protocol or engine change) and
+  draws one bar per token, so time-to-first-token, tok/s and inter-token
+  latency are visible while the answer is written; thinking arrives as a
+  separate collapsible channel. The page is embedded into the binary at build
+  time (`cmake/embed_webui.cmake`) so there is no runtime asset path; source
+  lives in `tools/imp-server/webui/index.html`. One file, no build step, no
+  dependencies — for anything richer, point Open WebUI at the same server.
+
+### Fixed
+- **Streamed non-ASCII text was corrupted** — `"größer"` arrived as `gr<?><?>ßer`
+  over SSE while the same generation was correct non-streaming. Two independent
+  causes, both fixed and covered by unit tests in the CI lane:
+  1. A BPE vocabulary splits a multi-byte character across two tokens. Each
+     delta is serialized on its own, so `dump_safe` saw half a character and
+     replaced it with U+FFFD. `Utf8Stitch` (`tools/imp-server/utils.h`) now
+     holds the partial bytes at the point of detokenization, before any
+     consumer sees the piece — which also protects the reasoning channel and
+     the byte-matching think/tool filters.
+  2. `holdback_decision` (the stop-sequence path) cut the flushed prefix at a
+     byte offset, so it could slice a character in half even when the buffer
+     itself was well-formed. The cut is now pulled back to a codepoint
+     boundary. This path was active for any request with stop sequences.
+
+  Only gpt-oss/Harmony was previously protected (#760); every other model and
+  every non-ASCII script was affected — German umlauts, accents, CJK, emoji.
+
 ### Removed
 - **`speculative.recycle_loop` (verify-in-loop) removed entirely**, together
   with `recycle_loop_min_emit`, the device adjacency table

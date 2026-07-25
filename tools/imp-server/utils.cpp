@@ -9,6 +9,22 @@ std::string dump_safe(const json& j) {
     return j.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
+std::string Utf8Stitch::feed(const std::string& piece) {
+    std::string buf = carry_ + piece;
+    carry_.clear();
+
+    const size_t complete = imp::stream::utf8_complete_len(buf);
+    // A split character is at most 3 bytes short. A longer tail is not a split
+    // character but invalid input, and utf8_complete_len parks on it — holding
+    // that back would stall the stream forever, so pass it through and let
+    // dump_safe replace it.
+    if (complete < buf.size() && buf.size() - complete <= 3) {
+        carry_.assign(buf, complete, buf.size() - complete);
+        buf.resize(complete);
+    }
+    return buf;
+}
+
 void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message) {
     json err = {{"error", {{"message", message}, {"type", type}}}};
     res.status = status;
