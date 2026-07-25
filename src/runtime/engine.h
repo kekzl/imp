@@ -799,6 +799,7 @@ private:
     bool tr_loop_doomed_ = false;           // capture failed once — never retry
     int tr_loop_backoff_req_ = -1;          // miss-exit backoff (see engine_tr_loop.cpp)
     size_t tr_loop_backoff_out_ = 0;
+    size_t tr_loop_launch_out_ = 0;  // output size at burst launch (economics)
     // Device/pinned staging for the verify chunk (lazy-init, K+1 capacity).
     // #1055: tokens/positions/row-ctx-lens + the 3 length scalars live in ONE
     // device block (d_spec_stage_) with a pinned host twin — one H2D per

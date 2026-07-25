@@ -304,6 +304,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("speculative.recycle_width", cfg.speculative.recycle_width);
     I("speculative.recycle_min_streak", cfg.speculative.recycle_min_streak);
     B("speculative.recycle_loop", cfg.speculative.recycle_loop);
+    F("speculative.recycle_loop_min_emit", cfg.speculative.recycle_loop_min_emit);
     B("speculative.suffix", cfg.speculative.suffix);
     I("speculative.suffix_k_max", cfg.speculative.suffix_k_max);
     I("speculative.min_match", cfg.speculative.min_match);

@@ -62,6 +62,8 @@ bool Engine::try_launch_tr_verify_loop_(std::shared_ptr<Request>& req, cudaStrea
     }
     if (tr_loop_runner_.launch_in_flight())
         return false;
+    if (req->tr_loop_given_up)
+        return false;  // economics verdict is final for this request
     // v1 gates: greedy, no penalties / logit shaping / constraints — the
     // in-loop argmax is penalty-free by construction.
     const bool greedy = req->temperature <= 0.0f || req->top_k == 1;
@@ -266,6 +268,7 @@ bool Engine::try_launch_tr_verify_loop_(std::shared_ptr<Request>& req, cudaStrea
     }
     tr_loop_req_ = req;
     tr_loop_initial_p0_ = p0;
+    tr_loop_launch_out_ = req->output_tokens.size();
     IMP_LOG_DEBUG("TrVerifyLoop: launched (p0=%d limit=%d)", p0, token_limit);
     return true;
 }
@@ -324,6 +327,28 @@ bool Engine::step_tr_loop_resume_(cudaStream_t stream) {
         // token is not yet forwarded), exactly the eager-path invariant.
         kv_manager_->rollback(req->id, req->context_len() - 1);
         kv_manager_->touch(req->id);
+        // Economics: only miss exits enter the relaunch cycle (stop/budget/
+        // ceiling either end the request or are one-offs), so only they are
+        // fair evidence. Below the break-even average the loop is handed back
+        // to the async graph loop for the rest of the request.
+        if (exit_reason == 1) {
+            const int emitted = static_cast<int>(req->output_tokens.size()) -
+                                static_cast<int>(tr_loop_launch_out_);
+            req->tr_loop_miss_bursts++;
+            req->tr_loop_miss_emitted += std::max(0, emitted);
+            constexpr int kTrEconSample = 4;  // fair sample before judging
+            const float min_emit = runtime_config_.speculative.recycle_loop_min_emit;
+            if (min_emit > 0.0f && req->tr_loop_miss_bursts >= kTrEconSample &&
+                static_cast<float>(req->tr_loop_miss_emitted) <
+                    static_cast<float>(req->tr_loop_miss_bursts) * min_emit) {
+                req->tr_loop_given_up = true;
+                IMP_LOG_INFO(
+                    "recycle_loop: req %d gave up (uneconomic: %d tokens over %d "
+                    "miss-exit bursts, below %.1f/burst) — async graph loop from here on",
+                    req->id, req->tr_loop_miss_emitted, req->tr_loop_miss_bursts,
+                    static_cast<double>(min_emit));
+            }
+        }
         if (exit_reason == 1 && req->status == RequestStatus::DECODING) {
             // Draft miss on a (still) cold table — produce miss_burst tokens
             // via the async decode loop before the next launch, and hand it

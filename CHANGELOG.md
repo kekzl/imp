@@ -5,6 +5,25 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- **`speculative.recycle_loop` now gives up per request when it is not paying
+  for itself** (#1060 follow-up). A cold adjacency table exits the verify loop
+  after ~1 token, pays the graph-launch + KV-rollback + miss-burst detour and
+  relaunches; that cycle — not the loop body — is what cost −6…−9% on generic
+  prompts and refuted the default flip. After a 4-miss-exit sample, an average
+  below `speculative.recycle_loop_min_emit` (default 4.0, 0 disables the guard)
+  hands the request back to the async graph loop, mirroring the eager-TR
+  `acceptance_poor` and `mtp_econ_min_emit` guards that already existed.
+  Measured on Qwen3-14B-NVFP4 (1024-tok greedy, 3 trials, interleaved, healthy
+  host: 2835-2880 MHz SM / 13801 MHz mem / ~510 W): the loss against loop-off
+  shrinks from −7.8% / −6.2% / −13.0% to −0.3% / −2.7% / −3.0% on
+  planning / math / repetitive prompts. **The flag stays default-OFF**: no
+  prompt class measured *faster* with the loop than without it, so this is
+  damage control for opt-in users, not a flip enabler. The residual cost is
+  the one-time loop-graph instantiation, which is paid before the guard can
+  judge. Note that switching paths mid-generation can flip greedy near-ties
+  (the #957 FP-summation-order class), so output stays coherent but is not
+  guaranteed bit-identical to a run that never entered the loop — the same
+  property the existing n-gram give-up already has.
 - **SWA-aware KV sizing is now tri-state `auto|on|off` (default `auto`)**:
   auto takes the sliding-window KV savings (gpt-oss ~2×, gemma-3/4 ~5-6× KV
   tokens; measured −14% peak VRAM on gpt-oss-20b at 131K context) only when
