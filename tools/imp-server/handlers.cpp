@@ -142,9 +142,13 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
         }
     }
 
-    // OpenAI semantics: expose only what this server can actually serve —
-    // the loaded model. Listing the whole models directory invited clients
-    // to request models the server then had to swap in mid-flight.
+    // Expose what this server can actually serve. That used to mean the loaded
+    // model alone, because listing the directory invited clients to request a
+    // model the server then had to swap in mid-flight. With server.model_swap
+    // those requests are served safely (drain + restore-on-failure), so the
+    // rest of the directory is listed too — a harness cannot pick a model it
+    // cannot see. The loaded one comes first and is the only one whose context
+    // window is known; the others report none until they are loaded.
     //
     // The context window is not part of OpenAI's model object, but every major
     // OpenAI-compatible server bolts it on so clients can auto-detect it. We
@@ -154,12 +158,26 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
         json model = {{"id", model_name},
                       {"object", "model"},
                       {"created", unix_timestamp()},
-                      {"owned_by", "imp"}};
+                      {"owned_by", "imp"},
+                      {"loaded", true}};
         if (max_seq_len > 0) {
             model["max_model_len"] = max_seq_len;               // vLLM convention
             model["meta"] = {{"n_ctx_train", max_seq_len}};     // llama.cpp convention
         }
         data.push_back(std::move(model));
+    }
+
+    if (state.runtime_config.server.model_swap) {
+        for (const auto& [fname, fpath] : scan_model_files(state.models_dir)) {
+            (void)fpath;
+            if (loaded && fname == model_name)
+                continue;
+            data.push_back({{"id", fname},
+                            {"object", "model"},
+                            {"created", unix_timestamp()},
+                            {"owned_by", "imp"},
+                            {"loaded", false}});
+        }
     }
 
     json body = {{"object", "list"}, {"data", data}};
@@ -243,15 +261,20 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
     return "";
 }
 
-// Serve only the loaded model (OpenAI semantics): requesting any other model
-// name gets 404 model_not_found. Inference requests never trigger a model
-// swap — the old auto-swap tore down the engine mid-stream, cancelling every
-// in-flight request (and the whole process if the new model didn't fit).
-// Switching models is an operator action: restart with a different --model.
+// Resolve the model a request asks for, loading or swapping as needed.
 //
-// The one lifecycle action that remains on this path: if the server was
-// started without a model, the first request's model is resolved from the
-// models directory and loaded.
+// A first-generation auto-swap was removed once because it tore the engine down
+// mid-stream (cancelling every in-flight request) and could leave the process
+// with no model when the new one did not fit. Both causes are now closed, so
+// swapping is back under `server.model_swap` (default on): in-flight
+// generations DRAIN before teardown and are never cancelled (the /admin/suspend
+// contract), and a failed load restores the previous model instead of leaving
+// the server empty. What is not solved — and cannot be on 32 GB — is serving
+// two models at once: a swap is serial and the requesting call pays one model
+// load. Set server.model_swap=false for the strict single-model contract.
+//
+// Unknown names never load anything: the name must resolve inside the models
+// directory (or as a HuggingFace repo id), otherwise this is a 404.
 //
 // Returns true if the requested model is loaded. Must be called with
 // state.mtx held.
@@ -297,10 +320,71 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
         return true;  // Already loaded
     }
 
+    // A different model was asked for. If it resolves inside the models
+    // directory, swap to it rather than refusing: agent harnesses drive a big
+    // model beside a small one, and 32 GB serves one at a time. An unresolvable
+    // name falls through to the 404 below, so a typo never triggers a load.
+    if (state.runtime_config.server.model_swap) {
+        std::string path = find_model_path(state, requested_model);
+        if (!path.empty()) {
+            // Drain first: in-flight generations finish, they are never
+            // cancelled (same contract as /admin/suspend). state.mtx is held,
+            // so no new request can be submitted while we tear down. On
+            // timeout nothing has been touched and the current model keeps
+            // serving.
+            const int drain_ms = state.runtime_config.server.model_swap_drain_ms;
+            if (state.batching && !state.batching->pause(drain_ms)) {
+                state.batching->resume();
+                res.status = 503;
+                json err = {{"error",
+                             {{"message", "model swap to '" + requested_model +
+                                              "' aborted: in-flight requests did not drain within " +
+                                              std::to_string(drain_ms) + "ms — still serving '" +
+                                              state.model_name + "'"},
+                              {"type", "server_error"}}}};
+                res.set_content(dump_safe(err), "application/json");
+                return false;
+            }
+            const std::string previous = state.model_name;
+            const std::string previous_path = state.loaded_model_path;
+            printf("[model-swap] %s -> %s\n", previous.c_str(), requested_model.c_str());
+            fflush(stdout);
+            // load_model_into_state owns the teardown of the previous model and
+            // builds a fresh batching engine, so the paused worker goes with it.
+            std::string error = load_model_into_state(state, path, json::object());
+            if (!error.empty()) {
+                // The previous model is already gone at this point. Put it back,
+                // or the server is left serving nothing — that (not the swap
+                // itself) is what made the historical auto-swap unsafe.
+                std::string restore = "not attempted";
+                if (!previous_path.empty()) {
+                    std::string rerr = load_model_into_state(state, previous_path, json::object());
+                    restore = rerr.empty() ? "previous model restored" : "restore ALSO failed: " + rerr;
+                }
+                printf("[model-swap] failed: %s (%s)\n", error.c_str(), restore.c_str());
+                fflush(stdout);
+                res.status = 503;
+                json err = {{"error",
+                             {{"message", "model swap to '" + requested_model + "' failed: " + error +
+                                              " — " + restore},
+                              {"type", "server_error"}}}};
+                res.set_content(dump_safe(err), "application/json");
+                return false;
+            }
+            printf("[model-swap] now serving %s\n", requested_model.c_str());
+            fflush(stdout);
+            return true;
+        }
+    }
+
     res.status = 404;
     json err = {{"error",
-                 {{"message", "The model '" + requested_model + "' does not exist; this server is serving '" +
-                                  state.model_name + "'"},
+                 {{"message",
+                   "The model '" + requested_model + "' is not available; this server is serving '" +
+                       state.model_name + "'" +
+                       (state.runtime_config.server.model_swap
+                            ? " and '" + requested_model + "' was not found in the models directory"
+                            : " and model swapping is disabled (server.model_swap=false)")},
                   {"type", "invalid_request_error"},
                   {"param", "model"},
                   {"code", "model_not_found"}}}};

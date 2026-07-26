@@ -660,6 +660,20 @@ struct RuntimeConfig {
         bool prefix_cache = true;
         // Cap on cache_control/cache_prompt-pinned blocks, % of the KV pool.
         int prefix_pin_budget_pct = 25;
+        // Serve a model other than the loaded one by swapping to it, instead of
+        // answering 404. Agent harnesses run a big model beside a small one
+        // (router, sub-agents, autocomplete) and 32 GB fits one at a time, so
+        // the swap is serial: in-flight generations drain first (never
+        // cancelled, same contract as /admin/suspend), then the old model is
+        // torn down and the requested one loaded. The requested name must
+        // resolve inside the models directory — an unknown name is still a 404,
+        // so a typo cannot trigger a load. Cost is one model load on the
+        // requesting call (the warm weight cache, #956, makes repeats cheap);
+        // set false to keep the single-model contract and fail fast instead.
+        bool model_swap = true;
+        // How long a swap waits for in-flight generations to finish before
+        // giving up and keeping the current model (503, nothing torn down).
+        int model_swap_drain_ms = 60000;
         // Device budget (MiB) for recurrent-state snapshots — what makes
         // prefix caching work on hybrid (SSM/GDN) models: KV blocks alone
         // cannot skip prefill there, the recurrent state at the skip boundary

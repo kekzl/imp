@@ -242,6 +242,8 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [server]
     B("server.prefix_cache", cfg.server.prefix_cache);
     I("server.prefix_pin_budget_pct", cfg.server.prefix_pin_budget_pct);
+    B("server.model_swap", cfg.server.model_swap);
+    I("server.model_swap_drain_ms", cfg.server.model_swap_drain_ms);
     I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
     B("server.green_contexts", cfg.server.green_contexts);
 
