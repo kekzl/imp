@@ -35,7 +35,7 @@ A ranked audit of what still separates imp from "best agentic engine on a 5090".
 | 4 | Constrained decoding is JSON-only | open (`/v1/rerank` needs cross-encoder arch support — bigger than it looked) |
 | 5 | No speculation tree / trained draft head | open — still the only durable batch=1 perf lever |
 | 6 | Context VRAM-capped, no host spill | open |
-| 7 | Agentic quality unmeasured vs competitors | open |
+| 7 | Agentic quality unmeasured vs competitors | **partial** — harness + first cross-engine data point landed; breadth open |
 
 Shipped alongside, not from this list: the live web UI at `GET /` (#1078) and the streamed non-ASCII corruption fix that building it exposed.
 
@@ -51,7 +51,7 @@ Shipped alongside, not from this list: the live web UI at `GET /` (#1078) and th
 
 6. **Context is VRAM-capped with no host spill.** No KV offload to host RAM and no general layer offload (only the MoE expert cache). The auto ceiling is 128K since #1004, but Q6_K on 32 GB tops out near 75K in practice ([`BENCHMARKS.md`](BENCHMARKS.md)); past that StreamingLLM evicts, which is silent context loss rather than a longer window.
 
-7. **Agentic quality is unmeasured against competitors.** `tools/analysis/degen_suite.py`, `tools/agent_bench.py` and the NIAH harness exist, but no cross-engine number is published for tool-call accuracy or format compliance over a long session. Release bar 7 declares the agentic surface green against our own batteries only. "42% faster" is provable today; "breaks tool calls less often" is not.
+7. **Agentic quality vs competitors — first data point landed, breadth open.** `tools/analysis/agentic_compare.py` (2026-07-26) runs the checks an agent harness depends on against any OpenAI-compatible server, so claims about reliability are now measurable rather than asserted. First result (Qwen3-8B-Q8_0 on both engines, `max_tokens=200`, 5 reps — table in [`BENCHMARKS.md`](BENCHMARKS.md)): imp 5/5 everywhere; llama.cpp 5/5 on tool calling but **0/5 on `json_schema`/`json_object`** at that budget, because a think-capable model spends it reasoning and returns empty `content`. **That is a defaults difference, not a capability one** — with `enable_thinking:false` (or a 447-token budget) llama.cpp passes everything, so the honest claim is "imp needs no client-side configuration to keep the JSON contract at an agent-sized budget", not "llama.cpp cannot do constrained decoding". Still open: more models, a budget sweep, format compliance across a long multi-turn session, and vLLM/SGLang as further comparison points.
 
 Explicitly **not** gaps: continuous batching, prefix caching, per-request LoRA, embeddings, the OpenAI / Anthropic / Responses APIs, `/metrics`, suspend/resume, and the sampler surface (DRY, mirostat, typical_p, logit_bias) all ship today. Multi-GPU remains a non-goal.
 
