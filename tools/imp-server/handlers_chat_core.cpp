@@ -799,8 +799,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         std::vector<ParsedToolCall> tool_calls;
         std::string tool_validation_error;
         if (ctx.params.has_tools) {
-            auto [pre_content, parsed_calls] = parse_tool_calls(ctx.snap.tpl_family, content,
-                                                                state.next_tool_call_id);
+            auto [pre_content, parsed_calls] =
+                parse_tool_calls(ctx.snap.tpl_family, content, state.next_tool_call_id,
+                                 tool_names_from_request(ctx.params.tools));
             if (!parsed_calls.empty()) {
                 tool_calls = std::move(parsed_calls);
                 // OpenAI parallel_tool_calls=false: emit at most one call.

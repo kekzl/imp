@@ -58,15 +58,25 @@ std::pair<std::string, std::string> collect_llama3_forced_tool(imp::ChatTemplate
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
     const std::string& text, std::atomic<int>& next_tool_call_id);
 
+// `known_tool_names`: the names the request actually offered. Llama 3.2 emits a
+// bare JSON object instead of the <function=F> envelope, and that form is only
+// treated as a call when the name is one of these — otherwise a model that
+// happens to answer with {"name":...,"parameters":...} would fabricate a tool
+// call nobody asked for (Llama-3.2-3B does exactly that on a plain chat turn).
+// Empty list = envelope form only, i.e. the pre-2026-07-26 behaviour.
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
-    const std::string& text, std::atomic<int>& next_tool_call_id);
+    const std::string& text, std::atomic<int>& next_tool_call_id,
+    const std::vector<std::string>& known_tool_names = {});
 
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_gemma(
     const std::string& text, std::atomic<int>& next_tool_call_id);
 
-std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(imp::ChatTemplateFamily family,
-                                                                     const std::string& text,
-                                                                     std::atomic<int>& next_tool_call_id);
+std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(
+    imp::ChatTemplateFamily family, const std::string& text, std::atomic<int>& next_tool_call_id,
+    const std::vector<std::string>& known_tool_names = {});
+
+// Names of the functions a request offered, for the check above.
+std::vector<std::string> tool_names_from_request(const json& tools);
 
 // Parse Qwen3.6's XML-flavored tool-call body (<function=NAME><parameter=K>V
 // </parameter>...); exported so the streaming paths can fall back to it when

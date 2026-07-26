@@ -324,13 +324,94 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
     return {content, calls};
 }
 
+std::vector<std::string> tool_names_from_request(const json& tools) {
+    std::vector<std::string> names;
+    if (!tools.is_array())
+        return names;
+    for (const auto& t : tools) {
+        if (!t.is_object())
+            continue;
+        const json& fn = t.contains("function") ? t["function"] : t;
+        if (fn.is_object() && fn.contains("name") && fn["name"].is_string())
+            names.push_back(fn["name"].get<std::string>());
+    }
+    return names;
+}
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
-    const std::string& text, std::atomic<int>& next_tool_call_id) {
+    const std::string& text, std::atomic<int>& next_tool_call_id,
+    const std::vector<std::string>& known_tool_names) {
     std::vector<ParsedToolCall> calls;
     std::string content;
 
     size_t first_tag = text.find("<function=");
     if (first_tag == std::string::npos) {
+        // Llama 3.2 emits a bare JSON object — {"name": F, "parameters": {...}}
+        // — where 3.1 used the <function=F> envelope above. Without this the
+        // call is handed back as `content` and an agent never sees a tool call,
+        // even though the model and the constrained grammar did their job.
+        // Deliberately strict: an object with a non-empty string `name` and an
+        // object `parameters`/`arguments`, nothing else, so a plain JSON answer
+        // is not mistaken for a call.
+        std::string trimmed = text;
+        auto b = trimmed.find_first_not_of("\n\r\t ");
+        auto e = trimmed.find_last_not_of("\n\r\t ");
+        if (b == std::string::npos)
+            return {text, {}};
+        trimmed = trimmed.substr(b, e - b + 1);
+        if (trimmed.front() != '{')
+            return {text, {}};
+        // Take the FIRST balanced object: a small model asked for one call can
+        // emit several, separated by "; ", and parsing the whole string then
+        // fails outright (Llama-3.2-3B does this with a two-property schema).
+        // Brace counting is string-aware so a '}' inside a value doesn't end it.
+        size_t depth = 0, end_obj = std::string::npos;
+        bool in_str = false, esc = false;
+        for (size_t i = 0; i < trimmed.size(); i++) {
+            char c = trimmed[i];
+            if (in_str) {
+                if (esc)
+                    esc = false;
+                else if (c == '\\')
+                    esc = true;
+                else if (c == '"')
+                    in_str = false;
+                continue;
+            }
+            if (c == '"')
+                in_str = true;
+            else if (c == '{')
+                depth++;
+            else if (c == '}' && --depth == 0) {
+                end_obj = i;
+                break;
+            }
+        }
+        if (end_obj == std::string::npos)
+            return {text, {}};
+        trimmed = trimmed.substr(0, end_obj + 1);
+        try {
+            json j = json::parse(trimmed);
+            if (j.is_object() && j.contains("name") && j["name"].is_string() &&
+                !j["name"].get<std::string>().empty()) {
+                const char* key = j.contains("parameters")  ? "parameters"
+                                  : j.contains("arguments") ? "arguments"
+                                                            : nullptr;
+                const std::string cand = j["name"].get<std::string>();
+                const bool known = std::find(known_tool_names.begin(), known_tool_names.end(), cand) !=
+                                   known_tool_names.end();
+                if (key && j[key].is_object() && known) {
+                    ParsedToolCall tc;
+                    tc.name = cand;
+                    tc.arguments = dump_safe(j[key]);
+                    tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
+                    calls.push_back(std::move(tc));
+                    return {std::string(), calls};
+                }
+            }
+        } catch (...) {
+            // not JSON — plain content
+        }
         return {text, {}};
     }
 
@@ -630,11 +711,11 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_gemma(
     return {content, calls};
 }
 
-std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(imp::ChatTemplateFamily family,
-                                                                     const std::string& text,
-                                                                     std::atomic<int>& next_tool_call_id) {
+std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(
+    imp::ChatTemplateFamily family, const std::string& text, std::atomic<int>& next_tool_call_id,
+    const std::vector<std::string>& known_tool_names) {
     if (family == imp::ChatTemplateFamily::LLAMA3)
-        return parse_tool_calls_llama3(text, next_tool_call_id);
+        return parse_tool_calls_llama3(text, next_tool_call_id, known_tool_names);
     if (family == imp::ChatTemplateFamily::GEMMA)
         return parse_tool_calls_gemma(text, next_tool_call_id);
     return parse_tool_calls_chatml(text, next_tool_call_id);

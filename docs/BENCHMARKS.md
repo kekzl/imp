@@ -375,6 +375,41 @@ the client knowing to configure anything.
 Tool calling is equally reliable on both — llama.cpp emits the call even while
 thinking, it just pays ~9× the tokens for it at this budget.
 
-Scope: one model, one budget, 5 repetitions, one llama.cpp build. It establishes
-the harness and a first honest data point, not an exhaustive study. Wider model
-coverage and a budget sweep are the obvious next steps.
+### Budget sweep (Qwen3-8B, default settings, 3 reps)
+
+Where each engine starts keeping the contract, as the agent's `max_tokens` grows:
+
+| budget | imp | llama.cpp |
+|---|---|---|
+| 100 | all 6 categories pass | only `tool_choice=auto` passes |
+| 200 | all 6 pass | tools flaky (1/3), JSON 0/3 |
+| 400 | all 6 pass | tools pass, JSON still 0-1/3 |
+| 800 | all 6 pass | all 6 pass (`json_schema` costs 447 tok) |
+
+imp is budget-independent because it does not spend the budget thinking on
+json/tool requests; llama.cpp needs roughly 800 tokens before a think-capable
+model gets to the answer.
+
+### Control: a model that does not think (Llama-3.2-3B-Q8_0, budget 200)
+
+If the difference above is really *thinking*, it should vanish on a model that
+has none. It does — and the control found a genuine bug in **imp**, not in
+llama.cpp:
+
+| Case | imp (before) | imp (after fix) | llama.cpp |
+|---|:--:|:--:|:--:|
+| `json_schema` / `json_object` / multi-turn | 3/3 | 3/3 | 3/3 · **0/3** · 3/3 |
+| `tool_choice=required` + args | **0/3** | **3/3** | 3/3 |
+| `tool_choice=auto` stays optional | 3/3 | 3/3 | **0/3** |
+
+imp was dropping Llama-3.2 tool calls: the model emits a bare JSON object where
+Llama 3.1 used the `<function=F>` envelope, so a correct call was handed back as
+`content` and an agent saw none. Fixed (parser accepts the bare form when the
+name matches a tool the request offered). The two llama.cpp cells are its own
+gaps at this budget: `json_object` returned non-JSON, and `tool_choice=auto`
+forced a call on a plain chat turn.
+
+Both engines have holes; this is what measuring instead of asserting looks like.
+
+Scope: two models, four budgets, 3-5 repetitions, one llama.cpp build. Still
+open: more model families, long multi-turn format compliance, vLLM/SGLang.
