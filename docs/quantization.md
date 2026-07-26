@@ -158,3 +158,23 @@ Quick guidance, not a benchmark:
 - **IQ4_NL / IQ4_XS** (i-quants) load and run since #556 via the dequant path (FP16-cache decode like Q4_K, dequant→cuBLAS prefill). Supported for community-quant compatibility — at equal VRAM prefer Q4_K_M, which has dedicated dp4a/MMVQ kernels. The IQ1/IQ2/IQ3 families remain unsupported.
 - **NVFP4** (SafeTensors prequant) gives the highest decode throughput on prequant-aware models (current per-model numbers in [`BENCHMARKS.md`](BENCHMARKS.md)). Requires AWQ/SmoothQuant calibration; only Modelopt is fully tested.
 - **MXFP4** is GGUF-native FP4. Smallest footprint (Qwen3-4B at 2.8 GB), but quality lags Q4_K_M without MR-GPTQ calibration.
+
+#### Refuted: micro-scale search (2026-07-26)
+
+Before reaching for calibration, the cheap hypothesis was tested and **does not
+pay**: choosing each micro-scale by minimizing the block's reconstruction error
+(searching FP8 candidates around `absmax` instead of taking it) moved
+Qwen3-0.6B from PPL 30.10 to **29.88** — 0.7%, for ~6x the quantization cost.
+Reverted; do not re-attempt.
+
+Why it cannot help much: the micro-block is only **16** values. Clipping the
+scale pays when one outlier spoils a large group (64-128), but across 16 values
+`absmax` is already near-optimal. The dominant error is the FP4 grid itself —
+eight magnitudes (0, 0.5, 1, 1.5, 2, 3, 4, 6) — which no choice of scale
+improves.
+
+That is why the open work is **AWQ / GPTQ class**, not better scales: they do
+not shrink the error, they move it. AWQ uses calibration activations to protect
+the channels that carry the most signal; GPTQ compensates each column's error in
+the columns still to be quantized. Both need infrastructure imp does not have
+yet (activation statistics hooks / a Hessian pass).
