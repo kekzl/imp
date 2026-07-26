@@ -5,7 +5,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- **`imp-quantize`: first-party BF16/FP16 → NVFP4 checkpoint conversion.** imp
+- **`imp-quantize` (EXPERIMENTAL): first-party BF16/FP16 → NVFP4 checkpoint
+  conversion.** imp
   could only ever *consume* NVFP4 exports, so reaching the fast path for a new
   model meant waiting for someone to publish one (roadmap gap 1). The tool
   writes the layout the loader already recognises (`<prefix>.weight` U8 packed
