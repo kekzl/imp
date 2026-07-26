@@ -22,19 +22,26 @@
 // QUALITY, MEASURED — read before using this on anything you care about.
 // The scales here are plain round-to-nearest over the weights (absmax per
 // micro-block, absmax per tensor). There is NO activation calibration, so
-// nothing protects the channels that matter most, and the cost is real:
+// nothing protects the channels that matter most, and it costs:
 //
-//   Qwen3-0.6B  PPL 13.51 -> 19.19  (+42%)
-//   Qwen3-1.7B  PPL  8.93 -> 14.01  (+57%)
-//   (imp-cli --perplexity, same 199-token corpus, deterministic_gemm, 2026-07-26)
+//   Qwen3-0.6B  PPL 24.06 -> 30.10  (+25%)
+//   Qwen3-1.7B  PPL 17.22 -> 20.43  (+19%)
+//   (imp-cli --perplexity over tools/analysis/ppl_corpus_45k.txt = 13536
+//    tokens, deterministic_gemm, 2026-07-26)
 //
-// The loss does not shrink with model size in that pair, which is the signal
-// that this is a calibration gap and not a small-model artifact. Output is
-// coherent and factually fine on short prompts, and the pipeline is correct
-// end to end — but a calibrated export (AWQ / SmoothQuant class, what Modelopt
-// does) will beat this, so prefer a published checkpoint when one exists.
-// Useful today for: getting a model onto the NVFP4 path at all, and for
-// performance work where the weights only need to be the right shape.
+// Use a corpus of that size to judge this. The same pair measured over the
+// 199-token ppl_corpus.txt reads +42% / +57% and appears to get WORSE with
+// model size — both artifacts of too few tokens. On the real corpus the loss
+// shrinks with size, which is the expected shape.
+//
+// Coherence is intact beyond perplexity: tools/analysis/degen_suite.py passes
+// 41/41 against a server running the quantized 0.6B, including constrained
+// json_schema decoding, forced tool calls and thinking channels.
+//
+// Still, a calibrated export (AWQ / SmoothQuant class, what Modelopt does)
+// will beat this — prefer a published checkpoint when one exists. Useful
+// today for: getting a model onto the NVFP4 path at all, and for performance
+// work where the weights only need to be the right shape.
 
 #include "core/tensor.h"
 #include "model/safetensors_raw.h"
@@ -407,7 +414,7 @@ int main(int argc, char** argv) {
     if (!opt.dry_run)
         printf(
             "\n\nNOTE: round-to-nearest, no activation calibration. Measured cost on the\n"
-            "      dense Qwen3 pair: PPL +42%% (0.6B) / +57%% (1.7B). Prefer a published\n"
+            "      dense Qwen3 pair: PPL +25%% (0.6B) / +19%% (1.7B). Prefer a published\n"
             "      calibrated checkpoint when one exists for your model.");
     if (n_moe_skipped)
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);

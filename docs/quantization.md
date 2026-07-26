@@ -50,20 +50,28 @@ Embeddings, norms and (unless `--lm-head`) the LM head stay full precision.
 
 **Quality: worse than a calibrated export, measurably.** The scales are plain
 round-to-nearest over the weights; there is no activation calibration, so
-nothing protects the channels that matter most. Measured on 2026-07-26 with
-`imp-cli --perplexity` over the same 199-token corpus, `deterministic_gemm`:
+nothing protects the channels that matter most. Measured 2026-07-26 with
+`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 536 tokens),
+`deterministic_gemm`:
 
 | Model | BF16 | imp-quantize NVFP4 | cost |
 |---|---:|---:|---:|
-| Qwen3-0.6B | 13.51 | 19.19 | +42% |
-| Qwen3-1.7B | 8.93 | 14.01 | +57% |
+| Qwen3-0.6B | 24.06 | 30.10 | +25% |
+| Qwen3-1.7B | 17.22 | 20.43 | +19% |
 
-The loss does not shrink with size across that pair, which points at the
-missing calibration rather than a small-model artifact. Output is coherent and
-factually correct on short prompts, and the pipeline is verified end to end
-(the result loads, is detected as `NVFP4 model (Model Optimizer)`, and
-generates) — but **prefer a Modelopt export when one exists**. Adding
-AWQ/SmoothQuant-class calibration is the open work; see [roadmap](roadmap.md).
+> **Measure this on the 45k corpus, not `ppl_corpus.txt`.** The same pair over
+> the 199-token corpus reads +42% / +57% and appears to get *worse* with model
+> size. Both are artifacts of too few tokens; on the real corpus the loss
+> shrinks with size, which is the expected shape.
+
+Coherence holds beyond perplexity: `tools/analysis/degen_suite.py` passes
+**41/41** against a server running the quantized Qwen3-0.6B — streaming,
+constrained `json_schema` decoding, forced tool calls and thinking channels
+included. The pipeline is verified end to end on both shard layouts (the
+result loads, is detected as `NVFP4 model (Model Optimizer)`, and generates).
+
+Still, **prefer a Modelopt export when one exists**. Adding AWQ/SmoothQuant-class
+calibration is the open work; see [roadmap](roadmap.md).
 
 MoE checkpoints are not supported yet: expert stacks are 3-D and need the
 per-expert path. They are reported and left unquantized rather than mangled.
