@@ -30,9 +30,14 @@ Calibrated per-tensor scales using AWQ or SmoothQuant. Two upstream tools produc
 |---|---|
 | [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (after PR #88 lit up the CUTLASS NVFP4×NVFP4 prefill cache). |
 | [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads, but several models degenerate past ~30 tokens. See [roadmap](roadmap.md). Prefer Modelopt where available. |
-| `imp-quantize` (in-tree) | Uncalibrated round-to-nearest — works, but costs measurably more quality than the two above. See below. |
+| `imp-quantize` (in-tree) | **Experimental.** Uncalibrated round-to-nearest — works, but costs measurably more quality than the two above. See below. |
 
-### imp-quantize — converting a checkpoint yourself
+### imp-quantize — converting a checkpoint yourself (EXPERIMENTAL)
+
+> **Experimental.** The pipeline is verified end to end, but the quantization is
+> uncalibrated and costs measurably more quality than a published export (table
+> below). Use it to get a model onto the NVFP4 path for evaluation or
+> performance work — not to produce a checkpoint you ship or rely on.
 
 `imp-quantize` turns a dense BF16/FP16 SafeTensors checkpoint into an NVFP4 one
 without leaving the repo, for models nobody has published an export for:

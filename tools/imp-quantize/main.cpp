@@ -1,5 +1,11 @@
 // imp-quantize — turn a BF16/FP16 SafeTensors checkpoint into an NVFP4 one.
 //
+// STATUS: EXPERIMENTAL. The pipeline is verified end to end, but the
+// quantization is uncalibrated and costs measurably more quality than a
+// published export (numbers below). Intended for getting a model onto the
+// NVFP4 path for evaluation or performance work — not for producing
+// checkpoints anyone should rely on.
+//
 // Why this exists: imp could only ever CONSUME NVFP4 checkpoints, so both model
 // coverage and quantization quality were gated on somebody else publishing a
 // Modelopt / llm-compressor export (docs/roadmap.md, gap 1). A model without an
@@ -73,6 +79,9 @@ struct Options {
 void usage() {
     printf(
         "usage: imp-quantize --model <safetensors-dir> --out <dir> [--lm-head] [--dry-run]\n"
+        "\n"
+        "EXPERIMENTAL: uncalibrated quantization, measurably below a published\n"
+        "export. For evaluation and performance work, not for shipping weights.\n"
         "\n"
         "  --model DIR   source checkpoint (BF16/FP16 SafeTensors + config.json)\n"
         "  --out DIR     destination; created if missing\n"
@@ -413,9 +422,10 @@ int main(int argc, char** argv) {
            n_copied);
     if (!opt.dry_run)
         printf(
-            "\n\nNOTE: round-to-nearest, no activation calibration. Measured cost on the\n"
-            "      dense Qwen3 pair: PPL +25%% (0.6B) / +19%% (1.7B). Prefer a published\n"
-            "      calibrated checkpoint when one exists for your model.");
+            "\n\nEXPERIMENTAL OUTPUT: round-to-nearest, no activation calibration.\n"
+            "      Measured cost on the dense Qwen3 pair: PPL +25%% (0.6B) / +19%% (1.7B).\n"
+            "      Fine for evaluation and performance work; prefer a published\n"
+            "      calibrated checkpoint for anything you rely on.");
     if (n_moe_skipped)
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
     if (!opt.dry_run)
