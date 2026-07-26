@@ -166,7 +166,7 @@ def check_tool_args(resp):
     return True, ""
 
 
-def check_multiturn(url, body_base, reps):
+def check_multiturn(url, body_base, reps, turns=3):
     """Does the JSON contract survive a conversation, not just one shot?
 
     An agent asks repeatedly with history growing underneath. Template drift,
@@ -177,7 +177,7 @@ def check_multiturn(url, body_base, reps):
     for _ in range(reps):
         msgs = [{"role": "user", "content": "Give me a person object."}]
         broke = ""
-        for turn in range(3):
+        for turn in range(turns):
             body = {**body_base, "messages": msgs, "response_format": PERSON_SCHEMA}
             try:
                 resp = post(url, body)
@@ -223,15 +223,15 @@ CASES = {
 }
 
 
-def run_engine(name, url, reps, budget, thinking_off):
+def run_engine(name, url, reps, budget, thinking_off, turns=3):
     model = model_id(url)
     print(f"\n=== {name} ({url}) model={model} budget={budget} thinking_off={thinking_off} ===")
     results = {}
-    ok_n, causes = check_multiturn(url, base_body(budget, thinking_off, model), reps)
+    ok_n, causes = check_multiturn(url, base_body(budget, thinking_off, model), reps, turns)
     results["json_multiturn"] = {"ok": ok_n, "n": reps, "tokens": 0, "causes": causes}
     mark = "PASS" if ok_n == reps else ("FAIL" if ok_n == 0 else "FLAKY")
     detail = f"  [{', '.join(causes)}]" if causes else ""
-    print(f"  {mark:5} {'json_multiturn':14} {ok_n}/{reps}  3 turns each{detail}")
+    print(f"  {mark:5} {'json_multiturn':14} {ok_n}/{reps}  {turns} turns each{detail}")
     for case, build in CASES.items():
         ok_n, causes, toks = 0, [], []
         for _ in range(reps):
@@ -264,6 +264,8 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--budget", type=int, default=200,
                     help="max_tokens per request (default 200, a realistic agent budget)")
+    ap.add_argument("--turns", type=int, default=3,
+                    help="turns in the multi-turn contract check (longer = template drift and KV reuse get more chances to break it)")
     ap.add_argument("--thinking-off", action="store_true",
                     help="disable thinking per request — separates a DEFAULT difference "
                          "from a CAPABILITY difference")
@@ -292,7 +294,7 @@ def main():
     for budget in budgets:
         for name, url in engines:
             out[f"{name}@{budget}"] = run_engine(name, url, args.reps, budget,
-                                                 args.thinking_off)
+                                                 args.thinking_off, args.turns)
 
     print("\n" + "=" * 62)
     cases = list(CASES) + ["json_multiturn"]
