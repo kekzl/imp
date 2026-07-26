@@ -128,6 +128,17 @@ Any match = **fail**, even if output passed the heuristic. Cross-check measured 
 
 Pick the first model from this table whose family matches your change. Stable prompts give stable regressions — do not invent new probes.
 
+**Perplexity corpus (2026-07-26):** when you fall back to PPL, use
+`tools/analysis/ppl_corpus_45k.txt` (13 536 tokens), **not**
+`tools/analysis/ppl_corpus.txt` (199 tokens). The short one does not merely add
+noise, it inverts conclusions: the same quantization pair reads +42%/+57% on it
+vs +25%/+19% on the real corpus, and appears to get *worse* with model size when
+it actually gets better. Pass `--set runtime.deterministic_gemm=true` on both
+arms. And PPL is never sufficient on its own — it cannot see a
+degenerate-but-low-perplexity model, which is what this battery is for. When
+validating quantized weights, run the suite in §0 against a server on them
+(41 checks incl. constrained decoding and tool calls) *and* report PPL.
+
 **Quant-file caveat (2026-06-06):** the local Qwen3-4B (unsloth) and Llama-3.2-3B (bartowski) GGUFs are re-downloads — *different quant files* than the originals. Greedy behavior on logit-tie prompts differs (the unsloth 4B degenerates on synthetic list prompts even unchunked — that's model-intrinsic, NOT an engine bug). For byte-level A/B prefer NLL/perplexity comparison over exact-output equality (the ChunkedPrefill tests switched to NLL for this reason, PR #553). Qwen3.6-35B is non-deterministic even at temp=0 — greedy-token A/B is INVALID there; use perplexity or `degen_suite.py --skip-deterministic`.
 
 ## Red flags — STOP and re-run
