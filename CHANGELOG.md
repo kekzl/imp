@@ -18,9 +18,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   holds truncated weights) and `safetensors_raw` (name-preserving reader that
   leaves the production load path untouched), with 12 unit tests in the CI lane.
   **Quality caveat, measured:** scales are uncalibrated round-to-nearest, which
-  costs PPL +42% (0.6B) / +57% (1.7B) vs BF16 — prefer a published Modelopt
-  export where one exists. AWQ/SmoothQuant-class calibration and MoE expert
-  stacks (3-D, currently reported and left unquantized) are the open work.
+  costs PPL +25% (0.6B) / +19% (1.7B) vs BF16 over a 13 536-token corpus, while
+  `degen_suite.py` passes 41/41 on the quantized model (constrained decoding,
+  tool calls and thinking channels included). Judge this on
+  `ppl_corpus_45k.txt` — the 199-token `ppl_corpus.txt` reads +42%/+57% for the
+  same pair and inverts the size trend, both artifacts of too few tokens.
+  Prefer a published Modelopt export where one exists; AWQ/SmoothQuant-class
+  calibration and MoE expert stacks (3-D, currently reported and left
+  unquantized) are the open work.
 - **Model swapping on request (`server.model_swap`, default on)** — a request
   naming a model other than the loaded one is now served by swapping to it
   instead of returning 404. Agent harnesses drive a big model beside a small
