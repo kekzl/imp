@@ -67,6 +67,7 @@ RUN cmake -B build -G Ninja \
         -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
     && cmake --build build -j$(nproc) \
     && cp build/imp-server build/imp-cli /tmp/ \
+    && ([ -f build/imp-quantize ] && cp build/imp-quantize /tmp/ || true) \
     && if [ -f build/imp-tests ]; then \
            cp build/imp-tests build/imp-tests-unit /tmp/ \
            && for b in test-core test-text test-compute test-attention \
@@ -101,6 +102,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy built binaries
 COPY --from=builder /tmp/imp-server /usr/local/bin/imp-server
 COPY --from=builder /tmp/imp-cli /usr/local/bin/imp-cli
+COPY --from=builder /tmp/imp-quantiz[e] /usr/local/bin/
 COPY --from=builder /tmp/imp-test[s] /usr/local/bin/
 COPY --from=builder /tmp/imp-tests-uni[t] /usr/local/bin/
 COPY --from=builder /tmp/test-cor[e] /usr/local/bin/
