@@ -32,11 +32,11 @@ A ranked audit of what still separates imp from "best agentic engine on a 5090".
 | 1 | First-party NVFP4 quantizer | **partial** — `imp-quantize` converts and the output runs, but it is **experimental**: uncalibrated, +19-25% PPL. Calibration open. |
 | 2 | Vision beyond Gemma | open |
 | 3 | One server, one model | **closed** — `server.model_swap` (#1080) |
-| 4 | Constrained decoding is JSON-only | **closed** — `response_format: regex` / `guided_regex` (#1091) and GBNF grammars (#1094) ship; `/v1/rerank` remains a separate item |
+| 4 | Constrained decoding is JSON-only | **closed** — `response_format: regex` / `guided_regex` (#1091) and GBNF grammars (#1095) ship; `/v1/rerank` remains a separate item |
 | 5 | No speculation tree / trained draft head | open — still the only durable batch=1 perf lever |
 | 6 | Context VRAM-capped, no host spill | open |
 | 7 | Agentic quality unmeasured vs competitors | **closed** — measured across three model families, published in [`BENCHMARKS.md`](BENCHMARKS.md); vLLM/SGLang deliberately out of scope |
-| 8 | No GBNF/EBNF grammar surface | **closed** — GBNF via `response_format: grammar`, llama.cpp's `grammar`, vLLM's `guided_grammar` (#1094) |
+| 8 | No GBNF/EBNF grammar surface | **closed** — GBNF via `response_format: grammar`, llama.cpp's `grammar`, vLLM's `guided_grammar` (#1095) |
 | 9 | `/v1/rerank` absent | open — split out of 4: it needs cross-encoder architecture support (model work), not a grammar surface |
 | 10 | Agent-harness batteries are imp-internal | open — `agent_loop_suite.py` probes our own server (#1007 stage 1); stage 2 is running real harness binaries (Claude Code, Aider, OpenHands) against imp |
 
