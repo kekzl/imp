@@ -411,5 +411,24 @@ forced a call on a plain chat turn.
 
 Both engines have holes; this is what measuring instead of asserting looks like.
 
-Scope: two models, four budgets, 3-5 repetitions, one llama.cpp build. Still
-open: more model families, long multi-turn format compliance, vLLM/SGLang.
+### Three families, 8-turn sessions (budget 200, 3 reps)
+
+| Model | imp | llama.cpp | note |
+|---|:--:|:--:|---|
+| Qwen3-8B-Q8_0 (thinks) | **6/6** | 3/6 | llama.cpp reaches 6/6 at budget 800 |
+| Llama-3.2-3B-Q8_0 | **6/6** | 4/6 | imp was 4/6 until the tool-call fix this found |
+| gemma-3-12b-Q4_K_M | 5/6 | 4/6 | `tool_forced` fails on BOTH — Gemma-3 has no native function calling, a model limit, not an engine gap |
+
+The 8-turn `json_multiturn` check passes everywhere on both engines: neither
+loses the JSON contract as history grows, which is the failure mode template
+drift and KV reuse would produce.
+
+Where they differ consistently: **`json_object` holds on imp across all three
+models and fails on llama.cpp for two of them** (returns prose, not JSON), and
+llama.cpp's `tool_choice=auto` forced a call on a plain chat turn with
+Llama-3.2. imp's own gap was Llama-3.2 tool calls (fixed; see the CHANGELOG).
+
+Scope: three model families, four budgets, 8-turn sessions, 3-5 repetitions,
+one llama.cpp build, GGUF only. **vLLM/SGLang are not covered** — they would
+need a different weight format and more VRAM than this box has free while
+serving; that is the honest remaining gap, not an oversight.

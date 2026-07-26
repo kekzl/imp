@@ -5,6 +5,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **Cross-engine agentic-reliability measurement** (`tools/analysis/agentic_compare.py`)
+  — the checks an agent harness depends on (json_schema, json_object, forced /
+  optional tool calls, tool-argument validity, and an N-turn JSON-contract
+  session) run against any OpenAI-compatible server, so reliability claims are
+  measured instead of asserted. Results for three model families in
+  `docs/BENCHMARKS.md`. It found a real imp bug on its first control run
+  (below), which is the point of having it.
 - **`imp-quantize` (EXPERIMENTAL): first-party BF16/FP16 → NVFP4 checkpoint
   conversion.** imp
   could only ever *consume* NVFP4 exports, so reaching the fast path for a new
@@ -51,6 +58,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   dependencies — for anything richer, point Open WebUI at the same server.
 
 ### Fixed
+- **Llama 3.2 tool calls were dropped.** Llama 3.2 emits a bare JSON object
+  (`{"name": F, "parameters": {...}}`) where 3.1 used the `<function=F>`
+  envelope; imp understood only the envelope, so a correct call — model and
+  constrained grammar both right — came back as `content` and an agent saw no
+  tool call. The parser now accepts the bare form, but only when the name is one
+  the request actually offered (an unguarded version fabricated calls from
+  `{"name":"print",...}`, which a small model emits on a plain chat turn — a
+  false call is worse than a missed one, since the agent executes it), and takes
+  the first balanced object (models asked for one call sometimes emit several,
+  `"; "`-separated). Llama-3.2-3B goes 4/6 -> 6/6 on the agentic comparison;
+  Qwen3-8B unchanged.
 - **Streamed non-ASCII text was corrupted** — `"größer"` arrived as `gr<?><?>ßer`
   over SSE while the same generation was correct non-streaming. Two independent
   causes, both fixed and covered by unit tests in the CI lane:
