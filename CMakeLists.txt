@@ -214,6 +214,9 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_routing_permute.cu
     src/compute/softmax.cu
     src/compute/regex_constrain.cu
+    src/compute/grammar_constrain.cu
+    src/compute/gbnf_grammar.cpp
+    src/compute/gbnf_parser.cpp
     src/compute/json_constrain.cu
     src/compute/json_schema.cpp
     src/compute/schema_constrain.cu
@@ -554,6 +557,9 @@ if(IMP_BUILD_TESTS)
         # every past grammar bug escaped CI because its tests need a GPU.
         tests/test_json_constrain_property.cpp
         tests/test_schema_constrain_property.cpp
+        # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
+        # CPU-only by construction — see the file header.
+        tests/test_gbnf_grammar.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp

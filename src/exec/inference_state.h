@@ -17,6 +17,7 @@ namespace imp {
 class JsonConstrainer;
 class SchemaConstrainer;
 class RegexConstrainer;
+class GrammarConstrainer;
 
 // All the state needed for a single forward pass invocation.
 struct InferenceState {
@@ -129,6 +130,7 @@ struct InferenceState {
     JsonConstrainer* json_constrainer = nullptr;
     SchemaConstrainer* schema_constrainer = nullptr;
     RegexConstrainer* regex_constrainer = nullptr;
+    GrammarConstrainer* grammar_constrainer = nullptr;
 
     // Logit bias (host-side, applied via cudaMemcpy before sampling)
     const std::pair<int32_t, float>* logit_bias = nullptr;

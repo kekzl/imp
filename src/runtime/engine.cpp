@@ -583,20 +583,25 @@ void Engine::embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t s
 void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {
     const bool tool_enforced = !req->tool_constraint_tools.empty();
     const bool regex_enforced = !req->regex_pattern.empty();
-    if (!(req->json_mode || !req->json_schema.empty() || tool_enforced || regex_enforced) ||
+    const bool grammar_enforced = !req->grammar.empty();
+    if (!(req->json_mode || !req->json_schema.empty() || tool_enforced || regex_enforced ||
+          grammar_enforced) ||
         req->constraints)
         return;
 
     // Pool key: tool-enforced requests key by their tool-call signature so a
     // pooled manager with the same classified tables is reused (#1002).
-    // A regex request keys by its pattern, so a pooled manager that already
-    // classified this pattern's vocabulary is reused.
+    // A regex or grammar request keys by its source, so a pooled manager that
+    // already classified that vocabulary is reused.
     const std::string pool_key_regex = regex_enforced ? ("regex:" + req->regex_pattern) : std::string();
+    const std::string pool_key_grammar = grammar_enforced ? ("gbnf:" + req->grammar) : std::string();
     const std::string pool_key = tool_enforced ? ConstraintManager::tool_call_key(req->tool_constraint_tools,
                                                                                   req->tool_envelope_open,
                                                                                   req->tool_envelope_close,
                                                                                   req->tool_constraint_xml)
-                                               : (regex_enforced ? pool_key_regex : req->json_schema);
+                                 : regex_enforced   ? pool_key_regex
+                                 : grammar_enforced ? pool_key_grammar
+                                                    : req->json_schema;
     req->constraints = constraints_checkout_(pool_key);
 
     bool enforced = false;
@@ -611,16 +616,22 @@ void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {
     if (!enforced && regex_enforced)
         enforced = req->constraints->prepare_regex(req->regex_pattern, model_->tokenizer(),
                                                    /*thinking_open=*/req->in_think_block);
+    if (!enforced && grammar_enforced)
+        enforced = req->constraints->prepare_grammar(req->grammar, model_->tokenizer(),
+                                                     /*thinking_open=*/req->in_think_block);
     if (!enforced && (req->json_mode || !req->json_schema.empty()))
         req->constraints->prepare(req->json_mode, req->json_schema, model_->tokenizer(), req->has_tools,
                                   req->tpl_family, /*thinking_open=*/req->in_think_block);
 }
 
 std::shared_ptr<ConstraintManager> Engine::constraints_checkout_(const std::string& json_schema) {
-    // Prefer a pooled manager that already classified this schema.
+    // Prefer a pooled manager that already classified this schema or grammar
+    // (the key is the schema string, or "gbnf:" + the grammar source).
     if (!json_schema.empty()) {
         for (auto it = constraint_pool_.begin(); it != constraint_pool_.end(); ++it) {
-            if ((*it)->cached_schema() == json_schema) {
+            const std::string& cached_gbnf = (*it)->cached_grammar();
+            if ((*it)->cached_schema() == json_schema ||
+                (!cached_gbnf.empty() && json_schema == "gbnf:" + cached_gbnf)) {
                 auto cm = std::move(*it);
                 constraint_pool_.erase(it);
                 return cm;

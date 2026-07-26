@@ -5,6 +5,31 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **GBNF grammar-constrained decoding** — `response_format: {"type":"grammar","grammar":"root ::= ..."}`,
+  llama.cpp's top-level `grammar` and vLLM's `guided_grammar` are all accepted.
+  The whole reply must be a derivation of `root` (roadmap gap 8). A regex covers
+  the formats agents pin most often, but it is regular by definition: a nested
+  expression language, a balanced DSL or any recursive format needs a stack,
+  which `RegexNfa` structurally cannot have. The engine is a nondeterministic
+  pushdown simulator over hash-consed parse stacks — the naive
+  vector-of-frames version spent 333 ms building a single token mask inside a
+  JSON string, so stacks are interned to integers and each stack's successor set
+  is memoised (a transition's target does not depend on which character took it),
+  which brought the same mask to 12 ms. GBNF surface: alternation, string
+  literals, character classes (`[a-z]`, `[^"]`), `.`, rule references, grouping,
+  `*` `+` `?` `{m}` `{m,}` `{m,n}`, comments and `\xNN`/`\uNNNN` escapes.
+  Grammars the simulator cannot honour are refused rather than mis-enforced:
+  left recursion (direct, indirect, and via a star over a nullable rule),
+  undefined rule references, a missing `root`, and repetition bounds large
+  enough to be a grammar bomb. EOS is gated on a complete derivation, so
+  generation cannot stop half-way through the format, and UTF-8 is assembled
+  across token boundaries (a BPE token can end mid-character) with overlong
+  encodings rejected — they would otherwise smuggle a forbidden character past
+  the mask as a longer spelling of an allowed one.
+  Wiring it also folded the four copies of the constrainer chain in
+  `src/exec/executor.cu` into one `apply_constraint_mask` helper: a new
+  constrainer previously had to be added to four sampling paths, and the two
+  easy-to-miss ones are exactly how an unmasked path ships.
 - **Regex-constrained decoding** — `response_format: {"type":"regex","regex":"..."}`
   (vLLM's top-level `guided_regex` is accepted too). The whole reply must match
   the pattern, so an agent can pin a diff header, an ID, a version string or a

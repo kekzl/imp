@@ -70,6 +70,10 @@ struct ChatRequestParams {
     // Constrain the whole reply to this regex (empty = off). Set via
     // response_format {"type":"regex","regex":...} or vLLM's guided_regex.
     std::string regex_pattern;
+    // Constrain the whole reply to this GBNF grammar (empty = off). Set via
+    // response_format {"type":"grammar","grammar":...}, llama.cpp's top-level
+    // "grammar", or vLLM's guided_grammar.
+    std::string grammar;
     // Tools
     nlohmann::json tools;
     nlohmann::json tool_choice;

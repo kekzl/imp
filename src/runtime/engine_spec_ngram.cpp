@@ -265,7 +265,7 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     if (req.dry_multiplier != 0.0f || req.mirostat != 0 || !req.logit_bias.empty())
         return false;
     if (req.logprobs || req.json_mode || !req.json_schema.empty() ||
-        !req.regex_pattern.empty() || !req.tool_constraint_tools.empty())
+        !req.regex_pattern.empty() || !req.grammar.empty() || !req.tool_constraint_tools.empty())
         return false;  // constrained decode: verify replicates no FSM masks (#1002)
     // Think budget forces tokens INSIDE the think block (loop/host-side) —
     // verify only outside it; the think interior runs loop bursts, which
