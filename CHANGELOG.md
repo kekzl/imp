@@ -5,6 +5,22 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **`imp-quantize`: first-party BF16/FP16 → NVFP4 checkpoint conversion.** imp
+  could only ever *consume* NVFP4 exports, so reaching the fast path for a new
+  model meant waiting for someone to publish one (roadmap gap 1). The tool
+  writes the layout the loader already recognises (`<prefix>.weight` U8 packed
+  nibbles + `.weight_scale` F8_E4M3 + `.weight_scale_2` F32 +
+  `hf_quant_config.json`), copies tokenizer/config files and rebuilds the shard
+  index when the source is sharded. Verified end to end on Qwen3-0.6B and
+  Qwen3-1.7B: the output loads, is detected as `NVFP4 model (Model Optimizer)`
+  and generates coherently. Supporting pieces: `safetensors_writer` (atomic
+  temp+rename, so an interrupted write cannot leave a file that parses but
+  holds truncated weights) and `safetensors_raw` (name-preserving reader that
+  leaves the production load path untouched), with 12 unit tests in the CI lane.
+  **Quality caveat, measured:** scales are uncalibrated round-to-nearest, which
+  costs PPL +42% (0.6B) / +57% (1.7B) vs BF16 — prefer a published Modelopt
+  export where one exists. AWQ/SmoothQuant-class calibration and MoE expert
+  stacks (3-D, currently reported and left unquantized) are the open work.
 - **Model swapping on request (`server.model_swap`, default on)** — a request
   naming a model other than the loaded one is now served by swapping to it
   instead of returning 404. Agent harnesses drive a big model beside a small

@@ -30,6 +30,43 @@ Calibrated per-tensor scales using AWQ or SmoothQuant. Two upstream tools produc
 |---|---|
 | [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (after PR #88 lit up the CUTLASS NVFP4×NVFP4 prefill cache). |
 | [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads, but several models degenerate past ~30 tokens. See [roadmap](roadmap.md). Prefer Modelopt where available. |
+| `imp-quantize` (in-tree) | Uncalibrated round-to-nearest — works, but costs measurably more quality than the two above. See below. |
+
+### imp-quantize — converting a checkpoint yourself
+
+`imp-quantize` turns a dense BF16/FP16 SafeTensors checkpoint into an NVFP4 one
+without leaving the repo, for models nobody has published an export for:
+
+```bash
+imp-quantize --model ./Qwen3-1.7B --out ./Qwen3-1.7B-nvfp4   # --dry-run to preview
+imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
+```
+
+It writes the layout the loader already recognises — `<prefix>.weight` (U8,
+packed nibbles), `.weight_scale` (F8_E4M3 micro-scales), `.weight_scale_2`
+(F32 tensor scale), plus `hf_quant_config.json` — copies the tokenizer and
+config files, and rebuilds the shard index when the source is sharded.
+Embeddings, norms and (unless `--lm-head`) the LM head stay full precision.
+
+**Quality: worse than a calibrated export, measurably.** The scales are plain
+round-to-nearest over the weights; there is no activation calibration, so
+nothing protects the channels that matter most. Measured on 2026-07-26 with
+`imp-cli --perplexity` over the same 199-token corpus, `deterministic_gemm`:
+
+| Model | BF16 | imp-quantize NVFP4 | cost |
+|---|---:|---:|---:|
+| Qwen3-0.6B | 13.51 | 19.19 | +42% |
+| Qwen3-1.7B | 8.93 | 14.01 | +57% |
+
+The loss does not shrink with size across that pair, which points at the
+missing calibration rather than a small-model artifact. Output is coherent and
+factually correct on short prompts, and the pipeline is verified end to end
+(the result loads, is detected as `NVFP4 model (Model Optimizer)`, and
+generates) — but **prefer a Modelopt export when one exists**. Adding
+AWQ/SmoothQuant-class calibration is the open work; see [roadmap](roadmap.md).
+
+MoE checkpoints are not supported yet: expert stacks are 3-D and need the
+per-expert path. They are reported and left unquantized rather than mangled.
 
 Workflow with Modelopt:
 

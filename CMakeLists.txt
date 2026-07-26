@@ -131,6 +131,8 @@ set(IMP_MODEL_SOURCES
     src/model/gguf_parse.cpp
     src/model/gguf_tensor_assign.cpp
     src/model/safetensors_loader.cpp
+    src/model/safetensors_writer.cpp
+    src/model/safetensors_raw.cpp
     src/model/llm_compressor_loader.cpp
     src/model/sentencepiece_loader.cpp
     src/model/json_util.cpp
@@ -415,6 +417,11 @@ if(IMP_BUILD_TOOLS)
     target_link_libraries(imp-cli PRIVATE imp imp_warnings)
     target_include_directories(imp-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+    # imp-quantize — offline BF16/FP16 -> NVFP4 checkpoint conversion
+    add_executable(imp-quantize tools/imp-quantize/main.cpp)
+    target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
+    target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
     # imp-bench
     if(IMP_BUILD_BENCH)
         add_executable(imp-bench
@@ -538,6 +545,7 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_hf_config_loader.cpp
         tests/test_safetensors_loader.cpp
+        tests/test_safetensors_writer.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
         # Generative FSM battery for the schema-less json_object grammar. Lives
