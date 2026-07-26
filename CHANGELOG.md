@@ -69,6 +69,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   dependencies — for anything richer, point Open WebUI at the same server.
 
 ### Fixed
+- **An undersized `kv_cache.swa_snapshot_mb` silently cost prefix caching.** One
+  SWA snapshot is several hundred MiB (350 on gemma-3-12b); a budget below that
+  leaves the store off, and prefix caching is then disabled with it — strictly
+  worse than `swa_snapshot_mb=0`, which keeps caching and yields the SWA savings
+  instead. The log said only "snapshot store off", so the two cases were
+  indistinguishable. It now warns with the required size and both ways out, and
+  `imp.conf.example` documents how to size it. Validated on gemma-3-12b at a
+  sufficient budget: SWA sizing and prefix caching run together, 2720 prompt
+  tokens served from cache, warm TTFT 853 -> 400 ms, warm output byte-identical
+  to cold.
 - **Llama 3.2 tool calls were dropped.** Llama 3.2 emits a bare JSON object
   (`{"name": F, "parameters": {...}}`) where 3.1 used the `<function=F>`
   envelope; imp understood only the envelope, so a correct call — model and

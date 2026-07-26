@@ -150,6 +150,10 @@ swa_sizing                  = auto
 # savings. Enable for long-context workloads (~8K+); leave off for
 # short-turn serving. 0 = off (auto yields to prefix caching, on
 # force-disables it).
+# SIZE IT PROPERLY: one snapshot is (windowed layers x window blocks) and can
+# run several hundred MiB (350 MiB on gemma-3-12b). A budget BELOW one snapshot
+# is worse than 0 — the store stays off and prefix caching is disabled with it,
+# so you lose both. The server logs the required size when this happens.
 swa_snapshot_mb             = 0
 
 [rope]
