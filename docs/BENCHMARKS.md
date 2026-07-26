@@ -342,3 +342,39 @@ Throughput numbers say nothing about correctness — that lesson is paid for
 
 *(This file is updated in the same commit as the measurement-relevant change;
 check `git log BENCHMARKS.md` for the measurement provenance trail.)*
+
+## Agentic reliability vs llama.cpp (2026-07-26)
+
+Speed was published per hero model; whether the *JSON contract* or a *tool call*
+survives was not — against another engine, same model, same requests. This is
+the first cross-engine measurement of that (roadmap gap 7).
+
+**Setup**: Qwen3-8B-Q8_0 GGUF on both engines, same prompts, `temperature=0`,
+5 repetitions per case, `max_tokens=200` (a budget an agent would plausibly
+set). imp commit at `docs/skills-generalize`; llama.cpp `ff067f76d` (build
+10133) served with `--jinja -fa 1 -ngl 99`. Harness:
+`tools/analysis/agentic_compare.py` (re-runnable, engine-agnostic).
+
+| Case | imp (default) | llama.cpp (default) | llama.cpp (`enable_thinking:false`) |
+|---|:--:|:--:|:--:|
+| `json_schema` schema-valid | **5/5** (10 tok) | 0/5 | 5/5 (23 tok) |
+| `json_object` parses | **5/5** (27 tok) | 0/5 | 5/5 (18 tok) |
+| `tool_choice=required` emits a call | 5/5 (21 tok) | 5/5 (197 tok) | 5/5 (26 tok) |
+| tool arguments parse + required field | 5/5 | 5/5 | 5/5 |
+| `tool_choice=auto` does not force a call | 5/5 | 5/5 | 5/5 |
+
+**Read this as a defaults difference, not a capability difference.** llama.cpp's
+constrained decoding is correct — given `enable_thinking:false`, or simply a
+larger budget (the same schema request completes at 447 tokens, ~420 of them
+reasoning), it passes everything. What differs is what happens *out of the box*:
+a think-capable model spends the whole 200-token budget reasoning and returns an
+empty `content`, so the agent gets nothing. imp suppresses thinking for
+json/tool requests automatically, which is why it answers in 10 tokens without
+the client knowing to configure anything.
+
+Tool calling is equally reliable on both — llama.cpp emits the call even while
+thinking, it just pays ~9× the tokens for it at this budget.
+
+Scope: one model, one budget, 5 repetitions, one llama.cpp build. It establishes
+the harness and a first honest data point, not an exhaustive study. Wider model
+coverage and a budget sweep are the obvious next steps.
