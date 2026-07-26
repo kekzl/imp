@@ -26,15 +26,15 @@ namespace {
 
 // OpenAI-shaped tools array with one function + a JSON-schema for its params.
 json weather_tools() {
-    return json::array({{{"type", "function"},
-                         {"function",
-                          {{"name", "get_weather"},
-                           {"description", "Get weather"},
-                           {"parameters",
-                            {{"type", "object"},
-                             {"properties",
-                              {{"city", {{"type", "string"}}}, {"days", {{"type", "integer"}}}}},
-                             {"required", json::array({"city"})}}}}}}});
+    return json::array(
+        {{{"type", "function"},
+          {"function",
+           {{"name", "get_weather"},
+            {"description", "Get weather"},
+            {"parameters",
+             {{"type", "object"},
+              {"properties", {{"city", {{"type", "string"}}}, {"days", {{"type", "integer"}}}}},
+              {"required", json::array({"city"})}}}}}}});
 }
 
 }  // namespace
@@ -134,6 +134,46 @@ TEST(ToolCallLlama3, NoCallReturnsContent) {
     EXPECT_EQ(content, "plain text");
 }
 
+// Llama 3.2 drops the <function=> envelope and emits a bare JSON object. Found
+// by the cross-engine agentic comparison: the model and the grammar were
+// correct, but the call came back as `content`, so an agent saw no tool call.
+TEST(ToolCallLlama3, BareJsonObjectIsACall) {
+    std::atomic<int> id(0);
+    std::string text = "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Berlin\"}}";
+    auto [content, calls] = parse_tool_calls_llama3(text, id, {"get_weather"});
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].name, "get_weather");
+    EXPECT_EQ(json::parse(calls[0].arguments)["city"], "Berlin");
+    EXPECT_TRUE(content.empty());
+    EXPECT_FALSE(calls[0].id.empty());
+}
+
+TEST(ToolCallLlama3, BareJsonAcceptsArgumentsKeyToo) {
+    std::atomic<int> id(0);
+    std::string text = "  {\"name\": \"f\", \"arguments\": {\"a\": 1}}  ";
+    auto [content, calls] = parse_tool_calls_llama3(text, id, {"f"});
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].name, "f");
+    EXPECT_EQ(json::parse(calls[0].arguments)["a"], 1);
+}
+
+// The strictness matters: a plain JSON answer must NOT become a tool call.
+TEST(ToolCallLlama3, PlainJsonAnswerIsNotACall) {
+    std::atomic<int> id(0);
+    for (const char* text : {
+             "{\"name\": \"Alice\", \"age\": 30}",                  // name, but no params object
+             "{\"parameters\": {\"city\": \"Berlin\"}}",            // params, but no name
+             "{\"name\": \"\", \"parameters\": {}}",                // empty name
+             "{\"name\": \"f\", \"parameters\": \"str\"}",          // parameters not an object
+             "[{\"name\": \"f\", \"parameters\": {}}]",             // not an object
+             "here you go: {\"name\": \"f\", \"parameters\": {}}",  // not bare
+         }) {
+        auto [content, calls] = parse_tool_calls_llama3(text, id, {"f", "get_weather"});
+        EXPECT_EQ(calls.size(), 0u) << "should not be a tool call: " << text;
+        EXPECT_EQ(content, text) << "content must pass through: " << text;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Gemma — <|tool_call>call:NAME{key:value}<tool_call|>
 // ---------------------------------------------------------------------------
@@ -165,15 +205,15 @@ TEST(ToolCallGemma, NoCallReturnsContent) {
 TEST(ToolCallDispatch, RoutesByFamily) {
     {
         std::atomic<int> id(0);
-        auto [c, calls] = parse_tool_calls(ChatTemplateFamily::LLAMA3,
-                                           "<function=f>{\"a\":1}</function>", id);
+        auto [c, calls] = parse_tool_calls(ChatTemplateFamily::LLAMA3, "<function=f>{\"a\":1}</function>",
+                                           id);
         ASSERT_EQ(calls.size(), 1u);
         EXPECT_EQ(calls[0].name, "f");
     }
     {
         std::atomic<int> id(0);
-        auto [c, calls] = parse_tool_calls(ChatTemplateFamily::GEMMA,
-                                           "<|tool_call>call:g{x:1}<tool_call|>", id);
+        auto [c, calls] = parse_tool_calls(ChatTemplateFamily::GEMMA, "<|tool_call>call:g{x:1}<tool_call|>",
+                                           id);
         ASSERT_EQ(calls.size(), 1u);
         EXPECT_EQ(calls[0].name, "g");
     }
@@ -252,8 +292,8 @@ TEST(ToolCallQwen36Xml, NoFunctionTagReturnsFalse) {
 
 TEST(ToolCallQwen36Xml, SingleStringParam) {
     ParsedToolCall tc;
-    ASSERT_TRUE(parse_qwen36_xml_call(
-        "<function=get_weather><parameter=city>Paris</parameter></function>", tc));
+    ASSERT_TRUE(
+        parse_qwen36_xml_call("<function=get_weather><parameter=city>Paris</parameter></function>", tc));
     EXPECT_EQ(tc.name, "get_weather");
     json args = json::parse(tc.arguments);
     EXPECT_EQ(args["city"], "Paris");
@@ -261,14 +301,15 @@ TEST(ToolCallQwen36Xml, SingleStringParam) {
 
 TEST(ToolCallQwen36Xml, CoercesScalarTypes) {
     ParsedToolCall tc;
-    ASSERT_TRUE(parse_qwen36_xml_call("<function=f>"
-                                      "<parameter=s>hello</parameter>"
-                                      "<parameter=i>42</parameter>"
-                                      "<parameter=d>3.5</parameter>"
-                                      "<parameter=b>true</parameter>"
-                                      "<parameter=n>null</parameter>"
-                                      "</function>",
-                                      tc));
+    ASSERT_TRUE(
+        parse_qwen36_xml_call("<function=f>"
+                              "<parameter=s>hello</parameter>"
+                              "<parameter=i>42</parameter>"
+                              "<parameter=d>3.5</parameter>"
+                              "<parameter=b>true</parameter>"
+                              "<parameter=n>null</parameter>"
+                              "</function>",
+                              tc));
     json args = json::parse(tc.arguments);
     EXPECT_TRUE(args["s"].is_string());
     EXPECT_EQ(args["s"], "hello");
@@ -405,15 +446,62 @@ TEST(ToolCallReconstruct, XmlDialectWrapsCall) {
 // must anchor on the newline form first and keep such text inside the value.
 TEST(ToolCallQwen36Xml, BareCloseTagInsideValueStaysValueText) {
     ParsedToolCall tc;
-    ASSERT_TRUE(parse_qwen36_xml_call("<function=f>\n"
-                                      "<parameter=doc>\n"
-                                      "call format: </parameter> and </function> inline\n"
-                                      "</parameter>\n"
-                                      "<parameter=n>\n42\n</parameter>\n"
-                                      "</function>",
-                                      tc));
+    ASSERT_TRUE(
+        parse_qwen36_xml_call("<function=f>\n"
+                              "<parameter=doc>\n"
+                              "call format: </parameter> and </function> inline\n"
+                              "</parameter>\n"
+                              "<parameter=n>\n42\n</parameter>\n"
+                              "</function>",
+                              tc));
     EXPECT_EQ(tc.name, "f");
     json args = json::parse(tc.arguments);
     EXPECT_EQ(args["doc"], "call format: </parameter> and </function> inline");
     EXPECT_EQ(args["n"], 42);
+}
+
+// A hallucinated function name must never become a call. Llama-3.2-3B answers a
+// plain chat turn with {"name":"print",...} when tools are in context; without
+// this gate that fabricates a tool call the caller never offered.
+TEST(ToolCallLlama3, UnknownFunctionNameIsNotACall) {
+    std::atomic<int> id(0);
+    std::string text = "{\"name\": \"print\", \"parameters\": {\"text\": \"hello\"}}";
+    auto [content, calls] = parse_tool_calls_llama3(text, id, {"get_weather"});
+    EXPECT_EQ(calls.size(), 0u);
+    EXPECT_EQ(content, text);
+    // And with no names known at all, the bare-JSON form stays off entirely.
+    auto [c2, calls2] = parse_tool_calls_llama3(text, id);
+    EXPECT_EQ(calls2.size(), 0u);
+    EXPECT_EQ(c2, text);
+}
+
+TEST(ToolNamesFromRequest, ExtractsOpenAIAndBareShapes) {
+    EXPECT_EQ(tool_names_from_request(weather_tools()), (std::vector<std::string>{"get_weather"}));
+    EXPECT_TRUE(tool_names_from_request(json::array()).empty());
+    EXPECT_TRUE(tool_names_from_request(json("not an array")).empty());
+}
+
+// A small model asked for one call can emit several, "; "-separated. Parsing the
+// whole string fails; the first balanced object is the call. Brace counting is
+// string-aware so a '}' inside a value does not terminate it early.
+TEST(ToolCallLlama3, TakesFirstOfSeveralConcatenatedObjects) {
+    std::atomic<int> id(0);
+    std::string text =
+        "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Berlin\", \"unit\": \"c\"}}; "
+        "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Berlin\", \"unit\": \"f\"}}";
+    auto [content, calls] = parse_tool_calls_llama3(text, id, {"get_weather"});
+    ASSERT_EQ(calls.size(), 1u);
+    json args = json::parse(calls[0].arguments);
+    EXPECT_EQ(args["city"], "Berlin");
+    EXPECT_EQ(args["unit"], "c");
+}
+
+TEST(ToolCallLlama3, BraceInsideStringDoesNotEndTheObject) {
+    std::atomic<int> id(0);
+    std::string text = "{\"name\": \"f\", \"parameters\": {\"q\": \"a } b\", \"n\": 1}}";
+    auto [content, calls] = parse_tool_calls_llama3(text, id, {"f"});
+    ASSERT_EQ(calls.size(), 1u);
+    json args = json::parse(calls[0].arguments);
+    EXPECT_EQ(args["q"], "a } b");
+    EXPECT_EQ(args["n"], 1);
 }

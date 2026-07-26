@@ -166,6 +166,38 @@ def check_tool_args(resp):
     return True, ""
 
 
+def check_multiturn(url, body_base, reps):
+    """Does the JSON contract survive a conversation, not just one shot?
+
+    An agent asks repeatedly with history growing underneath. Template drift,
+    KV reuse or a thinking block re-entering on a later turn all show up here
+    and nowhere in a single-shot test. Every turn must be schema-valid; the
+    turn that first breaks is reported."""
+    ok_n, causes = 0, []
+    for _ in range(reps):
+        msgs = [{"role": "user", "content": "Give me a person object."}]
+        broke = ""
+        for turn in range(3):
+            body = {**body_base, "messages": msgs, "response_format": PERSON_SCHEMA}
+            try:
+                resp = post(url, body)
+            except Exception as e:
+                broke = f"turn {turn + 1}: request failed: {e}"
+                break
+            ok, why = check_json(resp, True)
+            if not ok:
+                broke = f"turn {turn + 1}: {why}"
+                break
+            content = _msg(resp).get("content") or ""
+            msgs = msgs + [{"role": "assistant", "content": content},
+                           {"role": "user", "content": "Another one, different person."}]
+        if broke:
+            causes.append(broke)
+        else:
+            ok_n += 1
+    return ok_n, sorted(set(causes))
+
+
 CASES = {
     "json_schema": lambda b: (
         {**b, "messages": [{"role": "user", "content": "Give me a person object."}],
@@ -195,6 +227,11 @@ def run_engine(name, url, reps, budget, thinking_off):
     model = model_id(url)
     print(f"\n=== {name} ({url}) model={model} budget={budget} thinking_off={thinking_off} ===")
     results = {}
+    ok_n, causes = check_multiturn(url, base_body(budget, thinking_off, model), reps)
+    results["json_multiturn"] = {"ok": ok_n, "n": reps, "tokens": 0, "causes": causes}
+    mark = "PASS" if ok_n == reps else ("FAIL" if ok_n == 0 else "FLAKY")
+    detail = f"  [{', '.join(causes)}]" if causes else ""
+    print(f"  {mark:5} {'json_multiturn':14} {ok_n}/{reps}  3 turns each{detail}")
     for case, build in CASES.items():
         ok_n, causes, toks = 0, [], []
         for _ in range(reps):
@@ -258,7 +295,7 @@ def main():
                                                  args.thinking_off)
 
     print("\n" + "=" * 62)
-    cases = list(CASES)
+    cases = list(CASES) + ["json_multiturn"]
     width = max(len(k) for k in out) + 2
     print("summary (passed/total)".ljust(width) + "  ".join(f"{c:>14}" for c in cases))
     for key, res in out.items():
