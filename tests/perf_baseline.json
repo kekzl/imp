@@ -4,18 +4,19 @@
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "unknown",
   "vram_total_mb": 32607,
-  "timestamp": "2026-07-15T16:09:03Z",
+  "timestamp": "2026-07-26T01:48:33Z",
   "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=0); speculative.ngram=false",
   "reps": 5,
   "n_trials": 5,
+  "_note": "Prefill re-pinned 2026-07-26 and NOT comparable to the 2026-07-15 pin (pp128 5730 / pp512 14515 / pp4096 19279). Nothing regressed: #1061 made imp-cli one-shot runs (--prompt/--bench) disable prefix caching, because a single-generation process never re-sees a prefix. Before that, the repeated bench reps partly hit the prefix cache, so the old pp numbers measured cache hits on top of prefill. Verified by bisect (first differing commit d8bc45a8) and by forcing the old behaviour back on: main with `--set server.prefix_cache=true` reproduces the old band (14123/14661/14780 vs v0.19.2's 13936-14846 built through the same local pipeline), while the default path holds 12388-12500 across 15 trials in 3 independent cold-median runs. Decode was never affected (287.19 vs 288.02). Values here are the honest prefill cost.",
   "metrics": {
     "prefill_tps": {
-      "pp128": 5730.34,
-      "pp512": 14514.73,
-      "pp4096": 19278.75
+      "pp128": 4885.13,
+      "pp512": 12406.87,
+      "pp4096": 15324.70
     },
     "decode_tps": {
-      "tg128": 288.02
+      "tg128": 287.19
     },
     "memory_mb": {
       "model_weights": 8320

@@ -105,6 +105,19 @@ Morning-of-2026-06-07 baselines for the same five rows were 3 968 / 5 262 /
 prefill +36 % to +151 % per model. PPL teacher-forced gates: neutral or
 better on all except Qwen3.6-35B (+0.55 %, documented trade).
 
+> **Prefill numbers pinned between 2026-06 and #1061 read high.** Prefix
+> caching went default-on for the server/CLI in #758, and `imp-cli --bench`
+> repeats the same prompt — so the repeated reps partly measured cache hits
+> instead of prefill. #1061 disables prefix caching for one-shot CLI runs (a
+> single-generation process never re-sees a prefix), which restored honest
+> numbers. Qwen3-8B Q8_0 pp512 is the clean illustration: **12 131** here
+> (2026-06-07, before the default flip) → 14 515 pinned 2026-07-15 (with cache
+> hits) → **12 407** re-pinned 2026-07-26 (cache off again). Decode was never
+> affected. Re-pin evidence: bisect to `d8bc45a8`, plus `--set
+> server.prefix_cache=true` on current main reproducing the old band
+> (14 123 / 14 661 / 14 780). Do not read the 07-15 → 07-26 prefill drop as a
+> regression.
+
 ## NVFP4 SafeTensors decode (tg256)
 
 All rows: 2026-06-09, commit `ec9145b3` (v0.10.0 base), CUDA 13.3, NVFP4

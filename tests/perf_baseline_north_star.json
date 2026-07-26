@@ -4,26 +4,27 @@
   "gpu": "NVIDIA GeForce RTX 5090",
   "cuda": "13.3",
   "vram_total_mb": 32607,
-  "timestamp": "2026-07-15T16:12:25Z",
+  "timestamp": "2026-07-26T03:05:00Z",
+  "_repin_2026_07_26": "Prefill re-pinned across every length and NOT comparable to the 2026-07-15 values (pp128 3285.86 / pp512 8435.03 / pp2048 10731.51 / pp4096 12974.85 / pp8192 11421.11 / pp16384 10040.13 / pp32768 8053.95 / pp65536 5790.49). Nothing regressed: #1061 made imp-cli one-shot runs disable prefix caching, so the repeated bench reps no longer partly measure cache hits. Same cause and evidence as tests/perf_baseline.json (bisect d8bc45a8; --set server.prefix_cache=true reproduces the old band). Decode is unchanged: tg128 165.10 vs 166.00, and the GOAL.md headline tg128_at_ctx_2048 re-measured 149.47 vs 149.54 pinned (+0.05%). WATCH THE FLAGS on that headline metric — it needs --bench-pp 2048 so the decode actually runs AT ctx=2048; --bench-pp 16 reads 169.00 and --bench-pp 512 reads 164.83 on the same build, which look like double-digit gains and are not.",
   "methodology": "median of 5 trials × 5 reps, 15s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=0); speculative.ngram=false",
   "reps": 5,
   "n_trials": 5,
   "_note": "This is the docs/GOAL.md north-star baseline. CI verify.sh legacy path gates on pp512 + tg128 (i.e. at ctx=512). The tg128_at_ctx_2048 metric is the actual headline north-star number from docs/GOAL.md. Re-pinned 2026-07-15 on the spec-OFF gate metric (--set speculative.ngram=false): the self-repetitive bench prompt (~99.9% draft accept) made spec-ON tg measure the batched spec-verify GEMMs, which are restart-volatile (11% swing across healthy-clock restarts) — the gate now measures the stable decode GEMV hot path (<1% spread). Values are NOT comparable to the previous spec-ON pins (157.58 @512 / 156.02 @2048, 2026-06-12). Cold median, clocks verified during the bench (13801 MHz mem; band guard [275,290] passed on the Q8 companion pin).",
   "metrics": {
     "prefill_tps": {
-      "pp128": 3285.86,
-      "pp512": 8435.03,
-      "pp2048": 10731.51,
-      "pp4096": 12974.85,
-      "pp8192": 11421.11,
-      "pp16384": 10040.13,
-      "pp32768": 8053.95,
-      "pp65536": 5790.49
+      "pp128": 2687.92,
+      "pp512": 6822.15,
+      "pp2048": 9687.23,
+      "pp4096": 10275.50,
+      "pp8192": 9510.89,
+      "pp16384": 8338.75,
+      "pp32768": 6704.13,
+      "pp65536": 4820.96
     },
     "_ttft_note": "pp8192..pp65536 pinned 2026-07-16 (#1022 long-context TTFT gate), Qwen3-14B Q6_K single-chunk prefill (--prefill-chunk-size 0), 5 reps, verified-healthy host (mem 13801 MHz / ~570 W); cross-restart spread <0.5% at 32k (large-context prefill is compute/bandwidth-bound, not cuBLAS-algo-volatile like pp512). TTFT ms: 8k=717 / 16k=1632 / 32k=4069 / 64k=11318. The band ends at 64K by VRAM, not neglect: pp131072 needs 8192 KV blocks and this model's pool tops out ~4700 blocks on 32 GB (measured 2026-07-24, request rejected) — the 128K reference lives in docs/BENCHMARKS.md on Qwen3-14B-NVFP4 (3792 tok/s).",
     "decode_tps": {
-      "tg128": 166.00,
-      "tg128_at_ctx_2048": 149.54
+      "tg128": 165.10,
+      "tg128_at_ctx_2048": 149.47
     },
     "memory_mb": {
       "model_weights": 11584
