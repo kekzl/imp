@@ -41,18 +41,20 @@ A ranked audit of what still separates imp from "best agentic engine on a 5090".
 
 Explicitly **not** gaps: continuous batching, prefix caching, per-request LoRA, embeddings, the OpenAI / Anthropic / Responses APIs, `/metrics`, suspend/resume, and the sampler surface (DRY, mirostat, typical_p, logit_bias) all ship today. Multi-GPU remains a non-goal.
 
-### Built-in live UI -- feasible, unscoped
+### Built-in live UI -- shipped
 
-A browser frontend rendering the SSE stream live is **already possible against the server as it ships** (assessed 2026-07-26); no engine or protocol work is required:
+`imp-server` serves a single-page UI at `GET /` (assessed feasible 2026-07-26, shipped the same day). It renders the SSE stream live and draws one bar per token, so inter-token latency is visible while the answer is written. The page is embedded into the binary at build time (`cmake/embed_webui.cmake`), so there is no asset path to locate at runtime. Source: `tools/imp-server/webui/index.html`.
+
+The assessment that preceded it, kept because it is the reason this cost almost nothing -- no engine or protocol work was required:
 
 - Streaming is the real OpenAI wire format -- `text/event-stream` via `set_chunked_content_provider`, `data: {...}\n\n` chunks, terminating `data: [DONE]` (`handlers_chat_stream.cpp`).
 - CORS is wide open for any origin, preflight included -- `Access-Control-Allow-Origin: *` plus an `OPTIONS` catch-all (`main.cpp`), so a page served from anywhere can call the API directly, without a proxy.
 - Client disconnect is detected on the token loop (`is_writable`), so closing the tab cancels generation instead of leaving the GPU running.
 - `reasoning_content` and tool calls already arrive as separate stream channels, so a collapsible thinking pane and streamed tool calls need no server change.
 
-The only client-side constraint: `EventSource` is GET-only, so a frontend consumes the stream with `fetch()` + `ReadableStream` -- the standard approach.
+The only client-side constraint: `EventSource` is GET-only, so the page consumes the stream with `fetch()` + `ReadableStream` -- the standard approach.
 
-What is actually missing is a place to put it: the server has no static file serving (no `set_mount_point`), so a bundled UI would need that one route -- and then the UI itself, which is the real cost. Note this is **not** on the `GOAL.md` surface commitment (HTTP server, C API, CLI); it is a convenience, not a mission item, and shipping one adds a frontend to maintain. Listed here because the engine-side answer is unambiguous: nothing blocks it.
+Note this is **not** on the `GOAL.md` surface commitment (HTTP server, C API, CLI): it is a convenience with a maintenance tail, not a mission item. It stays deliberately small -- one file, no build step, no dependencies -- and it is not a reason to grow a frontend stack. Anything beyond a thin client belongs in Open WebUI or another external front end.
 
 ## Performance work
 

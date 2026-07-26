@@ -19,6 +19,29 @@ using json = nlohmann::json;
 // response/SSE/error body that can carry client- or model-supplied text.
 std::string dump_safe(const json& j);
 
+// Rejoins UTF-8 characters that a tokenizer split across two tokens.
+//
+// BPE vocabularies routinely cut a multi-byte character in half: "größer"
+// arrives as a piece ending in 0xC3 followed by a piece starting with 0xB6.
+// Each streamed delta is serialized on its own, so dump_safe() sees half a
+// character and replaces it with U+FFFD — the client receives "gr��ßer"
+// while the same generation is correct over the non-streaming path, which
+// decodes all tokens together. Any non-ASCII script hits this: German umlauts,
+// accents, CJK, emoji.
+//
+// feed() returns the part that is safe to emit and holds back a trailing
+// incomplete sequence until the next piece completes it. Bytes still held when
+// the stream ends are dropped: generation stopped inside a character, so there
+// is no character to show — emitting the fragment would reproduce the very
+// artifact this class removes.
+class Utf8Stitch {
+public:
+    std::string feed(const std::string& piece);
+
+private:
+    std::string carry_;
+};
+
 // Send an OpenAI-style error envelope {"error":{"message":..,"type":..}} with
 // the given HTTP status. Dumps via dump_safe so an invalid-UTF-8 byte echoed
 // into the message (e.g. a parse-error what() on byte-truncated input) can
