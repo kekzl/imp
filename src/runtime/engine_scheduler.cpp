@@ -854,6 +854,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     ensure_constraints_(req);
     if (req->constraints) {
         state.json_constrainer = req->constraints->json_constrainer();
+        state.regex_constrainer = req->constraints->regex_constrainer();
         state.schema_constrainer = req->constraints->schema_constrainer();
     }
 
@@ -1001,7 +1002,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         int32_t next_token;
         bool use_event_sync = (h_sample_pinned_ != nullptr && executor_->d_sample_result() != nullptr &&
                                (state.temperature <= 0.0f || state.top_k == 1) && !req->logprobs &&
-                               !state.json_constrainer && !state.schema_constrainer);
+                               !state.json_constrainer && !state.schema_constrainer &&
+                               !state.regex_constrainer);
 
         Tensor prefill_logits_out;
 
@@ -1550,6 +1552,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     if (valid_decode.size() == 1 && valid_decode[0]->constraints) {
         state.schema_constrainer = valid_decode[0]->constraints->schema_constrainer();
         state.json_constrainer = valid_decode[0]->constraints->json_constrainer();
+        state.regex_constrainer = valid_decode[0]->constraints->regex_constrainer();
     }
 }
 
@@ -1678,9 +1681,11 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             if (req->constraints) {
                 per_state.schema_constrainer = req->constraints->schema_constrainer();
                 per_state.json_constrainer = req->constraints->json_constrainer();
+                per_state.regex_constrainer = req->constraints->regex_constrainer();
             } else {
                 per_state.schema_constrainer = nullptr;
                 per_state.json_constrainer = nullptr;
+                per_state.regex_constrainer = nullptr;
             }
             per_state.n_sequences = 1;
             Tensor seq_logits = logits.slice(i, i + 1);
@@ -1722,9 +1727,11 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             if (req->constraints) {
                 per_state.schema_constrainer = req->constraints->schema_constrainer();
                 per_state.json_constrainer = req->constraints->json_constrainer();
+                per_state.regex_constrainer = req->constraints->regex_constrainer();
             } else {
                 per_state.schema_constrainer = nullptr;
                 per_state.json_constrainer = nullptr;
+                per_state.regex_constrainer = nullptr;
             }
             per_state.n_sequences = 1;
             Tensor seq_logits = logits.slice(i, i + 1);
@@ -2260,7 +2267,8 @@ inline int pipeline_bucket_pow2(int x) {
 }  // namespace
 
 bool Engine::pipeline_row_eligible_(const Request& r) const {
-    if (r.logprobs || r.json_mode || !r.json_schema.empty() || r.constraints)
+    if (r.logprobs || r.json_mode || !r.json_schema.empty() || !r.regex_pattern.empty() ||
+        r.constraints)
         return false;
     if (r.mirostat != 0 || !r.logit_bias.empty())
         return false;
@@ -2327,6 +2335,7 @@ InferenceState Engine::pipeline_row_state_(Request& req, int row_idx) const {
     }
     per.schema_constrainer = nullptr;
     per.json_constrainer = nullptr;
+    per.regex_constrainer = nullptr;
     per.n_sequences = 1;
     return per;
 }
@@ -2502,6 +2511,7 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
         }
         per.schema_constrainer = nullptr;
         per.json_constrainer = nullptr;
+        per.regex_constrainer = nullptr;
         per.n_sequences = 1;
         Tensor seq_logits = logits.slice(i, i + 1);
         if (!executor_->sample_single_from_logits_async(seq_logits, per, i, stream)) {

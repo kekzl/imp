@@ -81,6 +81,9 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
                                 bool has_tools, ChatTemplateFamily tpl_family, bool thinking_open) {
     active_json_ = false;
     active_schema_ = false;
+    // A pooled manager carries the previous request's flags; leaving this set
+    // would let a stale regex constrainer mask a JSON/tool request.
+    active_regex_ = false;
 
     const int32_t think_close = detect_think_close(tokenizer);
 
@@ -199,6 +202,9 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
                                           bool xml) {
     active_json_ = false;
     active_schema_ = false;
+    // A pooled manager carries the previous request's flags; leaving this set
+    // would let a stale regex constrainer mask a JSON/tool request.
+    active_regex_ = false;
 
     // Strict OPTIONAL mode needs a tool-tag dialect the gate can watch for — the
     // model emits the envelope freely. Only the ChatML `<tool_call>` dialect is
@@ -293,8 +299,35 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
     return true;
 }
 
+bool ConstraintManager::prepare_regex(const std::string& pattern, Tokenizer* tokenizer,
+                                     bool thinking_open) {
+    active_regex_ = false;
+    active_json_ = false;
+    active_schema_ = false;
+    if (pattern.empty() || !tokenizer)
+        return false;
+    if (!regex_constrainer_)
+        regex_constrainer_ = std::make_unique<RegexConstrainer>();
+    // vocab_size here is the LOGITS width; the constrainer clamps its own
+    // classification to the tokenizer vocab (SafeTensors models pad lm_head
+    // past it — indexing to the logits width read out of bounds once).
+    if (!regex_constrainer_->init(pattern, tokenizer, tokenizer->vocab_size())) {
+        IMP_LOG_WARN("ConstraintManager: regex '%s' rejected — not enforcing it", pattern.c_str());
+        return false;
+    }
+    const int32_t think_close = detect_think_close(tokenizer);
+    if (think_close >= 0)
+        regex_constrainer_->set_preamble(think_close, 8192, thinking_open);
+    regex_constrainer_->reset();
+    active_regex_ = true;
+    IMP_LOG_INFO("ConstraintManager: constraining output to regex '%s'", pattern.c_str());
+    return true;
+}
+
 void ConstraintManager::update(int32_t token) {
-    if (active_schema_ && schema_constrainer_) {
+    if (active_regex_ && regex_constrainer_) {
+        regex_constrainer_->update(token);
+    } else if (active_schema_ && schema_constrainer_) {
         schema_constrainer_->update(token);
     } else if (active_json_ && json_constrainer_) {
         json_constrainer_->update(token);
@@ -309,13 +342,18 @@ int ConstraintManager::forced_text(std::string& out, int max_chars) const {
 }
 
 void ConstraintManager::reset() {
-    if (active_schema_ && schema_constrainer_) {
+    if (active_regex_ && regex_constrainer_) {
+        regex_constrainer_->reset();
+    } else if (active_schema_ && schema_constrainer_) {
         schema_constrainer_->reset();
     } else if (active_json_ && json_constrainer_) {
         json_constrainer_->reset();
     }
     active_json_ = false;
     active_schema_ = false;
+    // A pooled manager carries the previous request's flags; leaving this set
+    // would let a stale regex constrainer mask a JSON/tool request.
+    active_regex_ = false;
 }
 
 }  // namespace imp

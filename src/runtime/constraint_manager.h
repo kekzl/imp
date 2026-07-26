@@ -1,6 +1,7 @@
 #pragma once
 
 #include "compute/json_constrain.h"
+#include "compute/regex_constrain.h"
 #include "compute/schema_constrain.h"
 #include "compute/json_schema.h"
 #include "model/tokenizer.h"
@@ -78,6 +79,15 @@ public:
     SchemaConstrainer* schema_constrainer() const noexcept {
         return active_schema_ ? schema_constrainer_.get() : nullptr;
     }
+    RegexConstrainer* regex_constrainer() const noexcept {
+        return active_regex_ ? regex_constrainer_.get() : nullptr;
+    }
+
+    // Constrain output to a regular expression (docs/roadmap.md gap 4). The
+    // engine behind it is the same RegexNfa that backs JSON-Schema `pattern`.
+    // Returns false on an unsupported/malformed pattern — the caller then
+    // declines constrained decoding rather than enforcing a wrong grammar.
+    bool prepare_regex(const std::string& pattern, Tokenizer* tokenizer, bool thinking_open = true);
 
     // Update FSM state after sampling a token.
     void update(int32_t token);
@@ -92,9 +102,10 @@ public:
     void reset();
 
     // Check if any constraint is active.
-    bool is_active() const noexcept { return active_json_ || active_schema_; }
+    bool is_active() const noexcept { return active_json_ || active_schema_ || active_regex_; }
     bool has_json() const noexcept { return active_json_; }
     bool has_schema() const noexcept { return active_schema_; }
+    bool has_regex() const noexcept { return active_regex_; }
 
     // Schema string of the cached (initialized) schema constrainer — lets the
     // engine's manager pool prefer an instance that already classified this
@@ -104,9 +115,11 @@ public:
 private:
     std::unique_ptr<JsonConstrainer> json_constrainer_;
     std::unique_ptr<SchemaConstrainer> schema_constrainer_;
+    std::unique_ptr<RegexConstrainer> regex_constrainer_;
     std::string cached_schema_string_;
     bool active_json_ = false;
     bool active_schema_ = false;
+    bool active_regex_ = false;
 };
 
 }  // namespace imp

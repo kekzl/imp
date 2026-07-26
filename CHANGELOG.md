@@ -5,6 +5,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **Regex-constrained decoding** — `response_format: {"type":"regex","regex":"..."}`
+  (vLLM's top-level `guided_regex` is accepted too). The whole reply must match
+  the pattern, so an agent can pin a diff header, an ID, a version string or a
+  small DSL that the JSON FSMs cannot express (roadmap gap 4). The engine is the
+  existing `RegexNfa` that already backs JSON-Schema `pattern`; this adds the
+  decode-time `RegexConstrainer` with the same `apply_mask` contract as the JSON
+  constrainers, a per-state-set mask cache (walking 151k tokens every step is
+  not affordable), and EOS gated on an accepting state so generation cannot stop
+  half-way through the format. Patterns using constructs a DFA cannot honour
+  (lookaround, anchors, `\\b`, backreferences) are refused rather than silently
+  enforced as something else.
 - **Cross-engine agentic-reliability measurement** (`tools/analysis/agentic_compare.py`)
   — the checks an agent harness depends on (json_schema, json_object, forced /
   optional tool calls, tool-argument validity, and an N-turn JSON-contract

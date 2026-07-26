@@ -11,10 +11,12 @@
 namespace imp {
 
 // Constrained-decoding hooks are referenced only by pointer here; their full
-// definitions live in compute/json_constrain.h / compute/schema_constrain.h and
-// are included by the TUs that dereference them (executor.cu).
+// definitions live in compute/json_constrain.h / schema_constrain.h /
+// regex_constrain.h and are included by the TUs that dereference them
+// (executor.cu).
 class JsonConstrainer;
 class SchemaConstrainer;
+class RegexConstrainer;
 
 // All the state needed for a single forward pass invocation.
 struct InferenceState {
@@ -126,6 +128,7 @@ struct InferenceState {
     // JSON mode: when non-null, apply logit mask before sampling
     JsonConstrainer* json_constrainer = nullptr;
     SchemaConstrainer* schema_constrainer = nullptr;
+    RegexConstrainer* regex_constrainer = nullptr;
 
     // Logit bias (host-side, applied via cudaMemcpy before sampling)
     const std::pair<int32_t, float>* logit_bias = nullptr;

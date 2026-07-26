@@ -67,6 +67,9 @@ struct ChatRequestParams {
     // Logit bias / format
     std::vector<std::pair<int32_t, float>> logit_bias;
     std::string json_schema_str;
+    // Constrain the whole reply to this regex (empty = off). Set via
+    // response_format {"type":"regex","regex":...} or vLLM's guided_regex.
+    std::string regex_pattern;
     // Tools
     nlohmann::json tools;
     nlohmann::json tool_choice;
