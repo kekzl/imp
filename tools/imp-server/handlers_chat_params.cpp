@@ -155,10 +155,19 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     if (ctx.params.top_logprobs > 20)
         ctx.params.top_logprobs = 20;
 
-    // Parse response_format for JSON mode / JSON Schema
+    // Parse response_format for JSON mode / JSON Schema / regex
     if (body.contains("response_format") && body["response_format"].is_object()) {
         std::string fmt_type = body["response_format"].value("type", "text");
-        if (fmt_type == "json_object") {
+        if (fmt_type == "regex") {
+            // {"type":"regex","regex":"..."} — the whole reply must match.
+            // Accepted at "pattern" too, since that is the JSON-Schema spelling
+            // and callers reach for it.
+            const auto& rf = body["response_format"];
+            if (rf.contains("regex") && rf["regex"].is_string())
+                ctx.params.regex_pattern = rf["regex"].get<std::string>();
+            else if (rf.contains("pattern") && rf["pattern"].is_string())
+                ctx.params.regex_pattern = rf["pattern"].get<std::string>();
+        } else if (fmt_type == "json_object") {
             ctx.params.json_mode = true;
         } else if (fmt_type == "json_schema") {
             ctx.params.json_mode = true;
@@ -183,6 +192,12 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
             }
         }
     }
+
+    // vLLM/SGLang spell it `guided_regex` at the top level; accept that too so
+    // an existing client works unchanged. response_format wins if both appear.
+    if (ctx.params.regex_pattern.empty() && body.contains("guided_regex") &&
+        body["guided_regex"].is_string())
+        ctx.params.regex_pattern = body["guided_regex"].get<std::string>();
 
     // Parse logit_bias: map of token_id (string) -> bias (float)
     if (body.contains("logit_bias") && body["logit_bias"].is_object()) {

@@ -582,16 +582,21 @@ void Engine::embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t s
 
 void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {
     const bool tool_enforced = !req->tool_constraint_tools.empty();
-    if (!(req->json_mode || !req->json_schema.empty() || tool_enforced) || req->constraints)
+    const bool regex_enforced = !req->regex_pattern.empty();
+    if (!(req->json_mode || !req->json_schema.empty() || tool_enforced || regex_enforced) ||
+        req->constraints)
         return;
 
     // Pool key: tool-enforced requests key by their tool-call signature so a
     // pooled manager with the same classified tables is reused (#1002).
+    // A regex request keys by its pattern, so a pooled manager that already
+    // classified this pattern's vocabulary is reused.
+    const std::string pool_key_regex = regex_enforced ? ("regex:" + req->regex_pattern) : std::string();
     const std::string pool_key = tool_enforced ? ConstraintManager::tool_call_key(req->tool_constraint_tools,
                                                                                   req->tool_envelope_open,
                                                                                   req->tool_envelope_close,
                                                                                   req->tool_constraint_xml)
-                                               : req->json_schema;
+                                               : (regex_enforced ? pool_key_regex : req->json_schema);
     req->constraints = constraints_checkout_(pool_key);
 
     bool enforced = false;
@@ -603,6 +608,9 @@ void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {
                                                        req->tool_constraint_parallel,
                                                        req->tool_constraint_bare_args,
                                                        req->tool_constraint_xml);
+    if (!enforced && regex_enforced)
+        enforced = req->constraints->prepare_regex(req->regex_pattern, model_->tokenizer(),
+                                                   /*thinking_open=*/req->in_think_block);
     if (!enforced && (req->json_mode || !req->json_schema.empty()))
         req->constraints->prepare(req->json_mode, req->json_schema, model_->tokenizer(), req->has_tools,
                                   req->tpl_family, /*thinking_open=*/req->in_think_block);

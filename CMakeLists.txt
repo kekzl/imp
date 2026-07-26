@@ -213,6 +213,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q8_imma_q51.cu
     src/compute/moe_routing_permute.cu
     src/compute/softmax.cu
+    src/compute/regex_constrain.cu
     src/compute/json_constrain.cu
     src/compute/json_schema.cpp
     src/compute/schema_constrain.cu
@@ -579,6 +580,7 @@ if(IMP_BUILD_TESTS)
             tests/test_responses_transform.cpp
             tests/test_sse_stream_utils.cpp
             tests/test_tool_call.cpp
+        tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
             tests/test_reasoning_reconcile.cpp
             tests/test_server_auth.cpp

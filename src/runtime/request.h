@@ -163,6 +163,9 @@ struct Request {
     // JSON mode
     bool json_mode = false;   // Constrain output to valid JSON
     std::string json_schema;  // JSON Schema string (empty = disabled)
+    // Constrain the whole output to this regular expression (empty = disabled).
+    // Mutually exclusive with json_mode/json_schema; the engine prefers it.
+    std::string regex_pattern;
     // Per-request constraint FSM (JsonConstrainer/SchemaConstrainer wrapper).
     // Owned by the request so concurrent prefills/finishes of OTHER requests
     // cannot clobber the state, and batched decode can mask per row. Checked

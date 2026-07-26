@@ -9,6 +9,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "compute/json_constrain.h"
 #include "compute/schema_constrain.h"
+#include "compute/regex_constrain.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -144,7 +145,9 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
     // JSON/Schema mode: apply logit mask to constrain output
     if (state.force_token < 0) {
         // Only apply constraints when not forcing a token
-        if (state.schema_constrainer) {
+        if (state.regex_constrainer) {
+            state.regex_constrainer->apply_mask(logits_ptr, vocab_size, stream);
+        } else if (state.schema_constrainer) {
             state.schema_constrainer->apply_mask(logits_ptr, vocab_size, stream);
         } else if (state.json_constrainer) {
             state.json_constrainer->apply_mask(logits_ptr, vocab_size, stream);
@@ -242,7 +245,9 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
                 }
             }
         }
-        if (st.schema_constrainer) {
+        if (st.regex_constrainer) {
+            st.regex_constrainer->apply_mask(lp, vocab, stream);
+        } else if (st.schema_constrainer) {
             st.schema_constrainer->apply_mask(lp, vocab, stream);
         } else if (st.json_constrainer) {
             st.json_constrainer->apply_mask(lp, vocab, stream);
@@ -449,7 +454,9 @@ void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceStat
         force_single_token(lp, vocab, state.force_token, stream);
     }
     if (state.force_token < 0) {
-        if (state.schema_constrainer)
+        if (state.regex_constrainer)
+            state.regex_constrainer->apply_mask(lp, vocab, stream);
+        else if (state.schema_constrainer)
             state.schema_constrainer->apply_mask(lp, vocab, stream);
         else if (state.json_constrainer)
             state.json_constrainer->apply_mask(lp, vocab, stream);
@@ -678,7 +685,9 @@ void GraphExecutor::masked_sample_async(const InferenceState& state, const Tenso
     }
 
     // Grammar constraint mask (host-computed this step, uploaded stream-ordered).
-    if (state.schema_constrainer)
+    if (state.regex_constrainer)
+        state.regex_constrainer->apply_mask(lp, vocab, stream);
+    else if (state.schema_constrainer)
         state.schema_constrainer->apply_mask(lp, vocab, stream);
     else if (state.json_constrainer)
         state.json_constrainer->apply_mask(lp, vocab, stream);
