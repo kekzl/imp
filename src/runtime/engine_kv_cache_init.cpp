@@ -368,9 +368,22 @@ bool Engine::init_kv_cache() {
         if (!swa_snapshots_) {
             kv_manager_->set_prefix_caching_enabled(false);
             config_.use_prefix_caching = false;
-            IMP_LOG_INFO("Prefix caching disabled under SWA sizing (snapshot store off — "
-                         "kv_cache.swa_snapshot_mb=%d)",
-                         budget_mb);
+            // Say WHY and WHAT TO DO. A budget below one snapshot silently costs
+            // prefix caching — strictly worse than swa_snapshot_mb=0, which keeps
+            // caching and yields the SWA savings instead. Without the required
+            // size in the message there is no way to tell those apart from a log.
+            const size_t need_mb = (kv_manager_->swa_snapshot_bytes() + (1u << 20) - 1) >> 20;
+            if (budget_mb > 0 && static_cast<size_t>(budget_mb) < need_mb) {
+                IMP_LOG_WARN("Prefix caching DISABLED: kv_cache.swa_snapshot_mb=%d is below one "
+                             "snapshot (%zu MiB). Set it to >=%zu to run SWA sizing AND prefix "
+                             "caching together, or to 0 to keep prefix caching and drop the SWA "
+                             "savings.",
+                             budget_mb, need_mb, need_mb);
+            } else {
+                IMP_LOG_INFO("Prefix caching disabled under SWA sizing (snapshot store off — "
+                             "kv_cache.swa_snapshot_mb=%d)",
+                             budget_mb);
+            }
         }
     }
 
