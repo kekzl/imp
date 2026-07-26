@@ -25,7 +25,8 @@ Key flags (`imp-server --help` for all): `--port` (8080) · `--chat-template aut
 | `POST /v1/responses` | OpenAI Responses | Agents SDK / Codex dialect; stateless shim over the chat path (`responses.cpp`); native SSE events incl. incremental `function_call_arguments.delta` |
 | `POST /v1/messages` | **Anthropic** | thinking, tool use, `cache_control`, **real per-token SSE** (old "synthetic replay" info is obsolete) |
 | `POST /v1/embeddings` | OpenAI | embedding vectors |
-| `GET /v1/models` | both | **strict semantics since PR #507**: only the loaded model is listed; a foreign `model` field → 404 `model_not_found`; switching models = restart (auto-swap was removed after a reload SIGSEGV). Model object also carries the context window as vLLM `max_model_len` + llama.cpp `meta.n_ctx_train` |
+| `GET /v1/models` | both | Lists the loaded model (`loaded: true`, with vLLM `max_model_len` + llama.cpp `meta.n_ctx_train`) **plus the rest of the models directory** (`loaded: false`) since #1080 — a harness cannot request what it cannot see. |
+| `GET /` | imp | Single-page web UI, embedded into the binary at build time (`cmake/embed_webui.cmake`, source `tools/imp-server/webui/index.html`). Editing the page requires a rebuild. |
 | `GET /props` | llama.cpp | context-window probe: `n_ctx` (top-level + `default_generation_settings.n_ctx`) |
 | `GET /info` | TGI | context-window probe: `max_total_tokens` / `max_input_tokens` |
 | `POST /tokenize`, `/detokenize` | imp | |
@@ -39,7 +40,9 @@ Key flags (`imp-server --help` for all): `--port` (8080) · `--chat-template aut
 - **Constrained-decode perf** (PR #651; the #650 SIGBUS/ctrl-char fixes are prerequisites): category prefilter + in-string shortcut on the schema mask, then `ConstrainedPipeline` (`src/runtime/engine.h`) enqueues forward N+1 *before* the host FSM advances — json_schema 102→235 tok/s (plain ≈270). In-pipeline: greedy/top-k/top-p, rep/freq/presence penalties, banned tokens, think-budget (deliberately, so the server defaults `repetition_penalty=1.05`/`think_budget=0.5` don't silently disqualify it). **Falls back to eager** (slow) for: logprobs, min_p, typical_p, mirostat, DRY, logit_bias, MTP, batch>1 — when measuring constrained perf, check none of these are set or you're benchmarking the eager path.
 - **`cache_control` / prefix cache**: Anthropic `cache_control` pins prompt-KV blocks (budget `server.prefix_pin_budget_pct` = 25% FIFO) and reports `cache_read_input_tokens`/`cache_creation_input_tokens`. Since #1046 the LAST marked system/message block bounds the pin (internal `cache_prefix_messages` → truncated re-render → `pin_kv_prefix_tokens`); a marker on tools = whole-prompt pin; TTL tiers accepted but not modeled. `server.prefix_cache` is default ON since the #536/#538 stale-block-table fix; `PrefixCacheE2ETest` is the ship gate.
 - **Speculative decoding** (n-gram prompt-lookup, greedy/batch-1): **default-ON for dense models, gated off for MoE** since PR #781 — disable via `--set speculative.ngram=false`. Knobs in `src/runtime/config.h` → `struct Speculative`: `k` (16), `min_match` (6), `max_match` (12), `give_up_after` (64), `burst` (128), `miss_burst` (8), `burst_rearm` (default ON — the #683 wrong-token artifact was the conditional-graph `setup()` position off-by-one, fixed in PR #692, not rearm). Output stays token-identical to plain greedy. Bench confound: on self-repetitive `--bench` prompts the draft accept rate hits ~99.9% — see `benchmark-cuda` before A/B-ing decode kernels.
-- **Config keys** (`src/runtime/config.h` → `struct Server`): `prefix_cache`, `prefix_pin_budget_pct`, `green_contexts`.
+- **Model swapping** (`server.model_swap`, default ON since #1080): a request naming another model in the models directory swaps to it instead of 404. Unknown names still 404 (the name must resolve, so a typo cannot trigger a load). The swap is safe because both failure modes that killed the FIRST auto-swap are closed — in-flight generations **drain** via `batching->pause(drain_ms)` (the `/admin/suspend` contract, never cancelled), and a failed load **restores** the previous model. If you touch this path, keep both: an auto-swap that cancels streams or leaves the server model-less is why it was removed once already.
+- **Streamed non-ASCII was corrupted until #1078** — worth knowing when touching the stream path. A BPE token can end mid-character, and each delta is serialized alone, so `dump_safe` turned the halves into U+FFFD (`größer` → `gr??ßer`). Two independent causes, both fixed: `Utf8Stitch` (`utils.h`) holds partial bytes at detokenization *before any consumer sees the piece* — the think splitter and tool filter match on raw bytes too — and `holdback_decision` now pulls its byte-offset cut back to a codepoint boundary. Any new streaming sink must not reintroduce a raw byte cut.
+- **Config keys** (`src/runtime/config.h` → `struct Server`): `prefix_cache`, `prefix_pin_budget_pct`, `green_contexts`, `model_swap`, `model_swap_drain_ms`.
 - **Stop handling**: server stops on turn markers at high temperature (PR #442) — don't remove that guard.
 
 ## Validation (run before claiming server work done)
@@ -54,6 +57,21 @@ pytest tests/api/        # or tests/api/run_mock_tests.sh
 # 3. SafeTensors model-level validation battery
 python3 scripts/validate_safetensors.py --help
 ```
+
+**Testing the web UI (or anything browser-driven) on this host**: the Playwright
+MCP tool does NOT work — there is no Chrome, and installing Node/Chrome on the
+host violates the clean-host rule. Drive a browser from a container instead:
+
+```bash
+docker run --rm --network host -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 -e HOME=/sp \
+  -v "$PWD":/work:ro -v /tmp/<scratch>:/sp -v /tmp/<scratch>/shots:/out \
+  -w /sp mcr.microsoft.com/playwright:v1.56.0-noble \
+  sh -c 'npm i --silent playwright@1.56.0 && node /sp/script.mjs'
+```
+
+Playwright is NOT preinstalled in that image (only the browsers), hence the
+`npm i`; `--network host` reaches `localhost:8080`; write screenshots to `/out`
+and read them back. Assert on the DOM, not on screenshots alone.
 
 **degen_suite `constrained` category** (added 2026-07-15) covers json_object, json_schema validity under three sampler states (greedy / temp=1.3 / min_p — the last forces the eager path, so it guards constrained-pipeline↔eager parity), and forced-`tool_choice` tool-call emission + argument JSON validity. Tool-arg *enforcement* is FSM-backed since #1002 (forced/required + `strict:true` + `parallel_tool_calls` on ChatML-JSON, forced on Llama3) and covers the Qwen-Coder/Qwen3.6 XML dialect (`<function=`/`<parameter=` raw-text bodies — templates teaching that format get the XML grammar, never the JSON body FSM, which would mask raw newlines and mangle multi-line code args). Categories now: repetition, think-leak, special-tokens, adherence, long-context, multi-turn, stream, **constrained**, anthropic-thinking. For deeper constrained-decoding changes also run `tests/api/` schema cases.
 

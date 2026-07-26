@@ -21,6 +21,7 @@ description: Use when opening, merging, or releasing a PR for imp — branching 
 - After it merges, **verify** the squash on `main` actually contains your final work:
   `git log -1 --stat origin/main` (or diff the merged SHA against your branch head). Don't assume.
 - **Never try to "beat" the race by pushing fast** — if `Build` goes green mid-push, you lose. Disable first.
+- **It bit again on 2026-07-26 (#1081), and the failure mode is nastier than a lost commit: it published wrong data.** The PR shipped quality numbers that a follow-up commit had already corrected; the correction lost the race, so `main` documented figures that had been disproved. Nothing was red — CI passed, the PR merged, the branch looked done. It surfaced only by accident during cleanup, and needed a second PR (#1082) to fix. **The verify step above is not optional bookkeeping** — when the late commit changes *claims* (numbers, docs, a caveat), losing it means shipping something you know to be false. Grep `main` for the corrected value, don't just check that the merge happened.
 - Opening a **draft** PR is the escape hatch when you know more commits are coming — the workflow skips drafts (arming fires on ready_for_review instead).
 
 **Need another commit after the PR is open** (the common case — do this in order):

@@ -35,6 +35,12 @@ Per-expert NVFP4 tensors are copied into one contiguous `[ne, N, K_packed]` buff
 
 `kv_cache.dtype = fp16 | fp8 | int8 | int4 | nvfp4` (CLI: `--kv-fp8` etc.). FP8 KV has a nondeterminism opt-in (`allow_nondeterministic_fp8`). Quant-KV accuracy envelopes are frozen in tests (TEST_AUDIT).
 
+## Judging quantization quality (the measurement is easy to get wrong)
+
+- **Use `tools/analysis/ppl_corpus_45k.txt` (13 536 tokens), never `ppl_corpus.txt` (199 tokens).** The short corpus does not just add noise, it *inverts conclusions*: the same imp-quantize pair reads +42%/+57% on it vs +25%/+19% on the real corpus, and appears to get worse with model size when it actually gets better. Add `--set runtime.deterministic_gemm=true` to both arms.
+- **PPL alone is not enough** — it cannot see a degenerate-but-low-perplexity model. Run `tools/analysis/degen_suite.py` against a server on the quantized weights (41 checks: streaming, json_schema, tool calls, thinking). See `check-degeneration`.
+- PPL measured via `--perplexity` runs the PREFILL path, so it does NOT see decode-only sidecars (fp8_attn_proj, NVFP4 decode cache on GGUF). Judge those by greedy-identity + coherent long generations instead.
+
 ## Gotchas
 
 - **Q8_0 blocks are 34 bytes, NOT 4-aligned** — `memcpy()`, never `reinterpret_cast`.
@@ -44,5 +50,7 @@ Per-expert NVFP4 tensors are copied into one contiguous `[ne, N, K_packed]` buff
 - **MoE expert leak fingerprint** (PR #925): host-resident experts left unpromoted (raw INT8/FP4 handed to cuBLAS → `status 15` / garbage). For any MoE-expert weight bug, check `src/exec/weight_upload.cu` promotion logic FIRST.
 - **VRAM ordering** (PR #926): mandatory NVFP4 caches are reserved BEFORE workspaces/KV (`cudaMemGetInfo` lies after async frees — a balloon reservation holds the floor). Don't reorder allocations "for simplicity".
 - **Dequant correctness is golden-locked**: GGUF dequant is bit-exact vs spec; f16-class cross-path tolerance is strict 1e-2 (measured ~4e-4). If your change moves these, it's a bug, not noise.
-- Quantizing new checkpoints happens OUTSIDE imp (NVIDIA ModelOpt / llm-compressor); imp only loads. Bad community quants exist — a degenerate model can be the file, not the engine (verify with llama.cpp control where possible).
+- Quantizing new checkpoints normally happens OUTSIDE imp (NVIDIA ModelOpt / llm-compressor). Bad community quants exist — a degenerate model can be the file, not the engine (verify with llama.cpp control where possible).
+- **`imp-quantize` (2026-07-26, #1081) converts dense BF16/FP16 SafeTensors → NVFP4 in-tree, and is EXPERIMENTAL**: uncalibrated round-to-nearest, +19–25% PPL vs BF16. Use it to get a model onto the NVFP4 path for evaluation or perf work, never to produce weights anyone relies on. Dense only — 3-D MoE expert stacks are reported and left unquantized. Sharded sources need a REBUILT `model.safetensors.index.json` (one weight becomes three tensors); without it the resolver reports the misleading "No .gguf file found in directory".
+- **REFUTED, do not re-attempt (#1083): searching micro-scale candidates instead of `absmax`.** Measured 30.10 → 29.88 PPL (0.7%) for ~6× quantization cost. The micro-block is only 16 values, where absmax is already near-optimal; the dominant error is the FP4 grid itself (8 magnitudes), which no scale improves. The open lever is *moving* the error — AWQ (protect high-activation channels) or GPTQ (compensate in not-yet-quantized columns), both needing infrastructure imp lacks.
 - NVFP4 lm_head quantization (`gemm.nvfp4_lm_head`, `_gdn` default ON) trades +2.2% PPL for +8–16% decode — owner-accepted; don't "fix" the PPL delta by reverting silently.

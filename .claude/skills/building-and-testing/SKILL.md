@@ -40,6 +40,10 @@ docker run --rm --gpus all -v $HOME/models:/models \
 
 Test binaries in the image: `imp-tests` (full GPU), `imp-tests-unit` (CPU), plus split binaries `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e test-gdn`. Gotcha: `test_ssm.cpp` tests live in **`test-moe-gdn`**, not a binary of their own.
 
+**`make test-unit` is NOT the CI lane.** It runs `imp-tests-unit` (~37 tests); CI runs `ctest -L unit` → **`test-core`** (550+) + test-text + an e2e subset. A new CPU test belongs in `test-core`, and the honest no-GPU check is `docker run --rm imp:test test-core` (no `--gpus`). Green in `imp-tests-unit` says nothing about CI.
+
+Tool binaries in the image: `imp-server`, `imp-cli`, `imp-bench`, and `imp-quantize` (offline BF16/FP16 → NVFP4 conversion, experimental — see `quant-formats`). A new tool needs BOTH a `cp` in the builder stage and a `COPY --from=builder` line in the Dockerfile, or it silently isn't in the image.
+
 ## Determinism & quality caveats
 
 - `--set runtime.deterministic=true` gives full temp=0 reproducibility (covers MoE routing atomics + top-k sampling races + implies `deterministic_gemm`). Default OFF — costs throughput. The engine promotes it process-wide since PR #542.
