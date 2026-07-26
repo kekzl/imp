@@ -167,6 +167,15 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.regex_pattern = rf["regex"].get<std::string>();
             else if (rf.contains("pattern") && rf["pattern"].is_string())
                 ctx.params.regex_pattern = rf["pattern"].get<std::string>();
+        } else if (fmt_type == "grammar") {
+            // {"type":"grammar","grammar":"root ::= ..."} — a GBNF grammar the
+            // whole reply must derive. "gbnf" is accepted as a spelling too,
+            // since that is what the format is called everywhere else.
+            const auto& rf = body["response_format"];
+            if (rf.contains("grammar") && rf["grammar"].is_string())
+                ctx.params.grammar = rf["grammar"].get<std::string>();
+            else if (rf.contains("gbnf") && rf["gbnf"].is_string())
+                ctx.params.grammar = rf["gbnf"].get<std::string>();
         } else if (fmt_type == "json_object") {
             ctx.params.json_mode = true;
         } else if (fmt_type == "json_schema") {
@@ -198,6 +207,15 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     if (ctx.params.regex_pattern.empty() && body.contains("guided_regex") &&
         body["guided_regex"].is_string())
         ctx.params.regex_pattern = body["guided_regex"].get<std::string>();
+
+    // Grammars have two established top-level spellings and no response_format
+    // convention at all: llama.cpp takes `grammar`, vLLM takes
+    // `guided_grammar`. Accept both, so a client written against either server
+    // works here unchanged.
+    if (ctx.params.grammar.empty() && body.contains("grammar") && body["grammar"].is_string())
+        ctx.params.grammar = body["grammar"].get<std::string>();
+    if (ctx.params.grammar.empty() && body.contains("guided_grammar") && body["guided_grammar"].is_string())
+        ctx.params.grammar = body["guided_grammar"].get<std::string>();
 
     // Parse logit_bias: map of token_id (string) -> bias (float)
     if (body.contains("logit_bias") && body["logit_bias"].is_object()) {

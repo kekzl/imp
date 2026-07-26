@@ -166,6 +166,11 @@ struct Request {
     // Constrain the whole output to this regular expression (empty = disabled).
     // Mutually exclusive with json_mode/json_schema; the engine prefers it.
     std::string regex_pattern;
+    // Constrain the whole output to this GBNF grammar (empty = disabled).
+    // Same deal one step up the Chomsky hierarchy: a grammar can balance
+    // brackets and nest, which no regex can. Engine precedence is
+    // tool-call > regex > grammar > json.
+    std::string grammar;
     // Per-request constraint FSM (JsonConstrainer/SchemaConstrainer wrapper).
     // Owned by the request so concurrent prefills/finishes of OTHER requests
     // cannot clobber the state, and batched decode can mask per row. Checked

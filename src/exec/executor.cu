@@ -10,6 +10,7 @@
 #include "compute/json_constrain.h"
 #include "compute/schema_constrain.h"
 #include "compute/regex_constrain.h"
+#include "compute/grammar_constrain.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -44,6 +45,27 @@ __global__ __launch_bounds__(256) void ban_logits_kernel(float* __restrict__ log
 }
 
 namespace imp {
+
+namespace {
+
+// The one place that decides which constrainer masks a step. There are four
+// sampling paths in this file and they used to carry four copies of this
+// chain — a new constrainer then had to be added to all four, and the two
+// easy-to-miss ones are exactly how an unmasked path ships. Precedence
+// mirrors ConstraintManager: grammar > regex > schema > json.
+inline void apply_constraint_mask(const imp::InferenceState& st, float* logits, int vocab,
+                                  cudaStream_t stream) {
+    if (st.grammar_constrainer)
+        st.grammar_constrainer->apply_mask(logits, vocab, stream);
+    else if (st.regex_constrainer)
+        st.regex_constrainer->apply_mask(logits, vocab, stream);
+    else if (st.schema_constrainer)
+        st.schema_constrainer->apply_mask(logits, vocab, stream);
+    else if (st.json_constrainer)
+        st.json_constrainer->apply_mask(logits, vocab, stream);
+}
+
+}  // namespace
 
 void GraphExecutor::pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t stream) {
     Tensor hidden = view_hidden(n_tokens);
@@ -142,17 +164,10 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         force_single_token(logits_ptr, vocab_size, state.force_token, stream);
     }
 
-    // JSON/Schema mode: apply logit mask to constrain output
-    if (state.force_token < 0) {
-        // Only apply constraints when not forcing a token
-        if (state.regex_constrainer) {
-            state.regex_constrainer->apply_mask(logits_ptr, vocab_size, stream);
-        } else if (state.schema_constrainer) {
-            state.schema_constrainer->apply_mask(logits_ptr, vocab_size, stream);
-        } else if (state.json_constrainer) {
-            state.json_constrainer->apply_mask(logits_ptr, vocab_size, stream);
-        }
-    }
+    // JSON/Schema/regex/grammar mode: mask before sampling, unless a token is
+    // being forced (think-budget) — then the mask must not fight it.
+    if (state.force_token < 0)
+        apply_constraint_mask(state, logits_ptr, vocab_size, stream);
 
     int32_t token;
     if (state.mirostat == 2) {
@@ -245,13 +260,7 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
                 }
             }
         }
-        if (st.regex_constrainer) {
-            st.regex_constrainer->apply_mask(lp, vocab, stream);
-        } else if (st.schema_constrainer) {
-            st.schema_constrainer->apply_mask(lp, vocab, stream);
-        } else if (st.json_constrainer) {
-            st.json_constrainer->apply_mask(lp, vocab, stream);
-        }
+        apply_constraint_mask(st, lp, vocab, stream);
         // Ban special tokens (chat template delimiters etc.). MUST happen
         // before sampling — without this, greedy can pick a banned token
         // (e.g. Gemma-4 NVFP4 picks `<|channel>` as the natural argmax) and
@@ -454,12 +463,7 @@ void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceStat
         force_single_token(lp, vocab, state.force_token, stream);
     }
     if (state.force_token < 0) {
-        if (state.regex_constrainer)
-            state.regex_constrainer->apply_mask(lp, vocab, stream);
-        else if (state.schema_constrainer)
-            state.schema_constrainer->apply_mask(lp, vocab, stream);
-        else if (state.json_constrainer)
-            state.json_constrainer->apply_mask(lp, vocab, stream);
+        apply_constraint_mask(state, lp, vocab, stream);
     }
     if (state.min_p > 0.0f)
         apply_min_p(lp, vocab, state.min_p, stream);
@@ -684,13 +688,8 @@ void GraphExecutor::masked_sample_async(const InferenceState& state, const Tenso
         IMP_CUDA_CHECK_LAUNCH();
     }
 
-    // Grammar constraint mask (host-computed this step, uploaded stream-ordered).
-    if (state.regex_constrainer)
-        state.regex_constrainer->apply_mask(lp, vocab, stream);
-    else if (state.schema_constrainer)
-        state.schema_constrainer->apply_mask(lp, vocab, stream);
-    else if (state.json_constrainer)
-        state.json_constrainer->apply_mask(lp, vocab, stream);
+    // Constraint mask (host-computed this step, uploaded stream-ordered).
+    apply_constraint_mask(state, lp, vocab, stream);
 
     // Device-side sampling → d_result, async copy to h_pinned.
     Tensor last = logits.slice(0, 1);

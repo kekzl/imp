@@ -81,9 +81,10 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
                                 bool has_tools, ChatTemplateFamily tpl_family, bool thinking_open) {
     active_json_ = false;
     active_schema_ = false;
-    // A pooled manager carries the previous request's flags; leaving this set
-    // would let a stale regex constrainer mask a JSON/tool request.
+    // A pooled manager carries the previous request's flags; leaving these set
+    // would let a stale regex/grammar constrainer mask a JSON/tool request.
     active_regex_ = false;
+    active_grammar_ = false;
 
     const int32_t think_close = detect_think_close(tokenizer);
 
@@ -202,9 +203,10 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
                                           bool xml) {
     active_json_ = false;
     active_schema_ = false;
-    // A pooled manager carries the previous request's flags; leaving this set
-    // would let a stale regex constrainer mask a JSON/tool request.
+    // A pooled manager carries the previous request's flags; leaving these set
+    // would let a stale regex/grammar constrainer mask a JSON/tool request.
     active_regex_ = false;
+    active_grammar_ = false;
 
     // Strict OPTIONAL mode needs a tool-tag dialect the gate can watch for — the
     // model emits the envelope freely. Only the ChatML `<tool_call>` dialect is
@@ -324,8 +326,45 @@ bool ConstraintManager::prepare_regex(const std::string& pattern, Tokenizer* tok
     return true;
 }
 
+bool ConstraintManager::prepare_grammar(const std::string& gbnf, Tokenizer* tokenizer, bool thinking_open) {
+    active_grammar_ = false;
+    active_regex_ = false;
+    active_json_ = false;
+    active_schema_ = false;
+    if (gbnf.empty() || !tokenizer)
+        return false;
+    // Same grammar this pooled manager already serves: skip re-compiling and
+    // re-classifying ~151K tokens, and keep the warm mask cache — an agent that
+    // pins one grammar sends it on every request.
+    const bool reuse = grammar_constrainer_ && grammar_constrainer_->is_initialized() &&
+                       grammar_constrainer_->source() == gbnf;
+    if (!reuse) {
+        if (!grammar_constrainer_)
+            grammar_constrainer_ = std::make_unique<GrammarConstrainer>();
+        // vocab_size here is the LOGITS width; the constrainer clamps its own
+        // classification to the tokenizer vocab (SafeTensors models pad lm_head
+        // past it — indexing to the logits width read out of bounds once).
+        if (!grammar_constrainer_->init(gbnf, tokenizer, tokenizer->vocab_size())) {
+            IMP_LOG_WARN("ConstraintManager: GBNF grammar rejected (%s) — not enforcing it",
+                         grammar_constrainer_->error().c_str());
+            cached_grammar_string_.clear();
+            return false;
+        }
+    }
+    const int32_t think_close = detect_think_close(tokenizer);
+    if (think_close >= 0)
+        grammar_constrainer_->set_preamble(think_close, 8192, thinking_open);
+    grammar_constrainer_->reset();
+    active_grammar_ = true;
+    cached_grammar_string_ = gbnf;
+    IMP_LOG_INFO("ConstraintManager: constraining output to a GBNF grammar (%zu bytes)", gbnf.size());
+    return true;
+}
+
 void ConstraintManager::update(int32_t token) {
-    if (active_regex_ && regex_constrainer_) {
+    if (active_grammar_ && grammar_constrainer_) {
+        grammar_constrainer_->update(token);
+    } else if (active_regex_ && regex_constrainer_) {
         regex_constrainer_->update(token);
     } else if (active_schema_ && schema_constrainer_) {
         schema_constrainer_->update(token);
@@ -342,7 +381,9 @@ int ConstraintManager::forced_text(std::string& out, int max_chars) const {
 }
 
 void ConstraintManager::reset() {
-    if (active_regex_ && regex_constrainer_) {
+    if (active_grammar_ && grammar_constrainer_) {
+        grammar_constrainer_->reset();
+    } else if (active_regex_ && regex_constrainer_) {
         regex_constrainer_->reset();
     } else if (active_schema_ && schema_constrainer_) {
         schema_constrainer_->reset();
@@ -351,9 +392,10 @@ void ConstraintManager::reset() {
     }
     active_json_ = false;
     active_schema_ = false;
-    // A pooled manager carries the previous request's flags; leaving this set
-    // would let a stale regex constrainer mask a JSON/tool request.
+    // A pooled manager carries the previous request's flags; leaving these set
+    // would let a stale regex/grammar constrainer mask a JSON/tool request.
     active_regex_ = false;
+    active_grammar_ = false;
 }
 
 }  // namespace imp

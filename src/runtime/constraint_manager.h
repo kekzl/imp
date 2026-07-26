@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/grammar_constrain.h"
 #include "compute/json_constrain.h"
 #include "compute/regex_constrain.h"
 #include "compute/schema_constrain.h"
@@ -82,12 +83,22 @@ public:
     RegexConstrainer* regex_constrainer() const noexcept {
         return active_regex_ ? regex_constrainer_.get() : nullptr;
     }
+    GrammarConstrainer* grammar_constrainer() const noexcept {
+        return active_grammar_ ? grammar_constrainer_.get() : nullptr;
+    }
 
     // Constrain output to a regular expression (docs/roadmap.md gap 4). The
     // engine behind it is the same RegexNfa that backs JSON-Schema `pattern`.
     // Returns false on an unsupported/malformed pattern — the caller then
     // declines constrained decoding rather than enforcing a wrong grammar.
     bool prepare_regex(const std::string& pattern, Tokenizer* tokenizer, bool thinking_open = true);
+
+    // Constrain output to a GBNF grammar (docs/roadmap.md gap 8). Same contract
+    // as prepare_regex one step up the Chomsky hierarchy: the engine is a
+    // pushdown simulator, so recursive and balanced formats are expressible.
+    // Returns false on a grammar that does not compile — the caller then
+    // declines constrained decoding rather than enforcing a wrong grammar.
+    bool prepare_grammar(const std::string& gbnf, Tokenizer* tokenizer, bool thinking_open = true);
 
     // Update FSM state after sampling a token.
     void update(int32_t token);
@@ -102,24 +113,35 @@ public:
     void reset();
 
     // Check if any constraint is active.
-    bool is_active() const noexcept { return active_json_ || active_schema_ || active_regex_; }
+    bool is_active() const noexcept {
+        return active_json_ || active_schema_ || active_regex_ || active_grammar_;
+    }
     bool has_json() const noexcept { return active_json_; }
     bool has_schema() const noexcept { return active_schema_; }
     bool has_regex() const noexcept { return active_regex_; }
+    bool has_grammar() const noexcept { return active_grammar_; }
 
     // Schema string of the cached (initialized) schema constrainer — lets the
     // engine's manager pool prefer an instance that already classified this
     // schema over re-classifying the vocab.
     const std::string& cached_schema() const noexcept { return cached_schema_string_; }
 
+    // Same idea for grammars: classifying ~151K tokens against a fresh grammar
+    // is the expensive part, so the engine's pool prefers an instance that has
+    // already seen this source.
+    const std::string& cached_grammar() const noexcept { return cached_grammar_string_; }
+
 private:
     std::unique_ptr<JsonConstrainer> json_constrainer_;
     std::unique_ptr<SchemaConstrainer> schema_constrainer_;
     std::unique_ptr<RegexConstrainer> regex_constrainer_;
+    std::unique_ptr<GrammarConstrainer> grammar_constrainer_;
     std::string cached_schema_string_;
+    std::string cached_grammar_string_;
     bool active_json_ = false;
     bool active_schema_ = false;
     bool active_regex_ = false;
+    bool active_grammar_ = false;
 };
 
 }  // namespace imp

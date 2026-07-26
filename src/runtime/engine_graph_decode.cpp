@@ -223,7 +223,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     // this directly — without this guard a tool-enforced request decoded a
     // full unmasked generation (#1002).
     if (req->constraints || req->json_mode || !req->json_schema.empty() ||
-        !req->regex_pattern.empty() || !req->tool_constraint_tools.empty())
+        !req->regex_pattern.empty() || !req->grammar.empty() || !req->tool_constraint_tools.empty())
         return false;
 
     int remaining = prepare_graph_loop(req);
@@ -484,6 +484,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     st.schema_constrainer = req->constraints ? req->constraints->schema_constrainer() : nullptr;
     st.json_constrainer = req->constraints ? req->constraints->json_constrainer() : nullptr;
     st.regex_constrainer = req->constraints ? req->constraints->regex_constrainer() : nullptr;
+    st.grammar_constrainer = req->constraints ? req->constraints->grammar_constrainer() : nullptr;
 
     p.runner.set_decode_fn([this](cudaStream_t s) { executor_->forward_logits(cpipe_.state, cpipe_.logits, s); });
 
