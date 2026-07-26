@@ -5,6 +5,20 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **Model swapping on request (`server.model_swap`, default on)** — a request
+  naming a model other than the loaded one is now served by swapping to it
+  instead of returning 404. Agent harnesses drive a big model beside a small
+  one (router, sub-agents, autocomplete) and 32 GB fits one at a time, so the
+  swap is serial and the requesting call pays one model load; the warm weight
+  cache (#956) makes repeats cheap. An auto-swap existed once and was removed
+  because it tore the engine down mid-stream and could leave the process with
+  no model — both causes are closed here: in-flight generations **drain** first
+  and are never cancelled (the `/admin/suspend` contract), and a failed load
+  **restores** the previous model. Unknown names still 404: the name must
+  resolve inside the models directory. `/v1/models` lists the rest of that
+  directory alongside the loaded model (`loaded: true|false`) so a client can
+  see what it may ask for. `server.model_swap=false` keeps the strict
+  single-model contract; `server.model_swap_drain_ms` bounds the drain wait.
 - **Web UI at `GET /`** — `imp-server` now serves a single-page chat client.
   It streams over the existing SSE endpoint (no protocol or engine change) and
   draws one bar per token, so time-to-first-token, tok/s and inter-token
