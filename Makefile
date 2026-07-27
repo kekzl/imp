@@ -167,11 +167,14 @@ test-niah: build check-gpu
 	python3 tools/analysis/niah_check.py --url http://localhost:8080 --model $(NIAH_MODEL) \
 		--lengths 16000,32000 --depths 0.1,0.5,0.9
 
-# #1007 stage-2 EXTERNAL gate (opt-in): a real third-party coding agent (aider)
-# driving imp-server through a genuine edit loop — proves the whole loop survives
-# an ACTUAL agent binary. Heavier than `test-agents` (builds a harness image with
-# aider baked in, uses --network host), so it is a separate opt-in target rather
-# than part of the default agent battery. GPU + local model.
+# #1007 stage-2 EXTERNAL gate (opt-in): REAL third-party agent binaries driving
+# imp-server through a genuine edit loop — proves the whole loop survives an
+# ACTUAL agent, not just our own driver. Two legs: aider over the OpenAI dialect
+# and Claude Code over the Anthropic one (ANTHROPIC_BASE_URL), the latter being
+# the demanding client — ~20K system prompt, 25 tools, cache_control, streaming.
+# Heavier than `test-agents` (builds harness images, uses --network host), so it
+# is a separate opt-in target rather than part of the default agent battery.
+# GPU + local model.  Third arg selects a leg: all (default) | aider | claude-code
 test-agents-external: build check-gpu
 	bash tools/analysis/agent_external_smoke.sh $(AGENTIC_MODEL) 8080
 

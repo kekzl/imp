@@ -68,8 +68,21 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         think_start_phase = imp::server::ThinkPhase::SCAN;  // model decides
     else
         think_start_phase = imp::server::ThinkPhase::CONTENT;  // no extraction
+    // How long SCAN may hold output while it is still unknown whether the model
+    // is reasoning. A tool request suppresses the thinking default, so the
+    // template renders a PRE-CLOSED think block and a model that reasons anyway
+    // emits only the CLOSER — the opener SCAN is looking for never arrives, and
+    // at the default budget the whole chain of thought had already been flushed
+    // as the visible answer by the time `</think>` proved otherwise. (Found by
+    // pointing Claude Code at imp-server: it printed raw reasoning as the reply.)
+    // Holding longer on the agent path is the trade this buys: an agent client
+    // is waiting for a tool call, not rendering partial prose, and the fallback
+    // is still a bounded flush — whereas streaming chain-of-thought as the
+    // answer is wrong in a way the caller cannot undo.
+    constexpr int kAgentScanLimit = 256;
+    const int scan_limit = has_tools ? kAgentScanLimit : 8;
     imp::server::StreamReasoningSplitter think_split(think_start_phase, ctx.snap.think_start_id,
-                                                     ctx.snap.think_end_id);
+                                                     ctx.snap.think_end_id, scan_limit);
 
     // Rejoins characters the tokenizer split across two tokens, before any
     // consumer sees the piece — the think splitter and tool filter match on raw
@@ -310,8 +323,18 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             out.n_reasoning_tokens += rs.reasoning_tokens;
             if (!rs.reasoning.empty() && !d.emit_reasoning(rs.reasoning))
                 return false;
-            if (rs.content.empty())
-                continue;
+            if (rs.content.empty()) {
+                // SCAN is holding output while it waits to learn whether this is
+                // reasoning. A tool-call opener settles it — a call is never
+                // reasoning — so release the hold NOW: keeping it would buffer
+                // the whole call and its argument deltas would never stream.
+                if (has_tools && think_split.phase() == imp::server::ThinkPhase::SCAN &&
+                    scan_tool_tag(think_split.held(), tpl_family).kind == ToolTagScan::Kind::OPEN) {
+                    rs = think_split.flush_scan();
+                }
+                if (rs.content.empty())
+                    continue;
+            }
             piece = std::move(rs.content);
         }
 

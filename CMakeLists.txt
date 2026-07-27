@@ -592,6 +592,7 @@ if(IMP_BUILD_TESTS)
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
             tests/test_reasoning_reconcile.cpp
+            tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
             tests/test_server_args.cpp
             tests/test_base64.cpp)
