@@ -93,7 +93,36 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   lives in `tools/imp-server/webui/index.html`. One file, no build step, no
   dependencies — for anything richer, point Open WebUI at the same server.
 
+### Changed
+- **One `needs_constrained` flag replaces the `needs_json_mode` /
+  `needs_schema_mode` pair** in the decode scheduler. Every consumer only ever
+  asked for their disjunction, so the split bought nothing and cost correctness:
+  regex-constrained requests (#1091) were in neither flag, which excluded them
+  from the constrained decode pipeline and left two device-side fast paths
+  relying on a second, per-request guard to not bypass the mask. Regex and GBNF
+  grammars now take the same pipelined path as `json_object` / `json_schema`.
+  **Measured neutral** on a 4B model — eager vs pipelined came out within noise
+  for a regex (231.9 → 228.7 tok/s), a flat grammar (224.7 → 224.1) and a
+  state-heavy recursive JSON grammar (247.6 → 251.0), with byte-identical
+  output; the per-state mask cache warms fast enough that there is no host
+  latency left to hide. It is shipped for the consistency, not for a speedup.
+- `tools/imp-server/tool_call.cpp` split: the Gemma-4 tool-call dialect parser
+  moved to `tool_call_gemma.cpp`. That file was the repo's only hard-review
+  file-size violation (847 code LOC against a threshold of 800) and had been
+  failing the `File size` CI job on `main`; it is now 642 and the gate is green.
+
 ### Fixed
+- **`json_object` accepted a trailing comma** (#1096) — `[1,]` and `{"a":1,}`
+  passed the mask, so a reply the caller was promised it could `json.loads()`
+  did not parse. Root cause: after a value, `,` returned to the state an
+  *opener* produces, and that state legally accepts the closer, because an empty
+  `[]` / `{}` is valid JSON. Two states (`ARRAY_NEED_VALUE`, `OBJECT_NEED_KEY`)
+  now express "a value/key is mandatory here". The schema FSM was never
+  affected — it already carried the equivalent `after_comma` guard, which is why
+  only the schema-less path shipped the bug. Covered by a generative property
+  test that inserts a comma before every closer in 2000 random documents; the
+  failure found in the wild was three levels deep, which is why the
+  example-based batteries next door had missed it for so long.
 - **An undersized `kv_cache.swa_snapshot_mb` silently cost prefix caching.** One
   SWA snapshot is several hundred MiB (350 on gemma-3-12b); a budget below that
   leaves the store off, and prefix caching is then disabled with it — strictly
