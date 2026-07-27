@@ -980,6 +980,17 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
             maybe_save_swa_snapshot_(*req, snap_end, pf_stream);
         }
+    } else if (!req->score_token_ids.empty()) {
+        // Rerank scoring (/v1/rerank): a cross-encoder reads its verdict from
+        // the last position's logits and never samples. Same no-sampling shape
+        // as the embedding branch above, but the pooling is a two-logit read.
+        Tensor score_logits;
+        executor_->forward_logits(state, score_logits, pf_stream);
+        if (!pf_pool_used) {
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+        }
+        score_capture_(*req, score_logits, pf_stream);
+        finish_request(req);
     } else if (req->embedding_request) {
         // Embedding request (#1005): last chunk — forward, pool, finish.
         // No sampling, no DECODING transition; the request rides the normal

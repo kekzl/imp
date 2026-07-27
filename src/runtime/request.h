@@ -160,6 +160,15 @@ struct Request {
     bool embedding_request = false;
     std::vector<float> embedding_out;
 
+    // Rerank scoring (/v1/rerank): prefill only, then read the logits of these
+    // token ids at the LAST position into score_out. A cross-encoder reranker
+    // scores query+document jointly in one forward and never generates, so
+    // this rides the same no-sampling path embeddings take — but it DOES want
+    // the prefix cache, because reranking N documents replays one shared
+    // system+query prefix N times.
+    std::vector<int32_t> score_token_ids;
+    std::vector<float> score_out;
+
     // JSON mode
     bool json_mode = false;   // Constrain output to valid JSON
     std::string json_schema;  // JSON Schema string (empty = disabled)

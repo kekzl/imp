@@ -558,6 +558,28 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         log_spec_stats_();
 }
 
+void Engine::score_capture_(Request& req, const Tensor& logits, cudaStream_t stream) {
+    if (req.score_token_ids.empty() || logits.data == nullptr)
+        return;
+    // logits is [n_rows, vocab]; a cross-encoder's verdict lives at the LAST
+    // position, which is the row the sampler would have used.
+    const int64_t n_rows = logits.ndim >= 2 ? logits.shape[0] : 1;
+    const int64_t vocab = logits.ndim >= 2 ? logits.shape[1] : logits.shape[0];
+    const float* last_row = static_cast<const float*>(logits.data) +
+                            static_cast<size_t>(n_rows - 1) * static_cast<size_t>(vocab);
+    req.score_out.assign(req.score_token_ids.size(), 0.0f);
+    // One D2H per id: the ids are a handful (yes/no), so a full-row copy would
+    // move 600 KB to read 8 bytes.
+    for (size_t i = 0; i < req.score_token_ids.size(); i++) {
+        const int32_t id = req.score_token_ids[i];
+        if (id < 0 || id >= static_cast<int32_t>(vocab))
+            continue;
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(&req.score_out[i], last_row + id, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    }
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+}
+
 void Engine::embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream) {
     const int d_model = static_cast<int>(model_->config().d_model);
     if (!d_embed_pool_scratch_) {

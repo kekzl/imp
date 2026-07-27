@@ -571,6 +571,10 @@ private:
     // the request already holds one.
     void ensure_constraints_(const std::shared_ptr<Request>& req);
     // Embedding requests (#1005): pool the chunk that hidden_ currently holds
+    // Read the logits of req.score_token_ids at the LAST position of `logits`
+    // into req.score_out (host, fp32). Rerank scoring only; synchronizes.
+    void score_capture_(Request& req, const Tensor& logits, cudaStream_t stream);
+
     // and accumulate into req.embedding_out (host, fp32). Synchronizes the
     // stream (one ~20KB D2H per chunk).
     void embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream);
