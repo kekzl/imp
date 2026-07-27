@@ -5,6 +5,71 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **`tools/analysis/ctx_capacity_decode_sweep.sh`** — one command that measures
+  decode throughput against the *configured* context capacity at a fixed live
+  sequence. It exists because that sweep found decode is 38% slower at the
+  server's default capacity than at 1024 on the same 280-token request
+  (issue #1100), and because the CI perf gate cannot see it: `imp-cli --bench`
+  sizes the engine to the bench workload while `imp-server` defaults to the
+  model's full context, so the pinned baseline and the served number measure
+  different regimes.
+- **`POST /v1/rerank`** (also `/rerank`) — Cohere/Jina/vLLM-compatible
+  reranking, closing roadmap gap 9. A RAG agent retrieves with an embedding
+  model and *orders* with a reranker; imp shipped only the first half. Query and
+  document are scored JOINTLY in one forward, which is the bar the gap set — a
+  score recomputed from two independent embeddings would be an endpoint with the
+  right name and the wrong answer. Supports `top_n`, `return_documents`, a task
+  `instruction`, Cohere's object-form documents and vLLM's `texts` spelling.
+  **Not a BERT sequence-classification head**, which is what the gap assumed:
+  current rerankers (Qwen3-Reranker, bge-reranker-v2-gemma) are causal LMs that
+  answer a yes/no question about the pair, and the relevance score is the
+  softmax over those two logits. That runs on imp's existing decoder stack
+  instead of adding a second architecture family, and the shared
+  system+instruct+query prefix means the prefix cache turns an N-document rerank
+  into one full prefill plus N document tails. Validated against llama.cpp
+  serving the SAME GGUF: top-1 agreement 3/3 queries, median per-document score
+  delta 0.0014. Gate: `make test-rerank` (16 checks; add `COMPARE_URL=` for the
+  cross-engine diff). Requires a reranker model — the endpoint refuses a general
+  model with a 400 rather than returning meaningless scores.
+- **Claude Code as an external agent gate** (`make test-agents-external`,
+  roadmap gap 10 / #1007 stage 2). The real CLI now drives imp-server over
+  `ANTHROPIC_BASE_URL` on a throwaway repo and has to land an actual edit — an
+  assertion only a real tool call can satisfy. It is the demanding client: one
+  request carries a ~20K system prompt, 25 tool definitions, `cache_control`,
+  extended-thinking fields and streaming, and it exercised the Anthropic dialect
+  the way no self-written probe had. It earned its keep on the first run by
+  finding the streaming reasoning leak below. The aider leg (OpenAI dialect) is
+  unchanged; both now run from one script, selectable per leg.
+- **`reasoning-channel` check in `agent_loop_suite.py`** (the hard
+  `make test-agents` gate): streaming and non-streaming must route reasoning to
+  the same channel, with and without tools. This is the protocol-level pin for
+  the leak above, so it fails in CI-shaped runs rather than only under a real
+  agent.
+- **GBNF grammar-constrained decoding** — `response_format: {"type":"grammar","grammar":"root ::= ..."}`,
+  llama.cpp's top-level `grammar` and vLLM's `guided_grammar` are all accepted.
+  The whole reply must be a derivation of `root` (roadmap gap 8). A regex covers
+  the formats agents pin most often, but it is regular by definition: a nested
+  expression language, a balanced DSL or any recursive format needs a stack,
+  which `RegexNfa` structurally cannot have. The engine is a nondeterministic
+  pushdown simulator over hash-consed parse stacks — the naive
+  vector-of-frames version spent 333 ms building a single token mask inside a
+  JSON string, so stacks are interned to integers and each stack's successor set
+  is memoised (a transition's target does not depend on which character took it),
+  which brought the same mask to 12 ms. GBNF surface: alternation, string
+  literals, character classes (`[a-z]`, `[^"]`), `.`, rule references, grouping,
+  `*` `+` `?` `{m}` `{m,}` `{m,n}`, comments and `\xNN`/`\uNNNN` escapes.
+  Grammars the simulator cannot honour are refused rather than mis-enforced:
+  left recursion (direct, indirect, and via a star over a nullable rule),
+  undefined rule references, a missing `root`, and repetition bounds large
+  enough to be a grammar bomb. EOS is gated on a complete derivation, so
+  generation cannot stop half-way through the format, and UTF-8 is assembled
+  across token boundaries (a BPE token can end mid-character) with overlong
+  encodings rejected — they would otherwise smuggle a forbidden character past
+  the mask as a longer spelling of an allowed one.
+  Wiring it also folded the four copies of the constrainer chain in
+  `src/exec/executor.cu` into one `apply_constraint_mask` helper: a new
+  constrainer previously had to be added to four sampling paths, and the two
+  easy-to-miss ones are exactly how an unmasked path ships.
 - **Regex-constrained decoding** — `response_format: {"type":"regex","regex":"..."}`
   (vLLM's top-level `guided_regex` is accepted too). The whole reply must match
   the pattern, so an agent can pin a diff header, an ID, a version string or a
@@ -68,7 +133,53 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   lives in `tools/imp-server/webui/index.html`. One file, no build step, no
   dependencies — for anything richer, point Open WebUI at the same server.
 
+### Changed
+- **One `needs_constrained` flag replaces the `needs_json_mode` /
+  `needs_schema_mode` pair** in the decode scheduler. Every consumer only ever
+  asked for their disjunction, so the split bought nothing and cost correctness:
+  regex-constrained requests (#1091) were in neither flag, which excluded them
+  from the constrained decode pipeline and left two device-side fast paths
+  relying on a second, per-request guard to not bypass the mask. Regex and GBNF
+  grammars now take the same pipelined path as `json_object` / `json_schema`.
+  **Measured neutral** on a 4B model — eager vs pipelined came out within noise
+  for a regex (231.9 → 228.7 tok/s), a flat grammar (224.7 → 224.1) and a
+  state-heavy recursive JSON grammar (247.6 → 251.0), with byte-identical
+  output; the per-state mask cache warms fast enough that there is no host
+  latency left to hide. It is shipped for the consistency, not for a speedup.
+- `tools/imp-server/tool_call.cpp` split: the Gemma-4 tool-call dialect parser
+  moved to `tool_call_gemma.cpp`. That file was the repo's only hard-review
+  file-size violation (847 code LOC against a threshold of 800) and had been
+  failing the `File size` CI job on `main`; it is now 642 and the gate is green.
+
 ### Fixed
+- **Streaming leaked the chain of thought as the answer whenever tools were
+  present.** The same request returned the reasoning in `reasoning_content`
+  (OpenAI) / a `thinking` block (Anthropic) without `stream:true`, and as the
+  user-visible answer with it — so the broken half was the half every real agent
+  client sees. A tool request suppresses the thinking default, the chat template
+  then renders a PRE-CLOSED think block, and a model that reasons anyway emits
+  only the CLOSER: the streaming splitter was scanning for a `<think>` opener
+  that had been rendered into the PROMPT and could never arrive, so at the
+  8-token scan budget it flushed the whole chain of thought as content. It now
+  (a) treats a closer without an opener as proof that the held prefix was
+  reasoning — the same conclusion the offline path reaches via `split_last_think`
+  — and (b) holds longer on the agent path so that proof can arrive. The hold is
+  released the moment a tool-call opener appears, since a call is never
+  reasoning; without that release the fix buffered whole tool calls and their
+  streamed argument deltas stopped arriving (caught by `make test-agents`).
+  Found by pointing the real Claude Code binary at imp-server, which printed the
+  model's reasoning instead of doing the edit.
+- **`json_object` accepted a trailing comma** (#1096) — `[1,]` and `{"a":1,}`
+  passed the mask, so a reply the caller was promised it could `json.loads()`
+  did not parse. Root cause: after a value, `,` returned to the state an
+  *opener* produces, and that state legally accepts the closer, because an empty
+  `[]` / `{}` is valid JSON. Two states (`ARRAY_NEED_VALUE`, `OBJECT_NEED_KEY`)
+  now express "a value/key is mandatory here". The schema FSM was never
+  affected — it already carried the equivalent `after_comma` guard, which is why
+  only the schema-less path shipped the bug. Covered by a generative property
+  test that inserts a comma before every closer in 2000 random documents; the
+  failure found in the wild was three levels deep, which is why the
+  example-based batteries next door had missed it for so long.
 - **An undersized `kv_cache.swa_snapshot_mb` silently cost prefix caching.** One
   SWA snapshot is several hundred MiB (350 on gemma-3-12b); a budget below that
   leaves the store off, and prefix caching is then disabled with it — strictly

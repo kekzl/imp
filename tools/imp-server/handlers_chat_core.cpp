@@ -231,13 +231,14 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // thinking; hardcoded families / templateless runs keep the old default.
     const bool template_think_evidence = !ctx.snap.have_template || !ctx.snap.chat_tpl.has_jinja() ||
                                          ctx.snap.chat_tpl.mentions_thinking();
-    // A regex constraint is structured output too: the pattern covers the WHOLE
-    // reply, so a reasoning preamble cannot be emitted without violating it —
-    // the constrainer's gate would hold the mask open while the model spends
-    // the budget thinking, and the caller gets prose instead of the format.
+    // A regex or grammar constraint is structured output too: it covers the
+    // WHOLE reply, so a reasoning preamble cannot be emitted without violating
+    // it — the constrainer's gate would hold the mask open while the model
+    // spends the budget thinking, and the caller gets prose instead of the
+    // format.
     const bool thinking_default = ctx.snap.is_think_model && template_think_evidence &&
                                   !ctx.params.json_mode && !ctx.params.has_tools &&
-                                  ctx.params.regex_pattern.empty();
+                                  ctx.params.regex_pattern.empty() && ctx.params.grammar.empty();
     const bool want_thinking = ctx.params.enable_thinking_set ? ctx.params.enable_thinking_requested
                                                               : thinking_default;
     // think_budget is the fraction of max_tokens reserved for reasoning;
@@ -566,6 +567,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->json_mode = ctx.params.json_mode;
     req->json_schema = ctx.params.json_schema_str;
     req->regex_pattern = ctx.params.regex_pattern;
+    req->grammar = ctx.params.grammar;
     req->has_tools = ctx.params.has_tools;
     req->tool_constraint_tools = ctx.params.tool_constraint_tools;
     req->tool_envelope_open = ctx.params.tool_envelope_open;

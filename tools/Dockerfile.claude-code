@@ -1,0 +1,16 @@
+# Harness image for the #1007 stage-2 EXTERNAL agent gate, Anthropic leg: the
+# real Claude Code binary driving imp-server's /v1/messages through
+# ANTHROPIC_BASE_URL. Separate from Dockerfile.agents (python/aider) so each
+# stays a two-line image; the run itself is offline because the agent is baked in.
+#
+# Build:  docker build -f tools/Dockerfile.claude-code -t imp:claude-code tools/
+# Usage:  see tools/analysis/agent_external_smoke.sh
+FROM node:22-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin the CLI: an agent harness that silently updates is not a gate.
+RUN npm install -g @anthropic-ai/claude-code@2.1.220 && npm cache clean --force
+
+WORKDIR /work

@@ -157,6 +157,21 @@ Per token:
   prefill for a recurrent model.
 - **Kernels** — `src/compute/` (attention, GEMM, RMSNorm, RoPE, SwiGLU,
   softmax, sampling) and `src/quant/` (dequant, FP8 quant, NVFP4 quant).
+- **Constrained decoding** — four grammars, one contract. Each owns a host-side
+  FSM and exposes the same `apply_mask(logits, vocab, stream)`:
+  `JsonConstrainer` (any valid JSON), `SchemaConstrainer` (a JSON Schema, plus
+  the tool-call envelopes), `RegexConstrainer` (`RegexNfa`, shared with
+  JSON-Schema `pattern`), and `GrammarConstrainer` (GBNF — a nondeterministic
+  pushdown simulator in `src/compute/gbnf_grammar.cpp`, so recursive and
+  bracket-balanced formats are expressible where a regex is not).
+  `ConstraintManager` (`src/runtime/constraint_manager.h`) picks at most one per
+  request and is pooled across requests. The mask is applied in
+  `src/exec/executor.cu` — through a single `apply_constraint_mask` helper,
+  because the sampling paths that must not bypass it are easy to miss. The
+  scheduler routes any constrained request through the pipelined constrained
+  decode (`Engine::step_constrained_pipeline`), gated on one `needs_constrained`
+  flag — a second flag for the same question is how regex requests ended up
+  taking a different path than the JSON ones for no reason.
 - **Public C API** — `include/imp/{imp,types,error,config}.h`,
   implemented in `src/api/imp_api.cpp`. ABI-stable per CONTRIBUTING.md.
 

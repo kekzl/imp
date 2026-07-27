@@ -68,6 +68,11 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
     const std::string& text, std::atomic<int>& next_tool_call_id,
     const std::vector<std::string>& known_tool_names = {});
 
+// Gemma-4's quote-escape sequence. Shared by the dialect parser
+// (tool_call_gemma.cpp) and the streaming / re-emission paths (tool_call.cpp).
+inline constexpr const char* kGemmaQuote = "<|\"|>";
+inline constexpr size_t kGemmaQuoteLen = 5;
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_gemma(
     const std::string& text, std::atomic<int>& next_tool_call_id);
 

@@ -86,6 +86,25 @@ public:
 
     ThinkPhase phase() const { return phase_; }
 
+    // Text SCAN is currently holding while it waits to learn whether this is
+    // reasoning. Callers that can prove it is not — a tool-call opener is proof,
+    // since a call is never reasoning — use this to inspect and then release it.
+    const std::string& held() const { return scan_buf_; }
+
+    // Give up the hold: everything buffered is content, and the phase moves on.
+    // Without this the hold that stops a chain of thought leaking would also
+    // swallow a tool call whole, and its argument deltas would never stream.
+    Result flush_scan() {
+        Result r;
+        if (phase_ != ThinkPhase::SCAN)
+            return r;
+        r.content = scan_buf_;
+        scan_buf_.clear();
+        phase_ = ThinkPhase::CONTENT;
+        content_started_ = true;
+        return r;
+    }
+
     // Feed one decoded token piece (with its token id). Returns the
     // reasoning/content split for this step.
     Result feed(std::string piece, int token) {
@@ -100,6 +119,21 @@ public:
                     r.reasoning_tokens++;
                     return r;
                 }
+                // A CLOSER with no opener. The chat template rendered the
+                // `<think>` into the PROMPT (a pre-closed block on a suppressed
+                // -thinking request, say) and the model reasoned anyway, so the
+                // output carries only `</think>` — scanning for an opener can
+                // never succeed. Everything held so far was reasoning. The
+                // offline path reaches the same conclusion via split_last_think;
+                // streaming only gets one shot at it, which is what the scan
+                // buffer is holding output for.
+                if (token_live && think_end_id_ >= 0 && token == think_end_id_) {
+                    r.reasoning += scan_buf_;
+                    r.reasoning_tokens += scan_count_ + 1;
+                    scan_buf_.clear();
+                    phase_ = ThinkPhase::CONTENT;
+                    return r;
+                }
                 scan_buf_ += work;
                 scan_count_++;
                 auto p = scan_buf_.find("<think>");
@@ -110,6 +144,17 @@ public:
                     scan_buf_.clear();
                     token_live = false;
                     continue;  // process the post-<think> remainder as reasoning
+                }
+                // Same, for models that spell the closer as plain text.
+                auto pc = scan_buf_.find("</think>");
+                if (pc != std::string::npos) {
+                    r.reasoning += scan_buf_.substr(0, pc);
+                    r.reasoning_tokens += scan_count_;
+                    work = scan_buf_.substr(pc + 8);
+                    scan_buf_.clear();
+                    phase_ = ThinkPhase::CONTENT;
+                    token_live = false;
+                    continue;  // the remainder after the closer is content
                 }
                 if (scan_count_ == 1 && work.empty()) {
                     phase_ = ThinkPhase::REASONING;

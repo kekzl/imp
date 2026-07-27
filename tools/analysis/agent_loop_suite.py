@@ -10,6 +10,9 @@ multi-turn tool loops in all three dialects — as a repeatable gate:
                    final answer; streaming tool_calls delta assembly
   responses-loop   /v1/responses: OpenAI Agents SDK dialect — response.created,
                    function_call_arguments.delta assembly, response.completed
+  reasoning-channel  stream vs non-stream must route reasoning to the same
+                   channel — with tools the streaming path used to hand the
+                   chain of thought to the user as the answer
 
 Pass = every check green: tool calls parse, arguments match the tool's schema,
 the final answer uses the tool result, no stream stalls (>30s gap = fail).
@@ -17,7 +20,7 @@ Stdlib-only, mirrors tools/analysis/degen_suite.py conventions.
 
 Usage:
   python3 tools/analysis/agent_loop_suite.py [--url http://localhost:8080]
-                                             [--only anthropic-loop,openai-loop]
+                                             [--only anthropic-loop,reasoning-channel]
 Exit codes: 0 = clean, 1 = failures, 2 = server unreachable.
 """
 
@@ -264,11 +267,69 @@ class Suite:
                     f"frags={frags[:80]!r}")
 
 
+    # ---- reasoning-channel --------------------------------------------------
+
+    def run_reasoning_channel(self):
+        """Streaming and non-streaming must agree on what is reasoning.
+
+        Found by pointing the real Claude Code binary at imp-server: with tools
+        present the same request returned the chain of thought in
+        `reasoning_content` without `stream:true`, and as the user-visible
+        answer with it. Agent harnesses stream, so the broken half is the half
+        every real client sees. Skipped on a model that does not reason.
+        """
+        print("== reasoning-channel ==")
+        cat = "reasoning-channel"
+        tools_oai = [{"type": "function", "function": {
+            "name": "edit_file", "description": "Edit a file.",
+            "parameters": {"type": "object",
+                           "properties": {"path": {"type": "string"}},
+                           "required": ["path"]}}}]
+        prompt = "Edit /tmp/a.py to add a helper function."
+
+        def oai(stream, tools):
+            body = {"model": self.model, "max_tokens": 400, "stream": stream,
+                    "messages": [{"role": "user", "content": prompt}]}
+            if tools:
+                body["tools"] = tools
+            if not stream:
+                m = self.post("/v1/chat/completions", body)["choices"][0]["message"]
+                return len(m.get("reasoning_content") or ""), len(m.get("content") or "")
+            rc = ct = 0
+            for ev in self.post_sse("/v1/chat/completions", body):
+                d = ev["choices"][0].get("delta", {})
+                rc += len(d.get("reasoning_content") or "")
+                ct += len(d.get("content") or "")
+            return rc, ct
+
+        # Baseline: no tools. Establishes that this model reasons at all.
+        base_ns, _ = oai(False, None)
+        if base_ns == 0:
+            self.record(cat, "model reasons (skipped: it does not)", True,
+                        "no reasoning_content without tools")
+            return
+        base_st, _ = oai(True, None)
+        self.record(cat, "no tools: stream and non-stream agree",
+                    base_st > 0, f"non-stream={base_ns} stream={base_st}")
+
+        # The regression: tools present.
+        ns_r, ns_c = oai(False, tools_oai)
+        st_r, st_c = oai(True, tools_oai)
+        if ns_r == 0:
+            self.record(cat, "with tools: model reasons (skipped: it does not)", True, "")
+            return
+        self.record(cat, "with tools: reasoning stays out of content when streaming",
+                    st_r > 0,
+                    f"non-stream reasoning={ns_r}/content={ns_c}, "
+                    f"stream reasoning={st_r}/content={st_c} — the chain of thought "
+                    f"was streamed as the answer")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8080")
     ap.add_argument("--only", default="",
-                    help="comma list: anthropic-loop,openai-loop,responses-loop")
+                    help="comma list: anthropic-loop,openai-loop,responses-loop,reasoning-channel")
     args = ap.parse_args()
 
     try:
@@ -285,6 +346,8 @@ def main():
         suite.run_openai_loop()
     if not only or "responses-loop" in only:
         suite.run_responses_loop()
+    if not only or "reasoning-channel" in only:
+        suite.run_reasoning_channel()
 
     fails = [r for r in suite.results if not r[2]]
     dt = time.monotonic() - t0

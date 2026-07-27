@@ -571,6 +571,10 @@ private:
     // the request already holds one.
     void ensure_constraints_(const std::shared_ptr<Request>& req);
     // Embedding requests (#1005): pool the chunk that hidden_ currently holds
+    // Read the logits of req.score_token_ids at the LAST position of `logits`
+    // into req.score_out (host, fp32). Rerank scoring only; synchronizes.
+    void score_capture_(Request& req, const Tensor& logits, cudaStream_t stream);
+
     // and accumulate into req.embedding_out (host, fp32). Synchronizes the
     // stream (one ~20KB D2H per chunk).
     void embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream);
@@ -908,7 +912,7 @@ private:
                                        std::vector<std::shared_ptr<imp::Request>>& valid_decode,
                                        int max_ctx, cudaStream_t dec_stream,
                                        InferenceState& state, bool& needs_logprobs,
-                                       bool& needs_json_mode, bool& needs_schema_mode);
+                                       bool& needs_constrained);
 
     // Build banned_token_ids_ — special/control tokens that must never appear
     // in generated output (e.g. <|im_start|>, <|endoftext|>). Scans tokenizer
@@ -1024,8 +1028,7 @@ private:
     // Extract logprobs from decode logits and distribute tokens to requests.
     void step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode,
                                      const std::vector<int32_t>& tokens, const Tensor& decode_logits_out,
-                                     bool needs_logprobs, bool needs_json_mode, bool needs_schema_mode,
-                                     cudaStream_t stream);
+                                     bool needs_logprobs, bool needs_constrained, cudaStream_t stream);
 
     // ── Pipelined batched decode (bd_pipe_) ──────────────────────────
     // Static per-row / per-batch eligibility for the one-step-in-flight

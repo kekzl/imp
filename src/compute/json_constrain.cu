@@ -132,6 +132,16 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
             mask |= CAT_COMMA | CAT_CLOSE_BRACKET;
             break;
 
+        case JsonState::ARRAY_NEED_VALUE:
+            // After , in array: a value is mandatory — no closer (#1096).
+            mask |= CAT_VALUE_START;
+            break;
+
+        case JsonState::OBJECT_NEED_KEY:
+            // After , in object: a key is mandatory — no closer (#1096).
+            mask |= CAT_QUOTE;
+            break;
+
         case JsonState::IN_STRING:
             // Inside string: any string-safe char or closing "
             mask |= CAT_STRING_CHAR | CAT_QUOTE;
@@ -212,10 +222,15 @@ bool JsonConstrainer::advance_char(char c) {
             break;
 
         case JsonState::OBJECT_START:
+        case JsonState::OBJECT_NEED_KEY:
             if (c == '"') {
                 current_state_ = JsonState::IN_STRING;
                 state_stack_.push_back(JsonState::AFTER_KEY);
             } else if (c == '}') {
+                // Legal only for an EMPTY object: after a comma this would be
+                // a trailing comma (#1096).
+                if (current_state_ == JsonState::OBJECT_NEED_KEY)
+                    return false;
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
@@ -270,8 +285,9 @@ bool JsonConstrainer::advance_char(char c) {
 
         case JsonState::AFTER_VALUE:
             if (c == ',') {
-                // Next key in object
-                current_state_ = JsonState::OBJECT_START;
+                // Next key in object — NOT OBJECT_START, which would also
+                // accept `}` and turn `{"a":1,}` into legal output (#1096).
+                current_state_ = JsonState::OBJECT_NEED_KEY;
             } else if (c == '}') {
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())
@@ -282,7 +298,12 @@ bool JsonConstrainer::advance_char(char c) {
             break;
 
         case JsonState::ARRAY_START:
+        case JsonState::ARRAY_NEED_VALUE:
             if (c == ']') {
+                // Legal only for an EMPTY array: after a comma this would be
+                // a trailing comma (#1096).
+                if (current_state_ == JsonState::ARRAY_NEED_VALUE)
+                    return false;
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())
                     state_stack_.pop_back();
@@ -320,7 +341,8 @@ bool JsonConstrainer::advance_char(char c) {
 
         case JsonState::ARRAY_AFTER_VALUE:
             if (c == ',') {
-                current_state_ = JsonState::ARRAY_START;
+                // See AFTER_VALUE: ARRAY_START would also accept `]`.
+                current_state_ = JsonState::ARRAY_NEED_VALUE;
             } else if (c == ']') {
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
                 if (!state_stack_.empty())

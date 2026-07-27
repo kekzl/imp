@@ -214,6 +214,9 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_routing_permute.cu
     src/compute/softmax.cu
     src/compute/regex_constrain.cu
+    src/compute/grammar_constrain.cu
+    src/compute/gbnf_grammar.cpp
+    src/compute/gbnf_parser.cpp
     src/compute/json_constrain.cu
     src/compute/json_schema.cpp
     src/compute/schema_constrain.cu
@@ -474,6 +477,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
         tools/imp-server/tool_call.cpp
+        tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/anthropic.cpp
         tools/imp-server/responses.cpp
         tools/imp-server/handlers.cpp
@@ -485,6 +489,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_messages.cpp
         tools/imp-server/handlers_responses.cpp
         tools/imp-server/handlers_misc.cpp
+        tools/imp-server/handlers_rerank.cpp
         tools/imp-server/handlers_admin.cpp
         tools/imp-server/batching_engine.cpp
     )
@@ -554,6 +559,9 @@ if(IMP_BUILD_TESTS)
         # every past grammar bug escaped CI because its tests need a GPU.
         tests/test_json_constrain_property.cpp
         tests/test_schema_constrain_property.cpp
+        # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
+        # CPU-only by construction — see the file header.
+        tests/test_gbnf_grammar.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp
@@ -575,6 +583,8 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/responses.cpp
             tools/imp-server/utils.cpp
             tools/imp-server/tool_call.cpp
+            tools/imp-server/tool_call_gemma.cpp
+        tools/imp-server/tool_call_gemma.cpp
             tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
@@ -583,6 +593,7 @@ if(IMP_BUILD_TESTS)
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
             tests/test_reasoning_reconcile.cpp
+            tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
             tests/test_server_args.cpp
             tests/test_base64.cpp)

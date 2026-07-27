@@ -855,6 +855,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     if (req->constraints) {
         state.json_constrainer = req->constraints->json_constrainer();
         state.regex_constrainer = req->constraints->regex_constrainer();
+        state.grammar_constrainer = req->constraints->grammar_constrainer();
         state.schema_constrainer = req->constraints->schema_constrainer();
     }
 
@@ -979,6 +980,17 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
             maybe_save_swa_snapshot_(*req, snap_end, pf_stream);
         }
+    } else if (!req->score_token_ids.empty()) {
+        // Rerank scoring (/v1/rerank): a cross-encoder reads its verdict from
+        // the last position's logits and never samples. Same no-sampling shape
+        // as the embedding branch above, but the pooling is a two-logit read.
+        Tensor score_logits;
+        executor_->forward_logits(state, score_logits, pf_stream);
+        if (!pf_pool_used) {
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+        }
+        score_capture_(*req, score_logits, pf_stream);
+        finish_request(req);
     } else if (req->embedding_request) {
         // Embedding request (#1005): last chunk — forward, pool, finish.
         // No sampling, no DECODING transition; the request rides the normal
@@ -1003,7 +1015,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         bool use_event_sync = (h_sample_pinned_ != nullptr && executor_->d_sample_result() != nullptr &&
                                (state.temperature <= 0.0f || state.top_k == 1) && !req->logprobs &&
                                !state.json_constrainer && !state.schema_constrainer &&
-                               !state.regex_constrainer);
+                               !state.regex_constrainer && !state.grammar_constrainer);
 
         Tensor prefill_logits_out;
 
@@ -1441,7 +1453,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
                                            std::vector<std::shared_ptr<Request>>& valid_decode,
                                            int max_ctx, cudaStream_t dec_stream,
                                            InferenceState& state, bool& needs_logprobs,
-                                           bool& needs_json_mode, bool& needs_schema_mode) {
+                                           bool& needs_constrained) {
     state.token_ids = gpu_batch.d_token_ids;
     state.positions = gpu_batch.d_positions;
     state.n_tokens = gpu_batch.total_tokens;
@@ -1528,16 +1540,19 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     fill_recurrent_state(*valid_decode[0], state, false, dec_stream);
 
     // Check if any request needs logprobs or constrained mode
+    // ONE flag for "this batch is driven by a host-side constraint FSM".
+    // It used to be two (json / schema) and every consumer only ever asked for
+    // their disjunction — which meant a new constrainer had to be remembered in
+    // both, and regex (#1091) was in neither, so a regex request could never
+    // reach the constrained pipeline and silently stayed on the eager path.
     needs_logprobs = false;
-    needs_json_mode = false;
-    needs_schema_mode = false;
+    needs_constrained = false;
     for (const auto& r : valid_decode) {
         if (r->logprobs)
             needs_logprobs = true;
-        if (r->json_mode && r->json_schema.empty() && r->tool_constraint_tools.empty())
-            needs_json_mode = true;
-        if (!r->json_schema.empty() || !r->tool_constraint_tools.empty())
-            needs_schema_mode = true;
+        if (r->json_mode || !r->json_schema.empty() || !r->tool_constraint_tools.empty() ||
+            !r->regex_pattern.empty() || !r->grammar.empty())
+            needs_constrained = true;
     }
 
     // Schema/JSON constraints for decode. Lazily create the per-request
@@ -1553,6 +1568,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
         state.schema_constrainer = valid_decode[0]->constraints->schema_constrainer();
         state.json_constrainer = valid_decode[0]->constraints->json_constrainer();
         state.regex_constrainer = valid_decode[0]->constraints->regex_constrainer();
+        state.grammar_constrainer = valid_decode[0]->constraints->grammar_constrainer();
     }
 }
 
@@ -1625,10 +1641,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
 
     InferenceState state;
     bool needs_logprobs = false;
-    bool needs_json_mode = false;
-    bool needs_schema_mode = false;
+    bool needs_constrained = false;
     decode_build_inference_state_(gpu_batch, valid_decode, max_ctx, dec_stream, state, needs_logprobs,
-                                  needs_json_mode, needs_schema_mode);
+                                  needs_constrained);
 
     // Per-request sampling lambda
     auto sample_per_request = [&](const Tensor& logits) -> std::vector<int32_t> {
@@ -1682,10 +1697,12 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 per_state.schema_constrainer = req->constraints->schema_constrainer();
                 per_state.json_constrainer = req->constraints->json_constrainer();
                 per_state.regex_constrainer = req->constraints->regex_constrainer();
+                per_state.grammar_constrainer = req->constraints->grammar_constrainer();
             } else {
                 per_state.schema_constrainer = nullptr;
                 per_state.json_constrainer = nullptr;
                 per_state.regex_constrainer = nullptr;
+                per_state.grammar_constrainer = nullptr;
             }
             per_state.n_sequences = 1;
             Tensor seq_logits = logits.slice(i, i + 1);
@@ -1728,10 +1745,12 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 per_state.schema_constrainer = req->constraints->schema_constrainer();
                 per_state.json_constrainer = req->constraints->json_constrainer();
                 per_state.regex_constrainer = req->constraints->regex_constrainer();
+                per_state.grammar_constrainer = req->constraints->grammar_constrainer();
             } else {
                 per_state.schema_constrainer = nullptr;
                 per_state.json_constrainer = nullptr;
                 per_state.regex_constrainer = nullptr;
+                per_state.grammar_constrainer = nullptr;
             }
             per_state.n_sequences = 1;
             Tensor seq_logits = logits.slice(i, i + 1);
@@ -1828,8 +1847,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // reading step N's tokens back. Falls through to the legacy
         // synchronous collect for every non-clean case.
         bool piped = false;
-        if (!needs_logprobs && !needs_json_mode && !needs_schema_mode &&
-            pipeline_batch_eligible_(valid_decode)) {
+        if (!needs_logprobs && !needs_constrained && pipeline_batch_eligible_(valid_decode)) {
             piped = pipeline_enter_(valid_decode, gpu_batch, graph_idx, state, logits_out,
                                     dec_stream, tokens);
         }
@@ -2014,8 +2032,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     }
 
     // Process outputs: logprobs extraction + token distribution
-    step_decode_process_outputs(valid_decode, tokens, decode_logits_out, needs_logprobs, needs_json_mode,
-                                needs_schema_mode, dec_stream);
+    step_decode_process_outputs(valid_decode, tokens, decode_logits_out, needs_logprobs, needs_constrained,
+                                dec_stream);
 }
 
 // =====================================================================
@@ -2025,7 +2043,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
 
 void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode,
                                          const std::vector<int32_t>& tokens, const Tensor& decode_logits_out,
-                                         bool needs_logprobs, bool needs_json_mode, bool needs_schema_mode,
+                                         bool needs_logprobs, bool needs_constrained,
                                          cudaStream_t dec_stream) {
     Tokenizer* tok = model_->tokenizer();
 
@@ -2105,7 +2123,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         // must be allowed back in here, or bursts only ever fire once. A park
         // for a DIFFERENT request is torn down inside the launch.
         (!async_graph_runner_.is_setup() || async_parked_req_id_ >= 0) &&
-        !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
+        !needs_logprobs && !needs_constrained) {
         auto& dreq = valid_decode[0];
         // forward_decode_async only implements banned_tokens + rep/freq/presence
         // penalties device-side. Any sampling feature that requires host-side
@@ -2208,15 +2226,17 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         }
     }
 
-    // Constrained requests (json_mode / json_schema) can't run the conditional
-    // loop (the grammar FSM is host-side) — launch the pipelined constrained
-    // decode instead: per tick the host enqueues mask+sample AND the next
-    // forward, hiding FSM/mask latency under GPU compute. masked_sample_async
+    // Constrained requests (json_mode / json_schema / regex / GBNF grammar)
+    // can't run the conditional loop (the FSM is host-side) — launch the
+    // pipelined constrained decode instead: per tick the host enqueues
+    // mask+sample AND the next forward, hiding FSM/mask latency under GPU
+    // compute. This matters most for the two newest constrainers, whose cold
+    // masks walk the whole vocabulary. masked_sample_async
     // covers banned tokens + greedy/top-k/top-p only — penalties or any
     // host-side sampling feature stays on the eager path.
     if (decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 && !offload_mgr_ &&
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() && !cpipe_.active && !needs_logprobs &&
-        (needs_json_mode || needs_schema_mode)) {
+        needs_constrained) {
         auto& dreq = valid_decode[0];
         // rep/freq/presence penalties and think_budget ARE supported (uploaded /
         // forced per tick like the eager path) — the server defaults
@@ -2268,6 +2288,7 @@ inline int pipeline_bucket_pow2(int x) {
 
 bool Engine::pipeline_row_eligible_(const Request& r) const {
     if (r.logprobs || r.json_mode || !r.json_schema.empty() || !r.regex_pattern.empty() ||
+        !r.grammar.empty() ||
         r.constraints)
         return false;
     if (r.mirostat != 0 || !r.logit_bias.empty())
@@ -2336,6 +2357,7 @@ InferenceState Engine::pipeline_row_state_(Request& req, int row_idx) const {
     per.schema_constrainer = nullptr;
     per.json_constrainer = nullptr;
     per.regex_constrainer = nullptr;
+    per.grammar_constrainer = nullptr;
     per.n_sequences = 1;
     return per;
 }
@@ -2512,6 +2534,7 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
         per.schema_constrainer = nullptr;
         per.json_constrainer = nullptr;
         per.regex_constrainer = nullptr;
+        per.grammar_constrainer = nullptr;
         per.n_sequences = 1;
         Tensor seq_logits = logits.slice(i, i + 1);
         if (!executor_->sample_single_from_logits_async(seq_logits, per, i, stream)) {

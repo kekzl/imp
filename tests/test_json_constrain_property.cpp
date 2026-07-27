@@ -206,6 +206,58 @@ TEST(JsonConstrainPropertyTest, RejectsTrailingContentAfterRoot) {
 }
 
 // ===========================================================================
+// P4b — Trailing commas (#1096). A comma before a closer is the single most
+// common way a model writes almost-JSON, and the FSM used to allow it: after a
+// value, `,` returned to the same state an OPENER produces — and that state
+// legally accepts the closer, because an empty `[]` / `{}` is valid. So `[1,]`
+// and `{"a":1,}` passed the mask and the reply did not parse, which is exactly
+// the contract json_object exists to keep.
+//
+// Generative, because the failing shape found in the wild was three levels
+// deep inside a larger document; an example-based test would have had to
+// imagine that.
+// ===========================================================================
+TEST(JsonConstrainPropertyTest, RejectsTrailingCommaBeforeAnyCloser) {
+    std::mt19937 rng(kSeed + 6);
+    int mutated_docs = 0;
+    for (int i = 0; i < 2000; i++) {
+        const std::string doc = gen_document(rng);
+        // Insert a comma before each closer in turn.
+        for (size_t p = 0; p < doc.size(); p++) {
+            if (doc[p] != ']' && doc[p] != '}')
+                continue;
+            // Only meaningful after a value — `[,]` / `{,}` are a different
+            // (already covered) rejection.
+            if (p == 0 || doc[p - 1] == '[' || doc[p - 1] == '{')
+                continue;
+            const std::string bad = doc.substr(0, p) + "," + doc.substr(p);
+            ASSERT_FALSE(nlohmann::json::accept(bad)) << "oracle accepts trailing comma: " << bad;
+            JsonConstrainer c;
+            EXPECT_FALSE(c.sim_token_valid(bad)) << "FSM accepted a trailing comma: " << bad;
+            mutated_docs++;
+        }
+    }
+    EXPECT_GT(mutated_docs, 100) << "generator produced too few closers to be a real test";
+}
+
+// The two minimal spellings, kept explicit so a failure names the shape
+// directly instead of printing a random 200-byte document.
+TEST(JsonConstrainPropertyTest, RejectsMinimalTrailingComma) {
+    for (const char* bad : {"[1,]", "{\"a\":1,}", "[[1,],2]", "{\"a\":[1,2,]}", "[\"x\",]", "[true,]",
+                            "[null,]", "[{},]", "{\"a\":{},}"}) {
+        ASSERT_FALSE(nlohmann::json::accept(bad)) << bad;
+        JsonConstrainer c;
+        EXPECT_FALSE(c.sim_token_valid(bad)) << "FSM accepted: " << bad;
+    }
+    // The empty forms stay legal — the fix must not ban `[]` / `{}`.
+    for (const char* good : {"[]", "{}", "[[],{}]", "{\"a\":[],\"b\":{}}"}) {
+        ASSERT_TRUE(nlohmann::json::accept(good)) << good;
+        JsonConstrainer c;
+        EXPECT_TRUE(c.sim_token_valid(good)) << "FSM rejected valid: " << good;
+    }
+}
+
+// ===========================================================================
 // P5 — Structural truncation: cutting a document short and closing it with the
 // WRONG bracket must be rejected. Catches context confusion one level up, the
 // exact failure mode of #1067 (close popped its own frame but resumed in the

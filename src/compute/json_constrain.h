@@ -11,7 +11,12 @@
 
 namespace imp {
 
-// JSON state machine states
+// JSON state machine states.
+//
+// Note the two *_NEED_* states: after a comma a value/key is MANDATORY. They
+// exist because the comma used to return to the matching *_START state, and
+// those legally accept the closer — an empty [] / {} is valid JSON — so `[1,]`
+// and `{"a":1,}` passed the mask and the reply did not parse (#1096).
 enum class JsonState : uint8_t {
     START,              // Expecting { or [
     OBJECT_START,       // After {: expecting " (key) or }
@@ -21,6 +26,8 @@ enum class JsonState : uint8_t {
     AFTER_VALUE,        // After value in object: expecting , or }
     ARRAY_START,        // After [: expecting value or ]
     ARRAY_AFTER_VALUE,  // After value in array: expecting , or ]
+    ARRAY_NEED_VALUE,   // After , in array: expecting a value, NOT ]
+    OBJECT_NEED_KEY,    // After , in object: expecting a key, NOT }
     IN_STRING,          // Inside a string value
     IN_STRING_ESCAPE,   // After \ in string
     IN_NUMBER,          // Inside a number
