@@ -78,6 +78,33 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                                size_t mandatory_cache_prealloc = 0,
                                const NativeCacheDemand* native_demand = nullptr);
 
+// Split of the post-reserve VRAM budget across the pre-dequant phases.
+struct PreDequantBudget {
+    // Free VRAM minus the safety reserve: the ceiling for the whole cache
+    // build. Phase 3 (NVFP4 decode cache) spends what Phases 1/2 leave.
+    size_t shared = 0;
+    // Phases 1/2 (FP16 + FP8 caches): `shared` minus the NVFP4 decode cache's
+    // reservation. That cache is planned but not yet allocated, so free_vram
+    // does not show it and the early phases would otherwise overcommit it.
+    size_t early = 0;
+};
+
+// Pure arithmetic. The NVFP4 reservation is withheld from Phases 1/2 ONLY.
+// Charging it to the shared budget as well charged it to Phase 3 — the phase
+// that *is* the reservation — so the decode cache paid for itself twice: the
+// KV pool is allocated before the cache build, so its bytes are already gone
+// from free_vram, and every one of them then came out of the decode cache a
+// second time. On Qwen3-14B-Q6_K at the server's full-context default
+// (max_seq_len 40960 → a 5.9 GiB KV pool) that left 100/280 tensors cached
+// instead of 278/280, dropping decode 38% while ~11 GiB sat free (#1100).
+inline PreDequantBudget split_pre_dequant_budget(size_t free_vram, size_t reserve_bytes,
+                                                 size_t nvfp4_reservation_bytes) {
+    PreDequantBudget b;
+    b.shared = (free_vram > reserve_bytes) ? (free_vram - reserve_bytes) : 0;
+    b.early = (b.shared > nvfp4_reservation_bytes) ? (b.shared - nvfp4_reservation_bytes) : 0;
+    return b;
+}
+
 // Bytes of one paged KV block for a single layer, K+V combined (2x),
 // packing- and scale-aware. Single source for every KV-size estimate
 // (#942): raw dtype_size() returns 0 for NVFP4/MXFP4_KV (zeroing the

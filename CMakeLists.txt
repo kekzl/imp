@@ -562,6 +562,9 @@ if(IMP_BUILD_TESTS)
         # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
         # CPU-only by construction — see the file header.
         tests/test_gbnf_grammar.cpp
+        # Pre-dequant VRAM budget split (#1100). CPU-only: pure arithmetic in
+        # runtime/vram_budget.h, and it belongs in the lane CI actually runs.
+        tests/test_pre_dequant_budget.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp
