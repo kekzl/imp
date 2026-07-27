@@ -5,6 +5,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **`tools/analysis/ctx_capacity_decode_sweep.sh`** — one command that measures
+  decode throughput against the *configured* context capacity at a fixed live
+  sequence. It exists because that sweep found decode is 38% slower at the
+  server's default capacity than at 1024 on the same 280-token request
+  (issue #1100), and because the CI perf gate cannot see it: `imp-cli --bench`
+  sizes the engine to the bench workload while `imp-server` defaults to the
+  model's full context, so the pinned baseline and the served number measure
+  different regimes.
 - **`POST /v1/rerank`** (also `/rerank`) — Cohere/Jina/vLLM-compatible
   reranking, closing roadmap gap 9. A RAG agent retrieves with an embedding
   model and *orders* with a reranker; imp shipped only the first half. Query and

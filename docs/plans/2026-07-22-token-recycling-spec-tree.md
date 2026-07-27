@@ -1,5 +1,13 @@
 # Token-Recycling multi-candidate speculative decode for reasoning/agentic text
 
+**Status (re-measured 2026-07-27 — conclusion unchanged):** on the current
+build, `token_recycling` is **−7% on fresh reasoning** (Qwen3-14B-Q6_K, server
+path, 3 prompts × best-of-3: off 99.37 vs on 92.46 tok/s), accept 1.65–1.79
+tok/verify at ~40 ms/verify vs a ~10 ms decode step. The re-evaluation trigger
+below ("verify ratio under ~1.3×") is not met — a verify step still costs ~4
+decode steps. Route (b) remains unwarranted. Repro of the larger lever this
+search surfaced instead: `tools/analysis/ctx_capacity_decode_sweep.sh` (#1100).
+
 **Status:** milestones 1–3 implemented 2026-07-23 (flag-gated
 `speculative.token_recycling`, default OFF; route (a) multi-candidate via
 per-candidate private KV blocks — no mask needed). Verify cost cut the same
