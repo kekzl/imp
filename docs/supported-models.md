@@ -9,6 +9,7 @@ Anything not on this list may still load (the GGUF and SafeTensors paths cover m
 | Model | Quant | VRAM | Decode `tg256` | Format |
 |---|---|---:|---:|---|
 | [nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) | Q8_0 | 0.2 GB | embeddings (`/v1/embeddings`, HF-oracle cos ≥ 0.999) | GGUF |
+| [Qwen3-Reranker-0.6B](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF) | Q8_0 | 0.7 GB | reranking (`/v1/rerank`; top-1 agrees with llama.cpp on the same GGUF, median score delta 0.0014) | GGUF |
 | [Qwen3-4B](https://huggingface.co/unsloth/Qwen3-4B-GGUF) | Q8_0 | 4.0 GB | 236 | GGUF |
 | Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF (imp-converted) |
 | [Qwen3-8B](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | Q8_0 | 8.2 GB | **268** (tg128, CI baseline #540) | GGUF |

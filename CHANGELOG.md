@@ -5,6 +5,24 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **`POST /v1/rerank`** (also `/rerank`) — Cohere/Jina/vLLM-compatible
+  reranking, closing roadmap gap 9. A RAG agent retrieves with an embedding
+  model and *orders* with a reranker; imp shipped only the first half. Query and
+  document are scored JOINTLY in one forward, which is the bar the gap set — a
+  score recomputed from two independent embeddings would be an endpoint with the
+  right name and the wrong answer. Supports `top_n`, `return_documents`, a task
+  `instruction`, Cohere's object-form documents and vLLM's `texts` spelling.
+  **Not a BERT sequence-classification head**, which is what the gap assumed:
+  current rerankers (Qwen3-Reranker, bge-reranker-v2-gemma) are causal LMs that
+  answer a yes/no question about the pair, and the relevance score is the
+  softmax over those two logits. That runs on imp's existing decoder stack
+  instead of adding a second architecture family, and the shared
+  system+instruct+query prefix means the prefix cache turns an N-document rerank
+  into one full prefill plus N document tails. Validated against llama.cpp
+  serving the SAME GGUF: top-1 agreement 3/3 queries, median per-document score
+  delta 0.0014. Gate: `make test-rerank` (16 checks; add `COMPARE_URL=` for the
+  cross-engine diff). Requires a reranker model — the endpoint refuses a general
+  model with a 400 rather than returning meaningless scores.
 - **Claude Code as an external agent gate** (`make test-agents-external`,
   roadmap gap 10 / #1007 stage 2). The real CLI now drives imp-server over
   `ANTHROPIC_BASE_URL` on a throwaway repo and has to land an actual edit — an

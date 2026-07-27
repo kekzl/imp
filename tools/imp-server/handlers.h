@@ -256,6 +256,11 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
 void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
+// POST /v1/rerank (also /rerank) — Cohere/Jina/vLLM-compatible reranking.
+// Scores each document against the query with a cross-encoder reranker, jointly
+// in one forward. Requires a reranker model to be loaded; see handlers_rerank.cpp.
+void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
 // POST /admin/suspend — snapshot weights to host RAM, tear the model/engine
 // down, free (approximately) all VRAM. POST /admin/resume — reload the same
 // model with the snapshot armed (warm weight restore) and serve again.

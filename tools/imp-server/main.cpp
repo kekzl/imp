@@ -25,8 +25,9 @@ using json = nlohmann::json;
 // bypassing both guards (the non-stream /v1/messages path reaches inference by
 // directly calling handle_chat_completions() without re-entering pre-routing).
 static bool is_inference_endpoint(const std::string& path) {
-    return path == "/v1/chat/completions" || path == "/v1/completions" ||
-           path == "/v1/responses" || path == "/v1/messages" || path == "/v1/embeddings";
+    return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/v1/responses" ||
+           path == "/v1/messages" || path == "/v1/embeddings" || path == "/v1/rerank" ||
+           path == "/rerank";
 }
 
 int main(int argc, char** argv) {
@@ -248,6 +249,13 @@ int main(int argc, char** argv) {
         handle_count_tokens(req, res, state);
     });
 
+    svr.Post("/v1/rerank", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_rerank(req, res, state);
+    });
+    // Cohere and TEI clients post to the unversioned path; vLLM serves both.
+    svr.Post("/rerank", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_rerank(req, res, state);
+    });
     svr.Post("/v1/embeddings", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_embeddings(req, res, state);
     });
@@ -327,6 +335,7 @@ int main(int argc, char** argv) {
     printf("  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)\n");
     printf("  POST   /v1/messages/count_tokens\n");
     printf("  POST   /v1/embeddings\n");
+    printf("  POST   /v1/rerank            (also /rerank) cross-encoder reranking\n");
     printf("  POST   /tokenize\n");
     printf("  POST   /detokenize\n");
     printf("  POST   /admin/suspend       Park weights in host RAM, free the GPU\n");

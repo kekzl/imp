@@ -14,7 +14,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -155,6 +155,22 @@ test-agents: build check-gpu
 # depths. A CORRECTNESS gate (retrieval success), independent of timing — safe on
 # any host. The TTFT timing gates at 32K-64K need a verified-healthy host to pin
 # their numbers (benchmarking contract) and are run separately.
+# Rerank gate (#roadmap gap 9): boots a cross-encoder reranker and asserts the
+# /v1/rerank contract, semantics (the relevant document wins) and stability.
+# Pass COMPARE_URL=http://host:port to also diff against a reference reranking
+# server (llama.cpp --reranking) running the SAME model file.
+RERANK_MODEL ?= qwen3-reranker-0.6b-q8_0.gguf
+test-rerank: build check-gpu
+	@docker rm -f imp-rerank >/dev/null 2>&1 || true
+	@docker run -d --name imp-rerank --gpus all -p 8080:8080 \
+		-v $(HOME)/models:/models $(DOCKER_IMG) \
+		imp-server --host 0.0.0.0 --model /models/$(RERANK_MODEL) >/dev/null
+	@echo "waiting for server..."; \
+	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
+	trap 'docker rm -f imp-rerank >/dev/null 2>&1' EXIT; \
+	python3 tools/analysis/rerank_check.py --url http://localhost:8080 \
+		$(if $(COMPARE_URL),--compare $(COMPARE_URL),)
+
 NIAH_MODEL ?= Qwen3-14B-Q6_K.gguf
 test-niah: build check-gpu
 	@docker rm -f imp-niah >/dev/null 2>&1 || true
