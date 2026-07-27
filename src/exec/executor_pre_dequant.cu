@@ -52,12 +52,17 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     // Reserve headroom to avoid shared/system memory fallback on WSL2 (not
     // visible via nvidia-smi) — canonical floor in vram_query.h.
     size_t min_reserve = std::max(budget.reserve_bytes, vram_reserve_floor(total_vram));
-    // Deduct NVFP4 decode cache (Phase 3, not yet allocated) from the budget
-    // so Phase 1's FP16 cache doesn't overcommit VRAM on large dense models
-    // (Gemma-3-12B Q4_K_M: 12.3 GiB FP16 + 1.4 GiB NVFP4 + 6.1 GiB KV → IMA).
-    // KV cache is already allocated before Phase 1 so free_vram already reflects it.
-    size_t total_reserve = min_reserve + budget.nvfp4_cache_bytes;
-    size_t remaining_budget = (free_vram > total_reserve) ? (free_vram - total_reserve) : 0;
+    // Deduct NVFP4 decode cache (Phase 3, not yet allocated) from the EARLY
+    // phases' budget so Phase 1's FP16 cache doesn't overcommit VRAM on large
+    // dense models (Gemma-3-12B Q4_K_M: 12.3 GiB FP16 + 1.4 GiB NVFP4 + 6.1 GiB
+    // KV → IMA). KV cache is already allocated before Phase 1 so free_vram
+    // already reflects it. Deducting the reservation from the SHARED budget
+    // charged it to Phase 3 too — see split_pre_dequant_budget (#1100).
+    const PreDequantBudget budgets = split_pre_dequant_budget(free_vram, min_reserve,
+                                                              budget.nvfp4_cache_bytes);
+    size_t remaining_budget = budgets.shared;
+    size_t early_budget = budgets.early;
+    const size_t early_budget_start = early_budget;
 
     // --- Phase 0: Promote NVFP4 pre-quantized weights to Tensor sidecars ---
     // (body extracted to pre_dequant_phase0_promote_nvfp4_sidecars_)
@@ -87,10 +92,15 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     }
 
     // --- Phase 1: FP16 weight cache + fused KV + fused gate+up (extracted) ---
-    pre_dequant_phase1_fp16_cache_(cfg, budget, remaining_budget, stream);
+    pre_dequant_phase1_fp16_cache_(cfg, budget, early_budget, stream);
 
     // --- Phase 2: FP8 cache for uncached weights (extracted) ---
-    pre_dequant_phase2_fp8_cache_(cfg, budget, remaining_budget, stream);
+    pre_dequant_phase2_fp8_cache_(cfg, budget, early_budget, stream);
+
+    // Phases 1/2 decrement their own budget as they allocate. Charge exactly
+    // what they spent against the shared budget — the untouched NVFP4
+    // reservation stays with Phase 3 instead of being lost to it.
+    pre_dequant_internal::deduct_budget(remaining_budget, early_budget_start - early_budget);
 
     // --- Phase 2b: FP8 decode sidecar for native-precision GDN/SSM
     // projections (gemm.fp8_ssm_proj) ---

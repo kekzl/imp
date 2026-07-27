@@ -152,6 +152,29 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **Decode paid for context capacity it never used — up to −38% on the served
+  path** (issue #1100). The NVFP4 decode cache's own VRAM reservation was
+  subtracted from the *shared* pre-dequant budget, which is also the budget the
+  cache spends from, so it paid for itself twice. The KV pool is allocated
+  before the cache is built, so its bytes are already out of `free_vram`; every
+  one of them then came out of the decode cache a second time. Raising
+  `runtime.max_seq_len` grows the KV pool, which is why decode throughput
+  tracked the *configured* capacity instead of the live sequence: on
+  Qwen3-14B-Q6_K at the server default the cache fell to 100 of 280 tensors —
+  180 weights decoding from Q6_K source instead of an NVFP4 overlay — while
+  ~11 GiB of VRAM sat free. The reservation now constrains only the phases it
+  was meant to constrain (the FP16/FP8 caches built before it), and the
+  invariant is structural: whatever those phases spend is charged to the shared
+  budget, so the decode cache always sees at least its own reservation. Same
+  280-token request, `runtime.max_seq_len` 1024 → 40960: **160.10 → 99.29 tok/s
+  before, 162.77 → 163.24 tok/s after**, with the captured decode body flat at
+  42 kernels instead of growing 44 → 137. The kernel growth was a symptom, not
+  the cause — an uncached weight needs an extra activation-quantize kernel — so
+  the split-K/workspace-width path the issue suspected is exonerated. No effect
+  on the pinned perf baseline: at `--bench` sizing that budget was never
+  binding, so its cache was already full (verified — no budget-reached line on
+  `Qwen3-8B-Q8_0.gguf`). The CUTLASS SF prefill cache was starved by the same
+  arithmetic and also fills now (2 → 280 tensors on the 14B).
 - **Streaming leaked the chain of thought as the answer whenever tools were
   present.** The same request returned the reasoning in `reasoning_content`
   (OpenAI) / a `thinking` block (Anthropic) without `stream:true`, and as the
