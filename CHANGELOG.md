@@ -5,6 +5,20 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **Claude Code as an external agent gate** (`make test-agents-external`,
+  roadmap gap 10 / #1007 stage 2). The real CLI now drives imp-server over
+  `ANTHROPIC_BASE_URL` on a throwaway repo and has to land an actual edit — an
+  assertion only a real tool call can satisfy. It is the demanding client: one
+  request carries a ~20K system prompt, 25 tool definitions, `cache_control`,
+  extended-thinking fields and streaming, and it exercised the Anthropic dialect
+  the way no self-written probe had. It earned its keep on the first run by
+  finding the streaming reasoning leak below. The aider leg (OpenAI dialect) is
+  unchanged; both now run from one script, selectable per leg.
+- **`reasoning-channel` check in `agent_loop_suite.py`** (the hard
+  `make test-agents` gate): streaming and non-streaming must route reasoning to
+  the same channel, with and without tools. This is the protocol-level pin for
+  the leak above, so it fails in CI-shaped runs rather than only under a real
+  agent.
 - **GBNF grammar-constrained decoding** — `response_format: {"type":"grammar","grammar":"root ::= ..."}`,
   llama.cpp's top-level `grammar` and vLLM's `guided_grammar` are all accepted.
   The whole reply must be a derivation of `root` (roadmap gap 8). A regex covers
@@ -112,6 +126,23 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **Streaming leaked the chain of thought as the answer whenever tools were
+  present.** The same request returned the reasoning in `reasoning_content`
+  (OpenAI) / a `thinking` block (Anthropic) without `stream:true`, and as the
+  user-visible answer with it — so the broken half was the half every real agent
+  client sees. A tool request suppresses the thinking default, the chat template
+  then renders a PRE-CLOSED think block, and a model that reasons anyway emits
+  only the CLOSER: the streaming splitter was scanning for a `<think>` opener
+  that had been rendered into the PROMPT and could never arrive, so at the
+  8-token scan budget it flushed the whole chain of thought as content. It now
+  (a) treats a closer without an opener as proof that the held prefix was
+  reasoning — the same conclusion the offline path reaches via `split_last_think`
+  — and (b) holds longer on the agent path so that proof can arrive. The hold is
+  released the moment a tool-call opener appears, since a call is never
+  reasoning; without that release the fix buffered whole tool calls and their
+  streamed argument deltas stopped arriving (caught by `make test-agents`).
+  Found by pointing the real Claude Code binary at imp-server, which printed the
+  model's reasoning instead of doing the edit.
 - **`json_object` accepted a trailing comma** (#1096) — `[1,]` and `{"a":1,}`
   passed the mask, so a reply the caller was promised it could `json.loads()`
   did not parse. Root cause: after a value, `,` returned to the state an
