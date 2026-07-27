@@ -167,7 +167,11 @@ Per token:
   `ConstraintManager` (`src/runtime/constraint_manager.h`) picks at most one per
   request and is pooled across requests. The mask is applied in
   `src/exec/executor.cu` — through a single `apply_constraint_mask` helper,
-  because the sampling paths that must not bypass it are easy to miss.
+  because the sampling paths that must not bypass it are easy to miss. The
+  scheduler routes any constrained request through the pipelined constrained
+  decode (`Engine::step_constrained_pipeline`), gated on one `needs_constrained`
+  flag — a second flag for the same question is how regex requests ended up
+  taking a different path than the JSON ones for no reason.
 - **Public C API** — `include/imp/{imp,types,error,config}.h`,
   implemented in `src/api/imp_api.cpp`. ABI-stable per CONTRIBUTING.md.
 

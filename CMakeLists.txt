@@ -477,6 +477,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
         tools/imp-server/tool_call.cpp
+        tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/anthropic.cpp
         tools/imp-server/responses.cpp
         tools/imp-server/handlers.cpp
@@ -581,6 +582,8 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/responses.cpp
             tools/imp-server/utils.cpp
             tools/imp-server/tool_call.cpp
+            tools/imp-server/tool_call_gemma.cpp
+        tools/imp-server/tool_call_gemma.cpp
             tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp

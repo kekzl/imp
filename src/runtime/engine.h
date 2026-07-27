@@ -908,7 +908,7 @@ private:
                                        std::vector<std::shared_ptr<imp::Request>>& valid_decode,
                                        int max_ctx, cudaStream_t dec_stream,
                                        InferenceState& state, bool& needs_logprobs,
-                                       bool& needs_json_mode, bool& needs_schema_mode);
+                                       bool& needs_constrained);
 
     // Build banned_token_ids_ — special/control tokens that must never appear
     // in generated output (e.g. <|im_start|>, <|endoftext|>). Scans tokenizer
@@ -1024,8 +1024,7 @@ private:
     // Extract logprobs from decode logits and distribute tokens to requests.
     void step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode,
                                      const std::vector<int32_t>& tokens, const Tensor& decode_logits_out,
-                                     bool needs_logprobs, bool needs_json_mode, bool needs_schema_mode,
-                                     cudaStream_t stream);
+                                     bool needs_logprobs, bool needs_constrained, cudaStream_t stream);
 
     // ── Pipelined batched decode (bd_pipe_) ──────────────────────────
     // Static per-row / per-batch eligibility for the one-step-in-flight

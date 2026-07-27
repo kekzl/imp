@@ -501,7 +501,10 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     p.req = req;
     p.active = true;
     IMP_LOG_INFO("ConstrainedPipeline: launched for %d budgeted tokens (%s)", budget,
-                 st.schema_constrainer ? "schema" : "json");
+                 st.grammar_constrainer  ? "grammar"
+                 : st.regex_constrainer  ? "regex"
+                 : st.schema_constrainer ? "schema"
+                                         : "json");
     return true;
 }
 
