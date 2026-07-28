@@ -84,7 +84,18 @@ void JsonConstrainer::reset() {
     partial_literal_.clear();
     target_literal_.clear();
     ws_run_ = 0;
+    enter_number_('0');  // clear the number sub-state (see #1104)
+    num_need_digit_ = false;
     preamble_.reset();
+}
+
+// Seed the RFC 8259 number sub-state on entry. `c` is the first character of
+// the number: a bare '-' still owes its first digit, a digit does not.
+void JsonConstrainer::enter_number_(char c) {
+    num_seen_frac_ = false;
+    num_seen_exp_ = false;
+    num_exp_sign_ok_ = false;
+    num_need_digit_ = (c == '-');
 }
 
 uint16_t JsonConstrainer::compute_allowed_mask() const {
@@ -278,6 +289,7 @@ bool JsonConstrainer::advance_char(char c) {
             } else if ((c >= '0' && c <= '9') || c == '-') {
                 state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::IN_NUMBER;
+                enter_number_(c);
             } else {
                 return false;
             }
@@ -334,6 +346,7 @@ bool JsonConstrainer::advance_char(char c) {
             } else if ((c >= '0' && c <= '9') || c == '-') {
                 state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::IN_NUMBER;
+                enter_number_(c);
             } else {
                 return false;
             }
@@ -381,8 +394,40 @@ bool JsonConstrainer::advance_char(char c) {
             current_state_ = JsonState::IN_STRING;
             break;
 
-        case JsonState::IN_NUMBER:
-            if (!((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')) {
+        case JsonState::IN_NUMBER: {
+            // RFC 8259 number grammar. The old test accepted every one of
+            // '.', 'e', 'E', '+', '-' unconditionally, which made "3.5.5.5"
+            // legal and left a degenerating model with no forced way out (#1104).
+            bool ok = false;
+            if (c >= '0' && c <= '9') {
+                ok = true;
+                num_need_digit_ = false;
+                num_exp_sign_ok_ = false;
+            } else if (c == '.') {
+                ok = !num_seen_frac_ && !num_seen_exp_ && !num_need_digit_;
+                if (ok) {
+                    num_seen_frac_ = true;
+                    num_need_digit_ = true;  // frac = "." 1*DIGIT
+                }
+            } else if (c == 'e' || c == 'E') {
+                ok = !num_seen_exp_ && !num_need_digit_;
+                if (ok) {
+                    num_seen_exp_ = true;
+                    num_exp_sign_ok_ = true;
+                    num_need_digit_ = true;  // exp = e [sign] 1*DIGIT
+                }
+            } else if (c == '+' || c == '-') {
+                ok = num_exp_sign_ok_;
+                if (ok) {
+                    num_exp_sign_ok_ = false;
+                    num_need_digit_ = true;
+                }
+            }
+            if (!ok) {
+                // A number still owing a digit ("3.", "1e", "-") is incomplete:
+                // nothing may terminate it, not even a structural char.
+                if (num_need_digit_)
+                    return false;
                 // Number ended — this char is part of the parent context
                 // Pop back to parent and re-process this character
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
@@ -391,6 +436,7 @@ bool JsonConstrainer::advance_char(char c) {
                 return advance_char(c);  // re-process in parent context
             }
             break;
+        }
 
         case JsonState::IN_LITERAL:
             // Strict: the char must be the literal's next expected char
@@ -422,6 +468,11 @@ bool JsonConstrainer::sim_token_valid(const std::string& text) {
     const std::string plit = partial_literal_;
     const std::string tlit = target_literal_;
     const int ws = ws_run_;
+    // The number sub-state is part of the FSM and MUST round-trip too — a
+    // simulated token that walks into a number would otherwise leave
+    // num_seen_frac_/num_need_digit_ mutated on the real state (#1104).
+    const bool nfrac = num_seen_frac_, nexp = num_seen_exp_;
+    const bool nsign = num_exp_sign_ok_, ndig = num_need_digit_;
     std::vector<JsonState> stack_copy = state_stack_;
 
     bool ok = true;
@@ -437,6 +488,10 @@ bool JsonConstrainer::sim_token_valid(const std::string& text) {
     (void)depth;
     partial_literal_ = plit;
     target_literal_ = tlit;
+    num_seen_frac_ = nfrac;
+    num_seen_exp_ = nexp;
+    num_exp_sign_ok_ = nsign;
+    num_need_digit_ = ndig;
     ws_run_ = ws;
     return ok;
 }

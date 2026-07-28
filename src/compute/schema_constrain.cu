@@ -1006,6 +1006,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                         f.phase = SchemaPhase::NUMBER_VALUE;
                         f.string_len = (c >= '0' && c <= '9') ? 1 : 0;  // digit count
                         f.num_leading_zero = (c == '0');                // "0..." forbids more int digits
+                        f.num_frac = f.num_exp = f.num_sign_ok = false;
+                        f.num_need_digit = (c == '-');  // a bare '-' still owes a digit
                         return true;
                     }
                     return false;
@@ -1288,19 +1290,46 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 if (f.string_len == 0) {  // first digit (came after a leading '-')
                     f.num_leading_zero = (c == '0');
                     f.string_len = 1;
+                    f.num_need_digit = false;
                     return true;
                 }
                 if (f.num_leading_zero)
                     return false;  // JSON forbids leading zeros: `0` then digit
                 f.string_len++;
+                f.num_need_digit = false;
+                f.num_sign_ok = false;
                 return true;
             }
             if (!is_int && (c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')) {
+                bool ok = false;
+                if (c == '.') {
+                    ok = !f.num_frac && !f.num_exp && !f.num_need_digit;
+                    if (ok) {
+                        f.num_frac = true;
+                        f.num_need_digit = true;
+                    }
+                } else if (c == 'e' || c == 'E') {
+                    ok = !f.num_exp && !f.num_need_digit;
+                    if (ok) {
+                        f.num_exp = true;
+                        f.num_sign_ok = true;
+                        f.num_need_digit = true;
+                    }
+                } else {  // '+' / '-'
+                    ok = f.num_sign_ok;
+                    if (ok) {
+                        f.num_sign_ok = false;
+                        f.num_need_digit = true;
+                    }
+                }
+                if (!ok)
+                    return false;
                 f.num_leading_zero = false;  // fractional/exponent part — int rule done
                 return true;
             }
-            // Any other char ends the number — legal only if >=1 digit was seen.
-            if (f.string_len == 0)
+            // Any other char ends the number — legal only if >=1 digit was seen
+            // and the number does not still owe one ("3.", "1e", "-").
+            if (f.string_len == 0 || f.num_need_digit)
                 return false;
             stk.pop_back();
             sim_fixup_parent(stk);

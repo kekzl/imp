@@ -139,6 +139,15 @@ private:
     // Consecutive whitespace chars in non-string states (escape-hatch cap,
     // see advance_char/compute_allowed_mask).
     int ws_run_ = 0;
+    // JSON number sub-state (RFC 8259: [minus] int [frac] [exp]). Without it
+    // IN_NUMBER accepted '.', 'e', 'E', '+', '-' an unlimited number of times,
+    // so "3.5.5.5.5…" was a legal continuation and a model that wandered into
+    // a number could never be forced out of it — the request then ran to
+    // max_tokens and returned truncated, unparseable JSON (#1104).
+    bool num_seen_frac_ = false;    // a '.' has been consumed
+    bool num_seen_exp_ = false;     // an 'e'/'E' has been consumed
+    bool num_exp_sign_ok_ = false;  // '+'/'-' legal only right after 'e'/'E'
+    bool num_need_digit_ = false;   // a digit is required next (after '-', '.', 'e', sign)
     std::string partial_literal_;  // for tracking partial "true"/"false"/"null"
     std::string target_literal_;   // full expected literal
 
@@ -157,6 +166,7 @@ private:
 
     // Advance FSM by one character
     bool advance_char(char c);
+    void enter_number_(char c);  // seed the RFC 8259 number sub-state (#1104)
 };
 
 }  // namespace imp

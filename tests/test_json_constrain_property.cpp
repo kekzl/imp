@@ -286,5 +286,59 @@ TEST(JsonConstrainPropertyTest, RejectsWrongCloserAtNestedDepth) {
     EXPECT_GT(exercised, 0) << "generator produced no nested closers — test is vacuous";
 }
 
+// --- #1104 probe: does the number FSM reject a second decimal point? --------
+// The live failure on Qwen3.6-35B-A3B-NVFP4 was `{"city":    3.5.5.5.5...`,
+// i.e. the mask admitted `.` inside an already-fractional number. If the FSM
+// itself accepts that, the bug is grammar-level and CPU-reproducible; if it
+// rejects it, the mask is right and something bypasses it at decode time.
+TEST(JsonConstrainFsm, RejectsSecondDecimalPointInNumber) {
+    JsonConstrainer c;
+    c.advance_text("{\"city\":");
+    EXPECT_TRUE(c.sim_token_valid("3.5")) << "FSM rejected a plain fractional number";
+
+    JsonConstrainer d;
+    d.advance_text("{\"city\": 3.5");
+    EXPECT_FALSE(d.sim_token_valid(".5"))
+        << "FSM accepted a SECOND decimal point — this is the #1104 output shape";
+    EXPECT_FALSE(d.sim_token_valid(".")) << "FSM accepted '.' after a fractional number";
+}
+
+// Full RFC 8259 number grammar, both directions. The permissive version
+// accepted every one of these malformed forms.
+TEST(JsonConstrainFsm, NumberGrammarMatchesRfc8259) {
+    struct Case {
+        const char* num;
+        bool valid;
+    };
+    const Case cases[] =
+        {
+            {"0", true},       {"-0", true},     {"3", true},    {"3.5", true},
+            {"1e5", true},     {"1E5", true},    {"1e+5", true}, {"1e-5", true},
+            {"-2.5e-3", true}, {"3.5.5", false},                // second decimal point — the #1104 shape
+            {"1e5e5", false},                                   // second exponent
+            {"1e+-5", false},                                   // double sign
+            {"3-5", false},                                     // sign inside the mantissa
+            {"1.2e", false},   {"3.", false},    {"-", false},  // incomplete: still owe a digit
+        };
+    for (const auto& c : cases) {
+        JsonConstrainer fsm;
+        // Wrap in an object so the number sits in a real value position, and
+        // require the document to close — an incomplete number must not be
+        // terminable by '}'.
+        const std::string doc = std::string("{\"v\":") + c.num + "}";
+        EXPECT_EQ(fsm.sim_token_valid(doc), c.valid)
+            << "number '" << c.num << "' judged " << (c.valid ? "invalid" : "valid")
+            << " — document: " << doc;
+    }
+}
+
+// The simulator must not leak number sub-state onto the live FSM.
+TEST(JsonConstrainFsm, SimulationDoesNotMutateNumberSubState) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"v\":3.5");
+    EXPECT_FALSE(fsm.sim_token_valid(".5"));  // walks into the number, then unwinds
+    EXPECT_TRUE(fsm.sim_token_valid("e5"));   // exponent still available afterwards
+    EXPECT_TRUE(fsm.sim_token_valid("}"));    // and the number can still be closed
+}
 }  // namespace
 }  // namespace imp
