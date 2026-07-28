@@ -313,13 +313,19 @@ void KVCacheManager::free_sequence(int seq_id) {
             // Pinned blocks: keep alive with ref_count=1, add to cached LRU
             // so num_cached_blocks() reports them, but do NOT count as
             // reclaimable (pinned blocks cannot be evicted until unpinned).
-            if (cache_->ref_count(block_id) > 1) {
-                cache_->free_block(block_id);
-            }
             if (cached_blocks_map_.find(block_id) == cached_blocks_map_.end()) {
+                // The cache does not own this block yet: hand it THIS
+                // sequence's reference instead of dropping it. Same refcount
+                // as before, now tracked by an owner rather than retained by
+                // an omitted free.
                 cached_blocks_lru_.push_back(block_id);
-                cached_blocks_map_[block_id] = std::prev(cached_blocks_lru_.end());
+                cached_blocks_map_.emplace(
+                    block_id, CachedEntry{std::prev(cached_blocks_lru_.end()),
+                                          cache_->adopt_block(block_id)});
                 // NOT incrementing reclaimable_cached_count_ — pinned blocks excluded
+            } else {
+                // Already owned by the cache — drop the sequence's reference.
+                cache_->free_block(block_id);
             }
             continue;
         }
@@ -329,13 +335,17 @@ void KVCacheManager::free_sequence(int seq_id) {
             // registered in the hash table for potential reuse.
             auto hash_it = block_id_to_hash_.find(block_id);
             if (hash_it != block_id_to_hash_.end()) {
-                // Don't free — keep ref_count=1 and move to cached LRU.
+                // Transfer this sequence's reference to the cache.
                 if (cached_blocks_map_.find(block_id) == cached_blocks_map_.end()) {
                     cached_blocks_lru_.push_back(block_id);
-                    cached_blocks_map_[block_id] = std::prev(cached_blocks_lru_.end());
+                    cached_blocks_map_.emplace(
+                        block_id, CachedEntry{std::prev(cached_blocks_lru_.end()),
+                                              cache_->adopt_block(block_id)});
                     reclaimable_cached_count_++;
+                } else {
+                    cache_->free_block(block_id);
                 }
-                continue;  // Skip cache_->free_block()
+                continue;
             }
         }
 
@@ -524,13 +534,15 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
                 // Remove from cached LRU if it was unreferenced.
                 auto cached_it = cached_blocks_map_.find(cached_block);
                 if (cached_it != cached_blocks_map_.end()) {
-                    cached_blocks_lru_.erase(cached_it->second);
+                    cached_blocks_lru_.erase(cached_it->second.lru_it);
+                    // The reference moves from the cache to this sequence:
+                    // relinquish without dropping, so the count stays 1.
+                    (void)cached_it->second.ref.release();
                     cached_blocks_map_.erase(cached_it);
                     // Leaving the LRU means leaving the reclaimable count —
                     // pinned blocks were never counted to begin with.
                     if (pinned_blocks_.find(cached_block) == pinned_blocks_.end())
                         reclaimable_cached_count_--;
-                    // Block already has ref_count=1 from being retained.
                 } else {
                     // Block is actively referenced by another sequence — share it.
                     cache_->inc_ref(cached_block);
@@ -666,7 +678,6 @@ int KVCacheManager::reclaim_cached_block() {
 
     int block_id = cached_blocks_lru_.front();
     cached_blocks_lru_.pop_front();
-    cached_blocks_map_.erase(block_id);
     reclaimable_cached_count_--;
 
     // Remove from hash tables.
@@ -676,9 +687,9 @@ int KVCacheManager::reclaim_cached_block() {
         block_id_to_hash_.erase(hash_it);
     }
 
-    // The block has ref_count=1 (retained from free_sequence).
-    // Free it to return it to the pool.
-    cache_->free_block(block_id);
+    // Dropping the cache's reference is what returns the block to the pool —
+    // there is no separate free_block() call any more.
+    cached_blocks_map_.erase(block_id);
     return block_id;
 }
 
@@ -1505,7 +1516,9 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
 
         cached_blocks_lru_.push_back(entry.block_id);
         reclaimable_cached_count_++;
-        cached_blocks_map_[entry.block_id] = std::prev(cached_blocks_lru_.end());
+        cached_blocks_map_.emplace(entry.block_id,
+                                   CachedEntry{std::prev(cached_blocks_lru_.end()),
+                                               cache_->adopt_block(entry.block_id)});
 
         actual_loaded++;
     }

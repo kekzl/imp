@@ -959,7 +959,8 @@ design above, so the argument that produced the original shape stays readable.
 | 2a — `plan_memory()`, pure and tested | **done** | `feat(memory): plan_memory — capacity planned, not discovered` |
 | 2b — shadow plan: run `plan_memory()` next to the live budget at init, log both | **done** | `feat(memory): shadow plan — log what plan_memory would decide` |
 | 3.1 — `KVCache` block ids + refcounts → `BlockPool` (slots mode) | **done** | `refactor(memory): KVCache block ids and refcounts move to BlockPool` |
-| 3.2–3.5 — manager referents → `BlockRef` | not started — see B2 | |
+| 3.2 — prefix cache holds its own `BlockRef` | **done** | `refactor(memory): the KV prefix cache owns its blocks instead of inheriting them` |
+| 3.3–3.4 — `seq_blocks_` → `BlockRef`, drop the raw scaffolding | not started — see B3 | |
 | 4 — executor workspaces | not started | |
 | 5 — per-request allocations (satisfies I2) | not started | |
 | 6 — weight upload + pre-dequant caches | not started | |
@@ -1048,11 +1049,11 @@ the scale and sketch regions) and becomes a pure address calculator over
    (StreamingLLM) frees slots while keeping the table *length*, and the
    attention kernels depend on that positional alignment. `-1` becomes
    `nullopt`; the kernel-facing block table is still built as ints.
-3. The cached LRU takes its own `BlockRef` per entry, and `free_sequence()`
-   stops skipping the free. **This is the load-bearing commit** and it is
-   where the remaining work concentrates — see B3 for why it cannot be split
-   further. It is what deletes `free_block_dropping_stale_hash()`, whose
-   comment documents the exact double-ownership bug it exists to prevent.
+3. **Done.** The cached LRU takes its own `BlockRef` per entry and
+   `free_sequence()` transfers rather than omits. `free_block_dropping_stale_
+   hash()` is now redundant in the common case but is deliberately left in
+   place — it still guards the rollback of a *shared* cached block, and
+   removing it is a separate decision with its own reasoning.
 4. The pin set needs no ownership change (see the correction above) — only the
    `reclaimable_cached_count_` bookkeeping follows the cached LRU's new shape.
 5. Delete `KVCache::free_block`/`inc_ref`/`ref_count`, the raw scaffolding

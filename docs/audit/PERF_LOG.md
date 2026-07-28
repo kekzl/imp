@@ -4,6 +4,42 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Memory architecture A7 step 3.2 (prefix cache owns its blocks) — neutral
+
+The cached LRU now holds its own `BlockRef` per entry; `free_sequence()`
+transfers the sequence's reference to it instead of skipping the free and
+letting the block survive at refcount 1. Same aggregate pool state, real
+ownership.
+
+The changed paths are NOT reachable from `imp-cli --bench` (`use_prefix_caching`
+is 0 unless `--prefix-caching` is passed), so the expectation was exact
+neutrality. Measured anyway, and the first reading looked like a −2.8% decode
+regression with < 0.04% variance across three trials — stable enough to be
+believable.
+
+It was host state. Back-to-back A/B (stash the change, rebuild the parent,
+bench both in the same window):
+
+| arm | pp512 (median) | tg128 (median) |
+|---|---:|---:|
+| step 3.1 (parent), measured 40 min earlier | 12396.02 | 285.69 |
+| **step 3.1 (parent), measured now** | **12056.40** | **277.84** |
+| **step 3.2 (change), measured now** | **12088.58** | **277.60** |
+
+Change effect: **−0.09% decode, +0.27% prefill** — noise. The 40-minute-old
+comparison would have reported −2.8% and sent me hunting a regression that did
+not exist. The depression was the operator streaming on the same GPU, which
+`nvidia-smi` does not attribute (same class as #526 / #1018).
+
+Correctness on the 3.2 build: `test-kv` 57/57, `test-core` 668/668
+(`KVCacheManagerTest` 48/48 incl. `LeakUnderSustainedChurn`), `PrefixEquivTest`
+10/10, `DegenerationTest` 5/5, and — with `IMP_TEST_MODEL` set, without which
+they silently skip — `PrefixCacheE2ETest` **4/4**, including
+`FreshVsPrefixHitTokenEqual` and `PrefixCacheMatchesNoCacheBaseline`, the two
+that assert token-identity between a cache hit and a fresh run.
+
+---
+
 ## 2026-07-28 · Memory architecture A7 step 3.1 (KV block ids → BlockPool) — decode neutral
 
 `KVCache`'s block free list and per-block refcounts move into `BlockPool`

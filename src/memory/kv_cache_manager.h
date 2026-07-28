@@ -397,7 +397,16 @@ private:
     // LRU list of cached (unreferenced) block IDs. When a block's
     // ref_count drops to 0, it goes to the tail. Eviction pops from head.
     std::list<int> cached_blocks_lru_;
-    std::unordered_map<int, std::list<int>::iterator> cached_blocks_map_;
+    // The cache's OWN reference to each entry, alongside its LRU position.
+    // Before A7 step 3.2 the cache held nothing: free_sequence() deliberately
+    // skipped the free and the block survived at refcount 1 — liveness by
+    // omission. Erasing an entry now drops the reference, which is what
+    // returns the block to the pool.
+    struct CachedEntry {
+        std::list<int>::iterator lru_it;
+        BlockRef ref;
+    };
+    std::unordered_map<int, CachedEntry> cached_blocks_map_;
 
     // seq_id -> vector of block hashes (parallel to seq_blocks_).
     // Used to maintain hash chain state for append_block operations.
