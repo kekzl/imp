@@ -360,17 +360,35 @@ reserved VA range — so I3 is satisfied and graph-captured KV pointers remain
 valid across growth. That is a property plain `cudaMalloc` growth cannot offer
 at all.
 
-*Why it is step 7 and not step 1.* Two things must be established first, and
-neither is assumable:
+*Why it is step 7 and not step 1.* Two things had to be established first:
 
-1. **`cuMemCreate`/`cuMemMap` under WSL2/WDDM.** imp already has scars from this
-   platform (`memcpyAsync` D2D costing a 165 µs host block; the driver update
-   that broke GPU containers). A 200-line spike that reserves 24 GiB of VA,
-   commits and decommits 256 MiB chunks, and verifies a graph-captured kernel
-   still reads correct data after a growth, is a hard gate. If it fails, the
-   `cudaMalloc` backend stays and the planner keeps a conservative fixed pool —
-   the rest of this design is unaffected, which is why the backend is an
-   interface.
+1. **`cuMemCreate`/`cuMemMap` under WSL2/WDDM.** **Measured 2026-07-29 — the
+   gate is OPEN.** `tools/analysis/vmm_wsl2_probe.cu`, 24/24 checks, two
+   reproducible runs on the RTX 5090 (driver 13030,
+   `VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED=1`):
+
+   | property | result |
+   |---|---|
+   | 24 GiB `cuMemAddressReserve` | succeeds in 0.4–1.0 ms, **+0.000 MiB** physical |
+   | commit in 256 MiB granules | exactly `+256.00 MiB` each, no overhead |
+   | base address across grow/shrink (8→2→6→4→10 chunks) | **invariant**, `0x2000000000` at every step |
+   | data in another region across decommit/recommit | intact, 0 / 67 108 864 words wrong |
+   | **graph-captured kernel over a fixed VA, across +1.5 GiB growth** | **same checksum three times, no re-instantiate** |
+   | full decommit | free VRAM returns to baseline, **+0.00 MiB** residual |
+
+   Two numbers change the design:
+   - **Granularity is 2 MiB** (minimum *and* recommended are identical on
+     sm_120a), not 64 KiB. A commit chunk must be a multiple of 2 MiB; 256 MiB
+     is 128 granules.
+   - **Decommit costs about twice what commit does** — commit 256 MiB is
+     ~1.2 ms mean, decommit ~2.4–2.6 ms. The "decommit when under-subscribed
+     for N steps" policy therefore points at the *expensive* direction: N must
+     be generous and hysteretic, or flapping costs more than the memory it
+     returns. A growth event is ~1.2 ms, i.e. a third of a decode step at
+     ~280 tok/s, but only every few hundred steps.
+
+   No WDDM tax of the 165 µs `memcpyAsync` kind appeared.
+
 2. **The tiers above must exist first**, or there is nothing to grow into.
 
 *Not considered:* `cudaMallocAsync` pools as the backend. imp already pins the
@@ -966,7 +984,8 @@ design above, so the argument that produced the original shape stays readable.
 | 4b — the remaining `exec/` workspaces, planner-sized | not started — see B5 | |
 | 5 — per-request allocations (satisfies I2) | not started | |
 | 6 — weight upload + pre-dequant caches | not started | |
-| 7 — VMM backend for the KV pool | not started | |
+| 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |
+| 7b — VMM backend implementation | not started | |
 | 8 — `compute/` statics | not started | |
 | 9 — guardrails, `--mem-report`, CI peak gate | not started | |
 
