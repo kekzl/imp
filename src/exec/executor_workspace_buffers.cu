@@ -1190,6 +1190,11 @@ void GraphExecutor::free_buffers() {
             wcache_.cutlass_sf_slab = nullptr;
             wcache_.cutlass_sf_slab_size = 0;
         }
+        // Per-(layer, projection) SfAtom slabs from the MoE phase. Their
+        // slices are sf_borrowed, so this is the only owner.
+        for (void* slab : wcache_.owned_sf_slabs)
+            vram_free(vram_alloc_, slab);
+        wcache_.owned_sf_slabs.clear();
         // CUTLASS MXFP4 cache
         for (auto& [ptr, mw] : wcache_.cutlass_mxfp4)
             free_cutlass_mxfp4_weight(mw);

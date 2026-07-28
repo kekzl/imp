@@ -4,6 +4,31 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Own the MoE SfAtom slabs — a real leak, not the B5 one
+
+`pre_dequant_phase3_moe.cu` allocated one SfAtom slab per (layer, projection)
+on the native NVFP4 MoE path and never stored the base pointer, while handing
+out its slices as `sf_borrowed=true` — which is exactly the flag that tells
+teardown to skip them. Both that site and its gpt-oss twin now register in
+`WeightCaches::owned_sf_slabs` and are freed through `VRAMAllocator`.
+
+The twin previously registered in `Model::gpu_allocations_`, which is freed
+with `cudaFreeAsync` (#834) although the allocation is a plain `cudaMalloc` —
+so the obvious fix would have propagated an API mismatch. Fixed in the same
+commit.
+
+**Does not close AUDIT B5.** The full `test-e2e` run still fails
+`MtpForwardTest` at a byte-identical `9.12 GiB free`, so the ~15 GiB of
+cross-teardown retention has another source. Recorded rather than assumed.
+
+Verified: `test-kv` 57/57, `test-core` 668/668, `DegenerationTest` 5/5,
+`LlmCompressorE2E` 2/2 run (2 skipped for absent models) — the native-NVFP4
+path this touches — and Qwen3-Coder-30B-A3B generates coherent prose.
+Teardown ordering checked: `executor_` (engine.h:330) is destroyed before
+`vram_alloc_` (engine.h:299), so the free path's allocator is still alive.
+
+---
+
 ## 2026-07-29 · Gate the grouped-3x NVFP4 prewarm on MoE — −512 MiB resident on dense/vision
 
 `gemm_grouped_3x_nvfp4_prewarm()` ran before any model-type check, gated only
