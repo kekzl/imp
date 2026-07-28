@@ -1,10 +1,11 @@
 # imp Memory Architecture
 
-> **Status: Phase A — design, not implemented.** Nothing in this document is in
-> the tree yet. Section A1 is measured current state; A2–A7 are the proposal.
-> Implementation follows the migration order in A7, one mergeable commit per
-> subsystem, and this document is updated in the same commit whenever the
-> implementation diverges from it.
+> **Status: Phase B in progress.** Section A1 is measured current state; A2–A7
+> are the design. Implementation follows the migration order in A7, one
+> mergeable commit per subsystem, and this document is updated in the same
+> commit whenever the implementation diverges from it — see
+> [§B0 Implementation log](#b0-implementation-log) for what has landed and every
+> divergence with its reason.
 
 Target: `sm_120a` (RTX 5090 / GB202, 32 607 MiB) with the `sm_120f` PTX
 fallback. No SM80/SM90 paths.
@@ -922,6 +923,69 @@ is type-enforced against aliasing and assert-plus-soak-enforced against outlivin
    prefill stream. Two stacks, or one with a mutex? Lean toward two (one per
    stream), which keeps the LIFO discipline per-stream and avoids a lock on the
    forward path. Decide with the step-5 measurement.
+
+---
+
+## B0. Implementation log
+
+What has landed, and every place the implementation diverged from A2–A7 with
+the reason. Divergences are recorded here rather than by quietly editing the
+design above, so the argument that produced the original shape stays readable.
+
+### Landed
+
+| A7 step | State | Commit |
+|---|---|---|
+| 0 — Backend, FakeBackend, phase guard, I1 gate | **done** | `feat(memory): L1 backend, allocation-phase guard, I1 CI gate` |
+| 1 — tier allocators + typed spans | **done** | `feat(memory): arena, block pool, scratch stack, stable spans` |
+| 2a — `plan_memory()`, pure and tested | **done** | `feat(memory): plan_memory — capacity planned, not discovered` |
+| 2b — adapter: fill `PlanInput` from `Model`/`EngineConfig`, log both plans at init, CI agreement check | not started | |
+| 3 — KV pool → `BlockPool`/`BlockRef` | not started | |
+| 4 — executor workspaces | not started | |
+| 5 — per-request allocations (satisfies I2) | not started | |
+| 6 — weight upload + pre-dequant caches | not started | |
+| 7 — VMM backend for the KV pool | not started | |
+| 8 — `compute/` statics | not started | |
+| 9 — guardrails, `--mem-report`, CI peak gate | not started | |
+
+### I1 allowlist baseline
+
+`tools/alloc_allowlist.txt` opens at **79 files / 717 sites**. That is larger
+than A1.1's "365 lines in 74 files" because the gate also counts the
+`cudaFree`/`cudaFreeAsync`/`cudaFreeHost` side — I1 names them, and a free
+outside `src/memory/` means ownership lives outside too. A1.1's number is
+allocations only. Both are correct; they measure different things, and the gate
+uses the wider one on purpose.
+
+### Divergences from the A3 sketch
+
+| # | Design said | Implementation does | Why |
+|---|---|---|---|
+| D1 | `Owned<T, Tier>`, with `Tier` a template parameter, so a model-resident buffer cannot be stored in an engine-persistent slot | `StableSpan<T>` everywhere; the arena carries a runtime `RegionTag` for reporting and a `generation()` counter for staleness | The compile-time tier tag would have to appear in every storage member and every signature that touches one, to prevent a bug class that has not actually bitten — `server.model_swap` shipped and works. imp already has `workspace_generation` for exactly this staleness check (the spec-graph cache invalidates on it). Adding a second mechanism to say the same thing is the speculative abstraction the project rules forbid. **Cost of the divergence, stated: cross-tier smuggling is now caught at runtime by the generation counter, not at compile time.** |
+| D2 | `template <size_t Stride> class BlockPool` | stride is a runtime constructor argument | KV block bytes are computed at init from `(kv_dtype, block_size, n_kv_heads, head_dim)` — see `kv_block_bytes_per_layer()`. A compile-time stride cannot express that, and instantiating the template per dtype would multiply the TU for no gain. |
+| D3 | `std::expected<Region, MemError>` | `AcquireResult { Region; MemError; explicit operator bool }` | These headers are included from `.cu` TUs. nvcc's frontend is the constraint, not the language version, and a plain aggregate costs nothing and cannot surprise it. |
+| D4 | `Backend::acquire()` for everything | separate `acquire()` and `acquire_growable(reserve, initial_commit, …)` | A VMM reservation has two sizes, not one. Overloading `bytes` to sometimes mean "reserve" would have made the KV pool's call site ambiguous at exactly the place the design is trying to remove ambiguity. `CudaMallocBackend` inherits the default and returns `NotGrowable`. |
+| D5 | `StableSpan`'s private constructor with the allocators as template friends | passkey idiom: a `detail::StableKey` only the allocators can construct | One friend list in one place instead of forward declarations of every allocator inside `span.h`, and granting a new type the right to promise stability stays a single greppable edit. Same guarantee. |
+| D6 | (not specified) | `FakeBackend` quarantines the last 16 released regions instead of freeing them | Poison-on-release is only useful if a test can read the poison back. Freeing immediately would have made `is_poisoned()` a use-after-free *in the test*. |
+| D7 | A4 sketched `PlanInput` as `{ModelShape, FeatureSet, ConcurrencyLimits, feature flags, budget}` | plus two explicit measured charges: `context_bytes` and `LibraryReserve` | These are the two things the old planner could not see and could not have seen. `context_bytes` (1679.6 MiB measured) is gone before imp allocates anything; `LibraryReserve` is the ~3.9 GiB of A1.5. Carrying them as named inputs is the difference between a plan and a guess — `MemoryPlan.ChargesTheLibraryReserveAsAFirstClassLineItem` fails if the KV pool stops noticing. |
+| D8 | A4 said the planner "fails at load time with a report" | it also fails when the KV pool would sit **below the admission floor**, even though the plan technically fits | A pool that cannot hold one advertised sequence is not a working configuration: it prefills fine and then cancels on the first block append, while `/v1/models` keeps advertising `max_seq_len`. Observed on Qwen3.6-35B-A3B-NVFP4 at `--max-batch 64`, where KV collapsed to 16 blocks = 512 tokens and every longer prompt came back `finish_reason=cancelled` with no hint why. Reporting that as a successful plan would preserve exactly the failure I4 exists to remove. |
+
+### Invariants now under test
+
+`tests/test_memory_backend.cpp` and `tests/test_memory_allocators.cpp`, both in
+the CPU lane (`test-core`), cover V1 (conservation), V2 (no allocation while
+serving), V3 (arena reset frees wholesale), V4 (block-pool conservation under
+randomised churn), V5 (refcount balance when an exception unwinds mid-sequence),
+V6 (LIFO discipline), and V9 (address stability across commit/decommit).
+`tests/test_memory_plan.cpp` adds V7 (plan determinism, 1000 randomised
+configs) and V8 (a successful plan never exceeds its budget, 2000 randomised
+configs).
+
+The I3 mechanism itself is asserted at compile time in
+`tests/test_memory_allocators.cpp`: `DeviceSpan` does not convert to
+`StableSpan`, `StableSpan` is not constructible from a raw pointer, and the
+widening direction stays implicit. A refactor that reopens the hole fails to
+compile rather than silently passing.
 
 ---
 
