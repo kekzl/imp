@@ -4,6 +4,32 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-28 · Memory architecture A7 step 3.1 (KV block ids → BlockPool) — decode neutral
+
+`KVCache`'s block free list and per-block refcounts move into `BlockPool`
+(id-space-only mode; the memory stays in `KVCache` because the layout is
+layer-major — see MEMORY_ARCHITECTURE D10). This one IS on the hot path:
+`BlockPool::acquire()` takes a mutex where the raw free list did not. Blocks
+are appended once per `block_size` decode steps, so the expectation was
+"unmeasurable"; measured to confirm rather than assumed.
+
+Same harness/settings as below, 3 trials — pp512 12339.10 / 12466.85 /
+12396.02, tg128 286.11 / 285.66 / 285.69. Medians **12396.02 / 285.69**, i.e.
+−0.09% prefill / −0.52% decode vs the 2026-07-26 pin, and slightly *above* the
+steps 0-2a measurement (12354.01 / 284.29). The lock costs nothing measurable.
+
+Correctness: `test-kv` 57/57, `test-core` 668/668, and the KV-sensitive e2e
+subset (degeneration + continuous batching + prefix-cache + chunked prefill)
+14/14 — all with `--gpus all`.
+
+**Pre-existing failure found and cleared, not caused here:**
+`MtpForwardTest.DraftStepProducesValidToken` fails in the full `test-e2e`
+binary (passes in isolation). A baseline build from the pre-step-3 commit
+fails identically with a byte-identical `9.12 GiB free` — engine teardown does
+not return ~15 GiB before the next test allocates. AUDIT B5; belongs to step 6.
+
+---
+
 ## 2026-07-28 · Memory architecture A7 step 2b (shadow plan) — init-only, neutral
 
 `plan_memory()` now runs next to `compute_vram_budget()` in

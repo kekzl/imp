@@ -97,12 +97,10 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
         MemAccount::instance().note("KV_BLOCK_POOL", static_cast<std::ptrdiff_t>(scale_total));
     }
 
-    // Initialise per-block ref counts (0 = free) and build free list
-    ref_counts_.resize(max_blocks_, 0);
-    free_list_.reserve(max_blocks_);
-    for (int i = max_blocks_ - 1; i >= 0; --i) {
-        free_list_.push_back(i);
-    }
+    // Block ids + refcounts. Slots-only: this class keeps the memory (the
+    // layout is layer-major and cannot be expressed as a uniform stride).
+    if (blocks_.open_slots(max_blocks_) != MemError::Ok)
+        throw std::runtime_error("KVCache: block id space init failed");
 }
 
 // ---------------------------------------------------------------------------
@@ -243,20 +241,14 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         scale_block_bytes_ = static_cast<size_t>(block_size_) * max_nkv * (max_hd / kNVFP4Group);
     }
 
-    // Initialize ref counts and free list
-    ref_counts_.resize(max_blocks_, 0);
-    free_list_.reserve(max_blocks_);
-    for (int i = max_blocks_ - 1; i >= 0; --i) {
-        free_list_.push_back(i);
-    }
+    if (blocks_.open_slots(max_blocks_) != MemError::Ok)
+        throw std::runtime_error("KVCache(per-layer): block id space init failed");
 
-    // SWA group: separate id space with its own free list.
+    // SWA group: separate id space, separate pool. Not a partition of the
+    // global one — a ref must not be able to cross between them.
     if (swa_max_blocks_ > 0) {
-        swa_ref_counts_.resize(swa_max_blocks_, 0);
-        swa_free_list_.reserve(swa_max_blocks_);
-        for (int i = swa_max_blocks_ - 1; i >= 0; --i) {
-            swa_free_list_.push_back(i);
-        }
+        if (swa_blocks_.open_slots(swa_max_blocks_) != MemError::Ok)
+            throw std::runtime_error("KVCache(per-layer): SWA block id space init failed");
         int n_swa_layers = 0;
         for (char f : layer_is_swa_)
             if (f)
@@ -271,6 +263,11 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
 }
 
 KVCache::~KVCache() {
+    // The manager's referents still hold UNTRACKED references at this point
+    // (they store ints). abandon() skips the outstanding-ref check; it goes
+    // away with the last int-based caller in A7 step 3's final commit.
+    blocks_.abandon();
+    swa_blocks_.abandon();
     if (d_copy_meta_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_copy_meta_));
         d_copy_meta_ = nullptr;
@@ -296,17 +293,16 @@ KVCache::~KVCache() {
 // ---------------------------------------------------------------------------
 
 int KVCache::allocate_block() {
-    if (free_list_.empty()) {
+    BlockRef ref = blocks_.acquire();
+    if (!ref) {
         if (graph_diag::enabled()) {
             IMP_LOG_ERROR("[graph_diag:kv_alloc] OOM (phase=%s, 0 free blocks left)",
                           graph_diag::phase_name(graph_diag::phase()));
         }
         return -1;
     }
-
-    int block_id = free_list_.back();
-    free_list_.pop_back();
-    ref_counts_[block_id] = 1;
+    // The int API keeps the reference untracked, exactly as before.
+    const int block_id = ref.release();
 
     if (graph_diag::enabled()) {
         auto p = graph_diag::phase();
@@ -314,28 +310,22 @@ int KVCache::allocate_block() {
         // (KV-block boundary crossed mid-replay with stale block_tables).
         if (p == graph_diag::Phase::REPLAY) {
             IMP_LOG_ERROR(
-                "[graph_diag:kv_alloc] allocate_block id=%d free_left=%zu "
+                "[graph_diag:kv_alloc] allocate_block id=%d free_left=%d "
                 "phase=REPLAY  <-- H1 smoking gun",
-                block_id, free_list_.size());
+                block_id, blocks_.free_count());
         } else {
-            IMP_LOG_INFO("[graph_diag:kv_alloc] allocate_block id=%d free_left=%zu phase=%s", block_id,
-                         free_list_.size(), graph_diag::phase_name(p));
+            IMP_LOG_INFO("[graph_diag:kv_alloc] allocate_block id=%d free_left=%d phase=%s", block_id,
+                         blocks_.free_count(), graph_diag::phase_name(p));
         }
     }
     return block_id;
 }
 
-void KVCache::free_block(int block_id) {
-    if (block_id < 0 || block_id >= max_blocks_)
-        return;
-    if (ref_counts_[block_id] <= 0)
-        return;
+void KVCache::free_block(int block_id) { blocks_.release_raw(block_id); }
 
-    --ref_counts_[block_id];
-    if (ref_counts_[block_id] == 0) {
-        free_list_.push_back(block_id);
-    }
-}
+BlockRef KVCache::acquire_block_ref() { return blocks_.acquire(); }
+
+BlockRef KVCache::adopt_block(int block_id) { return blocks_.adopt_raw(block_id); }
 
 // ---------------------------------------------------------------------------
 // SWA block group (kv_cache.swa_sizing): separate id space, no sharing —
@@ -343,38 +333,19 @@ void KVCache::free_block(int block_id) {
 // ---------------------------------------------------------------------------
 
 int KVCache::allocate_swa_block() {
-    if (swa_free_list_.empty())
-        return -1;
-    int block_id = swa_free_list_.back();
-    swa_free_list_.pop_back();
-    swa_ref_counts_[block_id] = 1;
-    return block_id;
+    BlockRef ref = swa_blocks_.acquire();
+    return ref ? ref.release() : -1;
 }
 
-void KVCache::free_swa_block(int block_id) {
-    if (block_id < 0 || block_id >= swa_max_blocks_)
-        return;
-    if (swa_ref_counts_[block_id] <= 0)
-        return;
-    if (--swa_ref_counts_[block_id] == 0)
-        swa_free_list_.push_back(block_id);
-}
+void KVCache::free_swa_block(int block_id) { swa_blocks_.release_raw(block_id); }
 
 // ---------------------------------------------------------------------------
 // Reference counting
 // ---------------------------------------------------------------------------
 
-int KVCache::ref_count(int block_id) const {
-    if (block_id < 0 || block_id >= max_blocks_)
-        return 0;
-    return ref_counts_[block_id];
-}
+int KVCache::ref_count(int block_id) const { return blocks_.ref_count(block_id); }
 
-void KVCache::inc_ref(int block_id) {
-    if (block_id < 0 || block_id >= max_blocks_)
-        return;
-    ++ref_counts_[block_id];
-}
+void KVCache::inc_ref(int block_id) { blocks_.acquire_raw(block_id); }
 
 // ---------------------------------------------------------------------------
 // Pointer computation into the contiguous pool
@@ -421,7 +392,7 @@ void* KVCache::v_ptr(int layer, int block_id) {
 // Capacity queries
 // ---------------------------------------------------------------------------
 
-int KVCache::num_free_blocks() const { return static_cast<int>(free_list_.size()); }
+int KVCache::num_free_blocks() const { return blocks_.free_count(); }
 
 int KVCache::total_blocks() const { return max_blocks_; }
 

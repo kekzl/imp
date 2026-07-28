@@ -61,6 +61,16 @@ public:
 
     void reset();
 
+    // Relinquish the handle WITHOUT dropping the reference, returning the id.
+    // The reference stays held and must later be dropped through the pool's
+    // raw API — i.e. this converts a tracked ref into an untracked one.
+    //
+    // Migration scaffolding only (A7 step 3). It exists so the KV cache's
+    // int-based API can keep its exact semantics while the callers move to
+    // BlockRef one at a time. Deleted in step 3's final commit; nothing new
+    // should use it.
+    [[nodiscard]] int release();
+
     int id() const { return id_; }
     bool valid() const { return pool_ != nullptr && id_ >= 0; }
     explicit operator bool() const { return valid(); }
@@ -84,6 +94,18 @@ public:
     // Acquire num_blocks x block_bytes from `backend` as one region.
     [[nodiscard]] MemError open(Backend& backend, size_t block_bytes, int num_blocks, RegionTag tag);
 
+    // Id space only: the pool owns the block ids and their refcounts, the
+    // CALLER owns the memory and computes its own addresses. block() then
+    // returns an empty span.
+    //
+    // This exists because the KV cache's pool is laid out layer-major — one
+    // block id's bytes are scattered across per-layer K and V regions whose
+    // sizes differ per layer (Gemma-4 dual geometry) and per group (SWA layers
+    // hold only the trailing window). A uniform stride cannot express that,
+    // and the addressing was never the part that needed fixing: the ownership
+    // was. See docs/MEMORY_ARCHITECTURE.md B2/D10.
+    [[nodiscard]] MemError open_slots(int num_blocks);
+
     // Release the region. Asserts (debug) that no refs are outstanding — a
     // non-zero count here is exactly the "block outlived its request" bug.
     void close();
@@ -105,14 +127,31 @@ public:
     // Sum of all refcounts. A request-scoped leak shows up here first.
     uint64_t total_refs() const;
     size_t block_bytes() const;
+    int ref_count(int id) const;
+
+    // ── Migration scaffolding (A7 step 3) — see BlockRef::release() ──
+    // Untracked refcount manipulation by id, matching what the KV cache does
+    // today. Deleted with the last int-based caller.
+    void acquire_raw(int id);   // inc_ref on an id whose ref is untracked
+    void release_raw(int id);   // dec_ref on an id whose ref is untracked
+    // Take a tracked handle for an id that already holds an untracked ref,
+    // transferring ownership of that ref to the handle (no count change).
+    [[nodiscard]] BlockRef adopt_raw(int id);
+    // Close without the outstanding-ref check. Only for an owner whose
+    // referents still hold UNTRACKED refs — i.e. the KV cache while its
+    // manager is still int-based. Removed with the last raw caller.
+    void abandon();
 
 private:
     friend class BlockRef;
     void inc_ref_(int id);
     void dec_ref_(int id);
+    void dec_ref_impl_(int id, bool strict);
+    void init_slots_(int num_blocks);  // caller holds mu_
 
     mutable std::mutex mu_;
-    Region region_;
+    Region region_;      // empty in open_slots() mode — the caller owns the memory
+    bool open_ = false;
     size_t block_bytes_ = 0;
     int num_blocks_ = 0;
     std::vector<int> refcount_;   // per block id
