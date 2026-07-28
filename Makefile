@@ -319,6 +319,15 @@ sanitize:
 	done
 
 # Apply clang-format in place across src/, include/, tools/, tests/.
+# I1 gate (docs/MEMORY_ARCHITECTURE.md): no direct CUDA memory API outside
+# src/memory/, against a monotonically shrinking allowlist. Host-only, no Docker.
+check-alloc-sites:
+	@python3 tools/check_alloc_sites.py
+
+# Remaining direct allocation sites, worst files first. Never fails.
+alloc-sites-stats:
+	@python3 tools/check_alloc_sites.py --stats
+
 format:
 	@$(CLANG_FORMAT_RUN) -i --style=file $(CLANG_FORMAT_FILES)
 	@echo "clang-format applied"

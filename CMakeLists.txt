@@ -102,16 +102,17 @@ endif()
 
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
+    src/core/allocator.cpp
     src/core/tensor.cpp
     src/core/qtype.cpp
     src/core/buffer.cpp
-    src/core/allocator.cpp
     src/core/logging.cpp
     src/core/threading.cpp
     src/core/cuda_static_reset.cpp
 )
 
 set(IMP_MEMORY_SOURCES
+    src/memory/backend.cpp
     src/memory/vram_allocator.cu
     src/memory/mem_account.cu
     src/memory/kv_cache.cu
@@ -565,6 +566,12 @@ if(IMP_BUILD_TESTS)
         # Pre-dequant VRAM budget split (#1100). CPU-only: pure arithmetic in
         # runtime/vram_budget.h, and it belongs in the lane CI actually runs.
         tests/test_pre_dequant_budget.cpp
+        # Memory subsystem L1 (docs/MEMORY_ARCHITECTURE.md). FakeBackend is the
+        # substitution seam that keeps the whole allocator stack testable in the
+        # CPU lane; it is test scaffolding, so it is compiled here rather than
+        # shipped in the imp library.
+        src/memory/fake_backend.cpp
+        tests/test_memory_backend.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp
