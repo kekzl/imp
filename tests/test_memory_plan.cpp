@@ -285,3 +285,97 @@ TEST(MemoryPlan, TotalEqualsTheSumOfItsLines) {
     EXPECT_EQ(sum, res.plan.total())
         << "criterion 6 is >=95% accounted; a plan that does not add up cannot get there";
 }
+
+// ── A7 step 2b: the shadow plan run next to the live budget ───────────
+
+#include "runtime/plan_shadow.h"
+
+namespace {
+
+// The measured dense reference point, expressed the way the engine sees it at
+// budget time: weights and context are already spent, so what is left is the
+// distributable residual.
+ShadowPlanProbe dense_probe() {
+    ShadowPlanProbe p;
+    p.distributable_bytes = 22290 * kMiB;  // logged by the live pass on this config
+    p.weight_cache_demand = 2158 * kMiB;
+    p.ssm_state_bytes = 0;
+    p.engine_persistent_bytes = 397 * kMiB;
+    p.workspace_estimate_available = true;
+    p.library_reserve_bytes = kMeasuredLibraryReserveBytes;
+    p.n_kv_layers = 36;
+    p.max_batch_size = 8;
+    p.max_seq_len = 4096;
+    p.kv_block_size = 16;
+    p.min_kv_tokens = 16384;
+    p.kv_block_bytes_per_layer = 16ull * 8 * 128 * 2 * 2;
+    return p;
+}
+
+}  // namespace
+
+TEST(ShadowPlan, DoesNotChargeWeightsOrContextASecondTime) {
+    // At budget time the weights and the CUDA context are already resident.
+    // Charging them again would make the shadow plan reject configurations the
+    // engine is happily running.
+    const auto in = shadow_plan_input(dense_probe());
+    EXPECT_EQ(in.model.weight_bytes, 0u);
+    EXPECT_EQ(in.context_bytes, 0u);
+    EXPECT_EQ(in.budget_bytes, dense_probe().distributable_bytes);
+}
+
+TEST(ShadowPlan, FeedsTheLivePassOwnDemandFigureSoThePoliciesAreComparable) {
+    auto p = dense_probe();
+    p.weight_cache_demand = 1234 * kMiB;
+    const auto in = shadow_plan_input(p);
+    EXPECT_EQ(in.model.weight_cache_bytes, 1234u * kMiB)
+        << "the comparison is of allocation policy, not of demand estimation";
+}
+
+TEST(ShadowPlan, TheLibraryReserveIsWhatSeparatesItFromTheLivePass) {
+    auto with = plan_memory(shadow_plan_input(dense_probe()));
+    ASSERT_TRUE(with) << with.failure.report();
+
+    auto p = dense_probe();
+    p.library_reserve_bytes = 0;
+    auto without = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(without);
+
+    EXPECT_LE(with.plan.kv.blocks, without.plan.kv.blocks);
+    EXPECT_LE(with.plan.total(), dense_probe().distributable_bytes);
+}
+
+TEST(ShadowPlan, ReportSaysWhatItDoesNotModel) {
+    auto p = dense_probe();
+    p.workspace_estimate_available = false;
+    p.vision_tower_unmodelled = true;
+    const auto res = plan_memory(shadow_plan_input(p));
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/2048);
+
+    EXPECT_NE(r.find("shadow plan"), std::string::npos);
+    EXPECT_NE(r.find("NOT applied"), std::string::npos);
+    EXPECT_NE(r.find("workspaces not modelled"), std::string::npos)
+        << "a probe that hides its gaps is worse than no probe";
+    EXPECT_NE(r.find("vision tower not modelled"), std::string::npos);
+    EXPECT_NE(r.find("forward scratch not modelled"), std::string::npos);
+}
+
+TEST(ShadowPlan, ReportShowsBothKvDecisions) {
+    const auto p = dense_probe();
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(res);
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/4096);
+    EXPECT_NE(r.find("live 4096 blocks"), std::string::npos);
+    EXPECT_NE(r.find("library reserve"), std::string::npos);
+}
+
+TEST(ShadowPlan, ReportsARejectionWithTheFullFailureText) {
+    auto p = dense_probe();
+    p.distributable_bytes = 6 * 1024 * kMiB;  // not enough for the floor
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_FALSE(res.ok);
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/16);
+    EXPECT_NE(r.find("plan REJECTS"), std::string::npos);
+    EXPECT_NE(r.find("Cannot fit"), std::string::npos)
+        << "the operator needs the itemisation, not just the verdict";
+}

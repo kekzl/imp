@@ -238,6 +238,18 @@ struct RuntimeConfig {
         // (~10× decode hit), so the caches rank above KV/context size.
         // Escape hatch only; leave on.
         bool native_cache_reserve = true;
+        // The fixed charge CUDA/cuBLAS/CUTLASS claim on the FIRST forward
+        // pass, in MiB. Measured at ~3900 on this target and invariant to
+        // batch (1..16) and context (1024..4096) — it is not a workspace imp
+        // allocates, and the old budget pass cannot see it, which is why it
+        // hands the KV pool a number that much too optimistic
+        // (docs/MEMORY_ARCHITECTURE.md A1.5).
+        //   -1 = use the built-in measured constant (default)
+        //    0 = charge nothing (for a driver/toolkit where it does not apply)
+        //   >0 = the measured value for THIS host, in MiB
+        // Advisory until A7 step 6: today it only feeds the shadow plan that
+        // is logged next to the live budget.
+        int library_reserve_mb = -1;
     } vram;
 
     struct Attention {

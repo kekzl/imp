@@ -939,7 +939,7 @@ design above, so the argument that produced the original shape stays readable.
 | 0 — Backend, FakeBackend, phase guard, I1 gate | **done** | `feat(memory): L1 backend, allocation-phase guard, I1 CI gate` |
 | 1 — tier allocators + typed spans | **done** | `feat(memory): arena, block pool, scratch stack, stable spans` |
 | 2a — `plan_memory()`, pure and tested | **done** | `feat(memory): plan_memory — capacity planned, not discovered` |
-| 2b — adapter: fill `PlanInput` from `Model`/`EngineConfig`, log both plans at init, CI agreement check | not started | |
+| 2b — shadow plan: run `plan_memory()` next to the live budget at init, log both | **done** | `feat(memory): shadow plan — log what plan_memory would decide` |
 | 3 — KV pool → `BlockPool`/`BlockRef` | not started | |
 | 4 — executor workspaces | not started | |
 | 5 — per-request allocations (satisfies I2) | not started | |
@@ -968,7 +968,37 @@ uses the wider one on purpose.
 | D5 | `StableSpan`'s private constructor with the allocators as template friends | passkey idiom: a `detail::StableKey` only the allocators can construct | One friend list in one place instead of forward declarations of every allocator inside `span.h`, and granting a new type the right to promise stability stays a single greppable edit. Same guarantee. |
 | D6 | (not specified) | `FakeBackend` quarantines the last 16 released regions instead of freeing them | Poison-on-release is only useful if a test can read the poison back. Freeing immediately would have made `is_poisoned()` a use-after-free *in the test*. |
 | D7 | A4 sketched `PlanInput` as `{ModelShape, FeatureSet, ConcurrencyLimits, feature flags, budget}` | plus two explicit measured charges: `context_bytes` and `LibraryReserve` | These are the two things the old planner could not see and could not have seen. `context_bytes` (1679.6 MiB measured) is gone before imp allocates anything; `LibraryReserve` is the ~3.9 GiB of A1.5. Carrying them as named inputs is the difference between a plan and a guess — `MemoryPlan.ChargesTheLibraryReserveAsAFirstClassLineItem` fails if the KV pool stops noticing. |
+| D9 | A7 step 2 said "assert agreement in CI via V8" | the shadow plan **logs** the comparison; there is no CI assertion of agreement | The two do not agree, and should not: measured on the dense server default, the live pass hands KV **4096 blocks (4608 MiB)** while the plan takes **2048 (2304 MiB)** — see B1 below. Asserting agreement would have meant either encoding the old pass's 2x overshoot as correct, or writing a tolerance so wide it asserts nothing. V8 is asserted instead against the plan's own contract (a successful plan never exceeds its budget), which is the property that actually has to hold. |
 | D8 | A4 said the planner "fails at load time with a report" | it also fails when the KV pool would sit **below the admission floor**, even though the plan technically fits | A pool that cannot hold one advertised sequence is not a working configuration: it prefills fine and then cancels on the first block append, while `/v1/models` keeps advertising `max_seq_len`. Observed on Qwen3.6-35B-A3B-NVFP4 at `--max-batch 64`, where KV collapsed to 16 blocks = 512 tokens and every longer prompt came back `finish_reason=cancelled` with no hint why. Reporting that as a successful plan would preserve exactly the failure I4 exists to remove. |
+
+### B1 — what the shadow plan found
+
+Measured at server defaults (Qwen3-4B Q8_0, `--max-batch 8`,
+`runtime.max_seq_len=4096`), both sides fed the same demand figures:
+
+```
+  distributable               25551 MiB
+  weight-cache demand          2397 MiB  (same figure the live pass used)
+  library reserve              3900 MiB  (the live pass does not charge this)
+  engine-persistent             397 MiB
+  KV: live 4096 blocks -> plan 2048 blocks (4608 -> 2304 MiB)
+```
+
+**The live pass gives the KV pool exactly twice what the configuration asks
+for.** `needed_blocks = ceil(4096/16) x 8 = 2048`, and `vram_budget.cpp:457`
+sets `target_blocks = needed_blocks * 2` for every non-mode-2 strategy. So
+2304 MiB of the pool cannot be reached by any request the server will accept:
+8 concurrent sequences at the advertised context fill 2048 blocks and stop.
+
+On the dense config this is invisible — 14 GiB sits free either way. It stops
+being invisible exactly where the incidents happened: the surplus is drawn from
+the same post-weight headroom the pre-dequant caches compete for, and it is the
+same order of magnitude as the library reserve the pass cannot see. #1100 and
+#1103 are both cases of that headroom being mis-divided.
+
+Not fixed here: the shadow plan computes and does not apply, and flipping
+`target_blocks` on its own would change KV sizing for every model without the
+rest of the plan behind it. It is what step 6 switches over.
 
 ### Invariants now under test
 

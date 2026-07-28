@@ -4,6 +4,26 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-28 · Memory architecture A7 step 2b (shadow plan) — init-only, neutral
+
+`plan_memory()` now runs next to `compute_vram_budget()` in
+`Engine::init_kv_cache` and logs the comparison. Computed, never applied: one
+`IMP_LOG_INFO` on the init path, no hot-path code. Same harness/settings as the
+entry below, 2 trials: pp512 12438.95 / 12375.17, tg128 284.92 / 284.73 —
+indistinguishable from the steps 0-2a numbers (12354.01 / 284.29). 614 CPU
+tests green.
+
+**What it found** (dense server default, both sides fed the same demand
+figures): the live pass hands KV **4096 blocks / 4608 MiB**, the plan takes
+**2048 / 2304 MiB**. `vram_budget.cpp:457` sets
+`target_blocks = needed_blocks * 2`, so half the pool is unreachable by any
+request the server accepts. Harmless on this config (14 GiB free either way),
+not harmless where the surplus is drawn from the headroom the pre-dequant
+caches compete for — which is #1100 and #1103. Details in
+docs/MEMORY_ARCHITECTURE.md B1.
+
+---
+
 ## 2026-07-28 · Memory architecture A7 steps 0-2a — hot path untouched, decode/prefill neutral
 
 Three additive commits (Backend + phase guard + I1 gate; arena/block pool/

@@ -554,6 +554,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // KV math above still applies but no FP8 cache will ever be built (Phase 2
     // is gated on use_fp8) — report 0 instead of a phantom reservation.
 
+    // Publish the demand figure this pass actually used, so the A7 step-2b
+    // comparison feeds plan_memory() the same number instead of re-deriving it.
+    budget.weight_cache_estimate_bytes = nvfp4_estimate + cutlass_sf_estimate;
+    budget.ssm_footprint_bytes = ssm_footprint;
+
     const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)
                                  ? (config.use_fp8_prefill ? "FP8_PREFILL_NVFP4_DECODE"
                                                            : "NVFP4_DECODE (fp8 prefill off)")

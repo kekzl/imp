@@ -11,6 +11,8 @@
 #include "runtime/engine.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
+#include "runtime/plan_shadow.h"
+#include "exec/executor.h"
 #include "memory/kv_cache.h"
 #include "core/logging.h"
 
@@ -187,6 +189,40 @@ bool Engine::init_kv_cache() {
                                            native_cache_balloon_bytes_, &native_cache_demand());
     int max_blocks = config_.kv_cache_max_blocks > 0 ? config_.kv_cache_max_blocks
                                                      : vram_budget.kv_max_blocks;
+
+    // A7 step 2b: run the new planner on the same inputs and log what it would
+    // have decided. Computed, never applied — the point is to establish that
+    // the plan is right BEFORE anything depends on it, and to make the charge
+    // the live pass cannot see (the ~3.9 GiB claimed on the first forward,
+    // A1.5) visible at the moment the KV pool is being sized from a number
+    // that does not include it.
+    {
+        ShadowPlanProbe probe;
+        probe.distributable_bytes = effective_free_vram();
+        probe.weight_cache_demand = vram_budget.weight_cache_estimate_bytes;
+        probe.mandatory_cache_bytes =
+            vram_budget.mandatory_sf_bytes + vram_budget.mandatory_moe_bytes;
+        probe.ssm_state_bytes = vram_budget.ssm_footprint_bytes;
+        if (executor_) {
+            probe.engine_persistent_bytes = executor_->workspace_estimate();
+            probe.workspace_estimate_available = true;
+        }
+        probe.vision_tower_unmodelled = !config_.mmproj_path.empty();
+        probe.library_reserve_bytes =
+            runtime_config_.vram.library_reserve_mb < 0
+                ? kMeasuredLibraryReserveBytes
+                : static_cast<size_t>(runtime_config_.vram.library_reserve_mb) << 20;
+        probe.n_kv_layers = n_kv_layers;
+        probe.n_swa_layers = n_swa_layers;
+        probe.swa_live_tokens = swa_live_tokens;
+        probe.max_batch_size = config_.max_batch_size;
+        probe.max_seq_len = config_.max_seq_len;
+        probe.kv_block_size = kv_bs;
+        probe.min_kv_tokens = config_.min_kv_tokens;
+        probe.kv_block_bytes_per_layer =
+            kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
+        log_shadow_plan(probe, vram_budget, max_blocks);
+    }
 
     {
         QType kv_dtype = config_.kv_cache_dtype;

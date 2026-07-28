@@ -86,6 +86,18 @@ struct LibraryReserve {
     const char* source = "unset";
 };
 
+// Measured 2026-07-28 on the target (RTX 5090 / sm_120a, CUDA 13.3, WSL2 WDDM
+// driver): with runtime.warmup=false the engine settles at 14 046 MiB and a
+// single 32-token request takes it to 18 234 MiB. Flat at 3848-3886 MiB across
+// batch 1/8/16 and context 1024/4096, so it scales with nothing the plan
+// controls. Refuted as explanations: imp's own lazy module loading
+// (CUDA_MODULE_LOADING=EAGER moves 124 MiB), and the default cudaMallocAsync
+// pool (reserved/used unchanged across the request).
+//
+// Re-measure after a driver or CUDA bump; imp.conf `vram.library_reserve_mb`
+// overrides it per host.
+constexpr size_t kMeasuredLibraryReserveBytes = 3900ull * 1024 * 1024;
+
 struct PlanInput {
     ModelShape model;
     FeatureSet features;

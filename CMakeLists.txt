@@ -292,6 +292,7 @@ set(IMP_RUNTIME_SOURCES
     src/vision/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
+    src/runtime/plan_shadow.cpp
     src/runtime/cuda_graph.cu
     src/runtime/pdl.cu
     src/runtime/presets.cpp
