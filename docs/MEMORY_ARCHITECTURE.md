@@ -1107,6 +1107,63 @@ coherence check (`check-degeneration`) — this touches the KV cache, so a
 repetition loop or a cross-request bleed is the failure to look for, and the
 CPU tests cannot see it.
 
+### B6 — the measurement campaign for step 6, and what it found
+
+Run before touching the ordering, as the control arm. Two configs, server
+defaults, `diagnostics.vram_audit=true`.
+
+**#1100's own repro is already fixed — there is no win left to demonstrate
+there.** Qwen3-14B-Q6_K, `--max-batch 8`, auto `max_seq_len` 32768:
+`Phase-4 overlay: registry=282 cached / plan-ideal=282`, KV 5154 blocks
+(6442 MiB), decode cache 280 tensors (7087 MiB), 2314 MiB free at the end.
+#1102 closed the arithmetic; the ordering change cannot improve on 282/282.
+The step-6 plan expected this as its headline measurement — recorded here so
+nobody re-derives the expectation.
+
+**gpt-oss-20b-mxfp4 at server defaults is still broken, and the mechanism is
+now exact.** ~16 tok/s (120 tokens in 7.1–7.8 s across two requests). The
+lifecycle checkpoints say everything:
+
+```
+02_weights+decode_cache   used  6127.6   free 26479.0   delta  3708.0
+03_kv_cache               used 32606.6   free     0.0   delta 26479.0
+04_features               used 32606.6   free     0.0   delta     0.0
+```
+
+**`03_kv_cache` consumed 26 479 MiB — every remaining byte on the card, down
+to 0.0 MiB free.** The chain, from the same log:
+
+1. `max_seq_len: auto → 131072` (the model's full context; KV costs
+   49 152 B/token, so one sequence alone is 6.4 GiB).
+2. The planner-driven weight-cache reserve *does* fire — 5811.6 MiB, capped so
+   KV keeps one full sequence (`kv guarantee=8192 blocks`).
+3. `KV clamped 65536 → 25382 blocks to fit post-weight VRAM` — **19 036 MiB**,
+   406 112 tokens, for a `--max-batch 8` server.
+4. The pre-dequant phases then expand into what is left, and
+   `vram_alloc_force` (8 sites in `pre_dequant_phase3_moe.cu`) bypasses the
+   headroom check entirely.
+5. The loser is whoever allocates *after* the cache build:
+   `VRAMAllocator: rejecting nvfp4_dequant allocation of 31.64 MiB (0 MiB
+   free, need 1630 MiB headroom)`.
+
+A **31 MiB** workspace fails on a 32 GiB card because a 19 GiB KV pool and an
+unbounded cache build got there first. Nothing here is a bad number in
+isolation — every step is locally reasonable and the composition is not.
+
+**This is the cleanest evidence in the whole audit for I4.** It is not "a
+clamp was mis-tuned"; it is the engine allocating until the device said no,
+and the last tenant paying. Another clamp cannot fix it — a clamp is what
+produced step 3. What fixes it is the plan deciding all of it up front and
+each tier taking only its share.
+
+**Consequence for the step-6 order.** A KV reservation threaded into
+`split_pre_dequant_budget` — the cheap way to make 6.4 safe without 6.5 —
+would *not* have fixed this config, because `vram_alloc_force` does not
+consult any reserve. The guarantee has to come from the tiers owning their
+memory (6.5), not from a term subtracted before a live-free read. 6.4 and 6.5
+are one change, and this config is its acceptance test: **`03_kv_cache` must
+not end at 0.0 MiB free, and `nvfp4_dequant` must not be rejected.**
+
 ### B5 — what step 4 still needs
 
 4a landed the arena and proved it on one tenant. The rest of `exec/` needs two
