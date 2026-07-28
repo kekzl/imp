@@ -849,7 +849,20 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     (void)engine_arena_open(cuda_malloc_backend());
     gemm_init();
     attention_cublas_prewarm();
-    gemm_grouped_3x_nvfp4_prewarm();
+    // The grouped-3x prewarm reserves 512 MiB of CUTLASS workspace + 1 MiB of
+    // staging so the lazy ensure_workspace() inside the grouped NVFP4 GEMM can
+    // never fire under stream capture. It used to run unconditionally, gated
+    // only on cutlass_grouped_3x_nvfp4_available() — an sm_120 *capability*
+    // query, not a model one. Every entry point into that GEMM lives in
+    // exec/executor_forward_moe*.cu, so a model without experts cannot reach
+    // it and was paying 513 MiB of resident VRAM for a path it never takes.
+    // (That was the bulk of the previously unattributed +676 MiB at the
+    // 01_prewarm_gemm checkpoint — docs/MEMORY_ARCHITECTURE.md A1.4, AUDIT B12.)
+    if (model_->profile().is_moe) {
+        gemm_grouped_3x_nvfp4_prewarm();
+    } else {
+        IMP_LOG_INFO("grouped-3x NVFP4 prewarm skipped: model has no experts (saves 513 MiB)");
+    }
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
     (void)stream_.create(cudaStreamNonBlocking);
     MemAccount::instance().checkpoint("01_prewarm_gemm");

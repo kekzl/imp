@@ -4,6 +4,40 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Gate the grouped-3x NVFP4 prewarm on MoE — −512 MiB resident on dense/vision
+
+`gemm_grouped_3x_nvfp4_prewarm()` ran before any model-type check, gated only
+on `cutlass_grouped_3x_nvfp4_available()` — an sm_120 *capability* query. It
+reserves 1 MiB staging + 512 MiB CUTLASS workspace so the lazy
+`ensure_workspace()` inside the grouped NVFP4 GEMM can never fire under stream
+capture. Every entry point into that GEMM is in `exec/executor_forward_moe*.cu`,
+so a model without experts cannot reach it and was paying for a path it never
+takes.
+
+Measured, `01_prewarm_gemm` checkpoint:
+
+| config | before | after |
+|---|---:|---:|
+| dense Qwen3-4B Q8_0 | 740 MiB | **228 MiB** |
+| MoE Qwen3-Coder-30B-A3B NVFP4 | 740 MiB | 740 MiB (unchanged) |
+
+The 512 MiB delta is exactly `ensure_workspace(512 MiB)`. (The 740 baseline is
+A1.4's 676 plus step 4a's 64 MiB arena, so this also closes the last of that
+checkpoint's unattributed bytes: 512 + 1 + 64 cuBLASLt + 32 bench scratch + 64
+arena + ~67 cuBLAS handle internals.)
+
+Correctness: `test-kv` 57/57, `test-core` 668/668, and 18/18 across
+`DegenerationTest` + `PrefixCacheE2ETest` + `ChunkedPrefillTest` with
+`IMP_TEST_MODEL` set. The MoE path — the one that still takes the prewarm —
+generates coherent code at 384 tok/s on Qwen3-Coder-30B.
+
+Perf, 3 trials on the same noisy host as the entries below: pp512 median
+12035.65, tg128 median **277.21** — indistinguishable from the parent's 277.84
+measured in the same window. No mechanism by which removing an unused
+allocation could cost decode; measured to confirm.
+
+---
+
 ## 2026-07-29 · Memory architecture A7 step 4a (engine-persistent arena) — init-only, in band
 
 The T2 arena is now opened by `Engine::init` (64 MiB, provisional) and the
