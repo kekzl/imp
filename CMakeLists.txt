@@ -113,6 +113,7 @@ set(IMP_CORE_SOURCES
 set(IMP_MEMORY_SOURCES
     src/memory/backend.cpp
     src/memory/arena.cpp
+    src/memory/engine_arena.cpp
     src/memory/block_pool.cpp
     src/memory/scratch_stack.cpp
     src/memory/plan.cpp

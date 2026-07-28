@@ -4,6 +4,28 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Memory architecture A7 step 4a (engine-persistent arena) — init-only, in band
+
+The T2 arena is now opened by `Engine::init` (64 MiB, provisional) and the
+MMVQ GEMV scratch is its first tenant. Init-path only; no hot-path code
+changed. Measured in the same noisy window as step 3.3/3.4: pp512 11574.97,
+tg128 274.42 — inside the 272-277 band the host was showing all evening, and
+there is no mechanism by which moving a fixed scratch buffer from a
+`cudaMalloc` to an arena slab could cost decode.
+
+Two measurements that mattered more than the throughput:
+
+- **Bench config** (`max_tokens=896`): prewarm takes 23.62 MiB from the arena,
+  high-water 23.62 of 64 MiB, no fallback, no hot-path grow.
+- **Server config** (`max_tokens=4096`): the same formula wants **108 MiB**.
+  The arena cannot supply it, the tenant falls back to a direct allocation
+  with a WARN, and the model generates correctly. Without that fallback this
+  would have been a broken GGUF server path — the reason D13 exists.
+
+`test-kv` 57/57, `test-core` 668/668.
+
+---
+
 ## 2026-07-29 · Memory architecture A7 step 3.3/3.4 (sequences own their blocks) — no regression detected
 
 `KVCacheManager::seq_blocks_` now stores `BlockRef` per positional slot

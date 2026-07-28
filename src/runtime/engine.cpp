@@ -13,6 +13,8 @@
 #include "compute/encoder_forward.h"
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
+#include "memory/engine_arena.h"
+#include "memory/backend.h"
 #include "memory/vram_query.h"
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
@@ -63,6 +65,7 @@ Engine::~Engine() {
     // (captures the device-used peak reached during the workload).
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
+    engine_arena_close();
 
     // Defensive: the mandatory-cache balloon is normally released before
     // pre_dequant_weights; don't leak it if init aborted in between.
@@ -839,6 +842,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         IMP_LOG_ERROR("Failed to initialize VRAM allocator");
         return false;
     }
+    // Engine-persistent (T2) arena — opened before the first tenant
+    // (docs/MEMORY_ARCHITECTURE.md A3.3). A failure here is not fatal: every
+    // tenant already handles an empty take the way it handled a failed
+    // cudaMalloc.
+    (void)engine_arena_open(cuda_malloc_backend());
     gemm_init();
     attention_cublas_prewarm();
     gemm_grouped_3x_nvfp4_prewarm();

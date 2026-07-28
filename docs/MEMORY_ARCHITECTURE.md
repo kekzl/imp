@@ -962,7 +962,8 @@ design above, so the argument that produced the original shape stays readable.
 | 3.2 — prefix cache holds its own `BlockRef` | **done** | `refactor(memory): the KV prefix cache owns its blocks instead of inheriting them` |
 | 3.3–3.4 — `seq_blocks_` → `BlockRef`, drop the scaffolding | **done** | `refactor(memory): sequences own their KV blocks through BlockRef` |
 | **A7 step 3 complete** | | |
-| 4 — executor workspaces | not started | |
+| 4a — engine-persistent (T2) arena in production, first tenant | **done** | `feat(memory): engine-persistent arena, with the MMVQ scratch as its first tenant` |
+| 4b — the remaining `exec/` workspaces, planner-sized | not started — see B5 | |
 | 5 — per-request allocations (satisfies I2) | not started | |
 | 6 — weight upload + pre-dequant caches | not started | |
 | 7 — VMM backend for the KV pool | not started | |
@@ -989,6 +990,8 @@ uses the wider one on purpose.
 | D5 | `StableSpan`'s private constructor with the allocators as template friends | passkey idiom: a `detail::StableKey` only the allocators can construct | One friend list in one place instead of forward declarations of every allocator inside `span.h`, and granting a new type the right to promise stability stays a single greppable edit. Same guarantee. |
 | D6 | (not specified) | `FakeBackend` quarantines the last 16 released regions instead of freeing them | Poison-on-release is only useful if a test can read the poison back. Freeing immediately would have made `is_poisoned()` a use-after-free *in the test*. |
 | D7 | A4 sketched `PlanInput` as `{ModelShape, FeatureSet, ConcurrencyLimits, feature flags, budget}` | plus two explicit measured charges: `context_bytes` and `LibraryReserve` | These are the two things the old planner could not see and could not have seen. `context_bytes` (1679.6 MiB measured) is gone before imp allocates anything; `LibraryReserve` is the ~3.9 GiB of A1.5. Carrying them as named inputs is the difference between a plan and a guess — `MemoryPlan.ChargesTheLibraryReserveAsAFirstClassLineItem` fails if the KV pool stops noticing. |
+| D12 | A3.3 has the arena owned by the Engine | `engine_arena()` is a **process global**, opened by `Engine::init` and closed by `~Engine` | Its tenants are file-scope statics in `compute/` and `exec/` with no Engine to reach through — the same reason `gemm.cu`'s cuBLAS workspace is a static today. Single-engine-per-process is the supported deployment (`vram_query.h` says so explicitly). A `generation()` counter makes a stale cached pointer detectable across an engine teardown, which the pre-arena statics could not do. |
+| D13 | A2 says a T2 tenant draws from the arena, full stop | the MMVQ scratch **falls back** to its own allocation when the arena is short, with a WARN | Measured, not hypothetical: the demand is `max_tokens x ceil(K/32) x 36 x 2`, and `max_tokens` belongs to the *executor*, not to anything the engine can bound when it opens the arena — 24 MiB on a bench run, **108 MiB on a server default** at K=12288. A guessed reservation that is too small must not be what breaks a model. The fallback goes when the planner sizes T2 from measured high-water marks (B5); until then the shortfall is reported rather than fatal. |
 | D10 | B2 said "`KVCache` acquires its region from `BlockPool`" | `BlockPool` gained an **id-space-only** mode (`open_slots`); `KVCache` keeps its own region | Reading the layout inverted the assumption. `BlockPool::block(id)` resolves `base + id * stride`, but the KV pool is laid out **layer-major**: one block id's bytes are scattered across per-layer K and V regions whose sizes differ per layer (Gemma-4 dual geometry) and per group (SWA layers hold only the trailing window, `layer_capacity()`). A uniform stride cannot express that — and the addressing was never the part that needed fixing. What had to move was the **ownership**: the free list and the refcounts. `BlockPool` now owns the id space and optionally a uniform region; the KV cache takes the former and keeps the latter. `open()` is unchanged and still what the SSM state, residual ring and snapshot store will use. |
 | D11 | (not specified) | `BlockRef::release()`, `BlockPool::acquire_raw/release_raw/adopt_raw/abandon()` | Strangler scaffolding, marked as such in the headers and deleted in step 3's final commit. They let the int-based `allocate_block`/`free_block`/`inc_ref` API keep **exactly** its current semantics — including tolerating a free of an already-free block, which `KVCache::free_block` does today and a `BlockRef` drop must not — while the manager's three referents migrate one at a time. Without them every caller would have to move in one commit, which is precisely the big-bang this migration is shaped to avoid. |
 | D9 | A7 step 2 said "assert agreement in CI via V8" | the shadow plan **logs** the comparison; there is no CI assertion of agreement | The two do not agree, and should not: measured on the dense server default, the live pass hands KV **4096 blocks (4608 MiB)** while the plan takes **2048 (2304 MiB)** — see B1 below. Asserting agreement would have meant either encoding the old pass's 2x overshoot as correct, or writing a tolerance so wide it asserts nothing. V8 is asserted instead against the plan's own contract (a successful plan never exceeds its budget), which is the property that actually has to hold. |
@@ -1084,6 +1087,30 @@ the scale and sketch regions) and becomes a pure address calculator over
 coherence check (`check-degeneration`) — this touches the KV cache, so a
 repetition loop or a cross-request bleed is the failure to look for, and the
 CPU tests cannot see it.
+
+### B5 — what step 4 still needs
+
+4a landed the arena and proved it on one tenant. The rest of `exec/` needs two
+things 4a deliberately did not guess at:
+
+1. **A planner-supplied capacity.** The arena is opened at a fixed
+   `kEngineArenaDefaultBytes` (64 MiB) because the engine cannot bound its
+   tenants' demand at open time. Measured on Qwen3-8B-Q8_0: the MMVQ scratch
+   alone wants 23.62 MiB at `max_tokens=896` and **108 MiB at 4096**. The fix
+   is not a bigger constant — it is `plan_memory()`'s `engine_persistent_bytes`
+   becoming the capacity, fed by the high-water marks the arena and the
+   `ScratchStack` now report.
+2. **A decision on the three rollback groups.** `moe_3x_packed`/`_sf`,
+   `cutlass_act_data`/`_sf`/`_workspace` and `mxfp4_act_sf`/`_workspace` each
+   allocate a set and, if one member fails, free the others and disable the
+   feature. A bump arena cannot reclaim, so those bytes would be stranded.
+   Bounded and one-time, but it has to be a decision per group rather than a
+   side effect — and with a planner-sized arena, a member failing means the
+   plan was wrong, which is a better signal than a silent feature downgrade.
+
+The leverage point for the mechanical part is `vram_alloc()` in
+`exec/executor_helpers.h`: 31 of the sites funnel through it, so the tier
+switch is one function once (1) and (2) are settled.
 
 ### B4 — step 3 as built
 
