@@ -146,11 +146,12 @@ void BlockPool::acquire_raw(int id) { inc_ref_(id); }
 
 void BlockPool::release_raw(int id) { dec_ref_impl_(id, /*strict=*/false); }
 
-BlockRef BlockPool::adopt_raw(int id) {
+BlockRef BlockPool::share_by_id(int id) {
     std::lock_guard<std::mutex> lock(mu_);
     if (id < 0 || id >= num_blocks_ || refcount_[static_cast<size_t>(id)] <= 0)
         return BlockRef();
-    return BlockRef(this, id);  // ownership transfer: no count change
+    ++refcount_[static_cast<size_t>(id)];
+    return BlockRef(this, id);
 }
 
 StableSpan<std::byte> BlockPool::block(int id) const {

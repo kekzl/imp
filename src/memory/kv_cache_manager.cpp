@@ -14,7 +14,7 @@
 
 namespace imp {
 
-void KVCacheManager::free_block_dropping_stale_hash(int block_id) {
+void KVCacheManager::drop_stale_hash_if_last(int block_id) {
     if (block_id >= 0 && cache_->ref_count(block_id) == 1) {
         auto hit = block_id_to_hash_.find(block_id);
         if (hit != block_id_to_hash_.end()) {
@@ -22,15 +22,13 @@ void KVCacheManager::free_block_dropping_stale_hash(int block_id) {
             block_id_to_hash_.erase(hit);
         }
     }
-    cache_->free_block(block_id);
 }
 
-void KVCacheManager::rollback_partial_allocation(int seq_id, std::vector<int>& blocks,
+void KVCacheManager::rollback_partial_allocation(int seq_id, SeqBlocks& blocks,
                                                  std::vector<size_t>& hashes, size_t original_size) {
-    for (size_t j = original_size; j < blocks.size(); ++j) {
-        free_block_dropping_stale_hash(blocks[j]);
-    }
-    blocks.resize(original_size);
+    for (size_t j = original_size; j < blocks.size(); ++j)
+        drop_stale_hash_if_last(blocks.id_at(j));
+    blocks.resize(original_size);  // dropping the refs is the free
     hashes.resize(original_size);
     if (blocks.empty()) {
         seq_blocks_.erase(seq_id);
@@ -255,12 +253,9 @@ bool KVCacheManager::allocate_blocks(int seq_id, int num_blocks) {
     const size_t original_size = blocks.size();
 
     for (int i = 0; i < num_blocks; ++i) {
-        int block_id = allocate_block_with_eviction();
-        if (block_id < 0) {
-            // Rollback: free every block we allocated in *this* call.
-            for (size_t j = original_size; j < blocks.size(); ++j) {
-                cache_->free_block(blocks[j]);
-            }
+        BlockRef ref = allocate_block_ref_with_eviction();
+        if (!ref) {
+            // Rollback: dropping the refs added in *this* call frees them.
             blocks.resize(original_size);
 
             // If the sequence had no blocks before and we failed to
@@ -270,7 +265,7 @@ bool KVCacheManager::allocate_blocks(int seq_id, int num_blocks) {
             }
             return false;
         }
-        blocks.push_back(block_id);
+        blocks.push(std::move(ref));
     }
 
     // Make sure the sequence is tracked in the LRU list.
@@ -288,11 +283,12 @@ int KVCacheManager::append_block(int seq_id) {
     if (it == seq_blocks_.end())
         return -1;
 
-    int block_id = allocate_block_with_eviction();
-    if (block_id < 0)
+    BlockRef ref = allocate_block_ref_with_eviction();
+    if (!ref)
         return -1;
 
-    it->second.push_back(block_id);
+    const int block_id = ref.id();
+    it->second.push(std::move(ref));
     return block_id;
 }
 
@@ -301,9 +297,11 @@ void KVCacheManager::free_sequence(int seq_id) {
     if (it == seq_blocks_.end())
         return;
 
-    for (int block_id : it->second) {
-        // -1 sentinel marks a slot whose physical block was freed by
-        // evict_middle_blocks (StreamingLLM). Skip — nothing to free.
+    SeqBlocks& seq = it->second;
+    for (size_t i = 0; i < seq.size(); ++i) {
+        const int block_id = seq.id_at(i);
+        // A hole marks a slot whose physical block was freed by
+        // evict_middle_blocks (StreamingLLM). Nothing to hand over.
         if (block_id < 0)
             continue;
         // Pinned blocks survive free_sequence: keep ref_count=1, add to
@@ -314,19 +312,16 @@ void KVCacheManager::free_sequence(int seq_id) {
             // so num_cached_blocks() reports them, but do NOT count as
             // reclaimable (pinned blocks cannot be evicted until unpinned).
             if (cached_blocks_map_.find(block_id) == cached_blocks_map_.end()) {
-                // The cache does not own this block yet: hand it THIS
-                // sequence's reference instead of dropping it. Same refcount
-                // as before, now tracked by an owner rather than retained by
-                // an omitted free.
+                // The cache does not own this block yet: MOVE this sequence's
+                // reference into it. Same refcount as before, now held by an
+                // owner rather than retained by an omitted free.
                 cached_blocks_lru_.push_back(block_id);
                 cached_blocks_map_.emplace(
-                    block_id, CachedEntry{std::prev(cached_blocks_lru_.end()),
-                                          cache_->adopt_block(block_id)});
+                    block_id, CachedEntry{std::prev(cached_blocks_lru_.end()), seq.take(i)});
                 // NOT incrementing reclaimable_cached_count_ — pinned blocks excluded
-            } else {
-                // Already owned by the cache — drop the sequence's reference.
-                cache_->free_block(block_id);
             }
+            // Otherwise the cache already owns it and this sequence's
+            // reference simply drops with the table below.
             continue;
         }
 
@@ -335,22 +330,18 @@ void KVCacheManager::free_sequence(int seq_id) {
             // registered in the hash table for potential reuse.
             auto hash_it = block_id_to_hash_.find(block_id);
             if (hash_it != block_id_to_hash_.end()) {
-                // Transfer this sequence's reference to the cache.
+                // Move this sequence's reference into the cache.
                 if (cached_blocks_map_.find(block_id) == cached_blocks_map_.end()) {
                     cached_blocks_lru_.push_back(block_id);
                     cached_blocks_map_.emplace(
-                        block_id, CachedEntry{std::prev(cached_blocks_lru_.end()),
-                                              cache_->adopt_block(block_id)});
+                        block_id, CachedEntry{std::prev(cached_blocks_lru_.end()), seq.take(i)});
                     reclaimable_cached_count_++;
-                } else {
-                    cache_->free_block(block_id);
                 }
                 continue;
             }
         }
 
-        // Normal free: decrement ref_count, return to pool if it hits 0.
-        cache_->free_block(block_id);
+        // Normal case: the reference drops with the table below.
     }
 
     seq_blocks_.erase(it);
@@ -382,7 +373,7 @@ const std::vector<int>& KVCacheManager::block_table(int seq_id) const {
     auto it = seq_blocks_.find(seq_id);
     if (it == seq_blocks_.end())
         return empty;
-    return it->second;
+    return it->second.ids();
 }
 
 int KVCacheManager::num_free_blocks() const { return cache_->num_free_blocks(); }
@@ -535,20 +526,18 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
                 auto cached_it = cached_blocks_map_.find(cached_block);
                 if (cached_it != cached_blocks_map_.end()) {
                     cached_blocks_lru_.erase(cached_it->second.lru_it);
-                    // The reference moves from the cache to this sequence:
-                    // relinquish without dropping, so the count stays 1.
-                    (void)cached_it->second.ref.release();
+                    // The reference MOVES from the cache to this sequence.
+                    blocks.push(std::move(cached_it->second.ref));
                     cached_blocks_map_.erase(cached_it);
                     // Leaving the LRU means leaving the reclaimable count —
                     // pinned blocks were never counted to begin with.
                     if (pinned_blocks_.find(cached_block) == pinned_blocks_.end())
                         reclaimable_cached_count_--;
                 } else {
-                    // Block is actively referenced by another sequence — share it.
-                    cache_->inc_ref(cached_block);
+                    // Actively referenced by another sequence — share it.
+                    blocks.push(cache_->share_block(cached_block));
                 }
 
-                blocks.push_back(cached_block);
                 hashes.push_back(block_hash);
                 parent_hash = block_hash;
                 ++reused_blocks;
@@ -557,27 +546,27 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
 
             // No cache hit (or reuse closed) — allocate a fresh block.
             reuse_open = false;
-            int block_id = allocate_block_with_eviction();
-            if (block_id < 0) {
+            BlockRef fresh = allocate_block_ref_with_eviction();
+            if (!fresh) {
                 // Rollback everything we allocated/shared in this call.
                 rollback_partial_allocation(seq_id, blocks, hashes, original_size);
                 return -1;
             }
 
-            blocks.push_back(block_id);
+            blocks.push(std::move(fresh));
             hashes.push_back(block_hash);
             // Don't register in hash table yet — KV data hasn't been computed.
             // register_block_hashes() will be called after prefill.
             parent_hash = block_hash;
         } else {
             // Partial block or prefix caching disabled — plain allocation.
-            int block_id = allocate_block_with_eviction();
-            if (block_id < 0) {
+            BlockRef plain = allocate_block_ref_with_eviction();
+            if (!plain) {
                 rollback_partial_allocation(seq_id, blocks, hashes, original_size);
                 return -1;
             }
 
-            blocks.push_back(block_id);
+            blocks.push(std::move(plain));
             if (is_full_block) {
                 size_t block_hash = compute_block_hash(tokens.subspan(block_start, block_tokens),
                                                        parent_hash);
@@ -625,7 +614,7 @@ void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> 
             break;  // Only full blocks are cacheable.
 
         // Skip recomputation if hash was already computed during allocate_blocks_with_prefix
-        int block_id = blocks[b];
+        int block_id = blocks.id_at(static_cast<size_t>(b));
         if (b < static_cast<int>(hashes.size()) && hashes[b] != 0) {
             size_t existing_hash = hashes[b];
             if (block_hash_to_id_.find(existing_hash) == block_hash_to_id_.end()) {
@@ -693,22 +682,20 @@ int KVCacheManager::reclaim_cached_block() {
     return block_id;
 }
 
-int KVCacheManager::allocate_block_with_eviction() {
-    int block_id = cache_->allocate_block();
-    if (block_id >= 0)
-        return block_id;
+BlockRef KVCacheManager::allocate_block_ref_with_eviction() {
+    BlockRef ref = cache_->acquire_block_ref();
+    if (ref)
+        return ref;
 
     // Try reclaiming cached blocks (cheaper than evicting a sequence).
-    // Loop until we get a usable block or exhaust all reclaimable cached blocks.
     while (!cached_blocks_lru_.empty()) {
         if (reclaim_cached_block() < 0)
             break;  // All remaining cached blocks are pinned.
-        block_id = cache_->allocate_block();
-        if (block_id >= 0)
-            return block_id;
+        ref = cache_->acquire_block_ref();
+        if (ref)
+            return ref;
     }
-
-    return -1;  // Caller should try evict_lru() if needed.
+    return BlockRef();  // Caller should try evict_lru() if needed.
 }
 
 // ─── Prefix block pinning ────────────────────────────────────────
@@ -741,7 +728,7 @@ void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
     std::vector<int> owned;
     owned.reserve(to_pin);
     for (int i = 0; i < to_pin; ++i) {
-        int bid = blocks[i];
+        int bid = blocks.id_at(static_cast<size_t>(i));
         if (bid < 0)
             continue;  // StreamingLLM sentinel — physical block already freed
         bool already_pinned = pinned_blocks_.contains(bid);
@@ -1111,7 +1098,7 @@ int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_win
     // Free middle blocks and replace with sentinel.
     int freed = 0;
     for (int i = sink_end_block; i < window_start_block; ++i) {
-        int bid = blocks[i];
+        int bid = blocks.id_at(static_cast<size_t>(i));
         if (bid < 0)
             continue;  // already evicted
         // Drop from prefix-hash table — chain is broken anyway.
@@ -1120,8 +1107,10 @@ int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_win
             block_hash_to_id_.erase(hit->second);
             block_id_to_hash_.erase(hit);
         }
-        cache_->free_block(bid);
-        blocks[i] = -1;
+        // Dropping the reference frees the block; the SLOT stays, as a hole,
+        // so the table length (and the kernels' positional alignment) is
+        // unchanged.
+        blocks.make_hole(static_cast<size_t>(i));
         ++freed;
     }
 
@@ -1133,7 +1122,7 @@ int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_win
         for (int i = sink_end_block; i < total_blocks && i < static_cast<int>(hashes.size()); ++i) {
             // Clear hash entry for window blocks too: their original hash
             // chained through the now-freed middle.
-            int bid = (i < static_cast<int>(blocks.size())) ? blocks[i] : -1;
+            int bid = blocks.id_at(static_cast<size_t>(i));
             if (bid >= 0) {
                 auto hit = block_id_to_hash_.find(bid);
                 if (hit != block_id_to_hash_.end()) {
@@ -1165,9 +1154,8 @@ void KVCacheManager::rollback(int seq_id, int new_seq_len) {
         // -1 sentinels (StreamingLLM evicted middle slots) need no free.
         // Hash-registered blocks must leave the prefix-hash table when this
         // free drops them to ref 0 (stale entry = double-ownership bug).
-        if (blocks.back() >= 0)
-            free_block_dropping_stale_hash(blocks.back());
-        blocks.pop_back();
+        drop_stale_hash_if_last(blocks.back_id());
+        blocks.pop_back();  // dropping the reference is the free
     }
 
     // Trim the block hash vector too.
@@ -1434,6 +1422,7 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
         int block_id;
         size_t buf_offset;  // offset into host_buf for this block's data
         bool copy_ok;
+        BlockRef ref;  // owns the block until it is handed to the cached LRU
     };
     std::vector<LoadEntry> load_entries;
     load_entries.reserve(n_blocks);
@@ -1458,8 +1447,9 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
         }
 
         // Allocate a fresh block
-        int block_id = cache_->allocate_block();
-        if (block_id < 0) {
+        BlockRef block_ref = cache_->acquire_block_ref();
+        const int block_id = block_ref.id();
+        if (!block_ref) {
             IMP_LOG_INFO("Prefix cache: pool exhausted after %d blocks", loaded);
             break;
         }
@@ -1467,7 +1457,7 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
         // Append this block's data to the persistent host buffer
         size_t buf_offset = all_host_buf.size();
         all_host_buf.insert(all_host_buf.end(), read_buf.begin(), read_buf.end());
-        load_entries.push_back({hash, block_id, buf_offset, true});
+        load_entries.push_back({hash, block_id, buf_offset, true, std::move(block_ref)});
         loaded++;
     }
 
@@ -1505,10 +1495,9 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
 
     // Register successfully loaded blocks. Free blocks with failed copies.
     int actual_loaded = 0;
-    for (const auto& entry : load_entries) {
+    for (auto& entry : load_entries) {
         if (!entry.copy_ok) {
-            cache_->free_block(entry.block_id);
-            continue;
+            continue;  // dropping the entry's reference frees the block
         }
 
         block_hash_to_id_[entry.hash] = entry.block_id;
@@ -1518,7 +1507,7 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
         reclaimable_cached_count_++;
         cached_blocks_map_.emplace(entry.block_id,
                                    CachedEntry{std::prev(cached_blocks_lru_.end()),
-                                               cache_->adopt_block(entry.block_id)});
+                                               std::move(entry.ref)});
 
         actual_loaded++;
     }

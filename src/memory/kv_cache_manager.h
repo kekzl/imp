@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <vector>
 #include <memory>
+#include <utility>
 
 namespace imp {
 
@@ -333,24 +334,79 @@ public:
     static size_t compute_block_hash(std::span<const int32_t> tokens, size_t parent_hash);
 
 private:
-    // Free a block that is about to leave its owning sequence. When this
-    // free drops the ref count to 0, the block's prefix-hash entries are
-    // erased first — a stale hash->id entry on a free-listed block lets a
-    // later prefix match inc_ref a block the allocator still hands out
-    // (double ownership -> free-list duplicates). See LeakUnderSustainedChurn.
-    void free_block_dropping_stale_hash(int block_id);
+    // A sequence's positional block table. refs_[i] is the OWNING reference;
+    // an empty ref is a hole, which StreamingLLM's evict_middle_blocks()
+    // creates deliberately — the table LENGTH must not change, because the
+    // attention kernels derive positional alignment from it.
+    //
+    // block_table() still hands out a plain vector<int> so the ~10 consumers
+    // in runtime/ are untouched; it is derived from refs_ and rebuilt lazily,
+    // so the two cannot drift.
+    class SeqBlocks {
+    public:
+        size_t size() const { return refs_.size(); }
+        bool empty() const { return refs_.empty(); }
+        int id_at(size_t i) const { return i < refs_.size() && refs_[i] ? refs_[i].id() : -1; }
+        int back_id() const { return refs_.empty() ? -1 : id_at(refs_.size() - 1); }
 
-    // Rollback a partial block allocation: free blocks added after
-    // original_size, trim the blocks/hashes vectors, and erase the
-    // sequence entries if empty.
-    void rollback_partial_allocation(int seq_id, std::vector<int>& blocks, std::vector<size_t>& hashes,
+        void push(BlockRef r) {
+            refs_.push_back(std::move(r));
+            dirty_ = true;
+        }
+        void pop_back() {
+            refs_.pop_back();
+            dirty_ = true;
+        }
+        // Shrinking drops the references, which is what frees the blocks.
+        void resize(size_t n) {
+            refs_.resize(n);
+            dirty_ = true;
+        }
+        // Move the reference out, leaving a hole. Used when ownership passes
+        // to the prefix cache.
+        BlockRef take(size_t i) {
+            dirty_ = true;
+            return i < refs_.size() ? std::move(refs_[i]) : BlockRef();
+        }
+        // Drop the reference, leaving a hole (StreamingLLM eviction).
+        void make_hole(size_t i) {
+            if (i < refs_.size())
+                refs_[i].reset();
+            dirty_ = true;
+        }
+
+        const std::vector<int>& ids() const {
+            if (dirty_) {
+                ids_.resize(refs_.size());
+                for (size_t i = 0; i < refs_.size(); ++i)
+                    ids_[i] = refs_[i] ? refs_[i].id() : -1;
+                dirty_ = false;
+            }
+            return ids_;
+        }
+
+    private:
+        std::vector<BlockRef> refs_;
+        mutable std::vector<int> ids_;
+        mutable bool dirty_ = true;
+    };
+
+    // Erase a block's prefix-hash entries when this is its last reference.
+    // A stale hash->id entry on a block that is about to be free-listed lets
+    // a later prefix match share a block the allocator still hands out.
+    void drop_stale_hash_if_last(int block_id);
+
+    // Rollback a partial block allocation: drop the references added after
+    // original_size, trim the hashes vector, and erase the sequence entries
+    // if empty.
+    void rollback_partial_allocation(int seq_id, SeqBlocks& blocks, std::vector<size_t>& hashes,
                                      size_t original_size);
 
     // Underlying block-level cache (owns the memory pool).
     std::unique_ptr<KVCache> cache_;
 
     // seq_id -> ordered list of block ids.
-    std::unordered_map<int, std::vector<int>> seq_blocks_;
+    std::unordered_map<int, SeqBlocks> seq_blocks_;
 
     // ── SWA-aware sizing state ───────────────────────────────────────
     // seq_id -> positional SWA-group block table (parallel to seq_blocks_,
@@ -437,7 +493,7 @@ private:
     int reclaim_cached_block();
 
     // Internal: allocate a fresh block, reclaiming cached blocks if needed.
-    int allocate_block_with_eviction();
+    [[nodiscard]] BlockRef allocate_block_ref_with_eviction();
 
     // ── Residual FP16 cache state ────────────────────────────────────
     // Single contiguous pool. Layout per element:

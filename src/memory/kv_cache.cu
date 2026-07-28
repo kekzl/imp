@@ -325,7 +325,7 @@ void KVCache::free_block(int block_id) { blocks_.release_raw(block_id); }
 
 BlockRef KVCache::acquire_block_ref() { return blocks_.acquire(); }
 
-BlockRef KVCache::adopt_block(int block_id) { return blocks_.adopt_raw(block_id); }
+BlockRef KVCache::share_block(int block_id) { return blocks_.share_by_id(block_id); }
 
 // ---------------------------------------------------------------------------
 // SWA block group (kv_cache.swa_sizing): separate id space, no sharing —

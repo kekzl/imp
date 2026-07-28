@@ -4,6 +4,37 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Memory architecture A7 step 3.3/3.4 (sequences own their blocks) — no regression detected
+
+`KVCacheManager::seq_blocks_` now stores `BlockRef` per positional slot
+instead of `int`. `block_table()` still returns `const vector<int>&`, derived
+and rebuilt lazily on mutation — so there is one O(table) rebuild per appended
+block (once per `block_size` decode steps), which is the only thing here that
+could plausibly cost anything.
+
+Back-to-back A/B against a rebuilt parent, 3 trials each:
+
+| arm | pp512 (median) | tg128 (median) |
+|---|---:|---:|
+| parent (step 3.2) | 11646.31 | 272.48 |
+| change (step 3.3/3.4) | 11924.59 | 276.27 |
+
+Medians favour the change (+2.4% prefill, +1.4% decode), which is not a real
+speedup — **the host was noisy** (the operator was streaming on the same GPU):
+within-arm spread reached 6% (change arm tg128 276.28/276.27/260.41, parent
+269.14/272.48/272.93). The supportable claim is **no regression detected**;
+nothing finer than that is measurable in this window, and the absolute level
+(~272-276 vs the 285.69 measured on a quiet host earlier the same day) is host
+state, not code. Re-measure on a quiet host before pinning anything.
+
+Correctness: `test-kv` 57/57, `test-core` 668/668, and with `IMP_TEST_MODEL`
+set the e2e set 18/18 — `PrefixCacheE2ETest` 4/4 (token-identity),
+`DegenerationTest` 5/5, `ChunkedPrefillTest` 7/7, plus
+`KVCacheManagerTest.PersistedCacheFingerprintGate`, which covers the
+save/load path whose `LoadEntry` now carries an owning reference.
+
+---
+
 ## 2026-07-29 · Memory architecture A7 step 3.2 (prefix cache owns its blocks) — neutral
 
 The cached LRU now holds its own `BlockRef` per entry; `free_sequence()`

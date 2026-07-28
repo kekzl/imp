@@ -115,6 +115,11 @@ public:
     // Take a free block with refcount 1. Invalid BlockRef when exhausted.
     [[nodiscard]] BlockRef acquire();
 
+    // Take a tracked reference to a block that already has at least one
+    // holder — the prefix-reuse case where a second sequence shares a block a
+    // live sequence is still using. Invalid handle if the block is free.
+    [[nodiscard]] BlockRef share_by_id(int id);
+
     // Bytes of one block. Stable for the pool's lifetime (I3): the region
     // never moves and blocks never migrate between ids.
     StableSpan<std::byte> block(int id) const;
@@ -129,17 +134,14 @@ public:
     size_t block_bytes() const;
     int ref_count(int id) const;
 
-    // ── Migration scaffolding (A7 step 3) — see BlockRef::release() ──
-    // Untracked refcount manipulation by id, matching what the KV cache does
-    // today. Deleted with the last int-based caller.
-    void acquire_raw(int id);   // inc_ref on an id whose ref is untracked
-    void release_raw(int id);   // dec_ref on an id whose ref is untracked
-    // Take a tracked handle for an id that already holds an untracked ref,
-    // transferring ownership of that ref to the handle (no count change).
-    [[nodiscard]] BlockRef adopt_raw(int id);
-    // Close without the outstanding-ref check. Only for an owner whose
-    // referents still hold UNTRACKED refs — i.e. the KV cache while its
-    // manager is still int-based. Removed with the last raw caller.
+    // ── Untracked, id-based refcounting ──────────────────────────────
+    // Backs KVCache's int API (allocate_block / free_block / inc_ref), which
+    // its own tests exercise directly. Every OWNER above this layer holds a
+    // BlockRef; these are for the id-based surface only.
+    void acquire_raw(int id);
+    void release_raw(int id);
+    // Close without the outstanding-ref check, for an owner whose referents
+    // hold untracked refs — a bare KVCache used through the int API.
     void abandon();
 
 private:

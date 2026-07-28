@@ -960,7 +960,8 @@ design above, so the argument that produced the original shape stays readable.
 | 2b — shadow plan: run `plan_memory()` next to the live budget at init, log both | **done** | `feat(memory): shadow plan — log what plan_memory would decide` |
 | 3.1 — `KVCache` block ids + refcounts → `BlockPool` (slots mode) | **done** | `refactor(memory): KVCache block ids and refcounts move to BlockPool` |
 | 3.2 — prefix cache holds its own `BlockRef` | **done** | `refactor(memory): the KV prefix cache owns its blocks instead of inheriting them` |
-| 3.3–3.4 — `seq_blocks_` → `BlockRef`, drop the raw scaffolding | not started — see B3 | |
+| 3.3–3.4 — `seq_blocks_` → `BlockRef`, drop the scaffolding | **done** | `refactor(memory): sequences own their KV blocks through BlockRef` |
+| **A7 step 3 complete** | | |
 | 4 — executor workspaces | not started | |
 | 5 — per-request allocations (satisfies I2) | not started | |
 | 6 — weight upload + pre-dequant caches | not started | |
@@ -1054,10 +1055,17 @@ the scale and sketch regions) and becomes a pure address calculator over
    hash()` is now redundant in the common case but is deliberately left in
    place — it still guards the rollback of a *shared* cached block, and
    removing it is a separate decision with its own reasoning.
-4. The pin set needs no ownership change (see the correction above) — only the
-   `reclaimable_cached_count_` bookkeeping follows the cached LRU's new shape.
-5. Delete `KVCache::free_block`/`inc_ref`/`ref_count`, the raw scaffolding
-   (D11) and `BlockPool::abandon()`.
+4. **Done.** The pin set needed no ownership change (see the correction
+   above); its `reclaimable_cached_count_` bookkeeping was already keyed on
+   the cached LRU and is unchanged.
+5. **Done, partially.** `allocate_block_with_eviction()` (int),
+   `free_block_dropping_stale_hash()` and `BlockPool::adopt_raw()` are gone.
+   `KVCache::allocate_block`/`free_block`/`inc_ref`/`ref_count` and their
+   `BlockPool` backing (`acquire_raw`/`release_raw`/`BlockRef::release`/
+   `abandon`) **stay**: they are KVCache's own public int API, exercised
+   directly by `KVCacheTest.KVCacheRefCounting` and used by the SWA group,
+   which has no sharing and therefore no need for handles. They are no longer
+   scaffolding and the comments say so.
 
 **Three traps, all load-bearing:**
 
@@ -1076,6 +1084,32 @@ the scale and sketch regions) and becomes a pure address calculator over
 coherence check (`check-degeneration`) — this touches the KV cache, so a
 repetition loop or a cross-request bleed is the failure to look for, and the
 CPU tests cannot see it.
+
+### B4 — step 3 as built
+
+Final ownership shape:
+
+| owner | holds | drops when |
+|---|---|---|
+| `KVCacheManager::SeqBlocks` (per sequence) | one `BlockRef` per positional slot; an **empty** ref is a hole | the sequence is freed, rolled back, or StreamingLLM-evicted — in every case by the reference going out of scope |
+| `cached_blocks_map_` (prefix cache) | one `BlockRef` per entry | the entry is erased (reclaim, or a reuse that moves it to a sequence) |
+| `pinned_blocks_` / `pin_refcount_` | **nothing** — an eviction-policy overlay | n/a |
+
+Every hand-over is now a `std::move` of a reference rather than an omitted
+free. `free_sequence()` has no "skip the free" branches left; it moves the
+reference into the cache or lets it drop. `evict_middle_blocks()` calls
+`make_hole(i)`, which drops the reference and keeps the slot — the table
+length, and with it the kernels' positional alignment, is unchanged by
+construction rather than by a `-1` convention that every caller has to
+remember.
+
+`block_table()` still returns `const std::vector<int>&`, derived from the refs
+and rebuilt lazily on mutation, so the ~10 consumers in `runtime/` are
+untouched and the two representations cannot drift.
+
+Deleted: `free_block_dropping_stale_hash()` (its guard survives as
+`drop_stale_hash_if_last()`, which no longer also frees),
+`allocate_block_with_eviction()` (int), `BlockPool::adopt_raw()`.
 
 ### B3 — why the remaining step-3 work does not split further
 

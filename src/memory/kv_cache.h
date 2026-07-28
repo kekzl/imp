@@ -56,13 +56,13 @@ public:
     int ref_count(int block_id) const;
     void inc_ref(int block_id);
 
-    // RAII handles over the same id space (A7 step 3). allocate_block() above
-    // is the int-based equivalent and holds an untracked reference; these are
-    // what the manager migrates onto, one referent at a time.
+    // RAII handles over the same id space. These are what KVCacheManager
+    // holds; allocate_block()/free_block()/inc_ref() above are the untracked
+    // int-based equivalents, kept for KVCache's own direct API and its tests.
     [[nodiscard]] BlockRef acquire_block_ref();
-    // Take a handle for an id that already holds an untracked reference,
-    // transferring ownership of it. Invalid handle if the id is free.
-    [[nodiscard]] BlockRef adopt_block(int block_id);
+    // Take an additional tracked reference to a block that is already held
+    // (prefix reuse of a block a live sequence still owns).
+    [[nodiscard]] BlockRef share_block(int block_id);
 
     // Pointer access into the contiguous pool
     void* k_ptr(int layer, int block_id);
