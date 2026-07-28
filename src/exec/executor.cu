@@ -61,8 +61,13 @@ inline void apply_constraint_mask(const imp::InferenceState& st, float* logits, 
         st.regex_constrainer->apply_mask(logits, vocab, stream);
     else if (st.schema_constrainer)
         st.schema_constrainer->apply_mask(logits, vocab, stream);
-    else if (st.json_constrainer)
+    else if (st.json_constrainer) {
+        // Budget-aware close (#1104): hand the remaining output allowance to
+        // the FSM so it can force the document shut before max_tokens cuts it
+        // mid-structure. Harmless when the engine leaves it at -1.
+        st.json_constrainer->set_remaining_budget(st.constrain_remaining_tokens);
         st.json_constrainer->apply_mask(logits, vocab, stream);
+    }
 }
 
 }  // namespace

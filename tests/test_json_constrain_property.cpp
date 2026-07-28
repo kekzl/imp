@@ -286,5 +286,124 @@ TEST(JsonConstrainPropertyTest, RejectsWrongCloserAtNestedDepth) {
     EXPECT_GT(exercised, 0) << "generator produced no nested closers — test is vacuous";
 }
 
+// --- #1104 probe: does the number FSM reject a second decimal point? --------
+// The live failure on Qwen3.6-35B-A3B-NVFP4 was `{"city":    3.5.5.5.5...`,
+// i.e. the mask admitted `.` inside an already-fractional number. If the FSM
+// itself accepts that, the bug is grammar-level and CPU-reproducible; if it
+// rejects it, the mask is right and something bypasses it at decode time.
+TEST(JsonConstrainFsm, RejectsSecondDecimalPointInNumber) {
+    JsonConstrainer c;
+    c.advance_text("{\"city\":");
+    EXPECT_TRUE(c.sim_token_valid("3.5")) << "FSM rejected a plain fractional number";
+
+    JsonConstrainer d;
+    d.advance_text("{\"city\": 3.5");
+    EXPECT_FALSE(d.sim_token_valid(".5"))
+        << "FSM accepted a SECOND decimal point — this is the #1104 output shape";
+    EXPECT_FALSE(d.sim_token_valid(".")) << "FSM accepted '.' after a fractional number";
+}
+
+// Full RFC 8259 number grammar, both directions. The permissive version
+// accepted every one of these malformed forms.
+TEST(JsonConstrainFsm, NumberGrammarMatchesRfc8259) {
+    struct Case {
+        const char* num;
+        bool valid;
+    };
+    const Case cases[] = {
+        {"0", true},
+        {"-0", true},
+        {"3", true},
+        {"3.5", true},
+        {"1e5", true},
+        {"1E5", true},
+        {"1e+5", true},
+        {"1e-5", true},
+        {"-2.5e-3", true},
+        {"3.5.5", false},  // second decimal point — the #1104 shape
+        {"1e5e5", false},  // second exponent
+        {"1e+-5", false},  // double sign
+        {"3-5", false},    // sign inside the mantissa
+        {"1.2e", false},
+        {"3.", false},
+        {"-", false},  // incomplete: still owe a digit
+        // Whitespace ends a number; it must never splice one back together.
+        {"1 ", true},
+        {"1.  1", false},
+        {"1.  ", false},
+    };
+    for (const auto& c : cases) {
+        JsonConstrainer fsm;
+        // Wrap in an object so the number sits in a real value position, and
+        // require the document to close — an incomplete number must not be
+        // terminable by '}'.
+        const std::string doc = std::string("{\"v\":") + c.num + "}";
+        EXPECT_EQ(fsm.sim_token_valid(doc), c.valid)
+            << "number '" << c.num << "' judged " << (c.valid ? "invalid" : "valid")
+            << " — document: " << doc;
+    }
+}
+
+// The simulator must not leak number sub-state onto the live FSM.
+TEST(JsonConstrainFsm, SimulationDoesNotMutateNumberSubState) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"v\":3.5");
+    EXPECT_FALSE(fsm.sim_token_valid(".5"));  // walks into the number, then unwinds
+    EXPECT_TRUE(fsm.sim_token_valid("e5"));   // exponent still available afterwards
+    EXPECT_TRUE(fsm.sim_token_valid("}"));    // and the number can still be closed
+}
+// --- #1104 part 2: force-close near the token budget ------------------------
+// The grammar fix alone still let a wandering model run to max_tokens inside a
+// long string, returning a truncated document. With the remaining allowance
+// known, the mask must narrow to the closers.
+TEST(JsonConstrainFsm, ForceCloseNarrowsMaskWhenBudgetIsSpent) {
+    // Deep inside a string value: {"a":"xxxx  → open object + open string.
+    // The narrowing is a MASK decision, so assert on the category mask —
+    // sim_token_valid() answers grammar legality, and "y" is legal in a string
+    // no matter how little budget is left.
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"a\":\"xxxx");
+
+    fsm.set_remaining_budget(100);
+    EXPECT_TRUE(fsm.allowed_categories_for_test() & CAT_STRING_CHAR)
+        << "narrowing engaged while the budget was comfortable";
+
+    fsm.set_remaining_budget(1);
+    const uint16_t tight = fsm.allowed_categories_for_test();
+    EXPECT_FALSE(tight & CAT_STRING_CHAR) << "string content still allowed with no budget left";
+    EXPECT_TRUE(tight & CAT_QUOTE) << "closing quote must stay available";
+
+    fsm.set_remaining_budget(-1);
+    EXPECT_TRUE(fsm.allowed_categories_for_test() & CAT_STRING_CHAR)
+        << "narrowing engaged with an unknown budget";
+}
+
+// Once the structures are closed the document must be completable, not stuck.
+TEST(JsonConstrainFsm, ForceCloseStillReachesAValidDocument) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"a\":\"xx");
+    fsm.set_remaining_budget(1);
+    ASSERT_TRUE(fsm.allowed_categories_for_test() & CAT_QUOTE);
+    fsm.advance_text("\"");  // close the string
+    EXPECT_TRUE(fsm.allowed_categories_for_test() & CAT_CLOSE_BRACE)
+        << "object closer unavailable after closing the string";
+    EXPECT_TRUE(fsm.sim_token_valid("}")) << "grammar rejects the closer the mask offers";
+}
+
+// #1104: raw control characters must never reach a string. The grammar has
+// always rejected them; apply_mask's in-string fast path skipped the check for
+// any token without a quote or a backslash, which is exactly what a newline
+// token is. Pinned at the grammar level here — the fast path is a GPU path,
+// but it now defers to the same rule.
+TEST(JsonConstrainFsm, RejectsRawControlCharsInsideStrings) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"k\":\"abc");
+    EXPECT_FALSE(fsm.sim_token_valid("\n")) << "raw newline accepted inside a string";
+    EXPECT_FALSE(fsm.sim_token_valid("de\nf")) << "raw newline accepted mid-token";
+    EXPECT_FALSE(fsm.sim_token_valid("\t")) << "raw tab accepted inside a string";
+    EXPECT_TRUE(fsm.sim_token_valid("def")) << "ordinary string content rejected";
+    EXPECT_TRUE(fsm.sim_token_valid("\\n")) << "ESCAPED newline must stay legal";
+}
+
 }  // namespace
 }  // namespace imp

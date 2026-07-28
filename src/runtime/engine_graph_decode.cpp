@@ -531,6 +531,9 @@ int Engine::step_constrained_pipeline() {
     //    last harvested token and uploaded stream-ordered behind the
     //    producer of those logits.
     p.state.seed = engine_internal::compute_step_seed(*req);
+    // Remaining output allowance for the force-close mask (#1104) — the
+    // pipeline keeps its own InferenceState, so it must be refreshed per tick.
+    p.state.constrain_remaining_tokens = req->max_tokens - static_cast<int>(req->output_tokens.size());
     // Think-budget enforcement (mirrors fill_sampling_params): when the
     // reasoning budget is exhausted mid-think, force </think> this step.
     p.state.force_token = -1;

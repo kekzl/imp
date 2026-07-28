@@ -84,13 +84,58 @@ void JsonConstrainer::reset() {
     partial_literal_.clear();
     target_literal_.clear();
     ws_run_ = 0;
+    enter_number_('0');  // clear the number sub-state (see #1104)
+    num_need_digit_ = false;
     preamble_.reset();
+}
+
+// Seed the RFC 8259 number sub-state on entry. `c` is the first character of
+// the number: a bare '-' still owes its first digit, a digit does not.
+void JsonConstrainer::enter_number_(char c) {
+    num_seen_frac_ = false;
+    num_seen_exp_ = false;
+    num_exp_sign_ok_ = false;
+    num_need_digit_ = (c == '-');
 }
 
 uint16_t JsonConstrainer::compute_allowed_mask() const {
     // Whitespace is legal between any JSON tokens, but cap the run length —
     // see advance_char. (EOS has its own CAT_EOS bit, allowed in DONE only.)
     constexpr int kMaxWsRun = 32;
+
+    // Force-close near the budget (#1104). A constrainer can forbid illegal
+    // tokens but cannot force termination, so a model inside a long string or
+    // a whitespace flood runs to max_tokens and returns a truncated document
+    // that no client can parse. Once only just enough tokens remain to shut
+    // everything that is open, narrow the mask to exactly the closers. The
+    // estimate deliberately errs high (the string's parent frame is already on
+    // the stack), because closing a few tokens early is strictly better than
+    // returning unparseable output. Disabled while the budget is unknown (-1).
+    force_close_active_ = false;
+    if (remaining_budget_ >= 0 && current_state_ != JsonState::DONE) {
+        const bool in_escape = (current_state_ == JsonState::IN_STRING_ESCAPE);
+        const bool in_string = (current_state_ == JsonState::IN_STRING ||
+                                current_state_ == JsonState::OBJECT_KEY);
+        // state_stack_ holds only the RETURN states of *nested* values, not the
+        // container we are currently inside — at `{"a"` the stack is empty
+        // while a '}' is still owed. Count that container explicitly, or the
+        // narrowing releases one token too early and the document is truncated
+        // anyway (observed: needed=0 in AFTER_KEY with an object still open).
+        const bool in_container = (current_state_ != JsonState::START && current_state_ != JsonState::DONE);
+        const int needed = static_cast<int>(state_stack_.size()) + (in_container ? 1 : 0) +
+                           (in_escape   ? 2
+                            : in_string ? 1
+                                        : 0);
+        if (remaining_budget_ <= needed) {
+            force_close_active_ = true;
+            if (in_escape)
+                return CAT_STRING_CHAR;  // finish the escape, close on the next tick
+            if (in_string)
+                return CAT_QUOTE;  // close the string, then the structures
+            return CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
+        }
+    }
+
     uint16_t mask = (ws_run_ < kMaxWsRun) ? CAT_WHITESPACE : 0;
 
     switch (current_state_) {
@@ -195,6 +240,17 @@ bool JsonConstrainer::advance_char(char c) {
     // whole-token simulation in apply_mask() uses it to reject tokens whose
     // FIRST char passes the category mask but whose tail violates the
     // grammar (e.g. the single token "[]." — '.' after a completed value).
+    // Whitespace TERMINATES a number, it does not continue one: "1.  1" is not
+    // a JSON number, yet the blanket skip below kept the FSM in IN_NUMBER and
+    // let the emitted text interleave digits with spaces (#1104). Close the
+    // number first, then let the whitespace be skipped in the parent state.
+    if (current_state_ == JsonState::IN_NUMBER && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+        if (num_need_digit_)
+            return false;  // "1." / "1e" / "-" cannot end here
+        current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
+        if (!state_stack_.empty())
+            state_stack_.pop_back();
+    }
     if (current_state_ != JsonState::IN_STRING && current_state_ != JsonState::IN_STRING_ESCAPE &&
         (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
         ws_run_++;
@@ -278,6 +334,7 @@ bool JsonConstrainer::advance_char(char c) {
             } else if ((c >= '0' && c <= '9') || c == '-') {
                 state_stack_.push_back(JsonState::AFTER_VALUE);
                 current_state_ = JsonState::IN_NUMBER;
+                enter_number_(c);
             } else {
                 return false;
             }
@@ -334,6 +391,7 @@ bool JsonConstrainer::advance_char(char c) {
             } else if ((c >= '0' && c <= '9') || c == '-') {
                 state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::IN_NUMBER;
+                enter_number_(c);
             } else {
                 return false;
             }
@@ -381,8 +439,40 @@ bool JsonConstrainer::advance_char(char c) {
             current_state_ = JsonState::IN_STRING;
             break;
 
-        case JsonState::IN_NUMBER:
-            if (!((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')) {
+        case JsonState::IN_NUMBER: {
+            // RFC 8259 number grammar. The old test accepted every one of
+            // '.', 'e', 'E', '+', '-' unconditionally, which made "3.5.5.5"
+            // legal and left a degenerating model with no forced way out (#1104).
+            bool ok = false;
+            if (c >= '0' && c <= '9') {
+                ok = true;
+                num_need_digit_ = false;
+                num_exp_sign_ok_ = false;
+            } else if (c == '.') {
+                ok = !num_seen_frac_ && !num_seen_exp_ && !num_need_digit_;
+                if (ok) {
+                    num_seen_frac_ = true;
+                    num_need_digit_ = true;  // frac = "." 1*DIGIT
+                }
+            } else if (c == 'e' || c == 'E') {
+                ok = !num_seen_exp_ && !num_need_digit_;
+                if (ok) {
+                    num_seen_exp_ = true;
+                    num_exp_sign_ok_ = true;
+                    num_need_digit_ = true;  // exp = e [sign] 1*DIGIT
+                }
+            } else if (c == '+' || c == '-') {
+                ok = num_exp_sign_ok_;
+                if (ok) {
+                    num_exp_sign_ok_ = false;
+                    num_need_digit_ = true;
+                }
+            }
+            if (!ok) {
+                // A number still owing a digit ("3.", "1e", "-") is incomplete:
+                // nothing may terminate it, not even a structural char.
+                if (num_need_digit_)
+                    return false;
                 // Number ended — this char is part of the parent context
                 // Pop back to parent and re-process this character
                 current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
@@ -391,6 +481,7 @@ bool JsonConstrainer::advance_char(char c) {
                 return advance_char(c);  // re-process in parent context
             }
             break;
+        }
 
         case JsonState::IN_LITERAL:
             // Strict: the char must be the literal's next expected char
@@ -422,6 +513,11 @@ bool JsonConstrainer::sim_token_valid(const std::string& text) {
     const std::string plit = partial_literal_;
     const std::string tlit = target_literal_;
     const int ws = ws_run_;
+    // The number sub-state is part of the FSM and MUST round-trip too — a
+    // simulated token that walks into a number would otherwise leave
+    // num_seen_frac_/num_need_digit_ mutated on the real state (#1104).
+    const bool nfrac = num_seen_frac_, nexp = num_seen_exp_;
+    const bool nsign = num_exp_sign_ok_, ndig = num_need_digit_;
     std::vector<JsonState> stack_copy = state_stack_;
 
     bool ok = true;
@@ -437,6 +533,10 @@ bool JsonConstrainer::sim_token_valid(const std::string& text) {
     (void)depth;
     partial_literal_ = plit;
     target_literal_ = tlit;
+    num_seen_frac_ = nfrac;
+    num_seen_exp_ = nexp;
+    num_exp_sign_ok_ = nsign;
+    num_need_digit_ = ndig;
     ws_run_ = ws;
     return ok;
 }
@@ -450,6 +550,20 @@ void JsonConstrainer::update(int32_t token) {
     for (char c : text) {
         advance_char(c);
     }
+}
+
+// Inside a string, a token that carries no '"' and no '\\' cannot change the
+// FSM state — the old shortcut concluded from that it must be legal and skipped
+// the whole-token simulation. It can still be ILLEGAL: JSON forbids raw control
+// characters (U+0000-U+001F) in strings, advance_char rejects them, and the
+// shortcut walked straight past that guard. A model then emitted a raw newline
+// inside a string and the reply did not parse (#1104).
+static bool string_token_needs_simulation(const std::string& text) {
+    for (char c : text) {
+        if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20)
+            return true;
+    }
+    return false;
 }
 
 void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
@@ -486,8 +600,7 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
             const std::string& text = token_texts_[i];
             if (token_categories_[i] == CAT_EOS) {
                 allow = 1;  // EOS already gated by the mask (DONE state only)
-            } else if (in_string && text.find('"') == std::string::npos &&
-                       text.find('\\') == std::string::npos) {
+            } else if (in_string && !string_token_needs_simulation(text)) {
                 allow = 1;
             } else {
                 allow = sim_token_valid(text) ? 1 : 0;
@@ -495,6 +608,34 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
         }
         token_allow_[i] = allow;
         n_allowed += allow;
+    }
+
+    // Force-close safety net: the narrowed mask offers only closers, and a
+    // closer is not legal in every state — after a key the grammar demands
+    // ':' and a value first. Narrowing there leaves nothing legal, which used
+    // to drop straight into the EOS guard below and end the reply mid-document
+    // with finish_reason="stop" (worse than the truncation it was meant to
+    // prevent). Retry once with the ordinary mask: force-close may help, it
+    // must never make the outcome worse.
+    if (n_allowed == 0 && force_close_active_) {
+        const int saved = remaining_budget_;
+        remaining_budget_ = -1;  // disable narrowing for this recompute
+        mask = compute_allowed_mask();
+        remaining_budget_ = saved;
+        for (int i = 0; i < n_classified; i++) {
+            uint8_t allow = 0;
+            if ((token_categories_[i] & mask) != 0) {
+                const std::string& text = token_texts_[i];
+                if (token_categories_[i] == CAT_EOS)
+                    allow = 1;
+                else if (in_string && !string_token_needs_simulation(text))
+                    allow = 1;
+                else
+                    allow = sim_token_valid(text) ? 1 : 0;
+            }
+            token_allow_[i] = allow;
+            n_allowed += allow;
+        }
     }
 
     // Empty-allow guard: if NOTHING passes (over-tight schema/state combo),

@@ -149,6 +149,9 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
     state.frequency_penalty = req.frequency_penalty;
     state.presence_penalty = req.presence_penalty;
     state.repeat_last_n = req.repeat_last_n;
+    // Remaining output allowance — the JSON constrainer uses it to force the
+    // document closed before max_tokens truncates it mid-structure (#1104).
+    state.constrain_remaining_tokens = req.max_tokens - static_cast<int>(req.output_tokens.size());
     state.dry_multiplier = req.dry_multiplier;
     state.dry_base = req.dry_base;
     state.dry_allowed_length = req.dry_allowed_length;

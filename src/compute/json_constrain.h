@@ -79,6 +79,12 @@ public:
     // Reset FSM for a new generation.
     void reset();
 
+    // Output tokens still available to the request. Once only just enough
+    // remain to close every open structure, the mask narrows to the closers so
+    // the document always ends well-formed instead of being truncated (#1104).
+    // -1 (default) disables the narrowing entirely.
+    void set_remaining_budget(int n) { remaining_budget_ = n; }
+
     // Check if initialized
     bool is_initialized() const { return initialized_; }
 
@@ -89,6 +95,12 @@ public:
     // true iff every char is a legal grammar continuation. Public for the
     // FSM unit tests; apply_mask uses it for whole-token validation.
     bool sim_token_valid(const std::string& text);
+
+    // Category mask the decode path would apply right now. Public for the FSM
+    // unit tests: apply_mask() needs an initialised GPU vocabulary, but the
+    // force-close narrowing (#1104) lives in this mask, not in the grammar
+    // simulator, so sim_token_valid() cannot observe it.
+    uint16_t allowed_categories_for_test() const { return compute_allowed_mask(); }
 
     // Advance the FSM over raw text (tests use this to reach mid-document
     // states; the decode path goes through update()).
@@ -139,6 +151,17 @@ private:
     // Consecutive whitespace chars in non-string states (escape-hatch cap,
     // see advance_char/compute_allowed_mask).
     int ws_run_ = 0;
+    // JSON number sub-state (RFC 8259: [minus] int [frac] [exp]). Without it
+    // IN_NUMBER accepted '.', 'e', 'E', '+', '-' an unlimited number of times,
+    // so "3.5.5.5.5…" was a legal continuation and a model that wandered into
+    // a number could never be forced out of it — the request then ran to
+    // max_tokens and returned truncated, unparseable JSON (#1104).
+    bool num_seen_frac_ = false;    // a '.' has been consumed
+    bool num_seen_exp_ = false;     // an 'e'/'E' has been consumed
+    bool num_exp_sign_ok_ = false;  // '+'/'-' legal only right after 'e'/'E'
+    bool num_need_digit_ = false;   // a digit is required next (after '-', '.', 'e', sign)
+    int remaining_budget_ = -1;     // see set_remaining_budget
+    mutable bool force_close_active_ = false;  // last compute_allowed_mask() narrowed
     std::string partial_literal_;  // for tracking partial "true"/"false"/"null"
     std::string target_literal_;   // full expected literal
 
@@ -157,6 +180,7 @@ private:
 
     // Advance FSM by one character
     bool advance_char(char c);
+    void enter_number_(char c);  // seed the RFC 8259 number sub-state (#1104)
 };
 
 }  // namespace imp

@@ -96,6 +96,15 @@ struct SchemaFrame {
     // (JSON forbids leading zeros: `0` is fine, `09` is not). Cleared once a
     // '.'/'e' is seen. Guards integer/number degeneration like `0999...`.
     bool num_leading_zero = false;
+
+    // RFC 8259 number sub-state. Without it the NUMBER_VALUE phase accepted
+    // '.', 'e', 'E', '+', '-' unconditionally, so "3.5.5.5…" was legal and a
+    // degenerating model could not be forced to close the number (#1104 —
+    // same defect as JsonConstrainer's IN_NUMBER).
+    bool num_frac = false;        // a '.' has been consumed
+    bool num_exp = false;         // an 'e'/'E' has been consumed
+    bool num_sign_ok = false;     // '+'/'-' legal only right after 'e'/'E'
+    bool num_need_digit = false;  // a digit is required next
 };
 
 class SchemaConstrainer {

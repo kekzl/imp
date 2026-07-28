@@ -222,5 +222,36 @@ TEST(SchemaConstrainPropertyTest, RejectsValueOutsideEnum) {
     EXPECT_FALSE(sc->token_legal(R"({"c":"redd"})"));  // valid prefix, invalid whole
 }
 
+// ===========================================================================
+// #1104 — the schema FSM carried the same permissive number grammar as
+// JsonConstrainer: '.', 'e', 'E', '+', '-' were accepted unconditionally in
+// NUMBER_VALUE, so "3.5.5.5…" was legal and a degenerating model could not be
+// forced to close the number. Live symptom: the reply ran to max_tokens and
+// came back as truncated, unparseable JSON.
+// ===========================================================================
+TEST(SchemaConstrainPropertyTest, NumberGrammarMatchesRfc8259) {
+    const std::string schema = R"({"type":"object","properties":{"v":{"type":"number"}},)"
+                               R"("required":["v"],"additionalProperties":false})";
+    struct Case {
+        const char* num;
+        bool valid;
+    };
+    const Case cases[] = {
+        {"0", true},      {"-0", true},   {"3", true},       {"3.5", true},    {"1e5", true},
+        {"1E5", true},    {"1e+5", true}, {"-2.5e-3", true}, {"3.5.5", false},  // second decimal point — the
+                                                                                // observed shape
+        {"1e5e5", false},                                // second exponent
+        {"1e+-5", false},                                // double sign
+        {"3.", false},    {"1e", false},  {"-", false},  // incomplete: still owe a digit
+    };
+    for (const auto& c : cases) {
+        auto sc = make_fsm(schema);
+        ASSERT_NE(sc, nullptr);
+        const std::string doc = std::string("{\"v\":") + c.num + "}";
+        EXPECT_EQ(sc->token_legal(doc), c.valid) << "number '" << c.num << "' judged "
+                                                 << (c.valid ? "invalid" : "valid") << " — document: " << doc;
+    }
+}
+
 }  // namespace
 }  // namespace imp
