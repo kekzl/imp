@@ -662,19 +662,37 @@ today after the fact.
 
 ### A5.1 Paged KV + prefix cache + pinning — who owns a block
 
-A KV block has **three concurrent referents** (COW-fork does not exist — A1.6):
+> **Corrected 2026-07-29 during step 3 (B3).** This section originally said a
+> block has three refcount holders — sequence, prefix cache, pin set. That is
+> wrong, and the correction changes what step 3 has to do. There are **two**
+> holders; the pin set is an eviction *policy* overlay, not an owner. Verified:
+> `kv_cache_manager.cpp` contains exactly **one** `cache_->inc_ref` call site
+> (line 536, prefix reuse) and none of the pin paths touch the KV refcount at
+> all. The text below is the corrected version.
+
+A KV block has **two refcount holders** (COW-fork does not exist — A1.6):
 
 1. **`seq_blocks_[seq_id]`** — an active sequence's positional block table.
-2. **`block_hash_to_id_`** — the content-addressed prefix cache. Holds a block
-   after its sequence is freed so a later sequence can reuse it.
-3. **`pinned_blocks_` / `pin_refcount_`** — agentic prefix pinning, with its own
-   FIFO owner list and budget, deliberately surviving `free_sequence()`.
+   Takes a reference on allocation, drops it in `free_sequence()`.
+2. **The cached LRU** (`cached_blocks_lru_` + `block_hash_to_id_`) — the
+   content-addressed prefix cache. It holds no reference of its own; it
+   survives because `free_sequence()` *deliberately skips* the free, leaving
+   the count at 1. That is the defect: liveness by omission rather than by
+   ownership.
 
-Plus a fourth, out-of-process referent: `save_prefix_cache()` / `load_prefix_
-cache()` serialise blocks to disk and re-register hashes on load.
+And one thing that is **not** a holder, though it behaves like a referent:
 
-**Ownership rule: the `BlockPool` owns the memory; nobody else does. All three
-referents hold `BlockRef`s.** A block is returned to the free list when — and
+3. **`pinned_blocks_` / `pin_refcount_`** — agentic prefix pinning. Its counts
+   are *pin-owner* counts, not KV refcounts. A pinned block stays alive because
+   it sits in the cached LRU at count 1; pinning only makes
+   `reclaim_cached_block()` rotate past it. So the pin set migrates as
+   **policy**, not as ownership — nothing to give it a `BlockRef` for.
+
+Plus one out-of-process referent: `save_prefix_cache()` / `load_prefix_cache()`
+serialise blocks to disk and re-register hashes on load.
+
+**Ownership rule: the `BlockPool` owns the memory; nobody else does. Both
+holders hold `BlockRef`s.** A block is returned to the free list when — and
 only when — its last `BlockRef` is destroyed. There is no path that frees a
 block by id.
 
@@ -1030,12 +1048,15 @@ the scale and sketch regions) and becomes a pure address calculator over
    (StreamingLLM) frees slots while keeping the table *length*, and the
    attention kernels depend on that positional alignment. `-1` becomes
    `nullopt`; the kernel-facing block table is still built as ints.
-3. The prefix-cache hash table takes its own `BlockRef` per entry. This is
-   what deletes `free_block_dropping_stale_hash()`, whose comment documents
-   the exact double-ownership bug it exists to prevent.
-4. The pin set (`pinned_blocks_` / `pin_refcount_` / `pin_fifo_`) takes
-   `BlockRef`s. Pins surviving `free_sequence()` stops being a special case.
-5. Delete `KVCache::free_block`/`inc_ref`/`ref_count` and the free lists.
+3. The cached LRU takes its own `BlockRef` per entry, and `free_sequence()`
+   stops skipping the free. **This is the load-bearing commit** and it is
+   where the remaining work concentrates — see B3 for why it cannot be split
+   further. It is what deletes `free_block_dropping_stale_hash()`, whose
+   comment documents the exact double-ownership bug it exists to prevent.
+4. The pin set needs no ownership change (see the correction above) — only the
+   `reclaimable_cached_count_` bookkeeping follows the cached LRU's new shape.
+5. Delete `KVCache::free_block`/`inc_ref`/`ref_count`, the raw scaffolding
+   (D11) and `BlockPool::abandon()`.
 
 **Three traps, all load-bearing:**
 
@@ -1054,6 +1075,47 @@ the scale and sketch regions) and becomes a pure address calculator over
 coherence check (`check-degeneration`) — this touches the KV cache, so a
 repetition loop or a cross-request bleed is the failure to look for, and the
 CPU tests cannot see it.
+
+### B3 — why the remaining step-3 work does not split further
+
+Attempted 3.2 (`seq_blocks_` → `BlockRef`) and stopped before committing,
+because the code says the decomposition in B2 is wrong. Recording it so the
+next attempt starts from the real shape.
+
+`free_sequence()` has three branches, and two of them **deliberately do not
+free**:
+
+```cpp
+if (pinned_blocks_.contains(block_id)) {          // keep alive at count 1
+    if (cache_->ref_count(block_id) > 1) cache_->free_block(block_id);
+    ... add to cached LRU ...; continue;
+}
+if (prefix_caching_enabled_ && cache_->ref_count(block_id) == 1) {
+    ... add to cached LRU ...; continue;           // "Skip cache_->free_block()"
+}
+cache_->free_block(block_id);                      // normal
+```
+
+So a sequence's reference is not dropped — it is *left behind* for the cache to
+inherit implicitly. Converting `seq_blocks_` to `BlockRef` first would mean
+writing scaffolding that deliberately leaks the ref in both branches, only to
+delete it one commit later; and converting the cache first requires
+`free_sequence()` to stop skipping in the same change, or the count is off by
+one. **The two are one commit.**
+
+The genuinely hard part is not the storage type. It is that
+`ref_count(block_id) > 1` in the pinned branch means "another sequence also
+holds this block via prefix reuse", and today the code drops exactly one count
+and lets the cache inherit whatever remains. Making the cache a real owner
+forces a decision about what those retained counts mean — and that decision has
+to be taken against what the 58 KV tests actually assert, not against the
+happy path. That is the next session's first task, and it is a reading task
+before it is an editing one.
+
+What is already safe to assume: the scaffolding from D11 (`adopt_raw`,
+`release_raw`, `abandon`) is exactly the right shape for it — `adopt_raw` is
+"the sequence hands its reference to the cache", which is precisely what the
+skip branches mean.
 
 ### Invariants now under test
 
