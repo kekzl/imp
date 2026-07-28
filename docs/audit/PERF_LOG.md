@@ -4,6 +4,38 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-28 · Memory architecture A7 steps 0-2a — hot path untouched, decode/prefill neutral
+
+Three additive commits (Backend + phase guard + I1 gate; arena/block pool/
+scratch stack/stable spans; `plan_memory()`), plus the deletion of the dead
+`src/core/allocator.{h,cpp}`. **Nothing in the engine calls any of it yet** —
+verified: no file outside `src/memory/` includes `backend.h`, `arena.h`,
+`block_pool.h`, `scratch_stack.h`, `span.h` or `plan.h`. The only linked-in
+change to an existing path is that `imp` no longer compiles two unreferenced
+TUs.
+
+Gate-matched harness (Qwen3-8B-Q8_0, `--bench-pp 512 --bench-reps 5
+--max-tokens 128 --prefill-chunk-size 0 --set speculative.ngram=false`,
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`, 3 trials, GPU idle before the run, healthy
+under load at 2917 MHz SM / 14001 MHz mem):
+
+| metric | baseline (`tests/perf_baseline.json`, pinned 2026-07-26) | now (median of 3) | Δ |
+|---|---:|---:|---:|
+| pp512 | 12406.87 | 12354.01 | −0.43% |
+| tg128 | 287.19 | 284.29 | −1.01% |
+
+Trials — pp512: 12311.00 / 12354.01 / 12405.93 · tg128: 284.29 / 284.13 /
+285.07. Both inside the CI gate (5% prefill / 3% decode). The decode −1.01%
+is at this box's noise floor rather than a regression: the commits add no
+call sites to the forward pass, and this host has documented intra-minute
+decode volatility (#999) and whole-day 8-15% depression (#526). Baseline not
+re-pinned — nothing intentionally moved perf.
+
+CPU lane: 608 tests green (`test-core`, no GPU). Gates: `File size` OK,
+new `Alloc sites` gate OK at 78 files / 713 sites (down from 79 / 717).
+
+---
+
 ## 2026-07-17 · CUDA-graph RAII owners (WI-3) — decode neutral
 
 `CudaGraph`/`CudaGraphExec` move-only owners in core/cuda_raii.h; adopted by
