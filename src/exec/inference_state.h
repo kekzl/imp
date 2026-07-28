@@ -131,6 +131,13 @@ struct InferenceState {
     SchemaConstrainer* schema_constrainer = nullptr;
     RegexConstrainer* regex_constrainer = nullptr;
     GrammarConstrainer* grammar_constrainer = nullptr;
+    // Output tokens still available to this request (max_tokens - produced).
+    // A constrainer can forbid illegal tokens but cannot force termination, so
+    // a model that wanders — an unterminated string, a whitespace flood — runs
+    // to the limit and returns truncated, unparseable JSON. With the budget
+    // known, the mask narrows to the closers once only just enough tokens
+    // remain to shut the document (#1104). -1 = unknown, no narrowing.
+    int constrain_remaining_tokens = -1;
 
     // Logit bias (host-side, applied via cudaMemcpy before sampling)
     const std::pair<int32_t, float>* logit_bias = nullptr;
