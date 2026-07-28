@@ -56,6 +56,18 @@ bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes);
 // The pct parameter is a budget-planner knob (imp.conf vram.reserve_floor_pct,
 // consumed only inside compute_vram_budget); the pre-dequant phases keep the
 // default so their internal safety floors stay independent of the knob.
+// Headroom the VRAMAllocator enforces on every allocation >=16 MiB
+// (can_allocate: free >= bytes + headroom). This is a HARD constraint, not a
+// policy knob: a plan that leaves less free than this cannot be executed, the
+// allocation is simply refused. Engine::init and the VRAM budget must agree on
+// it — they used to disagree by 1118 MiB on 32 GB, and the KV pool happily
+// consumed the difference (#1103).
+constexpr int kAllocatorHeadroomPct = 5;
+
+inline size_t vram_allocator_headroom(size_t total_bytes) {
+    return total_bytes * static_cast<size_t>(kAllocatorHeadroomPct) / 100;
+}
+
 inline size_t vram_reserve_floor(size_t total_bytes, int pct = 10) {
     const size_t floor_bytes = 256ULL * 1024 * 1024;
     pct = pct < 0 ? 0 : (pct > 50 ? 50 : pct);

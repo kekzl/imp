@@ -151,6 +151,15 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         budget.reserve_bytes =
             std::max(budget.reserve_bytes, vram_reserve_floor(total_vram, reserve_floor_pct));
     }
+    // Mode 2 skips the reserve-floor POLICY above on purpose (it wants the room
+    // for bigger weight caches), but it must still respect what the allocator
+    // physically enforces. Without this the plan handed the KV pool everything
+    // down to 512 MiB while VRAMAllocator refused any cache allocation that
+    // left less than 1630 MiB free — so the pool was sized from a number that
+    // could never be realised and the caches it starved failed mid-build
+    // ("rejecting fp8_ssm_sidecar ... 0 MiB free, need 1630 MiB headroom"),
+    // costing ~7x decode on gpt-oss-20b at server defaults (#1103).
+    budget.reserve_bytes = std::max(budget.reserve_bytes, vram_allocator_headroom(total_vram));
 
     // Estimate SSM footprint
     size_t ssm_footprint = 0;
