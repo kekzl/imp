@@ -82,6 +82,26 @@ before every run (0 containers, no compute processes); healthy under load
 
 ---
 
+## 2026-07-28 — Phase B, steps 0–2a
+
+### CONFIRMED
+
+| # | Finding | Evidence |
+|---|---|---|
+| B1 | **The I1 gate works as designed on its first real test.** Step 1 deleted the dead `src/core/allocator.{h,cpp}`; the gate immediately failed on the now-stale allowlist entry and refused to pass until it was removed. That is the mechanism that makes "the allowlist shrinks monotonically" structural rather than aspirational. Baseline 79 files / 717 sites → **78 / 713**. | `tools/check_alloc_sites.py` |
+| B2 | **The new code has no engine call sites yet.** Nothing outside `src/memory/` (and the three new test files) includes `backend.h`, `arena.h`, `block_pool.h`, `scratch_stack.h`, `span.h`, `plan.h` or `fake_backend.h`. Steps 0–2a are provably inert; the measured −0.43% prefill / −1.01% decode is noise, not a regression. | grep; `docs/audit/PERF_LOG.md` |
+| B3 | **The whole allocator stack + planner runs GPU-free.** 608 CPU tests green in `test-core`, including block-pool conservation under 5000-step randomised churn, refcount balance across every exception point in a sequence's lifecycle, and plan determinism over 1000 configs. imp has no GPU runner, so this was a hard requirement, not a nicety. | `docker run --rm imp:test test-core` |
+
+### GOTCHAS (Phase B)
+
+| # | Trap |
+|---|---|
+| G5 | **`make build \| tail` swallows the exit code** — a known imp trap, and it bit again here: a failed build reported `BUILD_EXIT=0` because the pipeline's last stage was `tail`. Capture to a file and echo `$?` on its own. |
+| G6 | **Two of my own planner tests encoded wrong premises and failed on first run.** `ChargesTheLibraryReserve...` compared KV block counts at the full 32 GiB budget, where KV stops at what it *needs* and the residual never binds — both arms were identical, so the test would have passed while proving nothing had the arithmetic differed slightly. `KvShrinksToTheResidual...` asserted a 12 GiB budget still plans, when the fixed charges alone consume 12.3 GiB. Both were fixed by correcting the test, not the implementation. Worth recording because a green test here would have been worse than a red one. |
+| G7 | **A `docker build` can fail on a transient DNS lookup for `docker/dockerfile:1`** (the `# syntax=` directive resolves over the network). Retry before debugging anything. |
+
+---
+
 ## Housekeeping note (not a memory finding)
 
 The working tree carries a **staged but uncommitted `#1103` fix** —
