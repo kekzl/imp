@@ -92,6 +92,8 @@ before every run (0 containers, no compute processes); healthy under load
 | B2 | **The new code has no engine call sites yet.** Nothing outside `src/memory/` (and the three new test files) includes `backend.h`, `arena.h`, `block_pool.h`, `scratch_stack.h`, `span.h`, `plan.h` or `fake_backend.h`. Steps 0–2a are provably inert; the measured −0.43% prefill / −1.01% decode is noise, not a regression. | grep; `docs/audit/PERF_LOG.md` |
 | B3 | **The whole allocator stack + planner runs GPU-free.** 608 CPU tests green in `test-core`, including block-pool conservation under 5000-step randomised churn, refcount balance across every exception point in a sequence's lifecycle, and plan determinism over 1000 configs. imp has no GPU runner, so this was a hard requirement, not a nicety. | `docker run --rm imp:test test-core` |
 
+| B4 | **The live budget pass gives the KV pool exactly 2x what the configuration asks for.** `vram_budget.cpp:457` sets `target_blocks = needed_blocks * 2` for every non-mode-2 strategy. Dense server default: `needed = ceil(4096/16) x 8 = 2048`, pool = **4096 blocks / 4608 MiB**, of which 2304 MiB is unreachable by any request the server accepts. Harmless where VRAM is slack; not harmless where the surplus is drawn from the headroom the pre-dequant caches compete for — which is exactly #1100 and #1103. | shadow plan at init, `docs/MEMORY_ARCHITECTURE.md` B1 |
+
 ### GOTCHAS (Phase B)
 
 | # | Trap |

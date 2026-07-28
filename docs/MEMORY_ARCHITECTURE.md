@@ -940,7 +940,7 @@ design above, so the argument that produced the original shape stays readable.
 | 1 — tier allocators + typed spans | **done** | `feat(memory): arena, block pool, scratch stack, stable spans` |
 | 2a — `plan_memory()`, pure and tested | **done** | `feat(memory): plan_memory — capacity planned, not discovered` |
 | 2b — shadow plan: run `plan_memory()` next to the live budget at init, log both | **done** | `feat(memory): shadow plan — log what plan_memory would decide` |
-| 3 — KV pool → `BlockPool`/`BlockRef` | not started | |
+| 3 — KV pool → `BlockPool`/`BlockRef` | **scoped, not started** — see B2 | |
 | 4 — executor workspaces | not started | |
 | 5 — per-request allocations (satisfies I2) | not started | |
 | 6 — weight upload + pre-dequant caches | not started | |
@@ -999,6 +999,58 @@ same order of magnitude as the library reserve the pass cannot see. #1100 and
 Not fixed here: the shadow plan computes and does not apply, and flipping
 `target_blocks` on its own would change KV sizing for every model without the
 rest of the plan behind it. It is what step 6 switches over.
+
+### B2 — step 3 scope (KV pool → `BlockPool`/`BlockRef`)
+
+Written down before starting because this is the step where a subtle error
+does not crash, it silently corrupts cross-request KV — the #1044/#1045 class.
+
+**Blast radius:** `kv_cache.{h,cu}` (615 LOC), `kv_cache_manager.{h,cpp}`
+(1519 LOC), 13 call sites in `runtime/scheduler.cpp` and
+`runtime/engine_scheduler.cpp`, and 58 tests across `test_kv_cache.cpp`,
+`test_fp8_kv_cache.cu`, `test_prefix_cache_equiv.cpp`.
+
+**What actually moves.** `KVCache` today owns the pool *and* implements the
+free list *and* the refcount (`allocate_block` / `free_block` / `inc_ref` /
+`ref_count`). Only the middle two move: `BlockPool` takes the region, the free
+list and the refcount; `KVCache` keeps the geometry (per-layer K/V offsets,
+the scale and sketch regions) and becomes a pure address calculator over
+`BlockPool::block(id)`.
+
+**Order, so the tree stays green at every commit:**
+
+1. `KVCache` acquires its region from `BlockPool` but keeps its own free list
+   and refcount. Pure plumbing; every test unchanged. This is where the
+   two-id-space problem is settled (below).
+2. `KVCacheManager::seq_blocks_` becomes `std::vector<std::optional<BlockRef>>`
+   — `std::optional`, not `BlockRef`, because `evict_middle_blocks()`
+   (StreamingLLM) frees slots while keeping the table *length*, and the
+   attention kernels depend on that positional alignment. `-1` becomes
+   `nullopt`; the kernel-facing block table is still built as ints.
+3. The prefix-cache hash table takes its own `BlockRef` per entry. This is
+   what deletes `free_block_dropping_stale_hash()`, whose comment documents
+   the exact double-ownership bug it exists to prevent.
+4. The pin set (`pinned_blocks_` / `pin_refcount_` / `pin_fifo_`) takes
+   `BlockRef`s. Pins surviving `free_sequence()` stops being a special case.
+5. Delete `KVCache::free_block`/`inc_ref`/`ref_count` and the free lists.
+
+**Three traps, all load-bearing:**
+
+- **Two id spaces.** SWA blocks live in a separate space with their own free
+  list (`allocate_swa_block`/`free_swa_block`). That is two `BlockPool`s
+  (`RegionTag::KvBlockPool`, `RegionTag::SwaBlockPool`), not one pool with a
+  partition — the tags already exist for this reason, and `BlockRef` must not
+  be able to cross between them.
+- **SWA blocks are deliberately unshared.** They are never hashed, pinned,
+  persisted or shared; `share()` on one is a bug, not a feature. Assert it.
+- **The persisted prefix cache is a fourth referent.** `save_prefix_cache()` /
+  `load_prefix_cache()` serialise blocks and re-register hashes on load; the
+  load path must take refs, not raw ids.
+
+**Verification bar:** the 58 existing KV tests unchanged and green, plus a
+coherence check (`check-degeneration`) — this touches the KV cache, so a
+repetition loop or a cross-request bleed is the failure to look for, and the
+CPU tests cannot see it.
 
 ### Invariants now under test
 
