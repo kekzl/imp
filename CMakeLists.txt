@@ -102,7 +102,6 @@ endif()
 
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
-    src/core/allocator.cpp
     src/core/tensor.cpp
     src/core/qtype.cpp
     src/core/buffer.cpp
@@ -113,6 +112,9 @@ set(IMP_CORE_SOURCES
 
 set(IMP_MEMORY_SOURCES
     src/memory/backend.cpp
+    src/memory/arena.cpp
+    src/memory/block_pool.cpp
+    src/memory/scratch_stack.cpp
     src/memory/vram_allocator.cu
     src/memory/mem_account.cu
     src/memory/kv_cache.cu
@@ -572,6 +574,7 @@ if(IMP_BUILD_TESTS)
         # shipped in the imp library.
         src/memory/fake_backend.cpp
         tests/test_memory_backend.cpp
+        tests/test_memory_allocators.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp
