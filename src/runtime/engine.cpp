@@ -64,6 +64,14 @@ Engine::~Engine() {
 
     // Phase-0 VRAM audit: stop the peak sampler and emit the final table
     // (captures the device-used peak reached during the workload).
+    // Teardown allocates nothing but frees plenty; leaving the process in
+    // Serving would make the next engine's init look like an I2 violation.
+    set_alloc_phase(AllocPhase::Loading);
+    if (const uint64_t n = steady_state_allocations(); n > 0) {
+        IMP_LOG_WARN("I2: %llu device allocation(s) were made while serving — "
+                     "see the per-tag warnings above (criterion 3 requires zero)",
+                     static_cast<unsigned long long>(n));
+    }
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
     engine_arena_close();
@@ -903,6 +911,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Sub-phases ---
+    // Everything from here to the end of warmup is expected to allocate.
+    set_alloc_phase(AllocPhase::Planning);
     if (!init_weights()) {
         release_native_cache_balloon_("init_weights failed");
         return false;
@@ -922,6 +932,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         warmup();
     }
     MemAccount::instance().checkpoint("05_post_warmup");
+
+    // I2: from here on, asking the driver for memory is a defect
+    // (docs/MEMORY_ARCHITECTURE.md A3.2). The guard was built in step 0 and
+    // then never connected — set_alloc_phase() existed only in tests, so
+    // steady_state_allocations() was structurally zero and acceptance
+    // criterion 3 was vacuous (AUDIT B8). Debug builds abort on a
+    // serving-phase acquisition; release builds count it per tag and log
+    // once, because a production server must not die over an accounting bug.
+    set_alloc_phase(AllocPhase::Serving);
     // Start the device-used peak sampler so the prefill activation / score
     // matrix spike during the workload is captured, then dump the init table.
     MemAccount::instance().sampler_start(2000);
