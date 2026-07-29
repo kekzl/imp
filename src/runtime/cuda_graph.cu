@@ -701,35 +701,71 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     }
 
     cudaError_t err;
+    bool slotted;
+
+    // The slot pool restates this size host-side; if the sampler's scratch ever
+    // grows, this is a compile error rather than a silent overrun of the slot.
+    static_assert(SAMPLE_SCRATCH_BYTES == kGraphSlotSampleScratchBytes,
+                  "graph slot sample scratch is out of sync with SAMPLE_SCRATCH_BYTES");
+
+    // ---- Take a T2 slot, or fall back to owning the buffers ----
+    // Every buffer below used to be a cudaMalloc/cudaFree pair per burst — the
+    // whole of the steady-state allocation traffic the --wrap interposer still
+    // saw after the earlier fixes (A7 step 5.3). The slot is held for exactly
+    // the length of the burst, which is what makes its addresses safe to bake
+    // into the captured graph. If the pool declines (closed, exhausted, or a
+    // capacity exceeded) the original path runs unchanged.
+    {
+        GraphSlotCaps need;
+        need.max_steps = config_.max_steps;
+        need.penalty_slots = static_cast<int>(config_.penalty_history.size()) + config_.max_steps;
+        need.stop_ids = static_cast<int>(config_.stop_ids.size());
+        slot_ = graph_slot_pool().acquire(need);
+    }
+    slotted = slot_.valid();
 
     // ---- Allocate device state ----
     // Must be SAMPLE_SCRATCH_BYTES — both samplers write multi-block partial
     // reduction arrays after the result token (greedy argmax: ARGMAX scratch;
     // top-k/top-p: the larger SAMPLE scratch). SAMPLE_SCRATCH_BYTES covers both.
-    err = cudaMalloc(&d_token_id_, SAMPLE_SCRATCH_BYTES);
-    if (err != cudaSuccess)
-        goto fail;
-    err = cudaMalloc(&d_position_, sizeof(int));
-    if (err != cudaSuccess)
-        goto fail;
-    err = cudaMalloc(&d_context_len_, sizeof(int));
-    if (err != cudaSuccess)
-        goto fail;
-    err = cudaMalloc(&d_step_counter_, sizeof(int));
-    if (err != cudaSuccess)
-        goto fail;
-    err = cudaMalloc(&d_step_limit_, sizeof(int));
-    if (err != cudaSuccess)
-        goto fail;
-    err = cudaMalloc(&d_think_limit_, sizeof(int));
-    if (err != cudaSuccess)
-        goto fail;
+    if (slotted) {
+        const GraphSlotView& sv = slot_.view();
+        d_token_id_ = static_cast<int32_t*>(sv.sample_scratch);
+        d_position_ = sv.position;
+        d_context_len_ = sv.context_len;
+        d_step_counter_ = sv.step_counter;
+        d_step_limit_ = sv.step_limit;
+        d_think_limit_ = sv.think_limit;
+    } else {
+        err = cudaMalloc(&d_token_id_, SAMPLE_SCRATCH_BYTES);
+        if (err != cudaSuccess)
+            goto fail;
+        err = cudaMalloc(&d_position_, sizeof(int));
+        if (err != cudaSuccess)
+            goto fail;
+        err = cudaMalloc(&d_context_len_, sizeof(int));
+        if (err != cudaSuccess)
+            goto fail;
+        err = cudaMalloc(&d_step_counter_, sizeof(int));
+        if (err != cudaSuccess)
+            goto fail;
+        err = cudaMalloc(&d_step_limit_, sizeof(int));
+        if (err != cudaSuccess)
+            goto fail;
+        err = cudaMalloc(&d_think_limit_, sizeof(int));
+        if (err != cudaSuccess)
+            goto fail;
+    }
 
     // Stop token IDs
     if (!config_.stop_ids.empty()) {
-        err = cudaMalloc(&d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t));
-        if (err != cudaSuccess)
-            goto fail;
+        if (slotted) {
+            d_stop_ids_ = slot_.view().stop_ids;
+        } else {
+            err = cudaMalloc(&d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t));
+            if (err != cudaSuccess)
+                goto fail;
+        }
         err = cudaMemcpyAsync(d_stop_ids_, config_.stop_ids.data(), config_.stop_ids.size() * sizeof(int32_t),
                               cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
@@ -742,18 +778,26 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     // active (a </think> id is known), not only for budgets — the in_think flag
     // and exit-step drive EOS/stop suppression + the post-</think> grace window.
     if (config_.think_end_id >= 0) {
-        err = cudaMalloc(&d_think_count_, sizeof(int));
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaMalloc(&d_in_think_, sizeof(int));
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaMalloc(&d_think_exit_step_, sizeof(int));
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaMalloc(&d_content_after_think_, sizeof(int));
-        if (err != cudaSuccess)
-            goto fail;
+        if (slotted) {
+            const GraphSlotView& sv = slot_.view();
+            d_think_count_ = sv.think_count;
+            d_in_think_ = sv.in_think;
+            d_think_exit_step_ = sv.think_exit_step;
+            d_content_after_think_ = sv.content_after_think;
+        } else {
+            err = cudaMalloc(&d_think_count_, sizeof(int));
+            if (err != cudaSuccess)
+                goto fail;
+            err = cudaMalloc(&d_in_think_, sizeof(int));
+            if (err != cudaSuccess)
+                goto fail;
+            err = cudaMalloc(&d_think_exit_step_, sizeof(int));
+            if (err != cudaSuccess)
+                goto fail;
+            err = cudaMalloc(&d_content_after_think_, sizeof(int));
+            if (err != cudaSuccess)
+                goto fail;
+        }
         int zero = 0;
         int neg_one = -1;
         int init_think = config_.initial_in_think ? 1 : 0;
@@ -786,12 +830,18 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         if (has_penalties) {
             penalty_prefix_len_ = static_cast<int>(config_.penalty_history.size());
             int total_penalty_slots = penalty_prefix_len_ + config_.max_steps;
-            err = cudaMalloc(&d_penalty_ring_, total_penalty_slots * sizeof(int32_t));
-            if (err != cudaSuccess)
-                goto fail;
-            err = cudaMalloc(&d_penalty_count_, sizeof(int));
-            if (err != cudaSuccess)
-                goto fail;
+            if (slotted) {
+                const GraphSlotView& sv = slot_.view();
+                d_penalty_ring_ = sv.penalty_ring;
+                d_penalty_count_ = sv.penalty_count;
+            } else {
+                err = cudaMalloc(&d_penalty_ring_, total_penalty_slots * sizeof(int32_t));
+                if (err != cudaSuccess)
+                    goto fail;
+                err = cudaMalloc(&d_penalty_count_, sizeof(int));
+                if (err != cudaSuccess)
+                    goto fail;
+            }
             // Copy prefix history to the beginning of the penalty ring
             if (penalty_prefix_len_ > 0) {
                 err = cudaMemcpyAsync(d_penalty_ring_, config_.penalty_history.data(),
@@ -814,8 +864,19 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         }
     }
 
-    // ---- Allocate mapped pinned memory for ring buffer ----
-    {
+    // ---- Mapped pinned memory for the ring buffer ----
+    // Pinning pages is the more expensive half of the per-burst cost, so the
+    // slot carries these too, pre-pinned and pre-mapped.
+    if (slotted) {
+        const GraphSlotView& sv = slot_.view();
+        h_ring_buffer_ = sv.h_ring;
+        d_ring_buffer_ = sv.d_ring;
+        h_step_counter_ = sv.h_step_counter;
+        d_step_counter_mapped_ = sv.d_step_counter_mapped;
+        h_burst_done_ = sv.h_burst_done;
+        d_burst_done_mapped_ = sv.d_burst_done_mapped;
+        h_decode_scratch_ = sv.h_decode_scratch;
+    } else {
         err = cudaHostAlloc(&h_ring_buffer_, config_.max_steps * sizeof(int32_t), cudaHostAllocMapped);
         if (err != cudaSuccess)
             goto fail;
@@ -1208,6 +1269,44 @@ void CudaGraphConditionalRunner::cleanup() {
     bool had_exec = static_cast<bool>(exec_);
     exec_.reset();
     graph_.reset();
+
+    // Slot-backed: the pool owns every buffer below, so returning the lease is
+    // the whole teardown. Done after the exec_/graph_ reset above (and the
+    // device sync at the top), so no replay can still be reading the slot when
+    // it becomes available to the next burst.
+    if (slot_.valid()) {
+        slot_.release();
+        d_token_id_ = nullptr;
+        d_position_ = nullptr;
+        d_context_len_ = nullptr;
+        d_step_counter_ = nullptr;
+        d_step_limit_ = nullptr;
+        d_think_limit_ = nullptr;
+        d_stop_ids_ = nullptr;
+        d_think_count_ = nullptr;
+        d_in_think_ = nullptr;
+        d_think_exit_step_ = nullptr;
+        d_content_after_think_ = nullptr;
+        d_penalty_ring_ = nullptr;
+        d_penalty_count_ = nullptr;
+        penalty_prefix_len_ = 0;
+        h_ring_buffer_ = nullptr;
+        d_ring_buffer_ = nullptr;
+        h_step_counter_ = nullptr;
+        d_step_counter_mapped_ = nullptr;
+        h_burst_done_ = nullptr;
+        d_burst_done_mapped_ = nullptr;
+        h_decode_scratch_ = nullptr;
+
+        if (had_exec) {
+            int dev = 0;
+            cudaGetDevice(&dev);
+            cudaDeviceGraphMemTrim(dev);
+        }
+        launched_ = false;
+        last_read_step_ = 0;
+        return;
+    }
 
     if (d_token_id_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_token_id_));
