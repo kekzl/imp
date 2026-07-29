@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 78 files, 706 sites
+# remaining: 78 files, 697 sites
 
 src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_mxfp4_sm120.cu  # 12
@@ -74,13 +74,13 @@ src/quant/nvfp4_quant.cu  # 16
 src/runtime/batch.cpp  # 12
 src/runtime/cuda_graph.cu  # 34
 src/runtime/engine.cpp  # 12
-src/runtime/engine_graph_decode.cpp  # 40
+src/runtime/engine_graph_decode.cpp  # 33
 src/runtime/engine_internal.h  # 4
 src/runtime/engine_kv_cache_init.cpp  # 5
-src/runtime/engine_scheduler.cpp  # 31
+src/runtime/engine_scheduler.cpp  # 30
 src/runtime/engine_spec_ngram.cpp  # 19
 src/runtime/engine_weight_upload.cpp  # 2
-src/runtime/engine_workspace_warmup.cpp  # 4
+src/runtime/engine_workspace_warmup.cpp  # 3
 src/vision/vision_encoder.cu  # 6
 src/vision/vision_loader.cpp  # 2
 src/vision/vision_model.cpp  # 1

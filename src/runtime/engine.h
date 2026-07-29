@@ -423,7 +423,6 @@ private:
     CudaGraphConditionalRunner async_graph_runner_;
     std::shared_ptr<Request> async_graph_req_;
     int* async_d_block_tables_ = nullptr;
-    int32_t* async_d_banned_tokens_ = nullptr;
     std::vector<int32_t> async_pending_tokens_;
     int async_pending_cursor_ = 0;
     // Burst-hybrid speculation: after a bounded (step_limit) burst drains,
@@ -550,6 +549,16 @@ private:
     // pre_dequant_weights builds the caches into the guaranteed space.
     // Plain cudaMalloc (NOT the async pool) so the release is immediately
     // visible to cudaMemGetInfo readers.
+    // The banned-token list is built once at warmup and never mutated, yet
+    // three separate graph paths each uploaded their own device copy per
+    // launch and freed it again (AUDIT B28: part of the per-burst allocation
+    // traffic the --wrap interposer named). One engine-owned copy, uploaded
+    // once, serves all three.
+    int32_t* d_banned_tokens_ = nullptr;
+    // Upload d_banned_tokens_ if not already resident. Returns nullptr when
+    // the list is empty or the upload failed; callers then simply mask nothing.
+    const int32_t* banned_tokens_device_(cudaStream_t stream);
+
     void* native_cache_balloon_ = nullptr;
     size_t native_cache_balloon_bytes_ = 0;
     void release_native_cache_balloon_(const char* when);
