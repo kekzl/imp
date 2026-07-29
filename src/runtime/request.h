@@ -39,7 +39,6 @@ const char* request_status_name(RequestStatus status);
 struct Request {
     int id = 0;
     RequestStatus status = RequestStatus::PENDING;
-    CancelReason cancel_reason = CancelReason::None;
 
     std::vector<int32_t> input_tokens;
     std::vector<int32_t> output_tokens;
@@ -243,6 +242,15 @@ struct Request {
     int n_vision_tokens = 0;
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
+
+    // Deliberately LAST rather than next to `status`: Request is touched every
+    // decode step, so inserting into the middle shifts every following field
+    // and there is no reason to perturb a hot layout for a field only read on
+    // error paths. NOT a measured win — an interleaved 4-pair A/B against a
+    // rebuilt parent put branch and main within 0.2% either way, and the
+    // non-interleaved reading that suggested ~2% was host drift between two
+    // measurements 20 minutes apart.
+    CancelReason cancel_reason = CancelReason::None;
 };
 
 }  // namespace imp
