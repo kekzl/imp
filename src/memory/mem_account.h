@@ -65,6 +65,19 @@ public:
     // previous checkpoint is the measured cost of the phase just completed.
     void checkpoint(const char* name);
 
+    // Reset the CUDA allocator high-water marks to their current values.
+    // Called at the Loading->Serving transition so everything they report
+    // afterwards was allocated WHILE SERVING — which is what invariant I2
+    // forbids and acceptance criterion 3 measures.
+    //
+    // This is the layer the allocation-phase guard cannot provide: the guard
+    // only sees allocations routed through Backend, while these attributes are
+    // maintained by the CUDA runtime itself and therefore catch every
+    // cudaMallocAsync (default pool) and every stream-ordered allocation
+    // captured inside a CUDA graph (graph pool), no matter which module made
+    // it or whether it went through imp's allocators at all.
+    void arm_steady_state_watermarks();
+
     // Background device-used peak sampler.
     void sampler_start(int interval_us = 2000);
     void sampler_stop();

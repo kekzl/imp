@@ -941,6 +941,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // serving-phase acquisition; release builds count it per tag and log
     // once, because a production server must not die over an accounting bug.
     set_alloc_phase(AllocPhase::Serving);
+    // Arm the CUDA-side watermarks too: the phase guard only sees Backend
+    // traffic, these see every cudaMallocAsync and every graph-owned
+    // allocation regardless of who made it (AUDIT B8).
+    MemAccount::instance().arm_steady_state_watermarks();
     // Start the device-used peak sampler so the prefill activation / score
     // matrix spike during the workload is captured, then dump the init table.
     MemAccount::instance().sampler_start(2000);

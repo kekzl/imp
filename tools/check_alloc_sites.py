@@ -96,14 +96,30 @@ def scan() -> dict[str, list[tuple[int, str]]]:
     return hits
 
 
-def read_allowlist() -> list[str]:
+def read_allowlist() -> dict[str, int]:
+    """rel_path -> budgeted site count.
+
+    The trailing `# N` the writer emits is the BUDGET, not a comment: a file
+    may not exceed it. Without that the gate is file-granular, and a step that
+    removes six of a file's seventeen sites shows zero progress and cannot
+    regress — engine_scheduler.cpp alone would hide six per-request
+    allocations behind an unchanged entry.
+    """
     if not ALLOWLIST.exists():
-        return []
-    out = []
+        return {}
+    out: dict[str, int] = {}
     for line in ALLOWLIST.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            out.append(line)
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        path, _, rest = stripped.partition("#")
+        path = path.strip()
+        if not path:
+            continue
+        try:
+            out[path] = int(rest.strip())
+        except ValueError:
+            out[path] = -1  # legacy entry without a budget: count not enforced
     return out
 
 
@@ -139,19 +155,46 @@ def main() -> int:
         print(f"allowlist updated: {len(hits)} files, {total_sites} sites")
         return 0
 
-    allowed = set(read_allowlist())
-    offenders = sorted(set(hits) - allowed)
-    stale = sorted(allowed - set(hits))
+    allowed = read_allowlist()
+    offenders = sorted(set(hits) - set(allowed))
+    stale = sorted(set(allowed) - set(hits))
+    budget_total = sum(v for v in allowed.values() if v >= 0)
 
     print(f"I1: {len(hits)} files / {total_sites} sites outside src/memory/ "
-          f"(allowlist: {len(allowed)} files)")
+          f"(allowlist: {len(allowed)} files / {budget_total} sites)")
 
     if args.stats:
         for rel in sorted(hits, key=lambda r: -len(hits[r]))[:15]:
-            print(f"  {len(hits[rel]):4d}  {rel}")
+            budget = allowed.get(rel, 0)
+            mark = "" if budget < 0 else f"  (budget {budget})"
+            print(f"  {len(hits[rel]):4d}  {rel}{mark}")
         return 0
 
     rc = 0
+
+    # Per-site budget. Over is a regression; under means the list is stale and
+    # has to be refreshed in the same commit that earned the reduction, so the
+    # remaining debt is always an accurate number rather than a stale ceiling.
+    over, under = [], []
+    for rel, sites in hits.items():
+        budget = allowed.get(rel, -1)
+        if budget < 0:
+            continue
+        if len(sites) > budget:
+            over.append((rel, len(sites), budget))
+        elif len(sites) < budget:
+            under.append((rel, len(sites), budget))
+    if over:
+        rc = 1
+        print("\nFAIL: these files gained allocation sites.")
+        for rel, actual, budget in sorted(over):
+            print(f"  {rel}: {actual} sites, budgeted {budget}")
+    if under:
+        rc = 1
+        print("\nFAIL: these files shrank — refresh the budget in this commit "
+              "(python3 tools/check_alloc_sites.py --update).")
+        for rel, actual, budget in sorted(under):
+            print(f"  {rel}: {actual} sites, budgeted {budget}  (-{budget - actual})")
     if offenders:
         rc = 1
         print("\nFAIL: these files allocate but are not on the I1 allowlist.")

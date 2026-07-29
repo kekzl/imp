@@ -773,11 +773,13 @@ from T1–T4, all of which are arena- or pool-backed and never move. The
 
 Interaction with `cudaDeviceGraphMemTrim`: graphs that capture stream-ordered
 allocations acquire their own graph memory pool, invisible to the default pool's
-`reserved`/`used` attributes. Two consequences: (a) once per-request
-`cudaMallocAsync` is removed from the captured regions (A7 step 5), graph-owned
-memory drops to zero and the trim calls in `cuda_graph.cu:366,1291` become dead;
-(b) until then, `--mem-report` must query `cudaDeviceGetGraphMemAttribute` and
-report it as its own line — it is currently part of the 20–39 % residual.
+`reserved`/`used` attributes. **Measured 2026-07-29: it is already zero.**
+`cudaDeviceGetGraphMemAttribute` reports `used=0.0 / reserved=0.0 /
+high_since_serving=0.0 MiB` after 12 serving requests on the dense config, so
+no captured region allocates today. Two consequences, both now settled: the
+trim calls at `cuda_graph.cu:366,1291` are **dead code already** — a pure
+deletion, not a step-5 deliverable — and graph memory is **not** part of the
+20–39 % residual (AUDIT B26/B27).
 
 ### A5.3 cuBLAS / CUTLASS workspaces
 

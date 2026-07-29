@@ -74,6 +74,24 @@ void MemAccount::sample_once() {
     }
 }
 
+void MemAccount::arm_steady_state_watermarks() {
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess)
+        return;
+    // Writing a *High attribute resets it to the current value.
+    cudaMemPool_t pool = nullptr;
+    if (cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess && pool) {
+        unsigned long long cur = 0;
+        if (cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &cur) == cudaSuccess)
+            (void)cudaMemPoolSetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &cur);
+        if (cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &cur) == cudaSuccess)
+            (void)cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReservedMemHigh, &cur);
+    }
+    unsigned long long zero = 0;
+    (void)cudaDeviceSetGraphMemAttribute(dev, cudaGraphMemAttrUsedMemHigh, &zero);
+    (void)cudaGetLastError();  // graph mem attrs are unsupported on some stacks
+}
+
 void MemAccount::sampler_start(int interval_us) {
     if (!enabled_.load(std::memory_order_relaxed))
         return;
@@ -139,6 +157,36 @@ void MemAccount::report(const char* phase_label) {
             cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &usd);
             emit("mempool(async): reserved=%.0f MiB  used=%.0f MiB  trimmable=%.0f MiB",
                  rsv / kMiB, usd / kMiB, (double(rsv) - double(usd)) / kMiB);
+            // I2 / criterion 3. Armed at the Serving transition, so anything
+            // above the value it was armed at was allocated while serving —
+            // and unlike steady_state_allocations() this sees allocations that
+            // never touched Backend.
+            unsigned long long usd_hi = 0, rsv_hi = 0;
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &usd_hi);
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemHigh, &rsv_hi);
+            emit("mempool(async) high-water since serving began: used=%.0f MiB  reserved=%.0f MiB "
+                 "(delta vs now: used %+.0f MiB)",
+                 usd_hi / kMiB, rsv_hi / kMiB, (double(usd_hi) - double(usd)) / kMiB);
+        }
+        // Graph-owned memory: stream-ordered allocations captured INSIDE a
+        // graph land here, not in the default pool. A5.2 predicts this should
+        // reach zero once step 5 removes per-request cudaMallocAsync from the
+        // captured regions — at which point the cudaDeviceGraphMemTrim calls
+        // in cuda_graph.cu become provably dead.
+        {
+            int gdev = 0;
+            cudaGetDevice(&gdev);
+            unsigned long long g_used = 0, g_high = 0, g_rsv = 0;
+            const bool ok =
+                cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrUsedMemCurrent, &g_used) ==
+                cudaSuccess;
+            cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrUsedMemHigh, &g_high);
+            cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrReservedMemCurrent, &g_rsv);
+            (void)cudaGetLastError();
+            if (ok) {
+                emit("graphmem: used=%.1f MiB  reserved=%.1f MiB  high_since_serving=%.1f MiB",
+                     g_used / kMiB, g_rsv / kMiB, g_high / kMiB);
+            }
         }
     }
 
