@@ -28,6 +28,8 @@
 #include "runtime/think_stop_logic.h"
 #include "compute/sampling.h"
 #include "memory/mem_account.h"
+#include "memory/plan.h"       // kMeasuredLibraryReserveBytes
+#include "memory/vram_query.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -265,6 +267,54 @@ void Engine::build_banned_token_list() {
     }
 }
 
+// What the first forward pass actually claimed, against what the plan charged.
+//
+// The plan needs this number BEFORE the forward that produces it, so it cannot
+// measure it in the same run — the charge is a constant
+// (kMeasuredLibraryReserveBytes) with an imp.conf override. AUDIT B41 measured
+// that constant wrong in both directions across four configs: 0 MiB on
+// Qwen3-4B-IQ4_NL (3900 MiB of KV pool set aside for nothing) and 7458 MiB on
+// Qwen3-8B-Q8_0 (a 3.5 GiB under-charge, most of the residual acceptance
+// criterion 5 is missing).
+//
+// So the honest move is to measure it here and hand the operator the exact
+// number to pin. It is stable per model + quant path and invariant to batch and
+// context (M5), so one line in imp.conf fixes that deployment for good.
+void Engine::report_library_reserve_(size_t free_before) {
+    if (free_before == 0)
+        return;
+    size_t free_after = 0;
+    if (!vram_budget_mem_get_info(&free_after, nullptr))
+        return;
+    const size_t measured = free_before > free_after ? free_before - free_after : 0;
+    const size_t charged = config_.library_reserve_mb < 0
+                               ? kMeasuredLibraryReserveBytes
+                               : (static_cast<size_t>(config_.library_reserve_mb) << 20);
+    const double meas_mib = measured / (1024.0 * 1024.0);
+    const double chg_mib = charged / (1024.0 * 1024.0);
+    // 20 % of the charge, floored at 256 MiB: below that the difference cannot
+    // move a plan decision and the line would be noise on every start.
+    const size_t tol = std::max<size_t>(charged / 5, 256ull * 1024 * 1024);
+    const size_t diff = measured > charged ? measured - charged : charged - measured;
+    if (diff <= tol) {
+        IMP_LOG_INFO("library reserve: charged %.0f MiB, first forward claimed %.0f MiB (within "
+                     "tolerance)",
+                     chg_mib, meas_mib);
+        return;
+    }
+    IMP_LOG_WARN("library reserve MISMATCH: the plan charged %.0f MiB, the first forward actually "
+                 "claimed %.0f MiB (%+.0f MiB). %s Pin it for this model with "
+                 "'vram.library_reserve_mb = %.0f' in imp.conf — it is stable per model and quant "
+                 "path, and invariant to batch and context (AUDIT B41).",
+                 chg_mib, meas_mib, meas_mib - chg_mib,
+                 measured > charged
+                     ? "The plan therefore under-reserved: caches and the KV pool were sized "
+                       "against VRAM that the libraries then took."
+                     : "The plan therefore over-reserved: that much KV pool was set aside for "
+                       "nothing.",
+                 meas_mib);
+}
+
 void Engine::warmup() {
     // Skip warmup for MXFP4 models — the warmup forward pass triggers
     // illegal memory access due to kernel paths that bypass the FP16 cache
@@ -301,6 +351,8 @@ void Engine::warmup() {
     // claim, the graph captures, or imp's own lazy workspaces. These three cost
     // one cudaMemGetInfo each, at init only (AUDIT B41).
     MemAccount::instance().checkpoint("05a_pre_warmup_forward");
+    size_t warm_free_before = 0;
+    vram_budget_mem_get_info(&warm_free_before, nullptr);
 
     for (int prompt_len : {16, 32}) {
         auto req = std::make_shared<Request>();
@@ -320,6 +372,7 @@ void Engine::warmup() {
         req->status = RequestStatus::CANCELLED;
     }
     MemAccount::instance().checkpoint("05b_post_warmup_forward");
+    report_library_reserve_(warm_free_before);
 
     for (int i = 0; i < kMaxGraphPoolSize; i++) {
         decode_graph_pool_[i].invalidate();
