@@ -27,6 +27,7 @@
 #include "runtime/config.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/sampling.h"
+#include "memory/mem_account.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -293,6 +294,14 @@ void Engine::warmup() {
     if (warmup_id < 0)
         warmup_id = 1;
 
+    // Split the warmup phase in the VRAM audit. `05_post_warmup` measured
+    // +7458 MiB on the dense config against a named library reserve of 3900,
+    // leaving ~3.5 GiB attributed to nothing — and a single checkpoint around
+    // the whole phase cannot say whether that is the first forward's library
+    // claim, the graph captures, or imp's own lazy workspaces. These three cost
+    // one cudaMemGetInfo each, at init only (AUDIT B41).
+    MemAccount::instance().checkpoint("05a_pre_warmup_forward");
+
     for (int prompt_len : {16, 32}) {
         auto req = std::make_shared<Request>();
         req->id = next_request_id_++;
@@ -310,6 +319,7 @@ void Engine::warmup() {
         while (kv_manager_->evict_cached_block()) {}
         req->status = RequestStatus::CANCELLED;
     }
+    MemAccount::instance().checkpoint("05b_post_warmup_forward");
 
     for (int i = 0; i < kMaxGraphPoolSize; i++) {
         decode_graph_pool_[i].invalidate();
