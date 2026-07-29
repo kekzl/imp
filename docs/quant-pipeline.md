@@ -32,7 +32,7 @@ Pure orchestration; calls `src/quant/` kernels for the actual format work.
 - `pre_dequant_phase0_nvfp4_loader.cu` — Phase 0 + 0b: NVFP4 sidecar promotion + CUTLASS-NVFP4 registration
 - `pre_dequant_phase1_fp16_cache.cu` — Phase 1: GGUF Q*_K → FP16 device cache (used by Q4_K_M, Q5_K_M, Q6_K, Q8_0, ...)
 - `pre_dequant_phase2_fp8_cache.cu` — Phase 2: FP16 → FP8 device tensors for the `fp8_prefill` path
-- `pre_dequant_phase3_nvfp4_decode.cu` — Phase 3: NVFP4 decode-cache quantization (the bulk, 10 helpers)
+- `pre_dequant_phase3_nvfp4_decode.cu` — Phase 3: NVFP4 decode-cache quantization (the bulk, 10 helpers), split further into `pre_dequant_phase3_fp8.cu`, `pre_dequant_phase3_cutlass.cu` and `pre_dequant_phase3_moe.cu` (the MoE expert stacks — where #1106 gave the `nvfp4_moe_sfatom` scale-factor slabs an owner)
 - `pre_dequant_phase3c_mxfp4.cu` — Phase 3c: standalone MXFP4 (separate from NVFP4 pipeline)
 - `pre_dequant_phase4_tensor_registry.cu` — Phase 4: WeightMap → role/tier registration
 
@@ -60,7 +60,7 @@ When adding a new quant format:
 
 ## Where the two layers meet at runtime
 
-1. `Engine::init_weights` → `executor_pre_dequant.cu::pre_dequant_weights()` runs all phases sequentially, producing device tensors in the right tiers.
+1. `Engine::init_kv_cache()` (`src/runtime/engine_kv_cache_init.cpp`) → `executor_pre_dequant.cu::pre_dequant_weights()` runs all phases sequentially, producing device tensors in the right tiers. **The call site is load-bearing, not incidental**: since #1106 the whole pipeline runs *before* the KV pool is sized, so the pool takes the measured residual instead of the caches being sized against an estimate (#1103 — the reverse order left the card at 0 MiB free and cost ~7x decode).
 2. Per-forward-pass: `gemm_kernel_registry` dispatches to the right `gemm_kernel_<format>.cu`, which reads the pre-dequant tier or calls `src/quant/dequant_*.cu` for an on-demand decode.
 
 Both paths share kernels in `src/quant/`. The split between `src/quant/` and `src/exec/pre_dequant_*.cu` is **when the work happens**, not what work it is.

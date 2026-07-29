@@ -41,7 +41,7 @@ description: Use when adding support for a new model architecture to imp, portin
 - **Draft/MTP heads must share the main model's exact RoPE math** — an MTP head computing plain NeoX while the target uses YaRN drifts the drafter (accept rate collapses, output stays correct). Shared impl: `src/compute/rope_yarn.cuh` (PR #913). Any new RoPE variant goes there, not into per-kernel copies.
 - **Encoder/embedding archs are supported** (nomic-bert, PR #867 — cosine 0.999 vs HF). Gotcha: BERT-family GGUFs use an SPM tokenizer, not WordPiece-as-expected.
 - **`attention_k_eq_v`** (gemma-4-31B-style) is NOT implemented — such archs need real work, not config.
-- Model too big? 32 GB VRAM: ~29 GiB weights is the practical ceiling (gemma-4-31B NVFP4 never fits).
+- Model too big? Do the arithmetic instead of trusting a remembered ceiling: the card is 32 607 MiB, the CUDA primary context takes ~1680 MiB before imp allocates anything, and cuBLAS/CUTLASS claim a measured ~3900 MiB constant on the first forward pass (`kMeasuredLibraryReserveBytes`, `src/memory/plan.h`). That leaves ~26 GiB for weights *before* the KV pool and workspaces — so gemma-4-31B NVFP4 never fits, and the old "~29 GiB of weights" figure was never reachable. Numbers and measured per-config peaks: `docs/MEMORY_ARCHITECTURE.md`.
 
 ## After it works
 

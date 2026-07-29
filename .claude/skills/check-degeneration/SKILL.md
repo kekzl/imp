@@ -73,10 +73,10 @@ Source: `tests/test_degeneration.cpp` — uses the same imp C API the production
 ### 2. Smoke + perf gate (covers real-prompt detector + baseline regression)
 
 ```bash
-make verify-fast    # build + filtered tests + perf baseline + 1 smoke prompt (~90s)
+make verify-fast    # build + filtered tests + perf baseline + peak VRAM + 1 smoke prompt
 ```
 
-Source: `scripts/verify.sh` — runs the canonical degeneration detector against a real model and fails on >3% decode regression vs. `tests/perf_baseline.json`.
+Source: `scripts/verify.sh` — runs the canonical degeneration detector against a real model and fails on >3% decode regression vs. `tests/perf_baseline.json`, on >10% growth in own-peak VRAM vs. its `metrics.memory_mb.own_peak_mb` pin, and on a graphs-ON/OFF decode speedup below 1.3×. The last two matter here: a path that fell out of graph capture and a change that quietly claims more memory are both things this battery is meant to catch.
 
 ### 3. Cross-stack docker smoke (covers tokenizer / chat-template / vision)
 

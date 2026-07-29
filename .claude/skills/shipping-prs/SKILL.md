@@ -11,7 +11,7 @@ description: Use when opening, merging, or releasing a PR for imp — branching 
 2. **English only in the repo.** PR title + body, commits, code comments, docs, `.md` files — all English. (Chat to the user stays German; this rule is only for what lands on GitHub.)
 3. **`main` merges are SQUASH** (each PR → one commit `… (#NNN)`). Write the PR title to be the final squash-commit subject.
 4. **The required GitHub check is named exactly `Build`** (branch ruleset id `14716423`, "Require CI"). If a CI job is renamed without updating the ruleset, every PR hangs at `mergeStateStatus=BLOCKED`. CI has **no GPU runner** — `Build` only compiles + runs CPU/mock tests. GPU correctness/perf is **your job locally** (`make verify-fast` before push).
-5. **Perf-moving change → refresh the baseline IN THE SAME PR and say so.** Regen `tests/perf_baseline.json` via `scripts/gen_perf_baseline.sh` (see `benchmark-cuda`), and state the intended delta in the PR body. CI gate is 3% decode / 5% prefill.
+5. **Perf- or VRAM-moving change → refresh the baseline IN THE SAME PR and say so.** Regen `tests/perf_baseline.json` via `scripts/gen_perf_baseline.sh` (see `benchmark-cuda`), and state the intended delta in the PR body. The gate is 3% decode / 5% prefill / 10% peak VRAM — the same file pins `metrics.memory_mb.own_peak_mb`, so a change that intentionally raises memory fails `verify-fast` until it is re-pinned.
 
 ## The auto-merge race (this lost commit `a5403bd5` in #718 — read it)
 

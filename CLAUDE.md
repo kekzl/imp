@@ -18,8 +18,22 @@ Match the task, invoke that skill first; the skills below are imp-specific and c
 | Open/merge a PR, cut a release | skill **shipping-prs** |
 | Structure audit / dead code / god-files | skill **codebase-audit** |
 | Keep docs in sync after a change | skill **docs-sync** |
+| VRAM / ownership / lifetime / "where did the memory go" | read [`docs/MEMORY_ARCHITECTURE.md`](docs/MEMORY_ARCHITECTURE.md) **first** |
 
-Canonical references: `docs/architecture.md` (narrative), `docs/sm120.md` (hardware), `AGENTS.md` (subagent roles + guardrails), `docs/BENCHMARKING.md` (measurement contract).
+Canonical references: `docs/architecture.md` (narrative), `docs/sm120.md` (hardware), `docs/MEMORY_ARCHITECTURE.md` (memory subsystem: tiers, allocators, invariants I1-I7), `AGENTS.md` (subagent roles + guardrails), `docs/BENCHMARKING.md` (measurement contract).
+
+## Memory work: two rules that cost real time when ignored
+
+- **A successful `cudaMalloc` proves nothing about free VRAM on this box.** WDDM
+  oversubscribes into host memory and returns `cudaSuccess` — 28 GiB succeeds
+  with 22.6 GiB reported free. Measure *bandwidth* to tell resident from
+  spilled: ~1530 GB/s vs ~237 GB/s. That 6.5x cliff is the mechanism behind
+  #1103 (55 vs 391 tok/s), and it is why "0 MiB free" is a correctness problem
+  and not just a tight fit.
+- **Free VRAM only ever decreases within a process.** WSL2/WDDM never returns a
+  process's peak commitment, even though every CUDA-level release succeeds. Any
+  sizing decision read from `cudaMemGetInfo` is reading a moving floor — which
+  is the whole argument for planning capacity instead of discovering it.
 
 ## Build & test
 

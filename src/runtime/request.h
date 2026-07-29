@@ -27,6 +27,13 @@ struct TokenLogprobInfo {
 
 enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED };
 
+// Why a CANCELLED request was cancelled. Most cancellations are indistinguishable
+// to a caller and stay `None` (client disconnect, engine-internal abort); the one
+// that is actionable — the prompt needs more KV blocks than the pool can ever
+// hold — gets its own reason so the API can return a typed error instead of a
+// generic cancel. Invariant I6.
+enum class CancelReason { None, KvCapacity };
+
 const char* request_status_name(RequestStatus status);
 
 struct Request {
@@ -235,6 +242,15 @@ struct Request {
     int n_vision_tokens = 0;
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
+
+    // Deliberately LAST rather than next to `status`: Request is touched every
+    // decode step, so inserting into the middle shifts every following field
+    // and there is no reason to perturb a hot layout for a field only read on
+    // error paths. NOT a measured win — an interleaved 4-pair A/B against a
+    // rebuilt parent put branch and main within 0.2% either way, and the
+    // non-interleaved reading that suggested ~2% was host drift between two
+    // measurements 20 minutes apart.
+    CancelReason cancel_reason = CancelReason::None;
 };
 
 }  // namespace imp

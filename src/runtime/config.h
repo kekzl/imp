@@ -186,6 +186,13 @@ struct RuntimeConfig {
         // swa_sizing=on force-disables it.
         int swa_snapshot_mb = 0;
 
+        // Pin the KV pool to exactly this many blocks; 0 = size it from the
+        // VRAM budget as usual. An operator sharing a card wants the pool to
+        // be a declared quantity rather than "whatever was left", and it is
+        // what makes the admission guardrail (I6) reachable from a config
+        // rather than only through the C API.
+        int max_blocks = 0;
+
         SwaSizingMode swa_sizing_mode() const {
             if (swa_sizing == "auto")
                 return SwaSizingMode::Auto;

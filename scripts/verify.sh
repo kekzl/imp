@@ -440,20 +440,31 @@ if [ "${IMP_VERIFY_SKIP_VRAM:-0}" = "1" ]; then
     skip "peak-VRAM gate (IMP_VERIFY_SKIP_VRAM=1)"
 elif [ ! -f "$BASELINE" ] || ! command -v jq >/dev/null 2>&1; then
     skip "peak-VRAM gate (no baseline or no jq)"
-elif [ ! -x "$BIN" ] || [ ! -f "$MODEL_PATH" ]; then
-    skip "peak-VRAM gate (binary or model missing)"
 else
-    BL_VRAM=$(jq -r '.metrics.memory_mb.own_peak_mb // empty' "$BASELINE")
+    # MODEL_PATH is set inside the perf gate above, which IMP_VERIFY_SKIP_PERF=1
+    # skips entirely — referencing it unguarded killed the whole script under
+    # `set -u`. Resolve it here instead of inheriting it, so this gate stands on
+    # its own whether or not the perf gate ran.
+    VRAM_MODEL=$(jq -r '.model // empty' "$BASELINE")
+    VRAM_MODEL_PATH="$MODELS/$VRAM_MODEL"
+    if [ -z "$VRAM_MODEL" ] || [ ! -x "$BIN" ] || [ ! -f "$VRAM_MODEL_PATH" ]; then
+        skip "peak-VRAM gate (binary or model missing)"
+        BL_VRAM=""
+    else
+        BL_VRAM=$(jq -r '.metrics.memory_mb.own_peak_mb // empty' "$BASELINE")
+    fi
     VRAM_THR=$(jq -r '.thresholds.vram_increase_pct // 10' "$BASELINE")
-    if [ -z "$BL_VRAM" ]; then
+    if [ -z "$BL_VRAM" ] && [ -n "$VRAM_MODEL" ] && [ -x "$BIN" ] && [ -f "$VRAM_MODEL_PATH" ]; then
         skip "no .metrics.memory_mb.own_peak_mb in $BASELINE — run scripts/gen_perf_baseline.sh"
+    elif [ -z "$BL_VRAM" ]; then
+        :  # already reported above
     else
         ERR_V=$(mktemp)
         # BOTH streams: imp's INFO logs (which carry the VRAM audit table) go to
         # STDOUT, only the bench result lines go to stderr. Capturing stderr
         # alone — as the perf gate above correctly does for its own numbers —
         # silently yields nothing here.
-        "$BIN" --model "$MODEL_PATH" --bench --bench-pp 128 --bench-reps 1 --max-tokens 8 \
+        "$BIN" --model "$VRAM_MODEL_PATH" --bench --bench-pp 128 --bench-reps 1 --max-tokens 8 \
               --temperature 0 --set speculative.ngram=false --mem-report \
               >"$ERR_V" 2>&1
         OWN_PEAK=$(grep -oP 'own_peak=\K[0-9]+' "$ERR_V" | tail -1)

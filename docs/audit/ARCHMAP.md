@@ -16,9 +16,18 @@ vision ──▶ compute/model        lora ──▶ runtime/model
 
 - **core** — `Buffer`, `Tensor`, `cuda_raii.h` (`CudaStream`/`CudaEvent`, move-only),
   logging + `IMP_CUDA_CHECK*` macros, `ModelProfile` (centralized arch facts).
-- **memory** — `DeviceAllocator` (stream-ordered `cudaMallocAsync`/`cudaMemPool`),
-  `KVCache` (paged, block_size 16) + `KVCacheManager` (block tables, LRU, prefix
-  cache, pinning), pinned allocator.
+- **memory** — three layers since #1106 (design doc: `docs/MEMORY_ARCHITECTURE.md`,
+  findings log: root `AUDIT.md`). `backend.{h,cpp}` is the **only** code that talks
+  to the driver about memory (invariant I1, gated by `tools/check_alloc_sites.py`);
+  above it the tier allocators `arena` (T2 engine-persistent), `block_pool` (T3
+  fixed-block, now backs `KVCache`), `scratch_stack` (T4 forward-scratch) and
+  `graph_slots` (T2 slot pool for the conditional-graph loop); `span.h` encodes in
+  the type system which memory a captured graph may bake an address into
+  (`StableSpan` vs `DeviceSpan`, passkey-enforced); `plan.{h,cpp}` (`plan_memory`)
+  plans capacity without ever querying the device, `fake_backend` is the CPU-lane
+  test seam, `alloc_interpose.cpp` sits behind `IMP_ALLOC_INTERPOSE` (default OFF).
+  Still live from before: `KVCache` (paged, block_size 16) + `KVCacheManager` (block
+  tables, LRU, prefix cache, pinning), `vram_allocator.cu`, `layer_offload.cu`.
 - **quant** — GGUF Q4_0…Q8_0/Q*_K + NVFP4/FP8/INT8 dequant & quant kernels.
 - **compute** — GEMM (cuBLASLt dense, CUTLASS grouped NVFP4 MoE), FA2 attention
   (`attention_fmha_sm120`), GDN, sampling, layernorm, MoE routing.
@@ -71,7 +80,9 @@ step() ─▶ step_decode() ─▶ [spec-ngram gate?] ─▶ build batch from sc
 ```
 
 Decode is at the HBM ceiling (~341 tok/s on 30B-MoE NVFP4); the only wall-breaker
-is speculation. Steady-state decode is allocation-free.
+is speculation. Steady-state decode is allocation-free — measured, since #1107:
+`0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`
+(`IMP_ALLOC_INTERPOSE=ON`, 15 requests, dense). It was 414 when first instrumented.
 
 ## CUDA Graph ↔ allocator coupling (the highest-leverage soundness invariant)
 
@@ -80,16 +91,34 @@ is speculation. Steady-state decode is allocation-free.
   (a fixed arena allocated once, `batch.cpp:158-202`); contents are re-uploaded
   each step, pointers stay put. `state.kv_cache` is the single persistent pool
   (`kv_cache.cu:42-49`). The graph bakes stable addresses; only buffer *contents*
-  change.
+  change. **It does not hold everywhere else**: `AUDIT.md` B9 and B13 record live
+  counter-examples in this same dimension — `residual_meta_d_buf_` allocated and
+  freed every decode step with its address baked into a replayed graph (safe only
+  because the pool's release threshold is `UINT64_MAX`), and six grow-on-demand
+  statics that `cudaFree` an address which is a live kernel parameter in an
+  instantiated graph, with no invalidation hook. That is why `span.h` distinguishes
+  `StableSpan` from `DeviceSpan` instead of leaving the rule to convention.
 - **Batch-size change** → per-size graph pool keyed `n_sequences-1`. **max_blocks
   growth** → pow2 buckets → `cudaGraphExecUpdate`, full reinstantiate on failure.
 - **Workspace arena vs dynamic KV are separated** by lifetime: workspace/persistent
   buffers are pre-sized to `max_tokens` at init *before* KV is sized against
-  remaining free VRAM. Conditional-graph `d_block_tables` is alloc-once + re-upload
-  with a capacity guard. The #683/#692 position off-by-one is fixed.
+  remaining free VRAM. **Since #1106 the weight/decode caches are built before the
+  KV pool too, and the pool takes the MEASURED residual** (`engine_kv_cache_init.cpp`)
+  — sizing KV first from an *estimate* of cache demand is what left the card at 0 MiB
+  free and cost ~7x decode on gpt-oss-20b (#1103, `AUDIT.md` B23). Conditional-graph
+  buffers are leased from the T2 `GraphSlotPool` (`memory/graph_slots.{h,cpp}`), with
+  the old alloc-once + re-upload path kept as the decline fallback;
+  `d_block_tables` keeps its capacity guard. The #683/#692 position off-by-one is fixed.
 - Degraded-mode per-step `cudaMalloc` paths exist (`batch.cpp` raw upload, MoE
   `owns_memory`, `force_cublas_decode`) but are all OFF the live dispatch (init-pool
-  fallbacks / debug flags); they would break capture if ever taken.
+  fallbacks / debug flags); they would break capture if ever taken. **This inventory
+  was incomplete** — interposed measurement found **414** device allocations per 15
+  served requests from paths not listed here (`CudaGraphConditionalRunner::setup`
+  allocating 13 device + 4 pinned buffers per burst, the per-launch banned-token
+  upload, `calibrate_fp8_scale` scratch, and first-touch growth in the speculative
+  verify path). Driven to **0** across #1106/#1107; `AUDIT.md` B28/B31/B33/B35.
+  Read the census from `tools/check_alloc_sites.py` and an `IMP_ALLOC_INTERPOSE=ON`
+  run, not from a list in a doc.
 
 ## Ownership / lifetime
 

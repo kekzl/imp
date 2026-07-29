@@ -512,6 +512,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_messages.cpp
         tools/imp-server/handlers_responses.cpp
         tools/imp-server/handlers_misc.cpp
+        tools/imp-server/metrics_memory.cpp
         tools/imp-server/handlers_rerank.cpp
         tools/imp-server/handlers_admin.cpp
         tools/imp-server/batching_engine.cpp
@@ -600,6 +601,10 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
         tests/test_graph_slots.cpp
+        # Arena sizing arithmetic (A7 step 4b). Pure and Model-free via ExecShape,
+        # so the numbers the T2 arena is reserved from are pinned in the lane CI
+        # actually runs.
+        tests/test_workspace_sizes.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp

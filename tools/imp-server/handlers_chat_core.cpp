@@ -719,6 +719,20 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         if (!finish)
             finish = "length";
 
+        // Admission refusal (I6): the KV pool can never hold this prompt, so no
+        // amount of waiting or retrying at the same length helps. Returning a
+        // 200 with an empty completion — which is what a generic "cancelled"
+        // produced — makes an unservable request look like a model that chose
+        // to say nothing. 503 with the reason is the honest answer, and it is
+        // the code a client is expected to back off / re-route on.
+        if (std::strcmp(finish, "capacity") == 0) {
+            send_json_error(res, 503, "capacity_error",
+                            "Request does not fit the KV cache: the prompt needs more blocks than "
+                            "the pool can hold. Shorten the prompt, lower --max-seq-len, or give "
+                            "the server more VRAM (see the engine log for the exact block counts).");
+            return;
+        }
+
         int n_output_tokens = static_cast<int>(output_ids.size());
         total_output_tokens += n_output_tokens;
         std::string content = !ctx.params.stop_sequences.empty() ? output_text

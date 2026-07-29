@@ -16,7 +16,9 @@ description: Use when keeping imp's docs and config examples coherent after a ch
    PR #624). When you add/remove/rename a config field: update `config.h`,
    `config.cpp`, AND `imp.conf.example` together, with the real default.
 3. **Numbers are commit-anchored.** `tests/perf_baseline.json` is the canonical gate
-   (CI: 3% decode / 5% prefill). `docs/BENCHMARKS.md` rows are
+   (3% decode / 5% prefill, plus 10% peak VRAM over `metrics.memory_mb.own_peak_mb` —
+   that one is evaluated by `scripts/verify.sh`).
+   `docs/BENCHMARKS.md` rows are
    `date | commit SHA | CUDA | model | quant | metric | value | exact command` —
    "the commit SHA is the version". Never paste a tok/s number without the commit +
    CUDA + reproducing command.
@@ -33,10 +35,11 @@ description: Use when keeping imp's docs and config examples coherent after a ch
 | Doc | Owns | Touch it when |
 |---|---|---|
 | `docs/architecture.md` | Canonical narrative (the source of truth) | a refactor changes the high-level structure / data flow |
+| `docs/MEMORY_ARCHITECTURE.md` · `AUDIT.md` | Memory subsystem: lifetime tiers, allocators, invariants I1–I7, acceptance criteria · the running findings log (incl. REFUTED results) | ownership, lifetime, capacity or VRAM behaviour changes. `architecture.md` defers to it for anything memory-shaped, so don't re-narrate it there |
 | `README.md` | User-facing pitch + quickstart + headline numbers | supported models, build steps, or headline perf change |
 | `docs/GOAL.md` | North-star target (Qwen3-14B Q6_K @ctx2048 → 175 tok/s) + hardware scope | the goal or hardware scope changes |
 | `docs/BENCHMARKS.md` | Reproducible perf table (SHA-anchored) | you measured a number worth publishing |
-| `tests/perf_baseline*.json` | The CI perf gate (canonical) | a change intentionally moves perf — refresh via `scripts/gen_perf_baseline.sh` |
+| `tests/perf_baseline*.json` | The perf **and peak-VRAM** gate (canonical) | a change intentionally moves perf or peak VRAM — refresh via `scripts/gen_perf_baseline.sh` (it re-pins `own_peak_mb` too) |
 | `docs/supported-models.md` | Supported architectures/models | a new arch/model lands or a quant is dropped |
 | `docs/MISSION_JOURNAL.md` · `docs/scoreboard.tsv` | Mission log · competitive scoreboard | a competitive/strategic result changes |
 | `CHANGELOG.md` | Notable changes | user-visible behavior changes |

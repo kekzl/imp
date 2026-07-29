@@ -30,6 +30,7 @@ Useful build options:
 | `IMP_BUILD_SERVER` | `ON` | Build `imp-server` |
 | `IMP_BUILD_BENCH` | `ON` | Build the benchmark binary |
 | `IMP_SANITIZERS` | `OFF` | ASAN + UBSAN (host C++ only) |
+| `IMP_ALLOC_INTERPOSE` | `OFF` | Wrap `cudaMalloc`/`cudaMallocAsync` to attribute steady-state allocations — never benchmark with it on, the shim costs ~3% decode (`AUDIT.md` G16) |
 | `CMAKE_BUILD_TYPE` | — | `Release` / `RelWithDebInfo` / `Debug` |
 
 ## Test
@@ -37,7 +38,7 @@ Useful build options:
 ```bash
 make test-gpu          # Full CUDA suite (~4-5 min; test-attention alone ~241s)
 make test-unit         # CPU-only filter (~5s)
-make verify-fast       # Build + filtered tests + perf gate + smoke prompt (~90s)
+make verify-fast       # Build + filtered tests + perf gate + peak-VRAM gate + smoke prompt
 make verify            # Full pre-merge gate (~5min)
 ```
 
@@ -45,7 +46,10 @@ make verify            # Full pre-merge gate (~5min)
 
 ## Benchmark
 
-The CI gate uses `tests/perf_baseline.json` (3% decode / 5% prefill regression thresholds). After an intentional perf change, refresh it:
+The gate uses `tests/perf_baseline.json` (3% decode / 5% prefill regression
+thresholds, plus a 10% peak-VRAM ceiling over the pinned
+`metrics.memory_mb.own_peak_mb`). After a change that intentionally moves perf
+*or* peak VRAM, refresh it:
 
 ```bash
 scripts/gen_perf_baseline.sh
@@ -85,7 +89,7 @@ Other rules:
 - File names are `snake_case`. Known intentional exception: the `smallM` fragment (`gemm_grouped_nvfp4_smallM.{h,cu}`) — it mirrors the user-facing config key `moe.nvfp4_smallM`, which can't change without breaking configs.
 - Errors return codes (`ImpError` / `bool`); CUDA errors are checked and logged, not thrown.
 - Don't add third-party dependencies without a very strong reason — the only runtime deps are the CUDA toolkit, CUTLASS (vendored via FetchContent), and `stb_image` for vision.
-- Keep `cudaMalloc` / `cudaFree` out of hot loops — pre-allocate and reuse.
+- **Serving allocates nothing** — the measured steady state is `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`. Acquire memory through `src/memory/backend.h` and the tier allocators (`arena`, `block_pool`, `scratch_stack`, `graph_slots`) rather than raw `cudaMalloc`/`cudaFree`, and resolve capacity at init instead of at first use. The blocking `Alloc sites` CI job (`tools/check_alloc_sites.py` against `tools/alloc_allowlist.txt`) rejects new direct allocation sites. See [`docs/MEMORY_ARCHITECTURE.md`](docs/MEMORY_ARCHITECTURE.md).
 - Don't `__noinline__` GPU inner-loop functions; spills go to local memory and tank performance.
 
 ## Commit messages

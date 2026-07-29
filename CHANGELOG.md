@@ -155,9 +155,12 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - **Decode paid for context capacity it never used — up to −38% on the served
   path** (issue #1100). The NVFP4 decode cache's own VRAM reservation was
   subtracted from the *shared* pre-dequant budget, which is also the budget the
-  cache spends from, so it paid for itself twice. The KV pool is allocated
-  before the cache is built, so its bytes are already out of `free_vram`; every
-  one of them then came out of the decode cache a second time. Raising
+  cache spends from, so it paid for itself twice. At the time, the KV pool was
+  allocated *before* the cache was built, so its bytes were already out of
+  `free_vram`; every one of them then came out of the decode cache a second
+  time. (That ordering has since been reversed — the weight caches are built
+  first and the KV pool takes the measured residual, issue #1103 — but the
+  double charge was independent of it.) Raising
   `runtime.max_seq_len` grows the KV pool, which is why decode throughput
   tracked the *configured* capacity instead of the live sequence: on
   Qwen3-14B-Q6_K at the server default the cache fell to 100 of 280 tensors —
