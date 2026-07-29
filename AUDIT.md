@@ -157,15 +157,17 @@ before every run (0 containers, no compute processes); healthy under load
 | G10 | **A −2.8% decode reading with < 0.04% variance across trials is still not a regression.** It looked stable enough to be real. A back-to-back A/B (stash, rebuild, bench) put the unmodified parent at 277.84 and the change at 277.60 — the whole delta was host state (the user was streaming, invisible in nvidia-smi; the same trap as the "evening drift" in #526/#1018). **Never compare against a number taken 40 minutes ago; rebuild the parent and measure both arms in the same window.** |
 | G8 | **A GPU test that passes in isolation and fails in the suite is a VRAM-retention story, not a logic story** — and the free-VRAM figure in the log is the tell. `MtpForwardTest` looked like a regression from the KV-cache migration; it is B5, and the giveaway was that the two runs report the *same* `9.12 GiB free`. Always compare against a rebuilt baseline before attributing a suite-only failure to your change. |
 | G7 | **A `docker build` can fail on a transient DNS lookup for `docker/dockerfile:1`** (the `# syntax=` directive resolves over the network). Retry before debugging anything. |
+| G16 | **An instrumented build silently became the perf baseline.** The pre-push `verify-fast` hook failed the decode gate at 277.04 tok/s (−3.53%), and four re-measurements on healthy clocks reproduced it to within 0.3% — textbook "real regression, not noise". It was neither: `verify-fast` does not rebuild, so it ran against the image I had last built with `-DIMP_ALLOC_INTERPOSE=ON` for the criterion-3 measurement. Every `cudaMallocAsync`/`cudaFreeAsync` on the decode path was going through the `--wrap` shim and its `dladdr` call. Rebuilt with the default (`OFF`): 286.5 tok/s, −0.24% against the pin. **Reproducibility says nothing about which binary you are holding.** After any build with a non-default option, rebuild before you measure — and G10's rule ("rebuild the parent, measure both arms in the same window") only works if *both* arms are rebuilt. Cost: two bisect builds to rediscover that the tree was fine all along. |
 
 ---
 
 ## Housekeeping note (not a memory finding)
 
-The working tree carries a **staged but uncommitted `#1103` fix** —
-`src/memory/vram_query.h`, `src/runtime/vram_budget.cpp`,
-`src/runtime/engine.cpp`, `tests/test_vram_budget_reserve.cpp` — on the
-unrelated branch `fix/1104-json-number-grammar`. It floors the mode-2 reserve at
-the `VRAMAllocator`'s 5 % headroom, which the planner previously undercut by
-1118 MiB on a 32 GB card. All A1 numbers were measured **with** it applied. It
-needs its own branch off `main` before it is lost or lands in the wrong PR.
+The `#1103` mode-2 reserve floor — `src/memory/vram_query.h`,
+`src/runtime/vram_budget.cpp`, `src/runtime/engine.cpp`,
+`tests/test_vram_budget_reserve.cpp` — was written on the unrelated branch
+`fix/1104-json-number-grammar` and is now carried as the first commit of this
+branch (`cf6fb43f`). It floors the mode-2 reserve at the `VRAMAllocator`'s 5 %
+headroom, which the planner previously undercut by 1118 MiB on a 32 GB card. All
+A1 numbers were measured **with** it applied. It is not on `main`, so the PR for
+this branch is the one that closes #1103 — do not open a second one.

@@ -4,6 +4,35 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Branch-vs-main gate measurement — the −3.5% was an instrumented binary
+
+Build: `make build` (default options) · Qwen3-8B-Q8_0 · `--bench --bench-pp 512
+--bench-reps 5 --max-tokens 128 --temperature 0 --prefill-chunk-size 0 --set
+speculative.ngram=false` · 3 trials each, clocks verified during the run
+(2917 MHz SM / 14001 MHz mem).
+
+| build | tg128 | vs pin 287.19 | pp512 | vs pin 12406.87 |
+|---|---:|---:|---:|---:|
+| `main` (7d8d1366) | 284.99 / 285.44 / 284.83 | −0.7% | 12603 / 12520 / 12472 | +1.0% |
+| this branch, HEAD | 286.75 / 286.50 / 286.28 | **−0.24%** | 12634 / 12526 / 12550 | **+1.2%** |
+
+Both inside the 3% decode / 5% prefill gate; the branch is marginally *above*
+`main` on decode.
+
+The number that started this: the pre-push hook's `verify-fast` reported
+**277.04 tok/s (−3.53%)** and four re-measurements reproduced it to within 0.3%
+on healthy clocks. Bisecting the branch against `main` put every intermediate
+commit at 286.4–286.8, including HEAD — i.e. the tree that "regressed" measured
+clean the moment it was rebuilt. `verify-fast` does not rebuild, and the image
+it inherited was the one built with `-DIMP_ALLOC_INTERPOSE=ON` for the
+criterion-3 measurement: every `cudaMallocAsync`/`cudaFreeAsync` on the decode
+path was passing through the `--wrap` shim and its `dladdr` lookup. That is the
+cost of the instrumentation, measured by accident, and it is a fair answer to
+"what does the interposer cost" — ~3% on decode, which is why it is off by
+default. Recorded as AUDIT G16.
+
+---
+
 ## 2026-07-29 · Build the weight caches before the KV pool — gpt-oss-20b 25 → 355 tok/s
 
 `init_kv_cache` sized the KV pool from an ESTIMATE of the weight-cache demand
