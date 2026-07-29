@@ -83,11 +83,29 @@ report; `[loader]` loader size log; `[budget]` vram_budget.cpp.
 > contiguous copy), so the `WEIGHTS` note can over-read while `nvfp4_moe_ms_ref`
 > double-books the same logical bytes. The lifecycle **checkpoints** and the
 > **device totals** are the ground truth; the residual absorbs both genuine
-> untracked memory and this note skew. The cudaMallocAsync **pool reserve** is a
-> prime residual suspect: imp sets the pool release threshold to UINT64_MAX
-> (`engine_weight_upload.cpp:92`), so init-time `cudaFree`s (incl. #679's ms_ref)
-> are **retained in the pool, not returned to the OS** — still counted as
-> device-used. Quantified in the follow-up section below.
+> untracked memory and this note skew.
+>
+> **Both halves of this note have since been measured (2026-07-29).**
+>
+> The double-booking is **confirmed**, and by a stronger signal than expected:
+> once `--mem-report` names the charges the notes cannot see, the MoE config
+> reports **102.0 % accounted — a *negative* residual of −552 MiB**. Accounted
+> exceeding device-used is only possible if some bytes are counted twice, so a
+> residual that can go negative proves what this note suspected. AUDIT B32.
+>
+> The pool-reserve suspicion is **refuted**. It read: "imp sets the release
+> threshold to UINT64_MAX, so init-time frees are retained in the pool, not
+> returned to the OS." Measured across three load→generate→free cycles: the
+> teardown trim logs `mempool trim: reserved 8320->0 MiB used 0->0 MiB`, graph
+> memory reads zero, and setting the release threshold to 0 and re-trimming
+> recovers **0 MiB**. Every CUDA-level release works. The memory is nevertheless
+> gone — `cudaMemGetInfo` drops by the model's footprint once and never recovers
+> — because **WSL2/WDDM does not return a process's peak VRAM commitment**.
+> That is a platform property, not a pool-tuning matter, and no allocator change
+> can address it. AUDIT B36. Careful with the obvious check: a `cudaMalloc`
+> succeeding proves nothing here (28 GiB succeeds with 22.6 GiB reported free —
+> the driver oversubscribes into host memory); time it instead, 1531 GB/s
+> resident against 237 GB/s spilled.
 
 ### Not consumers (verified, so we don't chase phantoms)
 
