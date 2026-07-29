@@ -791,6 +791,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         config_.vram_reserve_floor_pct = runtime_config_.vram.reserve_floor_pct;
     if (config_.library_reserve_mb < 0)
         config_.library_reserve_mb = runtime_config_.vram.library_reserve_mb;
+    if (config_.kv_cache_max_blocks == 0 && runtime_config_.kv_cache.max_blocks > 0)
+        config_.kv_cache_max_blocks = runtime_config_.kv_cache.max_blocks;
 
     // Install the process-wide VRAM budget view BEFORE any sizing runs —
     // every cudaMemGetInfo-based decision below (weight upload gates, cache

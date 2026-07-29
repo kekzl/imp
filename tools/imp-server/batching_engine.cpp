@@ -296,7 +296,12 @@ void BatchingEngine::worker_loop() {
                     const char* reason = "length";
                     bool is_stop_token = false;
                     if (req->status == imp::RequestStatus::CANCELLED) {
-                        reason = "cancelled";
+                        // "capacity" rather than "cancelled" when the pool can
+                        // never hold this prompt: the caller can act on that
+                        // one (shorter prompt, more VRAM), and the handler maps
+                        // it to 503 instead of a silent empty completion (I6).
+                        reason = req->cancel_reason == imp::CancelReason::KvCapacity ? "capacity"
+                                                                                     : "cancelled";
                     } else {
                         if (token == tok->eos_id()) {
                             reason = "stop";
@@ -337,8 +342,10 @@ void BatchingEngine::worker_loop() {
                 // If we didn't push a finish event via the token loop
                 // (request ended with no new tokens this step), push one now.
                 if (!had_new_tokens) {
-                    const char* reason = (req->status == imp::RequestStatus::CANCELLED) ? "cancelled"
-                                                                                        : "length";
+                    const char* reason =
+                        (req->status != imp::RequestStatus::CANCELLED) ? "length"
+                        : (req->cancel_reason == imp::CancelReason::KvCapacity) ? "capacity"
+                                                                                : "cancelled";
                     if (!req->output_tokens.empty()) {
                         int32_t last = req->output_tokens.back();
                         if (last == tok->eos_id())

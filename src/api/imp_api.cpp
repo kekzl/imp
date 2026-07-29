@@ -42,6 +42,8 @@ const char* imp_error_string(ImpError err) {
             return "internal error";
         case IMP_ERROR_CANCELLED:
             return "cancelled";
+        case IMP_ERROR_CAPACITY:
+            return "insufficient KV capacity for this request";
         default:
             return "unknown error";
     }
@@ -733,10 +735,15 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
             (void)ctx->engine->step();
         } while (req->status == imp::RequestStatus::PREFILLING);
 
-        // Verify the request was prefilled
+        // Verify the request was prefilled. A cancellation here reported a flat
+        // OUT_OF_MEMORY whatever the cause, which is where the admission
+        // refusal lost its identity: the scheduler logs "needs N KV blocks but
+        // cache capacity is M" and the caller saw "out of memory", i.e. a
+        // transient-looking condition for something retrying will never fix.
         if (req->status == imp::RequestStatus::CANCELLED) {
+            const bool capacity = req->cancel_reason == imp::CancelReason::KvCapacity;
             ctx->active_request = nullptr;
-            return IMP_ERROR_OUT_OF_MEMORY;
+            return capacity ? IMP_ERROR_CAPACITY : IMP_ERROR_OUT_OF_MEMORY;
         }
 
         // After prefill, any tokens already in output_tokens are "consumed"
@@ -849,7 +856,14 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
         // bare "internal error" hid the cause.
         if (req->status == imp::RequestStatus::FINISHED || req->status == imp::RequestStatus::CANCELLED) {
             bool cancelled = req->status == imp::RequestStatus::CANCELLED;
+            // A capacity refusal is the one cancellation the caller can act on,
+            // so it gets its own code rather than being folded into the generic
+            // cancel (I6). The server maps it to 503.
+            const bool capacity =
+                cancelled && req->cancel_reason == imp::CancelReason::KvCapacity;
             ctx->active_request = nullptr;
+            if (capacity)
+                return IMP_ERROR_CAPACITY;
             return cancelled ? IMP_ERROR_CANCELLED : IMP_ERROR_INTERNAL;
         }
 

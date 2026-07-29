@@ -27,11 +27,19 @@ struct TokenLogprobInfo {
 
 enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED };
 
+// Why a CANCELLED request was cancelled. Most cancellations are indistinguishable
+// to a caller and stay `None` (client disconnect, engine-internal abort); the one
+// that is actionable — the prompt needs more KV blocks than the pool can ever
+// hold — gets its own reason so the API can return a typed error instead of a
+// generic cancel. Invariant I6.
+enum class CancelReason { None, KvCapacity };
+
 const char* request_status_name(RequestStatus status);
 
 struct Request {
     int id = 0;
     RequestStatus status = RequestStatus::PENDING;
+    CancelReason cancel_reason = CancelReason::None;
 
     std::vector<int32_t> input_tokens;
     std::vector<int32_t> output_tokens;

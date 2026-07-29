@@ -59,6 +59,10 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                             "(ctx_len=%d, block_size=%d) — cancelling (KV cache too small for prompt)",
                             req->id, blocks_needed, cap, ctx_len, bs);
                         req->status = RequestStatus::CANCELLED;
+                        // Actionable, unlike every other cancellation: the
+                        // caller can shorten the prompt or give the process
+                        // more VRAM. Surfaces as IMP_ERROR_CAPACITY / HTTP 503.
+                        req->cancel_reason = CancelReason::KvCapacity;
                         it = pending_.erase(it);
                         continue;
                     }

@@ -184,4 +184,56 @@ TEST_F(ApiGenerateParityTest, ManualPrefillDecodeLoopRuns) {
     EXPECT_GT(std::strlen(buf), 0u) << "detokenised manual output is empty";
 }
 
+// I6, admission half: a prompt the KV pool can never hold must come back as a
+// TYPED, actionable error — not as a generic cancel, and not as a successful
+// call that produced nothing.
+//
+// Before this, the scheduler cancelled with a clear log line and the API
+// returned IMP_ERROR_CANCELLED, which is the same code a client disconnect
+// produces. A caller could not tell "you went away" from "this will never fit,
+// shorten the prompt", so the server answered 200 with an empty completion.
+TEST(AdmissionCapacityTest, PromptLargerThanTheKvPoolIsTypedNotCancelled) {
+    SKIP_IF_NO_MODEL();
+
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(get_model_path(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 4096;
+    config.max_batch_size = 1;
+    // Deliberately tiny: 16 blocks x 16 tokens = 256 tokens of KV, which no
+    // eviction can grow. The prompt below needs more than that.
+    config.kv_cache_max_blocks = 16;
+
+    ImpContext ctx = nullptr;
+    ImpError cerr = imp_context_create(model, &config, &ctx);
+    if (cerr != IMP_SUCCESS) {
+        imp_model_free(model);
+        GTEST_SKIP() << "context creation refused the tiny pool: " << imp_error_string(cerr);
+    }
+
+    // ~1500 tokens of prompt against a 256-token pool.
+    std::string prompt;
+    for (int i = 0; i < 500; ++i)
+        prompt += "the quick brown fox jumps over the lazy dog. ";
+
+    ImpGenerateParams params = imp_generate_params_default();
+    params.seed = 42;
+    params.max_tokens = 8;
+    params.temperature = 0.0f;
+
+    char buf[512] = {};
+    size_t n = 0;
+    ImpError err = imp_generate(ctx, prompt.c_str(), &params, buf, sizeof(buf), &n);
+
+    EXPECT_EQ(err, IMP_ERROR_CAPACITY)
+        << "expected a typed capacity refusal, got " << imp_error_string(err)
+        << " (" << static_cast<int>(err) << ")";
+    EXPECT_STRNE(imp_error_string(IMP_ERROR_CAPACITY), imp_error_string(IMP_ERROR_CANCELLED))
+        << "the two must be distinguishable to a caller";
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}
+
 }  // namespace
