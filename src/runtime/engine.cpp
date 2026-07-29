@@ -972,11 +972,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     MemAccount::instance().arm_steady_state_watermarks();
     // Start the device-used peak sampler so the prefill activation / score
     // matrix spike during the workload is captured, then dump the init table.
+    // Report the library reserve the first forward ACTUALLY claimed, not the
+    // constant the plan had to guess with (AUDIT B41/B42). The plan needs the
+    // figure before the forward that produces it, so it cannot use this — but
+    // the audit table runs after warmup and has no reason to keep guessing.
+    // Measured on Qwen3-8B this is the difference between 82.5 % and 98.3 %
+    // accounted, i.e. criterion 6 met instead of missed, with no config change.
+    // Falls back to the charged value when warmup was skipped (MXFP4, Gemma-4).
     MemAccount::instance().set_named_charges(
         ctx_baseline_bytes,
-        runtime_config_.vram.library_reserve_mb < 0
-            ? kMeasuredLibraryReserveBytes
-            : static_cast<size_t>(runtime_config_.vram.library_reserve_mb) << 20,
+        measured_library_reserve_ != SIZE_MAX
+            ? measured_library_reserve_
+            : engine_internal::library_reserve_charge(runtime_config_.vram.library_reserve_mb),
         engine_arena().capacity(), engine_arena().high_water());
     MemAccount::instance().sampler_start(2000);
     MemAccount::instance().report("init_complete");

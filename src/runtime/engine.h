@@ -773,7 +773,12 @@ private:
     void prewarm_spec_scratch_();
     // Compare the first forward's actual claim against what the plan charged
     // (AUDIT B41). Diagnostic; logs the number to pin.
-    void report_library_reserve_(size_t free_before);
+    // What the first forward actually claimed; SIZE_MAX until warmup measures
+    // it, and it stays SIZE_MAX when warmup is skipped. A sentinel rather than
+    // 0 because ZERO IS A VALID MEASUREMENT — Qwen3-4B-IQ4_NL claims nothing at
+    // all, and a `> 0` guard silently fell back to the assumed 3900 MiB there,
+    // reporting a charge that was never taken (residual −3486 MiB, 149 %).
+    size_t measured_library_reserve_ = SIZE_MAX;
     // Launch the cached graph for state.n_tokens (or warm up / capture one).
     // Returns true when the forward ran (graph replay or captured+launched);
     // false → caller runs the eager forward itself (warmup use, capture
