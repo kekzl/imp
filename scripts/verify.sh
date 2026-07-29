@@ -419,6 +419,60 @@ else
     fi
 fi
 
+# ------------------------ 3.4. peak-VRAM gate (memory acceptance criterion 8)
+# The baseline has carried a `memory_mb` block and a `vram_increase_pct`
+# threshold since it was written, and nothing ever read them — a declared gate
+# that never existed. Peak VRAM is exactly the quantity that creeps silently:
+# every "just cache one more thing" lands here, and it is invisible in the perf
+# numbers until a model stops fitting (#1103 is that failure, and it cost 7x
+# decode).
+#
+# Gated on own_peak, NOT device peak_used: device-used also carries the CUDA
+# primary context (~1.7 GiB here) and anything a neighbour process holds, so it
+# moves for reasons that have nothing to do with the change under test.
+# own_peak is this process's allocations since engine init and nothing else.
+#
+# Its own short run rather than piggy-backing on the perf bench: --mem-report
+# starts a 2 ms sampler thread, and perturbing the number the perf gate reads
+# to save ten seconds is a bad trade.
+section "peak VRAM vs baseline"
+if [ "${IMP_VERIFY_SKIP_VRAM:-0}" = "1" ]; then
+    skip "peak-VRAM gate (IMP_VERIFY_SKIP_VRAM=1)"
+elif [ ! -f "$BASELINE" ] || ! command -v jq >/dev/null 2>&1; then
+    skip "peak-VRAM gate (no baseline or no jq)"
+elif [ ! -x "$BIN" ] || [ ! -f "$MODEL_PATH" ]; then
+    skip "peak-VRAM gate (binary or model missing)"
+else
+    BL_VRAM=$(jq -r '.metrics.memory_mb.own_peak_mb // empty' "$BASELINE")
+    VRAM_THR=$(jq -r '.thresholds.vram_increase_pct // 10' "$BASELINE")
+    if [ -z "$BL_VRAM" ]; then
+        skip "no .metrics.memory_mb.own_peak_mb in $BASELINE — run scripts/gen_perf_baseline.sh"
+    else
+        ERR_V=$(mktemp)
+        # BOTH streams: imp's INFO logs (which carry the VRAM audit table) go to
+        # STDOUT, only the bench result lines go to stderr. Capturing stderr
+        # alone — as the perf gate above correctly does for its own numbers —
+        # silently yields nothing here.
+        "$BIN" --model "$MODEL_PATH" --bench --bench-pp 128 --bench-reps 1 --max-tokens 8 \
+              --temperature 0 --set speculative.ngram=false --mem-report \
+              >"$ERR_V" 2>&1
+        OWN_PEAK=$(grep -oP 'own_peak=\K[0-9]+' "$ERR_V" | tail -1)
+        if [ -z "$OWN_PEAK" ]; then
+            warn "could not read own_peak from --mem-report — gate not evaluated"
+        else
+            DELTA=$(awk -v a="$OWN_PEAK" -v b="$BL_VRAM" 'BEGIN{printf "%.2f", (a-b)/b*100}')
+            echo "  own peak VRAM = $OWN_PEAK MiB  (baseline $BL_VRAM, delta ${DELTA}%)"
+            OVER=$(awk -v d="$DELTA" -v t="$VRAM_THR" 'BEGIN{print (d>t)?1:0}')
+            if [ "$OVER" = "1" ]; then
+                fail "peak VRAM grew more than ${VRAM_THR}% over the baseline"
+            else
+                pass "peak VRAM within ${VRAM_THR}% of baseline"
+            fi
+        fi
+        rm -f "$ERR_V"
+    fi
+fi
+
 # ------------------------ 3.5. graphs-ON vs graphs-OFF decode regression gate
 # Catches future PRs that silently break CUDA Graph capture in the decode loop.
 # Without graphs, decode is launch-overhead-bound (875-1170 launches/step on

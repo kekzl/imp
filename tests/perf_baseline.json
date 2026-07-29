@@ -19,7 +19,9 @@
       "tg128": 287.19
     },
     "memory_mb": {
-      "model_weights": 8320
+      "model_weights": 8320,
+      "own_peak_mb": 20716,
+      "own_peak_note": "peak device memory this PROCESS allocates after engine init (vram_own_peak_bytes), measured by the verify.sh peak-VRAM gate with --bench-pp 128 --bench-reps 1 --max-tokens 8 --mem-report. Excludes the CUDA primary context (~1680 MiB here) and any neighbour process, so unlike device peak_used it does not move for reasons unrelated to the change under test. Byte-identical across repeat runs."
     }
   },
   "thresholds": {

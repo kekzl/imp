@@ -43,6 +43,22 @@ void vram_budget_install(size_t budget_mb);
 // Installed budget in bytes (0 = uncapped).
 size_t vram_budget_bytes();
 
+// Device-used at the moment the view was installed: the CUDA primary context
+// plus anything a neighbour process already held. NOT this process's model
+// memory, and NOT charged against the budget — the budget covers what imp
+// allocates after init. Snapshotted even when uncapped.
+size_t vram_used_at_install_bytes();
+
+// What this process has allocated since the install, i.e. the same baseline
+// delta the budget view sizes from. This — not device-used — is the number a
+// budget is a cap on, so it is what "--vram-budget respected" has to be
+// measured against. 0 if the view was never installed.
+size_t vram_own_used_bytes();
+
+// High water of vram_own_used_bytes(). Sampled at every sizing site, which is
+// the phase the peak forms in; serving adds nothing to it (I2).
+size_t vram_own_peak_bytes();
+
 // cudaMemGetInfo with the budget view applied. Either out pointer may be
 // null. Returns false (zeros) if the raw query fails.
 bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes);

@@ -1007,6 +1007,11 @@ design above, so the argument that produced the original shape stays readable.
 | 5.2 — `calibrate_fp8_scale` reduction scratch | **done** | `fix(quant): persistent reduction scratch for calibrate_fp8_scale` |
 | 5.3 — conditional-graph-loop buffers → T2 slot pool | **done** | `feat(memory): T2 slot pool for the conditional graph loop` |
 | 5.4 — pre-size the speculative verify path's lazy scratch | **done — criterion 3 reads zero** | `fix(runtime): pre-size the speculative verify scratch at init` |
+| 9b.1 — reserve floored at the library charge; `--vram-budget` starts binding | **done** | `fix(vram): charge the library reserve in the live budget pass` |
+| 9b.2 — plan-time refusal when a budget cannot serve one sequence (I6) | **done** | same |
+| 9b.3 — `/metrics` per-tier reserved *and* live, KV blocks, budget (I7) | **done** | `feat(memory): tagged memory metrics and the peak-VRAM gate` |
+| 9b.4 — peak-VRAM gate in `verify.sh`, pinned in `perf_baseline.json` | **done** | same |
+| 9b.5 — admission-time 429/503 on KV exhaustion | not started — the scheduler cancels with a typed reason, the HTTP layer does not map it | |
 | 6.4 — weight caches before the KV pool; KV takes the measured residual | **done** | `fix(vram): build the weight caches before the KV pool` |
 | 6.0/6.5/6.6 — exact demand, T1 arena, delete the balloon | not started | |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |

@@ -4,6 +4,49 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · A7 step 9b — the library reserve makes `--vram-budget` bind; peak-VRAM gate
+
+Build: `make build` defaults · Qwen3-8B-Q8_0 · gate protocol.
+
+**Budget adherence.** `own_peak` is this process's allocations since engine
+init; the CUDA primary context (1680 MiB here) is listed separately because a
+budget cannot cover memory that predates the baseline snapshot.
+
+| `--vram-budget` | peak_used before | peak_used after |
+|---:|---:|---:|
+| off | 22590 | 22590 |
+| 20000 | 22590 | 22590 |
+| 16000 | **22584** (flag did nothing) | **19468** |
+| 12000 | 15532 | **10740**, and the load now refuses |
+
+**Decode is unaffected**, verified against a rebuilt parent in the same window
+rather than against an older number:
+
+| | tg128 | pp512 |
+|---|---:|---:|
+| parent (stashed, rebuilt) | 286.56 / 285.32 / 286.63 | 12584 / 12561 / 12490 |
+| with 9b | 286.21 / 286.12 / 286.35 / 286.48 | 12524 / 12686 / 12660 / 12649 |
+
+Clocks sampled during the run: 2902 MHz SM / 13801 MHz mem / 500 W.
+
+Worth recording: an intermediate reading of **272–276 tok/s** appeared right
+after a docker build and did not reproduce — four clean trials landed at 286.3.
+Had I trusted it I would have reverted a correct change. Same lesson as G10,
+different trigger (build load rather than a stale binary).
+
+**Peak-VRAM gate.** `own_peak` measures **byte-identical across repeat runs**
+(20716 MiB), which makes it a far better gate signal than any throughput
+number, and being a delta from the install baseline it is immune to the 1.6 GB
+run-to-run swing in absolute free VRAM. Pinned in `tests/perf_baseline.json`
+(`metrics.memory_mb.own_peak_mb`) against the existing `vram_increase_pct: 10`
+threshold — a field the file has carried since it was written and that nothing
+read. Mutation-checked: pin at 18000 → `FAIL ... +15.46%`.
+
+test-core 633/633, test-kv 57/57, test-quant 197/197, Degeneration +
+EngineRelaunch 7/7. AUDIT B37–B39, G20.
+
+---
+
 ## 2026-07-29 · Pre-size the speculative verify scratch — criterion 3 reads zero
 
 Build: `make build` (default options) · same protocol · 3 trials.

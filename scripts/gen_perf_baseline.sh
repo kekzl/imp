@@ -121,6 +121,15 @@ VRAM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2
 vram_line=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 1 --temperature 0 2>&1 | grep "GPU memory after weight upload" | tail -1)
 vram_weights=$(echo "$vram_line" | grep -oP 'weights ~\K[0-9]+' || echo "0")
 
+# Peak VRAM for the gate in verify.sh. Same invocation the gate uses, so the
+# pinned number and the measured one are comparable; own_peak (this process's
+# allocations since engine init) rather than device peak_used, which also
+# carries the CUDA context and any neighbour process.
+own_peak=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 8 \
+              --temperature 0 --set speculative.ngram=false --mem-report 2>&1 \
+           | grep -oP 'own_peak=\K[0-9]+' | tail -1)
+own_peak=${own_peak:-0}
+
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 cat > "$OUTPUT" << EOF
@@ -144,7 +153,8 @@ cat > "$OUTPUT" << EOF
       "tg128": $tg128
     },
     "memory_mb": {
-      "model_weights": $vram_weights
+      "model_weights": $vram_weights,
+      "own_peak_mb": $own_peak
     }
   },
   "thresholds": {

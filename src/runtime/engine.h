@@ -69,6 +69,12 @@ struct EngineConfig {
     // [0, 50]); the 256 MiB absolute floor always applies.
     float kv_fraction = 0.8f;
     int vram_reserve_floor_pct = 10;
+    // library_reserve_mb: what cuBLAS/CUTLASS claim on the first forward pass
+    // (docs/MEMORY_ARCHITECTURE.md A1.5). -1 = the measured default. This is a
+    // FIXED charge — it does not shrink because --vram-budget asked for a
+    // smaller slice — so it floors the reserve above, which is otherwise all
+    // percentages of total.
+    int library_reserve_mb = -1;
 
     // Layer offloading: number of layers to keep on GPU (-1 = all on GPU, 0 = all offloaded)
     int gpu_layers = -1;
