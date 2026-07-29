@@ -328,6 +328,23 @@ jobs:
       - name: File-size hard-review gate (blocking)
         run: python3 tools/check_filesize.py
 
+  # I1 gate (docs/MEMORY_ARCHITECTURE.md): exactly one module talks to the CUDA
+  # driver about memory. Runs against tools/alloc_allowlist.txt, which shrinks
+  # monotonically — the gate fails both on a new direct allocation site and on a
+  # stale allowlist entry, so the list cannot silently stop being accurate.
+  alloc-sites:
+    name: Alloc sites
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Remaining direct allocation sites (progress)
+        run: python3 tools/check_alloc_sites.py --stats
+      - name: I1 allowlist gate (blocking)
+        run: python3 tools/check_alloc_sites.py
+
   test:
     name: Test
     needs: build

@@ -60,6 +60,17 @@ option(IMP_BUILD_TESTS "Build tests" ON)
 option(IMP_BUILD_TOOLS "Build CLI and benchmark tools" ON)
 option(IMP_BUILD_BENCH "Build benchmarks" ON)
 option(IMP_BUILD_SERVER "Build imp-server (OpenAI-compatible HTTP server)" ON)
+# Link-time interposition on the CUDA allocation symbols, so acceptance
+# criterion 3 can be measured against EVERY device allocation rather than only
+# the ones routed through Backend (docs/MEMORY_ARCHITECTURE.md A6, AUDIT B26).
+# Off by default: --wrap belongs on a measurement build, not a shipping one.
+option(IMP_ALLOC_INTERPOSE "Wrap cudaMalloc/cudaMallocAsync to attribute steady-state allocations" OFF)
+set(IMP_WRAP_LINK_FLAGS "")
+if(IMP_ALLOC_INTERPOSE)
+    set(IMP_WRAP_LINK_FLAGS
+        "-Wl,--wrap=cudaMalloc,--wrap=cudaFree,--wrap=cudaMallocAsync,--wrap=cudaFreeAsync,--wrap=cudaMallocHost,--wrap=cudaHostAlloc")
+    message(STATUS "Allocation interposition ENABLED (measurement build)")
+endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 
 if(IMP_SANITIZERS)
@@ -105,13 +116,19 @@ set(IMP_CORE_SOURCES
     src/core/tensor.cpp
     src/core/qtype.cpp
     src/core/buffer.cpp
-    src/core/allocator.cpp
     src/core/logging.cpp
     src/core/threading.cpp
     src/core/cuda_static_reset.cpp
 )
 
 set(IMP_MEMORY_SOURCES
+    src/memory/backend.cpp
+    $<$<BOOL:${IMP_ALLOC_INTERPOSE}>:src/memory/alloc_interpose.cpp>
+    src/memory/arena.cpp
+    src/memory/engine_arena.cpp
+    src/memory/block_pool.cpp
+    src/memory/scratch_stack.cpp
+    src/memory/plan.cpp
     src/memory/vram_allocator.cu
     src/memory/mem_account.cu
     src/memory/kv_cache.cu
@@ -288,6 +305,7 @@ set(IMP_RUNTIME_SOURCES
     src/vision/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
+    src/runtime/plan_shadow.cpp
     src/runtime/cuda_graph.cu
     src/runtime/pdl.cu
     src/runtime/presets.cpp
@@ -317,6 +335,7 @@ set(IMP_EXEC_SOURCES
     src/exec/gemm_kernel_q4k_imma.cu
     src/exec/gemm_kernel_q4k_hmma.cu
     src/exec/gemm_scratch.cu
+    src/exec/workspace_sizes.cpp
     src/exec/executor_workspace.cu
     src/exec/executor_workspace_buffers.cu
     src/exec/executor_kv_write.cu
@@ -419,6 +438,9 @@ if(IMP_BUILD_TOOLS)
         tools/imp-cli/args.cpp
     )
     target_link_libraries(imp-cli PRIVATE imp imp_warnings)
+    if(IMP_ALLOC_INTERPOSE)
+        target_link_options(imp-cli PRIVATE ${IMP_WRAP_LINK_FLAGS})
+    endif()
     target_include_directories(imp-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     # imp-quantize — offline BF16/FP16 -> NVFP4 checkpoint conversion
@@ -494,6 +516,9 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/batching_engine.cpp
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
+    if(IMP_ALLOC_INTERPOSE)
+        target_link_options(imp-server PRIVATE ${IMP_WRAP_LINK_FLAGS})
+    endif()
     target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                                   ${CMAKE_CURRENT_BINARY_DIR}/generated)
     # Optional gcov instrumentation of the server TUs only (the CUDA imp lib is
@@ -565,6 +590,14 @@ if(IMP_BUILD_TESTS)
         # Pre-dequant VRAM budget split (#1100). CPU-only: pure arithmetic in
         # runtime/vram_budget.h, and it belongs in the lane CI actually runs.
         tests/test_pre_dequant_budget.cpp
+        # Memory subsystem L1 (docs/MEMORY_ARCHITECTURE.md). FakeBackend is the
+        # substitution seam that keeps the whole allocator stack testable in the
+        # CPU lane; it is test scaffolding, so it is compiled here rather than
+        # shipped in the imp library.
+        src/memory/fake_backend.cpp
+        tests/test_memory_backend.cpp
+        tests/test_memory_allocators.cpp
+        tests/test_memory_plan.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp

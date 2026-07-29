@@ -2,6 +2,9 @@
 #include "quant/fp8_utils.cuh"
 #include "core/tensor.h"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
+
+#include <utility>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -184,6 +187,55 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(const uint8_t* __restrict__
 // Host-side launch wrappers
 // ---------------------------------------------------------------------------
 
+// Reduction scratch for calibrate_fp8_scale. It used to cudaMalloc the
+// per-block buffer and the result scalar on every call and free them again —
+// 144 of the 414 device allocations the --wrap interposer caught after warmup
+// (AUDIT B28/B29). The calls are one-shot per layer, not per request, so this
+// is not a hot-path win; it is an I2 violation that costs nothing to remove.
+//
+// Taken from the engine-persistent arena, growing by re-taking (the superseded
+// slab strands, bounded and one-time, exactly as the MMVQ tenant does). Falls
+// back to a direct allocation when the arena is closed — a bare quant unit in
+// a test has no engine.
+namespace {
+float* g_absmax_scratch = nullptr;   // [grid] block maxima, then [1] result
+int g_absmax_scratch_grid = 0;
+uint64_t g_absmax_scratch_gen = 0;
+bool g_absmax_scratch_owned = false;
+constexpr uint64_t kOwnedGen = ~0ull;
+
+// Returns {block_maxes, result} or {nullptr, nullptr}.
+std::pair<float*, float*> absmax_scratch(int grid) {
+    const bool live = g_absmax_scratch != nullptr &&
+                      (g_absmax_scratch_gen == kOwnedGen ||
+                       g_absmax_scratch_gen == imp::engine_arena().generation());
+    if (live && g_absmax_scratch_grid >= grid)
+        return {g_absmax_scratch, g_absmax_scratch + g_absmax_scratch_grid};
+
+    const size_t bytes = (static_cast<size_t>(grid) + 1) * sizeof(float);
+    auto slab = imp::engine_arena().take_bytes(bytes);
+    if (!slab.empty()) {
+        g_absmax_scratch = reinterpret_cast<float*>(slab.data());
+        g_absmax_scratch_gen = imp::engine_arena().generation();
+        g_absmax_scratch_owned = false;
+    } else {
+        if (g_absmax_scratch_owned && g_absmax_scratch)
+            IMP_CUDA_CHECK_LOG(cudaFree(g_absmax_scratch));
+        void* p = nullptr;
+        if (cudaMalloc(&p, bytes) != cudaSuccess) {
+            g_absmax_scratch = nullptr;
+            g_absmax_scratch_grid = 0;
+            return {nullptr, nullptr};
+        }
+        g_absmax_scratch = static_cast<float*>(p);
+        g_absmax_scratch_gen = kOwnedGen;
+        g_absmax_scratch_owned = true;
+    }
+    g_absmax_scratch_grid = grid;
+    return {g_absmax_scratch, g_absmax_scratch + grid};
+}
+}  // namespace
+
 static inline int compute_grid(int n) {
     const int threads_needed = (n + kElemsPerThread - 1) / kElemsPerThread;
     return (threads_needed + kBlockSize - 1) / kBlockSize;
@@ -205,11 +257,11 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream) {
 
     const int grid = compute_grid(n);
 
-    // Allocate temporary buffer for per-block absmax values + final scalar.
-    float* d_block_maxes = nullptr;
-    float* d_result = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_result, sizeof(float)));
+    auto [d_block_maxes, d_result] = absmax_scratch(grid);
+    if (!d_block_maxes) {
+        IMP_LOG_ERROR("calibrate_fp8_scale: reduction scratch unavailable");
+        return 1.0f;
+    }
 
     // First-level reduction: per-block absmax.
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input.data), d_block_maxes,
@@ -225,8 +277,7 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream) {
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&absmax, d_result, sizeof(float), cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
-    IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_result));
+    // Scratch is persistent — nothing to free.
 
     // Avoid division by zero.
     if (absmax == 0.0f) {

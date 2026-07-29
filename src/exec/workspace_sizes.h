@@ -1,0 +1,51 @@
+#pragma once
+
+// Exact, pre-upload demand for the engine-persistent (T2) tenants whose size
+// is a pure function of the model shape and the engine config
+// (docs/MEMORY_ARCHITECTURE.md B5 point 1, A7 step 4b/6).
+//
+// Why this exists: the T2 arena acquires its Region when it is OPENED, so
+// sizing it correctly is what reserves those bytes against everything that
+// allocates later — including the pre-dequant cache build, which expands into
+// whatever free VRAM it finds and, on gpt-oss-20b at server defaults, drove
+// the card to 0.0 MiB free and left a 31.64 MiB workspace to be rejected
+// (AUDIT B23). Getting the capacity right is therefore not tuning; it is the
+// mechanism.
+//
+// Pure and CUDA-free so it can be unit-tested on the CPU lane. It deliberately
+// covers only the two tenants whose formulas are exact today; the arena keeps
+// a floor for the rest until the remaining tenants are migrated.
+
+#include <cstddef>
+
+namespace imp {
+
+class Model;
+struct EngineConfig;
+
+struct ExecT2Demand {
+    // MMVQ (Q8_1-input GEMV) scratch: max_tokens * ceil(maxK/32) * 36 * 2.
+    size_t mmvq_scratch = 0;
+    // gemm_nvfp4 dequant workspace: the largest single NVFP4 dequant target,
+    // capped at 512 MiB (targets above the cap are served by the uncapturable
+    // path, exactly as allocate_nvfp4_dequant_workspace decides).
+    size_t nvfp4_dequant = 0;
+
+    size_t total() const { return mmvq_scratch + nvfp4_dequant; }
+};
+
+// max_tokens as GraphExecutor will compute it: min(max_seq_len, 4096), then
+// capped to 2048 for SSM+MoE hybrids.
+//
+// NOTE: this replicates the AS-BUILT condition, which reads has_gdn_ before it
+// is assigned and therefore fires only for SSM+MoE, never for pure GDN
+// (AUDIT B18). Replicating the *intended* condition would size the arena at
+// T=2048 while the executor allocates at T=4096 — a 2x under-reservation.
+int exec_max_tokens(const Model& model, int max_seq_len);
+
+// Largest logical K across the weight tensors the MMVQ / dequant paths see.
+int exec_max_weight_k(const Model& model);
+
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len);
+
+}  // namespace imp

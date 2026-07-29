@@ -13,6 +13,10 @@
 #include "compute/encoder_forward.h"
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
+#include "memory/engine_arena.h"
+#include "memory/plan.h"
+#include "exec/workspace_sizes.h"
+#include "memory/backend.h"
 #include "memory/vram_query.h"
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
@@ -61,8 +65,17 @@ Engine::~Engine() {
 
     // Phase-0 VRAM audit: stop the peak sampler and emit the final table
     // (captures the device-used peak reached during the workload).
+    // Teardown allocates nothing but frees plenty; leaving the process in
+    // Serving would make the next engine's init look like an I2 violation.
+    set_alloc_phase(AllocPhase::Loading);
+    if (const uint64_t n = steady_state_allocations(); n > 0) {
+        IMP_LOG_WARN("I2: %llu device allocation(s) were made while serving — "
+                     "see the per-tag warnings above (criterion 3 requires zero)",
+                     static_cast<unsigned long long>(n));
+    }
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
+    engine_arena_close();
 
     // Defensive: the mandatory-cache balloon is normally released before
     // pre_dequant_weights; don't leak it if init aborted in between.
@@ -93,13 +106,13 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
         async_d_block_tables_swa_ = nullptr;
     }
+    if (d_banned_tokens_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_banned_tokens_));
+        d_banned_tokens_ = nullptr;
+    }
     if (swa_snap_slab_) {
         IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));
         swa_snap_slab_ = nullptr;
-    }
-    if (async_d_banned_tokens_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
-        async_d_banned_tokens_ = nullptr;
     }
     if (d_penalty_tokens_) {
         vram_alloc_.free(d_penalty_tokens_);
@@ -832,16 +845,55 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             MemAccount::instance().set_dump_path(runtime_config_.diagnostics.vram_audit_dump);
     }
     MemAccount::instance().checkpoint("00_pre_init");
+    // Everything already resident before imp allocates anything: CUDA primary
+    // context + driver. Measured, not assumed — it is 1679.6 MiB on this
+    // WSL2/WDDM box and it is not imp's memory.
+    size_t ctx_baseline_bytes = 0;
+    {
+        size_t f = 0, tot = 0;
+        if (vram_budget_mem_get_info(&f, &tot))
+            ctx_baseline_bytes = tot > f ? tot - f : 0;
+    }
 
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
     // WSL2/WDDM has ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
-    if (!vram_alloc_.init(0.05f)) {
+    if (!vram_alloc_.init(kAllocatorHeadroomPct / 100.0f)) {
         IMP_LOG_ERROR("Failed to initialize VRAM allocator");
         return false;
     }
+    // Engine-persistent (T2) arena — opened before the first tenant
+    // (docs/MEMORY_ARCHITECTURE.md A3.3). The arena acquires its Region HERE,
+    // so its capacity is what reserves those bytes against everything that
+    // allocates later — notably the pre-dequant cache build, which expands
+    // into whatever free VRAM it finds (AUDIT B23). Size it from the exact
+    // per-tenant demand rather than a constant; the constant is only a floor
+    // for the tenants not migrated yet.
+    {
+        const ExecT2Demand d = exec_t2_demand(*model_, config_.max_seq_len);
+        // +1/8 for 256-byte alignment padding across the arena's takes.
+        const size_t want = d.total() + d.total() / 8;
+        const size_t cap = std::max(kEngineArenaDefaultBytes, want);
+        IMP_LOG_INFO("engine arena demand: mmvq %.1f MiB + nvfp4_dequant %.1f MiB -> %.1f MiB",
+                     d.mmvq_scratch / (1024.0 * 1024.0), d.nvfp4_dequant / (1024.0 * 1024.0),
+                     cap / (1024.0 * 1024.0));
+        (void)engine_arena_open(cuda_malloc_backend(), cap);
+    }
     gemm_init();
     attention_cublas_prewarm();
-    gemm_grouped_3x_nvfp4_prewarm();
+    // The grouped-3x prewarm reserves 512 MiB of CUTLASS workspace + 1 MiB of
+    // staging so the lazy ensure_workspace() inside the grouped NVFP4 GEMM can
+    // never fire under stream capture. It used to run unconditionally, gated
+    // only on cutlass_grouped_3x_nvfp4_available() — an sm_120 *capability*
+    // query, not a model one. Every entry point into that GEMM lives in
+    // exec/executor_forward_moe*.cu, so a model without experts cannot reach
+    // it and was paying 513 MiB of resident VRAM for a path it never takes.
+    // (That was the bulk of the previously unattributed +676 MiB at the
+    // 01_prewarm_gemm checkpoint — docs/MEMORY_ARCHITECTURE.md A1.4, AUDIT B12.)
+    if (model_->profile().is_moe) {
+        gemm_grouped_3x_nvfp4_prewarm();
+    } else {
+        IMP_LOG_INFO("grouped-3x NVFP4 prewarm skipped: model has no experts (saves 513 MiB)");
+    }
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
     (void)stream_.create(cudaStreamNonBlocking);
     MemAccount::instance().checkpoint("01_prewarm_gemm");
@@ -869,6 +921,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Sub-phases ---
+    // Everything from here to the end of warmup is expected to allocate.
+    set_alloc_phase(AllocPhase::Planning);
     if (!init_weights()) {
         release_native_cache_balloon_("init_weights failed");
         return false;
@@ -888,8 +942,27 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         warmup();
     }
     MemAccount::instance().checkpoint("05_post_warmup");
+
+    // I2: from here on, asking the driver for memory is a defect
+    // (docs/MEMORY_ARCHITECTURE.md A3.2). The guard was built in step 0 and
+    // then never connected — set_alloc_phase() existed only in tests, so
+    // steady_state_allocations() was structurally zero and acceptance
+    // criterion 3 was vacuous (AUDIT B8). Debug builds abort on a
+    // serving-phase acquisition; release builds count it per tag and log
+    // once, because a production server must not die over an accounting bug.
+    set_alloc_phase(AllocPhase::Serving);
+    // Arm the CUDA-side watermarks too: the phase guard only sees Backend
+    // traffic, these see every cudaMallocAsync and every graph-owned
+    // allocation regardless of who made it (AUDIT B8).
+    MemAccount::instance().arm_steady_state_watermarks();
     // Start the device-used peak sampler so the prefill activation / score
     // matrix spike during the workload is captured, then dump the init table.
+    MemAccount::instance().set_named_charges(
+        ctx_baseline_bytes,
+        runtime_config_.vram.library_reserve_mb < 0
+            ? kMeasuredLibraryReserveBytes
+            : static_cast<size_t>(runtime_config_.vram.library_reserve_mb) << 20,
+        engine_arena().capacity(), engine_arena().high_water());
     MemAccount::instance().sampler_start(2000);
     MemAccount::instance().report("init_complete");
 

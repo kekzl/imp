@@ -186,7 +186,9 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
             convert_nvfp4_moe_scales_to_sfatom(r.micro_scales, d_sfatom, ne, static_cast<int>(r.N),
                                                static_cast<int>(r.K), /*stream=*/nullptr);
             IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
-            const_cast<Model*>(model_)->gpu_allocations_.push_back(d_sfatom);
+            // NOT gpu_allocations_: that list is freed with cudaFreeAsync
+            // (#834) and this came from vram_alloc_force, i.e. cudaMalloc.
+            wcache_->owned_sf_slabs.push_back(d_sfatom);
             experts.assign(ne, Tensor{});
             for (int e = 0; e < ne; ++e) {
                 void* data_slice =
@@ -761,6 +763,12 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 if (d_sfatom) {
                     convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
                                                        static_cast<int>(K), stream);
+                    // The per-expert slices below are handed out with
+                    // sf_borrowed=true, so free_cutlass_nvfp4_weight skips
+                    // them; without this the base pointer had no owner at all
+                    // and leaked one SfAtom slab per (layer, projection) for
+                    // the life of the process (AUDIT B5/L1).
+                    wcache_->owned_sf_slabs.push_back(d_sfatom);
                 }
             }
             if (d_sfatom || phase0_has_cutlass) {

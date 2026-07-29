@@ -150,9 +150,23 @@ TEST(VramBudgetReserve, BeneficialSourcesKeepFullKvPool) {
 
     // Q6_K routes to the NVFP4 tier: heuristic ≈ planner, so KV keeps most of
     // the post-reserve VRAM (well above the one-sequence floor).
+    //
+    // Threshold restated 2026-07-28 (#1103). This used to assert an absolute
+    // `kv_bytes >= 4 GiB`, which silently encoded the old mode-2 safety reserve
+    // of 512 MiB. That reserve was wrong: it planned KV down to a level the
+    // VRAMAllocator refuses to allocate against (it requires free >= bytes +
+    // 5% of total for anything >=16 MiB), so the plan could not be executed and
+    // the caches it starved failed mid-build. With the reserve corrected the
+    // absolute number is unreachable in this synthetic 8 GiB scenario. The
+    // property under test is unchanged — the planner-driven weight-cache
+    // reservation must not fire — so express it relative to what is actually
+    // distributable, which is what "KV keeps most of it" always meant.
     const size_t per_block = 16ull * 8 * 128 * 2 * 2 * 32;
     const size_t kv_bytes = static_cast<size_t>(with_planner.kv_max_blocks) * per_block;
-    EXPECT_GE(kv_bytes, 4 * GiB) << "reservation must not fire for heuristic-covered sources";
+    const size_t distributable = 8 * GiB - with_planner.reserve_bytes;
+    EXPECT_GE(kv_bytes, distributable / 2) << "reservation must not fire for heuristic-covered sources "
+                                           << "(kv=" << kv_bytes / (1024 * 1024) << " MiB of "
+                                           << distributable / (1024 * 1024) << " MiB distributable)";
 }
 
 // --- imp.conf [vram] knobs (kv_fraction / reserve_floor_pct) ---
@@ -380,6 +394,38 @@ TEST(VramBudgetReserve, VramKnobsAreClamped) {
     EXPECT_EQ(a.reserve_bytes, b.reserve_bytes);
     EXPECT_EQ(a.kv_cache_bytes, b.kv_cache_bytes);
     EXPECT_EQ(a.kv_max_blocks, b.kv_max_blocks);
+}
+
+// #1103: the budget and the VRAMAllocator must agree on the headroom. Mode 2
+// deliberately skips the 10% reserve-floor POLICY to fit larger weight caches,
+// but the allocator's 5% is not policy — can_allocate() refuses any allocation
+// >=16 MiB that would leave less free than that. A plan below it cannot be
+// executed: the KV pool was sized against 512 MiB of assumed headroom while
+// every cache allocation needed 1630 MiB, so the caches failed mid-build.
+TEST(VramBudgetReserve, ReserveNeverUndercutsTheAllocatorHeadroom) {
+    SKIP_IF_NO_CUDA();
+
+    size_t total_vram = 0;
+    vram_budget_mem_get_info(nullptr, &total_vram);
+    ASSERT_GT(total_vram, 0u);
+    const size_t hard_floor = vram_allocator_headroom(total_vram);
+
+    Model m;
+    fill_model(m, QType::Q6_K, QType::Q6_K);
+
+    const size_t GiB = 1024ull * 1024 * 1024;
+    for (int mode : {0, 1, 2}) {
+        EngineConfig config;
+        config.max_seq_len = 32768;
+        config.max_batch_size = 8;
+        config.use_nvfp4_decode = mode;  // mode 2 is the one that skipped the floor
+        config.use_cuda_graphs = false;
+        config.kv_cache_dtype = QType::F16;
+
+        VRAMBudget b = compute_vram_budget(m, config, 32, 128, 8 * GiB);
+        EXPECT_GE(b.reserve_bytes, hard_floor)
+            << "use_nvfp4_decode=" << mode << ": plan reserves less than the allocator will ever leave free";
+    }
 }
 
 // kv_block_bytes_per_layer (#942): the single source for KV-size estimates.

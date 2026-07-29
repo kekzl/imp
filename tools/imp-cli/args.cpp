@@ -20,6 +20,7 @@ void print_usage(const char* prog) {
             "  --prompt <text>       Input prompt for generation\n"
             "  --max-tokens <n>      Maximum tokens to generate (default: 256)\n"
             "  --max-seq-len <n>     KV context ceiling in tokens (default: auto from VRAM)\n"
+            "  --mem-report          Print the full VRAM attribution table at init\n"
             "  --vram-budget <mb>    Hard per-process VRAM cap in MiB — size everything as if\n"
             "                        the GPU only had this much (multi-server on one GPU)\n"
             "  --min-kv-tokens <n>   Minimum KV capacity in tokens (default: auto)\n"
@@ -116,6 +117,12 @@ CliArgs parse_args(int argc, char** argv) {
             args.max_tokens_set = true;
         } else if (std::strcmp(arg, "--max-seq-len") == 0 && i + 1 < argc) {
             args.max_seq_len = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--mem-report") == 0) {
+            // The attribution table IS the vram-audit harness; the flag is a
+            // discoverable name for it plus the named-charge lines that make
+            // the residual mean something (criterion 6).
+            args.mem_report = true;
+            args.config_overrides.push_back("diagnostics.vram_audit=true");
         } else if (std::strcmp(arg, "--vram-budget") == 0 && i + 1 < argc) {
             args.vram_budget_mb = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--min-kv-tokens") == 0 && i + 1 < argc) {

@@ -7,6 +7,7 @@
 #include <cuda_fp16.h>
 #include <unordered_map>
 #include <cstddef>
+#include <vector>
 
 namespace imp {
 
@@ -92,6 +93,14 @@ struct WeightCaches {
     // cudaMalloc+cudaMemsetAsync on large MoE loads (~600 ms of load time).
     void* cutlass_sf_slab = nullptr;
     size_t cutlass_sf_slab_size = 0;
+    // Per-(layer, projection) SfAtom slabs built by the MoE phase. Their
+    // per-expert slices become CutlassNvFP4Weight::scale_factors with
+    // sf_borrowed=true, so free_cutlass_nvfp4_weight deliberately skips them
+    // and the BASE pointers have to be owned here — otherwise nothing frees
+    // them at all. They come from vram_alloc_force (plain cudaMalloc), so they
+    // must be released through VRAMAllocator, NOT through
+    // Model::gpu_allocations_, which frees with cudaFreeAsync (#834).
+    std::vector<void*> owned_sf_slabs;
 
     // --- CUTLASS sm_120 MXFP4 ---
     std::unordered_map<const void*, CutlassMxFP4Weight> cutlass_mxfp4;

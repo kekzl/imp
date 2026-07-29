@@ -55,6 +55,15 @@ struct VRAMBudget {
     // starve a cache whose room was physically reserved via the balloon.
     size_t mandatory_sf_bytes = 0;
     size_t mandatory_moe_bytes = 0;
+    // Total weight-cache demand this pass charged against the post-weight
+    // headroom (nvfp4 estimate + the cutlass_sf estimate, which absorbs the
+    // native-NVFP4 and planner-driven reserves). Already computed internally;
+    // exposed so plan_memory() can be fed the SAME demand figure and the two
+    // allocation policies compared like for like (A7 step 2b).
+    size_t weight_cache_estimate_bytes = 0;
+    // Batch-shaped SSM/GDN state footprint charged as overhead (0 on
+    // non-recurrent models). Same reason as above.
+    size_t ssm_footprint_bytes = 0;
 };
 
 // Pure computation: plan VRAM allocation split between KV cache, FP8 prefill

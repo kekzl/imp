@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "memory/block_pool.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
@@ -48,12 +49,20 @@ public:
     }
     int allocate_swa_block();
     void free_swa_block(int block_id);
-    int num_free_swa_blocks() const { return static_cast<int>(swa_free_list_.size()); }
+    int num_free_swa_blocks() const { return swa_blocks_.free_count(); }
     int swa_total_blocks() const { return swa_max_blocks_; }
 
     // Reference counting (for copy-on-write / prefix caching)
     int ref_count(int block_id) const;
     void inc_ref(int block_id);
+
+    // RAII handles over the same id space. These are what KVCacheManager
+    // holds; allocate_block()/free_block()/inc_ref() above are the untracked
+    // int-based equivalents, kept for KVCache's own direct API and its tests.
+    [[nodiscard]] BlockRef acquire_block_ref();
+    // Take an additional tracked reference to a block that is already held
+    // (prefix reuse of a block a live sequence still owns).
+    [[nodiscard]] BlockRef share_block(int block_id);
 
     // Pointer access into the contiguous pool
     void* k_ptr(int layer, int block_id);
@@ -115,8 +124,11 @@ private:
     VRAMAllocator* alloc_ = nullptr;
     size_t block_bytes_;  // cached: block_size * n_kv_heads * head_dim * dtype_size(dtype)
 
-    std::vector<int> ref_counts_;  // per-block reference count
-    std::vector<int> free_list_;
+    // Block ids + refcounts (A7 step 3). The pool owns the id space; the
+    // MEMORY stays here, because the layout is layer-major — one id's bytes
+    // are scattered across per-layer K/V regions of differing size, which a
+    // uniform stride cannot express (BlockPool::open_slots).
+    BlockPool blocks_;
     void* pool_ = nullptr;  // single contiguous GPU allocation (K+V)
 
     // Per-layer KV shapes and offsets (for Gemma 4 dual attention geometry).
@@ -147,8 +159,7 @@ private:
     // block ids passed to k_ptr/v_ptr for it come from the SWA id space.
     std::vector<char> layer_is_swa_;
     int swa_max_blocks_ = 0;
-    std::vector<int> swa_ref_counts_;
-    std::vector<int> swa_free_list_;
+    BlockPool swa_blocks_;  // separate id space; SWA blocks are never shared
 };
 
 }  // namespace imp

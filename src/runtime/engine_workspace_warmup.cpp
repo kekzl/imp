@@ -331,10 +331,6 @@ void Engine::warmup() {
         IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
         async_d_block_tables_swa_ = nullptr;
     }
-    if (async_d_banned_tokens_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
-        async_d_banned_tokens_ = nullptr;
-    }
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;

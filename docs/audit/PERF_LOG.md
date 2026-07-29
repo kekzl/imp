@@ -4,6 +4,347 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Branch-vs-main gate measurement — the −3.5% was an instrumented binary
+
+Build: `make build` (default options) · Qwen3-8B-Q8_0 · `--bench --bench-pp 512
+--bench-reps 5 --max-tokens 128 --temperature 0 --prefill-chunk-size 0 --set
+speculative.ngram=false` · 3 trials each, clocks verified during the run
+(2917 MHz SM / 14001 MHz mem).
+
+| build | tg128 | vs pin 287.19 | pp512 | vs pin 12406.87 |
+|---|---:|---:|---:|---:|
+| `main` (7d8d1366) | 284.99 / 285.44 / 284.83 | −0.7% | 12603 / 12520 / 12472 | +1.0% |
+| this branch, HEAD | 286.75 / 286.50 / 286.28 | **−0.24%** | 12634 / 12526 / 12550 | **+1.2%** |
+
+Both inside the 3% decode / 5% prefill gate; the branch is marginally *above*
+`main` on decode.
+
+The number that started this: the pre-push hook's `verify-fast` reported
+**277.04 tok/s (−3.53%)** and four re-measurements reproduced it to within 0.3%
+on healthy clocks. Bisecting the branch against `main` put every intermediate
+commit at 286.4–286.8, including HEAD — i.e. the tree that "regressed" measured
+clean the moment it was rebuilt. `verify-fast` does not rebuild, and the image
+it inherited was the one built with `-DIMP_ALLOC_INTERPOSE=ON` for the
+criterion-3 measurement: every `cudaMallocAsync`/`cudaFreeAsync` on the decode
+path was passing through the `--wrap` shim and its `dladdr` lookup. That is the
+cost of the instrumentation, measured by accident, and it is a fair answer to
+"what does the interposer cost" — ~3% on decode, which is why it is off by
+default. Recorded as AUDIT G16.
+
+---
+
+## 2026-07-29 · Build the weight caches before the KV pool — gpt-oss-20b 25 → 355 tok/s
+
+`init_kv_cache` sized the KV pool from an ESTIMATE of the weight-cache demand
+and allocated it first. On gpt-oss-20b-mxfp4 at server defaults the estimate
+was ~1.6 GiB low, the caches took the difference out of the reserve, and the
+card ended at **exactly 0 MiB free**.
+
+**The three-point sweep that identified it** (fixed `--max-batch 8`, only
+`runtime.max_seq_len` varied — so batch-scaled compute is held constant):
+
+| max_seq_len | KV | free VRAM | 200 tokens |
+|---:|---:|---:|---:|
+| 131072 (auto) | 19 023 MiB | **0 MiB** | **7.85 s** |
+| 32768 | 12 288 MiB | 1082 MiB | 0.58 s |
+| 8192 | 3072 MiB | 10 737 MiB | 0.54 s |
+
+Not batch-scaled compute — the card at 0 free, i.e. the WSL2/WDDM spill into
+host memory that `VRAMAllocator`'s docstring names as the reason it exists.
+1 GiB of headroom is enough to restore full speed.
+
+**The fix**: the caches, whose demand is bounded by the model, are built
+first; the KV pool — the elastic tier — then takes the *measured* residual
+minus the allocator headroom. It can only shrink the pool relative to the
+budget's projection, never grow it, so it cannot overcommit.
+
+| gpt-oss-20b, `--max-batch 8`, auto context | before | after |
+|---|---:|---:|
+| 200 tokens | 7.85 s | **0.56 s** |
+| effective decode | ~25 tok/s | **~355 tok/s** |
+| KV pool | 25 364 blk / 19 023 MiB | 16 238 blk / 12 178 MiB |
+| KV capacity | 405 824 tok | 259 808 tok |
+| free VRAM | **0 MiB** | **1629 MiB** |
+
+The clamp is silent where it is not needed: on all three A1.3 reference
+configs it does not fire, and they end with 2710 / 5304 / 2600 MiB free.
+
+**Perf gate, 3 trials, quiet host** (2917 MHz SM / 14001 MHz mem): pp512
+median **12 408.00**, tg128 median **287.57** — against the pinned baseline of
+12 406.87 / 287.19, i.e. +0.01% / +0.13%. On the pin.
+
+`test-kv` 57/57, `test-core` 668/668, full `test-e2e` 114 passed with only the
+pre-existing `MtpForwardTest` failure (AUDIT B5, unrelated and unchanged).
+
+---
+
+## 2026-07-29 · Size the T2 arena from exact demand — restores prefill graph capture on gpt-oss-20b
+
+The engine arena acquires its Region when it is OPENED, so its capacity is
+what reserves those bytes against everything that allocates later. It was a
+64 MiB constant. `exec/workspace_sizes.{h,cpp}` now computes the exact demand
+of the two migrated tenants from the model shape and config, and the arena
+opens at that size.
+
+**Verified functional repair.** gpt-oss-20b-mxfp4 at server defaults:
+
+| | before | after |
+|---|---|---|
+| `nvfp4_dequant` (31.64 MiB) | `rejecting ... (0 MiB free, need 1630 MiB headroom)` | allocated from the arena |
+| prefill graph capture | **disabled** — "M>1 fallback runs eager" | **enabled** — "graph-safe M>1 fallback; covers dense=2400, moe=72, cutlass=2304 cache entries" |
+| arena demand | (constant 64 MiB) | mmvq 36.0 + nvfp4_dequant 31.6 → 76.1 MiB |
+
+A 31 MiB workspace was failing on a 32 GiB card because the pre-dequant cache
+build expands into free VRAM and got there first. Tier ownership is the fix:
+the bytes are the arena's before anything else can take them.
+
+**Latency: no improvement attributable to this change, stated plainly.**
+120 tokens takes 4.72–5.30 s (median 4.86, 5 requests) against a 7.10–7.81 s
+baseline — but an intermediate build with the rejection *still present*
+already measured 4.87–5.30 s, so that delta is run-to-run variance on this
+pathological config, not this commit. The dominant defect is untouched:
+`03_kv_cache` still consumes every remaining byte (KV 25 380 blocks /
+19 035 MiB / 406 080 tokens on a `--max-batch 8` server) and the card still
+ends at 0.0 MiB free. That is the ordering problem (A7 6.4/6.5), still open.
+
+**Sizing gotcha the measurement caught.** The first attempt computed 22.5 MiB
+where 31.64 was needed: the demand runs BEFORE the weight upload, and gpt-oss'
+experts arrive as `expert_gate_up_packed_blocks` — a 4D U8 slot the upload
+consumes — so a tensor scan cannot see the real dequant target. It is one
+expert's FUSED gate_up, `2*expert_d_ff x d_model`, which the config carries.
+Deriving it from the config makes the reservation independent of when it runs.
+
+`test-kv` 57/57, `test-core` 668/668, 20/20 across Degeneration +
+PrefixCacheE2E + ChunkedPrefill + LlmCompressorE2E.
+
+---
+
+## 2026-07-29 · Own the MoE SfAtom slabs — a real leak, not the B5 one
+
+`pre_dequant_phase3_moe.cu` allocated one SfAtom slab per (layer, projection)
+on the native NVFP4 MoE path and never stored the base pointer, while handing
+out its slices as `sf_borrowed=true` — which is exactly the flag that tells
+teardown to skip them. Both that site and its gpt-oss twin now register in
+`WeightCaches::owned_sf_slabs` and are freed through `VRAMAllocator`.
+
+The twin previously registered in `Model::gpu_allocations_`, which is freed
+with `cudaFreeAsync` (#834) although the allocation is a plain `cudaMalloc` —
+so the obvious fix would have propagated an API mismatch. Fixed in the same
+commit.
+
+**Does not close AUDIT B5.** The full `test-e2e` run still fails
+`MtpForwardTest` at a byte-identical `9.12 GiB free`, so the ~15 GiB of
+cross-teardown retention has another source. Recorded rather than assumed.
+
+Verified: `test-kv` 57/57, `test-core` 668/668, `DegenerationTest` 5/5,
+`LlmCompressorE2E` 2/2 run (2 skipped for absent models) — the native-NVFP4
+path this touches — and Qwen3-Coder-30B-A3B generates coherent prose.
+Teardown ordering checked: `executor_` (engine.h:330) is destroyed before
+`vram_alloc_` (engine.h:299), so the free path's allocator is still alive.
+
+---
+
+## 2026-07-29 · Gate the grouped-3x NVFP4 prewarm on MoE — −512 MiB resident on dense/vision
+
+`gemm_grouped_3x_nvfp4_prewarm()` ran before any model-type check, gated only
+on `cutlass_grouped_3x_nvfp4_available()` — an sm_120 *capability* query. It
+reserves 1 MiB staging + 512 MiB CUTLASS workspace so the lazy
+`ensure_workspace()` inside the grouped NVFP4 GEMM can never fire under stream
+capture. Every entry point into that GEMM is in `exec/executor_forward_moe*.cu`,
+so a model without experts cannot reach it and was paying for a path it never
+takes.
+
+Measured, `01_prewarm_gemm` checkpoint:
+
+| config | before | after |
+|---|---:|---:|
+| dense Qwen3-4B Q8_0 | 740 MiB | **228 MiB** |
+| MoE Qwen3-Coder-30B-A3B NVFP4 | 740 MiB | 740 MiB (unchanged) |
+
+The 512 MiB delta is exactly `ensure_workspace(512 MiB)`. (The 740 baseline is
+A1.4's 676 plus step 4a's 64 MiB arena, so this also closes the last of that
+checkpoint's unattributed bytes: 512 + 1 + 64 cuBLASLt + 32 bench scratch + 64
+arena + ~67 cuBLAS handle internals.)
+
+Correctness: `test-kv` 57/57, `test-core` 668/668, and 18/18 across
+`DegenerationTest` + `PrefixCacheE2ETest` + `ChunkedPrefillTest` with
+`IMP_TEST_MODEL` set. The MoE path — the one that still takes the prewarm —
+generates coherent code at 384 tok/s on Qwen3-Coder-30B.
+
+Perf, 3 trials on the same noisy host as the entries below: pp512 median
+12035.65, tg128 median **277.21** — indistinguishable from the parent's 277.84
+measured in the same window. No mechanism by which removing an unused
+allocation could cost decode; measured to confirm.
+
+---
+
+## 2026-07-29 · Memory architecture A7 step 4a (engine-persistent arena) — init-only, in band
+
+The T2 arena is now opened by `Engine::init` (64 MiB, provisional) and the
+MMVQ GEMV scratch is its first tenant. Init-path only; no hot-path code
+changed. Measured in the same noisy window as step 3.3/3.4: pp512 11574.97,
+tg128 274.42 — inside the 272-277 band the host was showing all evening, and
+there is no mechanism by which moving a fixed scratch buffer from a
+`cudaMalloc` to an arena slab could cost decode.
+
+Two measurements that mattered more than the throughput:
+
+- **Bench config** (`max_tokens=896`): prewarm takes 23.62 MiB from the arena,
+  high-water 23.62 of 64 MiB, no fallback, no hot-path grow.
+- **Server config** (`max_tokens=4096`): the same formula wants **108 MiB**.
+  The arena cannot supply it, the tenant falls back to a direct allocation
+  with a WARN, and the model generates correctly. Without that fallback this
+  would have been a broken GGUF server path — the reason D13 exists.
+
+`test-kv` 57/57, `test-core` 668/668.
+
+---
+
+## 2026-07-29 · Memory architecture A7 step 3.3/3.4 (sequences own their blocks) — no regression detected
+
+`KVCacheManager::seq_blocks_` now stores `BlockRef` per positional slot
+instead of `int`. `block_table()` still returns `const vector<int>&`, derived
+and rebuilt lazily on mutation — so there is one O(table) rebuild per appended
+block (once per `block_size` decode steps), which is the only thing here that
+could plausibly cost anything.
+
+Back-to-back A/B against a rebuilt parent, 3 trials each:
+
+| arm | pp512 (median) | tg128 (median) |
+|---|---:|---:|
+| parent (step 3.2) | 11646.31 | 272.48 |
+| change (step 3.3/3.4) | 11924.59 | 276.27 |
+
+Medians favour the change (+2.4% prefill, +1.4% decode), which is not a real
+speedup — **the host was noisy** (the operator was streaming on the same GPU):
+within-arm spread reached 6% (change arm tg128 276.28/276.27/260.41, parent
+269.14/272.48/272.93). The supportable claim is **no regression detected**;
+nothing finer than that is measurable in this window, and the absolute level
+(~272-276 vs the 285.69 measured on a quiet host earlier the same day) is host
+state, not code. Re-measure on a quiet host before pinning anything.
+
+Correctness: `test-kv` 57/57, `test-core` 668/668, and with `IMP_TEST_MODEL`
+set the e2e set 18/18 — `PrefixCacheE2ETest` 4/4 (token-identity),
+`DegenerationTest` 5/5, `ChunkedPrefillTest` 7/7, plus
+`KVCacheManagerTest.PersistedCacheFingerprintGate`, which covers the
+save/load path whose `LoadEntry` now carries an owning reference.
+
+---
+
+## 2026-07-29 · Memory architecture A7 step 3.2 (prefix cache owns its blocks) — neutral
+
+The cached LRU now holds its own `BlockRef` per entry; `free_sequence()`
+transfers the sequence's reference to it instead of skipping the free and
+letting the block survive at refcount 1. Same aggregate pool state, real
+ownership.
+
+The changed paths are NOT reachable from `imp-cli --bench` (`use_prefix_caching`
+is 0 unless `--prefix-caching` is passed), so the expectation was exact
+neutrality. Measured anyway, and the first reading looked like a −2.8% decode
+regression with < 0.04% variance across three trials — stable enough to be
+believable.
+
+It was host state. Back-to-back A/B (stash the change, rebuild the parent,
+bench both in the same window):
+
+| arm | pp512 (median) | tg128 (median) |
+|---|---:|---:|
+| step 3.1 (parent), measured 40 min earlier | 12396.02 | 285.69 |
+| **step 3.1 (parent), measured now** | **12056.40** | **277.84** |
+| **step 3.2 (change), measured now** | **12088.58** | **277.60** |
+
+Change effect: **−0.09% decode, +0.27% prefill** — noise. The 40-minute-old
+comparison would have reported −2.8% and sent me hunting a regression that did
+not exist. The depression was the operator streaming on the same GPU, which
+`nvidia-smi` does not attribute (same class as #526 / #1018).
+
+Correctness on the 3.2 build: `test-kv` 57/57, `test-core` 668/668
+(`KVCacheManagerTest` 48/48 incl. `LeakUnderSustainedChurn`), `PrefixEquivTest`
+10/10, `DegenerationTest` 5/5, and — with `IMP_TEST_MODEL` set, without which
+they silently skip — `PrefixCacheE2ETest` **4/4**, including
+`FreshVsPrefixHitTokenEqual` and `PrefixCacheMatchesNoCacheBaseline`, the two
+that assert token-identity between a cache hit and a fresh run.
+
+---
+
+## 2026-07-28 · Memory architecture A7 step 3.1 (KV block ids → BlockPool) — decode neutral
+
+`KVCache`'s block free list and per-block refcounts move into `BlockPool`
+(id-space-only mode; the memory stays in `KVCache` because the layout is
+layer-major — see MEMORY_ARCHITECTURE D10). This one IS on the hot path:
+`BlockPool::acquire()` takes a mutex where the raw free list did not. Blocks
+are appended once per `block_size` decode steps, so the expectation was
+"unmeasurable"; measured to confirm rather than assumed.
+
+Same harness/settings as below, 3 trials — pp512 12339.10 / 12466.85 /
+12396.02, tg128 286.11 / 285.66 / 285.69. Medians **12396.02 / 285.69**, i.e.
+−0.09% prefill / −0.52% decode vs the 2026-07-26 pin, and slightly *above* the
+steps 0-2a measurement (12354.01 / 284.29). The lock costs nothing measurable.
+
+Correctness: `test-kv` 57/57, `test-core` 668/668, and the KV-sensitive e2e
+subset (degeneration + continuous batching + prefix-cache + chunked prefill)
+14/14 — all with `--gpus all`.
+
+**Pre-existing failure found and cleared, not caused here:**
+`MtpForwardTest.DraftStepProducesValidToken` fails in the full `test-e2e`
+binary (passes in isolation). A baseline build from the pre-step-3 commit
+fails identically with a byte-identical `9.12 GiB free` — engine teardown does
+not return ~15 GiB before the next test allocates. AUDIT B5; belongs to step 6.
+
+---
+
+## 2026-07-28 · Memory architecture A7 step 2b (shadow plan) — init-only, neutral
+
+`plan_memory()` now runs next to `compute_vram_budget()` in
+`Engine::init_kv_cache` and logs the comparison. Computed, never applied: one
+`IMP_LOG_INFO` on the init path, no hot-path code. Same harness/settings as the
+entry below, 2 trials: pp512 12438.95 / 12375.17, tg128 284.92 / 284.73 —
+indistinguishable from the steps 0-2a numbers (12354.01 / 284.29). 614 CPU
+tests green.
+
+**What it found** (dense server default, both sides fed the same demand
+figures): the live pass hands KV **4096 blocks / 4608 MiB**, the plan takes
+**2048 / 2304 MiB**. `vram_budget.cpp:457` sets
+`target_blocks = needed_blocks * 2`, so half the pool is unreachable by any
+request the server accepts. Harmless on this config (14 GiB free either way),
+not harmless where the surplus is drawn from the headroom the pre-dequant
+caches compete for — which is #1100 and #1103. Details in
+docs/MEMORY_ARCHITECTURE.md B1.
+
+---
+
+## 2026-07-28 · Memory architecture A7 steps 0-2a — hot path untouched, decode/prefill neutral
+
+Three additive commits (Backend + phase guard + I1 gate; arena/block pool/
+scratch stack/stable spans; `plan_memory()`), plus the deletion of the dead
+`src/core/allocator.{h,cpp}`. **Nothing in the engine calls any of it yet** —
+verified: no file outside `src/memory/` includes `backend.h`, `arena.h`,
+`block_pool.h`, `scratch_stack.h`, `span.h` or `plan.h`. The only linked-in
+change to an existing path is that `imp` no longer compiles two unreferenced
+TUs.
+
+Gate-matched harness (Qwen3-8B-Q8_0, `--bench-pp 512 --bench-reps 5
+--max-tokens 128 --prefill-chunk-size 0 --set speculative.ngram=false`,
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`, 3 trials, GPU idle before the run, healthy
+under load at 2917 MHz SM / 14001 MHz mem):
+
+| metric | baseline (`tests/perf_baseline.json`, pinned 2026-07-26) | now (median of 3) | Δ |
+|---|---:|---:|---:|
+| pp512 | 12406.87 | 12354.01 | −0.43% |
+| tg128 | 287.19 | 284.29 | −1.01% |
+
+Trials — pp512: 12311.00 / 12354.01 / 12405.93 · tg128: 284.29 / 284.13 /
+285.07. Both inside the CI gate (5% prefill / 3% decode). The decode −1.01%
+is at this box's noise floor rather than a regression: the commits add no
+call sites to the forward pass, and this host has documented intra-minute
+decode volatility (#999) and whole-day 8-15% depression (#526). Baseline not
+re-pinned — nothing intentionally moved perf.
+
+CPU lane: 608 tests green (`test-core`, no GPU). Gates: `File size` OK,
+new `Alloc sites` gate OK at 78 files / 713 sites (down from 79 / 717).
+
+---
+
 ## 2026-07-17 · CUDA-graph RAII owners (WI-3) — decode neutral
 
 `CudaGraph`/`CudaGraphExec` move-only owners in core/cuda_raii.h; adopted by

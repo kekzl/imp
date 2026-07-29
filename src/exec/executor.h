@@ -544,6 +544,9 @@ private:
     ExpertLRUCache expert_cache_;
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
+    // True when nvfp4_dequant_ws_buf_ came from the engine-persistent arena
+    // (freed wholesale) rather than from VRAMAllocator.
+    bool nvfp4_dequant_ws_from_arena_ = false;
     // Set up by allocate_nvfp4_dequant_workspace() and registered with the
     // free function via set_nvfp4_dequant_workspace(). Allows the fallback
     // path to run inside CUDA stream capture without crashing on cudaMalloc.

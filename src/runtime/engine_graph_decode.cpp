@@ -19,6 +19,24 @@ namespace imp {
 // for the production decode path.
 // =====================================================================
 
+const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
+    if (banned_token_ids_.empty())
+        return nullptr;
+    if (d_banned_tokens_)
+        return d_banned_tokens_;
+    const size_t bytes = banned_token_ids_.size() * sizeof(int32_t);
+    void* p = nullptr;
+    if (cudaMalloc(&p, bytes) != cudaSuccess) {
+        IMP_LOG_WARN("banned tokens: device upload failed (%zu B) — masking disabled", bytes);
+        return nullptr;
+    }
+    d_banned_tokens_ = static_cast<int32_t*>(p);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_banned_tokens_, banned_token_ids_.data(), bytes,
+                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));  // once, at first use
+    return d_banned_tokens_;
+}
+
 int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
@@ -173,31 +191,21 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
     fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
 
     // Upload banned tokens for graph-captured logit masking
-    int32_t* d_banned = nullptr;
-    if (!banned_token_ids_.empty()) {
-        if (cudaMallocAsync(&d_banned, banned_token_ids_.size() * sizeof(int32_t), stream) == cudaSuccess) {
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_banned, banned_token_ids_.data(),
-                                               banned_token_ids_.size() * sizeof(int32_t),
-                                               cudaMemcpyHostToDevice, stream));
-            state_template.d_banned_tokens = d_banned;
-            state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
-        }
+    if (const int32_t* d_banned = banned_tokens_device_(stream)) {
+        state_template.d_banned_tokens = const_cast<int32_t*>(d_banned);
+        state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
     }
 
     auto gcfg = build_graph_config(*req, remaining);
 
     CudaGraphConditionalRunner runner;
     if (!runner.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (d_banned)
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
         if (d_block_tables_swa)
             IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
         return {};
     }
     if (!runner.launch(stream)) {
-        if (d_banned)
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
         if (d_block_tables_swa)
             IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
@@ -205,8 +213,6 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
     }
 
     auto tokens = runner.wait_and_get_tokens(stream);
-    if (d_banned)
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_banned, stream));
     if (d_block_tables_swa)
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
@@ -294,10 +300,6 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
             IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
             async_d_block_tables_swa_ = nullptr;
         }
-        if (async_d_banned_tokens_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
-            async_d_banned_tokens_ = nullptr;
-        }
         async_parked_req_id_ = -1;
     }
 
@@ -336,15 +338,9 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
 
     // Upload banned tokens to device for graph-captured logit masking
-    int32_t* d_banned = nullptr;
-    if (!banned_token_ids_.empty()) {
-        if (cudaMalloc(&d_banned, banned_token_ids_.size() * sizeof(int32_t)) == cudaSuccess) {
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_banned, banned_token_ids_.data(),
-                                               banned_token_ids_.size() * sizeof(int32_t),
-                                               cudaMemcpyHostToDevice, stream));
-            state_template.d_banned_tokens = d_banned;
-            state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
-        }
+    if (const int32_t* d_banned = banned_tokens_device_(stream)) {
+        state_template.d_banned_tokens = const_cast<int32_t*>(d_banned);
+        state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
     }
 
     if (getenv("IMP_SPEC_TRACE"))
@@ -354,8 +350,6 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     gcfg.step_limit = step_limit;
 
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (d_banned)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_banned));
         if (d_bt_swa)
             IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
         IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
@@ -363,8 +357,6 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     }
     if (!async_graph_runner_.launch(stream)) {
         async_graph_runner_.cleanup();
-        if (d_banned)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_banned));
         if (d_bt_swa)
             IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
         IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
@@ -374,7 +366,6 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
     async_d_block_tables_swa_ = d_bt_swa;
-    async_d_banned_tokens_ = d_banned;
     async_bt_capacity_ = max_blocks_per_seq;
     async_parked_req_id_ = -1;
     IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens", state_template.n_d_banned_tokens);
