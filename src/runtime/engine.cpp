@@ -14,6 +14,7 @@
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
 #include "memory/engine_arena.h"
+#include "memory/graph_slots.h"
 #include "memory/plan.h"
 #include "exec/workspace_sizes.h"
 #include "memory/backend.h"
@@ -98,6 +99,11 @@ Engine::~Engine() {
     if (async_graph_runner_.is_setup()) {
         async_graph_runner_.cleanup();
     }
+    // Strictly after the runner teardown above: closing the pool frees the
+    // slots, so a lease still outstanding here means something is holding
+    // addresses into memory that is about to go away. The pool logs that as an
+    // error rather than letting it pass silently.
+    graph_slot_pool().close();
     if (async_d_block_tables_) {
         IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
         async_d_block_tables_ = nullptr;
@@ -878,6 +884,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                      cap / (1024.0 * 1024.0));
         (void)engine_arena_open(cuda_malloc_backend(), cap);
     }
+    // T2 slot pool for the conditional graph loop (A7 step 5.3).
+    graph_slot_pool_open_for(cuda_malloc_backend(), config_.max_seq_len);
     gemm_init();
     attention_cublas_prewarm();
     // The grouped-3x prewarm reserves 512 MiB of CUTLASS workspace + 1 MiB of

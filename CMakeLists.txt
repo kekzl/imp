@@ -126,6 +126,7 @@ set(IMP_MEMORY_SOURCES
     $<$<BOOL:${IMP_ALLOC_INTERPOSE}>:src/memory/alloc_interpose.cpp>
     src/memory/arena.cpp
     src/memory/engine_arena.cpp
+    src/memory/graph_slots.cpp
     src/memory/block_pool.cpp
     src/memory/scratch_stack.cpp
     src/memory/plan.cpp
@@ -598,6 +599,7 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_backend.cpp
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
+        tests/test_graph_slots.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp

@@ -985,7 +985,10 @@ design above, so the argument that produced the original shape stays readable.
 | 4a — engine-persistent (T2) arena in production, first tenant | **done** | `feat(memory): engine-persistent arena, with the MMVQ scratch as its first tenant` |
 | 4b.1 — T2 arena sized from exact per-tenant demand | **done** | `feat(memory): size the engine arena from exact tenant demand` |
 | 4b.2 — the remaining `exec/` workspaces | not started — see B5 | |
-| 5 — per-request allocations (satisfies I2) | not started | |
+| 5.1 — banned-token list: one engine-owned copy | **done** | `fix(runtime): one engine-owned device copy of the banned-token list` |
+| 5.2 — `calibrate_fp8_scale` reduction scratch | **done** | `fix(quant): persistent reduction scratch for calibrate_fp8_scale` |
+| 5.3 — conditional-graph-loop buffers → T2 slot pool | **done** | `feat(memory): T2 slot pool for the conditional graph loop` |
+| 5.4 — the last 9: lazy spec buffers + the grow-once prefill K/V cache | not started — see B33 | |
 | 6.4 — weight caches before the KV pool; KV takes the measured residual | **done** | `fix(vram): build the weight caches before the KV pool` |
 | 6.0/6.5/6.6 — exact demand, T1 arena, delete the balloon | not started | |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |

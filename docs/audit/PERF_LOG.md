@@ -4,6 +4,45 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · T2 slot pool for the conditional graph loop — 238 → 9 allocations, decode +0.4%
+
+Build: `make build` (default options) · Qwen3-8B-Q8_0 · same protocol as the
+entry below · 3 trials.
+
+| | tg128 | pp512 |
+|---|---:|---:|
+| baseline pin | 287.19 | 12406.87 |
+| main (`cbe3d2b3`) | 284.99 | 12520 |
+| with the slot pool | **288.14 / 288.67 / 288.07** | **12621 / 12578 / 12656** |
+
++0.4% decode against the pin, +1.7% prefill. Not claimed as a speedup — it is
+within the day-to-day band, and the change removes ~17 driver round-trips per
+burst, not per step. The point is that it costs nothing.
+
+Criterion 3, measured with `-DIMP_ALLOC_INTERPOSE=ON` in a **separate image**
+(`imp:interpose`, so the default image cannot become the perf baseline — G16),
+15 requests through `imp-server` on the dense config:
+
+```
+before: 238 device allocations while serving
+after:    9 device + 3 pinned, every one at "1 call"
+```
+
+The nine that remain are first-touch growth, not per-request traffic: five lazy
+`ensure_spec_buffers_` buffers with three pinned twins, two 64 MiB
+`chunk_eager_k_/v_` growth steps, and two unidentified sites (3 KiB, 580 KiB).
+
+Pool cost on this config: 289 KiB device + 17 KiB pinned host for 4 slots.
+
+Verification: `test-core` 633/633 (12 new `GraphSlotPool` tests, both mutation
+probes caught — dropping the `stop_ids` advance in `carve_` fails the overlap
+test, and a `release_` that never returns the slot fails three), `test-kv`
+57/57, `ChunkedPrefill` 7/7, and `DegenerationTest` **5/5 with a model that
+actually exists** — `SecondRequestNotCorrupt` is the one that exercises slot
+reuse across bursts. AUDIT B33/B34.
+
+---
+
 ## 2026-07-29 · Branch-vs-main gate measurement — the −3.5% was an instrumented binary
 
 Build: `make build` (default options) · Qwen3-8B-Q8_0 · `--bench --bench-pp 512

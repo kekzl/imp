@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "core/cuda_raii.h"
+#include "memory/graph_slots.h"
 
 namespace imp {
 
@@ -318,6 +319,13 @@ private:
     // only harvested after a full-burst sync, but a polling host could read
     // the transient token id as the step counter and over-read the ring.
     int32_t* h_decode_scratch_ = nullptr;
+
+    // T2 slot backing every pointer above (A7 step 5.3). When the lease is
+    // valid nothing here is individually owned and cleanup() only returns the
+    // lease; when the pool declines, setup() allocates as it always did and
+    // cleanup() frees. The pointers themselves are identical either way, so
+    // nothing downstream can tell the difference.
+    GraphSlotLease slot_;
 
     Config config_;
     int last_read_step_ = 0;
