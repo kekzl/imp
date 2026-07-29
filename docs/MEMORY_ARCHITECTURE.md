@@ -1279,10 +1279,13 @@ First measurement, dense config, 15 serving requests:
 
 Two things this settles that no amount of reading could:
 
-1. **`calibrate_fp8_scale()` allocates twice per call on the serving path**
-   (`fp8_quant.cu:211/212`), 144 of the 414. No inventory listed it. The rest
-   of the named sites are `CudaGraphConditionalRunner::setup` (108 calls), which
-   the step-5 inventory *did* list. An interposer finds what a census misses.
+1. **`calibrate_fp8_scale()` allocated twice per call** (`fp8_quant.cu:211/212`),
+   144 of the 414, and no inventory listed it — an interposer finds what a
+   census misses. It is, however, **one-shot per layer** (`executor_kv_write.cu`
+   gates on `kv_calibrated_[kv_layer]`), so it is an I2 violation by the letter
+   rather than hot-path traffic. Fixed via persistent arena scratch: 414 → 315.
+   The rest of the named sites are `CudaGraphConditionalRunner::setup`, which
+   the step-5 inventory *did* list and which is genuinely per burst.
 2. **The bytes are irrelevant; the count is not.** 1.15 MiB is three orders of
    magnitude below M2's +190 MiB, so that delta is library/driver internal
    growth, not imp's allocations (AUDIT B30). Step 5's value is removing 414

@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 78 files, 708 sites
+# remaining: 78 files, 706 sites
 
 src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_mxfp4_sm120.cu  # 12
@@ -67,7 +67,7 @@ src/exec/quant_scratch.cu  # 10
 src/lora/lora_adapter.cpp  # 3
 src/model/model.cpp  # 3
 src/model/weight_upload.cu  # 33
-src/quant/fp8_quant.cu  # 8
+src/quant/fp8_quant.cu  # 6
 src/quant/gpt_oss_mxfp4_convert.cu  # 9
 src/quant/nvfp4_gemm.cu  # 3
 src/quant/nvfp4_quant.cu  # 16
