@@ -949,6 +949,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     } else {
         warmup();
     }
+    // Last thing before the guard arms: the speculative verify path's one-shot
+    // capacity resolutions (A7 step 5.4), which otherwise land mid-serving.
+    prewarm_spec_scratch_();
     MemAccount::instance().checkpoint("05_post_warmup");
 
     // I2: from here on, asking the driver for memory is a defect

@@ -4,6 +4,46 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Pre-size the speculative verify scratch — criterion 3 reads zero
+
+Build: `make build` (default options) · same protocol · 3 trials.
+
+| | tg128 | pp512 |
+|---|---:|---:|
+| baseline pin | 287.19 | 12406.87 |
+| with the prewarm | **288.17 / 288.29 / 288.17** | **12632 / 12577 / 12653** |
+
++0.35% decode, +1.7% prefill — i.e. free.
+
+Interposed run (`imp:interpose`, separate image), 15 requests, dense:
+
+```
+[alloc-interpose] steady state clean: 0 cudaMalloc, 0 cudaMallocAsync,
+                  0 pinned-host allocations while serving
+```
+
+Sites resolved with `addr2line` rather than guessed, which corrected the
+attribution in the entry below: the 64 MiB pair is
+`GraphExecutor::ensure_chunk_capture_scratch` and the two unknowns are
+`greedy_argmax_all` — so all nine belonged to the speculative verify path.
+
+VRAM: the prewarm claims the chunk-capture scratch (2 × 64 MiB at ctx 32768)
+at init instead of at first verify, and only when `speculative.capture` is on.
+With capture off it costs nothing (`ctx_cap=-1` in the bench config). The
+**#1103 regression check matters here**, because the prewarm competes with the
+weight caches earlier than before — gpt-oss-20b-mxfp4 at `max_batch 8 / ctx
+32768` still reports the sidecar and the NVFP4 cache accepted, decode
+**416.18 tok/s**, prefill 18603.
+
+Speculation verified live after the change: `[spec-capture] enabled
+(ctx_cap=32768)` at init, `[spec] scratch prewarmed: chunk_cap=65
+table_cap=2576`, `verify chunk graph cached` during serving.
+
+test-core 633/633, test-kv 57/57, test-quant 197/197, test-compute 196/196,
+DegenerationTest 5/5, spec/draft e2e 2/2. AUDIT B35.
+
+---
+
 ## 2026-07-29 · T2 slot pool for the conditional graph loop — 238 → 9 allocations, decode +0.4%
 
 Build: `make build` (default options) · Qwen3-8B-Q8_0 · same protocol as the

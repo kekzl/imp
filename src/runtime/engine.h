@@ -763,6 +763,8 @@ private:
     // Round the real chunk length up to its capture bucket.
     int spec_capture_bucket_(int chunk_len) const;
     int spec_capture_bucket_max_() const;
+    // Pre-size the speculative verify path's lazy scratch at init (A7 step 5.4).
+    void prewarm_spec_scratch_();
     // Launch the cached graph for state.n_tokens (or warm up / capture one).
     // Returns true when the forward ran (graph replay or captured+launched);
     // false → caller runs the eager forward itself (warmup use, capture

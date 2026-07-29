@@ -382,14 +382,12 @@ __global__ void verify_penalties_kernel(float* __restrict__ logits, int row0, in
     *lg = logit;
 }
 
-void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
-                                      const int32_t* d_hist, int n_hist, const int32_t* d_draft,
-                                      float rep_pen, float freq_pen, float pres_pen,
-                                      int32_t* d_topm, int topm) {
-    if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
-        return;
-    }
-    const int V = model_->config().vocab_size;
+// Grow-once caches for the speculative verify path. Both are sized from values
+// fixed at init (max_logit_tokens_, vocab_size), so calling this from
+// prewarm_verify_scratch() removes the last two per-serving allocations the
+// --wrap interposer still saw (A7 step 5.4). The lazy calls below remain, so a
+// path that reaches them without a prewarm still works.
+bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     const size_t scratch_needed =
         static_cast<size_t>(mb) * kArgmaxSplits * (sizeof(float) + sizeof(int));
@@ -399,27 +397,54 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         if (cudaMalloc(&verify_argmax_scratch_, scratch_needed) != cudaSuccess) {
             verify_argmax_scratch_ = nullptr;
             verify_argmax_scratch_sz_ = 0;
-            return;
+            return false;
         }
         verify_argmax_scratch_sz_ = scratch_needed;
     }
+    if (!with_penalties)
+        return true;
+    const int V = model_->config().vocab_size;
+    if (verify_pen_counts_cap_ < V) {
+        if (verify_pen_counts_)
+            IMP_CUDA_CHECK_LOG(cudaFree(verify_pen_counts_));
+        if (cudaMalloc(&verify_pen_counts_, static_cast<size_t>(V) * sizeof(int32_t)) !=
+            cudaSuccess) {
+            verify_pen_counts_ = nullptr;
+            verify_pen_counts_cap_ = 0;
+            return false;
+        }
+        verify_pen_counts_cap_ = V;
+    }
+    return true;
+}
+
+void GraphExecutor::prewarm_verify_scratch() {
+    if (!initialized_)
+        return;
+    // Penalties included unconditionally: the buffer is one int per vocab entry
+    // (~0.6 MiB) and whether a request sets a penalty is not knowable at init.
+    (void)ensure_verify_scratch(/*with_penalties=*/true);
+}
+
+void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
+                                      const int32_t* d_hist, int n_hist, const int32_t* d_draft,
+                                      float rep_pen, float freq_pen, float pres_pen,
+                                      int32_t* d_topm, int topm) {
+    if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
+        return;
+    }
+    const int V = model_->config().vocab_size;
+    const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
+    if (!ensure_verify_scratch(/*with_penalties=*/false))
+        return;
     float* pvals = static_cast<float*>(verify_argmax_scratch_);
     int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
 
     const bool penalties = (rep_pen != 1.0f || freq_pen != 0.0f || pres_pen != 0.0f) &&
                            d_hist != nullptr && d_draft != nullptr;
     if (penalties) {
-        if (verify_pen_counts_cap_ < V) {
-            if (verify_pen_counts_)
-                IMP_CUDA_CHECK_LOG(cudaFree(verify_pen_counts_));
-            if (cudaMalloc(&verify_pen_counts_, static_cast<size_t>(V) * sizeof(int32_t)) !=
-                cudaSuccess) {
-                verify_pen_counts_ = nullptr;
-                verify_pen_counts_cap_ = 0;
-                return;
-            }
-            verify_pen_counts_cap_ = V;
-        }
+        if (!ensure_verify_scratch(/*with_penalties=*/true))
+            return;
         verify_hist_count_kernel<<<(V + 255) / 256, 256, 0, stream>>>(d_hist, n_hist, V,
                                                                       verify_pen_counts_);
         IMP_CUDA_CHECK_LAUNCH();

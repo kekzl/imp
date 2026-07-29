@@ -344,6 +344,13 @@ public:
     // cudaMallocAsync whose size would bake the growing ctx_len into the
     // graph. Idempotent; returns false on allocation failure.
     [[nodiscard]] bool ensure_chunk_capture_scratch(int ctx_capacity);
+
+    // Grow-once scratch for the speculative verify path (argmax partials, and
+    // the per-vocab penalty counts). Sized from init-time constants, so the
+    // engine pre-warms it rather than letting the first verify step allocate
+    // while serving (A7 step 5.4).
+    [[nodiscard]] bool ensure_verify_scratch(bool with_penalties);
+    void prewarm_verify_scratch();
     // Bumped whenever the shared forward workspace is reallocated. A captured
     // verify graph holds raw pointers into it — the engine invalidates its
     // graphs when this changes.

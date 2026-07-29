@@ -988,7 +988,7 @@ design above, so the argument that produced the original shape stays readable.
 | 5.1 — banned-token list: one engine-owned copy | **done** | `fix(runtime): one engine-owned device copy of the banned-token list` |
 | 5.2 — `calibrate_fp8_scale` reduction scratch | **done** | `fix(quant): persistent reduction scratch for calibrate_fp8_scale` |
 | 5.3 — conditional-graph-loop buffers → T2 slot pool | **done** | `feat(memory): T2 slot pool for the conditional graph loop` |
-| 5.4 — the last 9: lazy spec buffers + the grow-once prefill K/V cache | not started — see B33 | |
+| 5.4 — pre-size the speculative verify path's lazy scratch | **done — criterion 3 reads zero** | `fix(runtime): pre-size the speculative verify scratch at init` |
 | 6.4 — weight caches before the KV pool; KV takes the measured residual | **done** | `fix(vram): build the weight caches before the KV pool` |
 | 6.0/6.5/6.6 — exact demand, T1 arena, delete the balloon | not started | |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |

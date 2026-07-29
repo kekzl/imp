@@ -50,6 +50,51 @@
 
 namespace imp {
 
+// Pre-size everything on the speculative verify path that would otherwise be
+// allocated lazily during serving (A7 step 5.4). After the T2 slot pool these
+// were the ONLY device allocations the --wrap interposer still saw — nine of
+// them, each at "1 call" per process: the chunk-capture K/V scratch, the
+// consolidated spec staging block, and the verify argmax/penalty scratch.
+//
+// None of them is per-request; they are one-shot capacity resolutions that
+// happen at first use instead of at init. Doing them here turns a surprise
+// mid-serving claim into a planned one, which is the difference that #1103 was
+// about — the caches lost that race against the KV pool.
+//
+// Capacity comes from the same expressions the runtime uses, evaluated at
+// their maxima; a later call with a smaller request hits the >= guards inside
+// ensure_* and allocates nothing.
+void Engine::prewarm_spec_scratch_() {
+    const auto& scfg = runtime_config_.speculative;
+    const bool spec_on = scfg.ngram || scfg.suffix || scfg.capture || mtp_spec_decode_enabled();
+    if (!spec_on || !executor_)
+        return;
+
+    // Resolves spec_capture_ctx_cap_ and, through it, the chunk-capture K/V
+    // scratch. Called through spec_capture_ready_ on purpose: it carries the
+    // eligibility guards (host-offload, residual KV, the census probe), and
+    // duplicating them here would be a second copy to keep in sync. ctx_padded
+    // = 1 passes, so the call is a side-effect-only resolution.
+    if (scfg.capture)
+        (void)spec_capture_ready_(1);
+
+    // Staging + block tables, at the caps engine_spec_ngram.cpp would reach:
+    // the largest capture bucket, and a block table covering the whole context.
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    const int chunk_cap = std::max({spec_capture_bucket_max_(), scfg.k + 1, 33});
+    const int ctx_for_table = std::max(config_.max_seq_len, spec_capture_ctx_cap_);
+    const int table_cap = (ctx_for_table + kv_bs - 1) / kv_bs + 16;
+    if (!ensure_spec_buffers_(chunk_cap, table_cap)) {
+        IMP_LOG_WARN("[spec] scratch prewarm failed (chunk_cap=%d table_cap=%d) — "
+                     "buffers will be taken on first use instead",
+                     chunk_cap, table_cap);
+        return;
+    }
+    executor_->prewarm_verify_scratch();
+    IMP_LOG_INFO("[spec] scratch prewarmed: chunk_cap=%d table_cap=%d ctx_cap=%d", chunk_cap,
+                 table_cap, spec_capture_ctx_cap_);
+}
+
 int Engine::spec_capture_bucket_max_() const {
     const auto& scfg = runtime_config_.speculative;
     int k_max = std::max(1, scfg.k);
