@@ -146,4 +146,37 @@ private:
 // the reserved delta.
 void trim_device_mempool();
 
+// ─────────────────────────────────────────────────────────────────────
+// I7 — capacity is not occupancy (docs/MEMORY_ARCHITECTURE.md).
+//
+// A single "VRAM used" number cannot distinguish a KV pool that is 90 % full
+// from one that is 90 % reserved and empty, and every capacity question an
+// operator actually asks ("can this box take another concurrent request?",
+// "is the budget doing anything?") needs both halves. Each tier reports the
+// capacity it holds and what is live inside it.
+//
+// Process-global tiers only — anything owned by an Engine (the KV pool) is
+// added by the caller that has one. Cheap enough to call per scrape: driver
+// queries plus a few atomics, no allocation beyond the returned vector.
+struct MemTierStat {
+    const char* tier = "";
+    size_t reserved = 0;  // capacity this tier holds
+    size_t live = 0;      // in use inside it (== reserved when not tracked)
+};
+
+std::vector<MemTierStat> memory_tier_stats();
+
+// Installed --vram-budget and this process's own usage against it, both in
+// bytes. own_bytes is the same baseline delta the budget view sizes from, so
+// "is the cap respected?" is answerable from the same number the planner used
+// rather than from device-used (which also carries the CUDA context and any
+// neighbour process). budget_bytes is 0 when no budget is installed.
+struct MemBudgetStat {
+    size_t budget_bytes = 0;
+    size_t own_bytes = 0;
+    size_t own_peak_bytes = 0;
+};
+
+MemBudgetStat memory_budget_stat();
+
 }  // namespace imp

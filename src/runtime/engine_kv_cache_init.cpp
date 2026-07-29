@@ -309,6 +309,33 @@ bool Engine::init_kv_cache() {
         }
     }
 
+    // I6, plan-time half: an explicit --vram-budget that cannot hold one
+    // full-length sequence produces a process that loads fine and then cancels
+    // every request ("needs 32 KV blocks but cache capacity is 16"). That is
+    // the right runtime answer but the wrong time to learn it — the load has
+    // already been paid for. Fail here, naming the arithmetic, so the operator
+    // can raise the budget instead of reading scheduler errors.
+    //
+    // Only when a budget is installed. Without one this is the pre-existing
+    // best-effort path and must keep its current behaviour.
+    if (vram_budget_bytes() > 0 && per_block_total_bytes > 0) {
+        const int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
+        if (max_blocks < blocks_per_seq) {
+            const double need_mib =
+                double(blocks_per_seq) * double(per_block_total_bytes) / (1024.0 * 1024.0);
+            const double have_mib =
+                double(max_blocks) * double(per_block_total_bytes) / (1024.0 * 1024.0);
+            IMP_LOG_ERROR(
+                "--vram-budget %zu MiB is too small for this model: the KV pool ends up at %d "
+                "blocks (%.0f MiB) but one max_seq_len=%d sequence needs %d blocks (%.0f MiB). "
+                "Every request would be cancelled at admission. Raise --vram-budget by at least "
+                "%.0f MiB, or lower --max-seq-len.",
+                vram_budget_bytes() >> 20, max_blocks, have_mib, config_.max_seq_len,
+                blocks_per_seq, need_mib, need_mib - have_mib);
+            return false;
+        }
+    }
+
     {
         QType kv_dtype = config_.kv_cache_dtype;
         size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks *

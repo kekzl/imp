@@ -1,5 +1,9 @@
 #include "memory/mem_account.h"
 #include "core/logging.h"
+#include "memory/backend.h"
+#include "memory/engine_arena.h"
+#include "memory/graph_slots.h"
+#include "memory/vram_query.h"
 
 #include <algorithm>
 #include <chrono>
@@ -153,6 +157,24 @@ void MemAccount::report(const char* phase_label) {
     emit("device: total=%.0f MiB  used=%.0f MiB  free=%.0f MiB  peak_used=%.0f MiB",
          total_b / kMiB, used / kMiB, free_b / kMiB, peak / kMiB);
 
+    // What --vram-budget is actually a cap on. device-used above also carries
+    // the CUDA context and any neighbour process, so it is the wrong number to
+    // gate on; own_peak is this process's allocations since init and nothing
+    // else. The peak-VRAM gate reads this line.
+    {
+        const MemBudgetStat b = memory_budget_stat();
+        const size_t ctx = vram_used_at_install_bytes();
+        if (b.budget_bytes > 0) {
+            emit("budget: cap=%.0f MiB  own=%.0f MiB  own_peak=%.0f MiB  ctx_at_install=%.0f MiB  "
+                 "[%s]",
+                 b.budget_bytes / kMiB, b.own_bytes / kMiB, b.own_peak_bytes / kMiB, ctx / kMiB,
+                 b.own_peak_bytes <= b.budget_bytes ? "within budget" : "OVER BUDGET");
+        } else {
+            emit("budget: cap=none  own=%.0f MiB  own_peak=%.0f MiB  ctx_at_install=%.0f MiB",
+                 b.own_bytes / kMiB, b.own_peak_bytes / kMiB, ctx / kMiB);
+        }
+    }
+
     // cudaMallocAsync default-pool slack: freed-but-not-returned-to-OS memory
     // (e.g. the #679 ms_ref cudaFree's) sits here as reserved and still counts
     // as device-used. reserved - used = trimmable headroom (cudaMemPoolTrimTo).
@@ -269,6 +291,59 @@ void MemAccount::report(const char* phase_label) {
             std::fclose(f);
         }
     }
+}
+
+std::vector<MemTierStat> memory_tier_stats() {
+    std::vector<MemTierStat> out;
+    out.reserve(8);
+    auto push = [&](const char* tier, size_t reserved, size_t live) {
+        out.push_back(MemTierStat{tier, reserved, live});
+    };
+
+    // Device: reserved = total, live = used. The outer frame everything else
+    // sits inside, so a scraper can sanity-check the rest against it.
+    {
+        size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess)
+            push("device", total_b, total_b > free_b ? total_b - free_b : 0);
+    }
+    // The async mempool is the tier where capacity and occupancy diverge most:
+    // reserved can sit at the model's full footprint while used is zero.
+    int dev = 0;
+    if (cudaGetDevice(&dev) == cudaSuccess) {
+        cudaMemPool_t pool = nullptr;
+        if (cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess) {
+            unsigned long long rsv = 0, used = 0;
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv);
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used);
+            push("async_pool", static_cast<size_t>(rsv), static_cast<size_t>(used));
+        }
+        size_t g_rsv = 0, g_used = 0;
+        cudaDeviceGetGraphMemAttribute(dev, cudaGraphMemAttrReservedMemCurrent, &g_rsv);
+        cudaDeviceGetGraphMemAttribute(dev, cudaGraphMemAttrUsedMemCurrent, &g_used);
+        push("graph_pool", g_rsv, g_used);
+    }
+    // Tiers imp owns outright.
+    {
+        const BackendStats bs = cuda_malloc_backend().stats();
+        push("backend", bs.reserved_bytes, bs.live_bytes);
+    }
+    push("t2_arena", engine_arena().capacity(), engine_arena().high_water());
+    {
+        auto& gs = graph_slot_pool();
+        const int in_use = gs.num_slots() - gs.free_slots();
+        const size_t per_slot = gs.num_slots() > 0 ? gs.device_bytes() / gs.num_slots() : 0;
+        push("graph_slots", gs.device_bytes(), per_slot * static_cast<size_t>(in_use));
+    }
+    return out;
+}
+
+MemBudgetStat memory_budget_stat() {
+    MemBudgetStat s;
+    s.budget_bytes = vram_budget_bytes();
+    s.own_bytes = vram_own_used_bytes();
+    s.own_peak_bytes = vram_own_peak_bytes();
+    return s;
 }
 
 void trim_device_mempool() {

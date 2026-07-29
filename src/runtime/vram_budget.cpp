@@ -4,6 +4,7 @@
 #include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (SfAtom padding)
 #include "core/logging.h"
 #include "memory/vram_query.h"
+#include "memory/plan.h"  // kMeasuredLibraryReserveBytes
 #include <algorithm>
 #include <cuda_runtime.h>
 
@@ -160,6 +161,30 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // ("rejecting fp8_ssm_sidecar ... 0 MiB free, need 1630 MiB headroom"),
     // costing ~7x decode on gpt-oss-20b at server defaults (#1103).
     budget.reserve_bytes = std::max(budget.reserve_bytes, vram_allocator_headroom(total_vram));
+
+    // The library reserve (A1.5) is what cuBLAS/CUTLASS claim on the FIRST
+    // forward pass — after this pass runs, so it is not in the `free_vram` we
+    // are dividing up. Every term above is either a small feature constant or
+    // a percentage of total, and that is the bug under --vram-budget: asking
+    // for a 16 GiB slice scaled the reserve down to 1.6 GiB while the library
+    // still took its full ~3.9 GiB, so the plan overran the cap by the
+    // difference (measured: budget 16000 -> peak 22584 MiB, i.e. the budget
+    // changed nothing at all). The charge is fixed, so the floor must be too.
+    //
+    // plan_memory() has always charged this; the live pass did not, and the
+    // shadow-plan log said so on every startup ("library reserve ... the live
+    // pass does not charge this"). This closes that divergence.
+    {
+        const size_t lib_reserve = config.library_reserve_mb < 0
+                                       ? kMeasuredLibraryReserveBytes
+                                       : (static_cast<size_t>(config.library_reserve_mb) << 20);
+        if (lib_reserve > budget.reserve_bytes) {
+            IMP_LOG_INFO("VRAM budget: reserve floored at the library charge %.0f -> %.0f MiB",
+                         budget.reserve_bytes / (1024.0 * 1024.0),
+                         lib_reserve / (1024.0 * 1024.0));
+            budget.reserve_bytes = lib_reserve;
+        }
+    }
 
     // Estimate SSM footprint
     size_t ssm_footprint = 0;
