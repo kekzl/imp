@@ -977,7 +977,7 @@ rounded up — three of the seven are still open, and one has not moved at all.
 | I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ — `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). The balloon and the live `cudaMemGetInfo` sizing are still there | ✓ — `plan_memory()` never queries the device; fails at load with a report |
 | I5 | Unidirectional ownership | ✗ — `VRAMAllocator` is a tracker; raw `void*` cross module boundaries | **~ — KV blocks and the T2/T3 tiers own through move-only RAII** (`Region`, `BlockRef`, `GraphSlotLease`); raw `void*` still crosses boundaries in `exec/` and `compute/` | ✓ — `Owned<T, Tier>`, no cross-tier conversion, no raw device pointers above L1 |
 | I6 | OOM is typed and recoverable | ~ — `RequestStatus::CANCELLED`, plus a warning that fires *after* prefill | **✓ — both halves.** Plan-time: an unservable `--vram-budget` refuses at load with the block arithmetic. Admission-time: `IMP_ERROR_CAPACITY` → HTTP 503 `capacity_error`, distinct from a client cancel (B40) | ✓ — plan-time failure at load; admission-time 429/503 at runtime |
-| I7 | Capacity ≠ occupancy | ✗ — 20–39 % of device memory unattributed | **~ — per-tier reserved *and* live is served** on `/metrics`, plus KV blocks and budget-vs-own. Accounting: dense **96.7 %**, vision 93.3 %, MoE **102.0 %** — the negative residual proves the note double-booking (B32), so the gap is the counters, not the attribution | ✓ — per-tier reserved *and* live, library reserve named, ≥95 % accounted |
+| I7 | Capacity ≠ occupancy | ✗ — 20–39 % of device memory unattributed | **~ — per-tier reserved *and* live is served** on `/metrics`, plus KV blocks and budget-vs-own. Accounting reaches **98.3 %** once the library reserve is charged at its measured value rather than the 3900 MiB constant (B41/B42); with the constant it is 82.5 % on Qwen3-8B. MoE's **102.0 %** — a negative residual — proves the note double-booking (B32), so that config's gap is the counters, not the attribution | ✓ — per-tier reserved *and* live, library reserve named, ≥95 % accounted |
 
 Nothing in the invariant set had to be dropped. Two are weakened in a stated way:
 I3 is enforced by the type system for *stability* but the graph-invalidation hook
@@ -1034,6 +1034,7 @@ design above, so the argument that produced the original shape stays readable.
 | 9b.5 — admission-time 503 on KV exhaustion (I6) | **done** | `feat(api): a typed capacity refusal instead of a generic cancel` |
 | 6.4 — weight caches before the KV pool; KV takes the measured residual | **done** | `fix(vram): build the weight caches before the KV pool` |
 | 6.0/6.5/6.6 — exact demand, T1 arena, delete the balloon | not started | |
+| 6.7 — the library reserve is measured and reported, not assumed | **done** | `feat(memory): measure the library reserve instead of assuming it` |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |
 | 7b — VMM backend implementation | not started | |
 | 8 — `compute/` statics | not started | |

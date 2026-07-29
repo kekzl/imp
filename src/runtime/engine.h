@@ -771,6 +771,9 @@ private:
     int spec_capture_bucket_max_() const;
     // Pre-size the speculative verify path's lazy scratch at init (A7 step 5.4).
     void prewarm_spec_scratch_();
+    // Compare the first forward's actual claim against what the plan charged
+    // (AUDIT B41). Diagnostic; logs the number to pin.
+    void report_library_reserve_(size_t free_before);
     // Launch the cached graph for state.n_tokens (or warm up / capture one).
     // Returns true when the forward ran (graph replay or captured+launched);
     // false → caller runs the eager forward itself (warmup use, capture
