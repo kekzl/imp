@@ -25,6 +25,7 @@
 
 #include "runtime/engine.h"
 #include "runtime/config.h"
+#include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/sampling.h"
 #include "memory/mem_account.h"
@@ -280,16 +281,18 @@ void Engine::build_banned_token_list() {
 // So the honest move is to measure it here and hand the operator the exact
 // number to pin. It is stable per model + quant path and invariant to batch and
 // context (M5), so one line in imp.conf fixes that deployment for good.
-void Engine::report_library_reserve_(size_t free_before) {
+// Free function: it needs no Engine state beyond these two values, and keeping
+// it out of the class keeps engine.h (a god-header already at its size limit)
+// from growing for a diagnostic. Returns the measured claim, SIZE_MAX if it
+// could not be measured.
+static size_t report_library_reserve(size_t free_before, int library_reserve_mb) {
     if (free_before == 0)
-        return;
+        return SIZE_MAX;
     size_t free_after = 0;
     if (!vram_budget_mem_get_info(&free_after, nullptr))
-        return;
+        return SIZE_MAX;
     const size_t measured = free_before > free_after ? free_before - free_after : 0;
-    const size_t charged = config_.library_reserve_mb < 0
-                               ? kMeasuredLibraryReserveBytes
-                               : (static_cast<size_t>(config_.library_reserve_mb) << 20);
+    const size_t charged = engine_internal::library_reserve_charge(library_reserve_mb);
     const double meas_mib = measured / (1024.0 * 1024.0);
     const double chg_mib = charged / (1024.0 * 1024.0);
     // 20 % of the charge, floored at 256 MiB: below that the difference cannot
@@ -300,7 +303,7 @@ void Engine::report_library_reserve_(size_t free_before) {
         IMP_LOG_INFO("library reserve: charged %.0f MiB, first forward claimed %.0f MiB (within "
                      "tolerance)",
                      chg_mib, meas_mib);
-        return;
+        return measured;
     }
     IMP_LOG_WARN("library reserve MISMATCH: the plan charged %.0f MiB, the first forward actually "
                  "claimed %.0f MiB (%+.0f MiB). %s Pin it for this model with "
@@ -313,6 +316,7 @@ void Engine::report_library_reserve_(size_t free_before) {
                      : "The plan therefore over-reserved: that much KV pool was set aside for "
                        "nothing.",
                  meas_mib);
+    return measured;
 }
 
 void Engine::warmup() {
@@ -372,7 +376,7 @@ void Engine::warmup() {
         req->status = RequestStatus::CANCELLED;
     }
     MemAccount::instance().checkpoint("05b_post_warmup_forward");
-    report_library_reserve_(warm_free_before);
+    measured_library_reserve_ = report_library_reserve(warm_free_before, config_.library_reserve_mb);
 
     for (int i = 0; i < kMaxGraphPoolSize; i++) {
         decode_graph_pool_[i].invalidate();

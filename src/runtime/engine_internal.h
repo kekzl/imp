@@ -1,5 +1,7 @@
 #pragma once
 
+#include "memory/plan.h"  // kMeasuredLibraryReserveBytes
+
 // Internal helpers shared across engine_*.cpp translation units.
 // Not part of any public API; included only by src/runtime/engine*.cpp.
 //
@@ -60,6 +62,15 @@ inline void ensure_prefill_workspace(GraphExecutor* executor) {
     if (executor->has_decode_workspace() && executor->active_workspace() != 0) {
         executor->use_workspace(0);
     }
+}
+
+// The library reserve the PLAN charges: imp.conf's vram.library_reserve_mb, or
+// the measured default when unset. Shared because both the audit table and the
+// warmup reporter need the same number, and duplicating the ternary at two call
+// sites is how the two drift apart (AUDIT B41 is that drift, one level up).
+inline size_t library_reserve_charge(int library_reserve_mb) {
+    return library_reserve_mb < 0 ? kMeasuredLibraryReserveBytes
+                                  : (static_cast<size_t>(library_reserve_mb) << 20);
 }
 
 }  // namespace imp::engine_internal
