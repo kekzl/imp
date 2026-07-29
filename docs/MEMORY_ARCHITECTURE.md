@@ -1038,7 +1038,7 @@ design above, so the argument that produced the original shape stays readable.
 | 7b — VMM backend implementation | not started | |
 | 8 — `compute/` statics | not started | |
 | 9a — `--mem-report` with named charges | **done** | `feat(memory): --mem-report — name the charges the pool notes cannot see` |
-| 9b — admission control, `--vram-budget` as a cap, CI peak gate | not started | |
+| **A7 step 9 complete** (9a + 9b.1–9b.5) | | criterion 5 is *not* claimed — see B38 |
 
 ### I1 allowlist baseline
 
