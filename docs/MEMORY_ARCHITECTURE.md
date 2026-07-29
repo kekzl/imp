@@ -910,7 +910,23 @@ then a CI failure, not a production OOM.
 
 Acceptance criterion 8 (peak VRAM per model config vs checked-in thresholds)
 sits on top: a GPU-side job, run manually or on a self-hosted runner, comparing
-`--mem-report` totals against `tests/vram_thresholds.json`.
+`--mem-report` totals against checked-in thresholds.
+
+**Built (2026-07-29), with one design change.** The gate lives in
+`scripts/verify.sh` next to the perf gate — CI has no GPU runner, so a separate
+job would never execute — and the threshold lives in the existing
+`tests/perf_baseline.json` (`metrics.memory_mb.own_peak_mb` against
+`thresholds.vram_increase_pct`) rather than a new file. That file had carried
+both fields since it was written and nothing read either of them, so criterion 8
+was structurally unmeetable while looking provided-for (B39).
+
+The design change: it gates **`own_peak`, not the `--mem-report` device total**.
+Device-used also carries the CUDA primary context and any neighbour process, so
+it moves for reasons unrelated to the change under test. `own_peak` is this
+process's allocations since engine init, which makes it a delta rather than an
+absolute — and therefore immune to the 1.6 GB run-to-run swing in free VRAM that
+#1103 documented. Measured byte-identical across repeat runs, which is a better
+gate signal than any throughput number.
 
 ---
 
@@ -949,15 +965,19 @@ the KV cache, the forward pass and the weight caches respectively.
 
 ## Invariant compliance
 
-| | Invariant | Today | After |
-|---|---|---|---|
-| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | ✓ — `Backend`, allowlist empty, CI gate |
-| I2 | No allocation on the hot path | ✗ — measured +190 MiB/config of steady-state allocation | ✓ — `ScratchStack`, phase guard, counter == 0 |
-| I3 | Stable addresses for graph memory | ~ — true in practice, enforced by comments + a `workspace_generation` hook | ✓ — `StableSpan` in kernel signatures; no conversion from `DeviceSpan` |
-| I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | ✓ — `plan_memory()` never queries the device; fails at load with a report |
-| I5 | Unidirectional ownership | ✗ — `VRAMAllocator` is a tracker; raw `void*` cross module boundaries | ✓ — `Owned<T, Tier>`, no cross-tier conversion, no raw device pointers above L1 |
-| I6 | OOM is typed and recoverable | ~ — `RequestStatus::CANCELLED`, plus a warning that fires *after* prefill | ✓ — plan-time failure at load; admission-time 429/503 at runtime |
-| I7 | Capacity ≠ occupancy | ✗ — 20–39 % of device memory unattributed | ✓ — per-tier reserved *and* live, library reserve named, ≥95 % accounted |
+"Design-time" is the state Phase A was written against and is kept as the
+record. "Measured" is where Phase B actually stands, and it is deliberately not
+rounded up — three of the seven are still open, and one has not moved at all.
+
+| | Invariant | Design-time | **Measured (2026-07-29)** | Target |
+|---|---|---|---|---|
+| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 697 sites / 78 files.** Not improved: the migrated tenants kept their original path as a fallback, and the gate counts source sites, not executed ones (B34). The *gate* is now site-granular and mutation-verified, so the list cannot grow silently | ✓ — `Backend`, allowlist empty, CI gate |
+| I2 | No allocation on the hot path | ✗ — measured +190 MiB/config of steady-state allocation | **✓ — `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`**, 15 requests, dense. Was 414 → 238 → 0 | ✓ — `ScratchStack`, phase guard, counter == 0 |
+| I3 | Stable addresses for graph memory | ~ — true in practice, enforced by comments + a `workspace_generation` hook | **~ — `StableSpan` exists and is passkey-enforced**, so only allocators that can promise stability can mint one; kernel signatures still take raw pointers | ✓ — `StableSpan` in kernel signatures; no conversion from `DeviceSpan` |
+| I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ — `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). The balloon and the live `cudaMemGetInfo` sizing are still there | ✓ — `plan_memory()` never queries the device; fails at load with a report |
+| I5 | Unidirectional ownership | ✗ — `VRAMAllocator` is a tracker; raw `void*` cross module boundaries | **~ — KV blocks and the T2/T3 tiers own through move-only RAII** (`Region`, `BlockRef`, `GraphSlotLease`); raw `void*` still crosses boundaries in `exec/` and `compute/` | ✓ — `Owned<T, Tier>`, no cross-tier conversion, no raw device pointers above L1 |
+| I6 | OOM is typed and recoverable | ~ — `RequestStatus::CANCELLED`, plus a warning that fires *after* prefill | **✓ — both halves.** Plan-time: an unservable `--vram-budget` refuses at load with the block arithmetic. Admission-time: `IMP_ERROR_CAPACITY` → HTTP 503 `capacity_error`, distinct from a client cancel (B40) | ✓ — plan-time failure at load; admission-time 429/503 at runtime |
+| I7 | Capacity ≠ occupancy | ✗ — 20–39 % of device memory unattributed | **~ — per-tier reserved *and* live is served** on `/metrics`, plus KV blocks and budget-vs-own. Accounting: dense **96.7 %**, vision 93.3 %, MoE **102.0 %** — the negative residual proves the note double-booking (B32), so the gap is the counters, not the attribution | ✓ — per-tier reserved *and* live, library reserve named, ≥95 % accounted |
 
 Nothing in the invariant set had to be dropped. Two are weakened in a stated way:
 I3 is enforced by the type system for *stability* but the graph-invalidation hook
