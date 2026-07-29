@@ -560,6 +560,24 @@ annotations.** What the design does enforce:
 Type system where it can carry the weight; asserted invariants plus a soak where
 it cannot. Not claiming more than the language gives.
 
+**Criterion 4 must be read as pool-level, not device-level, and that is a
+platform fact rather than a concession** (AUDIT B36). Measured on this box:
+after one load → generate → free cycle, every CUDA-level release succeeds — the
+async pool trims to `reserved 0 / used 0`, graph memory reads zero — and
+`cudaMemGetInfo` still drops by the model's full footprint and never recovers,
+for the life of the process. Setting the pool's release threshold to zero and
+re-trimming returns nothing. WSL2/WDDM does not hand a process's peak VRAM
+commitment back. So "live blocks return to baseline" is testable and is what the
+soak checks; "device-used returns to baseline" is not achievable here by any
+allocator design, and a `cudaMalloc` probe cannot prove otherwise because the
+driver oversubscribes into host memory and returns success (G18 — time it
+instead: ~1530 GB/s resident vs ~237 GB/s spilled).
+
+This is also the sharpest argument for **I4**: within a process, free VRAM only
+ever decreases. Any capacity decision read from `cudaMemGetInfo` is measuring a
+moving floor, which is why the planner has to own capacity rather than discover
+it.
+
 ---
 
 ## A4. The planner
