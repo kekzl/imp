@@ -18,6 +18,7 @@
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "memory/vram_allocator.h"
+#include "memory/engine_arena.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -1061,7 +1062,27 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     if (covered_bytes == 0)
         return !nvfp4_dequant_uncapturable_;
 
-    nvfp4_dequant_ws_buf_ = vram_alloc(vram_alloc_, covered_bytes, "nvfp4_dequant");
+    // T2: take from the engine-persistent arena, whose capacity was sized to
+    // include exactly this buffer (exec/workspace_sizes.h). That is what keeps
+    // the pre-dequant cache build — which runs BEFORE this and expands into
+    // free VRAM — from leaving nothing behind (AUDIT B23). Fall back to a
+    // direct allocation when the arena is closed (bare GraphExecutor in tests)
+    // or short, exactly as the MMVQ tenant does.
+    {
+        auto slab = engine_arena().take_bytes(covered_bytes);
+        if (!slab.empty()) {
+            nvfp4_dequant_ws_buf_ = slab.data();
+            nvfp4_dequant_ws_from_arena_ = true;
+        } else {
+            nvfp4_dequant_ws_buf_ = vram_alloc(vram_alloc_, covered_bytes, "nvfp4_dequant");
+            nvfp4_dequant_ws_from_arena_ = false;
+            if (nvfp4_dequant_ws_buf_)
+                IMP_LOG_WARN("nvfp4_dequant: engine arena could not supply %.2f MiB "
+                             "(remaining %.2f MiB) — fell back to a direct allocation",
+                             covered_bytes / (1024.0 * 1024.0),
+                             engine_arena().remaining() / (1024.0 * 1024.0));
+        }
+    }
     if (!nvfp4_dequant_ws_buf_) {
         IMP_LOG_WARN("gemm_nvfp4 dequant workspace: alloc failed (%zu bytes) — prefill graph "
                      "capture disabled (M>1 fallback runs eager).",
@@ -1278,7 +1299,8 @@ void GraphExecutor::free_buffers() {
     // Free gemm_nvfp4 dequant workspace and unregister from the free function.
     if (nvfp4_dequant_ws_buf_) {
         set_nvfp4_dequant_workspace(nullptr, 0);
-        vram_free(vram_alloc_, nvfp4_dequant_ws_buf_);
+        if (!nvfp4_dequant_ws_from_arena_)
+            vram_free(vram_alloc_, nvfp4_dequant_ws_buf_);
         nvfp4_dequant_ws_buf_ = nullptr;
         nvfp4_dequant_ws_size_ = 0;
     }

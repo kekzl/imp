@@ -981,7 +981,8 @@ design above, so the argument that produced the original shape stays readable.
 | 3.3–3.4 — `seq_blocks_` → `BlockRef`, drop the scaffolding | **done** | `refactor(memory): sequences own their KV blocks through BlockRef` |
 | **A7 step 3 complete** | | |
 | 4a — engine-persistent (T2) arena in production, first tenant | **done** | `feat(memory): engine-persistent arena, with the MMVQ scratch as its first tenant` |
-| 4b — the remaining `exec/` workspaces, planner-sized | not started — see B5 | |
+| 4b.1 — T2 arena sized from exact per-tenant demand | **done** | `feat(memory): size the engine arena from exact tenant demand` |
+| 4b.2 — the remaining `exec/` workspaces | not started — see B5 | |
 | 5 — per-request allocations (satisfies I2) | not started | |
 | 6 — weight upload + pre-dequant caches | not started | |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |

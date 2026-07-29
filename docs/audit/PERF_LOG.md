@@ -4,6 +4,47 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Size the T2 arena from exact demand — restores prefill graph capture on gpt-oss-20b
+
+The engine arena acquires its Region when it is OPENED, so its capacity is
+what reserves those bytes against everything that allocates later. It was a
+64 MiB constant. `exec/workspace_sizes.{h,cpp}` now computes the exact demand
+of the two migrated tenants from the model shape and config, and the arena
+opens at that size.
+
+**Verified functional repair.** gpt-oss-20b-mxfp4 at server defaults:
+
+| | before | after |
+|---|---|---|
+| `nvfp4_dequant` (31.64 MiB) | `rejecting ... (0 MiB free, need 1630 MiB headroom)` | allocated from the arena |
+| prefill graph capture | **disabled** — "M>1 fallback runs eager" | **enabled** — "graph-safe M>1 fallback; covers dense=2400, moe=72, cutlass=2304 cache entries" |
+| arena demand | (constant 64 MiB) | mmvq 36.0 + nvfp4_dequant 31.6 → 76.1 MiB |
+
+A 31 MiB workspace was failing on a 32 GiB card because the pre-dequant cache
+build expands into free VRAM and got there first. Tier ownership is the fix:
+the bytes are the arena's before anything else can take them.
+
+**Latency: no improvement attributable to this change, stated plainly.**
+120 tokens takes 4.72–5.30 s (median 4.86, 5 requests) against a 7.10–7.81 s
+baseline — but an intermediate build with the rejection *still present*
+already measured 4.87–5.30 s, so that delta is run-to-run variance on this
+pathological config, not this commit. The dominant defect is untouched:
+`03_kv_cache` still consumes every remaining byte (KV 25 380 blocks /
+19 035 MiB / 406 080 tokens on a `--max-batch 8` server) and the card still
+ends at 0.0 MiB free. That is the ordering problem (A7 6.4/6.5), still open.
+
+**Sizing gotcha the measurement caught.** The first attempt computed 22.5 MiB
+where 31.64 was needed: the demand runs BEFORE the weight upload, and gpt-oss'
+experts arrive as `expert_gate_up_packed_blocks` — a 4D U8 slot the upload
+consumes — so a tensor scan cannot see the real dequant target. It is one
+expert's FUSED gate_up, `2*expert_d_ff x d_model`, which the config carries.
+Deriving it from the config makes the reservation independent of when it runs.
+
+`test-kv` 57/57, `test-core` 668/668, 20/20 across Degeneration +
+PrefixCacheE2E + ChunkedPrefill + LlmCompressorE2E.
+
+---
+
 ## 2026-07-29 · Own the MoE SfAtom slabs — a real leak, not the B5 one
 
 `pre_dequant_phase3_moe.cu` allocated one SfAtom slab per (layer, projection)

@@ -14,6 +14,7 @@
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
 #include "memory/engine_arena.h"
+#include "exec/workspace_sizes.h"
 #include "memory/backend.h"
 #include "memory/vram_query.h"
 #include "model/gguf_loader.h"
@@ -843,10 +844,22 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     }
     // Engine-persistent (T2) arena — opened before the first tenant
-    // (docs/MEMORY_ARCHITECTURE.md A3.3). A failure here is not fatal: every
-    // tenant already handles an empty take the way it handled a failed
-    // cudaMalloc.
-    (void)engine_arena_open(cuda_malloc_backend());
+    // (docs/MEMORY_ARCHITECTURE.md A3.3). The arena acquires its Region HERE,
+    // so its capacity is what reserves those bytes against everything that
+    // allocates later — notably the pre-dequant cache build, which expands
+    // into whatever free VRAM it finds (AUDIT B23). Size it from the exact
+    // per-tenant demand rather than a constant; the constant is only a floor
+    // for the tenants not migrated yet.
+    {
+        const ExecT2Demand d = exec_t2_demand(*model_, config_.max_seq_len);
+        // +1/8 for 256-byte alignment padding across the arena's takes.
+        const size_t want = d.total() + d.total() / 8;
+        const size_t cap = std::max(kEngineArenaDefaultBytes, want);
+        IMP_LOG_INFO("engine arena demand: mmvq %.1f MiB + nvfp4_dequant %.1f MiB -> %.1f MiB",
+                     d.mmvq_scratch / (1024.0 * 1024.0), d.nvfp4_dequant / (1024.0 * 1024.0),
+                     cap / (1024.0 * 1024.0));
+        (void)engine_arena_open(cuda_malloc_backend(), cap);
+    }
     gemm_init();
     attention_cublas_prewarm();
     // The grouped-3x prewarm reserves 512 MiB of CUTLASS workspace + 1 MiB of

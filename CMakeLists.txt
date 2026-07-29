@@ -323,6 +323,7 @@ set(IMP_EXEC_SOURCES
     src/exec/gemm_kernel_q4k_imma.cu
     src/exec/gemm_kernel_q4k_hmma.cu
     src/exec/gemm_scratch.cu
+    src/exec/workspace_sizes.cpp
     src/exec/executor_workspace.cu
     src/exec/executor_workspace_buffers.cu
     src/exec/executor_kv_write.cu
