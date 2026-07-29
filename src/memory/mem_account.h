@@ -78,6 +78,17 @@ public:
     // it or whether it went through imp's allocators at all.
     void arm_steady_state_watermarks();
 
+    // Named, non-imp charges the pool notes cannot see, so the reconciliation
+    // residual reports what is genuinely unattributed instead of lumping them
+    // in. Set from Engine::init once the numbers are known.
+    //   context  — CUDA primary context + driver, i.e. checkpoint 00_pre_init
+    //   library  — the fixed charge CUDA/cuBLAS/CUTLASS claim on the first
+    //              forward pass (docs/MEMORY_ARCHITECTURE.md A1.5)
+    //   arena    — engine-persistent tier reservation (its high-water is what
+    //              the planner should eventually use)
+    void set_named_charges(size_t context_bytes, size_t library_bytes, size_t arena_bytes,
+                           size_t arena_high_water);
+
     // Background device-used peak sampler.
     void sampler_start(int interval_us = 2000);
     void sampler_stop();
@@ -113,6 +124,10 @@ private:
     std::vector<Pool> pools_;
     std::vector<Checkpoint> checkpoints_;
     std::string dump_path_;
+    size_t named_context_ = 0;
+    size_t named_library_ = 0;
+    size_t named_arena_ = 0;
+    size_t named_arena_high_ = 0;
 
     std::atomic<size_t> peak_used_{0};
     std::atomic<bool> sampler_run_{false};

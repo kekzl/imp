@@ -991,7 +991,8 @@ design above, so the argument that produced the original shape stays readable.
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |
 | 7b — VMM backend implementation | not started | |
 | 8 — `compute/` statics | not started | |
-| 9 — guardrails, `--mem-report`, CI peak gate | not started | |
+| 9a — `--mem-report` with named charges | **done** | `feat(memory): --mem-report — name the charges the pool notes cannot see` |
+| 9b — admission control, `--vram-budget` as a cap, CI peak gate | not started | |
 
 ### I1 allowlist baseline
 

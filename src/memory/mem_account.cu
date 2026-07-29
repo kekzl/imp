@@ -74,6 +74,15 @@ void MemAccount::sample_once() {
     }
 }
 
+void MemAccount::set_named_charges(size_t context_bytes, size_t library_bytes, size_t arena_bytes,
+                                   size_t arena_high_water) {
+    std::lock_guard<std::mutex> lock(mu_);
+    named_context_ = context_bytes;
+    named_library_ = library_bytes;
+    named_arena_ = arena_bytes;
+    named_arena_high_ = arena_high_water;
+}
+
 void MemAccount::arm_steady_state_watermarks() {
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess)
@@ -218,9 +227,35 @@ void MemAccount::report(const char* phase_label) {
             peak_sum += p.peak;
         }
         emit("%-26s %12.1f %12.1f", "TRACKED TOTAL", cur_sum / kMiB, peak_sum / kMiB);
-        // Reconciliation: device_used - tracked = untracked (weights bypass the
-        // notes) + allocator fragmentation + driver/context overhead.
-        emit("%-26s %12.1f", "UNTRACKED (weights+frag)", (double(used) - double(cur_sum)) / kMiB);
+
+        // Named charges. These are real device memory that the per-pool notes
+        // structurally cannot see — not imp allocations at all in two of the
+        // three cases — so folding them into "untracked" made the residual
+        // look like unexplained loss. Criterion 6 asks for >=95% accounted
+        // "remainder explicitly attributed (context, driver, library
+        // internals)"; this is that attribution.
+        int64_t named = 0;
+        if (named_context_) {
+            emit("%-26s %12.1f    CUDA context + driver", "  named: context",
+                 named_context_ / kMiB);
+            named += static_cast<int64_t>(named_context_);
+        }
+        if (named_library_) {
+            emit("%-26s %12.1f    claimed on first forward (A1.5)", "  named: library reserve",
+                 named_library_ / kMiB);
+            named += static_cast<int64_t>(named_library_);
+        }
+        if (named_arena_) {
+            emit("%-26s %12.1f    high-water %.1f MiB", "  named: engine arena",
+                 named_arena_ / kMiB, named_arena_high_ / kMiB);
+            named += static_cast<int64_t>(named_arena_);
+        }
+
+        const double accounted = double(cur_sum) + double(named);
+        const double residual = double(used) - accounted;
+        emit("%-26s %12.1f", "ACCOUNTED (tracked+named)", accounted / kMiB);
+        emit("%-26s %12.1f    %.1f%% of device used", "RESIDUAL (unattributed)", residual / kMiB,
+             used ? (100.0 * (1.0 - residual / double(used))) : 0.0);
     }
     emit("===== END VRAM AUDIT [%s] =====", phase_label ? phase_label : "?");
 

@@ -14,6 +14,7 @@
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"
 #include "memory/engine_arena.h"
+#include "memory/plan.h"
 #include "exec/workspace_sizes.h"
 #include "memory/backend.h"
 #include "memory/vram_query.h"
@@ -844,6 +845,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             MemAccount::instance().set_dump_path(runtime_config_.diagnostics.vram_audit_dump);
     }
     MemAccount::instance().checkpoint("00_pre_init");
+    // Everything already resident before imp allocates anything: CUDA primary
+    // context + driver. Measured, not assumed — it is 1679.6 MiB on this
+    // WSL2/WDDM box and it is not imp's memory.
+    size_t ctx_baseline_bytes = 0;
+    {
+        size_t f = 0, tot = 0;
+        if (vram_budget_mem_get_info(&f, &tot))
+            ctx_baseline_bytes = tot > f ? tot - f : 0;
+    }
 
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
     // WSL2/WDDM has ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
@@ -947,6 +957,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     MemAccount::instance().arm_steady_state_watermarks();
     // Start the device-used peak sampler so the prefill activation / score
     // matrix spike during the workload is captured, then dump the init table.
+    MemAccount::instance().set_named_charges(
+        ctx_baseline_bytes,
+        runtime_config_.vram.library_reserve_mb < 0
+            ? kMeasuredLibraryReserveBytes
+            : static_cast<size_t>(runtime_config_.vram.library_reserve_mb) << 20,
+        engine_arena().capacity(), engine_arena().high_water());
     MemAccount::instance().sampler_start(2000);
     MemAccount::instance().report("init_complete");
 
