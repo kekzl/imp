@@ -56,35 +56,55 @@ void for_each_weight(const Model& model, F&& f) {
 
 }  // namespace
 
-int exec_max_tokens(const Model& model, int max_seq_len) {
+// ── adapter ──────────────────────────────────────────────────────────
+
+ExecShape exec_shape_of(const Model& model) {
     const auto& cfg = model.config();
-    int effective = (max_seq_len > 0) ? max_seq_len : cfg.max_seq_len;
+    const auto& prof = model.profile();
+    ExecShape s;
+    s.max_seq_len_cfg = cfg.max_seq_len;
+    s.is_ssm = prof.is_ssm;
+    s.is_moe = prof.is_moe;
+    s.n_experts = cfg.n_experts;
+    s.expert_d_ff = cfg.expert_d_ff;
+    s.d_ff = cfg.d_ff;
+    s.d_model = cfg.d_model;
+    for_each_weight(model, [&](const Tensor& t) {
+        const Dims d = weight_dims(t);
+        if (d.valid())
+            s.weights.emplace_back(d.n, d.k);
+    });
+    return s;
+}
+
+// ── pure core ────────────────────────────────────────────────────────
+
+int exec_max_tokens(const ExecShape& shape, int max_seq_len) {
+    int effective = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
     int t = std::min(effective, 4096);
     if (t <= 0)
         t = 4096;
     // AS-BUILT condition, not the intended one — executor_workspace.cu reads
     // has_gdn_ before it is assigned, so this fires for SSM+MoE only. Matching
     // the intent here would under-reserve by 2x on those models (AUDIT B18).
-    const auto& prof = model.profile();
-    if (prof.is_ssm && prof.is_moe)
+    if (shape.is_ssm && shape.is_moe)
         t = std::min(t, 2048);
     return t;
 }
 
-int exec_max_weight_k(const Model& model) {
+int exec_max_weight_k(const ExecShape& shape) {
     int64_t max_k = 0;
-    for_each_weight(model, [&](const Tensor& t) {
-        const Dims d = weight_dims(t);
-        if (d.valid())
-            max_k = std::max(max_k, d.k);
-    });
+    for (const auto& [n, k] : shape.weights) {
+        (void)n;
+        max_k = std::max(max_k, k);
+    }
     return static_cast<int>(max_k);
 }
 
-ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len) {
+ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     ExecT2Demand out;
-    const int t = exec_max_tokens(model, max_seq_len);
-    const int max_k = exec_max_weight_k(model);
+    const int t = exec_max_tokens(shape, max_seq_len);
+    const int max_k = exec_max_weight_k(shape);
     if (t <= 0 || max_k <= 0)
         return out;
 
@@ -103,10 +123,8 @@ ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len) {
         if (bytes <= kCap)
             covered = std::max(covered, bytes);
     };
-    for_each_weight(model, [&](const Tensor& tw) {
-        const Dims d = weight_dims(tw);
-        consider(d.n, d.k);
-    });
+    for (const auto& [n, k] : shape.weights)
+        consider(n, k);
 
     // Config-derived shapes, because this runs BEFORE the weight upload and
     // some checkpoints do not carry their final layout yet. gpt-oss is the
@@ -117,21 +135,32 @@ ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len) {
     // 2*expert_d_ff x d_model — which is exactly the 31.64 MiB the workspace
     // asked for and was refused (AUDIT B23). Deriving it from the config
     // instead of the tensors makes the reservation independent of when it runs.
-    const auto& cfg = model.config();
-    if (cfg.n_experts > 0) {
-        const int64_t eff = cfg.expert_d_ff > 0 ? cfg.expert_d_ff : cfg.d_ff;
-        consider(2 * eff, cfg.d_model);  // fused gate_up
-        consider(eff, cfg.d_model);      // gate / up / down individually
-        consider(cfg.d_model, eff);
+    if (shape.n_experts > 0) {
+        const int64_t eff = shape.expert_d_ff > 0 ? shape.expert_d_ff : shape.d_ff;
+        consider(2 * eff, shape.d_model);  // fused gate_up
+        consider(eff, shape.d_model);      // gate / up / down individually
+        consider(shape.d_model, eff);
     }
-    if (cfg.d_ff > 0) {
-        consider(2 * static_cast<int64_t>(cfg.d_ff), cfg.d_model);
-        consider(cfg.d_ff, cfg.d_model);
-        consider(cfg.d_model, cfg.d_ff);
+    if (shape.d_ff > 0) {
+        consider(2 * static_cast<int64_t>(shape.d_ff), shape.d_model);
+        consider(shape.d_ff, shape.d_model);
+        consider(shape.d_model, shape.d_ff);
     }
 
     out.nvfp4_dequant = covered;
     return out;
+}
+
+// ── Model overloads ──────────────────────────────────────────────────
+
+int exec_max_tokens(const Model& model, int max_seq_len) {
+    return exec_max_tokens(exec_shape_of(model), max_seq_len);
+}
+
+int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_of(model)); }
+
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len) {
+    return exec_t2_demand(exec_shape_of(model), max_seq_len);
 }
 
 }  // namespace imp

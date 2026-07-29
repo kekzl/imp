@@ -17,11 +17,33 @@
 // a floor for the rest until the remaining tenants are migrated.
 
 #include <cstddef>
+#include <cstdint>
+#include <utility>
+#include <vector>
 
 namespace imp {
 
 class Model;
 struct EngineConfig;
+
+// The shape facts the two functions below actually consume. Extracting this
+// makes them testable in the CPU lane — the header has always claimed they were
+// "pure and CUDA-free so it can be unit-tested", and until this existed they
+// took a Model and nothing tested them at all. The arena is sized from these
+// numbers, so a wrong one is the #1103 failure class (under-reservation), which
+// is not something to leave to review.
+struct ExecShape {
+    int max_seq_len_cfg = 0;
+    bool is_ssm = false;
+    bool is_moe = false;
+    int n_experts = 0;
+    int expert_d_ff = 0;
+    int d_ff = 0;
+    int d_model = 0;
+    // (N, logical K) of every weight the MMVQ / dequant paths can see. Logical
+    // K means NVFP4's packed byte dim already doubled.
+    std::vector<std::pair<int64_t, int64_t>> weights;
+};
 
 struct ExecT2Demand {
     // MMVQ (Q8_1-input GEMV) scratch: max_tokens * ceil(maxK/32) * 36 * 2.
@@ -47,5 +69,14 @@ int exec_max_tokens(const Model& model, int max_seq_len);
 int exec_max_weight_k(const Model& model);
 
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len);
+
+// ── Pure core ────────────────────────────────────────────────────────
+// The Model overloads above are thin wrappers over these. Everything the
+// arithmetic depends on is in ExecShape, so these run in the CPU lane.
+ExecShape exec_shape_of(const Model& model);
+
+int exec_max_tokens(const ExecShape& shape, int max_seq_len);
+int exec_max_weight_k(const ExecShape& shape);
+ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len);
 
 }  // namespace imp
