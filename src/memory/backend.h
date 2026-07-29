@@ -64,6 +64,14 @@ enum class AllocPhase { Loading, Planning, Serving };
 AllocPhase alloc_phase();
 void set_alloc_phase(AllocPhase);
 
+// Record a device allocation made while serving. Backend::acquire() calls
+// this itself; the --wrap interposer (memory/alloc_interpose.cpp) calls it for
+// allocations that never went through Backend at all, which is what makes
+// steady_state_allocations() authoritative rather than merely indicative.
+// `site` is the caller's return address when available (symbolize with
+// addr2line), nullptr otherwise.
+void note_serving_allocation(RegionTag tag, size_t bytes, const void* site = nullptr);
+
 // Total acquisitions observed while in AllocPhase::Serving, all tags.
 uint64_t steady_state_allocations();
 // Per-tag breakdown; `tag` indexes the RegionTag enum.

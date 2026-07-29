@@ -90,17 +90,21 @@ AllocPhaseScope::~AllocPhaseScope() {
 
 namespace {
 
-// Trips on any acquisition made while serving. Debug aborts (the call site is
-// the bug); release counts + logs once per tag and lets the server keep going.
-void guard_serving_phase(size_t bytes, RegionTag tag) {
+}  // namespace
+
+// Records a device allocation made while serving. Debug aborts (the call site
+// is the bug); release counts + logs once per tag and lets the server keep
+// going. Called by Backend::acquire() and by the --wrap interposer, so the
+// counter covers allocations that never went through Backend at all.
+void note_serving_allocation(RegionTag tag, size_t bytes, const void* site) {
     if (alloc_phase() != AllocPhase::Serving)
         return;
     const int i = tag_index(tag);
     g_steady_allocs[i].fetch_add(1, std::memory_order_relaxed);
     if (!g_steady_logged[i].exchange(true, std::memory_order_relaxed)) {
-        IMP_LOG_WARN("I2 violation: %.2f MiB acquired for '%s' while serving — this must be "
+        IMP_LOG_WARN("I2 violation: %.2f MiB for '%s' while serving (site %p) — this must be "
                      "drawn from a pre-planned pool (docs/MEMORY_ARCHITECTURE.md A3.2)",
-                     bytes / (1024.0 * 1024.0), region_tag_name(tag));
+                     bytes / (1024.0 * 1024.0), region_tag_name(tag), site);
     }
 #ifndef NDEBUG
     IMP_LOG_ERROR("I2 violation (debug build is fatal): %.2f MiB for '%s' while serving",
@@ -108,6 +112,10 @@ void guard_serving_phase(size_t bytes, RegionTag tag) {
     std::abort();
 #endif
 }
+
+namespace {
+
+void guard_serving_phase(size_t bytes, RegionTag tag) { note_serving_allocation(tag, bytes); }
 
 }  // namespace
 

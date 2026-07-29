@@ -1259,6 +1259,36 @@ What is already safe to assume: the scaffolding from D11 (`adopt_raw`,
 "the sequence hands its reference to the cache", which is precisely what the
 skip branches mean.
 
+### B7 — criterion 3, measured
+
+`IMP_ALLOC_INTERPOSE=ON` links `src/memory/alloc_interpose.cpp` and puts
+`-Wl,--wrap=` on the executables, so imp's references to the CUDA allocation
+symbols resolve to recorders that forward to `__real_*`. Calls made *inside*
+libcudart/cuBLAS/CUTLASS are not redirected — their references were resolved
+when those libraries were linked — which is exactly right: the ~3.9 GiB
+library reserve (A1.5) stays out of the counter and is charged separately.
+
+First measurement, dense config, 15 serving requests:
+
+```
+[alloc-interpose] I2 VIOLATIONS while serving:
+    cudaMalloc            414 calls        1.15 MiB
+    cudaMallocAsync         0 calls        0.00 MiB
+    pinned host            72 calls        0.01 MiB
+```
+
+Two things this settles that no amount of reading could:
+
+1. **`calibrate_fp8_scale()` allocates twice per call on the serving path**
+   (`fp8_quant.cu:211/212`), 144 of the 414. No inventory listed it. The rest
+   of the named sites are `CudaGraphConditionalRunner::setup` (108 calls), which
+   the step-5 inventory *did* list. An interposer finds what a census misses.
+2. **The bytes are irrelevant; the count is not.** 1.15 MiB is three orders of
+   magnitude below M2's +190 MiB, so that delta is library/driver internal
+   growth, not imp's allocations (AUDIT B30). Step 5's value is removing 414
+   driver round-trips from the hot path, not reclaiming memory — and the goal
+   statement should say so.
+
 ### Invariants now under test
 
 `tests/test_memory_backend.cpp` and `tests/test_memory_allocators.cpp`, both in

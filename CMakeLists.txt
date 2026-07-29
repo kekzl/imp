@@ -60,6 +60,17 @@ option(IMP_BUILD_TESTS "Build tests" ON)
 option(IMP_BUILD_TOOLS "Build CLI and benchmark tools" ON)
 option(IMP_BUILD_BENCH "Build benchmarks" ON)
 option(IMP_BUILD_SERVER "Build imp-server (OpenAI-compatible HTTP server)" ON)
+# Link-time interposition on the CUDA allocation symbols, so acceptance
+# criterion 3 can be measured against EVERY device allocation rather than only
+# the ones routed through Backend (docs/MEMORY_ARCHITECTURE.md A6, AUDIT B26).
+# Off by default: --wrap belongs on a measurement build, not a shipping one.
+option(IMP_ALLOC_INTERPOSE "Wrap cudaMalloc/cudaMallocAsync to attribute steady-state allocations" OFF)
+set(IMP_WRAP_LINK_FLAGS "")
+if(IMP_ALLOC_INTERPOSE)
+    set(IMP_WRAP_LINK_FLAGS
+        "-Wl,--wrap=cudaMalloc,--wrap=cudaFree,--wrap=cudaMallocAsync,--wrap=cudaFreeAsync,--wrap=cudaMallocHost,--wrap=cudaHostAlloc")
+    message(STATUS "Allocation interposition ENABLED (measurement build)")
+endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 
 if(IMP_SANITIZERS)
@@ -112,6 +123,7 @@ set(IMP_CORE_SOURCES
 
 set(IMP_MEMORY_SOURCES
     src/memory/backend.cpp
+    $<$<BOOL:${IMP_ALLOC_INTERPOSE}>:src/memory/alloc_interpose.cpp>
     src/memory/arena.cpp
     src/memory/engine_arena.cpp
     src/memory/block_pool.cpp
@@ -426,6 +438,9 @@ if(IMP_BUILD_TOOLS)
         tools/imp-cli/args.cpp
     )
     target_link_libraries(imp-cli PRIVATE imp imp_warnings)
+    if(IMP_ALLOC_INTERPOSE)
+        target_link_options(imp-cli PRIVATE ${IMP_WRAP_LINK_FLAGS})
+    endif()
     target_include_directories(imp-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     # imp-quantize — offline BF16/FP16 -> NVFP4 checkpoint conversion
@@ -501,6 +516,9 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/batching_engine.cpp
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
+    if(IMP_ALLOC_INTERPOSE)
+        target_link_options(imp-server PRIVATE ${IMP_WRAP_LINK_FLAGS})
+    endif()
     target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                                   ${CMAKE_CURRENT_BINARY_DIR}/generated)
     # Optional gcov instrumentation of the server TUs only (the CUDA imp lib is
