@@ -1,6 +1,6 @@
 # Supported models
 
-Model families with a known-working code path on `main`. Throughput numbers come from [`performance.md`](performance.md) — see that doc for methodology and the cuBLAS prefill-variance caveat. VRAM figures are model weights only (default KV cache adds 1–4 GiB depending on context).
+Model families with a known-working code path on `main`. Throughput numbers come from [`performance.md`](performance.md) — see that doc for methodology and the cuBLAS prefill-variance caveat. VRAM figures are model weights only. The KV cache is sized *on top* of that from whatever is left once the weight caches are built, so it scales with free VRAM and the configured context rather than sitting in a fixed band — a dense server default lands around 4.6 GiB, and a small model on an otherwise idle card takes far more. Bound it with `--max-seq-len` / `kv_cache` settings and read the actual split with `--mem-report`.
 
 Anything not on this list may still load (the GGUF and SafeTensors paths cover most LLaMA-derived architectures), but it has not been verified end-to-end.
 

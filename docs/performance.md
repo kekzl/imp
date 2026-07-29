@@ -12,7 +12,10 @@
 | Repetitions | 3 (decode); prefill varies up to ±2.6× across container restarts (cuBLAS algo selection) |
 | Reported | Mean; decode (`tg256`) is the reliable A/B signal |
 
-Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentional perf change.
+Refresh the baseline with `scripts/gen_perf_baseline.sh` after any intentional perf
+change — or any intentional memory change: the same file pins peak VRAM
+(`metrics.memory_mb.own_peak_mb`, gated at `thresholds.vram_increase_pct` by
+`scripts/verify.sh`), and a refresh re-pins it silently.
 
 **Last refreshed**: decode numbers are owned by the SHA-anchored
 [`BENCHMARKS.md`](BENCHMARKS.md) (see Decode Throughput below — no table is
@@ -21,7 +24,15 @@ duplicated here). Prefill + KV-cache tables below are
 across container restarts and is not maintained as a comparison table.
 llama.cpp / vLLM comparison from cross-engine bench 2026-05-24.
 
-**Bench-mode caveat**: `--bench --max-tokens 128` allocates less KV VRAM than production, which changes the NVFP4 cache budget. MoE models are most affected — use `imp-cli --prompt` for production numbers.
+**Bench-mode caveat**: `--bench --max-tokens 128` sizes the engine to the bench
+workload, so it does not measure the served regime (`imp-server` defaults to the
+model's full context). Use `imp-cli --prompt` or a real server request for production
+numbers. The old mechanism behind this caveat — bench-mode KV sizing changing what
+was left for the NVFP4 cache — no longer applies: since #1106 the weight caches are
+built *before* the KV pool and the pool takes the measured residual, so the cache
+budget no longer depends on how much KV was allocated first. Two related traps are
+fixed rather than caveated: the double-charged cache reservation (#1100/#1102) and
+the cache-starvation collapse at 0 MiB free (#1103).
 
 ## Decode Throughput
 

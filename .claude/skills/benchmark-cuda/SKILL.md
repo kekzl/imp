@@ -33,8 +33,9 @@ The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`,
 | End-to-end engine perf | `make bench` | `imp-cli --bench --bench-pp 512 --bench-reps 5` sweep across baseline models |
 | Single model quick check | `make test-perf` | Qwen3-8B Q8_0 only |
 | Per-config sweep MBU/MFU/TTFT/TBT | `bench/bench.py` | CSV output, optional llama.cpp compare |
-| Refresh perf baseline | `make gen-perf-baseline [MODEL=/models/…]` | cold-median: 5 trials × 15 s cooldown; writes `tests/perf_baseline.json` |
-| Regression gate | `make verify-fast` | 3% decode / 5% prefill thresholds |
+| Refresh perf baseline | `make gen-perf-baseline [MODEL=/models/…]` | cold-median: 5 trials × 15 s cooldown; writes `tests/perf_baseline.json`, including the `own_peak_mb` VRAM pin (extra `--mem-report` run) |
+| Regression gate | `make verify-fast` | 3% decode / 5% prefill / 10% peak VRAM (`own_peak`) |
+| VRAM attribution for one run | `imp-cli --mem-report` | lifecycle checkpoints, per-pool notes, named charges (context / library reserve / engine arena), `own_peak` vs any `--vram-budget`, residual; the gate parses `own_peak=` from it |
 | North-star gate (Qwen3-14B Q6_K) | `make verify-north-star` | vs `tests/perf_baseline_north_star.json` |
 | Single kernel — wall-clock A/B | `cudaEvent` in launcher | see Step 1 |
 | Single kernel — metrics, stalls | `ncu` | see Step 2 |
@@ -130,9 +131,9 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 
 ## Publishing numbers (keep docs from going stale)
 
-- **`tests/perf_baseline.json` is the canonical CI gate — read the current values there, never from this skill** (a number copied into a doc is a number that will be wrong). The file carries its own `_note` explaining any pin that is not comparable to older ones. Refresh ONLY when a change *intentionally* moves perf: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR. **The gate measures spec-OFF decode** (`--set speculative.ngram=false`): with speculation ON the self-repetitive bench prompt (~99.9% accept) measures the batched spec-verify GEMMs, which are restart-volatile — ungateable at 3%.
+- **`tests/perf_baseline.json` is the canonical gate — read the current values there, never from this skill** (a number copied into a doc is a number that will be wrong). It pins two gates, not one: throughput (`metrics.prefill_tps` / `decode_tps`, 3%/5%) and **peak VRAM** (`metrics.memory_mb.own_peak_mb` against `thresholds.vram_increase_pct`, evaluated by `scripts/verify.sh`). The file carries its own `_note` explaining any pin that is not comparable to older ones. Refresh ONLY when a change *intentionally* moves perf **or peak VRAM**: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR. **The gate measures spec-OFF decode** (`--set speculative.ngram=false`): with speculation ON the self-repetitive bench prompt (~99.9% accept) measures the batched spec-verify GEMMs, which are restart-volatile — ungateable at 3%.
 - **Refreshing on the wrong day bakes in the wrong bar, in both directions.** A baseline sampled on a peak day put its 3% threshold inside the normal range, so ordinary days failed spuriously. A baseline sampled while another process holds the GPU pins a floor that hides real regressions. Before refreshing: no other compute process, healthy clocks, and a second cold-median run that agrees.
-- **When a gate fails, rule out the cheap causes before bisecting**, in this order: (1) is anything else on the GPU (`nvidia-smi --query-compute-apps=pid`) — a forgotten server container reads ~−12%; (2) can the diff even reach the measured code (`git diff --stat main -- src/ include/ tools/imp-cli/` empty ⇒ a decode regression is impossible); (3) does a cold-median run reproduce the verify-fast number.
+- **When a gate fails, rule out the cheap causes before bisecting**, in this order: (0) is this process still VRAM-resident — at ~0 MiB free, WSL2/WDDM oversubscribes into host memory and every allocation keeps succeeding while bandwidth falls off a cliff (~1530 GB/s resident vs ~237 GB/s spilled). That is #1103: 55 tok/s at server defaults on a model that benches far higher. `--mem-report` prints free VRAM at init; **a successful `cudaMalloc` is not evidence of room** (28 GiB succeeds with 22.6 GiB reported free) — measure bandwidth or read the free figure. (1) is anything else on the GPU (`nvidia-smi --query-compute-apps=pid`) — a forgotten server container reads ~−12%; (2) can the diff even reach the measured code (`git diff --stat main -- src/ include/ tools/imp-cli/` empty ⇒ a decode regression is impossible); (3) does a cold-median run reproduce the verify-fast number.
 - **`docs/BENCHMARKS.md`** is SHA-anchored (method, date, commit, command, tok/s). Update it — and the README numbers — in the same commit as the perf change. `scripts/check-release.sh` gates release-touching PRs.
 - `bash scripts/scoreboard.sh` tallies hero-model status vs llama.cpp.
 
@@ -143,6 +144,7 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 - Cross-day decode delta without sampling clocks during the bench → host drift is 8–15%
 - Refreshing the baseline on a depressed-host day → bakes a low bar in
 - Including `cudaMalloc/Free` in timing → allocate once outside the loop
+- Measuring after a build with non-default CMake options → `verify-fast` does NOT rebuild, so the last image stands in as the baseline. An `IMP_ALLOC_INTERPOSE=ON` image reads ~3% low and reproduced to 0.3% across four re-measurements before anyone doubted the binary (`AUDIT.md` G16). Reproducibility says nothing about which binary you hold.
 - Trusting `ncu` wall-clock → ncu serializes/replays; use `nsys` or `cudaEvent` for real time
 - Comparing against wrong peak → FP16 ≠ FP8 ≠ FP4; pick the kernel's dtype
 - A/B without graphs both ON and OFF → graph replay can hide silent fallback (see `check-degeneration`)

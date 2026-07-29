@@ -27,7 +27,7 @@ cmake --build build -j$(nproc)
 
 # Docker build (canonical)
 make build           # → imp:test image with full GPU passthrough
-make verify-fast     # build + filtered tests + perf gate + smoke prompt (~90 s)
+make verify-fast     # build + filtered tests + perf gate + peak-VRAM gate + smoke prompt
 make verify          # full pre-merge gate (~5 min)
 ```
 
@@ -38,6 +38,7 @@ make verify          # full pre-merge gate (~5 min)
 | `IMP_BUILD_BENCH` | ON | imp-bench |
 | `IMP_BUILD_SERVER` | ON | imp-server |
 | `IMP_SANITIZERS` | OFF | ASAN + UBSAN (host C++ code only) |
+| `IMP_ALLOC_INTERPOSE` | OFF | Wrap `cudaMalloc`/`cudaMallocAsync` to attribute steady-state allocations (diagnostic; costs ~3% decode, so never benchmark with it on) |
 | `CMAKE_CUDA_ARCHITECTURES` | hard-pinned `sm_120a` | RTX 5090 / RTX PRO 6000 |
 
 `sm_120a` SASS + `compute_120f` PTX fallback are set via raw `--generate-code`
@@ -138,10 +139,26 @@ imp-server --model Qwen3-4B-Instruct-2507-Q8_0.gguf --port 8080 --vram-budget 90
 imp-server --model Llama-3.2-3B-Instruct-Q8_0.gguf  --port 8081 --vram-budget 8000 &
 ```
 
-Best-effort cap: small fixed buffers and cuBLAS internals sit outside the
-sizing gates, so leave ~1 GiB of real headroom between the sum of budgets
-and the card. A model whose weights don't fit the budget fails cleanly at
-load instead of starving the neighbour.
+The cap binds, but it is not exact — and the overshoot is measured rather than
+guessed. Two charges sit outside the sizing
+gates: the CUDA primary context (~1.7 GiB on this host, allocated before imp
+takes its baseline snapshot, so no budget can cover it) and ~1.8 GiB of
+dequant scratch, CUTLASS scale-factor buffers, pinned staging and workspaces
+whose allocation sites don't consult the budget. Measured on Qwen3-8B-Q8_0,
+`--vram-budget 16000` peaks at 19468 MiB — so leave ~3.5 GiB of real headroom
+between the sum of budgets and the card. `--mem-report` prints the peak
+against the cap and marks it `[OVER BUDGET]` when it exceeds it, so the gap is
+visible rather than inferred.
+
+Before #1109 the flag did nothing measurable: every term of the planner's
+reserve is a percentage of the (virtual) card, while the cuBLAS/CUTLASS
+reserve claimed on the first forward pass is a ~3.9 GiB constant, so shrinking
+the budget shrank the reserve and left the constant uncovered. The reserve is
+now floored at that measured charge (tune with `[vram] library_reserve_mb`).
+A model whose weights don't fit the budget fails cleanly at load instead of
+starving the neighbour, and a budget that cannot hold a single `max_seq_len`
+sequence is refused at init — naming the blocks available, the blocks needed
+and the MiB to add — rather than loading and then failing every request.
 
 <details>
 <summary>Full CLI options</summary>
@@ -163,6 +180,9 @@ Generation:
   --max-seq-len <n>         KV context ceiling in tokens (default: auto)
   --min-kv-tokens <n>       Minimum KV capacity in tokens (default: auto)
   --vram-budget <mb>        Hard per-process VRAM cap in MiB (default: 0 = uncapped)
+  --mem-report              Print the full VRAM attribution table at init
+                            (lifecycle checkpoints, per-pool notes, named
+                            charges, own_peak vs the cap, residual)
   --interactive             Interactive chat mode
   --stop <str>              Stop sequence (repeatable, up to 4)
   --chat-template <t>       auto|none|chatml|llama2|llama3|nemotron|gemma|deepseek_r1|phi
@@ -392,7 +412,9 @@ imp/
 ├── src/
 │   ├── core/             Tensor, Buffer, Allocator, Logging, Threading
 │   ├── compute/          CUDA kernels (GEMM, attention, RoPE, LayerNorm, sampling, MoE)
-│   ├── memory/           KV cache (paged), SSM state, device/pinned allocators
+│   ├── memory/           Driver backend, tier allocators (arena, block pool,
+│   │                     scratch stack, graph slots), capacity planner,
+│   │                     KV cache (paged), SSM state
 │   ├── model/            Model loading (GGUF + SafeTensors), tokenizer, weight upload
 │   ├── quant/            FP8, NVFP4, INT4/INT8 dequant, quantised GEMM
 │   ├── exec/             GraphExecutor (hardcoded transformer forward pass)

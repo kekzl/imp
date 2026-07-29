@@ -512,6 +512,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_messages.cpp
         tools/imp-server/handlers_responses.cpp
         tools/imp-server/handlers_misc.cpp
+        tools/imp-server/metrics_memory.cpp
         tools/imp-server/handlers_rerank.cpp
         tools/imp-server/handlers_admin.cpp
         tools/imp-server/batching_engine.cpp

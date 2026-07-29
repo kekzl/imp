@@ -116,7 +116,8 @@ implementation plan and (often) a findings memo:
 A second sweep of dated one-off material whose conclusions are now embedded in code,
 the live `audit/` memos, or shipped PRs. Originals removed; full text in git history.
 
-**Structural-audit chain (superseded by `audit/housekeeping_2026_06_13.md` + root `AUDIT.md`):**
+**Structural-audit chain (superseded by `audit/housekeeping_2026_06_13.md` + the 2026-06-17
+root audit ledger, itself since removed — git history; *not* today's root `AUDIT.md`):**
 - `audit/structural_debt_2026_06_08.md` — D1–D4 debt audit (ModelProfile / GraphExecutor /
   god-functions / flag sprawl). D1 shipped #622–#623; rest re-verified later.
 - `audit/structural_debt_2026_06_09.md` — C1–C8 follow-up; C1/C2/C4 refuted, C5–C8 tracked.
@@ -206,13 +207,16 @@ PRs. Originals removed; full text in git history.
 ## 2026-07-10 consolidation — root cleanup (docs moved under docs/, stale reports removed)
 
 Root-level project docs moved into `docs/`: `GOAL.md`, `BENCHMARKS.md`, `BENCHMARKING.md`
-(→ `docs/`), `AUDIT_FILESIZE.md`, `PERF_LOG.md` (→ `docs/audit/`). The repo root now holds
-only the standard set (README, CHANGELOG, CONTRIBUTING, AGENTS.md, CLAUDE.md). Removed
+(→ `docs/`), `AUDIT_FILESIZE.md`, `PERF_LOG.md` (→ `docs/audit/`). At the time the repo root
+held only the standard set (README, CHANGELOG, CONTRIBUTING, AGENTS.md, CLAUDE.md); a root
+`AUDIT.md` exists again since #1106, as the memory-subsystem findings log — a different
+document from the two ledgers below that once used that name. Removed
 outright (point-in-time reports, superseded; full text in git history):
 
 - `AUDIT.md` (root) — 2026-06-17 whole-repo structural/hardening audit ledger (469 lines,
   append-only through 06-29). Its confirmed findings shipped via the June/July fix PRs;
   later passes live in `audit/structural_debt_2026_07_07.md` / `_2026_07_10.md`.
+  (Not the current root `AUDIT.md`, which is the 2026-07-29 memory-subsystem audit.)
 - `AUDIT/agentic_server_scout.md` — 2026-06-23 phase-0 read-only scout for the agentic
   server hardening campaign; the campaign shipped (PRs #772–#774 and follow-ups).
 - `BATTERY_REPORT.md` (root) — 2026-06-30 full-architecture prompt-battery run report

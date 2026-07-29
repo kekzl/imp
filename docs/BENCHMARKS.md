@@ -16,7 +16,9 @@ reliable A/B signal; prefill (pp) varies up to 2.6× across container restarts
 
 The CI-gated canonical baseline lives in
 [`tests/perf_baseline.json`](../tests/perf_baseline.json) (3% decode / 5%
-prefill regression gate); refresh it via `scripts/gen_perf_baseline.sh`.
+prefill regression gate, plus a 10% peak-VRAM ceiling over the pinned
+`metrics.memory_mb.own_peak_mb` — see [`BENCHMARKING.md`](BENCHMARKING.md));
+refresh it via `scripts/gen_perf_baseline.sh`.
 
 **Toolchain (current: `v0.19.2`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.3.
 The C++20→C++23 move in v0.17.0 is perf-neutral — Qwen3-8B-Q8_0 decode re-measured

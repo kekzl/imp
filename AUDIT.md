@@ -181,5 +181,5 @@ The `#1103` mode-2 reserve floor — `src/memory/vram_query.h`,
 `fix/1104-json-number-grammar` and is now carried as the first commit of this
 branch (`cf6fb43f`). It floors the mode-2 reserve at the `VRAMAllocator`'s 5 %
 headroom, which the planner previously undercut by 1118 MiB on a 32 GB card. All
-A1 numbers were measured **with** it applied. It is not on `main`, so the PR for
-this branch is the one that closes #1103 — do not open a second one.
+A1 numbers were measured **with** it applied. It reached `main` as the first
+commit of #1106, which is the PR that closed #1103 — there was never a second one.

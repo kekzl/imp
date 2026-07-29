@@ -12,7 +12,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 3. **Never use `--mount=type=cache`** in the Dockerfile — it silently invalidates test results.
 4. **`models/` in the repo is a symlink farm** to `$HOME/models`. Most Makefile targets mount `$(PWD)/models`, which works because Docker resolves on access — but for custom `docker run`, mount `$HOME/models:/models` directly so symlink targets resolve.
 5. **Dependency pins are single-sourced in `cmake/imp-deps.cmake`** (current: CUTLASS v4.5.2, GTest v1.17.0, nlohmann/json v3.12.0, httplib v0.48.0). `make build` extracts them and injects Docker `--build-arg`s via `scripts/dep_build_args.sh` — bump ONLY that one file; never re-pin in the Dockerfile or CMakeLists.
-6. **CI has no GPU runner.** The `Test` job is auto-skipped until repo var `HAS_GPU_RUNNER=true` — GPU correctness/perf validation is LOCAL-ONLY (`make verify-fast` before push; `make install-hooks` installs the pre-push hook). CI jobs: **`Build`** (compile + `ctest -L unit`, the only REQUIRED check — renaming it without updating ruleset "Require CI" id 14716423 leaves PRs stuck at `mergeState=BLOCKED`), `clang-tidy` (advisory), `Mock API contract`, `Lint`, `File size` (`tools/check_filesize.py` — the hard-threshold step BLOCKS; see `codebase-audit`).
+6. **CI has no GPU runner.** The `Test` job is auto-skipped until repo var `HAS_GPU_RUNNER=true` — GPU correctness/perf validation is LOCAL-ONLY (`make verify-fast` before push; `make install-hooks` installs the pre-push hook). CI jobs: **`Build`** (compile + `ctest -L unit`, the only REQUIRED check — renaming it without updating ruleset "Require CI" id 14716423 leaves PRs stuck at `mergeState=BLOCKED`), `clang-tidy` (advisory), `Mock API contract`, `Lint`, `File size` (`tools/check_filesize.py` — the hard-threshold step BLOCKS; see `codebase-audit`), `Alloc sites` (`tools/check_alloc_sites.py` against `tools/alloc_allowlist.txt` — advisory `--stats` step plus a BLOCKING allowlist gate; it fails both on a new direct allocation site and on a stale allowlist entry).
 
 ## Command table
 
@@ -23,7 +23,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 | Full GPU suite | `make test-gpu` | ~4–5 min (`test-attention` alone ~241 s) |
 | E2E model tests (real models) | `make test-e2e` | needs Qwen3-4B + Qwen3.5-4B + Gemma-4 GGUFs |
 | Vision goldens | `make test-vision` | `IMP_VISION_GOLDEN_DUMP=1` to regenerate |
-| Pre-push gate | `make verify-fast` | ~90 s; build + filtered tests + perf gate + smoke |
+| Pre-push gate | `make verify-fast` | build + filtered tests + perf gate + peak-VRAM gate + graphs-ON/OFF gate + smoke (the VRAM gate adds its own short model load; skip with `IMP_VERIFY_SKIP_VRAM=1`) |
 | Full pre-merge gate | `make verify` | ~5 min |
 | Chunked-prefill gate | `make verify-chunked` | vs `perf_baseline_chunked.json`, 5%/8% |
 | North-star gate | `make verify-north-star` | Qwen3-14B Q6_K vs its own baseline |

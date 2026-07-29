@@ -10,7 +10,8 @@ global rules below; each role then narrows scope and lists explicit **MAY NOT** 
 - **Single architecture.** Target is exactly `sm_120a` (RTX 5090 / GB202) with a `compute_120f` PTX fallback.
   Never add speculative multi-arch paths or datacenter-Blackwell (`sm_100`, tcgen05/TMEM/wgmma/TMA-WS) designs.
 - **Performance is gated, single-session only.** `tests/perf_baseline.json` is canonical (3% decode / 5%
-  prefill). Compiler/cuBLAS autotuning makes cross-session numbers unreliable — **only compare benchmark
+  prefill, plus 10% peak VRAM over the pinned `metrics.memory_mb.own_peak_mb`). Compiler/cuBLAS autotuning
+  makes cross-session numbers unreliable — **only compare benchmark
   results captured within one run.** Decode `tg128` is the headline signal; refresh the baseline only via
   `scripts/gen_perf_baseline.sh`, and say so in the PR.
 - **GPU must be free before any GPU job:** `docker ps -q | wc -l` MUST be `0` and `nvidia-smi` must show no
@@ -45,7 +46,7 @@ compile-time isolation:
 ### auditor
 - **Scope:** whole repo, **read-only assessment**.
 - **Allowed tools:** read/search tools, read-only sub-agents.
-- **MUST:** verify each finding against source before reporting; write only a dated report under `docs/audit/`; rank by severity+effort.
+- **MUST:** verify each finding against source before reporting; write only a dated report under `docs/audit/`, or append to an existing running findings log where one owns the area (`AUDIT.md` for the memory subsystem, which records REFUTED results too); rank by severity+effort.
 - **MAY NOT:** edit any code or config; act on an unverified sweep result; propose multi-arch or speculative rewrites.
 
 ### build-engineer
@@ -73,9 +74,10 @@ compile-time isolation:
   (e.g. NVFP4 MoE atomic-scatter); commit a conflated/unsound golden.
 
 ### benchmark-runner
-- **Scope:** `scripts/bench_gate.sh`, `tools/imp-bench/`, `tests/perf_baseline*.json`.
+- **Scope:** `scripts/bench_gate.sh`, `scripts/gen_perf_baseline.sh`, the `scripts/verify.sh` gates,
+  `tools/imp-bench/`, `tests/perf_baseline*.json`.
 - **Allowed tools:** bash (benchmark), edit (baselines + bench scripts).
-- **MUST:** warm the clocks, run ≥3 trials single-session, enforce the 3%/5% gate, sample
+- **MUST:** warm the clocks, run ≥3 trials single-session, enforce the 3%/5%/10% gate, sample
   `nvidia-smi` clocks during the run to rule out depressed host state.
 - **MAY NOT:** compare across sessions/days as if equal; refresh a baseline silently (must be stated in the PR).
 

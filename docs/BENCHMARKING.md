@@ -29,16 +29,31 @@ is the auditable summary.)
    `nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw`. Healthy load ≈
    2850 MHz SM / 13801 MHz mem / ~500 W. Lower mem clock or power = depressed host
    state, not a regression.
+7. **Check the process is VRAM-resident** before reading a large decode collapse as a
+   code regression. At ~0 MiB free, WSL2/WDDM oversubscribes into host memory and
+   keeps returning `cudaSuccess`, so nothing fails — bandwidth just falls off a cliff
+   (~1530 GB/s resident vs ~237 GB/s spilled). That is what #1103 was: 55 tok/s at
+   server defaults on a model that benches far higher. `--mem-report` prints the
+   free-VRAM figure; a successful allocation is not evidence.
 
 ## The gate
 
 - Canonical baseline: **`tests/perf_baseline.json`** — thresholds **3 % decode /
-  5 % prefill**. Run by `scripts/bench_gate.sh` (used by `make verify*` and the GPU
-  CI job).
+  5 % prefill** (`scripts/bench_gate.sh`, used by `make verify*` and the GPU CI job)
+  and **10 % peak VRAM** (`scripts/verify.sh`, see below). One file, two gates.
 - A decode delta worse than −3 % **fails**; a prefill delta worse than −5 % warns
   (cuBLAS variance).
+- **Peak VRAM is gated too** (`scripts/verify.sh`, both `verify` and `verify-fast`):
+  a `--mem-report` run vs the pinned `metrics.memory_mb.own_peak_mb` against
+  `thresholds.vram_increase_pct`. It gates `own_peak` — this process's allocations
+  since engine init — **not** device `peak_used`, which also carries the CUDA primary
+  context and any neighbour process. `own_peak` measures byte-identical across
+  repeat runs, so it is a stricter signal than any throughput number.
+  (Skip with `IMP_VERIFY_SKIP_VRAM=1`.)
 - **Intentional perf moves:** refresh the baseline with `scripts/gen_perf_baseline.sh`
-  (cold-median: 5 trials, median per metric) and **say so in the PR**.
+  (cold-median: 5 trials, median per metric; it re-pins `own_peak_mb` in the same run)
+  and **say so in the PR**. A change that intentionally moves VRAM needs the same
+  refresh.
 
 ## Profiling builds
 

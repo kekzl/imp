@@ -155,6 +155,13 @@ swa_sizing                  = auto
 # is worse than 0 — the store stays off and prefix caching is disabled with it,
 # so you lose both. The server logs the required size when this happens.
 swa_snapshot_mb             = 0
+# Pin the KV pool to exactly this many blocks instead of sizing it from the
+# VRAM budget. 0 = auto (the default). Useful when several processes share a
+# card and the pool should be a declared quantity rather than "whatever was
+# left" — and it is what makes the admission guardrail reachable: a pool too
+# small for a prompt returns HTTP 503 `capacity_error` rather than a 200 with
+# an empty completion.
+max_blocks                  = 0
 
 [rope]
 # Runtime RoPE-scaling override: stretch a model's usable context past its
@@ -188,6 +195,13 @@ kv_fraction       = 0.8
 # at 256 MiB absolute. Clamped to [0, 50]. Default 10 ≈ 3.2 GiB on a 32 GiB
 # card — lower to hand more VRAM to the KV pool.
 reserve_floor_pct = 10
+# What cuBLAS/CUTLASS claim on the FIRST forward pass, in MiB. -1 = the value
+# measured on this host (3900). This is a FIXED charge: it does not shrink
+# because --vram-budget asked for a smaller slice of the card, so it floors the
+# reserve above, which is otherwise all percentages. Before that floor existed
+# a 16 GiB budget scaled the reserve to 1.6 GiB against a real 3.9 GiB and the
+# plan overran the cap by the difference. Re-measure after a CUDA/driver bump.
+library_reserve_mb = -1
 # Native-NVFP4 (prequant) models only: physically reserve the mandatory
 # decode caches (CUTLASS SfAtom slab + nvfp4_moe) right after weight upload,
 # before workspaces/KV consume the headroom. Partial caches abort decode

@@ -1,9 +1,11 @@
 # AUDIT_REPORT.md — imp soundness & hardening audit (2026-06-24)
 
 Branch `audit/soundness-hardening-2026-06-24` off `8f2cc9c4` (shipped as PRs
-#772/#773/#774). Companion artifacts: `AUDIT.md` (findings
-ledger; deleted 2026-07-10, full text in git history), `ARCHMAP.md` (code-derived map, alongside this file),
-`PERF_LOG.md` (bench log, alongside this file).
+#772/#773/#774). Companion artifacts: this pass's findings ledger — a root
+`AUDIT.md`, deleted 2026-07-10, full text in git history and **not** the root
+`AUDIT.md` that exists today (that one is the 2026-07-29 memory-subsystem audit,
+different findings, different numbering) — plus `ARCHMAP.md` (code-derived map,
+alongside this file) and `PERF_LOG.md` (bench log, alongside this file).
 
 ## Executive summary
 
@@ -17,7 +19,14 @@ invariant holds, `Model` is const-after-load and lock-free shareable, KV
 borrow/refcount/teardown is correct, the C-ABI and HTTP boundaries catch
 everything, streaming is real, and there is **no dead multi-arch scaffolding** in
 the shipped binary. Four agents independently confirmed a long list of
-verified-sound negatives (see `AUDIT.md`).
+verified-sound negatives (see this pass's ledger in git history).
+
+**Dated verdict.** This "fundamentally sound" reading is 2026-06-24 and two of its
+dimensions were re-opened by the 2026-07-29 memory audit (root `AUDIT.md`): the
+graph↔allocator invariant holds for the batched-decode graph but not universally
+(B9, B13), and "KV borrow/refcount/teardown is correct" holds by omission rather
+than by ownership — there is exactly one `inc_ref` site (B6). One outright
+ownership defect was found and fixed there too (`nvfp4_moe_sfatom`, B22).
 
 The real debt was a small number of **latent soundness holes on
 error/back-pressure/cancellation paths** — exactly where the prior audit's
@@ -71,7 +80,8 @@ determinism gate.
   hunch (over-flag guard).
 - Low/hardening: F-A5 (vision `stop()`→`pause()`), F-A10 (shared-KV COW), F-A11
   (`size_t→int` latent truncation), F-A12 (KV-write `block_id>=0` guard), F-A14
-  (move-only RAII handles), F-A17 (swallowed sync return). All in `AUDIT.md`.
+  (move-only RAII handles), F-A17 (swallowed sync return). All in this pass's
+  ledger (git history — today's root `AUDIT.md` is a different document).
 
 ## F-A9 determinism experiment — REFUTED
 

@@ -254,6 +254,10 @@ void handle_count_tokens(const httplib::Request& req, httplib::Response& res, Se
 void handle_tokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
+// Appends the per-tier memory gauges (I7) to a /metrics body. Lives in
+// metrics_memory.cpp.
+void append_memory_metrics(std::string& out, ServerState& state);
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
 // POST /v1/rerank (also /rerank) — Cohere/Jina/vLLM-compatible reranking.

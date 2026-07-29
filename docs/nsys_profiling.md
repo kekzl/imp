@@ -91,7 +91,7 @@ For each workload, produce a structured report answering:
 ### 2.3 Host-GPU concurrency
 - Is the host issuing work fast enough to keep the GPU saturated? Look for "kernel launch latency" gaps (>5–10 µs between kernels with no host work).
 - Are CUDA Graphs being used for the decode loop? If not, this is almost certainly a top-3 finding.
-- Check for malloc/free in the steady-state hot loop (any `cudaMalloc`/`cudaFree` after warmup is a bug).
+- Check for malloc/free in the steady-state hot loop (any `cudaMalloc`/`cudaFree` after warmup is a bug). nsys is the wrong instrument for this one — build with `-DIMP_ALLOC_INTERPOSE=ON` and read `[alloc-interpose] steady state`, which attributes every call site. The shipped state is zero (`0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`), so any nonzero count is the finding. **Rebuild with the default OFF before measuring throughput** — the shim costs ~3% decode and has already been mistaken for a regression (`AUDIT.md` G16).
 
 ### 2.4 Memory subsystem
 - HBM read/write bandwidth utilization (from `--gpu-metrics`). If decode kernels are below 70% of theoretical (1.79 TB/s on RTX 5090), there's headroom.

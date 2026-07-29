@@ -24,14 +24,14 @@ affected one:
 
 | binary | scope | GPU? |
 |---|---|---|
-| `test-core` | tensors, loaders (GGUF/SafeTensors/HF/SPM), config, server transforms (anthropic, SSE, **tool_call**), vision preprocess | no |
+| `test-core` | tensors, loaders (GGUF/SafeTensors/HF/SPM), config, server transforms (anthropic, SSE, **tool_call**), vision preprocess, **memory subsystem** (backend, tier allocators, `plan_memory`, graph slots — CPU-only via the `fake_backend` seam) | no |
 | `test-text` | tokenizers, chat templates, jinja | no |
 | `test-compute` | rope, norm, activation, embedding, GEMM/GEMV, softmax, sampling, reduce, **fp8 gemm/gemv** | yes |
 | `test-attention` | FA2 / paged / chunked / fp8 / mxfp4 attention, **crosspath parity** | yes |
 | `test-quant` | quant round-trip + **dequant/GEMV vs fp64 reference**, CUTLASS grouped GEMM | yes |
-| `test-kv` | KV-cache write/gather, FP8 KV, prefix cache | yes |
+| `test-kv` | KV-cache write/gather, FP8 KV, prefix cache, VRAM query/accounting | yes |
 | `test-moe-gdn` | MoE routing, GDN/SSM, json-schema FSM | yes |
-| `test-e2e` | forward pass, batching, determinism, greedy locks, vision golden | yes (some CPU-stub) |
+| `test-e2e` | forward pass, batching, determinism, greedy locks, vision golden, VRAM budget reserve | yes (some CPU-stub) |
 
 Run one binary / filter:
 
@@ -49,7 +49,9 @@ stages — install the hooks with `make install-hooks`:
   `make test-gpu` (the full GTest suite, which includes the CPU binaries too)
   when staged changes touch `src/ include/ tools/ tests/ CMakeLists/ *.cmake`.
   This is where the kernel oracles below are actually gated. (`pre-push` keeps
-  the `make verify-fast` perf + smoke regression gate.)
+  the `make verify-fast` perf + peak-VRAM + smoke regression gate — the VRAM gate
+  is the one that fails on a memory regression with flat throughput; it needs `jq`
+  and skips with `IMP_VERIFY_SKIP_VRAM=1`.)
 - **Stage 2 — CI (CPU).** `.github/workflows/ci.yml` builds everything and runs
   `ctest -L unit` (`test-core` incl. tool-call + Bearer-auth, `test-text`, the
   CPU subset of `test-e2e`) plus the Python mock-API suite. The `gpu`/`perf`
@@ -136,7 +138,9 @@ to ~0 where a per-element ratio explodes without indicating a real error.
   worse than no test — quarantine and document instead of merging it.
 - Use an **independent** oracle; print the measured error as a characterization
   record even when the assertion is loose.
-- If a test exposes a real engine bug, **file it** (see `AUDIT.md` §6) with a
+- If a test exposes a real engine bug, **file it** (a GitHub issue; for the memory
+  subsystem, append the finding to root `AUDIT.md` under its CONFIRMED / REFUTED /
+  OPEN convention) with a
   minimal repro and quarantine the assertion — do not silently patch the kernel
   or weaken the bound to go green.
 

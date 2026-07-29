@@ -31,7 +31,10 @@ verification, not the sweep.
 2. **Verify each** with the recipe above. Demote refuted ones immediately.
 3. **Write it up** — `docs/audit/structural_debt_YYYY_MM_DD.md`. Counts are evidence,
    not estimates. Keep a **"Refuted (do not re-chase)"** section so the next pass
-   doesn't re-flag the same false positives.
+   doesn't re-flag the same false positives. Exception: the memory subsystem has a
+   running findings log at repo root, **`AUDIT.md`** (CONFIRMED / REFUTED / OPEN per
+   finding, negative results included) — append there rather than opening a parallel
+   dated report, and read it before sweeping `src/memory/`.
 4. **Ship cleanups** as small PRs (REQUIRED SUB-SKILL: building-and-testing) — branch
    off `main`, never stack, Docker `make build` + `make test-unit`, prefer batching
    related nits. Behavior-sensitive removals: also a coherence check (check-degeneration).
@@ -39,6 +42,10 @@ verification, not the sweep.
 ## File-size gate (god-file findings go through this, not ad-hoc splits)
 
 `tools/check_filesize.py` (config: `tools/filesize_thresholds.toml`) measures **code LOC** (comments/blanks stripped) per category — kernel `.cu` warn>500/hard>600, normal TU warn>600/hard>800, header warn>500/hard>700. CI job `File size`: advisory warn step + **blocking** hard step. The real cost metric is *recompile blast radius* (one `.cu` = one `ptxas` TU), not line count — split on **compile-time isolation** (kernel def / host wrapper / explicit instantiations), never on size alone. A legitimately monolithic file goes into `[allow]` in the toml **with a reason** (empty reason is rejected). Baseline + per-file rationale: `docs/audit/AUDIT_FILESIZE.md`.
+
+## Allocation-site gate (invariant I1: one module talks to the driver)
+
+`tools/check_alloc_sites.py` counts direct `cudaMalloc*`/`cudaFree*`/`cudaHostAlloc` sites outside `src/memory/` and diffs them against `tools/alloc_allowlist.txt`. CI job `Alloc sites`: advisory `--stats` step + **blocking** allowlist gate — it fails on a new direct site *and* on a stale entry, so removing a site means updating the allowlist in the same PR. Note what it does and does not measure: it counts **source sites**, not executed allocations. A change can remove ~96% of runtime allocation traffic and leave the site count flat (the T2 slot pool did exactly that, keeping the old path as a fallback — `AUDIT.md` B34). For the runtime number, build with `-DIMP_ALLOC_INTERPOSE=ON` and read `steady_state_allocations()`; never benchmark that build (`AUDIT.md` G16).
 
 ## Priors — settled, do NOT re-flag
 
@@ -56,6 +63,15 @@ current verdicts in `docs/audit/housekeeping_2026_06_13.md`):
   report's **NOT-flagged list** — re-flagging its verified negatives wastes the sweep.
   Companion: `docs/audit/vram_audit_2026_07_07.md` (note: a `VramOwned` type does NOT
   exist — past audits hallucinated it).
+- **Memory-subsystem priors (2026-07-29, `AUDIT.md`)**: the "engine teardowns leak
+  ~15 GiB" finding is **REFUTED as a leak** — every CUDA-level release works
+  (`mempool trim: reserved 8320->0 used 0->0`), but WSL2/WDDM never returns a
+  process's peak VRAM commitment, so free VRAM only ever decreases within a process.
+  Do not re-flag it, and do not "fix" it in the allocator. Two measurement traps that
+  come with it: a successful `cudaMalloc` proves nothing about free VRAM here (28 GiB
+  succeeds with 22.6 GiB reported free — time it instead, ~1530 vs ~237 GB/s), and
+  `cudaMemPoolAttrReservedMemCurrent` drops to 0 on a trim even when nothing was
+  returned, so retention checks must assert on `UsedMemCurrent`.
 
 ## Red flags — you are about to over-flag
 

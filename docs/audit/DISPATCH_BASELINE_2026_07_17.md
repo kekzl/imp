@@ -80,9 +80,9 @@ Four independent read-only scouts verified each brief claim against code/docs.
 | D: per-request speculative toggle absent | ALREADY IMPLEMENTED | `"speculative"` bool on both APIs (`handlers_chat_params.cpp:208-211`, `anthropic.cpp:327-330`); note: MTP-head spec remains load-time-only |
 | D: cache_control not implemented | PARTIAL | parsed + honored as all-or-nothing prompt-prefix pin (`anthropic.cpp:291-310,410-413`, reports `cache_read_input_tokens`); per-breakpoint granularity + ephemeral TTL tiers not modeled |
 | D: no p50/p99 metrics endpoint | ALREADY IMPLEMENTED | Prometheus histograms on `/metrics`: `imp_request_duration_seconds`, `imp_ttft_seconds`, `imp_inter_token_seconds` (`handlers_misc.cpp:185-224`); p50/p99 via `histogram_quantile()` |
-| C: RAII coverage gaps | **CONFIRMED — REAL FINDING** | wrappers exist (`CudaStream`/`CudaEvent`/`Buffer`/`PoolAllocator`/`VRAMAllocator`) but **no owner for `cudaGraph_t`/`cudaGraphExec_t`/`cudaMemPool_t`**; ~801 raw `cudaMalloc*/cudaFree*` sites outside owners (top: `executor_workspace_buffers.cu` 68, `engine_graph_decode.cpp` 38, `weight_upload.cu` 29) |
+| C: RAII coverage gaps | **CONFIRMED — REAL FINDING** (partly addressed 2026-07-29) | wrappers exist (`CudaStream`/`CudaEvent`/`Buffer`/`PoolAllocator`/`VRAMAllocator`) but **no owner for `cudaGraph_t`/`cudaGraphExec_t`/`cudaMemPool_t`** — still true. The allocation half moved: `src/memory/backend.h`'s move-only `Region` owns the migrated tiers and the site census is gated by `tools/check_alloc_sites.py` (the `~801` figure here is a one-off count; read the gate instead). Graph/mempool handles remain unowned |
 | A: missing post-launch error checks | **CONFIRMED — REAL FINDING** | 415 kernel-launch sites in src/, only ~5 have `cudaGetLastError` within 3 lines (~1%); 50+ launch-containing files have zero checks. `IMP_CUDA_CHECK_LOG` (601 uses) covers API returns, not launches |
-| C: KV leak-under-churn regression test | **CONFIRMED — REAL GAP** | LRU eviction + prefix churn well covered (54 cases in `test_kv_cache.cpp`, 9 eviction + 10 prefix-integrity tests), but no sustained N-iteration churn test asserting free-block count returns to baseline |
+| C: KV leak-under-churn regression test | **CONFIRMED — REAL GAP** → **CLOSED 2026-07-29** (#1106; see Bottom line item 3) | LRU eviction + prefix churn well covered (54 cases in `test_kv_cache.cpp`, 9 eviction + 10 prefix-integrity tests), but no sustained N-iteration churn test asserting free-block count returns to baseline — now `tests/test_memory_allocators.cpp`, 5000 randomised steps against the `BlockPool` backing `KVCache` |
 | E: golden/numerical/determinism test matrix | PARTIAL (pre-existing) | ~574 GTest incl. per-quant + golden coverage; per-arch golden matrix not 1:1 with the brief's list; determinism tests exist (above) |
 
 ## Bottom line for the campaign
@@ -95,8 +95,20 @@ Work items with real substance, in brief-priority order (A → C):
    sites in `cuda_graph.cu`/`engine_graph_decode.cpp`) and audit of the 801 raw
    alloc sites for throw-path leaks (most sit behind init-once paths — triage, not
    blanket rewrite).
+   **Superseded 2026-07-29 for the allocation half** (#1106/#1107): `Backend`/`Region`
+   is the move-only owner for the migrated tiers, and the census is now a gate rather
+   than a doc figure — `tools/check_alloc_sites.py` with a monotonically shrinking
+   allowlist (blocking CI job `Alloc sites`). Read the current count from the gate.
+   Note that site count and runtime traffic are different quantities: #1107 removed
+   96% of the runtime allocations while leaving the site count flat (`AUDIT.md` B34).
+   Graph handles still have no RAII owner.
 3. **C: KV leak-under-churn stress test** (bounded: N alloc/evict/prefix cycles,
-   assert pool returns to baseline).
+   assert pool returns to baseline). **Delivered 2026-07-29** in the CPU lane
+   (`tests/test_memory_allocators.cpp`: 5000-step randomised block-pool churn with
+   conservation, plus refcount balance across exception paths) against the `BlockPool`
+   that now backs `KVCache`. Scope the assertion to *pool* accounting: at device level
+   WSL2/WDDM never returns a process's peak commitment, so "back to baseline" is not
+   observable through `cudaMemGetInfo` (`AUDIT.md` B36).
 4. **A: fix the single src warning** (`-Wnarrowing`, `engine_kv_cache_init.cpp:43`)
    + the test `-Wunused-result`.
 5. **D (optional, additive): cache_control per-breakpoint granularity / TTL tiers**
