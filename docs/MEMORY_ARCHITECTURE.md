@@ -984,7 +984,8 @@ design above, so the argument that produced the original shape stays readable.
 | 4b.1 — T2 arena sized from exact per-tenant demand | **done** | `feat(memory): size the engine arena from exact tenant demand` |
 | 4b.2 — the remaining `exec/` workspaces | not started — see B5 | |
 | 5 — per-request allocations (satisfies I2) | not started | |
-| 6 — weight upload + pre-dequant caches | not started | |
+| 6.4 — weight caches before the KV pool; KV takes the measured residual | **done** | `fix(vram): build the weight caches before the KV pool` |
+| 6.0/6.5/6.6 — exact demand, T1 arena, delete the balloon | not started | |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |
 | 7b — VMM backend implementation | not started | |
 | 8 — `compute/` statics | not started | |

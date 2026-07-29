@@ -4,6 +4,51 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-07-29 · Build the weight caches before the KV pool — gpt-oss-20b 25 → 355 tok/s
+
+`init_kv_cache` sized the KV pool from an ESTIMATE of the weight-cache demand
+and allocated it first. On gpt-oss-20b-mxfp4 at server defaults the estimate
+was ~1.6 GiB low, the caches took the difference out of the reserve, and the
+card ended at **exactly 0 MiB free**.
+
+**The three-point sweep that identified it** (fixed `--max-batch 8`, only
+`runtime.max_seq_len` varied — so batch-scaled compute is held constant):
+
+| max_seq_len | KV | free VRAM | 200 tokens |
+|---:|---:|---:|---:|
+| 131072 (auto) | 19 023 MiB | **0 MiB** | **7.85 s** |
+| 32768 | 12 288 MiB | 1082 MiB | 0.58 s |
+| 8192 | 3072 MiB | 10 737 MiB | 0.54 s |
+
+Not batch-scaled compute — the card at 0 free, i.e. the WSL2/WDDM spill into
+host memory that `VRAMAllocator`'s docstring names as the reason it exists.
+1 GiB of headroom is enough to restore full speed.
+
+**The fix**: the caches, whose demand is bounded by the model, are built
+first; the KV pool — the elastic tier — then takes the *measured* residual
+minus the allocator headroom. It can only shrink the pool relative to the
+budget's projection, never grow it, so it cannot overcommit.
+
+| gpt-oss-20b, `--max-batch 8`, auto context | before | after |
+|---|---:|---:|
+| 200 tokens | 7.85 s | **0.56 s** |
+| effective decode | ~25 tok/s | **~355 tok/s** |
+| KV pool | 25 364 blk / 19 023 MiB | 16 238 blk / 12 178 MiB |
+| KV capacity | 405 824 tok | 259 808 tok |
+| free VRAM | **0 MiB** | **1629 MiB** |
+
+The clamp is silent where it is not needed: on all three A1.3 reference
+configs it does not fire, and they end with 2710 / 5304 / 2600 MiB free.
+
+**Perf gate, 3 trials, quiet host** (2917 MHz SM / 14001 MHz mem): pp512
+median **12 408.00**, tg128 median **287.57** — against the pinned baseline of
+12 406.87 / 287.19, i.e. +0.01% / +0.13%. On the pin.
+
+`test-kv` 57/57, `test-core` 668/668, full `test-e2e` 114 passed with only the
+pre-existing `MtpForwardTest` failure (AUDIT B5, unrelated and unchanged).
+
+---
+
 ## 2026-07-29 · Size the T2 arena from exact demand — restores prefill graph capture on gpt-oss-20b
 
 The engine arena acquires its Region when it is OPENED, so its capacity is

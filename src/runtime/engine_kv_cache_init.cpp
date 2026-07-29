@@ -11,6 +11,7 @@
 #include "runtime/engine.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
+#include "memory/vram_query.h"
 #include "runtime/plan_shadow.h"
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
@@ -224,6 +225,90 @@ bool Engine::init_kv_cache() {
         log_shadow_plan(probe, vram_budget, max_blocks);
     }
 
+    // ── Weight caches are built BEFORE the KV pool (A7 step 6.4) ──────
+    // Measured on gpt-oss-20b-mxfp4 at server defaults: sizing KV first from
+    // an ESTIMATE of the cache demand left the card at exactly 0 MiB free —
+    // the estimate was ~1.6 GiB low, and the caches took the difference out
+    // of the reserve. At 0 free, WSL2/WDDM spills into host memory (the exact
+    // hazard VRAMAllocator's own docstring names) and decode collapses from
+    // ~345 tok/s to 25 tok/s. Leaving as little as 1 GiB free restores it.
+    // So the caches, whose demand is bounded by the model, go first, and the
+    // KV pool — the elastic tier — takes what is actually left (AUDIT B23).
+    //
+    // The two profile gates below must come with them: both feed flags the
+    // cache build reads (wcache_->use_fp8) or that graph capture depends on.
+    // GDN detection
+    {
+        if (model_->profile().is_gdn) {
+            if (config_.use_cuda_graphs) {
+                IMP_LOG_INFO("GDN model: CUDA graphs enabled (recurrent state in-place)");
+            } else {
+                IMP_LOG_INFO(
+                    "GDN model: CUDA graphs disabled (disabled earlier by caller or expert offload)");
+            }
+            // GDN recurrent state accumulates small precision errors per token.
+            // FP8 E4M3 (3-bit mantissa) amplifies these through the delta rule
+            // scan, causing degenerate output after ~50 special tokens in
+            // multi-turn chat.  Force FP16 weights for GDN prefill.
+            if (config_.use_fp8_prefill) {
+                if (config_.dual_path_quant) {
+                    IMP_LOG_WARN(
+                        "GDN + dual-path: attention weights forced to FP16 (not FP8) — "
+                        "recurrent state needs FP16 precision. FFN weights still use NVFP4.");
+                } else {
+                    IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
+                }
+                config_.use_fp8_prefill = 0;
+                executor_->disable_fp8_prefill();
+            }
+        }
+    }
+
+    // (Gemma 4 FP8 prefill disabled earlier, before executor init)
+
+    // Detect pure Mamba2 SSM layers (layers with ssm_in but without gdn_gate).
+    // GDN-only models (Qwen3.5) are graph-compatible; pure SSM (Nemotron-H) is not yet.
+    {
+        has_pure_ssm_layers_ = model_->profile().has_pure_ssm;
+        if (has_pure_ssm_layers_ && config_.use_cuda_graphs) {
+            config_.use_cuda_graphs = false;
+            IMP_LOG_INFO("Mamba2 SSM layers detected: disabling CUDA graphs "
+                         "(recurrent state not yet graph-safe)");
+        }
+    }
+
+    // Hand the reserved space to the cache build: everything elastic (KV
+    // pool, workspaces, SSM state) has allocated by now, so the freed bytes
+    // go to phase 3's CUTLASS-SF + nvfp4_moe builds — which additionally
+    // floor their live-free-derived budgets at vram_budget.mandatory_*.
+    release_native_cache_balloon_("cache build");
+
+    // Dequant weights → FP16/FP8/NVFP4 caches
+    executor_->pre_dequant_weights(stream_, vram_budget);
+    dequant_done_ = true;
+
+    // KV now takes the MEASURED residual, not a predicted one. This can only
+    // shrink the pool relative to the budget's projection, never grow it, so
+    // it cannot overcommit; and it keeps the allocator's headroom free, which
+    // is what everything allocated after this point needs to succeed.
+    const size_t per_block_total_bytes =
+        static_cast<size_t>(n_kv_layers) *
+        kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
+    if (per_block_total_bytes > 0) {
+        size_t free_now = 0, total_now = 0;
+        vram_budget_mem_get_info(&free_now, &total_now);
+        const size_t headroom = vram_allocator_headroom(total_now);
+        const size_t kv_room = (free_now > headroom) ? (free_now - headroom) : 0;
+        const int fits = static_cast<int>(kv_room / per_block_total_bytes);
+        if (fits < max_blocks) {
+            IMP_LOG_INFO("KV cache: %d -> %d blocks from the measured post-cache residual "
+                         "(%.0f MiB free, %.0f MiB allocator headroom kept)",
+                         max_blocks, std::max(fits, 16), free_now / (1024.0 * 1024.0),
+                         headroom / (1024.0 * 1024.0));
+            max_blocks = std::max(fits, 16);
+        }
+    }
+
     {
         QType kv_dtype = config_.kv_cache_dtype;
         size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks *
@@ -423,55 +508,6 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // GDN detection
-    {
-        if (model_->profile().is_gdn) {
-            if (config_.use_cuda_graphs) {
-                IMP_LOG_INFO("GDN model: CUDA graphs enabled (recurrent state in-place)");
-            } else {
-                IMP_LOG_INFO(
-                    "GDN model: CUDA graphs disabled (disabled earlier by caller or expert offload)");
-            }
-            // GDN recurrent state accumulates small precision errors per token.
-            // FP8 E4M3 (3-bit mantissa) amplifies these through the delta rule
-            // scan, causing degenerate output after ~50 special tokens in
-            // multi-turn chat.  Force FP16 weights for GDN prefill.
-            if (config_.use_fp8_prefill) {
-                if (config_.dual_path_quant) {
-                    IMP_LOG_WARN(
-                        "GDN + dual-path: attention weights forced to FP16 (not FP8) — "
-                        "recurrent state needs FP16 precision. FFN weights still use NVFP4.");
-                } else {
-                    IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
-                }
-                config_.use_fp8_prefill = 0;
-                executor_->disable_fp8_prefill();
-            }
-        }
-    }
-
-    // (Gemma 4 FP8 prefill disabled earlier, before executor init)
-
-    // Detect pure Mamba2 SSM layers (layers with ssm_in but without gdn_gate).
-    // GDN-only models (Qwen3.5) are graph-compatible; pure SSM (Nemotron-H) is not yet.
-    {
-        has_pure_ssm_layers_ = model_->profile().has_pure_ssm;
-        if (has_pure_ssm_layers_ && config_.use_cuda_graphs) {
-            config_.use_cuda_graphs = false;
-            IMP_LOG_INFO("Mamba2 SSM layers detected: disabling CUDA graphs "
-                         "(recurrent state not yet graph-safe)");
-        }
-    }
-
-    // Hand the reserved space to the cache build: everything elastic (KV
-    // pool, workspaces, SSM state) has allocated by now, so the freed bytes
-    // go to phase 3's CUTLASS-SF + nvfp4_moe builds — which additionally
-    // floor their live-free-derived budgets at vram_budget.mandatory_*.
-    release_native_cache_balloon_("cache build");
-
-    // Dequant weights → FP16/FP8/NVFP4 caches
-    executor_->pre_dequant_weights(stream_, vram_budget);
-    dequant_done_ = true;
     cudaStreamSynchronize(stream_);
 
     // Coverage check: for prequant MoE models the nvfp4_moe decode cache is
