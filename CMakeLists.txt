@@ -127,6 +127,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/arena.cpp
     src/memory/engine_arena.cpp
     src/memory/graph_slots.cpp
+    src/memory/library_reserve_cache.cpp
     src/memory/block_pool.cpp
     src/memory/scratch_stack.cpp
     src/memory/plan.cpp
@@ -605,6 +606,10 @@ if(IMP_BUILD_TESTS)
         # so the numbers the T2 arena is reserved from are pinned in the lane CI
         # actually runs.
         tests/test_workspace_sizes.cpp
+        # Persisted library-reserve measurement: a keyed text file whose number
+        # decides how much VRAM the plan hands out, so its failure modes are
+        # pinned in the lane CI actually runs.
+        tests/test_library_reserve_cache.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
         tests/test_ngram_draft.cpp

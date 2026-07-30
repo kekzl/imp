@@ -12,6 +12,8 @@
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
 #include "memory/vram_query.h"
+#include "memory/library_reserve_cache.h"
+#include "memory/plan.h"
 #include "runtime/plan_shadow.h"
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
@@ -185,6 +187,32 @@ bool Engine::init_kv_cache() {
     // VRAM budget. The mandatory-cache balloon (init_weights) is still held
     // here — effective_free_vram() excludes it, and passing the held bytes
     // keeps the prequant reserve from charging KV for the same demand twice.
+    // Charge what the first forward actually claimed LAST time, if we know
+    // (AUDIT B41/B49). The plan needs this number before the forward that
+    // produces it, so a single run cannot both measure and use it — but the
+    // value is stable per (model, quant path, library stack) and invariant to
+    // batch and context, so remembering it is enough. Explicit
+    // vram.library_reserve_mb always wins; a miss leaves the constant in place.
+    if (config_.library_reserve_mb < 0 && runtime_config_.vram.library_reserve_cache != "off") {
+        const std::string path = runtime_config_.vram.library_reserve_cache.empty()
+                                     ? library_reserve_cache_default_path()
+                                     : runtime_config_.vram.library_reserve_cache;
+        LibraryReserveKey key;
+        key.model_fingerprint = model_fingerprint_();
+        key.nvfp4_decode_mode = config_.use_nvfp4_decode;
+        key.fp8_prefill = config_.use_fp8_prefill;
+        cudaRuntimeGetVersion(&key.cuda_runtime_version);
+        library_reserve_key_ = key;
+        library_reserve_cache_path_ = path;
+        if (const size_t remembered = library_reserve_cache_load(path, key); remembered > 0) {
+            config_.library_reserve_mb = static_cast<int>(remembered >> 20);
+            IMP_LOG_INFO("library reserve: %d MiB from the measurement cache (%s) — the default "
+                         "constant is %zu MiB",
+                         config_.library_reserve_mb, path.c_str(),
+                         kMeasuredLibraryReserveBytes >> 20);
+        }
+    }
+
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
                                            effective_free_vram(), swa_live_tokens, n_swa_layers,
                                            native_cache_balloon_bytes_, &native_cache_demand());

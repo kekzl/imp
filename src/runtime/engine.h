@@ -14,6 +14,7 @@
 #include "runtime/token_recycle_draft.h"
 #include "runtime/vram_budget.h"
 #include "memory/kv_cache.h"
+#include "memory/library_reserve_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
 #include "memory/recurrent_snapshot_store.h"
@@ -779,6 +780,10 @@ private:
     // all, and a `> 0` guard silently fell back to the assumed 3900 MiB there,
     // reporting a charge that was never taken (residual −3486 MiB, 149 %).
     size_t measured_library_reserve_ = SIZE_MAX;
+    // Identity + location for persisting the measurement (AUDIT B49). Filled in
+    // init_kv_cache, consumed after warmup.
+    LibraryReserveKey library_reserve_key_{};
+    std::string library_reserve_cache_path_;
     // Launch the cached graph for state.n_tokens (or warm up / capture one).
     // Returns true when the forward ran (graph replay or captured+launched);
     // false → caller runs the eager forward itself (warmup use, capture

@@ -1035,7 +1035,8 @@ design above, so the argument that produced the original shape stays readable.
 | 6.4 — weight caches before the KV pool; KV takes the measured residual | **done** | `fix(vram): build the weight caches before the KV pool` |
 | 6.0/6.5/6.6 — exact demand, T1 arena, delete the balloon | not started | |
 | **criterion 4 — 2000-request soak** | **RUN, and it FAILED: one KV block leaks per request (B46)** | |
-| 6.7 — the library reserve is measured and reported, not assumed | **done** | `feat(memory): measure the library reserve instead of assuming it` |
+| 6.7 — the library reserve is measured and reported, not assumed | **done** |
+| 6.8 — the measurement is remembered; criteria 5+6 hold from the 2nd start | **done** | `feat(memory): remember the measured library reserve` | `feat(memory): measure the library reserve instead of assuming it` |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |
 | 7b — VMM backend implementation | not started | |
 | 8 — `compute/` statics | not started | |

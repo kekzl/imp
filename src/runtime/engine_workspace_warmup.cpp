@@ -377,6 +377,22 @@ void Engine::warmup() {
     }
     MemAccount::instance().checkpoint("05b_post_warmup_forward");
     measured_library_reserve_ = report_library_reserve(warm_free_before, config_.library_reserve_mb);
+    // Remember it, so the NEXT start on this model charges the measured value
+    // instead of the constant (AUDIT B49). A write failure is a warning, never a
+    // load failure — refusing to serve a model over a cache file would be absurd.
+    if (measured_library_reserve_ != SIZE_MAX && !library_reserve_cache_path_.empty()) {
+        if (library_reserve_cache_store(library_reserve_cache_path_, library_reserve_key_,
+                                        measured_library_reserve_)) {
+            IMP_LOG_INFO("library reserve: recorded %.0f MiB in %s — the next start on this model "
+                         "plans with it",
+                         measured_library_reserve_ / (1024.0 * 1024.0),
+                         library_reserve_cache_path_.c_str());
+        } else {
+            IMP_LOG_WARN("library reserve: could not write %s — the next start will charge the "
+                         "constant again",
+                         library_reserve_cache_path_.c_str());
+        }
+    }
 
     for (int i = 0; i < kMaxGraphPoolSize; i++) {
         decode_graph_pool_[i].invalidate();
