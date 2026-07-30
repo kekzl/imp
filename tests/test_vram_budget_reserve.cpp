@@ -437,17 +437,18 @@ TEST(VramBudgetReserve, ReserveIsFlooredAtTheLibraryCharge) {
         << "an unset library_reserve_mb must still charge the measured constant";
 }
 
-// V8 — the assertion A7 step 2 asked for and D9 deferred.
+// V8 — plan sufficiency, which is what A7 actually asked for ("assert no tier is
+// exceeded"). This replaced an assertion of mine that was simply wrong:
+// `live <= plan`. It read well, it passed on five VRAM-generous shapes, and the
+// bench-sized shape below disproves it — the live pass hands out 224 KV blocks
+// where the plan affords 56, because the two answer different questions. Since
+// #1135 the pool takes the PLAN's number, so the live pass being more generous
+// costs nothing and is not a violation of anything.
 //
-// NOT "live == plan": the two compute differently on purpose (live takes
-// kv_fraction of available and then clamps; the plan subtracts committed charges
-// and takes min(want, fits)), and on a VRAM-tight card the live pass legitimately
-// lands BELOW. What must never happen is the live pass handing out MORE KV than
-// the plan says is affordable — that is the live read spending bytes the plan has
-// already committed elsewhere, which is the shape of every budget bug this
-// campaign found: #1100's double-charged cache reserve, #1103's ordering, and the
-// unexplained 2x that made this assertion unwritable until B65 removed it.
-TEST(VramBudgetReserve, LivePassNeverExceedsThePlan) {
+// What must hold is the plan's own contract: a plan that reports ok must fit
+// inside the budget it was handed. If that ever fails, every number downstream
+// of it is furniture.
+TEST(VramBudgetReserve, PlanNeverExceedsTheBudgetItWasGiven) {
     SKIP_IF_NO_CUDA();
 
     struct Case {
@@ -467,9 +468,17 @@ TEST(VramBudgetReserve, LivePassNeverExceedsThePlan) {
         {"Q6_K mode-2", QType::Q6_K, QType::Q6_K, 32768, 1, 36, 128, 16, 2},
         {"Q4_K wide batch", QType::Q4_K, QType::Q4_K, 4096, 16, 40, 128, 12, 0},
         {"cheap KV hybrid", QType::Q6_K, QType::Q6_K, 17408, 2, 10, 256, 8, 2},
+        // The bench regime: small advertised context, batch 1. The shape the
+        // five above could not see.
+        {"bench-sized ctx", QType::Q8_0, QType::Q8_0, 896, 1, 36, 128, 20, 2},
+        // Cannot fit by construction: the library reserve alone exceeds this
+        // budget. Present so the sufficiency assertion above has a case that can
+        // actually fail — see the comment at the end of this test.
+        {"impossible", QType::Q8_0, QType::Q8_0, 32768, 8, 32, 128, 2, 0},
     };
 
-    int compared = 0;
+    int checked = 0;
+    int refused = 0;
     for (const Case& c : cases) {
         Model m;
         fill_model(m, c.attn, c.ffn);
@@ -484,7 +493,6 @@ TEST(VramBudgetReserve, LivePassNeverExceedsThePlan) {
         const size_t free_vram = c.free_vram_gib * 1024ull * 1024 * 1024;
         VRAMBudget live = compute_vram_budget(m, config, c.n_kv_layers, c.head_dim, free_vram);
 
-        // The probe the engine builds at this exact point (engine_kv_cache_init).
         ShadowPlanProbe probe;
         probe.distributable_bytes = free_vram;
         probe.weight_cache_demand = live.weight_cache_estimate_bytes;
@@ -500,21 +508,74 @@ TEST(VramBudgetReserve, LivePassNeverExceedsThePlan) {
             kv_block_bytes_per_layer(config.kv_cache_dtype, 16, m.config().n_kv_heads, c.head_dim);
 
         const PlanResult plan = plan_memory(shadow_plan_input(probe));
-        if (!plan.ok)
-            continue;  // the plan refusing is a different contract (D8), not this one
-        ++compared;
-
-        EXPECT_LE(live.kv_max_blocks, plan.plan.kv.blocks)
-            << c.name << ": the live pass handed out " << live.kv_max_blocks
-            << " KV blocks where the plan affords " << plan.plan.kv.blocks
-            << " — the live read is spending bytes the plan committed elsewhere";
+        if (plan.ok) {
+            ++checked;
+            EXPECT_LE(plan.plan.total(), free_vram)
+                << c.name << ": the plan reports ok while asking for "
+                << (plan.plan.total() >> 20) << " MiB of a " << (free_vram >> 20) << " MiB budget";
+        } else {
+            ++refused;
+            // A refusal must have a reason attached, or the operator gets "no"
+            // with nothing to act on.
+            EXPECT_GT(plan.failure.over_by + (plan.plan.kv.below_floor ? 1u : 0u), 0u)
+                << c.name << ": refused without either an overrun or a floor violation";
+        }
     }
 
-    // Without this the test passes by comparing nothing: a plan that refuses
-    // every case would skip every assertion and still report green.
-    EXPECT_GE(compared, 3) << "only " << compared
-                           << " of 5 cases reached the comparison — the rest were refused by the "
-                              "plan, so this test is not measuring what it claims";
+    EXPECT_GE(checked, 3) << "only " << checked
+                          << " of 7 cases produced a plan — the rest were refused, so the "
+                             "sufficiency half of this test is not measuring what it claims";
+    // Without a case that genuinely cannot fit, the EXPECT_LE above is a
+    // tautology: every plan it sees has already passed the very check it is
+    // asserting. Mutation-verified — removing the fit check inside plan_memory()
+    // left this test green until the impossible case was added.
+    EXPECT_GE(refused, 1) << "no case exercised the refusal path";
+}
+
+// The divergence the old assertion mistook for a bug, pinned so nobody restores
+// it. The live pass sizes KV from kv_fraction of what is free and clamps; the
+// plan grants blocks_per_seq x batch out of a computed residual. At a small
+// advertised context those answers differ by 4x, and neither is wrong — they are
+// answers to different questions. The pool takes the plan's (B69).
+TEST(VramBudgetReserve, LivePassMayExceedThePlanAtSmallContexts) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::Q8_0, QType::Q8_0);
+
+    EngineConfig config;
+    config.max_seq_len = 896;  // the --bench shape
+    config.max_batch_size = 1;
+    config.use_nvfp4_decode = 2;
+    config.use_cuda_graphs = false;
+    config.kv_cache_dtype = QType::F16;
+
+    const size_t free_vram = 20ull * 1024 * 1024 * 1024;
+    VRAMBudget live = compute_vram_budget(m, config, 36, 128, free_vram);
+
+    ShadowPlanProbe probe;
+    probe.distributable_bytes = free_vram;
+    probe.weight_cache_demand = live.weight_cache_estimate_bytes;
+    probe.mandatory_cache_bytes = live.mandatory_sf_bytes + live.mandatory_moe_bytes;
+    probe.ssm_state_bytes = live.ssm_footprint_bytes;
+    probe.library_reserve_bytes = kMeasuredLibraryReserveBytes;
+    probe.n_kv_layers = 36;
+    probe.max_batch_size = 1;
+    probe.max_seq_len = 896;
+    probe.kv_block_size = 16;
+    probe.min_kv_tokens = config.min_kv_tokens;
+    probe.kv_block_bytes_per_layer =
+        kv_block_bytes_per_layer(config.kv_cache_dtype, 16, m.config().n_kv_heads, 128);
+
+    const PlanResult plan = plan_memory(shadow_plan_input(probe));
+    ASSERT_TRUE(plan.ok);
+
+    // The plan grants exactly the advertised need; the live pass grants more.
+    EXPECT_EQ(plan.plan.kv.blocks, (896 + 15) / 16)
+        << "the plan should grant blocks_per_seq x batch and nothing for reuse";
+    EXPECT_GT(live.kv_max_blocks, plan.plan.kv.blocks)
+        << "if this ever stops holding, the two passes have converged at small "
+           "contexts and the note in B69 needs revisiting";
 }
 
 TEST(VramBudgetReserve, VramKnobsAreClamped) {
