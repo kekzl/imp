@@ -13,7 +13,8 @@
 #include <gtest/gtest.h>
 
 #include "compute/gemm_cutlass_sm120.h"
-#include "memory/plan.h"  // kMeasuredLibraryReserveBytes
+#include "memory/plan.h"  // kMeasuredLibraryReserveBytes, plan_memory
+#include "runtime/plan_shadow.h"
 #include "memory/vram_query.h"
 #include "model/model.h"
 #include "model/model_config.h"
@@ -434,6 +435,86 @@ TEST(VramBudgetReserve, ReserveIsFlooredAtTheLibraryCharge) {
     VRAMBudget b_dflt = compute_vram_budget(m, dflt, 32, 128, 8 * GiB);
     EXPECT_GE(b_dflt.reserve_bytes, kMeasuredLibraryReserveBytes)
         << "an unset library_reserve_mb must still charge the measured constant";
+}
+
+// V8 — the assertion A7 step 2 asked for and D9 deferred.
+//
+// NOT "live == plan": the two compute differently on purpose (live takes
+// kv_fraction of available and then clamps; the plan subtracts committed charges
+// and takes min(want, fits)), and on a VRAM-tight card the live pass legitimately
+// lands BELOW. What must never happen is the live pass handing out MORE KV than
+// the plan says is affordable — that is the live read spending bytes the plan has
+// already committed elsewhere, which is the shape of every budget bug this
+// campaign found: #1100's double-charged cache reserve, #1103's ordering, and the
+// unexplained 2x that made this assertion unwritable until B65 removed it.
+TEST(VramBudgetReserve, LivePassNeverExceedsThePlan) {
+    SKIP_IF_NO_CUDA();
+
+    struct Case {
+        const char* name;
+        QType attn;
+        QType ffn;
+        int max_seq_len;
+        int max_batch;
+        int n_kv_layers;
+        int head_dim;
+        size_t free_vram_gib;
+        int use_nvfp4_decode;
+    };
+    const Case cases[] = {
+        {"dense Q8 roomy", QType::Q8_0, QType::Q8_0, 8192, 4, 32, 128, 20, 0},
+        {"dense Q8 tight", QType::Q8_0, QType::Q8_0, 32768, 8, 32, 128, 6, 0},
+        {"Q6_K mode-2", QType::Q6_K, QType::Q6_K, 32768, 1, 36, 128, 16, 2},
+        {"Q4_K wide batch", QType::Q4_K, QType::Q4_K, 4096, 16, 40, 128, 12, 0},
+        {"cheap KV hybrid", QType::Q6_K, QType::Q6_K, 17408, 2, 10, 256, 8, 2},
+    };
+
+    int compared = 0;
+    for (const Case& c : cases) {
+        Model m;
+        fill_model(m, c.attn, c.ffn);
+
+        EngineConfig config;
+        config.max_seq_len = c.max_seq_len;
+        config.max_batch_size = c.max_batch;
+        config.use_nvfp4_decode = c.use_nvfp4_decode;
+        config.use_cuda_graphs = false;
+        config.kv_cache_dtype = QType::F16;
+
+        const size_t free_vram = c.free_vram_gib * 1024ull * 1024 * 1024;
+        VRAMBudget live = compute_vram_budget(m, config, c.n_kv_layers, c.head_dim, free_vram);
+
+        // The probe the engine builds at this exact point (engine_kv_cache_init).
+        ShadowPlanProbe probe;
+        probe.distributable_bytes = free_vram;
+        probe.weight_cache_demand = live.weight_cache_estimate_bytes;
+        probe.mandatory_cache_bytes = live.mandatory_sf_bytes + live.mandatory_moe_bytes;
+        probe.ssm_state_bytes = live.ssm_footprint_bytes;
+        probe.library_reserve_bytes = kMeasuredLibraryReserveBytes;
+        probe.n_kv_layers = c.n_kv_layers;
+        probe.max_batch_size = c.max_batch;
+        probe.max_seq_len = c.max_seq_len;
+        probe.kv_block_size = 16;
+        probe.min_kv_tokens = config.min_kv_tokens;
+        probe.kv_block_bytes_per_layer =
+            kv_block_bytes_per_layer(config.kv_cache_dtype, 16, m.config().n_kv_heads, c.head_dim);
+
+        const PlanResult plan = plan_memory(shadow_plan_input(probe));
+        if (!plan.ok)
+            continue;  // the plan refusing is a different contract (D8), not this one
+        ++compared;
+
+        EXPECT_LE(live.kv_max_blocks, plan.plan.kv.blocks)
+            << c.name << ": the live pass handed out " << live.kv_max_blocks
+            << " KV blocks where the plan affords " << plan.plan.kv.blocks
+            << " — the live read is spending bytes the plan committed elsewhere";
+    }
+
+    // Without this the test passes by comparing nothing: a plan that refuses
+    // every case would skip every assertion and still report green.
+    EXPECT_GE(compared, 3) << "only " << compared
+                           << " of 5 cases reached the comparison — the rest were refused by the "
+                              "plan, so this test is not measuring what it claims";
 }
 
 TEST(VramBudgetReserve, VramKnobsAreClamped) {
