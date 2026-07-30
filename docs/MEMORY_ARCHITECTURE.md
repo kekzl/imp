@@ -982,7 +982,7 @@ the KV cache, the forward pass and the weight caches respectively.
 record. "Measured" is where Phase B actually stands, and it is deliberately not
 rounded up — three of the seven are still open, and one has not moved at all.
 
-| | Invariant | Design-time | **Measured (2026-07-29)** | Target |
+| | Invariant | Design-time | **Measured (rows carry their own date; latest 2026-07-30)** | Target |
 |---|---|---|---|---|
 | I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 582 calls / 77 files (2026-07-30), of which 258 are acquisitions and 344 releases.** The **pinned-host class is CLOSED: 26 → 0** (B58/B60) — every one moved to T5b's `PinnedBuffer`/`HostRegistration`, which is why the total fell 638 → 582 (each migration took its releases with it). What remains is device memory only. Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52–B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ — `Backend`, allowlist empty, CI gate |
 | I2 | No allocation on the hot path | ✗ — measured +190 MiB/config of steady-state allocation | **✓ — `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`**, 15 requests, dense. Was 414 → 238 → 0 | ✓ — `ScratchStack`, phase guard, counter == 0 |
