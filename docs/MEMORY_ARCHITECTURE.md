@@ -271,7 +271,7 @@ impossible.**
 | **T3 Pooled fixed-block** | request-scoped, refcounted | free-list over one slab | external fragmentation (all blocks identical) | stable |
 | **T4 Forward-scratch** | one forward pass | LIFO stack | fragmentation (LIFO cannot fragment) + leak (stack unwinds) | stable per slot |
 | **T5a Transient host-staging** | load only | ordinary host alloc | surviving load (asserted at phase transition) | n/a |
-| **T5b Engine-persistent pinned host** | process | `PinnedBuffer` over `HostPinnedAllocator` | per-object leak (move-only owner, no free to forget) | n/a |
+| **T5b Engine-persistent pinned host** | process | `PinnedBuffer` over `HostPinnedAllocator`; `HostRegistration` for memory imp does not own | per-object leak (move-only owner, no free to forget); asymmetric unregister | n/a |
 
 Confirmed against A1.7. Three corrections the inventory forced:
 
@@ -984,7 +984,7 @@ rounded up — three of the seven are still open, and one has not moved at all.
 
 | | Invariant | Design-time | **Measured (2026-07-29)** | Target |
 |---|---|---|---|---|
-| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 638 calls / 77 files (2026-07-30), of which 284 are acquisitions and 374 releases.** The acquisitions are two different jobs, and the gate now says so: **258 device + 26 pinned-host in 11 files** (B58). Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52–B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ — `Backend`, allowlist empty, CI gate |
+| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 582 calls / 77 files (2026-07-30), of which 258 are acquisitions and 344 releases.** The **pinned-host class is CLOSED: 26 → 0** (B58/B60) — every one moved to T5b's `PinnedBuffer`/`HostRegistration`, which is why the total fell 638 → 582 (each migration took its releases with it). What remains is device memory only. Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52–B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ — `Backend`, allowlist empty, CI gate |
 | I2 | No allocation on the hot path | ✗ — measured +190 MiB/config of steady-state allocation | **✓ — `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`**, 15 requests, dense. Was 414 → 238 → 0 | ✓ — `ScratchStack`, phase guard, counter == 0 |
 | I3 | Stable addresses for graph memory | ~ — true in practice, enforced by comments + a `workspace_generation` hook | **~ — `StableSpan` exists and is passkey-enforced**, so only allocators that can promise stability can mint one; kernel signatures still take raw pointers | ✓ — `StableSpan` in kernel signatures; no conversion from `DeviceSpan` |
 | I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ — `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). The balloon and the live `cudaMemGetInfo` sizing are still there | ✓ — `plan_memory()` never queries the device; fails at load with a report |

@@ -66,17 +66,9 @@ Model::~Model() {
     if (had_gpu_weights)
         trim_device_mempool();
 
-    for (void* ptr : host_pinned_) {
-        if (ptr)
-            (void)cudaHostUnregister(ptr);
-    }
-    host_pinned_.clear();
+    host_pinned_.clear();  // HostRegistration un-registers each entry
 
-    for (void* ptr : host_pinned_allocs_) {
-        if (ptr)
-            (void)cudaFreeHost(ptr);
-    }
-    host_pinned_allocs_.clear();
+    host_pinned_allocs_.clear();  // PinnedBuffer owns each entry
 
     // Free heap-allocated permuted weight buffers (Qwen3.5/3.6 GDN reorder).
     for (void* ptr : host_owned_buffers_) {

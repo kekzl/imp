@@ -321,12 +321,13 @@ Tensor GraphExecutor::view_tokens(const Tensor& buf, int n_tokens) const {
 }
 
 void GraphExecutor::ensure_logits_pinned(int total_floats) {
-    if (h_logits_pinned_ && h_logits_pinned_size_ >= total_floats)
+    if (!h_logits_pinned_.empty() && h_logits_pinned_size_ >= total_floats)
         return;
-    if (h_logits_pinned_)
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_logits_pinned_));
-    IMP_CUDA_CHECK_LOG(cudaHostAlloc(&h_logits_pinned_, total_floats * sizeof(float), cudaHostAllocDefault));
-    h_logits_pinned_size_ = total_floats;
+    // Move-assignment releases the previous buffer, so the grow path has no
+    // free of its own to get wrong (T5b, memory/host_pinned.h).
+    h_logits_pinned_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                             static_cast<size_t>(total_floats) * sizeof(float));
+    h_logits_pinned_size_ = h_logits_pinned_.empty() ? 0 : total_floats;
 }
 
 }  // namespace imp

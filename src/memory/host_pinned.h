@@ -118,4 +118,79 @@ private:
     size_t bytes_ = 0;
 };
 
+// ─────────────────────────────────────────────────────────────────────
+// HostRegistration — pinning memory imp does NOT own.
+//
+// `cudaHostRegister` page-locks an existing mapping (imp's case: the mmap'd
+// GGUF, registered read-only so the H2D copies can DMA). It is not an
+// allocation: there is nothing to free, only something to un-register, which is
+// why PinnedBuffer is the wrong owner and this is a separate type rather than a
+// flag on it. Same discipline though — move-only, releases exactly once, and a
+// failed registration is an empty object rather than an exception.
+//
+// The leak this makes impossible is the asymmetric one: an early return between
+// register and unregister leaves a page-locked region behind that nothing owns,
+// and unlike a leaked allocation it does not show up as missing bytes.
+//
+// The registrar is an interface for the same reason `Backend` and
+// `HostPinnedAllocator` are, and it was not optional: without a device every
+// registration fails, so on the CPU-only CI lane every path through this class
+// collapses to "empty" and the ownership behaviour is unverifiable. Mutation
+// testing showed exactly that — a reset() that forgot to clear its pointer and a
+// dropped null guard both passed. With a substitutable registrar the CPU lane
+// pins the ownership, and the driver call itself is the only untested line.
+// ─────────────────────────────────────────────────────────────────────
+class HostRegistrar {
+public:
+    virtual ~HostRegistrar() = default;
+    [[nodiscard]] virtual bool register_read_only(void* ptr, size_t bytes) = 0;
+    virtual void unregister(void* ptr) = 0;
+};
+
+// cudaHostRegister(cudaHostRegisterReadOnly) + cudaHostUnregister.
+HostRegistrar& cuda_host_registrar();
+
+class HostRegistration {
+public:
+    HostRegistration() = default;
+    ~HostRegistration() { reset(); }
+
+    HostRegistration(HostRegistration&& o) noexcept : reg_(o.reg_), ptr_(o.ptr_), bytes_(o.bytes_) {
+        o.reg_ = nullptr;
+        o.ptr_ = nullptr;
+        o.bytes_ = 0;
+    }
+    HostRegistration& operator=(HostRegistration&& o) noexcept {
+        if (this != &o) {
+            reset();
+            reg_ = o.reg_;
+            ptr_ = o.ptr_;
+            bytes_ = o.bytes_;
+            o.reg_ = nullptr;
+            o.ptr_ = nullptr;
+            o.bytes_ = 0;
+        }
+        return *this;
+    }
+    HostRegistration(const HostRegistration&) = delete;
+    HostRegistration& operator=(const HostRegistration&) = delete;
+
+    // Empty on failure; the caller carries on with an unpinned mapping, which is
+    // what every current call site already does.
+    static HostRegistration acquire_read_only(void* ptr, size_t bytes,
+                                              HostRegistrar& reg = cuda_host_registrar());
+
+    void reset();
+
+    void* data() const { return ptr_; }
+    size_t bytes() const { return bytes_; }
+    bool empty() const { return ptr_ == nullptr; }
+    explicit operator bool() const { return ptr_ != nullptr; }
+
+private:
+    HostRegistrar* reg_ = nullptr;
+    void* ptr_ = nullptr;
+    size_t bytes_ = 0;
+};
+
 }  // namespace imp

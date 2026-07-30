@@ -192,10 +192,10 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         }
 
         if (state.temperature <= 0.0f || state.top_k == 1) {
-            if (d_sample_result_ && h_sample_pinned_) {
-                sample_greedy_device(last_logits, d_sample_result_, h_sample_pinned_, stream);
+            if (d_sample_result_ && h_sample_pinned_.as<int32_t>()) {
+                sample_greedy_device(last_logits, d_sample_result_, h_sample_pinned_.as<int32_t>(), stream);
                 cudaStreamSynchronize(stream);
-                token = *h_sample_pinned_;
+                token = *h_sample_pinned_.as<int32_t>();
             } else if (d_sample_result_) {
                 token = sample_greedy(last_logits, d_sample_result_, stream);
             } else {
@@ -205,11 +205,11 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
             int top_k = state.top_k > 0 ? state.top_k : 50;
             float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
             unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
-            if (d_sample_result_ && h_sample_pinned_) {
+            if (d_sample_result_ && h_sample_pinned_.as<int32_t>()) {
                 sample_topk_topp_device(last_logits, top_k, top_p, state.temperature, seed, d_sample_result_,
-                                        h_sample_pinned_, stream);
+                                        h_sample_pinned_.as<int32_t>(), stream);
                 cudaStreamSynchronize(stream);
-                token = *h_sample_pinned_;
+                token = *h_sample_pinned_.as<int32_t>();
             } else if (d_sample_result_) {
                 token = sample_topk_topp(last_logits, top_k, top_p, state.temperature, seed, d_sample_result_,
                                          stream);
@@ -340,7 +340,7 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
         // regime (> SAMPLE_MAX_TOP_K) that syncs internally.
         const int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
         const int eff_top_k = (top_k <= 0 || top_k > vocab) ? vocab : top_k;
-        const bool can_batch = d_sample_result_ && h_sample_pinned_ && n_seq <= sample_slots_ &&
+        const bool can_batch = d_sample_result_ && h_sample_pinned_.as<int32_t>() && n_seq <= sample_slots_ &&
                                (greedy || eff_top_k <= SAMPLE_MAX_TOP_K);
         if (can_batch) {
             for (int i = 0; i < n_seq; i++) {
@@ -360,12 +360,12 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
             }
             // Slots are SAMPLE_SCRATCH_BYTES apart; the token is the first
             // int32 of each slot — one strided D2H gathers the whole batch.
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_, sizeof(int32_t), d_sample_result_,
+            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_.as<int32_t>(), sizeof(int32_t), d_sample_result_,
                                                  SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_seq,
                                                  cudaMemcpyDeviceToHost, stream));
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
             for (int i = 0; i < n_seq; i++)
-                tokens[i] = h_sample_pinned_[i];
+                tokens[i] = h_sample_pinned_.as<int32_t>()[i];
         } else {
             // Fallback: per-sequence synchronous sampling (no slot buffers, or
             // top_k in the CUB regime).
@@ -517,7 +517,7 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     // D2H + one sync). The synchronous per-row readback cost ~850 us of
     // blocked host time per sequence per step at n=16 sustained serving
     // (pageable 4-byte D2H + stream sync each, nsys 2026-07-12).
-    if (!d_sample_result_ || !h_sample_pinned_ || slot_idx < 0 || slot_idx >= sample_slots_)
+    if (!d_sample_result_ || !h_sample_pinned_.as<int32_t>() || slot_idx < 0 || slot_idx >= sample_slots_)
         return false;
     // Parity offset: the pipelined decode enqueues into the half selected by
     // set_sample_parity while the other half's gather is still in flight.
@@ -552,11 +552,11 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     }
     unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
     float temperature = state.temperature <= 0.0f ? 1.0f : state.temperature;
-    if (h_row_args_ && d_row_args_) {
+    if (h_row_args_.as<TopkRowArgs>() && d_row_args_) {
         // STASH the row for the row-parallel batched launch in
         // collect_sampled_tokens — n serialized <<<64>>>+<<<1>>> launch pairs
         // become ONE partial + ONE finalize launch for the whole batch.
-        TopkRowArgs& a = h_row_args_[sample_parity_ * sample_slots_ + n_pending_topk_rows_++];
+        TopkRowArgs& a = h_row_args_.as<TopkRowArgs>()[sample_parity_ * sample_slots_ + n_pending_topk_rows_++];
         a.logits = lp;
         a.d_result = slot;
         a.inv_temperature = 1.0f / temperature;
@@ -578,7 +578,7 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
 void GraphExecutor::flush_pending_topk_rows_(cudaStream_t stream) {
     if (n_pending_topk_rows_ <= 0)
         return;
-    TopkRowArgs* h_base = h_row_args_ + sample_parity_ * sample_slots_;
+    TopkRowArgs* h_base = h_row_args_.as<TopkRowArgs>() + sample_parity_ * sample_slots_;
     TopkRowArgs* d_base = d_row_args_ + sample_parity_ * sample_slots_;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(TopkRowArgs) * n_pending_topk_rows_,
                                        cudaMemcpyHostToDevice, stream));
@@ -589,7 +589,7 @@ void GraphExecutor::flush_pending_topk_rows_(cudaStream_t stream) {
 }
 
 const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t stream) {
-    if (!d_sample_result_ || !h_sample_pinned_ || n_slots <= 0 || n_slots > sample_slots_) {
+    if (!d_sample_result_ || !h_sample_pinned_.as<int32_t>() || n_slots <= 0 || n_slots > sample_slots_) {
         n_pending_topk_rows_ = 0;
         pending_topk_max_k_ = 0;
         return nullptr;
@@ -598,13 +598,13 @@ const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t s
     // Slots are SAMPLE_SCRATCH_BYTES apart; the token is the first int32 of
     // each slot — one strided D2H gathers the whole batch.
     const size_t base = static_cast<size_t>(sample_parity_) * sample_slots_;
-    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_ + base, sizeof(int32_t),
+    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_.as<int32_t>() + base, sizeof(int32_t),
                                          reinterpret_cast<char*>(d_sample_result_) +
                                              base * SAMPLE_SCRATCH_BYTES,
                                          SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_slots,
                                          cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    return h_sample_pinned_ + base;
+    return h_sample_pinned_.as<int32_t>() + base;
 }
 
 // Event-based split of collect_sampled_tokens for the pipelined decode:
@@ -619,7 +619,7 @@ bool GraphExecutor::gather_sampled_tokens_async(int n_slots, cudaStream_t stream
     }
     flush_pending_topk_rows_(stream);
     const size_t base = static_cast<size_t>(sample_parity_) * sample_slots_;
-    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_ + base, sizeof(int32_t),
+    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_.as<int32_t>() + base, sizeof(int32_t),
                                          reinterpret_cast<char*>(d_sample_result_) +
                                              base * SAMPLE_SCRATCH_BYTES,
                                          SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_slots,
@@ -630,10 +630,10 @@ bool GraphExecutor::gather_sampled_tokens_async(int n_slots, cudaStream_t stream
 
 const int32_t* GraphExecutor::wait_gathered_tokens(int parity) {
     parity &= 1;
-    if (!h_sample_pinned_ || !sample_gather_evt_[parity])
+    if (!h_sample_pinned_.as<int32_t>() || !sample_gather_evt_[parity])
         return nullptr;
     IMP_CUDA_CHECK_LOG(cudaEventSynchronize(sample_gather_evt_[parity]));
-    return h_sample_pinned_ + static_cast<size_t>(parity) * sample_slots_;
+    return h_sample_pinned_.as<int32_t>() + static_cast<size_t>(parity) * sample_slots_;
 }
 
 const int32_t* GraphExecutor::sample_slot_base(int parity) const {

@@ -205,18 +205,18 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // Pinned host buffer for async sampling D2H copy (avoids stack-variable
     // sync) — one int32 per batched slot.
-    if (!h_sample_pinned_ && d_sample_result_) {
-        cudaError_t err = cudaHostAlloc(&h_sample_pinned_, 2 * sizeof(int32_t) * sample_slots_,
-                                        cudaHostAllocDefault);
-        if (err != cudaSuccess) {
-            IMP_LOG_WARN("cudaHostAlloc for sample pinned buffer failed: %s", cudaGetErrorString(err));
-            h_sample_pinned_ = nullptr;
-        }
+    if (h_sample_pinned_.empty() && d_sample_result_) {
+        // T5b (memory/host_pinned.h). Same failure contract as before: an empty
+        // buffer disables the async D2H path, which every consumer tests for.
+        h_sample_pinned_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                                 2 * sizeof(int32_t) * sample_slots_);
+        if (h_sample_pinned_.empty())
+            IMP_LOG_WARN("pinned sample buffer unavailable — async sample D2H disabled");
     }
 
     // Row-batched sampler args: pinned staging + device mirror (one H2D per
     // decode step for the whole batch).
-    if (!h_row_args_ && d_sample_result_ && sample_slots_ > 0) {
+    if (h_row_args_.empty() && d_sample_result_ && sample_slots_ > 0) {
         // The device mirror is engine-persistent (T2): sized once from
         // max_logit_tokens_ and reused every decode step, ~115 KiB. Taken from
         // the arena with NO direct-allocation fallback, because the caller
@@ -230,11 +230,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // one-time per reconfigure, which is the same trade the MMVQ tenant
         // makes — and 115 KiB against 120 MiB of arena slack.
         auto slab = engine_arena().take_bytes(2 * sizeof(TopkRowArgs) * sample_slots_);
-        if (cudaHostAlloc(&h_row_args_, 2 * sizeof(TopkRowArgs) * sample_slots_,
-                          cudaHostAllocDefault) != cudaSuccess ||
-            slab.empty()) {
+        h_row_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                            2 * sizeof(TopkRowArgs) * sample_slots_);
+        if (h_row_args_.empty() || slab.empty()) {
             IMP_LOG_WARN("row-batched sampler args alloc failed — falling back to per-row sampling");
-            if (h_row_args_) { cudaFreeHost(h_row_args_); h_row_args_ = nullptr; }
+            h_row_args_.reset();
             d_row_args_ = nullptr;
         } else {
             d_row_args_ = reinterpret_cast<TopkRowArgs*>(slab.data());
@@ -1404,14 +1404,10 @@ void GraphExecutor::free_buffers() {
         // after every executor teardown.
         d_sample_result_ = nullptr;
     }
-    if (h_sample_pinned_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_sample_pinned_));
-        h_sample_pinned_ = nullptr;
-    }
-    if (h_row_args_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_row_args_));
-        h_row_args_ = nullptr;
-    }
+    // T5b owners: reset() releases, and doing it twice is a no-op — the
+    // hand-written cudaFreeHost pairs are gone (memory/host_pinned.h).
+    h_sample_pinned_.reset();
+    h_row_args_.reset();
     if (d_banned_cache_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_banned_cache_));
         d_banned_cache_ = nullptr;
@@ -1431,11 +1427,8 @@ void GraphExecutor::free_buffers() {
         }
     }
     sample_parity_ = 0;
-    if (h_logits_pinned_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_logits_pinned_));
-        h_logits_pinned_ = nullptr;
-        h_logits_pinned_size_ = 0;
-    }
+    h_logits_pinned_.reset();
+    h_logits_pinned_size_ = 0;
     vfree(attn_scores_buf_);
     attn_scores_buf_size_ = 0;
     if (chunk_capture_k_) {

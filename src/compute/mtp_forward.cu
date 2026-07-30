@@ -483,10 +483,11 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
 
         // Pinned host buffers for D2H of routing decision.
         if (ok) {
-            ok &= (cudaHostAlloc(reinterpret_cast<void**>(&ws.h_expert_indices),
-                                  top_k * sizeof(int), cudaHostAllocDefault) == cudaSuccess);
-            ok &= (cudaHostAlloc(reinterpret_cast<void**>(&ws.h_expert_weights),
-                                  top_k * sizeof(float), cudaHostAllocDefault) == cudaSuccess);
+            ws.h_expert_indices = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                                       top_k * sizeof(int));
+            ws.h_expert_weights = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                                       top_k * sizeof(float));
+            ok &= !ws.h_expert_indices.empty() && !ws.h_expert_weights.empty();
         }
     }
     // MLP scratch shared by both variants: the MoE shared expert AND the
@@ -531,8 +532,8 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_shared_act);
     frfn(ws.d_shared_out);
     ws.routing_buf.free();
-    if (ws.h_expert_indices) { cudaFreeHost(ws.h_expert_indices); ws.h_expert_indices = nullptr; }
-    if (ws.h_expert_weights) { cudaFreeHost(ws.h_expert_weights); ws.h_expert_weights = nullptr; }
+    ws.h_expert_indices.reset();
+    ws.h_expert_weights.reset();
     frfn(ws.d_input_norm);
     frfn(ws.d_q_full);
     frfn(ws.d_q_attn);
@@ -870,9 +871,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         // 5.B.3 — D2H copy of expert indices + weights so the host loop can
         //         dispatch per-expert GEMVs. This is non-graph-safe but
         //         drafts run outside graph capture for now.
-        cudaMemcpyAsync(ws.h_expert_indices, ws.routing_buf.expert_indices,
+        cudaMemcpyAsync(ws.h_expert_indices.as<int>(), ws.routing_buf.expert_indices,
                         top_k * sizeof(int), cudaMemcpyDeviceToHost, stream);
-        cudaMemcpyAsync(ws.h_expert_weights, ws.routing_buf.expert_weights,
+        cudaMemcpyAsync(ws.h_expert_weights.as<float>(), ws.routing_buf.expert_weights,
                         top_k * sizeof(float), cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
 
@@ -889,7 +890,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         int64_t dn_shape[2] = {hd, d_ff_e};
 
         for (int k = 0; k < top_k; ++k) {
-            int   e_idx = ws.h_expert_indices[k];
+            int   e_idx = ws.h_expert_indices.as<int>()[k];
             if (e_idx < 0 || e_idx >= ne) {
                 IMP_LOG_WARN("mtp MoE: invalid expert index %d (top_k=%d)", e_idx, k);
                 continue;

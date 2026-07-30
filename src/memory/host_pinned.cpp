@@ -75,6 +75,52 @@ void PinnedBuffer::reset() {
     bytes_ = 0;
 }
 
+namespace {
+
+class CudaHostRegistrar final : public HostRegistrar {
+public:
+    bool register_read_only(void* ptr, size_t bytes) override {
+        const cudaError_t err = cudaHostRegister(ptr, bytes, cudaHostRegisterReadOnly);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("cudaHostRegister failed (%.2f MiB): %s — H2D will be slower",
+                         bytes / (1024.0 * 1024.0), cudaGetErrorString(err));
+            return false;
+        }
+        return true;
+    }
+    void unregister(void* ptr) override {
+        if (ptr)
+            (void)cudaHostUnregister(ptr);
+    }
+};
+
+}  // namespace
+
+HostRegistrar& cuda_host_registrar() {
+    static CudaHostRegistrar r;
+    return r;
+}
+
+HostRegistration HostRegistration::acquire_read_only(void* ptr, size_t bytes, HostRegistrar& reg) {
+    HostRegistration out;
+    if (!ptr || bytes == 0)
+        return out;
+    if (!reg.register_read_only(ptr, bytes))
+        return out;
+    out.reg_ = &reg;
+    out.ptr_ = ptr;
+    out.bytes_ = bytes;
+    return out;
+}
+
+void HostRegistration::reset() {
+    if (reg_ && ptr_)
+        reg_->unregister(ptr_);
+    reg_ = nullptr;
+    ptr_ = nullptr;
+    bytes_ = 0;
+}
+
 void PinnedBuffer::steal_(PinnedBuffer&& o) noexcept {
     owner_ = o.owner_;
     host_ = o.host_;

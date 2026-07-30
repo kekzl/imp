@@ -201,6 +201,144 @@ TEST(PinnedBuffer, DefaultKindIsPlain) {
     EXPECT_EQ(a.last_kind(), HostPinnedKind::Plain);
 }
 
+// ── HostRegistration ─────────────────────────────────────────────────
+// Pinning memory imp does not own. The registrar is substitutable for a reason
+// found by mutation testing: with the real one, a device-less machine fails every
+// registration, so every path collapses to "empty" and a reset() that forgot to
+// clear its pointer passed. Against the fake below the ownership is actually
+// pinned. The leak this type prevents is the asymmetric one — a page-locked
+// region left behind by an early return does not show up as missing bytes.
+
+// Host-heap stand-in for cudaHostRegister: it never touches the driver, so the
+// ownership paths below are reachable on a machine with no GPU. Without this the
+// CPU lane proves nothing here — mutation testing confirmed a reset() that
+// forgot to clear its pointer and a dropped null guard both survived.
+class FakeRegistrar final : public HostRegistrar {
+public:
+    bool register_read_only(void* ptr, size_t bytes) override {
+        if (fail_next_) {
+            fail_next_ = false;
+            return false;
+        }
+        ++registers_;
+        last_ptr_ = ptr;
+        last_bytes_ = bytes;
+        return true;
+    }
+    void unregister(void* ptr) override {
+        ++unregisters_;
+        unregistered_.push_back(ptr);
+    }
+    void fail_next() { fail_next_ = true; }
+    int registers() const { return registers_; }
+    int unregisters() const { return unregisters_; }
+    void* last_ptr() const { return last_ptr_; }
+    size_t last_bytes() const { return last_bytes_; }
+    const std::vector<void*>& unregistered() const { return unregistered_; }
+
+private:
+    bool fail_next_ = false;
+    int registers_ = 0;
+    int unregisters_ = 0;
+    void* last_ptr_ = nullptr;
+    size_t last_bytes_ = 0;
+    std::vector<void*> unregistered_;
+};
+
+TEST(HostRegistration, RegistersOnceAndUnregistersExactlyOnce) {
+    FakeRegistrar r;
+    std::vector<char> mem(4096);
+    {
+        HostRegistration h = HostRegistration::acquire_read_only(mem.data(), mem.size(), r);
+        ASSERT_FALSE(h.empty());
+        EXPECT_EQ(r.registers(), 1);
+        EXPECT_EQ(r.unregisters(), 0);
+        EXPECT_EQ(h.data(), mem.data());
+        EXPECT_EQ(h.bytes(), mem.size());
+        EXPECT_EQ(r.last_bytes(), mem.size());
+    }
+    EXPECT_EQ(r.unregisters(), 1);
+    ASSERT_EQ(r.unregistered().size(), 1u);
+    EXPECT_EQ(r.unregistered()[0], mem.data());
+}
+
+TEST(HostRegistration, ResetIsIdempotentAndDoesNotUnregisterTwice) {
+    FakeRegistrar r;
+    std::vector<char> mem(1024);
+    HostRegistration h = HostRegistration::acquire_read_only(mem.data(), mem.size(), r);
+    h.reset();
+    h.reset();
+    h.reset();
+    EXPECT_EQ(r.unregisters(), 1) << "unregistering twice is an error, not a no-op";
+    EXPECT_TRUE(h.empty());
+}
+
+TEST(HostRegistration, FailedRegistrationOwnsNothing) {
+    FakeRegistrar r;
+    std::vector<char> mem(1024);
+    r.fail_next();
+    HostRegistration h = HostRegistration::acquire_read_only(mem.data(), mem.size(), r);
+    EXPECT_TRUE(h.empty());
+    h.reset();
+    EXPECT_EQ(r.unregisters(), 0);
+}
+
+TEST(HostRegistration, MovedFromRegistrationDoesNotUnregister) {
+    FakeRegistrar r;
+    std::vector<char> mem(1024);
+    {
+        HostRegistration src = HostRegistration::acquire_read_only(mem.data(), mem.size(), r);
+        HostRegistration dst = std::move(src);
+        EXPECT_TRUE(src.empty());
+        EXPECT_FALSE(dst.empty());
+        EXPECT_EQ(r.unregisters(), 0);
+    }
+    EXPECT_EQ(r.unregisters(), 1) << "one registration, one unregister, after a move";
+}
+
+TEST(HostRegistration, MoveAssignmentReleasesTheTargetFirst) {
+    FakeRegistrar r;
+    std::vector<char> a(64), b(64);
+    HostRegistration first = HostRegistration::acquire_read_only(a.data(), a.size(), r);
+    HostRegistration second = HostRegistration::acquire_read_only(b.data(), b.size(), r);
+    first = std::move(second);
+    EXPECT_EQ(r.unregisters(), 1);
+    ASSERT_EQ(r.unregistered().size(), 1u);
+    EXPECT_EQ(r.unregistered()[0], a.data()) << "the overwritten registration must be released";
+    EXPECT_EQ(first.data(), b.data());
+}
+
+TEST(HostRegistration, NullOrZeroIsRefusedWithoutTouchingTheRegistrar) {
+    FakeRegistrar r;
+    std::vector<char> mem(4096);
+    EXPECT_TRUE(HostRegistration::acquire_read_only(nullptr, 4096, r).empty());
+    EXPECT_TRUE(HostRegistration::acquire_read_only(mem.data(), 0, r).empty());
+    EXPECT_EQ(r.registers(), 0);
+}
+
+TEST(HostRegistration, DefaultConstructedIsEmpty) {
+    HostRegistration r;
+    EXPECT_TRUE(r.empty());
+    EXPECT_FALSE(static_cast<bool>(r));
+    EXPECT_EQ(r.data(), nullptr);
+    EXPECT_EQ(r.bytes(), 0u);
+}
+
+TEST(HostRegistration, EitherRegistersOrStaysEmptyAndSurvivesRelease) {
+    std::vector<char> mem(64 * 1024);
+    HostRegistration r = HostRegistration::acquire_read_only(mem.data(), mem.size());
+    if (r.empty()) {
+        // CPU-only lane: no device, so registration fails and nothing blew up.
+        EXPECT_EQ(r.bytes(), 0u);
+    } else {
+        EXPECT_EQ(r.data(), mem.data());
+        EXPECT_EQ(r.bytes(), mem.size());
+    }
+    r.reset();
+    r.reset();  // idempotent — a second unregister would be an error
+    EXPECT_TRUE(r.empty());
+}
+
 // The tests above substitute the allocator, so none of them exercises the real
 // one at all. This one does, and what it can prove is bounded — stated here
 // rather than left to be assumed:

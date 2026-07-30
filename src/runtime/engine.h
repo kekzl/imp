@@ -13,6 +13,7 @@
 #include "runtime/suffix_draft.h"
 #include "runtime/token_recycle_draft.h"
 #include "runtime/vram_budget.h"
+#include "memory/host_pinned.h"
 #include "memory/kv_cache.h"
 #include "memory/library_reserve_cache.h"
 #include "memory/kv_cache_manager.h"
@@ -403,8 +404,8 @@ private:
     // Mapped-pinned block-table patch staging for the chain-advance kernel
     // (parity-alternated so a set is never rewritten while a kernel may
     // still read it). Allocated lazily on first pipeline entry.
-    int* h_bt_patch_off_[2] = {nullptr, nullptr};
-    int* h_bt_patch_val_[2] = {nullptr, nullptr};
+    PinnedBuffer h_bt_patch_off_[2];  // mapped (T5b); d_* below is .device()
+    PinnedBuffer h_bt_patch_val_[2];
     int* d_bt_patch_off_[2] = {nullptr, nullptr};
     int* d_bt_patch_val_[2] = {nullptr, nullptr};
     int bt_patch_cap_ = 0;
@@ -415,7 +416,7 @@ private:
     // per-row append positions, parity-alternated like the patches.
     int32_t* d_pipe_hist_ = nullptr;
     int pipe_hist_stride_ = 0;
-    int* h_hist_pos_[2] = {nullptr, nullptr};
+    PinnedBuffer h_hist_pos_[2];  // mapped (T5b)
     int* d_hist_pos_[2] = {nullptr, nullptr};
 
     // Prefill graph runner — captures forward_logits for non-last chunks of
@@ -425,7 +426,9 @@ private:
     CudaGraphRunner prefill_graph_runner_;
     int last_prefill_chunk_len_ = -1;
     int last_prefill_block_count_ = -1;
-    int32_t* h_sample_pinned_ = nullptr;
+    // T5b (memory/host_pinned.h): pinned staging for the graph-captured
+    // greedy sample. NOT the executor's same-named member — see AUDIT B59.
+    PinnedBuffer h_sample_pinned_;
     // Async conditional graph loop
     CudaGraphConditionalRunner async_graph_runner_;
     std::shared_ptr<Request> async_graph_req_;
@@ -460,7 +463,7 @@ private:
         int* d_bt = nullptr;         // uploaded block table
         int* d_bt_swa = nullptr;     // SWA-group mirror (kv_cache.swa_sizing)
         int32_t* d_banned = nullptr; // banned token ids (device)
-        int32_t* h_token = nullptr;  // pinned landing for the sampled token
+        PinnedBuffer h_token;  // pinned landing for the sampled token (T5b)
         cudaEvent_t ev = nullptr;    // sampled-token-ready event
         int budget = 0;              // tokens coverable by pre-allocated KV
         int produced = 0;            // tokens harvested by this pipeline
@@ -603,8 +606,8 @@ private:
     int* d_pf_block_tables_ = nullptr;
     int* d_pf_block_tables_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
     int* d_pf_context_lens_ = nullptr;
-    int* h_pf_positions_ = nullptr;      // pinned host staging
-    int32_t* h_pf_token_ids_ = nullptr;  // pinned host staging
+    PinnedBuffer h_pf_positions_;  // pinned host staging (T5b)
+    PinnedBuffer h_pf_token_ids_;  // pinned host staging (T5b)
     // Guards reuse of the pinned staging above: records after the H2D copies
     // are enqueued; the next chunk host-waits on it before REWRITING the
     // pinned source. Without this the host runs many fully-async chunks
@@ -828,14 +831,14 @@ private:
     // step; the named pointers below are stable sub-pointers into it.
     // Same layout trick for [argmax | topm] — one D2H per step.
     int32_t* d_spec_stage_ = nullptr;
-    int32_t* h_spec_stage_ = nullptr;  // pinned twin of d_spec_stage_
+    PinnedBuffer h_spec_stage_;  // pinned twin of d_spec_stage_ (T5b)
     int32_t* d_spec_tokens_ = nullptr;
     int* d_spec_positions_ = nullptr;
     int* d_spec_block_table_ = nullptr;
     int* d_spec_block_table_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
     int* d_spec_context_len_ = nullptr;
     int32_t* d_spec_argmax_ = nullptr;  // head of the [argmax | topm] block
-    int32_t* h_spec_argmax_ = nullptr;  // pinned, [argmax | topm] twin
+    PinnedBuffer h_spec_argmax_;  // pinned, [argmax | topm] twin (T5b)
     // Token-Recycling top-M harvest (speculative.token_recycling): per-row
     // top-M logit ids from the verify chunk, chunk_cap * kRowwiseTopMMax.
     int32_t* d_spec_topm_ = nullptr;  // = d_spec_argmax_ + chunk_cap
@@ -846,7 +849,7 @@ private:
     // becomes a same-KV "sequence" with ctx p0+1+i (causality via lengths).
     int* d_spec_row_ctx_lens_ = nullptr;  // sub-pointer into d_spec_stage_
     int* d_spec_row_block_tables_ = nullptr;
-    int32_t* h_spec_row_tables_pinned_ = nullptr;  // pinned staging, chunk_cap * table_cap
+    PinnedBuffer h_spec_row_tables_pinned_;  // pinned staging, chunk_cap * table_cap (T5b)
     int spec_chunk_cap_ = 0;
     int spec_block_table_cap_ = 0;
     // Hybrid (SSM/GDN) verify: device scratch holding the committed

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "memory/host_pinned.h"
 #include "model/hf_config_loader.h"
 #include "model/model_config.h"
 #include "model/model_profile.h"
@@ -160,8 +161,13 @@ public:
     // (memory/weight_cache_file.h). Empty for synthetically-built models.
     std::string source_path_;
     std::vector<void*> gpu_allocations_;
-    std::vector<void*> host_pinned_;         // mmap regions pinned via cudaHostRegister
-    std::vector<void*> host_pinned_allocs_;  // cudaHostAlloc'd expert buffers (WSL2 DMA path)
+    // mmap regions page-locked via cudaHostRegister. Owners (T5b): the
+    // unregister loop that used to live in ~Model is gone.
+    std::vector<HostRegistration> host_pinned_;
+    // Pinned expert buffers for the WSL2 DMA path. Owners since T5b, so the
+    // teardown loop that used to cudaFreeHost each entry is gone
+    // (memory/host_pinned.h).
+    std::vector<PinnedBuffer> host_pinned_allocs_;
     // Heap-allocated buffers used to hold permuted weight copies (e.g. Qwen3.5/3.6
     // GDN head reordering grouped→tiled). Freed with std::free() in destructor.
     std::vector<void*> host_owned_buffers_;

@@ -20,13 +20,17 @@ public:
     // Factory methods
     static Buffer device(size_t nbytes);
     static Buffer host(size_t nbytes);
-    static Buffer pinned(size_t nbytes);
+    // There was a pinned() factory here with zero callers, and with it a
+    // `pinned_` flag that reset() branched on. Pinned host memory has an owner
+    // of its own now (memory/host_pinned.h, T5b); this class is the
+    // device-or-pageable one. Removed rather than migrated — a second owner
+    // wrapped around the first would have removed no free.
+
 
     // Accessors
     void* ptr() const { return data_; }
     size_t size() const { return size_; }
     bool is_device() const { return on_device_; }
-    bool is_pinned() const { return pinned_; }
     explicit operator bool() const { return data_ != nullptr; }
 
     template <typename T>
@@ -54,7 +58,6 @@ private:
     void* data_ = nullptr;
     size_t size_ = 0;
     bool on_device_ = false;
-    bool pinned_ = false;
 };
 
 }  // namespace imp
