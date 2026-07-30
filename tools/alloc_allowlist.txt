@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 77 files, 693 sites
+# remaining: 77 files, 691 sites
 
 src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_mxfp4_sm120.cu  # 12
@@ -49,7 +49,7 @@ src/exec/executor_lora.cu  # 2
 src/exec/executor_perplexity.cu  # 8
 src/exec/executor_ssm_gdn.cu  # 2
 src/exec/executor_workspace.cu  # 7
-src/exec/executor_workspace_buffers.cu  # 63
+src/exec/executor_workspace_buffers.cu  # 61
 src/exec/executor_workspace_config.cu  # 4
 src/exec/expert_cache.cu  # 4
 src/exec/gemm_scratch.cu  # 1
