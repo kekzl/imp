@@ -19,6 +19,7 @@
 #include "memory/kv_cache.h"
 #include "memory/vram_allocator.h"
 #include "memory/engine_arena.h"
+#include "exec/workspace_sizes.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -27,6 +28,15 @@
 #include <algorithm>
 
 namespace imp {
+
+// workspace_sizes.h stays CUDA-free, so it replicates these two numbers rather
+// than including their definitions. Tie the copies to the originals HERE, where
+// both are visible: a layout change on either side becomes a compile error
+// instead of a silently under-sized arena.
+static_assert(kExecBlockQ81Bytes == sizeof(block_q8_1),
+              "exec_t2_demand's block_q8_1 stride drifted from compute/gemm.h");
+static_assert(kExecKVBlockSize == kKVBlockSize,
+              "exec_t2_demand's KV block size drifted from memory/kv_cache.h");
 
 void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     const auto& cfg = model_->config();
@@ -249,20 +259,23 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              sizeof(block_q8_1);
             size_t d8_sz = static_cast<size_t>(qscratch_.q8_1_max_blocks) * qscratch_.q8_1_rows *
                            sizeof(float);
-            cudaError_t err1 = cudaMalloc(&qscratch_.q8_1_buf, q8_1_sz);
-            cudaError_t err2 = cudaMalloc(reinterpret_cast<void**>(&qscratch_.d8_buf), d8_sz);
-            if (err1 != cudaSuccess || err2 != cudaSuccess) {
-                IMP_LOG_WARN("Failed to allocate MMVQ scratch buffers, dp4a path disabled");
-                if (qscratch_.q8_1_buf) {
-                    cudaFree(qscratch_.q8_1_buf);
-                    qscratch_.q8_1_buf = nullptr;
-                }
-                if (qscratch_.d8_buf) {
-                    cudaFree(qscratch_.d8_buf);
-                    qscratch_.d8_buf = nullptr;
-                }
+            // T2 (A7 step 4b.2). Engine-persistent: sized once from the model's
+            // max K and the batch, reused every decode step, never freed per
+            // request. exec_t2_demand charges the whole dp4a-staging family as
+            // `quant_scratch`, so the arena is SIZED for it instead of fitting it
+            // against slack. No direct-allocation fallback — every consumer
+            // already guards on null and takes the FP16 GEMV path, which is what
+            // "the arena is closed" has to mean here (AUDIT B47).
+            auto q8_slab = engine_arena().take_bytes(q8_1_sz);
+            auto d8_slab = engine_arena().take_bytes(d8_sz);
+            if (q8_slab.empty() || d8_slab.empty()) {
+                IMP_LOG_WARN("MMVQ scratch unavailable from the T2 arena, dp4a path disabled");
+                qscratch_.q8_1_buf = nullptr;
+                qscratch_.d8_buf = nullptr;
                 qscratch_.q8_1_max_blocks = 0;
             } else {
+                qscratch_.q8_1_buf = q8_slab.data();
+                qscratch_.d8_buf = reinterpret_cast<float*>(d8_slab.data());
                 IMP_LOG_INFO(
                     "MMVQ scratch buffers: %.2f KiB (q8_1) + %.2f KiB (d8), max_blocks=%d (max_k=%d, "
                     "moe_down=%d)",
@@ -274,13 +287,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         if (qscratch_.q8_1_max_blocks > 0) {
             int mask_words = (qscratch_.q8_1_max_blocks + 31) / 32;
             size_t mask_sz = static_cast<size_t>(mask_words) * sizeof(uint32_t);
-            cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&qscratch_.ffn_block_mask), mask_sz);
-            if (err != cudaSuccess) {
-                IMP_LOG_WARN("Failed to allocate FFN sparsity mask buffer (%zu bytes): %s",
-                             mask_sz, cudaGetErrorString(err));
+            // Same family, same tier: tens of bytes, engine-lifetime, and the
+            // sparsity path in executor_ffn.cu already tests the pointer.
+            auto slab = engine_arena().take_bytes(mask_sz);
+            if (slab.empty()) {
+                IMP_LOG_WARN("FFN sparsity mask unavailable from the T2 arena (%zu bytes)", mask_sz);
                 qscratch_.ffn_block_mask = nullptr;
                 qscratch_.ffn_block_mask_words = 0;
             } else {
+                qscratch_.ffn_block_mask = reinterpret_cast<uint32_t*>(slab.data());
                 qscratch_.ffn_block_mask_words = mask_words;
             }
         }
@@ -317,14 +332,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 int prefill_max_blocks = dp4a_m * (max_k / 32);
                 size_t q8_sz = static_cast<size_t>(prefill_max_blocks) * sizeof(block_q8_1);
                 size_t d8_sz = static_cast<size_t>(prefill_max_blocks) * sizeof(float);
-                cudaError_t e1 = cudaMalloc(&qscratch_.q8_1_prefill_buf, q8_sz);
-                cudaError_t e2 = cudaMalloc(reinterpret_cast<void**>(&qscratch_.d8_prefill_buf), d8_sz);
-                if (e1 != cudaSuccess || e2 != cudaSuccess) {
-                    IMP_LOG_WARN("dp4a prefill scratch alloc failed (%.1f MiB), FP16 cache fallback",
+                // Third member of the same family. executor_gemm_dispatch.cu
+                // checks both pointers AND both sizes before routing, so a
+                // closed arena degrades to the FP16 weight cache.
+                auto q8_slab = engine_arena().take_bytes(q8_sz);
+                auto d8_slab = engine_arena().take_bytes(d8_sz);
+                if (q8_slab.empty() || d8_slab.empty()) {
+                    IMP_LOG_WARN("dp4a prefill scratch unavailable from the T2 arena (%.1f MiB), "
+                                 "FP16 cache fallback",
                                  (q8_sz + d8_sz) / (1024.0 * 1024.0));
-                    if (qscratch_.q8_1_prefill_buf) { cudaFree(qscratch_.q8_1_prefill_buf); qscratch_.q8_1_prefill_buf = nullptr; }
-                    if (qscratch_.d8_prefill_buf) { cudaFree(qscratch_.d8_prefill_buf); qscratch_.d8_prefill_buf = nullptr; }
+                    qscratch_.q8_1_prefill_buf = nullptr;
+                    qscratch_.d8_prefill_buf = nullptr;
                 } else {
+                    qscratch_.q8_1_prefill_buf = q8_slab.data();
+                    qscratch_.d8_prefill_buf = reinterpret_cast<float*>(d8_slab.data());
                     qscratch_.q8_1_prefill_bytes = q8_sz;
                     qscratch_.d8_prefill_bytes = d8_sz;
                     IMP_LOG_INFO("dp4a prefill scratch: %.1f KiB (max_m=%d, max_k=%d)",
@@ -348,12 +369,19 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         int partial_stride = 2 + hd;
         int max_batch = max_logit_tokens_;  // = max_batch_size
         size_t sz = static_cast<size_t>(max_batch) * nh * max_splits * partial_stride * sizeof(float);
-        cudaError_t err = cudaMalloc(&qscratch_.splitk, sz);
-        if (err != cudaSuccess) {
-            IMP_LOG_WARN("Failed to allocate split-K scratch (%zu bytes), split-K disabled", sz);
+        // T2 (A7 step 4b.2), charged as `splitk_scratch`. Engine-persistent and
+        // sized from shape + batch + context; paged_attention_set_splitk_scratch
+        // takes a null as "no split-K", and the kernel re-checks the size before
+        // it uses the buffer, so the arena being closed costs the split path and
+        // nothing else.
+        auto slab = engine_arena().take_bytes(sz);
+        if (slab.empty()) {
+            IMP_LOG_WARN("Split-K scratch unavailable from the T2 arena (%zu bytes), split-K "
+                         "disabled", sz);
             qscratch_.splitk = nullptr;
             qscratch_.splitk_size = 0;
         } else {
+            qscratch_.splitk = slab.data();
             qscratch_.splitk_size = sz;
             IMP_LOG_INFO("Split-K paged attention scratch: %.2f KiB", sz / 1024.0);
         }
@@ -648,12 +676,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.cutlass3x_packed_size = packed_sz;
                 moe_.cutlass3x_sf_size = sf_sz;
                 // Device array of per-expert SFA base pointers for the fused quantize kernel.
+                // The last of the n_experts-sized MoE pointer arrays to move: same
+                // tier, same `moe_arrays` charge, and the fused quantize kernel
+                // already treats a null as "per-expert SFA bases unavailable".
                 size_t sfa_ptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(uint8_t*);
-                cudaError_t err = cudaMalloc(&moe_.cutlass3x_sfa_ptrs, sfa_ptr_bytes);
-                if (err == cudaSuccess) {
+                if (auto sl = engine_arena().take_bytes(sfa_ptr_bytes); !sl.empty()) {
+                    moe_.cutlass3x_sfa_ptrs = reinterpret_cast<uint8_t**>(sl.data());
                     moe_.cutlass3x_sfa_ptrs_count = cfg.n_experts;
                 } else {
-                    IMP_LOG_WARN("CUTLASS 3.x SFA pointer array alloc failed: %s", cudaGetErrorString(err));
+                    IMP_LOG_WARN("CUTLASS 3.x SFA pointer array unavailable from the T2 arena");
                     moe_.cutlass3x_sfa_ptrs = nullptr;
                 }
                 IMP_LOG_INFO("CUTLASS 3.x MoE staging: %.2f MiB (packed=%.2f, sf=%.2f) max_expanded=%d",

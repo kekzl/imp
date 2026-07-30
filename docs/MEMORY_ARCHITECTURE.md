@@ -1022,7 +1022,7 @@ design above, so the argument that produced the original shape stays readable.
 | **A7 step 3 complete** | | |
 | 4a — engine-persistent (T2) arena in production, first tenant | **done** | `feat(memory): engine-persistent arena, with the MMVQ scratch as its first tenant` |
 | 4b.1 — T2 arena sized from exact per-tenant demand | **done** | `feat(memory): size the engine arena from exact tenant demand` |
-| 4b.2 — the remaining `exec/` workspaces | not started — see B5 | |
+| 4b.2 — the remaining `exec/` workspaces | **in progress, cluster by cluster** (B52–B56): row-batched sampler mirror, sampling scratch, ten batched-MoE arrays, the FP8 reduction trio, the dp4a staging family + split-K. 695 → **645** gate calls, acquisitions 309 → **287**; `executor_workspace_buffers.cu` 29 → **7** acquisitions, and two of B48's eight release-only files cleared. Remaining there: the MLA scratch (3), two pinned-host buffers (no host tier exists — B57), the chunk-capture pair | `fix(exec): the row-batched sampler mirror / the sampling scratch / the batched-MoE array cluster / the FP8 reduction cluster / the dp4a staging cluster to the T2 arena` |
 | 5.1 — banned-token list: one engine-owned copy | **done** | `fix(runtime): one engine-owned device copy of the banned-token list` |
 | 5.2 — `calibrate_fp8_scale` reduction scratch | **done** | `fix(quant): persistent reduction scratch for calibrate_fp8_scale` |
 | 5.3 — conditional-graph-loop buffers → T2 slot pool | **done** | `feat(memory): T2 slot pool for the conditional graph loop` |

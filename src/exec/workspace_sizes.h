@@ -59,7 +59,23 @@ struct ExecShape {
     // (N, logical K) of every weight the MMVQ / dequant paths can see. Logical
     // K means NVFP4's packed byte dim already doubled.
     std::vector<std::pair<int64_t, int64_t>> weights;
+    // Raw facts for the dp4a input-staging cluster (q8_1 + d8, the FFN block
+    // mask, the Q4_K/Q5_K prefill pair). Deliberately NOT derived from
+    // `weights`: the site scans a narrower tensor list and reads shape[1] /
+    // shape[2] RAW — no NVFP4 doubling, no output_proj, no gdn_gate — so
+    // reusing exec_max_weight_k() here would size the scratch from a K the
+    // kernels never see. Replicated rather than approximated, same rule as
+    // exec_max_tokens.
+    int mmvq_max_k = 0;              // max dense shape[1] / expert-packed shape[2]
+    int mmvq_max_expert_down_k = 0;  // max expert_down_packed shape[2], 0 when dense
+    int n_experts_active = 0;        // top_k; the MoE down projection quantizes that many
+    bool has_sub5bit_dense = false;  // any dense Q4_K/Q5_K weight — gates the prefill pair
 };
+
+// Replicated constants, pinned against their definitions by static_asserts in
+// executor_workspace_buffers.cu. They live here so this stays CUDA-free.
+constexpr size_t kExecBlockQ81Bytes = 48;  // sizeof(block_q8_1), compute/gemm.h
+constexpr int kExecKVBlockSize = 16;       // kKVBlockSize, memory/kv_cache.h
 
 struct ExecT2Demand {
     // MMVQ (Q8_1-input GEMV) scratch: max_tokens * ceil(maxK/32) * 36 * 2.
@@ -77,9 +93,16 @@ struct ExecT2Demand {
     // capped at 512 MiB (targets above the cap are served by the uncapturable
     // path, exactly as allocate_nvfp4_dequant_workspace decides).
     size_t nvfp4_dequant = 0;
+    // dp4a input staging: the q8_1/d8 decode pair, the FFN sparsity mask and
+    // the Q4_K/Q5_K dense-prefill pair. One sizing family (the max-K scan), one
+    // degradation contract ("dp4a path disabled"), so they migrate as a unit.
+    size_t quant_scratch = 0;
+    // Split-K paged-attention partials: max_batch x n_heads x splits x (2+hd).
+    size_t splitk_scratch = 0;
 
     size_t total() const {
-        return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction;
+        return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction +
+               quant_scratch + splitk_scratch;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather

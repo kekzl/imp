@@ -90,7 +90,6 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
     vfree(cutlass3x_sf);
     cutlass3x_sf_size = 0;
     if (cutlass3x_sfa_ptrs) {
-        IMP_CUDA_CHECK_LOG(cudaFree(cutlass3x_sfa_ptrs));
         cutlass3x_sfa_ptrs = nullptr;
         cutlass3x_sfa_ptrs_count = 0;
     }
