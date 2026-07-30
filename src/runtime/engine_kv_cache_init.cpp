@@ -204,7 +204,13 @@ bool Engine::init_kv_cache() {
         cudaRuntimeGetVersion(&key.cuda_runtime_version);
         library_reserve_key_ = key;
         library_reserve_cache_path_ = path;
-        if (const size_t remembered = library_reserve_cache_load(path, key); remembered > 0) {
+        bool remembered_found = false;
+        const size_t remembered = library_reserve_cache_load(path, key, &remembered_found);
+        if (remembered_found) {
+            // `remembered > 0` was the test here, which discarded a recorded
+            // ZERO and charged the 3900 MiB constant instead — on exactly the
+            // models whose first forward claims nothing. B43 fixed this shape in
+            // the reporter; the loader kept it (AUDIT B70).
             config_.library_reserve_mb = static_cast<int>(remembered >> 20);
             IMP_LOG_INFO("library reserve: %d MiB from the measurement cache (%s) — the default "
                          "constant is %zu MiB",
@@ -216,15 +222,16 @@ bool Engine::init_kv_cache() {
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
                                            effective_free_vram(), swa_live_tokens, n_swa_layers,
                                            &native_cache_demand());
-    int max_blocks = config_.kv_cache_max_blocks > 0 ? config_.kv_cache_max_blocks
-                                                     : vram_budget.kv_max_blocks;
-
-    // A7 step 2b: run the new planner on the same inputs and log what it would
-    // have decided. Computed, never applied — the point is to establish that
-    // the plan is right BEFORE anything depends on it, and to make the charge
-    // the live pass cannot see (the ~3.9 GiB claimed on the first forward,
-    // A1.5) visible at the moment the KV pool is being sized from a number
-    // that does not include it.
+    // A7 step 2 — APPLIED. The KV block count now comes from plan_memory(), not
+    // from the live-free-derived pass. What made that safe is three changes, in
+    // this order: the balloon stopped hiding bytes from the live read (B62), the
+    // unexplained `* 2` that was the whole live-vs-plan divergence went (B65),
+    // and V8 now asserts the live pass never exceeds the plan (B66). Today the
+    // two produce the SAME number on every measured config, so this changes
+    // where the number comes from rather than what it is — and the
+    // measured-residual clamp further down can still only shrink it, which is
+    // what keeps a plan that is wrong about the device from overcommitting.
+    int max_blocks = 0;
     {
         ShadowPlanProbe probe;
         probe.distributable_bytes = effective_free_vram();
@@ -237,10 +244,14 @@ bool Engine::init_kv_cache() {
             probe.workspace_estimate_available = true;
         }
         probe.vision_tower_unmodelled = !config_.mmproj_path.empty();
-        probe.library_reserve_bytes =
-            runtime_config_.vram.library_reserve_mb < 0
-                ? kMeasuredLibraryReserveBytes
-                : static_cast<size_t>(runtime_config_.vram.library_reserve_mb) << 20;
+        // config_.library_reserve_mb, NOT the runtime-config field: the loader
+        // above writes the REMEMBERED measurement into the former, and reading
+        // the latter here meant the plan kept charging the 3900 MiB constant
+        // while the live pass used the measured 0. Two fields, one number, and
+        // the plan was on the wrong one (AUDIT B70).
+        probe.library_reserve_bytes = config_.library_reserve_mb < 0
+                                          ? kMeasuredLibraryReserveBytes
+                                          : static_cast<size_t>(config_.library_reserve_mb) << 20;
         probe.n_kv_layers = n_kv_layers;
         probe.n_swa_layers = n_swa_layers;
         probe.swa_live_tokens = swa_live_tokens;
@@ -250,7 +261,32 @@ bool Engine::init_kv_cache() {
         probe.min_kv_tokens = config_.min_kv_tokens;
         probe.kv_block_bytes_per_layer =
             kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
-        log_shadow_plan(probe, vram_budget, max_blocks);
+
+        const PlanResult plan = plan_memory(shadow_plan_input(probe));
+        IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, vram_budget.kv_max_blocks).c_str());
+
+        if (config_.kv_cache_max_blocks > 0) {
+            max_blocks = config_.kv_cache_max_blocks;  // operator pin wins over both
+        } else if (plan.ok) {
+            max_blocks = plan.plan.kv.blocks;
+            if (max_blocks != vram_budget.kv_max_blocks) {
+                // Not a failure — the two are allowed to differ, and the plan is
+                // the one that charges what the live read cannot see. Logged
+                // because a silent divergence is how the old pass drifted.
+                IMP_LOG_INFO("KV blocks: plan %d (live pass would have said %d)", max_blocks,
+                             vram_budget.kv_max_blocks);
+            }
+        } else {
+            // The plan refuses this configuration. D8 argues that should fail
+            // the load, and it does when an explicit --vram-budget is installed
+            // (the check further down). Without one, falling back to the live
+            // pass keeps the pre-existing best-effort behaviour rather than
+            // turning a plan gap into a refusal to serve.
+            max_blocks = vram_budget.kv_max_blocks;
+            IMP_LOG_WARN("KV blocks: the plan rejects this configuration — falling back to the "
+                         "live-derived %d blocks. The report above says what it could not fit.",
+                         max_blocks);
+        }
     }
 
     // ── Weight caches are built BEFORE the KV pool (A7 step 6.4) ──────

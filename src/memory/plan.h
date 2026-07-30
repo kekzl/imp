@@ -134,7 +134,13 @@ struct PlanLine {
 };
 
 struct MemoryPlan {
-    size_t model_resident = 0;      // weights + weight caches
+    size_t model_resident = 0;      // weights + the MANDATORY weight caches
+    // The rest of the weight-cache demand. Granted from the residual after the
+    // model-resident charges, and only above the one-sequence KV floor: it is
+    // the tier the engine itself trades away when VRAM is short (it caches what
+    // fits and leaves the rest as native blocks), so committing it whole made
+    // the plan reject configurations that serve fine (AUDIT B69).
+    size_t optional_caches = 0;
     size_t engine_persistent = 0;
     size_t forward_scratch = 0;
     KvPlan kv;

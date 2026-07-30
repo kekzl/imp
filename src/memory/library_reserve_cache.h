@@ -48,9 +48,15 @@ struct LibraryReserveKey {
 // callers then skip the cache rather than guessing a path.
 std::string library_reserve_cache_default_path();
 
-// Recorded bytes for `key`, or 0 when there is no usable entry. Never throws;
-// an absent or malformed file reads as "no entry".
-size_t library_reserve_cache_load(const std::string& path, const LibraryReserveKey& key);
+// Recorded bytes for `key`. `found` distinguishes a recorded ZERO from no entry
+// at all — and that distinction is the whole point of the out-param: models whose
+// first forward claims nothing (measured: Qwen3-4B-IQ4_NL, Qwen3.6-35B-A3B-NVFP4)
+// record 0, and a `> 0` test on the return value silently threw their
+// measurement away and charged the 3900 MiB constant instead. B43 found exactly
+// this shape in the reporter and fixed it there; the loader kept it (AUDIT B70).
+// Never throws; an absent or malformed file reads as "no entry".
+size_t library_reserve_cache_load(const std::string& path, const LibraryReserveKey& key,
+                                  bool* found = nullptr);
 
 // Record `bytes` for `key`, replacing any previous entry. Returns false when the
 // file could not be written — the caller should warn once and carry on, because

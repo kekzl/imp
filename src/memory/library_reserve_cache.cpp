@@ -63,13 +63,19 @@ std::vector<std::pair<std::string, size_t>> read_all(const std::string& path) {
 
 }  // namespace
 
-size_t library_reserve_cache_load(const std::string& path, const LibraryReserveKey& key) {
+size_t library_reserve_cache_load(const std::string& path, const LibraryReserveKey& key,
+                                  bool* found) {
+    if (found)
+        *found = false;
     if (path.empty())
         return 0;
     const std::string k = key.str();
     for (const auto& [name, bytes] : read_all(path)) {
-        if (name == k)
+        if (name == k) {
+            if (found)
+                *found = true;  // a recorded 0 is an answer, not a miss
             return bytes;
+        }
     }
     return 0;
 }
