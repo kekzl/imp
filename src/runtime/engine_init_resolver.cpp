@@ -311,9 +311,9 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // those + workspaces, and the downstream KV clamp is the hard backstop.
             size_t upload_bytes = approx_weight_bytes;
             // Native-NVFP4 models: the mandatory decode caches (CUTLASS SfAtom
-            // slab + nvfp4_moe) are physically reserved right after upload
-            // (vram.native_cache_reserve balloon) — subtract them too so the
-            // auto batch doesn't size workspaces into the reserved bytes.
+            // slab + nvfp4_moe) are built before the KV pool and are charged in
+            // the budget — subtract them here too so the auto batch does not size
+            // workspaces into bytes the cache build will take.
             if (mcfg.is_nvfp4_prequant)
                 upload_bytes += native_cache_demand().total();
             headroom = (free_vram > upload_bytes) ? (free_vram - upload_bytes) : 0;

@@ -292,9 +292,10 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         constexpr size_t kRuntimeHeadroom = 512ULL * 1024 * 1024;
         size_t total_reserve = kMoeReserve + kRuntimeHeadroom;
         moe_budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
-        // Prequant models: the Engine's balloon physically reserved the MoE
-        // slab bytes (released just before phase 3), so the guarantee holds
-        // even when cudaMemGetInfo under-reports free after async frees.
+        // Prequant models: the plan grants the MoE
+        // slab its measured demand, so the guarantee holds even when
+        // cudaMemGetInfo under-reports free after async frees (AUDIT B62 — it
+        // used to be a physically held balloon).
         // The +128 MiB covers the borrow branch's small ts/ms-copy + SfAtom
         // side allocations; the copy branch is net-zero per projection via
         // the moe_logical_avail refund below.

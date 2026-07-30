@@ -272,86 +272,17 @@ bool Engine::init_weights() {
         // never captured in CUDA graphs.
     }
 
-    // Balloon reservation for the mandatory native-NVFP4 decode caches
-    // (CUTLASS SfAtom slab + nvfp4_moe). They are all-or-nothing for decode
-    // CUDA-graph capture — one uncovered MoE layer falls to the host-args
-    // legacy path, throws under capture, and the WHOLE decode graph aborts
-    // (26-40 tok/s per-step instead of ~250 captured on Qwen3.6-35B). They
-    // are built LAST (pre_dequant, after KV init), so without this hold the
-    // workspaces below + the KV pool starve them. Holding the bytes now
-    // makes every later live-free reader (workspaces, vram budget, KV, SSM)
-    // see reduced free; released just before pre_dequant_weights builds the
-    // caches into the guaranteed space (engine_kv_cache_init.cpp).
-    if (mcfg.is_nvfp4_prequant && config_.use_nvfp4_decode == 2 && !experts_on_host_ &&
-        runtime_config_.vram.native_cache_reserve) {
-        const NativeCacheDemand& demand = native_cache_demand();
-        constexpr size_t kBalloonPad = 64ULL * 1024 * 1024;  // alloc granularity slack
-        size_t want = demand.total() + kBalloonPad;
-        // The hold must leave room for the ESSENTIAL allocations that run
-        // while it is held: the executor workspaces (a rejected persistent
-        // workspace is fatal — "cannot run inference") plus the
-        // VRAMAllocator's own free-headroom policy (~5% of total). If the
-        // card can't fit both, shrink the hold (SF-only) or skip it — the
-        // legacy partial-cache behavior beats a non-functional engine.
-        size_t free_now = 0, total_now = 0;
-        vram_budget_mem_get_info(&free_now, &total_now);
-        size_t essential = executor_->workspace_estimate() + total_now / 20 +
-                           256ULL * 1024 * 1024;
-        size_t grantable = (free_now > essential) ? free_now - essential : 0;
-        if (want > grantable) {
-            if (demand.sf_bytes <= grantable) {
-                // Partial: guarantee at least the SF slab (phase 3b runs
-                // first and is the larger, persistent cache).
-                want = demand.sf_bytes;
-                IMP_LOG_WARN("VRAM reserve: shrinking hold to %.0f MiB (SF slab only; "
-                             "%.0f MiB wanted, %.0f MiB grantable after workspaces) — "
-                             "the MoE cache may come out partial",
-                             want / (1024.0 * 1024.0), (demand.total() + kBalloonPad) / (1024.0 * 1024.0),
-                             grantable / (1024.0 * 1024.0));
-            } else {
-                want = 0;
-            }
-        }
-        auto try_alloc = [&](size_t bytes) {
-            void* p = nullptr;
-            // Plain cudaMalloc, NOT the async pool: the release must be
-            // immediately visible to the cudaMemGetInfo readers downstream.
-            if (cudaMalloc(&p, bytes) == cudaSuccess)
-                return p;
-            (void)cudaGetLastError();  // clear the sticky OOM
-            return static_cast<void*>(nullptr);
-        };
-        if (want > 0) {
-            native_cache_balloon_ = try_alloc(want);
-            if (!native_cache_balloon_) {
-                // The default async pool retains upload-time frees (release
-                // threshold UINT64_MAX above) — trim once and retry before
-                // concluding the VRAM is genuinely short.
-                cudaMemPool_t default_pool = nullptr;
-                int dev = 0;
-                cudaGetDevice(&dev);
-                if (cudaDeviceGetDefaultMemPool(&default_pool, dev) == cudaSuccess && default_pool)
-                    cudaMemPoolTrimTo(default_pool, 0);
-                native_cache_balloon_ = try_alloc(want);
-            }
-            if (native_cache_balloon_)
-                native_cache_balloon_bytes_ = want;
-        }
-        if (native_cache_balloon_) {
-            IMP_LOG_INFO("VRAM reserve: holding %.0f MiB for mandatory NVFP4 decode caches "
-                         "(sf=%.0f MiB, moe_slab=%.0f MiB) until cache build",
-                         native_cache_balloon_bytes_ / (1024.0 * 1024.0),
-                         demand.sf_bytes / (1024.0 * 1024.0),
-                         demand.moe_slab_bytes / (1024.0 * 1024.0));
-        } else {
-            IMP_LOG_WARN(
-                "VRAM reserve: could not hold %.0f MiB for the mandatory NVFP4 decode "
-                "caches (weights + workspaces leave too little VRAM). Caches may come out "
-                "partial → decode CUDA-graph capture will abort (~10x slower per-step "
-                "decode). Lower runtime.max_seq_len / max_batch_size or use a smaller model.",
-                (demand.total() + kBalloonPad) / (1024.0 * 1024.0));
-        }
-    }
+    // The mandatory native-NVFP4 decode caches used to be protected by a
+    // physical balloon here: a cudaMalloc taken right after the upload purely so
+    // every later live-free reader saw fewer bytes, released again before the
+    // cache build. It is gone (AUDIT B61/B62). Its premise expired when A7 step
+    // 6.4 moved the cache build BEFORE the KV pool — the comment still claimed
+    // the caches were built last — and measured across five configs it bound on
+    // exactly one, where it cost 5x KV capacity (16 vs 87 blocks) to buy coverage
+    // whose absence changed neither throughput nor correctness. The guarantee it
+    // provided now comes from the plan instead: vram_budget floors phase 3 at the
+    // measured demand (mandatory_sf_bytes / mandatory_moe_bytes), which is what
+    // I4 asks for — capacity decided up front, not hidden from a live query.
 
     // Phase 2: allocate GPU workspace
     (void)executor_->allocate_workspaces(experts_on_host_);
@@ -366,22 +297,6 @@ bool Engine::init_weights() {
     }
 
     return true;
-}
-
-// Release the mandatory-decode-cache balloon (idempotent). Called right
-// before pre_dequant_weights builds the caches into the freed space, and
-// defensively from ~Engine / init-failure paths so the hold can't leak.
-void Engine::release_native_cache_balloon_(const char* when) {
-    if (!native_cache_balloon_)
-        return;
-    size_t held = native_cache_balloon_bytes_;
-    IMP_CUDA_CHECK_LOG(cudaFree(native_cache_balloon_));
-    native_cache_balloon_ = nullptr;
-    native_cache_balloon_bytes_ = 0;
-    size_t free_mem = 0, total_mem = 0;
-    vram_budget_mem_get_info(&free_mem, &total_mem);
-    IMP_LOG_INFO("VRAM reserve: released %.0f MiB (%s; free now %.0f MiB)",
-                 held / (1024.0 * 1024.0), when, free_mem / (1024.0 * 1024.0));
 }
 
 }  // namespace imp

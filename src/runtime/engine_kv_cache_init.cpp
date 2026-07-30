@@ -184,9 +184,9 @@ bool Engine::init_kv_cache() {
     const int swa_live_tokens =
         swa_sizing_active_ ? swa_window_max_ + swa_slack_tokens_ + swa_burst_cap_tokens_ : 0;
 
-    // VRAM budget. The mandatory-cache balloon (init_weights) is still held
-    // here — effective_free_vram() excludes it, and passing the held bytes
-    // keeps the prequant reserve from charging KV for the same demand twice.
+    // VRAM budget. Nothing is held back from effective_free_vram() any more
+    // (the balloon is gone, AUDIT B62): the prequant reserve charges KV the full
+    // measured cache demand and phase 3 is floored at it.
     // Charge what the first forward actually claimed LAST time, if we know
     // (AUDIT B41/B49). The plan needs this number before the forward that
     // produces it, so a single run cannot both measure and use it — but the
@@ -215,7 +215,7 @@ bool Engine::init_kv_cache() {
 
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
                                            effective_free_vram(), swa_live_tokens, n_swa_layers,
-                                           native_cache_balloon_bytes_, &native_cache_demand());
+                                           &native_cache_demand());
     int max_blocks = config_.kv_cache_max_blocks > 0 ? config_.kv_cache_max_blocks
                                                      : vram_budget.kv_max_blocks;
 
@@ -304,12 +304,6 @@ bool Engine::init_kv_cache() {
                          "(recurrent state not yet graph-safe)");
         }
     }
-
-    // Hand the reserved space to the cache build: everything elastic (KV
-    // pool, workspaces, SSM state) has allocated by now, so the freed bytes
-    // go to phase 3's CUTLASS-SF + nvfp4_moe builds — which additionally
-    // floor their live-free-derived budgets at vram_budget.mandatory_*.
-    release_native_cache_balloon_("cache build");
 
     // Dequant weights → FP16/FP8/NVFP4 caches
     executor_->pre_dequant_weights(stream_, vram_budget);
