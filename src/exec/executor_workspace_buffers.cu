@@ -7,6 +7,7 @@
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "exec/gemm_scratch.h"  // prewarm_mmvq_scratch
+#include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
@@ -29,7 +30,7 @@
 
 namespace imp {
 
-// workspace_sizes.h stays CUDA-free, so it replicates these two numbers rather
+// workspace_sizes.h stays CUDA-free, so it replicates these numbers rather
 // than including their definitions. Tie the copies to the originals HERE, where
 // both are visible: a layout change on either side becomes a compile error
 // instead of a silently under-sized arena.
@@ -37,6 +38,14 @@ static_assert(kExecBlockQ81Bytes == sizeof(block_q8_1),
               "exec_t2_demand's block_q8_1 stride drifted from compute/gemm.h");
 static_assert(kExecKVBlockSize == kKVBlockSize,
               "exec_t2_demand's KV block size drifted from memory/kv_cache.h");
+static_assert(kExecCublasWorkspaceBytes == kGemmCublasWorkspaceBytes,
+              "exec_t2_demand's cuBLASLt workspace drifted from compute/gemm.h");
+static_assert(kExecBenchScratchBytes == kGemmBenchScratchBytes,
+              "exec_t2_demand's algo-bench scratch drifted from compute/gemm.h");
+static_assert(kExecGrouped3xStagingBytes == kGrouped3xStagingBytes,
+              "exec_t2_demand's grouped-3x staging drifted from gemm_cutlass_grouped_3x.h");
+static_assert(kExecGrouped3xWorkspaceBytes == kGrouped3xWorkspaceBytes,
+              "exec_t2_demand's grouped-3x workspace drifted from gemm_cutlass_grouped_3x.h");
 
 void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     const auto& cfg = model_->config();

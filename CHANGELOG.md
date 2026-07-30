@@ -134,6 +134,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   dependencies — for anything richer, point Open WebUI at the same server.
 
 ### Changed
+- **The cuBLAS and CUTLASS workspaces come from the engine-persistent (T2)
+  arena, and the grouped one shrank by 511 MiB** (A7 step 8). `gemm_init()`'s
+  cuBLASLt workspace (64 MiB) and algo-selection bench scratch (32 MiB) are now
+  arena tenants charged in `exec_t2_demand`, so they are reserved before the
+  pre-dequant caches can spend the VRAM they need. The bigger change is the
+  CUTLASS **grouped** path: its prewarm reserved 512 MiB "to cover CUTLASS
+  scratch even for very large grouped problems", and measuring
+  `get_workspace_size()` across three MoE geometries (128 and 256 experts,
+  N=512/768/1856, K=2048/2688) and prefills from 130 to 2800 tokens returned
+  **152 320 B every single time** — 170 SMs x 896 B of persistent-scheduler
+  state, a property of the chip rather than the problem. It now reserves 1 MiB.
+  Measured on Qwen3-30B-A3B-NVFP4: own peak VRAM **20932 -> 20454 MiB**, the
+  `01_prewarm_gemm` phase **834 -> 336 MiB**; dense models are unaffected
+  (20716 -> 20712 on the gate model) and decode is unchanged.
+
 - **One `needs_constrained` flag replaces the `needs_json_mode` /
   `needs_schema_mode` pair** in the decode scheduler. Every consumer only ever
   asked for their disjunction, so the split bought nothing and cost correctness:
@@ -152,6 +167,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **The lazy CUTLASS workspace growth path is gone — it could never have run.**
+  `gemm_nvfp4_cutlass_sm120` and `gemm_mxfp4_cutlass_sm120` each kept a
+  file-scope workspace that they `cudaFree`d and `cudaMalloc`d at GEMM time when
+  the caller's buffer looked too small — on a code path reachable under
+  CUDA-graph capture, where `cudaMalloc` is illegal. Every in-tree caller sizes
+  its buffer with the same `..._workspace(M, N, K)` it then passes, and the one
+  caller that passes none (the FP32 LM head) needs none: these kernel
+  configurations report a **0-byte** workspace at every shape measured. The GEMM
+  now refuses and lets the caller fall back to dequant instead of allocating,
+  and `CutlassWorkspaceContract` pins the property the deletion rests on.
+
 - **Decode paid for context capacity it never used — up to −38% on the served
   path** (issue #1100). The NVFP4 decode cache's own VRAM reservation was
   subtracted from the *shared* pre-dequant budget, which is also the budget the

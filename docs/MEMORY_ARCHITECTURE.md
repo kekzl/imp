@@ -834,6 +834,21 @@ N, K)` already exists and is already used by the executor to pre-size
 can produce and takes the max. If a shape exceeds the plan, the call fails
 cleanly and falls back — it does not allocate.
 
+**Implemented 2026-07-31 (B73), and the growth path turned out to be
+unreachable rather than merely undesirable.** Every in-tree caller sizes with
+the same `..._workspace()` it then passes, and the one caller that passes
+nothing — the FP32 LM head at `executor_forward.cu` / `executor_perplexity.cu`,
+which hands the GEMM `nullptr, 0` — needs zero, because these kernel
+configurations ask for **0 bytes at every shape measured**. That is pinned by
+`CutlassWorkspaceContract` rather than left as a comment. The same commit moved
+`gemm.cu`'s two statics to T2 and re-sized the **grouped** path: its 512 MiB
+reservation was guesswork against a measured 152 320 B (170 SMs x 896 B of
+persistent-scheduler state, invariant across expert count, N, K and prefill
+length), so it now takes 1 MiB and frees 488 MiB of resident VRAM on every MoE
+model. The grouped path keeps a growth path, which is safe for a reason the
+`cudaMalloc` version was not: **a bump-arena take is pointer arithmetic, not a
+CUDA call, so it is legal under stream capture.**
+
 **On the 2.6× prefill variance:** the dispatch asks whether persistent autotuning
 state explains it. It does not — there is no persistence (A1.6, verified: zero
 file I/O in `gemm.cu`). Recording it here closes the question; it is not a design
@@ -984,7 +999,7 @@ rounded up — three of the seven are still open, and one has not moved at all.
 
 | | Invariant | Design-time | **Measured (rows carry their own date; latest 2026-07-30)** | Target |
 |---|---|---|---|---|
-| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 582 calls / 77 files (2026-07-30), of which 258 are acquisitions and 344 releases.** The **pinned-host class is CLOSED: 26 → 0** (B58/B60) — every one moved to T5b's `PinnedBuffer`/`HostRegistration`, which is why the total fell 638 → 582 (each migration took its releases with it). What remains is device memory only. Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52–B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ — `Backend`, allowlist empty, CI gate |
+| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 549 calls / 75 files (2026-07-31), of which 246 are acquisitions and 303 releases.** The **pinned-host class is CLOSED: 26 → 0** (B58/B60) — every one moved to T5b's `PinnedBuffer`/`HostRegistration`, which is why the total fell 638 → 582 (each migration took its releases with it). What remains is device memory only. Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52–B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ — `Backend`, allowlist empty, CI gate |
 | I2 | No allocation on the hot path | ✗ — measured +190 MiB/config of steady-state allocation | **✓ — `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`**, 15 requests, dense. Was 414 → 238 → 0 | ✓ — `ScratchStack`, phase guard, counter == 0 |
 | I3 | Stable addresses for graph memory | ~ — true in practice, enforced by comments + a `workspace_generation` hook | **~ — `StableSpan` exists and is passkey-enforced**, so only allocators that can promise stability can mint one; kernel signatures still take raw pointers | ✓ — `StableSpan` in kernel signatures; no conversion from `DeviceSpan` |
 | I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ — `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). **The balloon is GONE (2026-07-30, B62)** — the mandatory-cache guarantee is a planned floor instead of a physical hold, which also freed 72x more KV on the config where the hold bound. **The KV block count is now the PLAN's** (B69) — `plan_memory()` decides it, the live pass is the fallback when the plan rejects, and the measured-residual clamp can still only shrink it. What still enters through `cudaMemGetInfo` is the *distributable* figure the plan is handed | ✓ — `plan_memory()` never queries the device; fails at load with a report |
@@ -1053,7 +1068,7 @@ design above, so the argument that produced the original shape stays readable.
 | 6.8 — the measurement is remembered; criteria 5+6 hold from the 2nd start | **done** | `feat(memory): remember the measured library reserve` | `feat(memory): measure the library reserve instead of assuming it` |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |
 | 7b — VMM backend implementation | not started | |
-| 8 — `compute/` statics | not started | |
+| 8 — `compute/` statics | **in progress, cluster by cluster**: the DRY penalty pair (B72) and the cuBLAS/CUTLASS workspace family (B73 — cuBLASLt workspace + algo-bench scratch + the grouped-3x pair, and the lazy CUTLASS growth path deleted as unreachable). What is left in `compute/` is per-kernel scratch, not workspaces: `gemm_grouped_nvfp4_smallM.cu`, `mmq_q8_imma.cu`, `sampling_topk_topp.cu`, `attention_cublas.cu`, `moe_routing.cu`, `mtp_forward.cu` | `fix(compute): DRY penalty buffers to the T2 arena` / `fix(compute): the cuBLAS and CUTLASS workspaces to the T2 arena` |
 | 9a — `--mem-report` with named charges | **done** | `feat(memory): --mem-report — name the charges the pool notes cannot see` |
 | **A7 step 9 complete** (9a + 9b.1–9b.5) | | criterion 5 is *not* claimed — see B38 |
 

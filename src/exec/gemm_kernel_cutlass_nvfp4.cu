@@ -54,10 +54,13 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     // Workspace precondition. Loud-but-soft: return PreconditionFail so the
     // dispatch site can fall back to Slice 4's dequant kernel (or legacy).
     // Only the activation scratch (act_data + act_sf) is mandatory — the GEMM
-    // workspace is optional because gemm_nvfp4_cutlass_sm120 has its own
-    // static-fallback path when the caller-supplied workspace is too small or
-    // null. This matches the legacy guard at executor_kernels.cu:2140 which
-    // only checks `cutlass_act_data != nullptr`.
+    // workspace may legitimately be null, because allocate_auxiliary_buffers()
+    // sizes it with gemm_nvfp4_cutlass_sm120_workspace() at the MAX shape and
+    // allocates nothing when that is 0. Since A7 step 8 the GEMM refuses rather
+    // than growing a static workspace if it ever needs more, and a refusal
+    // arrives here as PreconditionFail → the Slice 4 dequant fallback. This
+    // matches the legacy guard at executor_kernels.cu:2140 which only checks
+    // `cutlass_act_data != nullptr`.
     if (args.cutlass_act_data == nullptr || args.cutlass_act_sf == nullptr) {
         return GemmDispatchResult::PreconditionFail;
     }

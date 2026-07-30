@@ -89,12 +89,14 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
 
 void gemm_grouped_3x_nvfp4_cleanup();
 
-// Pre-allocate the persistent staging + workspace buffers so all
-// subsequent calls under stream capture find them sufficient and skip
-// the lazy cudaMalloc path (illegal under capture). Conservative caps —
-// 1 MiB staging (covers ~512 experts of per-expert layout structs);
-// 512 MiB workspace (covers CUTLASS GemmUniversal scratch for any
-// realistic prefill shape). Call once at engine init.
+// The engine-persistent (T2) charge of the grouped path, taken by the prewarm
+// below. The workspace figure is measured — see the prewarm's comment — not a
+// conservative cap; exec_t2_demand replicates both for MoE models.
+inline constexpr size_t kGrouped3xStagingBytes = 1ull << 20;    // 1 MiB
+inline constexpr size_t kGrouped3xWorkspaceBytes = 1ull << 20;  // 1 MiB
+
+// Pre-take the staging + workspace slices so every subsequent call finds them
+// sufficient. Call once at engine init, after the T2 arena is open.
 void gemm_grouped_3x_nvfp4_prewarm();
 
 }  // namespace imp

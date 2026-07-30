@@ -709,19 +709,6 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
 // CUTLASS GEMM execution
 // ---------------------------------------------------------------------------
 
-// Persistent workspace and GEMM instance
-static void* s_cutlass_workspace = nullptr;
-static size_t s_cutlass_workspace_size = 0;
-
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void gemm_cutlass_sm120_reset_static_cuda_state() {
-    if (s_cutlass_workspace) {
-        (void)cudaFree(s_cutlass_workspace);
-        s_cutlass_workspace = nullptr;
-        s_cutlass_workspace_size = 0;
-    }
-}
-
 template <class GemmT>
 static size_t cutlass_workspace_for(int M, int N, int K) {
     using GK = typename GemmT::GemmKernel;
@@ -804,20 +791,24 @@ static bool gemm_nvfp4_cutlass_sm120_impl(const void* a_data, const void* a_sf, 
         return false;
     }
 
-    // Ensure workspace
+    // The caller's workspace is the whole workspace. A7 step 8 deleted the
+    // cudaFree+cudaMalloc grow path that used to sit here: it ran at GEMM time,
+    // on a code path reachable under CUDA-graph capture (where cudaMalloc is
+    // illegal), to serve a case every in-tree caller already sizes against —
+    // each one asks gemm_nvfp4_cutlass_sm120_workspace() for the same (or a
+    // larger) shape and passes the answer. Refusing lets the dispatch fall back
+    // to the dequant path with correct output; allocating here could not
+    // (docs/MEMORY_ARCHITECTURE.md A5.3).
     size_t needed = GemmT::get_workspace_size(args);
-    void* ws = workspace;
     if (needed > workspace_size) {
-        if (needed > s_cutlass_workspace_size) {
-            if (s_cutlass_workspace)
-                IMP_CUDA_CHECK_LOG(cudaFree(s_cutlass_workspace));
-            IMP_CUDA_CHECK_LOG(cudaMalloc(&s_cutlass_workspace, needed));
-            s_cutlass_workspace_size = needed;
-        }
-        ws = s_cutlass_workspace;
+        IMP_LOG_WARN(
+            "CUTLASS sm120 NVFP4 GEMM: workspace %zu B < %zu B needed for M=%d N=%d K=%d "
+            "— refusing, the caller falls back",
+            workspace_size, needed, M, N, K);
+        return false;
     }
 
-    st = gemm.initialize(args, ws, stream);
+    st = gemm.initialize(args, workspace, stream);
     if (st != cutlass::Status::kSuccess) {
         IMP_LOG_ERROR("CUTLASS sm120 NVFP4 GEMM: initialize failed (%d) M=%d N=%d K=%d", (int)st, M, N, K);
         return false;

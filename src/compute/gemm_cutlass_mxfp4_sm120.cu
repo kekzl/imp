@@ -568,18 +568,6 @@ void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 // CUTLASS GEMM execution
 // ---------------------------------------------------------------------------
 
-static void* s_mxfp4_workspace = nullptr;
-static size_t s_mxfp4_workspace_size = 0;
-
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void gemm_cutlass_mxfp4_reset_static_cuda_state() {
-    if (s_mxfp4_workspace) {
-        (void)cudaFree(s_mxfp4_workspace);
-        s_mxfp4_workspace = nullptr;
-        s_mxfp4_workspace_size = 0;
-    }
-}
-
 size_t gemm_mxfp4_cutlass_sm120_workspace(int M, int N, int K) {
     auto stride_A = cutlass::make_cute_packed_stride(MxStrideA{}, {M, K, 1});
     auto stride_B = cutlass::make_cute_packed_stride(MxStrideB{}, {N, K, 1});
@@ -638,19 +626,19 @@ bool gemm_mxfp4_cutlass_sm120(const void* a_data, const void* a_sf, const Cutlas
         return false;
     }
 
+    // Same deletion as the NVFP4 twin (A7 step 8): no grow-and-realloc at GEMM
+    // time. Every caller sizes with gemm_mxfp4_cutlass_sm120_workspace() for
+    // the same or a larger shape, and a refusal falls back with correct output.
     size_t needed = MxGemm::get_workspace_size(args);
-    void* ws = workspace;
     if (needed > workspace_size) {
-        if (needed > s_mxfp4_workspace_size) {
-            if (s_mxfp4_workspace)
-                IMP_CUDA_CHECK_LOG(cudaFree(s_mxfp4_workspace));
-            IMP_CUDA_CHECK_LOG(cudaMalloc(&s_mxfp4_workspace, needed));
-            s_mxfp4_workspace_size = needed;
-        }
-        ws = s_mxfp4_workspace;
+        IMP_LOG_WARN(
+            "CUTLASS MXFP4 sm120: workspace %zu B < %zu B needed for M=%d N=%d K=%d "
+            "— refusing, the caller falls back",
+            workspace_size, needed, M, N, K);
+        return false;
     }
 
-    st = gemm.initialize(args, ws, stream);
+    st = gemm.initialize(args, workspace, stream);
     if (st != cutlass::Status::kSuccess) {
         IMP_LOG_ERROR("CUTLASS MXFP4 sm120: initialize failed (%d) M=%d N=%d K=%d", (int)st, M, N, K);
         return false;

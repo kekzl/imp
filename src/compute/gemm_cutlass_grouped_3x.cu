@@ -7,6 +7,7 @@
 
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -98,7 +99,7 @@ bool cutlass_grouped_3x_nvfp4_available() {
     return s_grp3x_available;
 }
 
-// Persistent staging + workspace (grow-only, process lifetime).
+// Staging + workspace, both engine-persistent (T2) since A7 step 8.
 static void* s_staging = nullptr;
 static size_t s_staging_sz = 0;
 static void* s_workspace = nullptr;
@@ -117,34 +118,70 @@ static int s_can_impl_K = -1;
 
 static size_t align128(size_t x) { return (x + 127) & ~size_t(127); }
 
+// Both buffers come from the engine-persistent (T2) arena (A7 step 8). The
+// growth path stays — unlike the cudaMalloc it replaces, a bump-arena take is
+// pointer arithmetic and not a CUDA call, so it is legal under stream capture,
+// which is the property the 512 MiB pre-reservation existed to buy. Growing
+// still strands the previous slab (a bump arena has no free), so the prewarm
+// takes the measured requirement up front and growth should never happen.
+static void* take_t2(size_t need, const char* what) {
+    auto slab = engine_arena().take_bytes(need);
+    if (slab.empty()) {
+        IMP_LOG_ERROR(
+            "CUTLASS 3x grouped: %s (%.2f MiB) unavailable from the T2 arena "
+            "(%.1f MiB free of %.1f MiB) — the grouped MoE GEMM will fail",
+            what, need / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0),
+            engine_arena().capacity() / (1024.0 * 1024.0));
+        return nullptr;
+    }
+    return slab.data();
+}
+
 static void ensure_staging(size_t need) {
     if (need <= s_staging_sz)
         return;
-    if (s_staging)
-        IMP_CUDA_CHECK_LOG(cudaFree(s_staging));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_staging, need));
-    s_staging_sz = need;
+    if (void* p = take_t2(need, "staging")) {
+        s_staging = p;
+        s_staging_sz = need;
+    }
 }
 
 static void ensure_workspace(size_t need) {
     if (need <= s_workspace_sz)
         return;
-    if (s_workspace)
-        IMP_CUDA_CHECK_LOG(cudaFree(s_workspace));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_workspace, need));
-    s_workspace_sz = need;
+    if (s_workspace_sz > 0) {
+        // The prewarm's measured reserve went stale — a CUTLASS bump, or a
+        // shape class the 2026-07-31 sweep did not cover. Recoverable (the
+        // take below serves it out of the arena's slack) but it strands the
+        // old slab, so it must not pass silently.
+        IMP_LOG_WARN(
+            "CUTLASS 3x grouped: workspace grew %zu -> %zu B past the measured reserve "
+            "— re-measure kGrouped3xWorkspaceBytes",
+            s_workspace_sz, need);
+    }
+    if (void* p = take_t2(need, "GEMM workspace")) {
+        s_workspace = p;
+        s_workspace_sz = need;
+    }
 }
 
 void gemm_grouped_3x_nvfp4_prewarm() {
     if (!cutlass_grouped_3x_nvfp4_available()) return;
-    // Conservative caps: covers any realistic prefill shape so the lazy
-    // cudaMalloc paths inside gemm_grouped_cutlass_3x_nvfp4{_device_args}
-    // never fire — including under stream capture where cudaMalloc is
-    // illegal. Sized for top-end MoE: 512 experts × 8 KiB/expert struct
-    // packing = 1 MiB staging; 512 MiB workspace covers CUTLASS scratch
-    // even for very large grouped problems.
-    ensure_staging(1ULL << 20);     // 1 MiB
-    ensure_workspace(512ULL << 20);  // 512 MiB
+    // Staging: the per-group struct-of-arrays block, ~200 B per expert against
+    // a hard n_experts <= 256 — 1 MiB is 20x the worst case.
+    //
+    // Workspace: MEASURED, not guessed. This used to reserve 512 MiB "to cover
+    // CUTLASS scratch even for very large grouped problems"; instrumenting
+    // GrpGemm::get_workspace_size() across three MoE geometries
+    // (ne=128 N=768 K=2048, ne=256 N=512 K=2048, ne=128 N=1856 K=2688) and
+    // prefills from 130 to 2800 tokens returned the same 152 320 B every time
+    // — 170 SMs x 896 B of persistent-scheduler state, which is a property of
+    // the CHIP and not of the problem. The old number was 3500x the real one
+    // and it was resident for the life of every MoE process (AUDIT B73).
+    // 1 MiB keeps ~7x headroom for a CUTLASS bump; more than that and
+    // ensure_workspace() grows into the arena's alignment slack and says so.
+    ensure_staging(kGrouped3xStagingBytes);
+    ensure_workspace(kGrouped3xWorkspaceBytes);
 }
 
 bool gemm_grouped_cutlass_3x_nvfp4(int n_experts, const int* host_M, int N, int K,
@@ -339,16 +376,12 @@ bool gemm_grouped_cutlass_3x_nvfp4(int n_experts, const int* host_M, int N, int 
 }
 
 void gemm_grouped_3x_nvfp4_cleanup() {
-    if (s_staging) {
-        IMP_CUDA_CHECK_LOG(cudaFree(s_staging));
-        s_staging = nullptr;
-        s_staging_sz = 0;
-    }
-    if (s_workspace) {
-        IMP_CUDA_CHECK_LOG(cudaFree(s_workspace));
-        s_workspace = nullptr;
-        s_workspace_sz = 0;
-    }
+    // Arena-owned since A7 step 8 — the T2 arena owns the region and ~Engine
+    // closes it. Re-arm the guards so the next prewarm takes a fresh slice.
+    s_staging = nullptr;
+    s_staging_sz = 0;
+    s_workspace = nullptr;
+    s_workspace_sz = 0;
     if (s_gemm) {
         delete s_gemm;
         s_gemm = nullptr;
