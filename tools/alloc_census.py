@@ -14,17 +14,26 @@ What it cannot do, stated so nobody reads more into the output than is there.
 It matches on the TEXT of the allocated expression, which fails in both
 directions, and the two worked examples are in the tree today:
 
-  - FALSE MERGE. `d_token_allow_` reports as one family across four files. It is
-    four *different* buffers — grammar_constrain.h:94, regex_constrain.h:101,
-    json_constrain.h:172 and schema_constrain.h:215 each declare their own
-    member of that name. Sibling classes with identical member names are the
-    common case in this codebase, so **a cross-file row is a hypothesis to
-    check, not a finding**. `d_block_tables` is the opposite case: genuinely one
-    buffer, threaded through four files, verified by hand in B59.
-  - FALSE SPLIT. A buffer renamed between its acquisition and its release
-    splits into two families. B59 hit exactly that: `d_bt` is acquired as a
-    local in engine_graph_decode.cpp and freed as `async_d_block_tables_` in
-    three other files. No textual tool can join them.
+  - FALSE MERGE. `d_token_allow_` reports as one family across four files and is
+    four *different* buffers — grammar/regex/json/schema_constrain.h each declare
+    their own member of that name. Sibling classes with identical member names
+    are the common case here.
+  - FALSE SPLIT. A buffer renamed between acquisition and release splits in two.
+    `d_bt` is acquired as a local in engine_graph_decode.cpp and freed as
+    `async_d_block_tables_` in three other files (B59).
+
+Both are now DETECTED rather than warned about, by counting the files that
+*declare* the name:
+
+    >1 declaration          -> same-named siblings, not one buffer
+    1 declaration, 0 acq    -> the other half is spelled differently
+    1 declaration, acq > 0  -> genuinely threaded through those files
+
+That check corrected this tool's own first version, which asserted
+`d_block_tables` was "genuinely one buffer, verified by hand". It is declared
+three times (two locals plus a struct member in batch.h) and is a false merge
+like the rest; what B59 verified by hand was the differently-named
+`async_d_block_tables_` half.
 
 It also says nothing about lifetime or hot-path-ness. Criterion 3 already
 measures that (0 allocations while serving); this is about ownership.
@@ -64,6 +73,14 @@ CALL = re.compile(
     re.S)
 ANY_CALL = re.compile(r"\b(" + "|".join(ACQUIRE + RELEASE) + r")\s*\(")
 COMMENT = re.compile(r"^\s*(//|\*|/\*)")
+
+# A declaration of the name: a type-ish run, the name, then `=`, `;` or `[`.
+# Counting the FILES that declare a name is what separates "one buffer threaded
+# through several files" from "several classes that happen to use the same member
+# name" — the tool cannot tell them apart from the calls alone, and guessing
+# wrong sends a migration at a coincidence.
+def declaration_re(name: str) -> re.Pattern:
+    return re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:<>,*&\s]*\b" + re.escape(name) + r"\b\s*(=|;|\[)")
 
 # Container prefixes that say where a buffer lives, not what it is. Stripping
 # them is what merges `ws.h_expert_indices` and `ctx.h_expert_indices` into one
@@ -145,6 +162,20 @@ def scan():
     return fams
 
 
+def declaring_files(name: str) -> list[str]:
+    pat = declaration_re(name)
+    out = []
+    for path in sorted(SRC.rglob("*")):
+        if path.suffix not in SUFFIXES or not path.is_file():
+            continue
+        rel = path.relative_to(REPO).as_posix()
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if pat.match(line):
+                out.append(rel)
+                break
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", action="store_true",
@@ -182,12 +213,27 @@ def main() -> int:
             print(f"      {f}:{n}")
     print(f"{'total':>5} {'acq':>4} {'rel':>4} {'files':>5}  buffer")
     for total, a, r, nfiles, name, sites in rows[:args.top]:
-        mark = "  <- cross-file: verify, may be same-named siblings" if nfiles > 1 else ""
+        bare = name.split("  [")[0]
+        decls = declaring_files(bare) if nfiles > 1 else []
+        mark = ""
+        if nfiles > 1:
+            if len(decls) > 1:
+                mark = f"  <- {len(decls)} declarations: SAME-NAMED SIBLINGS, not one buffer"
+            elif a == 0:
+                # One declaration, releases but no acquisition: the buffer is
+                # acquired under a different spelling and this family is one
+                # half of it. B59's case — `d_bt` acquired as a local, freed as
+                # `async_d_block_tables_`.
+                mark = "  <- one declaration, 0 acquisitions: OTHER HALF NAMED DIFFERENTLY"
+            else:
+                mark = "  <- one declaration: genuinely threaded"
         print(f"{total:5d} {a:4d} {r:4d} {nfiles:5d}  {name}{mark}")
         if nfiles > 1:
             where = collections.Counter(f for f, _ in sites["acquire"] + sites["release"])
             for f, c in where.most_common():
                 print(f"{'':22}{c:3d}  {f}")
+            for d in decls:
+                print(f"{'':22}decl  {d}")
     return 0
 
 
