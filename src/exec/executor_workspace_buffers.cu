@@ -49,19 +49,40 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         const size_t kva_out = static_cast<size_t>(cfg.kv_lora_rank + cfg.qk_rope_head_dim);
         const size_t kvb_out =
             static_cast<size_t>(cfg.n_heads) * (cfg.qk_nope_head_dim + cfg.v_head_dim);
+        // T2 (A7 step 4b.2), charged as `mla_scratch`. This quartet is the one
+        // tenant in this file with NO degradation contract: the two-step KV
+        // projection in executor_attention_qkv.cu dereferences all four
+        // unconditionally (cudaMemcpy2DAsync out of kv_a, GEMMs into kv_b), so a
+        // null is a device fault a few milliseconds later rather than a slower
+        // path. The pre-arena code logged an error and handed the null on
+        // anyway. It now FAILS THE LOAD instead: with the arena sized from
+        // exec_t2_demand, a member that cannot be served means the plan was
+        // wrong, and I6 says that is a typed refusal at load — not a downgrade
+        // and not a crash (docs/MEMORY_ARCHITECTURE.md B5 point 2).
+        bool mla_ok = true;
         auto alloc = [&](void** p, size_t cols, const char* name) {
             size_t sz = T * cols * sizeof(half);
-            cudaError_t e = cudaMalloc(p, sz);
-            if (e != cudaSuccess) {
-                IMP_LOG_ERROR("Failed to allocate MLA scratch %s (%.1f MiB): %s", name,
-                              sz / (1024.0 * 1024.0), cudaGetErrorString(e));
+            auto slab = engine_arena().take_bytes(sz);
+            if (slab.empty()) {
+                IMP_LOG_ERROR("MLA scratch %s (%.1f MiB) unavailable from the T2 arena "
+                              "(%.1f MiB of %.1f MiB still free) — the plan under-reserved",
+                              name, sz / (1024.0 * 1024.0),
+                              engine_arena().remaining() / (1024.0 * 1024.0),
+                              engine_arena().capacity() / (1024.0 * 1024.0));
                 *p = nullptr;
+                mla_ok = false;
+                return;
             }
+            *p = slab.data();
         };
         alloc(&mla_kv_a_buf_, kva_out, "kv_a");
         alloc(&mla_latent_buf_, static_cast<size_t>(cfg.kv_lora_rank), "latent");
         alloc(&mla_k_rope_buf_, static_cast<size_t>(cfg.qk_rope_head_dim), "k_rope");
         alloc(&mla_kv_b_buf_, kvb_out, "kv_b");
+        if (!mla_ok) {
+            mla_scratch_unservable_ = true;
+            return;
+        }
         IMP_LOG_INFO("MLA QKV scratch: kv_a+latent+k_rope+kv_b for max_tokens=%d (graph-safe)",
                      max_tokens_);
 
@@ -89,15 +110,24 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     static_cast<size_t>(cfg.n_layers) * mla_absorb_layer_stride_ * sizeof(half);
                 size_t scores_bytes =
                     static_cast<size_t>(cfg.n_heads) * mla_absorb_max_seq_ * sizeof(float);
-                cudaError_t e1 = cudaMalloc(&mla_absorb_cache_, cache_bytes);
-                cudaError_t e2 = cudaMalloc(&mla_absorb_scores_, scores_bytes);
-                if (e1 != cudaSuccess || e2 != cudaSuccess) {
-                    IMP_LOG_ERROR("attention.mla_absorb: latent cache alloc failed (%.1f MiB) — "
-                                  "falling back to materialized.",
+                // Same tier, opposite contract to the quartet above: both
+                // consumers (executor_attention.cu's cache write, the absorbed
+                // decode kernel) test mla_absorb_cache_ for null and take the
+                // materialized path, so this one degrades and must not fail the
+                // load. exec_t2_demand charges it only when the opt-in flag is
+                // set — it is n_layers x FULL max_seq wide, ~1 GiB at ctx 32k
+                // against the quartet's tens of MiB.
+                auto cache_slab = engine_arena().take_bytes(cache_bytes);
+                auto scores_slab = engine_arena().take_bytes(scores_bytes);
+                if (cache_slab.empty() || scores_slab.empty()) {
+                    IMP_LOG_ERROR("attention.mla_absorb: latent cache (%.1f MiB) unavailable from "
+                                  "the T2 arena — falling back to materialized.",
                                   cache_bytes / (1024.0 * 1024.0));
-                    if (mla_absorb_cache_) { cudaFree(mla_absorb_cache_); mla_absorb_cache_ = nullptr; }
-                    if (mla_absorb_scores_) { cudaFree(mla_absorb_scores_); mla_absorb_scores_ = nullptr; }
+                    mla_absorb_cache_ = nullptr;
+                    mla_absorb_scores_ = nullptr;
                 } else {
+                    mla_absorb_cache_ = cache_slab.data();
+                    mla_absorb_scores_ = reinterpret_cast<float*>(scores_slab.data());
                     // VRAM comparison vs the materialized per-token KV footprint.
                     const size_t mat_per_tok =
                         static_cast<size_t>(cfg.n_heads) *
@@ -1359,14 +1389,16 @@ void GraphExecutor::free_buffers() {
         lm_head_cutlass_ = {};
         lm_head_cutlass_ready_ = false;
     }
-    if (mla_absorb_cache_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(mla_absorb_cache_));
-        mla_absorb_cache_ = nullptr;
-    }
-    if (mla_absorb_scores_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(mla_absorb_scores_));
-        mla_absorb_scores_ = nullptr;
-    }
+    // The MLA quartet and the absorbed cache are arena-owned since A7 step 4b.2 —
+    // no frees here; ~Engine closes the arena after every executor teardown. The
+    // quartet never had one to begin with, which nothing noticed because they are
+    // process-lifetime buffers.
+    mla_kv_a_buf_ = nullptr;
+    mla_latent_buf_ = nullptr;
+    mla_k_rope_buf_ = nullptr;
+    mla_kv_b_buf_ = nullptr;
+    mla_absorb_cache_ = nullptr;
+    mla_absorb_scores_ = nullptr;
     if (d_sample_result_) {
         // Arena-owned since A7 step 4b.2 — no free here; ~Engine closes the arena
         // after every executor teardown.

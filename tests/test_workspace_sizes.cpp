@@ -199,7 +199,7 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     ExecShape s = dense_shape();
     const ExecT2Demand d = exec_t2_demand(s, 1024);
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
-                             d.fp8_reduction + d.quant_scratch + d.splitk_scratch);
+                             d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch);
     EXPECT_GT(d.total(), 0u);
 }
 
@@ -271,6 +271,59 @@ TEST(ExecT2Demand, PrefillPairIsChargedOnlyForSub5BitDenseAndCapsAtM64) {
         << "the dp4a dense prefill kernel is not taken above M=64, so neither is the reservation";
     // And at max_tokens == 1 (decode-only sizing) the pair is not charged at all.
     EXPECT_EQ(exec_t2_demand(s, 1).quant_scratch, without);
+}
+
+// MLA is DeepSeek-only, and kv_lora_rank > 0 IS the predicate (model_config.h).
+// The quartet follows max_tokens; every other model must be charged zero, or every
+// non-MLA load reserves arena for a path it cannot take.
+TEST(ExecT2Demand, MlaQuartetIsChargedOnlyForAnMlaShapeAndFollowsMaxTokens) {
+    ExecShape s = dense_shape();
+    EXPECT_EQ(exec_t2_demand(s, 1024).mla_scratch, 0u) << "a dense model has no MLA scratch";
+
+    s.n_heads = 16;
+    s.kv_lora_rank = 512;
+    s.qk_rope_head_dim = 64;
+    s.qk_nope_head_dim = 128;
+    s.v_head_dim = 128;
+    // T * 2 bytes * (kva_out + kv_lora_rank + rope + kvb_out), kva_out = 576,
+    // kvb_out = 16 * (128 + 128) = 4096.
+    const size_t expect = 1024ull * 2 * (576 + 512 + 64 + 4096) + 4 * 256;
+    EXPECT_EQ(exec_t2_demand(s, 1024).mla_scratch, expect);
+
+    // kv_b dominates through n_heads, so a wider head count must move the term.
+    ExecShape wide = s;
+    wide.n_heads = 128;
+    EXPECT_GT(exec_t2_demand(wide, 1024).mla_scratch, exec_t2_demand(s, 1024).mla_scratch * 4);
+}
+
+// The absorbed latent cache is the term that can reach a GiB, and it is sized from
+// mla_absorb_max_seq_ — the FULL sequence length, deliberately uncapped where
+// max_tokens_ clamps at 4096. Charging it from max_tokens would under-reserve 8x
+// at a 32k context, which is the #1103 failure class.
+TEST(ExecT2Demand, MlaAbsorbCacheIsOptInAndSizedFromTheFullSequenceNotMaxTokens) {
+    ExecShape s = dense_shape();
+    s.n_heads = 16;
+    s.n_layers = 27;
+    s.kv_lora_rank = 512;
+    s.qk_rope_head_dim = 64;
+    s.qk_nope_head_dim = 128;
+    s.v_head_dim = 128;
+
+    const size_t off = exec_t2_demand(s, 32768).mla_scratch;
+    s.mla_absorb = true;
+    const size_t on = exec_t2_demand(s, 32768).mla_scratch;
+
+    const size_t cache = 27ull * 32768 * 576 * 2;   // n_layers x max_seq x row_w, fp16
+    const size_t scores = 16ull * 32768 * sizeof(float);
+    EXPECT_EQ(on - off, cache + scores + 2 * 256);
+    EXPECT_GT(on - off, 900ull * 1024 * 1024)
+        << "974 MiB on a 27-layer DeepSeek at ctx 32k — the one tenant here at that scale";
+
+    // max_tokens caps at 4096, so a term sized from it would be 8x too small here.
+    EXPECT_GT(on - off, 8ull * 27 * 4096 * 576 * 2 - 1);
+
+    // And it follows the context, unlike the quartet.
+    EXPECT_LT(exec_t2_demand(s, 4096).mla_scratch, on);
 }
 
 TEST(ExecT2Demand, SplitkFollowsHeadsBatchAndContextAndCapsAt128Splits) {

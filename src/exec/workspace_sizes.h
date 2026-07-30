@@ -70,6 +70,14 @@ struct ExecShape {
     int mmvq_max_expert_down_k = 0;  // max expert_down_packed shape[2], 0 when dense
     int n_experts_active = 0;        // top_k; the MoE down projection quantizes that many
     bool has_sub5bit_dense = false;  // any dense Q4_K/Q5_K weight — gates the prefill pair
+    // MLA (DeepSeek) QKV scratch, and the opt-in absorbed-decode latent cache.
+    // n_layers is only read by the absorb term, which is per-layer.
+    int n_layers = 0;
+    int kv_lora_rank = 0;  // > 0 IS the is_mla() predicate (model_config.h)
+    int qk_rope_head_dim = 0;
+    int qk_nope_head_dim = 0;
+    int v_head_dim = 0;
+    bool mla_absorb = false;  // runtime_config().attention.mla_absorb
 };
 
 // Replicated constants, pinned against their definitions by static_asserts in
@@ -99,10 +107,14 @@ struct ExecT2Demand {
     size_t quant_scratch = 0;
     // Split-K paged-attention partials: max_batch x n_heads x splits x (2+hd).
     size_t splitk_scratch = 0;
+    // MLA QKV scratch (kv_a + latent + k_rope + kv_b), plus the absorbed-decode
+    // latent cache and its score scratch when attention.mla_absorb is on. Zero on
+    // every non-MLA model, which is every model except DeepSeek's.
+    size_t mla_scratch = 0;
 
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction +
-               quant_scratch + splitk_scratch;
+               quant_scratch + splitk_scratch + mla_scratch;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather
@@ -123,10 +135,12 @@ int exec_max_tokens(const Model& model, int max_seq_len);
 // Largest logical K across the weight tensors the MMVQ / dequant paths see.
 int exec_max_weight_k(const Model& model);
 
-// The batch is an engine decision, not a model fact, and the sampling scratch is
-// sized from it — so the caller passes it rather than assembling an ExecShape.
+// The batch, the FP8 prefill decision and attention.mla_absorb are engine and
+// runtime-config facts, not model facts, and three tenants are sized from them —
+// so the caller passes them rather than this header reaching for a global (there
+// is no process-global RuntimeConfig; it is per-Engine by design).
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size,
-                            bool use_fp8_prefill);
+                            bool use_fp8_prefill, bool mla_absorb = false);
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size);
 
 // Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).
