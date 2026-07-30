@@ -56,12 +56,14 @@
 
 #include <gtest/gtest.h>
 #include "compute/gemm_cutlass_grouped_3x.h"
+#include "scoped_engine_arena.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <random>
@@ -193,6 +195,9 @@ static void free_expert(SyntheticExpert& e) {
 class CutlassGroupedRefTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // T2 arena — the grouped path's staging + workspace come from it
+        // (A7 step 8); Engine::init opens it in production, nothing does here.
+        arena_ = std::make_unique<ScopedEngineArena>();
         cudaStreamCreate(&stream_);
         int dev = 0;
         cudaGetDevice(&dev);
@@ -204,7 +209,9 @@ protected:
     void TearDown() override {
         cudaStreamDestroy(stream_);
         gemm_grouped_3x_nvfp4_cleanup();
+        arena_.reset();
     }
+    std::unique_ptr<ScopedEngineArena> arena_;
     cudaStream_t stream_ = nullptr;
     int sm_ = 0;
 

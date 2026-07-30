@@ -4,12 +4,14 @@
 
 #include <gtest/gtest.h>
 #include "compute/gemm_cutlass_grouped_3x.h"
+#include "scoped_engine_arena.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <random>
@@ -20,6 +22,9 @@ namespace {
 class CutlassGrouped3xNvfp4Test : public ::testing::Test {
 protected:
     void SetUp() override {
+        // The grouped path takes its staging + workspace from the T2 arena
+        // (A7 step 8), which Engine::init opens in production. No Engine here.
+        arena_ = std::make_unique<ScopedEngineArena>();
         cudaStreamCreate(&stream_);
         int dev = 0;
         cudaGetDevice(&dev);
@@ -31,7 +36,9 @@ protected:
     void TearDown() override {
         cudaStreamDestroy(stream_);
         gemm_grouped_3x_nvfp4_cleanup();
+        arena_.reset();
     }
+    std::unique_ptr<ScopedEngineArena> arena_;
     cudaStream_t stream_ = nullptr;
     int sm_ = 0;
 };

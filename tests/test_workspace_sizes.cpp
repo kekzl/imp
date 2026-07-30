@@ -200,8 +200,51 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     const ExecT2Demand d = exec_t2_demand(s, 1024);
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
                              d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
-                             d.dry_penalty);
+                             d.dry_penalty + d.cublas_workspace + d.grouped3x);
     EXPECT_GT(d.total(), 0u);
+}
+
+// The CUTLASS grouped staging + workspace. engine.cpp gates the prewarm on
+// profile().is_moe, so the charge has to carry the same gate — charging it for
+// every model would reserve 2 MiB a dense model can never reach, and NOT
+// charging it for a MoE model is the #1103 failure class.
+TEST(ExecT2Demand, Grouped3xIsChargedForMoeModelsOnly) {
+    ExecShape dense = dense_shape();
+    EXPECT_EQ(exec_t2_demand(dense, 1024).grouped3x, 0u);
+
+    ExecShape moe = dense_shape();
+    moe.is_moe = true;
+    moe.n_experts = 128;
+    const size_t charged = exec_t2_demand(moe, 1024).grouped3x;
+    EXPECT_GE(charged, kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes);
+
+    // It follows the prewarm, which takes a fixed pair — not the expert count.
+    moe.n_experts = 256;
+    EXPECT_EQ(exec_t2_demand(moe, 1024).grouped3x, charged);
+
+    // And it is nowhere near the 512 MiB the pre-arena prewarm reserved: that
+    // number was 3500x the measured 152 320 B requirement (AUDIT B73).
+    EXPECT_LT(charged, 8ull * 1024 * 1024);
+}
+
+// The cuBLASLt workspace and the algo-bench scratch (A7 step 8). Unlike every
+// other tenant these are NOT derived from the shape — cuBLASLt is handed a
+// ceiling and picks algos that fit under it — so the thing worth pinning is
+// that the charge exists for every model and does not quietly track something.
+TEST(ExecT2Demand, CublasWorkspaceIsChargedAndShapeIndependent) {
+    const ExecT2Demand dense = exec_t2_demand(dense_shape(), 1024);
+    EXPECT_GE(dense.cublas_workspace, kExecCublasWorkspaceBytes + kExecBenchScratchBytes);
+
+    ExecShape big = dense_shape();
+    big.max_seq_len_cfg = 131072;
+    big.weights = {{16384, 16384}};
+    big.max_batch_size = 32;
+    EXPECT_EQ(exec_t2_demand(big, 131072).cublas_workspace, dense.cublas_workspace);
+
+    // And it is a real part of the reservation, not a rounding term: the arena
+    // Engine::init opens must cover gemm_init()'s take or the ladder in
+    // gemm.cu steps down and cuBLASLt loses its good algos.
+    EXPECT_GT(dense.total(), kExecCublasWorkspaceBytes + kExecBenchScratchBytes);
 }
 
 // The dp4a staging family. Its max-K scan is NOT exec_max_weight_k's: the site

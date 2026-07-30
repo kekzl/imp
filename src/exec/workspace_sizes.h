@@ -84,6 +84,13 @@ struct ExecShape {
 // executor_workspace_buffers.cu. They live here so this stays CUDA-free.
 constexpr size_t kExecBlockQ81Bytes = 48;  // sizeof(block_q8_1), compute/gemm.h
 constexpr int kExecKVBlockSize = 16;       // kKVBlockSize, memory/kv_cache.h
+// kGemmCublasWorkspaceBytes + kGemmBenchScratchBytes, compute/gemm.h.
+constexpr size_t kExecCublasWorkspaceBytes = 64ull << 20;
+constexpr size_t kExecBenchScratchBytes = 32ull << 20;
+// kGrouped3xStagingBytes + kGrouped3xWorkspaceBytes,
+// compute/gemm_cutlass_grouped_3x.h.
+constexpr size_t kExecGrouped3xStagingBytes = 1ull << 20;
+constexpr size_t kExecGrouped3xWorkspaceBytes = 1ull << 20;
 
 struct ExecT2Demand {
     // MMVQ (Q8_1-input GEMV) scratch: max_tokens * ceil(maxK/32) * 36 * 2.
@@ -114,10 +121,21 @@ struct ExecT2Demand {
     // latent cache and its score scratch when attention.mla_absorb is on. Zero on
     // every non-MLA model, which is every model except DeepSeek's.
     size_t mla_scratch = 0;
+    // The cuBLASLt workspace and the algo-selection bench scratch that
+    // gemm_init() takes (compute/gemm.cu). A fixed 96 MiB, independent of the
+    // model: cuBLASLt's workspace is a ceiling offered to its heuristic, not a
+    // shape-derived size. Charged unconditionally because gemm_init() runs for
+    // every model, encoder-only included.
+    size_t cublas_workspace = 0;
+    // CUTLASS 3.x grouped-GEMM staging + workspace (compute/gemm_cutlass_grouped_3x.cu),
+    // taken by gemm_grouped_3x_nvfp4_prewarm(). MoE models only — engine.cpp
+    // gates the prewarm on profile().is_moe, and a model without experts cannot
+    // reach the grouped path at all.
+    size_t grouped3x = 0;
 
     size_t total() const {
-        return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction +
-               quant_scratch + splitk_scratch + mla_scratch + dry_penalty;
+        return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction + quant_scratch +
+               splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather

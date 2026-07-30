@@ -12,6 +12,7 @@
 // cliff that fix removed.
 
 #include "compute/gemm.h"
+#include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
@@ -633,4 +634,65 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     cudaFree(d_y);
     cudaFree(d_w_dequant);
     cudaFree(d_y_ref);
+}
+
+// ---------------------------------------------------------------------------
+// The contract that let A7 step 8 delete the lazy CUTLASS workspace growth.
+//
+// The GEMM used to cudaFree+cudaMalloc a file-scope workspace at GEMM time
+// whenever the caller's buffer was too small — on a path reachable under
+// CUDA-graph capture, where cudaMalloc is illegal. It now refuses instead, and
+// the caller falls back to the dequant path. That is only a non-event if no
+// call can actually need more than its caller reserved.
+//
+// Two of the three callers ask ..._workspace() for the EXACT shape they then
+// pass, so they are safe by construction. The third — allocate_auxiliary_buffers
+// in exec/executor_workspace_buffers.cu — sizes ONCE at (max_tokens, max_n,
+// max_k) and reuses that for every smaller call, which needs the property below.
+// It is not obviously true: the NVFP4 entry point switches KERNEL at N <= 2048
+// (small-N pingpong vs cooperative), so a smaller N is a different kernel and
+// not merely a smaller problem.
+// ---------------------------------------------------------------------------
+TEST(CutlassWorkspaceContract, MaxShapeSizingCoversEverySmallerCall) {
+    // A generous stand-in for the executor's max shape: 4096 tokens is the
+    // max_tokens cap, and N/K above any hero model's projections.
+    const int max_m = 4096, max_n = 8192, max_k = 8192;
+    const size_t nv_at_max = gemm_nvfp4_cutlass_sm120_workspace(max_m, max_n, max_k);
+    const size_t mx_at_max = gemm_mxfp4_cutlass_sm120_workspace(max_m, max_n, max_k);
+
+    for (int m : {1, 8, 512, 2048, 4096}) {
+        for (int n : {1024, 2048, 2049, 5120, 8192}) {  // straddles kSmallNThreshold
+            for (int k : {512, 2048, 5120, 8192}) {
+                EXPECT_LE(gemm_nvfp4_cutlass_sm120_workspace(m, n, k), nv_at_max)
+                    << "NVFP4 M=" << m << " N=" << n << " K=" << k
+                    << " needs more workspace than the max shape the executor sizes for — "
+                       "the refusal path would fire and drop this GEMM to dequant";
+                EXPECT_LE(gemm_mxfp4_cutlass_sm120_workspace(m, n, k), mx_at_max)
+                    << "MXFP4 M=" << m << " N=" << n << " K=" << k;
+            }
+        }
+    }
+    // Report the absolute numbers: if these ever leave 0, the executor starts
+    // allocating a real buffer and the sizing above starts doing real work.
+    fprintf(stderr, "[WS] nvfp4 max-shape workspace=%zu B, mxfp4=%zu B\n", nv_at_max, mx_at_max);
+}
+
+// The FP32 LM-head variant has NO caller-supplied workspace at all: both
+// executor_forward.cu and executor_perplexity.cu call
+// gemm_nvfp4_cutlass_sm120_fp32(..., /*workspace=*/nullptr, /*size=*/0, ...).
+// Before A7 step 8 that was served by the static grow path; with the grow path
+// deleted, a non-zero requirement would make the LM head refuse on EVERY decode
+// step and silently drop to the batched GEMV — correct output, worse decode.
+// So this variant does not merely need to be covered by a max shape, it needs
+// to be exactly zero.
+TEST(CutlassWorkspaceContract, Fp32LmHeadVariantNeedsNoWorkspaceAtAll) {
+    for (int m : {1, 4, 8, 65, 512, 4096}) {
+        for (int vocab : {32000, 151936, 262144}) {
+            for (int d_model : {2048, 4096, 5120, 8192}) {
+                EXPECT_EQ(gemm_nvfp4_cutlass_sm120_fp32_workspace(m, vocab, d_model), 0u)
+                    << "LM head M=" << m << " vocab=" << vocab << " d_model=" << d_model
+                    << " wants workspace, but its call sites pass none";
+            }
+        }
+    }
 }

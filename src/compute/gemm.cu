@@ -5,6 +5,7 @@
 #include "compute/gemm_internal.cuh"
 #include "core/logging.h"
 #include "core/tensor_kind.h"
+#include "memory/engine_arena.h"
 #include "runtime/pdl.h"
 #include "runtime/process_diag.h"
 
@@ -77,39 +78,61 @@ static cublasLtHandle_t get_cublaslt_handle() {
 }
 
 // ---------------------------------------------------------------------------
-// Static workspace for cuBLASLt — allocated once via gemm_init(), shared by
-// all GEMM calls.  Avoids per-call cudaMalloc which fails when GPU memory is
-// saturated (e.g. 30B MoE models on 32 GB cards).
+// Shared workspace for cuBLASLt — taken once from the engine-persistent (T2)
+// arena via gemm_init(), used by all GEMM calls.  cuBLASLt takes the workspace
+// as an argument, so ONE slice sized at the plan's maximum serves every call:
+// per-handle would multiply it by handle count for no benefit
+// (docs/MEMORY_ARCHITECTURE.md A5.3).
 // ---------------------------------------------------------------------------
 static void* s_workspace = nullptr;
 static size_t s_workspace_size = 0;
 
-// Static benchmark scratch buffer for algo selection (allocated once in gemm_init).
-// Avoids per-cache-miss cudaMalloc/cudaFree which fragment GPU memory.
+// Bench scratch for algo selection — the C buffer the candidate algos write
+// while being timed. Also T2: the alternative is a cudaMalloc/cudaFree per
+// cache miss, which fragments and can run while serving.
 static void* s_bench_scratch = nullptr;
 static size_t s_bench_scratch_size = 0;
-static constexpr size_t kBenchScratchSize = 32ULL << 20;  // 32 MiB
 
 void gemm_init() {
     // Force handle creation early.
     get_cublas_handle();
     get_cublaslt_handle();
 
-    // Pre-allocate cuBLASLt workspace while GPU memory is still available.
+    // T2 (A7 step 8). Both buffers are engine-lifetime and both already
+    // DEGRADE cleanly to null — a 0-byte workspace makes cuBLASLt's heuristic
+    // return only algos that need none, and a null bench scratch skips the
+    // timing loop and takes the heuristic's first choice. That is why they can
+    // leave the I1 allowlist outright instead of keeping a cudaMalloc fallback
+    // the gate cannot see (AUDIT B47). Outside an Engine — the GPU test
+    // binaries call gemm_init() directly — the arena is not open, take_bytes()
+    // returns empty, and both stay null.
     if (!s_workspace) {
+        // The size ladder is kept from the pre-arena code, but it now degrades
+        // against the ARENA rather than against free VRAM: exec_t2_demand
+        // charges the full kGemmCublasWorkspaceBytes, so anything below it
+        // means the plan under-reserved, which is worth a line in the log
+        // rather than a silent halving.
         constexpr size_t kTrySizes[] = {
-            64ULL << 20,  // 64 MiB — RTX 5090 (32 GB) has headroom
-            32ULL << 20,  // 32 MiB
-            8ULL << 20,   //  8 MiB
-            2ULL << 20,   //  2 MiB
+            kGemmCublasWorkspaceBytes,  // 64 MiB — the charged size
+            32ULL << 20,                // 32 MiB
+            8ULL << 20,                 //  8 MiB
+            2ULL << 20,                 //  2 MiB
         };
         for (size_t sz : kTrySizes) {
-            cudaError_t err = cudaMalloc(&s_workspace, sz);
-            if (err == cudaSuccess) {
+            auto slab = engine_arena().take_bytes(sz);
+            if (!slab.empty()) {
+                s_workspace = slab.data();
                 s_workspace_size = sz;
                 break;
             }
-            s_workspace = nullptr;
+        }
+        if (s_workspace_size < kGemmCublasWorkspaceBytes && engine_arena().is_open()) {
+            IMP_LOG_WARN(
+                "cuBLASLt workspace: the T2 arena served %.1f MiB of the %.1f MiB charged "
+                "(%.1f MiB free of %.1f MiB) — GEMM algo choice is restricted",
+                s_workspace_size / (1024.0 * 1024.0), kGemmCublasWorkspaceBytes / (1024.0 * 1024.0),
+                engine_arena().remaining() / (1024.0 * 1024.0),
+                engine_arena().capacity() / (1024.0 * 1024.0));
         }
     }
 
@@ -118,10 +141,11 @@ void gemm_init() {
         cublasSetWorkspace(get_cublas_handle(), s_workspace, s_workspace_size);
     }
 
-    // Pre-allocate benchmark scratch buffer for algo selection.
     if (!s_bench_scratch) {
-        if (cudaMalloc(&s_bench_scratch, kBenchScratchSize) == cudaSuccess) {
-            s_bench_scratch_size = kBenchScratchSize;
+        auto slab = engine_arena().take_bytes(kGemmBenchScratchBytes);
+        if (!slab.empty()) {
+            s_bench_scratch = slab.data();
+            s_bench_scratch_size = kGemmBenchScratchBytes;
         }
     }
 }
@@ -529,16 +553,13 @@ void gemm_reset_static_cuda_state() {
         (void)cublasLtDestroy(s_cublaslt_handle);
         s_cublaslt_handle = nullptr;
     }
-    if (s_workspace) {
-        (void)cudaFree(s_workspace);
-        s_workspace = nullptr;
-        s_workspace_size = 0;
-    }
-    if (s_bench_scratch) {
-        (void)cudaFree(s_bench_scratch);
-        s_bench_scratch = nullptr;
-        s_bench_scratch_size = 0;
-    }
+    // Arena-owned since A7 step 8 — the region belongs to the T2 arena, which
+    // ~Engine closes. Only the pointers are re-armed here, so the next
+    // gemm_init() takes a fresh slice.
+    s_workspace = nullptr;
+    s_workspace_size = 0;
+    s_bench_scratch = nullptr;
+    s_bench_scratch_size = 0;
 }
 
 // ---------------------------------------------------------------------------

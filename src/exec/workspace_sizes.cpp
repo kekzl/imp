@@ -59,13 +59,13 @@ void for_each_weight(const Model& model, F&& f) {
 
 std::string ExecT2Demand::describe() const {
     constexpr double kMiB = 1024.0 * 1024.0;
-    char buf[256];
+    char buf[320];
     std::snprintf(buf, sizeof(buf),
                   "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f + fp8red %.2f + quant %.2f "
-                  "+ splitk %.2f + mla %.1f + dry %.2f MiB",
-                  mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB,
-                  moe_arrays / kMiB, fp8_reduction / kMiB, quant_scratch / kMiB,
-                  splitk_scratch / kMiB, mla_scratch / kMiB, dry_penalty / kMiB);
+                  "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f MiB",
+                  mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, moe_arrays / kMiB,
+                  fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB, mla_scratch / kMiB,
+                  dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB);
     return buf;
 }
 
@@ -286,6 +286,22 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         const size_t slots = static_cast<size_t>(effective > 0 ? effective : 4096);
         out.dry_penalty = slots * (sizeof(int32_t) + sizeof(float)) + 2 * 256;
     }
+
+    // cuBLASLt workspace + algo-bench scratch (compute/gemm.cu, gemm_init()).
+    // Not a function of the shape at all — cuBLASLt is handed a workspace
+    // CEILING and picks algos that fit inside it, so the number is a policy
+    // choice (the pre-arena code tried 64 MiB and stepped down on failure).
+    // Charged for every model because gemm_init() is unconditional; the site
+    // still steps down if the arena cannot serve the full amount, and says so.
+    out.cublas_workspace = kExecCublasWorkspaceBytes + kExecBenchScratchBytes + 2 * 256;
+
+    // CUTLASS 3.x grouped staging + workspace, for MoE models only — the same
+    // gate engine.cpp puts on the prewarm. The workspace half is a MEASURED
+    // 152 320 B rounded to 1 MiB, not the 512 MiB the pre-arena code reserved
+    // (AUDIT B73); the demand is what makes the smaller number safe, because
+    // the arena reserves it before the pre-dequant caches can spend it.
+    if (shape.is_moe)
+        out.grouped3x = kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes + 2 * 256;
 
     // MLA QKV scratch (executor_workspace_buffers.cu). kv_lora_rank > 0 IS
     // is_mla(). The quartet is sized for max_tokens and, unlike every other tenant

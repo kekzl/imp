@@ -6,6 +6,14 @@
 
 namespace imp {
 
+// The cuBLASLt workspace and the algo-selection bench scratch. Both are taken
+// from the engine-persistent (T2) arena by gemm_init() (A7 step 8) and are
+// charged in exec_t2_demand as `cublas_workspace`, so Engine::init reserves
+// them before anything else can spend the free VRAM they need. Exported so the
+// demand function's replicated copies can be static_asserted against them.
+inline constexpr size_t kGemmCublasWorkspaceBytes = 64ull << 20;  // 64 MiB
+inline constexpr size_t kGemmBenchScratchBytes = 32ull << 20;     // 32 MiB
+
 // Pre-initialize cuBLAS handle and workspace. Call early (before weight upload)
 // to ensure workspace is allocated while GPU memory is available.
 void gemm_init();
