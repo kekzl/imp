@@ -26,6 +26,7 @@
 // captured graph across bursts, which is not in this change's scope.
 
 #include "memory/backend.h"
+#include "memory/host_pinned.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -44,20 +45,11 @@ class GraphSlotPool;
 constexpr size_t kGraphSlotSampleScratchBytes =
     sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
 
-// The pinned-host half of a slot. Backend covers device memory only, so this
-// is the matching seam for the mapped host buffers — and it is the reason the
-// whole pool is testable in the CPU lane rather than needing a GPU (A6).
-// The default implementation is cudaHostAlloc(cudaHostAllocMapped) +
-// cudaHostGetDevicePointer.
-class HostPinnedAllocator {
-public:
-    virtual ~HostPinnedAllocator() = default;
-    // On success writes the host pointer and its device-side view.
-    [[nodiscard]] virtual bool alloc(size_t bytes, void** out_host, void** out_device) = 0;
-    virtual void free(void* host) = 0;
-};
-
-HostPinnedAllocator& cuda_host_pinned_allocator();
+// The pinned-host half of a slot comes from T5's engine-persistent allocator
+// (memory/host_pinned.h). It used to be declared here; it moved out because it
+// is a tier, not a detail of this pool — 26 acquisition sites in 11 files were
+// waiting for it. Substituting it is still what makes this pool testable in the
+// CPU lane rather than needing a GPU (A6).
 
 // Capacities a slot is cut for. Requests beyond these fall back.
 struct GraphSlotCaps {
@@ -189,10 +181,8 @@ private:
     GraphSlotView carve_(int index) const;
 
     mutable std::mutex mu_;
-    Region region_;  // device side, one region for all slots
-    HostPinnedAllocator* host_alloc_ = nullptr;
-    void* host_base_ = nullptr;
-    void* host_device_base_ = nullptr;  // device view of host_base_
+    Region region_;      // device side, one region for all slots
+    PinnedBuffer host_;  // pinned+mapped host side, one allocation for all slots
     bool open_ = false;
     GraphSlotCaps caps_{};
     int num_slots_ = 0;

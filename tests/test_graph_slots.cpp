@@ -26,7 +26,7 @@ namespace {
 // is the same pointer, which is all the pool's arithmetic needs.
 class FakeHostPinned final : public HostPinnedAllocator {
 public:
-    bool alloc(size_t bytes, void** out_host, void** out_device) override {
+    bool alloc(size_t bytes, HostPinnedKind kind, void** out_host, void** out_device) override {
         if (fail_next_) {
             fail_next_ = false;
             return false;
@@ -35,9 +35,12 @@ public:
         if (!p)
             return false;
         bytes_ = bytes;
+        kind_ = kind;
         ++allocs_;
         *out_host = p;
-        *out_device = p;
+        // Only a mapped allocation has a device view, same as the real thing.
+        if (out_device)
+            *out_device = (kind == HostPinnedKind::Mapped) ? p : nullptr;
         return true;
     }
     void free(void* host) override {
@@ -49,12 +52,14 @@ public:
     int allocs() const { return allocs_; }
     int frees() const { return frees_; }
     size_t bytes() const { return bytes_; }
+    HostPinnedKind kind() const { return kind_; }
 
 private:
     bool fail_next_ = false;
     int allocs_ = 0;
     int frees_ = 0;
     size_t bytes_ = 0;
+    HostPinnedKind kind_ = HostPinnedKind::Plain;
 };
 
 GraphSlotCaps default_caps() {

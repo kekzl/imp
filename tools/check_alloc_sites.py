@@ -78,6 +78,14 @@ APIS = APIS_ACQUIRE + APIS_RELEASE
 # a '(' or '<' on the right so a mention in an identifier is not either.
 PATTERN = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS) + r")\s*[(<]")
 PATTERN_ACQUIRE = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS_ACQUIRE) + r")\s*[(<]")
+# The pinned-host subset of the acquisitions. Split out because a device arena
+# cannot serve them: `Backend` covers device memory only, so until T5's
+# engine-persistent half existed (memory/host_pinned.h) these sites had no tier
+# to move to at all — 26 of them in 11 files. Reporting them inside the device
+# count made the remaining work look uniform when it is two different jobs.
+APIS_HOST_ACQUIRE = ["cudaMallocHost", "cudaHostAlloc", "cudaHostRegister"]
+PATTERN_HOST_ACQUIRE = re.compile(
+    r"\b(" + "|".join(re.escape(a) for a in APIS_HOST_ACQUIRE) + r")\s*[(<]")
 PATTERN_RELEASE = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS_RELEASE) + r")\s*[(<]")
 
 # A line whose first non-space run starts a comment. Cheap and good enough:
@@ -180,19 +188,35 @@ def main() -> int:
         # and the halves need different work: an acquisition needs a tier to move
         # to, a release follows for free once the owner is a RAII type. Reporting
         # one number overstated the distance to criterion 2 by more than half.
-        acq = rel_ = 0
+        acq = rel_ = host_acq = 0
         only_release = []
+        host_files = []
         for relpath, lines in hits.items():
             text = (REPO / relpath).read_text(errors="ignore").splitlines()
-            a = sum(len(PATTERN_ACQUIRE.findall(t)) for t in text
-                    if not t.strip().startswith("//"))
-            r = sum(len(PATTERN_RELEASE.findall(t)) for t in text
-                    if not t.strip().startswith("//"))
+            code = [t for t in text if not t.strip().startswith("//")]
+            a = sum(len(PATTERN_ACQUIRE.findall(t)) for t in code)
+            r = sum(len(PATTERN_RELEASE.findall(t)) for t in code)
+            # Pinned-host acquisitions are a separate class of work: they cannot
+            # move to a device arena at all, so counting them with the device
+            # sites makes the remaining migration look more uniform than it is.
+            h = sum(len(PATTERN_HOST_ACQUIRE.findall(t)) for t in code)
             acq += a
             rel_ += r
+            host_acq += h
+            if h > 0:
+                host_files.append((h, relpath))
             if a == 0 and r > 0:
                 only_release.append((r, relpath))
-        print(f"  acquisitions {acq}   releases {rel_}")
+        print(f"  acquisitions {acq}  (device {acq - host_acq}, pinned-host {host_acq})"
+              f"   releases {rel_}")
+        if host_files:
+            # T5's engine-persistent half (memory/host_pinned.h) is the tier these
+            # move to; they are listed apart because a device arena is the wrong
+            # answer for every one of them.
+            print(f"  {len(host_files)} file(s) acquire PINNED HOST memory — these need the T5 "
+                  f"host tier, not a device arena:")
+            for h, f in sorted(host_files, reverse=True):
+                print(f"    {h:4d}  {f}")
         if only_release:
             print(f"  {len(only_release)} file(s) contain ONLY releases — no allocation "
                   f"migration can remove them:")

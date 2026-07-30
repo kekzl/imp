@@ -270,9 +270,22 @@ impossible.**
 | **T2 Engine-persistent** | process | bump arena | per-object leak | stable |
 | **T3 Pooled fixed-block** | request-scoped, refcounted | free-list over one slab | external fragmentation (all blocks identical) | stable |
 | **T4 Forward-scratch** | one forward pass | LIFO stack | fragmentation (LIFO cannot fragment) + leak (stack unwinds) | stable per slot |
-| **T5 Transient host-staging** | load only | ordinary host alloc | surviving load (asserted at phase transition) | n/a |
+| **T5a Transient host-staging** | load only | ordinary host alloc | surviving load (asserted at phase transition) | n/a |
+| **T5b Engine-persistent pinned host** | process | `PinnedBuffer` over `HostPinnedAllocator` | per-object leak (move-only owner, no free to forget) | n/a |
 
-Confirmed against A1.7. Two corrections the inventory forced:
+Confirmed against A1.7. Three corrections the inventory forced:
+
+- **T5 as first written could not host most of the host memory in the engine, so
+  it splits.** The row said "load only", with *surviving load* as the failure
+  mode it makes impossible — asserted at the phase transition. But 26 of the
+  pinned-host acquisition sites are engine-persistent **by construction**: a
+  pinned staging buffer for the per-step D2H gather exists precisely so that it
+  is pinned once and reused every decode step, so it must survive into
+  `AllocPhase::Serving`. Asserting it away would delete the optimisation the
+  pinning is for. T5a keeps the original discipline; T5b is the tier those 26
+  sites move to, and its owner is `PinnedBuffer` (move-only, frees exactly once,
+  empty-on-failure so the existing degradation paths still work). `Backend`
+  covers device memory only, which is why they had no tier at all until then.
 
 - **T1 and T2 need separate arenas even though both are "stable forever."**
   `server.model_swap` (shipped 2026-07-26) unloads a model and loads another
@@ -971,7 +984,7 @@ rounded up — three of the seven are still open, and one has not moved at all.
 
 | | Invariant | Design-time | **Measured (2026-07-29)** | Target |
 |---|---|---|---|---|
-| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 696 calls / 77 files, of which 309 are acquisitions and 407 releases (B48).** Barely improved: the migrated tenants kept their original path as a fallback, and the gate counts source sites, not executed ones (B34). The *gate* is now site-granular and mutation-verified, so the list cannot grow silently | ✓ — `Backend`, allowlist empty, CI gate |
+| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 638 calls / 77 files (2026-07-30), of which 284 are acquisitions and 374 releases.** The acquisitions are two different jobs, and the gate now says so: **258 device + 26 pinned-host in 11 files** (B58). Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52–B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ — `Backend`, allowlist empty, CI gate |
 | I2 | No allocation on the hot path | ✗ — measured +190 MiB/config of steady-state allocation | **✓ — `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`**, 15 requests, dense. Was 414 → 238 → 0 | ✓ — `ScratchStack`, phase guard, counter == 0 |
 | I3 | Stable addresses for graph memory | ~ — true in practice, enforced by comments + a `workspace_generation` hook | **~ — `StableSpan` exists and is passkey-enforced**, so only allocators that can promise stability can mint one; kernel signatures still take raw pointers | ✓ — `StableSpan` in kernel signatures; no conversion from `DeviceSpan` |
 | I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ — `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). The balloon and the live `cudaMemGetInfo` sizing are still there | ✓ — `plan_memory()` never queries the device; fails at load with a report |

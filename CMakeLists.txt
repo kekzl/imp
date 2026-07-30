@@ -127,6 +127,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/arena.cpp
     src/memory/engine_arena.cpp
     src/memory/graph_slots.cpp
+    src/memory/host_pinned.cpp
     src/memory/library_reserve_cache.cpp
     src/memory/block_pool.cpp
     src/memory/scratch_stack.cpp
@@ -602,6 +603,10 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
         tests/test_graph_slots.cpp
+        # T5's engine-persistent half. The property that matters — freed exactly
+        # once, never after a move — is ownership, not CUDA, so it belongs in the
+        # lane CI actually runs.
+        tests/test_host_pinned.cpp
         # Arena sizing arithmetic (A7 step 4b). Pure and Model-free via ExecShape,
         # so the numbers the T2 arena is reserved from are pinned in the lane CI
         # actually runs.
