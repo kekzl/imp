@@ -1,5 +1,6 @@
 #include "compute/gemm_moe_fused_tc.h"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -258,7 +259,15 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
         grid_size = num_sms * max(max_blocks_per_sm, 1);
 
-        cudaMalloc(&d_tile_counter, sizeof(int));
+        // T2 (engine-persistent): a 4-byte counter allocated once under the
+        // `configured` guard and never freed — the arena is exactly the tier for
+        // that, and it takes this file off the I1 allowlist. Falls back to a
+        // direct allocation when the arena is closed (a bare GEMM unit test has
+        // no engine), same as the other migrated one-shot tenants.
+        if (auto slab = engine_arena().take_bytes(sizeof(int)); !slab.empty())
+            d_tile_counter = reinterpret_cast<int*>(slab.data());
+        else
+            cudaMalloc(&d_tile_counter, sizeof(int));
         configured = true;
     }
 
