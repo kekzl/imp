@@ -2,6 +2,7 @@
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 #include <cuda_runtime.h>
 #include <cmath>
 #include <cfloat>
@@ -220,31 +221,21 @@ void apply_dry_penalty(float* d_logits, int vocab_size, const int32_t* host_toke
     // Upload to GPU and apply — reuse persistent buffers to avoid per-call cudaMalloc
     // (buffers are file-scope; pre-allocated by sampling_preallocate_dry at engine init)
     size_t needed = static_cast<size_t>(n);
+    if (!s_dry_tokens_buf || !s_dry_values_buf)
+        return;  // preallocation did not run or the arena was closed
     if (needed > s_dry_buf_cap) {
-        // Grow buffers (sync stream first to ensure previous work is done)
-        cudaStreamSynchronize(stream);
-        if (s_dry_tokens_buf)
-            IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf));
-        if (s_dry_values_buf)
-            IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf));
-        // Over-allocate to reduce future reallocations
-        size_t new_cap = std::max(needed, s_dry_buf_cap * 2);
-        new_cap = std::max(new_cap, static_cast<size_t>(256));
-        if (cudaMalloc(&s_dry_tokens_buf, new_cap * sizeof(int32_t)) != cudaSuccess ||
-            cudaMalloc(&s_dry_values_buf, new_cap * sizeof(float)) != cudaSuccess) {
-            IMP_LOG_ERROR("apply_dry_penalty: cudaMalloc failed");
-            if (s_dry_tokens_buf) {
-                IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf));
-                s_dry_tokens_buf = nullptr;
-            }
-            if (s_dry_values_buf) {
-                IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf));
-                s_dry_values_buf = nullptr;
-            }
-            s_dry_buf_cap = 0;
-            return;
-        }
-        s_dry_buf_cap = new_cap;
+        // Unreachable by construction, and that is why the grow-and-realloc path
+        // that used to live here is gone: `n` counts DISTINCT tokens collected
+        // from the penalty window, so it cannot exceed the token history, which
+        // cannot exceed max_seq_len — the capacity sampling_preallocate_dry()
+        // takes at engine init. The old path freed and re-cudaMalloc'd both
+        // buffers on the sampling hot path, behind a cudaStreamSynchronize.
+        // Clamping keeps the impossible case bounded instead of allocating for
+        // it (A7 step 8, AUDIT B72).
+        IMP_LOG_WARN("apply_dry_penalty: %zu tokens exceeds the %zu-slot capacity — applying the "
+                     "first %zu. This should be impossible; please report the config.",
+                     needed, s_dry_buf_cap, s_dry_buf_cap);
+        n = static_cast<int>(s_dry_buf_cap);
     }
 
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_tokens_buf, h_tokens.data(), n * sizeof(int32_t),
@@ -511,44 +502,34 @@ void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
     if (cap <= s_dry_buf_cap)
         return;  // already large enough
 
-    // Free existing (if any) before re-allocating
-    if (s_dry_tokens_buf) {
-        cudaFree(s_dry_tokens_buf);
-        s_dry_tokens_buf = nullptr;
-    }
-    if (s_dry_values_buf) {
-        cudaFree(s_dry_values_buf);
-        s_dry_values_buf = nullptr;
-    }
+    // T2 (A7 step 8). Engine-lifetime, sized once from max_seq_len, and the
+    // caller already treats a null buffer as "DRY penalty off" — so no
+    // direct-allocation fallback and the sites leave the I1 allowlist rather
+    // than moving (AUDIT B47).
+    s_dry_tokens_buf = nullptr;
+    s_dry_values_buf = nullptr;
     s_dry_buf_cap = 0;
 
-    if (cudaMalloc(&s_dry_tokens_buf, cap * sizeof(int32_t)) != cudaSuccess ||
-        cudaMalloc(&s_dry_values_buf, cap * sizeof(float)) != cudaSuccess) {
-        IMP_LOG_ERROR("sampling_preallocate_dry: cudaMalloc failed for %zu elements", cap);
-        if (s_dry_tokens_buf) {
-            cudaFree(s_dry_tokens_buf);
-            s_dry_tokens_buf = nullptr;
-        }
-        if (s_dry_values_buf) {
-            cudaFree(s_dry_values_buf);
-            s_dry_values_buf = nullptr;
-        }
+    auto tokens = engine_arena().take_bytes(cap * sizeof(int32_t));
+    auto values = engine_arena().take_bytes(cap * sizeof(float));
+    if (tokens.empty() || values.empty()) {
+        IMP_LOG_WARN("sampling_preallocate_dry: %zu slots unavailable from the T2 arena — the DRY "
+                     "penalty will be skipped",
+                     cap);
         return;
     }
+    s_dry_tokens_buf = reinterpret_cast<int32_t*>(tokens.data());
+    s_dry_values_buf = reinterpret_cast<float*>(values.data());
     s_dry_buf_cap = cap;
     IMP_LOG_DEBUG("sampling_preallocate_dry: pre-allocated %zu DRY penalty slots", cap);
 }
 
 // Free persistent DRY penalty buffers. Called by sampling_cleanup().
 void sampling_cleanup_dry() {
-    if (s_dry_tokens_buf) {
-        cudaFree(s_dry_tokens_buf);
-        s_dry_tokens_buf = nullptr;
-    }
-    if (s_dry_values_buf) {
-        cudaFree(s_dry_values_buf);
-        s_dry_values_buf = nullptr;
-    }
+    // Arena-owned since A7 step 8 — ~Engine closes the arena after every
+    // executor teardown, so only the pointer nulling remains here.
+    s_dry_tokens_buf = nullptr;
+    s_dry_values_buf = nullptr;
     s_dry_buf_cap = 0;
 }
 
