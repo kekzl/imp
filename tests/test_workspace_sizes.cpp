@@ -199,7 +199,8 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     ExecShape s = dense_shape();
     const ExecT2Demand d = exec_t2_demand(s, 1024);
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
-                             d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch);
+                             d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
+                             d.dry_penalty);
     EXPECT_GT(d.total(), 0u);
 }
 

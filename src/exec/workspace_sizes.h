@@ -107,6 +107,9 @@ struct ExecT2Demand {
     size_t quant_scratch = 0;
     // Split-K paged-attention partials: max_batch x n_heads x splits x (2+hd).
     size_t splitk_scratch = 0;
+    // DRY-penalty staging (compute/sampling_penalties.cu): max_seq_len token
+    // ids + their float penalties, taken once at engine init.
+    size_t dry_penalty = 0;
     // MLA QKV scratch (kv_a + latent + k_rope + kv_b), plus the absorbed-decode
     // latent cache and its score scratch when attention.mla_absorb is on. Zero on
     // every non-MLA model, which is every model except DeepSeek's.
@@ -114,7 +117,7 @@ struct ExecT2Demand {
 
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction +
-               quant_scratch + splitk_scratch + mla_scratch;
+               quant_scratch + splitk_scratch + mla_scratch + dry_penalty;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather

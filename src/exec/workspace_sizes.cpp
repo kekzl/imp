@@ -62,10 +62,10 @@ std::string ExecT2Demand::describe() const {
     char buf[256];
     std::snprintf(buf, sizeof(buf),
                   "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f + fp8red %.2f + quant %.2f "
-                  "+ splitk %.2f + mla %.1f MiB",
+                  "+ splitk %.2f + mla %.1f + dry %.2f MiB",
                   mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB,
                   moe_arrays / kMiB, fp8_reduction / kMiB, quant_scratch / kMiB,
-                  splitk_scratch / kMiB, mla_scratch / kMiB);
+                  splitk_scratch / kMiB, mla_scratch / kMiB, dry_penalty / kMiB);
     return buf;
 }
 
@@ -275,6 +275,16 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                                      sizeof(float) +
                                  256;
         }
+    }
+
+    // DRY-penalty staging: one slot per token of advertised context, which is
+    // the bound sampling_preallocate_dry() uses and the reason its grow path
+    // could be deleted — `n` counts distinct tokens from the penalty window and
+    // cannot exceed the history.
+    {
+        const int effective = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
+        const size_t slots = static_cast<size_t>(effective > 0 ? effective : 4096);
+        out.dry_penalty = slots * (sizeof(int32_t) + sizeof(float)) + 2 * 256;
     }
 
     // MLA QKV scratch (executor_workspace_buffers.cu). kv_lora_rank > 0 IS
