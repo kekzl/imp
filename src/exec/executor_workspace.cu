@@ -290,6 +290,14 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     // before the host gate_up split fix since serial path had undefined
     // behavior for Gemma-4 host experts).
     allocate_auxiliary_buffers(/*skip_batch_dequant=*/false);
+    if (mla_scratch_unservable_) {
+        // The only auxiliary buffer whose absence is not a slower path. Refusing
+        // here turns a device fault inside the first KV projection into a load
+        // failure that names the tenant (A7 step 4b.2, I6).
+        IMP_LOG_ERROR("MLA QKV scratch could not be served from the engine arena — refusing to "
+                      "load rather than running with a null KV projection buffer");
+        return false;
+    }
     (void)experts_on_host;
 
     // MemAccount per-pool attribution (vram_audit diagnostic). The estimate

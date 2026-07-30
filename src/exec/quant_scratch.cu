@@ -4,10 +4,13 @@
 
 namespace imp {
 
-// d_act_scale, d_fp8_block_maxes and d_fp8_absmax are T2 arena tenants since
-// A7 step 4b.2 — engine-lifetime, charged by exec_t2_demand as `fp8_reduction`.
-// ~Engine closes the arena after every executor teardown, so only the pointer
-// nulling remains here.
+// The FP8 reduction trio (d_act_scale, d_fp8_block_maxes, d_fp8_absmax) and the
+// whole dp4a input-staging family (q8_1/d8, their prefill pair, the FFN block
+// mask, the split-K partials) are T2 arena tenants since A7 step 4b.2 —
+// engine-lifetime, charged by exec_t2_demand as `fp8_reduction`, `quant_scratch`
+// and `splitk_scratch`. ~Engine closes the arena after every executor teardown,
+// so only the pointer nulling remains here. What is still freed below draws from
+// the VRAMAllocator, not the arena.
 
 void QuantScratch::free(VRAMAllocator* alloc) {
     auto vfree = [alloc](void*& p) {
@@ -48,37 +51,19 @@ void QuantScratch::free(VRAMAllocator* alloc) {
     vfree(mxfp4_workspace);
     mxfp4_workspace_size = 0;
 
-    if (q8_1_buf) {
-        IMP_CUDA_CHECK_LOG(cudaFree(q8_1_buf));
-        q8_1_buf = nullptr;
-    }
-    if (d8_buf) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d8_buf));
-        d8_buf = nullptr;
-    }
+    q8_1_buf = nullptr;
+    d8_buf = nullptr;
     q8_1_max_blocks = 0;
 
-    if (q8_1_prefill_buf) {
-        IMP_CUDA_CHECK_LOG(cudaFree(q8_1_prefill_buf));
-        q8_1_prefill_buf = nullptr;
-    }
-    if (d8_prefill_buf) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d8_prefill_buf));
-        d8_prefill_buf = nullptr;
-    }
+    q8_1_prefill_buf = nullptr;
+    d8_prefill_buf = nullptr;
     q8_1_prefill_bytes = 0;
     d8_prefill_bytes = 0;
 
-    if (ffn_block_mask) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ffn_block_mask));
-        ffn_block_mask = nullptr;
-    }
+    ffn_block_mask = nullptr;
     ffn_block_mask_words = 0;
 
-    if (splitk) {
-        IMP_CUDA_CHECK_LOG(cudaFree(splitk));
-        splitk = nullptr;
-    }
+    splitk = nullptr;
     splitk_size = 0;
 }
 

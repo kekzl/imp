@@ -59,11 +59,13 @@ void for_each_weight(const Model& model, F&& f) {
 
 std::string ExecT2Demand::describe() const {
     constexpr double kMiB = 1024.0 * 1024.0;
-    char buf[160];
+    char buf[256];
     std::snprintf(buf, sizeof(buf),
-                  "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f + fp8red %.2f MiB",
+                  "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f + fp8red %.2f + quant %.2f "
+                  "+ splitk %.2f + mla %.1f MiB",
                   mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB,
-                  moe_arrays / kMiB, fp8_reduction / kMiB);
+                  moe_arrays / kMiB, fp8_reduction / kMiB, quant_scratch / kMiB,
+                  splitk_scratch / kMiB, mla_scratch / kMiB);
     return buf;
 }
 
@@ -85,12 +87,46 @@ ExecShape exec_shape_of(const Model& model) {
     s.ssm_inner_size = cfg.ssm_inner_size;
     s.ssm_conv_channels = cfg.ssm_inner_size > 0 ? cfg.ssm_conv_channels() : 0;
     s.ssm_dt_rank = cfg.ssm_dt_rank;
-    // Filled by the caller from EngineConfig; the model does not know the batch.
+    s.n_experts_active = cfg.n_experts_active;
+    s.n_layers = cfg.n_layers;
+    s.kv_lora_rank = cfg.kv_lora_rank;
+    s.qk_rope_head_dim = cfg.qk_rope_head_dim;
+    s.qk_nope_head_dim = cfg.qk_nope_head_dim;
+    s.v_head_dim = cfg.v_head_dim;
+    // max_batch_size, use_fp8_prefill and mla_absorb are filled by the caller: the
+    // model knows neither the batch nor the runtime config. mla_absorb matters
+    // because the absorbed latent cache is two orders of magnitude larger than the
+    // MLA quartet, so the plan can treat it as neither always-on nor always-off.
     for_each_weight(model, [&](const Tensor& t) {
         const Dims d = weight_dims(t);
         if (d.valid())
             s.weights.emplace_back(d.n, d.k);
     });
+    // The dp4a scratch's own scan (executor_workspace_buffers.cu): a narrower
+    // tensor list, shape[1]/shape[2] read RAW. Kept separate from `weights`
+    // above on purpose — see the ExecShape comment.
+    for (int i = 0; i < model.n_layers(); ++i) {
+        const auto& L = model.layer(i);
+        for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down,
+                              &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared, &L.ssm_in,
+                              &L.ssm_out}) {
+            if (w->data && w->ndim >= 2)
+                s.mmvq_max_k = std::max(s.mmvq_max_k, static_cast<int>(w->shape[1]));
+        }
+        for (const auto* w : {&L.expert_up_packed, &L.expert_down_packed, &L.expert_gate_packed}) {
+            if (w->data && w->ndim >= 3)
+                s.mmvq_max_k = std::max(s.mmvq_max_k, static_cast<int>(w->shape[2]));
+        }
+        if (L.expert_down_packed.data && L.expert_down_packed.ndim >= 3) {
+            s.mmvq_max_expert_down_k =
+                std::max(s.mmvq_max_expert_down_k, static_cast<int>(L.expert_down_packed.shape[2]));
+        }
+        for (const auto* w : {&L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared, &L.w_up_shared,
+                              &L.w_down_shared, &L.wq, &L.wk, &L.wv, &L.wo}) {
+            if (w->data && (w->qtype == QType::Q4_K || w->qtype == QType::Q5_K))
+                s.has_sub5bit_dense = true;
+        }
+    }
     return s;
 }
 
@@ -190,7 +226,84 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                          + 2 * ne * sizeof(void*)     // d_B_ptrs_cache, d_SFB_ptrs_cache
                          + ne * sizeof(float)         // d_alpha_full
                          + ne * sizeof(void*)         // d_weight_ptrs
-                         + 10 * 256;                  // per-take 256 B alignment
+                         + ne * sizeof(void*)         // cutlass3x_sfa_ptrs
+                         + 11 * 256;                  // per-take 256 B alignment
+    }
+
+    // dp4a input staging (executor_workspace_buffers.cu), all three tenants of
+    // one sizing family. The site's max_blocks is max(max_k/32, top_k *
+    // down_k/32) — the MoE down projection quantizes top_k expert activations
+    // contiguously, which is what makes the second term able to exceed the
+    // first.
+    {
+        const int moe_down_blocks =
+            shape.n_experts_active * (shape.mmvq_max_expert_down_k / 32);
+        const int max_blocks = std::max(shape.mmvq_max_k / 32, moe_down_blocks);
+        if (max_blocks > 0) {
+            // Rows: min(max(max_logit_tokens, 8), 16). The batch, capped at 16 so
+            // a large-batch server does not inflate this K-sized scratch.
+            const size_t rows =
+                static_cast<size_t>(std::min(std::max(shape.max_batch_size, 8), 16));
+            out.quant_scratch = static_cast<size_t>(max_blocks) * rows *
+                                (kExecBlockQ81Bytes + sizeof(float));
+            // FFN sparsity mask: one bit per Q8 block, packed uint32.
+            out.quant_scratch +=
+                ((static_cast<size_t>(max_blocks) + 31) / 32) * sizeof(uint32_t);
+            // dp4a dense prefill pair. Gated on a Q4_K/Q5_K dense weight existing
+            // at all, and sized from kDp4aDenseMaxM=64 — the M above which the
+            // weight-stationary tile stops winning and the path is not taken.
+            if (shape.has_sub5bit_dense && t > 1) {
+                const size_t prefill_blocks = static_cast<size_t>(std::min(t, 64)) *
+                                              (static_cast<size_t>(shape.mmvq_max_k) / 32);
+                out.quant_scratch += prefill_blocks * (kExecBlockQ81Bytes + sizeof(float));
+            }
+            out.quant_scratch += 5 * 256;  // per-take 256 B alignment
+        }
+    }
+
+    // Split-K paged attention partials (executor_workspace_buffers.cu). Splits
+    // scale with the context in KV blocks and cap at 128; the batch dimension is
+    // max_logit_tokens, not max_batch_size, so it inherits the floor of 8.
+    if (shape.n_heads > 0) {
+        const int hd = shape.head_dim > 0 ? shape.head_dim : (shape.d_model / shape.n_heads);
+        const int ctx_blocks = (t + kExecKVBlockSize - 1) / kExecKVBlockSize;
+        const int splits = std::min(128, std::max(1, ctx_blocks));
+        const int stride = 2 + hd;
+        const int batch = std::max(shape.max_batch_size, 8);
+        if (hd > 0) {
+            out.splitk_scratch = static_cast<size_t>(batch) * shape.n_heads * splits * stride *
+                                     sizeof(float) +
+                                 256;
+        }
+    }
+
+    // MLA QKV scratch (executor_workspace_buffers.cu). kv_lora_rank > 0 IS
+    // is_mla(). The quartet is sized for max_tokens and, unlike every other tenant
+    // here, has NO degradation contract: executor_attention_qkv.cu dereferences
+    // all four unconditionally, so a short arena fails the load instead of
+    // handing out a null (see the site).
+    if (shape.kv_lora_rank > 0) {
+        const size_t T = static_cast<size_t>(t);
+        const size_t kva_out = static_cast<size_t>(shape.kv_lora_rank + shape.qk_rope_head_dim);
+        const size_t kvb_out =
+            static_cast<size_t>(shape.n_heads) * (shape.qk_nope_head_dim + shape.v_head_dim);
+        out.mla_scratch = T * 2 *
+                          (kva_out + static_cast<size_t>(shape.kv_lora_rank) +
+                           static_cast<size_t>(shape.qk_rope_head_dim) + kvb_out);
+        out.mla_scratch += 4 * 256;  // four takes
+
+        // Absorbed-decode latent cache. Sized from the FULL sequence length, NOT
+        // from max_tokens — mla_absorb_max_seq_ is deliberately uncapped where
+        // max_tokens_ clamps at 4096, so this is the term that reaches ~974 MiB at
+        // a 32k context. Charged only when the opt-in flag is on, because charging
+        // it always would reserve that on every DeepSeek load.
+        if (shape.mla_absorb) {
+            const int effective = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
+            const size_t absorb_seq = static_cast<size_t>(effective > 0 ? effective : 4096);
+            out.mla_scratch += static_cast<size_t>(shape.n_layers) * absorb_seq * kva_out * 2;
+            out.mla_scratch += static_cast<size_t>(shape.n_heads) * absorb_seq * sizeof(float);
+            out.mla_scratch += 2 * 256;
+        }
     }
 
     // FP8 activation reduction scratch. Mirrors the max_dim ladder and the grid
@@ -228,10 +341,11 @@ int exec_max_tokens(const Model& model, int max_seq_len) {
 int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_of(model)); }
 
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size,
-                            bool use_fp8_prefill) {
+                            bool use_fp8_prefill, bool mla_absorb) {
     ExecShape shape = exec_shape_of(model);
     shape.max_batch_size = max_batch_size;
     shape.use_fp8_prefill = use_fp8_prefill;
+    shape.mla_absorb = mla_absorb;
     return exec_t2_demand(shape, max_seq_len);
 }
 

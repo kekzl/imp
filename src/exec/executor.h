@@ -578,6 +578,10 @@ private:
     float* mla_absorb_scores_ = nullptr;      // [n_heads, max_seq] decode scratch
     size_t mla_absorb_layer_stride_ = 0;      // halfs per layer = max_seq*(kv_lora+rope)
     int mla_absorb_max_seq_ = 0;
+    // The MLA QKV quartet is the one T2 tenant with no null-tolerant consumer, so
+    // an arena that cannot serve it fails the load instead of handing out a
+    // pointer the KV projection will dereference (A7 step 4b.2, I6).
+    bool mla_scratch_unservable_ = false;
 
     // Set when allocate_nvfp4_dequant_workspace() could NOT pre-allocate the
     // M>1 dequant scratch (largest NVFP4 weight exceeds the cap, or alloc

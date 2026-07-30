@@ -199,8 +199,155 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     ExecShape s = dense_shape();
     const ExecT2Demand d = exec_t2_demand(s, 1024);
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
-                             d.fp8_reduction);
+                             d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch);
     EXPECT_GT(d.total(), 0u);
+}
+
+// The dp4a staging family. Its max-K scan is NOT exec_max_weight_k's: the site
+// reads the raw shape[1]/shape[2] of a narrower tensor list, so ExecShape carries
+// it separately and this pins that the term follows THAT number.
+TEST(ExecT2Demand, QuantScratchFollowsTheSitesOwnMaxKAndNotTheLogicalOne) {
+    ExecShape s = dense_shape();
+    s.weights = {{4096, 32768}};  // logical K = 32768, which must NOT be used here
+    s.mmvq_max_k = 4096;
+    const size_t at_4096 = exec_t2_demand(s, 1024).quant_scratch;
+    EXPECT_GT(at_4096, 0u);
+
+    s.mmvq_max_k = 8192;
+    EXPECT_GT(exec_t2_demand(s, 1024).quant_scratch, at_4096) << "it must follow the site's max_k";
+
+    // 128 blocks x 8 rows x (48 + 4) bytes + the 4-word mask + alignment.
+    ExecShape exact = dense_shape();
+    exact.mmvq_max_k = 4096;  // 128 blocks
+    exact.max_batch_size = 1;  // rows = max(1, 8) = 8
+    const size_t expect = 128ull * 8 * (48 + sizeof(float)) + 4 * sizeof(uint32_t) + 5 * 256;
+    EXPECT_EQ(exec_t2_demand(exact, 1024).quant_scratch, expect);
+
+    // Rows follow the batch but cap at 16, so a 64-way server does not inflate a
+    // K-sized buffer 8x. The site caps it; a term that did not would over-reserve
+    // exactly where VRAM is tightest.
+    exact.max_batch_size = 64;
+    EXPECT_EQ(exec_t2_demand(exact, 1024).quant_scratch,
+              128ull * 16 * (48 + sizeof(float)) + 4 * sizeof(uint32_t) + 5 * 256);
+}
+
+// The MoE down projection quantizes top_k expert activations contiguously, so on
+// an MoE model that term can exceed max_k/32 — and did on every model the dp4a
+// MoE path serves. Sizing the buffer from max_k alone would overrun it.
+TEST(ExecT2Demand, QuantScratchTakesTheMoeDownProjectionWhenItIsLarger) {
+    ExecShape s = dense_shape();
+    s.mmvq_max_k = 2048;  // 64 blocks
+    const size_t dense_only = exec_t2_demand(s, 1024).quant_scratch;
+
+    s.n_experts = 128;
+    s.n_experts_active = 8;
+    s.mmvq_max_expert_down_k = 2048;  // 8 * 64 = 512 blocks, 8x the dense term
+    const size_t with_moe = exec_t2_demand(s, 1024).quant_scratch;
+    EXPECT_GT(with_moe, dense_only * 4)
+        << "top_k * down_k/32 must win over max_k/32 — the site takes the max of the two";
+
+    // And top_k is the multiplier, not a constant.
+    s.n_experts_active = 4;
+    EXPECT_LT(exec_t2_demand(s, 1024).quant_scratch, with_moe);
+}
+
+// The prefill pair only exists for a model with Q4_K/Q5_K dense weights (the
+// only quants the dp4a dense-prefill GEMM reads directly), and it is sized from
+// kDp4aDenseMaxM=64, NOT from max_tokens — the kernel is not taken above M=64,
+// so sizing it from the context would reserve 64x too much at ctx 4096.
+TEST(ExecT2Demand, PrefillPairIsChargedOnlyForSub5BitDenseAndCapsAtM64) {
+    ExecShape s = dense_shape();
+    s.mmvq_max_k = 4096;
+    const size_t without = exec_t2_demand(s, 4096).quant_scratch;
+
+    s.has_sub5bit_dense = true;
+    const size_t with = exec_t2_demand(s, 4096).quant_scratch;
+    EXPECT_GT(with, without);
+    // 64 * 128 blocks * 52 bytes.
+    EXPECT_EQ(with - without, 64ull * 128 * (48 + sizeof(float)));
+
+    // Capped at M=64: a longer context must not grow it.
+    EXPECT_EQ(exec_t2_demand(s, 131072).quant_scratch, with)
+        << "the dp4a dense prefill kernel is not taken above M=64, so neither is the reservation";
+    // And at max_tokens == 1 (decode-only sizing) the pair is not charged at all.
+    EXPECT_EQ(exec_t2_demand(s, 1).quant_scratch, without);
+}
+
+// MLA is DeepSeek-only, and kv_lora_rank > 0 IS the predicate (model_config.h).
+// The quartet follows max_tokens; every other model must be charged zero, or every
+// non-MLA load reserves arena for a path it cannot take.
+TEST(ExecT2Demand, MlaQuartetIsChargedOnlyForAnMlaShapeAndFollowsMaxTokens) {
+    ExecShape s = dense_shape();
+    EXPECT_EQ(exec_t2_demand(s, 1024).mla_scratch, 0u) << "a dense model has no MLA scratch";
+
+    s.n_heads = 16;
+    s.kv_lora_rank = 512;
+    s.qk_rope_head_dim = 64;
+    s.qk_nope_head_dim = 128;
+    s.v_head_dim = 128;
+    // T * 2 bytes * (kva_out + kv_lora_rank + rope + kvb_out), kva_out = 576,
+    // kvb_out = 16 * (128 + 128) = 4096.
+    const size_t expect = 1024ull * 2 * (576 + 512 + 64 + 4096) + 4 * 256;
+    EXPECT_EQ(exec_t2_demand(s, 1024).mla_scratch, expect);
+
+    // kv_b dominates through n_heads, so a wider head count must move the term.
+    ExecShape wide = s;
+    wide.n_heads = 128;
+    EXPECT_GT(exec_t2_demand(wide, 1024).mla_scratch, exec_t2_demand(s, 1024).mla_scratch * 4);
+}
+
+// The absorbed latent cache is the term that can reach a GiB, and it is sized from
+// mla_absorb_max_seq_ — the FULL sequence length, deliberately uncapped where
+// max_tokens_ clamps at 4096. Charging it from max_tokens would under-reserve 8x
+// at a 32k context, which is the #1103 failure class.
+TEST(ExecT2Demand, MlaAbsorbCacheIsOptInAndSizedFromTheFullSequenceNotMaxTokens) {
+    ExecShape s = dense_shape();
+    s.n_heads = 16;
+    s.n_layers = 27;
+    s.kv_lora_rank = 512;
+    s.qk_rope_head_dim = 64;
+    s.qk_nope_head_dim = 128;
+    s.v_head_dim = 128;
+
+    const size_t off = exec_t2_demand(s, 32768).mla_scratch;
+    s.mla_absorb = true;
+    const size_t on = exec_t2_demand(s, 32768).mla_scratch;
+
+    const size_t cache = 27ull * 32768 * 576 * 2;   // n_layers x max_seq x row_w, fp16
+    const size_t scores = 16ull * 32768 * sizeof(float);
+    EXPECT_EQ(on - off, cache + scores + 2 * 256);
+    EXPECT_GT(on - off, 900ull * 1024 * 1024)
+        << "974 MiB on a 27-layer DeepSeek at ctx 32k — the one tenant here at that scale";
+
+    // max_tokens caps at 4096, so a term sized from it would be 8x too small here.
+    EXPECT_GT(on - off, 8ull * 27 * 4096 * 576 * 2 - 1);
+
+    // And it follows the context, unlike the quartet.
+    EXPECT_LT(exec_t2_demand(s, 4096).mla_scratch, on);
+}
+
+TEST(ExecT2Demand, SplitkFollowsHeadsBatchAndContextAndCapsAt128Splits) {
+    ExecShape s = dense_shape();
+    s.n_heads = 32;
+    s.head_dim = 128;
+    s.max_batch_size = 1;  // max_logit_tokens floor of 8
+
+    // ctx 1024 -> 64 KV blocks -> 64 splits (below the cap).
+    const size_t expect = 8ull * 32 * 64 * (2 + 128) * sizeof(float) + 256;
+    EXPECT_EQ(exec_t2_demand(s, 1024).splitk_scratch, expect);
+
+    // The split count caps at 128, so beyond ctx 2048 the term stops growing.
+    const size_t at_2048 = exec_t2_demand(s, 2048).splitk_scratch;
+    EXPECT_EQ(exec_t2_demand(s, 4096).splitk_scratch, at_2048)
+        << "max_splits = min(128, ctx_blocks); reserving past the cap would be dead VRAM";
+
+    // It follows the batch, with the floor of 8 shared with the sampling scratch.
+    s.max_batch_size = 16;
+    EXPECT_EQ(exec_t2_demand(s, 1024).splitk_scratch, expect * 2 - 256);
+
+    // A shape with no attention heads asks for nothing rather than dividing by zero.
+    ExecShape headless = dense_shape();
+    EXPECT_EQ(exec_t2_demand(headless, 1024).splitk_scratch, 0u);
 }
 
 // The sampling scratch is sized from max_logit_tokens = max(max_batch, 8), which

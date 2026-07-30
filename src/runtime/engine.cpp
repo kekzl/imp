@@ -880,10 +880,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // for the tenants not migrated yet.
     {
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
-                                      config_.use_fp8_prefill);
+                                      config_.use_fp8_prefill, runtime_config_.attention.mla_absorb);
         // +1/8 for 256-byte alignment padding across the arena's takes.
-        const size_t want = d.total() + d.total() / 8;
-        const size_t cap = std::max(kEngineArenaDefaultBytes, want);
+        const size_t cap = std::max(kEngineArenaDefaultBytes, d.total() + d.total() / 8);
         IMP_LOG_INFO("engine arena demand: %s -> %.1f MiB reserved", d.describe().c_str(),
                      cap / (1024.0 * 1024.0));
         (void)engine_arena_open(cuda_malloc_backend(), cap);
