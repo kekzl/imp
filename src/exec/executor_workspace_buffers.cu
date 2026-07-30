@@ -146,12 +146,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // exact pre-parity layout.
     {
         sample_slots_ = std::max(1, max_logit_tokens_);
-        cudaError_t err = cudaMalloc(&d_sample_result_,
-                                     2 * static_cast<size_t>(sample_slots_) * SAMPLE_SCRATCH_BYTES);
-        if (err != cudaSuccess) {
-            IMP_LOG_ERROR("Failed to allocate sampling result buffer: %s", cudaGetErrorString(err));
+        // T2 (A7 step 4b.2). max_logit_tokens_ is max(max_batch, 8) — the BATCH,
+        // not the context — so this is ~1 MiB, and exec_t2_demand now charges it
+        // as `sample_scratch` so the arena is SIZED for it rather than fitting by
+        // luck against slack. No direct-allocation fallback: the caller below
+        // already treats a null buffer as "no batched sampling" by zeroing
+        // sample_slots_, which is what a closed arena should mean (AUDIT B53).
+        auto slab = engine_arena().take_bytes(2 * static_cast<size_t>(sample_slots_) *
+                                              SAMPLE_SCRATCH_BYTES);
+        if (slab.empty()) {
+            IMP_LOG_ERROR("Failed to obtain the sampling result buffer from the T2 arena");
             d_sample_result_ = nullptr;
             sample_slots_ = 0;
+        } else {
+            d_sample_result_ = reinterpret_cast<int32_t*>(slab.data());
         }
     }
 
@@ -1334,7 +1342,8 @@ void GraphExecutor::free_buffers() {
         mla_absorb_scores_ = nullptr;
     }
     if (d_sample_result_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_sample_result_));
+        // Arena-owned since A7 step 4b.2 — no free here; ~Engine closes the arena
+        // after every executor teardown.
         d_sample_result_ = nullptr;
     }
     if (h_sample_pinned_) {

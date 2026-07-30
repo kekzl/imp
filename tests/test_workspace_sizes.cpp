@@ -151,9 +151,41 @@ TEST(ExecT2Demand, ExpertDFfFallsBackToDFfWhenUnset) {
     EXPECT_EQ(exec_t2_demand(a, 1024).nvfp4_dequant, exec_t2_demand(b, 1024).nvfp4_dequant);
 }
 
-TEST(ExecT2Demand, TotalIsTheSumOfBothTenants) {
+TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     ExecShape s = dense_shape();
     const ExecT2Demand d = exec_t2_demand(s, 1024);
-    EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant);
+    EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch);
     EXPECT_GT(d.total(), 0u);
+}
+
+// The sampling scratch is sized from max_logit_tokens = max(max_batch, 8), which
+// is the BATCH and not the context. I mistook it for the context once and wrongly
+// ruled the tenant out as ~115 MiB when it is ~1 MiB (AUDIT B52 corrected by
+// B53), so this pins which quantity it follows.
+TEST(ExecT2Demand, SampleScratchFollowsTheBATCHNotTheContext) {
+    constexpr size_t kSample =
+        sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
+
+    ExecShape s = dense_shape();
+    s.max_batch_size = 1;
+    // max(1, 8) = 8 slots, two parities.
+    EXPECT_EQ(exec_t2_demand(s, 1024).sample_scratch, 2ull * 8 * kSample);
+
+    // Below the floor of 8 the size must not shrink.
+    s.max_batch_size = 4;
+    EXPECT_EQ(exec_t2_demand(s, 1024).sample_scratch, 2ull * 8 * kSample);
+
+    // Above it, it follows the batch.
+    s.max_batch_size = 16;
+    EXPECT_EQ(exec_t2_demand(s, 1024).sample_scratch, 2ull * 16 * kSample);
+
+    // And it is INDEPENDENT of the context, which is the mistake this guards.
+    ExecShape long_ctx = dense_shape();
+    long_ctx.max_batch_size = 16;
+    EXPECT_EQ(exec_t2_demand(long_ctx, 131072).sample_scratch,
+              exec_t2_demand(long_ctx, 128).sample_scratch)
+        << "sizing it from the context would ask for ~115 MiB instead of ~1 MiB";
+
+    // Sanity on the order of magnitude that made the wrong call wrong.
+    EXPECT_LT(exec_t2_demand(long_ctx, 131072).sample_scratch, 4ull * 1024 * 1024);
 }

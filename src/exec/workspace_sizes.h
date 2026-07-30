@@ -40,6 +40,10 @@ struct ExecShape {
     int expert_d_ff = 0;
     int d_ff = 0;
     int d_model = 0;
+    // max_logit_tokens as executor_workspace.cu computes it: max(max_batch, 8).
+    // NOT the context length — I mistook it for that once and wrongly ruled the
+    // sampling scratch out as ~115 MiB when it is ~1 MiB (AUDIT B52/B53).
+    int max_batch_size = 1;
     // (N, logical K) of every weight the MMVQ / dequant paths can see. Logical
     // K means NVFP4's packed byte dim already doubled.
     std::vector<std::pair<int64_t, int64_t>> weights;
@@ -48,12 +52,14 @@ struct ExecShape {
 struct ExecT2Demand {
     // MMVQ (Q8_1-input GEMV) scratch: max_tokens * ceil(maxK/32) * 36 * 2.
     size_t mmvq_scratch = 0;
+    // Sampling result scratch: 2 (parity) * max_logit_tokens * SAMPLE_SCRATCH.
+    size_t sample_scratch = 0;
     // gemm_nvfp4 dequant workspace: the largest single NVFP4 dequant target,
     // capped at 512 MiB (targets above the cap are served by the uncapturable
     // path, exactly as allocate_nvfp4_dequant_workspace decides).
     size_t nvfp4_dequant = 0;
 
-    size_t total() const { return mmvq_scratch + nvfp4_dequant; }
+    size_t total() const { return mmvq_scratch + nvfp4_dequant + sample_scratch; }
 };
 
 // max_tokens as GraphExecutor will compute it: min(max_seq_len, 4096), then
@@ -68,6 +74,11 @@ int exec_max_tokens(const Model& model, int max_seq_len);
 // Largest logical K across the weight tensors the MMVQ / dequant paths see.
 int exec_max_weight_k(const Model& model);
 
+// The batch is an engine decision, not a model fact, and the sampling scratch is
+// sized from it — so the caller passes it rather than assembling an ExecShape.
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size);
+
+// Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len);
 
 // ── Pure core ────────────────────────────────────────────────────────

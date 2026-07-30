@@ -879,13 +879,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // per-tenant demand rather than a constant; the constant is only a floor
     // for the tenants not migrated yet.
     {
-        const ExecT2Demand d = exec_t2_demand(*model_, config_.max_seq_len);
+        const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size);
         // +1/8 for 256-byte alignment padding across the arena's takes.
         const size_t want = d.total() + d.total() / 8;
         const size_t cap = std::max(kEngineArenaDefaultBytes, want);
-        IMP_LOG_INFO("engine arena demand: mmvq %.1f MiB + nvfp4_dequant %.1f MiB -> %.1f MiB",
+        IMP_LOG_INFO("engine arena demand: mmvq %.1f + nvfp4_dequant %.1f + sample %.1f MiB -> %.1f MiB",
                      d.mmvq_scratch / (1024.0 * 1024.0), d.nvfp4_dequant / (1024.0 * 1024.0),
-                     cap / (1024.0 * 1024.0));
+                     d.sample_scratch / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
         (void)engine_arena_open(cuda_malloc_backend(), cap);
     }
     // T2 slot pool for the conditional graph loop (A7 step 5.3).

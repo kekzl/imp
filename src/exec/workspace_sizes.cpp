@@ -69,6 +69,7 @@ ExecShape exec_shape_of(const Model& model) {
     s.expert_d_ff = cfg.expert_d_ff;
     s.d_ff = cfg.d_ff;
     s.d_model = cfg.d_model;
+    // Filled by the caller from EngineConfig; the model does not know the batch.
     for_each_weight(model, [&](const Tensor& t) {
         const Dims d = weight_dims(t);
         if (d.valid())
@@ -148,6 +149,16 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     }
 
     out.nvfp4_dequant = covered;
+
+    // Sampling result scratch (executor_workspace_buffers.cu): two parities of
+    // max_logit_tokens slots, each SAMPLE_SCRATCH_BYTES. max_logit_tokens is
+    // max(max_batch_size, 8) — the BATCH, not the context, which is why this is
+    // ~1 MiB and not the ~115 MiB I first assumed (AUDIT B53).
+    constexpr size_t kSampleScratchBytes =
+        sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
+    const int logit_tokens = std::max(shape.max_batch_size, 8);
+    out.sample_scratch = 2ull * static_cast<size_t>(logit_tokens) * kSampleScratchBytes;
+
     return out;
 }
 
@@ -159,8 +170,14 @@ int exec_max_tokens(const Model& model, int max_seq_len) {
 
 int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_of(model)); }
 
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size) {
+    ExecShape shape = exec_shape_of(model);
+    shape.max_batch_size = max_batch_size;
+    return exec_t2_demand(shape, max_seq_len);
+}
+
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len) {
-    return exec_t2_demand(exec_shape_of(model), max_seq_len);
+    return exec_t2_demand(model, max_seq_len, 1);
 }
 
 }  // namespace imp
