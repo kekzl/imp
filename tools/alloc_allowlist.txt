@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 76 files, 580 sites
+# remaining: 76 files, 579 sites
 
 src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_mxfp4_sm120.cu  # 12
@@ -56,7 +56,7 @@ src/exec/gemm_scratch.cu  # 1
 src/exec/moe_workspace.cu  # 2
 src/exec/pre_dequant_phase0_nvfp4_loader.cu  # 1
 src/exec/pre_dequant_phase2_fp8_cache.cu  # 6
-src/exec/pre_dequant_phase3_cutlass.cu  # 3
+src/exec/pre_dequant_phase3_cutlass.cu  # 2
 src/exec/pre_dequant_phase3_fp8.cu  # 5
 src/exec/pre_dequant_phase3_moe.cu  # 3
 src/exec/pre_dequant_phase3_nvfp4_decode.cu  # 26

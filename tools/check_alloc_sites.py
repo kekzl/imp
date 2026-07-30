@@ -94,6 +94,28 @@ PATTERN_RELEASE = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS_RELEAS
 COMMENT_LINE = re.compile(r"^\s*(//|\*|/\*)")
 
 
+def in_string_literal(line: str, pos: int) -> bool:
+    """Is `pos` inside a double-quoted string on this line?
+
+    An API NAME can appear in a log message — `IMP_LOG_WARN("... slab
+    cudaMalloc(%.1f MiB) failed")` matched the pattern and was counted as an
+    allocation site for as long as this gate has existed. One phantom in the
+    tree today (pre_dequant_phase3_cutlass.cu), found by tools/alloc_census.py
+    failing to attribute it to any buffer. A gate whose number includes text is
+    a gate that can be satisfied by editing a message.
+    """
+    quotes = 0
+    i = 0
+    while i < pos:
+        if line[i] == "\\":
+            i += 2
+            continue
+        if line[i] == '"':
+            quotes += 1
+        i += 1
+    return quotes % 2 == 1
+
+
 def scan() -> dict[str, list[tuple[int, str]]]:
     """rel_path -> [(line_no, api)] for every non-exempt file that allocates."""
     hits: dict[str, list[tuple[int, str]]] = {}
@@ -109,7 +131,7 @@ def scan() -> dict[str, list[tuple[int, str]]]:
                 if COMMENT_LINE.match(line):
                     continue
                 m = PATTERN.search(line)
-                if m:
+                if m and not in_string_literal(line, m.start()):
                     found.append((n, m.group(1)))
         if found:
             hits[rel] = found
@@ -191,15 +213,24 @@ def main() -> int:
         acq = rel_ = host_acq = 0
         only_release = []
         host_files = []
+        def count(pattern, code_lines):
+            # Same string-literal exclusion scan() applies, or --stats reports a
+            # different number than the gate it is summarising.
+            total = 0
+            for t in code_lines:
+                total += sum(1 for m in pattern.finditer(t)
+                             if not in_string_literal(t, m.start()))
+            return total
+
         for relpath, lines in hits.items():
             text = (REPO / relpath).read_text(errors="ignore").splitlines()
             code = [t for t in text if not t.strip().startswith("//")]
-            a = sum(len(PATTERN_ACQUIRE.findall(t)) for t in code)
-            r = sum(len(PATTERN_RELEASE.findall(t)) for t in code)
+            a = count(PATTERN_ACQUIRE, code)
+            r = count(PATTERN_RELEASE, code)
             # Pinned-host acquisitions are a separate class of work: they cannot
             # move to a device arena at all, so counting them with the device
             # sites makes the remaining migration look more uniform than it is.
-            h = sum(len(PATTERN_HOST_ACQUIRE.findall(t)) for t in code)
+            h = count(PATTERN_HOST_ACQUIRE, code)
             acq += a
             rel_ += r
             host_acq += h
@@ -229,9 +260,8 @@ def main() -> int:
         per_file = []
         for relpath in hits:
             text = (REPO / relpath).read_text(errors="ignore").splitlines()
-            a = sum(len(PATTERN_ACQUIRE.findall(t)) for t in text
-                    if not t.strip().startswith("//"))
-            per_file.append((a, len(hits[relpath]), relpath))
+            code = [t for t in text if not t.strip().startswith("//")]
+            per_file.append((count(PATTERN_ACQUIRE, code), len(hits[relpath]), relpath))
         for a, total, relpath in sorted(per_file, reverse=True)[:15]:
             budget = allowed.get(relpath, 0)
             mark = "" if budget < 0 else f"  (budget {budget})"
