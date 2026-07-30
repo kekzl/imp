@@ -210,11 +210,6 @@ library_reserve_mb = -1
 # Empty = $XDG_CACHE_HOME/imp/library_reserve (or ~/.cache/imp/...); "off"
 # disables it. A miss or an unwritable path warns and charges the constant.
 library_reserve_cache =
-# Native-NVFP4 (prequant) models only: physically reserve the mandatory
-# decode caches (CUTLASS SfAtom slab + nvfp4_moe) right after weight upload,
-# before workspaces/KV consume the headroom. Partial caches abort decode
-# CUDA-graph capture (~10x decode hit). Escape hatch only - leave on.
-native_cache_reserve = true
 
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +

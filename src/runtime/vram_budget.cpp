@@ -103,7 +103,6 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
 
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens, int n_swa_layers,
-                               size_t mandatory_cache_prealloc,
                                const NativeCacheDemand* native_demand) {
     VRAMBudget budget;
     const auto& mcfg = model.config();
@@ -357,30 +356,34 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // directly, no qtype filter: on an NVFP4-prequant checkpoint
             // these are exactly the quantized set.
             NativeCacheDemand demand = native_demand ? *native_demand : compute_native_cache_demand(model);
-            // Floors are only handed to phase 3 when the balloon physically
-            // guaranteed the bytes — an unbacked floor on a genuinely tight
-            // card would over-commit the SF slab cudaMalloc. Phase 3b (SF)
-            // runs before phase 3-moe, so an sf-only balloon still floors SF.
-            budget.mandatory_sf_bytes =
-                (mandatory_cache_prealloc >= demand.sf_bytes) ? demand.sf_bytes : 0;
-            budget.mandatory_moe_bytes =
-                (mandatory_cache_prealloc >= demand.total()) ? demand.moe_slab_bytes : 0;
+            // The floors are now unconditional. They used to be handed to phase 3
+            // only when the balloon had physically reserved the bytes, on the
+            // argument that an unbacked floor could over-commit the SF slab on a
+            // tight card. Two things changed: A7 step 6.4 builds the caches BEFORE
+            // the KV pool, i.e. at the moment VRAM is least contended, and the
+            // balloon is gone (AUDIT B62). What the floor is actually for survives
+            // both — cudaMemGetInfo under-reports free while async frees are still
+            // being reclaimed, so the builder must trust the plan over the live
+            // read. If the slab genuinely cannot be allocated the builder degrades
+            // to partial coverage, which is exactly what it did without a balloon.
+            budget.mandatory_sf_bytes = demand.sf_bytes;
+            budget.mandatory_moe_bytes = demand.moe_slab_bytes;
             size_t phase3_reserve =
                 vram_reserve_floor(total_vram, reserve_floor_pct) + 1024ULL * 1024 * 1024;
-            // Bytes already physically held by the Engine's balloon are
-            // excluded from free_vram — charge KV only for the UNCOVERED
-            // remainder (normally 0) so the demand isn't counted twice.
-            size_t uncovered = (demand.total() > mandatory_cache_prealloc)
-                                   ? demand.total() - mandatory_cache_prealloc
-                                   : 0;
-            size_t native_need = uncovered + phase3_reserve;
+            // KV is charged the full measured demand, which is what the
+            // no-balloon path always did — nothing is hidden from free_vram any
+            // more, so the plan states the cost instead of a hold enforcing it.
+            // (I tried dropping this charge as a suspected double count against
+            // the post-cache residual sizing; diffing the init logs showed the
+            // budget produces the same kv_max_blocks either way, so the charge
+            // stays and the speculation does not.)
+            size_t native_need = demand.total() + phase3_reserve;
             if (native_need > cutlass_sf_estimate) {
                 IMP_LOG_INFO("VRAM budget: native-NVFP4 weight-cache reserve %.1f MiB "
-                             "(sf=%.1f, moe_slab=%.1f, prealloc-covered=%.1f, "
-                             "phase3+workspaces=%.1f)",
+                             "(sf=%.1f, moe_slab=%.1f, phase3+workspaces=%.1f; floored, "
+                             "not pre-held)",
                              native_need / (1024.0 * 1024.0), demand.sf_bytes / (1024.0 * 1024.0),
                              demand.moe_slab_bytes / (1024.0 * 1024.0),
-                             std::min(demand.total(), mandatory_cache_prealloc) / (1024.0 * 1024.0),
                              phase3_reserve / (1024.0 * 1024.0));
                 cutlass_sf_estimate = native_need;
             }

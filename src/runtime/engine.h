@@ -321,7 +321,7 @@ private:
     // compute_native_cache_demand(*model_) is a pure function of the
     // checkpoint's tensor shapes (stable pre- and post-upload by contract);
     // it used to be re-scanned at every init phase that needs it (auto
-    // batch/ctx sizing, VRAM budget planning, balloon reserve). Scan once,
+    // batch/ctx sizing, VRAM budget planning, the phase-3 floors). Scan once,
     // reuse everywhere.
     const NativeCacheDemand& native_cache_demand() {
         if (!native_cache_demand_valid_) {
@@ -569,9 +569,6 @@ private:
     // the list is empty or the upload failed; callers then simply mask nothing.
     const int32_t* banned_tokens_device_(cudaStream_t stream);
 
-    void* native_cache_balloon_ = nullptr;
-    size_t native_cache_balloon_bytes_ = 0;
-    void release_native_cache_balloon_(const char* when);
     ChatTemplate chat_template_;
 
     // ── Extracted subsystems ─────────────────────────────────────────

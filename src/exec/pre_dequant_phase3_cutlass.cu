@@ -52,11 +52,12 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         // capture-failure root cause is understood.
         size_t kCtReserve = vram_reserve_floor(total_mem);
         ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
-        // Prequant models: the Engine's balloon physically reserved the SF
-        // slab bytes (released just before this build), so the demand is
-        // guaranteed even when cudaMemGetInfo under-reports free (async
-        // frees are reclaimed late on this driver). Floor, don't trust
-        // live-free below the guarantee.
+        // Prequant models: the plan grants the SF slab its measured demand, so
+        // the budget is floored at it even when cudaMemGetInfo under-reports
+        // free (async frees are reclaimed late on this driver). Floor, don't
+        // trust live-free below the guarantee. This used to be backed by a
+        // physical balloon the Engine held across init; the floor alone carries
+        // it now (AUDIT B62).
         if (budget.mandatory_sf_bytes > ct_budget) {
             IMP_LOG_INFO("CUTLASS NVFP4 cache: budget floored at guaranteed %.1f MiB "
                          "(live-free-derived %.1f MiB under-reports)",

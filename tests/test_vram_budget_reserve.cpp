@@ -354,24 +354,23 @@ TEST(VramBudgetReserve, PreallocCoversDemandAndFreesKv) {
     NativeCacheDemand d = compute_native_cache_demand(m);
     ASSERT_GT(d.total(), 0u);
 
-    // Without prealloc: full demand charged against KV; floors unbacked → 0.
-    VRAMBudget none = compute_vram_budget(m, config, 2, 128, 4 * GiB);
-    EXPECT_EQ(none.mandatory_sf_bytes, 0u);
-    EXPECT_EQ(none.mandatory_moe_bytes, 0u);
+    // The floors are stated by the PLAN now, not conditional on bytes some
+    // caller physically pre-held (AUDIT B62 — the balloon is gone). They are
+    // the measured demand, unconditionally, on every call.
+    VRAMBudget b = compute_vram_budget(m, config, 2, 128, 4 * GiB);
+    EXPECT_EQ(b.mandatory_sf_bytes, d.sf_bytes);
+    EXPECT_EQ(b.mandatory_moe_bytes, d.moe_slab_bytes);
 
-    // With the balloon held (free_vram already excludes it): only the
-    // uncovered remainder (0) is charged, and the floors are backed.
-    VRAMBudget held =
-        compute_vram_budget(m, config, 2, 128, 4 * GiB, /*swa_live_tokens=*/0,
-                            /*n_swa_layers=*/0, /*mandatory_cache_prealloc=*/d.total());
-    EXPECT_EQ(held.mandatory_sf_bytes, d.sf_bytes);
-    EXPECT_EQ(held.mandatory_moe_bytes, d.moe_slab_bytes);
-    EXPECT_GE(held.kv_max_blocks, none.kv_max_blocks);
+    // And they do not depend on how much VRAM the call is told about: a floor
+    // that shrank with free VRAM would be exactly the live-free-derived number
+    // it exists to override.
+    VRAMBudget tight = compute_vram_budget(m, config, 2, 128, 2 * GiB);
+    EXPECT_EQ(tight.mandatory_sf_bytes, d.sf_bytes);
+    EXPECT_EQ(tight.mandatory_moe_bytes, d.moe_slab_bytes);
 
-    // Partial (SF-only) balloon: SF floor backed, MoE floor not.
-    VRAMBudget sf_only = compute_vram_budget(m, config, 2, 128, 4 * GiB, 0, 0, d.sf_bytes);
-    EXPECT_EQ(sf_only.mandatory_sf_bytes, d.sf_bytes);
-    EXPECT_EQ(sf_only.mandatory_moe_bytes, 0u);
+    // KV is charged the full demand — nothing is hidden from free_vram, so a
+    // roomier card still gets the larger pool.
+    EXPECT_GE(b.kv_max_blocks, tight.kv_max_blocks);
 }
 
 TEST(VramBudgetReserve, VramKnobsAreClamped) {

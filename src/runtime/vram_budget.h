@@ -21,8 +21,7 @@ struct NativeCacheDemand {
     size_t sf_bytes = 0;
     // Largest transient per-(layer,proj) contiguous MoE expert copy
     // (phase 3-moe copy branch: packed + micro-scales + tensor-scales).
-    // The zero-copy borrow branch needs ~none of this — it is an upper
-    // bound, held only until the balloon is released before phase 3.
+    // The zero-copy borrow branch needs ~none of this — it is an upper bound.
     size_t moe_slab_bytes = 0;
     size_t total() const { return sf_bytes + moe_slab_bytes; }
 };
@@ -51,8 +50,10 @@ struct VRAMBudget {
     // Guaranteed byte-floors for the mandatory native-NVFP4 decode caches
     // (0 for non-prequant models). Phase 3b / phase 3-moe floor their live-
     // free-derived mode-2 budgets at these values so a lagging
-    // cudaMemGetInfo (async frees are reclaimed late on this driver) can't
-    // starve a cache whose room was physically reserved via the balloon.
+    // cudaMemGetInfo (async frees are reclaimed late on this driver) cannot
+    // starve a cache the PLAN has already granted. Unconditional since the
+    // balloon was removed (AUDIT B62): the guarantee is the floor itself, not
+    // bytes some caller pre-held.
     size_t mandatory_sf_bytes = 0;
     size_t mandatory_moe_bytes = 0;
     // Total weight-cache demand this pass charged against the post-weight
@@ -75,16 +76,17 @@ struct VRAMBudget {
 // swa_live_tokens (window + slack + burst/chunk peak) instead of
 // max_seq_len; only the remaining global layers scale with context.
 //
-// mandatory_cache_prealloc: bytes already physically reserved for the
-// mandatory native-NVFP4 decode caches (Engine's balloon, held while this
-// runs — free_vram excludes it). The prequant reserve then only charges KV
-// for the UNCOVERED remainder, preventing a double-count.
+// The mandatory native-NVFP4 decode caches used to be physically pre-reserved
+// by an Engine-held balloon, and this took its size so KV was charged only for
+// the uncovered remainder. The balloon is gone (AUDIT B62): KV is now charged
+// the full measured demand, and phase 3 is floored at it through
+// mandatory_sf_bytes / mandatory_moe_bytes — a planned guarantee instead of
+// hidden bytes.
 //
 // native_demand: precomputed NativeCacheDemand (Engine's cached scan) to
 // skip the tensor rescan; nullptr computes it locally (tests, standalone).
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens = 0, int n_swa_layers = 0,
-                               size_t mandatory_cache_prealloc = 0,
                                const NativeCacheDemand* native_demand = nullptr);
 
 // Split of the post-reserve VRAM budget across the pre-dequant phases.

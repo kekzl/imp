@@ -6,10 +6,11 @@
 // is pure in the functional sense and impure in the useful one: its dominant
 // input is a live cudaMemGetInfo reading taken after the weight upload and
 // before the weight caches are built. So the KV pool is sized from a number
-// that is ~3.9 GiB too optimistic (§A1.5), the cache phases re-derive their own
-// budgets from live free VRAM again (#1100), and the engine works around the
-// ordering with a physical balloon allocation whose only job is to hide bytes
-// from the planner.
+// that is ~3.9 GiB too optimistic (§A1.5) and the cache phases re-derive their
+// own budgets from live free VRAM again (#1100). The engine used to work around
+// the ordering with a physical balloon allocation whose only job was to hide
+// bytes from the planner; that is gone (AUDIT B62 — the guarantee is a planned
+// floor now), but the live re-derivation it papered over is still here.
 //
 // plan_memory() has three properties that code does not:
 //
