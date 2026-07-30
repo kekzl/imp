@@ -42,31 +42,43 @@ SUFFIXES = (".cpp", ".cu", ".h", ".cuh", ".hpp")
 
 # Driver/runtime memory APIs. Ordered longest-first so the alternation reports
 # the most specific name (cudaMallocAsync, not cudaMalloc).
-APIS = [
+# Split on purpose. Invariant I1 is titled "single ACQUISITION point", and the
+# two halves need different work: an acquisition needs a tier to move to, while
+# a release follows for free once the owner is a RAII type (Region, BlockRef,
+# GraphSlotLease) — it is a consequence of migrating, not separate work.
+# Reporting one number for both overstated the distance to criterion 2 by more
+# than half: 696 total is 309 acquisitions and 407 releases, and EIGHT files
+# contain only releases, so no allocation migration can ever remove them.
+APIS_ACQUIRE = [
     "cudaMallocAsync",
     "cudaMallocManaged",
     "cudaMallocPitch",
     "cudaMallocHost",
     "cudaMalloc3D",
     "cudaMalloc",
-    "cudaFreeAsync",
-    "cudaFreeHost",
-    "cudaFree",
     "cudaHostAlloc",
     "cudaHostRegister",
-    "cudaHostUnregister",
     "cuMemAddressReserve",
-    "cuMemAddressFree",
     "cuMemCreate",
-    "cuMemRelease",
     "cuMemMap",
-    "cuMemUnmap",
     "cuMemSetAccess",
     "thrust::device_vector",
 ]
+APIS_RELEASE = [
+    "cudaFreeAsync",
+    "cudaFreeHost",
+    "cudaFree",
+    "cudaHostUnregister",
+    "cuMemAddressFree",
+    "cuMemRelease",
+    "cuMemUnmap",
+]
+APIS = APIS_ACQUIRE + APIS_RELEASE
 # Word-boundary on the left so `imp_cudaMalloc_wrapper` is not a false hit, and
 # a '(' or '<' on the right so a mention in an identifier is not either.
 PATTERN = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS) + r")\s*[(<]")
+PATTERN_ACQUIRE = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS_ACQUIRE) + r")\s*[(<]")
+PATTERN_RELEASE = re.compile(r"\b(" + "|".join(re.escape(a) for a in APIS_RELEASE) + r")\s*[(<]")
 
 # A line whose first non-space run starts a comment. Cheap and good enough:
 # the alternative is a real preprocessor, and a banned call hidden inside a
@@ -164,10 +176,33 @@ def main() -> int:
           f"(allowlist: {len(allowed)} files / {budget_total} sites)")
 
     if args.stats:
-        for rel in sorted(hits, key=lambda r: -len(hits[r]))[:15]:
-            budget = allowed.get(rel, 0)
+        # Acquisition / release split. I1 is titled "single ACQUISITION point",
+        # and the halves need different work: an acquisition needs a tier to move
+        # to, a release follows for free once the owner is a RAII type. Reporting
+        # one number overstated the distance to criterion 2 by more than half.
+        acq = rel_ = 0
+        only_release = []
+        for relpath, lines in hits.items():
+            text = (REPO / relpath).read_text(errors="ignore").splitlines()
+            a = sum(len(PATTERN_ACQUIRE.findall(t)) for t in text
+                    if not t.strip().startswith("//"))
+            r = sum(len(PATTERN_RELEASE.findall(t)) for t in text
+                    if not t.strip().startswith("//"))
+            acq += a
+            rel_ += r
+            if a == 0 and r > 0:
+                only_release.append((r, relpath))
+        print(f"  acquisitions {acq}   releases {rel_}")
+        if only_release:
+            print(f"  {len(only_release)} file(s) contain ONLY releases — no allocation "
+                  f"migration can remove them:")
+            for r, f in sorted(only_release, reverse=True):
+                print(f"    {r:4d}  {f}")
+        print("  largest by total calls:")
+        for relpath in sorted(hits, key=lambda r: -len(hits[r]))[:15]:
+            budget = allowed.get(relpath, 0)
             mark = "" if budget < 0 else f"  (budget {budget})"
-            print(f"  {len(hits[rel]):4d}  {rel}{mark}")
+            print(f"  {len(hits[relpath]):4d}  {relpath}{mark}")
         return 0
 
     rc = 0
