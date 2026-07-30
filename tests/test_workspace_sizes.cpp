@@ -158,6 +158,29 @@ TEST(ExecT2Demand, MoeArraysAreChargedOnlyForMoeAndScaleWithExperts) {
     EXPECT_LT(at128, 64u * 1024) << "these are pointer and scale arrays, a few KiB at most";
 }
 
+// The FP8 reduction scratch is charged only when FP8 prefill is on — which on
+// sm_120 it never is ("FP8 prefill: auto -> DISABLED on sm_120"). So the RUNTIME
+// path is unreachable on the target and only this arithmetic is verifiable; the
+// test exists so the term cannot drift unnoticed against the site it mirrors.
+TEST(ExecT2Demand, Fp8ReductionIsChargedOnlyWhenFp8PrefillIsOn) {
+    ExecShape s = dense_shape();
+    s.n_heads = 32;
+    s.head_dim = 128;
+    EXPECT_EQ(exec_t2_demand(s, 1024).fp8_reduction, 0u) << "off by default, as on sm_120";
+
+    s.use_fp8_prefill = true;
+    const size_t on = exec_t2_demand(s, 1024).fp8_reduction;
+    EXPECT_GT(on, 0u);
+
+    // It follows max_tokens x max_dim / 1024, so a longer context grows it.
+    ExecShape longer = s;
+    EXPECT_GT(exec_t2_demand(longer, 4096).fp8_reduction, exec_t2_demand(longer, 512).fp8_reduction)
+        << "the reduction grid is derived from the activation size, which scales with tokens";
+
+    // A per-block absmax array over ~11M elements is tens of KiB, not MiB.
+    EXPECT_LT(exec_t2_demand(s, 4096).fp8_reduction, 1024u * 1024);
+}
+
 TEST(ExecT2Demand, ExpertDFfFallsBackToDFfWhenUnset) {
     ExecShape a;
     a.d_model = 2048;
@@ -175,7 +198,8 @@ TEST(ExecT2Demand, ExpertDFfFallsBackToDFfWhenUnset) {
 TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     ExecShape s = dense_shape();
     const ExecT2Demand d = exec_t2_demand(s, 1024);
-    EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays);
+    EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
+                             d.fp8_reduction);
     EXPECT_GT(d.total(), 0u);
 }
 

@@ -879,7 +879,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // per-tenant demand rather than a constant; the constant is only a floor
     // for the tenants not migrated yet.
     {
-        const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size);
+        const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
+                                      config_.use_fp8_prefill);
         // +1/8 for 256-byte alignment padding across the arena's takes.
         const size_t want = d.total() + d.total() / 8;
         const size_t cap = std::max(kEngineArenaDefaultBytes, want);

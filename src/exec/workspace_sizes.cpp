@@ -60,9 +60,10 @@ void for_each_weight(const Model& model, F&& f) {
 std::string ExecT2Demand::describe() const {
     constexpr double kMiB = 1024.0 * 1024.0;
     char buf[160];
-    std::snprintf(buf, sizeof(buf), "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f MiB",
+    std::snprintf(buf, sizeof(buf),
+                  "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f + fp8red %.2f MiB",
                   mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB,
-                  moe_arrays / kMiB);
+                  moe_arrays / kMiB, fp8_reduction / kMiB);
     return buf;
 }
 
@@ -79,6 +80,11 @@ ExecShape exec_shape_of(const Model& model) {
     s.expert_d_ff = cfg.expert_d_ff;
     s.d_ff = cfg.d_ff;
     s.d_model = cfg.d_model;
+    s.n_heads = cfg.n_heads;
+    s.head_dim = cfg.head_dim;
+    s.ssm_inner_size = cfg.ssm_inner_size;
+    s.ssm_conv_channels = cfg.ssm_inner_size > 0 ? cfg.ssm_conv_channels() : 0;
+    s.ssm_dt_rank = cfg.ssm_dt_rank;
     // Filled by the caller from EngineConfig; the model does not know the batch.
     for_each_weight(model, [&](const Tensor& t) {
         const Dims d = weight_dims(t);
@@ -187,6 +193,29 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                          + 10 * 256;                  // per-take 256 B alignment
     }
 
+    // FP8 activation reduction scratch. Mirrors the max_dim ladder and the grid
+    // arithmetic in executor_workspace_buffers.cu exactly: kElemsPerThread=4,
+    // kBlockSize=256, plus the act-scale and absmax scalars.
+    if (shape.use_fp8_prefill && shape.d_model > 0) {
+        int max_dim = shape.d_model;
+        if (shape.d_ff > 0)
+            max_dim = std::max(max_dim, shape.d_ff);
+        const int hd = shape.head_dim > 0
+                           ? shape.head_dim
+                           : (shape.n_heads > 0 ? shape.d_model / shape.n_heads : 0);
+        max_dim = std::max(max_dim, shape.n_heads * hd);
+        if (shape.ssm_inner_size > 0) {
+            max_dim = std::max(max_dim, shape.ssm_inner_size + shape.ssm_conv_channels +
+                                            shape.ssm_dt_rank);
+            max_dim = std::max(max_dim, shape.ssm_conv_channels + shape.ssm_inner_size +
+                                            2 * shape.ssm_dt_rank);
+            max_dim = std::max(max_dim, shape.ssm_inner_size);
+        }
+        const size_t act = static_cast<size_t>(t) * static_cast<size_t>(max_dim);
+        const size_t grid = ((act + 3) / 4 + 255) / 256;
+        out.fp8_reduction = grid * sizeof(float) + 2 * sizeof(float) + 3 * 256;
+    }
+
     return out;
 }
 
@@ -198,14 +227,20 @@ int exec_max_tokens(const Model& model, int max_seq_len) {
 
 int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_of(model)); }
 
-ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size) {
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size,
+                            bool use_fp8_prefill) {
     ExecShape shape = exec_shape_of(model);
     shape.max_batch_size = max_batch_size;
+    shape.use_fp8_prefill = use_fp8_prefill;
     return exec_t2_demand(shape, max_seq_len);
 }
 
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size) {
+    return exec_t2_demand(model, max_seq_len, max_batch_size, false);
+}
+
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len) {
-    return exec_t2_demand(model, max_seq_len, 1);
+    return exec_t2_demand(model, max_seq_len, 1, false);
 }
 
 }  // namespace imp
