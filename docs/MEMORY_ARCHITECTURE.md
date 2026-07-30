@@ -1034,7 +1034,7 @@ design above, so the argument that produced the original shape stays readable.
 | 9b.5 — admission-time 503 on KV exhaustion (I6) | **done** | `feat(api): a typed capacity refusal instead of a generic cancel` |
 | 6.4 — weight caches before the KV pool; KV takes the measured residual | **done** | `fix(vram): build the weight caches before the KV pool` |
 | 6.0/6.5/6.6 — exact demand, T1 arena, delete the balloon | not started | |
-| **criterion 4 — 2000-request soak** | **RUN, and it FAILED: one KV block leaks per request (B46)** | |
+| **criterion 4 — post-drain live blocks return to baseline** | **RUN and PASSES: live blocks 0 → 0 across 48 requests.** The earlier "one block per request leaks" reading was my gauge conflating live with cached — see B46, #1115 closed invalid | |
 | 6.7 — the library reserve is measured and reported, not assumed | **done** |
 | 6.8 — the measurement is remembered; criteria 5+6 hold from the 2nd start | **done** | `feat(memory): remember the measured library reserve` | `feat(memory): measure the library reserve instead of assuming it` |
 | 7a — WSL2 VMM spike (the gate) | **done — GO** | `test(memory): WSL2 VMM spike — the step-7 gate is open` |

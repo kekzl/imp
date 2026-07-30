@@ -12,6 +12,7 @@
 
 #include "api/imp_internal.h"
 #include "memory/kv_cache.h"
+#include "memory/kv_cache_manager.h"
 #include "memory/mem_account.h"
 #include "runtime/engine.h"
 
@@ -42,9 +43,37 @@ if (state.ctx && state.ctx->engine) {
         out += "# HELP imp_kv_blocks_total KV pool capacity in blocks\n";
         out += "# TYPE imp_kv_blocks_total gauge\n";
         out += "imp_kv_blocks_total " + std::to_string(total_blocks) + "\n";
-        out += "# HELP imp_kv_blocks_used KV blocks currently held by sequences\n";
+        out += "# HELP imp_kv_blocks_used KV blocks held by anything — live sequences, the "
+               "prefix cache, pins\n";
         out += "# TYPE imp_kv_blocks_used gauge\n";
         out += "imp_kv_blocks_used " + std::to_string(total_blocks - free_blocks) + "\n";
+        // The split matters more than the total, and its absence cost me a wrong
+        // bug report (#1115): `used` grew by one block per request and looked
+        // like a leak, but the server enables prefix caching by default, so
+        // free_sequence MOVES the last reference of a hashed block into the
+        // cache instead of dropping it. Such a block is occupied AND reclaimable
+        // — precisely the distinction invariant I7 exists to make, and a single
+        // "used" gauge cannot express it. imp_kv_blocks_live is the one a soak
+        // should assert returns to baseline.
+        if (auto* mgr = state.ctx->engine->kv_manager()) {
+            const int cached = mgr->num_cached_blocks();
+            out += "# HELP imp_kv_blocks_cached KV blocks held by the prefix cache (occupied but "
+                   "reusable)\n";
+            out += "# TYPE imp_kv_blocks_cached gauge\n";
+            out += "imp_kv_blocks_cached " + std::to_string(cached) + "\n";
+            out += "# HELP imp_kv_blocks_reclaimable Cached blocks eviction can hand back\n";
+            out += "# TYPE imp_kv_blocks_reclaimable gauge\n";
+            out += "imp_kv_blocks_reclaimable " +
+                   std::to_string(mgr->num_reclaimable_cached_blocks()) + "\n";
+            out += "# HELP imp_kv_blocks_pinned Cached blocks pinned by cache_control\n";
+            out += "# TYPE imp_kv_blocks_pinned gauge\n";
+            out += "imp_kv_blocks_pinned " + std::to_string(mgr->num_pinned_blocks()) + "\n";
+            out += "# HELP imp_kv_blocks_live KV blocks held by LIVE SEQUENCES only — the number "
+                   "that must return to baseline when the load stops\n";
+            out += "# TYPE imp_kv_blocks_live gauge\n";
+            out += "imp_kv_blocks_live " + std::to_string(total_blocks - free_blocks - cached) +
+                   "\n";
+        }
     }
 }
 // --vram-budget adherence. own_bytes is this process's allocations since
