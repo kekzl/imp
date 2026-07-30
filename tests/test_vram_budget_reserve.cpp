@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "compute/gemm_cutlass_sm120.h"
+#include "memory/plan.h"  // kMeasuredLibraryReserveBytes
 #include "memory/vram_query.h"
 #include "model/model.h"
 #include "model/model_config.h"
@@ -73,6 +74,11 @@ TEST(VramBudgetReserve, PlannerDemandKeepsKvPoolFromEatingWeightCacheRoom) {
     config.use_nvfp4_decode = 2;   // mode 2: reserve floor is the flat 512 MiB
     config.use_cuda_graphs = false;
     config.kv_cache_dtype = QType::F16;
+    // Isolate this test from the library charge (#1109 floors reserve_bytes at
+    // what cuBLAS/CUTLASS claim on the first forward). That charge has its own
+    // test below; folding it in here made this one assert the sum of two
+    // unrelated policies, which is how it went red for three PRs (AUDIT B63).
+    config.library_reserve_mb = 0;
 
     const int n_kv_layers = 32;
     const int head_dim = 128;
@@ -144,6 +150,11 @@ TEST(VramBudgetReserve, BeneficialSourcesKeepFullKvPool) {
     config.use_nvfp4_decode = 2;
     config.use_cuda_graphs = false;
     config.kv_cache_dtype = QType::F16;
+    // Isolate this test from the library charge (#1109 floors reserve_bytes at
+    // what cuBLAS/CUTLASS claim on the first forward). That charge has its own
+    // test below; folding it in here made this one assert the sum of two
+    // unrelated policies, which is how it went red for three PRs (AUDIT B63).
+    config.library_reserve_mb = 0;
 
     const size_t GiB = 1024ull * 1024 * 1024;
     VRAMBudget with_planner = compute_vram_budget(m, config, 32, 128, 8 * GiB);
@@ -240,6 +251,13 @@ TEST(VramBudgetReserve, ReserveFloorPctScalesReserve) {
     EngineConfig cfg_10 = knob_config();
     EngineConfig cfg_20 = knob_config();
     cfg_20.vram_reserve_floor_pct = 20;
+    // The floor percentage is what this test is about; the library charge is a
+    // separate floor with its own test (ReserveIsFlooredAtTheLibraryCharge).
+    // With both live, reserve_bytes is max(pct floor, library charge) and the
+    // library charge wins on any real card — which is exactly what silently
+    // broke this test in #1109 (AUDIT B63).
+    cfg_10.library_reserve_mb = 0;
+    cfg_20.library_reserve_mb = 0;
 
     size_t total_vram = 0;
     vram_budget_mem_get_info(nullptr, &total_vram);
@@ -371,6 +389,51 @@ TEST(VramBudgetReserve, PreallocCoversDemandAndFreesKv) {
     // KV is charged the full demand — nothing is hidden from free_vram, so a
     // roomier card still gets the larger pool.
     EXPECT_GE(b.kv_max_blocks, tight.kv_max_blocks);
+}
+
+// The floor that #1109 added, and the test it should have come with. Its
+// absence is why three tests in this file encoded the pre-#1109 arithmetic and
+// stayed red for three PRs: CI has no GPU runner, so nothing ran them.
+TEST(VramBudgetReserve, ReserveIsFlooredAtTheLibraryCharge) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::F16, QType::F16);
+    const size_t GiB = 1024ull * 1024 * 1024;
+
+    // A VRAM-BOUND pool, deliberately: knob_config()'s 2048-token context makes
+    // the pool demand-bound (512 blocks either way), and an assertion about the
+    // reserve would then pass for the wrong reason. At 32k the pool is sized by
+    // what is left, which is what the charge is supposed to move.
+    EngineConfig uncharged;
+    uncharged.max_seq_len = 32768;
+    uncharged.max_batch_size = 8;
+    uncharged.use_nvfp4_decode = 0;
+    uncharged.use_cuda_graphs = false;
+    uncharged.kv_cache_dtype = QType::F16;
+    uncharged.library_reserve_mb = 0;
+    EngineConfig charged = uncharged;
+    charged.library_reserve_mb = 6000;
+
+    VRAMBudget b_none = compute_vram_budget(m, uncharged, 32, 128, 8 * GiB);
+    VRAMBudget b_chg = compute_vram_budget(m, charged, 32, 128, 8 * GiB);
+
+    // The charge is a floor, not an addend: it replaces the reserve when larger.
+    EXPECT_EQ(b_chg.reserve_bytes, 6000ull << 20);
+    EXPECT_GT(b_chg.reserve_bytes, b_none.reserve_bytes);
+
+    // And it has to come out of the elastic tier, or the plan would hand out
+    // bytes the first forward is about to take (the #1109 failure: budget
+    // 16000 -> peak 22584 MiB, i.e. --vram-budget changed nothing).
+    EXPECT_LT(b_chg.kv_max_blocks, b_none.kv_max_blocks)
+        << "the library charge must reduce the KV pool, not be added on top of it";
+
+    // The default (-1) charges the measured constant rather than nothing.
+    EngineConfig dflt = uncharged;
+    dflt.library_reserve_mb = -1;
+    VRAMBudget b_dflt = compute_vram_budget(m, dflt, 32, 128, 8 * GiB);
+    EXPECT_GE(b_dflt.reserve_bytes, kMeasuredLibraryReserveBytes)
+        << "an unset library_reserve_mb must still charge the measured constant";
 }
 
 TEST(VramBudgetReserve, VramKnobsAreClamped) {
