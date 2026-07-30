@@ -2,6 +2,7 @@
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -149,10 +150,28 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    int32_t* d_result = nullptr;
-    if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
-        IMP_LOG_ERROR("sample_greedy: cudaMalloc failed");
-        return 0;
+    // Four bytes, allocated ONCE. This used to cudaMalloc and cudaFree per call
+    // — an I2 violation on a sampling path, and the kind that hides because the
+    // allocation is trivially small (docs/MEMORY_ARCHITECTURE.md A3.2). The
+    // buffer is write-then-read within this call and reused by every later one,
+    // so engine-persistent is the correct tier.
+    //
+    // This overload is itself the fallback the executor takes when its own
+    // d_sample_result_ is unavailable, and single-engine-per-process is the
+    // supported deployment (memory/vram_query.h), so a file-static is safe here
+    // in exactly the way it would not be for a per-request buffer.
+    static int32_t* d_result = nullptr;
+    if (!d_result) {
+        if (auto slab = engine_arena().take_bytes(sizeof(int32_t)); !slab.empty()) {
+            d_result = reinterpret_cast<int32_t*>(slab.data());
+        } else if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
+            // Kept because the arena is closed in a bare unit test, and returning
+            // token 0 there would be a silently wrong sample rather than a loud
+            // failure. It runs at most once per process.
+            IMP_LOG_ERROR("sample_greedy: could not obtain the result scratch");
+            d_result = nullptr;
+            return 0;
+        }
     }
 
     argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
@@ -161,8 +180,6 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
-
-    IMP_CUDA_CHECK_LOG(cudaFree(d_result));
     return h_result;
 }
 
