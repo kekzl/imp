@@ -221,7 +221,12 @@ if [ ! -x "$TESTS_BIN" ]; then
     fail "$TESTS_BIN not found"
 else
     if [ "$MODE" = "fast" ]; then
-        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:AttentionTest.*"
+        # VramBudgetReserve is in here because CI structurally cannot run it:
+        # compute_vram_budget queries the device for total VRAM, so the suite is
+        # SKIP_IF_NO_CUDA and the GPU-less CI lane skips it. Three of its tests
+        # were red for three PRs before anyone looked (AUDIT B63). The pre-push
+        # gate is the only place that can catch that class.
+        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:AttentionTest.*:VramBudget*"
         if "$TESTS_BIN" --gtest_filter="$FILTER" >/tmp/imp_verify_tests.log 2>&1; then
             pass "fast gtest filter"
         else
