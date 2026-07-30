@@ -154,8 +154,11 @@ Per token:
   [`AUDIT.md`](../AUDIT.md) records what was measured on the way (including the
   negative results). The short version: five lifetime tiers (T1 model-resident,
   T2 engine-persistent, T3 pooled fixed-block, T4 forward-scratch, T5 host
-  staging) over a three-layer stack — `src/memory/backend.{h,cpp}` is the only
-  code that talks to the driver, `arena` / `block_pool` / `scratch_stack` /
+  staging — split into T5a transient and T5b engine-persistent pinned, because a
+  buffer pinned once and reused every decode step cannot obey "load only") over a
+  three-layer stack — `src/memory/backend.{h,cpp}` is the only code that talks to
+  the driver about *device* memory and `memory/host_pinned.{h,cpp}` is its
+  host-side counterpart, `arena` / `block_pool` / `scratch_stack` /
   `graph_slots` are the tier allocators, and `StableSpan` vs `DeviceSpan`
   encodes in the type system which memory a captured CUDA graph may bake an
   address into. `src/memory/plan.cpp` plans capacity without querying the
