@@ -3,6 +3,7 @@
 #include "model/model.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace imp {
 
@@ -55,6 +56,15 @@ void for_each_weight(const Model& model, F&& f) {
 }
 
 }  // namespace
+
+std::string ExecT2Demand::describe() const {
+    constexpr double kMiB = 1024.0 * 1024.0;
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f MiB",
+                  mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB,
+                  moe_arrays / kMiB);
+    return buf;
+}
 
 // ── adapter ──────────────────────────────────────────────────────────
 
@@ -158,6 +168,24 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
     const int logit_tokens = std::max(shape.max_batch_size, 8);
     out.sample_scratch = 2ull * static_cast<size_t>(logit_tokens) * kSampleScratchBytes;
+
+    // Batched-MoE pointer/scale arrays (executor_workspace_buffers.cu): work
+    // pointers 3*ne void*, fp8 scales ne float, M_per ne int32, alpha_compact ne
+    // float, the active-expert counter, and the SFA offset prefix sum (ne+1)
+    // int64. A few KiB in total; charged so the arena is sized for them.
+    if (shape.n_experts > 0) {
+        const size_t ne = static_cast<size_t>(shape.n_experts);
+        out.moe_arrays = 3 * ne * sizeof(void*)        // d_work_ptrs
+                         + ne * sizeof(float)         // d_fp8_scales
+                         + ne * sizeof(int32_t)       // d_M_per
+                         + ne * sizeof(float)         // d_alpha_compact
+                         + sizeof(int32_t)            // d_na
+                         + (ne + 1) * sizeof(int64_t) // d_sfa_offsets
+                         + 2 * ne * sizeof(void*)     // d_B_ptrs_cache, d_SFB_ptrs_cache
+                         + ne * sizeof(float)         // d_alpha_full
+                         + ne * sizeof(void*)         // d_weight_ptrs
+                         + 10 * 256;                  // per-take 256 B alignment
+    }
 
     return out;
 }

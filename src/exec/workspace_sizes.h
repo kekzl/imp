@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -54,12 +55,23 @@ struct ExecT2Demand {
     size_t mmvq_scratch = 0;
     // Sampling result scratch: 2 (parity) * max_logit_tokens * SAMPLE_SCRATCH.
     size_t sample_scratch = 0;
+    // Batched-MoE pointer/scale arrays, all sized from n_experts and all "< 4 KB"
+    // by their own comments. Small, but the point of charging them is that the
+    // arena is SIZED for its tenants rather than absorbing them into slack.
+    size_t moe_arrays = 0;
     // gemm_nvfp4 dequant workspace: the largest single NVFP4 dequant target,
     // capped at 512 MiB (targets above the cap are served by the uncapturable
     // path, exactly as allocate_nvfp4_dequant_workspace decides).
     size_t nvfp4_dequant = 0;
 
-    size_t total() const { return mmvq_scratch + nvfp4_dequant + sample_scratch; }
+    size_t total() const {
+        return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays;
+    }
+
+    // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather
+    // than at the log site so adding a tenant does not grow engine.cpp, which
+    // sits on its file-size hard limit.
+    std::string describe() const;
 };
 
 // max_tokens as GraphExecutor will compute it: min(max_seq_len, 4096), then

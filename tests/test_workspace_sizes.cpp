@@ -137,6 +137,27 @@ TEST(ExecT2Demand, ConfigDerivedFusedExpertShapeIsChargedWhenTensorsCannotShowIt
         << "and it must exceed the dense d_ff term, or this test is not measuring the expert path";
 }
 
+// The batched-MoE pointer arrays are charged only for a MoE model, and they scale
+// with n_experts. Small, but the point of charging them is that the arena is
+// SIZED for its tenants rather than absorbing them into slack (A7 step 4b.2).
+TEST(ExecT2Demand, MoeArraysAreChargedOnlyForMoeAndScaleWithExperts) {
+    ExecShape dense = dense_shape();
+    EXPECT_EQ(exec_t2_demand(dense, 1024).moe_arrays, 0u) << "a dense model has none of these";
+
+    ExecShape moe = dense_shape();
+    moe.n_experts = 32;
+    moe.expert_d_ff = 2880;
+    const size_t at32 = exec_t2_demand(moe, 1024).moe_arrays;
+    EXPECT_GT(at32, 0u);
+
+    moe.n_experts = 128;
+    const size_t at128 = exec_t2_demand(moe, 1024).moe_arrays;
+    EXPECT_GT(at128, at32) << "it must follow n_experts";
+    // Ten arrays of pointers/floats over 128 experts is kilobytes, not megabytes;
+    // a term that came out large would mean the arithmetic drifted from the site.
+    EXPECT_LT(at128, 64u * 1024) << "these are pointer and scale arrays, a few KiB at most";
+}
+
 TEST(ExecT2Demand, ExpertDFfFallsBackToDFfWhenUnset) {
     ExecShape a;
     a.d_model = 2048;
@@ -154,7 +175,7 @@ TEST(ExecT2Demand, ExpertDFfFallsBackToDFfWhenUnset) {
 TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     ExecShape s = dense_shape();
     const ExecT2Demand d = exec_t2_demand(s, 1024);
-    EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch);
+    EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays);
     EXPECT_GT(d.total(), 0u);
 }
 

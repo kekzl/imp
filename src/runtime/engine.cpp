@@ -883,9 +883,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // +1/8 for 256-byte alignment padding across the arena's takes.
         const size_t want = d.total() + d.total() / 8;
         const size_t cap = std::max(kEngineArenaDefaultBytes, want);
-        IMP_LOG_INFO("engine arena demand: mmvq %.1f + nvfp4_dequant %.1f + sample %.1f MiB -> %.1f MiB",
-                     d.mmvq_scratch / (1024.0 * 1024.0), d.nvfp4_dequant / (1024.0 * 1024.0),
-                     d.sample_scratch / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
+        IMP_LOG_INFO("engine arena demand: %s -> %.1f MiB reserved", d.describe().c_str(),
+                     cap / (1024.0 * 1024.0));
         (void)engine_arena_open(cuda_malloc_backend(), cap);
     }
     // T2 slot pool for the conditional graph loop (A7 step 5.3).
