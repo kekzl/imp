@@ -169,12 +169,27 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // Row-batched sampler args: pinned staging + device mirror (one H2D per
     // decode step for the whole batch).
     if (!h_row_args_ && d_sample_result_ && sample_slots_ > 0) {
+        // The device mirror is engine-persistent (T2): sized once from
+        // max_logit_tokens_ and reused every decode step, ~115 KiB. Taken from
+        // the arena with NO direct-allocation fallback, because the caller
+        // already has a real one — it falls back to per-row sampling, which is
+        // exactly what "the arena is closed" should mean here. Keeping a
+        // cudaMalloc for that case would leave the site on the I1 allowlist for
+        // a path that only runs without an engine (AUDIT B47, A7 step 4b.2).
+        //
+        // A re-configure (teardown frees h_row_args_, then a larger batch takes
+        // again) strands the superseded slab in the bump arena. Bounded and
+        // one-time per reconfigure, which is the same trade the MMVQ tenant
+        // makes — and 115 KiB against 120 MiB of arena slack.
+        auto slab = engine_arena().take_bytes(2 * sizeof(TopkRowArgs) * sample_slots_);
         if (cudaHostAlloc(&h_row_args_, 2 * sizeof(TopkRowArgs) * sample_slots_,
                           cudaHostAllocDefault) != cudaSuccess ||
-            cudaMalloc(&d_row_args_, 2 * sizeof(TopkRowArgs) * sample_slots_) != cudaSuccess) {
+            slab.empty()) {
             IMP_LOG_WARN("row-batched sampler args alloc failed — falling back to per-row sampling");
             if (h_row_args_) { cudaFreeHost(h_row_args_); h_row_args_ = nullptr; }
             d_row_args_ = nullptr;
+        } else {
+            d_row_args_ = reinterpret_cast<TopkRowArgs*>(slab.data());
         }
     }
 
@@ -1338,7 +1353,8 @@ void GraphExecutor::free_buffers() {
         banned_cache_capacity_ = 0;
     }
     if (d_row_args_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_row_args_));
+        // Arena-owned since A7 step 4b.2 — no free here. The arena is closed by
+        // ~Engine, after every executor teardown.
         d_row_args_ = nullptr;
     }
     for (int p = 0; p < 2; ++p) {
