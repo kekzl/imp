@@ -352,8 +352,13 @@ TEST(ShadowPlan, ReportSaysWhatItDoesNotModel) {
     const auto res = plan_memory(shadow_plan_input(p));
     const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/2048);
 
-    EXPECT_NE(r.find("shadow plan"), std::string::npos);
-    EXPECT_NE(r.find("NOT applied"), std::string::npos);
+    // The report used to say "shadow plan … computed, NOT applied". It is
+    // applied now — the KV block count it prints is the one the pool uses — so
+    // the wording must not claim otherwise (AUDIT B69).
+    EXPECT_NE(r.find("memory plan"), std::string::npos);
+    EXPECT_NE(r.find("APPLIED"), std::string::npos);
+    EXPECT_EQ(r.find("NOT applied"), std::string::npos)
+        << "the report still describes itself as a shadow";
     EXPECT_NE(r.find("workspaces not modelled"), std::string::npos)
         << "a probe that hides its gaps is worse than no probe";
     EXPECT_NE(r.find("vision tower not modelled"), std::string::npos);
@@ -365,7 +370,7 @@ TEST(ShadowPlan, ReportShowsBothKvDecisions) {
     const auto res = plan_memory(shadow_plan_input(p));
     ASSERT_TRUE(res);
     const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/4096);
-    EXPECT_NE(r.find("live 4096 blocks"), std::string::npos);
+    EXPECT_NE(r.find("live pass 4096 blocks"), std::string::npos);
     EXPECT_NE(r.find("library reserve"), std::string::npos);
 }
 

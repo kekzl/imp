@@ -25,8 +25,8 @@ std::string fmt_lever(const char* key, long long from, long long to) {
 }  // namespace
 
 size_t MemoryPlan::total() const {
-    size_t sum = context_reserve + library_reserve + model_resident + engine_persistent +
-                 forward_scratch + kv.bytes + kv.swa_bytes;
+    size_t sum = context_reserve + library_reserve + model_resident + optional_caches +
+                 engine_persistent + forward_scratch + kv.bytes + kv.swa_bytes;
     for (const auto& p : pools)
         sum += p.bytes;
     return sum;
@@ -34,7 +34,8 @@ size_t MemoryPlan::total() const {
 
 std::vector<PlanLine> MemoryPlan::lines() const {
     std::vector<PlanLine> v;
-    push(v, "model weights + caches", RegionTag::ModelResident, model_resident);
+    push(v, "model weights + mandatory caches", RegionTag::ModelResident, model_resident);
+    push(v, "optional weight caches", RegionTag::ModelResident, optional_caches);
     push(v, "KV pool", RegionTag::KvBlockPool, kv.bytes);
     push(v, "KV pool (SWA group)", RegionTag::SwaBlockPool, kv.swa_bytes);
     push(v, "engine-persistent", RegionTag::EnginePersistent, engine_persistent);
@@ -93,8 +94,18 @@ PlanResult plan_memory(const PlanInput& in) {
     p.context_reserve = in.context_bytes;
     p.library_reserve = in.library.bytes;
 
-    // ── 2. Model-resident. The mandatory cache subset is never traded. ──
-    p.model_resident = in.model.weight_bytes + in.model.weight_cache_bytes;
+    // ── 2. Model-resident. The mandatory cache subset is never traded; the
+    // rest of the cache demand is a preference, and is charged in step 5. ──
+    // This line used to commit weight_cache_bytes whole, and that made the plan
+    // reject configurations the engine serves without trouble: on
+    // Qwen3.6-35B-A3B-NVFP4 at 32k it wanted 6553 MiB of caches against 6083 MiB
+    // distributable and failed by 4703 — while naming "drop the optional weight
+    // caches, frees 4285 MiB" as its own largest lever. A charge the plan would
+    // itself drop under pressure is not a commitment (AUDIT B69).
+    const size_t mandatory_caches =
+        std::min(in.model.mandatory_cache_bytes, in.model.weight_cache_bytes);
+    const size_t optional_cache_demand = in.model.weight_cache_bytes - mandatory_caches;
+    p.model_resident = in.model.weight_bytes + mandatory_caches;
 
     // ── 3. Engine-persistent + scratch + the fixed pools. ──
     p.engine_persistent = in.engine_persistent_bytes + in.features.vision_tower_bytes +
@@ -139,8 +150,18 @@ PlanResult plan_memory(const PlanInput& in) {
         p.kv.bytes = 0;
     } else {
         const size_t residual = in.budget_bytes - committed;
+        // The engine builds the weight caches BEFORE the KV pool (A7 step 6.4)
+        // and KV then takes the measured remainder, so the plan grants the
+        // optional caches first — but never below one advertised sequence, which
+        // is the floor D8 already refuses under. That ordering is the policy;
+        // stating it here is the point of having a plan at all.
+        const size_t kv_floor_bytes = static_cast<size_t>(p.kv.blocks_per_seq) * per_block;
+        const size_t grantable = residual > kv_floor_bytes ? residual - kv_floor_bytes : 0;
+        p.optional_caches = std::min(optional_cache_demand, grantable);
+
+        const size_t kv_residual = residual - p.optional_caches;
         const int want_blocks = p.kv.blocks_per_seq * batch;
-        const int fits_blocks = static_cast<int>(residual / per_block);
+        const int fits_blocks = static_cast<int>(kv_residual / per_block);
         p.kv.blocks = std::min(want_blocks, fits_blocks);
         p.kv.bytes = static_cast<size_t>(p.kv.blocks) * per_block;
     }

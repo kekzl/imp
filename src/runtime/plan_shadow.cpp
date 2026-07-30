@@ -60,19 +60,19 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
         out += '\n';
     };
 
-    emit("shadow plan (A7 step 2b — computed, NOT applied):");
+    emit("memory plan (A7 step 2 — APPLIED: the KV block count below is what the pool uses):");
     emit("  distributable            %8.0f MiB", probe.distributable_bytes / kMiB);
     emit("  weight-cache demand      %8.0f MiB  (same figure the live pass used)",
          probe.weight_cache_demand / kMiB);
     emit("  library reserve          %8.0f MiB  (%s)", probe.library_reserve_bytes / kMiB,
-         probe.library_reserve_bytes ? "the live pass does not charge this" : "disabled");
+         probe.library_reserve_bytes ? "charged by both passes since #1109" : "disabled");
     if (probe.ssm_state_bytes)
         emit("  SSM/GDN state            %8.0f MiB", probe.ssm_state_bytes / kMiB);
     if (probe.engine_persistent_bytes)
         emit("  engine-persistent        %8.0f MiB", probe.engine_persistent_bytes / kMiB);
 
     if (shadow.ok) {
-        emit("  KV: live %d blocks -> plan %d blocks (%.0f -> %.0f MiB)", live_kv_blocks,
+        emit("  KV: live pass %d blocks -> plan %d blocks, APPLIED (%.0f -> %.0f MiB)", live_kv_blocks,
              shadow.plan.kv.blocks, static_cast<double>(live_kv_blocks) * per_block / kMiB,
              shadow.plan.kv.bytes / kMiB);
     } else {
