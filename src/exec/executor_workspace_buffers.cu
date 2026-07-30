@@ -789,11 +789,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             qscratch_.fp8_act_size = 0;
         }
         {
-            cudaError_t serr = cudaMalloc(reinterpret_cast<void**>(&qscratch_.d_act_scale), sizeof(float));
-            if (serr != cudaSuccess) {
-                IMP_LOG_WARN("Failed to allocate FP8 act scale: %s", cudaGetErrorString(serr));
-                qscratch_.d_act_scale = nullptr;
-            }
+            // T2 (A7 step 4b.2). These three are engine-lifetime, sized from
+            // init-time shapes, and each caller degrades on null — the reduction
+            // pair falls back to "the sync path" by its own log line. So no
+            // direct-allocation fallback and the sites leave the allowlist.
+            // exec_t2_demand charges them as `fp8_reduction`.
+            auto sl = engine_arena().take_bytes(sizeof(float));
+            qscratch_.d_act_scale = sl.empty() ? nullptr : reinterpret_cast<float*>(sl.data());
+            if (!qscratch_.d_act_scale)
+                IMP_LOG_WARN("FP8 act scale unavailable from the T2 arena");
         }
         // Pre-allocate reduction buffers for async FP8 activation quantization.
         // Eliminates per-call cudaMalloc + cudaStreamSynchronize from the hot path.
@@ -801,21 +805,17 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             int max_n = static_cast<int>(qscratch_.fp8_act_size);   // max elements
             int threads_needed = (max_n + 3) / 4;                   // kElemsPerThread=4
             qscratch_.fp8_max_grid = (threads_needed + 255) / 256;  // kBlockSize=256
-            cudaError_t e1 = cudaMalloc(&qscratch_.d_fp8_block_maxes,
-                                        static_cast<size_t>(qscratch_.fp8_max_grid) * sizeof(float));
-            cudaError_t e2 = cudaMalloc(&qscratch_.d_fp8_absmax, sizeof(float));
-            if (e1 != cudaSuccess || e2 != cudaSuccess || !qscratch_.d_fp8_block_maxes ||
-                !qscratch_.d_fp8_absmax) {
-                IMP_LOG_WARN("Failed to allocate FP8 reduction buffers — will use sync path");
-                if (qscratch_.d_fp8_block_maxes) {
-                    cudaFree(qscratch_.d_fp8_block_maxes);
-                    qscratch_.d_fp8_block_maxes = nullptr;
-                }
-                if (qscratch_.d_fp8_absmax) {
-                    cudaFree(qscratch_.d_fp8_absmax);
-                    qscratch_.d_fp8_absmax = nullptr;
-                }
+            auto sl_bm = engine_arena().take_bytes(
+                static_cast<size_t>(qscratch_.fp8_max_grid) * sizeof(float));
+            auto sl_am = engine_arena().take_bytes(sizeof(float));
+            if (sl_bm.empty() || sl_am.empty()) {
+                IMP_LOG_WARN("FP8 reduction buffers unavailable from the T2 arena — sync path");
+                qscratch_.d_fp8_block_maxes = nullptr;
+                qscratch_.d_fp8_absmax = nullptr;
                 qscratch_.fp8_max_grid = 0;
+            } else {
+                qscratch_.d_fp8_block_maxes = reinterpret_cast<float*>(sl_bm.data());
+                qscratch_.d_fp8_absmax = reinterpret_cast<float*>(sl_am.data());
             }
             IMP_LOG_INFO(
                 "FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d, async reduction grid=%d)",

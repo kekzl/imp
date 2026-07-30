@@ -4,6 +4,11 @@
 
 namespace imp {
 
+// d_act_scale, d_fp8_block_maxes and d_fp8_absmax are T2 arena tenants since
+// A7 step 4b.2 — engine-lifetime, charged by exec_t2_demand as `fp8_reduction`.
+// ~Engine closes the arena after every executor teardown, so only the pointer
+// nulling remains here.
+
 void QuantScratch::free(VRAMAllocator* alloc) {
     auto vfree = [alloc](void*& p) {
         if (!p)
@@ -21,15 +26,12 @@ void QuantScratch::free(VRAMAllocator* alloc) {
     vfree(fp8_act);
     fp8_act_size = 0;
     if (d_act_scale) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_act_scale));
         d_act_scale = nullptr;
     }
     if (d_fp8_block_maxes) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_fp8_block_maxes));
         d_fp8_block_maxes = nullptr;
     }
     if (d_fp8_absmax) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_fp8_absmax));
         d_fp8_absmax = nullptr;
     }
     fp8_max_grid = 0;

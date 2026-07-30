@@ -45,6 +45,17 @@ struct ExecShape {
     // NOT the context length — I mistook it for that once and wrongly ruled the
     // sampling scratch out as ~115 MiB when it is ~1 MiB (AUDIT B52/B53).
     int max_batch_size = 1;
+    // Shape inputs for the FP8 activation reduction scratch. Mirrors the
+    // max_dim ladder in executor_workspace_buffers.cu — replicated rather than
+    // approximated, for the same reason exec_max_tokens replicates the as-built
+    // GDN cap: a demand function that merely resembles the site is a plan that
+    // fits by luck.
+    bool use_fp8_prefill = false;
+    int n_heads = 0;
+    int head_dim = 0;
+    int ssm_inner_size = 0;
+    int ssm_conv_channels = 0;
+    int ssm_dt_rank = 0;
     // (N, logical K) of every weight the MMVQ / dequant paths can see. Logical
     // K means NVFP4's packed byte dim already doubled.
     std::vector<std::pair<int64_t, int64_t>> weights;
@@ -55,6 +66,9 @@ struct ExecT2Demand {
     size_t mmvq_scratch = 0;
     // Sampling result scratch: 2 (parity) * max_logit_tokens * SAMPLE_SCRATCH.
     size_t sample_scratch = 0;
+    // FP8 activation reduction scratch: the per-block absmax array plus two
+    // scalars. Charged only when FP8 prefill is on.
+    size_t fp8_reduction = 0;
     // Batched-MoE pointer/scale arrays, all sized from n_experts and all "< 4 KB"
     // by their own comments. Small, but the point of charging them is that the
     // arena is SIZED for its tenants rather than absorbing them into slack.
@@ -65,7 +79,7 @@ struct ExecT2Demand {
     size_t nvfp4_dequant = 0;
 
     size_t total() const {
-        return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays;
+        return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather
@@ -88,6 +102,8 @@ int exec_max_weight_k(const Model& model);
 
 // The batch is an engine decision, not a model fact, and the sampling scratch is
 // sized from it — so the caller passes it rather than assembling an ExecShape.
+ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size,
+                            bool use_fp8_prefill);
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size);
 
 // Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).
