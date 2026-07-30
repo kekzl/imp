@@ -1,6 +1,7 @@
 #include "compute/ffn_sparsity_probe.h"
 #include "runtime/process_diag.h"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -36,12 +37,22 @@ void ensure_init_locked() {
     g_state.enabled = process_diag_ffn_sparsity_probe();
     if (g_state.enabled) {
         const size_t bytes = sizeof(unsigned long long) * kMaxLayers * kSlotsPerLayer;
-        cudaError_t e = cudaMalloc(&g_state.d_counters, bytes);
-        if (e != cudaSuccess) {
-            IMP_LOG_ERROR("ffn-sparsity-probe: cudaMalloc failed: %s", cudaGetErrorString(e));
+        // T2 (engine-persistent): fixed size, allocated once, never freed. The
+        // arena is the tier for that, and it takes this file off the I1
+        // allowlist. Direct allocation only when the arena is closed.
+        // T2 (engine-persistent) and NO direct-allocation fallback on purpose.
+        // Fixed size, allocated once, never freed — the arena is exactly that
+        // tier. Keeping a cudaMalloc fallback would leave this file on the I1
+        // allowlist for a path that only runs when the arena is closed, which
+        // for a diagnostic probe means "not in an engine, so nothing to probe"
+        // (AUDIT B34: a fallback keeps the site even when the site never runs).
+        auto slab = engine_arena().take_bytes(bytes);
+        if (slab.empty()) {
+            IMP_LOG_WARN("ffn-sparsity-probe: T2 arena unavailable — probe disabled");
             g_state.d_counters = nullptr;
             g_state.enabled = false;
         } else {
+            g_state.d_counters = reinterpret_cast<unsigned long long*>(slab.data());
             cudaMemset(g_state.d_counters, 0, bytes);
         }
     }
