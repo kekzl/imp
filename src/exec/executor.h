@@ -1,6 +1,7 @@
 #pragma once
 
 #include "model/model.h"
+#include "memory/host_pinned.h"
 #include "memory/kv_cache.h"
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
@@ -202,7 +203,7 @@ public:
     // kernel reads sampled tokens strided by SAMPLE_SCRATCH_BYTES from here).
     const int32_t* sample_slot_base(int parity) const;
     bool sample_pipeline_ready() const {
-        return d_sample_result_ && h_sample_pinned_ && h_row_args_ && d_row_args_ &&
+        return d_sample_result_ && !h_sample_pinned_.empty() && !h_row_args_.empty() && d_row_args_ &&
                sample_gather_evt_[0] && sample_gather_evt_[1];
     }
     int32_t sample_single_from_logits(const Tensor& logits, const InferenceState& state,
@@ -370,7 +371,7 @@ public:
     int32_t* d_sample_result() const { return d_sample_result_; }
 
     // Pinned host buffer for logprobs extraction.
-    float* h_logits_pinned() const { return h_logits_pinned_; }
+    float* h_logits_pinned() const { return h_logits_pinned_.as<float>(); }
 
     // Ensure pinned logits buffer is allocated for the given number of floats.
     // For single sequence: pass vocab_size. For batched logprobs: pass vocab_size * n_sequences.
@@ -632,7 +633,7 @@ private:
     // eligible rows here instead of launching; collect_sampled_tokens uploads
     // the args (one pinned H2D) and fires ONE partial + ONE finalize launch
     // for the whole batch. Greedy rows launch immediately (2 cheap kernels).
-    TopkRowArgs* h_row_args_ = nullptr;  // pinned, 2 x sample_slots_ entries (parity halves)
+    PinnedBuffer h_row_args_;            // pinned, 2 x sample_slots_ entries (parity halves, T5b)
     TopkRowArgs* d_row_args_ = nullptr;  // device mirror (same layout)
     int n_pending_topk_rows_ = 0;
     int pending_topk_max_k_ = 0;
@@ -646,14 +647,14 @@ private:
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
                                           // (2 x sample_slots_ x SAMPLE_SCRATCH_BYTES parity
                                           // halves; slot 0 of parity 0 = single-seq)
-    int32_t* h_sample_pinned_ = nullptr;  // pinned host buffer for async D2H sample result
+    PinnedBuffer h_sample_pinned_;        // async D2H sample result staging (T5b)
                                           // (2 x sample_slots_ int32s, parity halves)
     int sample_slots_ = 0;                // batched sampling slots per parity set (= max_batch_size)
     int sample_parity_ = 0;               // active parity half for async enqueue/flush/gather
     cudaEvent_t sample_gather_evt_[2] = {nullptr, nullptr};  // per-parity gather-done events
 
     // Pinned host buffer for logprobs extraction (D2H copy of logits)
-    float* h_logits_pinned_ = nullptr;  // [vocab_size] pinned host memory
+    PinnedBuffer h_logits_pinned_;      // [vocab_size] pinned host memory (T5b)
     int h_logits_pinned_size_ = 0;      // vocab_size used for allocation
 
     // --- Layer index mappings ---

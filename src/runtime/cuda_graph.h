@@ -304,6 +304,12 @@ private:
     int penalty_prefix_len_ = 0;         // number of pre-populated history tokens
 
     // Mapped pinned memory for zero-copy host readback
+    // The four mapped-pinned buffers below are EITHER views into a graph-slot
+    // lease (the pool owns them) or owned here when the pool declines. The
+    // owners are these T5b buffers; the raw pointers stay views either way, so
+    // "did I own this?" is answered by the type instead of by which teardown
+    // branch you are in (memory/host_pinned.h).
+    PinnedBuffer owned_ring_, owned_step_counter_, owned_burst_done_, owned_decode_scratch_;
     int32_t* h_ring_buffer_ = nullptr;      // host pointer to ring buffer
     int32_t* d_ring_buffer_ = nullptr;      // device pointer to same ring buffer
     int* h_step_counter_ = nullptr;         // host pointer to step counter mirror

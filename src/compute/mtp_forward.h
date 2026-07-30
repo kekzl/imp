@@ -21,6 +21,7 @@
 // =============================================================================
 
 #include "compute/moe_routing.h"  // MoeRoutingBuffers
+#include "memory/host_pinned.h"
 #include "core/tensor.h"
 #include "model/mtp_head.h"
 #include <cuda_runtime.h>
@@ -111,8 +112,8 @@ struct MtpDraftWorkspace {
     MoeRoutingBuffers routing_buf;
     // Per-step host-side copies of indices/weights for the M=1 host-side
     // per-expert GEMV loop. Allocated as cudaHostAlloc'd for pinned D2H.
-    int*   h_expert_indices = nullptr;   // [top_k]
-    float* h_expert_weights = nullptr;   // [top_k]
+    PinnedBuffer h_expert_indices;  // [top_k] (T5b, memory/host_pinned.h)
+    PinnedBuffer h_expert_weights;  // [top_k]
 
     // Hyperparameters captured at workspace-allocate time so the draft step
     // doesn't need to re-derive them from the model.

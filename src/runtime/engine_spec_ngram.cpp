@@ -62,10 +62,17 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     // per capacity, so they stay stable. Same trick for argmax+topm D2H.
     const size_t stage_ints = 3ull * chunk_cap + 3;
     const size_t out_ints = static_cast<size_t>(chunk_cap) * (1 + kRowwiseTopMMax);
+    // T5b for the pinned twins (memory/host_pinned.h). Wrapped in a lambda so the
+    // && chain still SHORT-CIRCUITS: acquiring them up front would allocate host
+    // memory even when an earlier device allocation had already failed.
+    auto pin = [](PinnedBuffer& b, size_t bytes) {
+        b = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
+        return !b.empty();
+    };
     bool ok = cudaMalloc(&d_spec_stage_, stage_ints * sizeof(int32_t)) == cudaSuccess &&
-              cudaMallocHost(&h_spec_stage_, stage_ints * sizeof(int32_t)) == cudaSuccess &&
+              pin(h_spec_stage_, stage_ints * sizeof(int32_t)) &&
               cudaMalloc(&d_spec_argmax_, out_ints * sizeof(int32_t)) == cudaSuccess &&
-              cudaMallocHost(&h_spec_argmax_, out_ints * sizeof(int32_t)) == cudaSuccess &&
+              pin(h_spec_argmax_, out_ints * sizeof(int32_t)) &&
               cudaMalloc(&d_spec_block_table_, max_blocks * sizeof(int)) == cudaSuccess &&
               // SWA-group mirror (kv_cache.swa_sizing): same capacity as the
               // main table. Allocated unconditionally so a mid-session gate
@@ -75,9 +82,8 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
               cudaMalloc(&d_spec_row_block_tables_,
                          static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int)) ==
                   cudaSuccess &&
-              cudaMallocHost(&h_spec_row_tables_pinned_,
-                             static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int32_t)) ==
-                  cudaSuccess;
+              pin(h_spec_row_tables_pinned_,
+                  static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int32_t));
     if (!ok) {
         IMP_LOG_WARN("spec-ngram: buffer allocation failed — speculation disabled this step");
         free_spec_buffers_();
@@ -92,7 +98,7 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     d_spec_past_len_ = d_spec_context_len_ + 1;
     d_spec_chunk_len_ = d_spec_context_len_ + 2;
     d_spec_topm_ = d_spec_argmax_ + chunk_cap;
-    h_spec_topm_ = h_spec_argmax_ + chunk_cap;
+    h_spec_topm_ = h_spec_argmax_.as<int32_t>() + chunk_cap;
     spec_chunk_cap_ = chunk_cap;
     spec_block_table_cap_ = max_blocks;
     return true;
@@ -156,27 +162,24 @@ void Engine::free_spec_buffers_() {
     // chunk_len_ are sub-pointers into d_spec_stage_; d_spec_topm_ into
     // d_spec_argmax_ — only the block heads are freed.
     if (d_spec_stage_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_stage_));
-    if (h_spec_stage_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_stage_));
     if (d_spec_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_));
     if (d_spec_block_table_swa_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_swa_));
     if (d_spec_row_block_tables_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_row_block_tables_));
-    if (h_spec_row_tables_pinned_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_row_tables_pinned_));
     if (d_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_argmax_));
-    if (h_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_spec_argmax_));
     d_spec_stage_ = nullptr;
-    h_spec_stage_ = nullptr;
+    h_spec_stage_.reset();
     d_spec_tokens_ = nullptr;
     d_spec_positions_ = nullptr;
     d_spec_block_table_ = nullptr;
     d_spec_block_table_swa_ = nullptr;
     d_spec_row_ctx_lens_ = nullptr;
     d_spec_row_block_tables_ = nullptr;
-    h_spec_row_tables_pinned_ = nullptr;
+    h_spec_row_tables_pinned_.reset();
     d_spec_context_len_ = nullptr;
     d_spec_past_len_ = nullptr;
     d_spec_chunk_len_ = nullptr;
     d_spec_argmax_ = nullptr;
-    h_spec_argmax_ = nullptr;
+    h_spec_argmax_.reset();
     d_spec_topm_ = nullptr;
     h_spec_topm_ = nullptr;
     spec_chunk_cap_ = 0;
@@ -625,9 +628,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // p0+i+1 (per-row causality), pads attend 1 token — consumed only on
     // the decode-attn route, harmless otherwise.
     const int cap = spec_chunk_cap_;
-    int32_t* h_tokens = h_spec_stage_;
-    int32_t* h_positions = h_spec_stage_ + cap;
-    int32_t* h_row_lens = h_spec_stage_ + 2ull * cap;
+    int32_t* h_stage = h_spec_stage_.as<int32_t>();
+    int32_t* h_tokens = h_stage;
+    int32_t* h_positions = h_stage + cap;
+    int32_t* h_row_lens = h_stage + 2ull * cap;
     for (int i = 0; i < chunk_pad; ++i) {
         h_tokens[i] = t0;
         h_positions[i] = mc_on ? p0 : p0 + i;
@@ -648,9 +652,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         for (int i = 0; i < K; ++i) h_tokens[1 + i] = draft[i];
         for (int i = 0; i < chunk_len; ++i) h_row_lens[i] = p0 + i + 1;
     }
-    h_spec_stage_[3ull * cap] = ctx_len;
-    h_spec_stage_[3ull * cap + 1] = p0;
-    h_spec_stage_[3ull * cap + 2] = chunk_len;
+    h_stage[3ull * cap] = ctx_len;
+    h_stage[3ull * cap + 1] = p0;
+    h_stage[3ull * cap + 2] = chunk_len;
 
     auto check = [&](cudaError_t err, const char* op) {
         if (err != cudaSuccess) {
@@ -659,7 +663,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
         return true;
     };
-    if (!check(cudaMemcpyAsync(d_spec_stage_, h_spec_stage_,
+    if (!check(cudaMemcpyAsync(d_spec_stage_, h_spec_stage_.as<int32_t>(),
                                (3ull * cap + 3) * sizeof(int32_t), cudaMemcpyHostToDevice,
                                stream), "stage H2D") ||
         !check(cudaMemcpyAsync(d_spec_block_table_, block_table.data(), n_blocks * sizeof(int),
@@ -719,7 +723,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // one H2D of the used region.
         for (int i = 0; i < chunk_pad; ++i)
             std::copy(block_table.begin(), block_table.end(),
-                      h_spec_row_tables_pinned_ +
+                      h_spec_row_tables_pinned_.as<int32_t>() +
                           static_cast<size_t>(i) * spec_block_table_cap_);
         // mc: alias each candidate's written block indices [mc_bp ..
         // mc_bp + mc_n_priv) to its private appended blocks — reads of the
@@ -727,13 +731,13 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         if (mc_on) {
             for (int i = 0; i < chunk_len; ++i) {
                 const int c = i / mc_rows_per_cand;
-                int32_t* row = h_spec_row_tables_pinned_ +
+                int32_t* row = h_spec_row_tables_pinned_.as<int32_t>() +
                                static_cast<size_t>(i) * spec_block_table_cap_;
                 for (int t = 0; t < mc_n_priv; ++t)
                     row[mc_bp + t] = block_table[mc_priv_base + c * mc_n_priv + t];
             }
         }
-        if (check(cudaMemcpyAsync(d_spec_row_block_tables_, h_spec_row_tables_pinned_,
+        if (check(cudaMemcpyAsync(d_spec_row_block_tables_, h_spec_row_tables_pinned_.as<int32_t>(),
                                   static_cast<size_t>(chunk_pad) * spec_block_table_cap_ *
                                       sizeof(int32_t),
                                   cudaMemcpyHostToDevice, stream),
@@ -863,7 +867,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             ? static_cast<size_t>(spec_chunk_cap_) + static_cast<size_t>(chunk_len) * recycle_m
             : static_cast<size_t>(chunk_len);
     bool argmax_ok =
-        check(cudaMemcpyAsync(h_spec_argmax_, d_spec_argmax_, d2h_ints * sizeof(int32_t),
+        check(cudaMemcpyAsync(h_spec_argmax_.as<int32_t>(), d_spec_argmax_, d2h_ints * sizeof(int32_t),
                               cudaMemcpyDeviceToHost, stream), "argmax D2H") &&
         check(cudaStreamSynchronize(stream), "verify sync");
     if (!argmax_ok) {
@@ -885,7 +889,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             s += std::to_string(dref[j]) + (j + 1 < dref.size() ? "," : "");
         s += "] argmax=[";
         for (int j = 0; j < chunk_len; ++j)
-            s += std::to_string(h_spec_argmax_[j]) + (j + 1 < chunk_len ? "," : "");
+            s += std::to_string(h_spec_argmax_.as<int32_t>()[j]) + (j + 1 < chunk_len ? "," : "");
         s += "]";
         IMP_LOG_INFO("%s", s.c_str());
     }
@@ -901,7 +905,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         for (size_t c = 0; c < mc.size(); ++c) {
             const int r0 = static_cast<int>(c) * mc_rows_per_cand;
             int m = 0;
-            while (m < static_cast<int>(mc[c].size()) && h_spec_argmax_[r0 + m] == mc[c][m])
+            while (m < static_cast<int>(mc[c].size()) && h_spec_argmax_.as<int32_t>()[r0 + m] == mc[c][m])
                 ++m;
             if (m > best_m) {
                 best_m = m;
@@ -918,7 +922,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     int emitted = 0;
     for (int j = 0; j + mc_row0 < chunk_len; ++j) {
         if (mc_on && j > acc_len) break;  // stay inside the winning group
-        const int32_t tokj = h_spec_argmax_[mc_row0 + j];
+        const int32_t tokj = h_spec_argmax_.as<int32_t>()[mc_row0 + j];
         req->output_tokens.push_back(tokj);
         track_think_state(*req, tokj);
         emitted++;

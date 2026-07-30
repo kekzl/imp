@@ -86,13 +86,16 @@ struct PinnedStager {
     // depth N keeps N-1 DMAs queued while CPU fills the next).
     static constexpr int kRing = 4;
     static constexpr size_t kChunkSize = 128 << 20;  // 128 MiB per buffer (4 × 128 MiB = 512 MiB)
-    void* buf[kRing] = {};
+    // T5a: transient load-time staging. PinnedBuffer owns it, so the partial
+    // failure path below no longer has to unwind by hand (memory/host_pinned.h).
+    PinnedBuffer buf[kRing];
     cudaEvent_t done[kRing] = {};
     int idx = 0;
 
     bool init() {
         for (int i = 0; i < kRing; i++) {
-            if (cudaHostAlloc(&buf[i], kChunkSize, cudaHostAllocDefault) != cudaSuccess) {
+            buf[i] = PinnedBuffer::acquire(cuda_host_pinned_allocator(), kChunkSize);
+            if (buf[i].empty()) {
                 destroy();
                 return false;
             }
@@ -107,8 +110,9 @@ struct PinnedStager {
             size_t chunk = std::min(n - off, kChunkSize);
             int b = idx % kRing;
             cudaEventSynchronize(done[b]);
-            memcpy(buf[b], static_cast<const char*>(src) + off, chunk);
-            last = cudaMemcpyAsync(static_cast<char*>(dst) + off, buf[b], chunk, cudaMemcpyHostToDevice, s);
+            memcpy(buf[b].data(), static_cast<const char*>(src) + off, chunk);
+            last = cudaMemcpyAsync(static_cast<char*>(dst) + off, buf[b].data(), chunk,
+                                   cudaMemcpyHostToDevice, s);
             cudaEventRecord(done[b], s);
             off += chunk;
             idx++;
@@ -123,10 +127,7 @@ struct PinnedStager {
                 cudaEventDestroy(done[i]);
                 done[i] = nullptr;
             }
-            if (buf[i]) {
-                IMP_CUDA_CHECK_LOG(cudaFreeHost(buf[i]));
-                buf[i] = nullptr;
-            }
+            buf[i].reset();
         }
     }
 };
@@ -849,8 +850,8 @@ struct UploadCtx {
     QType compute_dtype;
     cudaStream_t stream;
     std::vector<void*>& gpu_allocs;
-    std::vector<void*>& host_pinned;
-    std::vector<void*>& host_pinned_allocs;
+    std::vector<HostRegistration>& host_pinned;
+    std::vector<PinnedBuffer>& host_pinned_allocs;
     // Architecture-specific norm-weight offset. Qwen3.5/3.6 SafeTensors stores
     // block-norm gammas as deltas (gamma = 1 + W) while GGUF bakes the +1 in
     // at conversion time. Applied only on BF16-source paths in upload_weight().
@@ -1830,34 +1831,34 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                     // WSL2: cudaHostRegister fails on mmap'd memory. Instead,
                     // allocate fresh pinned memory and copy mmap'd data there.
                     // This enables true async DMA H2D (no per-token CPU memcpy).
-                    void* pinned_buf = nullptr;
-                    cudaError_t pin_err = cudaHostAlloc(&pinned_buf, total_raw, cudaHostAllocDefault);
-                    if (pin_err == cudaSuccess) {
-                        memcpy(pinned_buf, packed.data, total_raw);
-                        packed.data = pinned_buf;
-                        ctx.host_pinned_allocs.push_back(pinned_buf);
+                    PinnedBuffer pinned_buf =
+                        PinnedBuffer::acquire(cuda_host_pinned_allocator(), total_raw);
+                    if (!pinned_buf.empty()) {
+                        memcpy(pinned_buf.data(), packed.data, total_raw);
+                        packed.data = pinned_buf.data();
+                        ctx.host_pinned_allocs.push_back(std::move(pinned_buf));
                         IMP_LOG_INFO("  %s: WSL2 pinned copy (%.2f MiB, DMA-ready)", name,
                                      total_raw / (1024.0 * 1024.0));
                     } else {
-                        IMP_LOG_DEBUG("Cleared WSL2 cudaHostAlloc error: %s", cudaGetErrorString(pin_err));
                         cudaGetLastError();  // clear sticky CUDA error state
                         IMP_LOG_INFO(
-                            "  %s: WSL2 cudaHostAlloc failed, falling back to "
+                            "  %s: WSL2 pinned alloc failed, falling back to "
                             "unpinned mmap (%.2f MiB)",
                             name, total_raw / (1024.0 * 1024.0));
                     }
                 } else {
-                    cudaError_t pin_err = cudaHostRegister(packed.data, total_raw, cudaHostRegisterReadOnly);
-                    if (pin_err == cudaSuccess) {
-                        ctx.host_pinned.push_back(packed.data);
+                    // T5b: the registration is owned, so an early return between
+                    // here and teardown cannot leave a page-locked region behind
+                    // (memory/host_pinned.h). It logs its own failure.
+                    HostRegistration reg =
+                        HostRegistration::acquire_read_only(packed.data, total_raw);
+                    if (!reg.empty()) {
+                        ctx.host_pinned.push_back(std::move(reg));
                         IMP_LOG_DEBUG("  %s: %d experts, raw %s pinned on host (%.2f MiB)", name, n_experts,
                                       qtype == QType::Q6_K   ? "Q6_K"
                                       : qtype == QType::Q8_0 ? "Q8_0"
                                                              : "Q4_0",
                                       total_raw / (1024.0 * 1024.0));
-                    } else {
-                        IMP_LOG_WARN("  %s: cudaHostRegister failed (%s), H2D will be slower", name,
-                                     cudaGetErrorString(pin_err));
                     }
                 }
 
@@ -1916,19 +1917,17 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             size_t dst_pitch = static_cast<size_t>(half_rows) * row_bytes;
 
             // Allocate two pinned host buffers for the split halves.
-            void* gate_buf = nullptr;
-            void* up_buf = nullptr;
-            cudaError_t eg = cudaHostAlloc(&gate_buf, half_raw, cudaHostAllocDefault);
-            cudaError_t eu = cudaHostAlloc(&up_buf, half_raw, cudaHostAllocDefault);
-            if (eg != cudaSuccess || eu != cudaSuccess) {
-                IMP_LOG_ERROR("Gemma 4: host split cudaHostAlloc failed (layer %d): %s/%s", i,
-                              cudaGetErrorString(eg), cudaGetErrorString(eu));
-                if (gate_buf)
-                    cudaFreeHost(gate_buf);
-                if (up_buf)
-                    cudaFreeHost(up_buf);
+            PinnedBuffer gate_pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), half_raw);
+            PinnedBuffer up_pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), half_raw);
+            if (gate_pin.empty() || up_pin.empty()) {
+                // Whichever one succeeded releases itself on the way out — the
+                // hand-written unwind is gone (T5a/T5b, memory/host_pinned.h).
+                IMP_LOG_ERROR("Gemma 4: host split pinned alloc failed (layer %d, %.1f MiB each)", i,
+                              half_raw / (1024.0 * 1024.0));
                 return false;
             }
+            void* gate_buf = gate_pin.data();
+            void* up_buf = up_pin.data();
 
             const char* src_base = static_cast<const char*>(L.expert_gate_packed.data);
             for (int64_t e = 0; e < n_exp; ++e) {
@@ -1943,8 +1942,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             L.expert_gate_packed = Tensor(gate_buf, L.expert_gate_packed.qtype, 3, split_shape, false);
             L.expert_up_packed = Tensor(up_buf, L.expert_gate_packed.qtype, 3, split_shape, false);
             L.expert_up_packed.qtype = L.expert_gate_packed.qtype;
-            ctx.host_pinned_allocs.push_back(gate_buf);
-            ctx.host_pinned_allocs.push_back(up_buf);
+            ctx.host_pinned_allocs.push_back(std::move(gate_pin));
+            ctx.host_pinned_allocs.push_back(std::move(up_pin));
             IMP_LOG_INFO("Gemma 4: host-split fused gate_up_exps layer %d (n_ff_exp=%ld, %.1f MiB each)", i,
                          (long)half_rows, half_raw / (1024.0 * 1024.0));
         }
@@ -2078,15 +2077,15 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                         continue;
                     int64_t n_elem = w.numel();
                     size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
-                    uint16_t* pinned = nullptr;
-                    if (cudaHostAlloc(reinterpret_cast<void**>(&pinned), bytes,
-                                      cudaHostAllocDefault) != cudaSuccess) {
+                    PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
+                    if (pin.empty()) {
                         IMP_LOG_WARN(
-                            "Host expert BF16→FP16: cudaHostAlloc failed "
+                            "Host expert BF16→FP16: pinned alloc failed "
                             "(%.1f MiB) — expert stays BF16, GEMM will fail",
                             bytes / (1024.0 * 1024.0));
                         continue;
                     }
+                    uint16_t* pinned = pin.as<uint16_t>();
                     const uint16_t* src = static_cast<const uint16_t*>(w.data);
                     for (int64_t k = 0; k < n_elem; ++k) {
                         uint32_t bits = static_cast<uint32_t>(src[k]) << 16;
@@ -2094,8 +2093,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                         std::memcpy(&f, &bits, sizeof(float));
                         pinned[k] = float_to_fp16(f);
                     }
-                    ctx.host_pinned_allocs.push_back(pinned);
                     w = Tensor(pinned, QType::F16, w.ndim, w.shape, /*on_device=*/false);
+                    ctx.host_pinned_allocs.push_back(std::move(pin));
                 }
             };
             convert_host_bf16(L.expert_w_gate);

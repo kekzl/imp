@@ -53,42 +53,6 @@ static size_t host_stride_for(const GraphSlotCaps& caps) {
 
 GraphSlotPool::~GraphSlotPool() { close(); }
 
-namespace {
-
-class CudaHostPinnedAllocator final : public HostPinnedAllocator {
-public:
-    bool alloc(size_t bytes, void** out_host, void** out_device) override {
-        void* hp = nullptr;
-        const cudaError_t herr = cudaHostAlloc(&hp, bytes, cudaHostAllocMapped);
-        if (herr != cudaSuccess) {
-            IMP_LOG_WARN("graph slot pool: pinned host alloc failed (%zu B): %s", bytes,
-                         cudaGetErrorString(herr));
-            return false;
-        }
-        void* hdev = nullptr;
-        const cudaError_t derr = cudaHostGetDevicePointer(&hdev, hp, 0);
-        if (derr != cudaSuccess) {
-            IMP_LOG_WARN("graph slot pool: host device pointer failed: %s", cudaGetErrorString(derr));
-            cudaFreeHost(hp);
-            return false;
-        }
-        *out_host = hp;
-        *out_device = hdev;
-        return true;
-    }
-    void free(void* host) override {
-        if (host)
-            IMP_CUDA_CHECK_LOG(cudaFreeHost(host));
-    }
-};
-
-}  // namespace
-
-HostPinnedAllocator& cuda_host_pinned_allocator() {
-    static CudaHostPinnedAllocator a;
-    return a;
-}
-
 MemError GraphSlotPool::open(Backend& backend, HostPinnedAllocator& host, const GraphSlotCaps& caps,
                              int num_slots) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -106,15 +70,14 @@ MemError GraphSlotPool::open(Backend& backend, HostPinnedAllocator& host, const 
     if (!got)
         return got.error;
 
-    void* hp = nullptr;
-    void* hdev = nullptr;
-    if (!host.alloc(host_total, &hp, &hdev))
+    // Mapped: the ring and the step counters are read in place by a captured
+    // graph, which is the whole reason this half is pinned rather than paged.
+    PinnedBuffer host_buf = PinnedBuffer::acquire(host, host_total, HostPinnedKind::Mapped);
+    if (host_buf.empty())
         return MemError::OutOfMemory;
 
     region_ = std::move(got.region);
-    host_alloc_ = &host;
-    host_base_ = hp;
-    host_device_base_ = hdev;
+    host_ = std::move(host_buf);
     caps_ = caps;
     num_slots_ = num_slots;
     device_bytes_ = dev_total;
@@ -148,11 +111,7 @@ void GraphSlotPool::close() {
                      static_cast<unsigned long long>(declines_too_small_));
     }
     region_.reset();
-    if (host_base_ && host_alloc_)
-        host_alloc_->free(host_base_);
-    host_base_ = nullptr;
-    host_alloc_ = nullptr;
-    host_device_base_ = nullptr;
+    host_.reset();  // PinnedBuffer owns it; there is no free left to forget
     in_use_.clear();
     num_slots_ = 0;
     device_bytes_ = 0;
@@ -191,8 +150,8 @@ GraphSlotView GraphSlotPool::carve_(int index) const {
     v.penalty_ring = reinterpret_cast<int32_t*>(d);
 
     const size_t host_off = slot_host_stride_ * static_cast<size_t>(index);
-    auto* h = static_cast<std::byte*>(host_base_) + host_off;
-    auto* hd = static_cast<std::byte*>(host_device_base_) + host_off;
+    auto* h = host_.as<std::byte>() + host_off;
+    auto* hd = host_.device_as<std::byte>() + host_off;
     const size_t ring_bytes = align_up(static_cast<size_t>(caps_.max_steps) * sizeof(int32_t), kSubAlign);
     const size_t scalar_bytes = align_up(sizeof(int), kSubAlign);
 

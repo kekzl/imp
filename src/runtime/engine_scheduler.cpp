@@ -624,11 +624,11 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
     // (#548: catastrophic chunked-prefill NLL, timing/arch-dependent).
     // Pageable sources below (block_table, ctx_len) are safe by CUDA
     // semantics (captured before cudaMemcpyAsync returns).
-    if (pf_staging_evt_ && (h_pf_token_ids_ || h_pf_positions_) && chunk_len <= config_.max_seq_len)
+    if (pf_staging_evt_ && (h_pf_token_ids_.as<int32_t>() || h_pf_positions_.as<int>()) && chunk_len <= config_.max_seq_len)
         IMP_CUDA_CHECK_LOG(cudaEventSynchronize(pf_staging_evt_));
-    if (h_pf_token_ids_ && chunk_len <= config_.max_seq_len) {
-        memcpy(h_pf_token_ids_, req->input_tokens.data() + offset, chunk_len * sizeof(int32_t));
-        check(cudaMemcpyAsync(d_token_ids, h_pf_token_ids_, chunk_len * sizeof(int32_t),
+    if (h_pf_token_ids_.as<int32_t>() && chunk_len <= config_.max_seq_len) {
+        memcpy(h_pf_token_ids_.as<int32_t>(), req->input_tokens.data() + offset, chunk_len * sizeof(int32_t));
+        check(cudaMemcpyAsync(d_token_ids, h_pf_token_ids_.as<int32_t>(), chunk_len * sizeof(int32_t),
                               cudaMemcpyHostToDevice, pf_stream),
               "memcpy token_ids");
     } else {
@@ -637,10 +637,10 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
               "memcpy token_ids");
     }
 
-    if (h_pf_positions_ && chunk_len <= config_.max_seq_len) {
+    if (int* h_pos = h_pf_positions_.as<int>(); h_pos && chunk_len <= config_.max_seq_len) {
         for (int i = 0; i < chunk_len; i++)
-            h_pf_positions_[i] = offset + i;
-        check(cudaMemcpyAsync(d_positions, h_pf_positions_, chunk_len * sizeof(int), cudaMemcpyHostToDevice,
+            h_pos[i] = offset + i;
+        check(cudaMemcpyAsync(d_positions, h_pos, chunk_len * sizeof(int), cudaMemcpyHostToDevice,
                               pf_stream),
               "memcpy positions");
     } else {
@@ -652,7 +652,7 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
               "memcpy positions");
     }
 
-    if (pf_staging_evt_ && (h_pf_token_ids_ || h_pf_positions_) && chunk_len <= config_.max_seq_len)
+    if (pf_staging_evt_ && (h_pf_token_ids_.as<int32_t>() || h_pf_positions_.as<int>()) && chunk_len <= config_.max_seq_len)
         IMP_CUDA_CHECK_LOG(cudaEventRecord(pf_staging_evt_, pf_stream));
 
     check(cudaMemcpyAsync(d_block_tables, block_table.data(), block_table.size() * sizeof(int),
@@ -1008,7 +1008,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     } else {
         // Last chunk: forward + sample
         int32_t next_token;
-        bool use_event_sync = (h_sample_pinned_ != nullptr && executor_->d_sample_result() != nullptr &&
+        bool use_event_sync = (!h_sample_pinned_.empty() && executor_->d_sample_result() != nullptr &&
                                (state.temperature <= 0.0f || state.top_k == 1) && !req->logprobs &&
                                !state.json_constrainer && !state.schema_constrainer &&
                                !state.regex_constrainer && !state.grammar_constrainer);
@@ -1042,7 +1042,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 }
             }
 
-            sample_greedy_device(last_logits, executor_->d_sample_result(), h_sample_pinned_, pf_stream);
+            sample_greedy_device(last_logits, executor_->d_sample_result(),
+                                 h_sample_pinned_.as<int32_t>(), pf_stream);
 
             if (!prefill_done_)
                 (void)prefill_done_.create();
@@ -1053,7 +1054,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             }
 
             cudaEventSynchronize(prefill_done_);
-            next_token = *h_sample_pinned_;
+            next_token = *h_sample_pinned_.as<int32_t>();
         } else if (req->logprobs) {
             executor_->forward_logits(state, prefill_logits_out, pf_stream);
             auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
@@ -2367,28 +2368,31 @@ bool Engine::pipeline_staging_ensure_() {
         const int msl = model_ ? model_->config().max_seq_len : 0;
         pipe_hist_stride_ = std::max(1024, std::min(msl > 0 ? msl : 32768, 65536));
         bool ok = true;
+        // T5b, mapped: PinnedBuffer::device() IS the cudaHostGetDevicePointer
+        // result, so the three separate lookups are gone with the three allocs
+        // (memory/host_pinned.h).
+        auto pin_mapped = [](PinnedBuffer& b, int** d_out, size_t bytes) {
+            b = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes,
+                                      HostPinnedKind::Mapped);
+            if (b.empty())
+                return false;
+            *d_out = b.device_as<int>();
+            return true;
+        };
         for (int p = 0; p < 2 && ok; ++p) {
-            ok = cudaHostAlloc(&h_bt_patch_off_[p], kMaxGraphPoolSize * sizeof(int),
-                               cudaHostAllocMapped) == cudaSuccess &&
-                 cudaHostAlloc(&h_bt_patch_val_[p], kMaxGraphPoolSize * sizeof(int),
-                               cudaHostAllocMapped) == cudaSuccess &&
-                 cudaHostAlloc(&h_hist_pos_[p], kMaxGraphPoolSize * sizeof(int),
-                               cudaHostAllocMapped) == cudaSuccess &&
-                 cudaHostGetDevicePointer(&d_bt_patch_off_[p], h_bt_patch_off_[p], 0) ==
-                     cudaSuccess &&
-                 cudaHostGetDevicePointer(&d_bt_patch_val_[p], h_bt_patch_val_[p], 0) ==
-                     cudaSuccess &&
-                 cudaHostGetDevicePointer(&d_hist_pos_[p], h_hist_pos_[p], 0) == cudaSuccess;
+            const size_t patch_bytes = kMaxGraphPoolSize * sizeof(int);
+            ok = pin_mapped(h_bt_patch_off_[p], &d_bt_patch_off_[p], patch_bytes) &&
+                 pin_mapped(h_bt_patch_val_[p], &d_bt_patch_val_[p], patch_bytes) &&
+                 pin_mapped(h_hist_pos_[p], &d_hist_pos_[p], patch_bytes);
         }
         if (ok)
             ok = cudaMalloc(&d_pipe_hist_, static_cast<size_t>(kMaxGraphPoolSize) *
                                                pipe_hist_stride_ * sizeof(int32_t)) == cudaSuccess;
         if (!ok) {
             for (int p = 0; p < 2; ++p) {
-                if (h_bt_patch_off_[p]) cudaFreeHost(h_bt_patch_off_[p]);
-                if (h_bt_patch_val_[p]) cudaFreeHost(h_bt_patch_val_[p]);
-                if (h_hist_pos_[p]) cudaFreeHost(h_hist_pos_[p]);
-                h_bt_patch_off_[p] = h_bt_patch_val_[p] = h_hist_pos_[p] = nullptr;
+                h_bt_patch_off_[p].reset();
+                h_bt_patch_val_[p].reset();
+                h_hist_pos_[p].reset();
                 d_bt_patch_off_[p] = d_bt_patch_val_[p] = d_hist_pos_[p] = nullptr;
             }
             if (d_pipe_hist_) {
@@ -2422,8 +2426,8 @@ int Engine::pipeline_prebook_kv_(int parity) {
             const int nb = kv_manager_->append_block(req->id);
             if (nb < 0)
                 return -1;  // KV exhausted — per-step path handles reject/streaming
-            h_bt_patch_off_[parity][n_patches] = i * stride + have;
-            h_bt_patch_val_[parity][n_patches] = nb;
+            h_bt_patch_off_[parity].as<int>()[n_patches] = i * stride + have;
+            h_bt_patch_val_[parity].as<int>()[n_patches] = nb;
             ++n_patches;
         }
     }
@@ -2457,7 +2461,7 @@ bool Engine::pipeline_enqueue_next_(int parity, cudaStream_t stream) {
         const int count = static_cast<int>(bd_pipe_.rows[i]->output_tokens.size());
         if (count + 2 > pipe_hist_stride_)
             return false;
-        h_hist_pos_[parity][i] = count;
+        h_hist_pos_[parity].as<int>()[i] = count;
     }
 
     // Device-side chain: feed the IN-FLIGHT step's sampled tokens (other

@@ -15,7 +15,7 @@ static void check_cuda(cudaError_t err, const char* msg) {
 Buffer::~Buffer() { reset(); }
 
 Buffer::Buffer(Buffer&& other) noexcept
-    : data_(other.data_), size_(other.size_), on_device_(other.on_device_), pinned_(other.pinned_) {
+    : data_(other.data_), size_(other.size_), on_device_(other.on_device_) {
     other.data_ = nullptr;
     other.size_ = 0;
 }
@@ -26,7 +26,6 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
         data_ = other.data_;
         size_ = other.size_;
         on_device_ = other.on_device_;
-        pinned_ = other.pinned_;
         other.data_ = nullptr;
         other.size_ = 0;
     }
@@ -50,16 +49,6 @@ Buffer Buffer::host(size_t nbytes) {
         buf.data_ = std::malloc(nbytes);
         if (!buf.data_)
             throw std::bad_alloc();
-    }
-    return buf;
-}
-
-Buffer Buffer::pinned(size_t nbytes) {
-    Buffer buf;
-    buf.size_ = nbytes;
-    buf.pinned_ = true;
-    if (nbytes > 0) {
-        check_cuda(cudaMallocHost(&buf.data_, nbytes), "cudaMallocHost");
     }
     return buf;
 }
@@ -137,8 +126,6 @@ void Buffer::reset() {
         return;
     if (on_device_) {
         IMP_CUDA_CHECK_LOG(cudaFree(data_));
-    } else if (pinned_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(data_));
     } else {
         std::free(data_);
     }

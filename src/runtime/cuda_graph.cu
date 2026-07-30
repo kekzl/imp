@@ -877,30 +877,29 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         d_burst_done_mapped_ = sv.d_burst_done_mapped;
         h_decode_scratch_ = sv.h_decode_scratch;
     } else {
-        err = cudaHostAlloc(&h_ring_buffer_, config_.max_steps * sizeof(int32_t), cudaHostAllocMapped);
-        if (err != cudaSuccess)
+        // T5b, mapped: .device() IS the cudaHostGetDevicePointer result, so the
+        // four allocations and their three lookups become four acquires.
+        owned_ring_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                            static_cast<size_t>(config_.max_steps) * sizeof(int32_t),
+                                            HostPinnedKind::Mapped);
+        owned_step_counter_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int),
+                                                    HostPinnedKind::Mapped);
+        owned_burst_done_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int),
+                                                  HostPinnedKind::Mapped);
+        owned_decode_scratch_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t),
+                                                      HostPinnedKind::Mapped);
+        if (owned_ring_.empty() || owned_step_counter_.empty() || owned_burst_done_.empty() ||
+            owned_decode_scratch_.empty()) {
+            err = cudaErrorMemoryAllocation;
             goto fail;
-        err = cudaHostGetDevicePointer(&d_ring_buffer_, h_ring_buffer_, 0);
-        if (err != cudaSuccess)
-            goto fail;
-
-        err = cudaHostAlloc(&h_step_counter_, sizeof(int), cudaHostAllocMapped);
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaHostGetDevicePointer(&d_step_counter_mapped_, h_step_counter_, 0);
-        if (err != cudaSuccess)
-            goto fail;
-
-        err = cudaHostAlloc(&h_burst_done_, sizeof(int), cudaHostAllocMapped);
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaHostGetDevicePointer(&d_burst_done_mapped_, h_burst_done_, 0);
-        if (err != cudaSuccess)
-            goto fail;
-
-        err = cudaHostAlloc(&h_decode_scratch_, sizeof(int32_t), cudaHostAllocMapped);
-        if (err != cudaSuccess)
-            goto fail;
+        }
+        h_ring_buffer_ = owned_ring_.as<int32_t>();
+        d_ring_buffer_ = owned_ring_.device_as<int32_t>();
+        h_step_counter_ = owned_step_counter_.as<int>();
+        d_step_counter_mapped_ = owned_step_counter_.device_as<int>();
+        h_burst_done_ = owned_burst_done_.as<int>();
+        d_burst_done_mapped_ = owned_burst_done_.device_as<int>();
+        h_decode_scratch_ = owned_decode_scratch_.as<int32_t>();
     }
 
     // ---- Initialize device state ----
@@ -1362,25 +1361,19 @@ void CudaGraphConditionalRunner::cleanup() {
     }
     penalty_prefix_len_ = 0;
 
-    if (h_ring_buffer_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_ring_buffer_));
-        h_ring_buffer_ = nullptr;
-    }
+    // reset() releases what this runner owned and is a no-op for a slot-backed
+    // burst, where the pointers were views into the pool's buffer.
+    owned_ring_.reset();
+    owned_step_counter_.reset();
+    owned_burst_done_.reset();
+    owned_decode_scratch_.reset();
+    h_ring_buffer_ = nullptr;
     d_ring_buffer_ = nullptr;
-    if (h_step_counter_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_step_counter_));
-        h_step_counter_ = nullptr;
-    }
+    h_step_counter_ = nullptr;
     d_step_counter_mapped_ = nullptr;
-    if (h_burst_done_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_burst_done_));
-        h_burst_done_ = nullptr;
-    }
+    h_burst_done_ = nullptr;
     d_burst_done_mapped_ = nullptr;
-    if (h_decode_scratch_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_decode_scratch_));
-        h_decode_scratch_ = nullptr;
-    }
+    h_decode_scratch_ = nullptr;
 
     // Release the per-device graph memory pool (matches CudaGraphCapture::reset).
     // Keeps long-running sessions from holding stale graph reservations.

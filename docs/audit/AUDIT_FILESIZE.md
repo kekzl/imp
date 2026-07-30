@@ -202,3 +202,29 @@ It is the safe, behaviour-preserving option; a genuine split is left as future w
 
 Gate after remediation: **0 hard-review violations** (the 12 entries were removed from
 `[allow]`; 25 `(c)`/`(b)` files remain allowlisted with reasons).
+
+---
+
+## 2026-07-30 — a note on `src/runtime/engine.cpp`, which sits ON the limit
+
+Not an audit run; one fact worth writing down because it has now cost two
+sessions a red CI job (#1124, #1125, and again in #1127).
+
+`src/runtime/engine.cpp` measures **exactly 800 code LOC**, which is the `tu`
+group's **hard** threshold. The gate fails at 801, so *any* single added line —
+including wrapping one function call across an extra line — turns the blocking
+`File size` job red without touching anything a reviewer would call growth.
+
+Practical consequences, in order of preference:
+
+1. If you touch `engine.cpp` at all, run `python3 tools/check_filesize.py`
+   **before** committing. It reports in under a second.
+2. Prefer edits that are line-neutral or negative. Both times so far the fix was
+   trivial once seen: fold a call's arguments onto fewer lines, or collapse an
+   intermediate `const size_t want = …; const size_t cap = std::max(…, want);`
+   into one expression.
+3. It is *not* on the `[allow]` list and should not be added to it to buy room —
+   it is on the limit because it accreted engine-init responsibilities, and the
+   right remediation when it next needs to grow is to move one of them out
+   (the arena/slot-pool opening block and the shadow-plan logging are the two
+   obvious candidates, both already self-contained).

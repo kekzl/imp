@@ -408,7 +408,10 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     bool ok = cudaMalloc(&p.d_token, SAMPLE_SCRATCH_BYTES) == cudaSuccess &&
               cudaMalloc(&p.d_pos, sizeof(int)) == cudaSuccess &&
               cudaMalloc(&p.d_ctx, sizeof(int)) == cudaSuccess &&
-              cudaHostAlloc(&p.h_token, sizeof(int32_t), cudaHostAllocDefault) == cudaSuccess &&
+              [&] {
+                  p.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
+                  return !p.h_token.empty();
+              }() &&
               cudaEventCreateWithFlags(&p.ev, cudaEventDisableTiming) == cudaSuccess;
     if (!ok) {
         teardown_constrained_pipeline(/*synchronize=*/false);
@@ -545,7 +548,8 @@ int Engine::step_constrained_pipeline() {
                             shape, /*borrowed=*/true);
         tick_logits = &row_logits;
     }
-    executor_->masked_sample_async(p.state, *tick_logits, p.d_token, p.h_token, stream);
+    executor_->masked_sample_async(p.state, *tick_logits, p.d_token, p.h_token.as<int32_t>(),
+                                  stream);
     if (!consuming)
         launch_pipeline_advance(p.d_pos, p.d_ctx, stream);
     IMP_CUDA_CHECK_LOG(cudaEventRecord(p.ev, stream));
@@ -562,7 +566,7 @@ int Engine::step_constrained_pipeline() {
 
     // 3. Wait only for the sampled token (GPU continues in forward N+1).
     IMP_CUDA_CHECK_LOG(cudaEventSynchronize(p.ev));
-    int32_t token = *p.h_token;
+    int32_t token = *p.h_token.as<int32_t>();
 
     // 4. Harvest — mirrors step_decode_process_outputs for one token.
     req->output_tokens.push_back(token);
@@ -820,7 +824,7 @@ void Engine::teardown_constrained_pipeline(bool synchronize) {
     if (p.d_pos) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_pos)); p.d_pos = nullptr; }
     if (p.d_ctx) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_ctx)); p.d_ctx = nullptr; }
     if (p.d_banned) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_banned)); p.d_banned = nullptr; }
-    if (p.h_token) { IMP_CUDA_CHECK_LOG(cudaFreeHost(p.h_token)); p.h_token = nullptr; }
+    p.h_token.reset();
     if (p.ev) { IMP_CUDA_CHECK_LOG(cudaEventDestroy(p.ev)); p.ev = nullptr; }
     if (p.d_frows) { IMP_CUDA_CHECK_LOG(cudaFree(p.d_frows)); p.d_frows = nullptr; }
     p.req = nullptr;

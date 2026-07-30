@@ -270,9 +270,22 @@ impossible.**
 | **T2 Engine-persistent** | process | bump arena | per-object leak | stable |
 | **T3 Pooled fixed-block** | request-scoped, refcounted | free-list over one slab | external fragmentation (all blocks identical) | stable |
 | **T4 Forward-scratch** | one forward pass | LIFO stack | fragmentation (LIFO cannot fragment) + leak (stack unwinds) | stable per slot |
-| **T5 Transient host-staging** | load only | ordinary host alloc | surviving load (asserted at phase transition) | n/a |
+| **T5a Transient host-staging** | load only | ordinary host alloc | surviving load (asserted at phase transition) | n/a |
+| **T5b Engine-persistent pinned host** | process | `PinnedBuffer` over `HostPinnedAllocator`; `HostRegistration` for memory imp does not own | per-object leak (move-only owner, no free to forget); asymmetric unregister | n/a |
 
-Confirmed against A1.7. Two corrections the inventory forced:
+Confirmed against A1.7. Three corrections the inventory forced:
+
+- **T5 as first written could not host most of the host memory in the engine, so
+  it splits.** The row said "load only", with *surviving load* as the failure
+  mode it makes impossible — asserted at the phase transition. But 26 of the
+  pinned-host acquisition sites are engine-persistent **by construction**: a
+  pinned staging buffer for the per-step D2H gather exists precisely so that it
+  is pinned once and reused every decode step, so it must survive into
+  `AllocPhase::Serving`. Asserting it away would delete the optimisation the
+  pinning is for. T5a keeps the original discipline; T5b is the tier those 26
+  sites move to, and its owner is `PinnedBuffer` (move-only, frees exactly once,
+  empty-on-failure so the existing degradation paths still work). `Backend`
+  covers device memory only, which is why they had no tier at all until then.
 
 - **T1 and T2 need separate arenas even though both are "stable forever."**
   `server.model_swap` (shipped 2026-07-26) unloads a model and loads another
@@ -944,7 +957,7 @@ decode and prefill within 1 %, and records both in `docs/audit/PERF_LOG.md`.
 | 2 | **`plan_memory()` alongside `compute_vram_budget()`**, computing but not applying. Log both; assert agreement within a tolerance in CI via V8. | 0 | Establishes the plan is right *before* anything depends on it. Highest-information, lowest-risk step. |
 | 3 | **KV pool + `KVCacheManager`** → `BlockPool` + `BlockRef`. Deletes the manual refcount, `free_block_dropping_stale_hash`, and the free-by-id paths. | ~15 | The hardest ownership question (A5.1) and the one with the best existing test coverage. Doing it early means the refcount machinery is proven before four more subsystems depend on it. |
 | 4 | **Executor workspaces** (`exec/executor_workspace*.cu`, 47+ sites in one file) → T2 arena + `ScratchStack`. | ~70 | Biggest single-file win; the sizes are already computed centrally in `compute_shared_sizes`. |
-| 5 | **Per-request allocations** (`engine_graph_decode.cpp`, `engine_scheduler.cpp`, `executor_attention_prefill.cu`, `executor_attention.cu`, MoE per-call arrays) → `ScratchStack`. **This is the step that satisfies I2**; the counter from step 0 must reach zero. | ~40 | Depends on the stack existing (4) and on the plan sizing it (2). |
+| 5 | **Per-request allocations** (`engine_graph_decode.cpp`, `engine_scheduler.cpp`, `executor_attention_prefill.cu`, `executor_attention.cu`, MoE per-call arrays) → `ScratchStack`. **This is the step that satisfies I2**; the counter from step 0 must reach zero. **Plan it per BUFFER FAMILY, not per file** (B59): the KV block tables alone are 8 acquisitions against **23 releases in 5 files**, one allocation being freed at 8 sites depending on which path unwinds, so a file-at-a-time pass cannot close them. | ~40 | Depends on the stack existing (4) and on the plan sizing it (2). |
 | 6 | **Weight upload + pre-dequant caches** (`model/`, `quant/`, `exec/pre_dequant_*`) → T1 arena. **Deletes the balloon** and the phase-local free-VRAM re-derivation. Switch the allocation order to the plan's tier order. | ~90 | Largest blast radius; must come after the plan is trusted (2) and the KV pool no longer competes for a residual (3). |
 | 7 | **VMM backend for the KV pool**, gated on the WSL2 spike (A3.1). If the spike fails, stop here — everything above stands. | 0 | Optional by construction. |
 | 8 | **`compute/` statics**: cuBLAS/cuBLASLt/CUTLASS workspaces from the T2 arena; delete the lazy CUTLASS growth path. | ~115 | Mostly mechanical once the arena exists; `compute/` sites are small per-kernel scratch. |
@@ -969,9 +982,9 @@ the KV cache, the forward pass and the weight caches respectively.
 record. "Measured" is where Phase B actually stands, and it is deliberately not
 rounded up — three of the seven are still open, and one has not moved at all.
 
-| | Invariant | Design-time | **Measured (2026-07-29)** | Target |
+| | Invariant | Design-time | **Measured (rows carry their own date; latest 2026-07-30)** | Target |
 |---|---|---|---|---|
-| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 696 calls / 77 files, of which 309 are acquisitions and 407 releases (B48).** Barely improved: the migrated tenants kept their original path as a fallback, and the gate counts source sites, not executed ones (B34). The *gate* is now site-granular and mutation-verified, so the list cannot grow silently | ✓ — `Backend`, allowlist empty, CI gate |
+| I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 582 calls / 77 files (2026-07-30), of which 258 are acquisitions and 344 releases.** The **pinned-host class is CLOSED: 26 → 0** (B58/B60) — every one moved to T5b's `PinnedBuffer`/`HostRegistration`, which is why the total fell 638 → 582 (each migration took its releases with it). What remains is device memory only. Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52–B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ — `Backend`, allowlist empty, CI gate |
 | I2 | No allocation on the hot path | ✗ — measured +190 MiB/config of steady-state allocation | **✓ — `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`**, 15 requests, dense. Was 414 → 238 → 0 | ✓ — `ScratchStack`, phase guard, counter == 0 |
 | I3 | Stable addresses for graph memory | ~ — true in practice, enforced by comments + a `workspace_generation` hook | **~ — `StableSpan` exists and is passkey-enforced**, so only allocators that can promise stability can mint one; kernel signatures still take raw pointers | ✓ — `StableSpan` in kernel signatures; no conversion from `DeviceSpan` |
 | I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ — `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). The balloon and the live `cudaMemGetInfo` sizing are still there | ✓ — `plan_memory()` never queries the device; fails at load with a report |

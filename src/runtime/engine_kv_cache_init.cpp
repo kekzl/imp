@@ -657,12 +657,13 @@ bool Engine::init_kv_cache() {
         }
 
         // Pinned host staging buffers for prefill
-        if (cudaHostAlloc(&h_pf_positions_, config_.max_seq_len * sizeof(int), cudaHostAllocDefault) !=
-            cudaSuccess)
-            h_pf_positions_ = nullptr;
-        if (cudaHostAlloc(&h_pf_token_ids_, config_.max_seq_len * sizeof(int32_t), cudaHostAllocDefault) !=
-            cudaSuccess)
-            h_pf_token_ids_ = nullptr;
+        // T5b: an empty buffer means "no staging", which the prefill path already
+        // tests for (memory/host_pinned.h).
+        h_pf_positions_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                                static_cast<size_t>(config_.max_seq_len) * sizeof(int));
+        h_pf_token_ids_ = PinnedBuffer::acquire(
+            cuda_host_pinned_allocator(),
+            static_cast<size_t>(config_.max_seq_len) * sizeof(int32_t));
         if (cudaEventCreateWithFlags(&pf_staging_evt_, cudaEventDisableTiming) != cudaSuccess)
             pf_staging_evt_ = nullptr;
     }

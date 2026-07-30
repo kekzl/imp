@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 77 files, 638 sites
+# remaining: 77 files, 582 sites
 
 src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_mxfp4_sm120.cu  # 12
@@ -26,7 +26,7 @@ src/compute/json_constrain.cu  # 6
 src/compute/mmq_q4k_imma_tile.cu  # 12
 src/compute/mmq_q8_imma.cu  # 19
 src/compute/moe_routing.cu  # 12
-src/compute/mtp_forward.cu  # 16
+src/compute/mtp_forward.cu  # 12
 src/compute/quantize_fp16_nvfp4_moe_native.cu  # 6
 src/compute/regex_constrain.cu  # 2
 src/compute/rowwise_topm.cu  # 8
@@ -34,7 +34,7 @@ src/compute/sampling.cu  # 1
 src/compute/sampling_penalties.cu  # 16
 src/compute/sampling_topk_topp.cu  # 15
 src/compute/schema_constrain.cu  # 6
-src/core/buffer.cpp  # 4
+src/core/buffer.cpp  # 2
 src/exec/executor.cu  # 2
 src/exec/executor_attention.cu  # 4
 src/exec/executor_attention_decode.cu  # 6
@@ -49,8 +49,8 @@ src/exec/executor_lora.cu  # 2
 src/exec/executor_perplexity.cu  # 8
 src/exec/executor_ssm_gdn.cu  # 2
 src/exec/executor_workspace.cu  # 7
-src/exec/executor_workspace_buffers.cu  # 28
-src/exec/executor_workspace_config.cu  # 4
+src/exec/executor_workspace_buffers.cu  # 22
+src/exec/executor_workspace_config.cu  # 2
 src/exec/expert_cache.cu  # 4
 src/exec/gemm_scratch.cu  # 1
 src/exec/moe_workspace.cu  # 2
@@ -64,22 +64,22 @@ src/exec/pre_dequant_phase3c_mxfp4.cu  # 1
 src/exec/pre_dequant_phase4_tensor_registry.cu  # 4
 src/exec/quant_scratch.cu  # 1
 src/lora/lora_adapter.cpp  # 3
-src/model/model.cpp  # 3
-src/model/weight_upload.cu  # 33
+src/model/model.cpp  # 1
+src/model/weight_upload.cu  # 24
 src/quant/fp8_quant.cu  # 6
 src/quant/gpt_oss_mxfp4_convert.cu  # 9
 src/quant/nvfp4_gemm.cu  # 3
 src/quant/nvfp4_quant.cu  # 16
 src/runtime/batch.cpp  # 12
-src/runtime/cuda_graph.cu  # 34
-src/runtime/engine.cpp  # 12
-src/runtime/engine_graph_decode.cpp  # 33
+src/runtime/cuda_graph.cu  # 26
+src/runtime/engine.cpp  # 6
+src/runtime/engine_graph_decode.cpp  # 31
 src/runtime/engine_internal.h  # 4
-src/runtime/engine_kv_cache_init.cpp  # 5
-src/runtime/engine_scheduler.cpp  # 30
-src/runtime/engine_spec_ngram.cpp  # 19
+src/runtime/engine_kv_cache_init.cpp  # 3
+src/runtime/engine_scheduler.cpp  # 24
+src/runtime/engine_spec_ngram.cpp  # 13
 src/runtime/engine_weight_upload.cpp  # 2
-src/runtime/engine_workspace_warmup.cpp  # 3
+src/runtime/engine_workspace_warmup.cpp  # 2
 src/vision/vision_encoder.cu  # 6
 src/vision/vision_loader.cpp  # 2
 src/vision/vision_model.cpp  # 1

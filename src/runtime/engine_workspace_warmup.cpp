@@ -155,12 +155,11 @@ bool Engine::init_features() {
 
     // Pinned sample buffer for CUDA graphs
     if (!h_sample_pinned_) {
-        cudaError_t err = cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
-        if (err != cudaSuccess) {
-            IMP_LOG_WARN("cudaHostAlloc for sample buffer failed: %s", cudaGetErrorString(err));
+        h_sample_pinned_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
+        if (h_sample_pinned_.empty()) {
+            IMP_LOG_WARN("pinned sample buffer unavailable — disabling CUDA graphs");
             if (config_.use_cuda_graphs)
                 config_.use_cuda_graphs = false;
-            h_sample_pinned_ = nullptr;
         }
     }
     if (!decode_done_)

@@ -136,27 +136,16 @@ Engine::~Engine() {
         cudaFree(d_kv_slot_buf_);
         d_kv_slot_buf_ = nullptr;
     }
-    if (h_sample_pinned_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_sample_pinned_));
-        h_sample_pinned_ = nullptr;
-    }
     abandon_decode_pipeline();
     for (int p = 0; p < 2; ++p) {
-        if (h_bt_patch_off_[p]) {
-            IMP_CUDA_CHECK_LOG(cudaFreeHost(h_bt_patch_off_[p]));
-            h_bt_patch_off_[p] = nullptr;
-            d_bt_patch_off_[p] = nullptr;
-        }
-        if (h_bt_patch_val_[p]) {
-            IMP_CUDA_CHECK_LOG(cudaFreeHost(h_bt_patch_val_[p]));
-            h_bt_patch_val_[p] = nullptr;
-            d_bt_patch_val_[p] = nullptr;
-        }
-        if (h_hist_pos_[p]) {
-            IMP_CUDA_CHECK_LOG(cudaFreeHost(h_hist_pos_[p]));
-            h_hist_pos_[p] = nullptr;
-            d_hist_pos_[p] = nullptr;
-        }
+        // T5b owners release themselves; the d_* mirrors are views into them, so
+        // they only need nulling (memory/host_pinned.h).
+        h_bt_patch_off_[p].reset();
+        h_bt_patch_val_[p].reset();
+        h_hist_pos_[p].reset();
+        d_bt_patch_off_[p] = nullptr;
+        d_bt_patch_val_[p] = nullptr;
+        d_hist_pos_[p] = nullptr;
     }
     if (d_pipe_hist_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_pipe_hist_));
@@ -167,14 +156,6 @@ Engine::~Engine() {
     if (prefill_pool_) {
         vram_alloc_.free(prefill_pool_);
         prefill_pool_ = nullptr;
-    }
-    if (h_pf_positions_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_pf_positions_));
-        h_pf_positions_ = nullptr;
-    }
-    if (h_pf_token_ids_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_pf_token_ids_));
-        h_pf_token_ids_ = nullptr;
     }
     if (pf_staging_evt_) {
         IMP_CUDA_CHECK_LOG(cudaEventDestroy(pf_staging_evt_));
