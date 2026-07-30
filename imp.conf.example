@@ -202,6 +202,14 @@ reserve_floor_pct = 10
 # a 16 GiB budget scaled the reserve to 1.6 GiB against a real 3.9 GiB and the
 # plan overran the cap by the difference. Re-measure after a CUDA/driver bump.
 library_reserve_mb = -1
+# Where to remember what the first forward ACTUALLY claimed, so the SECOND start
+# on a model plans with the measured value instead of the constant above. The
+# plan needs this figure before the forward that produces it, so one run cannot
+# both measure and use it — but the value is stable per (model, quant path, CUDA
+# runtime) and invariant to batch and context, so remembering it is enough.
+# Empty = $XDG_CACHE_HOME/imp/library_reserve (or ~/.cache/imp/...); "off"
+# disables it. A miss or an unwritable path warns and charges the constant.
+library_reserve_cache =
 # Native-NVFP4 (prequant) models only: physically reserve the mandatory
 # decode caches (CUTLASS SfAtom slab + nvfp4_moe) right after weight upload,
 # before workspaces/KV consume the headroom. Partial caches abort decode

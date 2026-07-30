@@ -257,6 +257,11 @@ struct RuntimeConfig {
         // Advisory until A7 step 6: today it only feeds the shadow plan that
         // is logged next to the live budget.
         int library_reserve_mb = -1;
+        // Where to remember what the first forward ACTUALLY claimed, so the
+        // second start on a model charges the measured value instead of the
+        // constant (AUDIT B41/B49). Empty = the default cache location;
+        // "off" disables it. A cache miss or an unwritable path is never fatal.
+        std::string library_reserve_cache;
     } vram;
 
     struct Attention {
