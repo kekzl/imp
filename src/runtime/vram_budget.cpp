@@ -455,7 +455,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // built), so the 90% reserve was dead VRAM: an NVFP4 SafeTensors
             // model starved its KV pool to ~24K tokens while 16 GB sat free —
             // the long-context/agentic default was effectively broken.
-            // target_blocks (below) still clamps mode 2 to needed_blocks, so
+            // target_blocks (below) clamps every mode to needed_blocks, so
             // the fraction only lifts KV up to the per-sequence need and leaves
             // the remainder for FP8 (computed post-clamp) when it IS enabled —
             // no regression for fp8-prefill configs.
@@ -482,9 +482,23 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     }
     budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
 
-    int target_blocks = (config.use_nvfp4_decode == 2 || budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)
-                            ? needed_blocks
-                            : needed_blocks * 2;
+    // One pool per advertised sequence set, not two. The `* 2` this used to
+    // apply outside mode 2 entered in #100 (a public-release sweep, not a sizing
+    // decision) with no comment and survived ~1000 PRs. It was the ENTIRE
+    // divergence between the live pass and plan_memory(): measured on
+    // Qwen3-8B-Q8_0 at two different (seq, batch) combinations, live came out
+    // 4096 blocks against the plan's 2048 both times, and mode-2 models — which
+    // never had the doubling — already agreed. D9 recorded that disagreement as
+    // the reason CI cannot assert the plan; this is what it was.
+    //
+    // Measured before removing it (AUDIT B65): the doubling buys no prefix-cache
+    // reuse — 12656 cached tokens and the same warm latency with half the pool —
+    // and it binds rather than being VRAM-clamped, so it was holding ~2.3 GiB for
+    // headroom nothing demonstrated a need for. Admission control
+    // (Scheduler::can_allocate) already bounds concurrency against the real pool,
+    // so a smaller pool limits how many sequences run at once; it cannot
+    // under-serve one.
+    int target_blocks = needed_blocks;
     budget.kv_max_blocks = std::min(budget.kv_max_blocks, target_blocks);
     budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
 
