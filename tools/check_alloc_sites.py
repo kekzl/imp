@@ -198,11 +198,20 @@ def main() -> int:
                   f"migration can remove them:")
             for r, f in sorted(only_release, reverse=True):
                 print(f"    {r:4d}  {f}")
-        print("  largest by total calls:")
-        for relpath in sorted(hits, key=lambda r: -len(hits[r]))[:15]:
+        # Per file, acquisitions first: that is the column the migration work is
+        # measured in. Reading the total instead sends someone to
+        # executor_workspace_buffers.cu expecting 65 pieces of work when it is 38.
+        print("  largest by ACQUISITIONS (total in brackets):")
+        per_file = []
+        for relpath in hits:
+            text = (REPO / relpath).read_text(errors="ignore").splitlines()
+            a = sum(len(PATTERN_ACQUIRE.findall(t)) for t in text
+                    if not t.strip().startswith("//"))
+            per_file.append((a, len(hits[relpath]), relpath))
+        for a, total, relpath in sorted(per_file, reverse=True)[:15]:
             budget = allowed.get(relpath, 0)
             mark = "" if budget < 0 else f"  (budget {budget})"
-            print(f"  {len(hits[relpath]):4d}  {relpath}{mark}")
+            print(f"  {a:4d}  [{total:3d}]  {relpath}{mark}")
         return 0
 
     rc = 0
