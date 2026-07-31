@@ -1,5 +1,7 @@
 #include "model/hf_config_loader.h"
 #include "model/json_util.h"
+#include "vision/qwen3vl_vision_config.h"
+#include "vision/vision_model.h"
 #include "model/llm_compressor_loader.h"
 #include "core/logging.h"
 #include "runtime/process_diag.h"
@@ -70,7 +72,8 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
 
 // ---- load_config ----
 
-bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg) {
+bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
+                                 std::unique_ptr<VisionModel>* out_vision_tower) {
     std::string path = model_dir + "/config.json";
     JValue root;
     if (!parse_json_file(path, root))
@@ -727,14 +730,39 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     // cases don't silently degrade to text-only.
     const JValue* vc = jobj_find(root, "vision_config");
     if (vc && vc->type == JType::OBJECT) {
-        std::string model_type;
-        jobj_get_string(*vc, "model_type", model_type);
-        IMP_LOG_WARN(
-            "Multimodal model detected (vision_config present, model_type='%s'). "
-            "imp's SafeTensors loader handles only the language head; the "
-            "vision tower will be skipped. Multimodal SafeTensors support is "
-            "a separate audit item (#18).",
-            model_type.empty() ? "?" : model_type.c_str());
+        std::string vision_type;
+        jobj_get_string(*vc, "model_type", vision_type);
+        // Qwen3-VL's tower is understood: parse its geometry here and let
+        // weight_map fill the weights. Everything else still degrades to
+        // text-only, loudly.
+        bool parsed = false;
+        if (vision_type == "qwen3_vl" && out_vision_tower) {
+            auto tower = std::make_unique<VisionModel>();
+            std::string verr;
+            if (parse_qwen3vl_vision_config(*vc, tower->config, verr)) {
+                *out_vision_tower = std::move(tower);
+                parsed = true;
+                IMP_LOG_INFO(
+                    "Qwen3-VL vision tower: depth=%d hidden=%d heads=%d patch=%d merge=%d "
+                    "pos_grid=%dx%d out=%d deepstack=%zu",
+                    (*out_vision_tower)->config.num_layers, (*out_vision_tower)->config.hidden_size,
+                    (*out_vision_tower)->config.num_heads, (*out_vision_tower)->config.patch_size,
+                    (*out_vision_tower)->config.merge_size, (*out_vision_tower)->config.pos_embed_grid,
+                    (*out_vision_tower)->config.pos_embed_grid, (*out_vision_tower)->config.out_hidden_size,
+                    (*out_vision_tower)->config.deepstack_indexes.size());
+            } else {
+                // Refusing beats loading a tower whose geometry we misread.
+                IMP_LOG_WARN("Qwen3-VL vision_config rejected (%s) — continuing text-only", verr.c_str());
+            }
+        }
+        if (!parsed) {
+            IMP_LOG_WARN(
+                "Multimodal model detected (vision_config present, model_type='%s'). "
+                "imp's SafeTensors loader handles only the language head; the "
+                "vision tower will be skipped. Multimodal SafeTensors support is "
+                "a separate audit item (#18).",
+                vision_type.empty() ? "?" : vision_type.c_str());
+        }
     }
 
     if (cfg.arch == ModelArch::GENERIC) {
