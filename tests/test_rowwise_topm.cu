@@ -80,3 +80,46 @@ TEST(RowwiseTopM, M1MatchesArgmax) {
 
 }  // namespace
 }  // namespace imp
+
+// An exhausted arena must DEGRADE, not corrupt. This is the contract the
+// attention_cublas pointer array turned out not to have (A7 step 8): migrating
+// a buffer whose caller dereferences it unconditionally turns "no arena" into a
+// null-pointer kernel launch, a sticky CUDA error, and every later test in the
+// binary failing on a device query that returns zero. rowwise_topm has the
+// contract — it returns without writing — and this pins it, because the whole
+// argument for leaving this tenant UNCHARGED is that running out is survivable.
+TEST(RowwiseTopM, AnExhaustedArenaLeavesTheOutputAloneInsteadOfCorruptingTheContext) {
+    // Take the standing arena down and put up one far too small for the ask.
+    const bool had_arena = imp::engine_arena().is_open();
+    if (had_arena)
+        imp::engine_arena_close();
+    ASSERT_EQ(imp::engine_arena_open(imp::cuda_malloc_backend(), 4096), imp::MemError::Ok);
+
+    const int rows = 512, V = 4096, m = 16;  // needs 512*32*16*8 B >> 4 KiB
+    std::vector<float> h_logits(static_cast<size_t>(rows) * V, 0.0f);
+    for (int r = 0; r < rows; ++r)
+        h_logits[static_cast<size_t>(r) * V + (r % V)] = 10.0f;
+
+    float* d_logits = nullptr;
+    int32_t* d_out = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_logits, h_logits.size() * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(rows) * m * sizeof(int32_t)), cudaSuccess);
+    cudaMemcpy(d_logits, h_logits.data(), h_logits.size() * sizeof(float), cudaMemcpyHostToDevice);
+    const int32_t sentinel = -12345;
+    std::vector<int32_t> h_out(static_cast<size_t>(rows) * m, sentinel);
+    cudaMemcpy(d_out, h_out.data(), h_out.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+
+    imp::rowwise_topm(d_logits, rows, V, m, d_out, /*stream=*/nullptr);
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess) << "the exhausted path launched something anyway";
+    EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "the exhausted path left a sticky CUDA error";
+
+    std::vector<int32_t> got(h_out.size());
+    cudaMemcpy(got.data(), d_out, got.size() * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(got, h_out) << "output written from a scratch the arena never handed out";
+
+    cudaFree(d_logits);
+    cudaFree(d_out);
+    imp::engine_arena_close();
+    if (had_arena)
+        ASSERT_EQ(imp::engine_arena_open(imp::cuda_malloc_backend(), 64ull << 20), imp::MemError::Ok);
+}

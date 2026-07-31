@@ -141,9 +141,10 @@ bool topm_ensure(size_t need) {
     auto pv = engine_arena().take_bytes(need * sizeof(float));
     auto pi = engine_arena().take_bytes(need * sizeof(int32_t));
     if (pv.empty() || pi.empty()) {
-        IMP_LOG_WARN("rowwise_topm: %.2f MiB unavailable from the T2 arena (%.1f MiB free) — top-M "
-                     "returns empty for this call",
-                     need * 8.0 / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
+        IMP_LOG_WARN(
+            "rowwise_topm: %.2f MiB unavailable from the T2 arena (%.1f MiB free) — top-M "
+            "returns empty for this call",
+            need * 8.0 / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
         g_topm_pvals = nullptr;
         g_topm_pidxs = nullptr;
         g_topm_cap = 0;

@@ -134,6 +134,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   dependencies — for anything richer, point Open WebUI at the same server.
 
 ### Changed
+- **A7 step 8 is done: the `compute/` scratches that outlive a request now come
+  from the engine-persistent (T2) arena.** Four PRs' worth — the DRY penalty
+  staging, the cuBLAS/CUTLASS workspaces (which also found a 512 MiB
+  reservation against a measured 152 320 B need), the IMMA and MXFP4
+  grow-on-demand statics that closed the CUDA-graph dangling-pointer class, and
+  finally the CUB sort scratch and the top-M partials. Two consequences beyond
+  the accounting: a bump-arena take is legal under stream capture where the
+  `cudaMalloc` it replaces was not, and a grow no longer frees an address a
+  captured graph still names. What deliberately stays a direct allocation is
+  enumerated in `AUDIT.md` B75 — weight caches (T1, step 6), per-call result
+  tensors (step 5), one-shot init transients, and test-only overloads.
+
 - **The cuBLAS and CUTLASS workspaces come from the engine-persistent (T2)
   arena, and the grouped one shrank by 511 MiB** (A7 step 8). `gemm_init()`'s
   cuBLASLt workspace (64 MiB) and algo-selection bench scratch (32 MiB) are now
