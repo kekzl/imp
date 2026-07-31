@@ -111,7 +111,8 @@ calibration over 36 058 tokens of general prose. Full chain reproducible with
 `degen_suite.py` reads 45/45 on every checkpoint in that table (the AWQ ones
 re-run three and two times respectively). `--calib` closes about a quarter of
 the quantization gap on the 0.6B and nearly two fifths on the 1.7B — it does
-not close it: a Modelopt export still wins.
+not close it against BF16 — but see the head-to-head below before assuming a
+published export is automatically better.
 
 **The battery is worth a note, because it did not always read 45/45.**
 Checkpoints built from the earlier, non-deterministic calibration files each
@@ -140,6 +141,42 @@ round-to-nearest, where the gap is far larger than that spread.
 > **Measure this on the 45k corpus, not `ppl_corpus.txt`.** The 199-token corpus
 > reads wildly different numbers and inverts the model-size trend — an artifact
 > of too few tokens, not a property of the quantizer.
+
+#### Head-to-head against a Modelopt export
+
+The standing advice here was "prefer a published Modelopt checkpoint when one
+exists". Measured 2026-07-31, it does not hold on the one model that can be
+compared locally.
+
+`Qwen3-14B-NVFP4` is a genuine Modelopt export (`producer: modelopt`), and its
+untouched tensors are **bit-identical** to the `Qwen/Qwen3-14B` BF16 source —
+`model.norm.weight`, every `input_layernorm`, and the 1.5 GB embedding table all
+hash the same, so both quantizers started from exactly the same weights. Both
+quantize the same **280 tensors** and both exclude `lm_head`. Same corpus, same
+engine, same `deterministic_gemm`; each number reproduced to four decimals:
+
+| NVFP4 checkpoint | PPL (`ppl_corpus_45k.txt`) |
+|---|---:|
+| Modelopt export | 10.0301 |
+| `imp-quantize`, no `--calib` | **9.9252** |
+
+The *uncalibrated* in-tree quantizer comes out 1.05% ahead. That is not a claim
+that imp-quantize is the better quantizer — it is one model on one corpus — but
+it does retire the blanket "a published export will beat this".
+
+**A likely reason, stated as a hypothesis.** The Modelopt export also ships 280
+`input_scale` and 40 `k_scale`/`v_scale` tensors: its weights were calibrated
+*jointly with* activation and KV-cache quantization. imp runs the weight half of
+that recipe. A weight rounding tuned for W4A4-plus-quantized-KV is not
+necessarily the best weight rounding for W4A16, and a calibration set of general
+web text is not this corpus of technical English. Confirming that would need an
+A/B with the activation scales actually applied.
+
+**What could not be measured:** the BF16 baseline for this model, and therefore
+`--calib` on it. 27.5 GiB of weights plus the allocator's 5% headroom does not
+fit in 32 GiB (upload fails at layer 39), and calibration needs a full forward
+pass on the BF16 source. So the 14B row above is round-to-nearest only; the AWQ
+numbers in the table further up are from the models that do fit.
 
 #### MoE, and two roles that must stay full precision
 

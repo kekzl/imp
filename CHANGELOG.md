@@ -4,6 +4,27 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- **"Prefer a published Modelopt checkpoint" no longer stands unmeasured — and
+  on the one model that can be compared here, it is wrong.** `Qwen3-14B-NVFP4`
+  is a genuine Modelopt export whose untouched tensors are *bit-identical* to
+  the `Qwen/Qwen3-14B` BF16 source (norm weights and the 1.5 GB embedding table
+  hash the same), so both quantizers provably started from the same weights.
+  Both quantize the same 280 tensors and exclude `lm_head`. Same corpus, engine
+  and `deterministic_gemm`, each reproduced to four decimals:
+  **Modelopt 10.0301, `imp-quantize` without `--calib` 9.9252** — the
+  uncalibrated in-tree quantizer 1.05% ahead.
+
+  One model, one corpus: that is not a claim that imp-quantize is the better
+  quantizer, but it does retire the blanket advice. Hypothesis for the gap,
+  stated as one: the Modelopt export also carries 280 `input_scale` and 40
+  `k_scale`/`v_scale` tensors, so its weight rounding was calibrated *jointly
+  with* activation and KV quantization while imp runs the weight half.
+
+  Not measurable here: the BF16 baseline for this model, and therefore `--calib`
+  on it — 27.5 GiB of weights plus the allocator's 5% headroom does not fit in
+  32 GiB (upload fails at layer 39).
+
 ### Fixed
 - **`imp-quantize` silently produced a broken MoE checkpoint.** The docs claimed
   MoE was "reported and left unquantized rather than mangled" — but that only
