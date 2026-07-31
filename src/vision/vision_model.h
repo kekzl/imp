@@ -5,6 +5,8 @@
 
 namespace imp {
 
+class VRAMAllocator;
+
 struct VisionConfig {
     int image_size = 896;
     int patch_size = 14;
@@ -96,8 +98,11 @@ struct VisionModel {
     // Transformer layers
     std::vector<VisionLayerWeights> layers;
 
-    // GPU allocations for cleanup
+    // GPU allocations for cleanup. Released through `allocator` when one is set
+    // (the Qwen3-VL path, so the VRAM ledger stays accurate) and with a plain
+    // cudaFree otherwise (the legacy GGUF mmproj path).
     std::vector<void*> gpu_allocs;
+    VRAMAllocator* allocator = nullptr;
 
     int lm_d_model = 0;  // LLM hidden dimension (from mm_proj output)
 

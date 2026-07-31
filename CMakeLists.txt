@@ -378,6 +378,10 @@ set(IMP_VISION_SOURCES
     src/vision/qwen3vl_vision_map.cpp
     src/vision/qwen3vl_vision_config.cpp
     src/vision/qwen3vl_vision_load.cpp
+    src/vision/qwen3vl_vision_grid.cpp
+    src/vision/qwen3vl_vision_upload.cpp
+    src/vision/qwen3vl_encoder_kernels.cu
+    src/vision/qwen3vl_encoder.cu
     src/vision/image_processor.cpp
     src/vision/vision_encoder.cu
 )
@@ -596,6 +600,7 @@ if(IMP_BUILD_TESTS)
         tests/test_qwen3vl_vision_map.cpp
         tests/test_qwen3vl_vision_config.cpp
         tests/test_qwen3vl_vision_load.cpp
+        tests/test_qwen3vl_vision_grid.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
         # Generative FSM battery for the schema-less json_object grammar. Lives
@@ -803,6 +808,7 @@ if(IMP_BUILD_TESTS)
         tests/test_prefix_cache_e2e.cpp
         tests/test_determinism_e2e.cpp
         tests/test_vision_golden.cu
+        tests/test_qwen3vl_encoder.cu
     )
 
     set(IMP_TEST_BINARIES

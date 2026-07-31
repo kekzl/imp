@@ -29,6 +29,7 @@ void gemm_grouped_nvfp4_smallM_reset_static_cuda_state();   // compute/gemm_grou
 void attention_cublas_reset_static_cuda_state();            // compute/attention_cublas.cu
 void attention_mxfp4_prefill_reset_static_cuda_state();     // compute/attention_mxfp4_prefill.cu
 void vision_encoder_reset_static_cuda_state();              // vision/vision_encoder.cu
+void qwen3vl_encoder_reset_static_cuda_state();             // vision/qwen3vl_encoder.cu
 void fmha_sm120_reset_static_cuda_state();                  // compute/attention_fmha_sm120.cu
 void fmha_mxfp4_reset_static_cuda_state();                  // compute/attention_fmha_mxfp4_sm120.cu
 void moe_batch_reset_static_cuda_state();                   // exec/executor_forward_moe_batch.cu

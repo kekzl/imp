@@ -13,6 +13,7 @@ void reset_static_cuda_state() {
     attention_cublas_reset_static_cuda_state();
     attention_mxfp4_prefill_reset_static_cuda_state();
     vision_encoder_reset_static_cuda_state();
+    qwen3vl_encoder_reset_static_cuda_state();
     // gemm_cutlass_sm120 / gemm_cutlass_mxfp4 have no hook: A7 step 8 deleted
     // the lazily-grown CUTLASS workspaces they existed to re-arm.
     fmha_sm120_reset_static_cuda_state();
