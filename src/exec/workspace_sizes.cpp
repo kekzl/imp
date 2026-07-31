@@ -59,13 +59,13 @@ void for_each_weight(const Model& model, F&& f) {
 
 std::string ExecT2Demand::describe() const {
     constexpr double kMiB = 1024.0 * 1024.0;
-    char buf[320];
+    char buf[384];
     std::snprintf(buf, sizeof(buf),
                   "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f + fp8red %.2f + quant %.2f "
-                  "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f MiB",
+                  "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f MiB",
                   mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, moe_arrays / kMiB,
                   fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB, mla_scratch / kMiB,
-                  dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB);
+                  dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB, imma_scratch / kMiB);
     return buf;
 }
 
@@ -117,6 +117,20 @@ ExecShape exec_shape_of(const Model& model) {
             if (w->data && w->ndim >= 3)
                 s.mmvq_max_k = std::max(s.mmvq_max_k, static_cast<int>(w->shape[2]));
         }
+        // IMMA prefill routes (executor_gemm_dispatch.cu). Dense takes Q8_0
+        // only; the MoE batch path takes the GGUF expert stacks. Scanned here
+        // rather than reusing mmvq_max_k because that one merges dense and
+        // expert Ks into a single number, and this term needs them apart.
+        for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down,
+                              &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared}) {
+            if (w->data && w->ndim >= 2 && w->qtype == QType::Q8_0)
+                s.imma_dense_max_k = std::max(s.imma_dense_max_k, static_cast<int>(w->shape[1]));
+        }
+        for (const auto* w : {&L.expert_up_packed, &L.expert_down_packed, &L.expert_gate_packed}) {
+            if (w->data && w->ndim >= 3 &&
+                (w->qtype == QType::Q8_0 || w->qtype == QType::Q4_K || w->qtype == QType::Q6_K))
+                s.imma_expert_max_k = std::max(s.imma_expert_max_k, static_cast<int>(w->shape[2]));
+        }
         if (L.expert_down_packed.data && L.expert_down_packed.ndim >= 3) {
             s.mmvq_max_expert_down_k =
                 std::max(s.mmvq_max_expert_down_k, static_cast<int>(L.expert_down_packed.shape[2]));
@@ -152,6 +166,34 @@ int exec_max_weight_k(const ExecShape& shape) {
         max_k = std::max(max_k, k);
     }
     return static_cast<int>(max_k);
+}
+
+ImmaScratchShape exec_imma_scratch_shape(const ExecShape& shape, int max_seq_len) {
+    const int t = exec_max_tokens(shape, max_seq_len);
+    if (t <= 0)
+        return {};
+    // Pick the route with the larger row*K product. The activation triple's two
+    // capacity guards (rows*K and rows*(K/32)) scale together, so the winner of
+    // the product covers the other route as well.
+    ImmaScratchShape best;
+    size_t best_bytes = 0;
+    auto consider = [&](int rows, int k) {
+        if (rows <= 0 || k <= 0)
+            return;
+        const size_t bytes = static_cast<size_t>(rows) * static_cast<size_t>(k);
+        if (bytes > best_bytes) {
+            best_bytes = bytes;
+            best = {rows, k};
+        }
+    };
+    consider(t, shape.imma_dense_max_k);
+    if (shape.imma_expert_max_k > 0)
+        consider(t * std::max(1, shape.n_experts_active), shape.imma_expert_max_k);
+    return best;
+}
+
+ImmaScratchShape exec_imma_scratch_shape(const Model& model, int max_seq_len) {
+    return exec_imma_scratch_shape(exec_shape_of(model), max_seq_len);
 }
 
 ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
@@ -294,6 +336,15 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     // Charged for every model because gemm_init() is unconditional; the site
     // still steps down if the arena cannot serve the full amount, and says so.
     out.cublas_workspace = kExecCublasWorkspaceBytes + kExecBenchScratchBytes + 2 * 256;
+
+    // IMMA prefill activation scratch (mmq_q8_imma.cu) plus its split-K
+    // partials. The act triple is M*K int8 + M*(K/32) half + M*(K/32) float =
+    // M*K*1.1875, taken at the (rows, K) exec_imma_scratch_shape() picks.
+    if (const ImmaScratchShape imma = exec_imma_scratch_shape(shape, max_seq_len); imma.valid()) {
+        const size_t rows = static_cast<size_t>(imma.rows);
+        const size_t k = static_cast<size_t>(imma.k);
+        out.imma_scratch = rows * k + rows * (k / 32) * 6 + kExecImmaSplitkBytes + 4 * 256;
+    }
 
     // CUTLASS 3.x grouped staging + workspace, for MoE models only — the same
     // gate engine.cpp puts on the prewarm. The workspace half is a MEASURED

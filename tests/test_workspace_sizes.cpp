@@ -200,7 +200,7 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     const ExecT2Demand d = exec_t2_demand(s, 1024);
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
                              d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
-                             d.dry_penalty + d.cublas_workspace + d.grouped3x);
+                             d.dry_penalty + d.cublas_workspace + d.grouped3x + d.imma_scratch);
     EXPECT_GT(d.total(), 0u);
 }
 
@@ -225,6 +225,40 @@ TEST(ExecT2Demand, Grouped3xIsChargedForMoeModelsOnly) {
     // And it is nowhere near the 512 MiB the pre-arena prewarm reserved: that
     // number was 3500x the measured 152 320 B requirement (AUDIT B73).
     EXPECT_LT(charged, 8ull * 1024 * 1024);
+}
+
+// The IMMA prefill activation scratch (A7 step 8 / AUDIT B13). Two things are
+// worth pinning: it is charged only for models whose weights the IMMA routes
+// can actually take, and it takes the LARGER of the two routes rather than the
+// product of their maxima — dense runs max_tokens rows against a dense K, MoE
+// runs max_tokens * top_k rows against an expert K, and they never co-occur.
+TEST(ExecT2Demand, ImmaScratchIsZeroWithoutImmaWeightsAndTakesTheLargerRoute) {
+    ExecShape none = dense_shape();
+    EXPECT_EQ(exec_t2_demand(none, 1024).imma_scratch, 0u)
+        << "a native-NVFP4 model never enters the IMMA routes";
+
+    ExecShape densei = dense_shape();
+    densei.imma_dense_max_k = 12288;
+    const size_t dense_only = exec_t2_demand(densei, 1024).imma_scratch;
+    EXPECT_GT(dense_only, 0u);
+
+    // A small expert K with a big expansion must not be able to lower the
+    // charge below the dense route it shares the buffer with.
+    ExecShape both = densei;
+    both.is_moe = true;
+    both.imma_expert_max_k = 64;
+    both.n_experts_active = 8;
+    EXPECT_EQ(exec_t2_demand(both, 1024).imma_scratch, dense_only);
+
+    // ...and a wide expert route must raise it. 1024 rows x 8 experts x K=2048
+    // beats 1024 rows x K=12288.
+    ExecShape moe = both;
+    moe.imma_expert_max_k = 2048;
+    EXPECT_GT(exec_t2_demand(moe, 1024).imma_scratch, dense_only);
+
+    // The product of the two maxima is what this term exists NOT to charge.
+    const size_t product = static_cast<size_t>(1024) * 8 * 12288 * 2;
+    EXPECT_LT(exec_t2_demand(moe, 1024).imma_scratch, product);
 }
 
 // The cuBLASLt workspace and the algo-bench scratch (A7 step 8). Unlike every

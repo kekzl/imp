@@ -167,6 +167,22 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **A CUDA graph could replay a kernel whose scratch pointer had been freed
+  underneath it** (AUDIT B13). Six `compute/` statics grew on demand with a
+  `cudaFree` + `cudaMalloc` pair, and the freed address was in some cases still
+  a kernel parameter baked into an instantiated graph: capture chunk 0, run a
+  later chunk eagerly at a larger `seq_kv`, and the grow frees exactly the
+  pointer the recorded graph replays. Latent (it needed `attention.mxfp4 =
+  "always"`, off by default) but real. All six now come from the T2 bump arena,
+  which never frees — a grow hands out a new slice and leaves the previous one
+  valid at the size the graph captured. Two were removed outright with the
+  CUTLASS workspace work; the IMMA activation/split-K scratches and the MXFP4
+  promotion scratches are migrated here, each carrying the arena `generation()`
+  it was taken at so a model swap re-takes instead of reusing a released
+  address. `mmq_q8_imma_preallocate()` takes the IMMA scratch at its planned
+  bound during `Engine::init`, because taking it incrementally would strand
+  every intermediate slice in the arena.
+
 - **The lazy CUTLASS workspace growth path is gone — it could never have run.**
   `gemm_nvfp4_cutlass_sm120` and `gemm_mxfp4_cutlass_sm120` each kept a
   file-scope workspace that they `cudaFree`d and `cudaMalloc`d at GEMM time when

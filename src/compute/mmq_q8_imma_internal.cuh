@@ -11,6 +11,8 @@
 // launches them. Kept BYTE-IDENTICAL to the original inline code.
 // =============================================================================
 
+#include <mutex>
+#include <unordered_map>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -89,6 +91,52 @@ constexpr size_t q6k_smem_bytes(int BM) {
             static_cast<size_t>(kBN) * kQhRow + static_cast<size_t>(kBN) * 8 +
             static_cast<size_t>(BM) * 4);
 }
+
+// ── State owned by mmq_q8_imma_scratch.cu ────────────────────────────
+// Declared here, not file-static, because the dispatch in mmq_q8_imma.cu reads
+// the scratch pointers directly when it builds its kernel arguments. The
+// weight caches are model-resident direct allocations (T1, A7 step 6 will move
+// them); the activation triple and the split-K slice come from the T2 arena
+// and carry the generation they were taken at (A7 step 8 / AUDIT B13).
+struct WeightPlanes {
+    int8_t* qs = nullptr;
+    __half* sc = nullptr;  // interleaved (alpha, beta) [N][K/32][2]
+    int N = 0;             // total rows (ne x per-expert rows for MoE)
+    int K = 0;
+};
+
+struct ActScratch {
+    int8_t* xs8 = nullptr;
+    __half* xscale = nullptr;
+    float* xrowsum = nullptr;
+    size_t cap_mk = 0;
+    size_t cap_msubs = 0;
+    uint64_t gen = 0;
+};
+
+struct SplitKScratch {
+    float* buf = nullptr;
+    size_t cap = 0;
+    uint64_t gen = 0;
+};
+
+struct Q6kRepack {
+    uint8_t* blocks = nullptr;  // 224-B-stride super-blocks
+    size_t n_blocks = 0;
+};
+
+extern std::mutex g_imma_mtx;
+extern std::unordered_map<const void*, WeightPlanes> g_imma_weights;
+extern std::unordered_map<const void*, Q6kRepack> g_imma_q6k;
+extern ActScratch g_imma_act;
+extern SplitKScratch g_imma_splitk;
+
+bool imma_stream_capturing(cudaStream_t stream);
+bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capturing);
+bool imma_ensure_q6k(const void* src, size_t n_blocks, cudaStream_t stream, bool capturing);
+bool imma_ensure_act(int M, int K, bool capturing);
+bool imma_ensure_splitk(size_t floats, bool capturing);
+void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream);
 
 }  // namespace imp
 

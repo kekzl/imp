@@ -23,6 +23,7 @@
 #include "model/chat_template.h"
 #include "compute/ffn_sparsity_probe.h"
 #include "compute/gemm.h"
+#include "compute/mmq_q8_imma.h"
 #include "compute/gemm_capture_fp16_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/attention_cublas.h"
@@ -877,6 +878,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // it and was paying for a path it never takes (AUDIT B12). What it takes is
     // now 2 MiB rather than 513: the workspace half was 512 MiB of guesswork
     // against a measured 152 320 B (AUDIT B73).
+    // IMMA prefill scratch (A7 step 8 / AUDIT B13): take it at the charged
+    // bound now rather than letting the GEMM climb a staircase of takes later —
+    // each intermediate one is stranded, a bump arena having no free.
+    {
+        const auto imma = exec_imma_scratch_shape(*model_, config_.max_seq_len);
+        mmq_q8_imma_preallocate(imma.rows, imma.k);
+    }
     if (model_->profile().is_moe) {
         gemm_grouped_3x_nvfp4_prewarm();
     } else {

@@ -24,6 +24,7 @@
 #include "compute/attention_paged_common.cuh"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 #include "quant/fp8_utils.cuh"
 #include "runtime/process_diag.h"
 #include <cuda_runtime.h>
@@ -1562,27 +1563,73 @@ static size_t s_means_paged_cap = 0;
 static uint8_t* s_d_promote_paged = nullptr;
 static size_t s_promote_paged_cap = 0;
 
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
+// All five come from the engine-persistent (T2) arena (A7 step 8). This is the
+// third and last of AUDIT B13's grow-on-demand families: each pointer can be a
+// kernel parameter inside an instantiated CUDA graph, and the cudaFree the grow
+// used to perform made a later replay read freed memory. A bump arena never
+// frees, so a grow hands out a new slice and the old one stays valid.
+//
+// Deliberately NOT charged in exec_t2_demand: the promotion pre-pass needs
+// `attention.mxfp4 = "always"` plus a non-zero promote budget, both off by
+// default, so a charge would reserve for a path almost nobody takes. They draw
+// on the arena's slack and degrade the way the pre-arena code already did — a
+// null scratch means "skip the promotion pre-pass", which the call sites
+// already test for.
+// The arena generation the five pointers below were taken at. close()/reset()
+// bumps it, so a model swap re-takes instead of leaving a capacity guard armed
+// over a released region.
+static uint64_t s_mxfp4_scratch_gen = 0;
+
+static void mxfp4_scratch_check_generation() {
+    const uint64_t gen = engine_arena().generation();
+    if (gen == s_mxfp4_scratch_gen)
+        return;
+    s_mxfp4_scratch_gen = gen;
+    s_d_kmean = nullptr;
+    s_kmean_cap = 0;
+    s_d_means = nullptr;
+    s_means_cap = 0;
+    s_d_promote = nullptr;
+    s_promote_cap = 0;
+    s_d_means_paged = nullptr;
+    s_means_paged_cap = 0;
+    s_d_promote_paged = nullptr;
+    s_promote_paged_cap = 0;
+}
+
+template <class T>
+static bool ensure_mxfp4_scratch(T*& p, size_t& cap, size_t need, const char* what) {
+    mxfp4_scratch_check_generation();
+    if (p != nullptr && need <= cap)
+        return true;
+    auto slab = engine_arena().take_bytes(need * sizeof(T));
+    if (slab.empty()) {
+        IMP_LOG_WARN(
+            "fmha mxfp4: %s (%.2f MiB) unavailable from the T2 arena (%.1f MiB free) — "
+            "the promotion pre-pass is skipped for this call",
+            what, need * sizeof(T) / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
+        p = nullptr;
+        cap = 0;
+        return false;
+    }
+    p = reinterpret_cast<T*>(slab.data());
+    cap = need;
+    return true;
+}
+
+// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h). Arena-owned now, so
+// this only re-arms the guards; ~Engine closes the region itself.
 void fmha_mxfp4_reset_static_cuda_state() {
-    auto free_f = [](float*& p, size_t& cap) {
-        if (p) {
-            (void)cudaFree(p);
-            p = nullptr;
-        }
-        cap = 0;
-    };
-    auto free_u8 = [](uint8_t*& p, size_t& cap) {
-        if (p) {
-            (void)cudaFree(p);
-            p = nullptr;
-        }
-        cap = 0;
-    };
-    free_f(s_d_kmean, s_kmean_cap);
-    free_f(s_d_means, s_means_cap);
-    free_u8(s_d_promote, s_promote_cap);
-    free_f(s_d_means_paged, s_means_paged_cap);
-    free_u8(s_d_promote_paged, s_promote_paged_cap);
+    s_d_kmean = nullptr;
+    s_kmean_cap = 0;
+    s_d_means = nullptr;
+    s_means_cap = 0;
+    s_d_promote = nullptr;
+    s_promote_cap = 0;
+    s_d_means_paged = nullptr;
+    s_means_paged_cap = 0;
+    s_d_promote_paged = nullptr;
+    s_promote_paged_cap = 0;
 }
 
 bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
@@ -1647,16 +1694,7 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     const float* d_kmean = nullptr;
     if (ksmooth) {
         const size_t need = (size_t)batch_size * n_kv_heads * head_dim;
-        if (need > s_kmean_cap) {
-            if (s_d_kmean != nullptr)
-                cudaFree(s_d_kmean);
-            if (cudaMalloc(&s_d_kmean, need * sizeof(float)) != cudaSuccess) {
-                s_d_kmean = nullptr;
-                s_kmean_cap = 0;
-            } else {
-                s_kmean_cap = need;
-            }
-        }
+        (void)ensure_mxfp4_scratch(s_d_kmean, s_kmean_cap, need, "K-smoothing means");
         if (s_d_kmean != nullptr) {
             mxfp4_k_channel_mean_kernel<<<batch_size * n_kv_heads, 128, 0, stream>>>(
                 reinterpret_cast<const half*>(K.data), s_d_kmean, seq_kv, n_kv_heads, head_dim);
@@ -1680,26 +1718,8 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         const size_t kmean_elems = (size_t)batch_size * n_kv_heads * n_kv_tiles * head_dim;
         const size_t means_need = qmean_elems + kmean_elems;
         const size_t mask_need = (size_t)batch_size * n_heads * num_q_tiles * n_kv_tiles;
-        if (means_need > s_means_cap) {
-            if (s_d_means != nullptr)
-                cudaFree(s_d_means);
-            if (cudaMalloc(&s_d_means, means_need * sizeof(float)) != cudaSuccess) {
-                s_d_means = nullptr;
-                s_means_cap = 0;
-            } else {
-                s_means_cap = means_need;
-            }
-        }
-        if (mask_need > s_promote_cap) {
-            if (s_d_promote != nullptr)
-                cudaFree(s_d_promote);
-            if (cudaMalloc(&s_d_promote, mask_need) != cudaSuccess) {
-                s_d_promote = nullptr;
-                s_promote_cap = 0;
-            } else {
-                s_promote_cap = mask_need;
-            }
-        }
+        (void)ensure_mxfp4_scratch(s_d_means, s_means_cap, means_need, "promotion tile means");
+        (void)ensure_mxfp4_scratch(s_d_promote, s_promote_cap, mask_need, "promotion mask");
         if (s_d_means != nullptr && s_d_promote != nullptr) {
             float* d_qmean = s_d_means;
             float* d_kmean_tiles = s_d_means + qmean_elems;
@@ -1917,26 +1937,9 @@ bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fr
         const size_t kmean_elems = (size_t)n_kv_heads * n_kv_tiles * head_dim;
         const size_t means_need = qmean_elems + kmean_elems;
         const size_t mask_need = (size_t)n_heads * num_q_tiles * n_kv_tiles;
-        if (means_need > s_means_paged_cap) {
-            if (s_d_means_paged != nullptr)
-                cudaFree(s_d_means_paged);
-            if (cudaMalloc(&s_d_means_paged, means_need * sizeof(float)) != cudaSuccess) {
-                s_d_means_paged = nullptr;
-                s_means_paged_cap = 0;
-            } else {
-                s_means_paged_cap = means_need;
-            }
-        }
-        if (mask_need > s_promote_paged_cap) {
-            if (s_d_promote_paged != nullptr)
-                cudaFree(s_d_promote_paged);
-            if (cudaMalloc(&s_d_promote_paged, mask_need) != cudaSuccess) {
-                s_d_promote_paged = nullptr;
-                s_promote_paged_cap = 0;
-            } else {
-                s_promote_paged_cap = mask_need;
-            }
-        }
+        (void)ensure_mxfp4_scratch(s_d_means_paged, s_means_paged_cap, means_need,
+                                   "paged promotion tile means");
+        (void)ensure_mxfp4_scratch(s_d_promote_paged, s_promote_paged_cap, mask_need, "paged promotion mask");
         if (s_d_means_paged != nullptr && s_d_promote_paged != nullptr) {
             float* d_qmean = s_d_means_paged;
             float* d_kmean_tiles = s_d_means_paged + qmean_elems;

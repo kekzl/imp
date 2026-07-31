@@ -16,6 +16,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "compute/mmq_q8_imma_internal.cuh"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 
 #include <cstring>
 #include <mutex>
@@ -311,71 +312,6 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 // the nibble) and qh bytes [g*32 .. +31] (shift quad*2).
 // -----------------------------------------------------------------------------
 
-__global__ void q6k_repack_kernel(const uint8_t* __restrict__ src, uint8_t* __restrict__ dst,
-                                  size_t n_blocks) {
-    const size_t b = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const size_t total = n_blocks * 105;  // 210 B as 105 u16 copies
-    if (b >= total) return;
-    const size_t blk = b / 105;
-    const size_t off = (b % 105) * 2;
-    uint16_t v;
-    memcpy(&v, src + blk * 210 + off, 2);
-    memcpy(dst + blk * kQ6Stride + off, &v, 2);
-}
-
-
-// -----------------------------------------------------------------------------
-// Q8_0 SoA split: raw 34-B blocks {half d; int8 qs[32]} (2-aligned! memcpy
-// only) → qs plane [N][K] s8 + interleaved (α=d, β=0) plane [N][K/32][2].
-// -----------------------------------------------------------------------------
-__global__ void q8_split_kernel(const uint8_t* __restrict__ src, int8_t* __restrict__ qs_plane,
-                                __half* __restrict__ sc_plane, int n_blocks_total) {
-    const int b = blockIdx.x * blockDim.x + threadIdx.x;
-    if (b >= n_blocks_total) return;
-    const uint8_t* blk = src + static_cast<size_t>(b) * 34;
-    __half d;
-    memcpy(&d, blk, 2);
-    sc_plane[static_cast<size_t>(b) * 2] = d;
-    sc_plane[static_cast<size_t>(b) * 2 + 1] = __float2half(0.0f);
-    int8_t* dst = qs_plane + static_cast<size_t>(b) * 32;
-#pragma unroll
-    for (int i = 0; i < 32; ++i) dst[i] = static_cast<int8_t>(blk[2 + i]);
-}
-
-// Activation quantizer: 8 warps per block, grid-stride over (m, sub) pairs
-// (the shared 32-thread-block version ran at ~150 GB/s). Emits s8 + half
-// scale + float rowsum (the rowsum couples to the Q4_K β term; ~free here).
-__global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, int K,
-                                         int8_t* __restrict__ xs8, __half* __restrict__ xscale,
-                                         float* __restrict__ xrowsum) {
-    const int subs = K / 32;
-    const int total = M * subs;
-    const int lane = threadIdx.x & 31;
-    const int warp = (blockIdx.x * (blockDim.x >> 5)) + (threadIdx.x >> 5);
-    const int nwarps = gridDim.x * (blockDim.x >> 5);
-    for (int idx = warp; idx < total; idx += nwarps) {
-        const int m = idx / subs;
-        const int s = idx - m * subs;
-        const size_t off = static_cast<size_t>(m) * K + s * 32;
-        const float v = __half2float(X[off + lane]);
-        float amax = fabsf(v);
-#pragma unroll
-        for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, o));
-        const float inv = (amax > 0.0f) ? (127.0f / amax) : 0.0f;
-        int q = __float2int_rn(v * inv);
-        q = max(-127, min(127, q));
-        xs8[off + lane] = static_cast<int8_t>(q);
-        int sq = q;
-#pragma unroll
-        for (int o = 16; o > 0; o >>= 1) sq += __shfl_xor_sync(0xFFFFFFFFu, sq, o);
-        if (lane == 0) {
-            xscale[static_cast<size_t>(m) * subs + s] =
-                __float2half((amax > 0.0f) ? (amax / 127.0f) : 0.0f);
-            xrowsum[static_cast<size_t>(m) * subs + s] = static_cast<float>(sq);
-        }
-    }
-}
-
 // TUNING LADDER 2026-06-07 (Qwen3-8B Q8_0 pp512, baseline 12 131 tok/s) —
 // three refuted attempts, kernel is at its local optimum in this structure:
 //   __launch_bounds__(256,2):  9 768 (-19%) — 184-reg kernel spills under
@@ -389,141 +325,20 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
 // Remaining structural ideas (BK=128 sync-halving w/ dynamic smem, warp
 // specialization) are larger rewrites; the model-level gap vs llama.cpp is
 // 1.13x — the smallest on the board. Spend elsewhere first.
-struct WeightPlanes {
-    int8_t* qs = nullptr;
-    __half* sc = nullptr;  // interleaved (α, β) [N][K/32][2]
-    int N = 0;             // total rows (ne × per-expert rows for MoE)
-    int K = 0;
-};
-struct ActScratch {
-    int8_t* xs8 = nullptr;
-    __half* xscale = nullptr;
-    float* xrowsum = nullptr;
-    size_t cap_mk = 0;
-    size_t cap_msubs = 0;
-};
-
-struct Q6kRepack {
-    uint8_t* blocks = nullptr;  // 224-B-stride super-blocks
-    size_t n_blocks = 0;
-};
-
-std::mutex g_mtx;
-std::unordered_map<const void*, WeightPlanes> g_weights;
-std::unordered_map<const void*, Q6kRepack> g_q6k;
-ActScratch g_act;
-
-bool stream_capturing(cudaStream_t stream) {
-    cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
-    return cudaStreamIsCapturing(stream, &st) == cudaSuccess &&
-           st == cudaStreamCaptureStatusActive;
-}
-
-bool ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capturing) {
-    // Q8_0 only: the SoA planes cost 1.06x the source — fine for dense Q8
-    // models, but Q4_K (esp. MoE experts) reads the raw blocks in-kernel
-    // instead (the plane variant duplicated all expert weights and hit the
-    // 32-GB VRAM wall on Qwen3-30B: pp512 8x SLOWER under UVM paging).
-    auto it = g_weights.find(src);
-    if (it != g_weights.end() && it->second.N == N && it->second.K == K) return true;
-    if (capturing) return false;  // never allocate inside graph capture
-
-    WeightPlanes w;
-    w.N = N;
-    w.K = K;
-    const size_t subs = static_cast<size_t>(K) / 32;
-    if (cudaMalloc(&w.qs, static_cast<size_t>(N) * K) != cudaSuccess) return false;
-    if (cudaMalloc(&w.sc, static_cast<size_t>(N) * subs * 2 * sizeof(__half)) != cudaSuccess) {
-        cudaFree(w.qs);
-        return false;
-    }
-    const int total = N * static_cast<int>(subs);
-    q8_split_kernel<<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const uint8_t*>(src),
-                                                             w.qs, w.sc, total);
-    IMP_CUDA_CHECK_LAUNCH();
-    g_weights[src] = w;
-    return true;
-}
-
-bool ensure_q6k(const void* src, size_t n_blocks, cudaStream_t stream, bool capturing) {
-    auto it = g_q6k.find(src);
-    if (it != g_q6k.end() && it->second.n_blocks == n_blocks) return true;
-    if (capturing) return false;
-    Q6kRepack r;
-    r.n_blocks = n_blocks;
-    if (cudaMalloc(&r.blocks, n_blocks * kQ6Stride) != cudaSuccess) return false;
-    const size_t total = n_blocks * 105;
-    q6k_repack_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(
-        static_cast<const uint8_t*>(src), r.blocks, n_blocks);
-    IMP_CUDA_CHECK_LAUNCH();
-    g_q6k[src] = r;
-    return true;
-}
-
-bool ensure_act(int M, int K, bool capturing) {
-    const size_t mk = static_cast<size_t>(M) * K;
-    const size_t msubs = static_cast<size_t>(M) * (K / 32);
-    if (g_act.xs8 && g_act.cap_mk >= mk && g_act.cap_msubs >= msubs) return true;
-    if (capturing) return false;
-    if (g_act.xs8) {
-        cudaFree(g_act.xs8);
-        cudaFree(g_act.xscale);
-        cudaFree(g_act.xrowsum);
-        g_act = ActScratch{};
-    }
-    if (cudaMalloc(&g_act.xs8, mk) != cudaSuccess) return false;
-    if (cudaMalloc(&g_act.xscale, msubs * sizeof(__half)) != cudaSuccess) return false;
-    if (cudaMalloc(&g_act.xrowsum, msubs * sizeof(float)) != cudaSuccess) return false;
-    g_act.cap_mk = mk;
-    g_act.cap_msubs = msubs;
-    return true;
-}
-
-// SPLITK partial-slice scratch (grow-only, freed in mmq_q8_imma_release_all).
-struct SplitKScratch {
-    float* buf = nullptr;
-    size_t cap = 0;
-};
-SplitKScratch g_splitk;
-
-bool ensure_splitk(size_t floats, bool capturing) {
-    if (g_splitk.buf && g_splitk.cap >= floats) return true;
-    if (capturing) return false;
-    if (g_splitk.buf) cudaFree(g_splitk.buf);
-    if (cudaMalloc(&g_splitk.buf, floats * sizeof(float)) != cudaSuccess) {
-        g_splitk.buf = nullptr;
-        g_splitk.cap = 0;
-        return false;
-    }
-    g_splitk.cap = floats;
-    return true;
-}
-
-void quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
-    // NO memoization: workspace buffers (moe gathered, layer activations) are
-    // REUSED across layers with the same pointer — a (ptr, M, K) memo served
-    // layer-1 activations to every later layer (PPL 31.6 → 441k, found
-    // 2026-06-07). The kernel costs ~7 µs; quantize unconditionally.
-    const int total_warps = M * (K / 32);
-    const int blocks = min(2048, (total_warps + 7) / 8);
-    quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_act.xs8, g_act.xscale,
-                                                         g_act.xrowsum);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne) {
-    std::lock_guard<std::mutex> lk(g_mtx);
-    const bool capturing = stream_capturing(stream);
-    if (qkind == 0 && !ensure_weight(w_blocks, ne * N, K, stream, capturing)) return false;
-    if (qkind == 2 &&
-        !ensure_q6k(w_blocks, static_cast<size_t>(ne) * N * (K / 256), stream, capturing))
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+    const bool capturing = imma_stream_capturing(stream);
+    if (qkind == 0 && !imma_ensure_weight(w_blocks, ne * N, K, stream, capturing))
+        return false;
+    if (qkind == 2 && !imma_ensure_q6k(w_blocks, static_cast<size_t>(ne) * N * (K / 256), stream, capturing))
         return false;
     // qkind 3 (Q5_1) reads raw blocks — nothing to prepare
     const int act_rows = d_offsets ? expanded : M;
-    if (!ensure_act(act_rows, K, capturing)) return false;
-    quantize_act(x_f16, act_rows, K, stream);
+    if (!imma_ensure_act(act_rows, K, capturing))
+        return false;
+    imma_quantize_act(x_f16, act_rows, K, stream);
 
     const int grid_m_rows = d_offsets ? h_max_rows : M;
     const bool small_m = d_offsets && h_max_rows < 96;
@@ -535,19 +350,19 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
         const uint8_t* w4 = static_cast<const uint8_t*>(w_blocks);
         const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
         if (small_m) {
-            mmq_imma_q4k_raw_kernel<32, false><<<grid, kThreads, 0, stream>>>(
-                g_act.xs8, g_act.xscale, g_act.xrowsum, w4, out_f16, M, N, K, d_offsets,
-                w_stride_blocks);
+            mmq_imma_q4k_raw_kernel<32, false>
+                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w4,
+                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
         } else if (beta == 1.0f) {
-            mmq_imma_q4k_raw_kernel<128, true><<<grid, kThreads, 0, stream>>>(
-                g_act.xs8, g_act.xscale, g_act.xrowsum, w4, out_f16, M, N, K, d_offsets,
-                w_stride_blocks);
+            mmq_imma_q4k_raw_kernel<128, true>
+                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w4,
+                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
         } else {
-            mmq_imma_q4k_raw_kernel<128, false><<<grid, kThreads, 0, stream>>>(
-                g_act.xs8, g_act.xscale, g_act.xrowsum, w4, out_f16, M, N, K, d_offsets,
-                w_stride_blocks);
+            mmq_imma_q4k_raw_kernel<128, false>
+                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w4,
+                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
         }
         return true;
@@ -556,25 +371,25 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
         const uint8_t* w5 = static_cast<const uint8_t*>(w_blocks);
         const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 32);
         if (small_m) {
-            mmq_imma_q51_raw_kernel<32, false><<<grid, kThreads, 0, stream>>>(
-                g_act.xs8, g_act.xscale, g_act.xrowsum, w5, out_f16, M, N, K, d_offsets,
-                w_stride_blocks);
+            mmq_imma_q51_raw_kernel<32, false>
+                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w5,
+                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
         } else if (beta == 1.0f) {
-            mmq_imma_q51_raw_kernel<128, true><<<grid, kThreads, 0, stream>>>(
-                g_act.xs8, g_act.xscale, g_act.xrowsum, w5, out_f16, M, N, K, d_offsets,
-                w_stride_blocks);
+            mmq_imma_q51_raw_kernel<128, true>
+                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w5,
+                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
         } else {
-            mmq_imma_q51_raw_kernel<128, false><<<grid, kThreads, 0, stream>>>(
-                g_act.xs8, g_act.xscale, g_act.xrowsum, w5, out_f16, M, N, K, d_offsets,
-                w_stride_blocks);
+            mmq_imma_q51_raw_kernel<128, false>
+                <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w5,
+                                                out_f16, M, N, K, d_offsets, w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
         }
         return true;
     }
     if (qkind == 2) {
-        const uint8_t* w6 = g_q6k[w_blocks].blocks;
+        const uint8_t* w6 = g_imma_q6k[w_blocks].blocks;
         const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
         static bool smem_set6 = false;
         if (!smem_set6) {
@@ -591,19 +406,19 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
         }
         if (small_m) {
             mmq_imma_q6k_raw_kernel<32, false>
-                <<<grid, kThreads, q6k_smem_bytes(32), stream>>>(g_act.xs8, g_act.xscale, w6,
+                <<<grid, kThreads, q6k_smem_bytes(32), stream>>>(g_imma_act.xs8, g_imma_act.xscale, w6,
                                                                  out_f16, M, N, K, d_offsets,
                                                                  w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
         } else if (beta == 1.0f) {
             mmq_imma_q6k_raw_kernel<128, true>
-                <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_act.xs8, g_act.xscale, w6,
+                <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_imma_act.xs8, g_imma_act.xscale, w6,
                                                                   out_f16, M, N, K, d_offsets,
                                                                   w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
         } else {
             mmq_imma_q6k_raw_kernel<128, false>
-                <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_act.xs8, g_act.xscale, w6,
+                <<<grid, kThreads, q6k_smem_bytes(128), stream>>>(g_imma_act.xs8, g_imma_act.xscale, w6,
                                                                   out_f16, M, N, K, d_offsets,
                                                                   w_stride_blocks);
             IMP_CUDA_CHECK_LAUNCH();
@@ -611,7 +426,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
         return true;
     }
 
-    const auto& w = g_weights[w_blocks];
+    const auto& w = g_imma_weights[w_blocks];
     const size_t w_stride = static_cast<size_t>(N) * K;
     const size_t wsc_stride = static_cast<size_t>(N) * (K / 32) * 2;
 
@@ -629,15 +444,17 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
             const int ks_per_split = (ksteps_total + S - 1) / S;
             const int used = (ksteps_total + ks_per_split - 1) / ks_per_split;
             const size_t slice = static_cast<size_t>(M) * N;
-            if (used > 1 && ensure_splitk(slice * used, capturing)) {
+            if (used > 1 && imma_ensure_splitk(slice * used, capturing)) {
                 dim3 sgrid(n_tiles, 1, used);
-                mmq_imma_kernel<32, false, false, true><<<sgrid, kThreads, 0, stream>>>(
-                    g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K,
-                    nullptr, w_stride, wsc_stride, g_splitk.buf, ks_per_split);
+                mmq_imma_kernel<32, false, false, true>
+                    <<<sgrid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
+                                                     w.qs, w.sc, out_f16, M, N, K, nullptr, w_stride,
+                                                     wsc_stride, g_imma_splitk.buf, ks_per_split);
                 IMP_CUDA_CHECK_LAUNCH();
                 const int total = static_cast<int>(slice);
-                mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
-                    g_splitk.buf, used, total, out_f16, beta == 1.0f ? 1 : 0);
+                mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(g_imma_splitk.buf, used,
+                                                                                    total, out_f16,
+                                                                                    beta == 1.0f ? 1 : 0);
                 IMP_CUDA_CHECK_LAUNCH();
                 return true;
             }
@@ -646,19 +463,19 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k*/, const __h
 
     // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
     if (small_m) {
-        mmq_imma_kernel<32, false, false><<<grid, kThreads, 0, stream>>>(
-            g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
-            w_stride, wsc_stride);
+        mmq_imma_kernel<32, false, false>
+            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
+                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (beta == 1.0f) {
-        mmq_imma_kernel<128, true, false><<<grid, kThreads, 0, stream>>>(
-            g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
-            w_stride, wsc_stride);
+        mmq_imma_kernel<128, true, false>
+            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
+                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        mmq_imma_kernel<128, false, false><<<grid, kThreads, 0, stream>>>(
-            g_act.xs8, g_act.xscale, g_act.xrowsum, w.qs, w.sc, out_f16, M, N, K, d_offsets,
-            w_stride, wsc_stride);
+        mmq_imma_kernel<128, false, false>
+            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
+                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
         IMP_CUDA_CHECK_LAUNCH();
     }
     return true;
@@ -710,25 +527,21 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
 }
 
 void mmq_q8_imma_release_all() {
-    std::lock_guard<std::mutex> lk(g_mtx);
-    if (g_splitk.buf) {
-        cudaFree(g_splitk.buf);
-        g_splitk.buf = nullptr;
-        g_splitk.cap = 0;
-    }
-    for (auto& [_, w] : g_weights) {
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+    // g_imma_splitk and g_imma_act are arena-owned since A7 step 8 — ~Engine closes the
+    // arena; only the guards are re-armed here. The weight/Q6_K repack caches
+    // below are still direct allocations: they are model-resident (T1, A7
+    // step 6), keyed by source weight pointer, and outlive nothing else here.
+    g_imma_splitk = SplitKScratch{};
+    for (auto& [_, w] : g_imma_weights) {
         cudaFree(w.qs);
         cudaFree(w.sc);
     }
-    g_weights.clear();
-    for (auto& [_, r] : g_q6k) cudaFree(r.blocks);
-    g_q6k.clear();
-    if (g_act.xs8) {
-        cudaFree(g_act.xs8);
-        cudaFree(g_act.xscale);
-        cudaFree(g_act.xrowsum);
-        g_act = ActScratch{};
-    }
+    g_imma_weights.clear();
+    for (auto& [_, r] : g_imma_q6k)
+        cudaFree(r.blocks);
+    g_imma_q6k.clear();
+    g_imma_act = ActScratch{};
 }
 
 }  // namespace imp

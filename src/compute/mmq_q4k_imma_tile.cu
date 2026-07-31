@@ -16,6 +16,7 @@
 #include "compute/mmq_q4k_imma_tile.h"
 #include "compute/mmq_q4k_imma_layout.h"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -324,6 +325,10 @@ struct ActScratch {
     float* x_rowsum = nullptr;
     int max_M = 0;
     int max_K = 0;
+    // Arena generation these came from — close()/reset() bumps it, so a model
+    // swap invalidates them instead of leaving the capacity guard armed over a
+    // released region.
+    uint64_t gen = 0;
 };
 
 std::mutex g_imma_mtx;
@@ -353,28 +358,43 @@ bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t st
     return true;
 }
 
+// T2 (A7 step 8), same AUDIT B13 argument as mmq_q8_imma.cu: these three are
+// kernel parameters inside instantiated graphs, and the cudaFree they used to
+// do on a grow made a replayed graph read freed memory. A bump arena never
+// frees, so the old slice stays valid.
+//
+// Deliberately NOT charged in exec_t2_demand. This whole file is behind
+// `gemm.q4k_imma_prefill`, which is OFF by default (config.h) — charging its
+// worst case on every model would reserve tens of MiB for a path nobody takes.
+// It draws on the arena's alignment slack instead and degrades honestly: a
+// short arena returns false and the caller falls back to the dequant path.
 bool ensure_act_scratch(int M, int K) {
-    if (g_act_scratch.X_s8 != nullptr && g_act_scratch.max_M >= M && g_act_scratch.max_K >= K)
+    const uint64_t gen = engine_arena().generation();
+    if (g_act_scratch.X_s8 != nullptr && g_act_scratch.gen == gen && g_act_scratch.max_M >= M &&
+        g_act_scratch.max_K >= K)
         return true;
-    if (g_act_scratch.X_s8) {
-        cudaFree(g_act_scratch.X_s8);
-        cudaFree(g_act_scratch.x_scale);
-        cudaFree(g_act_scratch.x_rowsum);
-    }
-    g_act_scratch = ActScratch{};
+    if (g_act_scratch.X_s8 != nullptr && g_act_scratch.gen != gen)
+        g_act_scratch = ActScratch{};  // the arena was closed under us
     const int new_M = std::max(M, g_act_scratch.max_M);
     const int new_K = std::max(K, g_act_scratch.max_K);
     const int subs = new_K / 32;
-    if (cudaMalloc(&g_act_scratch.X_s8, static_cast<size_t>(new_M) * new_K) != cudaSuccess)
+    g_act_scratch = ActScratch{};
+    auto xs8 = engine_arena().take_bytes(static_cast<size_t>(new_M) * new_K);
+    auto xscale = engine_arena().take_bytes(static_cast<size_t>(new_M) * subs * sizeof(__half));
+    auto xrowsum = engine_arena().take_bytes(static_cast<size_t>(new_M) * subs * sizeof(float));
+    if (xs8.empty() || xscale.empty() || xrowsum.empty()) {
+        IMP_LOG_WARN(
+            "mmq_q4k_imma_tile: activation scratch for M=%d K=%d unavailable from the T2 "
+            "arena (%.1f MiB free) — gemm.q4k_imma_prefill falls back to dequant",
+            new_M, new_K, engine_arena().remaining() / (1024.0 * 1024.0));
         return false;
-    if (cudaMalloc(&g_act_scratch.x_scale,
-                   static_cast<size_t>(new_M) * subs * sizeof(__half)) != cudaSuccess)
-        return false;
-    if (cudaMalloc(&g_act_scratch.x_rowsum,
-                   static_cast<size_t>(new_M) * subs * sizeof(float)) != cudaSuccess)
-        return false;
+    }
+    g_act_scratch.X_s8 = reinterpret_cast<int8_t*>(xs8.data());
+    g_act_scratch.x_scale = reinterpret_cast<__half*>(xscale.data());
+    g_act_scratch.x_rowsum = reinterpret_cast<float*>(xrowsum.data());
     g_act_scratch.max_M = new_M;
     g_act_scratch.max_K = new_K;
+    g_act_scratch.gen = gen;
     return true;
 }
 

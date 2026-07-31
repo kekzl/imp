@@ -66,6 +66,14 @@ struct ExecShape {
     // reusing exec_max_weight_k() here would size the scratch from a K the
     // kernels never see. Replicated rather than approximated, same rule as
     // exec_max_tokens.
+    // IMMA (INT8 tensor-core) prefill activation scratch, mmq_q8_imma.cu. TWO
+    // maxima, kept apart on purpose: the dense route runs at max_tokens rows
+    // against a dense K, the MoE route at max_tokens * top_k rows against an
+    // expert K, and the two never co-occur. Multiplying rows_max by K_max would
+    // charge ~5x what either route can actually reach (measured 2026-07-31:
+    // dense 8B peaks at M=2048 K=12288, the 30B MoE at M=16384 K=2048).
+    int imma_dense_max_k = 0;        // max shape[1] over Q8_0 dense weights
+    int imma_expert_max_k = 0;       // max shape[2] over IMMA-routed expert stacks
     int mmvq_max_k = 0;              // max dense shape[1] / expert-packed shape[2]
     int mmvq_max_expert_down_k = 0;  // max expert_down_packed shape[2], 0 when dense
     int n_experts_active = 0;        // top_k; the MoE down projection quantizes that many
@@ -91,6 +99,12 @@ constexpr size_t kExecBenchScratchBytes = 32ull << 20;
 // compute/gemm_cutlass_grouped_3x.h.
 constexpr size_t kExecGrouped3xStagingBytes = 1ull << 20;
 constexpr size_t kExecGrouped3xWorkspaceBytes = 1ull << 20;
+// mmq_q8_imma.cu's split-K partial slices. A BOUND, not a measurement: the path
+// needs M * N * used floats, runs only when M <= 32, and its tile guard
+// (`n_tiles * S < 256`, checked before the last doubling, kBN = 128) caps
+// N * used at 512 * 128 — so the buffer cannot exceed 32 * 65536 * 4 B.
+// (Measured peak on Qwen3-8B-Q8_0: 6.0 MiB.)
+constexpr size_t kExecImmaSplitkBytes = 8ull << 20;
 
 struct ExecT2Demand {
     // MMVQ (Q8_1-input GEMV) scratch: max_tokens * ceil(maxK/32) * 36 * 2.
@@ -132,10 +146,14 @@ struct ExecT2Demand {
     // gates the prewarm on profile().is_moe, and a model without experts cannot
     // reach the grouped path at all.
     size_t grouped3x = 0;
+    // IMMA prefill activation scratch + its split-K partials (mmq_q8_imma.cu).
+    // Charged whenever the model carries weights the IMMA routes can take;
+    // zero on native-NVFP4 models, which never enter them.
+    size_t imma_scratch = 0;
 
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction + quant_scratch +
-               splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x;
+               splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x + imma_scratch;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather
@@ -175,5 +193,18 @@ ExecShape exec_shape_of(const Model& model);
 int exec_max_tokens(const ExecShape& shape, int max_seq_len);
 int exec_max_weight_k(const ExecShape& shape);
 ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len);
+
+// The (rows, K) pair the `imma_scratch` charge was computed from — the larger
+// of the dense and MoE routes. engine.cpp hands it to
+// mmq_q8_imma_preallocate() so the scratch is taken ONCE at the charged size.
+// Growing it incrementally instead would strand every intermediate slice in the
+// bump arena, and the sum of a growth staircase is not what was charged.
+struct ImmaScratchShape {
+    int rows = 0;
+    int k = 0;
+    bool valid() const { return rows > 0 && k > 0; }
+};
+ImmaScratchShape exec_imma_scratch_shape(const ExecShape& shape, int max_seq_len);
+ImmaScratchShape exec_imma_scratch_shape(const Model& model, int max_seq_len);
 
 }  // namespace imp

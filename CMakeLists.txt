@@ -248,6 +248,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q4k_imma_layout.cu
     src/compute/mmq_q4k_imma_tile.cu
     src/compute/mmq_q8_imma.cu
+    src/compute/mmq_q8_imma_scratch.cu
     src/compute/mmq_q4k_hmma.cu
 )
 
