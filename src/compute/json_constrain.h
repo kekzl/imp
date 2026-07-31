@@ -134,6 +134,12 @@ public:
                                        std::move(close_suffix), thinking_open);
     }
 
+    // Is the per-token allow list resident? True after a successful
+    // initialize() and never false again — the point of issue #1104, where it
+    // was allocated lazily inside apply_mask() and a failure there produced a
+    // silently UNCONSTRAINED reply instead of a refused one.
+    bool has_device_allow_list() const { return d_token_allow_ != nullptr; }
+
 private:
     bool initialized_ = false;
     int vocab_size_ = 0;

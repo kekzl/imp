@@ -179,6 +179,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **The first `response_format` request after a model load could come back
+  unconstrained** (issue #1104). `JsonConstrainer` allocated its per-token allow
+  list lazily inside `apply_mask()` — on the serving path, mid-decode — and on a
+  model that loads with almost no free VRAM left the allocation failed, at which
+  point `apply_mask` returned **without applying any mask and without logging**.
+  The reply then decoded unconstrained: prose where JSON was promised,
+  deterministic and byte-identical across restarts, first request per process
+  only (later ones found memory and worked), and invisible in
+  `imp_constrained_eager_fallback_total` because no fallback was taken. The
+  three sibling constrainers — regex, grammar, schema — have always allocated
+  this at init and failed the load loudly; the JSON one was the outlier. It now
+  does the same, and the unreachable path logs instead of masking nothing.
+  Verified against a `main` build on the reported model
+  (Qwen3.6-35B-A3B-NVFP4): request 1 invalid there, valid here.
+
 - **`top_k` above 128 sampled from the PREVIOUS decode step's candidates**
   (issue #1142). Requests over `SAMPLE_MAX_TOP_K` take a CUB path that ran
   `cub::DeviceTopK::MaxPairs` to pick the candidates and then radix-sorted just
