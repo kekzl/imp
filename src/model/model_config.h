@@ -109,6 +109,15 @@ struct ModelConfig {
     int mxfp4_hadamard_ffn = 0;   // block size for FFN weights (0=disabled)
 
     // NVFP4 pre-quantized model (from Model Optimizer SafeTensors)
+    // The checkpoint is a multimodal wrapper: its config nests the text
+    // hyperparameters under `text_config` and its tensors live under
+    // `model.language_model.*` with a separate vision tower. Set by the config
+    // loader, consumed by weight_map to strip the wrapper prefixes. A flag
+    // rather than an arch list because the TEXT model of such a checkpoint is
+    // an ordinary one (Qwen3-VL's is plain Qwen3) — widening the arch list
+    // would change behaviour for every text-only model of that family.
+    bool multimodal_wrapper = false;
+
     bool is_nvfp4_prequant = false;
     int nvfp4_group_size = 16;
     // llm-compressor NVFP4 format: weight_global_scale is a divisor, not a multiplier.

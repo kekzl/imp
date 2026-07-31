@@ -27,6 +27,10 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Qwen2MoeForCausalLM", ModelArch::QWEN3_MOE},
         {"Qwen3ForCausalLM", ModelArch::QWEN3},
         {"Qwen3MoeForCausalLM", ModelArch::QWEN3_MOE},
+        // Qwen3-VL: the text tower is a plain Qwen3; the wrapper nests it under
+        // `text_config` and `model.language_model.*` (handled generically below).
+        {"Qwen3VLForConditionalGeneration", ModelArch::QWEN3},
+        {"Qwen3VLMoeForConditionalGeneration", ModelArch::QWEN3_MOE},
         {"Qwen3_5ForCausalLM", ModelArch::QWEN35},
         {"Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
         {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
@@ -155,6 +159,12 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     // root for all subsequent reads so we don't have to duplicate every lookup.
     const JValue* text_cfg = jobj_find(root, "text_config");
     const JValue& eff = (text_cfg && text_cfg->type == JType::OBJECT) ? *text_cfg : root;
+    // A nested text_config is exactly the marker that this checkpoint is a
+    // multimodal wrapper, so weight_map knows to strip `model.language_model.`
+    // and drop the vision tower. Derived from the file rather than from an arch
+    // allowlist — the text tower itself is an ordinary model.
+    if (text_cfg && text_cfg->type == JType::OBJECT)
+        cfg.multimodal_wrapper = true;
 
     // Core dimensions
     jobj_get_int(eff, "hidden_size", cfg.d_model);

@@ -339,7 +339,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     // Qwen3.6-VL) share the same `model.language_model.*` / `model.vision_tower.*`
     // (resp. `model.visual.*`) layout plus an `mtp.*` head. Text-only variants
     // ship bare `model.*` keys, so the strip is prefix-guarded and a no-op there.
-    const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe || (arch_ == ModelArch::QWEN35);
+    const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe || (arch_ == ModelArch::QWEN35) ||
+                                        model.config_.multimodal_wrapper;
 
     for (auto& [orig_name, tensor] : tensors) {
         std::string name = orig_name;
