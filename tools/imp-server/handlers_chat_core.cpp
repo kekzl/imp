@@ -897,14 +897,11 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                   {"total_tokens", ctx.snap.n_prompt_tokens + total_output_tokens}};
     // Prefix-cache reporting (OpenAI prompt_tokens_details; the Anthropic
     // converter maps these to cache_read/cache_creation_input_tokens).
-    if (imp_req && (imp_req->cached_tokens > 0 || imp_req->pin_kv_prefix)) {
-        json details = {{"cached_tokens", imp_req->cached_tokens}};
-        int creation = cache_creation_tokens_(imp_req, ctx.snap.n_prompt_tokens);
-        if (creation > 0)
-            details["cache_creation_tokens"] = creation;
+    // Also carries `evicted_tokens` when StreamingLLM dropped context mid-run.
+    if (json details = prompt_tokens_details_(imp_req, ctx.snap.n_prompt_tokens); !details.is_null())
         usage["prompt_tokens_details"] = std::move(details);
+    if (imp_req && (imp_req->cached_tokens > 0 || imp_req->pin_kv_prefix))
         state.metrics.tokens_cached_total += imp_req->cached_tokens;
-    }
     // Predicted Outputs accounting (only when the request carried a
     // prediction): accepted/rejected draft tokens whose draft came from the
     // prediction region of the n-gram corpus.

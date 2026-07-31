@@ -192,13 +192,9 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                       {"completion_tokens", out.n_output_tokens},
                       {"total_tokens", n_prompt_tokens + out.n_output_tokens}};
         // Report prefix cache hit (OpenAI-compatible prompt_tokens_details)
-        if (active_req && (active_req->cached_tokens > 0 || active_req->pin_kv_prefix)) {
-            json details = {{"cached_tokens", active_req->cached_tokens}};
-            int creation = cache_creation_tokens_(active_req, n_prompt_tokens);
-            if (creation > 0)
-                details["cache_creation_tokens"] = creation;
+        // Also carries `evicted_tokens` (StreamingLLM dropped context mid-run).
+        if (json details = prompt_tokens_details_(active_req, n_prompt_tokens); !details.is_null())
             usage["prompt_tokens_details"] = std::move(details);
-        }
         if (out.n_reasoning_tokens > 0) {
             usage["completion_tokens_details"] = {{"reasoning_tokens", out.n_reasoning_tokens}};
         }

@@ -129,6 +129,13 @@ struct Request {
     int harmony_force_idx = -1;
     int prefill_offset = 0;  // Chunked prefill: tokens processed so far
     int cached_tokens = 0;   // Tokens served from prefix cache (skipped in prefill)
+    // Context this request LOST to StreamingLLM eviction mid-generation: the
+    // KV of the middle of its own conversation was freed to keep decoding.
+    // The engine logs a WARN when eviction auto-enables, but a WARN is not
+    // something the caller sees, and the answer it gets back was written
+    // against less context than it sent. Surfaced as
+    // usage.prompt_tokens_details.evicted_tokens (roadmap gap 6).
+    int evicted_kv_tokens = 0;
     // Hybrid (SSM/GDN) prefix caching: snapshot of the recurrent state at
     // exactly `cached_tokens` tokens, set at admission when the prompt prefix
     // matches a stored snapshot. Restored into the request's recurrent slot

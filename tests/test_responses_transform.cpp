@@ -175,3 +175,26 @@ TEST(ResponsesTransform, LengthFinishBecomesIncomplete) {
     EXPECT_EQ(out["status"], "incomplete");
     EXPECT_EQ(out["incomplete_details"]["reason"], "max_output_tokens");
 }
+
+// Context lost to StreamingLLM eviction must survive the transform. A caller
+// on /v1/responses is exactly as entitled to know its context was truncated
+// mid-generation as a caller on chat-completions, and the field is absent
+// unless it happened — so its presence is the signal, not its value.
+TEST(ResponsesTransform, EvictedTokensForwarded) {
+    json oai = make_oai("hi");
+    oai["usage"]["prompt_tokens_details"]["evicted_tokens"] = 384;
+    json out = openai_to_responses_response(oai, "m", "resp_e");
+    EXPECT_EQ(out["usage"]["input_tokens_details"]["evicted_tokens"], 384);
+    EXPECT_EQ(out["usage"]["input_tokens_details"]["cached_tokens"], 4);
+}
+
+TEST(ResponsesTransform, NoEvictionMeansNoKey) {
+    json out = openai_to_responses_response(make_oai("hi"), "m", "resp_n");
+    EXPECT_FALSE(out["usage"]["input_tokens_details"].contains("evicted_tokens"));
+    // A zero must not be forwarded as a key either — "0 evicted" and "never
+    // evicted" would then be indistinguishable from "the field exists".
+    json oai0 = make_oai("hi");
+    oai0["usage"]["prompt_tokens_details"]["evicted_tokens"] = 0;
+    json out0 = openai_to_responses_response(oai0, "m", "resp_z");
+    EXPECT_FALSE(out0["usage"]["input_tokens_details"].contains("evicted_tokens"));
+}
