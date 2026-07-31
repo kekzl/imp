@@ -421,15 +421,38 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         }
 
         int ndim = static_cast<int>(shape_val->arr.size());
-        if (ndim > kMaxDims) {
-            n_dropped_too_many_dims++;
-            warn_drop(tensor_name.c_str(), "shape ndim exceeds engine kMaxDims");
-            continue;
-        }
-
         int64_t shape[kMaxDims] = {};
-        for (int d = 0; d < ndim; d++) {
-            shape[d] = shape_val->arr[d].as_int();
+        if (ndim > kMaxDims) {
+            // Was: drop with a WARN. That loses a weight and only says so in a
+            // log line — Qwen3-VL's patch embed is [1024, 3, 2, 16, 16] and
+            // vanished exactly that way.
+            //
+            // Flatten the trailing dims into dim 1 instead: [d0, d1..dn] ->
+            // [d0, d1*..*dn]. The element order is untouched (row-major), so
+            // this is a pure reinterpretation, and it is the only shape imp's
+            // GEMM path could consume in any case. It is also the RIGHT shape
+            // for the tensors that actually arrive this way: a patch-embed
+            // convolution whose kernel equals its stride is a linear projection
+            // of flattened patches, i.e. exactly a [out_ch, in_ch*kt*kh*kw]
+            // matrix.
+            //
+            // A genuine sliding-window convolution would lose its window
+            // structure here — but it was being DROPPED before, so nothing can
+            // regress, and the INFO line makes the reinterpretation visible
+            // rather than silent.
+            int64_t tail = 1;
+            for (int d = 1; d < ndim; d++)
+                tail *= shape_val->arr[d].as_int();
+            shape[0] = shape_val->arr[0].as_int();
+            shape[1] = tail;
+            IMP_LOG_WARN("SafeTensors %s: tensor '%s' has %d dims; flattening trailing dims to [%lld, %lld]",
+                         path.c_str(), tensor_name.c_str(), ndim, static_cast<long long>(shape[0]),
+                         static_cast<long long>(shape[1]));
+            ndim = 2;
+        } else {
+            for (int d = 0; d < ndim; d++) {
+                shape[d] = shape_val->arr[d].as_int();
+            }
         }
 
         const JValue* offsets_val = jobj_find(tensor_meta, "data_offsets");
