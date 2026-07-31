@@ -1,6 +1,7 @@
 #include "api/imp_internal.h"
 #include "args.h"
 #include "model/chat_template.h"
+#include "model/image_placeholders.h"
 #include "model/hf_hub.h"
 #include "model/tokenizer.h"
 #include <sys/stat.h>
@@ -714,7 +715,25 @@ int main(int argc, char** argv) {
 
             // Tokenize prompt (with image tokens if vision is active)
             std::vector<int32_t> tokens;
-            if (have_template && ctx->engine->has_vision_input()) {
+            const int pending_img_tokens = imp_pending_image_tokens(ctx);
+            if (have_template && pending_img_tokens > 0) {
+                // Dynamic resolution: the template emits ONE <|image_pad|>
+                // because the count is not knowable until the image has been
+                // resized. Render it, then expand to what the encoder produced.
+                std::vector<imp::ChatMessage> msgs = {
+                    {"user", "<|vision_start|><|image_pad|><|vision_end|>" + args.prompt}};
+                tokens = chat_tpl.apply(*tok, msgs);
+                const int32_t pad_id = tok->find_token("<|image_pad|>");
+                std::string exp_err;
+                if (pad_id < 0 ||
+                    !imp::expand_image_placeholders(tokens, pad_id, {pending_img_tokens}, exp_err)) {
+                    fprintf(stderr, "Error placing image tokens: %s\n",
+                            pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err.c_str());
+                    imp_context_free(ctx);
+                    imp_model_free(model);
+                    return 1;
+                }
+            } else if (have_template && ctx->engine->has_vision_input()) {
                 std::vector<imp::ChatMessage> msgs = {{"user", args.prompt}};
                 tokens = chat_tpl.apply_with_image(*tok, msgs, 256);
             } else if (have_template) {

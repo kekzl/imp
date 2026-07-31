@@ -152,6 +152,24 @@ bool Engine::init_features() {
         if (!vision_.init(config_.mmproj_path, mcfg.d_model, model_.get(), vram_alloc_, stream_))
             return false;
     }
+    // Qwen3-VL's tower came in with the checkpoint, so there is no mmproj path
+    // to key off — its presence IS the signal. A tower that fails to come up is
+    // not fatal: the text half of the model works, and refusing to load at all
+    // would be a worse answer than "images are unavailable".
+    if (model_->vision_tower) {
+        const int unit = model_->vision_tower->config.merge_size * model_->vision_tower->config.merge_size;
+        int budget = runtime_config_.runtime.vision_max_patches;
+        if (budget <= 0)
+            budget = 4096;  // a 1024x1024 image at patch 16
+        budget -= budget % unit;
+        if (!qwen_vision_.init(*model_->vision_tower, vram_alloc_, budget)) {
+            IMP_LOG_WARN("Qwen3-VL vision tower failed to initialise — continuing text-only");
+        } else if (model_->tokenizer()) {
+            qwen_image_pad_id_ = model_->tokenizer()->find_token("<|image_pad|>");
+            if (qwen_image_pad_id_ < 0)
+                IMP_LOG_WARN("Qwen3-VL: no <|image_pad|> in the tokenizer — images unavailable");
+        }
+    }
 
     // Pinned sample buffer for CUDA graphs
     if (!h_sample_pinned_) {

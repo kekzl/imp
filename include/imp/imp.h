@@ -177,6 +177,12 @@ ImpError imp_set_image(ImpContext ctx, const char* image_path);
 // Set image from raw memory (e.g. decoded base64). Pass NULL/0 to clear.
 ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len);
 
+// Number of image tokens the pending image expands to, 0 if none. Dynamic-
+// resolution encoders (Qwen3-VL) only know this after the image is set, and the
+// prompt has to reserve exactly this many placeholders — so call it between
+// imp_set_image and tokenizing.
+int imp_pending_image_tokens(ImpContext ctx);
+
 // --- Suspend to RAM (weight snapshot) ---
 //
 // Flow (see imp-server /admin/suspend and /admin/resume):

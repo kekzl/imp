@@ -816,11 +816,26 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         return;  // caller already set req->status = CANCELLED
     }
 
+    // First chunk of a request is where a pending image becomes this request's:
+    // it needs the prompt's final token layout, which only exists now.
+    if (offset == 0)
+        (void)attach_qwen_image_(*req);
+
     // Build InferenceState
     InferenceState state;
     state.token_ids = d_token_ids;
     state.positions = d_positions;
     state.n_tokens = chunk_len;
+    bind_mrope_prefill_(state, *req, offset, chunk_len, pf_stream);
+    if (req->n_vision_tokens > 0 && req->vision_token_id >= 0 && qwen_image_.d_embeddings) {
+        state.vision_embeddings = qwen_image_.d_embeddings;
+        state.vision_token_id = req->vision_token_id;
+        state.n_vision_tokens = req->n_vision_tokens;
+        state.n_deepstack = std::min<int>(static_cast<int>(qwen_image_.d_deepstack.size()),
+                                          InferenceState::kMaxDeepStack);
+        for (int d = 0; d < state.n_deepstack; ++d)
+            state.deepstack_embeddings[d] = qwen_image_.d_deepstack[d];
+    }
     state.kv_cache = kv_cache_raw_;
     state.block_tables = d_block_tables;
     state.block_tables_swa = d_block_tables_swa;
@@ -1468,6 +1483,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     state.max_context_len = max_ctx;
     state.is_prefill = false;
     state.kv_manager = kv_manager_.get();
+    bind_mrope_decode_(state, valid_decode, dec_stream);
     if (kv_manager_ && kv_manager_->residual_enabled()) {
         // Allocate / refresh per-seq residual metadata for this decode step.
         // Slot allocation is idempotent (returns existing slot on re-call).

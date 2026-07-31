@@ -303,6 +303,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_workspace_warmup.cpp
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
+    src/runtime/engine_qwen3vl.cpp
     src/runtime/engine_spec_ngram.cpp
     src/runtime/engine_spec_capture.cpp
     src/runtime/engine_spec_mtp.cpp

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/rope.h"  // MRopeParams
 #include "core/tensor.h"
 #include "memory/kv_cache.h"     // KVCache
 #include "memory/ssm_state.h"    // SSMState
@@ -167,6 +168,18 @@ struct InferenceState {
     static constexpr int kMaxDeepStack = 4;
     const half* deepstack_embeddings[kMaxDeepStack] = {};
     int n_deepstack = 0;
+
+    // M-RoPE: per-token (t, h, w) positions, [3, n_tokens] on device.
+    //
+    // Present on EVERY step of a model that has M-RoPE, including text-only
+    // prompts — there all three rows carry the same value and the result is
+    // bit-identical to the single-axis path. Always-on rather than
+    // only-when-an-image-is-present is deliberate: the rope dispatch branches
+    // on this pointer, and a branch that flips between CUDA-graph capture and
+    // replay would bake the wrong rotation into every replay.
+    //
+    // Null for every model without M-RoPE, which is the unchanged path.
+    MRopeParams mrope;
 
     // Early exit: run only the first exit_layer layers (-1 = all layers).
     // Used by self-speculative decoding to generate cheap draft tokens.

@@ -8,6 +8,7 @@
 #include "runtime/green_ctx.h"
 #include "runtime/cuda_graph.h"
 #include "vision/vision_pipeline.h"
+#include "vision/qwen3vl_pipeline.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/config.h"
 #include "runtime/suffix_draft.h"
@@ -193,11 +194,15 @@ public:
     [[nodiscard]] bool begin_perplexity_capture(const int32_t* tokens, int n);
     [[nodiscard]] bool end_perplexity_capture(double* out_ppl);
 
+    // Image tokens the pending Qwen3-VL image expands to, 0 when none. The
+    // caller needs this BEFORE tokenizing, because the chat template emits one
+    // placeholder and the prompt has to hold this many.
+    int pending_image_tokens() const;
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     [[nodiscard]] bool set_image(const std::string& path);
     [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
     void clear_image();
-    bool has_vision() const noexcept { return vision_.is_available(); }
+    bool has_vision() const noexcept { return vision_.is_available() || qwen_vision_.is_ready(); }
     bool has_vision_input() const noexcept { return vision_.has_input(); }
     // Per-request vision (server batched path). preprocess_image runs CPU-only
     // (safe off the worker, e.g. an HTTP handler thread). encode_image_for runs
@@ -573,6 +578,43 @@ private:
 
     // ── Extracted subsystems ─────────────────────────────────────────
     VisionPipeline vision_;
+    // Qwen3-VL's tower rides in the model checkpoint, not in a separate mmproj
+    // GGUF, and its token count is per-image — so it gets its own pipeline
+    // rather than a mode inside `vision_`.
+    Qwen3VLPipeline qwen_vision_;
+    // [3, n] device scratch for M-RoPE positions, refilled per step.
+    //
+    // Two buffers, and the reason is not tidiness: a captured decode graph
+    // bakes in the POINTER. Growing one shared buffer for a long prefill chunk
+    // would reallocate it and leave every replayed decode graph reading freed
+    // memory. The decode buffer is therefore sized once, to the batch ceiling,
+    // and never moves; only the prefill one grows.
+    int32_t* d_mrope_prefill_ = nullptr;
+    int mrope_prefill_cap_ = 0;
+    int32_t* d_mrope_decode_ = nullptr;
+    int mrope_decode_cap_ = 0;
+    void free_mrope_buffers_();
+    std::vector<int32_t> h_mrope_scratch_;
+    // Uploads `h_mrope_scratch_` ([3, n]) and points `state.mrope` at it, with
+    // the section split from the model config. No-op for a model without
+    // M-RoPE, which is how every text-only model keeps the unchanged path.
+    void bind_mrope_(InferenceState& state, int n_tokens, int32_t*& buf, int& cap, bool fixed,
+                     cudaStream_t stream);
+    // The prompt's own (t, h, w) rows for one prefill chunk.
+    void bind_mrope_prefill_(InferenceState& state, const Request& req, int offset, int chunk_len,
+                             cudaStream_t stream);
+    // One token per request: its position plus that request's continuation
+    // delta, replicated across all three axes (generated text is not an image).
+    void bind_mrope_decode_(InferenceState& state, const std::vector<std::shared_ptr<Request>>& reqs,
+                            cudaStream_t stream);
+    // Attaches the pending Qwen3-VL image to a request on its first prefill
+    // chunk: embeddings, DeepStack taps, and the (t, h, w) layout derived from
+    // where the image placeholders sit in its prompt.
+    bool attach_qwen_image_(Request& req);
+
+    Qwen3VLImage qwen_image_{};
+    bool qwen_image_pending_ = false;
+    int32_t qwen_image_pad_id_ = -1;
     // Constraint FSM state lives per-request (Request::constraints) — a
     // single engine-global manager let any concurrent prefill/finish clobber
     // another request's FSM and dropped enforcement at decode batch>1. The
