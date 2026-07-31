@@ -12,7 +12,13 @@
 # pulls <algorithm>/<numeric> in transitively through other headers, so it
 # catches the missing-include class of bugs at build time (see #903) that the
 # older GCC 13 toolchain silently accepted.
-FROM nvidia/cuda:13.3.0-devel-ubuntu26.04 AS builder
+# Split into `toolchain` (compiler + pinned deps, no source) and `builder`
+# (toolchain + this checkout). The split is what makes `make dev` possible:
+# that target mounts the working tree into the toolchain image and runs an
+# INCREMENTAL ninja build against a persistent build dir, so a one-file edit
+# costs seconds instead of the full-image rebuild's minutes. The final image is
+# byte-for-byte what it was — `builder` still starts from exactly these layers.
+FROM nvidia/cuda:13.3.0-devel-ubuntu26.04 AS toolchain
 
 ARG CMAKE_BUILD_TYPE=Release
 
@@ -44,10 +50,17 @@ RUN git clone --depth=1 --branch ${IMP_DEP_GOOGLETEST_TAG} https://github.com/go
  && git clone --depth=1 --branch ${IMP_DEP_HTTPLIB_TAG}    https://github.com/yhirose/cpp-httplib.git /deps/httplib  \
  && git clone --depth=1 --branch ${IMP_DEP_NLOHMANN_JSON_TAG} https://github.com/nlohmann/json.git   /deps/json
 
+FROM toolchain AS builder
+
 WORKDIR /src
 COPY . .
 
-# Override -march=native with portable -march=x86-64-v3 for Docker portability
+# Historical no-op kept as a guard: cmake/CompilerFlags.cmake pins
+# -march=x86-64-v3 directly now. If a `-march=native` ever comes back, this
+# rewrites it so the shipped image stays portable — and, just as importantly,
+# so `make dev` (which does NOT run this) keeps producing identical codegen to
+# the image. Two build paths that disagree on -march would silently confound
+# every A/B measured on one and compared against the other.
 RUN sed -i 's/-march=native/-march=x86-64-v3/g' cmake/CompilerFlags.cmake
 
 ARG IMP_BUILD_TESTS=OFF

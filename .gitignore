@@ -113,3 +113,6 @@ tools/roofline/plots/
 tools/roofline/__pycache__/
 .superpowers/
 tools/analysis/ppl_corpus_45k.txt
+
+# make dev: persistent incremental build dir (root-owned, container-written)
+build-dev/

@@ -18,8 +18,10 @@ description: Use when building imp, running its test suite, checking CI status, 
 
 | Task | Command | Time |
 |---|---|---|
-| Build Docker image (tests on) | `make build` | varies |
-| CPU/host unit tests | `make test-unit` | <5 s |
+| **Incremental build (the inner loop)** | `make dev` | **2–14 s** |
+| **Incremental build + CI unit lane** | `make dev-test` | **~3 s** |
+| Build Docker image (tests on) | `make build` | ~3.5 min regardless of diff size |
+| CPU/host unit tests | `make test-unit` | <5 s (NOT the CI lane — see below) |
 | Full GPU suite | `make test-gpu` | ~4–5 min (`test-attention` alone ~241 s) |
 | E2E model tests (real models) | `make test-e2e` | needs Qwen3-4B + Qwen3.5-4B + Gemma-4 GGUFs |
 | Vision goldens | `make test-vision` | `IMP_VISION_GOLDEN_DUMP=1` to regenerate |
@@ -39,6 +41,16 @@ docker run --rm --gpus all -v $HOME/models:/models \
 ```
 
 Test binaries in the image: `imp-tests` (full GPU), `imp-tests-unit` (CPU), plus split binaries `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e test-gdn`. Gotcha: `test_ssm.cpp` tests live in **`test-moe-gdn`**, not a binary of their own.
+
+**Iterate with `make dev`, gate with `make build`.** `make build` recompiles the
+whole tree in a fresh image every time — same ~3.5 min for a one-line edit as for a
+rewrite. `make dev` mounts the tree into the Dockerfile's `toolchain` stage and runs
+ninja against a persistent `build-dev/`: measured 2.4 s no-op, 4.9 s after a test file,
+6.8 s after a kernel `.cu`, 13.9 s after a server TU. Codegen is identical to the image
+(both `-march=x86-64-v3`), so dev binaries are valid to test against, and `make dev-test`
+runs the real CI lane (`ctest -L unit`). **But build the IMAGE for anything you measure
+or push** — benchmarks, the perf gate and `verify-fast` must never read `build-dev/`,
+where a stale object would hide. `make dev-clean` removes it (root-owned; never `sudo`).
 
 **`make test-unit` is NOT the CI lane.** It runs `imp-tests-unit` (~37 tests); CI runs `ctest -L unit` → **`test-core`** (550+) + test-text + an e2e subset. A new CPU test belongs in `test-core`, and the honest no-GPU check is `docker run --rm imp:test test-core` (no `--gpus`). Green in `imp-tests-unit` says nothing about CI.
 
