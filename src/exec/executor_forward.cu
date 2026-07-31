@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "vision/deepstack_inject.h"
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
@@ -531,6 +532,21 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // Also dump the FP32 shadow so we can diff FP32-truth vs FP16-view vs llama.cpp.
         if (fp32_accum_buf_) {
             dump_tensor_npy("C_fp32_shadow", view_tokens(fp32_hidden_, n), stream, i, decode_step);
+        }
+
+        // DeepStack: add the vision taps into the hidden state after each of
+        // the first `n_deepstack` layers, at image-token positions only. The
+        // taps came from vision blocks 5/11/17 but land here at layers 0/1/2 —
+        // a different index space, and the reason this is keyed on `i` rather
+        // than on any vision-side number.
+        // `is_prefill` is part of the condition, not an optimisation: image
+        // tokens only ever exist in the prompt, and a decode graph captured
+        // with this branch taken would bake the add into every replay.
+        if (state.is_prefill && i < state.n_deepstack && state.deepstack_embeddings[i] &&
+            state.n_vision_tokens > 0 && state.vision_token_id >= 0 && h.qtype == QType::F16) {
+            launch_add_vision_embeddings(static_cast<half*>(h.data), state.token_ids,
+                                         state.deepstack_embeddings[i], state.vision_token_id, n, cfg.d_model,
+                                         state.n_vision_tokens, stream);
         }
 
         if (i == max_layer - 1) {
