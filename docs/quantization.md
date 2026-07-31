@@ -164,13 +164,20 @@ The *uncalibrated* in-tree quantizer comes out 1.05% ahead. That is not a claim
 that imp-quantize is the better quantizer — it is one model on one corpus — but
 it does retire the blanket "a published export will beat this".
 
-**A likely reason, stated as a hypothesis.** The Modelopt export also ships 280
-`input_scale` and 40 `k_scale`/`v_scale` tensors: its weights were calibrated
-*jointly with* activation and KV-cache quantization. imp runs the weight half of
-that recipe. A weight rounding tuned for W4A4-plus-quantized-KV is not
-necessarily the best weight rounding for W4A16, and a calibration set of general
-web text is not this corpus of technical English. Confirming that would need an
-A/B with the activation scales actually applied.
+**The mechanism, one half confirmed and one half inferred.** The Modelopt export
+ships 280 `input_scale` and 40 `k_scale`/`v_scale` tensors alongside the weights
+— it was produced for a recipe that quantizes activations and the KV cache too.
+imp **does not apply them**: `input_scale` is loaded for diagnostics and read by
+no GEMM kernel (`weight_upload.cu`, and it is only uploaded at all under audit).
+So imp runs W4A16 against weights rounded for W4A4-with-quantized-KV. That is
+confirmed. What stays inferred is that this is *why* the export loses here —
+the alternative explanation, that Modelopt's calibration corpus (general text)
+simply sits further from this one (technical English) than round-to-nearest's
+absence of any calibration does, would need a second corpus to separate.
+
+Note the direction: applying `input_scale` would not fix it. Those scales exist
+to quantize activations *down*; imp already keeps them at higher precision. The
+export is simply not rounded for the runtime it is being run on.
 
 **What could not be measured:** the BF16 baseline for this model, and therefore
 `--calib` on it. 27.5 GiB of weights plus the allocator's 5% headroom does not
