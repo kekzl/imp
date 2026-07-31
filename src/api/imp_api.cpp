@@ -1024,9 +1024,7 @@ ImpError imp_set_image(ImpContext ctx, const char* image_path) {
     }
 
     if (!ctx->engine->has_vision()) {
-        IMP_LOG_ERROR(
-            "imp_set_image: loaded model has no vision tower (Qwen3-VL ships one in the "
-            "checkpoint; Gemma-3/4 need mmproj_path)");
+        IMP_LOG_ERROR("imp_set_image: model has no vision tower (Gemma-3/4 need mmproj_path)");
         return IMP_ERROR_UNSUPPORTED;
     }
 
