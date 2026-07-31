@@ -393,6 +393,9 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
     wcache_->fp8_bytes += total_bytes;
+    // Attributed by VRAMAllocator under the "fp8_ssm_sidecar" tag; record the
+    // amount so the WEIGHT_CACHE_FP8 note can leave it out.
+    wcache_->fp8_sidecar_bytes += total_bytes;
     wcache_->fp8_ssm_sidecar_data = d_bulk;
     wcache_->fp8_ssm_sidecar_data_size = total_bytes;
     wcache_->fp8_ssm_sidecar_row_scales = d_row_scales;

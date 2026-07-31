@@ -190,6 +190,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **`--mem-report` counted the FP8 SSM sidecar twice.** It is the one FP8 weight
+  cache allocated through `VRAMAllocator` rather than raw `cudaMallocAsync`, so
+  once the allocator started naming its own charges the explicit
+  `WEIGHT_CACHE_FP8` note counted it a second time — 963.8 MiB on
+  Qwen3.6-35B-A3B-NVFP4, which read a flattered 89 % accounted instead of an
+  honest 85.0 %. Diagnostics only.
+
 - **The remembered library reserve never survived the way imp is actually run,
   and the log promised that it would.** imp measures what CUDA/cuBLAS/CUTLASS
   claim on the first forward and records it so the *next* start plans with the

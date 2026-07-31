@@ -52,6 +52,12 @@ struct WeightCaches {
     // --- FP8 E4M3 weight cache ---
     std::unordered_map<const void*, FP8CacheEntry> fp8;
     size_t fp8_bytes = 0;
+    // The part of fp8_bytes that the FP8 SSM sidecar contributes. It is the one
+    // FP8 cache allocated through VRAMAllocator rather than raw
+    // cudaMallocAsync, so since the allocator started naming its own charges
+    // the WEIGHT_CACHE_FP8 note has to exclude it or the report counts it twice
+    // (measured: 963.8 MiB double-counted on Qwen3.6-35B-A3B-NVFP4).
+    size_t fp8_sidecar_bytes = 0;
     bool use_fp8 = false;
 
     // Bulk-allocated buffers for FP16→FP8 migration
