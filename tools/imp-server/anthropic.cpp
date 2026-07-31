@@ -548,15 +548,22 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         // via OpenAI's prompt_tokens_details.cached_tokens — pass it through.
         int cached = 0;
         int creation = 0;
+        int evicted = 0;
         if (u.contains("prompt_tokens_details") && u["prompt_tokens_details"].is_object()) {
             cached = u["prompt_tokens_details"].value("cached_tokens", 0);
             creation = u["prompt_tokens_details"].value("cache_creation_tokens", 0);
+            evicted = u["prompt_tokens_details"].value("evicted_tokens", 0);
         }
         if (cached > prompt_tokens)
             cached = prompt_tokens;
         usage_out["input_tokens"] = prompt_tokens - cached;
         usage_out["cache_read_input_tokens"] = cached;
         usage_out["cache_creation_input_tokens"] = creation;
+        // Anthropic's usage shape has no slot for "we dropped context", so this
+        // is an imp-namespaced extension rather than a guess at their schema.
+        // Only present when eviction actually fired.
+        if (evicted > 0)
+            usage_out["imp_evicted_tokens"] = evicted;
     }
 
     // Use the OpenAI id if present; otherwise synthesize one.

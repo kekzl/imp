@@ -5,6 +5,28 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **`evicted_tokens`: the caller is now told when StreamingLLM dropped its
+  context**, closing the second half of roadmap gap 6. When the KV pool runs out
+  mid-generation the engine frees the middle of the sequence and keeps
+  decoding — correct behaviour, but the only trace was a server-side WARN, and
+  a WARN is not something an API client sees. The answer it got back was
+  written against less context than it sent, and it had no way to know.
+
+  The reply now carries the count: `usage.prompt_tokens_details.evicted_tokens`
+  on chat-completions, `usage.input_tokens_details.evicted_tokens` on
+  `/v1/responses`, and `usage.imp_evicted_tokens` on `/v1/messages` — namespaced
+  there because Anthropic's usage shape has no field for this and guessing at
+  their schema is worse than an obvious extension. **The key is absent unless
+  eviction actually fired**, so its presence is the signal rather than its
+  value.
+
+  Verified by forcing the path rather than by inspection: FP16 KV,
+  `kv_cache.max_blocks=320` (a 5120-token pool), and a prompt that starts past
+  the 4132-token eviction threshold — the engine logs the auto-enable and all
+  three dialects return the field. Converter coverage in
+  `test_responses_transform` / `test_anthropic_transform`, including that a
+  zero is not forwarded as a key.
+
 - **AWQ-class activation calibration for `imp-quantize`** (`--calib`), closing
   the open half of roadmap gap 1. Until now the in-tree quantizer had never
   looked at an activation: scales were plain round-to-nearest over the weights,

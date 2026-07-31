@@ -285,10 +285,14 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     if (incomplete)
         response["incomplete_details"] = {{"reason", "max_output_tokens"}};
     int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
+    json in_details = {{"cached_tokens", cached}};
+    // Context lost to StreamingLLM eviction — see prompt_tokens_details_().
+    if (active_req && active_req->evicted_kv_tokens > 0)
+        in_details["evicted_tokens"] = active_req->evicted_kv_tokens;
     response["usage"] = {{"input_tokens", n_prompt_tokens},
                          {"output_tokens", lres.n_output_tokens},
                          {"total_tokens", n_prompt_tokens + lres.n_output_tokens},
-                         {"input_tokens_details", {{"cached_tokens", cached}}},
+                         {"input_tokens_details", std::move(in_details)},
                          {"output_tokens_details", {{"reasoning_tokens", lres.n_reasoning_tokens}}}};
     out.emit(incomplete ? "response.incomplete" : "response.completed",
              json{{"response", std::move(response)}});

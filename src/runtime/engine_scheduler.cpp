@@ -1425,7 +1425,12 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                 int threshold = (config_.streaming_kv_threshold > 0) ? config_.streaming_kv_threshold
                                                                      : (n_sinks + win + 2 * kv_bs);
                 if (req->context_len() > threshold) {
-                    kv_manager_->evict_middle_blocks(req->id, n_sinks, win);
+                    // Idempotent: returns 0 once this sequence is fully
+                    // streamed, so accumulating gives the total context this
+                    // request lost — which is what the caller is told.
+                    const int freed = kv_manager_->evict_middle_blocks(req->id, n_sinks, win);
+                    if (freed > 0)
+                        req->evicted_kv_tokens += freed * kv_bs;
                 }
             }
         }

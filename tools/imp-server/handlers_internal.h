@@ -157,6 +157,33 @@ inline int cache_creation_tokens_(const std::shared_ptr<imp::Request>& req, int 
     return creation > 0 ? creation : 0;
 }
 
+// usage.prompt_tokens_details — prefix-cache accounting, plus `evicted_tokens`:
+// context this request LOST to StreamingLLM eviction while it was generating.
+// That last one is the point of the field existing at all. When the KV pool
+// runs out mid-generation the engine frees the middle of the sequence and keeps
+// decoding; it logs a WARN, but a server-side WARN is not something the caller
+// sees, and the answer it gets back was written against less context than it
+// sent. `evicted_tokens` is how the caller finds out (roadmap gap 6).
+//
+// Returns a null json when there is nothing to report, so the field appears
+// only when it says something.
+inline nlohmann::json prompt_tokens_details_(const std::shared_ptr<imp::Request>& req, int n_prompt_tokens) {
+    if (!req)
+        return nlohmann::json();
+    nlohmann::json details = nlohmann::json::object();
+    if (req->cached_tokens > 0 || req->pin_kv_prefix) {
+        details["cached_tokens"] = req->cached_tokens;
+        const int creation = cache_creation_tokens_(req, n_prompt_tokens);
+        if (creation > 0)
+            details["cache_creation_tokens"] = creation;
+    }
+    if (req->evicted_kv_tokens > 0)
+        details["evicted_tokens"] = req->evicted_kv_tokens;
+    if (details.empty())
+        return nlohmann::json();
+    return details;
+}
+
 // Set true on the calling thread when a shim handler (handle_messages,
 // handle_responses, handle_count_tokens) is delegating to
 // handle_chat_completions — suppresses inner request-log entries so the

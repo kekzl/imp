@@ -256,9 +256,17 @@ json openai_to_responses_response(const json& oai, const std::string& req_model,
                       {"output_tokens", u.value("completion_tokens", 0)},
                       {"total_tokens", u.value("total_tokens", 0)}};
         int cached = 0;
-        if (u.contains("prompt_tokens_details"))
+        int evicted = 0;
+        if (u.contains("prompt_tokens_details")) {
             cached = u["prompt_tokens_details"].value("cached_tokens", 0);
+            evicted = u["prompt_tokens_details"].value("evicted_tokens", 0);
+        }
         usage["input_tokens_details"] = {{"cached_tokens", cached}};
+        // imp extension, forwarded rather than dropped: context this request
+        // lost to StreamingLLM eviction. Present only when it happened, so a
+        // client that never hits the KV ceiling never sees the key.
+        if (evicted > 0)
+            usage["input_tokens_details"]["evicted_tokens"] = evicted;
         int reasoning_toks = 0;
         if (u.contains("completion_tokens_details"))
             reasoning_toks = u["completion_tokens_details"].value("reasoning_tokens", 0);

@@ -556,6 +556,28 @@ TEST(AnthropicResponse, UsageCachedClampedToPrompt) {
     EXPECT_EQ(u["cache_read_input_tokens"], 40);  // clamped to prompt_tokens
 }
 
+// Anthropic's usage shape has no field meaning "we dropped part of your
+// context", so imp namespaces its own rather than guessing at their schema.
+// A client that never hits the KV ceiling never sees the key.
+TEST(AnthropicResponse, EvictedTokensSurfacedUnderImpNamespace) {
+    json details = json{{"cached_tokens", 0}, {"evicted_tokens", 512}};
+    json usage = json{{"prompt_tokens", 100}, {"completion_tokens", 20}, {"prompt_tokens_details", details}};
+    json oai = oai_response(json{{"content", "x"}});
+    oai["usage"] = usage;
+    json u = openai_to_anthropic_response(oai, "m")["usage"];
+    EXPECT_EQ(u["imp_evicted_tokens"], 512);
+    // The standard fields keep their meaning.
+    EXPECT_EQ(u["input_tokens"], 100);
+    EXPECT_EQ(u["output_tokens"], 20);
+}
+
+TEST(AnthropicResponse, NoEvictionMeansNoImpKey) {
+    json usage = json{{"prompt_tokens", 100}, {"completion_tokens", 20}};
+    json oai = oai_response(json{{"content", "x"}});
+    oai["usage"] = usage;
+    EXPECT_FALSE(openai_to_anthropic_response(oai, "m")["usage"].contains("imp_evicted_tokens"));
+}
+
 TEST(AnthropicResponse, ChatcmplIdRewrittenToMsg) {
     json out = openai_to_anthropic_response(oai_response(json{{"content", "x"}}), "m");
     // "chatcmpl-abc" -> "msg_-abc"
