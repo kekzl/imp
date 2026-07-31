@@ -375,7 +375,33 @@ void Engine::warmup() {
         req->status = RequestStatus::CANCELLED;
     }
     MemAccount::instance().checkpoint("05b_post_warmup_forward");
-    measured_library_reserve_ = report_library_reserve(warm_free_before, config_.library_reserve_mb);
+    const size_t forward_window = report_library_reserve(warm_free_before, config_.library_reserve_mb);
+
+    // Which library claims WHEN depends on the model's execution path, so the
+    // forward window only ever sees part of the charge: Q8_0 first touches
+    // cuBLAS in the forward and measures ~7.5 GiB, while the NVFP4 cache build
+    // runs CUTLASS two phases earlier and measures ~0 (AUDIT B79). What the
+    // device holds that imp's own allocations cannot account for IS the rest —
+    // B78 established the allocator and the async mempool are both fully named,
+    // and the invariance A1.5 defines the charge by confirms it.
+    //
+    // This reads the per-pool ledger, which is why note() is no longer gated on
+    // --mem-report: with an empty ledger the residual is the whole device, and
+    // charging from it collapsed the 35B's KV pool 4096 -> 512 tokens (B80).
+    //
+    // Take the larger. The window can only see a subset, so a window reading
+    // HIGHER means the residual lost something to a pool still growing during
+    // warmup — keep the bigger number rather than under-charge the plan.
+    const size_t whole_init = MemAccount::instance().unattributed_bytes();
+    measured_library_reserve_ = (forward_window == SIZE_MAX) ? SIZE_MAX
+                                                             : std::max(forward_window, whole_init);
+    if (forward_window != SIZE_MAX) {
+        IMP_LOG_INFO(
+            "library reserve: forward window %.0f MiB, whole-init %.0f MiB — charging %.0f MiB "
+            "(AUDIT B79/B80)",
+            forward_window / (1024.0 * 1024.0), whole_init / (1024.0 * 1024.0),
+            measured_library_reserve_ / (1024.0 * 1024.0));
+    }
     // Remember it, so the NEXT start on this model charges the measured value
     // instead of the constant (AUDIT B49). A write failure is a warning, never a
     // load failure — refusing to serve a model over a cache file would be absurd.
