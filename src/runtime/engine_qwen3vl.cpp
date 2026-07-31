@@ -17,6 +17,7 @@
 #include "core/logging.h"
 #include "exec/inference_state.h"
 #include "runtime/engine_internal.h"
+#include "model/image_placeholders.h"
 #include "model/mrope_positions.h"
 #include "runtime/request.h"
 
@@ -186,13 +187,18 @@ bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
         if (!qwen_vision_.preprocess(data, len, *patches))
             return false;
         qwen_pending_patches_ = std::move(patches);
+        pending_image_hash_ = image_content_hash(data, len);
         return true;
     }
+    // The mmproj path stores its image inside VisionPipeline, but the hash has
+    // to reach the request either way — see the note at the prefill guard.
+    pending_image_hash_ = image_content_hash(data, len);
     return vision_.set_image_from_memory(data, len, stream_);
 }
 
 void Engine::clear_image() {
     qwen_pending_patches_.reset();
+    pending_image_hash_ = 0;
     vision_.clear_image();
 }
 
@@ -313,7 +319,9 @@ bool Engine::attach_qwen_image_(Request& req) {
     if (!has_pad)
         return false;  // this prompt has no image; the pending one may be a later request's
     req.qwen_patches = std::move(qwen_pending_patches_);
+    req.vision_content_hash = pending_image_hash_;
     qwen_pending_patches_.reset();
+    pending_image_hash_ = 0;
     return true;
 }
 

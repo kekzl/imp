@@ -41,4 +41,13 @@ bool expand_image_placeholders(std::vector<int32_t>& tokens, int32_t pad_id, con
     return true;
 }
 
+size_t image_content_hash(const uint8_t* data, size_t len) {
+    size_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= data[i];
+        h *= 0x100000001b3ULL;
+    }
+    return h ? h : 1;  // 0 is the cache's "no image" sentinel
+}
+
 }  // namespace imp

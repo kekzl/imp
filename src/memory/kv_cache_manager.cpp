@@ -442,13 +442,14 @@ bool KVCacheManager::can_allocate(int num_blocks) const {
 // ─── Content-addressed prefix caching ────────────────────────────────
 
 int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens,
-                                                 std::vector<size_t>& chain_hashes) const {
+                                                 std::vector<size_t>& chain_hashes,
+                                                 size_t content_salt) const {
     chain_hashes.clear();
     const int num_tokens = static_cast<int>(tokens.size());
     const int full_blocks = num_tokens / cache_->block_size();
     int cached = 0;
     bool chain_intact = true;
-    size_t parent_hash = 0;
+    size_t parent_hash = content_salt;
     for (int b = 0; b < full_blocks; ++b) {
         size_t h = compute_block_hash(
             tokens.subspan(static_cast<size_t>(b) * cache_->block_size(), cache_->block_size()),
@@ -464,7 +465,7 @@ int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens
 }
 
 int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens,
-                                                int max_reuse_blocks) {
+                                                int max_reuse_blocks, size_t content_salt) {
     const int num_tokens = static_cast<int>(tokens.size());
     if (num_tokens <= 0)
         return 0;
@@ -486,7 +487,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
 
     auto& hashes = seq_block_hashes_[seq_id];
     int reused_blocks = 0;
-    size_t parent_hash = 0;
+    size_t parent_hash = content_salt;
     // Reuse must form a contiguous prefix: once a block misses (or the
     // caller's cap is reached), later hash hits must NOT be shared — the
     // caller skips prefill for reused*block_size tokens, so a hole would
@@ -591,7 +592,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
     return reused_blocks;
 }
 
-void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> tokens) {
+void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> tokens, size_t content_salt) {
     const int num_tokens = static_cast<int>(tokens.size());
     if (!prefix_caching_enabled_)
         return;
@@ -604,7 +605,7 @@ void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> 
     int total_blocks = static_cast<int>(blocks.size());
 
     auto& hashes = seq_block_hashes_[seq_id];
-    size_t parent_hash = 0;
+    size_t parent_hash = content_salt;
 
     for (int b = 0; b < total_blocks; ++b) {
         int block_start = b * cache_->block_size();

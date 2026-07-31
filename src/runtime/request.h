@@ -254,6 +254,13 @@ struct Request {
     // `deepstack_emb` on admission and clears it. Per-request rather than
     // engine-global because the server admits image requests concurrently.
     std::shared_ptr<QwenPatches> qwen_patches;
+    // Hash of this request's image bytes, seeded into the prefix cache's block
+    // chain. Without it the cache matches on token ids alone, and every image
+    // token has the same id — so a second request would inherit the first
+    // one's picture. Non-zero whenever the request carries an image; a request
+    // that has one but reports 0 is refused the cache entirely, so a missed
+    // plumbing site degrades to "no reuse" instead of "wrong picture".
+    size_t vision_content_hash = 0;
     // `deepstack_emb` holds one buffer per vision tap, each the same
     // shape as `vision_emb`; they are ADDED at the LM's first layers.
     std::vector<std::shared_ptr<Buffer>> deepstack_emb;
