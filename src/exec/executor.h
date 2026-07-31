@@ -14,6 +14,7 @@
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/tensor.h"
 #include "compute/sampling.h"  // TopkRowArgs (row-batched sampler staging)
+#include "exec/activation_calibrator.h"
 #include "exec/expert_cache.h"
 #include "exec/inference_state.h"
 #include "exec/moe_ffn_context.h"
@@ -30,6 +31,7 @@
 #include <cuda_fp16.h>
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <vector>
 #include <unordered_map>
 #include <utility>
@@ -410,6 +412,17 @@ public:
     // owning Engine must wire a RuntimeConfig themselves (see
     // tests/test_helpers.h for a default loader).
     void set_runtime_config(const RuntimeConfig& cfg) noexcept { runtime_config_ = &cfg; }
+
+    // Activation calibration ([calibration] enabled): collect per-input-channel
+    // activation magnitudes off gemm_via_handle_ for an offline quantizer.
+    // Engine turns this on before the first forward and turns CUDA graphs off
+    // with it — the collector allocates lazily, which a capture forbids.
+    void enable_calibration() {
+        if (!calib_)
+            calib_ = std::make_unique<ActivationCalibrator>(vram_alloc_);
+    }
+    const ActivationCalibrator* calibration() const { return calib_.get(); }
+
     const RuntimeConfig& runtime_config() const noexcept {
         // CRITICAL: set_runtime_config() must be called before any forward.
         // Hard-failing here would crash unit tests; cold default is acceptable.
@@ -456,6 +469,9 @@ private:
     int32_t* verify_pen_counts_ = nullptr;
     int verify_pen_counts_cap_ = 0;
 
+    // Activation calibration collector — null unless [calibration] enabled.
+    std::unique_ptr<ActivationCalibrator> calib_;
+
     // LoRA (issue #522)
     const LoraAdapter* lora_ = nullptr;
     void* lora_scratch_ = nullptr;  // fp32[max_rank] + fp16[max_tokens*max_rank]
@@ -463,6 +479,7 @@ private:
     void lora_delta_(const LoraWeights& w, const void* x, void* y, int n, cudaStream_t stream);
     int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max(max_batch_size, 8))
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn
+    int cur_layer_ = -1;           // set by forward_logits; keys calibration entries
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
     bool cur_spec_verify_ = false; // set by forward_logits: spec-verify chunk (#998)

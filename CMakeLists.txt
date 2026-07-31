@@ -175,6 +175,8 @@ set(IMP_QUANT_SOURCES
     src/quant/dequant_gpu.cu
     src/quant/fp8_utils.cu
     src/quant/quant_gemm.cu
+    src/quant/awq_transform.cpp
+    src/quant/calibration_stats.cpp
     src/quant/fp8_quant.cu
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
@@ -328,6 +330,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase3_cutlass.cu
     src/exec/pre_dequant_phase3_moe.cu
     src/exec/executor_gemm_dispatch.cu
+    src/exec/activation_calibrator.cu
     src/exec/gemm_kernel_registry.cu
     src/exec/gemm_kernel_fp8.cu
     src/exec/gemm_kernel_nvfp4_gemv.cu
@@ -448,7 +451,11 @@ if(IMP_BUILD_TOOLS)
     target_include_directories(imp-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     # imp-quantize — offline BF16/FP16 -> NVFP4 checkpoint conversion
-    add_executable(imp-quantize tools/imp-quantize/main.cpp)
+    add_executable(imp-quantize
+        tools/imp-quantize/main.cpp
+        tools/imp-quantize/awq_plan.cpp
+        tools/imp-quantize/awq.cu
+    )
     target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
     target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -582,6 +589,7 @@ if(IMP_BUILD_TESTS)
         tests/test_hf_config_loader.cpp
         tests/test_safetensors_loader.cpp
         tests/test_safetensors_writer.cpp
+        tests/test_awq_calibration.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
         # Generative FSM battery for the schema-less json_object grammar. Lives

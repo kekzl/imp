@@ -151,6 +151,12 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
 // Requires n_tokens <= the model's max prefill length. *out_ppl < 0 on failure.
 ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, double* out_ppl);
 
+// Write the activation-calibration statistics collected so far to `path`
+// (see `[calibration] enabled`). Input to imp-quantize's AWQ scale search.
+// Returns IMP_ERROR_INVALID_ARG when calibration was never enabled or no
+// forward pass has run, so an empty file can never pass for a valid one.
+ImpError imp_calibration_write(ImpContext ctx, const char* path);
+
 // Reset context state (clear KV cache etc.)
 ImpError imp_context_reset(ImpContext ctx);
 

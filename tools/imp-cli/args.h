@@ -14,6 +14,9 @@ struct CliArgs {
     std::string revision;  // --revision: HuggingFace model revision (branch/tag/commit)
     std::string prompt;
     std::string perplexity_file;  // --perplexity <file>: teacher-forced PPL over the file's text
+    // --calibrate <out>: collect per-channel activation magnitudes during the
+    // --perplexity pass and write them for imp-quantize --calib.
+    std::string calibrate_out;
     int max_tokens = 256;
     int max_seq_len = 0;    // --max-seq-len: KV context ceiling (0 = auto from VRAM)
     bool mem_report = false; // --mem-report: full VRAM attribution table at init

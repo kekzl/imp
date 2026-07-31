@@ -5,6 +5,59 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **AWQ-class activation calibration for `imp-quantize`** (`--calib`), closing
+  the open half of roadmap gap 1. Until now the in-tree quantizer had never
+  looked at an activation: scales were plain round-to-nearest over the weights,
+  so nothing protected the input channels that carry the most signal, and the
+  result cost +25% perplexity against BF16. Two pieces ship:
+  `imp-cli --perplexity <corpus> --calibrate <file>` runs one forward pass that
+  accumulates the mean `|activation|` per input channel and writes it; and
+  `imp-quantize --calib <file>` searches a per-group scale against it.
+  **Measured** over `ppl_corpus_45k.txt` (13 537 tokens), calibrated on general
+  prose that is deliberately *not* the scoring corpus, on both dense Qwen3
+  sizes staged locally — Qwen3-0.6B: BF16 24.06, round-to-nearest 30.10
+  (+25.1%), **AWQ 28.48 (+18.3%)**; Qwen3-1.7B (sharded, so the multi-shard
+  write path too): BF16 17.22, round-to-nearest 20.43 (+18.6%), **AWQ 19.21
+  (+11.5%)**. 5-6% of the perplexity removed, a quarter to two fifths of the
+  gap to BF16, `degen_suite.py` 45/45 on every checkpoint. Reproduce with
+  `tools/analysis/awq_ppl_ab.sh`.
+
+  The collector hooks `gemm_via_handle_`, the one dispatch every registered
+  weight GEMM passes through, so no call site has to be taught about
+  calibration and the statistic is the activation the weight actually consumes
+  whatever tier it lands on. It is off unless `[calibration] enabled` is set,
+  and enabling it turns CUDA graphs off (the collector allocates a per-weight
+  accumulator lazily, which a capture forbids).
+
+  The compensating `1/s` is folded into the producer, so the output stays a
+  plain NVFP4 checkpoint that needs no runtime support: q/k/v and gate/up fold
+  into their preceding RMSNorm weight, `o_proj` into `v_proj`'s output rows
+  (GQA-tied), `down_proj` into `up_proj`'s. Because the norm fold assumes a
+  plain multiplicative RMSNorm, `--calib` **refuses** architectures whose norm
+  applies `(1 + g)` (Gemma-class) instead of silently emitting a different
+  model. `alpha = 0` is always in the search grid, so a group where scaling
+  does not pay keeps its untransformed weights.
+
+  **`--calibrate` forces `runtime.deterministic_gemm`, and that is the finding,
+  not a detail.** Without it, two runs of the identical command produced
+  calibration files differing on **94% of the recorded floats** (up to 0.5%
+  each) — imp's forward has run-to-run variance on this config — and three
+  checkpoints built from three such files scored 28.84, 28.94 and 28.48: a 1.6%
+  perplexity spread from nothing but which run wrote the file. Those
+  checkpoints also each flipped exactly one of the 45 degeneration probes — a
+  different one each time — which the deterministic build does not (45/45 on
+  three consecutive runs, same as BF16 and round-to-nearest). The variance is
+  also large enough to swamp per-group attribution, so the norm-folds-only
+  (29.40) and no-`o_proj` (29.25) numbers measured along the way are reported
+  in `docs/quantization.md` as *not established* rather than as an ordering.
+
+  **One hypothesis refuted.** Folding `o_proj` into `v_proj` writes into the
+  tensor the KV cache stores, so on the default FP8_E4M3 KV it looked like it
+  must cost more than it wins. Measured against one fixed calibration: the
+  FP8-vs-FP16-KV penalty is **0.300 PPL on the calibrated checkpoint and 0.595
+  on the round-to-nearest one** — the scaled `v_proj` is, if anything,
+  friendlier to FP8 KV.
+
 - **A third external agent leg: the OpenAI Agents SDK over `/v1/responses`**,
   closing roadmap gap 10. `make test-agents-external` now drives imp with a real
   third-party client in each of the three dialects — aider over

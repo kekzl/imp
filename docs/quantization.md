@@ -30,22 +30,29 @@ Calibrated per-tensor scales using AWQ or SmoothQuant. Two upstream tools produc
 |---|---|
 | [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (after PR #88 lit up the CUTLASS NVFP4×NVFP4 prefill cache). |
 | [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads, but several models degenerate past ~30 tokens. See [roadmap](roadmap.md). Prefer Modelopt where available. |
-| `imp-quantize` (in-tree) | **Experimental.** Uncalibrated round-to-nearest — works, but costs measurably more quality than the two above. See below. |
+| `imp-quantize` (in-tree) | **Experimental.** AWQ-calibrated with `--calib`, plain round-to-nearest without. Below a published export either way. See below. |
 
 ### imp-quantize — converting a checkpoint yourself (EXPERIMENTAL)
 
-> **Experimental.** The pipeline is verified end to end, but the quantization is
-> uncalibrated and costs measurably more quality than a published export (table
-> below). Use it to get a model onto the NVFP4 path for evaluation or
-> performance work — not to produce a checkpoint you ship or rely on.
+> **Experimental.** The pipeline is verified end to end and `--calib` recovers a
+> measurable part of the quantization loss, but the result still sits below a
+> published Modelopt export. Use it to get a model onto the NVFP4 path for
+> evaluation or performance work — not to produce a checkpoint you ship.
 
 `imp-quantize` turns a dense BF16/FP16 SafeTensors checkpoint into an NVFP4 one
 without leaving the repo, for models nobody has published an export for:
 
 ```bash
-imp-quantize --model ./Qwen3-1.7B --out ./Qwen3-1.7B-nvfp4   # --dry-run to preview
+# 1. one calibration pass over a corpus — writes per-channel activation stats
+imp-cli --model ./Qwen3-1.7B --perplexity ./calib_corpus.txt --calibrate ./calib.bin
+
+# 2. quantize using them
+imp-quantize --model ./Qwen3-1.7B --out ./Qwen3-1.7B-nvfp4 --calib ./calib.bin
 imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 ```
+
+Drop `--calib` (and step 1) for plain round-to-nearest; `--dry-run` previews
+what would be quantized without touching the GPU.
 
 It writes the layout the loader already recognises — `<prefix>.weight` (U8,
 packed nibbles), `.weight_scale` (F8_E4M3 micro-scales), `.weight_scale_2`
@@ -53,33 +60,91 @@ packed nibbles), `.weight_scale` (F8_E4M3 micro-scales), `.weight_scale_2`
 config files, and rebuilds the shard index when the source is sharded.
 Embeddings, norms and (unless `--lm-head`) the LM head stay full precision.
 
-**Quality: worse than a calibrated export, measurably.** The scales are plain
-round-to-nearest over the weights; there is no activation calibration, so
-nothing protects the channels that matter most. Measured 2026-07-26 with
-`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 536 tokens),
-`deterministic_gemm`:
+#### What `--calib` does
 
-| Model | BF16 | imp-quantize NVFP4 | cost |
-|---|---:|---:|---:|
-| Qwen3-0.6B | 24.06 | 30.10 | +25% |
-| Qwen3-1.7B | 17.22 | 20.43 | +19% |
+NVFP4's error scales with the magnitude of what it quantizes, so multiplying an
+input channel's weights *up* before quantizing buys that channel precision at
+the others' expense — provided something divides the activation back *down*.
+Which channels deserve it is not visible in the weights; it takes a forward
+pass. That is the whole reason a calibration step exists.
 
-> **Measure this on the 45k corpus, not `ppl_corpus.txt`.** The same pair over
-> the 199-token corpus reads +42% / +57% and appears to get *worse* with model
-> size. Both are artifacts of too few tokens; on the real corpus the loss
-> shrinks with size, which is the expected shape.
+The transform is exact before quantization, `y = x Wᵀ = (x/s)(W·diag(s))ᵀ`, so
+the only open question is which `s` minimises the error *after* quantizing
+`W·diag(s)`. imp answers it by measurement rather than a closed form: for each
+candidate exponent it quantizes with the real kernel and keeps the winner.
+`alpha = 0` (plain round-to-nearest) is always in the grid, so a group where
+scaling does not pay keeps its untransformed weights.
 
-Coherence holds beyond perplexity: `tools/analysis/degen_suite.py` passes
-**41/41** against a server running the quantized Qwen3-0.6B — streaming,
-constrained `json_schema` decoding, forced tool calls and thinking channels
-included. The pipeline is verified end to end on both shard layouts (the
-result loads, is detected as `NVFP4 model (Model Optimizer)`, and generates).
+The compensating `1/s` is folded into the producer, which keeps the output a
+plain NVFP4 checkpoint needing no runtime support — four groups per layer:
+q/k/v and gate/up fold into their preceding RMSNorm weight, `o_proj` into
+`v_proj`'s output rows (GQA-tied), `down_proj` into `up_proj`'s. Because the
+norm fold assumes a plain multiplicative RMSNorm, `--calib` **refuses**
+architectures whose norm applies `(1 + g)` (Gemma-class) rather than silently
+producing a different model.
 
-Still, **prefer a Modelopt export when one exists**. Adding AWQ/SmoothQuant-class
-calibration is the open work; see [roadmap](roadmap.md).
+**Calibrate on a different corpus than you score on.** `tools/analysis/`
+`fetch_calib_corpus.sh` assembles general public-domain prose for exactly this
+reason; scoring happens on `ppl_corpus_45k.txt` (imp's own architecture doc).
+Calibrating and scoring on one text reports a gain that exists only on it.
 
-MoE checkpoints are not supported yet: expert stacks are 3-D and need the
-per-expert path. They are reported and left unquantized rather than mangled.
+**`--calibrate` forces `runtime.deterministic_gemm`,** and that is not a
+formality. Without it, two runs of the identical command differed on **94% of
+the recorded floats** (up to 0.5% each) — imp's forward has run-to-run variance
+on this config — and that carried straight through: three checkpoints built
+from three such calibration files scored PPL 28.84, 28.94 and 28.48, a 1.6%
+spread from nothing but which run happened to produce the file. With
+determinism forced the calibration file is bit-identical run to run, and so is
+the checkpoint.
+
+#### Quality, measured
+
+`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens),
+calibration over 36 058 tokens of general prose. Full chain reproducible with
+`tools/analysis/awq_ppl_ab.sh`:
+
+| Model | BF16 | NVFP4 RTN | NVFP4 `--calib` | AWQ gain | gap to BF16 |
+|---|---:|---:|---:|---:|---|
+| Qwen3-0.6B | 24.06 | 30.10 | **28.48** | −5.4% | +25.1% → **+18.3%** |
+| Qwen3-1.7B (2 shards) | 17.22 | 20.43 | **19.21** | −6.0% | +18.6% → **+11.5%** |
+
+`degen_suite.py` reads 45/45 on every checkpoint in that table (the AWQ ones
+re-run three and two times respectively). `--calib` closes about a quarter of
+the quantization gap on the 0.6B and nearly two fifths on the 1.7B — it does
+not close it: a Modelopt export still wins.
+
+**The battery is worth a note, because it did not always read 45/45.**
+Checkpoints built from the earlier, non-deterministic calibration files each
+flipped exactly one of the 45 probes — and a *different* one each time (a
+stream-vs-non-stream whitespace check, a think-leak check, an adherence probe
+returning empty content). Forcing calibration determinism removed that too.
+Treat it as one more reason the calibration pass has to be reproducible, not as
+a coherence property that happens to hold.
+
+**One hypothesis measured and refuted.** Folding `o_proj`'s scale into `v_proj`
+writes into the tensor the KV cache stores, and imp's default KV dtype here
+resolves to FP8_E4M3 — so widening v's per-channel range looked like it should
+cost more in the cache than the scale wins in the weight. It does not. The
+FP8-vs-FP16-KV penalty is **0.300 PPL on the calibrated checkpoint and 0.595
+on the round-to-nearest one** (28.478/28.178 vs 30.098/29.503). The scaled
+`v_proj` is, if anything, friendlier to FP8 KV than the unscaled one.
+
+**Not established: the per-group contribution.** Norm-folds-only and
+no-`o_proj` variants were measured at 29.40 and 29.25, which would suggest an
+ordering — but each was built from a different (pre-determinism) calibration
+file, and the 1.6% spread above is the same size as the gaps. Attributing the
+gain to individual groups needs a re-run against one fixed calibration file;
+what the table above measures is the shipped configuration against
+round-to-nearest, where the gap is far larger than that spread.
+
+> **Measure this on the 45k corpus, not `ppl_corpus.txt`.** The 199-token corpus
+> reads wildly different numbers and inverts the model-size trend — an artifact
+> of too few tokens, not a property of the quantizer.
+
+Open work, in order: MoE expert stacks (3-D, needs the per-expert path), then a
+head-to-head against a Modelopt export of the same model. MoE checkpoints are
+not supported yet — expert stacks are reported and left unquantized rather than
+mangled.
 
 Workflow with Modelopt:
 
