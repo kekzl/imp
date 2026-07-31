@@ -1,0 +1,113 @@
+#include "vision/qwen3vl_vision_config.h"
+
+#include <cmath>
+
+namespace imp {
+
+namespace {
+
+const JValue* find(const JValue& v, const char* key) {
+    if (v.type != JType::OBJECT)
+        return nullptr;
+    for (const auto& [k, val] : v.obj)
+        if (k == key)
+            return &val;
+    return nullptr;
+}
+
+// Missing and present-but-not-a-number are the same failure here: both mean the
+// geometry is not what this parser assumes.
+bool get_int(const JValue& v, const char* key, int& out) {
+    const JValue* f = find(v, key);
+    if (!f || f->type != JType::NUMBER)
+        return false;
+    out = static_cast<int>(f->as_int());
+    return true;
+}
+
+}  // namespace
+
+bool parse_qwen3vl_vision_config(const JValue& vision_cfg, VisionConfig& out, std::string& err) {
+    // Everything lands in a scratch config first: a partially-filled VisionConfig
+    // is worse than none, because the caller cannot tell which fields are real.
+    VisionConfig c;
+    int depth = 0, hidden = 0, heads = 0, inter = 0, patch = 0, merge = 0, temporal = 0;
+    int out_hidden = 0, num_pos = 0;
+
+    struct Field {
+        const char* key;
+        int* dst;
+    };
+    const Field required[] = {
+        {"depth", &depth},
+        {"hidden_size", &hidden},
+        {"num_heads", &heads},
+        {"intermediate_size", &inter},
+        {"patch_size", &patch},
+        {"spatial_merge_size", &merge},
+        {"temporal_patch_size", &temporal},
+        {"out_hidden_size", &out_hidden},
+        {"num_position_embeddings", &num_pos},
+    };
+    for (const auto& f : required) {
+        if (!get_int(vision_cfg, f.key, *f.dst)) {
+            err = std::string("vision_config: missing or non-numeric '") + f.key + "'";
+            return false;
+        }
+        if (*f.dst <= 0) {
+            err = std::string("vision_config: '") + f.key + "' must be positive";
+            return false;
+        }
+    }
+
+    if (hidden % heads != 0) {
+        err = "vision_config: hidden_size is not divisible by num_heads";
+        return false;
+    }
+
+    // The learned position embedding is a SQUARE grid that gets resampled per
+    // image. A non-square count means this parser has the wrong model.
+    const int grid = static_cast<int>(std::lround(std::sqrt(static_cast<double>(num_pos))));
+    if (grid * grid != num_pos) {
+        err = "vision_config: num_position_embeddings is not a perfect square";
+        return false;
+    }
+
+    c.is_qwen3vl = true;
+    c.num_layers = depth;
+    c.hidden_size = hidden;
+    c.num_heads = heads;
+    c.head_dim = hidden / heads;
+    c.intermediate_size = inter;
+    c.patch_size = patch;
+    c.merge_size = merge;
+    c.temporal_patch_size = temporal;
+    c.out_hidden_size = out_hidden;
+    c.pos_embed_grid = grid;
+    // Dynamic resolution: there is no fixed image_size or patch count. Leaving
+    // the inherited defaults in place would be a lie the encoder could read.
+    c.image_size = 0;
+    c.num_patches = 0;
+    c.num_image_tokens = 0;
+
+    const JValue* ds = find(vision_cfg, "deepstack_visual_indexes");
+    if (ds && ds->type == JType::ARRAY) {
+        for (const auto& e : ds->arr) {
+            if (e.type != JType::NUMBER) {
+                err = "vision_config: deepstack_visual_indexes holds a non-number";
+                return false;
+            }
+            const int idx = static_cast<int>(e.as_int());
+            if (idx < 0 || idx >= depth) {
+                err = "vision_config: deepstack index out of range for depth";
+                return false;
+            }
+            c.deepstack_indexes.push_back(idx);
+        }
+    }
+
+    out = c;
+    return true;
+}
+
+}  // namespace imp

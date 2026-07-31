@@ -30,6 +30,11 @@ struct VisionConfig {
     int merge_size = 1;           // spatial merge factor (2 => 2x2 patches per token)
     int temporal_patch_size = 1;  // still images repeat along this axis
     int out_hidden_size = 0;      // merger output width (the LM's d_model)
+    // Side of the LEARNED position-embedding grid (48 for Qwen3-VL, from
+    // num_position_embeddings = 2304). A real image rarely has this grid, so the
+    // table is resampled per image — this is the SOURCE resolution, not the
+    // image's.
+    int pos_embed_grid = 0;
     // Vision blocks whose hidden state is tapped for DeepStack. NOTE these index
     // VISION blocks; the LM-side injection happens at LM layers 0..n-1, a
     // different index space entirely.
