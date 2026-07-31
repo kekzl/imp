@@ -83,6 +83,23 @@ norm fold assumes a plain multiplicative RMSNorm, `--calib` **refuses**
 architectures whose norm applies `(1 + g)` (Gemma-class) rather than silently
 producing a different model.
 
+**A norm can only be folded when every consumer of it is scaled.** Dividing a
+norm's weight by `s` divides its output by `s` for *every* reader, and each
+reader only stays correct if its own columns were multiplied by the same `s`.
+Two roles are deliberately excluded from quantization (MLA latent projections,
+the MoE router) and so never receive that compensation — and the router reads
+exactly the norm the gate/up group folds into. `--calib` therefore checks the
+consumers of each norm and **refuses the fold** when an unscaled one exists,
+naming it. On DeepSeek-V2-Lite that leaves 2 of 108 groups scaled (layer 0's
+dense MLP, the only layer with no router) and prints a line per refusal.
+
+**`--calib` does not calibrate MoE experts yet.** The planner groups the dense
+FFN by name (`mlp.gate_proj` / `mlp.up_proj` / `mlp.down_proj`); a MoE
+checkpoint's weight lives in `mlp.experts.<e>.*`, which it does not model. On a
+MoE model the attention groups still calibrate and the experts — the bulk of the
+model — stay at round-to-nearest. That is now stated per layer in the output
+rather than folded into a `skipped` count.
+
 **Calibrate on a different corpus than you score on.** `tools/analysis/`
 `fetch_calib_corpus.sh` assembles general public-domain prose for exactly this
 reason; scoring happens on `ppl_corpus_45k.txt` (imp's own architecture doc).
