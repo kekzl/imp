@@ -159,6 +159,15 @@ struct InferenceState {
     int vision_token_id = -1;                 // <image_soft_token> ID
     int n_vision_tokens = 0;                  // 256
 
+    // DeepStack (Qwen3-VL): extra visual features ADDED at the image-token
+    // positions after each of the LM's first `n_deepstack` layers. Indexed by
+    // LM layer, NOT by the vision block the feature was tapped from — those are
+    // blocks 5/11/17 and these are layers 0/1/2. Each entry has the same shape
+    // as `vision_embeddings`.
+    static constexpr int kMaxDeepStack = 4;
+    const half* deepstack_embeddings[kMaxDeepStack] = {};
+    int n_deepstack = 0;
+
     // Early exit: run only the first exit_layer layers (-1 = all layers).
     // Used by self-speculative decoding to generate cheap draft tokens.
     int exit_layer = -1;
