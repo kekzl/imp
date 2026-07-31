@@ -251,7 +251,7 @@ into a captured CUDA graph (prefill and decode are both graphified).
 | `runtime/engine_graph_decode.cpp` | block tables, banned-token list | `max_blocks_per_seq × 4 B`, `n_banned × 4 B` | **per-request, `cudaMallocAsync`** | ✓ | ✗ |
 | `runtime/engine_scheduler.cpp` | prefill metadata (token ids, positions, block tables, ctx lens) | `chunk_len × 4 B` etc., pooled when it fits, else `cudaMallocAsync` | **per-request** | ✓ | ✗ |
 | `runtime/engine_spec_*` | draft/verify staging + `spec_graphs_` | `k_max × …` per bucket | engine-persistent (invalidated) | ✓ | ✗ |
-| `vision/` | tower weights, pixel buffer, embedding buffer | `Σ tower tensors`; `image_size²·3·2 B`; `num_image_tokens × d_model × 2 B` | model-resident | ✗ | via `VRAMAllocator` |
+| `vision/` | tower weights, pixel buffer, embedding buffer | `Σ tower tensors`; `image_size²·3·2 B` (mmproj) or `vision_max_patches × features × 2 B` (Qwen3-VL); `num_image_tokens × d_model × 2 B`, plus one such buffer per DeepStack tap | model-resident | ✗ | via `VRAMAllocator` |
 | `memory/layer_offload.cu` | double-buffered H2D layer staging | `2 × max_layer_bytes` | engine-persistent | ✗ | ✗ |
 | `memory/weight_snapshot`, `weight_cache_file` | suspend/resume + warm-cache staging | host-side only | transient host-staging | ✗ | n/a |
 | — | **library reservation (F4)** | **~3.9 GiB, constant** | engine-persistent | n/a | ✗ |
@@ -876,12 +876,22 @@ pre-allocating both the pixel buffer and the embedding buffer through
 `VRAMAllocator`. Measured cost on the gemma-3-4b pair: **+1610 MiB** at
 `04_features` (A1.4) — for a server that may never receive an image.
 
+Qwen3-VL (2026-07-31) is the same story with a different switch and a different
+sizing rule. Its tower ships *inside* the checkpoint, so its presence is the
+signal and there is no `--mmproj` to withhold; the operator-facing knob is
+`runtime.vision_max_patches` (default 4096 ≈ 1024x1024), which sets the image-token
+budget every encoder workspace is sized from — a hard ceiling, so a larger image is
+scaled down rather than refused. DeepStack adds one embedding buffer per tap
+(`engine_qwen3vl.cpp`) on top of the merged one. The tower is not measured here
+yet; that number belongs in this table when it is.
+
 **Design: keep it resident, but make it a planned, declared T1 cost.** Lazy
 loading is rejected: the tower is model-resident weights, so a first-image
 request would have to allocate ~1.6 GiB *while serving*, which violates I2
 outright and would need admission control for a memory event that has nothing to
-do with request size. Declared-and-resident is the honest trade — and if an
-operator does not want the cost, not passing `--mmproj` is already the switch.
+do with request size. Declared-and-resident is the honest trade — and on the
+mmproj path, not passing `--mmproj` is already the switch. On Qwen3-VL there is no
+such switch, because the tower is part of the model.
 
 `VisionPipeline` keeps one genuine hot-path hole to fix: `vision_pipeline.cpp:97`
 falls back to a raw `cudaMalloc` per image if the pre-allocated pixel buffer was

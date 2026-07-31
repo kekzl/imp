@@ -125,7 +125,7 @@ The other half of the mission. An engine can be fast and still be useless to an 
 - **Long-context agent loops.** Prefix cache default-ON for multi-turn (#763), `cache_control` pinning, KV budget defaults sized for agentic working sets (auto max_seq_len to 64k, NVFP4 KV-fraction fix, #771), `kv_cache.dtype=auto` honouring FP8 hints where quality allows (Qwen3, #704). The target is a coding-agent session that stays coherent across a full task, not a one-shot prompt.
 - **Concurrency for sub-agent fan-out.** Per-request spec/vision/sampling state so heterogeneous concurrent requests batch together without an engine pause (per-request vision #774, per-request spec toggle #770). The per-seq decode consumers are batched (sampler #745, batched-M / tensor-core lm_head #746/#748) — concurrent decode 472→767 tok/s @16. Tens of concurrent agent requests on one 5090 must stay responsive (TTFT, ITL) without starving the single-stream path.
 - **Reliability under sustained load.** Clean request cancel, ITL/cancel/queue metrics (#770), bounded decode bursts, fail-fast on bad input — the server must survive an agent that opens, abandons and retries streams for hours.
-- **Multimodal agents.** Vision (gemma-3/4-VL) routed through the normal batched path so image requests interleave with text instead of pausing the engine (#774).
+- **Multimodal agents.** Vision (gemma-3/4-VL, Qwen3-VL) routed through the normal batched path so image requests interleave with text instead of pausing the engine (#774). Qwen3-VL adds dynamic resolution and DeepStack (#1163-#1180); one image per request for now.
 
 ---
 

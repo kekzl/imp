@@ -57,20 +57,34 @@ GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but elimi
 
 ## Vision
 
-Gemma-3 and Gemma-4 are the multimodal families currently supported. The vision encoder weights ship as a separate `mmproj.gguf` file:
+Three multimodal families are supported, in two shapes. Gemma-3 and Gemma-4 keep
+their vision encoder in a separate `mmproj.gguf`; Qwen3-VL carries its tower in the
+checkpoint, so there is no second file and no second flag.
 
-| Model | Quant | VRAM | Decode `tg256` | Notes |
-|---|---|---:|---:|---|
-| [Gemma-3-12B-it](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF) | Q8_0 | 12 GB | 129 | text + vision (includes mmproj) |
-| [Gemma-3-27B-it](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | Q4_K_M | 16 GB | — | largest Gemma-3 |
-| [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | 14 GB | 273 (tg128) | text + vision via the gemma4v encoder (separate BF16 mmproj) — see [`vision_gemma4v_spec.md`](vision_gemma4v_spec.md) |
+| Model | Quant | Format | Notes |
+|---|---|---|---|
+| [Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct) | BF16 | SafeTensors | Tower ships with the checkpoint — no `--mmproj`. Dynamic resolution (a 1795x2397 photo becomes 972 image tokens), DeepStack taps into the LM's first layers, three-axis M-RoPE |
+| [Gemma-3-12B-it](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF) | Q8_0 | GGUF | text + vision, `tg256` 129 |
+| [Gemma-3-27B-it](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | Q4_K_M | GGUF | largest Gemma-3 |
+| [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | GGUF | text + vision via the gemma4v encoder (separate BF16 mmproj), `tg128` 273 — see [`vision_gemma4v_spec.md`](vision_gemma4v_spec.md) |
 
-Run with both flags:
+`Qwen3VLForConditionalGeneration` and `Qwen3VLMoeForConditionalGeneration` are both
+registered; only the dense 4B is validated end to end here. A VL checkpoint also
+loads text-only — the tower is simply never run if no image is passed.
 
 ```bash
+# Qwen3-VL — one flag, the tower comes with the model
+imp-cli --model models/Qwen3-VL-4B-Instruct/ --image photo.jpg \
+        --prompt "Describe this image"
+
+# Gemma — text model plus its mmproj
 imp-cli --model gemma-3-12b-it-Q8_0.gguf --mmproj mmproj-google_gemma-3-12b-it-f16.gguf \
         --image photo.jpg --prompt "Describe this image"
 ```
+
+Image tokens cost VRAM in the encoder workspace, sized by
+`runtime.vision_max_patches` (default 4096 ≈ 1024x1024). Larger images are scaled
+down to fit that budget rather than refused.
 
 ## Format notes
 
@@ -88,7 +102,8 @@ imp-cli --model models/Qwen3-8B-Q8_0.gguf --prompt "Hello"
 # SafeTensors — directory path
 imp-cli --model models/Qwen3-Coder-30B-A3B-FP4/ --prompt "Hello"
 
-# Vision — text model + mmproj
+# Vision — Qwen3-VL carries its tower; Gemma needs an mmproj
+imp-cli --model models/Qwen3-VL-4B-Instruct/ --image photo.jpg --prompt "Describe"
 imp-cli --model gemma-3-12b-it-Q8_0.gguf --mmproj mmproj-google_gemma-3-12b-it-f16.gguf \
         --image photo.jpg --prompt "Describe"
 ```

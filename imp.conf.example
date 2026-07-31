@@ -95,6 +95,11 @@ no_pdl               = false
 debug_raw            = false
 # Disable SigLIP vision encoder CUDA-graph capture (debug).
 no_vision_graph      = false
+# Image-token budget for the Qwen3-VL encoder: the workspace is sized from it, so
+# it is a hard ceiling — a larger image is scaled down to fit, never refused.
+# 4096 patches ~ 1024x1024. Does not apply to the mmproj (SigLIP/gemma4v) path,
+# which is sized off the checkpoint's fixed image_size.
+vision_max_patches   = 4096
 
 [kv_cache]
 # KV-cache element type. "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for
@@ -507,6 +512,7 @@ generate             = false
 
 [paths]
 # Path to a vision projector .gguf file (Gemma-3, Mistral3 multimodal).
+# Qwen3-VL does not use this — its tower ships inside the checkpoint.
 mmproj               = ""
 
 [speculative]
