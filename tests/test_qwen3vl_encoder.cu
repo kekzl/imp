@@ -378,7 +378,8 @@ void run_case(int grid_h, int grid_w) {
     ASSERT_TRUE(alloc.init(0.10f));
     size_t bytes = 0;
     std::string err;
-    ASSERT_TRUE(qwen3vl_upload_vision_tower(tower.model, &alloc, bytes, err)) << err;
+    std::vector<void*> tower_allocs;
+    ASSERT_TRUE(qwen3vl_upload_vision_tower(tower.model, &alloc, tower_allocs, bytes, err)) << err;
     EXPECT_GT(bytes, 0u);
 
     QwenVisionGrid grid;
@@ -441,7 +442,9 @@ void run_case(int grid_h, int grid_w) {
     alloc.free(d_patches);
     alloc.free(d_out);
     alloc.free(d_deep);
-    tower.model.free_gpu();
+    qwen3vl_release_vision_tower(tower.model);
+    for (void* p : tower_allocs)
+        alloc.free(p);
 }
 
 TEST(Qwen3VLEncoder, MatchesAnIndependentCpuReference) {

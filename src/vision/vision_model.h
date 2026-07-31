@@ -98,11 +98,12 @@ struct VisionModel {
     // Transformer layers
     std::vector<VisionLayerWeights> layers;
 
-    // GPU allocations for cleanup. Released through `allocator` when one is set
-    // (the Qwen3-VL path, so the VRAM ledger stays accurate) and with a plain
-    // cudaFree otherwise (the legacy GGUF mmproj path).
+    // GPU allocations for cleanup (the legacy GGUF mmproj path, which allocates
+    // them itself). The Qwen3-VL path does NOT use this: its device copies are
+    // owned by the pipeline that made them, because a VisionModel outliving the
+    // allocator it borrowed from is a use-after-free waiting for a teardown
+    // order to expose it.
     std::vector<void*> gpu_allocs;
-    VRAMAllocator* allocator = nullptr;
 
     int lm_d_model = 0;  // LLM hidden dimension (from mm_proj output)
 

@@ -48,8 +48,8 @@ bool to_fp16(const Tensor& t, std::vector<half>& out, std::string& err) {
 
 }  // namespace
 
-bool qwen3vl_upload_vision_tower(VisionModel& model, VRAMAllocator* alloc, size_t& bytes_out,
-                                 std::string& err) {
+bool qwen3vl_upload_vision_tower(VisionModel& model, VRAMAllocator* alloc, std::vector<void*>& out_allocs,
+                                 size_t& bytes_out, std::string& err) {
     if (!alloc) {
         err = "no VRAM allocator for the vision tower";
         return false;
@@ -109,13 +109,21 @@ bool qwen3vl_upload_vision_tower(VisionModel& model, VRAMAllocator* alloc, size_
         p.slot->qtype = QType::F16;
         p.slot->on_device = true;
         p.slot->compute_strides();
-        model.gpu_allocs.push_back(p.device);
+        out_allocs.push_back(p.device);
     }
-    model.allocator = alloc;
     bytes_out = total;
     IMP_LOG_INFO("Vision tower: %zu tensors uploaded, %.1f MiB", pending.size(),
                  static_cast<double>(total) / (1024.0 * 1024.0));
     return true;
+}
+
+void qwen3vl_release_vision_tower(VisionModel& model) {
+    qwen3vl_visit_vision_tensors(model, [](Tensor& t, const std::string&) {
+        if (t.on_device) {
+            t.data = nullptr;
+            t.on_device = false;
+        }
+    });
 }
 
 }  // namespace imp
