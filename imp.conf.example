@@ -209,6 +209,14 @@ library_reserve_mb = -1
 # runtime) and invariant to batch and context, so remembering it is enough.
 # Empty = $XDG_CACHE_HOME/imp/library_reserve (or ~/.cache/imp/...); "off"
 # disables it. A miss or an unwritable path warns and charges the constant.
+#
+# IN A CONTAINER, SET THIS. The default lands in the container filesystem, so a
+# `docker run --rm` server re-measures on every start and never benefits: it
+# keeps planning with the constant. Mount a directory and point this at it.
+# Measured on Qwen3-14B-Q6_K, whose first forward actually claims 0 MiB: with
+# the path persisted the second start plans a 0 MiB reserve instead of 3900 and
+# hands the pools 639 MiB more to distribute.
+#   docker run -v $HOME/.cache/imp:/cache ... --set vram.library_reserve_cache=/cache/library_reserve
 library_reserve_cache =
 
 [attention]
