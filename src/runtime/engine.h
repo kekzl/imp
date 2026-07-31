@@ -198,6 +198,11 @@ public:
     // caller needs this BEFORE tokenizing, because the chat template emits one
     // placeholder and the prompt has to hold this many.
     int pending_image_tokens() const;
+    // Server path: CPU-only patchify (safe off the batch worker) and the token
+    // count the prompt must reserve for it.
+    bool preprocess_image_qwen(const uint8_t* data, size_t len, QwenPatches& out) const;
+    int image_tokens_of(const QwenPatches& patches) const;
+    bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready(); }
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     [[nodiscard]] bool set_image(const std::string& path);
     [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
@@ -593,11 +598,6 @@ private:
     int mrope_prefill_cap_ = 0;
     int32_t* d_mrope_decode_ = nullptr;
     int mrope_decode_cap_ = 0;
-    // One int on the device: the running request's M-RoPE position delta. Read
-    // by the rotary kernels at replay time, so a captured decode graph picks up
-    // the current request's value instead of the one live at capture.
-    int* d_mrope_delta_ = nullptr;
-    void publish_mrope_delta_(int delta, cudaStream_t stream);
     // Binds M-RoPE onto a SINGLE-request decode state (graph templates, the
     // speculative chunk). Generated text needs only the scalar delta, so this
     // is the whole binding for every decode path.
@@ -616,13 +616,23 @@ private:
     // delta, replicated across all three axes (generated text is not an image).
     void bind_mrope_decode_(InferenceState& state, const std::vector<std::shared_ptr<Request>>& reqs,
                             cudaStream_t stream);
-    // Attaches the pending Qwen3-VL image to a request on its first prefill
-    // chunk: embeddings, DeepStack taps, and the (t, h, w) layout derived from
-    // where the image placeholders sit in its prompt.
+    // Moves the CLI's single pending image onto the first request that reserves
+    // placeholders for it. The server bypasses this and sets
+    // `Request::qwen_patches` itself, because it admits images concurrently.
     bool attach_qwen_image_(Request& req);
+    // Batch-worker half: patches -> this request's own device buffers.
+    // Takes the stream the CALLER will read the result on. Encoding on the
+    // engine's own stream and reading on the prefill stream is unsynchronised:
+    // the buffer is freshly allocated but may be RECYCLED memory still holding
+    // the previous request's image, so the race does not surface as garbage —
+    // it surfaces as an answer about the last picture.
+    bool encode_qwen_image_for_(Request& req, cudaStream_t stream);
+    // Prompt-side half: where the image sits and what it costs in positions.
+    bool build_qwen_layout_(Request& req, const Qwen3VLImage& shape);
 
-    Qwen3VLImage qwen_image_{};
-    bool qwen_image_pending_ = false;
+    // CLI only: one image, preprocessed on the caller's thread, waiting for the
+    // next request that has placeholders for it.
+    std::shared_ptr<QwenPatches> qwen_pending_patches_;
     int32_t qwen_image_pad_id_ = -1;
     // Constraint FSM state lives per-request (Request::constraints) — a
     // single engine-global manager let any concurrent prefill/finish clobber

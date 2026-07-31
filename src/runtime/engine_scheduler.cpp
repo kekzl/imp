@@ -491,8 +491,16 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // Embedding requests mean-pool EVERY position's hidden state — a
     // prefix-cache hit would skip the reused prefix's forward and silently
     // bias the pooled vector (#1005). Same class as the ppl_capture guard.
-    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 &&
-        !ppl_capture_.active && !req->embedding_request) {
+    // Image requests are the third member of that class, and the sharpest: the
+    // prefix cache is content-addressed on TOKEN IDS, and every image token
+    // carries the SAME id (<|image_pad|> / the soft token). Two requests with
+    // different pictures therefore produce identical prefixes, and the second
+    // one silently answers about the first one's image. Observed: a photo of a
+    // pizza described as "a tabby cat sitting outdoors". Applies to the mmproj
+    // path too, not just Qwen3-VL — the ids are just as uniform there.
+    const bool has_image = req->image || req->qwen_patches || req->vision_emb || req->n_vision_tokens > 0;
+    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
+        !req->embedding_request && !has_image) {
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
         if (prefix_reused < 0) {
             // KV exhausted even after cached-block reclamation. The old fallback
@@ -816,10 +824,22 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         return;  // caller already set req->status = CANCELLED
     }
 
-    // First chunk of a request is where a pending image becomes this request's:
-    // it needs the prompt's final token layout, which only exists now.
+    // First chunk of a request is where its image becomes device-resident: the
+    // layout needs the prompt's final token sequence, which only exists now.
+    // The CLI leaves its image pending on the engine; the server puts it on the
+    // request itself. Both end up in `encode_qwen_image_for_`.
     if (offset == 0)
         (void)attach_qwen_image_(*req);
+    // Not gated on `offset == 0`: `qwen_patches` is cleared by the encode, so
+    // this runs exactly once regardless of how the prompt is chunked.
+    {
+        if (req->qwen_patches && !encode_qwen_image_for_(*req, pf_stream)) {
+            IMP_LOG_ERROR("Qwen3-VL: image encode failed — cancelling request %llu",
+                          static_cast<unsigned long long>(req->id));
+            req->status = RequestStatus::CANCELLED;
+            return;
+        }
+    }
 
     // Build InferenceState
     InferenceState state;
@@ -827,14 +847,14 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.positions = d_positions;
     state.n_tokens = chunk_len;
     bind_mrope_prefill_(state, *req, offset, chunk_len, pf_stream);
-    if (req->n_vision_tokens > 0 && req->vision_token_id >= 0 && qwen_image_.d_embeddings) {
-        state.vision_embeddings = qwen_image_.d_embeddings;
+    if (req->n_vision_tokens > 0 && req->vision_token_id >= 0 && req->vision_emb) {
+        state.vision_embeddings = req->vision_emb->as<half>();
         state.vision_token_id = req->vision_token_id;
         state.n_vision_tokens = req->n_vision_tokens;
-        state.n_deepstack = std::min<int>(static_cast<int>(qwen_image_.d_deepstack.size()),
+        state.n_deepstack = std::min<int>(static_cast<int>(req->deepstack_emb.size()),
                                           InferenceState::kMaxDeepStack);
         for (int d = 0; d < state.n_deepstack; ++d)
-            state.deepstack_embeddings[d] = qwen_image_.d_deepstack[d];
+            state.deepstack_embeddings[d] = req->deepstack_emb[d]->as<half>();
     }
     state.kv_cache = kv_cache_raw_;
     state.block_tables = d_block_tables;
@@ -1146,7 +1166,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             finish_request(req);
         } else {
             req->status = RequestStatus::DECODING;
-            if (kv_manager_->prefix_caching_enabled()) {
+            // Publishing is as unsound as reading for an image request: these
+            // blocks would be offered to any later prompt with the same token
+            // ids, and every image token has the SAME id. A text request that
+            // happens to share the prefix would inherit a picture's KV.
+            const bool had_image = req->n_vision_tokens > 0 || req->image || req->vision_emb;
+            if (kv_manager_->prefix_caching_enabled() && !had_image) {
                 kv_manager_->register_block_hashes(req->id, req->input_tokens);
             }
         }

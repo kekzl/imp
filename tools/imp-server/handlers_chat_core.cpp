@@ -7,6 +7,7 @@
 
 #include "handlers.h"
 #include "handlers_internal.h"
+#include "model/image_placeholders.h"
 #include "utils.h"
 #include "tool_call.h"
 #include "anthropic.h"
@@ -200,16 +201,32 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // binds it per-request on admission, so a vision request batches like text.
     // Soft-token placeholders are injected by apply_with_image() below.
     if (ctx.snap.has_vision_request) {
-        auto img = std::make_shared<imp::ImageData>();
-        if (!state.ctx->engine->preprocess_image(ctx.params.image_data.data(), ctx.params.image_data.size(),
-                                                 *img)) {
+        auto fail = [&] {
             res.status = 400;
             json error = {
                 {"error", {{"message", "Failed to process image"}, {"type", "invalid_request_error"}}}};
             res.set_content(dump_safe(error), "application/json");
             return false;
+        };
+        if (state.ctx->engine->has_qwen_vision()) {
+            // Dynamic resolution: patchify now (CPU only) so the token count is
+            // known before the prompt is tokenized — the placeholders have to be
+            // expanded to exactly that many.
+            auto patches = std::make_shared<imp::QwenPatches>();
+            if (!state.ctx->engine->preprocess_image_qwen(ctx.params.image_data.data(),
+                                                          ctx.params.image_data.size(), *patches))
+                return fail();
+            ctx.snap.qwen_image_tokens = state.ctx->engine->image_tokens_of(*patches);
+            if (ctx.snap.qwen_image_tokens <= 0)
+                return fail();
+            ctx.snap.qwen_patches = std::move(patches);
+        } else {
+            auto img = std::make_shared<imp::ImageData>();
+            if (!state.ctx->engine->preprocess_image(ctx.params.image_data.data(),
+                                                     ctx.params.image_data.size(), *img))
+                return fail();
+            ctx.snap.vision_image = std::move(img);
         }
-        ctx.snap.vision_image = std::move(img);
     }
 
     // Thinking mode default: ON for think models in plain chat. These models
@@ -276,7 +293,30 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                                 ctx.snap.enable_thinking;
 
     // Tokenize with chat template (with image tokens if vision is active)
-    if (ctx.snap.have_template && ctx.snap.has_vision_request) {
+    if (ctx.snap.have_template && ctx.snap.qwen_patches) {
+        // The chat template renders ONE <|image_pad|> — at template time nobody
+        // knows how big the image will be after smart_resize. Put the vision
+        // block in front of the first user turn, render, then expand.
+        auto msgs = ctx.params.chat_msgs;
+        for (auto& m : msgs)
+            if (m.role == "user") {
+                m.content = "<|vision_start|><|image_pad|><|vision_end|>" + m.content;
+                break;
+            }
+        ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
+                                                  force_thinking);
+        const int32_t pad_id = ctx.snap.tok->find_token("<|image_pad|>");
+        std::string exp_err;
+        if (pad_id < 0 ||
+            !imp::expand_image_placeholders(ctx.snap.tokens, pad_id, {ctx.snap.qwen_image_tokens}, exp_err)) {
+            res.status = 400;
+            json error = {{"error",
+                           {{"message", pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err},
+                            {"type", "invalid_request_error"}}}};
+            res.set_content(dump_safe(error), "application/json");
+            return false;
+        }
+    } else if (ctx.snap.have_template && ctx.snap.has_vision_request) {
         ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_image(*ctx.snap.tok, ctx.params.chat_msgs, 256,
                                                              ctx.snap.suppress_thinking, force_thinking);
     } else if (ctx.snap.have_template && ctx.snap.tools_via_jinja) {
@@ -538,7 +578,8 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
                                                  const std::vector<int32_t>& input_tokens, int completion_idx,
                                                  bool stream) {
     auto req = std::make_shared<imp::Request>();
-    req->image = ctx.snap.vision_image;  // per-request vision (null for text)
+    req->image = ctx.snap.vision_image;         // per-request vision (null for text)
+    req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (null otherwise)
     req->input_tokens = input_tokens;
     req->max_tokens = ctx.params.max_tokens;
     req->temperature = ctx.params.temperature;
