@@ -432,6 +432,24 @@ class Suite:
         self.record("repetition", "temp=1.2 finish_reason set",
                     r["finish"] in ("stop", "length"), f"finish={r['finish']}")
 
+        # Large top_k — the CUB sampler path (> SAMPLE_MAX_TOP_K = 128). It had
+        # NO coverage here, which is why issue #1142 shipped: DeviceTopK served
+        # STALE candidates from the previous decode step and the model emitted
+        # `Okay,,,,,,,,` for the whole budget, while every top_k the battery
+        # used stayed on the multiblock path and looked fine. Two values, one
+        # just past the boundary and one far past it.
+        for k in (129, 2000):
+            r = self.srv.chat(
+                [{"role": "user", "content": "Name three seas."}],
+                max_tokens=n, temperature=0.9, seed=42, top_k=k,
+            )
+            text = r["reasoning"] + " " + r["content"]
+            self.record("repetition", f"top_k={k} (CUB path) loop-free",
+                        not ngram_loop(text) and max_token_run(text) <= 8,
+                        text[-160:].replace("\n", " "))
+            self.record("repetition", f"top_k={k} vocabulary diversity > 0.25",
+                        unique_ratio(text) > 0.25, f"ratio={unique_ratio(text):.2f}")
+
     # -- think-leak ---------------------------------------------------------
     def cat_think_leak(self):
         if not self.is_reasoning:
