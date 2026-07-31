@@ -22,6 +22,29 @@ struct VisionConfig {
     // norm, 2D axial NEOX RoPE, sandwich post-norms, GeGLU FFN, scale-1 attn).
     bool is_gemma4v = false;
     float rope_theta = 0.0f;  // gemma4v vision RoPE base (100.0)
+
+    // Qwen3-VL: dynamic resolution (no fixed image_size — num_patches varies per
+    // image), fused QKV, plain (non-gated) MLP, and a two-layer patch merger
+    // instead of a single projection. See docs/plans/2026-07-31-qwen3-vl-vision.md.
+    bool is_qwen3vl = false;
+    int merge_size = 1;           // spatial merge factor (2 => 2x2 patches per token)
+    int temporal_patch_size = 1;  // still images repeat along this axis
+    int out_hidden_size = 0;      // merger output width (the LM's d_model)
+    // Vision blocks whose hidden state is tapped for DeepStack. NOTE these index
+    // VISION blocks; the LM-side injection happens at LM layers 0..n-1, a
+    // different index space entirely.
+    std::vector<int> deepstack_indexes;
+};
+
+// Qwen3-VL patch merger: norm -> fc1 -> GELU -> fc2. The main merger normalises
+// BEFORE the 2x2 concat (norm width = hidden_size) and each DeepStack merger
+// normalises AFTER it (norm width = hidden_size * merge_size^2). Upstream calls
+// that flag `use_postshuffle_norm`; here the norm tensor's own width says which
+// it is, so nothing needs to be remembered.
+struct VisionMergerWeights {
+    Tensor norm_w, norm_b;
+    Tensor fc1_w, fc1_b;
+    Tensor fc2_w, fc2_b;
 };
 
 struct VisionLayerWeights {
@@ -50,6 +73,11 @@ struct VisionModel {
 
     // Post-encoder LayerNorm
     Tensor post_norm_w, post_norm_b;
+
+    // Qwen3-VL mergers: `merger` produces the image tokens the LM consumes;
+    // `deepstack_mergers` are the extra taps, one per config.deepstack_indexes.
+    VisionMergerWeights merger;
+    std::vector<VisionMergerWeights> deepstack_mergers;
 
     // Multimodal projector
     Tensor mm_pre_norm_w;   // RMSNorm before linear projection
