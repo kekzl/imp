@@ -38,7 +38,9 @@ Two shapes carry information worth stating:
   spatial merge is a plain concatenation of four patch vectors.
 - The main merger's `norm` is `[1024]` but each deepstack merger's `norm` is
   `[4096]`. So the main merger normalises **before** the concat and the deepstack
-  mergers **after** it. Do not copy one from the other.
+  mergers **after** it. Do not copy one from the other. (Confirmed in
+  `modeling_qwen3_vl.py`: one flag, `use_postshuffle_norm`, selects exactly
+  this — the shape difference was not a coincidence.)
 
 ## What imp already has
 
@@ -60,18 +62,33 @@ More than the old assessment implied:
    image (or to a configured maximum), and attention must run over a variable
    token count. This is the only piece that is genuinely encoder work.
 2. **Position-embedding interpolation.** `pos_embed` is a fixed 48×48 grid; a
-   non-48×48 patch grid needs it resampled. HF interpolates bilinearly.
+   non-48×48 patch grid needs it resampled. HF gathers precomputed indices and
+   sums them with precomputed weights (`pos_embed(interp_indices) *
+   interp_weights`), i.e. bilinear expressed as a gather + weighted sum.
+
+2b. **The encoder also has its own 2-D RoPE** — missed in the first draft of this
+   plan and found only by reading the model code. `rotary_pos_emb(position_ids)`
+   feeds `apply_rotary_pos_emb_vision` inside every block, *in addition to* the
+   learned `pos_embed` above. Not free, but not new either: imp's gemma4v
+   encoder already does "2D axial NEOX RoPE" (`vision_model.h`), so the building
+   block exists. Attention also runs packed with `cu_seqlens`, which is the
+   variable token count of piece 1 seen from the kernel side.
 3. **Patch embed over the temporal axis.** `temporal_patch_size 2` means a still
    image is repeated along t before the projection; the flattened `[1024, 1536]`
    matrix already expects `3·2·16·16` inputs, so the preprocessor must build
    patches in that order.
 4. **Merger.** 2×2 concat → norm → fc1 → gelu → fc2 → `[*, 2560]`. Straight
    GEMMs; note the norm placement above.
-5. **DeepStack.** Blocks 5/11/17 tap their hidden state through their own merger.
-   **Open question — do not guess:** where the three results enter the LM. The
-   HF implementation adds them to the text hidden state at the first layers, but
-   that must be read off `modeling_qwen3_vl.py` before implementing, not
-   inferred from the config.
+5. **DeepStack.** Blocks 5/11/17 tap their hidden state through their own
+   merger. **Resolved against `modeling_qwen3_vl.py` rather than guessed** — and
+   the two index spaces are different, which is the trap:
+   - the vision-side taps are blocks `[5, 11, 17]` (`deepstack_visual_indexes`);
+   - the LM-side injection is at **layers 0, 1, 2** — `layer_idx in
+     range(len(deepstack_visual_embeds))`, i.e. the first three LM layers in
+     order, *not* layers 5/11/17;
+   - and it is an **add at image-token positions only**:
+     `hidden[visual_pos_masks] += deepstack_embed[i]` (`_deepstack_process`).
+     So the LM needs a per-token mask of which positions came from the image.
 6. **3-axis M-RoPE in the main forward.** Today the section split exists **only**
    in the MTP draft head (`mtp_forward.cu`), hardcoded to `[11, 11, 10]` for
    `rope_dim == 64`, with an explicit "imp doesn't load this from config yet",
