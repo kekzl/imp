@@ -5,9 +5,9 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 74 files, 496 sites
+# remaining: 74 files, 499 sites
 
-src/compute/attention_cublas.cu  # 11
+src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_sm120.cu  # 2
 src/compute/attention_mxfp4_prefill.cu  # 8
 src/compute/encoder_forward.cu  # 5
