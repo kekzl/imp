@@ -341,7 +341,7 @@ __global__ void mirostat_v2_sample_kernel(const float* __restrict__ logits, int 
     // Thread 0 scans through vocab, accumulating filtered probabilities.
     if (tid == 0) {
         float inv_fsum = 1.0f / fsum;
-        unsigned int rng = seed;
+        unsigned int rng = sampler_seed_scramble(seed);  // issue #1142
         float r = lcg_rand_float(rng);
 
         float acc = 0.0f;

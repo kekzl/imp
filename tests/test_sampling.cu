@@ -9,6 +9,7 @@
 #include <numeric>
 #include <limits>
 #include <map>
+#include <random>
 #include "scoped_engine_arena.h"
 
 namespace imp {
@@ -340,4 +341,63 @@ TEST(SamplingTest, AsyncBatchedSlotsMatchSynchronousPerSequence) {
 }
 
 }  // namespace
+// Issue #1142: the sampler drew the SAME quantile on every token.
+//
+// The engine hands the samplers `base_seed + step` — consecutive integers, one
+// per generated token — and the device side took a single LCG step from it. An
+// LCG's first output is affine in its seed, so seed+1 moved the drawn float by
+// 1664525 / 2^32 ~= 0.0004: over a whole generation the draw is effectively
+// constant and the sampler keeps picking the same RANK. At small top_k that
+// rank is the argmax, which reads as fluent greedy text and is why this hid;
+// at top_k = 2000 it is a fixed token deep in the tail and the model emits it
+// forever.
+//
+// The probe is the shape of the bug: 200 CONSECUTIVE seeds over a distribution
+// whose top token holds well under all the mass. Before the scramble this
+// returned exactly ONE distinct token on both sides of the k=128 path split.
+TEST(SamplerSeeding, ConsecutiveSeedsDoNotAllDrawTheSameToken) {
+    const int V = 4096;
+    std::vector<float> h(V);
+    std::mt19937 rng(7);
+    std::normal_distribution<float> nd(0.0f, 2.0f);
+    for (auto& v : h)
+        v = nd(rng);
+    // Three near-equal winners: a correct sampler spreads over them, a
+    // fixed-quantile sampler cannot.
+    h[1000] = 12.0f;
+    h[2000] = 11.9f;
+    h[3000] = 11.8f;
+
+    Tensor d_logits = make_logits(h.data(), h.size());
+
+    auto draw = [&](int top_k) {
+        std::map<int32_t, int> hist;
+        for (unsigned s = 1; s <= 200; ++s)
+            hist[sample_topk_topp(d_logits, top_k, /*top_p=*/0.95f, /*temperature=*/1.0f, s)]++;
+        int top3 = 0;
+        for (int tok : {1000, 2000, 3000})
+            if (auto it = hist.find(tok); it != hist.end())
+                top3 += it->second;
+        fprintf(stderr, "[#1142] k=%d: %zu distinct tokens, top-3 share %.2f\n", top_k, hist.size(),
+                top3 / 200.0);
+        return hist;
+    };
+
+    // Both sides of the SAMPLE_MAX_TOP_K = 128 split: the multiblock kernel and
+    // the CUB kernel take the seed through the same path and both regressed.
+    for (int top_k : {128, 256}) {
+        const auto hist = draw(top_k);
+        EXPECT_GT(hist.size(), 1u)
+            << "top_k=" << top_k
+            << ": 200 consecutive seeds produced one token — the seed is not being decorrelated";
+        int most = 0;
+        for (const auto& [tok, n] : hist)
+            most = std::max(most, n);
+        EXPECT_LT(most, 190) << "top_k=" << top_k << ": one token took " << most
+                             << "/200 draws from three near-equal candidates";
+    }
+
+    free_gpu_tensor(d_logits);
+}
+
 }  // namespace imp
