@@ -382,8 +382,17 @@ void Engine::warmup() {
     if (measured_library_reserve_ != SIZE_MAX && !library_reserve_cache_path_.empty()) {
         if (library_reserve_cache_store(library_reserve_cache_path_, library_reserve_key_,
                                         measured_library_reserve_)) {
+            // "the next start plans with it" is only true if that path
+            // OUTLIVES this process. The supported way to run imp is a
+            // container, where the default location ($XDG_CACHE_HOME or
+            // $HOME/.cache) is ephemeral — so a `docker run --rm` server
+            // re-measures forever and keeps charging the constant. Measured on
+            // Qwen3-14B-Q6_K: with the path mounted the second start plans a
+            // 0 MiB reserve instead of 3900 and hands the pools 639 MiB more.
+            // Say the condition out loud rather than promise the outcome.
             IMP_LOG_INFO("library reserve: recorded %.0f MiB in %s — the next start on this model "
-                         "plans with it",
+                         "plans with it IF that path persists (in a container, mount it or set "
+                         "vram.library_reserve_cache; otherwise the constant is charged again)",
                          measured_library_reserve_ / (1024.0 * 1024.0),
                          library_reserve_cache_path_.c_str());
         } else {

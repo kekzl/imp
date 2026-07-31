@@ -179,6 +179,24 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **The remembered library reserve never survived the way imp is actually run,
+  and the log promised that it would.** imp measures what CUDA/cuBLAS/CUTLASS
+  claim on the first forward and records it so the *next* start plans with the
+  measured value instead of the 3900 MiB constant — but the default cache path
+  (`$XDG_CACHE_HOME` / `$HOME/.cache`) is inside the container, so a
+  `docker run --rm` server re-measures forever while the post-forward line still
+  said "the next start on this model plans with it". Measured on Qwen3-14B-Q6_K,
+  whose first forward actually claims 0 MiB: with the path persisted, the second
+  start plans a **0 MiB** reserve instead of 3900 and hands the pools **639 MiB
+  more** to distribute — recovered on every restart, lost today. The knob
+  (`vram.library_reserve_cache`) already existed; nothing pointed at it, so
+  `imp.conf.example` now does, with the container invocation spelled out.
+- **A missing reserve measurement was silent until it was too late to act on.**
+  The operator only learned the plan had over-reserved from the mismatch warning
+  *after* the first forward — by which point the KV pool had already been sized
+  around a reserve the model did not want. The miss is now reported at plan
+  time, naming the path and the knob.
+
 - **The first `response_format` request after a model load could come back
   unconstrained** (issue #1104). `JsonConstrainer` allocated its per-token allow
   list lazily inside `apply_mask()` — on the serving path, mid-decode — and on a

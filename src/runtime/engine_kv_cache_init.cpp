@@ -216,6 +216,15 @@ bool Engine::init_kv_cache() {
                          "constant is %zu MiB",
                          config_.library_reserve_mb, path.c_str(),
                          kMeasuredLibraryReserveBytes >> 20);
+        } else if (!path.empty()) {
+            // No entry: the plan is about to charge the constant. Say so HERE,
+            // before the pools are sized, instead of only reporting the
+            // mismatch after the first forward — by then the KV pool has
+            // already been sized around a reserve the model may not want.
+            IMP_LOG_INFO("library reserve: no measurement for this model in %s — planning with the "
+                         "%zu MiB constant. It is recorded after the first forward; mount that "
+                         "path (or set vram.library_reserve_cache) to keep it across restarts.",
+                         path.c_str(), kMeasuredLibraryReserveBytes >> 20);
         }
     }
 
