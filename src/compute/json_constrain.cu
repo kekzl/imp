@@ -1,6 +1,8 @@
 #include "compute/json_constrain.h"
 #include "compute/constrain_common.h"
 #include "core/logging.h"
+
+#include <mutex>
 #include <cuda_runtime.h>
 #include <cfloat>
 #include <cstring>
@@ -69,6 +71,24 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     err = cudaMalloc(&d_allowed_mask_, sizeof(uint16_t));
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("JsonConstrainer: failed to allocate mask buffer: %s", cudaGetErrorString(err));
+        return false;
+    }
+
+    // Per-token allow list. Allocated HERE, not on first use (issue #1104).
+    // The lazy version allocated it inside apply_mask() — i.e. mid-decode, on
+    // the serving path — and on a model that loads with no free VRAM left
+    // (#1103) the allocation failed and apply_mask returned WITHOUT applying
+    // any mask and without logging. The request then decoded unconstrained and
+    // returned prose where JSON was promised: deterministic, first request per
+    // process, invisible in `imp_constrained_eager_fallback_total` because no
+    // fallback was taken. The three sibling constrainers (regex, grammar,
+    // schema) have always allocated this at init and failed the load loudly;
+    // this one was the outlier.
+    err = cudaMalloc(&d_token_allow_, static_cast<size_t>(vocab_size_));
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("JsonConstrainer: failed to allocate the %d-token allow list: %s", vocab_size_,
+                      cudaGetErrorString(err));
+        d_token_allow_ = nullptr;
         return false;
     }
 
@@ -651,13 +671,26 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     }
 
     if (!d_token_allow_) {
-        if (cudaMalloc(&d_token_allow_, vocab_size) != cudaSuccess) {
-            d_token_allow_ = nullptr;
-            return;
-        }
+        // Unreachable after a successful initialize(), which is the point: a
+        // constrainer that cannot mask must SAY so rather than let the request
+        // decode unconstrained and look like a model that ignored the schema
+        // (issue #1104).
+        static std::once_flag once;
+        std::call_once(once, [] {
+            IMP_LOG_ERROR(
+                "JsonConstrainer: no device allow list — the reply will NOT be constrained. "
+                "This should be impossible after initialize(); please report it.");
+        });
+        return;
     }
+    // Clamp to what initialize() reserved. The model's lm_head can be WIDER
+    // than the tokenizer (padding rows), and the host list is sized to the
+    // model — but the kernel returns before touching token_allow[idx] for
+    // idx >= n_classified, so the tokenizer-sized device buffer is exactly
+    // enough and copying the model width would run off the end of it.
+    const size_t allow_bytes = std::min(static_cast<size_t>(vocab_size), static_cast<size_t>(vocab_size_));
     IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(d_token_allow_, token_allow_.data(), vocab_size, cudaMemcpyHostToDevice, stream));
+        cudaMemcpyAsync(d_token_allow_, token_allow_.data(), allow_bytes, cudaMemcpyHostToDevice, stream));
 
     uint16_t any_mask = 0xFFFF;  // per-token allow already encodes the category mask
     IMP_CUDA_CHECK_LOG(

@@ -641,5 +641,48 @@ TEST(JsonConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
     }
 }
 
+// Issue #1104: a constrainer that cannot mask must never decode SILENTLY
+// unconstrained.
+//
+// The device allow list used to be allocated lazily inside apply_mask() — on
+// the serving path, mid-decode. On a model that loads with no free VRAM left
+// (#1103) that allocation failed and apply_mask returned without masking and
+// without logging, so the first constrained request per process came back as
+// prose where JSON was promised: deterministic, byte-identical across restarts,
+// and invisible in `imp_constrained_eager_fallback_total` because no fallback
+// was taken. The three sibling constrainers (regex, grammar, schema) have
+// always allocated this at init and failed the load loudly.
+//
+// This pins the property that makes the failure impossible rather than
+// unlikely: after init() reports success, the allow list is already resident.
+TEST(JsonConstrainTest, InitReservesTheAllowListSoApplyMaskNeverAllocates) {
+    SKIP_IF_NO_CUDA();
+
+    std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "}", "0"};
+    std::vector<float> scores(toks.size(), 0.0f);
+    Tokenizer tok;
+    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+
+    JsonConstrainer jc;
+    ASSERT_TRUE(jc.init(tok));
+    EXPECT_TRUE(jc.has_device_allow_list())
+        << "init() succeeded without reserving the allow list — apply_mask would allocate on the "
+           "serving path, and a failure there masks nothing at all (issue #1104)";
+
+    // And the very first apply_mask already constrains: no warm-up call needed.
+    const int vocab = static_cast<int>(toks.size());
+    std::vector<float> h(vocab, 1.0f);
+    float* d = nullptr;
+    ASSERT_EQ(cudaMalloc(&d, vocab * sizeof(float)), cudaSuccess);
+    cudaMemcpy(d, h.data(), vocab * sizeof(float), cudaMemcpyHostToDevice);
+    jc.apply_mask(d, vocab, 0);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h.data(), d, vocab * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d);
+
+    EXPECT_GT(h[3], -1e30f) << "'{' must open the document on the FIRST masked step";
+    EXPECT_FLOAT_EQ(h[5], -FLT_MAX) << "'}' cannot open a document — the first step must already mask";
+}
+
 }  // namespace
 }  // namespace imp
