@@ -215,5 +215,35 @@ TEST(SafeTensorsMalformedEntryWarnings, OffsetByteCountMismatchWarns) {
     EXPECT_NE(captured.find("byte count"), std::string::npos) << captured;
 }
 
+// A tensor with more dims than the engine's kMaxDims used to be DROPPED with a
+// WARN — which silently loses a weight. Qwen3-VL's patch embed is
+// [1024, 3, 2, 16, 16] and vanished exactly that way. It is now flattened to
+// [d0, d1*..*dn] instead: element order is row-major and untouched, so this is
+// a pure reinterpretation, and it is the only shape the GEMM path could consume.
+TEST(SafeTensorsHighDimTensors, FlattenedInsteadOfDropped) {
+    // [2, 3, 2, 2, 2] F32 = 48 elements = 192 bytes. Flattens to [2, 24].
+    const std::string header =
+        "{\"conv5d\": {\"dtype\": \"F32\", \"shape\": [2, 3, 2, 2, 2], \"data_offsets\": [0, 192]}}";
+    std::string path = write_temp_blob(header, 192);
+    ASSERT_FALSE(path.empty());
+
+    testing::internal::CaptureStderr();
+    auto model = load_safetensors(path);
+    std::string captured = testing::internal::GetCapturedStderr();
+    std::remove(path.c_str());
+
+    // Whether a Model is built depends on what else sits next to the temp file,
+    // so that is not asserted here — the shard scan is what this test is about.
+    (void)model;
+    EXPECT_NE(captured.find("conv5d"), std::string::npos) << captured;
+    EXPECT_NE(captured.find("flattening"), std::string::npos)
+        << "Expected the reinterpretation to be logged, not silent. Captured: " << captured;
+    EXPECT_NE(captured.find("[2, 24]"), std::string::npos)
+        << "Expected the flattened shape in the log. Captured: " << captured;
+    // The old behaviour must be gone: nothing dropped for dimensionality.
+    EXPECT_EQ(captured.find("ndim exceeds"), std::string::npos)
+        << "High-dim tensors must no longer be dropped. Captured: " << captured;
+}
+
 }  // namespace
 }  // namespace imp
