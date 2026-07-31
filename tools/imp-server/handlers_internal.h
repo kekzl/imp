@@ -115,6 +115,11 @@ struct ChatStateSnapshot {
     // req->image at every request-build site. The batch worker encodes + binds
     // it per-request (no engine pause). Null for text-only requests.
     std::shared_ptr<imp::ImageData> vision_image;
+    // Qwen3-VL takes the other route: a dynamic-resolution image is patchified
+    // here (CPU only) and its token count is known BEFORE tokenizing, because
+    // the prompt has to reserve exactly that many placeholders.
+    std::shared_ptr<imp::QwenPatches> qwen_patches;
+    int qwen_image_tokens = 0;
     std::vector<int32_t> stop_token_ids;
     imp::ChatTemplateFamily tpl_family = imp::ChatTemplateFamily::CHATML;
     std::vector<imp::ToolFunction> tool_defs;

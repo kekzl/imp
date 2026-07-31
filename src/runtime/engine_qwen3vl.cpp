@@ -11,6 +11,9 @@
 
 #include "runtime/engine.h"
 
+#include <fstream>
+
+#include "core/buffer.h"
 #include "core/logging.h"
 #include "exec/inference_state.h"
 #include "runtime/engine_internal.h"
@@ -64,31 +67,11 @@ void Engine::bind_mrope_(InferenceState& state, int n_tokens, int32_t*& buf, int
     state.mrope.interleaved = mc.mrope_interleaved;
 }
 
-// Decode usually runs as a CUDA-graph REPLAY, which never revisits the host
-// binding — it only dereferences the pointer baked in at capture. So the delta
-// has to be CURRENT on the device before the first replay, which is why it is
-// published at prefill rather than only where the decode state is built.
-void Engine::publish_mrope_delta_(int delta, cudaStream_t stream) {
-    if (!d_mrope_delta_) {
-        d_mrope_delta_ = static_cast<int*>(vram_alloc_.allocate(sizeof(int), "mrope_delta"));
-        if (!d_mrope_delta_) {
-            IMP_LOG_ERROR("M-RoPE: could not allocate the decode delta");
-            return;
-        }
-    }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_mrope_delta_, &delta, sizeof(int), cudaMemcpyHostToDevice, stream));
-}
-
 void Engine::bind_mrope_prefill_(InferenceState& state, const Request& req, int offset, int chunk_len,
                                  cudaStream_t stream) {
     const ModelConfig& mc = model_->config_;
     if (!mc.has_mrope() || chunk_len <= 0)
         return;
-
-    // Published at the START of the request's prefill, so it is in place before
-    // the first decode replay — and reset here for a request without an image.
-    if (offset == 0)
-        publish_mrope_delta_(req.mrope_pos_delta, stream);
 
     const size_t n_prompt = req.input_tokens.size();
     h_mrope_scratch_.assign(static_cast<size_t>(3) * chunk_len, 0);
@@ -108,13 +91,13 @@ void Engine::bind_mrope_prefill_(InferenceState& state, const Request& req, int 
 }
 
 void Engine::bind_mrope_single_(InferenceState& state, const Request& req, cudaStream_t stream) {
+    (void)stream;
     const ModelConfig& mc = model_->config_;
-    if (!mc.has_mrope())
+    // No delta buffer means no image, and a zero offset — which is what the
+    // unbound path already computes, bit for bit.
+    if (!mc.has_mrope() || !req.mrope_delta_dev)
         return;
-    publish_mrope_delta_(req.mrope_pos_delta, stream);
-    if (!d_mrope_delta_)
-        return;
-    state.mrope.pos_delta = d_mrope_delta_;
+    state.mrope.pos_delta = static_cast<const int*>(req.mrope_delta_dev->ptr());
     state.mrope.sec_t = mc.mrope_section[0];
     state.mrope.sec_h = mc.mrope_section[1];
     state.mrope.sec_w = mc.mrope_section[2];
@@ -127,25 +110,38 @@ void Engine::bind_mrope_decode_(InferenceState& state, const std::vector<std::sh
     if (!mc.has_mrope() || reqs.empty())
         return;
 
-    // Generated text advances all three axes together, so the whole layout
-    // collapses to one number per request. That is what makes this safe inside
-    // a captured graph: `positions` is advanced device-side during replay and
-    // the delta rides alongside it, rather than a host-filled array that a
-    // replay would never see refreshed.
-    int delta = reqs[0]->mrope_pos_delta;
-    for (const auto& r : reqs) {
-        if (r->mrope_pos_delta != delta) {
-            // Mixed batch: one scalar cannot serve both. Refuse rather than
-            // apply one request's image offset to another's text.
-            IMP_LOG_WARN("M-RoPE: decode batch mixes position deltas — skipping the offset this step");
-            state.mrope = MRopeParams{};
+    // One offset per token, because a batch mixes an image request (negative
+    // offset) with text requests (zero). The kernel adds it to the device
+    // `positions` it already reads, so this path and the single-sequence one
+    // compute the same number from the same source.
+    const int n = static_cast<int>(reqs.size());
+    bool any = false;
+    h_mrope_scratch_.assign(static_cast<size_t>(n), 0);
+    for (int i = 0; i < n; ++i) {
+        h_mrope_scratch_[static_cast<size_t>(i)] = reqs[i]->mrope_pos_delta;
+        any = any || reqs[i]->mrope_pos_delta != 0;
+    }
+    if (!any)
+        return;  // all text: identical to the unbound path, bit for bit
+
+    if (!d_mrope_decode_ || n > mrope_decode_cap_) {
+        if (d_mrope_decode_ && mrope_decode_cap_ > 0) {
+            // Sized once; a captured graph holds this pointer.
+            IMP_LOG_ERROR("M-RoPE: decode batch of %d exceeds the %d it was sized for", n, mrope_decode_cap_);
             return;
         }
+        const int want = std::max(n, std::max(1, config_.max_batch_size));
+        d_mrope_decode_ = static_cast<int32_t*>(
+            vram_alloc_.allocate(static_cast<size_t>(want) * sizeof(int32_t), "mrope_delta"));
+        if (!d_mrope_decode_)
+            return;
+        mrope_decode_cap_ = want;
     }
-    publish_mrope_delta_(delta, stream);
-    if (!d_mrope_delta_)
-        return;
-    state.mrope.pos_delta = d_mrope_delta_;
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_mrope_decode_, h_mrope_scratch_.data(),
+                                       static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                       stream));
+    state.mrope.pos_delta = d_mrope_decode_;
+    state.mrope.stride = n;
     state.mrope.sec_t = mc.mrope_section[0];
     state.mrope.sec_h = mc.mrope_section[1];
     state.mrope.sec_w = mc.mrope_section[2];
@@ -159,10 +155,6 @@ void Engine::free_mrope_buffers_() {
             *b = nullptr;
         }
     }
-    if (d_mrope_delta_) {
-        vram_alloc_.free(d_mrope_delta_);
-        d_mrope_delta_ = nullptr;
-    }
     mrope_prefill_cap_ = 0;
     mrope_decode_cap_ = 0;
 }
@@ -171,45 +163,100 @@ void Engine::free_mrope_buffers_() {
 // Here rather than in engine.cpp because they are the Qwen3-VL half of the
 // vision surface and belong next to the layout code above.
 
+// Set-image is CPU-only for Qwen3-VL: it patchifies and stops there. That is
+// what lets the caller learn the token count before tokenizing, and it keeps
+// GPU work off whichever thread happened to call.
 bool Engine::set_image(const std::string& path) {
-    // Qwen3-VL first: its tower came in with the checkpoint, so a model can
-    // have one without any mmproj being configured.
     if (qwen_vision_.is_ready()) {
-        if (!qwen_vision_.encode_file(path, qwen_image_, stream_))
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            IMP_LOG_ERROR("Qwen3-VL: could not open image '%s'", path.c_str());
             return false;
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream_));
-        qwen_image_pending_ = true;
-        return true;
+        }
+        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                                         std::istreambuf_iterator<char>());
+        return set_image_from_memory(bytes.data(), bytes.size());
     }
     return vision_.set_image(path, stream_);
 }
 
 bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
     if (qwen_vision_.is_ready()) {
-        if (!qwen_vision_.encode_memory(data, len, qwen_image_, stream_))
+        auto patches = std::make_shared<QwenPatches>();
+        if (!qwen_vision_.preprocess(data, len, *patches))
             return false;
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream_));
-        qwen_image_pending_ = true;
+        qwen_pending_patches_ = std::move(patches);
         return true;
     }
     return vision_.set_image_from_memory(data, len, stream_);
 }
 
 void Engine::clear_image() {
-    qwen_image_pending_ = false;
+    qwen_pending_patches_.reset();
     vision_.clear_image();
 }
 
-int Engine::pending_image_tokens() const { return qwen_image_pending_ ? qwen_image_.tokens : 0; }
+bool Engine::preprocess_image_qwen(const uint8_t* data, size_t len, QwenPatches& out) const {
+    return qwen_vision_.is_ready() && qwen_vision_.preprocess(data, len, out);
+}
 
-bool Engine::attach_qwen_image_(Request& req) {
-    if (!qwen_image_pending_ || req.vision_emb || qwen_image_pad_id_ < 0)
+int Engine::image_tokens_of(const QwenPatches& patches) const {
+    return qwen_vision_.merged_tokens_of(patches);
+}
+
+int Engine::pending_image_tokens() const {
+    return qwen_pending_patches_ ? qwen_vision_.merged_tokens_of(*qwen_pending_patches_) : 0;
+}
+
+// Turns a request's CPU-preprocessed image into its own device buffers and its
+// own (t, h, w) layout. Runs on the batch worker: it drives the GPU, so it
+// cannot be on an HTTP thread.
+bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
+    if (!req.qwen_patches || !qwen_vision_.is_ready() || qwen_image_pad_id_ < 0)
         return false;
 
-    // Where the image sits in the prompt. The placeholders were expanded to the
-    // encoder's token count before the request was submitted; if they were not,
-    // the layout below would be built for a different prompt than the one the
-    // embeddings land in, so the mismatch is fatal rather than tolerated.
+    const int tokens = qwen_vision_.merged_tokens_of(*req.qwen_patches);
+    const size_t bytes = qwen_vision_.embedding_bytes(tokens);
+    if (tokens <= 0 || bytes == 0) {
+        IMP_LOG_ERROR("Qwen3-VL: image produced no tokens");
+        req.qwen_patches.reset();
+        return false;
+    }
+
+    // Per-request buffers, so two concurrent image requests cannot share one
+    // encoder output. shared_ptr<Buffer> frees on the last reference, which is
+    // what keeps the cancel paths from needing a lifecycle of their own.
+    auto emb = std::make_shared<Buffer>(Buffer::device(bytes));
+    if (!*emb)
+        return false;
+    const int taps = qwen_vision_.deepstack_taps();
+    std::vector<std::shared_ptr<Buffer>> deep;
+    std::vector<half*> deep_ptrs;
+    deep.reserve(static_cast<size_t>(taps));
+    for (int i = 0; i < taps; ++i) {
+        auto b = std::make_shared<Buffer>(Buffer::device(bytes));
+        if (!*b)
+            return false;
+        deep_ptrs.push_back(b->as<half>());
+        deep.push_back(std::move(b));
+    }
+
+    Qwen3VLImage shape;
+    if (!qwen_vision_.encode_patches_to(*req.qwen_patches, emb->as<half>(), deep_ptrs, shape, stream))
+        return false;
+    req.qwen_patches.reset();  // host pixels no longer needed
+
+    if (!build_qwen_layout_(req, shape))
+        return false;
+    req.vision_emb = std::move(emb);
+    req.deepstack_emb = std::move(deep);
+    return true;
+}
+
+// The prompt-side half: which positions hold the image, and what that costs the
+// M-RoPE sequence. Kept apart from the encode because it is pure bookkeeping
+// over the token ids and fails for entirely different reasons.
+bool Engine::build_qwen_layout_(Request& req, const Qwen3VLImage& shape) {
     std::vector<uint8_t> is_image(req.input_tokens.size(), 0);
     int found = 0;
     for (size_t i = 0; i < req.input_tokens.size(); ++i)
@@ -217,21 +264,17 @@ bool Engine::attach_qwen_image_(Request& req) {
             is_image[i] = 1;
             ++found;
         }
-    if (found == 0) {
-        // This prompt has no image in it. Leave the pending one alone rather
-        // than consuming or complaining about it — a text turn between two
-        // image turns is ordinary.
-        return false;
-    }
-    if (found != qwen_image_.tokens) {
+    if (found != shape.tokens) {
+        // The prompt and the encoder describe different images. Every position
+        // after the mismatch would be shifted, so this is fatal, not tolerated.
         IMP_LOG_ERROR("Qwen3-VL: prompt reserves %d image tokens but the encoder produced %d", found,
-                      qwen_image_.tokens);
+                      shape.tokens);
         return false;
     }
 
     std::string err;
     int next_pos = 0;
-    const std::vector<MRopeImageGrid> grids = {{qwen_image_.grid_rows, qwen_image_.grid_cols}};
+    const std::vector<MRopeImageGrid> grids = {{shape.grid_rows, shape.grid_cols}};
     if (!qwen_build_mrope_positions(is_image, grids, 0, req.mrope_positions, next_pos, err)) {
         IMP_LOG_ERROR("Qwen3-VL: %s", err.c_str());
         return false;
@@ -240,12 +283,37 @@ bool Engine::attach_qwen_image_(Request& req) {
     // it cost positions — and it is what keeps generation continuing where the
     // prompt left off instead of jumping past a gap.
     req.mrope_pos_delta = next_pos - static_cast<int>(req.input_tokens.size());
-
+    // Its own device copy: decode replays dereference this pointer, and a
+    // shared one would let a concurrent request's prefill change it mid-run.
+    auto delta_buf = std::make_shared<Buffer>(Buffer::device(sizeof(int)));
+    if (!*delta_buf)
+        return false;
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpy(delta_buf->ptr(), &req.mrope_pos_delta, sizeof(int), cudaMemcpyHostToDevice));
+    req.mrope_delta_dev = std::move(delta_buf);
     req.vision_token_id = qwen_image_pad_id_;
-    req.n_vision_tokens = qwen_image_.tokens;
-    qwen_image_pending_ = false;
-    IMP_LOG_INFO("Qwen3-VL: attached %d image tokens (%dx%d), position delta %d", qwen_image_.tokens,
-                 qwen_image_.grid_rows, qwen_image_.grid_cols, req.mrope_pos_delta);
+    req.n_vision_tokens = shape.tokens;
+    IMP_LOG_INFO("Qwen3-VL: %d image tokens (%dx%d), position delta %d", shape.tokens, shape.grid_rows,
+                 shape.grid_cols, req.mrope_pos_delta);
+    return true;
+}
+
+// CLI path: one pending image on the engine, moved onto the first request that
+// reserves placeholders for it. The server does not use this — it sets
+// `req.qwen_patches` directly, because it admits image requests concurrently.
+bool Engine::attach_qwen_image_(Request& req) {
+    if (!qwen_pending_patches_ || req.qwen_patches || req.vision_emb)
+        return false;
+    bool has_pad = false;
+    for (int32_t t : req.input_tokens)
+        if (t == qwen_image_pad_id_) {
+            has_pad = true;
+            break;
+        }
+    if (!has_pad)
+        return false;  // this prompt has no image; the pending one may be a later request's
+    req.qwen_patches = std::move(qwen_pending_patches_);
+    qwen_pending_patches_.reset();
     return true;
 }
 

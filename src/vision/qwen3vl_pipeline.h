@@ -12,6 +12,7 @@
 // so this holds a reference, not ownership, and uploads them to the device on
 // first init.
 
+#include "vision/image_processor.h"  // QwenPatches
 #include "vision/qwen3vl_encoder.h"
 #include "vision/vision_model.h"
 
@@ -58,8 +59,28 @@ public:
     bool encode_file(const std::string& path, Qwen3VLImage& out, cudaStream_t stream);
     bool encode_memory(const uint8_t* data, size_t len, Qwen3VLImage& out, cudaStream_t stream);
 
+    // --- Per-request path (the server) --------------------------------
+    // CPU only — decode, resize, patchify. Safe to call off the batch worker
+    // (an HTTP handler thread), and it is what tells the caller how many image
+    // tokens the prompt has to reserve, BEFORE any GPU work happens.
+    bool preprocess(const uint8_t* data, size_t len, QwenPatches& out) const;
+    // Image tokens a patchified image becomes.
+    int merged_tokens_of(const QwenPatches& p) const;
+    // Bytes one request's embedding buffer needs (same for each DeepStack tap).
+    size_t embedding_bytes(int tokens) const;
+    int deepstack_taps() const;
+
+    // Encode into the CALLER's buffers. Runs through the pipeline's own stable
+    // scratch first and copies out, because the encoder's workspaces are sized
+    // once and shared — a per-request output would mean re-sizing per image.
+    // Serialized: the caller must be the sole GPU driver (the batch worker).
+    bool encode_patches_to(const QwenPatches& patches, half* d_out, const std::vector<half*>& d_deepstack,
+                           Qwen3VLImage& shape_out, cudaStream_t stream);
+
 private:
     bool encode_rgb(const uint8_t* rgb, int width, int height, Qwen3VLImage& out, cudaStream_t stream);
+    bool encode_patches(const QwenPatches& patches, Qwen3VLImage& out, cudaStream_t stream);
+    QwenPatchifyConfig patchify_config() const;
     void free_buffers();
 
     VisionModel* tower_ = nullptr;

@@ -9,7 +9,8 @@
 namespace imp {
 
 // Forward declares to keep CUDA / buffer headers out of this widely-included file.
-struct ImageData;  // src/vision/image_processor.h
+struct ImageData;
+struct QwenPatches;  // vision/image_processor.h
 class Buffer;      // src/core/buffer.h
 
 // Per-token log probability information (for logprobs output)
@@ -248,7 +249,12 @@ struct Request {
     int32_t vision_token_id = -1;
     int n_vision_tokens = 0;
 
-    // Qwen3-VL. `deepstack_emb` holds one buffer per vision tap, each the same
+    // Qwen3-VL, per-request. `qwen_patches` is the CPU-preprocessed image set by
+    // the server thread; the batch worker turns it into `vision_emb` +
+    // `deepstack_emb` on admission and clears it. Per-request rather than
+    // engine-global because the server admits image requests concurrently.
+    std::shared_ptr<QwenPatches> qwen_patches;
+    // `deepstack_emb` holds one buffer per vision tap, each the same
     // shape as `vision_emb`; they are ADDED at the LM's first layers.
     std::vector<std::shared_ptr<Buffer>> deepstack_emb;
     // Per-token (t, h, w) positions for the PROMPT, [3, input_tokens.size()].
@@ -259,6 +265,11 @@ struct Request {
     // rows*cols tokens, so this is negative whenever the prompt held one, and
     // `context_len()` alone would leave a gap the model never saw in training.
     int mrope_pos_delta = 0;
+    // The same number, on the device, owned by THIS request. Engine-global
+    // would be a cross-request corruption: decode replays read the pointer at
+    // replay time, so a concurrent request's prefill would overwrite the value
+    // a different sequence is mid-generation on.
+    std::shared_ptr<Buffer> mrope_delta_dev;
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
 

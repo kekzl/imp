@@ -28,9 +28,15 @@ struct MRopeParams {
     // plus a per-request constant — and an image makes that constant NEGATIVE,
     // because it occupied more tokens than it cost positions.
     //
-    // It is a DEVICE pointer, not an int, on purpose: the decode position is
-    // advanced device-side inside a captured graph, and a baked-in scalar would
-    // freeze the value of whichever request was live at capture time.
+    // A DEVICE array of `stride` entries, one per token — not a scalar, and not
+    // host-computed. Two reasons, both learned the hard way:
+    //   - the decode position is advanced device-side inside a captured graph,
+    //     so a baked-in scalar would freeze whichever request was live at
+    //     capture time;
+    //   - a decode batch mixes requests, and an image request's offset must not
+    //     reach a text request sharing the step.
+    // Deriving from the same device `positions` the rest of the kernel reads is
+    // what keeps the batched and single-sequence paths from drifting apart.
     const int* pos_delta = nullptr;
 };
 

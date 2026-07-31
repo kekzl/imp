@@ -108,27 +108,95 @@ bool Qwen3VLPipeline::init(VisionModel& tower, VRAMAllocator& alloc, int max_pat
     return true;
 }
 
+QwenPatchifyConfig Qwen3VLPipeline::patchify_config() const {
+    QwenPatchifyConfig pc;
+    if (tower_) {
+        const VisionConfig& c = tower_->config;
+        pc.patch_size = c.patch_size;
+        pc.merge_size = c.merge_size;
+        pc.temporal_patch_size = c.temporal_patch_size;
+        // The budget is a hard ceiling here, not a preference: every workspace
+        // was sized from it, so an image is scaled down to fit rather than
+        // refused.
+        pc.max_pixels = std::min<int64_t>(pc.max_pixels, max_pixels());
+    }
+    return pc;
+}
+
+int Qwen3VLPipeline::merged_tokens_of(const QwenPatches& p) const {
+    if (!tower_)
+        return 0;
+    const int unit = tower_->config.merge_size * tower_->config.merge_size;
+    return unit > 0 ? p.tokens / unit : 0;
+}
+
+size_t Qwen3VLPipeline::embedding_bytes(int tokens) const {
+    if (!tower_ || tokens <= 0)
+        return 0;
+    return static_cast<size_t>(tokens) * tower_->config.out_hidden_size * sizeof(half);
+}
+
+int Qwen3VLPipeline::deepstack_taps() const {
+    return tower_ ? static_cast<int>(tower_->config.deepstack_indexes.size()) : 0;
+}
+
+bool Qwen3VLPipeline::preprocess(const uint8_t* data, size_t len, QwenPatches& out) const {
+    if (!tower_)
+        return false;
+    int w = 0, h = 0, ch = 0;
+    uint8_t* rgb = stbi_load_from_memory(data, static_cast<int>(len), &w, &h, &ch, 3);
+    if (!rgb) {
+        IMP_LOG_ERROR("Qwen3-VL pipeline: could not decode a %zu-byte image", len);
+        return false;
+    }
+    const bool ok = qwen_patchify(rgb, w, h, patchify_config(), out);
+    stbi_image_free(rgb);
+    if (!ok)
+        IMP_LOG_ERROR("Qwen3-VL pipeline: could not patchify a %dx%d image", w, h);
+    return ok;
+}
+
+bool Qwen3VLPipeline::encode_patches_to(const QwenPatches& patches, half* d_out,
+                                        const std::vector<half*>& d_deepstack, Qwen3VLImage& shape_out,
+                                        cudaStream_t stream) {
+    if (!encode_patches(patches, shape_out, stream))
+        return false;
+    const size_t bytes = embedding_bytes(shape_out.tokens);
+    if (d_out)
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(d_out, shape_out.d_embeddings, bytes, cudaMemcpyDeviceToDevice, stream));
+    for (size_t i = 0; i < d_deepstack.size() && i < shape_out.d_deepstack.size(); ++i)
+        if (d_deepstack[i])
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_deepstack[i], shape_out.d_deepstack[i], bytes,
+                                               cudaMemcpyDeviceToDevice, stream));
+    // Point the shape at the caller's memory so nothing keeps a handle on the
+    // shared scratch, which the next request overwrites.
+    shape_out.d_embeddings = d_out;
+    shape_out.d_deepstack.assign(d_deepstack.begin(), d_deepstack.end());
+    return true;
+}
+
 bool Qwen3VLPipeline::encode_rgb(const uint8_t* rgb, int width, int height, Qwen3VLImage& out,
                                  cudaStream_t stream) {
     if (!encoder_) {
         IMP_LOG_ERROR("Qwen3-VL pipeline: encode before init");
         return false;
     }
-    const VisionConfig& c = tower_->config;
-
-    QwenPatchifyConfig pc;
-    pc.patch_size = c.patch_size;
-    pc.merge_size = c.merge_size;
-    pc.temporal_patch_size = c.temporal_patch_size;
-    // The budget is a hard ceiling here, not a preference: every workspace was
-    // sized from it, so an image is scaled down to fit rather than refused.
-    pc.max_pixels = std::min<int64_t>(pc.max_pixels, max_pixels());
-
     QwenPatches patches;
-    if (!qwen_patchify(rgb, width, height, pc, patches)) {
+    if (!qwen_patchify(rgb, width, height, patchify_config(), patches)) {
         IMP_LOG_ERROR("Qwen3-VL pipeline: could not patchify a %dx%d image", width, height);
         return false;
     }
+    IMP_LOG_INFO("Qwen3-VL: %dx%d image -> %dx%d patches", width, height, patches.grid_h, patches.grid_w);
+    return encode_patches(patches, out, stream);
+}
+
+bool Qwen3VLPipeline::encode_patches(const QwenPatches& patches, Qwen3VLImage& out, cudaStream_t stream) {
+    if (!encoder_) {
+        IMP_LOG_ERROR("Qwen3-VL pipeline: encode before init");
+        return false;
+    }
+    const VisionConfig& c = tower_->config;
     if (patches.tokens > max_patches_) {
         // smart_resize honours max_pixels, so this means the two disagree —
         // worth an error rather than a silent truncation.
@@ -158,8 +226,6 @@ bool Qwen3VLPipeline::encode_rgb(const uint8_t* rgb, int width, int height, Qwen
     out.tokens = patches.tokens / unit;
     out.d_embeddings = d_out_;
     out.d_deepstack.assign(d_deepstack_.begin(), d_deepstack_.end());
-    IMP_LOG_INFO("Qwen3-VL: %dx%d image -> %dx%d patches -> %d image tokens", width, height, patches.grid_h,
-                 patches.grid_w, out.tokens);
     return true;
 }
 
@@ -176,15 +242,10 @@ bool Qwen3VLPipeline::encode_file(const std::string& path, Qwen3VLImage& out, cu
 }
 
 bool Qwen3VLPipeline::encode_memory(const uint8_t* data, size_t len, Qwen3VLImage& out, cudaStream_t stream) {
-    int w = 0, h = 0, ch = 0;
-    uint8_t* rgb = stbi_load_from_memory(data, static_cast<int>(len), &w, &h, &ch, 3);
-    if (!rgb) {
-        IMP_LOG_ERROR("Qwen3-VL pipeline: could not decode a %zu-byte image", len);
+    QwenPatches patches;
+    if (!preprocess(data, len, patches))
         return false;
-    }
-    const bool ok = encode_rgb(rgb, w, h, out, stream);
-    stbi_image_free(rgb);
-    return ok;
+    return encode_patches(patches, out, stream);
 }
 
 }  // namespace imp

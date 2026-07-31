@@ -71,7 +71,18 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     continue;
                 }
                 // Reserve blocks, using prefix caching when enabled.
-                if (kv_manager_->prefix_caching_enabled()) {
+                //
+                // An image request is excluded, and the reason is not caution:
+                // the prefix cache is content-addressed on TOKEN IDS, and every
+                // image token carries the SAME id (<|image_pad|> / the soft
+                // token). Two requests with different pictures therefore share
+                // a long identical prefix, and the second one silently answers
+                // about the first one's image. Observed: a pizza described as
+                // "a tabby cat sitting outdoors". Holds for the mmproj path
+                // too — its ids are just as uniform.
+                const bool has_image = req->image || req->qwen_patches || req->vision_emb ||
+                                       req->n_vision_tokens > 0;
+                if (kv_manager_->prefix_caching_enabled() && !has_image) {
                     // Hybrid models cap reuse at the recurrent-snapshot
                     // boundary (and attach the snapshot to the request).
                     int max_reuse = prefix_reuse_limit_ ? prefix_reuse_limit_(*req) : -1;
