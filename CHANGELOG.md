@@ -190,6 +190,26 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **The library reserve was measured through a window that missed most of it,
+  and on one model that cost 4x the KV capacity.** `report_library_reserve()`
+  anchored immediately before the warmup forward, so it only saw what the
+  libraries claimed from that point on — and which library claims *when* depends
+  on the model's execution path (Q8_0 first touches cuBLAS in the forward and
+  measures 7452 MiB; the NVFP4 cache build runs CUTLASS two phases earlier and
+  measures 2). The charge is taken across the whole init now: what the device
+  holds that imp's own allocations cannot account for. Corrects in both
+  directions — the 8B's libraries really do claim 7830 MiB where the constant
+  charged 3900, the 14B claims 791. Measured over two starts on four configs:
+  every one keeps its full requested KV pool and Qwen3.6-35B-A3B-NVFP4's second
+  start gets **16 384 tokens instead of 4096**. Attribution goes from
+  98.3 / 96.6 / 89.7 % to 99.9 / 99.9 / 100 %.
+- **`MemAccount`'s per-pool ledger is no longer gated on `--mem-report`.** With
+  it gated the residual above reads as the whole device on any normal start —
+  which would have collapsed the 35B's pool to 512 tokens. The expensive half
+  (checkpoint history, report table, sampler thread) stays opt-in; what is
+  always on is a lock and a map lookup per allocation, and allocations are an
+  init-time event.
+
 - **`--mem-report` counted the FP8 SSM sidecar twice.** It is the one FP8 weight
   cache allocated through `VRAMAllocator` rather than raw `cudaMallocAsync`, so
   once the allocator started naming its own charges the explicit

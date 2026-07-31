@@ -46,7 +46,20 @@ MemAccount::Pool& MemAccount::pool_locked(const char* name) {
 }
 
 void MemAccount::note(const char* pool, std::ptrdiff_t delta_bytes) {
-    if (!enabled_.load(std::memory_order_relaxed) || delta_bytes == 0)
+    // Deliberately NOT gated on enabled_. The per-pool ledger is what makes
+    // unattributed_bytes() mean "what imp cannot account for"; gated, it is
+    // empty on every start that did not pass --mem-report and the residual
+    // reads as the whole device. That is not hypothetical — charging a plan
+    // from it collapsed Qwen3.6-35B-A3B-NVFP4's KV pool from 4096 tokens to
+    // 512, and only the sweep that happened to have --mem-report on looked
+    // sound (AUDIT B80).
+    //
+    // The cost is a lock and a small map lookup per ACQUISITION, and
+    // acquisitions are an init-time event: I2 measures zero of them while
+    // serving. The 35B's weight upload is the worst case at ~31k notes, once.
+    // What stays gated is the expensive half — checkpoint history, the report
+    // table and the sampler thread.
+    if (delta_bytes == 0)
         return;
     std::lock_guard<std::mutex> lock(mu_);
     Pool& p = pool_locked(pool);
@@ -76,6 +89,21 @@ void MemAccount::sample_once() {
     size_t prev = peak_used_.load(std::memory_order_relaxed);
     while (used > prev && !peak_used_.compare_exchange_weak(prev, used, std::memory_order_relaxed)) {
     }
+}
+
+size_t MemAccount::unattributed_bytes() const {
+    size_t free_b = 0, total_b = 0;
+    if (!vram_budget_mem_get_info(&free_b, &total_b))
+        return 0;
+    const size_t used = total_b > free_b ? total_b - free_b : 0;
+    std::lock_guard<std::mutex> lock(mu_);
+    int64_t cur = 0;
+    for (const auto& p : pools_)
+        cur += p.current;
+    const int64_t named = static_cast<int64_t>(named_context_) + static_cast<int64_t>(named_library_) +
+                          static_cast<int64_t>(named_arena_);
+    const int64_t residual = static_cast<int64_t>(used) - cur - named;
+    return residual > 0 ? static_cast<size_t>(residual) : 0;
 }
 
 void MemAccount::set_named_charges(size_t context_bytes, size_t library_bytes, size_t arena_bytes,

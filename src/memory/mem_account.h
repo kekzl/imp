@@ -86,6 +86,8 @@ public:
     //              forward pass (docs/MEMORY_ARCHITECTURE.md A1.5)
     //   arena    — engine-persistent tier reservation (its high-water is what
     //              the planner should eventually use)
+    size_t unattributed_bytes() const;
+
     void set_named_charges(size_t context_bytes, size_t library_bytes, size_t arena_bytes,
                            size_t arena_high_water);
 
