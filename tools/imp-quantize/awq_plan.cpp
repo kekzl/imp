@@ -102,6 +102,58 @@ bool fetch_matrix(const std::map<std::string, const RawTensor*>& index, const Pl
     return true;
 }
 
+// The fold's safety condition, and the reason this function exists.
+//
+// Dividing a norm's weight by s divides its OUTPUT by s — for EVERY consumer of
+// that norm, not just the ones in the group. Each consumer only stays correct
+// if its own columns were multiplied by the same s. So a norm may be folded
+// only when every 2-D consumer of it is a group member.
+//
+// This is not hypothetical. Two weight roles are deliberately excluded from
+// quantization (MLA latent projections, MoE router) and therefore never receive
+// the compensating column scale — and the MoE router reads exactly the norm
+// group B folds into. A MoE checkpoint whose expert names happened to match
+// would have had its router silently fed inputs divided by s.
+//
+// `extra` lists consumer names that are NOT members; the fold is refused if any
+// of them exists in the checkpoint.
+bool fold_is_safe(const std::map<std::string, const RawTensor*>& index,
+                  const std::vector<std::string>& extra_consumers, std::string& blocker) {
+    for (const auto& name : extra_consumers) {
+        if (index.count(name)) {
+            blocker = name;
+            return false;
+        }
+    }
+    return true;
+}
+
+// Every 2-D `.weight` under `prefix` that is not a member and not explicitly
+// exempt. Used to catch consumers this file does not know about by name — a new
+// architecture adding a second reader of a pre-norm must not silently break the
+// fold.
+std::vector<std::string> unlisted_consumers(const std::map<std::string, const RawTensor*>& index,
+                                            const std::string& prefix,
+                                            const std::vector<std::string>& members,
+                                            const std::vector<std::string>& exempt_suffixes) {
+    std::vector<std::string> out;
+    for (const auto& [name, t] : index) {
+        if (name.rfind(prefix, 0) != 0 || t->shape.size() != 2)
+            continue;
+        if (name.size() < 7 || name.compare(name.size() - 7, 7, ".weight") != 0)
+            continue;
+        if (std::find(members.begin(), members.end(), name) != members.end())
+            continue;
+        bool skip = false;
+        for (const auto& suf : exempt_suffixes)
+            if (name.size() >= suf.size() && name.compare(name.size() - suf.size(), suf.size(), suf) == 0)
+                skip = true;
+        if (!skip)
+            out.push_back(name);
+    }
+    return out;
+}
+
 // Runs one group: search, then record the column scales and the fold. Returns
 // false only on a hard error; a skipped group is reported through `plan`.
 bool run_group(const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats, int layer,
@@ -315,13 +367,24 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
                         act[i] = std::max(act[i], e->mean_abs[i]);
             }
             const std::string norm = base + "input_layernorm.weight";
-            if (!members.empty() && !act.empty() && index.count(norm)) {
+            // o_proj reads the attention output, not this norm, so it is exempt.
+            // Anything else 2-D under self_attn. IS a consumer — notably MLA's
+            // kv_a_proj_with_mqa, which is excluded from quantization and so
+            // would never get the compensating scale.
+            std::string blocker;
+            const std::vector<std::string> extra = unlisted_consumers(index, base + "self_attn.", members,
+                                                                      {"o_proj.weight"});
+            if (!members.empty() && !act.empty() && index.count(norm) &&
+                fold_is_safe(index, extra, blocker)) {
                 if (!run_group(index, stats, static_cast<int>(L), "WQ", members, act, plan, res, err))
                     return false;
                 if (res.alpha != 0.0f)
                     plan.vec_div[norm] = res.s;
             } else {
                 plan.groups_skipped++;
+                if (!blocker.empty())
+                    plan.notes.push_back("layer " + std::to_string(L) + " q/k/v: no fold — " + blocker +
+                                         " also reads input_layernorm but is not scaled");
             }
         }
 
@@ -345,13 +408,36 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
                         act[i] = std::max(act[i], e->mean_abs[i]);
             }
             const std::string norm = base + "post_attention_layernorm.weight";
-            if (!members.empty() && !act.empty() && index.count(norm)) {
+            // down_proj reads the SwiGLU product, not this norm, so it is exempt.
+            // Everything else 2-D under mlp. IS a consumer: the MoE router
+            // (`mlp.gate.weight`, excluded from quantization), every routed
+            // expert's gate/up, and shared-expert gate/up. On a MoE checkpoint
+            // this refuses the fold rather than dividing the router's input by a
+            // scale the router never receives.
+            std::string blocker;
+            const std::vector<std::string> extra = unlisted_consumers(index, base + "mlp.", members,
+                                                                      {"down_proj.weight"});
+            if (!members.empty() && !act.empty() && index.count(norm) &&
+                fold_is_safe(index, extra, blocker)) {
                 if (!run_group(index, stats, static_cast<int>(L), "W_GATE", members, act, plan, res, err))
                     return false;
                 if (res.alpha != 0.0f)
                     plan.vec_div[norm] = res.s;
             } else {
                 plan.groups_skipped++;
+                if (!blocker.empty()) {
+                    plan.notes.push_back("layer " + std::to_string(L) + " gate/up: no fold — " + blocker +
+                                         " also reads post_attention_layernorm but is not scaled");
+                } else if (members.empty() && index.count(base + "mlp.experts.0.gate_proj.weight")) {
+                    // MoE layer: the FFN weight is in per-expert tensors this
+                    // planner does not group, so the experts — the bulk of the
+                    // model — stay at round-to-nearest. Say so; a silent bump of
+                    // `skipped` reads like a technicality rather than "most of
+                    // the weights were not calibrated".
+                    plan.notes.push_back("layer " + std::to_string(L) +
+                                         ": MoE experts NOT calibrated (per-expert groups are not "
+                                         "modelled yet) — they stay round-to-nearest");
+                }
             }
         }
 
