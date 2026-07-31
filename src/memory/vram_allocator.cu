@@ -1,4 +1,7 @@
 #include "memory/vram_allocator.h"
+#include "memory/mem_account.h"
+
+#include <string>
 #include "memory/vram_query.h"
 #include "core/logging.h"
 
@@ -60,11 +63,19 @@ void* VRAMAllocator::allocate(size_t bytes, const char* tag, bool bypass_headroo
         return nullptr;
     }
 
+    const char* pool = tag ? tag : "unknown";
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        alloc_map_[ptr] = {bytes, tag ? tag : "unknown"};
+        alloc_map_[ptr] = {bytes, pool};
     }
     allocated_.fetch_add(bytes, std::memory_order_relaxed);
+    // Attribution (criterion 6). Every allocation through here already carries
+    // the tag its caller chose, and free() looks the bytes back up — so the
+    // report can name the charge instead of leaving it in the residual. Doing
+    // it HERE rather than at each call site is what makes it complete: the
+    // executor's auxiliary buffers alone are 15 call sites in one file, and
+    // none of them was accounted before.
+    MemAccount::instance().note(pool, static_cast<std::ptrdiff_t>(bytes));
 
     return ptr;
 }
@@ -74,11 +85,13 @@ void VRAMAllocator::free(void* ptr) {
         return;
 
     size_t bytes = 0;
+    std::string pool;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         auto it = alloc_map_.find(ptr);
         if (it != alloc_map_.end()) {
             bytes = it->second.bytes;
+            pool = it->second.tag;
             alloc_map_.erase(it);
         }
     }
@@ -87,6 +100,9 @@ void VRAMAllocator::free(void* ptr) {
 
     if (bytes > 0) {
         allocated_.fetch_sub(bytes, std::memory_order_relaxed);
+        // Symmetric with allocate(): the map knew both halves, so the pool
+        // never drifts on a free.
+        MemAccount::instance().note(pool.c_str(), -static_cast<std::ptrdiff_t>(bytes));
     }
 }
 

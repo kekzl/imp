@@ -134,6 +134,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   dependencies — for anything richer, point Open WebUI at the same server.
 
 ### Changed
+- **`--mem-report` names every VRAMAllocator charge instead of estimating the
+  executor's.** Attribution moved into `VRAMAllocator::allocate()/free()`, which
+  already knew the caller's tag and the byte count on both sides, so the table
+  is now per-charge (`shared_workspace`, `persistent_workspace`, `kv_cache`,
+  `moe_3x_packed`, `cutlass_act_data`, …) rather than one `workspace_estimate()`
+  line that both double-counted the two slabs it covered and missed every
+  auxiliary buffer. The explicit `KV_BLOCK_POOL` / `EXEC_WORKSPACES` notes are
+  gone with it; the weight and weight-cache notes stay, because those allocate
+  through `cudaMallocAsync` where the allocator never sees them. Diagnostics
+  only — no allocation behaviour changes.
+
 - **A7 step 8 is done: the `compute/` scratches that outlive a request now come
   from the engine-persistent (T2) arena.** Four PRs' worth — the DRY penalty
   staging, the cuBLAS/CUTLASS workspaces (which also found a 512 MiB
