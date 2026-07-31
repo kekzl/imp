@@ -59,13 +59,13 @@ void for_each_weight(const Model& model, F&& f) {
 
 std::string ExecT2Demand::describe() const {
     constexpr double kMiB = 1024.0 * 1024.0;
-    char buf[384];
+    char buf[448];
     std::snprintf(buf, sizeof(buf),
                   "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f + fp8red %.2f + quant %.2f "
-                  "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f MiB",
+                  "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f + chunkcap %.1f MiB",
                   mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, moe_arrays / kMiB,
                   fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB, mla_scratch / kMiB,
-                  dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB, imma_scratch / kMiB);
+                  dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB, imma_scratch / kMiB, chunk_capture / kMiB);
     return buf;
 }
 
@@ -89,6 +89,16 @@ ExecShape exec_shape_of(const Model& model) {
     s.ssm_dt_rank = cfg.ssm_dt_rank;
     s.n_experts_active = cfg.n_experts_active;
     s.n_layers = cfg.n_layers;
+    // Per-layer maxima for the chunk-capture scratch — see ExecShape.
+    for (int x : cfg.n_kv_heads_per_layer)
+        s.kv_heads_max = std::max(s.kv_heads_max, x);
+    if (s.kv_heads_max <= 0)
+        s.kv_heads_max = cfg.n_kv_heads;
+    for (int x : cfg.head_dim_per_layer)
+        s.head_dim_max = std::max(s.head_dim_max, x);
+    if (s.head_dim_max <= 0)
+        s.head_dim_max = cfg.head_dim > 0 ? cfg.head_dim
+                                          : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
     s.kv_lora_rank = cfg.kv_lora_rank;
     s.qk_rope_head_dim = cfg.qk_rope_head_dim;
     s.qk_nope_head_dim = cfg.qk_nope_head_dim;
@@ -346,6 +356,19 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         out.imma_scratch = rows * k + rows * (k / 32) * 6 + kExecImmaSplitkBytes + 4 * 256;
     }
 
+    // Chunk-capture K/V pair (executor_workspace_buffers.cu,
+    // ensure_chunk_capture_scratch). Two buffers of ctx * kv_heads * head_dim
+    // halves each. It used to be the one exec/ buffer left out of the T2
+    // migration because it grows and "a bump arena strands it" — which is true
+    // of the intermediate takes, not of taking the bound once, so it is charged
+    // here and the site takes it at this size (A7 step 4b.2, AUDIT B13).
+    if (shape.capture_ctx_cap > 0 && shape.kv_heads_max > 0 && shape.head_dim_max > 0) {
+        const size_t ctx = static_cast<size_t>(shape.capture_ctx_cap);
+        out.chunk_capture = 2 * ctx * static_cast<size_t>(shape.kv_heads_max) *
+                                static_cast<size_t>(shape.head_dim_max) * sizeof(uint16_t) +
+                            2 * 256;
+    }
+
     // CUTLASS 3.x grouped staging + workspace, for MoE models only — the same
     // gate engine.cpp puts on the prewarm. The workspace half is a MEASURED
     // 152 320 B rounded to 1 MiB, not the 512 MiB the pre-arena code reserved
@@ -418,11 +441,12 @@ int exec_max_tokens(const Model& model, int max_seq_len) {
 int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_of(model)); }
 
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size,
-                            bool use_fp8_prefill, bool mla_absorb) {
+                            bool use_fp8_prefill, bool mla_absorb, int capture_ctx_cap) {
     ExecShape shape = exec_shape_of(model);
     shape.max_batch_size = max_batch_size;
     shape.use_fp8_prefill = use_fp8_prefill;
     shape.mla_absorb = mla_absorb;
+    shape.capture_ctx_cap = capture_ctx_cap;
     return exec_t2_demand(shape, max_seq_len);
 }
 

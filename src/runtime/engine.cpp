@@ -857,8 +857,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // per-tenant demand rather than a constant; the constant is only a floor
     // for the tenants not migrated yet.
     {
+        // capture_ctx_cap mirrors engine_spec_capture.cpp: the chunk-capture
+        // scratch is sized from min(the configured cap, max_seq_len), and is
+        // charged only when speculation can actually take that path.
+        const int capture_cap =
+            runtime_config_.speculative.capture
+                ? (config_.max_seq_len > 0
+                       ? std::min(runtime_config_.speculative.capture_ctx_cap, config_.max_seq_len)
+                       : runtime_config_.speculative.capture_ctx_cap)
+                : 0;
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
-                                      config_.use_fp8_prefill, runtime_config_.attention.mla_absorb);
+                                      config_.use_fp8_prefill, runtime_config_.attention.mla_absorb,
+                                      capture_cap);
         // +1/8 for 256-byte alignment padding across the arena's takes.
         const size_t cap = std::max(kEngineArenaDefaultBytes, d.total() + d.total() / 8);
         IMP_LOG_INFO("engine arena demand: %s -> %.1f MiB reserved", d.describe().c_str(),
