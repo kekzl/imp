@@ -854,6 +854,8 @@ state explains it. It does not — there is no persistence (A1.6, verified: zero
 file I/O in `gemm.cu`). Recording it here closes the question; it is not a design
 input.
 
+**The measurement window, not the charge, is what varies (B79).** The reserve reads 0 / 2 / 4182 / 7460 MiB across configs because `report_library_reserve()` anchors immediately before the warmup forward, and which library claims before that point depends on the model's execution path — the NVFP4 cache build runs CUTLASS two phases earlier. On 30B-A3B-NVFP4 the unmeasured remainder is the 2239 MiB residual, confirmed by the invariance A1.5 defines the charge by (identical at batch 1 and 8, +27.7 MiB across a 4x context). The fix is an earlier anchor; it changes what the plan charges on every model, so it is its own pass.
+
 **Not covered by any of this: the ~3.9 GiB library reservation (F4).** It is not
 a workspace imp allocates; it is claimed by the libraries themselves on first
 dispatch. The plan charges it (A4.2) and `--mem-report` names it. Reducing it is
