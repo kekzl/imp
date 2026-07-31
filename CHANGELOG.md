@@ -179,6 +179,22 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **The sampler drew the same quantile on every token.** The engine hands the
+  device samplers `base_seed + step` — consecutive integers, one per generated
+  token — and they took a single LCG step from it. An LCG's first output is
+  affine in its seed, so `seed + 1` moved the drawn float by
+  `1664525 / 2^32 ≈ 0.0004`: across a whole generation the draw was effectively
+  constant and the sampler kept picking the same RANK out of the candidate list.
+  At the usual `top_k` that rank is the argmax, so the output read as fluent
+  greedy text and the bug hid in plain sight; what it cost was the sampling
+  diversity that `temperature`, `top_p` and `top_k` are supposed to provide.
+  Measured on a synthetic distribution with three near-equal winners: 200
+  consecutive seeds produced **one** distinct token before, **seven** after.
+  Fixed by running the seed through a splitmix32 finalizer before the first
+  draw — four ALU ops, and the same seed still produces the same token, so
+  seeded reproducibility is unchanged. Pinned by
+  `SamplerSeeding.ConsecutiveSeedsDoNotAllDrawTheSameToken`.
+
 - **A CUDA graph could replay a kernel whose scratch pointer had been freed
   underneath it** (AUDIT B13). Six `compute/` statics grew on demand with a
   `cudaFree` + `cudaMalloc` pair, and the freed address was in some cases still

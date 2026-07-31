@@ -264,7 +264,7 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
         norm += s_val[i];
     float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
 
-    unsigned int rng_state = seed;
+    unsigned int rng_state = sampler_seed_scramble(seed);
     float r = lcg_rand_float(rng_state);
     float acc = 0.0f;
     int chosen = s_idx[0];
@@ -477,7 +477,7 @@ __global__ void topp_sample_from_sorted_kernel(const float* __restrict__ sorted_
         norm += sorted_probs[i];
     float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
 
-    unsigned int rng_state = seed;
+    unsigned int rng_state = sampler_seed_scramble(seed);
     float r = lcg_rand_float(rng_state);
 
     float acc = 0.0f;
