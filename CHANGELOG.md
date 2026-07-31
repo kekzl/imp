@@ -322,270 +322,120 @@ matrix for the external hardening brief that seeded the campaign:
 
 Highlights: first cross-engine PPL-parity measurement (release bar 1) with two
 real tokenizer/quant fixes out of it; dense n-gram speculation now wins long
-context (#964); FP8 KV auto-on for hint-less Qwen3 GGUFs (+41% @16k); batched
-serving 861→1173 tok/s @16 (above the published vLLM reference); suspend/resume
-and warm weight cache; competitive re-sweep vs llama.cpp b9976 (dense +42–48%,
-hybrid +18%, Gemma-4 +21%; gpt-oss now a statistical tie — #984).
+context (#964); FP8 KV auto-on for hint-less Qwen3 GGUFs (+41% at 16k); batched
+serving 861 → 1173 tok/s at 16 streams (above the published vLLM reference);
+suspend/resume and warm weight cache; competitive re-sweep vs llama.cpp b9976
+(dense +42-48%, hybrid +18%, Gemma-4 +21%; gpt-oss now a statistical tie — #984).
+
+### Added
+- **Suspend to RAM** (`POST /admin/suspend` / `POST /admin/resume`): park the
+  loaded weights in host RAM and free the GPU completely, then resume serving in
+  seconds. Only the weights stay warm — sessions and KV do not survive. Models
+  whose device buffers are transformed in place (native MXFP4 GGUF, gpt-oss,
+  Gemma-4 fused experts) answer a clean 501, and capture is gated on host
+  `MemAvailable` (507) rather than driving the host into swap. Config:
+  `[suspend]`; C API: `imp_weights_snapshot_*`, `imp_gpu_release`.
+- **On-disk warm weight cache** (`[warm_cache] enabled`, default on): the first
+  cold load persists its *transformed* uploads (BF16→FP16 conversions, GPU
+  dequants, split layouts) to `~/.cache/imp/warm`; later boots mmap them and skip
+  the conversion. Raw quant payloads are never duplicated, so the cache is
+  near-zero for GGUF and NVFP4 and ~model-size for BF16-dense, where it saves the
+  most. Version- and fingerprint-guarded; a stale cache means a normal cold load.
+- **`diagnostics.ppl_first` / `diagnostics.ppl_last`**: NLL counting window for
+  `imp-cli --perplexity`, matching llama-perplexity's `first = n_ctx/2` for exact
+  cross-engine alignment. Recipe and results:
+  `docs/audit/ppl_parity_2026_07_12.md`.
 
 ### Changed
-- **Depth-aware speculation gate replaces the dense draft context cap**
-  (#964 stage 2): the residual long-context loss after stage 1 was never
-  a context cost — it was draft depth. A verify step costs ~1.4× a decode
-  step at 512 ctx rising to ~2.6× at 16k, so 1-token drafts stop paying
-  past ~14k while 3-token drafts win +24% at 13k (the bench prompts
-  happen to produce different n-gram depths per length, which is what
-  the "cliff" actually was). New `speculative.shallow_draft_ctx`
-  (default 12288): past that request context, 1-token n-gram/suffix
-  drafts are discarded and the miss-burst path serves the step at plain
-  decode speed; depth ≥ 2 always verifies. `speculative.draft_ctx_cap`
-  now defaults 0 (off). Measured with pure defaults (Qwen3-8B Q8_0,
-  msl 16384, vs speculation off): **+45% @512, +27% @13312 (deep
-  drafts, previously capped away), −0.6% @15872 (shallow drafts,
-  previously −23%)**.
-- **Dense n-gram speculation now WINS on long context** (#964 structural
-  fix, stage 1): the verify chunk's attention runs on the batched-decode
-  split-K paged kernels — chunk rows become same-KV "sequences" with
-  per-row context lens (causality by construction), reading quantized KV
-  directly — instead of the small-M prefill FA2 tile plus a full-context
-  FP16 KV gather (557 → ~65 µs/layer at 16k; also why FP8 KV never moved
-  the verify cost). New finer capture buckets {3,5} keep the baked
-  split-K geometry close to the real 2-row draft (a 9-row pad halved the
-  split count 4×). Measured route+capture vs speculation-off (Qwen3-8B
-  Q8_0, 3 trials): **+44% @512, +43% @2k, +25% @8k, +29% @12288** — the
-  pre-fix numbers were −8/−16/−32/−62%. `speculative.draft_ctx_cap`
-  default rises 2048 → 12288; the near-msl band (15872 @ msl 16384)
-  still loses −23% (capture-ready ceiling + weight-bound small-M verify
-  GEMMs + per-step host work — follow-ups in #964). Output stays
-  token-identical to plain greedy. Opt out with
-  `speculative.verify_decode_attn = false`. Note: `imp-cli --bench`
-  pins the verify EAGER (`speculative.capture=false`) by design — the
-  full win shows on the server/captured path; pass
-  `--set speculative.capture=true` to reproduce it in the CLI.
-- **FP8 KV cache now auto-enables on GGUF Qwen3 dense/MoE**
-  (`kv_cache.dtype = "auto"`): the auto policy previously honored only the
-  checkpoint's `kv_cache_quant_algo=FP8` hint, which GGUF exports never
-  declare — long-context GGUF decode was leaving −39..41% on the table
-  (Qwen3-8B Q8_0 at 16k context: 150 → 211 tok/s with FP8 KV). A new
-  stricter no-hint arch gate (`kv_fp8_no_hint_default_safe`) upgrades
-  hint-less checkpoints for families measured PPL-neutral at 16k
-  (teacher-forced, ~13.5k-token corpus, fresh process per run): QWEN3
-  (Q8_0 +0.05%, Q6_K +0.10%, bit-stable) and QWEN3_MOE (Q4_K_M −0.15%,
-  3 runs/arm). Measured but excluded: QWEN36_MOE (GGUF neutral, but the
-  arch-wide flip would cost the NVFP4 35B a real +1.47% PPL and hybrids
-  have little KV surface to win back) and LLAMA (gate-corpus baseline
-  broken). Short-context decode is not a trade-off either: same-day
-  baseline-method tg128 reads +2.9% with FP8 KV (287.8 vs 279.7 median).
-  The perf baseline is deliberately NOT re-pinned in this PR — it was
-  measured on a top-of-range host day and baking it in would repeat the
-  #697 peak-day false-fail; the existing (FP16-measured) bar stays valid
-  and conservative under the faster FP8 default. Opt out with
-  `kv_cache.dtype = "fp16"`.
-- **`gemm.nvfp4_lm_head_cutlass` is now default ON** — the batched-decode
-  (n>1) LM head runs as one CUTLASS NVFP4 tensor-core GEMM (one LM-head
-  weight read per batch instead of ceil(n/4)), which was the opt-in behind
-  +8% aggregate concurrent decode @16 and the 1 173 tok/s Coder-30B
-  headline. The PPL trade is now measured per family (teacher-forced,
-  13.5k-token corpus): +1.9–2.1% on MoE/hybrid (Coder-30B 10.19→10.38,
-  Modelopt-30B 11.65→11.88, Qwen3.6-35B 13.39→13.66), +0.2–0.5% on dense —
-  within the ±0.3–0.5% run-to-run spread. Batch=1 output is bit-identical
-  either way: the spec-decode verify LM head now explicitly keeps the
-  FP16-activation GEMV (`for_each_lm_head_batch_` gained an
-  `allow_cutlass` switch; only the perplexity harness measures the CUTLASS
-  path), and the SfAtom scale VRAM (19–47 MiB) is only allocated when
-  `max_batch_size > 1`. Set `gemm.nvfp4_lm_head_cutlass = false` for
-  maximum batched-serving coherence.
-- **Pipelined batched decode** (`runtime.decode_pipeline`, default on): at
-  n≥2 with CUDA graphs, the engine keeps ONE decode step in flight — step
-  N+1 (a device-side chain-advance kernel feeds step N's sampled slot
-  tokens as input ids and bumps positions/context lens/block tables, then
-  the forward graph replays and the per-row samplers enqueue into a second
-  slot-parity half) is enqueued BEFORE step N's tokens are read back, and
-  the host waits on an event recorded after step N's gather only. Host
-  bookkeeping, scheduler work and SSE delivery now overlap GPU compute
-  instead of idling it. Measured on Qwen3-Coder-30B-A3B-FP4 @16 sustained
-  closed-loop STREAMING serving (the mode where per-token host work is
-  real): 915 → 970 tok/s aggregate median (+6.0%, 6 trials each, healthy
-  clocks sampled during runs), TPOT 17.0 → 16.1 ms; non-streaming @16 is
-  parity within the harness noise, single-stream (n=1 never pipelines)
-  unchanged.
-  Engages for async-sampleable rows (greedy / top-k ≤ 128 / top-p / min-p /
-  typical-p; rep/freq/presence penalties — the server default — are served
-  via a per-row device-side token history that the chain-advance kernel
-  keeps current) on non-SSM models without SWA/StreamingLLM/residual-KV;
-  DRY/constraints/logprobs/mirostat/logit-bias rows and everything else
-  keep the per-step path unchanged. Rows that stop while
-  a chained step is in flight have their KV release deferred until that
-  step completes (`drain_decode_pipeline`); uniform-composition runs are
-  bit-identical to the per-step path (pinned by
-  `EngineIntegrationTest.PipelinedBatchedDecodeMatchesPerStep`).
-- **Concurrent decode @16 on the hero MoE: 861 → 1 173 tok/s sustained
-  (+36%)** — now above the published vLLM reference for the same model class
-  on an RTX 5090 (1 157 aggregate / 13.6 ms TPOT, cloudrift.ai) at per-stream
-  TPOT parity, with single-stream decode unchanged (396 tok/s, 5.4× vLLM).
-  Four batched-serving fixes, each nsys-attributed:
-  (1) batched sampling readback — the per-row pageable 4-byte D2H + stream
-  sync (~850 µs blocked host time per sequence per step, 29% GPU idle @16)
-  becomes one pinned strided D2H + one sync per step;
-  (2) row-parallel top-k/top-p — n serialized `<<<64>>>`+`<<<1>>>` launch
-  pairs (~10% of GPU time) become ONE partial + ONE finalize launch for the
-  whole batch (bit-identical tokens: same per-row reduction geometry/seeds);
-  (3) per-MoE-layer residual copies switch from cudaMemcpyAsync (WSL2 WDDM
-  DMA submission blocks the host ~165 µs per call) to a vectorized copy
-  kernel;
-  (4) the engine-static banned-token list is cached on device instead of
-  cudaMallocAsync+upload+free per row per step.
-  degen_suite 22/22; sampling identity test pins async == sync tokens.
+- **Dense n-gram speculation now WINS on long context** (#964). The verify chunk
+  moved off the small-M prefill FA2 tile onto the batched-decode split-K paged
+  kernels — 557 → ~65 µs/layer at 16k — and a depth-aware gate
+  (`speculative.shallow_draft_ctx`, default 12288) discards 1-token drafts past
+  the point where a verify stops paying for itself. Versus speculation off
+  (Qwen3-8B Q8_0): **+45% at 512 ctx, +27% at 13312, −0.6% at 15872**, where the
+  same three points read −8% / −23% / −62% before. Output stays token-identical
+  to plain greedy. `speculative.draft_ctx_cap`, the interim gate, now defaults 0.
+- **FP8 KV cache auto-enables on GGUF Qwen3 dense/MoE** (`kv_cache.dtype =
+  "auto"`): GGUF exports never declare the FP8 hint the auto policy required, so
+  long-context GGUF decode was leaving ~40% on the table (Qwen3-8B Q8_0 at 16k:
+  150 → 211 tok/s). A stricter no-hint arch gate admits only families measured
+  PPL-neutral at 16k (QWEN3, QWEN3_MOE, ≤0.15%); which families stay excluded and
+  why is in `docs/roadmap.md`. Opt out with `kv_cache.dtype = "fp16"`.
+- **Concurrent decode at 16 streams: 861 → 1173 tok/s (+36%)** on
+  Qwen3-Coder-30B-A3B-FP4 — above the published vLLM reference for this model
+  class on a 5090 at per-stream TPOT parity, with single-stream decode unchanged.
+  Four nsys-attributed fixes: one pinned strided sampling readback per step
+  instead of a pageable one per row (which blocked the host ~850 µs per sequence
+  per step), row-parallel top-k/top-p, a vectorized copy kernel for the
+  per-MoE-layer residuals (WSL2 WDDM blocks the host ~165 µs per
+  `cudaMemcpyAsync`), and a device-cached banned-token list.
+- **Pipelined batched decode** (`runtime.decode_pipeline`, default on): at n≥2
+  with CUDA graphs the engine keeps one decode step in flight, so host
+  bookkeeping, scheduling and SSE delivery overlap GPU compute instead of idling
+  it. Coder-30B-FP4 at 16 sustained streaming: 915 → 970 tok/s (+6.0%), TPOT 17.0
+  → 16.1 ms; n=1 never pipelines. Uniform-composition runs are bit-identical to
+  the per-step path (`EngineIntegrationTest.PipelinedBatchedDecodeMatchesPerStep`).
+- **`gemm.nvfp4_lm_head_cutlass` is now default ON** — the batched-decode LM head
+  runs as one CUTLASS NVFP4 GEMM, one head weight read per batch instead of
+  ceil(n/4); this was the opt-in behind the 1173 tok/s headline. Measured PPL cost
+  +1.9-2.1% on MoE/hybrid, +0.2-0.5% on dense (inside run-to-run spread), and
+  batch=1 output is bit-identical either way. Set it false for maximum
+  batched-serving coherence.
+- **FP8 SSM-projection decode sidecar extended to GGUF hybrids**
+  (`gemm.fp8_ssm_proj`, default on): the Q8_0-kept GDN projections of UD quants
+  were in no decode cache at all and paid a dequant→cuBLAS round-trip per token.
+  Qwen3.6-35B-A3B UD-Q4_K_M decode 224.4 → 272.0 tok/s (+21%), now ahead of
+  llama.cpp's ~229; PPL +1.8%, a documented trade — `--set
+  gemm.fp8_ssm_proj=false` reverts. Sub-8-bit GDN sources are excluded on purpose
+  (FP8 would *increase* their decode bytes).
+- **Roofline baseline re-pinned** (`cf1b382a_20260711_193211`, config_version 4),
+  the old pin predating FA2-hd256 (#932) and the FP8 sidecar (#949/#962). Adds an
+  `nvfp4-hybrid` cell — first kernel-level coverage of Qwen3.6-35B — and reaches
+  0 unclassified kernels, from 51-63% of the q4k-moe prefill window.
 
-- **Roofline baseline re-pinned** (`cf1b382a_20260711_193211`, config_version
-  4): the old pin predated FA2-hd256 (#932), the FP8 SSM sidecar (#949/#962)
-  and this week's decode fixes. New `nvfp4-hybrid` cell gives Qwen3.6-35B
-  kernel-level coverage for the first time (decode: NVFP4 GEMV 34% of window
-  at 25.9% roofline, FP8 sidecar GEMV 22.7% at 57%, paged attention 14% at
-  1.5%). Kernel classification completed (0 unclassified, was 51-63% of the
-  q4k-moe prefill window). Kernel-level confirmation that #932 removed the
-  hd=256 legacy-attention fallback (0.0% share, was 80% of attention).
+### Fixed
+- **Qwen3.5/3.6 GGUF tokenization was non-canonical**: `tokenizer.ggml.pre =
+  "qwen35"` fell through to the gpt2 per-char-punct fallback, over-splitting
+  symbol runs by +13% tokens on a 95 KB corpus. It now routes to the qwen2
+  scanner, with token streams verified identical to `llama-tokenize`. Found by
+  the first PPL-parity sweep (`docs/audit/ppl_parity_2026_07_12.md`).
+- **The NVFP4-LM-head opt-outs were dead on GGUF checkpoints**: the
+  quantized-source cache collector added the head unconditionally, so
+  `gemm.nvfp4_lm_head=false` and the GOAL-listed `gemm.nvfp4_lm_head_gdn=false`
+  silently did nothing — and that head's quantization is the entire cross-engine
+  PPL gap vs llama.cpp (+1.5…+4.8%, model-size-dependent). Defaults are
+  byte-identical.
+- **Qwen3.6-35B illegal memory access / silent garbage past 16k context** (#963):
+  when StreamingLLM auto-enabled, eviction retained a ceil-aligned sliding window
+  while the paged decode kernels start reading floor-aligned, so they read a freed
+  −1 sentinel block — an IMA on a VRAM-full card, silent out-of-bounds attention
+  otherwise. Eviction now keeps one extra boundary block, and the paged loops skip
+  negative sentinels outright.
+- **gemma-3-12b GGUF decode illegal-memory-access**, the last hard crash in the
+  known-issues list: gemma-3's NVFP4 decode cache must be built from an FP16
+  companion, and VRAM-budget starvation silently dropped 35 of 49 tensors to the
+  from-scratch build that corrupts decode. Those weights now stay on the
+  dequant-at-decode path — a bandwidth loss on the uncached fraction, never
+  garbage. Pinned by `tests/test_nvfp4_gemv_gemma3_dims.cu`.
+- **KV floor now covers the full advertised context on cheap-KV models** (#963
+  follow-up): the old min(16384, 4×max_seq_len) floor gave a hybrid a 16.4k pool
+  that a 16k prompt fills to 94%, tripping the StreamingLLM valve on a request
+  that fits outright. When full coverage plus 12.5% headroom costs ≤1 GiB the
+  floor now takes it; expensive-KV models keep the old floor.
+- **Greedy request-order independence in default mode** — the documented "30B
+  NVFP4 MoE nondeterministic at temp=0" flipper: the first request of a process
+  ran one decode step on a different kernel mix than every later one, flipping
+  greedy output on near-tie logits. The decode graph pool is now pre-armed in
+  warmup and `runtime.warmup` defaults true (+2-4 s init on a 30B). Verified 3
+  fresh processes × 12 requests = 36/36 byte-identical. See `docs/determinism.md`.
 
 ### Removed
 - **`gemm.nvfp4_ssm_proj`** (the 2026-05-30 opt-in forcing GGUF-hybrid GDN
-  projections into the NVFP4 decode cache): bit-rotted in the tier refactors
-  (measured 71 tok/s vs its original 248 on Qwen3.6-35B Q4_K_M) and superseded
-  by the GGUF branch of `gemm.fp8_ssm_proj` (#962), which is faster than the
-  flag ever was and quality-safer than 4-bit into the recurrent scan. Stale
-  `imp.conf` entries now log the standard unknown-key warning and are ignored.
-
-
-### Changed
-- **FP8 SSM-projection decode sidecar extended to GGUF hybrids**
-  (`gemm.fp8_ssm_proj`, default on): the Q8_0-kept GDN projections of UD
-  quants (ssm_in / gdn_gate / ssm_out) were in no decode cache at all
-  (Undefined tier, quality-locked out of NVFP4) and paid a full
-  dequant→cuBLAS round-trip per decode token. They are now dequanted once at
-  init and per-row FP8-quantized into the same sidecar the native-NVFP4 path
-  uses; prefill keeps the Q8_0 source. Qwen3.6-35B-A3B UD-Q4_K_M decode
-  224.4 → 272.0 tok/s defaults (+21%, spec-off 219.2 → 265.9) — now ahead of
-  llama.cpp (~229). PPL 4.215 → 4.289 (+1.8% on the 201-token corpus, E4M3
-  stacked on the Q8_0 lattice) — a documented trade in the
-  `nvfp4_lm_head_gdn` class; `--set gemm.fp8_ssm_proj=false` reverts.
-  degen_suite 33/33; native-NVFP4 and dense paths measured unchanged.
-  Sub-8-bit GDN sources (plain Q4_K_M GGUFs) are deliberately excluded (FP8
-  would increase their decode bytes). Adds a kernel-chain regression test
-  (Q8_0 → dequant → FP8 rows → rowscale GEMV vs fp64 reference).
-
-### Fixed
-- **Qwen3.5/3.6 GGUF tokenization was non-canonical** (`tokenizer.ggml.pre =
-  "qwen35"` fell through to the gpt2 per-char-punct fallback): symbol runs
-  were over-split — +13% tokens on a 95 KB docs corpus (35 807 vs 31 620) and
-  off-distribution splits on every real prompt. "qwen35" (qwen2 rules plus
-  `\p{M}` in the letter run, which the scanner's letter classifier already
-  covers) now routes to the qwen2 scanner; token streams verified IDENTICAL
-  to `llama-tokenize` on the 35B hero. Found by the first release-bar-1
-  PPL-parity sweep (`docs/audit/ppl_parity_2026_07_12.md`).
-- **The NVFP4-LM-head opt-outs were dead on GGUF checkpoints**: the
-  quantized-source decode-cache collector added the LM head unconditionally,
-  so `gemm.nvfp4_lm_head=false` and the GOAL-listed
-  `gemm.nvfp4_lm_head_gdn=false` trade opt-out silently did nothing for GGUF
-  models (the head's NVFP4 quantization costs +1.5…+4.8% teacher-forced PPL,
-  model-size-dependent — the entire cross-engine PPL gap vs llama.cpp, see
-  the audit doc). The collector now applies the same gates as the
-  native-precision paths; defaults (both flags on) are byte-identical.
-- **KV floor now covers the full advertised context on cheap-KV models**
-  (#963 follow-up): the auto floor was min(16384, 4×max_seq_len), so a
-  max_seq_len=17408 hybrid (10 attention layers, ~0.3 MiB/block) got a
-  16.4k-token pool that a 16k prompt fills to 94% — tripping the >90%
-  StreamingLLM valve (CUDA graphs off, windowed attention) on a request
-  that fits outright. When full coverage plus 12.5% streaming headroom
-  costs ≤1 GiB, the floor now takes it; expensive-KV models (dense 64k ≈
-  9 GiB) keep the old floor, and the kv_fraction affordability cap keeps
-  protecting the weight-cache budget either way.
-- **Default-on n-gram speculation regressed long-context decode** (#964,
-  partial): the chunk verify runs the FA2 prefill tile over the full context
-  plus a paged-KV gather, costing ~2.1× a decode step at 2k ctx and ~5.2× at
-  16k (nsys: +2.05 s fmha_sm120_fa2 + 0.32 s paged_kv_gather in a 96-token
-  decode window) while paying out at most k+1 tokens — end-to-end −4% @2k,
-  −15% @8k, −62% @16k on Qwen3-8B Q8_0 even at 100% draft accept. Root
-  cause: the captured verify is sized to the pow2 ctx TIER (floor 4096,
-  clamped to max_seq_len) — its cost follows the tier, not the live context.
-  New `speculative.draft_ctx_cap` (default 2048, 0 = off) gates DENSE
-  drafting once a request's context crosses the cap, checked per step;
-  MoE-NVFP4 and GDN-hybrid drafts are exempt (deep drafts — Coder-30B
-  code-edit 15.9 tok/verify, MTP chains — pay for the verify). Long-context
-  dense decode recovers to the spec-off rate (152 tok/s @16k, was 58.7);
-  short-context is unchanged (pp16 parity). The structural fix (verify cost
-  following live ctx instead of the tier) stays tracked in #964.
-- **Qwen3.6-35B illegal memory access / silent garbage at 16k+ context**
-  (#963): when StreamingLLM auto-enabled (KV pool >90% full), the
-  middle-block eviction retained the sliding window ceil-aligned from the
-  sequence tail while the paged decode kernels start reading at
-  floor((ctx − window) / block_size) — for non-block-aligned context (every
-  decode step after an aligned prefill) the kernels read a freed −1
-  sentinel block: an illegal memory access on a VRAM-full card (35B NVFP4),
-  silent out-of-bounds garbage attention otherwise (35B GGUF). Eviction now
-  retains one extra boundary block, and the four plain-loop paged kernels
-  skip negative sentinels outright (defense-in-depth). Adds a host-side
-  KVCacheManager regression test pinning the eviction/kernel window
-  invariant.
-- **gemma-3-12b GGUF decode illegal-memory-access** (last hard crash in the
-  known-issues list): gemma-3's NVFP4 decode cache must be built from an FP16
-  companion copy — a from-scratch build (Q4_K → dequant → NVFP4) corrupts
-  decode (first step emits token 0 `<pad>`, then an IMA). The companion
-  guarantee was best-effort and silently defeated by FP16-cache VRAM-budget
-  starvation on a 32 GB card with a tight KV budget: 35 of 49 cached tensors
-  fell to from-scratch and re-triggered the exact bug the `fp16_companion`
-  flag exists to prevent. The NVFP4 decode-cache collector now skips
-  from-scratch candidates for gemma-3, leaving those weights on the coherent
-  dequant-at-decode path (a bandwidth loss on the uncached fraction, never
-  garbage). Verified: CLI + server decode coherent, 0 IMA, clean
-  `finish_reason: stop`. Adds a standalone GEMV regression test at gemma-3
-  decode dims (`tests/test_nvfp4_gemv_gemma3_dims.cu`).
-- **Greedy request-order independence in default mode** — the documented
-  "30B-NVFP4-MoE greedy nondeterministic at temp=0" flipper: the FIRST
-  request of a process ran one decode step on a different kernel mix than
-  every later request (eager pre-capture warmup step + `is_ready()`-gated
-  loop entry, both once-per-process), flipping greedy output on near-tie
-  logits. Fixed by pre-arming the decode graph pool in engine warmup
-  (`mark_process_warm`), gating loop/pipeline entry on
-  `graph_path_available()`, and defaulting `runtime.warmup` to **true**
-  (+~2-4 s init on a 30B; `runtime.warmup=false` opts out). Verified: 3
-  fresh processes x 12 greedy requests on Qwen3-30B-A3B-NVFP4 = 36/36
-  byte-identical. See docs/determinism.md.
-
-### Added
-- **`diagnostics.ppl_first` / `diagnostics.ppl_last`**: NLL counting window
-  for `imp-cli --perplexity` (row i predicts token i+1; count rows
-  [first, last]). Matches llama-perplexity's `first = n_ctx/2` convention via
-  `-c C --chunks 1` for exact cross-engine window alignment — the measurement
-  recipe for GOAL release bar 1 (`docs/audit/ppl_parity_2026_07_12.md`:
-  with the LM-head opt-out imp reads at or slightly below llama.cpp
-  (−0.8%…+0.2%) on every comparable GGUF hero; llama.cpp runs need
-  `--no-escape` or the token streams desync on corpora containing `\"`).
-- **On-disk warm weight cache** (`[warm_cache] enabled`, default on): the
-  first fully-cold model load persists its TRANSFORMED weight uploads
-  (BF16→FP16 host conversions, GPU dequants, split layouts) into
-  `~/.cache/imp/warm` (override: `[warm_cache] dir`); later boots mmap the
-  cache and skip the conversion work. Raw quant payloads are never duplicated
-  — the model file already holds them — so the cache is near-zero for
-  raw-served GGUF quants and NVFP4-prequant SafeTensors and ~model-size only
-  for BF16-dense checkpoints (where it saves the most startup time). Guarded
-  by a format version and a model-content fingerprint; stale or corrupt
-  caches are ignored (normal cold load). Reuses the suspend-to-RAM restore
-  machinery, including its per-tensor cold fallback.
-- **Suspend to RAM** (`POST /admin/suspend` / `POST /admin/resume`): park the
-  loaded model's weights in host RAM and free the GPU completely (engine +
-  model teardown, mempool trim, and — default on — a CUDA primary-context
-  reset, so the process holds ~0 MiB VRAM for other workloads), then resume
-  serving in seconds. Resume re-runs the normal init path but restores weight
-  buffer bytes from the snapshot instead of re-reading + re-converting (mmap
-  read, host BF16→FP16 loops, GPU dequant all skipped); KV cache, CUDA graphs
-  and GEMM handles are rebuilt fresh. Sessions/KV do not survive — only the
-  weights stay warm. Any per-tensor mismatch falls back to the cold path, so
-  warm and cold uploads mix byte-safely. Unsupported (clean 501): models whose
-  device weight buffers are transformed in place after upload (native MXFP4
-  GGUF, gpt-oss, Gemma-4 fused-expert split). Capture is gated on host
-  `MemAvailable` (507 with a clear message instead of driving the host into
-  swap). Config: `[suspend] device_reset`, `host_ram_headroom_mb`; C API:
-  `imp_weights_snapshot_capture/arm/free/bytes/hits`, `imp_gpu_release`.
-  While suspended, inference endpoints answer 503 and `/health` reports
-  `"suspended": true` with HTTP 200.
+  projections into the NVFP4 decode cache): bit-rotted in the tier refactors — 71
+  tok/s against its original 248 on Qwen3.6-35B Q4_K_M — and superseded by the
+  GGUF branch of `gemm.fp8_ssm_proj`, which is both faster and quality-safer than
+  4-bit into the recurrent scan. Stale `imp.conf` entries now log the standard
+  unknown-key warning.
 
 ## [0.18.1] - 2026-07-10
 
