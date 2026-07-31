@@ -141,10 +141,43 @@ round-to-nearest, where the gap is far larger than that spread.
 > reads wildly different numbers and inverts the model-size trend — an artifact
 > of too few tokens, not a property of the quantizer.
 
-Open work, in order: MoE expert stacks (3-D, needs the per-expert path), then a
-head-to-head against a Modelopt export of the same model. MoE checkpoints are
-not supported yet — expert stacks are reported and left unquantized rather than
-mangled.
+#### MoE, and two roles that must stay full precision
+
+"MoE is not supported" was too broad, and it was wrong in the dangerous
+direction. Checkpoints that store experts the HF-standard way — one 2-D tensor
+per expert — were never skipped; they were quantized and **silently produced a
+broken checkpoint**. Measured on DeepSeek-V2-Lite (MLA + 64 routed experts,
+2026-07-31): quantizing everything gave a model that loaded and then emitted
+cross-script repetition garbage, while the BF16 source answered normally.
+
+Bisection named the two culprits, and neither is the experts:
+
+| Quantized | Result |
+|---|---|
+| everything | garbage |
+| everything except MLA `kv_a_proj`/`kv_b_proj` | garbage (router still in) |
+| everything except the router | garbage (MLA pair still in) |
+| everything except **both** | **coherent** |
+| MLP + all 4992 expert tensors, attention left BF16 | coherent |
+
+So **expert quantization works**; what breaks is the MLA latent projections
+(the runtime slices `kv_a_proj_with_mqa` into latent+RoPE and reshapes
+`kv_b_proj` into per-head nope/v halves) and the MoE router (FP4 across 16
+shared-scale values changes the top-k expert pick). Both are now refused, at a
+cost of a handful of small matrices per layer.
+
+With them excluded, DeepSeek-V2-Lite quantizes 29.26 GiB → 8.91 GiB (3.28×) in
+~70 s and `degen_suite.py` reads **3 FAIL / 32** against the BF16 source's
+**5 FAIL / 32** — the quantized model's failures are a strict *subset*, so the
+quantization introduces none of them. (This model is weak at instruction
+following either way; the residual failures are the model's, not the
+quantizer's.)
+
+Still unsupported: expert weights stored as one 3-D `[n_experts, N, K]` **stack**
+(gpt-oss-style). Those are reported and left unquantized.
+
+Remaining open work: a head-to-head against a Modelopt export of the same model,
+which needs one staged locally in both precisions.
 
 Workflow with Modelopt:
 

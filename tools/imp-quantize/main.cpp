@@ -21,9 +21,18 @@
 //   <prefix>.weight_scale_2  F32      [1]        tensor scale
 //   + hf_quant_config.json   {"quantization": {"quant_algo": "NVFP4", ...}}
 //
-// Scope of this version: DENSE models. MoE expert stacks are 3-D
-// [n_experts, N, K] and need the per-expert variant (quantize_moe_to_nvfp4);
-// they are reported and left unquantized rather than silently mangled.
+// Scope of this version: dense models AND MoE checkpoints that store experts
+// the HF-standard way — one 2-D tensor per expert
+// (`...mlp.experts.<e>.gate_proj.weight`). Those need no special handling and
+// are quantized like any other matrix; measured on DeepSeek-V2-Lite, 4992
+// expert tensors quantize and the result generates correctly. Expert weights
+// stored as a single 3-D [n_experts, N, K] STACK (gpt-oss-style) are still
+// unsupported: they are reported and left unquantized rather than mangled.
+//
+// Two roles are deliberately excluded even though they are 2-D and K-aligned:
+// the MLA latent projections and the MoE router (see should_quantize for the
+// measurements). Quantizing either produces a checkpoint that loads and then
+// emits garbage — which is why they are refused rather than trusted to shape.
 //
 // QUALITY, MEASURED — read before using this on anything you care about.
 // Without --calib the scales are plain round-to-nearest over the weights
@@ -158,6 +167,33 @@ bool should_quantize(const RawTensor& t, const Options& opt, std::string& why_no
     }
     if (contains(t.name, "lm_head") && !opt.quantize_lm_head) {
         why_not = "lm_head (use --lm-head to include)";
+        return false;
+    }
+    // Two weight roles that are 2-D and K-aligned — so every shape check waves
+    // them through — but that must NOT be quantized. Both were found by
+    // bisection on DeepSeek-V2-Lite (MLA + 64-expert MoE), where quantizing
+    // everything produced a checkpoint that loaded and then emitted
+    // cross-script repetition garbage while the BF16 source answered normally.
+    // Excluding them costs almost nothing: a handful of small matrices per
+    // layer against 4992 expert tensors that quantize fine.
+    //
+    // 1. MLA latent projections. `kv_a_proj_with_mqa` packs latent+RoPE into one
+    //    output and `kv_b_proj` up-projects the latent into per-head nope/v
+    //    halves; the runtime slices and reshapes both. Leaving only these two in
+    //    full precision made the same checkpoint coherent again.
+    if (contains(t.name, "kv_a_proj") || contains(t.name, "kv_b_proj")) {
+        why_not = "MLA latent projection (runtime slices it — must stay full precision)";
+        return false;
+    }
+    // 2. MoE router. It decides WHICH experts run, and FP4 across 16
+    //    shared-scale values is enough to change the top-k pick. Measured
+    //    independently: with the MLA pair already excluded, quantizing the
+    //    router alone still produced garbage. Published exports (Modelopt,
+    //    llm-compressor) keep routers full precision for the same reason.
+    //    `.gate.weight` is the router; expert projections are `gate_proj.weight`
+    //    and are unaffected by this suffix test.
+    if (ends_with(t.name, ".gate.weight") || ends_with(t.name, ".router.weight")) {
+        why_not = "MoE router (FP4 changes expert selection)";
         return false;
     }
     if (t.shape[1] % 16 != 0) {
