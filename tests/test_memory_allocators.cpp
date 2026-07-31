@@ -45,6 +45,43 @@ TEST(Arena, TakesAlignedAndTracksUsage) {
     EXPECT_EQ(arena.used() + arena.remaining(), arena.capacity());
 }
 
+// The property that closes AUDIT B13, and the reason the grow-on-demand
+// scratches in compute/ could move here (A7 step 8). Those pointers are kernel
+// PARAMETERS baked into instantiated CUDA graphs. Their old cudaFree+cudaMalloc
+// grow made a replayed graph read a freed address; an arena grow must leave the
+// previous slice both valid and untouched, because the graph is still using it
+// at the size it was captured for.
+TEST(Arena, GrowingATenantLeavesThePreviousSliceValidAndIntact) {
+    FakeBackend be;
+    ArenaAllocator arena;
+    ASSERT_EQ(arena.open(be, 1 * kMiB, RegionTag::EnginePersistent), MemError::Ok);
+
+    auto first = arena.take<uint8_t>(4096);
+    ASSERT_TRUE(first);
+    std::memset(first.data(), 0xA5, first.size());
+
+    // The "grow": the tenant needs more, so it takes a second, larger slice and
+    // drops its reference to the first. Nothing frees.
+    auto grown = arena.take<uint8_t>(16384);
+    ASSERT_TRUE(grown);
+    std::memset(grown.data(), 0x5A, grown.size());
+
+    const auto* f = reinterpret_cast<const uint8_t*>(first.data());
+    const auto* g = reinterpret_cast<const uint8_t*>(grown.data());
+    EXPECT_TRUE(g + grown.size() <= f || f + first.size() <= g)
+        << "the grown slice overlaps the one a captured graph may still be reading";
+    for (size_t i = 0; i < first.size(); ++i)
+        ASSERT_EQ(f[i], 0xA5) << "byte " << i << " of the pre-grow slice was clobbered";
+
+    // And the guard the tenants use to notice a model swap: close() bumps the
+    // generation, so a cached pointer is recognised as stale rather than reused
+    // over a released region.
+    const uint64_t before = arena.generation();
+    arena.close();
+    ASSERT_EQ(arena.open(be, 1 * kMiB, RegionTag::EnginePersistent), MemError::Ok);
+    EXPECT_NE(arena.generation(), before);
+}
+
 TEST(Arena, ExhaustionReturnsAnEmptySpanInsteadOfReachingForTheDriver) {
     FakeBackend be;
     ArenaAllocator arena;

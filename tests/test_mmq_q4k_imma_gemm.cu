@@ -14,8 +14,11 @@
 #include <vector>
 
 #include "compute/mmq_q4k_imma_tile.h"
+#include "scoped_engine_arena.h"
 
 namespace imp {
+
+IMP_TEST_ENGINE_ARENA(64ull << 20);  // T2 arena for the migrated scratches (A7 step 8)
 namespace {
 
 constexpr int kQ4kBlockBytes = 144;

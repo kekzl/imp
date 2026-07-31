@@ -5,10 +5,9 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 75 files, 549 sites
+# remaining: 75 files, 519 sites
 
 src/compute/attention_cublas.cu  # 14
-src/compute/attention_fmha_mxfp4_sm120.cu  # 12
 src/compute/attention_fmha_sm120.cu  # 2
 src/compute/attention_mxfp4_prefill.cu  # 8
 src/compute/encoder_forward.cu  # 5
@@ -22,8 +21,9 @@ src/compute/gemm_grouped_nvfp4_smallM.cu  # 24
 src/compute/gemm_moe_fused_tc.cu  # 1
 src/compute/grammar_constrain.cu  # 2
 src/compute/json_constrain.cu  # 6
-src/compute/mmq_q4k_imma_tile.cu  # 12
-src/compute/mmq_q8_imma.cu  # 19
+src/compute/mmq_q4k_imma_tile.cu  # 6
+src/compute/mmq_q8_imma.cu  # 3
+src/compute/mmq_q8_imma_scratch.cu  # 4
 src/compute/moe_routing.cu  # 12
 src/compute/mtp_forward.cu  # 12
 src/compute/quantize_fp16_nvfp4_moe_native.cu  # 6

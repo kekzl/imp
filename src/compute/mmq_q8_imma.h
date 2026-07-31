@@ -56,4 +56,11 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
 // Free cached weight planes + activation scratch (tests / teardown).
 void mmq_q8_imma_release_all();
 
+// Take the IMMA prefill activation scratch (and the split-K slice) from the T2
+// arena once, at the bound exec_t2_demand charged as `imma_scratch`. Call from
+// Engine::init after the arena is open; `rows`/`k` come from
+// exec_imma_scratch_shape(). A no-op for a model with no IMMA-eligible weights
+// (rows or k == 0).
+void mmq_q8_imma_preallocate(int rows, int k);
+
 }  // namespace imp
