@@ -56,7 +56,8 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
 
     // Zero-initialize the pool so fresh blocks start clean
     IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
-    MemAccount::instance().note("KV_BLOCK_POOL", static_cast<std::ptrdiff_t>(total));
+    // Attribution comes from VRAMAllocator::allocate() now, under the "kv_cache"
+    // tag — noting it here as well double-counted the pool.
 
     // Allocate separate scale buffer for quantized KV cache modes.
     //   INT8/INT4: 1 half (FP16) per head per token slot.
@@ -94,7 +95,6 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
             throw std::runtime_error(msg);
         }
         IMP_CUDA_CHECK_LOG(cudaMemset(scale_pool_, 0, scale_total));
-        MemAccount::instance().note("KV_BLOCK_POOL", static_cast<std::ptrdiff_t>(scale_total));
     }
 
     // Block ids + refcounts. Slots-only: this class keeps the memory (the

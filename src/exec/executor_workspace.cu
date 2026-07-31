@@ -300,10 +300,9 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     }
     (void)experts_on_host;
 
-    // MemAccount per-pool attribution (vram_audit diagnostic). The estimate
-    // covers persistent + shared workspace, the dominant executor buffers.
-    MemAccount::instance().note("EXEC_WORKSPACES",
-                                static_cast<std::ptrdiff_t>(workspace_estimate()));
+    // Attribution is per-allocation in VRAMAllocator now. This used to note
+    // workspace_estimate() — an ESTIMATE of persistent + shared — which both
+    // double-counts the real allocations and misses every auxiliary buffer.
 
     return true;
 }
