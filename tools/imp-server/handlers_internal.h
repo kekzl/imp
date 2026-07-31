@@ -120,6 +120,7 @@ struct ChatStateSnapshot {
     // the prompt has to reserve exactly that many placeholders.
     std::shared_ptr<imp::QwenPatches> qwen_patches;
     int qwen_image_tokens = 0;
+    size_t vision_content_hash = 0;
     std::vector<int32_t> stop_token_ids;
     imp::ChatTemplateFamily tpl_family = imp::ChatTemplateFamily::CHATML;
     std::vector<imp::ToolFunction> tool_defs;

@@ -91,21 +91,29 @@ public:
     // the recurrent-snapshot boundary so prefill never re-writes shared
     // blocks beyond the restorable state position.
     // Returns -1 on allocation failure.
+    //
+    // `content_salt` seeds the hash chain. It exists because the cache is
+    // addressed by TOKEN IDS, and that is not enough for a multimodal prompt:
+    // every image token carries the same id, so two requests with different
+    // pictures produce identical prefixes and the second one would inherit the
+    // first one's KV. Passing a hash of the image content makes the two chains
+    // diverge from block 0, so a hit requires the same tokens AND the same
+    // picture. 0 for text, which is the unchanged behaviour.
     [[nodiscard]] int allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens,
-                                                  int max_reuse_blocks = -1);
+                                                  int max_reuse_blocks = -1, size_t content_salt = 0);
 
     // Read-only probe: length (in blocks) of the longest fully-cached
     // contiguous block prefix for `tokens`, without allocating anything.
     // Fills `chain_hashes` with the chained hash of every FULL block of
     // `tokens` (independent of cache state). Used by the hybrid recurrent-
     // snapshot lookup to pick a restore boundary before allocation.
-    int longest_cached_prefix_blocks(std::span<const int32_t> tokens,
-                                     std::vector<size_t>& chain_hashes) const;
+    int longest_cached_prefix_blocks(std::span<const int32_t> tokens, std::vector<size_t>& chain_hashes,
+                                     size_t content_salt = 0) const;
 
     // Register the block hashes for a sequence after prefill completes.
     // This must be called so that future sequences can match against
     // these blocks. `tokens` is the full token sequence.
-    void register_block_hashes(int seq_id, std::span<const int32_t> tokens);
+    void register_block_hashes(int seq_id, std::span<const int32_t> tokens, size_t content_salt = 0);
 
     // Number of cached (unreferenced) blocks in the hash table.
     int num_cached_blocks() const;

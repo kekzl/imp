@@ -208,6 +208,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             res.set_content(dump_safe(error), "application/json");
             return false;
         };
+        // Salts the prefix cache so a hit needs the same picture, not just the
+        // same token ids (every image token shares one id).
+        ctx.snap.vision_content_hash = imp::image_content_hash(ctx.params.image_data.data(),
+                                                               ctx.params.image_data.size());
         if (state.ctx->engine->has_qwen_vision()) {
             // Dynamic resolution: patchify now (CPU only) so the token count is
             // known before the prompt is tokenized — the placeholders have to be
@@ -580,6 +584,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     auto req = std::make_shared<imp::Request>();
     req->image = ctx.snap.vision_image;         // per-request vision (null for text)
     req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (null otherwise)
+    req->vision_content_hash = ctx.snap.vision_content_hash;
     req->input_tokens = input_tokens;
     req->max_tokens = ctx.params.max_tokens;
     req->temperature = ctx.params.temperature;

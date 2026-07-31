@@ -633,6 +633,9 @@ private:
     // CLI only: one image, preprocessed on the caller's thread, waiting for the
     // next request that has placeholders for it.
     std::shared_ptr<QwenPatches> qwen_pending_patches_;
+    // Hash of the image currently pending on the engine (the CLI's single
+    // image), stamped onto the request that picks it up.
+    size_t pending_image_hash_ = 0;
     int32_t qwen_image_pad_id_ = -1;
     // Constraint FSM state lives per-request (Request::constraints) — a
     // single engine-global manager let any concurrent prefill/finish clobber

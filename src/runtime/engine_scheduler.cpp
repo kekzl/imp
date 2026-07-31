@@ -491,17 +491,18 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // Embedding requests mean-pool EVERY position's hidden state — a
     // prefix-cache hit would skip the reused prefix's forward and silently
     // bias the pooled vector (#1005). Same class as the ppl_capture guard.
-    // Image requests are the third member of that class, and the sharpest: the
-    // prefix cache is content-addressed on TOKEN IDS, and every image token
-    // carries the SAME id (<|image_pad|> / the soft token). Two requests with
-    // different pictures therefore produce identical prefixes, and the second
-    // one silently answers about the first one's image. Observed: a photo of a
-    // pizza described as "a tabby cat sitting outdoors". Applies to the mmproj
-    // path too, not just Qwen3-VL — the ids are just as uniform there.
+    // An image request participates only through its content hash: the cache is
+    // addressed by TOKEN IDS, every image token carries the SAME id, and two
+    // different pictures would otherwise share a long prefix and the second one
+    // would answer about the first one's picture. A request that carries an
+    // image but reports no hash is excluded outright — a missed plumbing site
+    // must degrade to "no reuse", never to "the previous picture".
     const bool has_image = req->image || req->qwen_patches || req->vision_emb || req->n_vision_tokens > 0;
+    const bool cacheable = !has_image || req->vision_content_hash != 0;
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
-        !req->embedding_request && !has_image) {
-        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
+        !req->embedding_request && cacheable) {
+        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, -1,
+                                                                 req->vision_content_hash);
         if (prefix_reused < 0) {
             // KV exhausted even after cached-block reclamation. The old fallback
             // evicted live sequences (every lru_order_ entry is live; no
@@ -828,8 +829,15 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // layout needs the prompt's final token sequence, which only exists now.
     // The CLI leaves its image pending on the engine; the server puts it on the
     // request itself. Both end up in `encode_qwen_image_for_`.
-    if (offset == 0)
+    if (offset == 0) {
         (void)attach_qwen_image_(*req);
+        // The legacy global-image path (imp_set_image + the mmproj pipeline)
+        // never puts anything on the request, so the prefix-cache guard below
+        // cannot see it. Stamp the hash here, or an interactive session that
+        // switches pictures would match the previous one's blocks.
+        if (req->vision_content_hash == 0 && vision_.has_input() && vision_.is_available())
+            req->vision_content_hash = pending_image_hash_;
+    }
     // Not gated on `offset == 0`: `qwen_patches` is cleared by the encode, so
     // this runs exactly once regardless of how the prompt is chunked.
     {
@@ -1166,13 +1174,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             finish_request(req);
         } else {
             req->status = RequestStatus::DECODING;
-            // Publishing is as unsound as reading for an image request: these
-            // blocks would be offered to any later prompt with the same token
-            // ids, and every image token has the SAME id. A text request that
-            // happens to share the prefix would inherit a picture's KV.
+            // Publish under the same salt these blocks were looked up with, so
+            // they can only ever be offered to a prompt with the same picture.
             const bool had_image = req->n_vision_tokens > 0 || req->image || req->vision_emb;
-            if (kv_manager_->prefix_caching_enabled() && !had_image) {
-                kv_manager_->register_block_hashes(req->id, req->input_tokens);
+            if (kv_manager_->prefix_caching_enabled() && (!had_image || req->vision_content_hash != 0)) {
+                kv_manager_->register_block_hashes(req->id, req->input_tokens, req->vision_content_hash);
             }
         }
     }

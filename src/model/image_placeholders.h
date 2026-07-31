@@ -23,4 +23,9 @@ namespace imp {
 bool expand_image_placeholders(std::vector<int32_t>& tokens, int32_t pad_id, const std::vector<int>& counts,
                                std::string& err);
 
+// FNV-1a over an image's bytes. Used as the prefix cache's content salt, so a
+// hit needs the same tokens AND the same picture. Never returns 0 — that value
+// means "no image" to the cache, and an all-zero image must not claim it.
+size_t image_content_hash(const uint8_t* data, size_t len);
+
 }  // namespace imp
