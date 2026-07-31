@@ -65,6 +65,11 @@ struct RuntimeConfig {
         bool no_pdl = false;
         bool debug_raw = false;        // raw stream debug
         bool no_vision_graph = false;  // disable SigLIP graph capture
+        // Qwen3-VL patch budget: the largest image the dynamic-resolution
+        // encoder will accept, in 16x16 patches. It is a CEILING that pulls
+        // the preprocessor's max_pixels down, not a check that refuses an
+        // image, and it sizes every encoder workspace. 4096 = 1024x1024.
+        int vision_max_patches = 4096;
         // cudaStreamCaptureMode passed to begin_capture / conditional bodies:
         // "global" | "relaxed" (default) | "thread_local". "relaxed" drops the
         // cross-thread sync constraint that CUTLASS 3.x grouped-GEMM

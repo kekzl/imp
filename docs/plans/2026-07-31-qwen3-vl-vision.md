@@ -121,8 +121,19 @@ More than the old assessment implied:
 | 1+2+2b+4 | Grid math, upload, encoder forward | `vision/qwen3vl_{vision_grid,vision_upload,encoder}` | ✅ #1171 |
 | 6a | M-RoPE kernel + config read | `compute/rope`, `model_config` | #1172 |
 | 6b | Per-token `(t, h, w)` positions | `model/mrope_positions` | #1173 |
-| 5 | DeepStack injection at LM layers 0/1/2 | — | **open** |
-| — | Image-token expansion, embedding replacement, server/CLI path | — | **open** |
+| 5 | DeepStack injection at LM layers 0/1/2 | `vision/deepstack_inject` | ✅ #1176 |
+| 7c | Image-placeholder expansion | `model/image_placeholders` | #1177 |
+| — | End-to-end wiring (engine, CLI, M-RoPE positions) | `runtime/engine_qwen3vl` | #1178 |
+
+**The path works.** `imp-cli --model Qwen3-VL-4B-Instruct --image cat.jpg
+--prompt "Describe this image in one sentence."` answers *"A striped tabby cat
+with green eyes sitting on a …"*; the pizza photo gets *"A freshly baked pizza
+with a golden crust, melted cheese …"*; and a text-only prompt on the same model
+still answers *"Red, blue, green."*
+
+Still open: the server's `/v1/chat/completions` image path (the CLI route is
+wired, the HTTP one still goes through the fixed-token GGUF pipeline), and
+videos.
 
 The encoder runs and is verified; nothing calls it yet. What is left is the
 integration: expanding the image placeholder to the right number of tokens,

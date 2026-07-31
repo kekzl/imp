@@ -114,6 +114,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("runtime.no_pdl", cfg.runtime.no_pdl);
     B("runtime.debug_raw", cfg.runtime.debug_raw);
     B("runtime.no_vision_graph", cfg.runtime.no_vision_graph);
+    I("runtime.vision_max_patches", cfg.runtime.vision_max_patches);
     S("runtime.graph_capture_mode", cfg.runtime.graph_capture_mode);
     B("runtime.prefill_graph", cfg.runtime.prefill_graph);
     I("runtime.max_batch_size", cfg.runtime.max_batch_size);

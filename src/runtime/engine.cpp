@@ -118,6 +118,7 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));
         swa_snap_slab_ = nullptr;
     }
+    free_mrope_buffers_();
     if (d_penalty_tokens_) {
         vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
@@ -685,13 +686,8 @@ void Engine::constraints_return_(std::shared_ptr<ConstraintManager> cm) {
 // Vision delegation
 // =====================================================================
 
-bool Engine::set_image(const std::string& path) { return vision_.set_image(path, stream_); }
 
-bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
-    return vision_.set_image_from_memory(data, len, stream_);
-}
 
-void Engine::clear_image() { vision_.clear_image(); }
 
 bool Engine::preprocess_image(const uint8_t* data, size_t len, ImageData& out) {
     return vision_.preprocess(data, len, out);

@@ -359,9 +359,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // degeneration from token 2. Keep YaRN on the separate full path.
         // MLA uses asymmetric K/V head dims (hd=192, vhd=128): the fused rope-KV
         // write kernel doesn't support different K vs V dimensions, so disable it.
+        // `rope_q_only_fp16_kernel` and the deferred K-RoPE in the KV write take
+        // a single position array and know nothing about axes. With M-RoPE
+        // active they would rotate every dimension by the text position —
+        // silently, and only wrongly for image tokens. Keep them off.
+        const bool mrope_active = state.mrope.positions != nullptr || state.mrope.pos_delta != nullptr;
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
-                                 state.kv_cache->qtype() == QType::F16 && prof.attn_variant != AttnVariant::NOPE &&
-                                 cfg.yarn_ext_factor <= 0.0f && !cfg.is_mla());
+                                 state.kv_cache->qtype() == QType::F16 &&
+                                 prof.attn_variant != AttnVariant::NOPE && cfg.yarn_ext_factor <= 0.0f &&
+                                 !cfg.is_mla() && !mrope_active);
         // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
         // full head_dim. Global layers' freq_factors (loaded into
         // longrope_freqs above) zero out most pairs to realize the
@@ -381,7 +387,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                               static_cast<const half*>(ly.attn_k_norm.data), nh, nkv, hd, eps,
                               state.positions, layer_rope_theta, layer_rope_freq_scale, fused_rope_dim,
                               cfg.rope_neox, stream, norm_w_off_, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                              cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, longrope_freqs);
+                              cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, longrope_freqs,
+                              state.mrope);
         } else if (can_fuse_rope_kv && !has_qk_norm) {
             // Fused path: Q-only RoPE here, K-RoPE deferred to KV write
             const int effective_rope_dim = fused_rope_dim;
@@ -441,7 +448,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             if (prof.attn_variant != AttnVariant::NOPE) {
                 rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
                              layer_rope_dim, cfg.rope_neox, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                             cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream, longrope_freqs);
+                             cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream, longrope_freqs,
+                             state.mrope);
             }
         }
     }

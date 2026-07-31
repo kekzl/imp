@@ -248,6 +248,18 @@ struct Request {
     int32_t vision_token_id = -1;
     int n_vision_tokens = 0;
 
+    // Qwen3-VL. `deepstack_emb` holds one buffer per vision tap, each the same
+    // shape as `vision_emb`; they are ADDED at the LM's first layers.
+    std::vector<std::shared_ptr<Buffer>> deepstack_emb;
+    // Per-token (t, h, w) positions for the PROMPT, [3, input_tokens.size()].
+    // Empty for a model without M-RoPE.
+    std::vector<int32_t> mrope_positions;
+    // What to add to a generated token's position to continue the M-RoPE
+    // sequence. An image costs max(rows, cols) positions but occupies
+    // rows*cols tokens, so this is negative whenever the prompt held one, and
+    // `context_len()` alone would leave a gap the model never saw in training.
+    int mrope_pos_delta = 0;
+
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
 
     // Deliberately LAST rather than next to `status`: Request is touched every

@@ -1008,6 +1008,10 @@ ImpError imp_enable_mtp_spec_decode(ImpContext ctx, int k) {
 
 // --- Vision (Multimodal) ---
 
+int imp_pending_image_tokens(ImpContext ctx) {
+    return (ctx && ctx->engine) ? ctx->engine->pending_image_tokens() : 0;
+}
+
 ImpError imp_set_image(ImpContext ctx, const char* image_path) {
     if (!ctx)
         return IMP_ERROR_INVALID_ARG;
