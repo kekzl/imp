@@ -157,6 +157,7 @@ set(IMP_MODEL_SOURCES
     src/model/sentencepiece_loader.cpp
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
+    src/model/image_placeholders.cpp
     src/model/hf_hub.cpp
     src/model/weight_map.cpp
     src/model/weight_upload.cu
@@ -637,6 +638,7 @@ if(IMP_BUILD_TESTS)
         tests/test_library_reserve_cache.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
+        tests/test_image_placeholders.cpp
         tests/test_ngram_draft.cpp
         tests/test_suffix_draft.cpp
         tests/test_token_recycle_draft.cpp
