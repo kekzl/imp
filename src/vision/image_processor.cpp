@@ -82,6 +82,66 @@ static bool preprocess_pixels(const uint8_t* rgb, int w, int h, int target_size,
     return true;
 }
 
+bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchifyConfig& cfg,
+                   QwenPatches& out) {
+    if (!rgb || width <= 0 || height <= 0 || cfg.patch_size <= 0 || cfg.merge_size <= 0 ||
+        cfg.temporal_patch_size <= 0)
+        return false;
+
+    const int factor = cfg.patch_size * cfg.merge_size;
+    const SmartResize rs = qwen_smart_resize(height, width, factor, cfg.min_pixels, cfg.max_pixels);
+    if (!rs.ok)
+        return false;
+
+    // Upstream resamples with PIL BICUBIC. Catmull-Rom is the closest filter stb
+    // offers; the two are not bit-identical and do not need to be — a resampling
+    // difference of this size is far below what the encoder is sensitive to, and
+    // claiming PIL parity would be false.
+    std::vector<uint8_t> resized(static_cast<size_t>(rs.height) * rs.width * 3);
+    if (!stbir_resize(rgb, width, height, width * 3, resized.data(), rs.width, rs.height, rs.width * 3,
+                      STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_CATMULLROM))
+        return false;
+
+    const int P = cfg.patch_size, M = cfg.merge_size, T = cfg.temporal_patch_size;
+    const int gh = rs.height / P, gw = rs.width / P;
+    const int C = 3;
+    out.grid_h = gh;
+    out.grid_w = gw;
+    out.tokens = gh * gw;
+    out.features = C * T * P * P;
+    out.data.assign(static_cast<size_t>(out.tokens) * out.features, __float2half(0.0f));
+
+    // Token index follows (gh/M, gw/M, M, M); inside a token, (C, T, ph, pw).
+    size_t tok = 0;
+    for (int bh = 0; bh < gh / M; ++bh) {
+        for (int bw = 0; bw < gw / M; ++bw) {
+            for (int mh = 0; mh < M; ++mh) {
+                for (int mw = 0; mw < M; ++mw, ++tok) {
+                    const int patch_row = bh * M + mh;
+                    const int patch_col = bw * M + mw;
+                    half* dst = out.data.data() + tok * out.features;
+                    for (int c = 0; c < C; ++c) {
+                        for (int ph = 0; ph < P; ++ph) {
+                            const int y = patch_row * P + ph;
+                            for (int pw = 0; pw < P; ++pw) {
+                                const int x = patch_col * P + pw;
+                                const uint8_t raw = resized[(static_cast<size_t>(y) * rs.width + x) * 3 + c];
+                                const float v = (raw / 255.0f - cfg.mean[c]) / cfg.std[c];
+                                // The temporal axis is a repeat for a still image.
+                                for (int t = 0; t < T; ++t) {
+                                    const size_t idx = ((static_cast<size_t>(c) * T + t) * P + ph) * P + pw;
+                                    dst[idx] = __float2half(v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool load_and_preprocess_image(const std::string& path, int target_size, const float mean[3],
                                const float std[3], ImageData& out) {
     int w, h, channels;
