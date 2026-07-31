@@ -55,9 +55,12 @@
 // is why --calibrate forces runtime.deterministic_gemm. See
 // docs/quantization.md.
 //
-// A published Modelopt export still beats this. Useful today for: getting a
-// model onto the NVFP4 path at all, and for performance work where the weights
-// only need to be the right shape.
+// A published export is NOT automatically better: on Qwen3-14B — same weights
+// (bit-identical untouched tensors), same 280 quantized tensors, same corpus —
+// this tool without --calib read PPL 9.9252 against a Modelopt export's 10.0301.
+// One model, one corpus, so not a general claim; see docs/quantization.md.
+// Useful today for: getting a model onto the NVFP4 path at all, and for
+// performance work where the weights only need to be the right shape.
 
 #include "awq.h"
 
