@@ -11,6 +11,7 @@
 #include "vision/vision_model.h"
 
 #include <string>
+#include <vector>
 
 namespace imp {
 
@@ -18,7 +19,18 @@ class VRAMAllocator;
 
 // `alloc` may be null, in which case the tower is left alone and this returns
 // false — the encoder has no fallback for host-resident weights.
-bool qwen3vl_upload_vision_tower(VisionModel& model, VRAMAllocator* alloc, size_t& bytes_out,
-                                 std::string& err);
+//
+// The device blocks are appended to `out_allocs` and belong to the CALLER, not
+// to the VisionModel. That is deliberate: a tower holding pointers into an
+// allocator it does not own is a use-after-free the moment a teardown order
+// puts the allocator first. The caller frees them and calls
+// `qwen3vl_release_vision_tower` to invalidate the tower in the same breath.
+bool qwen3vl_upload_vision_tower(VisionModel& model, VRAMAllocator* alloc, std::vector<void*>& out_allocs,
+                                 size_t& bytes_out, std::string& err);
+
+// Point every tensor slot back at nothing. Call this when the device blocks the
+// upload handed out are released, so a tower that outlives them cannot be
+// mistaken for a usable one.
+void qwen3vl_release_vision_tower(VisionModel& model);
 
 }  // namespace imp

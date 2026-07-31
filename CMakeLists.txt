@@ -383,6 +383,7 @@ set(IMP_VISION_SOURCES
     src/vision/qwen3vl_vision_upload.cpp
     src/vision/qwen3vl_encoder_kernels.cu
     src/vision/qwen3vl_encoder.cu
+    src/vision/qwen3vl_pipeline.cpp
     src/vision/image_processor.cpp
     src/vision/vision_encoder.cu
 )
@@ -813,6 +814,7 @@ if(IMP_BUILD_TESTS)
         tests/test_determinism_e2e.cpp
         tests/test_vision_golden.cu
         tests/test_qwen3vl_encoder.cu
+        tests/test_qwen3vl_pipeline.cu
     )
 
     set(IMP_TEST_BINARIES
