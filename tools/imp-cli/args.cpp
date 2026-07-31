@@ -87,8 +87,9 @@ void print_usage(const char* prog) {
             "  --perplexity <file>   Compute teacher-forced perplexity over a text file and exit\n"
             "  --calibrate <out>     With --perplexity: also write activation-calibration\n"
             "                        statistics to <out> (input for imp-quantize --calib)\n"
-            "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
-            "  --image <path>        Input image for vision (requires --mmproj)\n"
+            "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for Gemma-3/4;\n"
+            "                        Qwen3-VL carries its tower in the checkpoint\n"
+            "  --image <path>        Input image (needs a model with a vision tower)\n"
             "  --help                Show this help message\n",
             stderr);
 }

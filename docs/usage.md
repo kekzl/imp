@@ -82,7 +82,11 @@ The most common keys are also exposed as named CLI flags (`--kv-fp8`,
 # Interactive chat
 ./build/imp-cli --model model.gguf --interactive
 
-# Vision (Gemma-3)
+# Vision — Qwen3-VL carries its tower in the checkpoint
+./build/imp-cli --model ./Qwen3-VL-4B-Instruct --image photo.jpg \
+                --prompt "Describe this image"
+
+# Vision — Gemma-3 needs its encoder as a separate mmproj
 ./build/imp-cli --model gemma-3-12b-it.gguf --mmproj mmproj.gguf \
                 --image photo.jpg --prompt "Describe this image"
 
@@ -167,8 +171,9 @@ and the MiB to add — rather than loading and then failing every request.
 Model:
   --model <path>            Path to GGUF or SafeTensors model
   --revision <rev>          HuggingFace revision when --model is a hub repo id
-  --mmproj <path>           Vision encoder GGUF for multimodal
-  --image <path>            Input image (requires --mmproj)
+  --mmproj <path>           Vision encoder GGUF (Gemma-3/Gemma-4; Qwen3-VL
+                            carries its tower in the checkpoint)
+  --image <path>            Input image (needs a model with a vision tower)
   --device <n>              CUDA device ID (default: 0)
   --gpu-layers <n>          Layers on GPU, -1 = all (default: -1)
   --config <path>           Path to imp.conf (overrides search-path)
@@ -249,7 +254,8 @@ Benchmark / eval:
 # Start with SafeTensors (NVFP4 prequant)
 ./build/imp-server --model ./Qwen3-Coder-30B-A3B-FP4 --port 8080
 
-# With vision
+# With vision — Qwen3-VL needs no second file
+./build/imp-server --model ./Qwen3-VL-4B-Instruct
 ./build/imp-server --model gemma-3-12b-it.gguf --mmproj mmproj.gguf
 ```
 
@@ -402,7 +408,7 @@ imp_model_free(model);
 ```
 
 Token-level control via `imp_prefill` / `imp_decode_step`, vision
-via `imp_set_image`.
+via `imp_set_image` (one image at a time; pass NULL to clear).
 
 ## Project Structure
 
@@ -420,7 +426,8 @@ imp/
 │   ├── exec/             GraphExecutor (hardcoded transformer forward pass)
 │   ├── runtime/          Engine, Scheduler, CUDA Graphs, PDL, Green Contexts,
 │   │                     RuntimeConfig (imp.conf parser)
-│   ├── vision/           SigLIP encoder, image preprocessing, mmproj loader
+│   ├── vision/           SigLIP + Qwen3-VL encoders, image preprocessing,
+│   │                     mmproj loader, DeepStack injection
 │   └── api/              C API implementation
 ├── tools/
 │   ├── imp-cli/          CLI (interactive + single-prompt + benchmark)

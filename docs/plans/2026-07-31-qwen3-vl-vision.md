@@ -119,11 +119,13 @@ More than the old assessment implied:
 | — | `vision_config` parse | `vision/qwen3vl_vision_config` | ✅ #1169 |
 | — | Tower load (315 tensors, shape-checked) | `vision/qwen3vl_vision_load` | ✅ #1170 |
 | 1+2+2b+4 | Grid math, upload, encoder forward | `vision/qwen3vl_{vision_grid,vision_upload,encoder}` | ✅ #1171 |
-| 6a | M-RoPE kernel + config read | `compute/rope`, `model_config` | #1172 |
-| 6b | Per-token `(t, h, w)` positions | `model/mrope_positions` | #1173 |
+| 6a | M-RoPE kernel + config read | `compute/rope`, `model_config` | ✅ #1172 |
+| 6b | Per-token `(t, h, w)` positions | `model/mrope_positions` | ✅ #1173 |
 | 5 | DeepStack injection at LM layers 0/1/2 | `vision/deepstack_inject` | ✅ #1176 |
-| 7c | Image-placeholder expansion | `model/image_placeholders` | #1177 |
-| — | End-to-end wiring (engine, CLI, M-RoPE positions) | `runtime/engine_qwen3vl` | #1178 |
+| 7c | Image-placeholder expansion | `model/image_placeholders` | ✅ #1177 |
+| — | End-to-end wiring (engine, CLI, M-RoPE positions) | `runtime/engine_qwen3vl` | ✅ #1178 |
+| — | Images over `/v1/chat/completions` | `imp-server/handlers_chat_*` | ✅ #1179 |
+| — | Prefix cache salted with the image | `model/image_placeholders` | ✅ #1180 |
 
 **The path works.** `imp-cli --model Qwen3-VL-4B-Instruct --image cat.jpg
 --prompt "Describe this image in one sentence."` answers *"A striped tabby cat
@@ -131,14 +133,21 @@ with green eyes sitting on a …"*; the pizza photo gets *"A freshly baked pizza
 with a golden crust, melted cheese …"*; and a text-only prompt on the same model
 still answers *"Red, blue, green."*
 
-Still open: the server's `/v1/chat/completions` image path (the CLI route is
-wired, the HTTP one still goes through the fixed-token GGUF pipeline), and
-videos.
+The server path landed too (#1179), and #1180 closed the prefix-cache hole it
+exposed: the cache is addressed by token ids and every image token carries the
+same id, so two requests with different pictures shared a prefix until block
+hashes were salted with the image content.
 
-The encoder runs and is verified; nothing calls it yet. What is left is the
-integration: expanding the image placeholder to the right number of tokens,
-feeding the merged embeddings into the prefill, and adding the three DeepStack
-taps at image-token positions.
+**Still open**, tracked as the remainder of gap 2 in [`../roadmap.md`](../roadmap.md):
+
+- **One image per request.** Every `image_url` part is parsed but written into the
+  same buffer, so the last one silently wins, and exactly one vision block is
+  attached to the first user message. `expand_image_placeholders` and
+  `qwen_build_mrope_positions` already take per-image counts and grids (with
+  tests); the plumbing between the request parser and them does not.
+- **Videos.** `temporal_patch_size` exists but only as a still-image repeat.
+- **The interactive CLI and `imp_generate`** still take the mmproj-only branch, so
+  `/image` in a chat session loads a picture the prompt never references.
 
 ## Corrections to this plan, found while building it
 

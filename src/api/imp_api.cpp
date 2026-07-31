@@ -1024,7 +1024,7 @@ ImpError imp_set_image(ImpContext ctx, const char* image_path) {
     }
 
     if (!ctx->engine->has_vision()) {
-        IMP_LOG_ERROR("imp_set_image: no vision model loaded (mmproj_path not set)");
+        IMP_LOG_ERROR("imp_set_image: model has no vision tower (Gemma-3/4 need mmproj_path)");
         return IMP_ERROR_UNSUPPORTED;
     }
 

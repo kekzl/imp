@@ -78,6 +78,11 @@ RMSNorm + residual → FFN (dense SwiGLU or MoE top-k grouped GEMM)
 
 After the last layer of the last chunk: final RMSNorm + LM head → logits.
 
+With an image in the request, the encoder has already run and its merged
+embeddings replace the expanded `<|image_pad|>` positions before the first layer;
+on Qwen3-VL the first few layers additionally get DeepStack taps added at those
+same positions (see **Vision** under Subsystems).
+
 ### Attention dispatcher (the central choice)
 
 `executor_attention_prefill.cu` decides which attention kernel to call. Since #687
@@ -188,6 +193,22 @@ Per token:
   decode (`Engine::step_constrained_pipeline`), gated on one `needs_constrained`
   flag — a second flag for the same question is how regex requests ended up
   taking a different path than the JSON ones for no reason.
+- **Vision** (`src/vision/`) — two shapes, one seam. The Gemma path
+  (SigLIP / gemma4v) loads its encoder from a separate `mmproj.gguf` and produces
+  a fixed token count from a fixed `image_size`. The Qwen3-VL path loads its tower
+  from the checkpoint itself and is *dynamic*: `smart_resize` + `patchify` derive a
+  per-image grid, so the token count varies with the picture, and every workspace
+  is sized from a patch budget (`runtime.vision_max_patches`) rather than an image
+  size — which makes the budget a ceiling, so a larger image is scaled down rather
+  than refused. Both hand the LM a merged embedding, but Qwen3-VL touches the text
+  forward in two more places: `deepstack_inject.cu` adds encoder taps after each of
+  the first few LM layers at the image-token positions (`executor_forward.cu`), and
+  positions are three-axis M-RoPE (`model/mrope_positions.cpp` builds per-token
+  (t,h,w); `compute/rope.cu` applies the section split). One image per request
+  today. The seam is the `<|image_pad|>` placeholder: `model/image_placeholders.cpp`
+  expands it to the encoder's real token count and salts the prefix-cache hash with
+  the image content, since every image token otherwise carries the same id and two
+  different pictures would share a prefix.
 - **Public C API** — `include/imp/{imp,types,error,config}.h`,
   implemented in `src/api/imp_api.cpp`. ABI-stable per CONTRIBUTING.md.
 
