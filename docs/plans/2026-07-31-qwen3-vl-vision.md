@@ -99,7 +99,13 @@ More than the old assessment implied:
    touches the hot path for every model, so it needs a text-only invariant test:
    with all three positions equal the output must be bit-identical to today.
 7. **Image preprocessing.** Resize to a multiple of `patch_size × spatial_merge_size`
-   (32) within the model's pixel bounds; `preprocessor_config.json` is staged.
+   (32) within the model's pixel bounds. **The sizing half is done** —
+   `qwen_smart_resize`, ported from transformers' `smart_resize` with its
+   ties-to-even rounding and its asymmetric clamp branches, 7 unit tests.
+   Remaining: resample + normalise + patchify into the `3·2·16·16 = 1536` order
+   the flattened `patch_embed` expects. Note the bounds in
+   `preprocessor_config.json` are PIXEL COUNTS despite being spelled
+   `shortest_edge` / `longest_edge` — 65536 = 256² and 16777216 = 4096².
 
 ## Suggested order
 
