@@ -2,6 +2,7 @@
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 #include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -501,21 +502,34 @@ struct CubSortScratch {
     void* d_temp = nullptr;
     size_t temp_bytes = 0;
     int capacity = 0;  // max vocab_size allocated for
+    uint64_t gen = 0;  // arena generation these came from (model swap invalidates)
 
     bool ensure(int vocab_size, cudaStream_t stream) {
-        if (vocab_size <= capacity)
+        const uint64_t g = engine_arena().generation();
+        if (vocab_size <= capacity && gen == g)
             return true;
-        free();
+        // T2 (A7 step 8). One take per (model, arena) — `capacity` is the
+        // vocabulary, which does not change while a model is loaded, so this
+        // runs once and never climbs a staircase. The pre-arena code freed and
+        // re-cudaMalloc'd six buffers from the SAMPLER, i.e. potentially while
+        // serving; the arena take is pointer arithmetic and cannot.
+        *this = CubSortScratch{};
         size_t elem_bytes = static_cast<size_t>(vocab_size) * sizeof(float);
         size_t idx_bytes = static_cast<size_t>(vocab_size) * sizeof(int32_t);
-        if (cudaMalloc(&d_keys_in, elem_bytes) != cudaSuccess ||
-            cudaMalloc(&d_keys_out, elem_bytes) != cudaSuccess ||
-            cudaMalloc(&d_vals_in, idx_bytes) != cudaSuccess ||
-            cudaMalloc(&d_vals_out, idx_bytes) != cudaSuccess ||
-            cudaMalloc(&d_max_sum, 2 * sizeof(float)) != cudaSuccess) {
-            free();
+        auto ki = engine_arena().take_bytes(elem_bytes);
+        auto ko = engine_arena().take_bytes(elem_bytes);
+        auto vi = engine_arena().take_bytes(idx_bytes);
+        auto vo = engine_arena().take_bytes(idx_bytes);
+        auto ms = engine_arena().take_bytes(2 * sizeof(float));
+        if (ki.empty() || ko.empty() || vi.empty() || vo.empty() || ms.empty()) {
+            *this = CubSortScratch{};
             return false;
         }
+        d_keys_in = reinterpret_cast<float*>(ki.data());
+        d_keys_out = reinterpret_cast<float*>(ko.data());
+        d_vals_in = reinterpret_cast<int32_t*>(vi.data());
+        d_vals_out = reinterpret_cast<int32_t*>(vo.data());
+        d_max_sum = reinterpret_cast<float*>(ms.data());
         // Query CUB temp storage requirements: take max of full RadixSort
         // (fallback) and DeviceTopK (preferred) + a small RadixSort over the
         // top-K results (to produce sorted output for top-p).
@@ -532,42 +546,23 @@ struct CubSortScratch {
         cub::DeviceRadixSort::SortPairsDescending(nullptr, rs_topk_bytes, d_keys_in, d_keys_out, d_vals_in,
                                                   d_vals_out, vocab_size, 0, 32, stream);
         temp_bytes = std::max({rs_full_bytes, topk_bytes, rs_topk_bytes});
-        if (cudaMalloc(&d_temp, temp_bytes) != cudaSuccess) {
-            free();
+        auto tmp = engine_arena().take_bytes(temp_bytes);
+        if (tmp.empty()) {
+            *this = CubSortScratch{};
             return false;
         }
+        d_temp = tmp.data();
         capacity = vocab_size;
+        gen = g;
+        IMP_LOG_DEBUG("CUB sort scratch: %.2f MiB from the T2 arena for vocab=%d (CUB temp %.2f MiB)",
+                      (2 * elem_bytes + 2 * idx_bytes + 8 + temp_bytes) / (1024.0 * 1024.0), vocab_size,
+                      temp_bytes / (1024.0 * 1024.0));
         return true;
     }
 
-    void free() {
-        if (d_keys_in) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_keys_in));
-            d_keys_in = nullptr;
-        }
-        if (d_keys_out) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_keys_out));
-            d_keys_out = nullptr;
-        }
-        if (d_vals_in) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_vals_in));
-            d_vals_in = nullptr;
-        }
-        if (d_vals_out) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_vals_out));
-            d_vals_out = nullptr;
-        }
-        if (d_max_sum) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_max_sum));
-            d_max_sum = nullptr;
-        }
-        if (d_temp) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_temp));
-            d_temp = nullptr;
-        }
-        temp_bytes = 0;
-        capacity = 0;
-    }
+    // Arena-owned since A7 step 8: the region belongs to the T2 arena and
+    // ~Engine closes it. `gen` is what notices a close, so this only re-arms.
+    void free() { *this = CubSortScratch{}; }
 };
 
 static CubSortScratch s_cub_scratch;
