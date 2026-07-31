@@ -6,6 +6,25 @@
 
 namespace imp {
 
+// M-RoPE (Qwen-VL family): rotary pairs are driven by three position axes —
+// text/time, image height, image width — instead of one.
+//
+// `positions` is [3, stride]: axis-major, one row of `stride` token positions
+// each. A null pointer is the whole opt-out: every rotary pair then reads the
+// single `positions` argument of the call, which is exactly what every
+// text-only model does today. A non-null pointer whose three rows are equal
+// produces the same angles as that path and must stay bit-identical to it —
+// that is the invariant a text prompt on a VL model relies on.
+struct MRopeParams {
+    const int* positions = nullptr;
+    int stride = 0;                       // tokens per axis row
+    int sec_t = 0, sec_h = 0, sec_w = 0;  // half-counts, summing to rope_dim/2
+    // Qwen3-VL interleaves the axes across the spectrum (T,H,W,T,H,W,... then a
+    // T tail); Qwen2-VL takes three contiguous blocks. Different dimensions get
+    // different angles, so the layouts are not interchangeable.
+    bool interleaved = false;
+};
+
 // Fused RoPE on Q and K tensors in-place
 // rope_dim: if > 0, only rotate the first rope_dim dimensions; rest unchanged.
 //           if 0, rotate all head_dim dimensions (default).
@@ -19,7 +38,7 @@ namespace imp {
 void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, float theta = 10000.0f,
                   float scaling = 1.0f, int rope_dim = 0, bool neox = false, float ext_factor = 0.0f,
                   float attn_factor = 1.0f, const float* corr_dims = nullptr, cudaStream_t stream = nullptr,
-                  const float* longrope_inv_freqs = nullptr);
+                  const float* longrope_inv_freqs = nullptr, MRopeParams mrope = {});
 
 // Fused QK-norm + RoPE for decode (n=1, FP16).
 // Applies per-head RMSNorm on Q and K, then RoPE, in a single kernel launch.
@@ -31,7 +50,7 @@ void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* 
                        float scaling = 1.0f, int rope_dim = 0, bool neox = false,
                        cudaStream_t stream = nullptr, float weight_offset = 0.0f, float ext_factor = 0.0f,
                        float attn_factor = 1.0f, const float* corr_dims = nullptr,
-                       const float* longrope_inv_freqs = nullptr);
+                       const float* longrope_inv_freqs = nullptr, MRopeParams mrope = {});
 
 // Precompute YaRN correction dimension boundaries.
 // dims[0] = start (below: full NTK interpolation)

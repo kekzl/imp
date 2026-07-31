@@ -54,16 +54,30 @@ struct ModelConfig {
     int rope_dim = 0;       // 0 = full head_dim, 84 = partial
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
+    // M-RoPE (Qwen-VL family): the rotary pairs are split across three position
+    // axes — text/time, image height, image width. Half-counts, summing to
+    // rope_dim/2 (Qwen3-VL: [24, 20, 20] for rope_dim 128). All zero means the
+    // model has no M-RoPE and every rotary pair follows the single text
+    // position, which is also what a text-only prompt reduces to on a model
+    // that does have it.
+    int mrope_section[3] = {0, 0, 0};
+    // Qwen3-VL interleaves the three axes across the frequency spectrum
+    // (T,H,W,T,H,W,... then T for the tail) instead of taking three contiguous
+    // blocks, "preserving frequency continuity" per upstream. The two layouts
+    // rotate different dimensions by different angles, so this is not cosmetic.
+    bool mrope_interleaved = false;
+    bool has_mrope() const { return mrope_section[1] > 0 || mrope_section[2] > 0; }
+
     // MLA (DeepSeek-V2/V3). kv_lora_rank > 0 selects the MLA path.
-    int   kv_lora_rank      = 0;     // 512 (V2-Lite) / 1024 (V3)
-    int   q_lora_rank       = 0;     // 0 = full Q projection (V2-Lite); >0 = Q down/up LoRA (V3)
-    int   qk_rope_head_dim  = 0;     // 64  — decoupled RoPE key dims
-    int   qk_nope_head_dim  = 0;     // 128 — non-RoPE key dims
-    int   v_head_dim        = 0;     // 128 — value head dim
+    int kv_lora_rank = 0;      // 512 (V2-Lite) / 1024 (V3)
+    int q_lora_rank = 0;       // 0 = full Q projection (V2-Lite); >0 = Q down/up LoRA (V3)
+    int qk_rope_head_dim = 0;  // 64  — decoupled RoPE key dims
+    int qk_nope_head_dim = 0;  // 128 — non-RoPE key dims
+    int v_head_dim = 0;        // 128 — value head dim
     // YaRN mscale used for the softmax attention-scale adjustment.
     // Stores rope_scaling.mscale_all_dim if present, else rope_scaling.mscale.
     // For DeepSeek-V2-Lite both are 0.707; the distinction matters for V3.
-    float mla_mscale        = 1.0f;
+    float mla_mscale = 1.0f;
     // Raw rope_scaling.mscale (the numerator of the RoPE cos/sin scale).
     // HF DeepseekV2YarnRotaryEmbedding scales cos/sin by the RATIO
     //   yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim),
@@ -71,9 +85,9 @@ struct ModelConfig {
     // NOT yarn_get_mscale(factor, mscale_all_dim). Kept separate from
     // mla_mscale (= mscale_all_dim, used by the softmax scale) so the rope
     // factor below can form the ratio instead of double-applying the mscale.
-    float mla_mscale_num    = 1.0f;
-    bool  is_mla() const { return kv_lora_rank > 0; }
-    int   first_k_dense_replace = 0; // layers [0, k) use dense FFN even in a MoE model
+    float mla_mscale_num = 1.0f;
+    bool is_mla() const { return kv_lora_rank > 0; }
+    int first_k_dense_replace = 0;  // layers [0, k) use dense FFN even in a MoE model
     // NoPE attention (Nemotron-H family): attention layers use NO rotary
     // embedding — position is carried by the recurrent (Mamba) layers.
     bool rope_attn_disabled = false;
@@ -186,9 +200,9 @@ struct ModelConfig {
 // This helper returns mscale_adj^2 when the config is an MLA model with
 // YaRN factor > 1, and 1.0f otherwise (leaving non-MLA models unaffected).
 inline float mla_attention_scale_multiplier(const ModelConfig& cfg) {
-    if (!cfg.is_mla() || cfg.rope_freq_scale <= 1.0f) return 1.0f;
-    const float mscale_adj =
-        0.1f * cfg.mla_mscale * std::log(cfg.rope_freq_scale) + 1.0f;
+    if (!cfg.is_mla() || cfg.rope_freq_scale <= 1.0f)
+        return 1.0f;
+    const float mscale_adj = 0.1f * cfg.mla_mscale * std::log(cfg.rope_freq_scale) + 1.0f;
     return mscale_adj * mscale_adj;
 }
 
@@ -222,13 +236,13 @@ struct TransformerLayer {
     // kv_a_layernorm: RMSNorm weight on the 512-dim latent (never quantized).
     // kv_b_proj: up-projection, output 16*(128+128)=4096.
     Tensor kv_a_proj, kv_a_layernorm, kv_b_proj;
-    Tensor q_bias, k_bias, v_bias;         // Attention biases (Qwen2)
-    Tensor o_bias;                         // Output-projection bias (gpt-oss)
-    Tensor attn_sinks;                     // Per-head sink logits [n_heads] (gpt-oss)
-    Tensor router_bias;                    // Router logits bias [n_experts] (gpt-oss)
-    Tensor expert_gate_bias;               // Per-expert gate bias [ne, d_ff] (gpt-oss, de-interleaved)
-    Tensor expert_up_bias;                 // Per-expert up bias [ne, d_ff] (gpt-oss, de-interleaved)
-    Tensor expert_down_bias;               // Per-expert down bias [ne, d_model] (gpt-oss)
+    Tensor q_bias, k_bias, v_bias;  // Attention biases (Qwen2)
+    Tensor o_bias;                  // Output-projection bias (gpt-oss)
+    Tensor attn_sinks;              // Per-head sink logits [n_heads] (gpt-oss)
+    Tensor router_bias;             // Router logits bias [n_experts] (gpt-oss)
+    Tensor expert_gate_bias;        // Per-expert gate bias [ne, d_ff] (gpt-oss, de-interleaved)
+    Tensor expert_up_bias;          // Per-expert up bias [ne, d_ff] (gpt-oss, de-interleaved)
+    Tensor expert_down_bias;        // Per-expert down bias [ne, d_model] (gpt-oss)
     // gpt-oss raw checkpoint slots (HF MXFP4 layout, consumed at upload):
     Tensor expert_gate_up_packed_blocks;   // U8 [ne, 2*d_ff, K/32, 16] e2m1, rows interleaved g0,u0,g1,...
     Tensor expert_gate_up_packed_scales;   // U8 [ne, 2*d_ff, K/32] ue8m0

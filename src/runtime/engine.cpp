@@ -71,9 +71,10 @@ Engine::~Engine() {
     // Serving would make the next engine's init look like an I2 violation.
     set_alloc_phase(AllocPhase::Loading);
     if (const uint64_t n = steady_state_allocations(); n > 0) {
-        IMP_LOG_WARN("I2: %llu device allocation(s) were made while serving — "
-                     "see the per-tag warnings above (criterion 3 requires zero)",
-                     static_cast<unsigned long long>(n));
+        IMP_LOG_WARN(
+            "I2: %llu device allocation(s) were made while serving — "
+            "see the per-tag warnings above (criterion 3 requires zero)",
+            static_cast<unsigned long long>(n));
     }
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
@@ -251,13 +252,19 @@ bool Engine::enable_mtp_spec_decode(int k) {
     ws->rope_neox = model_->config_.rope_neox;
     ws->rms_norm_eps = model_->config_.rms_norm_eps;
     ws->rope_dim = (model_->config_.rope_dim > 0) ? model_->config_.rope_dim : mtp_head_dim;
-    // mrope section split. Qwen3.6 ships mrope_section = [11, 11, 10]
-    // (half-counts; full rope_dim = 64 = 2*(11+11+10)). imp doesn't load
-    // this from config yet — hardcoded here based on the on-disk spec.
+    // mrope section split. Read from config when the checkpoint carries one
+    // (Qwen3-VL: [24, 20, 20]); the Qwen3.6 constant below stays as the
+    // fallback for checkpoints that ship the split only in their spec.
     // For text-only generation all 3 positions are equal, so this is
     // mathematically equivalent to standard partial-rope; the section
     // split matters only for true multimodal tokens.
-    if (ws->rope_dim == 64) {
+    const ModelConfig& mc = model_->config_;
+    if (mc.has_mrope() &&
+        mc.mrope_section[0] + mc.mrope_section[1] + mc.mrope_section[2] == ws->rope_dim / 2) {
+        ws->mrope_sec0 = mc.mrope_section[0];
+        ws->mrope_sec1 = mc.mrope_section[1];
+        ws->mrope_sec2 = mc.mrope_section[2];
+    } else if (ws->rope_dim == 64) {
         ws->mrope_sec0 = 11;
         ws->mrope_sec1 = 11;
         ws->mrope_sec2 = 10;
@@ -860,12 +867,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // capture_ctx_cap mirrors engine_spec_capture.cpp: the chunk-capture
         // scratch is sized from min(the configured cap, max_seq_len), and is
         // charged only when speculation can actually take that path.
-        const int capture_cap =
-            runtime_config_.speculative.capture
-                ? (config_.max_seq_len > 0
-                       ? std::min(runtime_config_.speculative.capture_ctx_cap, config_.max_seq_len)
-                       : runtime_config_.speculative.capture_ctx_cap)
-                : 0;
+        const int capture_cap = runtime_config_.speculative.capture
+                                    ? (config_.max_seq_len > 0
+                                           ? std::min(runtime_config_.speculative.capture_ctx_cap,
+                                                      config_.max_seq_len)
+                                           : runtime_config_.speculative.capture_ctx_cap)
+                                    : 0;
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
                                       config_.use_fp8_prefill, runtime_config_.attention.mla_absorb,
                                       capture_cap);
@@ -979,12 +986,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // Measured on Qwen3-8B this is the difference between 82.5 % and 98.3 %
     // accounted, i.e. criterion 6 met instead of missed, with no config change.
     // Falls back to the charged value when warmup was skipped (MXFP4, Gemma-4).
-    MemAccount::instance().set_named_charges(
-        ctx_baseline_bytes,
-        measured_library_reserve_ != SIZE_MAX
-            ? measured_library_reserve_
-            : engine_internal::library_reserve_charge(runtime_config_.vram.library_reserve_mb),
-        engine_arena().capacity(), engine_arena().high_water());
+    MemAccount::instance().set_named_charges(ctx_baseline_bytes,
+                                             measured_library_reserve_ != SIZE_MAX
+                                                 ? measured_library_reserve_
+                                                 : engine_internal::library_reserve_charge(
+                                                       runtime_config_.vram.library_reserve_mb),
+                                             engine_arena().capacity(), engine_arena().high_water());
     MemAccount::instance().sampler_start(2000);
     MemAccount::instance().report("init_complete");
 
