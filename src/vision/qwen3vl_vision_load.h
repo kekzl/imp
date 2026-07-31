@@ -10,6 +10,7 @@
 #include "core/tensor.h"
 #include "vision/vision_model.h"
 
+#include <functional>
 #include <string>
 #include <unordered_map>
 
@@ -27,5 +28,15 @@ struct Qwen3VLVisionLoadStats {
 // with a null slot must not reach the encoder.
 bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& tensors, VisionModel& out,
                                  Qwen3VLVisionLoadStats& stats, std::string& err);
+
+// Visit every tensor slot of the tower exactly once, with the checkpoint name it
+// came from. Single source of truth on purpose: the load-completeness check and
+// the device upload both walk this list, so a slot added to one cannot be
+// forgotten by the other — which would leave the encoder reading a host pointer
+// from the device.
+//
+// `model.layers` and `model.deepstack_mergers` must already be sized.
+void qwen3vl_visit_vision_tensors(VisionModel& model,
+                                  const std::function<void(Tensor&, const std::string&)>& fn);
 
 }  // namespace imp

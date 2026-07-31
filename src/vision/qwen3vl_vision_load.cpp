@@ -247,45 +247,49 @@ bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& 
 
     // A null slot is the failure this function exists to catch: the encoder
     // would read it as a garbage embedding many layers later.
-    auto require = [&](const Tensor& t, const char* what) {
+    qwen3vl_visit_vision_tensors(out, [&](Tensor& t, const std::string& what) {
         if (t.data == nullptr) {
             stats.missing++;
             if (err.empty())
-                err = std::string("vision tower is missing ") + what;
+                err = "vision tower is missing " + what;
         }
-    };
-    require(out.patch_embd_w, "patch_embed.proj.weight");
-    require(out.patch_embd_b, "patch_embed.proj.bias");
-    require(out.position_embd, "pos_embed.weight");
-    for (size_t i = 0; i < out.layers.size(); ++i) {
-        const VisionLayerWeights& L = out.layers[i];
-        const std::string p = "blocks." + std::to_string(i) + ".";
-        require(L.ln1_w, (p + "norm1.weight").c_str());
-        require(L.ln1_b, (p + "norm1.bias").c_str());
-        require(L.wq, (p + "attn.qkv.weight").c_str());
-        require(L.bq, (p + "attn.qkv.bias").c_str());
-        require(L.wo, (p + "attn.proj.weight").c_str());
-        require(L.bo, (p + "attn.proj.bias").c_str());
-        require(L.ln2_w, (p + "norm2.weight").c_str());
-        require(L.ln2_b, (p + "norm2.bias").c_str());
-        require(L.ffn_up_w, (p + "mlp.linear_fc1.weight").c_str());
-        require(L.ffn_up_b, (p + "mlp.linear_fc1.bias").c_str());
-        require(L.ffn_down_w, (p + "mlp.linear_fc2.weight").c_str());
-        require(L.ffn_down_b, (p + "mlp.linear_fc2.bias").c_str());
-    }
-    auto require_merger = [&](const VisionMergerWeights& m, const char* what) {
-        require(m.norm_w, what);
-        require(m.norm_b, what);
-        require(m.fc1_w, what);
-        require(m.fc1_b, what);
-        require(m.fc2_w, what);
-        require(m.fc2_b, what);
-    };
-    require_merger(out.merger, "merger");
-    for (size_t i = 0; i < out.deepstack_mergers.size(); ++i)
-        require_merger(out.deepstack_mergers[i], "a deepstack merger");
+    });
 
     return stats.missing == 0;
+}
+
+void qwen3vl_visit_vision_tensors(VisionModel& model,
+                                  const std::function<void(Tensor&, const std::string&)>& fn) {
+    fn(model.patch_embd_w, "patch_embed.proj.weight");
+    fn(model.patch_embd_b, "patch_embed.proj.bias");
+    fn(model.position_embd, "pos_embed.weight");
+    for (size_t i = 0; i < model.layers.size(); ++i) {
+        VisionLayerWeights& L = model.layers[i];
+        const std::string p = "blocks." + std::to_string(i) + ".";
+        fn(L.ln1_w, p + "norm1.weight");
+        fn(L.ln1_b, p + "norm1.bias");
+        fn(L.wq, p + "attn.qkv.weight");
+        fn(L.bq, p + "attn.qkv.bias");
+        fn(L.wo, p + "attn.proj.weight");
+        fn(L.bo, p + "attn.proj.bias");
+        fn(L.ln2_w, p + "norm2.weight");
+        fn(L.ln2_b, p + "norm2.bias");
+        fn(L.ffn_up_w, p + "mlp.linear_fc1.weight");
+        fn(L.ffn_up_b, p + "mlp.linear_fc1.bias");
+        fn(L.ffn_down_w, p + "mlp.linear_fc2.weight");
+        fn(L.ffn_down_b, p + "mlp.linear_fc2.bias");
+    }
+    auto visit_merger = [&](VisionMergerWeights& m, const std::string& p) {
+        fn(m.norm_w, p + "norm.weight");
+        fn(m.norm_b, p + "norm.bias");
+        fn(m.fc1_w, p + "linear_fc1.weight");
+        fn(m.fc1_b, p + "linear_fc1.bias");
+        fn(m.fc2_w, p + "linear_fc2.weight");
+        fn(m.fc2_b, p + "linear_fc2.bias");
+    };
+    visit_merger(model.merger, "merger.");
+    for (size_t i = 0; i < model.deepstack_mergers.size(); ++i)
+        visit_merger(model.deepstack_mergers[i], "deepstack_merger_list." + std::to_string(i) + ".");
 }
 
 }  // namespace imp
