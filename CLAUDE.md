@@ -93,6 +93,12 @@ binary; green there is not green in CI).
 
 ## Conventions
 
+- **The CHANGELOG is a changelog, not a journal.** One to three lines per
+  entry: what changed for the reader, plus the number or issue that makes it
+  checkable. The investigation — hypotheses, what was ruled out, how it was
+  measured — goes to `docs/` or `docs/MISSION_JOURNAL.md`, and the entry links
+  there. Entries had drifted to 20-40 lines each and `[Unreleased]` to 649,
+  which is how a changelog stops being read.
 - **English only in the repo.** All PRs (title + body), commit messages, code comments, docs, and `.md` files are written entirely in English. (Chat replies to the user stay German per global instructions — this rule covers artifacts that land in the repository or on GitHub.)
 - **Always branch off `main` and `gh pr create --base main`.** Never stack PRs (squash-merge + stacking caused recovery-PR cascades). Prefer fewer, batched PRs over one-per-fix.
 - **Performance is gated.** `tests/perf_baseline.json` is the canonical baseline (CI: 3% decode / 5% prefill thresholds). Refresh via `scripts/gen_perf_baseline.sh` when a change intentionally moves perf, and say so in the PR.

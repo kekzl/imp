@@ -2,655 +2,175 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+**This is a changelog, not a journal.** One to three lines per entry: what
+changed, from the reader's side, plus the number or issue that makes it
+checkable. The investigation behind a change — hypotheses, what was ruled out,
+how it was measured — belongs in `docs/` (`quantization.md`, `roadmap.md`,
+`AUDIT.md`, `docs/plans/`) or in `docs/MISSION_JOURNAL.md`, and the entry links
+there instead of retelling it.
+
 ## [Unreleased]
 
-### Changed
-- **"Prefer a published Modelopt checkpoint" no longer stands unmeasured — and
-  on the one model that can be compared here, it is wrong.** `Qwen3-14B-NVFP4`
-  is a genuine Modelopt export whose untouched tensors are *bit-identical* to
-  the `Qwen/Qwen3-14B` BF16 source (norm weights and the 1.5 GB embedding table
-  hash the same), so both quantizers provably started from the same weights.
-  Both quantize the same 280 tensors and exclude `lm_head`. Same corpus, engine
-  and `deterministic_gemm`, each reproduced to four decimals:
-  **Modelopt 10.0301, `imp-quantize` without `--calib` 9.9252** — the
-  uncalibrated in-tree quantizer 1.05% ahead.
-
-  One model, one corpus: that is not a claim that imp-quantize is the better
-  quantizer, but it does retire the blanket advice. Hypothesis for the gap,
-  stated as one: the Modelopt export also carries 280 `input_scale` and 40
-  `k_scale`/`v_scale` tensors, so its weight rounding was calibrated *jointly
-  with* activation and KV quantization while imp runs the weight half.
-
-  Not measurable here: the BF16 baseline for this model, and therefore `--calib`
-  on it — 27.5 GiB of weights plus the allocator's 5% headroom does not fit in
-  32 GiB (upload fails at layer 39).
-
-### Fixed
-- **`imp-quantize` silently produced a broken MoE checkpoint.** The docs claimed
-  MoE was "reported and left unquantized rather than mangled" — but that only
-  ever applied to 3-D stacked expert tensors. Checkpoints storing experts the
-  HF-standard way (one 2-D tensor per expert, as DeepSeek-V2/Qwen3-MoE/Mixtral
-  do) sailed through every shape check, got quantized, and produced a model that
-  *loaded* and then emitted cross-script repetition garbage while the BF16 source
-  answered normally.
-
-  Bisection on DeepSeek-V2-Lite (MLA + 64 routed experts) cleared the experts:
-  quantizing all 4992 expert tensors with attention left BF16 is coherent. Two
-  other roles are the culprits, and both are 2-D and K-aligned so nothing caught
-  them — the **MLA latent projections** (`kv_a_proj_with_mqa`, `kv_b_proj`, which
-  the runtime slices into latent+RoPE and per-head nope/v halves) and the **MoE
-  router** (FP4 across 16 shared-scale values changes the top-k expert pick).
-  Each was confirmed independently: excluding only one still gave garbage;
-  excluding both gives a working checkpoint. Both are now refused, at a cost of a
-  handful of small matrices per layer.
-
-  DeepSeek-V2-Lite now quantizes 29.26 GiB → 8.91 GiB (3.28x) in ~70 s, and
-  `degen_suite.py` reads **3 FAIL / 32 against the BF16 source's 5 FAIL / 32** —
-  the quantized model's failures are a strict subset, so the quantization
-  introduces none of them.
-
 ### Added
-- **`evicted_tokens`: the caller is now told when StreamingLLM dropped its
-  context**, closing the second half of roadmap gap 6. When the KV pool runs out
-  mid-generation the engine frees the middle of the sequence and keeps
-  decoding — correct behaviour, but the only trace was a server-side WARN, and
-  a WARN is not something an API client sees. The answer it got back was
-  written against less context than it sent, and it had no way to know.
-
-  The reply now carries the count: `usage.prompt_tokens_details.evicted_tokens`
-  on chat-completions, `usage.input_tokens_details.evicted_tokens` on
-  `/v1/responses`, and `usage.imp_evicted_tokens` on `/v1/messages` — namespaced
-  there because Anthropic's usage shape has no field for this and guessing at
-  their schema is worse than an obvious extension. **The key is absent unless
-  eviction actually fired**, so its presence is the signal rather than its
-  value.
-
-  Verified by forcing the path rather than by inspection: FP16 KV,
-  `kv_cache.max_blocks=320` (a 5120-token pool), and a prompt that starts past
-  the 4132-token eviction threshold — the engine logs the auto-enable and all
-  three dialects return the field. Converter coverage in
-  `test_responses_transform` / `test_anthropic_transform`, including that a
-  zero is not forwarded as a key.
-
-- **AWQ-class activation calibration for `imp-quantize`** (`--calib`), closing
-  the open half of roadmap gap 1. Until now the in-tree quantizer had never
-  looked at an activation: scales were plain round-to-nearest over the weights,
-  so nothing protected the input channels that carry the most signal, and the
-  result cost +25% perplexity against BF16. Two pieces ship:
-  `imp-cli --perplexity <corpus> --calibrate <file>` runs one forward pass that
-  accumulates the mean `|activation|` per input channel and writes it; and
-  `imp-quantize --calib <file>` searches a per-group scale against it.
-  **Measured** over `ppl_corpus_45k.txt` (13 537 tokens), calibrated on general
-  prose that is deliberately *not* the scoring corpus, on both dense Qwen3
-  sizes staged locally — Qwen3-0.6B: BF16 24.06, round-to-nearest 30.10
-  (+25.1%), **AWQ 28.48 (+18.3%)**; Qwen3-1.7B (sharded, so the multi-shard
-  write path too): BF16 17.22, round-to-nearest 20.43 (+18.6%), **AWQ 19.21
-  (+11.5%)**. 5-6% of the perplexity removed, a quarter to two fifths of the
-  gap to BF16, `degen_suite.py` 45/45 on every checkpoint. Reproduce with
+- **Vision: Qwen3-VL** (#1163-#1180). imp describes images end to end, from
+  `imp-cli --image` and from `/v1/chat/completions`. Dynamic resolution (no
+  fixed image size — a 1795x2397 photo becomes 972 image tokens), DeepStack
+  taps injected at the LM's first layers, and three-axis M-RoPE. Text-only
+  models and text-only prompts are bit-identical to before.
+  Plan and inventory: `docs/plans/2026-07-31-qwen3-vl-vision.md`.
+- **`POST /v1/rerank`** (also `/rerank`) — Cohere/Jina/vLLM-compatible, scoring
+  query and document jointly in one forward. Supports `top_n`,
+  `return_documents`, `instruction`, Cohere's object documents and vLLM's
+  `texts`. Validated against llama.cpp on the same GGUF (top-1 agreement 3/3,
+  median score delta 0.0014). Needs a reranker model; a general model is
+  refused with a 400. Gate: `make test-rerank`.
+- **GBNF grammar-constrained decoding** — `response_format: {"type":"grammar"}`,
+  llama.cpp's `grammar` and vLLM's `guided_grammar`. Recursive formats a regex
+  cannot express. Grammars the simulator cannot honour (left recursion,
+  undefined rules, missing `root`, unbounded repetition) are refused rather
+  than mis-enforced.
+- **Regex-constrained decoding** — `response_format: {"type":"regex"}` and
+  vLLM's `guided_regex`. Constructs a DFA cannot honour (lookaround, anchors,
+  `\b`, backreferences) are refused.
+- **`imp-quantize` (EXPERIMENTAL)**: first-party BF16/FP16 → NVFP4 checkpoint
+  conversion, writing the layout the loader already reads. Sharded sources
+  supported. With `--calib` (below) Qwen3-0.6B scores PPL 28.48 vs BF16 24.06;
+  without it 30.10. Details and caveats in `docs/quantization.md`.
+- **AWQ-class activation calibration** (`imp-cli --calibrate` +
+  `imp-quantize --calib`). Measured over a 13.5k-token corpus: Qwen3-0.6B
+  30.10 → **28.48**, Qwen3-1.7B 20.43 → **19.21**; `degen_suite.py` 45/45.
+  `--calibrate` forces `runtime.deterministic_gemm` — without it two identical
+  runs differ on 94% of recorded floats and the resulting checkpoints spread
+  1.6% in perplexity. Refuses architectures whose norm applies `(1 + g)`
+  (Gemma-class) rather than emitting a different model. Reproduce with
   `tools/analysis/awq_ppl_ab.sh`.
-
-  The collector hooks `gemm_via_handle_`, the one dispatch every registered
-  weight GEMM passes through, so no call site has to be taught about
-  calibration and the statistic is the activation the weight actually consumes
-  whatever tier it lands on. It is off unless `[calibration] enabled` is set,
-  and enabling it turns CUDA graphs off (the collector allocates a per-weight
-  accumulator lazily, which a capture forbids).
-
-  The compensating `1/s` is folded into the producer, so the output stays a
-  plain NVFP4 checkpoint that needs no runtime support: q/k/v and gate/up fold
-  into their preceding RMSNorm weight, `o_proj` into `v_proj`'s output rows
-  (GQA-tied), `down_proj` into `up_proj`'s. Because the norm fold assumes a
-  plain multiplicative RMSNorm, `--calib` **refuses** architectures whose norm
-  applies `(1 + g)` (Gemma-class) instead of silently emitting a different
-  model. `alpha = 0` is always in the search grid, so a group where scaling
-  does not pay keeps its untransformed weights.
-
-  **`--calibrate` forces `runtime.deterministic_gemm`, and that is the finding,
-  not a detail.** Without it, two runs of the identical command produced
-  calibration files differing on **94% of the recorded floats** (up to 0.5%
-  each) — imp's forward has run-to-run variance on this config — and three
-  checkpoints built from three such files scored 28.84, 28.94 and 28.48: a 1.6%
-  perplexity spread from nothing but which run wrote the file. Those
-  checkpoints also each flipped exactly one of the 45 degeneration probes — a
-  different one each time — which the deterministic build does not (45/45 on
-  three consecutive runs, same as BF16 and round-to-nearest). The variance is
-  also large enough to swamp per-group attribution, so the norm-folds-only
-  (29.40) and no-`o_proj` (29.25) numbers measured along the way are reported
-  in `docs/quantization.md` as *not established* rather than as an ordering.
-
-  **One hypothesis refuted.** Folding `o_proj` into `v_proj` writes into the
-  tensor the KV cache stores, so on the default FP8_E4M3 KV it looked like it
-  must cost more than it wins. Measured against one fixed calibration: the
-  FP8-vs-FP16-KV penalty is **0.300 PPL on the calibrated checkpoint and 0.595
-  on the round-to-nearest one** — the scaled `v_proj` is, if anything,
-  friendlier to FP8 KV.
-
-- **A third external agent leg: the OpenAI Agents SDK over `/v1/responses`**,
-  closing roadmap gap 10. `make test-agents-external` now drives imp with a real
-  third-party client in each of the three dialects — aider over
-  chat-completions, Claude Code over `/v1/messages`, and the Agents SDK over the
-  Responses API, which is what Codex speaks and which nothing outside our own
-  probes had ever exercised. Same contract as the other legs: a real function
-  call has to land an actual edit in a throwaway repo, and the run has to
-  contain a `function_call` item rather than a description of one.
-
-- **`tools/analysis/ctx_capacity_decode_sweep.sh`** — one command that measures
-  decode throughput against the *configured* context capacity at a fixed live
-  sequence. It exists because that sweep found decode is 38% slower at the
-  server's default capacity than at 1024 on the same 280-token request
-  (issue #1100), and because the CI perf gate cannot see it: `imp-cli --bench`
-  sizes the engine to the bench workload while `imp-server` defaults to the
-  model's full context, so the pinned baseline and the served number measure
-  different regimes.
-- **`POST /v1/rerank`** (also `/rerank`) — Cohere/Jina/vLLM-compatible
-  reranking, closing roadmap gap 9. A RAG agent retrieves with an embedding
-  model and *orders* with a reranker; imp shipped only the first half. Query and
-  document are scored JOINTLY in one forward, which is the bar the gap set — a
-  score recomputed from two independent embeddings would be an endpoint with the
-  right name and the wrong answer. Supports `top_n`, `return_documents`, a task
-  `instruction`, Cohere's object-form documents and vLLM's `texts` spelling.
-  **Not a BERT sequence-classification head**, which is what the gap assumed:
-  current rerankers (Qwen3-Reranker, bge-reranker-v2-gemma) are causal LMs that
-  answer a yes/no question about the pair, and the relevance score is the
-  softmax over those two logits. That runs on imp's existing decoder stack
-  instead of adding a second architecture family, and the shared
-  system+instruct+query prefix means the prefix cache turns an N-document rerank
-  into one full prefill plus N document tails. Validated against llama.cpp
-  serving the SAME GGUF: top-1 agreement 3/3 queries, median per-document score
-  delta 0.0014. Gate: `make test-rerank` (16 checks; add `COMPARE_URL=` for the
-  cross-engine diff). Requires a reranker model — the endpoint refuses a general
-  model with a 400 rather than returning meaningless scores.
-- **Claude Code as an external agent gate** (`make test-agents-external`,
-  roadmap gap 10 / #1007 stage 2). The real CLI now drives imp-server over
-  `ANTHROPIC_BASE_URL` on a throwaway repo and has to land an actual edit — an
-  assertion only a real tool call can satisfy. It is the demanding client: one
-  request carries a ~20K system prompt, 25 tool definitions, `cache_control`,
-  extended-thinking fields and streaming, and it exercised the Anthropic dialect
-  the way no self-written probe had. It earned its keep on the first run by
-  finding the streaming reasoning leak below. The aider leg (OpenAI dialect) is
-  unchanged; both now run from one script, selectable per leg.
-- **`reasoning-channel` check in `agent_loop_suite.py`** (the hard
-  `make test-agents` gate): streaming and non-streaming must route reasoning to
-  the same channel, with and without tools. This is the protocol-level pin for
-  the leak above, so it fails in CI-shaped runs rather than only under a real
-  agent.
-- **GBNF grammar-constrained decoding** — `response_format: {"type":"grammar","grammar":"root ::= ..."}`,
-  llama.cpp's top-level `grammar` and vLLM's `guided_grammar` are all accepted.
-  The whole reply must be a derivation of `root` (roadmap gap 8). A regex covers
-  the formats agents pin most often, but it is regular by definition: a nested
-  expression language, a balanced DSL or any recursive format needs a stack,
-  which `RegexNfa` structurally cannot have. The engine is a nondeterministic
-  pushdown simulator over hash-consed parse stacks — the naive
-  vector-of-frames version spent 333 ms building a single token mask inside a
-  JSON string, so stacks are interned to integers and each stack's successor set
-  is memoised (a transition's target does not depend on which character took it),
-  which brought the same mask to 12 ms. GBNF surface: alternation, string
-  literals, character classes (`[a-z]`, `[^"]`), `.`, rule references, grouping,
-  `*` `+` `?` `{m}` `{m,}` `{m,n}`, comments and `\xNN`/`\uNNNN` escapes.
-  Grammars the simulator cannot honour are refused rather than mis-enforced:
-  left recursion (direct, indirect, and via a star over a nullable rule),
-  undefined rule references, a missing `root`, and repetition bounds large
-  enough to be a grammar bomb. EOS is gated on a complete derivation, so
-  generation cannot stop half-way through the format, and UTF-8 is assembled
-  across token boundaries (a BPE token can end mid-character) with overlong
-  encodings rejected — they would otherwise smuggle a forbidden character past
-  the mask as a longer spelling of an allowed one.
-  Wiring it also folded the four copies of the constrainer chain in
-  `src/exec/executor.cu` into one `apply_constraint_mask` helper: a new
-  constrainer previously had to be added to four sampling paths, and the two
-  easy-to-miss ones are exactly how an unmasked path ships.
-- **Regex-constrained decoding** — `response_format: {"type":"regex","regex":"..."}`
-  (vLLM's top-level `guided_regex` is accepted too). The whole reply must match
-  the pattern, so an agent can pin a diff header, an ID, a version string or a
-  small DSL that the JSON FSMs cannot express (roadmap gap 4). The engine is the
-  existing `RegexNfa` that already backs JSON-Schema `pattern`; this adds the
-  decode-time `RegexConstrainer` with the same `apply_mask` contract as the JSON
-  constrainers, a per-state-set mask cache (walking 151k tokens every step is
-  not affordable), and EOS gated on an accepting state so generation cannot stop
-  half-way through the format. Patterns using constructs a DFA cannot honour
-  (lookaround, anchors, `\\b`, backreferences) are refused rather than silently
-  enforced as something else.
-- **Cross-engine agentic-reliability measurement** (`tools/analysis/agentic_compare.py`)
-  — the checks an agent harness depends on (json_schema, json_object, forced /
-  optional tool calls, tool-argument validity, and an N-turn JSON-contract
-  session) run against any OpenAI-compatible server, so reliability claims are
-  measured instead of asserted. Results for three model families in
-  `docs/BENCHMARKS.md`. It found a real imp bug on its first control run
-  (below), which is the point of having it.
-- **`imp-quantize` (EXPERIMENTAL): first-party BF16/FP16 → NVFP4 checkpoint
-  conversion.** imp
-  could only ever *consume* NVFP4 exports, so reaching the fast path for a new
-  model meant waiting for someone to publish one (roadmap gap 1). The tool
-  writes the layout the loader already recognises (`<prefix>.weight` U8 packed
-  nibbles + `.weight_scale` F8_E4M3 + `.weight_scale_2` F32 +
-  `hf_quant_config.json`), copies tokenizer/config files and rebuilds the shard
-  index when the source is sharded. Verified end to end on Qwen3-0.6B and
-  Qwen3-1.7B: the output loads, is detected as `NVFP4 model (Model Optimizer)`
-  and generates coherently. Supporting pieces: `safetensors_writer` (atomic
-  temp+rename, so an interrupted write cannot leave a file that parses but
-  holds truncated weights) and `safetensors_raw` (name-preserving reader that
-  leaves the production load path untouched), with 12 unit tests in the CI lane.
-  **Quality caveat, measured:** scales are uncalibrated round-to-nearest, which
-  costs PPL +25% (0.6B) / +19% (1.7B) vs BF16 over a 13 536-token corpus, while
-  `degen_suite.py` passes 41/41 on the quantized model (constrained decoding,
-  tool calls and thinking channels included). Judge this on
-  `ppl_corpus_45k.txt` — the 199-token `ppl_corpus.txt` reads +42%/+57% for the
-  same pair and inverts the size trend, both artifacts of too few tokens.
-  Prefer a published Modelopt export where one exists; AWQ/SmoothQuant-class
-  calibration and MoE expert stacks (3-D, currently reported and left
-  unquantized) are the open work.
-- **Model swapping on request (`server.model_swap`, default on)** — a request
-  naming a model other than the loaded one is now served by swapping to it
-  instead of returning 404. Agent harnesses drive a big model beside a small
-  one (router, sub-agents, autocomplete) and 32 GB fits one at a time, so the
-  swap is serial and the requesting call pays one model load; the warm weight
-  cache (#956) makes repeats cheap. An auto-swap existed once and was removed
-  because it tore the engine down mid-stream and could leave the process with
-  no model — both causes are closed here: in-flight generations **drain** first
-  and are never cancelled (the `/admin/suspend` contract), and a failed load
-  **restores** the previous model. Unknown names still 404: the name must
-  resolve inside the models directory. `/v1/models` lists the rest of that
-  directory alongside the loaded model (`loaded: true|false`) so a client can
-  see what it may ask for. `server.model_swap=false` keeps the strict
-  single-model contract; `server.model_swap_drain_ms` bounds the drain wait.
-- **Web UI at `GET /`** — `imp-server` now serves a single-page chat client.
-  It streams over the existing SSE endpoint (no protocol or engine change) and
-  draws one bar per token, so time-to-first-token, tok/s and inter-token
-  latency are visible while the answer is written; thinking arrives as a
-  separate collapsible channel. The page is embedded into the binary at build
-  time (`cmake/embed_webui.cmake`) so there is no runtime asset path; source
-  lives in `tools/imp-server/webui/index.html`. One file, no build step, no
-  dependencies — for anything richer, point Open WebUI at the same server.
+- **`evicted_tokens`**: the caller is told when StreamingLLM dropped context —
+  `usage.prompt_tokens_details.evicted_tokens` (chat-completions),
+  `usage.input_tokens_details.evicted_tokens` (`/v1/responses`),
+  `usage.imp_evicted_tokens` (`/v1/messages`). The key is absent unless
+  eviction fired, so its presence is the signal.
+- **Model swapping on request** (`server.model_swap`, default on). A request
+  naming another model in the models directory swaps to it instead of 404ing.
+  In-flight generations drain first; a failed load restores the previous model.
+  `/v1/models` lists the directory with `loaded: true|false`.
+- **Web UI at `GET /`** — single-page chat client embedded in the binary,
+  streaming over the existing SSE endpoint, with per-token latency bars and a
+  separate thinking channel.
+- **SWA window snapshots** (`kv_cache.swa_snapshot_mb`, default 0): prefix
+  caching and SWA-aware KV sizing now combine. Opt-in — the sized attention
+  route trades ~50-100 ms warm TTFT at 1-2K contexts for faster long prefill
+  (+8% at 13K) plus the KV savings.
+- **Qwen-Coder XML tool-call grammar** for templates teaching the
+  `<function=NAME>`/`<parameter=KEY>` dialect (Qwen3-Coder, Qwen3.6). Measured
+  0/3 → 3/3 compiling `write_file` contents on Coder-30B.
+- **External agent gates** (`make test-agents-external`): aider over
+  chat-completions, Claude Code over `/v1/messages`, and the OpenAI Agents SDK
+  over `/v1/responses`. Each must land a real edit in a throwaway repo.
+- **Generative property batteries for both constrained-decode FSMs**, in the
+  CPU `unit` lane, checked against nlohmann/json as an independent oracle and
+  validated by mutation.
+- **Measurement tools**: `tools/analysis/agentic_compare.py` (cross-engine
+  agentic reliability; results in `docs/BENCHMARKS.md`) and
+  `tools/analysis/ctx_capacity_decode_sweep.sh` (decode throughput against
+  configured context capacity — the regime the CI perf gate cannot see).
 
 ### Changed
-- **`--mem-report` names every VRAMAllocator charge instead of estimating the
-  executor's.** Attribution moved into `VRAMAllocator::allocate()/free()`, which
-  already knew the caller's tag and the byte count on both sides, so the table
-  is now per-charge (`shared_workspace`, `persistent_workspace`, `kv_cache`,
-  `moe_3x_packed`, `cutlass_act_data`, …) rather than one `workspace_estimate()`
-  line that both double-counted the two slabs it covered and missed every
-  auxiliary buffer. The explicit `KV_BLOCK_POOL` / `EXEC_WORKSPACES` notes are
-  gone with it; the weight and weight-cache notes stay, because those allocate
-  through `cudaMallocAsync` where the allocator never sees them. Diagnostics
-  only — no allocation behaviour changes.
-
-- **A7 step 8 is done: the `compute/` scratches that outlive a request now come
-  from the engine-persistent (T2) arena.** Four PRs' worth — the DRY penalty
-  staging, the cuBLAS/CUTLASS workspaces (which also found a 512 MiB
-  reservation against a measured 152 320 B need), the IMMA and MXFP4
-  grow-on-demand statics that closed the CUDA-graph dangling-pointer class, and
-  finally the CUB sort scratch and the top-M partials. Two consequences beyond
-  the accounting: a bump-arena take is legal under stream capture where the
-  `cudaMalloc` it replaces was not, and a grow no longer frees an address a
-  captured graph still names. What deliberately stays a direct allocation is
-  enumerated in `AUDIT.md` B75 — weight caches (T1, step 6), per-call result
-  tensors (step 5), one-shot init transients, and test-only overloads.
-
-- **The cuBLAS and CUTLASS workspaces come from the engine-persistent (T2)
-  arena, and the grouped one shrank by 511 MiB** (A7 step 8). `gemm_init()`'s
-  cuBLASLt workspace (64 MiB) and algo-selection bench scratch (32 MiB) are now
-  arena tenants charged in `exec_t2_demand`, so they are reserved before the
-  pre-dequant caches can spend the VRAM they need. The bigger change is the
-  CUTLASS **grouped** path: its prewarm reserved 512 MiB "to cover CUTLASS
-  scratch even for very large grouped problems", and measuring
-  `get_workspace_size()` across three MoE geometries (128 and 256 experts,
-  N=512/768/1856, K=2048/2688) and prefills from 130 to 2800 tokens returned
-  **152 320 B every single time** — 170 SMs x 896 B of persistent-scheduler
-  state, a property of the chip rather than the problem. It now reserves 1 MiB.
-  Measured on Qwen3-30B-A3B-NVFP4: own peak VRAM **20932 -> 20454 MiB**, the
-  `01_prewarm_gemm` phase **834 -> 336 MiB**; dense models are unaffected
-  (20716 -> 20712 on the gate model) and decode is unchanged.
-
-- **One `needs_constrained` flag replaces the `needs_json_mode` /
-  `needs_schema_mode` pair** in the decode scheduler. Every consumer only ever
-  asked for their disjunction, so the split bought nothing and cost correctness:
-  regex-constrained requests (#1091) were in neither flag, which excluded them
-  from the constrained decode pipeline and left two device-side fast paths
-  relying on a second, per-request guard to not bypass the mask. Regex and GBNF
-  grammars now take the same pipelined path as `json_object` / `json_schema`.
-  **Measured neutral** on a 4B model — eager vs pipelined came out within noise
-  for a regex (231.9 → 228.7 tok/s), a flat grammar (224.7 → 224.1) and a
-  state-heavy recursive JSON grammar (247.6 → 251.0), with byte-identical
-  output; the per-state mask cache warms fast enough that there is no host
-  latency left to hide. It is shipped for the consistency, not for a speedup.
-- `tools/imp-server/tool_call.cpp` split: the Gemma-4 tool-call dialect parser
-  moved to `tool_call_gemma.cpp`. That file was the repo's only hard-review
-  file-size violation (847 code LOC against a threshold of 800) and had been
-  failing the `File size` CI job on `main`; it is now 642 and the gate is green.
+- **SWA-aware KV sizing is tri-state `auto|on|off`** (default `auto`): the
+  savings (gpt-oss ~2x, gemma-3/4 ~5-6x KV tokens) are taken only when prefix
+  caching is off, so warm-prefix TTFT is untouched. Legacy bools still parse.
+- **Auto `max_seq_len` ceiling raised 64K → 128K** (#1004).
+- **Engine-persistent (T2) arena for `compute/` scratches** (A7 step 8). The
+  CUTLASS grouped workspace reservation drops 512 MiB → 1 MiB: measured
+  `get_workspace_size()` returns 152 320 B across every geometry tried, a
+  property of the chip rather than the problem. Qwen3-30B-A3B-NVFP4 own peak
+  VRAM 20932 → 20454 MiB; dense models and decode unaffected.
+- **`--mem-report` names every `VRAMAllocator` charge** instead of estimating
+  the executor's. Diagnostics only.
+- **One `needs_constrained` flag** replaces `needs_json_mode` /
+  `needs_schema_mode`; regex and GBNF now take the same pipelined path.
+  Measured neutral on a 4B model, shipped for consistency rather than speed.
+- **"Prefer a published Modelopt checkpoint" no longer stands unmeasured.**
+  Against a bit-identical Modelopt export of Qwen3-14B, same corpus and engine:
+  **Modelopt 10.0301, `imp-quantize` without `--calib` 9.9252**. One model, one
+  corpus — enough to retire the blanket advice, not to reverse it.
+- `tools/imp-server/tool_call.cpp` split (the Gemma-4 dialect parser moved to
+  `tool_call_gemma.cpp`), clearing the repo's only hard-review file-size
+  violation.
 
 ### Fixed
-- **The library reserve was measured through a window that missed most of it,
-  and on one model that cost 4x the KV capacity.** `report_library_reserve()`
-  anchored immediately before the warmup forward, so it only saw what the
-  libraries claimed from that point on — and which library claims *when* depends
-  on the model's execution path (Q8_0 first touches cuBLAS in the forward and
-  measures 7452 MiB; the NVFP4 cache build runs CUTLASS two phases earlier and
-  measures 2). The charge is taken across the whole init now: what the device
-  holds that imp's own allocations cannot account for. Corrects in both
-  directions — the 8B's libraries really do claim 7830 MiB where the constant
-  charged 3900, the 14B claims 791. Measured over two starts on four configs:
-  every one keeps its full requested KV pool and Qwen3.6-35B-A3B-NVFP4's second
-  start gets **16 384 tokens instead of 4096**. Attribution goes from
-  98.3 / 96.6 / 89.7 % to 99.9 / 99.9 / 100 %.
-- **`MemAccount`'s per-pool ledger is no longer gated on `--mem-report`.** With
-  it gated the residual above reads as the whole device on any normal start —
-  which would have collapsed the 35B's pool to 512 tokens. The expensive half
-  (checkpoint history, report table, sampler thread) stays opt-in; what is
-  always on is a lock and a map lookup per allocation, and allocations are an
-  init-time event.
-
-- **`--mem-report` counted the FP8 SSM sidecar twice.** It is the one FP8 weight
-  cache allocated through `VRAMAllocator` rather than raw `cudaMallocAsync`, so
-  once the allocator started naming its own charges the explicit
-  `WEIGHT_CACHE_FP8` note counted it a second time — 963.8 MiB on
-  Qwen3.6-35B-A3B-NVFP4, which read a flattered 89 % accounted instead of an
-  honest 85.0 %. Diagnostics only.
-
-- **The remembered library reserve never survived the way imp is actually run,
-  and the log promised that it would.** imp measures what CUDA/cuBLAS/CUTLASS
-  claim on the first forward and records it so the *next* start plans with the
-  measured value instead of the 3900 MiB constant — but the default cache path
-  (`$XDG_CACHE_HOME` / `$HOME/.cache`) is inside the container, so a
-  `docker run --rm` server re-measures forever while the post-forward line still
-  said "the next start on this model plans with it". Measured on Qwen3-14B-Q6_K,
-  whose first forward actually claims 0 MiB: with the path persisted, the second
-  start plans a **0 MiB** reserve instead of 3900 and hands the pools **639 MiB
-  more** to distribute — recovered on every restart, lost today. The knob
-  (`vram.library_reserve_cache`) already existed; nothing pointed at it, so
-  `imp.conf.example` now does, with the container invocation spelled out.
-- **A missing reserve measurement was silent until it was too late to act on.**
-  The operator only learned the plan had over-reserved from the mismatch warning
-  *after* the first forward — by which point the KV pool had already been sized
-  around a reserve the model did not want. The miss is now reported at plan
-  time, naming the path and the knob.
-
-- **The first `response_format` request after a model load could come back
-  unconstrained** (issue #1104). `JsonConstrainer` allocated its per-token allow
-  list lazily inside `apply_mask()` — on the serving path, mid-decode — and on a
-  model that loads with almost no free VRAM left the allocation failed, at which
-  point `apply_mask` returned **without applying any mask and without logging**.
-  The reply then decoded unconstrained: prose where JSON was promised,
-  deterministic and byte-identical across restarts, first request per process
-  only (later ones found memory and worked), and invisible in
-  `imp_constrained_eager_fallback_total` because no fallback was taken. The
-  three sibling constrainers — regex, grammar, schema — have always allocated
-  this at init and failed the load loudly; the JSON one was the outlier. It now
-  does the same, and the unreachable path logs instead of masking nothing.
-  Verified against a `main` build on the reported model
-  (Qwen3.6-35B-A3B-NVFP4): request 1 invalid there, valid here.
-
-- **`top_k` above 128 sampled from the PREVIOUS decode step's candidates**
-  (issue #1142). Requests over `SAMPLE_MAX_TOP_K` take a CUB path that ran
-  `cub::DeviceTopK::MaxPairs` to pick the candidates and then radix-sorted just
-  those. Instrumented on Qwen3-8B-Q8_0 at `top_k=129`, that call fills all 129
-  slots on the first invocation, writes **nothing** on the second while still
-  returning `cudaSuccess`, and from the fourth fails permanently with
-  `invalid device ordinal` — same thread, same stream, device 0, no pending
-  error beforehand. Nothing checked the return code, so the sampler kept
-  drawing from whatever the previous step had left in the buffer, and the model
-  emitted `Okay,,,,,,,,` for the rest of the budget. The two-step plan is
-  replaced by one full-vocabulary descending sort — the scratch was already
-  sized for it — and the return code is now checked. `degen_suite.py` gains
-  `top_k` 129 and 2000 cases; the whole path had no coverage, which is why this
-  shipped.
-
-- **The sampler drew the same quantile on every token.** The engine hands the
-  device samplers `base_seed + step` — consecutive integers, one per generated
-  token — and they took a single LCG step from it. An LCG's first output is
-  affine in its seed, so `seed + 1` moved the drawn float by
-  `1664525 / 2^32 ≈ 0.0004`: across a whole generation the draw was effectively
-  constant and the sampler kept picking the same RANK out of the candidate list.
-  At the usual `top_k` that rank is the argmax, so the output read as fluent
-  greedy text and the bug hid in plain sight; what it cost was the sampling
-  diversity that `temperature`, `top_p` and `top_k` are supposed to provide.
-  Measured on a synthetic distribution with three near-equal winners: 200
-  consecutive seeds produced **one** distinct token before, **seven** after.
-  Fixed by running the seed through a splitmix32 finalizer before the first
-  draw — four ALU ops, and the same seed still produces the same token, so
-  seeded reproducibility is unchanged. Pinned by
-  `SamplerSeeding.ConsecutiveSeedsDoNotAllDrawTheSameToken`.
-
-- **A CUDA graph could replay a kernel whose scratch pointer had been freed
-  underneath it** (AUDIT B13). Six `compute/` statics grew on demand with a
-  `cudaFree` + `cudaMalloc` pair, and the freed address was in some cases still
-  a kernel parameter baked into an instantiated graph: capture chunk 0, run a
-  later chunk eagerly at a larger `seq_kv`, and the grow frees exactly the
-  pointer the recorded graph replays. Latent (it needed `attention.mxfp4 =
-  "always"`, off by default) but real. All six now come from the T2 bump arena,
-  which never frees — a grow hands out a new slice and leaves the previous one
-  valid at the size the graph captured. Two were removed outright with the
-  CUTLASS workspace work; the IMMA activation/split-K scratches and the MXFP4
-  promotion scratches are migrated here, each carrying the arena `generation()`
-  it was taken at so a model swap re-takes instead of reusing a released
-  address. `mmq_q8_imma_preallocate()` takes the IMMA scratch at its planned
-  bound during `Engine::init`, because taking it incrementally would strand
-  every intermediate slice in the arena.
-
-- **The lazy CUTLASS workspace growth path is gone — it could never have run.**
-  `gemm_nvfp4_cutlass_sm120` and `gemm_mxfp4_cutlass_sm120` each kept a
-  file-scope workspace that they `cudaFree`d and `cudaMalloc`d at GEMM time when
-  the caller's buffer looked too small — on a code path reachable under
-  CUDA-graph capture, where `cudaMalloc` is illegal. Every in-tree caller sizes
-  its buffer with the same `..._workspace(M, N, K)` it then passes, and the one
-  caller that passes none (the FP32 LM head) needs none: these kernel
-  configurations report a **0-byte** workspace at every shape measured. The GEMM
-  now refuses and lets the caller fall back to dequant instead of allocating,
-  and `CutlassWorkspaceContract` pins the property the deletion rests on.
-
+- **`imp-quantize` silently produced a broken MoE checkpoint.** "MoE is left
+  unquantized" only ever applied to 3-D stacked tensors; the HF-standard
+  per-expert 2-D layout was quantized and produced a model that loaded and then
+  emitted garbage. The experts were not the cause — the **MLA latent
+  projections** and the **MoE router** are, and both are now refused.
+  DeepSeek-V2-Lite: 29.26 → 8.91 GiB (3.28x), `degen_suite.py` 3 FAIL/32
+  against the BF16 source's 5 FAIL/32.
+- **The prefix cache could serve one request's image to another.** It is
+  addressed by token ids, and every image token carries the same id, so two
+  requests with different pictures shared a prefix. Block hashes are now salted
+  with the image content: a hit needs the same tokens *and* the same picture.
+  Affected the mmproj path too, not only Qwen3-VL.
 - **Decode paid for context capacity it never used — up to −38% on the served
-  path** (issue #1100). The NVFP4 decode cache's own VRAM reservation was
-  subtracted from the *shared* pre-dequant budget, which is also the budget the
-  cache spends from, so it paid for itself twice. At the time, the KV pool was
-  allocated *before* the cache was built, so its bytes were already out of
-  `free_vram`; every one of them then came out of the decode cache a second
-  time. (That ordering has since been reversed — the weight caches are built
-  first and the KV pool takes the measured residual, issue #1103 — but the
-  double charge was independent of it.) Raising
-  `runtime.max_seq_len` grows the KV pool, which is why decode throughput
-  tracked the *configured* capacity instead of the live sequence: on
-  Qwen3-14B-Q6_K at the server default the cache fell to 100 of 280 tensors —
-  180 weights decoding from Q6_K source instead of an NVFP4 overlay — while
-  ~11 GiB of VRAM sat free. The reservation now constrains only the phases it
-  was meant to constrain (the FP16/FP8 caches built before it), and the
-  invariant is structural: whatever those phases spend is charged to the shared
-  budget, so the decode cache always sees at least its own reservation. Same
-  280-token request, `runtime.max_seq_len` 1024 → 40960: **160.10 → 99.29 tok/s
-  before, 162.77 → 163.24 tok/s after**, with the captured decode body flat at
-  42 kernels instead of growing 44 → 137. The kernel growth was a symptom, not
-  the cause — an uncached weight needs an extra activation-quantize kernel — so
-  the split-K/workspace-width path the issue suspected is exonerated. No effect
-  on the pinned perf baseline: at `--bench` sizing that budget was never
-  binding, so its cache was already full (verified — no budget-reached line on
-  `Qwen3-8B-Q8_0.gguf`). The CUTLASS SF prefill cache was starved by the same
-  arithmetic and also fills now (2 → 280 tensors on the 14B).
+  path** (#1100). The NVFP4 decode cache's reservation was subtracted from the
+  budget it spends from. Same 280-token request at `max_seq_len` 1024 → 40960:
+  **160.10 → 99.29 tok/s before, 162.77 → 163.24 after**. No effect on the
+  pinned perf baseline, which never bound that budget.
+- **The library reserve was measured through a window that missed most of it**,
+  costing one model 4x its KV capacity. It is now charged across the whole
+  init. Qwen3.6-35B-A3B-NVFP4's second start gets **16 384 tokens instead of
+  4096**; attribution 98.3/96.6/89.7% → 99.9/99.9/100%. Related: the remembered
+  reserve never survived a `docker run --rm` (the cache path is inside the
+  container — `imp.conf.example` now spells out the invocation), a missing
+  measurement is reported at plan time instead of after the first forward, and
+  `MemAccount`'s per-pool ledger is no longer gated on `--mem-report`.
+- **The first `response_format` request after a model load could come back
+  unconstrained** (#1104). `JsonConstrainer` allocated its allow list lazily
+  mid-decode; under VRAM pressure the allocation failed and `apply_mask`
+  returned without masking and without logging. It now allocates at init like
+  its three siblings.
+- **`top_k` above 128 sampled from the previous decode step's candidates**
+  (#1142). `cub::DeviceTopK::MaxPairs` writes nothing from its second call
+  while returning `cudaSuccess`, and nothing checked the code. Replaced with a
+  full-vocabulary sort; `degen_suite.py` gains `top_k` 129 and 2000 cases.
+- **The sampler drew the same quantile on every token.** Seeds are
+  `base_seed + step`, and an LCG's first output is affine in its seed, so the
+  draw was effectively constant and the sampler kept picking the same rank.
+  Fixed with a splitmix32 finalizer; same seed still gives the same token.
+- **A CUDA graph could replay a kernel whose scratch pointer had been freed**
+  (AUDIT B13). Six `compute/` statics grew with `cudaFree` + `cudaMalloc`; they
+  now come from the T2 arena, which never frees. The lazy CUTLASS workspace
+  growth path is removed outright — it was reachable under capture, where
+  `cudaMalloc` is illegal, and no in-tree caller could reach it.
 - **Streaming leaked the chain of thought as the answer whenever tools were
-  present.** The same request returned the reasoning in `reasoning_content`
-  (OpenAI) / a `thinking` block (Anthropic) without `stream:true`, and as the
-  user-visible answer with it — so the broken half was the half every real agent
-  client sees. A tool request suppresses the thinking default, the chat template
-  then renders a PRE-CLOSED think block, and a model that reasons anyway emits
-  only the CLOSER: the streaming splitter was scanning for a `<think>` opener
-  that had been rendered into the PROMPT and could never arrive, so at the
-  8-token scan budget it flushed the whole chain of thought as content. It now
-  (a) treats a closer without an opener as proof that the held prefix was
-  reasoning — the same conclusion the offline path reaches via `split_last_think`
-  — and (b) holds longer on the agent path so that proof can arrive. The hold is
-  released the moment a tool-call opener appears, since a call is never
-  reasoning; without that release the fix buffered whole tool calls and their
-  streamed argument deltas stopped arriving (caught by `make test-agents`).
-  Found by pointing the real Claude Code binary at imp-server, which printed the
-  model's reasoning instead of doing the edit.
-- **`json_object` accepted a trailing comma** (#1096) — `[1,]` and `{"a":1,}`
-  passed the mask, so a reply the caller was promised it could `json.loads()`
-  did not parse. Root cause: after a value, `,` returned to the state an
-  *opener* produces, and that state legally accepts the closer, because an empty
-  `[]` / `{}` is valid JSON. Two states (`ARRAY_NEED_VALUE`, `OBJECT_NEED_KEY`)
-  now express "a value/key is mandatory here". The schema FSM was never
-  affected — it already carried the equivalent `after_comma` guard, which is why
-  only the schema-less path shipped the bug. Covered by a generative property
-  test that inserts a comma before every closer in 2000 random documents; the
-  failure found in the wild was three levels deep, which is why the
-  example-based batteries next door had missed it for so long.
-- **An undersized `kv_cache.swa_snapshot_mb` silently cost prefix caching.** One
-  SWA snapshot is several hundred MiB (350 on gemma-3-12b); a budget below that
-  leaves the store off, and prefix caching is then disabled with it — strictly
-  worse than `swa_snapshot_mb=0`, which keeps caching and yields the SWA savings
-  instead. The log said only "snapshot store off", so the two cases were
-  indistinguishable. It now warns with the required size and both ways out, and
-  `imp.conf.example` documents how to size it. Validated on gemma-3-12b at a
-  sufficient budget: SWA sizing and prefix caching run together, 2720 prompt
-  tokens served from cache, warm TTFT 853 -> 400 ms, warm output byte-identical
-  to cold.
-- **Llama 3.2 tool calls were dropped.** Llama 3.2 emits a bare JSON object
-  (`{"name": F, "parameters": {...}}`) where 3.1 used the `<function=F>`
-  envelope; imp understood only the envelope, so a correct call — model and
-  constrained grammar both right — came back as `content` and an agent saw no
-  tool call. The parser now accepts the bare form, but only when the name is one
-  the request actually offered (an unguarded version fabricated calls from
-  `{"name":"print",...}`, which a small model emits on a plain chat turn — a
-  false call is worse than a missed one, since the agent executes it), and takes
-  the first balanced object (models asked for one call sometimes emit several,
-  `"; "`-separated). Llama-3.2-3B goes 4/6 -> 6/6 on the agentic comparison;
-  Qwen3-8B unchanged.
-- **Streamed non-ASCII text was corrupted** — `"größer"` arrived as `gr<?><?>ßer`
-  over SSE while the same generation was correct non-streaming. Two independent
-  causes, both fixed and covered by unit tests in the CI lane:
-  1. A BPE vocabulary splits a multi-byte character across two tokens. Each
-     delta is serialized on its own, so `dump_safe` saw half a character and
-     replaced it with U+FFFD. `Utf8Stitch` (`tools/imp-server/utils.h`) now
-     holds the partial bytes at the point of detokenization, before any
-     consumer sees the piece — which also protects the reasoning channel and
-     the byte-matching think/tool filters.
-  2. `holdback_decision` (the stop-sequence path) cut the flushed prefix at a
-     byte offset, so it could slice a character in half even when the buffer
-     itself was well-formed. The cut is now pulled back to a codepoint
-     boundary. This path was active for any request with stop sequences.
-
-  Only gpt-oss/Harmony was previously protected (#760); every other model and
-  every non-ASCII script was affected — German umlauts, accents, CJK, emoji.
+  present** — the half every real agent client sees. A tool request renders a
+  pre-closed think block, so the model emits only the closer and the splitter
+  waited for an opener that could never arrive. Found by pointing the real
+  Claude Code binary at imp-server.
+- **Streamed non-ASCII text was corrupted** (`"größer"` → `gr<?><?>ßer`). Two
+  causes: a BPE token can end mid-character (now stitched at detokenization),
+  and the stop-sequence holdback cut at a byte offset (now at a codepoint
+  boundary). Every non-ASCII script was affected.
+- **`json_object` accepted a trailing comma** (#1096) and the schema-less FSM
+  emitted structurally invalid JSON (#1067). Both are container-stack bugs; the
+  schema FSM was never affected.
+- **Llama 3.2 tool calls were dropped** — 3.2 emits a bare JSON object where
+  3.1 used the `<function=F>` envelope. Accepted now, but only for a name the
+  request actually offered: a fabricated call is worse than a missed one.
+  Llama-3.2-3B goes 4/6 → 6/6 on the agentic comparison.
+- **An undersized `kv_cache.swa_snapshot_mb` silently disabled prefix caching** —
+  strictly worse than `0`. It now warns with the required size and both ways out.
+- Tool-call enforcement derives from the post-load template (it was collected
+  before `ensure_model_loaded`); multi-turn tool replay re-renders in the XML
+  shape the model emits; Qwen XML close tags are matched newline-anchored so
+  raw values may contain bare close-tag text.
+- `--mem-report` counted the FP8 SSM sidecar twice. Diagnostics only.
 
 ### Removed
-- **`speculative.recycle_loop` (verify-in-loop) removed entirely**, together
-  with `recycle_loop_min_emit`, the device adjacency table
-  (`compute/token_recycle_device.*`), `TrVerifyLoopRunner`
-  (`runtime/tr_verify_loop.*`) and the engine wiring
-  (`runtime/engine_tr_loop.cpp`) — ~1.5k LOC. The feature never paid: a
-  nine-class sweep (planning, math, repetitive, reasoning self-talk,
-  enumeration, templated code, free prose, long explanation, chain-over-list;
-  Qwen3-14B-NVFP4, 1024-tok greedy, interleaved, healthy host) found **no**
-  prompt class where the loop beat the same configuration with the loop off;
-  isolated against the eager token-recycling drafter it cost a consistent
-  **5.6-8.3%**. The +38-97% recorded at #1055 was real (an era-image bisect
-  ruled out a regression from #1059-#1066) but came from a prompt class that
-  was never recorded and could not be re-found. The per-request economics
-  guard added earlier in this cycle bounded the damage to -0.3..-3.0% without
-  ever producing a win, and extending the flag to MoE proved impossible in
-  any case: the loop is never reached there, because `step_async_graph_resume()`
-  precedes `step_decode()` and the async graph loop owns the whole generation
-  once the eager drafter finds nothing.
-  **The eager `speculative.token_recycling` drafter is unaffected and stays**
-  (measured neutral, -1.3..+2.0%). A stale `speculative.recycle_loop` key in an
-  existing `imp.conf` is ignored with a warning, not an error. The server's
-  default `repetition_penalty` is now unconditionally 1.05 (the 1.0 special
-  case existed only to keep requests eligible for the loop).
-
-### Changed
-### Added
-- **Generative property batteries for both constrained-decode FSMs**, running in
-  the CPU `unit` lane. The constrained-decode surface has shipped seven grammar
-  bugs (#517, #650, #761, #850, #1002, #1014, #1067), every one found by a
-  symptom and none by a test, while GOAL.md release bar 7 makes "valid,
-  terminating JSON under any sampler state" a release blocker. The existing
-  batteries are example-based *and* live in the GPU lane, so CI — which has no
-  GPU runner — never guarded this class on a pull request.
-  `test_json_constrain_property.cpp` generates random JSON and checks the
-  schema-less FSM against **nlohmann/json as an independent oracle**;
-  `test_schema_constrain_property.cpp` co-generates a schema plus a conforming
-  document (nlohmann does not validate schemas, so conformance is known by
-  construction) and checks both directions. Shared invariants: accept every
-  valid/conforming document, accept every prefix of one, never enter a dead-end
-  state with no legal continuation (release bar 7 as an invariant), and reject
-  structurally impossible continuations — swapped closers, trailing content
-  after the root, objects missing required properties, arrays below `minItems`,
-  values outside an `enum`.
-  Both batteries were validated by mutation, not just by passing: against the
-  pre-#1068 FSM three json_object properties fail (reproducing the #1067
-  signature `[{"k0":true]]`), and with the `minItems` check disabled exactly
-  `RejectsArrayBelowMinItems` fails.
-  `SchemaConstrainer` gains `init_grammar_for_test()` (installs the grammar
-  without the tokenizer classification and device buffers that only `apply_mask`
-  needs) and `token_legal()` becomes public — the same test-hook treatment
-  #1068 gave `JsonConstrainer::sim_token_valid`.
-
-### Changed
-- **SWA-aware KV sizing is now tri-state `auto|on|off` (default `auto`)**:
-  auto takes the sliding-window KV savings (gpt-oss ~2×, gemma-3/4 ~5-6× KV
-  tokens; measured −14% peak VRAM on gpt-oss-20b at 131K context) only when
-  prefix caching is off, so the server keeps warm-prefix TTFT untouched;
-  `on` keeps the old force semantics (disables prefix caching), legacy
-  bools still parse. One-shot imp-cli runs (`--prompt` / `--bench`) now
-  disable prefix caching (a single-generation process never re-sees a
-  prefix), which makes them qualify for the auto savings — `--bench` pins
-  `swa_sizing=off` to keep baseline semantics. The sized path is
-  numerically exact: PPL bit-parity vs full-length KV on gemma-3-12b and
-  gpt-oss-20b (deterministic_gemm A/B; without pinned GEMM algorithms
-  gpt-oss PPL is restart-volatile by ±20% on the gate corpus, which is a
-  measurement artifact, not a path difference). The sized decode route is
-  per-path deterministic but a different FP-summation order than full-length
-  KV (split-K over fewer blocks), so greedy near-ties can resolve
-  differently — the same accepted cross-path property as the existing
-  kernel-route dispatches (#957). Retrieval validated: needle at 10% depth
-  of a 77K-token prompt retrieved exactly on gemma-3-12b with sizing
-  active, followed by a coherent 575-token generation across window trims.
-- **Auto `max_seq_len` ceiling raised 64K → 128K** (#1004): coding-agent
-  transcripts run 50-150K tokens; VRAM and the model's declared context
-  still bound the auto pick, so this only extends models that declare (and
-  can hold) more than 64K.
-### Added
-- **SWA window snapshots (`kv_cache.swa_snapshot_mb`)**: prefix caching and
-  SWA-aware KV sizing now combine — the engine packs each prefill-end
-  window of the sliding-window layers into a device LRU store (same pattern
-  as the hybrid recurrent-state snapshots) and restores it at admission on
-  a prefix-cache hit, so warm multi-turn reuse works with the windowed-KV
-  savings. Snapshots are also saved at request finish over the same span
-  the finish path hash-registers, so the next agent turn reuses the whole
-  previous transcript (generated tokens included) — measured on a growing
-  6-turn transcript: cache-hit coverage identical to full-length-KV prefix
-  caching. Opt-in budget in MiB, default 0 (kept opt-in by measurement: the
-  snapshot machinery is ~free — ~0.1 ms enqueue, and the prefill-boundary
-  save needs no stream sync at all (SWA blocks are sequence-private; the
-  first-token D2H orders every later writer behind the pack) — but the
-  sized attention route trades ~+50-100 ms warm TTFT per turn at 1-2K
-  contexts for faster prefill at long ones (+8% at 13K) plus the KV
-  savings; per-save/restore ms telemetry logs at INFO).
-- **Qwen-Coder XML tool-call grammar**: `tool_choice=required`/forced and
-  `strict:true` on templates teaching the `<function=NAME>`/`<parameter=KEY>`
-  raw-text dialect (Qwen3-Coder, Qwen3.6) are now enforced by a dedicated
-  XML grammar in the schema FSM instead of the ChatML JSON body FSM, which
-  masked raw newlines and collapsed multi-line code arguments to one line
-  (measured 0/3 → 3/3 compiling `write_file` contents on Coder-30B).
-  Dialect detection probe-renders the template; parallel/strict re-arm and
-  jump-ahead work as on the JSON dialect.
-
-### Fixed
-- **Schema-less `json_object` FSM emitted structurally invalid JSON** (#1067):
-  every container close popped its own stack continuation but then resumed
-  in the *grandparent's* context, and number/literal ends popped without a
-  matching push — after a nested array closed inside an object the FSM
-  believed it was in an array, accepting `,"bare-string"` + `]]` (and
-  rejecting valid nested documents like `{"a":{"b":1},"c":2}`). Openers now
-  push their continuation and every close pops-and-uses it; covered by
-  `JsonConstrainFsmTest` and the degen_suite constrained category on
-  Qwen3-14B-NVFP4. json_schema mode (separate FSM) was never affected.
-- **Tool-call enforcement now derives from the post-load template**: the
-  constraint was collected before `ensure_model_loaded`, so auto-load-on-
-  first-request and cross-model requests baked a grammar from the previous
-  (or no) template.
-- **Multi-turn tool replay on XML templates**: prior assistant `tool_calls`
-  re-render in the XML shape the model emits, not the ChatML JSON body.
-- **Qwen XML parser anchoring**: `</parameter>`/`</function>` close tags are
-  matched newline-anchored first, so raw values may contain bare close-tag
-  text without truncating arguments.
+- **`speculative.recycle_loop`** (verify-in-loop) and its ~1.5k LOC of support.
+  A nine-class prompt sweep found no class where the loop beat the same
+  configuration with it off; isolated against the eager drafter it cost a
+  consistent 5.6-8.3%. The eager `speculative.token_recycling` drafter stays
+  (measured neutral). A stale key in an existing `imp.conf` warns, not errors.
 
 ## [0.19.2] - 2026-07-17
 
