@@ -34,6 +34,62 @@ check-gpu:
 build:
 	docker build $(BUILD_ARGS) $(DEP_ARGS) -t $(DOCKER_IMG) .
 
+# ---------------------------------------------------------------------------
+# Fast inner loop (`make dev`) — incremental compile, seconds not minutes.
+#
+# `make build` copies the tree into an image and compiles from scratch every
+# time: correct, reproducible, and ~3.5 min even for a one-line edit. That is
+# the right gate before a PR and the wrong tool for iterating.
+#
+# `make dev` mounts the working tree into the toolchain image and runs ninja
+# against a PERSISTENT build dir, so only what changed recompiles. Codegen is
+# identical to the image build (both -march=x86-64-v3, same toolchain layers),
+# so a dev binary is a valid thing to run tests against.
+#
+# NOT a replacement for `make build`:
+#   - benchmarks and the perf gate run against the IMAGE, never build-dev/ —
+#     an incremental tree is exactly where a stale object hides, and this repo
+#     re-pins baselines off measured numbers.
+#   - `make verify-fast` / CI build the image. Green here is not green there.
+# Use it to compile, run unit tests and iterate; then `make build` once.
+#
+# build-dev/ is root-owned (container writes it) — remove via the dev-clean
+# target, never `sudo` on the host.
+DEV_IMG ?= imp:toolchain
+DEV_DIR ?= build-dev
+DEV_RUN = docker run --rm -v $(PWD):/src -w /src $(DEV_IMG)
+DEV_CMAKE_ARGS = -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON -DIMP_BUILD_TOOLS=ON \
+                 -DIMP_BUILD_SERVER=ON \
+                 -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
+                 -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
+                 -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
+                 -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json
+
+.PHONY: dev dev-image dev-test dev-clean
+
+# Toolchain-only image (compiler + pinned deps, no source). Always re-runs
+# rather than guarding on `docker image inspect`: fully cached this costs ~1 s,
+# and the guard would silently keep a stale toolchain after a dependency-pin
+# bump — the exact class of "green build, wrong inputs" this repo keeps paying
+# for elsewhere.
+dev-image:
+	@docker build $(DEP_ARGS) --target toolchain -t $(DEV_IMG) . >/dev/null
+
+# Incremental build. `cmake -B` on an existing dir is a fast reconfigure, so
+# this is safe to run every time.
+dev: dev-image
+	$(DEV_RUN) bash -c 'cmake -B $(DEV_DIR) -G Ninja $(DEV_CMAKE_ARGS) >/dev/null \
+	  && cmake --build $(DEV_DIR) -j$$(nproc)'
+
+# CPU unit lane against the dev build. Mirrors what CI's `ctest -L unit` runs,
+# so a failure here is a real failure there — but the reverse does not hold
+# (CI builds the image from a clean tree).
+dev-test: dev
+	$(DEV_RUN) ctest --test-dir $(DEV_DIR) -L unit --output-on-failure
+
+dev-clean:
+	docker run --rm -v $(PWD):/src -w /src $(DEV_IMG) rm -rf $(DEV_DIR)
+
 # Unit tests: CPU-only, no GPU, no model, < 5s
 # Mirrors `ctest -L unit`. Filter is sourced from CMakeLists.txt (_unit_e2e_filter).
 test-unit: build

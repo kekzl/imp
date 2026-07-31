@@ -42,8 +42,10 @@ Canonical references: `docs/architecture.md` (narrative), `docs/sm120.md` (hardw
 The host has **no CUDA toolkit** by design — build inside Docker. `build/` is created root-owned by the container; remove it via a throwaway container, never `sudo` on the host.
 
 ```
-make build         # Docker build (CUDA 13.3) (or: cmake --preset ci && cmake --build --preset ci on a CUDA 13.3+ host)
-make test-unit     # CPU/host unit tests
+make dev           # INCREMENTAL build — use this to iterate (see below)
+make dev-test      # incremental build + `ctest -L unit` (the actual CI lane)
+make build         # full Docker image (CUDA 13.3) — the gate, not the loop
+make test-unit     # CPU/host unit tests (imp-tests-unit — NOT the CI lane)
 make test-gpu      # GPU tests (requires RTX 5090)
 make verify-fast   # ~90s pre-push gate
 make verify        # ~5min full
@@ -51,9 +53,43 @@ make install-hooks # pre-push hook: runs verify-fast on src/include/tools/tests 
 make format        # clang-format
 ```
 
+- **Never run bare `make format`.** The repo is *not* uniformly clang-formatted
+  (untouched files violate the current style), so formatting whole files rewrites
+  hundreds of lines you did not touch. CI only checks *changed* lines. Format the
+  files you created; for files you edited, format nothing and hand-fix only the
+  lines you added. To check yourself, intersect the violation list with your own
+  added lines rather than trusting a clean `format-check`.
 - Targets exist for `bench`, `test-perf`, `test-golden`, `test-vision`, `gen-perf-baseline`, `verify-north-star`, `verify-chunked`, `tidy` (clang-tidy, advisory), `sanitize`, and the roofline pipeline (`roofline-measure`, `roofline-pin`, `roofline-regress` — see `tools/roofline/README.md`).
 - Configure presets live in `CMakePresets.json` (`default`/`ci`/`debug`/`relwithdebinfo`); dependency pins are single-sourced in `cmake/imp-deps.cmake` (the Dockerfile takes them as build-args). sm_120a is selected via raw gencode (CMake <3.31 workaround); 120f PTX fallback covers non-5090 SKUs.
 - See also: [`AGENTS.md`](AGENTS.md) (subagent roles + guardrails) and [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) (measurement methodology contract).
+
+### Iterate with `make dev`, gate with `make build`
+
+`make build` recompiles the whole tree inside a fresh image every time — ~3.5 min
+whether you changed one line or a hundred. Ten edit-compile cycles is half an hour
+of waiting, and that is the single largest avoidable cost of working here.
+
+`make dev` mounts the tree into the toolchain image and runs ninja against a
+persistent `build-dev/`. Measured on this box:
+
+| after… | `make build` | `make dev` |
+|---|---:|---:|
+| nothing | ~210 s | **2.4 s** |
+| one test file | ~210 s | **4.9 s** |
+| one kernel `.cu` | ~210 s | **6.8 s** |
+| one server TU | ~210 s | **13.9 s** |
+
+Codegen is identical (both `-march=x86-64-v3`, same toolchain layers), so dev
+binaries are valid to run tests against — `make dev-test` runs `ctest -L unit`,
+which is the lane CI actually gates on (`make test-unit` runs a *different*
+binary; green there is not green in CI).
+
+**Where `make dev` is the wrong tool:**
+- **Benchmarks and the perf gate.** Always measure the image. An incremental tree
+  is exactly where a stale object hides, and baselines get re-pinned off measured
+  numbers.
+- **Before pushing.** `verify-fast` and CI build the image from a clean tree.
+- `build-dev/` is root-owned; remove it with `make dev-clean`, never `sudo`.
 
 ## Conventions
 
@@ -92,6 +128,8 @@ fat header re-triggers every includer. Optimize for compile-time isolation:
 - cuBLAS prefill varies up to **2.6× across container restarts** and drifts under sustained load — use **decode** for A/B and follow the bench methodology (`CUBLAS_WORKSPACE_CONFIG=:4096:8`, 10 reps, 3+ trials, one model per process / isolated).
 - **Decode is stable within a session but can read 8–15% low for a whole day** (host/driver state on this WSL2 box; issue #526: identical builds measured tg 238 on one day, 278 the next — full methodology both times). Before trusting a cross-day decode delta or refreshing the baseline, sample `nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw` DURING the bench: healthy load = ~2850 MHz SM / 13801 MHz mem / ~500 W. Lower mem clock or power = depressed host state, not a regression. GPU history: `gpu-stats` skill (7-day retention).
 - nsys with CUDA Graphs ON hides captured kernels — profile with `--no-cuda-graphs` to see the true decode kernel mix.
+- **`gemm.deterministic` is not the determinism switch — `runtime.deterministic_gemm` is.** On FA2-served configs the engine skips the legacy deterministic-cuBLAS forcing and says so in the init log. Without the right flag the forward varies run to run: two identical calibration passes differed on **94% of recorded per-channel floats** and moved a quantized model's PPL by 1.6% (2026-07-31). Anything you intend to *diff* across runs — calibration files, layer dumps, logit traces — needs `runtime.deterministic_gemm=true`, and it is worth asserting reproducibility (run twice, compare checksums) before drawing a conclusion from the difference.
+- **Container-written outputs are owned by the container user.** `imp-quantize --out`, calibration files and `build/` cannot be deleted from the host; a failed `rm -rf` leaves a *stale* directory that the next run only partly overwrites — which looks like a result, not an error. Clear them from a throwaway container (`docker run --rm -v … --entrypoint /bin/sh imp:test -c 'rm -rf …'`), and make bind-mounted output dirs writable (`chmod 777`) before the container writes into them.
 
 ## Hardware reality (sm_120 ≠ datacenter Blackwell)
 
