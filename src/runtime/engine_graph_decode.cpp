@@ -189,6 +189,7 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
     // Recurrent state for SSM/GDN layers — pointers are constant for
     // single-sequence decode, so they're safe to bake into the graph.
     fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
+    bind_mrope_single_(state_template, *req, stream);
 
     // Upload banned tokens for graph-captured logit masking
     if (const int32_t* d_banned = banned_tokens_device_(stream)) {
@@ -336,6 +337,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     // Recurrent state for SSM/GDN layers — pointers are constant for
     // single-sequence decode, so they're safe to bake into the graph.
     fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
+    bind_mrope_single_(state_template, *req, stream);
 
     // Upload banned tokens to device for graph-captured logit masking
     if (const int32_t* d_banned = banned_tokens_device_(stream)) {
@@ -462,6 +464,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     st.max_blocks_per_seq = max_blocks_per_seq;
     st.is_prefill = false;
     fill_recurrent_state(*req, st, /*reset=*/false, stream);
+    bind_mrope_single_(st, *req, stream);
     if (p.d_banned) {
         st.d_banned_tokens = p.d_banned;
         st.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
@@ -783,6 +786,7 @@ void Engine::constrained_jump_commit_(std::shared_ptr<Request>& req, cudaStream_
     cs.max_blocks_per_seq = 0;
     cs.is_prefill = true;
     cs.prefill_offset = pos1 + 1;
+    bind_mrope_single_(cs, *req, stream);
     cs.kv_manager = kv_manager_.get();
     if (kv_manager_ && kv_manager_->residual_enabled())
         cs.kv_seq_id = req->id;

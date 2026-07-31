@@ -41,7 +41,7 @@ struct RopeTraits<__half> {
 __device__ __forceinline__ int mrope_position(const MRopeParams& m, int fallback, int pair_idx,
                                               int token_idx) {
     if (!m.positions)
-        return fallback;
+        return fallback + (m.pos_delta ? *m.pos_delta : 0);
     int axis;
     if (m.interleaved) {
         const int r = pair_idx % 3;

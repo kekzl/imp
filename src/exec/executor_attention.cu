@@ -363,7 +363,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // a single position array and know nothing about axes. With M-RoPE
         // active they would rotate every dimension by the text position —
         // silently, and only wrongly for image tokens. Keep them off.
-        const bool mrope_active = state.mrope.positions != nullptr;
+        const bool mrope_active = state.mrope.positions != nullptr || state.mrope.pos_delta != nullptr;
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
                                  state.kv_cache->qtype() == QType::F16 &&
                                  prof.attn_variant != AttnVariant::NOPE && cfg.yarn_ext_factor <= 0.0f &&

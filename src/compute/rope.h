@@ -23,6 +23,15 @@ struct MRopeParams {
     // T tail); Qwen2-VL takes three contiguous blocks. Different dimensions get
     // different angles, so the layouts are not interchangeable.
     bool interleaved = false;
+    // Decode's alternative to the per-token array. Generated text advances all
+    // three axes together, so its M-RoPE position is just the single position
+    // plus a per-request constant — and an image makes that constant NEGATIVE,
+    // because it occupied more tokens than it cost positions.
+    //
+    // It is a DEVICE pointer, not an int, on purpose: the decode position is
+    // advanced device-side inside a captured graph, and a baked-in scalar would
+    // freeze the value of whichever request was live at capture time.
+    const int* pos_delta = nullptr;
 };
 
 // Fused RoPE on Q and K tensors in-place

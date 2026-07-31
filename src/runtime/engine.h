@@ -593,6 +593,15 @@ private:
     int mrope_prefill_cap_ = 0;
     int32_t* d_mrope_decode_ = nullptr;
     int mrope_decode_cap_ = 0;
+    // One int on the device: the running request's M-RoPE position delta. Read
+    // by the rotary kernels at replay time, so a captured decode graph picks up
+    // the current request's value instead of the one live at capture.
+    int* d_mrope_delta_ = nullptr;
+    void publish_mrope_delta_(int delta, cudaStream_t stream);
+    // Binds M-RoPE onto a SINGLE-request decode state (graph templates, the
+    // speculative chunk). Generated text needs only the scalar delta, so this
+    // is the whole binding for every decode path.
+    void bind_mrope_single_(InferenceState& state, const Request& req, cudaStream_t stream);
     void free_mrope_buffers_();
     std::vector<int32_t> h_mrope_scratch_;
     // Uploads `h_mrope_scratch_` ([3, n]) and points `state.mrope` at it, with
