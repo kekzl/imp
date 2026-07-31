@@ -384,6 +384,7 @@ set(IMP_VISION_SOURCES
     src/vision/qwen3vl_encoder.cu
     src/vision/image_processor.cpp
     src/vision/vision_encoder.cu
+    src/vision/deepstack_inject.cu
 )
 
 set(IMP_API_SOURCES
@@ -807,6 +808,7 @@ if(IMP_BUILD_TESTS)
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
         tests/test_determinism_e2e.cpp
+        tests/test_deepstack_inject.cu
         tests/test_vision_golden.cu
         tests/test_qwen3vl_encoder.cu
     )
