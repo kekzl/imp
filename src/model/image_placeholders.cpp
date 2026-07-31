@@ -1,0 +1,44 @@
+#include "model/image_placeholders.h"
+
+namespace imp {
+
+bool expand_image_placeholders(std::vector<int32_t>& tokens, int32_t pad_id, const std::vector<int>& counts,
+                               std::string& err) {
+    size_t found = 0;
+    for (int32_t t : tokens)
+        if (t == pad_id)
+            ++found;
+    if (found != counts.size()) {
+        err = "prompt holds " + std::to_string(found) + " image placeholder(s) but " +
+              std::to_string(counts.size()) + " image(s) were encoded";
+        return false;
+    }
+    for (size_t k = 0; k < counts.size(); ++k) {
+        if (counts[k] <= 0) {
+            err = "image " + std::to_string(k) + " produced no tokens";
+            return false;
+        }
+    }
+    if (found == 0)
+        return true;
+
+    size_t total = tokens.size();
+    for (int c : counts)
+        total += static_cast<size_t>(c) - 1;
+
+    std::vector<int32_t> out;
+    out.reserve(total);
+    size_t k = 0;
+    for (int32_t t : tokens) {
+        if (t != pad_id) {
+            out.push_back(t);
+            continue;
+        }
+        out.insert(out.end(), static_cast<size_t>(counts[k]), pad_id);
+        ++k;
+    }
+    tokens = std::move(out);
+    return true;
+}
+
+}  // namespace imp
