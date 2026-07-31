@@ -216,5 +216,77 @@ TEST(VisionPreprocess, FileEntryPointMatchesMemoryPath) {
     EXPECT_FALSE(load_and_preprocess_image("/nonexistent/imp_no_such_image.bmp", 2, mean, stdv, from_file));
 }
 
+// ---------------------------------------------------------------------------
+// qwen_smart_resize — the dynamic-resolution target size (Qwen3-VL).
+// Oracle: transformers' smart_resize (qwen2_vl image processing), reproduced by
+// hand below for each case. factor 32 = patch_size 16 * merge_size 2; the pixel
+// bounds are the staged Qwen3-VL-4B preprocessor_config.json (65536 / 16777216).
+// ---------------------------------------------------------------------------
+constexpr int kFactor = 32;
+constexpr int64_t kMinPx = 65536;     // 256^2
+constexpr int64_t kMaxPx = 16777216;  // 4096^2
+
+TEST(QwenSmartResize, AlreadyAlignedAndInRangeIsUnchanged) {
+    // 640x480: both divisible by 32, 307200 px sits inside the bounds.
+    auto r = qwen_smart_resize(480, 640, kFactor, kMinPx, kMaxPx);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.height, 480);
+    EXPECT_EQ(r.width, 640);
+}
+
+TEST(QwenSmartResize, BelowMinPixelsScalesUp) {
+    // 100x100 -> round(3.125)*32 = 96 each; 9216 < 65536, so the min branch
+    // runs: beta = sqrt(65536/10000) = 2.56, ceil(100*2.56/32)*32 = 256.
+    auto r = qwen_smart_resize(100, 100, kFactor, kMinPx, kMaxPx);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.height, 256);
+    EXPECT_EQ(r.width, 256);
+    EXPECT_GE(static_cast<int64_t>(r.height) * r.width, kMinPx);
+}
+
+TEST(QwenSmartResize, AboveMaxPixelsScalesDown) {
+    // 8000x8000 -> 64e6 px > max; beta = sqrt(64e6/16777216), which lands
+    // exactly on 4096x4096 = max_pixels.
+    auto r = qwen_smart_resize(8000, 8000, kFactor, kMinPx, kMaxPx);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.height, 4096);
+    EXPECT_EQ(r.width, 4096);
+    EXPECT_LE(static_cast<int64_t>(r.height) * r.width, kMaxPx);
+}
+
+// The one case where Python's round() and std::round() disagree and it CHANGES
+// THE RESULT, not just an intermediate. 16/32 is exactly 0.5: ties-to-even
+// gives 0, ties-away gives 1.
+//   ties-to-even (correct): h_bar 0 -> product 0 < min -> min branch -> 32x2912
+//   ties-away  (wrong):     h_bar 32 -> product 65536 == min, no branch -> 32x2048
+// A silent one-step difference here changes the image's token count.
+TEST(QwenSmartResize, TiesRoundToEvenLikePython) {
+    auto r = qwen_smart_resize(16, 2048, kFactor, kMinPx, kMaxPx);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.height, 32);
+    EXPECT_EQ(r.width, 2912) << "ties-away rounding would give 2048 here";
+}
+
+TEST(QwenSmartResize, RejectsExtremeAspectRatio) {
+    // Upstream raises above 200:1; imp reports it instead of returning a size.
+    auto r = qwen_smart_resize(1, 300, kFactor, kMinPx, kMaxPx);
+    EXPECT_FALSE(r.ok);
+}
+
+TEST(QwenSmartResize, RejectsDegenerateInput) {
+    EXPECT_FALSE(qwen_smart_resize(0, 100, kFactor, kMinPx, kMaxPx).ok);
+    EXPECT_FALSE(qwen_smart_resize(100, 100, 0, kMinPx, kMaxPx).ok);
+}
+
+TEST(QwenSmartResize, OutputIsAlwaysFactorAligned) {
+    for (int h : {37, 100, 255, 512, 1023, 4000})
+        for (int w : {41, 100, 257, 640, 1919, 5000}) {
+            auto r = qwen_smart_resize(h, w, kFactor, kMinPx, kMaxPx);
+            ASSERT_TRUE(r.ok) << h << "x" << w;
+            EXPECT_EQ(r.height % kFactor, 0) << h << "x" << w;
+            EXPECT_EQ(r.width % kFactor, 0) << h << "x" << w;
+        }
+}
+
 }  // namespace
 }  // namespace imp
