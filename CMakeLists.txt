@@ -632,6 +632,7 @@ if(IMP_BUILD_TESTS)
         tests/test_library_reserve_cache.cpp
         tests/test_weight_snapshot.cpp
         tests/test_rope_override.cpp
+        tests/test_mrope_config.cpp
         tests/test_ngram_draft.cpp
         tests/test_suffix_draft.cpp
         tests/test_token_recycle_draft.cpp
@@ -683,6 +684,7 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-compute SOURCES
         tests/test_rope.cu
+        tests/test_mrope.cu
         tests/test_gpt_oss_yarn_ref.cu
         tests/test_layernorm.cu
         tests/test_mla.cu

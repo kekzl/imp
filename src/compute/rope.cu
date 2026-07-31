@@ -35,6 +35,28 @@ struct RopeTraits<__half> {
     }
 };
 
+// Which position axis drives this rotary pair. Returns `fallback` unchanged
+// when M-RoPE is off, so the single-axis path keeps computing exactly what it
+// computed before.
+__device__ __forceinline__ int mrope_position(const MRopeParams& m, int fallback, int pair_idx,
+                                              int token_idx) {
+    if (!m.positions)
+        return fallback;
+    int axis;
+    if (m.interleaved) {
+        const int r = pair_idx % 3;
+        if (r == 1 && pair_idx < 3 * m.sec_h)
+            axis = 1;
+        else if (r == 2 && pair_idx < 3 * m.sec_w)
+            axis = 2;
+        else
+            axis = 0;
+    } else {
+        axis = (pair_idx < m.sec_t) ? 0 : (pair_idx < m.sec_t + m.sec_h) ? 1 : 2;
+    }
+    return m.positions[static_cast<int64_t>(axis) * m.stride + token_idx];
+}
+
 // --------------------------------------------------------------------------
 // Unified RoPE kernel with YaRN support (FP32 and FP16 via template)
 // --------------------------------------------------------------------------
@@ -43,7 +65,7 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
                                     int batch, int seq_len, int n_heads, int n_kv_heads, int head_dim,
                                     float theta, float inv_scaling, int rope_pairs, bool neox,
                                     float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
-                                    const float* __restrict__ longrope_inv_freqs) {
+                                    const float* __restrict__ longrope_inv_freqs, MRopeParams mrope) {
     using Traits = RopeTraits<T>;
 
     const int token_idx = blockIdx.x;
@@ -53,7 +75,7 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
     if (pair_idx >= rope_pairs)
         return;
 
-    const int pos = positions[token_idx];
+    const int pos = mrope_position(mrope, positions[token_idx], pair_idx, token_idx);
 
     float cos_val, sin_val;
     if (longrope_inv_freqs) {
@@ -111,17 +133,17 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
 // Explicit template instantiations
 template __global__ void rope_forward_kernel<float>(float*, float*, const int*, int, int, int, int, int,
                                                     float, float, int, bool, float, float, float, float,
-                                                    const float*);
+                                                    const float*, MRopeParams);
 template __global__ void rope_forward_kernel<__half>(__half*, __half*, const int*, int, int, int, int, int,
                                                      float, float, int, bool, float, float, float, float,
-                                                     const float*);
+                                                     const float*, MRopeParams);
 
 // --------------------------------------------------------------------------
 // Host dispatch
 // --------------------------------------------------------------------------
 void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, float theta, float scaling,
                   int rope_dim, bool neox, float ext_factor, float attn_factor, const float* corr_dims,
-                  cudaStream_t stream, const float* longrope_inv_freqs) {
+                  cudaStream_t stream, const float* longrope_inv_freqs, MRopeParams mrope) {
     const int batch = static_cast<int>(Q.shape[0]);
     const int seq_len = static_cast<int>(Q.shape[1]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -151,13 +173,13 @@ void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, floa
             pdl::launch(rope_forward_kernel<float>, grid, block, 0, stream, static_cast<float*>(Q.data),
                         static_cast<float*>(K.data), positions, batch, seq_len, n_heads, n_kv_heads, head_dim,
                         theta, inv_scaling, pairs, neox, ext_factor, attn_factor, cd0, cd1,
-                        longrope_inv_freqs);
+                        longrope_inv_freqs, mrope);
             break;
         case QType::F16:
             pdl::launch(rope_forward_kernel<__half>, grid, block, 0, stream, static_cast<__half*>(Q.data),
                         static_cast<__half*>(K.data), positions, batch, seq_len, n_heads, n_kv_heads,
                         head_dim, theta, inv_scaling, pairs, neox, ext_factor, attn_factor, cd0, cd1,
-                        longrope_inv_freqs);
+                        longrope_inv_freqs, mrope);
             break;
         default:
             break;
@@ -191,9 +213,9 @@ __global__ void qknorm_rope_fused_fp16_kernel(
     const __half* __restrict__ k_norm_w, const int* __restrict__ positions, int n_heads, int n_kv_heads,
     int head_dim, float eps, float theta, float inv_scaling, int rope_pairs, bool neox, float weight_offset,
     float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
-    const float* __restrict__ longrope_inv_freqs) {
+    const float* __restrict__ longrope_inv_freqs, MRopeParams mrope) {
     const int head_idx = blockIdx.x;
-    const int pos = positions[0];
+    const int pos_text = positions[0];
 
     extern __shared__ float smem[];
     float* reduce_buf = smem;
@@ -225,6 +247,8 @@ __global__ void qknorm_rope_fused_fp16_kernel(
         __syncthreads();
 
         for (int pair = threadIdx.x; pair < rope_pairs; pair += blockDim.x) {
+            // Decode runs one token, so the axis rows are single entries.
+            const int pos = mrope_position(mrope, pos_text, pair, 0);
             float cos_val, sin_val;
             if (longrope_inv_freqs) {
                 // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
@@ -287,6 +311,8 @@ __global__ void qknorm_rope_fused_fp16_kernel(
         __syncthreads();
 
         for (int pair = threadIdx.x; pair < rope_pairs; pair += blockDim.x) {
+            // Decode runs one token, so the axis rows are single entries.
+            const int pos = mrope_position(mrope, pos_text, pair, 0);
             float cos_val, sin_val;
             if (longrope_inv_freqs) {
                 // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
@@ -323,7 +349,7 @@ void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* 
                        int n_kv_heads, int head_dim, float eps, const int* positions, float theta,
                        float scaling, int rope_dim, bool neox, cudaStream_t stream, float weight_offset,
                        float ext_factor, float attn_factor, const float* corr_dims,
-                       const float* longrope_inv_freqs) {
+                       const float* longrope_inv_freqs, MRopeParams mrope) {
     const int max_heads = (n_heads > n_kv_heads) ? n_heads : n_kv_heads;
     if (max_heads == 0 || head_dim == 0)
         return;
@@ -346,7 +372,7 @@ void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* 
                 reinterpret_cast<const __half*>(q_norm_weight),
                 reinterpret_cast<const __half*>(k_norm_weight), positions, n_heads, n_kv_heads, head_dim, eps,
                 theta, inv_scaling, rope_pairs, neox, weight_offset, ext_factor, attn_factor, cd0, cd1,
-                longrope_inv_freqs);
+                longrope_inv_freqs, mrope);
 }
 
 // --------------------------------------------------------------------------

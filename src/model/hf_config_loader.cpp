@@ -203,6 +203,40 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
             jobj_get_float(*rope_params, "partial_rotary_factor", partial_factor);
         }
     }
+
+    // M-RoPE section split. It lives under `rope_scaling` in older configs and
+    // under `rope_parameters` in newer ones (Qwen3-VL), so both are checked —
+    // reading only one silently leaves a multimodal model on single-axis RoPE.
+    for (const char* key : {"rope_scaling", "rope_parameters"}) {
+        const JValue* obj = jobj_find(eff, key);
+        if (!obj || obj->type != JType::OBJECT)
+            continue;
+        const JValue* sec = jobj_find(*obj, "mrope_section");
+        if (sec && sec->type == JType::ARRAY && sec->arr.size() == 3) {
+            bool ok = true;
+            int parsed[3] = {0, 0, 0};
+            for (size_t i = 0; i < 3; ++i) {
+                if (sec->arr[i].type != JType::NUMBER || sec->arr[i].as_int() < 0)
+                    ok = false;
+                else
+                    parsed[i] = static_cast<int>(sec->arr[i].as_int());
+            }
+            if (ok) {
+                for (int i = 0; i < 3; ++i)
+                    cfg.mrope_section[i] = parsed[i];
+            } else {
+                IMP_LOG_WARN("mrope_section under '%s' is malformed — ignoring it", key);
+            }
+        }
+        // Booleans arrive as NUMBER 0.0/1.0 from this parser.
+        const JValue* inter = jobj_find(*obj, "mrope_interleaved");
+        if (inter && inter->type == JType::NUMBER)
+            cfg.mrope_interleaved = inter->num_val != 0.0;
+    }
+    if (cfg.has_mrope()) {
+        IMP_LOG_INFO("M-RoPE section [%d, %d, %d]%s", cfg.mrope_section[0], cfg.mrope_section[1],
+                     cfg.mrope_section[2], cfg.mrope_interleaved ? " (interleaved)" : "");
+    }
     if (partial_factor > 0.0f && partial_factor < 1.0f) {
         int hd_for_rope = (cfg.head_dim > 0) ? cfg.head_dim
                                              : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
