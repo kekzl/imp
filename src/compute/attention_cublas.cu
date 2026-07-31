@@ -329,6 +329,14 @@ __global__ void softcap_fp32_kernel(float* S, int64_t n, float softcap) {
 static void** s_attn_d_ptrs = nullptr;
 static int s_attn_d_ptrs_capacity = 0;  // in number of pointers
 
+// NOT a T2 tenant, and the reason is worth recording (A7 step 8). This 6 KiB
+// pointer array has no degradation contract: attention_cublas_prefill() returns
+// void and the GQA branch dereferences s_attn_d_ptrs unconditionally, so a null
+// is a corrupted CUDA context a few microseconds later rather than a slower
+// path — which is exactly what happened when it was migrated and a caller
+// without an open arena got null back. Moving it needs either a fallback the
+// I1 gate cannot see (AUDIT B47) or a signature that can refuse; neither is
+// worth 6 KiB. It stays a direct allocation, prewarmed at n_heads = 256.
 static void ensure_attn_ptr_arrays(int n_heads) {
     int needed = 3 * n_heads;
     if (needed <= s_attn_d_ptrs_capacity)

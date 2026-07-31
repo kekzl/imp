@@ -9,8 +9,11 @@
 #include <numeric>
 #include <limits>
 #include <map>
+#include "scoped_engine_arena.h"
 
 namespace imp {
+
+IMP_TEST_ENGINE_ARENA(64ull << 20);  // T2 arena for the migrated scratches (A7 step 8)
 namespace {
 
 // Helper: create a 1D FP32 GPU tensor from host data

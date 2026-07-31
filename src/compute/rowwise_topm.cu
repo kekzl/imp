@@ -1,5 +1,6 @@
 #include "compute/rowwise_topm.h"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 
 #include <cfloat>
 
@@ -110,6 +111,50 @@ namespace {
 float* g_topm_pvals = nullptr;
 int32_t* g_topm_pidxs = nullptr;
 size_t g_topm_cap = 0;
+uint64_t g_topm_gen = 0;  // arena generation; a model swap invalidates the pair
+
+// T2 (A7 step 8). Same shape as AUDIT B13's family and for the same reason: the
+// two pointers below are kernel parameters, the old grow freed them, and the
+// comment in rowwise_topm() already conceded that "growing under stream capture
+// would abort the capture — callers warm the shape up eagerly first". An arena
+// take is not a CUDA call, so it cannot abort a capture, and it does not free
+// the slice a captured graph may still name.
+//
+// Uncharged in exec_t2_demand: the one live caller in the engine is
+// executor_perplexity.cu (the --perplexity tool path, rows = the eval chunk),
+// and rowwise_topm_reserve() has no caller at all today — the header's claim
+// that "callers warm the shape up eagerly first (spec-capture warmup does)" is
+// stale, which the arena move makes harmless rather than latent. Charging the
+// max_tokens worst case would reserve ~16 MiB for a path that is not on the
+// serving hot path at all, so it draws on the arena's slack and returns without
+// a result if that runs out.
+bool topm_ensure(size_t need) {
+    const uint64_t g = engine_arena().generation();
+    if (g_topm_pvals && g_topm_gen == g && need <= g_topm_cap)
+        return true;
+    if (g_topm_gen != g) {
+        g_topm_pvals = nullptr;
+        g_topm_pidxs = nullptr;
+        g_topm_cap = 0;
+        g_topm_gen = g;
+    }
+    auto pv = engine_arena().take_bytes(need * sizeof(float));
+    auto pi = engine_arena().take_bytes(need * sizeof(int32_t));
+    if (pv.empty() || pi.empty()) {
+        IMP_LOG_WARN(
+            "rowwise_topm: %.2f MiB unavailable from the T2 arena (%.1f MiB free) — top-M "
+            "returns empty for this call",
+            need * 8.0 / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
+        g_topm_pvals = nullptr;
+        g_topm_pidxs = nullptr;
+        g_topm_cap = 0;
+        return false;
+    }
+    g_topm_pvals = reinterpret_cast<float*>(pv.data());
+    g_topm_pidxs = reinterpret_cast<int32_t*>(pi.data());
+    g_topm_cap = need;
+    return true;
+}
 }  // namespace
 
 void rowwise_topm_reserve(int rows, int m) {
@@ -117,21 +162,7 @@ void rowwise_topm_reserve(int rows, int m) {
         return;
     if (m > kRowwiseTopMMax)
         m = kRowwiseTopMMax;
-    const size_t need = static_cast<size_t>(rows) * kTopMSplits * m;
-    if (need <= g_topm_cap)
-        return;
-    if (g_topm_pvals)
-        IMP_CUDA_CHECK_LOG(cudaFree(g_topm_pvals));
-    if (g_topm_pidxs)
-        IMP_CUDA_CHECK_LOG(cudaFree(g_topm_pidxs));
-    if (cudaMalloc(&g_topm_pvals, need * sizeof(float)) != cudaSuccess ||
-        cudaMalloc(&g_topm_pidxs, need * sizeof(int32_t)) != cudaSuccess) {
-        g_topm_pvals = nullptr;
-        g_topm_pidxs = nullptr;
-        g_topm_cap = 0;
-        return;
-    }
-    g_topm_cap = need;
+    (void)topm_ensure(static_cast<size_t>(rows) * kTopMSplits * m);
 }
 
 void rowwise_topm(const float* d_logits, int rows, int vocab, int m, int32_t* d_out,
@@ -141,22 +172,8 @@ void rowwise_topm(const float* d_logits, int rows, int vocab, int m, int32_t* d_
     if (m > kRowwiseTopMMax)
         m = kRowwiseTopMMax;
     const size_t need = static_cast<size_t>(rows) * kTopMSplits * m;
-    if (need > g_topm_cap) {
-        // Growing under stream capture would abort the capture — callers
-        // warm the shape up eagerly first (spec-capture warmup does).
-        if (g_topm_pvals)
-            IMP_CUDA_CHECK_LOG(cudaFree(g_topm_pvals));
-        if (g_topm_pidxs)
-            IMP_CUDA_CHECK_LOG(cudaFree(g_topm_pidxs));
-        if (cudaMalloc(&g_topm_pvals, need * sizeof(float)) != cudaSuccess ||
-            cudaMalloc(&g_topm_pidxs, need * sizeof(int32_t)) != cudaSuccess) {
-            g_topm_pvals = nullptr;
-            g_topm_pidxs = nullptr;
-            g_topm_cap = 0;
-            return;
-        }
-        g_topm_cap = need;
-    }
+    if (!topm_ensure(need))
+        return;
     dim3 grid(rows, kTopMSplits);
     rowwise_topm_partial_kernel<<<grid, 256, 0, stream>>>(d_logits, vocab, m, g_topm_pvals,
                                                           g_topm_pidxs);
