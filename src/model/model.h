@@ -16,6 +16,12 @@
 namespace imp {
 
 class WeightUploadLog;
+// The vision tower of a multimodal checkpoint. Held by Model — not by the
+// pipeline — because its weights come from the SAME checkpoint and are views
+// into the same mapping, so its lifetime IS the model's. Forward-declared so
+// model/ keeps no header dependency on vision/; only model.cpp (destructor) and
+// weight_map.cpp (which fills it) include the definition.
+struct VisionModel;
 
 class Model {
 public:
@@ -155,6 +161,10 @@ public:
     bool sources_consumed_ = false;         // Phase-4b freed source tensors (#830)
     bool device_sources_mutated_ = false;   // in-place transformed device sources
     std::unique_ptr<WeightUploadLog> upload_log_;
+    // Null unless the checkpoint carries one. Populated in two steps by the
+    // parties that own each half: the config loader fills `->config` from
+    // config.json, weight_map fills the tensors from the shard map.
+    std::unique_ptr<VisionModel> vision_tower;
     int last_warm_hits_ = 0;
     // Path the loader was invoked with (GGUF file or SafeTensors directory).
     // Used to derive the on-disk warm-cache location and its fingerprint

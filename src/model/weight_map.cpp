@@ -1,4 +1,5 @@
 #include "model/weight_map.h"
+#include "vision/qwen3vl_vision_load.h"
 #include "model/tensor_kind_matcher.h"
 #include "core/logging.h"
 #include <string>
@@ -356,6 +357,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             // they ever appear in the main shard, drop them here.
             const std::string visual_prefix = "model.visual.";
             if (name.compare(0, visual_prefix.size(), visual_prefix) == 0) {
+                // Routed into the vision tower below when there is one; still
+                // skipped here either way, since these are not LM weights.
                 ++skipped;
                 continue;
             }
@@ -1318,6 +1321,27 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         "WeightMap (%s): assigned %d tensors, skipped %d, "
         "layers=%d, experts=%d",
         model_arch_name(arch_), assigned, skipped, model.config_.n_layers, model.config_.n_experts);
+
+    // Vision tower, when the config loader recognised one. Its weights ride in
+    // the same shard map as the LM's — that is why Model owns it — but they are
+    // routed by their own mapper, not by the LM matchers above.
+    if (model.vision_tower) {
+        Qwen3VLVisionLoadStats vstats;
+        std::string verr;
+        if (load_qwen3vl_vision_tensors(tensors, *model.vision_tower, vstats, verr)) {
+            IMP_LOG_INFO("Vision tower: %d tensors assigned (%zu blocks, %zu deepstack mergers)",
+                         vstats.assigned, model.vision_tower->layers.size(),
+                         model.vision_tower->deepstack_mergers.size());
+        } else {
+            // Drop it rather than hand the encoder a tower with null slots —
+            // that would surface as a garbage embedding many layers later.
+            IMP_LOG_WARN(
+                "Vision tower incomplete (%s; %d assigned, %d unknown, %d missing) — "
+                "continuing text-only",
+                verr.c_str(), vstats.assigned, vstats.unknown, vstats.missing);
+            model.vision_tower.reset();
+        }
+    }
 
     if (assigned == 0) {
         IMP_LOG_ERROR("WeightMap: no tensors were assigned -- check weight names");

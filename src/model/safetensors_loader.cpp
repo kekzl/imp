@@ -836,7 +836,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     ModelConfig& cfg = model->config_;
 
     // 1. Try config.json (authoritative for all hyperparams)
-    bool has_config = HFConfigLoader::load_config(model_dir, cfg);
+    bool has_config = HFConfigLoader::load_config(model_dir, cfg, &model->vision_tower);
 
     // 2. Detect architecture from weights if config.json didn't provide it
     if (!has_config || cfg.arch == ModelArch::GENERIC) {

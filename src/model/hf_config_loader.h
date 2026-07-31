@@ -4,16 +4,24 @@
 #include "model/model_arch.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace imp {
 
+struct VisionModel;  // vision/vision_model.h — only a pointer is needed here
+
 struct HFConfigLoader {
     // Load config.json from model directory, populate ModelConfig.
     // Returns true if config.json was found and parsed successfully.
     // Only overwrites cfg fields that are present in the JSON.
-    static bool load_config(const std::string& model_dir, ModelConfig& cfg);
+    // `out_vision_tower` is optional: when non-null AND the checkpoint carries a
+    // vision tower this loader understands, it receives a VisionModel with only
+    // its `config` filled — the weights are weight_map's half. Left null for
+    // every text-only path, so nothing else changes.
+    static bool load_config(const std::string& model_dir, ModelConfig& cfg,
+                            std::unique_ptr<VisionModel>* out_vision_tower = nullptr);
 
     // Sampling and stop-condition defaults shipped by the model author in
     // generation_config.json. Sentinel values (<0 for floats, -1 for ints,

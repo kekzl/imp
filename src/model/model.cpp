@@ -3,6 +3,8 @@
 #include "core/logging.h"
 #include "memory/mem_account.h"  // trim_device_mempool
 #include "memory/weight_snapshot.h"
+// Complete type needed here: ~Model destroys the unique_ptr<VisionModel>.
+#include "vision/vision_model.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cctype>
