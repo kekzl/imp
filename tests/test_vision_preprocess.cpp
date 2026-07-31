@@ -288,5 +288,99 @@ TEST(QwenSmartResize, OutputIsAlwaysFactorAligned) {
         }
 }
 
+// ---------------------------------------------------------------------------
+// qwen_patchify — layout, not values. The two orderings below are the ones the
+// encoder silently depends on and that guessing gets wrong:
+//   - tokens are grouped by 2x2 MERGE BLOCK, not raster;
+//   - inside a token the layout is (C, T, ph, pw), and T is a REPEAT.
+// Oracle: the reshape/permute in Qwen2VLImageProcessorFast.
+// ---------------------------------------------------------------------------
+
+// An RGB image where every patch-sized tile carries a distinct constant, so a
+// token's content identifies which patch it came from.
+std::vector<uint8_t> patch_id_image(int side, int patch) {
+    std::vector<uint8_t> img(static_cast<size_t>(side) * side * 3);
+    const int g = side / patch;
+    for (int y = 0; y < side; ++y)
+        for (int x = 0; x < side; ++x) {
+            const int pid = (y / patch) * g + (x / patch);
+            for (int c = 0; c < 3; ++c)
+                img[(static_cast<size_t>(y) * side + x) * 3 + c] = static_cast<uint8_t>(pid * 16 + c);
+        }
+    return img;
+}
+
+QwenPatchifyConfig patchify_test_cfg(int side) {
+    QwenPatchifyConfig c;
+    // Pin the geometry so smart_resize is a no-op and the test controls the grid.
+    c.min_pixels = 1;
+    c.max_pixels = static_cast<int64_t>(side) * side;
+    return c;
+}
+
+TEST(QwenPatchify, GridAndShape) {
+    const int side = 64, P = 16;
+    auto img = patch_id_image(side, P);
+    QwenPatches out;
+    ASSERT_TRUE(qwen_patchify(img.data(), side, side, patchify_test_cfg(side), out));
+    EXPECT_EQ(out.grid_h, 4);
+    EXPECT_EQ(out.grid_w, 4);
+    EXPECT_EQ(out.tokens, 16);
+    EXPECT_EQ(out.features, 3 * 2 * P * P);  // C*T*P*P = 1536
+    EXPECT_EQ(out.data.size(), static_cast<size_t>(out.tokens) * out.features);
+}
+
+// Token k must be the k-th patch in MERGE-BLOCK order, not raster order. For a
+// 4x4 patch grid with merge 2 the block order is:
+//   block(0,0): patches 0,1,4,5    block(0,1): patches 2,3,6,7
+//   block(1,0): patches 8,9,12,13  block(1,1): patches 10,11,14,15
+TEST(QwenPatchify, TokensAreGroupedByMergeBlockNotRaster) {
+    const int side = 64, P = 16;
+    auto img = patch_id_image(side, P);
+    QwenPatches out;
+    ASSERT_TRUE(qwen_patchify(img.data(), side, side, patchify_test_cfg(side), out));
+
+    const int expect[16] = {0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15};
+    for (int t = 0; t < 16; ++t) {
+        // channel 0, temporal 0, first pixel of the patch.
+        const float v = __half2float(out.data[static_cast<size_t>(t) * out.features]);
+        const float want = (expect[t] * 16) / 255.0f * 2.0f - 1.0f;  // mean/std 0.5
+        EXPECT_NEAR(v, want, 0.02f) << "token " << t << " came from the wrong patch";
+    }
+}
+
+TEST(QwenPatchify, ChannelMajorAndTemporalIsARepeat) {
+    const int side = 64, P = 16, T = 2;
+    auto img = patch_id_image(side, P);
+    QwenPatches out;
+    ASSERT_TRUE(qwen_patchify(img.data(), side, side, patchify_test_cfg(side), out));
+
+    const half* tok0 = out.data.data();
+    for (int c = 0; c < 3; ++c) {
+        const size_t base = (static_cast<size_t>(c) * T + 0) * P * P;
+        const size_t rep = (static_cast<size_t>(c) * T + 1) * P * P;
+        // The temporal axis repeats the same spatial patch...
+        for (int i = 0; i < P * P; ++i)
+            EXPECT_EQ(__half2float(tok0[base + i]), __half2float(tok0[rep + i]))
+                << "temporal slot 1 must repeat slot 0 (channel " << c << ", elem " << i << ")";
+        // ...and channels stay distinct, so the layout really is channel-major.
+        if (c > 0) {
+            const size_t prev = (static_cast<size_t>(c - 1) * T + 0) * P * P;
+            EXPECT_NE(__half2float(tok0[base]), __half2float(tok0[prev]))
+                << "channels " << c - 1 << " and " << c << " must not alias";
+        }
+    }
+}
+
+TEST(QwenPatchify, RejectsBadInput) {
+    QwenPatches out;
+    QwenPatchifyConfig c = patchify_test_cfg(64);
+    std::vector<uint8_t> img(64 * 64 * 3, 0);
+    EXPECT_FALSE(qwen_patchify(nullptr, 64, 64, c, out));
+    EXPECT_FALSE(qwen_patchify(img.data(), 0, 64, c, out));
+    c.patch_size = 0;
+    EXPECT_FALSE(qwen_patchify(img.data(), 64, 64, c, out));
+}
+
 }  // namespace
 }  // namespace imp
