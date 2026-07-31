@@ -5,8 +5,9 @@
 # assert what imp *thinks* correct looks like.
 #
 # Two legs, one per dialect:
-#   aider       -> /v1/chat/completions (OpenAI)     image imp:agents
-#   Claude Code -> /v1/messages         (Anthropic)  image imp:claude-code
+#   aider          -> /v1/chat/completions (OpenAI)     image imp:agents
+#   Claude Code    -> /v1/messages         (Anthropic)  image imp:claude-code
+#   OpenAI Agents  -> /v1/responses        (Responses)  image imp:agents-sdk
 #
 # Each runs on a throwaway git repo, asks for a one-function edit, and asserts
 # the function landed in the file — an assertion only a real tool call can
@@ -20,7 +21,7 @@
 # is `make test-agents` (agent_task_loop.py).
 #
 # Usage: tools/analysis/agent_external_smoke.sh [MODEL] [PORT] [LEG]
-#        LEG = all (default) | aider | claude-code
+#        LEG = all (default) | aider | claude-code | agents-sdk
 set -euo pipefail
 
 MODEL="${1:-Qwen3-8B-Q8_0.gguf}"
@@ -29,6 +30,7 @@ LEG="${3:-all}"
 IMG_SERVER="${DOCKER_IMG:-imp:test}"
 IMG_AGENTS="imp:agents"
 IMG_CC="imp:claude-code"
+IMG_SDK="imp:agents-sdk"
 SRV_NAME="imp-agent-external"
 WORK="$(mktemp -d)"
 FAILED=0
@@ -131,6 +133,49 @@ if [ "$LEG" = "all" ] || [ "$LEG" = "claude-code" ]; then
         FAILED=1
     else
         echo "PASS: no think markers in the user-visible output"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Leg 3 — the OpenAI Agents SDK over the RESPONSES dialect (roadmap gap 10's
+# remaining leg). aider covers chat-completions and Claude Code covers
+# /v1/messages; /v1/responses is what the Agents SDK and Codex speak, and until
+# this leg nothing outside our own probes had ever driven it.
+#
+# The driver pins temperature=0 and max_tokens=400. The budget is not cosmetic:
+# measured on Qwen3-8B-Q8_0 against this exact request, 400 yields
+# `reasoning` + `function_call` (232 output tokens) while 1400 yields a bare
+# `message` (511) — given room, the model reasons its way past the call and
+# answers in prose. imp emits both shapes correctly; the leg pins the budget so
+# it tests the DIALECT rather than the model's appetite for deliberation.
+# ---------------------------------------------------------------------------
+if [ "$LEG" = "all" ] || [ "$LEG" = "agents-sdk" ]; then
+    echo "--- leg: OpenAI Agents SDK -> /v1/responses ---"
+    docker build -q -f tools/Dockerfile.agents-sdk -t "$IMG_SDK" tools/ >/dev/null
+    REPO="$(new_repo agents-sdk)"
+    OUT="$WORK/sdk_out.txt"
+    docker run --rm --network host -v "$REPO:/work" \
+        -v "$(pwd)/tools/analysis:/drv:ro" -w /work \
+        -e OPENAI_BASE_URL="http://localhost:${PORT}/v1" \
+        -e OPENAI_API_KEY=dummy \
+        -e IMP_MODEL="$MODEL" \
+        "$IMG_SDK" python /drv/agents_sdk_edit.py >"$OUT" 2>&1 || true
+    tail -6 "$OUT"
+
+    if edit_landed "$REPO"; then
+        echo "PASS: the Agents SDK applied a real edit (add(a, b)) via /v1/responses"
+    else
+        echo "FAIL: Agents SDK — expected add(a, b) in math_utils.py, got:"
+        cat "$REPO/math_utils.py" 2>/dev/null || echo "(no file)"
+        FAILED=1
+    fi
+
+    # The run has to go through an actual tool call, not a description of one.
+    if grep -q "ToolCallItem" "$OUT"; then
+        echo "PASS: the run contains a real function_call item"
+    else
+        echo "FAIL: Agents SDK — no function_call in the run; the model only talked"
+        FAILED=1
     fi
 fi
 
