@@ -4,6 +4,30 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- **`imp-quantize` silently produced a broken MoE checkpoint.** The docs claimed
+  MoE was "reported and left unquantized rather than mangled" — but that only
+  ever applied to 3-D stacked expert tensors. Checkpoints storing experts the
+  HF-standard way (one 2-D tensor per expert, as DeepSeek-V2/Qwen3-MoE/Mixtral
+  do) sailed through every shape check, got quantized, and produced a model that
+  *loaded* and then emitted cross-script repetition garbage while the BF16 source
+  answered normally.
+
+  Bisection on DeepSeek-V2-Lite (MLA + 64 routed experts) cleared the experts:
+  quantizing all 4992 expert tensors with attention left BF16 is coherent. Two
+  other roles are the culprits, and both are 2-D and K-aligned so nothing caught
+  them — the **MLA latent projections** (`kv_a_proj_with_mqa`, `kv_b_proj`, which
+  the runtime slices into latent+RoPE and per-head nope/v halves) and the **MoE
+  router** (FP4 across 16 shared-scale values changes the top-k expert pick).
+  Each was confirmed independently: excluding only one still gave garbage;
+  excluding both gives a working checkpoint. Both are now refused, at a cost of a
+  handful of small matrices per layer.
+
+  DeepSeek-V2-Lite now quantizes 29.26 GiB → 8.91 GiB (3.28x) in ~70 s, and
+  `degen_suite.py` reads **3 FAIL / 32 against the BF16 source's 5 FAIL / 32** —
+  the quantized model's failures are a strict subset, so the quantization
+  introduces none of them.
+
 ### Added
 - **`evicted_tokens`: the caller is now told when StreamingLLM dropped its
   context**, closing the second half of roadmap gap 6. When the KV pool runs out
