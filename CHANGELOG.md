@@ -98,6 +98,16 @@ there instead of retelling it.
   violation.
 
 ### Fixed
+- **An image that spanned a prefill chunk boundary got the wrong half of
+  itself.** Both vision kernels find "the k-th image token" by scanning the span
+  they are handed, which under chunked prefill is one chunk — so a second chunk
+  restarted at the image's *first* embeddings. Reachable on defaults (chunks are
+  2048 and Qwen3's FP8-KV path is chunk-eligible) as soon as enough text precedes
+  the picture. Pinned by `tests/test_vision_chunk_offset.cu`.
+- **`/image` in the interactive CLI loaded a picture the prompt never
+  referenced.** The multi-turn path branched on the mmproj tower alone, so on
+  Qwen3-VL it rendered a prompt with no image tokens: "Image loaded", then an
+  answer given as if there were no image.
 - **`imp-quantize` silently produced a broken MoE checkpoint.** "MoE is left
   unquantized" only ever applied to 3-D stacked tensors; the HF-standard
   per-expert 2-D layout was quantized and produced a model that loaded and then

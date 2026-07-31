@@ -1,5 +1,7 @@
 #include "model/image_placeholders.h"
 
+#include <algorithm>
+
 namespace imp {
 
 bool expand_image_placeholders(std::vector<int32_t>& tokens, int32_t pad_id, const std::vector<int>& counts,
@@ -48,6 +50,16 @@ size_t image_content_hash(const uint8_t* data, size_t len) {
         h *= 0x100000001b3ULL;
     }
     return h ? h : 1;  // 0 is the cache's "no image" sentinel
+}
+
+int image_tokens_before(const std::vector<int32_t>& tokens, int32_t pad_id, int upto) {
+    if (upto <= 0)
+        return 0;
+    const size_t end = std::min(static_cast<size_t>(upto), tokens.size());
+    int n = 0;
+    for (size_t i = 0; i < end; ++i)
+        n += (tokens[i] == pad_id);
+    return n;
 }
 
 }  // namespace imp

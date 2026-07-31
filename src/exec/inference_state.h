@@ -158,7 +158,13 @@ struct InferenceState {
     // Vision: when non-null, replace vision_token_id positions with vision embeddings
     const half* vision_embeddings = nullptr;  // [n_vision_tokens, d_model] FP16 on device
     int vision_token_id = -1;                 // <image_soft_token> ID
-    int n_vision_tokens = 0;                  // 256
+    int n_vision_tokens = 0;                  // total in the buffer, across all chunks
+
+    // How many image tokens EARLIER chunks already placed. `token_ids` is one
+    // chunk, so without this the k-th placeholder of a later chunk would take
+    // the k-th embedding of the image — the wrong picture region, silently.
+    // Zero whenever the prompt is prefilled in one go.
+    int vision_emb_offset = 0;
 
     // DeepStack (Qwen3-VL): extra visual features ADDED at the image-token
     // positions after each of the LM's first `n_deepstack` layers. Indexed by

@@ -89,5 +89,31 @@ TEST(ImagePlaceholders, HandlesAdjacentPlaceholders) {
     EXPECT_EQ(t.size(), 4u);
 }
 
+// `image_tokens_before` is where a chunk learns which embedding to resume from.
+// Off by one here is not a crash — it shifts the whole rest of the image by one
+// position, which reads as a slightly wrong answer.
+TEST(ImageTokensBefore, CountsOnlyWhatPrecedesTheChunk) {
+    //                             0     1     2     3     4     5
+    const std::vector<int32_t> t = {9, kPad, kPad, 8, kPad, 7};
+    EXPECT_EQ(image_tokens_before(t, kPad, 0), 0) << "the first chunk resumes from nothing";
+    EXPECT_EQ(image_tokens_before(t, kPad, 1), 0) << "the boundary token itself is not yet placed";
+    EXPECT_EQ(image_tokens_before(t, kPad, 2), 1);
+    EXPECT_EQ(image_tokens_before(t, kPad, 3), 2);
+    EXPECT_EQ(image_tokens_before(t, kPad, 5), 3);
+    EXPECT_EQ(image_tokens_before(t, kPad, 6), 3) << "whole prompt";
+}
+
+TEST(ImageTokensBefore, ClampsRatherThanReadingPastTheEnd) {
+    const std::vector<int32_t> t = {kPad, 5};
+    EXPECT_EQ(image_tokens_before(t, kPad, 99), 1);
+    EXPECT_EQ(image_tokens_before(t, kPad, -3), 0);
+    EXPECT_EQ(image_tokens_before({}, kPad, 4), 0);
+}
+
+TEST(ImageTokensBefore, TextOnlyPromptsResumeFromZero) {
+    const std::vector<int32_t> t = {1, 2, 3, 4};
+    EXPECT_EQ(image_tokens_before(t, kPad, 4), 0);
+}
+
 }  // namespace
 }  // namespace imp

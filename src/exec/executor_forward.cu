@@ -306,10 +306,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         extern void launch_replace_vision_embeddings(half * hidden, const int32_t* token_ids,
                                                      const half* vision_emb, int vision_token_id,
                                                      int n_tokens, int d_model, int n_vision_tokens,
-                                                     cudaStream_t stream);
+                                                     int emb_offset, cudaStream_t stream);
         launch_replace_vision_embeddings(static_cast<half*>(h.data), state.token_ids, state.vision_embeddings,
                                          state.vision_token_id, n, cfg.d_model, state.n_vision_tokens,
-                                         stream);
+                                         state.vision_emb_offset, stream);
     }
 
     debug_tensor_stats("after_embedding", h, stream);
@@ -546,7 +546,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             state.n_vision_tokens > 0 && state.vision_token_id >= 0 && h.qtype == QType::F16) {
             launch_add_vision_embeddings(static_cast<half*>(h.data), state.token_ids,
                                          state.deepstack_embeddings[i], state.vision_token_id, n, cfg.d_model,
-                                         state.n_vision_tokens, stream);
+                                         state.n_vision_tokens, state.vision_emb_offset, stream);
         }
 
         if (i == max_layer - 1) {

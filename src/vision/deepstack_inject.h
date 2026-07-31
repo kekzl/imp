@@ -18,12 +18,18 @@
 
 namespace imp {
 
-// hidden[p, :] += embeddings[k, :] for the k-th token whose id is
-// `vision_token_id`. `n_vision_tokens` bounds k, so a prompt with more
-// placeholders than the encoder produced leaves the surplus untouched rather
-// than reading past the buffer.
+// hidden[p, :] += embeddings[emb_offset + k, :] for the k-th token in THIS call
+// whose id is `vision_token_id`. `n_vision_tokens` bounds `emb_offset + k`, so a
+// prompt with more placeholders than the encoder produced leaves the surplus
+// untouched rather than reading past the buffer.
+//
+// `emb_offset` is how many image tokens the caller already consumed. Under
+// chunked prefill `token_ids` is one CHUNK, so the k-th placeholder in a later
+// chunk is NOT the k-th of the image — without the offset a run of image tokens
+// that straddles a chunk boundary gets the FIRST embeddings again in the second
+// chunk, which is silently the wrong picture rather than a crash.
 void launch_add_vision_embeddings(half* hidden, const int32_t* token_ids, const half* embeddings,
                                   int vision_token_id, int n_tokens, int d_model, int n_vision_tokens,
-                                  cudaStream_t stream);
+                                  int emb_offset, cudaStream_t stream);
 
 }  // namespace imp

@@ -817,6 +817,7 @@ if(IMP_BUILD_TESTS)
         tests/test_prefix_cache_e2e.cpp
         tests/test_determinism_e2e.cpp
         tests/test_deepstack_inject.cu
+        tests/test_vision_chunk_offset.cu
         tests/test_vision_golden.cu
         tests/test_qwen3vl_encoder.cu
         tests/test_qwen3vl_pipeline.cu

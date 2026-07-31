@@ -28,4 +28,11 @@ bool expand_image_placeholders(std::vector<int32_t>& tokens, int32_t pad_id, con
 // means "no image" to the cache, and an all-zero image must not claim it.
 size_t image_content_hash(const uint8_t* data, size_t len);
 
+// How many image tokens sit before `upto` — the embedding index a chunk
+// starting there must resume from. The vision kernels scan the chunk they are
+// handed, so without this a run of image tokens crossing a chunk boundary
+// silently restarts at the image's first embedding. `upto` is clamped, so a
+// prefix-cache offset past the prompt is not a special case for the caller.
+int image_tokens_before(const std::vector<int32_t>& tokens, int32_t pad_id, int upto);
+
 }  // namespace imp
