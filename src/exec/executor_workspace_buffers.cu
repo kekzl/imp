@@ -1440,14 +1440,9 @@ void GraphExecutor::free_buffers() {
     h_logits_pinned_size_ = 0;
     vfree(attn_scores_buf_);
     attn_scores_buf_size_ = 0;
-    if (chunk_capture_k_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_k_));
-        chunk_capture_k_ = nullptr;
-    }
-    if (chunk_capture_v_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_v_));
-        chunk_capture_v_ = nullptr;
-    }
+    // Arena-owned since A7 step 4b.2 — ~Engine closes the region; re-arm only.
+    chunk_capture_k_ = nullptr;
+    chunk_capture_v_ = nullptr;
     chunk_capture_ctx_ = 0;
     if (chunk_eager_k_) {
         IMP_CUDA_CHECK_LOG(cudaFree(chunk_eager_k_));
@@ -1659,25 +1654,27 @@ bool GraphExecutor::ensure_chunk_capture_scratch(int ctx_capacity) {
     if (nkv_u <= 0 || hd_u <= 0)
         return false;
     const size_t bytes = static_cast<size_t>(ctx_capacity) * nkv_u * hd_u * sizeof(half);
-    if (chunk_capture_k_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_k_));
-        chunk_capture_k_ = nullptr;
-    }
-    if (chunk_capture_v_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_v_));
-        chunk_capture_v_ = nullptr;
-    }
+    // T2 (A7 step 4b.2, the last exec/ holdout). It was left out because it
+    // grows and "a bump arena strands it" — true of a STAIRCASE of takes, not
+    // of taking the charged bound once, which is what happens here:
+    // exec_t2_demand charges 2 x capture_ctx_cap x nkv x hd halves and the
+    // caller asks for exactly that (engine_spec_capture.cpp clamps the cap to
+    // max_seq_len). It also closes this site's share of AUDIT B13 — both
+    // pointers are baked into the captured verify graph, and the cudaFree this
+    // replaces handed a replay a freed address.
     chunk_capture_ctx_ = 0;
-    if (cudaMalloc(&chunk_capture_k_, bytes) != cudaSuccess ||
-        cudaMalloc(&chunk_capture_v_, bytes) != cudaSuccess) {
-        IMP_LOG_WARN("chunk-capture scratch alloc failed (2x %.1f MiB) — captured verify disabled",
-                     bytes / (1024.0 * 1024.0));
-        if (chunk_capture_k_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(chunk_capture_k_));
-            chunk_capture_k_ = nullptr;
-        }
+    auto k_slab = engine_arena().take_bytes(bytes);
+    auto v_slab = engine_arena().take_bytes(bytes);
+    if (k_slab.empty() || v_slab.empty()) {
+        IMP_LOG_WARN("chunk-capture scratch unavailable from the T2 arena (2x %.1f MiB, %.1f MiB "
+                     "free) — captured verify disabled",
+                     bytes / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
+        chunk_capture_k_ = nullptr;
+        chunk_capture_v_ = nullptr;
         return false;
     }
+    chunk_capture_k_ = reinterpret_cast<half*>(k_slab.data());
+    chunk_capture_v_ = reinterpret_cast<half*>(v_slab.data());
     chunk_capture_ctx_ = ctx_capacity;
     IMP_LOG_INFO("chunk-capture K/V scratch: 2x %.1f MiB (ctx_capacity=%d, nkv=%d, hd=%d)",
                  bytes / (1024.0 * 1024.0), ctx_capacity, nkv_u, hd_u);

@@ -86,6 +86,16 @@ struct ExecShape {
     int qk_nope_head_dim = 0;
     int v_head_dim = 0;
     bool mla_absorb = false;  // runtime_config().attention.mla_absorb
+    // Chunk-capture K/V scratch (executor_workspace_buffers.cu). The site takes
+    // the MAX over the per-layer arrays rather than the config scalars —
+    // hybrids have layers with different kv-head counts — so carry both maxima
+    // rather than n_kv_heads/head_dim, which would fit by luck on uniform
+    // models and under-reserve on the others.
+    int kv_heads_max = 0;
+    int head_dim_max = 0;
+    // min(speculative.capture_ctx_cap, max_seq_len) as engine_spec_capture.cpp
+    // computes it. 0 = the captured-verify path is off, charge nothing.
+    int capture_ctx_cap = 0;
 };
 
 // Replicated constants, pinned against their definitions by static_asserts in
@@ -150,6 +160,9 @@ struct ExecT2Demand {
     // Charged whenever the model carries weights the IMMA routes can take;
     // zero on native-NVFP4 models, which never enter them.
     size_t imma_scratch = 0;
+    // Chunk-capture K/V pair for the captured speculative verify. Sized from
+    // the capture context cap, charged only when that path is eligible.
+    size_t chunk_capture = 0;
 
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction + quant_scratch +
@@ -179,7 +192,8 @@ int exec_max_weight_k(const Model& model);
 // so the caller passes them rather than this header reaching for a global (there
 // is no process-global RuntimeConfig; it is per-Engine by design).
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size,
-                            bool use_fp8_prefill, bool mla_absorb = false);
+                            bool use_fp8_prefill, bool mla_absorb = false,
+                            int capture_ctx_cap = 0);
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size);
 
 // Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).
