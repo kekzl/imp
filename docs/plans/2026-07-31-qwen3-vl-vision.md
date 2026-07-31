@@ -107,19 +107,71 @@ More than the old assessment implied:
    `preprocessor_config.json` are PIXEL COUNTS despite being spelled
    `shortest_edge` / `longest_edge` — 65536 = 256² and 16777216 = 4096².
 
-## Suggested order
+## Status (2026-07-31, end of day)
 
-3 → 1 → 2 → 4 gets an image to `[*, 2560]` embeddings. Then 6, then 5. Piece 6
-is the one that can regress existing models, so it should land on its own with
-the invariant test rather than inside a large vision commit.
+| # | Piece | Where | Status |
+|---|---|---|---|
+| 0 | Text tower loads and generates | — | ✅ #1163 (`degen_suite` 34/34) |
+| — | Loader keeps >4-D tensors | `safetensors_loader.cpp` | ✅ #1164 |
+| 7a | `smart_resize` | `vision/image_processor` | ✅ #1166 |
+| 3+7b | `patchify` (`C,T,ph,pw`, merge-block order) | `vision/image_processor` | ✅ #1167 |
+| — | Vision tensor name mapping | `vision/qwen3vl_vision_map` | ✅ #1168 |
+| — | `vision_config` parse | `vision/qwen3vl_vision_config` | ✅ #1169 |
+| — | Tower load (315 tensors, shape-checked) | `vision/qwen3vl_vision_load` | ✅ #1170 |
+| 1+2+2b+4 | Grid math, upload, encoder forward | `vision/qwen3vl_{vision_grid,vision_upload,encoder}` | ✅ #1171 |
+| 6a | M-RoPE kernel + config read | `compute/rope`, `model_config` | #1172 |
+| 6b | Per-token `(t, h, w)` positions | `model/mrope_positions` | #1173 |
+| 5 | DeepStack injection at LM layers 0/1/2 | — | **open** |
+| — | Image-token expansion, embedding replacement, server/CLI path | — | **open** |
+
+The encoder runs and is verified; nothing calls it yet. What is left is the
+integration: expanding the image placeholder to the right number of tokens,
+feeding the merged embeddings into the prefill, and adding the three DeepStack
+taps at image-token positions.
+
+## Corrections to this plan, found while building it
+
+- **Piece 6 is interleaved, not sectioned.** Qwen3-VL sets
+  `mrope_interleaved: true`: the axes alternate across the frequency spectrum
+  (`T,H,W,T,H,W,…` and then a `T` tail past `3·section[axis]`), where Qwen2-VL
+  takes three contiguous blocks. Different dimensions get different angles, so
+  the two are not interchangeable — both are implemented.
+- **`mrope_section` lives under two different keys.** `rope_scaling` in the
+  Qwen2-VL generation, `rope_parameters` in Qwen3-VL. Reading one leaves a
+  multimodal model on single-axis RoPE with no error at all.
+- **An image costs `max(rows, cols)` positions, not its token count.** A 2×3
+  image is six tokens and three positions.
+- **The LM-side vision token order is raster over the MERGED grid**, while the
+  encoder consumes patches in merge-block order. They agree because four
+  consecutive encoder tokens form one merged token in raster order — but the
+  two orders are written differently in the reference and are easy to conflate.
 
 ## Verification
 
-**No reference implementation is required, and none is available here** (no
-torch on this host, no llama.cpp Qwen3-VL mmproj staged). The oracle is
-end-to-end: a VL model that describes a test image correctly is strong evidence
-the encoder is right, because a wrong encoder produces unrelated text rather
-than slightly-off text. This is the same standard that carried the MoE quantizer
+**Correction to the original plan: an end-to-end oracle was not enough, and a
+better one was available.** The plan below still holds for the final check, but
+the encoder is verified against a from-scratch double-precision reimplementation
+of `modeling_qwen3_vl.py`, written in the test
+(`tests/test_qwen3vl_encoder.cu`). End-to-end tells you *something* is wrong; the
+reference tells you *what*. The HF source is a `curl` away and should be read,
+not recalled.
+
+Two results from mutation-checking that reference are worth keeping:
+
+- **A reference test can be structurally blind.** The first version could not
+  catch a swapped RoPE axis. Small random gains made every LayerNorm shrink its
+  activations until the attention logits sat within ±0.01 and softmax came out
+  near-uniform — the rotary embedding had no influence on the output at all.
+  Realistic magnitudes (norm gain near 1, Xavier linears) fixed it. Check the
+  magnitudes of a synthetic fixture, not just its structure.
+- **The two GELU variants are not distinguishable in FP16.** The block MLP's
+  tanh-GELU and the mergers' erf-GELU differ by at most `4.7e-4`, below one FP16
+  ulp at magnitude 1 (`9.8e-4`). The code follows upstream on the strength of
+  the reference; no test covers it, and the test says so.
+
+The end-to-end oracle still applies to the finished path: a VL model that
+describes a test image correctly is strong evidence, because a wrong encoder
+produces unrelated text rather than slightly-off text. This is the same standard that carried the MoE quantizer
 bisection on 2026-07-31 (coherent vs cross-script garbage), and it is decisive
 in practice.
 
