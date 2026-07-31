@@ -124,8 +124,11 @@ void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAll
     // note the build totals here — one note per cache family.
     MemAccount::instance().note("WEIGHT_CACHE_FP16",
                                 static_cast<std::ptrdiff_t>(wcache_->fp16_bytes));
+    // Minus the SSM sidecar: it is the one FP8 cache that goes through
+    // VRAMAllocator, which names its own charges now, so including it here
+    // counted it twice.
     MemAccount::instance().note("WEIGHT_CACHE_FP8",
-                                static_cast<std::ptrdiff_t>(wcache_->fp8_bytes));
+                                static_cast<std::ptrdiff_t>(wcache_->fp8_bytes - wcache_->fp8_sidecar_bytes));
     MemAccount::instance().note(
         "WEIGHT_CACHE_NVFP4",
         static_cast<std::ptrdiff_t>(wcache_->nvfp4_bytes + wcache_->nvfp4_moe_bytes));

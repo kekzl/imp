@@ -864,6 +864,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         IMP_LOG_INFO("engine arena demand: %s -> %.1f MiB reserved", d.describe().c_str(),
                      cap / (1024.0 * 1024.0));
         (void)engine_arena_open(cuda_malloc_backend(), cap);
+        // Name the two charges that are already known, HERE rather than after
+        // warmup. Both are facts by now — the context was measured above, the
+        // arena just took its region — and naming them early is what lets
+        // MemAccount::unattributed_bytes() mean "what imp cannot account for"
+        // during init instead of "context + arena + that" (AUDIT B79). The
+        // library figure is filled in after warmup measures it.
+        MemAccount::instance().set_named_charges(ctx_baseline_bytes, /*library=*/0, engine_arena().capacity(),
+                                                 engine_arena().high_water());
     }
     // T2 slot pool for the conditional graph loop (A7 step 5.3).
     graph_slot_pool_open_for(cuda_malloc_backend(), config_.max_seq_len);
