@@ -30,20 +30,20 @@
 // (absmax per micro-block, absmax per tensor): nothing protects the channels
 // that matter most, because nothing has looked at an activation. With --calib
 // they are AWQ scales searched against a calibration pass (awq.h, awq_plan.cpp).
-// Measured over tools/analysis/ppl_corpus_45k.txt (13 536 tokens),
-// deterministic_gemm, calibrated on general prose that is NOT the scoring
-// corpus:
+// Measured over tools/analysis/ppl_corpus_45k.txt (13 537 tokens), calibrated
+// on general prose that is NOT the scoring corpus:
 //
 //   Qwen3-0.6B  BF16 24.06 -> RTN 30.10 (+25%) -> AWQ 28.48 (+18%)
+//   Qwen3-1.7B  BF16 17.22 -> RTN 20.43 (+19%) -> AWQ 19.21 (+12%)
 //
 // Use a corpus of that size to judge this. The same model over the 199-token
 // ppl_corpus.txt reads wildly different numbers and inverts the size trend —
 // an artifact of too few tokens, not a property of the quantizer.
 //
-// Coherence: tools/analysis/degen_suite.py reads 45/45 on all three (three
-// consecutive runs on the AWQ output). Checkpoints built from a NON-
-// deterministic calibration file each flipped one probe, a different one each
-// time — which is why --calibrate forces runtime.deterministic_gemm. See
+// Coherence: tools/analysis/degen_suite.py reads 45/45 on every checkpoint
+// above (the AWQ ones re-run). Checkpoints built from a NON-deterministic
+// calibration file each flipped one probe, a different one each time — which
+// is why --calibrate forces runtime.deterministic_gemm. See
 // docs/quantization.md.
 //
 // A published Modelopt export still beats this. Useful today for: getting a

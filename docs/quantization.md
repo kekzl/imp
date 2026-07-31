@@ -100,26 +100,26 @@ the checkpoint.
 #### Quality, measured
 
 `imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens),
-Qwen3-0.6B, calibration over 36 058 tokens of general prose. Full chain
-reproducible with `tools/analysis/awq_ppl_ab.sh`:
+calibration over 36 058 tokens of general prose. Full chain reproducible with
+`tools/analysis/awq_ppl_ab.sh`:
 
-| Variant | PPL | vs BF16 | degen_suite |
-|---|---:|---:|---|
-| BF16 source | 24.06 | — | 45/45 |
-| NVFP4, round-to-nearest | 30.10 | +25.1% | 45/45 |
-| NVFP4, `--calib` (AWQ) | **28.48** | **+18.3%** | 45/45 (3 runs) |
+| Model | BF16 | NVFP4 RTN | NVFP4 `--calib` | AWQ gain | gap to BF16 |
+|---|---:|---:|---:|---:|---|
+| Qwen3-0.6B | 24.06 | 30.10 | **28.48** | −5.4% | +25.1% → **+18.3%** |
+| Qwen3-1.7B (2 shards) | 17.22 | 20.43 | **19.21** | −6.0% | +18.6% → **+11.5%** |
 
-`--calib` removes 5.4% of the perplexity and closes about a quarter of the gap
-to BF16. It does not close it: a Modelopt export still wins.
+`degen_suite.py` reads 45/45 on every checkpoint in that table (the AWQ ones
+re-run three and two times respectively). `--calib` closes about a quarter of
+the quantization gap on the 0.6B and nearly two fifths on the 1.7B — it does
+not close it: a Modelopt export still wins.
 
 **The battery is worth a note, because it did not always read 45/45.**
 Checkpoints built from the earlier, non-deterministic calibration files each
 flipped exactly one of the 45 probes — and a *different* one each time (a
 stream-vs-non-stream whitespace check, a think-leak check, an adherence probe
-returning empty content). Forcing calibration determinism removed that too: the
-shipped configuration reads 45/45 on three consecutive runs. Treat it as one
-more reason the calibration pass has to be reproducible, not as a coherence
-property that happens to hold.
+returning empty content). Forcing calibration determinism removed that too.
+Treat it as one more reason the calibration pass has to be reproducible, not as
+a coherence property that happens to hold.
 
 **One hypothesis measured and refuted.** Folding `o_proj`'s scale into `v_proj`
 writes into the tensor the KV cache stores, and imp's default KV dtype here

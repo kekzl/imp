@@ -13,10 +13,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   `imp-cli --perplexity <corpus> --calibrate <file>` runs one forward pass that
   accumulates the mean `|activation|` per input channel and writes it; and
   `imp-quantize --calib <file>` searches a per-group scale against it.
-  **Measured** on Qwen3-0.6B over `ppl_corpus_45k.txt` (13 537 tokens),
-  calibrated on general prose that is deliberately *not* the scoring corpus:
-  BF16 24.06, round-to-nearest 30.10 (+25.1%), **AWQ 28.48 (+18.3%)** — 5.4% of
-  the perplexity removed, roughly a quarter of the gap to BF16. Reproduce with
+  **Measured** over `ppl_corpus_45k.txt` (13 537 tokens), calibrated on general
+  prose that is deliberately *not* the scoring corpus, on both dense Qwen3
+  sizes staged locally — Qwen3-0.6B: BF16 24.06, round-to-nearest 30.10
+  (+25.1%), **AWQ 28.48 (+18.3%)**; Qwen3-1.7B (sharded, so the multi-shard
+  write path too): BF16 17.22, round-to-nearest 20.43 (+18.6%), **AWQ 19.21
+  (+11.5%)**. 5-6% of the perplexity removed, a quarter to two fifths of the
+  gap to BF16, `degen_suite.py` 45/45 on every checkpoint. Reproduce with
   `tools/analysis/awq_ppl_ab.sh`.
 
   The collector hooks `gemm_via_handle_`, the one dispatch every registered
