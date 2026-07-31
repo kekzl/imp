@@ -179,6 +179,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   failing the `File size` CI job on `main`; it is now 642 and the gate is green.
 
 ### Fixed
+- **`top_k` above 128 sampled from the PREVIOUS decode step's candidates**
+  (issue #1142). Requests over `SAMPLE_MAX_TOP_K` take a CUB path that ran
+  `cub::DeviceTopK::MaxPairs` to pick the candidates and then radix-sorted just
+  those. Instrumented on Qwen3-8B-Q8_0 at `top_k=129`, that call fills all 129
+  slots on the first invocation, writes **nothing** on the second while still
+  returning `cudaSuccess`, and from the fourth fails permanently with
+  `invalid device ordinal` — same thread, same stream, device 0, no pending
+  error beforehand. Nothing checked the return code, so the sampler kept
+  drawing from whatever the previous step had left in the buffer, and the model
+  emitted `Okay,,,,,,,,` for the rest of the budget. The two-step plan is
+  replaced by one full-vocabulary descending sort — the scratch was already
+  sized for it — and the return code is now checked. `degen_suite.py` gains
+  `top_k` 129 and 2000 cases; the whole path had no coverage, which is why this
+  shipped.
+
 - **The sampler drew the same quantile on every token.** The engine hands the
   device samplers `base_seed + step` — consecutive integers, one per generated
   token — and they took a single LCG step from it. An LCG's first output is

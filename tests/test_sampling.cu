@@ -400,4 +400,46 @@ TEST(SamplerSeeding, ConsecutiveSeedsDoNotAllDrawTheSameToken) {
     free_gpu_tensor(d_logits);
 }
 
+// Issue #1142: the CUB path (top_k > SAMPLE_MAX_TOP_K) served STALE candidates.
+//
+// cub::DeviceTopK::MaxPairs filled its output on the first call, wrote nothing
+// on the second while still returning cudaSuccess, and failed permanently with
+// `invalid device ordinal` from the fourth — all on one thread, one stream,
+// device 0. Nobody checked the return code, so the sampler kept drawing from
+// whatever the previous call had left in the buffer. On a real model that is a
+// token loop; every existing test missed it for one reason:
+//
+//   THE LOGITS HAVE TO CHANGE BETWEEN CALLS. Feed the same distribution twice
+//   and the stale candidates ARE the correct candidates, so a broken run is
+//   indistinguishable from a working one. This test moves the winner every
+//   iteration, which is what a real decode step does.
+TEST(SamplerCubPath, EachCallSamplesFromItsOwnLogitsNotThePreviousCalls) {
+    const int V = 151936;   // the vocabulary the issue was reported on
+    const int top_k = 200;  // > SAMPLE_MAX_TOP_K, so the CUB path runs
+    std::vector<float> h(V, -20.0f);
+
+    int wrong_step = -1, wrong_token = -1, expected = -1;
+    for (int step = 0; step < 12 && wrong_step < 0; ++step) {
+        // One unmistakable winner, moved to a fresh place every step.
+        const int winner = 1000 + step * 7919;
+        std::fill(h.begin(), h.end(), -20.0f);
+        h[winner] = 30.0f;
+
+        Tensor d_logits = make_logits(h.data(), h.size());
+        const int32_t got = sample_topk_topp(d_logits, top_k, /*top_p=*/0.95f, /*temperature=*/0.7f,
+                                             1234u + step);
+        free_gpu_tensor(d_logits);
+
+        if (got != winner) {
+            wrong_step = step;
+            wrong_token = got;
+            expected = winner;
+        }
+    }
+
+    EXPECT_EQ(wrong_step, -1) << "step " << wrong_step << " sampled token " << wrong_token
+                              << " but its logits put all the mass on " << expected
+                              << " — the candidate list came from an earlier call";
+}
+
 }  // namespace imp

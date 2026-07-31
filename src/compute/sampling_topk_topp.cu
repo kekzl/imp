@@ -530,22 +530,12 @@ struct CubSortScratch {
         d_vals_in = reinterpret_cast<int32_t*>(vi.data());
         d_vals_out = reinterpret_cast<int32_t*>(vo.data());
         d_max_sum = reinterpret_cast<float*>(ms.data());
-        // Query CUB temp storage requirements: take max of full RadixSort
-        // (fallback) and DeviceTopK (preferred) + a small RadixSort over the
-        // top-K results (to produce sorted output for top-p).
+        // Query CUB temp storage: one full-vocabulary descending radix sort.
+        // (The DeviceTopK + small-sort plan this used to size for is gone —
+        // see the sampler for why, issue #1142.)
         temp_bytes = 0;
-        size_t rs_full_bytes = 0;
-        cub::DeviceRadixSort::SortPairsDescending(nullptr, rs_full_bytes, d_keys_in, d_keys_out, d_vals_in,
+        cub::DeviceRadixSort::SortPairsDescending(nullptr, temp_bytes, d_keys_in, d_keys_out, d_vals_in,
                                                   d_vals_out, vocab_size, 0, 32, stream);
-        size_t topk_bytes = 0;
-        cub::DeviceTopK::MaxPairs(nullptr, topk_bytes, d_keys_in, d_keys_out, d_vals_in, d_vals_out,
-                                  vocab_size, vocab_size,
-                                  ::cuda::execution::require(::cuda::execution::determinism::not_guaranteed,
-                                                             ::cuda::execution::output_ordering::unsorted));
-        size_t rs_topk_bytes = 0;
-        cub::DeviceRadixSort::SortPairsDescending(nullptr, rs_topk_bytes, d_keys_in, d_keys_out, d_vals_in,
-                                                  d_vals_out, vocab_size, 0, 32, stream);
-        temp_bytes = std::max({rs_full_bytes, topk_bytes, rs_topk_bytes});
         auto tmp = engine_arena().take_bytes(temp_bytes);
         if (tmp.empty()) {
             *this = CubSortScratch{};
@@ -621,37 +611,36 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
                                                                            sc.d_keys_in, sc.d_vals_in);
     IMP_CUDA_CHECK_LAUNCH();
 
-    // Step 3: extract top_k via DeviceTopK (unsorted), then sort just those k.
-    // Much faster than a full radix sort over the whole vocab when k << vocab.
+    // Step 3: sort the whole vocabulary by probability, descending. The top_k
+    // entries the sampler needs are then simply the head of the result.
     //
-    // TODO(determinism): even in deterministic mode the candidate SET and the
-    // subsequent descending radix sort by probability are reproducible (the
-    // FP sum above is now fixed-order, and the probs are a pure function of the
-    // logits), so the sampled token is reproducible for distinct
-    // probabilities. The one residual gap is exact ties: DeviceTopK is invoked
-    // with determinism::not_guaranteed and SortPairsDescending on equal keys is
-    // not guaranteed stable on the int32 value, so two tokens with bit-identical
-    // probability could swap order between runs. For a fully tie-stable top-k
-    // here, fold the vocab index into the sort key (e.g. sort by (prob, -index))
-    // or request cub determinism::guaranteed when this stochastic path needs
-    // bit-exact reproducibility under ties. The single-block path
-    // (top_k <= MAX_TOP_K) already tie-breaks by index and is fully
-    // deterministic; this CUB path only runs for top_k > MAX_TOP_K (128).
+    // This used to run cub::DeviceTopK::MaxPairs first and radix-sort only the
+    // k survivors, which is asymptotically the better plan when k << vocab.
+    // It is gone because it does not work here (issue #1142): instrumented on
+    // Qwen3-8B-Q8_0 at top_k=129, MaxPairs writes all 129 slots on the first
+    // call, writes NOTHING on the second while still returning cudaSuccess,
+    // and from the fourth call on fails permanently with `invalid device
+    // ordinal` — same thread, same stream, device 0, no pending error before
+    // the call. The stale candidates left behind are what the model then
+    // samples from, which is the `Okay,,,,,,,,` loop the issue reports.
+    //
+    // Nothing checked the return code, so the failure was silent. The full
+    // sort is one well-trodden CUB entry point instead of two, the scratch is
+    // already sized for it (`rs_full_bytes` in ensure()), and it only runs at
+    // all when a request asks for top_k > MAX_TOP_K, which is rare and which
+    // the caller has already opted into paying for.
     {
-        size_t tk_bytes = sc.temp_bytes;
-        cub::DeviceTopK::MaxPairs(sc.d_temp, tk_bytes, sc.d_keys_in, sc.d_keys_out, sc.d_vals_in,
-                                  sc.d_vals_out, vocab_size, top_k,
-                                  ::cuda::execution::require(::cuda::execution::determinism::not_guaranteed,
-                                                             ::cuda::execution::output_ordering::unsorted));
         size_t rs_bytes = sc.temp_bytes;
-        // In-place sort: copy outputs back to inputs as the source for the
-        // small sort, write sorted result to outputs.
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_keys_in, sc.d_keys_out, top_k * sizeof(float),
-                                           cudaMemcpyDeviceToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_vals_in, sc.d_vals_out, top_k * sizeof(int32_t),
-                                           cudaMemcpyDeviceToDevice, stream));
-        cub::DeviceRadixSort::SortPairsDescending(sc.d_temp, rs_bytes, sc.d_keys_in, sc.d_keys_out,
-                                                  sc.d_vals_in, sc.d_vals_out, top_k, 0, 32, stream);
+        cudaError_t rc = cub::DeviceRadixSort::SortPairsDescending(sc.d_temp, rs_bytes, sc.d_keys_in,
+                                                                   sc.d_keys_out, sc.d_vals_in, sc.d_vals_out,
+                                                                   vocab_size, 0, 32, stream);
+        if (rc != cudaSuccess) {
+            IMP_LOG_ERROR(
+                "sample_topk_topp_cub: CUB sort failed (%s) for vocab=%d top_k=%d — no token "
+                "sampled",
+                cudaGetErrorString(rc), vocab_size, top_k);
+            return 0;
+        }
     }
 
     // Step 4: Top-p filter + sample from sorted top-k
