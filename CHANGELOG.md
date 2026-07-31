@@ -5,6 +5,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- **A third external agent leg: the OpenAI Agents SDK over `/v1/responses`**,
+  closing roadmap gap 10. `make test-agents-external` now drives imp with a real
+  third-party client in each of the three dialects — aider over
+  chat-completions, Claude Code over `/v1/messages`, and the Agents SDK over the
+  Responses API, which is what Codex speaks and which nothing outside our own
+  probes had ever exercised. Same contract as the other legs: a real function
+  call has to land an actual edit in a throwaway repo, and the run has to
+  contain a `function_call` item rather than a description of one.
+
 - **`tools/analysis/ctx_capacity_decode_sweep.sh`** — one command that measures
   decode throughput against the *configured* context capacity at a fixed live
   sequence. It exists because that sweep found decode is 38% slower at the
