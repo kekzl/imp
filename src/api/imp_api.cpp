@@ -812,6 +812,35 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
     }
 }
 
+ImpError imp_calibration_write(ImpContext ctx, const char* path) {
+    if (!ctx || !path || !*path)
+        return IMP_ERROR_INVALID_ARG;
+    if (!ctx->engine || !ctx->engine->executor())
+        return IMP_ERROR_INTERNAL;
+    try {
+        const imp::ActivationCalibrator* calib = ctx->engine->executor()->calibration();
+        if (!calib || calib->empty()) {
+            IMP_LOG_ERROR(
+                "imp_calibration_write: nothing collected — is [calibration] enabled set, and did a "
+                "forward pass run?");
+            return IMP_ERROR_INVALID_ARG;
+        }
+        const std::string model_id =
+            (ctx->model_handle && ctx->model_handle->model) ? ctx->model_handle->model->source_path() : "";
+        imp::CalibrationStats stats = calib->snapshot(model_id);
+        std::string err = imp::write_calibration_stats(path, stats);
+        if (!err.empty()) {
+            IMP_LOG_ERROR("imp_calibration_write: %s", err.c_str());
+            return IMP_ERROR_INTERNAL;
+        }
+        IMP_LOG_INFO("Calibration written: %s (%zu entries)", path, stats.entries.size());
+        return IMP_SUCCESS;
+    } catch (const std::exception& ex) {
+        IMP_LOG_ERROR("imp_calibration_write: %s", ex.what());
+        return IMP_ERROR_INTERNAL;
+    }
+}
+
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token) {
     if (!ctx || !params || !out_token) {
         return IMP_ERROR_INVALID_ARG;

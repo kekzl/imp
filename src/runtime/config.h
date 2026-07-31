@@ -1062,6 +1062,20 @@ struct RuntimeConfig {
         // [RETIRED] tq_skip_qjl removed in Phase 5 (TurboQuant retired 2026-05-17).
     } diagnostics;
 
+    // ----- Activation calibration (offline quantizer input) -----
+    //
+    // Collect per-input-channel activation magnitudes during a forward pass and
+    // write them for imp-quantize's AWQ scale search. Not an inference feature:
+    // a calibration run is a prefill over a corpus whose only output is this
+    // file. Turning it on also turns CUDA graphs off, because the collector
+    // allocates a per-weight accumulator lazily and a capture forbids that.
+    struct Calibration {
+        bool enabled = false;
+        // Where imp_calibration_write() puts the file. Empty means the caller
+        // supplies the path.
+        std::string out_path;
+    } calibration;
+
     // ----- Loading -----
 
     // Find a config file in the search-path order documented above.

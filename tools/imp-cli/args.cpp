@@ -85,6 +85,8 @@ void print_usage(const char* prog) {
             "  --bench-pp <n>        Synthetic prompt token count (default: 512)\n"
             "  --bench-reps <n>      Repetitions to average (default: 3)\n"
             "  --perplexity <file>   Compute teacher-forced perplexity over a text file and exit\n"
+            "  --calibrate <out>     With --perplexity: also write activation-calibration\n"
+            "                        statistics to <out> (input for imp-quantize --calib)\n"
             "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
             "  --image <path>        Input image for vision (requires --mmproj)\n"
             "  --help                Show this help message\n",
@@ -110,6 +112,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.revision = argv[++i];
         } else if (std::strcmp(arg, "--perplexity") == 0 && i + 1 < argc) {
             args.perplexity_file = argv[++i];
+        } else if (std::strcmp(arg, "--calibrate") == 0 && i + 1 < argc) {
+            args.calibrate_out = argv[++i];
         } else if (std::strcmp(arg, "--prompt") == 0 && i + 1 < argc) {
             args.prompt = argv[++i];
         } else if (std::strcmp(arg, "--max-tokens") == 0 && i + 1 < argc) {

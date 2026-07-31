@@ -372,6 +372,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             }
         }
 
+        cur_layer_ = i;  // keys activation-calibration entries in gemm_via_handle_
+
         // Layer-diff dump: Snapshot A — pre-attention layer input.
         dump_tensor_npy("A_pre_attn", view_tokens(h, n), stream, i, decode_step);
 
@@ -542,6 +544,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             offload_mgr_->release_layer(i);
         }
     }
+    cur_layer_ = -1;  // past the layers: the LM head is not a calibration target
 
     // BitDecoding Phase 3: advance the residual ring state once per decode
     // step. Has to happen INSIDE the captured graph (otherwise replays would

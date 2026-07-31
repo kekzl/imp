@@ -157,6 +157,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                      Tensor& output, const GemmContext& ctx) {
     const auto& h = registry_.handle(id);
 
+    // Activation calibration ([calibration] enabled). Placed before the tier
+    // switch so the statistic is the activation the weight consumes, not
+    // whatever a particular tier's kernel happens to materialise.
+    if (calib_)
+        calib_->accumulate(cur_layer_, h.kind, input, ctx.stream);
+
     if (h.primary_tier == StorageTier::Undefined) {
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
         // Preserve semantic identity + NVFP4 scale sidecars so the uncached

@@ -1,9 +1,9 @@
 // imp-quantize — turn a BF16/FP16 SafeTensors checkpoint into an NVFP4 one.
 //
-// STATUS: EXPERIMENTAL. The pipeline is verified end to end, but the
-// quantization is uncalibrated and costs measurably more quality than a
-// published export (numbers below). Intended for getting a model onto the
-// NVFP4 path for evaluation or performance work — not for producing
+// STATUS: EXPERIMENTAL. The pipeline is verified end to end and `--calib` now
+// recovers a measurable part of the quantization loss, but the result still
+// sits below a published Modelopt export. Intended for getting a model onto
+// the NVFP4 path for evaluation or performance work — not for producing
 // checkpoints anyone should rely on.
 //
 // Why this exists: imp could only ever CONSUME NVFP4 checkpoints, so both model
@@ -26,32 +26,37 @@
 // they are reported and left unquantized rather than silently mangled.
 //
 // QUALITY, MEASURED — read before using this on anything you care about.
-// The scales here are plain round-to-nearest over the weights (absmax per
-// micro-block, absmax per tensor). There is NO activation calibration, so
-// nothing protects the channels that matter most, and it costs:
+// Without --calib the scales are plain round-to-nearest over the weights
+// (absmax per micro-block, absmax per tensor): nothing protects the channels
+// that matter most, because nothing has looked at an activation. With --calib
+// they are AWQ scales searched against a calibration pass (awq.h, awq_plan.cpp).
+// Measured over tools/analysis/ppl_corpus_45k.txt (13 536 tokens),
+// deterministic_gemm, calibrated on general prose that is NOT the scoring
+// corpus:
 //
-//   Qwen3-0.6B  PPL 24.06 -> 30.10  (+25%)
-//   Qwen3-1.7B  PPL 17.22 -> 20.43  (+19%)
-//   (imp-cli --perplexity over tools/analysis/ppl_corpus_45k.txt = 13536
-//    tokens, deterministic_gemm, 2026-07-26)
+//   Qwen3-0.6B  BF16 24.06 -> RTN 30.10 (+25%) -> AWQ 28.48 (+18%)
 //
-// Use a corpus of that size to judge this. The same pair measured over the
-// 199-token ppl_corpus.txt reads +42% / +57% and appears to get WORSE with
-// model size — both artifacts of too few tokens. On the real corpus the loss
-// shrinks with size, which is the expected shape.
+// Use a corpus of that size to judge this. The same model over the 199-token
+// ppl_corpus.txt reads wildly different numbers and inverts the size trend —
+// an artifact of too few tokens, not a property of the quantizer.
 //
-// Coherence is intact beyond perplexity: tools/analysis/degen_suite.py passes
-// 41/41 against a server running the quantized 0.6B, including constrained
-// json_schema decoding, forced tool calls and thinking channels.
+// Coherence: tools/analysis/degen_suite.py reads 45/45 on all three (three
+// consecutive runs on the AWQ output). Checkpoints built from a NON-
+// deterministic calibration file each flipped one probe, a different one each
+// time — which is why --calibrate forces runtime.deterministic_gemm. See
+// docs/quantization.md.
 //
-// Still, a calibrated export (AWQ / SmoothQuant class, what Modelopt does)
-// will beat this — prefer a published checkpoint when one exists. Useful
-// today for: getting a model onto the NVFP4 path at all, and for performance
-// work where the weights only need to be the right shape.
+// A published Modelopt export still beats this. Useful today for: getting a
+// model onto the NVFP4 path at all, and for performance work where the weights
+// only need to be the right shape.
+
+#include "awq.h"
 
 #include "core/tensor.h"
 #include "model/safetensors_raw.h"
 #include "model/safetensors_writer.h"
+#include "quant/awq_transform.h"
+#include "quant/calibration_stats.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_fp16.h>
@@ -62,6 +67,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -72,19 +79,22 @@ namespace {
 
 struct Options {
     std::string in_dir, out_dir;
+    std::string calib_file;         // --calib: activation statistics for AWQ scaling
     bool quantize_lm_head = false;  // imp has its own lm_head NVFP4 policy (#982)
     bool dry_run = false;
 };
 
 void usage() {
     printf(
-        "usage: imp-quantize --model <safetensors-dir> --out <dir> [--lm-head] [--dry-run]\n"
-        "\n"
-        "EXPERIMENTAL: uncalibrated quantization, measurably below a published\n"
-        "export. For evaluation and performance work, not for shipping weights.\n"
+        "usage: imp-quantize --model <safetensors-dir> --out <dir> [--calib <file>]\n"
+        "                    [--lm-head] [--dry-run]\n"
         "\n"
         "  --model DIR   source checkpoint (BF16/FP16 SafeTensors + config.json)\n"
         "  --out DIR     destination; created if missing\n"
+        "  --calib FILE  activation calibration (AWQ scaling). Produce it with:\n"
+        "                  imp-cli --model DIR --perplexity <corpus> --calibrate FILE\n"
+        "                Without it the quantization is plain round-to-nearest,\n"
+        "                which costs measurably more quality (see the header).\n"
         "  --lm-head     also quantize lm_head (default: excluded, imp applies its\n"
         "                own measured lm_head policy at runtime)\n"
         "  --dry-run     report what would be quantized, write nothing\n");
@@ -96,24 +106,23 @@ bool ends_with(const std::string& s, const std::string& suf) {
 
 bool contains(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
 
-// BF16/F16 -> FP16 half bits on the host. Mirrors the upload path's conversion
-// (weight_upload.cu): BF16 widens by zero-filling the low mantissa bits.
-std::vector<uint16_t> to_fp16(const RawTensor& t) {
-    const int64_t n = t.numel();
-    std::vector<uint16_t> out(static_cast<size_t>(n));
-    const auto* src = static_cast<const uint16_t*>(t.data);
-    if (t.dtype == "F16") {
-        std::memcpy(out.data(), src, static_cast<size_t>(n) * 2);
-        return out;
-    }
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
-        float f;
-        std::memcpy(&f, &bits, sizeof(float));
-        // float -> half, round-to-nearest-even via the compiler's own conversion.
-        __half h = __float2half(f);
-        std::memcpy(&out[static_cast<size_t>(i)], &h, 2);
-    }
+// Look up a plan vector by tensor name, or an empty one when the plan has
+// nothing to say about it. awq_apply_* treat empty (and wrong-length) vectors
+// as no-ops, so an untouched tensor takes the same path as a transformed one.
+const std::vector<float>& plan_vec(const std::map<std::string, std::vector<float>>& m,
+                                   const std::string& name) {
+    static const std::vector<float> kNone;
+    auto it = m.find(name);
+    return (it == m.end()) ? kNone : it->second;
+}
+
+// A fresh copy of a 1-D producer with 1/s folded in, in the tensor's ORIGINAL
+// dtype — the loader reads these by dtype, so widening here would be a format
+// change rather than a fix.
+std::vector<unsigned char> folded_copy(const RawTensor& t, const std::vector<float>& div, bool& ok) {
+    std::vector<unsigned char> out(t.nbytes);
+    std::memcpy(out.data(), t.data, t.nbytes);
+    ok = awq_apply_vector_div(out.data(), static_cast<size_t>(t.numel()), t.dtype, div);
     return out;
 }
 
@@ -253,14 +262,16 @@ bool write_shard_index(const Options& opt,
     return static_cast<bool>(f);
 }
 
-bool write_quant_config(const Options& opt, const std::vector<std::string>& excluded, std::string& err) {
+bool write_quant_config(const Options& opt, const std::vector<std::string>& excluded, bool calibrated,
+                        std::string& err) {
     std::ofstream f(fs::path(opt.out_dir) / "hf_quant_config.json");
     if (!f) {
         err = "cannot write hf_quant_config.json";
         return false;
     }
     f << "{\n"
-      << "  \"producer\": { \"name\": \"imp-quantize\", \"version\": \"1\" },\n"
+      << "  \"producer\": { \"name\": \"imp-quantize\", \"version\": \"2\", \"calibration\": \""
+      << (calibrated ? "awq" : "none") << "\" },\n"
       << "  \"quantization\": {\n"
       << "    \"quant_algo\": \"NVFP4\",\n"
       << "    \"kv_cache_quant_algo\": null,\n"
@@ -285,6 +296,8 @@ int main(int argc, char** argv) {
             opt.out_dir = next();
         else if (a == "--lm-head")
             opt.quantize_lm_head = true;
+        else if (a == "--calib")
+            opt.calib_file = next();
         else if (a == "--dry-run")
             opt.dry_run = true;
         else if (a == "-h" || a == "--help") {
@@ -320,25 +333,70 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Every shard is opened before anything is written: the AWQ transform is
+    // cross-tensor (a scale decided on down_proj is folded into up_proj) and a
+    // sharded checkpoint gives no guarantee those two live in the same file.
+    std::vector<std::unique_ptr<RawSafeTensors>> opened;
+    for (const auto& shard : shards) {
+        auto src = std::make_unique<RawSafeTensors>();
+        std::string err = src->open(shard.string());
+        if (!err.empty()) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        opened.push_back(std::move(src));
+    }
+
+    awq::Plan plan;
+    // A dry run reports what would be quantized; the scale search costs a GPU
+    // pass per layer and changes nothing it would report.
+    if (!opt.calib_file.empty() && !opt.dry_run) {
+        CalibrationStats stats;
+        std::string err = read_calibration_stats(opt.calib_file, stats);
+        if (!err.empty()) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        std::map<std::string, const RawTensor*> index;
+        for (const auto& src : opened)
+            for (const auto& t : src->tensors())
+                index[t.name] = &t;
+        printf("AWQ calibration: %zu entries from %s\n", stats.entries.size(),
+               stats.model_id.empty() ? opt.calib_file.c_str() : stats.model_id.c_str());
+        if (!awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(), plan, err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        printf("AWQ: %d groups scaled, %d kept round-to-nearest, %d skipped\n", plan.groups_scaled,
+               plan.groups_rtn, plan.groups_skipped);
+        for (const auto& n : plan.notes)
+            printf("  note: %s\n", n.c_str());
+        if (plan.groups_scaled == 0) {
+            fprintf(stderr,
+                    "AWQ found no group worth scaling — refusing to write a checkpoint that\n"
+                    "would be labelled calibrated but is byte-identical to round-to-nearest.\n");
+            return 1;
+        }
+    }
+
     size_t n_quantized = 0, n_copied = 0, n_moe_skipped = 0;
     size_t bytes_in = 0, bytes_out = 0;
     std::vector<std::string> excluded_modules;
     std::vector<std::pair<std::string, std::string>> tensor_to_shard;
 
-    for (const auto& shard : shards) {
-        RawSafeTensors src;
-        std::string err = src.open(shard.string());
-        if (!err.empty()) {
-            fprintf(stderr, "%s\n", err.c_str());
-            return 1;
-        }
+    for (size_t shard_idx = 0; shard_idx < shards.size(); shard_idx++) {
+        const fs::path& shard = shards[shard_idx];
+        const RawSafeTensors& src = *opened[shard_idx];
+        std::string err;
         printf("[%s] %zu tensors\n", shard.filename().string().c_str(), src.tensors().size());
 
         // Owns the buffers the output descriptors point at until the shard is written.
         std::vector<Quantized> quant_store;
         std::vector<float> scale_store;
+        std::vector<std::vector<unsigned char>> folded_store;
         quant_store.reserve(src.tensors().size());
         scale_store.reserve(src.tensors().size());
+        folded_store.reserve(src.tensors().size());
         std::vector<SafeTensorsOut> out;
 
         for (const auto& t : src.tensors()) {
@@ -355,7 +413,23 @@ int main(int argc, char** argv) {
                     std::string mod = t.name.substr(0, t.name.size() - strlen(".weight"));
                     excluded_modules.push_back(mod);
                 }
-                out.push_back({t.name, t.dtype, t.shape, t.data, t.nbytes});
+                // Copied through — unless it is the producer AWQ folded 1/s
+                // into (an RMSNorm weight, or a bias on a scaled output).
+                const void* data = t.data;
+                auto vd = plan.vec_div.find(t.name);
+                if (vd != plan.vec_div.end() && !opt.dry_run) {
+                    bool folded = false;
+                    folded_store.push_back(folded_copy(t, vd->second, folded));
+                    if (!folded) {
+                        fprintf(stderr,
+                                "  %s: cannot fold the AWQ scale into a %s tensor of %lld elements "
+                                "— refusing to write a half-transformed checkpoint\n",
+                                t.name.c_str(), t.dtype.c_str(), (long long)t.numel());
+                        return 1;
+                    }
+                    data = folded_store.back().data();
+                }
+                out.push_back({t.name, t.dtype, t.shape, data, t.nbytes});
                 bytes_out += t.nbytes;
                 n_copied++;
                 continue;
@@ -368,7 +442,8 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            std::vector<uint16_t> h = to_fp16(t);
+            std::vector<uint16_t> h = awq::raw_to_fp16(t);
+            awq_apply_matrix(h, N, K, plan_vec(plan.row_div, t.name), plan_vec(plan.col_scale, t.name));
             quant_store.emplace_back();
             Quantized& q = quant_store.back();
             if (!quantize_one(h, N, K, q, err)) {
@@ -406,7 +481,8 @@ int main(int argc, char** argv) {
 
     if (!opt.dry_run) {
         std::string err;
-        if (!copy_aux_files(opt, err) || !write_quant_config(opt, excluded_modules, err)) {
+        if (!copy_aux_files(opt, err) ||
+            !write_quant_config(opt, excluded_modules, !opt.calib_file.empty(), err)) {
             fprintf(stderr, "%s\n", err.c_str());
             return 1;
         }
@@ -420,12 +496,14 @@ int main(int argc, char** argv) {
 
     printf("\n%s: %zu tensors quantized, %zu copied", opt.dry_run ? "dry run" : "done", n_quantized,
            n_copied);
-    if (!opt.dry_run)
+    if (!opt.dry_run && opt.calib_file.empty())
         printf(
-            "\n\nEXPERIMENTAL OUTPUT: round-to-nearest, no activation calibration.\n"
+            "\n\nUNCALIBRATED OUTPUT: round-to-nearest, no activation calibration.\n"
             "      Measured cost on the dense Qwen3 pair: PPL +25%% (0.6B) / +19%% (1.7B).\n"
-            "      Fine for evaluation and performance work; prefer a published\n"
-            "      calibrated checkpoint for anything you rely on.");
+            "      Pass --calib to spend a calibration pass and recover most of that.");
+    else if (!opt.dry_run)
+        printf("\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest.", plan.groups_scaled,
+               plan.groups_rtn);
     if (n_moe_skipped)
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
     if (!opt.dry_run)

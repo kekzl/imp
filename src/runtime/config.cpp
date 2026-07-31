@@ -286,6 +286,10 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);
     S("diagnostics.vram_audit_dump", cfg.diagnostics.vram_audit_dump);
 
+    // [calibration]
+    B("calibration.enabled", cfg.calibration.enabled);
+    S("calibration.out_path", cfg.calibration.out_path);
+
     // [constrained]
     B("constrained.jump_ahead", cfg.constrained.jump_ahead);
     I("constrained.jump_min_run", cfg.constrained.jump_min_run);

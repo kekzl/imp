@@ -94,6 +94,28 @@ int main(int argc, char** argv) {
         if (!pc_set)
             runtime_cfg.server.prefix_cache = false;
     }
+    // --calibrate is only meaningful alongside a corpus pass: the statistics
+    // are what a forward pass saw, and --perplexity is the pass that walks a
+    // whole corpus without sampling.
+    if (!args.calibrate_out.empty()) {
+        if (args.perplexity_file.empty()) {
+            fprintf(stderr, "Error: --calibrate requires --perplexity <corpus>\n");
+            return 1;
+        }
+        runtime_cfg.calibration.enabled = true;
+        // A calibration file that varies run to run makes the checkpoint built
+        // from it unreproducible, and the variance is NOT small: two runs of
+        // this exact command differed on 94% of the recorded floats (up to
+        // 0.5% each), which moved the quantized model's perplexity by ~1.6%.
+        // runtime.deterministic_gemm makes it bit-identical, so calibration
+        // forces it rather than offering it.
+        if (!runtime_cfg.runtime.deterministic_gemm) {
+            runtime_cfg.runtime.deterministic_gemm = true;
+            fprintf(stderr,
+                    "--calibrate: forcing runtime.deterministic_gemm=true "
+                    "(a non-reproducible calibration file is not worth having)\n");
+        }
+    }
     // Cache the few diagnostic / runtime-mode flags that are read from free
     // functions (kernel diagnostics, CUDA-graph capture mode, PDL gate)
     // before set_pending_runtime_config() consumes the value.
@@ -337,6 +359,16 @@ int main(int argc, char** argv) {
             return 1;
         }
         printf("perplexity: %.4f  (%zu tokens)\n", ppl, ppl_tokens.size());
+        if (!args.calibrate_out.empty()) {
+            ImpError ce = imp_calibration_write(ctx, args.calibrate_out.c_str());
+            if (ce != IMP_SUCCESS) {
+                fprintf(stderr, "calibration write failed: %s\n", imp_error_string(ce));
+                imp_context_free(ctx);
+                imp_model_free(model);
+                return 1;
+            }
+            printf("calibration: %s\n", args.calibrate_out.c_str());
+        }
         imp_context_free(ctx);
         imp_model_free(model);
         return 0;

@@ -677,3 +677,18 @@ audit_nvfp4_scales   = false
 vram_audit           = false
 # Optional append-only file the VRAM audit table is mirrored into ("" = off).
 vram_audit_dump      = ""
+
+# ---------------------------------------------------------------------------
+# [calibration] — activation statistics for the offline quantizer
+# ---------------------------------------------------------------------------
+# Not an inference feature. With this on, every weight GEMM also accumulates
+# the mean |activation| per input channel, which imp-quantize --calib turns
+# into AWQ scales. Turning it on turns CUDA graphs off (the collector
+# allocates per-weight accumulators lazily, which a capture forbids), so a
+# server should never run with it.
+#
+# Normally set by `imp-cli --perplexity <corpus> --calibrate <out>` rather
+# than by hand.
+[calibration]
+enabled              = false
+out_path             = ""

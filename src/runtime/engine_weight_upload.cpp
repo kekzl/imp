@@ -40,6 +40,17 @@ bool Engine::init_weights() {
             IMP_LOG_INFO("Dual-path quant: attention weights → FP8, FFN weights → NVFP4");
         }
 
+        if (runtime_config_.calibration.enabled) {
+            executor_->enable_calibration();
+            IMP_LOG_INFO("Activation calibration ON — collecting per-channel activation magnitudes.");
+            // The collector allocates an accumulator the first time it sees a
+            // weight, which a graph capture rejects outright.
+            if (config_.use_cuda_graphs) {
+                IMP_LOG_INFO("Disabling CUDA Graphs while calibration is active.");
+                config_.use_cuda_graphs = false;
+            }
+        }
+
         if (config_.streaming_kv_enabled) {
             // Streaming is only safe for the FP16 GQA decode kernel — the
             // quantized variants don't yet skip -1 sentinels in their block
