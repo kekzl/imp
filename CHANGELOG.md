@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-01
+
 ### Added
 - **Several images in one request** (Qwen3-VL). Every `image_url` part is
   encoded, in prompt order, into one concatenated embedding; each placeholder
@@ -103,6 +105,11 @@ there instead of retelling it.
 - `tools/imp-server/tool_call.cpp` split (the Gemma-4 dialect parser moved to
   `tool_call_gemma.cpp`), clearing the repo's only hard-review file-size
   violation.
+- **`scripts/check-release.sh` runs in CI** as `Release hygiene`, and now also
+  pins the version to one value across `CMakeLists.txt`, `CHANGELOG.md` and
+  `docs/BENCHMARKS.md`. It was wired into nothing before, so it ran only when
+  someone remembered to: cutting this release found two maintainer paths that
+  had been on `main` for days.
 
 ### Fixed
 - **A MoE checkpoint whose experts imp cannot read now fails to load** instead
