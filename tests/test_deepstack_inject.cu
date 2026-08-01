@@ -49,7 +49,8 @@ InjectResult inject(const std::vector<int32_t>& tokens, const std::vector<float>
         cudaMemcpy(d_e, e.data(), e.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_t, tokens.data(), tokens.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
 
-    launch_add_vision_embeddings(d_h, d_t, d_e, kImageToken, n, kD, n_vision_tokens, nullptr);
+    launch_add_vision_embeddings(d_h, d_t, d_e, kImageToken, n, kD, n_vision_tokens, /*emb_offset=*/0,
+                                 nullptr);
     EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     cudaMemcpy(h.data(), d_h, h.size() * sizeof(half), cudaMemcpyDeviceToHost);

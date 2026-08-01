@@ -356,10 +356,14 @@ __global__ void mul_tensors_kernel(const half* __restrict__ a, const half* __res
 __global__ void replace_vision_embeddings_v2_kernel(half* __restrict__ hidden,
                                                     const int32_t* __restrict__ token_ids,
                                                     const half* __restrict__ vision_emb, int vision_token_id,
-                                                    int n_tokens, int d_model, int n_vision_tokens) {
-    // blockIdx.x = sequential vision token index
+                                                    int n_tokens, int d_model, int n_vision_tokens,
+                                                    int emb_offset) {
+    // blockIdx.x = vision token index within THIS call's token span. Under
+    // chunked prefill that span is one chunk, so the embedding this position
+    // wants sits `emb_offset` further into the buffer.
     int vision_idx = blockIdx.x;
-    if (vision_idx >= n_vision_tokens)
+    int emb_idx = vision_idx + emb_offset;
+    if (emb_idx >= n_vision_tokens)
         return;
 
     // Find the vision_idx-th occurrence of vision_token_id
@@ -379,7 +383,7 @@ __global__ void replace_vision_embeddings_v2_kernel(half* __restrict__ hidden,
 
     // Copy vision embedding into hidden state
     for (int d = threadIdx.x; d < d_model; d += blockDim.x) {
-        hidden[token_pos * d_model + d] = vision_emb[vision_idx * d_model + d];
+        hidden[token_pos * d_model + d] = vision_emb[emb_idx * d_model + d];
     }
 }
 
@@ -940,14 +944,19 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
 }
 
 // ---- Public kernel launcher for embedding replacement ----
+// `emb_offset` is how many image tokens earlier chunks already placed; see
+// vision/deepstack_inject.h, whose kernel has to agree with this one.
 void launch_replace_vision_embeddings(half* hidden, const int32_t* token_ids, const half* vision_emb,
                                       int vision_token_id, int n_tokens, int d_model, int n_vision_tokens,
-                                      cudaStream_t stream) {
+                                      int emb_offset, cudaStream_t stream) {
     if (n_vision_tokens <= 0)
         return;
-    replace_vision_embeddings_v2_kernel<<<n_vision_tokens, 256, 0, stream>>>(hidden, token_ids, vision_emb,
-                                                                             vision_token_id, n_tokens,
-                                                                             d_model, n_vision_tokens);
+    const int remaining = n_vision_tokens - emb_offset;
+    if (emb_offset < 0 || remaining <= 0)
+        return;
+    replace_vision_embeddings_v2_kernel<<<remaining, 256, 0, stream>>>(hidden, token_ids, vision_emb,
+                                                                       vision_token_id, n_tokens, d_model,
+                                                                       n_vision_tokens, emb_offset);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

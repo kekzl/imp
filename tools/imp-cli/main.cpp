@@ -516,7 +516,7 @@ int main(int argc, char** argv) {
                 if (err != IMP_SUCCESS) {
                     fprintf(stderr, "Error loading image: %s\n", imp_error_string(err));
                 } else {
-                    printf("Image loaded: %s\n", img_path.c_str());
+                    printf("Image loaded: %s (applies to your next message)\n", img_path.c_str());
                 }
                 continue;
             }
@@ -525,7 +525,28 @@ int main(int argc, char** argv) {
                 // Multi-turn: append user message and apply full template
                 history.push_back({"user", input});
                 std::vector<int32_t> tokens;
-                if (ctx->engine->has_vision_input()) {
+                // Same three-way split as the single-prompt path below: a
+                // pending Qwen-VL image has a count only the encoder knows, an
+                // mmproj image has a fixed one, and most turns have neither.
+                // Testing only `has_vision_input()` here — which is the mmproj
+                // tower alone — rendered a prompt with no image tokens at all,
+                // so a picture loaded with /image was never referenced and the
+                // model answered as if it had not been given one.
+                const int pending_img_tokens = imp_pending_image_tokens(ctx);
+                if (pending_img_tokens > 0) {
+                    std::vector<imp::ChatMessage> msgs = history;
+                    msgs.back().content = "<|vision_start|><|image_pad|><|vision_end|>" + msgs.back().content;
+                    tokens = chat_tpl.apply(*tok, msgs);
+                    const int32_t pad_id = tok->find_token("<|image_pad|>");
+                    std::string exp_err;
+                    if (pad_id < 0 ||
+                        !imp::expand_image_placeholders(tokens, pad_id, {pending_img_tokens}, exp_err)) {
+                        fprintf(stderr, "Error placing image tokens: %s\n",
+                                pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err.c_str());
+                        history.pop_back();
+                        continue;
+                    }
+                } else if (ctx->engine->has_vision_input()) {
                     tokens = chat_tpl.apply_with_image(*tok, history, 256);
                 } else {
                     tokens = chat_tpl.apply(*tok, history);

@@ -26,6 +26,7 @@
 #include "runtime/batch.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/mtp_forward.h"
+#include "model/image_placeholders.h"
 #include "memory/kv_cache.h"
 #include "compute/sampling.h"
 #include "compute/layernorm.h"
@@ -859,6 +860,14 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         state.vision_embeddings = req->vision_emb->as<half>();
         state.vision_token_id = req->vision_token_id;
         state.n_vision_tokens = req->n_vision_tokens;
+        // The kernels index placeholders within the chunk they are handed, so
+        // they need to know how many this request already placed. A long enough
+        // prompt puts an image across a chunk boundary (chunks default to 2048),
+        // and without this the second chunk would re-use the image's FIRST
+        // embeddings — the wrong region of the picture, with nothing failing.
+        // Counted over the whole prompt so a prefix-cache hit, which starts at
+        // `cached_tokens`, is covered by the same arithmetic.
+        state.vision_emb_offset = image_tokens_before(req->input_tokens, req->vision_token_id, offset);
         state.n_deepstack = std::min<int>(static_cast<int>(req->deepstack_emb.size()),
                                           InferenceState::kMaxDeepStack);
         for (int d = 0; d < state.n_deepstack; ++d)

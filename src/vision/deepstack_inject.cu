@@ -12,9 +12,12 @@ namespace {
 // way to keep them from drifting apart.
 __global__ void add_vision_embeddings_kernel(half* __restrict__ hidden, const int32_t* __restrict__ token_ids,
                                              const half* __restrict__ embeddings, int vision_token_id,
-                                             int n_tokens, int d_model, int n_vision_tokens) {
+                                             int n_tokens, int d_model, int n_vision_tokens, int emb_offset) {
+    // Placeholder index within this call's token span; the embedding it wants
+    // sits `emb_offset` further into the buffer (see the header).
     const int vision_idx = blockIdx.x;
-    if (vision_idx >= n_vision_tokens)
+    const int emb_idx = vision_idx + emb_offset;
+    if (emb_idx >= n_vision_tokens)
         return;
 
     int count = 0;
@@ -36,7 +39,7 @@ __global__ void add_vision_embeddings_kernel(half* __restrict__ hidden, const in
     for (int d = threadIdx.x; d < d_model; d += blockDim.x) {
         const int64_t at = static_cast<int64_t>(token_pos) * d_model + d;
         hidden[at] = __float2half(__half2float(hidden[at]) +
-                                  __half2float(embeddings[static_cast<int64_t>(vision_idx) * d_model + d]));
+                                  __half2float(embeddings[static_cast<int64_t>(emb_idx) * d_model + d]));
     }
 }
 
@@ -44,12 +47,17 @@ __global__ void add_vision_embeddings_kernel(half* __restrict__ hidden, const in
 
 void launch_add_vision_embeddings(half* hidden, const int32_t* token_ids, const half* embeddings,
                                   int vision_token_id, int n_tokens, int d_model, int n_vision_tokens,
-                                  cudaStream_t stream) {
+                                  int emb_offset, cudaStream_t stream) {
     if (n_vision_tokens <= 0 || !embeddings || !token_ids)
         return;
-    add_vision_embeddings_kernel<<<n_vision_tokens, 256, 0, stream>>>(hidden, token_ids, embeddings,
-                                                                      vision_token_id, n_tokens, d_model,
-                                                                      n_vision_tokens);
+    // Everything from emb_offset on is still unwritten; blocks past that would
+    // only read out of bounds.
+    const int remaining = n_vision_tokens - emb_offset;
+    if (emb_offset < 0 || remaining <= 0)
+        return;
+    add_vision_embeddings_kernel<<<remaining, 256, 0, stream>>>(hidden, token_ids, embeddings,
+                                                                vision_token_id, n_tokens, d_model,
+                                                                n_vision_tokens, emb_offset);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
