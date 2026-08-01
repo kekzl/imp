@@ -5,6 +5,18 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Run CI against a ref on demand: `gh workflow run CI --ref main`.
+  #
+  # Needed because a squash merge performed by AUTO-MERGE does not start a
+  # workflow run. The merge is attributed to GITHUB_TOKEN (auto-merge.yml arms
+  # it with that token), and events created by GITHUB_TOKEN do not trigger
+  # further runs — GitHub's loop prevention. A merge a human clicks does fire.
+  # So `main`'s newest CI run can be many commits old and show a state that has
+  # since been fixed: on 2026-08-01 it still displayed seven warnings that main
+  # no longer had. Coverage is not lost (the PR run builds the tree that gets
+  # squashed), but the branch's reported status is stale, and this makes it
+  # refreshable without a PAT or a merge queue.
+  workflow_dispatch:
 
 jobs:
   build:

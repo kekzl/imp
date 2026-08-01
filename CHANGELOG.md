@@ -11,6 +11,13 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+- **CI can be run against a ref on demand** (`gh workflow run CI --ref main`).
+  A squash merge performed by auto-merge starts no workflow run — it is
+  attributed to `GITHUB_TOKEN`, which GitHub does not let trigger further
+  runs — so `main`'s reported CI state can be many commits old. It was ten
+  commits old on 2026-08-01, still showing warnings that had been fixed.
+
 ### Fixed
 - **The build is warning-free again.** Five had accumulated: `tmpnam` in a
   test fixture (which then fed `system("rm -rf " + dir)` — replaced with
