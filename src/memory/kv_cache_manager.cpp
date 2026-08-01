@@ -1221,7 +1221,8 @@ int KVCacheManager::total_allocated_blocks() const {
 // Rejecting on fingerprint mismatch degrades to a clean recompute.
 
 static constexpr uint32_t kPrefixCacheMagic = 0x494D5043;  // "IMPC"
-static constexpr uint32_t kPrefixCacheVersion = 2;
+// v3 carries the KV scale blocks alongside K/V.
+static constexpr uint32_t kPrefixCacheVersion = 3;
 
 struct PrefixCacheHeader {
     uint32_t magic;
@@ -1232,6 +1233,10 @@ struct PrefixCacheHeader {
     uint32_t head_dim;
     uint32_t dtype;
     uint64_t block_bytes;
+    // Bytes of scale per block per layer, 0 for dtypes that carry none (FP16,
+    // FP8_E4M3). A quantized KV block is meaningless without its scales, so
+    // this is part of the format rather than something to infer at load.
+    uint64_t scale_block_bytes;
     uint64_t model_fingerprint;
 };
 
@@ -1255,6 +1260,7 @@ int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fi
 
     int n_blocks = static_cast<int>(cached_blocks_lru_.size());
     size_t bb = cache_->block_bytes();
+    size_t sbb = cache_->scale_block_bytes();
     int nl = cache_->n_layers();
 
     PrefixCacheHeader hdr = {};
@@ -1266,6 +1272,7 @@ int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fi
     hdr.head_dim = static_cast<uint32_t>(cache_->head_dim());
     hdr.dtype = std::to_underlying(cache_->qtype());
     hdr.block_bytes = bb;
+    hdr.scale_block_bytes = sbb;
     hdr.model_fingerprint = model_fingerprint;
 
     if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) {
@@ -1276,7 +1283,10 @@ int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fi
 
     // Allocate host buffer for ALL blocks' KV data so we can pipeline
     // all D2H transfers with cudaMemcpyAsync and sync once.
-    size_t per_block_total = static_cast<size_t>(nl) * 2 * bb;
+    // K + V + their scales, per layer. Persisting the KV bytes without the
+    // scales produced a block that loads and then decodes against whatever
+    // scales happened to be in the pool — wrong attention, no error.
+    size_t per_block_total = static_cast<size_t>(nl) * 2 * (bb + sbb);
 
     // First pass: collect valid block IDs and their hashes.
     struct BlockEntry {
@@ -1326,6 +1336,22 @@ int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fi
                 break;
             }
             offset += bb;
+            if (sbb == 0)
+                continue;
+            err = cudaMemcpyAsync(host_buf.data() + buf_offset + offset, cache_->k_scale_ptr(l, block_id),
+                                  sbb, cudaMemcpyDeviceToHost, stream);
+            if (err == cudaSuccess) {
+                offset += sbb;
+                err = cudaMemcpyAsync(host_buf.data() + buf_offset + offset, cache_->v_scale_ptr(l, block_id),
+                                      sbb, cudaMemcpyDeviceToHost, stream);
+            }
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("cudaMemcpyAsync failed for block %d layer %d scales: %s", block_id, l,
+                              cudaGetErrorString(err));
+                block_ok[bi] = false;
+                break;
+            }
+            offset += sbb;
         }
     }
 
@@ -1412,7 +1438,16 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
     int n_blocks = static_cast<int>(hdr.n_blocks);
     int nl = cache_->n_layers();
     size_t bb = cache_->block_bytes();
-    size_t per_block_total = static_cast<size_t>(nl) * 2 * bb;
+    size_t sbb = cache_->scale_block_bytes();
+    // Same reasoning as the dtype/geometry gate above: a file whose scale
+    // geometry differs describes blocks this cache cannot interpret.
+    if (hdr.scale_block_bytes != sbb) {
+        IMP_LOG_WARN("Prefix cache: scale geometry mismatch (cache=%llu, current=%zu) — discarding",
+                     static_cast<unsigned long long>(hdr.scale_block_bytes), sbb);
+        fclose(f);
+        return -1;
+    }
+    size_t per_block_total = static_cast<size_t>(nl) * 2 * (bb + sbb);
 
     int loaded = 0;
     int skipped = 0;
@@ -1488,6 +1523,24 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
                 break;
             }
             offset += bb;
+            if (sbb == 0)
+                continue;
+            err = cudaMemcpyAsync(cache_->k_scale_ptr(l, entry.block_id),
+                                  all_host_buf.data() + entry.buf_offset + offset, sbb,
+                                  cudaMemcpyHostToDevice, stream);
+            if (err == cudaSuccess) {
+                offset += sbb;
+                err = cudaMemcpyAsync(cache_->v_scale_ptr(l, entry.block_id),
+                                      all_host_buf.data() + entry.buf_offset + offset, sbb,
+                                      cudaMemcpyHostToDevice, stream);
+            }
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("cudaMemcpyAsync failed loading block %d layer %d scales: %s", entry.block_id,
+                              l, cudaGetErrorString(err));
+                entry.copy_ok = false;
+                break;
+            }
+            offset += sbb;
         }
     }
 
