@@ -105,6 +105,13 @@ there instead of retelling it.
   violation.
 
 ### Fixed
+- **A MoE checkpoint whose experts imp cannot read now fails to load** instead
+  of routing through null experts and generating garbage. Measured on
+  `gpt-oss-20b` in BF16, whose experts are 3-D stacks only the MXFP4
+  `_blocks`/`_scales` matcher looks for: every layer logged "unrecognised layer
+  weight", the load succeeded, and generation produced `:!!!!!!!!!!`. The check
+  fires only when the config declares experts and not one layer carries any
+  expert representation, so a partially mapped MoE stays a warning.
 - **The persisted prefix cache dropped the KV scales**, so a restored block
   decoded against whatever scales were in the pool — wrong attention, no error.
   Only on a KV dtype with a separate scale pool (NVFP4, INT8, INT4, MXFP4_KV),

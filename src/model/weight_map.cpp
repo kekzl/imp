@@ -1343,6 +1343,46 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         }
     }
 
+    // A MoE model whose experts were all skipped loads, runs, and answers with
+    // garbage — the routing picks experts that are null tensors. Measured on
+    // gpt-oss-20b in BF16, whose experts are 3-D stacks (`experts.gate_up_proj`)
+    // that only the MXFP4 `_blocks`/`_scales` matcher looks for: every layer
+    // logged "unrecognised layer weight", the load succeeded, and generation
+    // produced ":!!!!!!!!!!".
+    //
+    // Deliberately narrow: it fires only when the config declares experts and
+    // NOT ONE layer carries any expert representation — per-expert 2-D, the
+    // Gemma-4 packed pair, or the gpt-oss packed blocks. A partially mapped MoE
+    // is a different question and stays a warning.
+    if (model.config_.n_experts > 0) {
+        // The per-expert vectors are RESIZED by `ensure_expert` as soon as any
+        // expert-shaped name is seen, so a non-empty vector says nothing — the
+        // entries can all be default Tensors. Only a non-null `data` means a
+        // weight actually arrived.
+        bool any_experts = false;
+        for (const auto& layer : model.layers_) {
+            for (const auto& w : layer.expert_w_gate) {
+                if (w.data) {
+                    any_experts = true;
+                    break;
+                }
+            }
+            if (any_experts || layer.expert_gate_packed.data || layer.expert_gate_up_packed_blocks.data ||
+                layer.expert_down_packed.data || layer.expert_down_packed_blocks.data) {
+                any_experts = true;
+                break;
+            }
+        }
+        if (!any_experts) {
+            IMP_LOG_ERROR(
+                "WeightMap: the config declares %d experts per layer but not one expert tensor was "
+                "recognised (%d tensors skipped). This checkpoint stores its experts in a layout imp "
+                "does not read — loading it would route through null experts and generate garbage.",
+                model.config_.n_experts, skipped);
+            return false;
+        }
+    }
+
     if (assigned == 0) {
         IMP_LOG_ERROR("WeightMap: no tensors were assigned -- check weight names");
         return false;
