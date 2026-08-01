@@ -12,8 +12,11 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace imp {
 namespace {
@@ -22,10 +25,19 @@ namespace {
 class MRopeConfig : public ::testing::Test {
 protected:
     void SetUp() override {
-        dir_ = std::string(std::tmpnam(nullptr)) + "_mrope";
-        ::system(("mkdir -p " + dir_).c_str());
+        // mkdtemp creates the directory atomically and reports the name it
+        // actually used. tmpnam only guesses one — which is what the linker
+        // warns about — and that guess then went into `system("rm -rf " + dir)`
+        // on teardown: a shell taking apart a path nobody had validated.
+        const std::string tmpl = (std::filesystem::temp_directory_path() / "imp_mrope_XXXXXX").string();
+        std::vector<char> buf(tmpl.c_str(), tmpl.c_str() + tmpl.size() + 1);
+        ASSERT_NE(::mkdtemp(buf.data()), nullptr) << "could not create a temp directory";
+        dir_ = buf.data();
     }
-    void TearDown() override { ::system(("rm -rf " + dir_).c_str()); }
+    void TearDown() override {
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);  // no shell involved
+    }
 
     ModelConfig load(const std::string& json) {
         std::ofstream f(dir_ + "/config.json");

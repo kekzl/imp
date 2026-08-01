@@ -161,8 +161,11 @@ TEST_F(PhaseFixture, JournalRecordsThePhaseOfEveryEvent) {
 
     // The I2 assertion a soak makes: no acquire event carries phase == Serving.
     for (const auto& e : be.journal()) {
-        if (e.op == AllocEvent::Op::Acquire)
+        if (e.op == AllocEvent::Op::Acquire) {
+            // Braced: the GTest macro expands to an if/else of its own, so an
+            // unbraced branch here is a dangling-else the compiler warns about.
             EXPECT_NE(e.phase, AllocPhase::Serving);
+        }
     }
 }
 
