@@ -18,6 +18,11 @@ CATEGORY pre-filter that runs before it classified any token containing a byte
 spelled the nearest ASCII word it was allowed to emit. Structure must never
 alter content, so this asserts the constrained reply keeps the characters.
 
+#1199 — the constrainer offered EOS while the JSON document was still open, so a
+model that reached for it ended the request with a 200 carrying invalid JSON. The
+EOS clear in the allow mask was gated on the XML dialect while the hazard belongs
+to the JSON free-string shortcut just as much.
+
 Exit code: 0 = PASS, 1 = a case regressed.
 """
 import json
@@ -165,16 +170,70 @@ def test_non_ascii_survives_json_schema(m):
     )
     check("output is valid UTF-8", _is_utf8(text), repr(text)[:160])
 
-    # NOT asserted here, deliberately: whether the reply is well-formed JSON.
-    # That is the FSM's contract and has its own batteries; this one is about
-    # characters surviving the mask. Keeping it here would also make this file
-    # red for an unrelated reason — Qwen3-VL-4B closes the string with a
-    # TYPOGRAPHIC quote (U+201C) and stops with the document still open, which
-    # reproduces identically on builds predating the #1197 fix. Reported
-    # separately; see the note in the PR that introduced this file.
-    if not _is_json(content):
-        print(f"       note: reply was not well-formed JSON ({content[:80]!r}) — separate defect,"
-              f" not a #1197 regression")
+    check("reply is well-formed JSON", _is_json(content), content[:160])
+
+
+def test_eos_is_masked_while_the_document_is_open(m):
+    """#1199 — the model must not be *offered* EOS mid-document.
+
+    Asserting only that the reply parses would pass by luck on a model that
+    never reaches for EOS mid-string. This reads the alternatives the sampler
+    was given: while the JSON is incomplete, no end-of-turn token may be among
+    them. On the build that had the bug, `<|im_end|>` sat at rank 2 on the very
+    last step — the model took it, and the request returned 200 with the string
+    still open.
+    """
+    print("\n#1199 — EOS must not be offered while the document is incomplete")
+    status, body = post(
+        "/v1/chat/completions",
+        {
+            "model": m,
+            "max_tokens": 200,
+            "temperature": 0,
+            "logprobs": True,
+            "top_logprobs": 5,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Gib exakt diesen Satz zurück: Die Bären hören Gebüsch rascheln, "
+                    "größte Stärke, Persönlichkeit.",
+                }
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "S",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"satz": {"type": "string"}},
+                        "required": ["satz"],
+                    },
+                },
+            },
+        },
+    )
+    if status != 200:
+        check("request succeeded", False, f"got {status}")
+        return
+    content = body["choices"][0]["message"]["content"]
+    check("constrained reply is well-formed JSON", _is_json(content), repr(content)[:160])
+
+    steps = (body["choices"][0].get("logprobs") or {}).get("content") or []
+    if not steps:
+        print("       note: server returned no logprobs — the offer check needs them")
+        return
+    # Every step except the last is unambiguously mid-document.
+    offered = []
+    for st in steps[:-1]:
+        for alt in st.get("top_logprobs") or []:
+            tokentext = alt.get("token") or ""
+            if "<|im_end|>" in tokentext or "<|endoftext|>" in tokentext:
+                offered.append(tokentext)
+    check(
+        "no end-of-turn token among the candidates mid-document",
+        not offered,
+        f"offered {sorted(set(offered))} while the JSON was still open",
+    )
 
 
 def _is_json(s):
@@ -198,6 +257,7 @@ def main():
     print(f"server: {BASE}   model: {m}")
     test_image_is_used_or_refused(m)
     test_non_ascii_survives_json_schema(m)
+    test_eos_is_masked_while_the_document_is_open(m)
     print()
     if failures:
         print(f"FAIL — {len(failures)} case(s): {', '.join(failures)}")
