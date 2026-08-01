@@ -9,8 +9,7 @@
 // vs separate (two CUtensorMap descriptors, one per tile) using REAL
 // cp.async.bulk.tensor.2d TMA loads.
 //
-// History: the original spec
-//   docs/superpowers/specs/2026-05-10-nvfp4-smallM-kernel-design.md
+// History: the original NVFP4 small-M kernel spec
 // hypothesised that fused would be >5% faster, justifying the
 // single-descriptor design assumption. Repeated measurement on sm_120a
 // **refuted** this: fused runs at parity or marginally slower (typically
@@ -18,9 +17,8 @@
 // retired in favour of a logged observation; the test now only asserts that
 // both kernels launch successfully (which is the meaningful regression gate).
 //
-// This is consistent with the broader pattern documented in
-//   docs/superpowers/plans/2026-05-14-fmha-tma-lever-refuted.md
-// — TMA bulk on sm_120 is empirically equivalent or slower than cp.async for
+// This is consistent with the broader pattern:
+// TMA bulk on sm_120 is empirically equivalent or slower than cp.async for
 // our workload sizes; the perceived advantage of fused descriptors over
 // separate doesn't materialise either.
 //

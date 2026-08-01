@@ -199,7 +199,7 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     // residual add to rmsnorm_fp32_accum_to_fp16_kernel (which keeps fp32_hidden_ in
     // sync + applies overflow scaling). Without this, moe_weighted_sum_residual
     // adds residual in FP16 and the shadow goes stale — measured ~7% drift at L3
-    // that compounds to 260% by L29 vs llama.cpp (docs/gemma4_layer_diff.md).
+    // that compounds to 260% by L29 vs llama.cpp (regenerate with tools/analysis/layer_diff.py).
     ctx.moe_use_fp32_residual = (prof.is_gemma4 && fp32_accum_buf_ != nullptr &&
                                  ly.post_ffn_norm.data != nullptr);
     // Diagnostic: keep MoE down-projection output in FP32 (no FP16 truncation

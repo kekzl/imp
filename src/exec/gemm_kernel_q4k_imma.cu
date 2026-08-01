@@ -19,8 +19,8 @@
 // falls through to the generic dequant catch-all (Slice 8.5) which performs
 // dequant→FP16 cuBLAS — bit-identical to the pre-Phase-2C behaviour.
 //
-// Reference: docs/plans/q4k_imma_design_2026_05_17.md,
-// docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md.
+// Reference: docs/plans/2026-05-28-q4k-mmq-kernel-design.md, which records
+// how this path measured.
 
 #include "exec/gemm_kernel_registry.h"
 

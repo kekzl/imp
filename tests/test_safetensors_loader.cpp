@@ -1,9 +1,6 @@
 // Unit tests for the SafeTensors loader's blob-level validation surface.
 // Exercises the test-visible helpers in safetensors_internal:: directly with
 // synthetic blob bytes — no Model construction, no GPU.
-//
-// Closes audit findings F3, F4, F5, F7, F8 from
-// docs/audit/safetensors_nvfp4_audit_2026-05.md.
 
 #include "model/safetensors_loader.h"
 

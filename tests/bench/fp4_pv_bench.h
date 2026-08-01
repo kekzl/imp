@@ -10,7 +10,7 @@ namespace imp {
 //
 // Discriminates "MMA-level gain is real on realistic post-softmax data" vs
 // "evaporates" before committing to the multi-week Phase 3b/3c production
-// integration. See `docs/plans/fp4_pv_phase3_design_2026_05_17.md` §3 + §4.
+// integration.
 //
 // Two questions answered:
 //

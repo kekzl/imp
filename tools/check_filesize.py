@@ -5,7 +5,7 @@ Classifies every source file (header / kernel-.cu / normal TU) and compares its
 CODE LOC against per-category thresholds from tools/filesize_thresholds.toml.
 
 The metric is a proxy for RECOMPILE BLAST RADIUS, not readability — see the toml
-header and docs/AGENTS.md "File Layout & Size".
+header and AGENTS.md "File Layout & Size".
 
 Exit codes:
   0  no hard-review violation (warn-level smells may still be printed)

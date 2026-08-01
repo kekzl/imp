@@ -2,8 +2,9 @@
 // mmq_q4k_imma_layout.cu — Phase 2A reorder kernel
 // =============================================================================
 //
-// Companion to design memo docs/plans/q4k_imma_design_2026_05_17.md §3 ("Q4_K →
-// INT8 reordering") and findings memo 2026-05-18-q4k-imma-phase1-findings.md.
+// The "Q4_K → INT8 reordering" step (Phase 2A) of the INT8 IMMA direct-GEMM
+// experiment. Its design and findings memos are gone; what the experiment
+// measured is in docs/plans/2026-05-28-q4k-mmq-kernel-design.md.
 //
 // Decodes one Q4_K super-block per CTA. For each sub-block j ∈ [0, 8):
 //

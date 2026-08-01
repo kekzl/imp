@@ -435,7 +435,7 @@ if (mx_native > 0) {
     // Dequant MXFP4 → FP16 for decode (only when MXFP4 GEMV not available).
     // Single bulk allocation to avoid CUDA heap fragmentation.
     //
-    // Phase A2 (`docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md`):
+    // Phase A2:
     // when attention.mxfp4_fp16_cache_policy == "pruned", skip
     // tensor slots that aren't read on the dispatch hot path —
     // MoE expert_*_packed (consumed only by executor_forward_moe.cu's

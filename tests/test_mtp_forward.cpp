@@ -9,8 +9,6 @@
 //   4. Assert it does NOT crash and out_token_id is in [0, vocab_size)
 //
 // GTEST_SKIPs if the model is absent so CI on bare hosts still passes.
-//
-// Spec: docs/superpowers/specs/2026-05-14-mtp-wiring-design.md
 // =============================================================================
 
 #include "model/model.h"

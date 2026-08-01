@@ -11,7 +11,7 @@
 # Run:
 #   bash scripts/mtp_accuracy_bench.sh
 #
-# Decision thresholds (per docs/superpowers/specs/2026-05-14-mtp-wiring-design.md):
+# Decision thresholds:
 #   ≥ 60% on ≥ 3/4 prompt classes  → batched-verify Phase 3.5 is ROI-worthy
 #   < 30% across the board         → Phase 2.2.Attn+KV (real attention with
 #                                    MTP-side KV cache) is the blocker

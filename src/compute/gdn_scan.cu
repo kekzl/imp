@@ -190,8 +190,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
 // Numerically equivalent to gdn_scan_fused_kernel but factors the
 // chunk-internal sequential dependency into a forward triangular solve +
 // matrix-matrix products. Reference: Yang et al. 2024, "Parallel Linear
-// Attention With The Delta Rule"; imp-specific derivation in
-// docs/plans/gdn_chunkwise_scan_design_2026_05_23.md §"Phase 2a".
+// Attention With The Delta Rule".
 //
 // Algorithm per chunk of L tokens:
 //   1. Cache K̃, Q̃ in shared memory (post L2 norm)
@@ -466,8 +465,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
 // fused kernel; it establishes the chunked shared-memory layout that the
 // SSD matmul will need.
 //
-// Phase 0 verdict (ncu): docs/plans/gdn_chunkwise_scan_design_2026_05_23.md
-//   Memory 5.47 % peak / Compute 5.47 % peak / Achieved Occ 8.33 % → PROCEED.
+// Phase 0 verdict (ncu): Memory 5.47 % peak / Compute 5.47 % peak /
+//   Achieved Occ 8.33 % → PROCEED.
 // Templated dispatcher used by both gdn_scan_chunkwise_f32 (YOut=half) and
 // gdn_scan_chunkwise_fp32out (YOut=float). Keeps the kernel-template + smem
 // + opt-in logic in one place — the two host launchers only differ in the

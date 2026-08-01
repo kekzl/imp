@@ -22,7 +22,7 @@
 //   IMP_TEST_MMPROJ_GEMMA4=/models/gemma-3-4b-vl/mmproj-gemma4-26b-bf16.gguf \
 //   IMP_VISION_GOLDEN_DUMP=1 imp-tests --gtest_filter='VisionGolden.*'
 //   then paste the emitted blocks below (overwrite the matching arch).
-// See tests/refs/README.md and tests/TEST_AUDIT.md (R9).
+// See tests/refs/README.md.
 #pragma once
 
 namespace imp_refs {

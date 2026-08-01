@@ -2,7 +2,7 @@
 // tma_block_scale_bench.cu — Block-scale-aware TMA descriptor microbench (SM120)
 // =============================================================================
 //
-// Validates spec assumption in docs/superpowers/specs/2026-05-10-nvfp4-smallM-kernel-design.md:
+// Validates the NVFP4 small-M kernel spec's assumption:
 // "single TMA descriptor for data + scales is +10-20% faster than two separate
 //  descriptors".
 //

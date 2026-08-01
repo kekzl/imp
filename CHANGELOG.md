@@ -11,6 +11,12 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+- **A dead `docs/…` pointer in a code comment is now a gate failure.** Sixteen
+  design memos were deleted in doc-consolidation PRs (#183, #273, #441) and the
+  38 comments citing them stayed behind, so following one led nowhere. They now
+  name what survived — or state the finding inline, where nothing did.
+
 ## [0.20.0] - 2026-08-01
 
 ### Added

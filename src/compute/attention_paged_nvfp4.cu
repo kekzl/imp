@@ -38,8 +38,7 @@ __device__ __forceinline__ float ue4m3_decode(uint8_t bits) {
 
 // Scale dtype tag for the NVFP4 paged attention kernels. Default E4M3 is the
 // existing NVFP4 path; UE8M0 reserves the second template arm for the
-// upcoming MXFP4-KV variant (design memo `docs/plans/turboquant_fp8_gap_design_2026_05_17.md`
-// §5 Phase 3). This Slice 1 commit only adds the template parameter; the
+// upcoming MXFP4-KV variant. This Slice 1 commit only adds the template parameter; the
 // UE8M0 branch is implemented in Slice 2.
 enum class ScaleDtype : int { E4M3 = 0, UE8M0 = 1 };
 

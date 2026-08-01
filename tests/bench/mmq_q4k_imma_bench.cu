@@ -2,7 +2,8 @@
 // mmq_q4k_imma_bench.cu — Phase 1 INT8 IMMA throughput microbench
 // =============================================================================
 //
-// Companion to design memo docs/plans/q4k_imma_design_2026_05_17.md.
+// Phase 1 of the INT8 IMMA direct-GEMM experiment (outcome:
+// docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
 //
 // Each kernel is a tight per-warp loop of one MMA opcode with all operands
 // alive — same harness pattern as tests/bench/mxf4nvf4_mma_variants_bench.cu.

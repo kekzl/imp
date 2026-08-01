@@ -37,8 +37,7 @@ struct RuntimeConfig {
         // routing + sampling. Costs a little throughput (serial / ordered
         // reductions), so it is strictly OFF by default — the default code
         // path runs the exact same kernels as before with zero overhead.
-        // Legacy env: IMP_DETERMINISTIC=1. See audit B-9
-        // (docs/audit/performance_agent_readiness_2026_05_31.md).
+        // Legacy env: IMP_DETERMINISTIC=1.
         bool deterministic = false;
         std::string cuda_graphs = "auto";  // "auto" | "always" | "never"
         // Engine warmup (two tiny BOS requests at init, ~2-4 s on a 30B).
@@ -366,8 +365,7 @@ struct RuntimeConfig {
         // executor_forward_moe.cu's pre-cached FP16 fallback, which is
         // bypassed by the more efficient batch-dequant path for MXFP4)
         // or routed through generic-dequant (LM head). Pruning is the
-        // Phase A1+A2 path from
-        // docs/plans/qwen35_27b_mxfp4_host_dequant_design_2026_05_17.md —
+        // Phase A1+A2 path — it
         // unlocks Qwen3.5-27B MXFP4 load on 32 GiB VRAM by shrinking the
         // ~48 GiB FP16 fallback to ~8-12 GiB.
         std::string mxfp4_fp16_cache_policy = "legacy";
@@ -461,8 +459,8 @@ struct RuntimeConfig {
         float norm_eps_override = 0.0f;  // 0 = use model default
         bool ref_kernel = false;
         bool vhead_reorder = false;
-        // GDN chunkwise SSD scan refactor — Phase 1b.1 structural prototype
-        // (docs/plans/gdn_chunkwise_scan_design_2026_05_23.md). When true,
+        // GDN chunkwise SSD scan refactor — Phase 1b.1 structural prototype.
+        // When true,
         // the executor dispatches GDN scan through
         // `gdn_scan_chunkwise_{f32,fp32out}` (chunk-cached K/Q in shared
         // memory) instead of the per-token-loop `gdn_scan_fused_{f32,fp32out}`.
