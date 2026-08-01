@@ -11,6 +11,28 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+- **Constrained decoding dropped every non-ASCII character** (#1197). With
+  `response_format: json_schema` or `json_object`, "Die Bären hören" came back as
+  "Die Baren horen" — German, and every other non-English language, was
+  unusable. The FSM was never at fault: it compares through `unsigned char` and
+  accepted umlauts all along. `classify_token()` did not, and `char` is signed,
+  so every byte of a multi-byte UTF-8 sequence read as negative and lost
+  `CAT_STRING_CHAR` — the category mask then dropped those tokens *before* the
+  FSM was consulted, and the model spelled the nearest ASCII word it was allowed
+  to emit. GBNF and regex constraining were never affected (they do not use that
+  pre-filter). Pinned by `TokenCategory.NonAsciiCountsAsStringContent` in the CPU
+  lane, and the json_object property batteries now generate non-ASCII instead of
+  documenting its absence as deliberate.
+- **An image sent to a model that cannot see it is refused, not ignored**
+  (#1198). A multimodal SafeTensors checkpoint whose tower imp does not
+  understand (Gemma-4 NVFP4, the Qwen3.5/3.6 MoE checkpoints) loads text-only and
+  says so in the load log — but `image_url` parts were then accepted and answered
+  from the text alone, so the caller got a confident description of a picture the
+  model never received. Now `400` with code `vision_unavailable`, in every
+  dialect. `docs/supported-models.md` states which checkpoints can see and which
+  cannot.
+
 ## [0.20.1] - 2026-08-01
 
 ### Changed

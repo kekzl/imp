@@ -72,8 +72,12 @@ static inline uint16_t classify_token(const std::string& text) {
             cat |= CAT_NUMBER_CONT | CAT_STRING_CHAR;
         if (first == ' ' || first == '\t' || first == '\n' || first == '\r')
             cat |= CAT_WHITESPACE;
-        // General string chars (printable, not quote or backslash)
-        if (first >= 32 && first != '"' && first != '\\')
+        // General string chars: anything that is not a control character, a
+        // quote or a backslash. The cast is load-bearing — `char` is signed
+        // here, so every byte of a multi-byte UTF-8 sequence (0x80-0xFF) reads
+        // as negative and would fail this test, which is how constrained output
+        // lost its umlauts (#1197).
+        if (static_cast<unsigned char>(first) >= 32 && first != '"' && first != '\\')
             cat |= CAT_STRING_CHAR;
         // Literal continuation characters
         if (std::strchr("ruealskl", first))
@@ -84,8 +88,8 @@ static inline uint16_t classify_token(const std::string& text) {
         for (char c : text) {
             if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
                 is_ws = false;
-            if (c < 32 || c == '"' || c == '\\')
-                is_str = false;
+            if (static_cast<unsigned char>(c) < 32 || c == '"' || c == '\\')
+                is_str = false;  // signed char: see the single-char path (#1197)
             if (!std::strchr("0123456789.-+eE", c))
                 is_num = false;
             if (!std::islower(static_cast<unsigned char>(c)))
@@ -132,6 +136,12 @@ static inline uint16_t classify_token(const std::string& text) {
 
     return cat;
 }
+
+// The kernels below are the only device code in this header. They are guarded
+// so a host-only translation unit can include it for classify_token() alone —
+// which is what puts the classifier under test in the CPU `unit` lane, the lane
+// CI actually runs. #1197 lived here precisely because nothing tested it.
+#ifdef __CUDACC__
 
 // ---------------------------------------------------------------------------
 // Shared GPU kernel: apply category bitmask to logits.
@@ -188,5 +198,7 @@ __global__ inline void constrain_mask_allow_kernel(float* __restrict__ logits,
         }
     }
 }
+
+#endif  // __CUDACC__
 
 }  // namespace imp

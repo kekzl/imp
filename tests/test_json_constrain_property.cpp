@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "compute/json_constrain.h"
+#include "compute/constrain_common.h"
 
 #include <random>
 #include <string>
@@ -34,18 +35,36 @@ namespace {
 constexpr uint32_t kSeed = 0x5EED1067;  // fixed: failures must reproduce
 
 // --- Random valid-JSON generator -------------------------------------------
-// ASCII only and escape-free on purpose: non-ASCII in constrained strings is a
-// known, deliberate limitation of the token classifier, not a grammar bug, and
-// mixing it in here would produce false failures rather than findings.
+// Escape-free on purpose (escapes have their own example-based battery), but
+// NOT ASCII-only. It used to be, and the comment here called non-ASCII "a known,
+// deliberate limitation of the token classifier" — a sentence that turned out to
+// describe #1197, where constrained German output silently lost every umlaut.
+//
+// Worth being precise about what this generator does and does not cover: these
+// tests drive the FSM, and the FSM was never the broken part — it compares
+// through `unsigned char` and accepted umlauts all along. The bug was one layer
+// out, in classify_token()'s category pre-filter, which the mask consults BEFORE
+// the FSM is asked (see TokenCategory.NonAsciiCountsAsStringContent, which is
+// what actually fails when the fix is reverted). So this covers UTF-8 through
+// the grammar; it does not cover the mask. Both are needed.
 
 std::string gen_string(std::mt19937& rng) {
     static const char kAlphabet[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123456789_ -";
+    // Multi-byte UTF-8 of two, three and four bytes: the classifier must treat
+    // every byte of a sequence as string content, not just the ASCII range.
+    static const char* kNonAscii[] = {"ä", "ö", "ü", "ß", "é", "日", "本", "🐻", "→"};
     std::uniform_int_distribution<int> len(0, 8);
     std::uniform_int_distribution<size_t> ch(0, sizeof(kAlphabet) - 2);
+    std::uniform_int_distribution<size_t> nonascii(0, sizeof(kNonAscii) / sizeof(kNonAscii[0]) - 1);
+    std::uniform_int_distribution<int> pick_nonascii(0, 4);  // ~20% of characters
     std::string s = "\"";
     int n = len(rng);
-    for (int i = 0; i < n; i++)
-        s += kAlphabet[ch(rng)];
+    for (int i = 0; i < n; i++) {
+        if (pick_nonascii(rng) == 0)
+            s += kNonAscii[nonascii(rng)];
+        else
+            s += kAlphabet[ch(rng)];
+    }
     return s + "\"";
 }
 
@@ -403,6 +422,46 @@ TEST(JsonConstrainFsm, RejectsRawControlCharsInsideStrings) {
     EXPECT_FALSE(fsm.sim_token_valid("\t")) << "raw tab accepted inside a string";
     EXPECT_TRUE(fsm.sim_token_valid("def")) << "ordinary string content rejected";
     EXPECT_TRUE(fsm.sim_token_valid("\\n")) << "ESCAPED newline must stay legal";
+}
+
+// ---------------------------------------------------------------------------
+// #1197: constrained output lost every non-ASCII character — "Die Bären hören"
+// came back as "Die Baren horen". The FSM was never the problem; it casts to
+// unsigned char before comparing. classify_token() did not, and `char` is
+// signed here, so every byte of a multi-byte UTF-8 sequence read as negative:
+// the single-char path failed `first >= 32` and the multi-char path hit
+// `c < 32` and cleared is_str. Tokens carrying an umlaut therefore lost
+// CAT_STRING_CHAR and were masked out by category, before the FSM was ever
+// asked. The model then spelled the nearest ASCII word it was allowed to.
+// ---------------------------------------------------------------------------
+TEST(TokenCategory, NonAsciiCountsAsStringContent) {
+    // A whole word, the way a BPE vocabulary usually carries it.
+    EXPECT_TRUE(classify_token("Bären") & CAT_STRING_CHAR) << "multi-byte word rejected";
+    EXPECT_TRUE(classify_token("ä") & CAT_STRING_CHAR) << "two-byte character rejected";
+    EXPECT_TRUE(classify_token("größte") & CAT_STRING_CHAR) << "sharp s rejected";
+    EXPECT_TRUE(classify_token("日本語") & CAT_STRING_CHAR) << "three-byte characters rejected";
+    EXPECT_TRUE(classify_token("🐻") & CAT_STRING_CHAR) << "four-byte character rejected";
+
+    // A BPE token can be a single raw byte — every byte of a UTF-8 sequence
+    // has to pass on its own, or the sequence can never be spelled.
+    for (int b = 0x80; b <= 0xFF; b++) {
+        const std::string one(1, static_cast<char>(b));
+        EXPECT_TRUE(classify_token(one) & CAT_STRING_CHAR) << "lone byte 0x" << std::hex << b << " rejected";
+    }
+
+    // What must STAY rejected, so the fix does not open the door too wide.
+    EXPECT_FALSE(classify_token("\x01") & CAT_STRING_CHAR) << "control char accepted";
+    EXPECT_FALSE(classify_token("\n") & CAT_STRING_CHAR) << "raw newline accepted";
+    EXPECT_FALSE(classify_token("\"") & CAT_STRING_CHAR) << "bare quote accepted";
+    EXPECT_FALSE(classify_token("\\") & CAT_STRING_CHAR) << "bare backslash accepted";
+    EXPECT_FALSE(classify_token("ab\nc") & CAT_STRING_CHAR) << "embedded newline accepted";
+}
+
+TEST(JsonConstrainFsm, AcceptsUmlautsInsideStrings) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"k\":\"Die ");
+    EXPECT_TRUE(fsm.sim_token_valid("Bären")) << "umlaut word rejected inside a string";
+    EXPECT_TRUE(fsm.sim_token_valid("ö")) << "lone umlaut rejected inside a string";
 }
 
 }  // namespace
