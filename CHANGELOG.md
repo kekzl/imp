@@ -11,32 +11,9 @@ there instead of retelling it.
 
 ## [Unreleased]
 
-### Fixed
-- **Constrained generation could stop with the JSON document still open**
-  (#1199), returning 200 with a reply that does not parse. `<|im_end|>`
-  decodes to plain printable ASCII, so the token classifier gives it
-  `CAT_STRING_CHAR` and the free-string shortcut allowed it without
-  simulating — the category mask does not govern EOS inside a string. The
-  clear that exists for exactly this hazard was gated on the XML dialect;
-  it is unconditional now, which is correct because the mask is only
-  computed while the document is incomplete. Measured on Qwen3-VL-4B:
-  `<|im_end|>` sat at rank 2 on the last step and the model took it.
-
-### Changed
-- **CI can be run against a ref on demand** (`gh workflow run CI --ref main`).
-  A squash merge performed by auto-merge starts no workflow run — it is
-  attributed to `GITHUB_TOKEN`, which GitHub does not let trigger further
-  runs — so `main`'s reported CI state can be many commits old. It was ten
-  commits old on 2026-08-01, still showing warnings that had been fixed.
+## [0.20.2] - 2026-08-02
 
 ### Fixed
-- **The build is warning-free again.** Five had accumulated: `tmpnam` in a
-  test fixture (which then fed `system("rm -rf " + dir)` — replaced with
-  `mkdtemp` + `std::filesystem::remove_all`, so no shell parses the path), a
-  non-literal format string reaching `snprintf` with no arguments
-  (`-Wformat-security`), and three unbraced `if` branches around GTest macros
-  that expand to an `if`/`else` of their own (`-Wdangling-else`). Only the
-  first two show in an incremental build; the other three need the full image.
 - **Constrained decoding dropped every non-ASCII character** (#1197). With
   `response_format: json_schema` or `json_object`, "Die Bären hören" came back as
   "Die Baren horen" — German, and every other non-English language, was
@@ -57,6 +34,29 @@ there instead of retelling it.
   model never received. Now `400` with code `vision_unavailable`, in every
   dialect. `docs/supported-models.md` states which checkpoints can see and which
   cannot.
+- **Constrained generation could stop with the JSON document still open**
+  (#1199), returning 200 with a reply that does not parse. `<|im_end|>`
+  decodes to plain printable ASCII, so the token classifier gives it
+  `CAT_STRING_CHAR` and the free-string shortcut allowed it without
+  simulating — the category mask does not govern EOS inside a string. The
+  clear that exists for exactly this hazard was gated on the XML dialect;
+  it is unconditional now, which is correct because the mask is only
+  computed while the document is incomplete. Measured on Qwen3-VL-4B:
+  `<|im_end|>` sat at rank 2 on the last step and the model took it.
+- **The build is warning-free again.** Five had accumulated: `tmpnam` in a
+  test fixture (which then fed `system("rm -rf " + dir)` — replaced with
+  `mkdtemp` + `std::filesystem::remove_all`, so no shell parses the path), a
+  non-literal format string reaching `snprintf` with no arguments
+  (`-Wformat-security`), and three unbraced `if` branches around GTest macros
+  that expand to an `if`/`else` of their own (`-Wdangling-else`). Only the
+  first two show in an incremental build; the other three need the full image.
+
+### Changed
+- **CI can be run against a ref on demand** (`gh workflow run CI --ref main`).
+  A squash merge performed by auto-merge starts no workflow run — it is
+  attributed to `GITHUB_TOKEN`, which GitHub does not let trigger further
+  runs — so `main`'s reported CI state can be many commits old. It was ten
+  commits old on 2026-08-01, still showing warnings that had been fixed.
 
 ## [0.20.1] - 2026-08-01
 
