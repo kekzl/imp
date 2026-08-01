@@ -182,22 +182,40 @@ bool Engine::set_image(const std::string& path) {
 }
 
 bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
+    clear_image();
+    return add_image_from_memory(data, len);
+}
+
+bool Engine::add_image(const std::string& path) {
+    if (!qwen_vision_.is_ready())
+        return false;  // the mmproj tower takes one image; there is nothing to add to
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        IMP_LOG_ERROR("Qwen3-VL: could not open image '%s'", path.c_str());
+        return false;
+    }
+    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return add_image_from_memory(bytes.data(), bytes.size());
+}
+
+bool Engine::add_image_from_memory(const uint8_t* data, size_t len) {
     if (qwen_vision_.is_ready()) {
         auto patches = std::make_shared<QwenPatches>();
         if (!qwen_vision_.preprocess(data, len, *patches))
             return false;
-        qwen_pending_patches_ = std::move(patches);
-        pending_image_hash_ = image_content_hash(data, len);
+        qwen_pending_patches_.push_back(std::move(patches));
+        pending_image_hash_ = combine_image_hash(pending_image_hash_, image_content_hash(data, len));
         return true;
     }
     // The mmproj path stores its image inside VisionPipeline, but the hash has
-    // to reach the request either way — see the note at the prefill guard.
+    // to reach the request either way — see the note at the prefill guard. It
+    // holds exactly one image, so adding replaces.
     pending_image_hash_ = image_content_hash(data, len);
     return vision_.set_image_from_memory(data, len, stream_);
 }
 
 void Engine::clear_image() {
-    qwen_pending_patches_.reset();
+    qwen_pending_patches_.clear();
     pending_image_hash_ = 0;
     vision_.clear_image();
 }
@@ -211,23 +229,48 @@ int Engine::image_tokens_of(const QwenPatches& patches) const {
 }
 
 int Engine::pending_image_tokens() const {
-    return qwen_pending_patches_ ? qwen_vision_.merged_tokens_of(*qwen_pending_patches_) : 0;
+    int n = 0;
+    for (const auto& p : qwen_pending_patches_)
+        if (p)
+            n += qwen_vision_.merged_tokens_of(*p);
+    return n;
+}
+
+std::vector<int> Engine::pending_image_token_counts() const {
+    std::vector<int> counts;
+    counts.reserve(qwen_pending_patches_.size());
+    for (const auto& p : qwen_pending_patches_)
+        counts.push_back(p ? qwen_vision_.merged_tokens_of(*p) : 0);
+    return counts;
 }
 
 // Turns a request's CPU-preprocessed image into its own device buffers and its
 // own (t, h, w) layout. Runs on the batch worker: it drives the GPU, so it
 // cannot be on an HTTP thread.
 bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
-    if (!req.qwen_patches || !qwen_vision_.is_ready() || qwen_image_pad_id_ < 0)
+    if (req.qwen_patches.empty() || !qwen_vision_.is_ready() || qwen_image_pad_id_ < 0)
         return false;
 
-    const int tokens = qwen_vision_.merged_tokens_of(*req.qwen_patches);
-    const size_t bytes = qwen_vision_.embedding_bytes(tokens);
-    if (tokens <= 0 || bytes == 0) {
-        IMP_LOG_ERROR("Qwen3-VL: image produced no tokens");
-        req.qwen_patches.reset();
-        return false;
+    // One buffer for every image, laid out in prompt order. The kernels index
+    // it by "the k-th image token in the prompt", which does not care where one
+    // picture ends and the next begins, so concatenation IS the multi-image
+    // representation — no per-image indirection is needed downstream.
+    std::vector<int> tokens_per_image;
+    tokens_per_image.reserve(req.qwen_patches.size());
+    int total_tokens = 0;
+    for (const auto& p : req.qwen_patches) {
+        const int n = p ? qwen_vision_.merged_tokens_of(*p) : 0;
+        if (n <= 0) {
+            IMP_LOG_ERROR("Qwen3-VL: image %zu produced no tokens", tokens_per_image.size());
+            req.qwen_patches.clear();
+            return false;
+        }
+        tokens_per_image.push_back(n);
+        total_tokens += n;
     }
+    const size_t bytes = qwen_vision_.embedding_bytes(total_tokens);
+    if (bytes == 0)
+        return false;
 
     // Per-request buffers, so two concurrent image requests cannot share one
     // encoder output. shared_ptr<Buffer> frees on the last reference, which is
@@ -237,22 +280,35 @@ bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
         return false;
     const int taps = qwen_vision_.deepstack_taps();
     std::vector<std::shared_ptr<Buffer>> deep;
-    std::vector<half*> deep_ptrs;
     deep.reserve(static_cast<size_t>(taps));
     for (int i = 0; i < taps; ++i) {
         auto b = std::make_shared<Buffer>(Buffer::device(bytes));
         if (!*b)
             return false;
-        deep_ptrs.push_back(b->as<half>());
         deep.push_back(std::move(b));
     }
 
-    Qwen3VLImage shape;
-    if (!qwen_vision_.encode_patches_to(*req.qwen_patches, emb->as<half>(), deep_ptrs, shape, stream))
-        return false;
-    req.qwen_patches.reset();  // host pixels no longer needed
+    // The encoder workspace is sized for ONE image (runtime.vision_max_patches),
+    // so the images are encoded one at a time, each writing at its own offset.
+    std::vector<Qwen3VLImage> shapes;
+    shapes.reserve(req.qwen_patches.size());
+    size_t token_offset = 0;
+    for (size_t i = 0; i < req.qwen_patches.size(); ++i) {
+        const size_t elem_offset = token_offset * static_cast<size_t>(qwen_vision_.embedding_dim());
+        std::vector<half*> deep_ptrs;
+        deep_ptrs.reserve(deep.size());
+        for (const auto& b : deep)
+            deep_ptrs.push_back(b->as<half>() + elem_offset);
+        Qwen3VLImage shape;
+        if (!qwen_vision_.encode_patches_to(*req.qwen_patches[i], emb->as<half>() + elem_offset, deep_ptrs,
+                                            shape, stream))
+            return false;
+        shapes.push_back(shape);
+        token_offset += static_cast<size_t>(tokens_per_image[i]);
+    }
+    req.qwen_patches.clear();  // host pixels no longer needed
 
-    if (!build_qwen_layout_(req, shape))
+    if (!build_qwen_layout_(req, shapes))
         return false;
     req.vision_emb = std::move(emb);
     req.deepstack_emb = std::move(deep);
@@ -262,7 +318,7 @@ bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
 // The prompt-side half: which positions hold the image, and what that costs the
 // M-RoPE sequence. Kept apart from the encode because it is pure bookkeeping
 // over the token ids and fails for entirely different reasons.
-bool Engine::build_qwen_layout_(Request& req, const Qwen3VLImage& shape) {
+bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes) {
     std::vector<uint8_t> is_image(req.input_tokens.size(), 0);
     int found = 0;
     for (size_t i = 0; i < req.input_tokens.size(); ++i)
@@ -270,17 +326,26 @@ bool Engine::build_qwen_layout_(Request& req, const Qwen3VLImage& shape) {
             is_image[i] = 1;
             ++found;
         }
-    if (found != shape.tokens) {
+    int expected = 0;
+    for (const auto& s : shapes)
+        expected += s.tokens;
+    if (found != expected) {
         // The prompt and the encoder describe different images. Every position
         // after the mismatch would be shifted, so this is fatal, not tolerated.
-        IMP_LOG_ERROR("Qwen3-VL: prompt reserves %d image tokens but the encoder produced %d", found,
-                      shape.tokens);
+        IMP_LOG_ERROR("Qwen3-VL: prompt reserves %d image tokens but %zu image(s) produced %d", found,
+                      shapes.size(), expected);
         return false;
     }
 
     std::string err;
     int next_pos = 0;
-    const std::vector<MRopeImageGrid> grids = {{shape.grid_rows, shape.grid_cols}};
+    // One grid per image, in prompt order. `qwen_build_mrope_positions` walks
+    // the runs of image tokens and takes the next grid at each one, so a second
+    // picture continues the (t, h, w) sequence rather than restarting it.
+    std::vector<MRopeImageGrid> grids;
+    grids.reserve(shapes.size());
+    for (const auto& s : shapes)
+        grids.push_back({s.grid_rows, s.grid_cols});
     if (!qwen_build_mrope_positions(is_image, grids, 0, req.mrope_positions, next_pos, err)) {
         IMP_LOG_ERROR("Qwen3-VL: %s", err.c_str());
         return false;
@@ -298,9 +363,13 @@ bool Engine::build_qwen_layout_(Request& req, const Qwen3VLImage& shape) {
         cudaMemcpy(delta_buf->ptr(), &req.mrope_pos_delta, sizeof(int), cudaMemcpyHostToDevice));
     req.mrope_delta_dev = std::move(delta_buf);
     req.vision_token_id = qwen_image_pad_id_;
-    req.n_vision_tokens = shape.tokens;
-    IMP_LOG_INFO("Qwen3-VL: %d image tokens (%dx%d), position delta %d", shape.tokens, shape.grid_rows,
-                 shape.grid_cols, req.mrope_pos_delta);
+    req.n_vision_tokens = expected;
+    if (shapes.size() == 1)
+        IMP_LOG_INFO("Qwen3-VL: %d image tokens (%dx%d), position delta %d", expected, shapes[0].grid_rows,
+                     shapes[0].grid_cols, req.mrope_pos_delta);
+    else
+        IMP_LOG_INFO("Qwen3-VL: %zu images, %d image tokens total, position delta %d", shapes.size(),
+                     expected, req.mrope_pos_delta);
     return true;
 }
 
@@ -308,7 +377,7 @@ bool Engine::build_qwen_layout_(Request& req, const Qwen3VLImage& shape) {
 // reserves placeholders for it. The server does not use this — it sets
 // `req.qwen_patches` directly, because it admits image requests concurrently.
 bool Engine::attach_qwen_image_(Request& req) {
-    if (!qwen_pending_patches_ || req.qwen_patches || req.vision_emb)
+    if (qwen_pending_patches_.empty() || !req.qwen_patches.empty() || req.vision_emb)
         return false;
     bool has_pad = false;
     for (int32_t t : req.input_tokens)
@@ -320,7 +389,7 @@ bool Engine::attach_qwen_image_(Request& req) {
         return false;  // this prompt has no image; the pending one may be a later request's
     req.qwen_patches = std::move(qwen_pending_patches_);
     req.vision_content_hash = pending_image_hash_;
-    qwen_pending_patches_.reset();
+    qwen_pending_patches_.clear();
     pending_image_hash_ = 0;
     return true;
 }

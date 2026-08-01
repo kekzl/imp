@@ -73,7 +73,9 @@ struct CliArgs {
     int bench_pp = 512;                       // --bench-pp: synthetic prompt token count
     int bench_reps = 3;                       // --bench-reps: repetitions to average
     std::string mmproj_path;                  // --mmproj: vision encoder GGUF
-    std::string image_path;                   // --image: input image for vision
+    // --image, repeatable: images for vision, in the order given. Each one
+    // gets its own placeholder in the prompt.
+    std::vector<std::string> image_paths;
 };
 
 CliArgs parse_args(int argc, char** argv);

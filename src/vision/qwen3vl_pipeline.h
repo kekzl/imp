@@ -68,6 +68,9 @@ public:
     int merged_tokens_of(const QwenPatches& p) const;
     // Bytes one request's embedding buffer needs (same for each DeepStack tap).
     size_t embedding_bytes(int tokens) const;
+    // Elements per image token — the stride a caller concatenating several
+    // images into one buffer has to advance by.
+    int embedding_dim() const;
     int deepstack_taps() const;
 
     // Encode into the CALLER's buffers. Runs through the pipeline's own stable

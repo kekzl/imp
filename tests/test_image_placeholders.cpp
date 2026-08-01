@@ -110,6 +110,20 @@ TEST(ImageTokensBefore, ClampsRatherThanReadingPastTheEnd) {
     EXPECT_EQ(image_tokens_before({}, kPad, 4), 0);
 }
 
+// The prefix cache asks one question — "same tokens and same pictures?" — so a
+// request carrying several images folds them into one salt. Order has to matter:
+// two prompts differing only in which picture comes first are different prompts.
+TEST(CombineImageHash, IsOrderSensitiveAndNeverZero) {
+    const size_t a = 0x1111, b = 0x2222;
+    const size_t ab = combine_image_hash(combine_image_hash(0, a), b);
+    const size_t ba = combine_image_hash(combine_image_hash(0, b), a);
+    EXPECT_NE(ab, ba) << "swapping two images must change the cache key";
+    EXPECT_NE(ab, 0u) << "0 is the cache's 'no image' sentinel";
+
+    EXPECT_EQ(combine_image_hash(0, a), a) << "one image hashes to itself";
+    EXPECT_NE(combine_image_hash(combine_image_hash(0, a), a), a) << "the same picture twice is not once";
+}
+
 TEST(ImageTokensBefore, TextOnlyPromptsResumeFromZero) {
     const std::vector<int32_t> t = {1, 2, 3, 4};
     EXPECT_EQ(image_tokens_before(t, kPad, 4), 0);

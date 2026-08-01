@@ -351,11 +351,16 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     text_parts += part.value("text", "");
                 } else if (type == "image_url" && part.contains("image_url")) {
                     std::string url = part["image_url"].value("url", "");
+                    // One slot per part, appended before it is filled: if the
+                    // fetch below fails the request is rejected, so a half-read
+                    // list never reaches the prompt builder.
+                    ctx.params.images.emplace_back();
+                    std::vector<uint8_t>& image_bytes = ctx.params.images.back();
                     if (url.rfind("data:", 0) == 0) {
                         // Data URI: data:image/...;base64,...
                         auto comma = url.find(',');
                         if (comma != std::string::npos) {
-                            ctx.params.image_data = base64_decode(url.substr(comma + 1));
+                            image_bytes = base64_decode(url.substr(comma + 1));
                         }
                     } else if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
                         // Remote URL: fetch image via HTTP
@@ -372,8 +377,10 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                             cli.set_connection_timeout(10);
                             auto img_res = cli.Get(path_str);
                             if (img_res && img_res->status == 200) {
-                                ctx.params.image_data.assign(img_res->body.begin(), img_res->body.end());
+                                image_bytes.assign(img_res->body.begin(), img_res->body.end());
                             }
+#else
+                            ctx.params.image_error = "https image_url needs an imp built with OpenSSL";
 #endif
                         } else {
                             httplib::Client cli(host);
@@ -381,10 +388,15 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                             cli.set_connection_timeout(10);
                             auto img_res = cli.Get(path_str);
                             if (img_res && img_res->status == 200) {
-                                ctx.params.image_data.assign(img_res->body.begin(), img_res->body.end());
+                                image_bytes.assign(img_res->body.begin(), img_res->body.end());
                             }
                         }
                     }
+                    // A scheme we do not fetch (file://, plain paths) leaves the
+                    // slot empty, same as a failed request. Both are refused
+                    // below rather than silently dropping a picture.
+                    if (image_bytes.empty() && ctx.params.image_error.empty())
+                        ctx.params.image_error = "could not read image_url: " + url.substr(0, 64);
                 }
             }
             ctx.params.chat_msgs.push_back({role, text_parts});

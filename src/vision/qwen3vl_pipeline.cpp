@@ -136,6 +136,8 @@ size_t Qwen3VLPipeline::embedding_bytes(int tokens) const {
     return static_cast<size_t>(tokens) * tower_->config.out_hidden_size * sizeof(half);
 }
 
+int Qwen3VLPipeline::embedding_dim() const { return tower_ ? tower_->config.out_hidden_size : 0; }
+
 int Qwen3VLPipeline::deepstack_taps() const {
     return tower_ ? static_cast<int>(tower_->config.deepstack_indexes.size()) : 0;
 }

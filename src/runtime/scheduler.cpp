@@ -78,7 +78,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 // a long prefix. A request that carries an image but reports no
                 // hash is excluded outright, so a missed plumbing site degrades
                 // to "no reuse" rather than "the previous picture".
-                const bool has_image = req->image || req->qwen_patches || req->vision_emb ||
+                const bool has_image = req->image || !req->qwen_patches.empty() || req->vision_emb ||
                                        req->n_vision_tokens > 0;
                 const bool cacheable = !has_image || req->vision_content_hash != 0;
                 if (kv_manager_->prefix_caching_enabled() && cacheable) {

@@ -498,7 +498,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // would answer about the first one's picture. A request that carries an
     // image but reports no hash is excluded outright — a missed plumbing site
     // must degrade to "no reuse", never to "the previous picture".
-    const bool has_image = req->image || req->qwen_patches || req->vision_emb || req->n_vision_tokens > 0;
+    const bool has_image = req->image || !req->qwen_patches.empty() || req->vision_emb || req->n_vision_tokens > 0;
     const bool cacheable = !has_image || req->vision_content_hash != 0;
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
         !req->embedding_request && cacheable) {
@@ -842,7 +842,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // Not gated on `offset == 0`: `qwen_patches` is cleared by the encode, so
     // this runs exactly once regardless of how the prompt is chunked.
     {
-        if (req->qwen_patches && !encode_qwen_image_for_(*req, pf_stream)) {
+        if (!req->qwen_patches.empty() && !encode_qwen_image_for_(*req, pf_stream)) {
             IMP_LOG_ERROR("Qwen3-VL: image encode failed — cancelling request %llu",
                           static_cast<unsigned long long>(req->id));
             req->status = RequestStatus::CANCELLED;

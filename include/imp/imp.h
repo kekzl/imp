@@ -177,6 +177,13 @@ ImpError imp_set_image(ImpContext ctx, const char* image_path);
 // Set image from raw memory (e.g. decoded base64). Pass NULL/0 to clear.
 ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len);
 
+// Append an image instead of replacing the pending one, so a prompt can carry
+// several. They are consumed in the order added, one per placeholder.
+// IMP_ERROR_UNSUPPORTED on a model whose vision tower takes a single image
+// (the mmproj path) — refused rather than silently keeping only one.
+ImpError imp_add_image(ImpContext ctx, const char* image_path);
+ImpError imp_add_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len);
+
 // Number of image tokens the pending image expands to, 0 if none. Dynamic-
 // resolution encoders (Qwen3-VL) only know this after the image is set, and the
 // prompt has to reserve exactly this many placeholders — so call it between

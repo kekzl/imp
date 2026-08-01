@@ -138,16 +138,27 @@ exposed: the cache is addressed by token ids and every image token carries the
 same id, so two requests with different pictures shared a prefix until block
 hashes were salted with the image content.
 
+Three things this plan listed as open have since closed:
+
+- **Several images per request** — N `image_url` parts become one concatenated
+  embedding in prompt order. The kernels were already indexing by "the k-th image
+  token in the prompt", an index that spans pictures, so only the plumbing
+  between the request parser and `expand_image_placeholders` was missing.
+- **The interactive CLI** branched on the mmproj tower alone, so `/image` in a
+  chat session loaded a picture the prompt never referenced.
+- **An image straddling a prefill chunk boundary** took the image's FIRST
+  embeddings again in the second chunk, because both vision kernels scan the
+  chunk they are handed rather than the prompt.
+
 **Still open**, tracked as the remainder of gap 2 in [`../roadmap.md`](../roadmap.md):
 
-- **One image per request.** Every `image_url` part is parsed but written into the
-  same buffer, so the last one silently wins, and exactly one vision block is
-  attached to the first user message. `expand_image_placeholders` and
-  `qwen_build_mrope_positions` already take per-image counts and grids (with
-  tests); the plumbing between the request parser and them does not.
-- **Videos.** `temporal_patch_size` exists but only as a still-image repeat.
-- **The interactive CLI and `imp_generate`** still take the mmproj-only branch, so
-  `/image` in a chat session loads a picture the prompt never references.
+- **Videos.** `temporal_patch_size` exists but only as a still-image repeat: there
+  is no frame axis on `QwenPatches`, no temporal axis in M-RoPE (every image token
+  in a run shares one `t`), no `<|video_pad|>`, and no decoder — only `stb` is
+  vendored.
+- **A second VL family.** There is no vision arch registry; `vision_type ==
+  "qwen3_vl"` is one branch, and anything else logs "vision tower will be skipped"
+  and runs text-only.
 
 ## Corrections to this plan, found while building it
 

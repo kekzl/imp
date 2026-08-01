@@ -96,7 +96,14 @@ struct ChatRequestParams {
     bool tool_constraint_xml = false;
     // Messages + image
     std::vector<imp::ChatMessage> chat_msgs;
-    std::vector<uint8_t> image_data;
+    // Every `image_url` part in the request, in prompt order. A vector because
+    // one buffer meant the last picture silently overwrote the rest: the
+    // request named several, the model saw one, and nothing said so.
+    std::vector<std::vector<uint8_t>> images;
+    // Set when an `image_url` could not be resolved. Fatal rather than skipped:
+    // dropping one image would shift every later picture onto the wrong
+    // placeholder, which reads as a coherent answer about the wrong thing.
+    std::string image_error;
     std::string requested_model;
 };
 
@@ -115,11 +122,14 @@ struct ChatStateSnapshot {
     // req->image at every request-build site. The batch worker encodes + binds
     // it per-request (no engine pause). Null for text-only requests.
     std::shared_ptr<imp::ImageData> vision_image;
-    // Qwen3-VL takes the other route: a dynamic-resolution image is patchified
-    // here (CPU only) and its token count is known BEFORE tokenizing, because
-    // the prompt has to reserve exactly that many placeholders.
-    std::shared_ptr<imp::QwenPatches> qwen_patches;
-    int qwen_image_tokens = 0;
+    // Qwen3-VL takes the other route: dynamic-resolution images are patchified
+    // here (CPU only) and their token counts are known BEFORE tokenizing,
+    // because the prompt has to reserve exactly that many placeholders — and
+    // each picture reserves its own number, so this stays a list.
+    std::vector<std::shared_ptr<imp::QwenPatches>> qwen_patches;
+    // Token count per image, in prompt order — the k-th placeholder expands to
+    // the k-th entry, so this must stay parallel to `qwen_patches`.
+    std::vector<int> qwen_image_tokens;
     size_t vision_content_hash = 0;
     std::vector<int32_t> stop_token_ids;
     imp::ChatTemplateFamily tpl_family = imp::ChatTemplateFamily::CHATML;
