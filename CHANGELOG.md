@@ -98,6 +98,14 @@ there instead of retelling it.
   violation.
 
 ### Fixed
+- **`imp-quantize` wrote a "quantized" checkpoint whose experts were untouched.**
+  The 3-D refusal sat behind a `.weight` name test, and no real stacked
+  checkpoint names its experts that way (`experts.gate_up_proj`,
+  `..._blocks`), so they were copied through as BF16 with no message, no
+  counter and no exclusion entry — while `hf_quant_config.json` announced
+  NVFP4. Such a checkpoint is now refused before anything is written. The
+  selection rule moved to `tools/imp-quantize/tensor_policy.cpp` and is covered
+  by `tests/test_quantize_policy.cpp` in the CPU lane.
 - **`imp-quantize` silently produced a broken MoE checkpoint.** "MoE is left
   unquantized" only ever applied to 3-D stacked tensors; the HF-standard
   per-expert 2-D layout was quantized and produced a model that loaded and then

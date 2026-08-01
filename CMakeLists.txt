@@ -465,6 +465,7 @@ if(IMP_BUILD_TOOLS)
     # imp-quantize — offline BF16/FP16 -> NVFP4 checkpoint conversion
     add_executable(imp-quantize
         tools/imp-quantize/main.cpp
+        tools/imp-quantize/tensor_policy.cpp
         tools/imp-quantize/awq_plan.cpp
         tools/imp-quantize/awq.cu
     )
@@ -653,6 +654,11 @@ if(IMP_BUILD_TESTS)
         tests/test_vision_preprocess.cpp
         tests/test_mrope_positions.cpp
         tests/test_mla.cpp
+        # imp-quantize's tensor-selection rule. The tool is not otherwise
+        # covered, and this is the part of it that has already shipped a broken
+        # checkpoint (#1159), so it is compiled into the CPU lane directly.
+        tools/imp-quantize/tensor_policy.cpp
+        tests/test_quantize_policy.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse the server's
