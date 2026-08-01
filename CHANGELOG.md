@@ -11,6 +11,17 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+- **Constrained generation could stop with the JSON document still open**
+  (#1199), returning 200 with a reply that does not parse. `<|im_end|>`
+  decodes to plain printable ASCII, so the token classifier gives it
+  `CAT_STRING_CHAR` and the free-string shortcut allowed it without
+  simulating — the category mask does not govern EOS inside a string. The
+  clear that exists for exactly this hazard was gated on the XML dialect;
+  it is unconditional now, which is correct because the mask is only
+  computed while the document is incomplete. Measured on Qwen3-VL-4B:
+  `<|im_end|>` sat at rank 2 on the last step and the model took it.
+
 ### Changed
 - **CI can be run against a ref on demand** (`gh workflow run CI --ref main`).
   A squash merge performed by auto-merge starts no workflow run — it is

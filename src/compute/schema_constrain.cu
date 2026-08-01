@@ -583,11 +583,21 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     // EOS must not stop generation mid-value: its rendered text ("<|im_end|>")
     // would pass the anything-goes value scan above. Post-loop so no shortcut
     // can re-allow it.
-    if (xml_raw) {
-        for (int32_t e : eos_tokens_)
-            if (e >= 0 && e < vocab_size_)
-                token_allow_[e] = 0;
-    }
+    //
+    // This used to be gated on `xml_raw` while the hazard it describes belongs
+    // just as much to the JSON free-string shortcut a few lines up (#1199).
+    // "<|im_end|>" is plain printable ASCII, so classify_token hands it
+    // CAT_STRING_CHAR and the category mask does NOT govern it inside a string
+    // — contrary to what the comment on compute_token_allow_mask assumes. A
+    // model that reached for EOS mid-string therefore ended the request with
+    // the document still open, and the caller got a 200 carrying invalid JSON.
+    //
+    // Unconditional is correct: reaching this function means the stack is
+    // non-empty, and apply_mask returns before it when the root value is
+    // complete — that is the one place EOS is legal, and there it is forced.
+    for (int32_t e : eos_tokens_)
+        if (e >= 0 && e < vocab_size_)
+            token_allow_[e] = 0;
 }
 
 // ---------------------------------------------------------------------------
