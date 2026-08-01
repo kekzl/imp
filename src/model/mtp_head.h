@@ -11,8 +11,6 @@
 // Phase 2: forward kernel implementation.
 // Phase 3+: verify-loop integration.
 //
-// Full design: docs/superpowers/specs/2026-05-14-mtp-wiring-design.md
-//
 // Reference architecture (Qwen3.6-NVFP4 MTP, 1.6 GB BF16, 19 tensors):
 //
 //   FC + pre-FC norms (token-conditioning block):

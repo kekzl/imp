@@ -1,5 +1,5 @@
-// Phase 1 INT8 IMMA throughput microbench wrapper. Companion to design memo
-// docs/plans/q4k_imma_design_2026_05_17.md.
+// Phase 1 INT8 IMMA throughput microbench wrapper. Outcome of the experiment:
+// docs/plans/2026-05-28-q4k-mmq-kernel-design.md.
 //
 // Asserts that every IMMA variant launches without ptxas / runtime error and
 // prints the TOPS table to stderr. Does *not* gate on the perf ratio — that's

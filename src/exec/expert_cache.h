@@ -37,8 +37,7 @@ struct ExpertCacheKeyHash {
 
 // MoE projection enum — every layer has up to three: gate, up, down.
 // Used to index the per-layer × per-projection × per-expert device-side
-// lookup mirror (Phase 2 of the MoE host-offload + CUDA Graphs design,
-// see docs/plans/moe_host_offload_graphs_design_2026_05_17.md §3a).
+// lookup mirror (Phase 2 of the MoE host-offload + CUDA Graphs design).
 enum class ExpertProj { Gate = 0, Up = 1, Down = 2 };
 inline constexpr int kExpertProjCount = 3;
 

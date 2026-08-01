@@ -1,6 +1,5 @@
 // Reference numerical test for compressed-tensors NVFP4 dequant.
 //
-// Closes audit finding F1 from docs/audit/safetensors_nvfp4_audit_2026-05.md.
 // Existing NVFP4 unit tests (test_nvfp4_quant_ref.cu, test_nvfp4_quant_hw.cu,
 // test_nvfp4_gemv_kpar_loop.cu) all roundtrip imp's own quantizer through
 // imp's own dequantizer. They cannot detect a paired sign-flip / nibble-order

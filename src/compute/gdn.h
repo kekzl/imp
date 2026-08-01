@@ -35,9 +35,7 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
 // Phase 1b.1 replaces the within-chunk sequential scan with the SSD matmul
 // algorithm; this scaffolding establishes the API + regression-gate plumbing.
 //
-// Design doc: docs/plans/gdn_chunkwise_scan_design_2026_05_23.md
-// Phase 0 verdict: docs/plans/gdn_chunkwise_scan_design_2026_05_23.md →
-// PROCEED (latency-bound, 5.47 % mem + 5.47 % compute at peak).
+// Phase 0 verdict: PROCEED (latency-bound, 5.47 % mem + 5.47 % compute at peak).
 void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                             int n_heads, int head_dim_ssm, int state_size, int n_groups,
@@ -56,8 +54,7 @@ void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const 
 // Phase 2a — WY-representation parallel delta-rule scan prototype.
 // Numerically equivalent to the sequential delta rule but factors the
 // chunk-internal dependency into a forward triangular solve + matrix-matrix
-// products (steps 2/3/5/6 of the algorithm in
-// docs/plans/gdn_chunkwise_scan_design_2026_05_23.md §"Phase 2a"). Naive
+// products (steps 2/3/5/6 of the Phase 2a algorithm). Naive
 // shared-memory matmuls; Tensor Core MMA is Phase 2b.
 //
 // Currently instantiated for HD=SS=128, CHUNK=32 (chunk_size=32 dispatch);

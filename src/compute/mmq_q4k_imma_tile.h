@@ -7,7 +7,8 @@
 namespace imp {
 
 // Phase 2B INT8 IMMA tile-GEMM kernel for the Q4_K_M direct-GEMM project.
-// Companion to design memo `docs/plans/q4k_imma_design_2026_05_17.md` §4.
+// Phase 2B of the INT8 IMMA direct-GEMM experiment (outcome:
+// docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
 //
 // Inputs (Phase 2A's mmq_q4k_imma_reorder produces W_s8 / α / β; for activations
 // use quantize_fp16_to_int8_subblock below or mmq_q4k_imma_gemm wrapper):
@@ -32,7 +33,7 @@ namespace imp {
 // Architecture: BLOCK_M=64 BLOCK_N=32 BLOCK_K=32; 4 warps per CTA in 2×2 spatial
 // with WRM·WRN=2·2 per warp (16 MMAs per CTA per K-block); 2-stage cp.async
 // pipeline. Throughput plateaus at ~40 TOPS on sm_120a (4.3 % of the 931 TOPS
-// raw MMA peak — see `docs/superpowers/plans/2026-05-18-q4k-imma-phase2b-ceiling.md`).
+// raw MMA peak — the same figure is in docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
 //
 // M and N must be multiples of 64 / 32 respectively; K must be a multiple of 32.
 void mmq_q4k_imma_tile(const int8_t* X_s8, const __half* x_scale, const float* x_rowsum,

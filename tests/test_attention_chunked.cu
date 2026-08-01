@@ -13,8 +13,7 @@ namespace imp {
 namespace {
 
 // Local naive reference attention for cuBLAS-SWA parity check.
-// Inlined from the archived src/compute/attention_naive.{h,cu} (see
-// docs/archive/attention_naive/RESURRECTION.md). Pure FP32 accumulation,
+// Inlined from the archived src/compute/attention_naive.{h,cu}. Pure FP32 accumulation,
 // one block per (head, query). Handles GQA + causal + sliding window.
 __global__ void naive_attention_prefill_ref_kernel(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V,

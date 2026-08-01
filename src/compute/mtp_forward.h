@@ -17,7 +17,6 @@
 //          upstream-reference investigation before correct implementation).
 //   - 2.2.Attn (future): full attention block.
 //
-// Design: docs/superpowers/specs/2026-05-14-mtp-wiring-design.md
 // =============================================================================
 
 #include "compute/moe_routing.h"  // MoeRoutingBuffers

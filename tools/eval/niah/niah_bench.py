@@ -14,8 +14,7 @@ Usage:
       [--config NAME ...] [--ctx N ...] [--depth PCT ...] [--seed N ...]
 
 Note: TurboQuant (tq_qjl_on / tq_qjl_off) configs were removed in Phase 5
-(2026-05-17) when TurboQuant was retired. Historical findings are documented in
-docs/plans/turboquant_fp8_gap_design_2026_05_17.md §5.
+(2026-05-17) when TurboQuant was retired.
 """
 
 from __future__ import annotations

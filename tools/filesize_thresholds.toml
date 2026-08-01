@@ -8,7 +8,7 @@
 # (the slowest part of an sm_120a build) with zero parallelism. Headers are worse:
 # a fat .cuh re-triggers every TU that includes it. Line count is only a *proxy*
 # for that cost — these thresholds are smells, not hard rules. See docs/audit/AUDIT_FILESIZE.md
-# for the per-file baseline and docs/AGENTS.md "File Layout & Size".
+# for the per-file baseline and AGENTS.md "File Layout & Size".
 #
 # METRIC: thresholds apply to CODE LOC (blank + comment lines stripped by an honest
 # C/C++ state machine that ignores // and /* */ inside string/char literals). RAW

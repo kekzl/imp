@@ -409,8 +409,7 @@ public:
     // RuntimeConfig::current() singleton is gone). Engine wires this via
     // set_runtime_config() during init; the contract is now "set before
     // first access". Tests that build a bare GraphExecutor without an
-    // owning Engine must wire a RuntimeConfig themselves (see
-    // tests/test_helpers.h for a default loader).
+    // owning Engine must wire a RuntimeConfig themselves.
     void set_runtime_config(const RuntimeConfig& cfg) noexcept { runtime_config_ = &cfg; }
 
     // Activation calibration ([calibration] enabled): collect per-input-channel

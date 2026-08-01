@@ -138,7 +138,7 @@ public:
     // next to the main weights (DeepSeek-V3-family models, e.g. Qwen3.6).
     // Phase 1.A: detection only (info populated, .loaded=false).
     // Phase 1.B: actual weights loaded into named Tensor fields.
-    // Phase 2+: forward+verify wiring (see docs/superpowers/specs/2026-05-14-mtp-wiring-design.md).
+    // Phase 2+: forward+verify wiring.
     std::optional<MtpHead> mtp_;
 
     // Load-time scratch for NVFP4 prequant scale tensors.

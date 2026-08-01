@@ -3,7 +3,9 @@
 # `ctest -L unit` lane — see .github/workflows/ci.yml).
 #
 # This pre-commit hook runs the GPU test suite locally, because CI has no GPU
-# runner: GPU correctness can ONLY be gated here, before the commit lands. It
+# runner: GPU correctness is gated on this machine or nowhere. It is not the
+# only local gate — the pre-push hook runs `verify-fast`, a filtered subset plus
+# the perf and smoke gates — but it is the only one that runs the FULL suite. It
 # fires only when staged changes touch buildable sources (src/, include/, tools/,
 # tests/, CMakeLists, *.cmake) — doc/config-only commits are not gated.
 #

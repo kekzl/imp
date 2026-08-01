@@ -7,7 +7,8 @@
 namespace imp {
 
 // Q4_K_M → symmetric-s8 reorder for the future INT8 IMMA direct-GEMM kernel.
-// Phase 2A of the design memo `docs/plans/q4k_imma_design_2026_05_17.md`.
+// Phase 2A of the INT8 IMMA direct-GEMM experiment (outcome:
+// docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
 //
 // Splits each Q4_K weight super-block into three outputs:
 //

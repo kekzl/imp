@@ -255,10 +255,7 @@ bool device_args_done = false;
         // layout in one kernel pass. Saves the gathered_base HBM read
         // (the moe_gather write still happens upstream; conditional
         // skip-gather is a follow-up that needs a will-device-args
-        // pre-check + lazy-gather in the legacy fallback). See
-        // docs/plans/moe_prefill_cudagraph_via_cutlass_moe_scheduler_*.md
-        // Phase 2 and docs/archive/bench-2026-05-10/moe_fusion_targets.md
-        // Candidate B.
+        // pre-check + lazy-gather in the legacy fallback).
         prep_sfa(d);
         imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
             ctx.no.data,
