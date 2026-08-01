@@ -105,6 +105,13 @@ there instead of retelling it.
   violation.
 
 ### Fixed
+- **The persisted prefix cache dropped the KV scales**, so a restored block
+  decoded against whatever scales were in the pool — wrong attention, no error.
+  Only on a KV dtype with a separate scale pool (NVFP4, INT8, INT4, MXFP4_KV),
+  which is why the FP16/FP8 defaults never showed it; `--prefix-cache` plus
+  `--kv-nvfp4` was enough. The file format now carries the scales
+  (`kPrefixCacheVersion` 3, older files are discarded as before). Pinned by
+  `PrefixPersistTest.QuantizedKvRestoresItsScales`.
 - **An image that spanned a prefill chunk boundary got the wrong half of
   itself.** Both vision kernels find "the k-th image token" by scanning the span
   they are handed, which under chunked prefill is one chunk — so a second chunk

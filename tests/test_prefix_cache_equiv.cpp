@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <cstdio>
 #include <numeric>
 #include <vector>
 
@@ -410,6 +411,83 @@ TEST(PrefixEquivTest, LongestCachedPrefixProbe) {
     // Break the chain at block 0 → probe reports 0 despite block 1 cached.
     ASSERT_TRUE(mgr->evict_cached_block());
     EXPECT_EQ(mgr->longest_cached_prefix_blocks(tokens, hashes), 0);
+}
+
+// ── (N) Persistence carries the KV SCALES, not just the KV bytes ──────────
+// A quantized KV block is meaningless without its scales: the values are
+// indices into a scale, so restoring the bytes alone yields a block that loads
+// and then decodes against whatever scales happen to sit in the pool. Nothing
+// errors — the attention is simply wrong.
+//
+// NVFP4 (like INT8/INT4/MXFP4_KV) allocates a SEPARATE scale pool, so the
+// scales are not covered by copying k_ptr/v_ptr. FP16 and FP8_E4M3 carry no
+// scale pool, which is why the gap stayed invisible on the default KV dtype.
+TEST(PrefixPersistTest, QuantizedKvRestoresItsScales) {
+    SKIP_IF_NO_CUDA();
+    // head_dim must be a multiple of 16 for the NVFP4 scale geometry.
+    auto cache = std::make_unique<KVCache>(2, /*n_kv_heads=*/2, /*head_dim=*/32, QType::NVFP4,
+                                           /*max_blocks=*/16);
+    ASSERT_GT(cache->scale_block_bytes(), 0u) << "NVFP4 must have a scale pool, or this proves nothing";
+    const size_t sbb = cache->scale_block_bytes();
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+    mgr->set_prefix_caching_enabled(true);
+    KVCache* c = mgr->kv_cache();
+
+    std::vector<int32_t> tokens(32);
+    std::iota(tokens.begin(), tokens.end(), 4000);
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(0, tokens), 0);
+    const std::vector<int> table = mgr->block_table(0);
+    ASSERT_GE(table.size(), 2u);
+
+    // A pattern the zero-initialized pool cannot reproduce by accident.
+    std::vector<uint8_t> scale_pattern(sbb);
+    for (size_t i = 0; i < sbb; ++i)
+        scale_pattern[i] = static_cast<uint8_t>(0xA0 + (i & 0x1F));
+    for (int bi = 0; bi < 2; ++bi) {
+        WriteBlockPattern(c, table[bi], static_cast<uint8_t>(11 + bi));
+        for (int l = 0; l < c->n_layers(); ++l) {
+            ASSERT_EQ(cudaMemcpy(c->k_scale_ptr(l, table[bi]), scale_pattern.data(), sbb,
+                                 cudaMemcpyHostToDevice),
+                      cudaSuccess);
+            ASSERT_EQ(cudaMemcpy(c->v_scale_ptr(l, table[bi]), scale_pattern.data(), sbb,
+                                 cudaMemcpyHostToDevice),
+                      cudaSuccess);
+        }
+    }
+    mgr->register_block_hashes(0, tokens);
+    mgr->free_sequence(0);
+    ASSERT_EQ(mgr->num_cached_blocks(), 2);
+
+    const std::string path = "/tmp/imp_prefix_scale_roundtrip.bin";
+    ::remove(path.c_str());
+    ASSERT_GT(mgr->save_prefix_cache(path, /*fingerprint=*/0xABCDEF, nullptr), 0);
+
+    // A FRESH pool: zero-initialized, so anything the restore does not write
+    // reads back as zero rather than as the previous manager's leftovers.
+    auto cache2 = std::make_unique<KVCache>(2, 2, 32, QType::NVFP4, 16);
+    auto mgr2 = std::make_unique<KVCacheManager>(std::move(cache2));
+    mgr2->set_prefix_caching_enabled(true);
+    ASSERT_EQ(mgr2->load_prefix_cache(path, 0xABCDEF, nullptr), 2);
+    KVCache* c2 = mgr2->kv_cache();
+
+    // The restored blocks are the ones a matching prefix now hits.
+    ASSERT_EQ(mgr2->allocate_blocks_with_prefix(1, tokens), 2);
+    const std::vector<int> table2 = mgr2->block_table(1);
+    ASSERT_GE(table2.size(), 2u);
+
+    std::vector<uint8_t> got(sbb);
+    for (int bi = 0; bi < 2; ++bi) {
+        for (int l = 0; l < c2->n_layers(); ++l) {
+            ASSERT_EQ(cudaMemcpy(got.data(), c2->k_scale_ptr(l, table2[bi]), sbb, cudaMemcpyDeviceToHost),
+                      cudaSuccess);
+            EXPECT_EQ(got, scale_pattern) << "K scales lost for block " << bi << " layer " << l;
+            ASSERT_EQ(cudaMemcpy(got.data(), c2->v_scale_ptr(l, table2[bi]), sbb, cudaMemcpyDeviceToHost),
+                      cudaSuccess);
+            EXPECT_EQ(got, scale_pattern) << "V scales lost for block " << bi << " layer " << l;
+        }
+    }
+    mgr2->free_sequence(1);
+    ::remove(path.c_str());
 }
 
 }  // namespace
