@@ -105,6 +105,13 @@ there instead of retelling it.
   violation.
 
 ### Fixed
+- **A MoE checkpoint whose experts imp cannot read now fails to load** instead
+  of routing through null experts and generating garbage. Measured on
+  `gpt-oss-20b` in BF16, whose experts are 3-D stacks only the MXFP4
+  `_blocks`/`_scales` matcher looks for: every layer logged "unrecognised layer
+  weight", the load succeeded, and generation produced `:!!!!!!!!!!`. The check
+  fires only when the config declares experts and not one layer carries any
+  expert representation, so a partially mapped MoE stays a warning.
 - **An image that spanned a prefill chunk boundary got the wrong half of
   itself.** Both vision kernels find "the k-th image token" by scanning the span
   they are handed, which under chunked prefill is one chunk — so a second chunk
