@@ -152,8 +152,9 @@ TEST(MemoryPlan, IsDeterministicAcrossRandomisedConfigs) {
         ASSERT_EQ(a.plan.total(), b.plan.total()) << "i=" << i;
         ASSERT_EQ(a.plan.kv.blocks, b.plan.kv.blocks) << "i=" << i;
         ASSERT_EQ(a.plan.model_resident, b.plan.model_resident) << "i=" << i;
-        if (!a.ok)
+        if (!a.ok) {
             ASSERT_EQ(a.failure.over_by, b.failure.over_by) << "i=" << i;
+        }
     }
 }
 

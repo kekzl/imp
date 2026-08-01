@@ -12,6 +12,13 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Fixed
+- **The build is warning-free again.** Five had accumulated: `tmpnam` in a
+  test fixture (which then fed `system("rm -rf " + dir)` — replaced with
+  `mkdtemp` + `std::filesystem::remove_all`, so no shell parses the path), a
+  non-literal format string reaching `snprintf` with no arguments
+  (`-Wformat-security`), and three unbraced `if` branches around GTest macros
+  that expand to an `if`/`else` of their own (`-Wdangling-else`). Only the
+  first two show in an incremental build; the other three need the full image.
 - **Constrained decoding dropped every non-ASCII character** (#1197). With
   `response_format: json_schema` or `json_object`, "Die Bären hören" came back as
   "Die Baren horen" — German, and every other non-English language, was

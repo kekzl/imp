@@ -305,8 +305,9 @@ TEST(GbnfGrammar, LeadByteFilterAgreesWithTheSimulator) {
     m.lead_bytes(lead);
     for (int b = 0; b < 256; b++) {
         const std::string s(1, static_cast<char>(b));
-        if (m.would_accept(s))
+        if (m.would_accept(s)) {
             EXPECT_TRUE(lead[b]) << "byte " << b << " is legal but the prefilter drops it";
+        }
     }
     EXPECT_TRUE(lead[static_cast<unsigned char>('5')]);
     EXPECT_FALSE(lead[static_cast<unsigned char>('a')]);

@@ -55,7 +55,13 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
     std::string out;
     char line[320];
     auto emit = [&](const char* fmt, auto... args) {
-        std::snprintf(line, sizeof(line), fmt, args...);
+        // Without arguments `fmt` is still a runtime pointer as far as the
+        // compiler can tell, so a stray '%' in it would read operands that were
+        // never passed (-Wformat-security). Print it as data in that case.
+        if constexpr (sizeof...(args) == 0)
+            std::snprintf(line, sizeof(line), "%s", fmt);
+        else
+            std::snprintf(line, sizeof(line), fmt, args...);
         out += line;
         out += '\n';
     };
