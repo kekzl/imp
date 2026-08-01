@@ -90,6 +90,24 @@ else
     fail "LICENSE missing or README license claim mismatched"
 fi
 
+# --------------------------------------------------- 5b. version consistency
+# The version lives in three places that have to agree, and nothing pinned
+# them: CMakeLists.txt is the source of truth, CHANGELOG.md must carry a
+# released section for it, and docs/BENCHMARKS.md names the release its
+# tabulated numbers were taken on. Bumping one and forgetting the others is a
+# documented red flag in the shipping playbook — this makes it a failure.
+section "version consistency"
+CM_VER=$(sed -nE 's/^project\(imp .*VERSION ([0-9]+\.[0-9]+\.[0-9]+)\).*/\1/p' CMakeLists.txt | head -1)
+CL_VER=$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | head -1 | tr -d '#[] ')
+BM_VER=$(sed -nE 's/.*\*\*Toolchain \(current: `v([0-9]+\.[0-9]+\.[0-9]+)`\).*/\1/p' docs/BENCHMARKS.md | head -1)
+if [ -z "$CM_VER" ]; then
+    fail "no project(imp ... VERSION X.Y.Z) in CMakeLists.txt"
+elif [ "$CM_VER" = "$CL_VER" ] && [ "$CM_VER" = "$BM_VER" ]; then
+    pass "CMakeLists / CHANGELOG / BENCHMARKS all say $CM_VER"
+else
+    fail "version drift — CMakeLists '$CM_VER', CHANGELOG '${CL_VER:-none}', BENCHMARKS '${BM_VER:-none}'"
+fi
+
 # ----------------------------------------------- 6. defer to make verify-fast
 section "make verify-fast"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then

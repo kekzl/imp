@@ -328,6 +328,24 @@ jobs:
       - name: File-size hard-review gate (blocking)
         run: python3 tools/check_filesize.py
 
+  # Publishable-tree hygiene: the cheap half of scripts/check-release.sh (doc
+  # links, maintainer paths, credential-shaped strings, tracked binaries,
+  # LICENSE). SKIP_VERIFY=1 drops the `make verify-fast` step — that one needs a
+  # GPU and the built image, so it stays local. Own ubuntu job, no toolchain,
+  # seconds. The script existed since the first release but was wired into
+  # nothing, so it only ran when someone remembered it: v0.20.0 found two
+  # maintainer paths that had been on main for days. A gate nobody runs is not
+  # a gate.
+  hygiene:
+    name: Release hygiene
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: check-release.sh (without the GPU gate)
+        env:
+          SKIP_VERIFY: "1"
+        run: bash scripts/check-release.sh
+
   # I1 gate (docs/MEMORY_ARCHITECTURE.md): exactly one module talks to the CUDA
   # driver about memory. Runs against tools/alloc_allowlist.txt, which shrinks
   # monotonically — the gate fails both on a new direct allocation site and on a

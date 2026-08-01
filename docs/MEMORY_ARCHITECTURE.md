@@ -124,7 +124,7 @@ is **1679.6 MiB** on all three.
 All MiB. Aggregate throughput during the load: 876 / 567 / 215 tok/s.
 
 > **Substitution, stated:** the dispatch names Gemma-3-12B + mmproj. There is no
-> 12B mmproj on this host (`/home/kekz/models/gemma-3-4b-vl/` is the only vision
+> 12B mmproj on this host (`~/models/gemma-3-4b-vl/` is the only vision
 > pair). The vision row is gemma-3-4b + `mmproj-F16.gguf`, driven with three real
 > image requests in addition to the text load. The *shape* of the vision finding
 > (tower is resident, `04_features` is where it lands) is unaffected by the size.

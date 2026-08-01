@@ -9,7 +9,7 @@
 # corpus. Calibrating and scoring on one text would report a gain that exists
 # only on that text.
 #
-# usage: MODEL_DIR=/home/kekz/models/Qwen3-0.6B tools/analysis/awq_ppl_ab.sh
+# usage: MODEL_DIR=/home/user/models/Qwen3-0.6B tools/analysis/awq_ppl_ab.sh
 set -euo pipefail
 
 MODELS_HOST="${MODELS_HOST:-$HOME/models}"
