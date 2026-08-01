@@ -27,7 +27,8 @@
 // are quantized like any other matrix; measured on DeepSeek-V2-Lite, 4992
 // expert tensors quantize and the result generates correctly. Expert weights
 // stored as a single 3-D [n_experts, N, K] STACK (gpt-oss-style) are still
-// unsupported: they are reported and left unquantized rather than mangled.
+// unsupported, and such a checkpoint is now REFUSED outright rather than
+// written with its experts copied through — see tensor_policy.h.
 //
 // Two roles are deliberately excluded even though they are 2-D and K-aligned:
 // the MLA latent projections and the MoE router (see should_quantize for the
@@ -63,6 +64,7 @@
 // performance work where the weights only need to be the right shape.
 
 #include "awq.h"
+#include "tensor_policy.h"
 
 #include "core/tensor.h"
 #include "model/safetensors_raw.h"
@@ -136,74 +138,6 @@ std::vector<unsigned char> folded_copy(const RawTensor& t, const std::vector<flo
     std::memcpy(out.data(), t.data, t.nbytes);
     ok = awq_apply_vector_div(out.data(), static_cast<size_t>(t.numel()), t.dtype, div);
     return out;
-}
-
-// A weight qualifies when it is a 2-D linear matrix the runtime reads through
-// the NVFP4 GEMM path. Everything else is copied through untouched: norms and
-// biases are 1-D, embeddings stay full precision (quantizing them costs quality
-// for no bandwidth win on the decode hot path), and K must be a multiple of 16
-// because that is the micro-block size.
-bool should_quantize(const RawTensor& t, const Options& opt, std::string& why_not) {
-    if (!ends_with(t.name, ".weight")) {
-        why_not = "not a .weight tensor";
-        return false;
-    }
-    if (t.dtype != "BF16" && t.dtype != "F16") {
-        why_not = "dtype " + t.dtype + " (already quantized or unsupported)";
-        return false;
-    }
-    if (t.shape.size() == 3) {
-        why_not = "3-D MoE expert stack — needs the per-expert path, not supported yet";
-        return false;
-    }
-    if (t.shape.size() != 2) {
-        why_not = std::to_string(t.shape.size()) + "-D";
-        return false;
-    }
-    if (contains(t.name, "embed_tokens") || contains(t.name, "embed_positions")) {
-        why_not = "embedding";
-        return false;
-    }
-    if (contains(t.name, "norm")) {
-        why_not = "norm";
-        return false;
-    }
-    if (contains(t.name, "lm_head") && !opt.quantize_lm_head) {
-        why_not = "lm_head (use --lm-head to include)";
-        return false;
-    }
-    // Two weight roles that are 2-D and K-aligned — so every shape check waves
-    // them through — but that must NOT be quantized. Both were found by
-    // bisection on DeepSeek-V2-Lite (MLA + 64-expert MoE), where quantizing
-    // everything produced a checkpoint that loaded and then emitted
-    // cross-script repetition garbage while the BF16 source answered normally.
-    // Excluding them costs almost nothing: a handful of small matrices per
-    // layer against 4992 expert tensors that quantize fine.
-    //
-    // 1. MLA latent projections. `kv_a_proj_with_mqa` packs latent+RoPE into one
-    //    output and `kv_b_proj` up-projects the latent into per-head nope/v
-    //    halves; the runtime slices and reshapes both. Leaving only these two in
-    //    full precision made the same checkpoint coherent again.
-    if (contains(t.name, "kv_a_proj") || contains(t.name, "kv_b_proj")) {
-        why_not = "MLA latent projection (runtime slices it — must stay full precision)";
-        return false;
-    }
-    // 2. MoE router. It decides WHICH experts run, and FP4 across 16
-    //    shared-scale values is enough to change the top-k pick. Measured
-    //    independently: with the MLA pair already excluded, quantizing the
-    //    router alone still produced garbage. Published exports (Modelopt,
-    //    llm-compressor) keep routers full precision for the same reason.
-    //    `.gate.weight` is the router; expert projections are `gate_proj.weight`
-    //    and are unaffected by this suffix test.
-    if (ends_with(t.name, ".gate.weight") || ends_with(t.name, ".router.weight")) {
-        why_not = "MoE router (FP4 changes expert selection)";
-        return false;
-    }
-    if (t.shape[1] % 16 != 0) {
-        why_not = "K=" + std::to_string(t.shape[1]) + " is not a multiple of 16";
-        return false;
-    }
-    return true;
 }
 
 // Quantize one host FP16 matrix, returning host-side packed data + scales.
@@ -386,6 +320,40 @@ int main(int argc, char** argv) {
         opened.push_back(std::move(src));
     }
 
+    // Refuse a stacked-expert checkpoint before writing anything. The experts
+    // are the bulk of the bytes and there is no NVFP4 layout the loader can
+    // read them back from, so "quantizing" one produced a checkpoint that was
+    // mostly still BF16 and said NVFP4 in its config — the failure being that
+    // it loads and runs, just without the size or bandwidth win it claims.
+    {
+        std::vector<const RawTensor*> stacked;
+        size_t stacked_bytes = 0, total_bytes = 0;
+        for (const auto& src : opened) {
+            for (const auto& t : src->tensors())
+                total_bytes += t.nbytes;
+            auto found = quantize::find_stacked_expert_tensors(src->tensors());
+            for (const RawTensor* t : found)
+                stacked_bytes += t->nbytes;
+            stacked.insert(stacked.end(), found.begin(), found.end());
+        }
+        if (!stacked.empty()) {
+            fprintf(stderr,
+                    "refusing: %zu tensor(s) store MoE experts as a 3-D stack — %.1f%% of this\n"
+                    "checkpoint — and imp has no NVFP4 layout to read stacked experts back from.\n"
+                    "Quantizing would copy them through unchanged and still label the result\n"
+                    "NVFP4, so the output would claim a size and bandwidth win it does not have.\n",
+                    stacked.size(), total_bytes ? 100.0 * double(stacked_bytes) / double(total_bytes) : 0.0);
+            for (size_t i = 0; i < stacked.size() && i < 3; ++i)
+                fprintf(stderr, "  %s\n", stacked[i]->name.c_str());
+            if (stacked.size() > 3)
+                fprintf(stderr, "  ... and %zu more\n", stacked.size() - 3);
+            fprintf(stderr,
+                    "Supported layout: one 2-D tensor per expert\n"
+                    "(`...mlp.experts.<e>.gate_proj.weight`), which is the HF standard.\n");
+            return 1;
+        }
+    }
+
     awq::Plan plan;
     // A dry run reports what would be quantized; the scale search costs a GPU
     // pass per layer and changes nothing it would report.
@@ -441,8 +409,8 @@ int main(int argc, char** argv) {
         for (const auto& t : src.tensors()) {
             bytes_in += t.nbytes;
             std::string why;
-            if (!should_quantize(t, opt, why)) {
-                if (contains(why, "3-D MoE")) {
+            if (!quantize::should_quantize(t, opt.quantize_lm_head, why)) {
+                if (contains(why, "3-D stacked")) {
                     n_moe_skipped++;
                     printf("  SKIP  %-58s %s\n", t.name.c_str(), why.c_str());
                 }
