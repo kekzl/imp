@@ -36,7 +36,7 @@ run() {
 ppl() {  # ppl <model-path-in-container> <label>
     echo "=== PPL: $2"
     run imp-cli --model "$1" --perplexity /corpus/ppl_corpus_45k.txt \
-        --set gemm.deterministic=true 2>&1 | grep -E "^perplexity:|^Perplexity:"
+        --set runtime.deterministic_gemm=true 2>&1 | grep -E "^perplexity:|^Perplexity:"
 }
 
 echo "### 1/4 baseline (BF16 source)"

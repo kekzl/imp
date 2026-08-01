@@ -509,8 +509,17 @@ int main(int argc, char** argv) {
             "      Measured cost on the dense Qwen3 pair: PPL +25%% (0.6B) / +19%% (1.7B).\n"
             "      Pass --calib to spend a calibration pass and recover most of that.");
     else if (!opt.dry_run)
-        printf("\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest.", plan.groups_scaled,
-               plan.groups_rtn);
+        // The scale search minimises a per-group weight-reconstruction error,
+        // which is a local proxy: it improved on every group here and the model
+        // can still come out worse. Measured 2026-08-01 on Qwen3-14B, from two
+        // independently produced calibration files (imp's own round-to-nearest
+        // checkpoint and NVIDIA's Modelopt export): PPL 9.93 round-to-nearest
+        // vs 12.60 / 12.29 calibrated. Score the result before trusting it.
+        printf("\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest."
+               "\n      Validated to HELP on Qwen3-0.6B/1.7B and measured to HURT on Qwen3-14B"
+               "\n      (PPL 9.93 -> 12.3-12.6). Score this checkpoint with --perplexity against"
+               "\n      the uncalibrated one before using it; see docs/quantization.md.",
+               plan.groups_scaled, plan.groups_rtn);
     if (n_moe_skipped)
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
     if (!opt.dry_run)

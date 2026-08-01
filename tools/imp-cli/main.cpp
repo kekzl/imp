@@ -22,7 +22,18 @@ int main(int argc, char** argv) {
     // Load imp.conf (if present) + apply --set overrides, then stash for
     // Engine::init to pick up (Phase 5 Track D follow-up: replaces the
     // RuntimeConfig::install() process-wide singleton).
-    imp::RuntimeConfig runtime_cfg = imp::RuntimeConfig::load(args.config_path, args.config_overrides);
+    std::vector<std::string> rejected_overrides;
+    imp::RuntimeConfig runtime_cfg =
+        imp::RuntimeConfig::load(args.config_path, args.config_overrides, &rejected_overrides);
+    if (!rejected_overrides.empty()) {
+        // Silently ignoring these is how a benchmark ends up measuring a
+        // configuration nobody asked for: `--set gemm.deterministic=true` sat
+        // in the AWQ reproduction harness doing nothing at all.
+        for (const auto& bad : rejected_overrides)
+            fprintf(stderr, "Error: --set %s\n", bad.c_str());
+        fprintf(stderr, "See imp.conf.example for the key names.\n");
+        return 1;
+    }
     // Benchmark mode measures raw engine decode: MoE speculation would fold
     // draft-acceptance luck + grouped-GEMM restart variance into the gated
     // tg signal (dense spec stays as-is — measured neutral on the bench

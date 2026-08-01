@@ -11,7 +11,24 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+- **`--set` with a key that does not exist is now an error, not a warning.** A
+  typo silently measured the default instead: `tools/analysis/awq_ppl_ab.sh`,
+  the harness the AWQ result names for reproduction, passed
+  `--set gemm.deterministic=true` — the key is `runtime.deterministic_gemm` —
+  so its three scoring runs never got the determinism they asked for. (Re-run
+  with the key fixed, the published numbers reproduce unchanged: BF16 24.0641,
+  round-to-nearest 30.0979, AWQ 28.4782.) An unknown key in `imp.conf` stays a
+  warning: a config file may outlive the build that understood every key in it.
+
 ### Changed
+- **`imp-quantize --calib` says where it is validated and where it is not.** A
+  model too big to run in BF16 can be calibrated off any quantization of itself
+  (the statistics are keyed by layer and tensor kind, not by checkpoint) — which
+  produced the first `--calib` result on Qwen3-14B, and it is negative: PPL
+  **9.9252 uncalibrated vs 12.6016 / 12.2853** calibrated, from two independent
+  twins. It still helps on Qwen3-0.6B/1.7B. Recipe and what was ruled out:
+  `docs/quantization.md`.
 - **A dead `docs/…` pointer in a code comment is now a gate failure.** Sixteen
   design memos were deleted in doc-consolidation PRs (#183, #273, #441) and the
   38 comments citing them stayed behind, so following one led nowhere. They now

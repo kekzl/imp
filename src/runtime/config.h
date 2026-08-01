@@ -1090,13 +1090,19 @@ struct RuntimeConfig {
     bool load_from_file(const std::string& path);
 
     // Apply key=value strings (e.g. "kv_cache.dtype=fp8"). Each entry is
-    // parsed via dotted-section lookup. Unknown keys log a warning but
-    // don't stop loading.
-    void apply_overrides(const std::vector<std::string>& kvs);
+    // parsed via dotted-section lookup. Returns the entries that bound to
+    // nothing — a `--set` naming a key this build does not have is a typo,
+    // and a measurement flag that silently does nothing is worse than one
+    // that stops. (An unknown key in imp.conf stays a warning: a config file
+    // may legitimately outlive the build that understood it.)
+    [[nodiscard]] std::vector<std::string> apply_overrides(const std::vector<std::string>& kvs);
 
     // Convenience: locate + load + apply overrides + log a one-line summary.
-    // Pass empty path to use the search-path default.
-    static RuntimeConfig load(const std::string& explicit_path, const std::vector<std::string>& overrides);
+    // Pass empty path to use the search-path default. Pass `rejected` to take
+    // the unbound overrides and decide yourself (both tool mains exit on them);
+    // leave it null and they are only logged.
+    static RuntimeConfig load(const std::string& explicit_path, const std::vector<std::string>& overrides,
+                              std::vector<std::string>* rejected = nullptr);
 };
 
 // ---- Pending-config handoff (tool-main → Engine) -----------------------

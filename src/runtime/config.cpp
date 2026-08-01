@@ -74,8 +74,10 @@ float parse_float(const std::string& v, float fallback) {
 }
 
 // Apply a single dotted key (e.g. "kv_cache.dtype") with raw value string.
-// Logs a warning for unknown keys but keeps going.
-void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::string& raw) {
+// Returns false when the key is not bound — the caller decides what that
+// means: an imp.conf may legitimately carry a key this build does not know,
+// a `--set` on the command line is a typo and must not pass silently.
+bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::string& raw) {
     std::string val = strip_quotes(trim(raw));
 
     // Typed key binders. Each binds one dotted key to its destination field;
@@ -327,8 +329,7 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.capture", cfg.speculative.capture);
     I("speculative.capture_ctx_cap", cfg.speculative.capture_ctx_cap);
 
-    if (!matched)
-        IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted_key.c_str(), val.c_str());
+    return matched;
 }
 
 bool file_exists(const std::string& path) {
@@ -434,26 +435,31 @@ bool RuntimeConfig::load_from_file(const std::string& path) {
             dotted += '.';
             dotted += key;
         }
-        apply_one(*this, dotted, val);
+        if (!apply_one(*this, dotted, val))
+            IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted.c_str(), val.c_str());
     }
     return true;
 }
 
-void RuntimeConfig::apply_overrides(const std::vector<std::string>& kvs) {
+std::vector<std::string> RuntimeConfig::apply_overrides(const std::vector<std::string>& kvs) {
+    std::vector<std::string> rejected;
     for (const auto& kv : kvs) {
         size_t eq = kv.find('=');
         if (eq == std::string::npos) {
-            IMP_LOG_WARN("imp.conf override: ignoring malformed '%s' (expected key=value)", kv.c_str());
+            rejected.push_back(kv + "  (expected key=value)");
             continue;
         }
         std::string key = trim(kv.substr(0, eq));
         std::string val = trim(kv.substr(eq + 1));
-        apply_one(*this, key, val);
+        if (!apply_one(*this, key, val))
+            rejected.push_back(kv + "  (no such key)");
     }
+    return rejected;
 }
 
 RuntimeConfig RuntimeConfig::load(const std::string& explicit_path,
-                                  const std::vector<std::string>& overrides) {
+                                  const std::vector<std::string>& overrides,
+                                  std::vector<std::string>* rejected) {
     RuntimeConfig cfg;
     // Seed legacy IMP_* env vars first; file values + CLI overrides win on top.
     seed_from_env(cfg);
@@ -465,7 +471,12 @@ RuntimeConfig RuntimeConfig::load(const std::string& explicit_path,
     } else {
         IMP_LOG_INFO("imp.conf: no config file found, using built-in defaults");
     }
-    cfg.apply_overrides(overrides);
+    std::vector<std::string> bad = cfg.apply_overrides(overrides);
+    if (rejected != nullptr)
+        *rejected = std::move(bad);
+    else
+        for (const auto& b : bad)
+            IMP_LOG_WARN("config override rejected: %s", b.c_str());
     return cfg;
 }
 
