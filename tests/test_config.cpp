@@ -21,6 +21,14 @@ struct TempFile {
     ~TempFile() { std::remove(path.c_str()); }
 };
 
+// Apply overrides and fail if any of them bound to nothing — the contract the
+// tool mains enforce. Going through this helper means a typo in a test is a red
+// test rather than an assertion that quietly stops testing anything.
+void set_(RuntimeConfig& cfg, const std::vector<std::string>& kvs) {
+    const std::vector<std::string> rejected = cfg.apply_overrides(kvs);
+    ASSERT_TRUE(rejected.empty()) << "unbound override: " << rejected.front();
+}
+
 TEST(RuntimeConfigTest, DefaultsAreSane) {
     RuntimeConfig cfg;
     EXPECT_FALSE(cfg.runtime.deterministic_gemm);
@@ -38,23 +46,23 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
 // (the key was a bool until 2026-07-24 — existing imp.conf files keep parsing).
 TEST(RuntimeConfigTest, SwaSizingTriState) {
     RuntimeConfig cfg;
-    cfg.apply_overrides({"kv_cache.swa_sizing=on"});
+    set_(cfg, {"kv_cache.swa_sizing=on"});
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::On);
-    cfg.apply_overrides({"kv_cache.swa_sizing=off"});
+    set_(cfg, {"kv_cache.swa_sizing=off"});
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Off);
-    cfg.apply_overrides({"kv_cache.swa_sizing=auto"});
+    set_(cfg, {"kv_cache.swa_sizing=auto"});
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Auto);
     // Legacy bool spellings map to On/Off.
-    cfg.apply_overrides({"kv_cache.swa_sizing=true"});
+    set_(cfg, {"kv_cache.swa_sizing=true"});
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::On);
-    cfg.apply_overrides({"kv_cache.swa_sizing=false"});
+    set_(cfg, {"kv_cache.swa_sizing=false"});
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Off);
     // Unknown value falls back to Off (never silently forces sizing on).
-    cfg.apply_overrides({"kv_cache.swa_sizing=banana"});
+    set_(cfg, {"kv_cache.swa_sizing=banana"});
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Off);
     // SWA snapshot budget: off by default, plain int binder.
     EXPECT_EQ(RuntimeConfig{}.kv_cache.swa_snapshot_mb, 0);
-    cfg.apply_overrides({"kv_cache.swa_snapshot_mb=512"});
+    set_(cfg, {"kv_cache.swa_snapshot_mb=512"});
     EXPECT_EQ(cfg.kv_cache.swa_snapshot_mb, 512);
 }
 
@@ -150,7 +158,7 @@ reserve_floor_pct = 5
     EXPECT_EQ(cfg.vram.reserve_floor_pct, 5);
 
     // --set style overrides reach the same fields.
-    cfg.apply_overrides({"rope.scaling=linear", "rope.factor=2", "vram.kv_fraction=0.9"});
+    set_(cfg, {"rope.scaling=linear", "rope.factor=2", "vram.kv_fraction=0.9"});
     EXPECT_EQ(cfg.rope.scaling, "linear");
     EXPECT_FLOAT_EQ(cfg.rope.factor, 2.0f);
     EXPECT_FLOAT_EQ(cfg.vram.kv_fraction, 0.9f);
@@ -174,7 +182,7 @@ warmup              = false
 
 TEST(RuntimeConfigTest, ApplyOverrides) {
     RuntimeConfig cfg;
-    cfg.apply_overrides({
+    set_(cfg, {
         "kv_cache.dtype=fp8",
         "runtime.cuda_graphs=never",
         "moe.expert_overhead_pct=30",
@@ -195,28 +203,54 @@ dtype = "fp16"
     RuntimeConfig cfg;
     cfg.load_from_file(f.path);
     EXPECT_EQ(cfg.kv_cache.dtype, "fp16");
-    cfg.apply_overrides({"kv_cache.dtype=fp8"});
+    set_(cfg, {"kv_cache.dtype=fp8"});
     EXPECT_EQ(cfg.kv_cache.dtype, "fp8");
 }
 
 TEST(RuntimeConfigTest, BoolParsingIsLenient) {
     RuntimeConfig cfg;
-    cfg.apply_overrides({"runtime.warmup=false"});
+    set_(cfg, {"runtime.warmup=false"});
     EXPECT_FALSE(cfg.runtime.warmup);
-    cfg.apply_overrides({"runtime.warmup=on"});
+    set_(cfg, {"runtime.warmup=on"});
     EXPECT_TRUE(cfg.runtime.warmup);
-    cfg.apply_overrides({"runtime.warmup=0"});
+    set_(cfg, {"runtime.warmup=0"});
     EXPECT_FALSE(cfg.runtime.warmup);
-    cfg.apply_overrides({"runtime.warmup=1"});
+    set_(cfg, {"runtime.warmup=1"});
     EXPECT_TRUE(cfg.runtime.warmup);
 }
 
-TEST(RuntimeConfigTest, UnknownKeyIsIgnored) {
-    // Should not crash; just log a warning.
+TEST(RuntimeConfigTest, UnknownOverrideIsReportedNotSwallowed) {
+    // An override that binds to nothing comes back named, so `--set` can refuse
+    // instead of running a measurement the flag never configured. This was not
+    // hypothetical: `--set gemm.deterministic=true` (the key is
+    // runtime.deterministic_gemm) sat in the AWQ reproduction harness and did
+    // nothing at all.
     RuntimeConfig cfg;
-    cfg.apply_overrides({"runtime.does_not_exist=42"});
-    // Default is unchanged.
+    const std::vector<std::string> rejected =
+        cfg.apply_overrides({"runtime.does_not_exist=42", "runtime.warmup=false", "gemm.deterministic=true"});
+    ASSERT_EQ(rejected.size(), 2u);
+    EXPECT_NE(rejected[0].find("runtime.does_not_exist=42"), std::string::npos);
+    EXPECT_NE(rejected[1].find("gemm.deterministic=true"), std::string::npos);
+    // The good key in the same batch still applied, and no field moved for the
+    // bad ones.
+    EXPECT_FALSE(cfg.runtime.warmup);
     EXPECT_FALSE(cfg.runtime.deterministic_gemm);
+}
+
+TEST(RuntimeConfigTest, MalformedOverrideIsReported) {
+    RuntimeConfig cfg;
+    const std::vector<std::string> rejected = cfg.apply_overrides({"runtime.warmup"});
+    ASSERT_EQ(rejected.size(), 1u);
+    EXPECT_NE(rejected[0].find("expected key=value"), std::string::npos);
+}
+
+TEST(RuntimeConfigTest, UnknownKeyInAFileStaysAWarning) {
+    // The other half of the contract: a config file may outlive the build that
+    // understood every key in it, so the file path must not become fatal.
+    TempFile tf("[runtime]\ndoes_not_exist = 42\nwarmup = false\n");
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.load_from_file(tf.path));
+    EXPECT_FALSE(cfg.runtime.warmup);
 }
 
 TEST(RuntimeConfigTest, MissingFileFallsBackToDefaults) {

@@ -51,7 +51,16 @@ int main(int argc, char** argv) {
     // a model at runtime (auto-load on first request when started without
     // --model); load_model_into_state re-stashes the same config snapshot
     // before each Engine construction.
-    state.runtime_config = imp::RuntimeConfig::load(args.config_path, args.config_overrides);
+    std::vector<std::string> rejected_overrides;
+    state.runtime_config = imp::RuntimeConfig::load(args.config_path, args.config_overrides, &rejected_overrides);
+    if (!rejected_overrides.empty()) {
+        // Serving with a configuration the operator did not ask for is worse
+        // than refusing to start.
+        for (const auto& bad : rejected_overrides)
+            fprintf(stderr, "Error: --set %s\n", bad.c_str());
+        fprintf(stderr, "See imp.conf.example for the key names.\n");
+        return 1;
+    }
     imp::process_diag_install(state.runtime_config);
     imp::set_pending_runtime_config(state.runtime_config);
 

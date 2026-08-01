@@ -196,11 +196,60 @@ Note the direction: applying `input_scale` would not fix it. Those scales exist
 to quantize activations *down*; imp already keeps them at higher precision. The
 export is simply not rounded for the runtime it is being run on.
 
-**What could not be measured:** the BF16 baseline for this model, and therefore
-`--calib` on it. 27.5 GiB of weights plus the allocator's 5% headroom does not
-fit in 32 GiB (upload fails at layer 39), and calibration needs a full forward
-pass on the BF16 source. So the 14B row above is round-to-nearest only; the AWQ
-numbers in the table further up are from the models that do fit.
+**The BF16 baseline for this model still cannot be measured** — 27.5 GiB of
+weights plus the allocator's 5% headroom does not fit in 32 GiB (the upload dies
+partway through the layer stack), and there is nowhere to spill to. But
+`--calib` on it turned out not to need that, and what it showed is the section
+below.
+
+#### Calibrating a model that will not fit, and what it exposed
+
+A calibration file is keyed by **(layer index, tensor kind)** — not by tensor
+name, not by dtype — and the recording hook sits *before* the tier switch in
+`gemm_via_handle_`, so the statistic is the activation a weight consumes rather
+than whatever a particular tier's kernel materialises. Nothing in that ties a
+calibration file to the checkpoint it was collected from. So the statistics for
+a model too large to run can be collected from **any quantization of the same
+model**, and the BF16 source quantized with them.
+
+Measured 2026-08-01, `ppl_corpus_45k.txt`, 13 537 tokens, deterministic:
+
+| Model | round-to-nearest | AWQ, stats from the BF16 source | AWQ, stats from a quantized twin |
+|---|---:|---:|---:|
+| Qwen3-0.6B | 30.0979 | **28.4782** | **28.8868** |
+| Qwen3-14B | 9.9252 | *(impossible — will not fit)* | **12.6016** / **12.2853** |
+
+**The detour itself is sound.** On Qwen3-0.6B, where both routes are possible,
+stats collected from imp's own round-to-nearest checkpoint recover three
+quarters of the gain the BF16-source stats give (1.21 of 1.62 PPL). Note what
+that twin is: a checkpoint 25% worse than the BF16 source it was made from. Its
+statistics still work, so twin *fidelity* is not the sensitive part.
+
+**What it exposed is that `--calib` hurts at 14B.** The two 14B figures come
+from two independently produced twins — imp's own round-to-nearest checkpoint
+(12.6016) and NVIDIA's Modelopt export (12.2853) — which agree with each other
+and disagree with round-to-nearest by 24-27% in the wrong direction. Since the
+two quantizers share no code, the calibration *source* is not the variable:
+AWQ calibration makes this model worse. (Re-scored later the same day, the
+round-to-nearest checkpoint read 9.9225 and the calibrated one 12.5371 — the
+residual spread is far below the gap.) Ruled out along the way: an incomplete
+plan (both runs scaled 160 groups, which is 4 per layer across all 40, so none
+were skipped), degenerate
+statistics (280 entries over all 40 layers, no zero or non-finite channel), a
+magnitude effect (the search normalises by the group mean, so it is
+scale-invariant, and the floor is relative), and the FP8 KV path (`fp8_e4m3`
+and `fp16` score identically to four decimals).
+
+That leaves the scale search's objective, which is a **local proxy**: it
+minimises per-group weight-reconstruction error, and it improved on every group
+of the 14B run. A checkpoint whose weights are each reconstructed better can
+still be a worse model, and at 40 layers apparently is. Why that flips between
+1.7B and 14B is open — it is the first `--calib` result at this size, because
+until this measurement nobody could produce one.
+
+So: `imp-quantize --calib` is validated on Qwen3-0.6B and Qwen3-1.7B and
+measured harmful on Qwen3-14B. The tool now says so, and the rule is to score
+the calibrated checkpoint against the uncalibrated one before using it.
 
 #### MoE, and two roles that must stay full precision
 
