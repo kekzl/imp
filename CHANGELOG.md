@@ -11,17 +11,14 @@ there instead of retelling it.
 
 ## [Unreleased]
 
-### Fixed
-- **`--set` with a key that does not exist is now an error, not a warning.** A
-  typo silently measured the default instead: `tools/analysis/awq_ppl_ab.sh`,
-  the harness the AWQ result names for reproduction, passed
-  `--set gemm.deterministic=true` — the key is `runtime.deterministic_gemm` —
-  so its three scoring runs never got the determinism they asked for. (Re-run
-  with the key fixed, the published numbers reproduce unchanged: BF16 24.0641,
-  round-to-nearest 30.0979, AWQ 28.4782.) An unknown key in `imp.conf` stays a
-  warning: a config file may outlive the build that understood every key in it.
+## [0.20.1] - 2026-08-01
 
 ### Changed
+- **CUDA 13.3.0 → 13.3.1** (nvcc V13.3.33 → V13.3.73), the newest toolkit there
+  is — there is no 13.4 or 14.x. Same release string, so CI's nvcc check and the
+  ccache keys are untouched, and the driver's UMD is 13.3 either way. Measured
+  perf-neutral: decode tg128 287.95 tok/s (median of three) against 288.38 on
+  13.3.0, both against the 287.19 baseline.
 - **`imp-quantize --calib` says where it is validated and where it is not.** A
   model too big to run in BF16 can be calibrated off any quantization of itself
   (the statistics are keyed by layer and tensor kind, not by checkpoint) — which
@@ -33,6 +30,16 @@ there instead of retelling it.
   design memos were deleted in doc-consolidation PRs (#183, #273, #441) and the
   38 comments citing them stayed behind, so following one led nowhere. They now
   name what survived — or state the finding inline, where nothing did.
+
+### Fixed
+- **`--set` with a key that does not exist is now an error, not a warning.** A
+  typo silently measured the default instead: `tools/analysis/awq_ppl_ab.sh`,
+  the harness the AWQ result names for reproduction, passed
+  `--set gemm.deterministic=true` — the key is `runtime.deterministic_gemm` —
+  so its three scoring runs never got the determinism they asked for. (Re-run
+  with the key fixed, the published numbers reproduce unchanged: BF16 24.0641,
+  round-to-nearest 30.0979, AWQ 28.4782.) An unknown key in `imp.conf` stays a
+  warning: a config file may outlive the build that understood every key in it.
 
 ## [0.20.0] - 2026-08-01
 

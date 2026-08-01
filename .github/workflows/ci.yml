@@ -18,7 +18,7 @@ jobs:
       # out of the box (matches the Dockerfile builder). No apt toolkit install.
       # Ubuntu 26.04 → GCC 15.2, so CI compiles on the same libstdc++ 15 as the
       # release image and catches missing-include regressions (#903) here.
-      image: nvidia/cuda:13.3.0-devel-ubuntu26.04
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -196,7 +196,7 @@ jobs:
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.3.0-devel-ubuntu26.04
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
     env:
       CUDA_VERSION: "13.3"
     steps:

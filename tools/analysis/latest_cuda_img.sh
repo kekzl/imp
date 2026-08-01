@@ -7,7 +7,7 @@
 # pinned recent tag when curl/jq are missing or the registry query fails
 # (offline), so surveys still run without a network round-trip.
 latest_cuda_devel_img() {
-    local fallback="nvidia/cuda:13.3.0-devel-ubuntu26.04"
+    local fallback="nvidia/cuda:13.3.1-devel-ubuntu26.04"
     command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || { echo "$fallback"; return; }
     local tag
     tag=$(curl -fsS --max-time 8 \
