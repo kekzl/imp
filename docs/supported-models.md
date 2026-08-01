@@ -75,6 +75,28 @@ send several `image_url` parts — and they are read in prompt order.
 registered; only the dense 4B is validated end to end here. A VL checkpoint also
 loads text-only — the tower is simply never run if no image is passed.
 
+### What cannot see, and how you find out
+
+The list above is exhaustive: **a multimodal SafeTensors checkpoint from any other
+family loads text-only.** `Gemma-4-26B-A4B-it-NVFP4` and the Qwen3.5/Qwen3.6 MoE
+checkpoints carry a `vision_config`, but imp's SafeTensors loader only understands
+the Qwen3-VL tower — for everything else it logs
+
+```
+WARN Multimodal model detected (vision_config present, model_type='…').
+     imp's SafeTensors loader handles only the language head; the vision tower
+     will be skipped.
+```
+
+and serves the language model alone. Gemma-4 *does* see images, but only through
+the GGUF + `--mmproj` pair in the table, not from its NVFP4 SafeTensors export.
+
+Since #1198 this is also visible from the client rather than only in the server
+log: a request carrying `image_url` parts that the loaded model cannot use is
+refused with **400 `vision_unavailable`** instead of being answered from the text
+alone. That failure mode was the dangerous one — a fluent description of a picture
+the model never received is indistinguishable from a real one.
+
 ```bash
 # Qwen3-VL — one flag, the tower comes with the model
 imp-cli --model models/Qwen3-VL-4B-Instruct/ --image photo.jpg \

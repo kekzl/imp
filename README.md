@@ -138,6 +138,13 @@ CLI reference, server flags, config, and C API: [`docs/usage.md`](docs/usage.md)
 | Llama / Mistral / DeepSeek | dense + MoE | GGUF (Q*_K, Q8_0) |
 | DeepSeek-V2 (MLA) | Multi-head Latent Attention + MoE | SafeTensors (bf16) |
 
+**Vision** is Qwen3-VL (tower in the checkpoint, no extra flag) and Gemma-3/Gemma-4
+through GGUF + `--mmproj`. Those are the only ones: a multimodal SafeTensors
+checkpoint from another family — Gemma-4 NVFP4, the Qwen3.5/3.6 MoE checkpoints —
+loads **text-only**, and a request that sends it an image is refused with
+`400 vision_unavailable` rather than answered from the text. Details:
+[supported-models.md](docs/supported-models.md#vision).
+
 VRAM, decode tok/s, and per-model notes: [`docs/supported-models.md`](docs/supported-models.md).
 
 ## Features

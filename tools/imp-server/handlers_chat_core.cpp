@@ -125,6 +125,11 @@ static void collect_tool_enforcement_(ChatRequestContext& ctx) {
 }
 
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx) {
+    // Read under the lock, acted on after it: whether the LOADED model can see
+    // images at all. A request that carries pictures a model has no tower for
+    // used to fall through to the text-only path and be answered as if nothing
+    // had been sent (#1198).
+    bool model_has_vision = false;
     // Snapshot all state fields needed for request processing under lock.
     // This protects against concurrent model load/unload invalidating pointers.
     {
@@ -152,8 +157,31 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         if (state.think_start_id >= 0) {
             ctx.snap.stop_token_ids.push_back(state.think_start_id);
         }
-        ctx.snap.has_vision_request = !ctx.params.images.empty() && state.ctx &&
-                                      state.ctx->engine->has_vision();
+        model_has_vision = state.ctx && state.ctx->engine->has_vision();
+        ctx.snap.has_vision_request = !ctx.params.images.empty() && model_has_vision;
+    }
+
+    // Refuse rather than answer from the text alone. Silently dropping the
+    // image is the worst of the three options: a refusal is trivial for a
+    // caller to handle, but a fluent answer about a picture the model never
+    // received is indistinguishable from a real one — it reads as a verdict.
+    // The load-time WARN ("the vision tower will be skipped") is in the server
+    // log, not in the response, so nothing reached the client at all.
+    if (!ctx.params.images.empty() && !model_has_vision) {
+        res.status = 400;
+        json error = {
+            {"error",
+             {{"message",
+               "This model cannot see images — it is loaded without a vision tower, so the " +
+                   std::to_string(ctx.params.images.size()) +
+                   " image part(s) in this request would be ignored. Vision needs either a "
+                   "Qwen3-VL checkpoint or a GGUF started with --mmproj; a multimodal "
+                   "SafeTensors checkpoint of any other family loads text-only (the load log "
+                   "says so). Send text only, or load a model that can see."},
+              {"type", "invalid_request_error"},
+              {"code", "vision_unavailable"}}}};
+        res.set_content(dump_safe(error), "application/json");
+        return false;
     }
 
     // Enforced tool calling (#1002): tool_choice=required / forced function /
