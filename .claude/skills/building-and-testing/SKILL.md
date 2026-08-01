@@ -52,6 +52,13 @@ runs the real CI lane (`ctest -L unit`). **But build the IMAGE for anything you 
 or push** — benchmarks, the perf gate and `verify-fast` must never read `build-dev/`,
 where a stale object would hide. `make dev-clean` removes it (root-owned; never `sudo`).
 
+**`verify-fast` does not build — it measures whatever `imp:test` already holds.** On a
+host without cmake it re-execs into that image with `IMP_VERIFY_SKIP_BUILD=1` and prints
+`SKIP build`. So a pre-push run does NOT test the code being pushed unless `make build`
+ran first: the gate can pass on code you deleted, or fail on a regression that is not
+yours. Read that `SKIP build` line before believing either result — a decode failure
+against a stale image is host drift by construction, since the binary did not change.
+
 **`make test-unit` is NOT the CI lane.** It runs `imp-tests-unit` (~37 tests); CI runs `ctest -L unit` → **`test-core`** (550+) + test-text + an e2e subset. A new CPU test belongs in `test-core`, and the honest no-GPU check is `docker run --rm imp:test test-core` (no `--gpus`). Green in `imp-tests-unit` says nothing about CI.
 
 Tool binaries in the image: `imp-server`, `imp-cli`, `imp-bench`, and `imp-quantize` (offline BF16/FP16 → NVFP4 conversion, experimental — see `quant-formats`). A new tool needs BOTH a `cp` in the builder stage and a `COPY --from=builder` line in the Dockerfile, or it silently isn't in the image.
