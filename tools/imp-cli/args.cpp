@@ -89,7 +89,8 @@ void print_usage(const char* prog) {
             "                        statistics to <out> (input for imp-quantize --calib)\n"
             "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for Gemma-3/4;\n"
             "                        Qwen3-VL carries its tower in the checkpoint\n"
-            "  --image <path>        Input image (needs a model with a vision tower)\n"
+            "  --image <path>        Input image (needs a model with a vision tower).\n"
+            "                        Repeat for several images (Qwen3-VL only)\n"
             "  --help                Show this help message\n",
             stderr);
 }
@@ -238,7 +239,7 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--mmproj") == 0 && i + 1 < argc) {
             args.mmproj_path = argv[++i];
         } else if (std::strcmp(arg, "--image") == 0 && i + 1 < argc) {
-            args.image_path = argv[++i];
+            args.image_paths.push_back(argv[++i]);
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_usage(argv[0]);

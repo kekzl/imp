@@ -12,6 +12,13 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Added
+- **Several images in one request** (Qwen3-VL). Every `image_url` part is
+  encoded, in prompt order, into one concatenated embedding; each placeholder
+  expands to its own picture's token count. `imp-cli --image` repeats, `/image`
+  stacks before a turn, and the C API gained `imp_add_image{,_from_memory}`.
+  Previously the last image silently won. An `image_url` that cannot be read is
+  now a 400: dropping one would slide every later picture onto the wrong
+  placeholder. The mmproj tower (Gemma-3/4) still takes one and refuses more.
 - **Vision: Qwen3-VL** (#1163-#1180). imp describes images end to end, from
   `imp-cli --image` and from `/v1/chat/completions`. Dynamic resolution (no
   fixed image size — a 1795x2397 photo becomes 972 image tokens), DeepStack

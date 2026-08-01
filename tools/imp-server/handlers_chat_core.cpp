@@ -152,7 +152,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         if (state.think_start_id >= 0) {
             ctx.snap.stop_token_ids.push_back(state.think_start_id);
         }
-        ctx.snap.has_vision_request = !ctx.params.image_data.empty() && state.ctx &&
+        ctx.snap.has_vision_request = !ctx.params.images.empty() && state.ctx &&
                                       state.ctx->engine->has_vision();
     }
 
@@ -201,34 +201,48 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // binds it per-request on admission, so a vision request batches like text.
     // Soft-token placeholders are injected by apply_with_image() below.
     if (ctx.snap.has_vision_request) {
-        auto fail = [&] {
+        auto fail = [&](const std::string& why) {
             res.status = 400;
-            json error = {
-                {"error", {{"message", "Failed to process image"}, {"type", "invalid_request_error"}}}};
+            json error = {{"error", {{"message", why}, {"type", "invalid_request_error"}}}};
             res.set_content(dump_safe(error), "application/json");
             return false;
         };
-        // Salts the prefix cache so a hit needs the same picture, not just the
-        // same token ids (every image token shares one id).
-        ctx.snap.vision_content_hash = imp::image_content_hash(ctx.params.image_data.data(),
-                                                               ctx.params.image_data.size());
+        // An image_url that could not be read is fatal, not skipped: dropping
+        // one would slide every later picture onto the wrong placeholder.
+        if (!ctx.params.image_error.empty())
+            return fail(ctx.params.image_error);
+        // Salts the prefix cache so a hit needs the same pictures, not just the
+        // same token ids (every image token shares one id). Folded in order, so
+        // the same two images the other way round are a different key.
+        ctx.snap.vision_content_hash = 0;
+        for (const auto& bytes : ctx.params.images)
+            ctx.snap.vision_content_hash = imp::combine_image_hash(ctx.snap.vision_content_hash,
+                                                                   imp::image_content_hash(bytes.data(),
+                                                                                           bytes.size()));
         if (state.ctx->engine->has_qwen_vision()) {
-            // Dynamic resolution: patchify now (CPU only) so the token count is
-            // known before the prompt is tokenized — the placeholders have to be
-            // expanded to exactly that many.
-            auto patches = std::make_shared<imp::QwenPatches>();
-            if (!state.ctx->engine->preprocess_image_qwen(ctx.params.image_data.data(),
-                                                          ctx.params.image_data.size(), *patches))
-                return fail();
-            ctx.snap.qwen_image_tokens = state.ctx->engine->image_tokens_of(*patches);
-            if (ctx.snap.qwen_image_tokens <= 0)
-                return fail();
-            ctx.snap.qwen_patches = std::move(patches);
+            // Dynamic resolution: patchify now (CPU only) so the token counts
+            // are known before the prompt is tokenized — each placeholder has
+            // to be expanded to exactly its own picture's count.
+            for (const auto& bytes : ctx.params.images) {
+                auto patches = std::make_shared<imp::QwenPatches>();
+                if (!state.ctx->engine->preprocess_image_qwen(bytes.data(), bytes.size(), *patches))
+                    return fail("Failed to process image");
+                const int tokens = state.ctx->engine->image_tokens_of(*patches);
+                if (tokens <= 0)
+                    return fail("Failed to process image");
+                ctx.snap.qwen_image_tokens.push_back(tokens);
+                ctx.snap.qwen_patches.push_back(std::move(patches));
+            }
+        } else if (ctx.params.images.size() > 1) {
+            // The mmproj tower encodes one image into a fixed token count and
+            // has no notion of a second. Refusing beats answering about one of
+            // the pictures as if it were all of them.
+            return fail("this model accepts one image per request");
         } else {
             auto img = std::make_shared<imp::ImageData>();
-            if (!state.ctx->engine->preprocess_image(ctx.params.image_data.data(),
-                                                     ctx.params.image_data.size(), *img))
-                return fail();
+            if (!state.ctx->engine->preprocess_image(ctx.params.images[0].data(), ctx.params.images[0].size(),
+                                                     *img))
+                return fail("Failed to process image");
             ctx.snap.vision_image = std::move(img);
         }
     }
@@ -297,14 +311,23 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                                 ctx.snap.enable_thinking;
 
     // Tokenize with chat template (with image tokens if vision is active)
-    if (ctx.snap.have_template && ctx.snap.qwen_patches) {
-        // The chat template renders ONE <|image_pad|> — at template time nobody
-        // knows how big the image will be after smart_resize. Put the vision
-        // block in front of the first user turn, render, then expand.
+    if (ctx.snap.have_template && !ctx.snap.qwen_patches.empty()) {
+        // The chat template renders one <|image_pad|> per block — at template
+        // time nobody knows how big each image will be after smart_resize. Put
+        // one block per image in front of the first user turn, render, then
+        // expand each placeholder to its own count.
+        //
+        // All of them go on the first user turn, which is where a single image
+        // already went: the request parser keeps the pictures in order but not
+        // which message they came from, so this is the position that is
+        // actually known rather than guessed.
+        std::string blocks;
+        for (size_t i = 0; i < ctx.snap.qwen_patches.size(); ++i)
+            blocks += "<|vision_start|><|image_pad|><|vision_end|>";
         auto msgs = ctx.params.chat_msgs;
         for (auto& m : msgs)
             if (m.role == "user") {
-                m.content = "<|vision_start|><|image_pad|><|vision_end|>" + m.content;
+                m.content = blocks + m.content;
                 break;
             }
         ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
@@ -312,7 +335,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         const int32_t pad_id = ctx.snap.tok->find_token("<|image_pad|>");
         std::string exp_err;
         if (pad_id < 0 ||
-            !imp::expand_image_placeholders(ctx.snap.tokens, pad_id, {ctx.snap.qwen_image_tokens}, exp_err)) {
+            !imp::expand_image_placeholders(ctx.snap.tokens, pad_id, ctx.snap.qwen_image_tokens, exp_err)) {
             res.status = 400;
             json error = {{"error",
                            {{"message", pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err},
@@ -583,7 +606,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
                                                  bool stream) {
     auto req = std::make_shared<imp::Request>();
     req->image = ctx.snap.vision_image;         // per-request vision (null for text)
-    req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (null otherwise)
+    req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (empty otherwise)
     req->vision_content_hash = ctx.snap.vision_content_hash;
     req->input_tokens = input_tokens;
     req->max_tokens = ctx.params.max_tokens;

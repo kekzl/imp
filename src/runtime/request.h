@@ -249,11 +249,16 @@ struct Request {
     int32_t vision_token_id = -1;
     int n_vision_tokens = 0;
 
-    // Qwen3-VL, per-request. `qwen_patches` is the CPU-preprocessed image set by
-    // the server thread; the batch worker turns it into `vision_emb` +
-    // `deepstack_emb` on admission and clears it. Per-request rather than
-    // engine-global because the server admits image requests concurrently.
-    std::shared_ptr<QwenPatches> qwen_patches;
+    // Qwen3-VL, per-request. `qwen_patches` holds the CPU-preprocessed images
+    // set by the server thread, in prompt order; the batch worker encodes them
+    // into ONE concatenated `vision_emb` (+ one `deepstack_emb` per tap) on
+    // admission and clears them. Per-request rather than engine-global because
+    // the server admits image requests concurrently.
+    //
+    // A vector rather than one image because the kernels address embeddings by
+    // "the k-th image token in the prompt", which is already a global index
+    // across every picture — concatenating in prompt order is all they need.
+    std::vector<std::shared_ptr<QwenPatches>> qwen_patches;
     // Hash of this request's image bytes, seeded into the prefix cache's block
     // chain. Without it the cache matches on token ids alone, and every image
     // token has the same id — so a second request would inherit the first

@@ -68,6 +68,9 @@ checkpoint, so there is no second file and no second flag.
 | [Gemma-3-27B-it](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | Q4_K_M | GGUF | largest Gemma-3 |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | GGUF | text + vision via the gemma4v encoder (separate BF16 mmproj), `tg128` 273 — see [`vision_gemma4v_spec.md`](vision_gemma4v_spec.md) |
 
+Several images in one request are supported on this tower — repeat `--image`, or
+send several `image_url` parts — and they are read in prompt order.
+
 `Qwen3VLForConditionalGeneration` and `Qwen3VLMoeForConditionalGeneration` are both
 registered; only the dense 4B is validated end to end here. A VL checkpoint also
 loads text-only — the tower is simply never run if no image is passed.

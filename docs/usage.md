@@ -173,7 +173,8 @@ Model:
   --revision <rev>          HuggingFace revision when --model is a hub repo id
   --mmproj <path>           Vision encoder GGUF (Gemma-3/Gemma-4; Qwen3-VL
                             carries its tower in the checkpoint)
-  --image <path>            Input image (needs a model with a vision tower)
+  --image <path>            Input image (needs a model with a vision tower).
+                            Repeat for several images (Qwen3-VL only)
   --device <n>              CUDA device ID (default: 0)
   --gpu-layers <n>          Layers on GPU, -1 = all (default: -1)
   --config <path>           Path to imp.conf (overrides search-path)
@@ -408,7 +409,8 @@ imp_model_free(model);
 ```
 
 Token-level control via `imp_prefill` / `imp_decode_step`, vision
-via `imp_set_image` (one image at a time; pass NULL to clear).
+via `imp_set_image` (pass NULL to clear) and `imp_add_image` for a second and
+further picture on the Qwen3-VL tower.
 
 ## Project Structure
 

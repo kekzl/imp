@@ -52,6 +52,15 @@ size_t image_content_hash(const uint8_t* data, size_t len) {
     return h ? h : 1;  // 0 is the cache's "no image" sentinel
 }
 
+size_t combine_image_hash(size_t running, size_t next) {
+    if (running == 0)
+        return next;
+    // FNV-style mix, so swapping two images changes the result. Never returns
+    // 0: that value means "no image" to the prefix cache.
+    const size_t h = (running * 0x100000001b3ULL) ^ next;
+    return h ? h : 1;
+}
+
 int image_tokens_before(const std::vector<int32_t>& tokens, int32_t pad_id, int upto) {
     if (upto <= 0)
         return 0;

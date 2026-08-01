@@ -512,7 +512,11 @@ int main(int argc, char** argv) {
             // Handle /image command
             if (input.rfind("/image ", 0) == 0) {
                 std::string img_path = input.substr(7);
-                err = imp_set_image(ctx, img_path.c_str());
+                // Repeating /image before sending stacks the pictures up. The
+                // pending list empties when a message consumes it, so the first
+                // /image of the next turn starts fresh without a clear command.
+                const bool first = imp_pending_image_tokens(ctx) == 0;
+                err = first ? imp_set_image(ctx, img_path.c_str()) : imp_add_image(ctx, img_path.c_str());
                 if (err != IMP_SUCCESS) {
                     fprintf(stderr, "Error loading image: %s\n", imp_error_string(err));
                 } else {
@@ -534,13 +538,16 @@ int main(int argc, char** argv) {
                 // model answered as if it had not been given one.
                 const int pending_img_tokens = imp_pending_image_tokens(ctx);
                 if (pending_img_tokens > 0) {
+                    const std::vector<int> counts = ctx->engine->pending_image_token_counts();
+                    std::string blocks;
+                    for (size_t i = 0; i < counts.size(); ++i)
+                        blocks += "<|vision_start|><|image_pad|><|vision_end|>";
                     std::vector<imp::ChatMessage> msgs = history;
-                    msgs.back().content = "<|vision_start|><|image_pad|><|vision_end|>" + msgs.back().content;
+                    msgs.back().content = blocks + msgs.back().content;
                     tokens = chat_tpl.apply(*tok, msgs);
                     const int32_t pad_id = tok->find_token("<|image_pad|>");
                     std::string exp_err;
-                    if (pad_id < 0 ||
-                        !imp::expand_image_placeholders(tokens, pad_id, {pending_img_tokens}, exp_err)) {
+                    if (pad_id < 0 || !imp::expand_image_placeholders(tokens, pad_id, counts, exp_err)) {
                         fprintf(stderr, "Error placing image tokens: %s\n",
                                 pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err.c_str());
                         history.pop_back();
@@ -704,16 +711,19 @@ int main(int argc, char** argv) {
         if (args.prompt.empty()) {
             fprintf(stderr, "No prompt provided. Use --prompt or --interactive\n");
         } else {
-            // Load image if specified
-            if (!args.image_path.empty()) {
-                err = imp_set_image(ctx, args.image_path.c_str());
+            // Load images if specified. The first replaces whatever was
+            // pending, the rest append, so repeating --image builds a prompt
+            // with one placeholder per picture.
+            for (size_t i = 0; i < args.image_paths.size(); ++i) {
+                const char* p = args.image_paths[i].c_str();
+                err = (i == 0) ? imp_set_image(ctx, p) : imp_add_image(ctx, p);
                 if (err != IMP_SUCCESS) {
-                    fprintf(stderr, "Error loading image: %s\n", imp_error_string(err));
+                    fprintf(stderr, "Error loading image '%s': %s\n", p, imp_error_string(err));
                     imp_context_free(ctx);
                     imp_model_free(model);
                     return 1;
                 }
-                fprintf(stderr, "Image loaded: %s\n", args.image_path.c_str());
+                fprintf(stderr, "Image loaded: %s\n", p);
             }
 
             imp::Tokenizer* tok = model->model->tokenizer();
@@ -738,16 +748,19 @@ int main(int argc, char** argv) {
             std::vector<int32_t> tokens;
             const int pending_img_tokens = imp_pending_image_tokens(ctx);
             if (have_template && pending_img_tokens > 0) {
-                // Dynamic resolution: the template emits ONE <|image_pad|>
-                // because the count is not knowable until the image has been
-                // resized. Render it, then expand to what the encoder produced.
-                std::vector<imp::ChatMessage> msgs = {
-                    {"user", "<|vision_start|><|image_pad|><|vision_end|>" + args.prompt}};
+                // Dynamic resolution: the template emits one <|image_pad|> per
+                // block, because the count is not knowable until the image has
+                // been resized. Render one block per image, then expand each to
+                // what its own encoder pass produced.
+                const std::vector<int> counts = ctx->engine->pending_image_token_counts();
+                std::string blocks;
+                for (size_t i = 0; i < counts.size(); ++i)
+                    blocks += "<|vision_start|><|image_pad|><|vision_end|>";
+                std::vector<imp::ChatMessage> msgs = {{"user", blocks + args.prompt}};
                 tokens = chat_tpl.apply(*tok, msgs);
                 const int32_t pad_id = tok->find_token("<|image_pad|>");
                 std::string exp_err;
-                if (pad_id < 0 ||
-                    !imp::expand_image_placeholders(tokens, pad_id, {pending_img_tokens}, exp_err)) {
+                if (pad_id < 0 || !imp::expand_image_placeholders(tokens, pad_id, counts, exp_err)) {
                     fprintf(stderr, "Error placing image tokens: %s\n",
                             pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err.c_str());
                     imp_context_free(ctx);

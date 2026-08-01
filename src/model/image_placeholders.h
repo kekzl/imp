@@ -28,6 +28,12 @@ bool expand_image_placeholders(std::vector<int32_t>& tokens, int32_t pad_id, con
 // means "no image" to the cache, and an all-zero image must not claim it.
 size_t image_content_hash(const uint8_t* data, size_t len);
 
+// Fold one more image's hash into a running salt for a request carrying
+// several. Order-sensitive on purpose: the same two pictures the other way
+// round are a different prompt and must not share a prefix-cache key. Seed with
+// 0 and call once per image, in prompt order.
+size_t combine_image_hash(size_t running, size_t next);
+
 // How many image tokens sit before `upto` — the embedding index a chunk
 // starting there must resume from. The vision kernels scan the chunk they are
 // handed, so without this a run of image tokens crossing a chunk boundary

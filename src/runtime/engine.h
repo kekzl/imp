@@ -198,14 +198,21 @@ public:
     // caller needs this BEFORE tokenizing, because the chat template emits one
     // placeholder and the prompt has to hold this many.
     int pending_image_tokens() const;
+    // The same total, split per pending image — what `expand_image_placeholders`
+    // needs, since each placeholder expands to its OWN picture's count.
+    std::vector<int> pending_image_token_counts() const;
     // Server path: CPU-only patchify (safe off the batch worker) and the token
     // count the prompt must reserve for it.
     bool preprocess_image_qwen(const uint8_t* data, size_t len, QwenPatches& out) const;
     int image_tokens_of(const QwenPatches& patches) const;
     bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready(); }
     // Vision: set image for next generation. Returns false if no mmproj loaded.
+    // `set_` replaces whatever was pending; `add_` appends, which only the
+    // Qwen3-VL tower supports (the mmproj tower holds exactly one image).
     [[nodiscard]] bool set_image(const std::string& path);
     [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
+    [[nodiscard]] bool add_image(const std::string& path);
+    [[nodiscard]] bool add_image_from_memory(const uint8_t* data, size_t len);
     void clear_image();
     bool has_vision() const noexcept { return vision_.is_available() || qwen_vision_.is_ready(); }
     bool has_vision_input() const noexcept { return vision_.has_input(); }
@@ -628,13 +635,15 @@ private:
     // it surfaces as an answer about the last picture.
     bool encode_qwen_image_for_(Request& req, cudaStream_t stream);
     // Prompt-side half: where the image sits and what it costs in positions.
-    bool build_qwen_layout_(Request& req, const Qwen3VLImage& shape);
+    bool build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes);
 
-    // CLI only: one image, preprocessed on the caller's thread, waiting for the
-    // next request that has placeholders for it.
-    std::shared_ptr<QwenPatches> qwen_pending_patches_;
-    // Hash of the image currently pending on the engine (the CLI's single
-    // image), stamped onto the request that picks it up.
+    // CLI only: images preprocessed on the caller's thread, in the order they
+    // were given, waiting for the next request that has placeholders for them.
+    std::vector<std::shared_ptr<QwenPatches>> qwen_pending_patches_;
+    // Hash over ALL pending images, stamped onto the request that picks them
+    // up. Combined rather than per-image because the prefix cache asks one
+    // question — "same tokens and same pictures?" — and two requests differing
+    // only in the order of two images must not share a prefix.
     size_t pending_image_hash_ = 0;
     int32_t qwen_image_pad_id_ = -1;
     // Constraint FSM state lives per-request (Request::constraints) — a
