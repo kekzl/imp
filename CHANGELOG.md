@@ -11,6 +11,30 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+- **A C-API embedding got different kernels than `imp-cli`/`imp-server` from the
+  same config** (#1205). `process_diag_install()` — the snapshot 28 kernel- and
+  dispatch-affecting flags are read from by leaf kernels that carry no
+  `RuntimeConfig` — ran only in the tool mains, so a library consumer's
+  `attention.*`, `moe.*`, `gdn.*` and `runtime.*` settings were honoured by
+  `exec/` and silently ignored by `compute/`. `attention.fa2_hd256` was the sharp
+  case: the executor decides whether to attempt FA2 (and whether to size the
+  384 MiB S-matrix workspace) from the engine's config while the kernel accepts
+  hd=256 from the process-wide snapshot, so the two could disagree and walk the
+  FMHA chain down to the #654 throw. `Engine::init()` now installs, before the
+  arch resolvers that promote `cublas_fp16_acc`/`deterministic_gemm`.
+
+### Added
+- **`Resolved dispatch:` log line — which attention and MoE kernels a model
+  actually ran** (#1205). Emitted once, after the first step that has seen both a
+  prefill and a decode, e.g.
+  `attn_prefill=fa2_fp16qk attn_decode=paged_fp8 moe_prefill=cutlass3x → device_args graphs=1`.
+  The six prefill tiers and five MoE branches all decline by returning `false`
+  with no log, so a model dropping to a slower or lower-quality path used to
+  leave no trace. Recorded from inside the real dispatch
+  (`compute/dispatch_record.h`), not predicted from a second copy of the routing
+  rules, so it cannot disagree with what ran.
+
 ## [0.20.2] - 2026-08-02
 
 ### Fixed

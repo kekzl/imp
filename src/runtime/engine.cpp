@@ -780,12 +780,30 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // budgets, KV clamp, workspaces) reads through vram_budget_mem_get_info.
     vram_budget_install(config_.vram_budget_mb);
 
-    // The deterministic kernel gate lives in process_diag (compute kernels
-    // read process_diag_deterministic_gemm()), but process_diag_install()
-    // only runs in tool mains. Promote the gate here so library/test
-    // embeddings (C API without a tool main) honor [runtime] deterministic /
-    // IMP_DETERMINISTIC too. True-promotion only — arch resolvers and tool
-    // installs may already have set it.
+    // Publish THIS engine's RuntimeConfig to the process_diag snapshot that the
+    // leaf kernels read. Until #1205 this only ever ran in the tool mains
+    // (imp-cli / imp-server), so a C-API embedding got the *default* value for
+    // all 28 mirrored flags while exec/ read the engine's own RuntimeConfig —
+    // same config, different kernels. attention.fa2_hd256 was the sharp case:
+    // exec/ decides whether to attempt FA2 (and whether to size the S-matrix
+    // workspace) from runtime_config_, while the kernel accepts hd=256 based on
+    // process_diag_fa2_hd256(); with the two disagreeing, the FMHA chain can walk
+    // down to the #654 throw.
+    //
+    // Ordering matters twice over:
+    //   - BEFORE the arch resolvers below. install() writes gemm.cublas_fp16_acc
+    //     ("auto" → off) and runtime.deterministic_gemm verbatim; the resolvers
+    //     then promote both via their setters. Installing after them would undo
+    //     the arch-specific decisions.
+    //   - BEFORE the true-promotion of the deterministic gate, which must stay
+    //     after install() so [runtime] deterministic still implies
+    //     deterministic_gemm (install copies only the latter field).
+    process_diag_install(runtime_config_);
+
+    // The deterministic kernel gate lives in process_diag (compute kernels read
+    // process_diag_deterministic_gemm()). [runtime] deterministic implies it,
+    // but install() above copies only [runtime] deterministic_gemm, so promote
+    // here. True-promotion only — arch resolvers may already have set it.
     if (runtime_config_.runtime.deterministic || runtime_config_.runtime.deterministic_gemm)
         process_diag_set_deterministic_gemm(true);
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/dispatch_paths.h"  // AttnPrefillPath
 #include "runtime/config.h"
 
 // Pure host-side model of the attention-prefill dispatch ordering in
@@ -25,14 +26,9 @@
 
 namespace imp {
 
-enum class AttnPrefillPath {
-    MXFP4,        // fmha_sm120_mxfp4_prefill
-    FA2,          // fmha_sm120_fa2_prefill (register-resident)
-    FP8,          // fmha_sm120_fp8_prefill
-    FMHA_SM120,   // fmha_sm120_prefill (WMMA)
-    BLACKWELL,    // flash_attention_blackwell (final tier; declines unsupported configs)
-    NONE,         // chain exhausted → attention_prefill_dispatch throws (#654)
-};
+// AttnPrefillPath now lives in compute/dispatch_paths.h so the runtime recorder
+// (compute/dispatch_record.h) names the tiers with the same vocabulary this
+// model does — see #1205. Renaming a tier breaks both sides together.
 
 // Per-kernel "would this kernel accept the config" flags, mirroring the bool
 // each `fmha_..._prefill(...)` collapses to in the .cu (mxfp4 also has an outer

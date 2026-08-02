@@ -570,6 +570,8 @@ private:
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
     bool experts_on_host_ = false;
     bool dequant_done_ = false;
+    // One-shot guard for the resolved-dispatch summary (#1205).
+    bool dispatch_dump_done_ = false;
     // Balloon reservation for the mandatory native-NVFP4 decode caches
     // (CUTLASS SfAtom slab + nvfp4_moe). Held from right after weight
     // upload (before workspaces/KV consume the headroom) until just before
@@ -973,6 +975,11 @@ private:
     // call sequence in init() for which flag each one resolves.
     void init_apply_debug_raw_overrides_();
     void init_apply_rope_override_();
+    // One-shot "which kernels did this model actually resolve to" summary,
+    // read back from compute/dispatch_record.h after the first step that has
+    // seen both a prefill and a decode (#1205).
+    void log_resolved_dispatch_once_();
+
     void init_resolve_kv_dtype_policy_();
     void init_resolve_ssm_dtype_();
     void init_resolve_fp8_prefill_();

@@ -191,6 +191,7 @@ set(IMP_QUANT_SOURCES
 )
 
 set(IMP_COMPUTE_SOURCES
+    src/compute/dispatch_paths.cpp
     src/compute/gemm.cu
     src/compute/gemm_capture_fp16_sm120.cu
     src/compute/ffn_sparsity_probe.cu
@@ -610,6 +611,13 @@ if(IMP_BUILD_TESTS)
         tests/test_qwen3vl_vision_grid.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
+        # RuntimeConfig → process_diag snapshot (#1205). CPU-only by design:
+        # process_diag exists so leaf kernels can read config without carrying
+        # one, so the coupling is testable with no CUDA, Model or Engine.
+        tests/test_process_diag.cpp
+        # Resolved-dispatch recorder (#1205). CPU-only: plain POD + name tables,
+        # and it guards the "new tier prints '?' in the summary" gap.
+        tests/test_dispatch_record.cpp
         # Generative FSM battery for the schema-less json_object grammar. Lives
         # in the CPU lane on purpose: the FSM is CUDA-free without init(), and
         # every past grammar bug escaped CI because its tests need a GPU.
