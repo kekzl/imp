@@ -69,8 +69,16 @@ bool Engine::init_features() {
                 IMP_LOG_INFO("No chat template in metadata, using %s default for %s",
                              chat_template_family_name(family), model_arch_name(mcfg.arch));
         }
-        if (family != ChatTemplateFamily::RAW)
-            chat_template_.init(family, *tok, tok->chat_template_str());
+        if (family != ChatTemplateFamily::RAW && !chat_template_.init(family, *tok, tok->chat_template_str()))
+            // Was silently discarded until #1206 marked init() [[nodiscard]]. A
+            // failed template init leaves chat_template_ inert, so every
+            // /v1/chat/completions request falls back to raw concatenation —
+            // the model sees no role markers and answers as if continuing text.
+            // That looks like a model-quality problem, not a load problem.
+            IMP_LOG_WARN(
+                "Chat template init failed for family %s — requests will use raw "
+                "prompt concatenation (no role markers)",
+                chat_template_family_name(family));
     }
 
     build_banned_token_list();

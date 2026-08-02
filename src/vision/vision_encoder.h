@@ -15,7 +15,8 @@ public:
     ~VisionEncoder();
 
     // Initialize workspace buffers. lm_d_model = LLM hidden dim.
-    bool init(const VisionModel& model, int lm_d_model, cudaStream_t stream, VRAMAllocator* alloc = nullptr);
+    [[nodiscard]] bool init(const VisionModel& model, int lm_d_model, cudaStream_t stream,
+                            VRAMAllocator* alloc = nullptr);
 
     // Encode a preprocessed image.
     // d_pixels: [3, image_size, image_size] FP16 on device

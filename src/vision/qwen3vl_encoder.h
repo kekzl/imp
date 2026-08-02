@@ -29,7 +29,7 @@ public:
 
     // `model` must already be uploaded (qwen3vl_upload_vision_tower). Its
     // lifetime must outlast this encoder — only the pointer is kept.
-    bool init(const VisionModel& model, VRAMAllocator* alloc, int max_tokens);
+    [[nodiscard]] bool init(const VisionModel& model, VRAMAllocator* alloc, int max_tokens);
     void free_buffers();
 
     int max_tokens() const { return max_tokens_; }

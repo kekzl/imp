@@ -618,6 +618,10 @@ if(IMP_BUILD_TESTS)
         # Resolved-dispatch recorder (#1205). CPU-only: plain POD + name tables,
         # and it guards the "new tier prints '?' in the summary" gap.
         tests/test_dispatch_record.cpp
+        # Public C enums vs their internal counterparts (#1206). A test file may
+        # include both sides, which is the only place the two hand-maintained
+        # copies of the arch/dtype numbering can be tied together.
+        tests/test_c_api_enum_binding.cpp
         # Generative FSM battery for the schema-less json_object grammar. Lives
         # in the CPU lane on purpose: the FSM is CUDA-free without init(), and
         # every past grammar bug escaped CI because its tests need a GPU.

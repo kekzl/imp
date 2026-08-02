@@ -222,8 +222,8 @@ public:
     //   - d_position[0] and d_context_len[0] will be set by setup.
     //   - block_tables must cover the full generation (pre-allocated).
     //   - max_context_len should be set to initial_ctx + max_steps.
-    bool setup(GraphExecutor* executor, const InferenceState& state_template, int32_t first_token,
-               Config config, cudaStream_t stream);
+    [[nodiscard]] bool setup(GraphExecutor* executor, const InferenceState& state_template,
+                             int32_t first_token, Config config, cudaStream_t stream);
 
     // Launch the graph. Returns immediately.
     bool launch(cudaStream_t stream);

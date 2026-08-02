@@ -33,7 +33,7 @@ public:
 
     // Initialize: query total VRAM and set headroom fraction.
     // Must be called before any allocations.
-    bool init(float headroom_fraction = 0.10f);
+    [[nodiscard]] bool init(float headroom_fraction = 0.10f);
 
     // Allocate device memory. Returns nullptr if:
     //  - allocation would violate headroom (unless bypass_headroom=true)
