@@ -1,5 +1,7 @@
 #pragma once
 
+#include "compute/constrain_device_buffers.h"
+
 #include "compute/json_schema.h"
 #include "compute/preamble_gate.h"
 #include "model/tokenizer.h"
@@ -207,13 +209,12 @@ private:
 
     // Per-token classification (shared pattern with JsonConstrainer)
     std::vector<uint16_t> token_categories_;
-    uint16_t* d_token_categories_ = nullptr;
     std::vector<std::string> token_texts_;
 
     // Per-token allow mask for fine-grained control (key names, enum values)
     std::vector<uint8_t> token_allow_;
-    uint8_t* d_token_allow_ = nullptr;
-    uint16_t* d_allowed_mask_ = nullptr;
+    // categories + allowed-mask + token-allow, one lifetime (F-18)
+    ConstrainDeviceBuffers dev_;
     bool need_token_allow_ = false;
 
     // Schema FSM state

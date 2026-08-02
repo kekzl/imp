@@ -578,10 +578,8 @@ void Engine::init_resolve_quant_flags_() {
         }
         // Gemma 4: CUDA graphs are fully enabled by default. The user can opt
         // out via [gemma4] no_graphs = true for bisecting regressions.
-        if (model_->config().overrides.gemma4.no_graphs) {
-            IMP_LOG_INFO("Gemma 4: disabling all CUDA graphs (gemma4.no_graphs=true)");
-            config_.use_cuda_graphs = false;
-        }
+        if (model_->config().overrides.gemma4.no_graphs)
+            demote_graphs_(GraphDemotionReason::Gemma4NoGraphs);
         // Enable MMVQ for all weight GEMMs — quantized matmul matching llama.cpp's
         // accumulation behavior, critical for 128-expert MoE precision.
         if (!model_->config().overrides.gemma4.force_mmvq) {

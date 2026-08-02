@@ -11,6 +11,7 @@
 #include "vision/qwen3vl_pipeline.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/config.h"
+#include "runtime/graph_eligibility.h"
 #include "runtime/suffix_draft.h"
 #include "runtime/token_recycle_draft.h"
 #include "runtime/vram_budget.h"
@@ -572,6 +573,10 @@ private:
     bool dequant_done_ = false;
     // One-shot guard for the resolved-dispatch summary (#1205).
     bool dispatch_dump_done_ = false;
+    // Why CUDA graphs were turned off, if they were. First reason wins: a model
+    // demoted for pure-SSM layers that later also hits KV pressure was never
+    // graph-eligible in the first place, and that is the answer worth keeping.
+    GraphDemotionReason graph_demotion_ = GraphDemotionReason::None;
     // Balloon reservation for the mandatory native-NVFP4 decode caches
     // (CUTLASS SfAtom slab + nvfp4_moe). Held from right after weight
     // upload (before workspaces/KV consume the headroom) until just before
@@ -1100,6 +1105,18 @@ private:
     void finish_request(std::shared_ptr<Request>& req);
 
     // ── step() sub-phases ─────────────────────────────────────────────
+    // The real step body. step() is a thin wrapper so the resolved-dispatch
+    // summary runs on EVERY exit — the body has five early returns, and the
+    // graphs-ON decode path leaves through the first of them (#1205 placed the
+    // call before the final return, where decode almost never arrives).
+    [[nodiscard]] bool step_impl_();
+
+    // The single answer site for "are CUDA graphs off, and why" (F-14). Turns
+    // them off if they are still on, records the FIRST reason, and logs it in
+    // one format. Idempotent: calling it once graphs are already off keeps the
+    // original reason and logs nothing further.
+    void demote_graphs_(GraphDemotionReason reason);
+
     // Returns: 0 = no async graph active, 1 = still running (step returns true),
     //         -1 = graph exhausted/generation done (check scheduler for more work)
     int step_async_graph_resume();

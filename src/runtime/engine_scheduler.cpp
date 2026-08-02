@@ -59,7 +59,23 @@ using engine_internal::free_prefill_buffers;
 // step() — main inference loop
 // =====================================================================
 
+// The resolved-dispatch summary must survive EVERY exit from the step body,
+// which is why the body is wrapped instead of ending with the call.
+//
+// #1205 put log_resolved_dispatch_once_() before the final `return` of step().
+// That is the one exit the decode path almost never takes: once the async
+// conditional graph loop is armed — the normal graphs-ON decode route — every
+// subsequent step() returns from the `async_result == 1` fast path below, so the
+// recorded decode tier was set and then never read. A full prefill+decode E2E run
+// on Qwen3.6-35B-A3B-NVFP4 printed no summary line at all. The feature built to
+// make silent routing visible was itself silent.
 bool Engine::step() {
+    const bool more = step_impl_();
+    log_resolved_dispatch_once_();
+    return more;
+}
+
+bool Engine::step_impl_() {
     // Fast path: async conditional graph loop completed on GPU.
     int async_result = step_async_graph_resume();
     if (async_result == 1)
@@ -104,9 +120,26 @@ bool Engine::step() {
         ensure_prefill_workspace(executor_.get());
     }
 
-    log_resolved_dispatch_once_();
-
     return scheduler_->has_pending() || scheduler_->active_count() > 0;
+}
+
+// The one answer site for graph eligibility (F-14).
+//
+// Eight sites across four TUs can turn graphs off. They stay where they are —
+// two of them depend on state that does not exist until weight upload and
+// warmup respectively — but they all route the *decision* through here, so the
+// reason survives the call and prints in the resolved-dispatch summary instead
+// of scrolling past in an init transcript.
+void Engine::demote_graphs_(GraphDemotionReason reason) {
+    if (!config_.use_cuda_graphs) {
+        // Already off. Keep the first reason: it is the one that describes the
+        // model, and a later demotion could not have taken effect anyway.
+        return;
+    }
+    config_.use_cuda_graphs = false;
+    graph_demotion_ = reason;
+    IMP_LOG_INFO("CUDA graphs disabled: %s%s", graph_demotion_reason_name(reason),
+                 graph_demotion_is_mid_run(reason) ? " (mid-run, one-way)" : "");
 }
 
 // One-shot summary of the kernels this model ACTUALLY resolved to (#1205).
@@ -149,8 +182,16 @@ void Engine::log_resolved_dispatch_once_() {
         snprintf(moe, sizeof(moe), "%s", moe_prefill_outer_name(r.moe_prefill_outer));
     }
 
-    IMP_LOG_INFO("Resolved dispatch: attn_prefill=%s attn_decode=%s moe_prefill=%s graphs=%d", prefill,
-                 attn_decode_path_name(r.attn_decode), moe, (int)config_.use_cuda_graphs);
+    // graphs=0 alone made the interesting case unreadable — "off" and "off
+    // because this model can never capture" are different facts (F-14).
+    char graphs[64];
+    if (config_.use_cuda_graphs)
+        snprintf(graphs, sizeof(graphs), "1");
+    else
+        snprintf(graphs, sizeof(graphs), "0(%s)", graph_demotion_reason_name(graph_demotion_));
+
+    IMP_LOG_INFO("Resolved dispatch: attn_prefill=%s attn_decode=%s moe_prefill=%s graphs=%s", prefill,
+                 attn_decode_path_name(r.attn_decode), moe, graphs);
 }
 
 // =====================================================================
@@ -1509,11 +1550,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                         "KV cache >90%% full (%d/%d blocks free) — auto-enabling "
                         "StreamingLLM (sinks=%d, window=%d)",
                         st.free_blocks, st.total_blocks, n_sinks, win);
-                    if (config_.use_cuda_graphs) {
-                        IMP_LOG_WARN(
-                            "Disabling CUDA Graphs (block table mutates with StreamingLLM).");
-                        config_.use_cuda_graphs = false;
-                    }
+                    demote_graphs_(GraphDemotionReason::StreamingKvKvPressure);
                 }
             }
         }

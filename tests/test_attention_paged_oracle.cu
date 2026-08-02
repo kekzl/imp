@@ -194,6 +194,17 @@ float ue4m3_to_f(uint8_t b) {
     return (float)v;
 }
 
+// UE8M0 (MXFP4-KV block scale): pure exponent, byte b means 2^(b-127), no
+// mantissa. Round the required scale UP to the next power of two — rounding
+// down would push the largest element of the group past E2M1's +-6 and clip it.
+uint8_t f_to_ue8m0(float s) {
+    if (!(s > 0.0f))
+        return 127;  // 2^0
+    int e = (int)std::ceil(std::log2(s)) + 127;
+    return (uint8_t)std::clamp(e, 0, 255);
+}
+float ue8m0_to_f(uint8_t b) { return std::ldexp(1.0f, (int)b - 127); }
+
 // ---------------------------------------------------------------------------
 // Build the F16 paged cache: [num_blocks, block_size, n_kv_heads, head_dim].
 // Identity block table. Returns flat half buffer.
@@ -476,8 +487,12 @@ struct PathINT4 {
 // Shared NVFP4 host quantize (scalar + TC use the same cache). per-(token,
 // kv_head, group-of-16) UE4M3 micro-scale + E2M1 nibble [head_dim/2]. A CORRECT
 // host quantize is mandatory — random-byte NVFP4 drives the scalar kernel NaN.
+// `ue8m0` switches the group-scale byte from UE4M3 (NVFP4) to UE8M0 (MXFP4-KV).
+// Everything else — group of 16, E2M1 nibble pairs, buffer layout — is shared;
+// per attention_paged.h the two caches are structurally identical and differ
+// only in scale-byte semantics.
 static std::vector<uint8_t> nvfp4_quant_kv(const PathCtx& c, const std::vector<half>& kv,
-                                           std::vector<uint8_t>& scales) {
+                                           std::vector<uint8_t>& scales, bool ue8m0 = false) {
     const int half_hd = c.head_dim / 2;
     const int sc_groups = c.head_dim / 16;
     const int sc_elems = c.num_blocks * BLOCK_SIZE * c.n_kv_heads * sc_groups;
@@ -496,8 +511,8 @@ static std::vector<uint8_t> nvfp4_quant_kv(const PathCtx& c, const std::vector<h
                 for (int d = 0; d < 16; d++)
                     amax = std::max(amax, std::fabs(__half2float(kv[src + g * 16 + d])));
                 float sc = amax > 0 ? amax / 6.0f : 1.0f;  // E2M1 max magnitude = 6
-                uint8_t sc_byte = f_to_ue4m3(sc);
-                float sc_q = ue4m3_to_f(sc_byte);
+                uint8_t sc_byte = ue8m0 ? f_to_ue8m0(sc) : f_to_ue4m3(sc);
+                float sc_q = ue8m0 ? ue8m0_to_f(sc_byte) : ue4m3_to_f(sc_byte);
                 if (sc_q <= 0.0f)
                     sc_q = 1.0f;
                 scales[sdst + g] = sc_byte;
@@ -573,6 +588,44 @@ struct PathNVFP4TC {
     }
 };
 
+// MXFP4-KV: reachable from both binaries via --kv-mxfp4 and kv_cache.dtype=mxfp4,
+// dispatched at exec/executor_attention_decode.cu, and until now the only
+// user-selectable KV dtype with no correctness oracle (audit finding F-8).
+//
+// The envelope is looser than NVFP4's on purpose: UE8M0 carries no mantissa, so
+// the group scale is rounded up to a power of two and up to half the E2M1 range
+// can go unused. That is a property of the format, not of the kernel.
+struct PathMXFP4KV {
+    static const char* name() { return "MXFP4-KV"; }
+    static bool strict() { return false; }
+    static float envelope() { return 0.12f; }
+    static ErrStats run(const PathCtx& c) {
+        std::vector<uint8_t> ks, vs;
+        auto Kq = nvfp4_quant_kv(c, *c.Kh, ks, /*ue8m0=*/true);
+        auto Vq = nvfp4_quant_kv(c, *c.Vh, vs, /*ue8m0=*/true);
+        const int half_hd = c.head_dim / 2;
+        void* d_k = up(Kq.data(), Kq.size());
+        void* d_v = up(Vq.data(), Vq.size());
+        void* d_ks = up(ks.data(), ks.size());
+        void* d_vs = up(vs.data(), vs.size());
+        Tensor K = raw_tensor(d_k, QType::MXFP4_KV, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
+        Tensor V = raw_tensor(d_v, QType::MXFP4_KV, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
+        Tensor O = c.O();
+        c.clear_o();
+        paged_attention_decode_mxfp4_kv(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
+                                        c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, 0, 0.0f, c.stream,
+                                        c.num_blocks);
+        cudaStreamSynchronize(c.stream);
+        EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "MXFP4-KV paged launch";
+        ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_ks);
+        cudaFree(d_vs);
+        return e;
+    }
+};
+
 // ===========================================================================
 // TYPED_TEST over KV dtypes (R8 / audit Phase-2 R8: "TYPED_TEST over KV dtypes
 // in the paged oracle"). One typed fixture, one body; each KV dtype is a policy
@@ -639,7 +692,8 @@ protected:
     }
 };
 
-using KVDtypes = ::testing::Types<PathF16, PathFP8, PathINT8, PathINT4, PathNVFP4, PathNVFP4TC>;
+using KVDtypes =
+    ::testing::Types<PathF16, PathFP8, PathINT8, PathINT4, PathNVFP4, PathNVFP4TC, PathMXFP4KV>;
 TYPED_TEST_SUITE(PagedOracle, KVDtypes);
 
 // ===========================================================================
@@ -658,6 +712,7 @@ TYPED_TEST_SUITE(PagedOracle, KVDtypes);
 //   INT4       0.0609    0.0474    0.0193    0.0096    0.10
 //   NVFP4      0.0670    0.0251    0.0134    0.0072    0.11
 //   NVFP4-TC   0.0670    0.0251    0.0133    0.0072    0.11  (tracks scalar)
+//   MXFP4-KV   0.0801    0.0362    0.0251    0.0163    0.12  (MEASURED 2026-08-03)
 //
 // Findings (real):
 //   * Monotone improvement with kv_len — confirms the #512 mechanism in the
@@ -671,6 +726,11 @@ TYPED_TEST_SUITE(PagedOracle, KVDtypes);
 //     documented trap). The no-NaN guard is the load-bearing decode assert.
 //   * NVFP4 scalar and NVFP4-TC agree to <2e-4 — the tensor-core Q.K dot is
 //     numerically equivalent to the scalar dot on this data.
+//   * MXFP4-KV sits ~20% above NVFP4 at every kv_len (0.0801 vs 0.0670 at 16)
+//     and follows the same monotone dilution. That gap is the format, not the
+//     kernel: UE8M0 has no mantissa, so the group scale rounds up to a power of
+//     two and up to half of E2M1's range can go unused. Same layout, same
+//     kernel structure, one coarser scale byte.
 //   * F16 paged tracks fp64 at <2.5e-4, four orders under its 1e-2 budget —
 //     the decode F16 path has no hidden score-precision tax.
 // ===========================================================================

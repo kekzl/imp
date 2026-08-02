@@ -23,12 +23,7 @@ __global__ void regex_mask_kernel(float* __restrict__ logits, const uint8_t* __r
 
 }  // namespace
 
-RegexConstrainer::~RegexConstrainer() {
-    if (d_token_allow_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
-        d_token_allow_ = nullptr;
-    }
-}
+RegexConstrainer::~RegexConstrainer() = default;
 
 // The shared engine is permissive about syntax it cannot honour: `(?=x)` parses
 // as an ordinary group and `^`/`$`/`\b` as literals, so a pattern using them
@@ -147,9 +142,7 @@ bool RegexConstrainer::init(const std::string& pattern, Tokenizer* tokenizer, in
         token_texts_[i] = tokenizer->decode_token(static_cast<int32_t>(i));
     eos_ids_ = tokenizer->eos_ids();
 
-    if (cudaMalloc(&d_token_allow_, vocab_size) != cudaSuccess) {
-        IMP_LOG_ERROR("RegexConstrainer: failed to allocate the device allow mask");
-        d_token_allow_ = nullptr;
+    if (!dev_.alloc_token_allow("RegexConstrainer", vocab_size)) {
         initialized_ = false;
         return false;
     }
@@ -250,18 +243,18 @@ const std::vector<uint8_t>& RegexConstrainer::allow_for_current_state(int vocab_
 }
 
 void RegexConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
-    if (!initialized_ || !d_token_allow_)
+    if (!initialized_ || !dev_.has_token_allow())
         return;
     if (preamble_.active())
         return;
 
     const std::vector<uint8_t>& allow = allow_for_current_state(vocab_size);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, allow.data(), static_cast<size_t>(vocab_size),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev_.token_allow(), allow.data(), static_cast<size_t>(vocab_size),
                                        cudaMemcpyHostToDevice, stream));
 
     const int threads = 256;
     const int blocks = (vocab_size + threads - 1) / threads;
-    regex_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_allow_, vocab_size,
+    regex_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, dev_.token_allow(), vocab_size,
                                                       std::min(vocab_size, vocab_size_));
     IMP_CUDA_CHECK_LAUNCH();
 }

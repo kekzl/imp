@@ -21,12 +21,7 @@ __global__ void grammar_mask_kernel(float* __restrict__ logits, const uint8_t* _
 
 }  // namespace
 
-GrammarConstrainer::~GrammarConstrainer() {
-    if (d_token_allow_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
-        d_token_allow_ = nullptr;
-    }
-}
+GrammarConstrainer::~GrammarConstrainer() = default;
 
 bool GrammarConstrainer::init_grammar_only(const std::string& gbnf) {
     // The manager is pooled and reused across requests, so a new grammar lands
@@ -57,9 +52,7 @@ bool GrammarConstrainer::init(const std::string& gbnf, Tokenizer* tokenizer, int
         token_texts_[static_cast<size_t>(i)] = tokenizer->decode_token(static_cast<int32_t>(i));
     eos_ids_ = tokenizer->eos_ids();
 
-    if (cudaMalloc(&d_token_allow_, static_cast<size_t>(vocab_size)) != cudaSuccess) {
-        IMP_LOG_ERROR("GrammarConstrainer: failed to allocate the device allow mask");
-        d_token_allow_ = nullptr;
+    if (!dev_.alloc_token_allow("GrammarConstrainer", vocab_size)) {
         initialized_ = false;
         return false;
     }
@@ -141,18 +134,18 @@ const std::vector<uint8_t>& GrammarConstrainer::allow_for_current_state(int voca
 }
 
 void GrammarConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
-    if (!initialized_ || !d_token_allow_)
+    if (!initialized_ || !dev_.has_token_allow())
         return;
     if (preamble_.active())
         return;
 
     const std::vector<uint8_t>& allow = allow_for_current_state(vocab_size);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, allow.data(), static_cast<size_t>(vocab_size),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev_.token_allow(), allow.data(), static_cast<size_t>(vocab_size),
                                        cudaMemcpyHostToDevice, stream));
 
     const int threads = 256;
     const int blocks = (vocab_size + threads - 1) / threads;
-    grammar_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_allow_, vocab_size,
+    grammar_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, dev_.token_allow(), vocab_size,
                                                         std::min(vocab_size, vocab_size_));
     IMP_CUDA_CHECK_LAUNCH();
 }

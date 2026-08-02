@@ -293,6 +293,7 @@ endif()
 set(IMP_RUNTIME_SOURCES
     src/runtime/config.cpp
     src/runtime/process_diag.cpp
+    src/runtime/graph_eligibility.cpp
     src/runtime/green_ctx.cu
     src/runtime/scheduler.cpp
     src/runtime/request.cpp
@@ -622,6 +623,10 @@ if(IMP_BUILD_TESTS)
         # Resolved-dispatch recorder (#1205). CPU-only: plain POD + name tables,
         # and it guards the "new tier prints '?' in the summary" gap.
         tests/test_dispatch_record.cpp
+        # Graph-demotion reason enum (F-14). CPU-only: the enum↔name binding is
+        # what makes "graphs=0(reason)" readable, and a new reason without a
+        # name would silently print "?".
+        tests/test_graph_eligibility.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
