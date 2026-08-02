@@ -1426,7 +1426,7 @@ the harness for the other five dtypes.
 
 ---
 
-**F-9 — cuBLASLt algorithm selection is neither cached nor pinned**
+**F-9 — cuBLASLt algorithm selection is neither cached nor pinned** — ⚠️ mechanism CONFIRMED, magnitude REFUTED (3.50 %, not 2.6×; see open question 5)
 `MEDIUM` · effort `M` · blast 2 files · confidence **MEDIUM** (mechanism confirmed; the 2.6× figure
 is from the dispatch, not re-measured)
 
@@ -2077,10 +2077,22 @@ Things this audit could not resolve from source, ordered by how much the answer 
    Reading the call site did not settle whether it is a one-time prewarm or per-invocation;
    a profile would settle it in minutes.
 
-5. **What is the real prefill selection variance today?** The dispatch's 2.6×-across-restarts figure
-   could not be re-measured (GPU busy all session). The *mechanism* is confirmed (§5.2: six
-   independent cuBLASLt handles, no algo cache, no pinning) and `AGENTS.md` compensates with a
-   process rule — but the magnitude is a citation, not an observation.
+5. **What is the real prefill selection variance today?** — ✅ **ANSWERED 2026-08-03: 3.50 %, not 2.6×.**
+   Nine runs of one binary (`imp:test`, Qwen3-8B Q8_0, pp512) from nine independent `docker run`
+   process starts, i.e. nine fresh cuBLASLt handle creations: min 12039.3, max 12460.9 tok/s,
+   spread **3.50 %**. Sub-groups: 0.90 % (n=3), 3.50 % (n=4), 0.94 % (n=2).
+
+   The *mechanism* stands exactly as §5.2 describes it — six independent lazily-created handles,
+   no algo cache, no pinning. What does not stand is the magnitude: the 2.6× figure was a citation
+   carried forward, and at this shape the observable variance sits **inside the prefill gate's own
+   5 % threshold**.
+
+   That re-prices R-16. A persistent algo cache needs a file format plus invalidation on
+   cuBLAS/driver/GPU change, to recover ≤3.5 % on a metric the gate already tolerates.
+
+   **Bound, not a universal claim:** all nine runs are the same model and the same shape. A shape
+   whose heuristic sits on a genuine tie could still swing further, and this measurement says
+   nothing about that case — it only removes 2.6× as the working assumption.
 
 6. **Where does the 20-39 % untracked VRAM actually go?** (F-6.) The `MemAccount` campaign
    quantified the gap without closing it. My reading points at the 676 MiB prewarm block and the
