@@ -8,38 +8,45 @@ If this doc and the code disagree, the code wins. Source of truth is `src/exec/e
 > on hd=128 models (Qwen3 dense/MoE — Q8_0, Q4_K_M, NVFP4) the legacy
 > materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512–pp4096
 > — FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range.
-> At the time of that measurement hd≠128 models (gemma-3-12b, hd=256) still hit
-> it (3.6–6.9% of prefill time); since #930/#932 hd=256 rides the FA2 port too
-> (`attention.fa2_hd256`, default on), so the cuBLAS path now serves only
-> heterogeneous-shape / sinks / opted-out configs.
+> Since #930/#932 hd=256 rides the FA2 port too (`attention.fa2_hd256`, default on).
+>
+> **This does NOT generalise to Gemma-4** (2026-08-02 audit, F-16). Its global
+> layers are hd=512 and take `attention_cublas_prefill` — or, when the S-matrix
+> overflows, `attention_cublas_prefill_sliced` (#1036) — *by design and by
+> measurement*: both beat the SMEM-capped fused hd=512 kernel
+> ([`docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md`](audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md)).
+> So on an advertised model the "legacy" path is the *default* prefill path for
+> half the layer stack, and the 384 MiB `attn_scores` workspace is retained for it.
 
-## Prefill — gate (post #525/#932: FA2 f16-QK first at hd 128 and 256, cuBLAS as fallback)
+## Prefill — the gate
 
-The prefill dispatch in `src/exec/executor_attention_prefill.cu` (~line 338) tries
-the FP16-QK FA2 drop-in before the materialized cuBLAS path:
+**Read the code, not a snippet.** This section used to inline the dispatch
+source; the variables it named (`force_cublas_attn`, `s_matrix_fits`,
+`prefer_fmha`) no longer all exist, and the quoted logic was wrong about
+Gemma-4 for six weeks. Source of truth:
+`src/exec/executor_attention_prefill.cu` for the outer gate (two blocks —
+chunked and non-chunked) and `src/compute/attention_dispatch.cu` for the FMHA
+chain.
 
-```cpp
-// Uniform per-layer shapes (GDN/Mamba2 hybrids: zeros on non-attention layers)
-// are FA2-servable since #932 — only truly heterogeneous shapes (gemma-4 dual
-// head_dim) and learned sinks (gpt-oss) force cuBLAS.
-const bool force_cublas_attn = (per_layer_shapes && !attn_shapes_uniform()) ||
-                               attn_sinks != nullptr;
-const bool s_matrix_fits     = attn_scores_buf_ != nullptr &&
-                               n <= attn_scores_.shape[1];
-const bool prefer_fmha       = !force_cublas_attn &&
-                               (n >= attention.fmha_prefill_threshold);
+The outer gate is decided **per layer**, not per model — that is the part the
+old snippet got wrong. A Gemma-4 request takes FA2 on its hd=256 SWA layers and
+cuBLAS on its hd=512 global layers, in the same forward pass:
 
-if (!force_cublas_attn && try_fa2_fp16qk_prefill(...)) { /* FA2 f16-QK */ }
-else if (s_matrix_fits && !prefer_fmha) attention_cublas_prefill(...); // legacy materialized
-else attention_prefill_dispatch(...);                                  // FMHA chain
-```
+| Condition (per layer) | Path |
+|---|---|
+| no learned sinks, and `hd == 128` or (`hd == 256` and `attention.fa2_hd256`), and `fa2_fp16qk != "never"` | `try_fa2_fp16qk_prefill` — FP16-QK FA2, O(n) memory, primary path |
+| S-matrix fits and below the FMHA threshold | `attention_cublas_prefill` — materialized `[nh, n, ctx]` FP16 S-matrix |
+| `hd == 512`, S-matrix too small for the whole chunk | `attention_cublas_prefill_sliced` (#1036) — cuBLAS in workspace-sized q-row slices; 3.4–3.9x faster than the fused hd=512 FMHA at Skv 8k/16k |
+| otherwise | `attention_prefill_dispatch` → the FMHA chain below |
 
-| Condition | Path | Why |
-|---|---|---|
-| **hd=128, or hd=256 with `fa2_hd256` (default on)**, uniform shapes, no sinks, `fa2_fp16qk != "never"` | `fmha_sm120_fa2_kernel<…,FP16QK=1>` | FP16-QK FA2 (#525, hd=256 since #930/#932): cuBLAS-FP16-quality without the materialized S-matrix, at every length. |
-| short seq, FA2 declined (heterogeneous shapes, `attn_sinks`, hd ∉ {128, 256}, or `fa2_hd256=false`) | `attention_cublas_prefill` | Legacy materialized path: cuBLAS QK^T → [nh, n, n] FP16 S-matrix (`attn_scores_mib`, default 384 MiB; skipped entirely at init when FA2 serves all prefill, #932) → causal softmax → cuBLAS PV. |
-| long seq (n ≥ threshold), FA2 declined | FMHA chain below | Tiled O(n) memory; no materialized S. |
-| chunked continuation (`q_offset > 0`) with cumulative ctx < threshold | `attention_cublas_prefill` | FA2 f16-QK still declines `q_offset > 0` (conservative blanket gate post-#548); the FMHA chain needs ctx ≥ threshold. |
+Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cu:45`: they route
+straight to the FP16 WMMA FMHA — the only sink-capable tier — and **throw** on
+decline rather than falling through to a sink-blind kernel (#992).
+
+Since #1205 the resolved path is also **observable at runtime**: the engine logs
+one `Resolved dispatch: attn_prefill=… attn_decode=… moe_prefill=…` line after
+the first step that has seen both a prefill and a decode, recorded from inside
+the real dispatch rather than predicted.
 
 ### FMHA chain (`src/compute/attention_dispatch.cu`, host model: `attention_dispatch_decision.h`)
 
@@ -74,6 +81,16 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 ### BitDecoding residual cache
 
 When `kv_cache.bitdecoding_qk` is true AND `kv_cache.dtype = nvfp4`, the newest `kv_cache.bitdecoding_residual_tokens` tokens are kept in a residual FP16 buffer and combined with the quantized older blocks at attention time. Used by NVFP4-decode for higher fidelity on the recent context. See `src/compute/attention_paged_nvfp4_tc.cu`.
+
+## MLA (Multi-head Latent Attention)
+
+DeepSeek-V2/V3 checkpoints take a different route entirely and were missing from
+this doc until the 2026-08-02 audit. `ModelProfile::AttnVariant::MLA` marks them;
+the compressed KV latent is expanded by `src/compute/mla_kv_assemble.cu` before
+the assembled K/V reach the gate above, so from the dispatch's point of view an
+MLA layer looks like a normal attention layer with the assembled shapes. There is
+no standard RoPE on the latent path — the YaRN `mscale` ratio bug fixed
+2026-07-07 lived here.
 
 ## Sliding-window mask
 
