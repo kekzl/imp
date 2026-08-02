@@ -301,11 +301,28 @@ void MemAccount::report(const char* phase_label) {
             named += static_cast<int64_t>(named_arena_);
         }
 
+        // The headline number of the whole attribution campaign, so it has to
+        // say what it is labelled. It did not: the percentage printed on the
+        // RESIDUAL line was 100*(1 - residual/used) — the ACCOUNTED share — so
+        // an over-count rendered as "RESIDUAL (unattributed) -38246.8 MiB,
+        // 230.3% of device used". Both halves now belong to their own line.
+        //
+        // `cur_sum` can exceed `used` legitimately: pools report their own live
+        // bytes, and a pool that suballocates from an arena is counted by both.
+        // When that happens the residual goes negative, which is a real signal
+        // (double-counting) and not a rounding artifact — so it is named rather
+        // than clamped to zero.
         const double accounted = double(cur_sum) + double(named);
         const double residual = double(used) - accounted;
-        emit("%-26s %12.1f", "ACCOUNTED (tracked+named)", accounted / kMiB);
+        const double used_d = double(used);
+        emit("%-26s %12.1f    %.1f%% of device used", "ACCOUNTED (tracked+named)", accounted / kMiB,
+             used ? (100.0 * accounted / used_d) : 0.0);
         emit("%-26s %12.1f    %.1f%% of device used", "RESIDUAL (unattributed)", residual / kMiB,
-             used ? (100.0 * (1.0 - residual / double(used))) : 0.0);
+             used ? (100.0 * residual / used_d) : 0.0);
+        if (residual < 0.0)
+            emit("%-26s %s", "  NOTE",
+                 "residual < 0 — pools sum above device usage, i.e. at least one "
+                 "region is counted twice (suballocation reported by both owner and pool).");
     }
     emit("===== END VRAM AUDIT [%s] =====", phase_label ? phase_label : "?");
 
