@@ -1,0 +1,12 @@
+=== args.cpp overlap ===
+  252 tools/imp-cli/args.cpp
+  161 tools/imp-server/args.cpp
+  413 total
+--- flags only in cli ---
+"--bench" "--bench-pp" "--bench-reps" "--calibrate" "--dry-allowed-length" "--dry-base" "--dry-multiplier" "--dry-penalty-last-n" "--frequency-penalty" "--image" "--interactive" "--kv-fp16" "--max-seq-len" "--min-p" "--mirostat" "--mirostat-eta" "--mirostat-tau" "--mtp-spec-decode" "--no-fp8-prefill" "--no-streaming-kv-auto" "--perplexity" "--prefill-fp8" "--prefix-caching" "--presence-penalty" "--prompt" "--repeat-last-n" "--repeat-penalty" "--seed" "--stop" "--streaming-kv" "--stream-sinks" "--stream-window" "--temperature" "--top-k" "--top-p" "--typical-p" 
+--- shared flags ---
+"--chat-template" "--config" "--decode-nvfp4" "--decode-nvfp4-only" "--device" "--dual-path-quant" "--gpu-layers" "--help" "--kv-fp8" "--kv-int4" "--kv-int8" "--kv-mxfp4" "--kv-nvfp4" "--max-tokens" "--mem-report" "--min-kv-tokens" "--mmproj" "--model" "--mxfp4-prefill" "--no-cuda-graphs" "--no-nvfp4" "--prefill-chunk-size" "--revision" "--set" "--ssm-fp16" "--vram-budget" 
+=== shared arg helper? ===
+args.cpp
+args.h
+main.cpp

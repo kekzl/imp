@@ -1,0 +1,51 @@
+=== auth ===
+tools/imp-server/main.cpp:127:    state.api_key = args.api_key;
+tools/imp-server/main.cpp:145:        res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+tools/imp-server/main.cpp:183:        // api_key_matches()/bearer_token_matches() (utils.cpp) so it is
+tools/imp-server/main.cpp:184:        // unit-testable (test-core). Accept both the OpenAI `Authorization:
+tools/imp-server/main.cpp:185:        // Bearer` and the Anthropic `x-api-key` header so real Anthropic SDK
+tools/imp-server/main.cpp:187:        if (!state.api_key.empty()) {
+tools/imp-server/main.cpp:188:            std::string auth = req.get_header_value("Authorization");
+tools/imp-server/main.cpp:189:            std::string xkey = req.get_header_value("x-api-key");
+tools/imp-server/main.cpp:190:            if (!api_key_matches(auth, xkey, state.api_key)) {
+tools/imp-server/main.cpp:323:    if (!state.api_key.empty())
+tools/imp-server/utils.cpp:34:bool bearer_token_matches(const std::string& authorization, const std::string& api_key) {
+tools/imp-server/utils.cpp:35:    const std::string expected = "Bearer " + api_key;
+
+=== metrics exposed ===
+imp_constrained_eager_fallback_total
+imp_context_reset
+imp_detokenize
+imp_error_string
+imp_internal
+"imp_inter_token_seconds"
+imp_last_request_duration_ms
+imp_last_ttft_ms
+imp_model_bos_token
+imp_model_d_model
+imp_model_loaded
+imp_model_loads_total
+imp_prefill
+imp_queue_depth
+"imp_request_duration_seconds"
+imp_requests_cancelled_total
+imp_requests_failed_total
+imp_requests_total
+imp_tokenize
+imp_tokens_cached_total
+imp_tokens_completion_total
+imp_tokens_prompt_total
+"imp_ttft_seconds"
+imp_uptime_seconds
+
+=== path handling for model load ===
+tools/imp-server/tool_call.cpp:784:    // Tool responses arrive either as a plain string (OpenAI canonical) or as
+src/model/hf_hub.cpp:42:    // no model-file extension. Anything else (an absolute path, a ./ or ../
+tools/imp-server/handlers.cpp:78:// Resolves symlinks and rejects any path that escapes the base directory (path traversal).
+tools/imp-server/handlers.cpp:84:    auto base = std::filesystem::canonical(dir, ec);
+tools/imp-server/handlers.cpp:95:            auto real = std::filesystem::canonical(path, ec2);
+tools/imp-server/handlers.cpp:108:                auto real = std::filesystem::canonical(path, ec2);
+src/model/tokenizer.cpp:443:// instead of the symbol run and diverged from canonical segmentation (#657).
+src/model/tokenizer.cpp:471:// Faithful hand-rolled scan of the Qwen2 pre-tokenizer regex (the canonical
+
+=== unauth endpoints ===

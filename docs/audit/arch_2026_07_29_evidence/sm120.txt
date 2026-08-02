@@ -1,0 +1,34 @@
+=== stale-target debt hunt (code + comments) ===
+wgmma: 3
+tcgen05: 2
+sm_90: 10
+sm_100: 2
+TMEM: 8
+Hopper: 3
+H100: 0
+B200: 1
+TMA: 460
+
+--- non-comment hits for wgmma/tcgen05/sm_90/sm_100 ---
+
+=== sm_120 idiom presence ===
+mxf4nvf4: 15
+e4m3x2: 21
+cvt.e2m1: 0
+griddepcontrol: 0
+PDL: 34
+cudaGreenCtx\|green_ctx: 24
+cp.async: 220
+mma.sync: 53
+
+=== sm_120f PTX fallback in build ===
+36:# Primary target: sm_120a (RTX 5090, RTX PRO 6000 — GB202).
+40:# Fallback PTX: compute_120f (family-portable). JIT-compiles on load for GB203
+45:# CMake < 3.31 doesn't parse the 'a'/'f' suffix in CMAKE_CUDA_ARCHITECTURES,
+46:# so we pass gencode directly.
+47:option(IMP_DISABLE_120F_FALLBACK "Skip compute_120f PTX fallback (RTX 5090-only fatbin)" OFF)
+48:set(IMP_SM120_FLAGS "--generate-code=arch=compute_120a,code=sm_120a")
+50:    set(IMP_SM120_FLAGS "${IMP_SM120_FLAGS} --generate-code=arch=compute_120f,code=compute_120f")
+51:    message(STATUS "CUDA architectures: sm_120a (SASS, RTX 5090 / RTX PRO 6000) + compute_120f (PTX, RTX 5080 / 5070 Ti)")
+53:    message(STATUS "CUDA architectures: sm_120a (RTX 5090 only — fallback disabled)")
+55:set(CMAKE_CUDA_ARCHITECTURES OFF)

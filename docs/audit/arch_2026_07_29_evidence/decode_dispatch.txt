@@ -1,0 +1,19 @@
+=== decode dispatch switch (executor_attention_decode.cu) ===
+150:        QType cache_dtype = cache->qtype();
+155:        Tensor k_c(cache->k_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
+156:        Tensor v_c(cache->v_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
+162:        if (cache_dtype == QType::INT4) {
+165:            paged_attention_decode_int4(q4, k_c, v_c, o4,
+171:        } else if (cache_dtype == QType::NVFP4) {
+187:                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, layer_block_tables,
+225:                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, layer_block_tables,
+236:                paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
+243:        } else if (cache_dtype == QType::MXFP4_KV) {
+247:            paged_attention_decode_mxfp4_kv(q4, k_c, v_c, o4,
+253:        } else if (cache_dtype == QType::INT8) {
+256:            paged_attention_decode_int8(q4, k_c, v_c, o4,
+262:        } else if (cache_dtype == QType::FP8_E4M3) {
+268:            paged_attention_decode_fp8(q4, k_c, v_c, o4, layer_block_tables, state.context_lens, kv_bs, scale,
+273:            paged_attention_decode(q4, k_c, v_c, o4, layer_block_tables, state.context_lens, kv_bs, scale,
+277:        if (attn_sinks && cache_dtype != QType::F16) {
+283:                             std::to_underlying(cache_dtype));

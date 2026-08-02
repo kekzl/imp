@@ -1,0 +1,36 @@
+=== Buffer copy/move semantics ===
+12:    Buffer() = default;
+13:    ~Buffer();
+15:    Buffer(const Buffer&) = delete;
+16:    Buffer& operator=(const Buffer&) = delete;
+17:    Buffer(Buffer&& other) noexcept;
+18:    Buffer& operator=(Buffer&& other) noexcept;
+
+=== Tensor: raw ptr? copyable? ===
+19:    void* data = nullptr;
+52:    Tensor() = default;
+55:    Tensor(void* data, QType qtype, int ndim, const int64_t* shape, bool on_device);
+58:    Tensor(void* data, QType qtype, int ndim, const int64_t* shape, const int64_t* stride, bool on_device);
+
+=== two-phase init: classes with init()/setup() ===
+src/core/cuda_raii.h:15:    [[nodiscard]] bool create(unsigned int flags = cudaStreamNonBlocking) {
+src/core/cuda_raii.h:61:    [[nodiscard]] bool create(unsigned int flags = cudaEventDisableTiming) {
+src/compute/grammar_constrain.h:38:    bool init(const std::string& gbnf, Tokenizer* tokenizer, int vocab_size);
+src/vision/qwen3vl_pipeline.h:52:    bool init(VisionModel& tower, VRAMAllocator& alloc, int max_patches);
+src/memory/layer_offload.h:31:    bool init(Model* model, int gpu_layers);
+src/memory/vram_allocator.h:36:    bool init(float headroom_fraction = 0.10f);
+src/memory/recurrent_snapshot_store.h:43:    void init(size_t entry_bytes, size_t budget_bytes);
+src/runtime/green_ctx.h:20:    bool init(int device, float prefill_sm_ratio = 0.8f);
+src/exec/expert_cache.h:156:    bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc,
+src/compute/schema_constrain.h:116:    bool init(const Tokenizer& tok, std::unique_ptr<SchemaNode> schema);
+src/memory/ssm_state.h:25:    bool init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel, int n_heads,
+src/runtime/engine.h:145:    [[nodiscard]] bool init(std::shared_ptr<Model> model, const EngineConfig& config);
+src/runtime/cuda_graph.h:225:    bool setup(GraphExecutor* executor, const InferenceState& state_template, int32_t first_token,
+src/vision/vision_encoder.h:18:    bool init(const VisionModel& model, int lm_d_model, cudaStream_t stream, VRAMAllocator* alloc = nullptr);
+src/exec/executor.h:75:    [[nodiscard]] bool init(const Model& model, QType compute_dtype = QType::F16, bool use_pdl = false,
+src/vision/vision_pipeline.h:26:    [[nodiscard]] bool init(const std::string& mmproj_path, int lm_d_model, Model* model,
+src/vision/qwen3vl_encoder.h:32:    bool init(const VisionModel& model, VRAMAllocator* alloc, int max_tokens);
+src/exec/workspace.h:40:    void init(const Model& model, VRAMAllocator* alloc, QType compute_dtype, int* max_tokens,
+src/compute/regex_constrain.h:41:    bool init(const std::string& pattern, Tokenizer* tokenizer, int vocab_size);
+src/model/chat_template.h:55:    bool init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str = "");
+src/compute/json_constrain.h:70:    bool init(const Tokenizer& tok);

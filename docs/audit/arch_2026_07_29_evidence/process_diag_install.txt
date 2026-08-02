@@ -1,0 +1,44 @@
+=== ProcessDiag mirrored fields (from install()) ===
+void process_diag_install(const RuntimeConfig& cfg) {
+    auto& d = slot();
+    d.debug_forward = cfg.diagnostics.debug_forward;
+    d.debug_template = cfg.diagnostics.debug_template;
+    d.graph_diag = cfg.diagnostics.graph_diag;
+    d.nvfp4_force_dequant = cfg.diagnostics.nvfp4_force_dequant;
+    d.log_gemm_algo = cfg.diagnostics.log_gemm_algo;
+    d.audit_nvfp4_scales = cfg.diagnostics.audit_nvfp4_scales;
+    d.dump_hidden_dir = cfg.diagnostics.dump_hidden_dir;
+    if (d.dump_hidden_dir == "1" || d.dump_hidden_dir == "all") {
+        d.dump_hidden_dir_resolved = "/tmp";
+    } else {
+        d.dump_hidden_dir_resolved = d.dump_hidden_dir;
+    }
+    d.graph_dump_dir = cfg.diagnostics.graph_dump_dir;
+    d.no_pdl = cfg.runtime.no_pdl;
+    d.no_vision_graph = cfg.runtime.no_vision_graph;
+    d.graph_capture_mode = cfg.runtime.graph_capture_mode;
+    d.prefill_graph_enabled = cfg.runtime.prefill_graph;
+    d.deterministic_gemm = cfg.runtime.deterministic_gemm;
+    // "auto" resolves per-arch at engine init (init_resolve_quant_flags_ →
+    // process_diag_set_cublas_fp16_acc); standalone tools without an engine
+    // treat auto as off.
+    d.cublas_fp16_acc = (cfg.gemm.cublas_fp16_acc == "on");
+    d.attention_splitk_pipe = cfg.attention.splitk_pipe;
+    d.attention_fp8_tile = cfg.attention.fp8_tile;
+    d.attention_fp8_tile_gqa = cfg.attention.fp8_tile_gqa;
+    d.attention_fa2_f16acc = cfg.attention.fa2_f16acc;
+    d.attention_fa2_pv_f16acc = cfg.attention.fa2_pv_f16acc;
+    d.attention_fa2_hd256 = cfg.attention.fa2_hd256;
+    d.attention_fp8_qk_scaled = cfg.attention.fp8_qk_scaled;
+    d.attention_mxfp4_mode = cfg.attention.mxfp4;
+    d.mxfp4_blockscale = cfg.attention.mxfp4_blockscale;
+    d.mxfp4_ksmooth = cfg.attention.mxfp4_ksmooth;
+    d.mxfp4_pv_fp4 = cfg.attention.mxfp4_pv_fp4;
+    d.mxfp4_promote_budget = cfg.attention.mxfp4_promote_budget;
+    d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
+    d.moe_mr_nr = cfg.moe.mr_nr;
+    d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
+    d.moe_force_host_experts = cfg.moe.force_host_experts;
+    d.gdn_layout_override = cfg.gdn.layout_override;
+}
+

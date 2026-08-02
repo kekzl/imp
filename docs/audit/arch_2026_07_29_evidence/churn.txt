@@ -1,0 +1,31 @@
+=== god classes: member count in the big headers ===
+--- src/runtime/engine.h: 1200 LOC, members ~53
+--- src/exec/executor.h: 863 LOC, members ~9
+--- src/memory/kv_cache_manager.h: 533 LOC, members ~21
+
+=== churn x size (top 25 by commits) ===
+    253 src/runtime/engine.cpp
+    131 src/runtime/engine.h
+    128 src/runtime/config.h
+    103 src/runtime/config.cpp
+    100 tools/imp-server/handlers.cpp
+     88 src/api/imp_api.cpp
+     83 src/graph/executor_forward.cu
+     69 tools/imp-cli/main.cpp
+     68 src/model/weight_upload.cu
+     67 src/graph/executor.h
+     65 src/graph/executor_kernels.cu
+     64 src/runtime/engine_scheduler.cpp
+     55 src/graph/executor_attention.cu
+     54 src/model/gguf_loader.cpp
+     54 src/exec/executor.h
+     50 tools/imp-cli/args.cpp
+     50 src/graph/executor_workspace.cu
+     50 src/graph/executor.cu
+     49 src/exec/executor_workspace_buffers.cu
+     49 src/compute/gemm.cu
+     48 tools/imp-server/main.cpp
+     48 src/runtime/cuda_graph.cu
+     47 src/runtime/request.h
+     45 src/model/model.cpp
+     43 tools/imp-cli/args.h

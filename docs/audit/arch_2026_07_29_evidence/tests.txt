@@ -1,0 +1,32 @@
+=== test targets from CMakeLists ===
+570:    function(imp_add_test_module target)
+593:    imp_add_test_module(test-core SOURCES
+695:    imp_add_test_module(test-text SOURCES
+704:    imp_add_test_module(test-compute SOURCES
+730:    imp_add_test_module(test-attention SOURCES
+745:    imp_add_test_module(test-quant SOURCES
+781:    imp_add_test_module(test-kv SOURCES
+793:    imp_add_test_module(test-moe-gdn SOURCES
+804:    imp_add_test_module(test-e2e WITH_STUB SOURCES
+857:    add_test(NAME unit_core       COMMAND test-core)
+858:    add_test(NAME unit_text       COMMAND test-text)
+859:    add_test(NAME unit_e2e_subset COMMAND test-e2e "--gtest_filter=${_unit_e2e_filter}")
+860:    add_test(NAME guard_e2e_lane_split
+867:    add_test(NAME gpu_compute   COMMAND test-compute)
+868:    add_test(NAME gpu_attention COMMAND test-attention)
+869:    add_test(NAME gpu_quant     COMMAND test-quant)
+870:    add_test(NAME gpu_kv        COMMAND test-kv)
+871:    add_test(NAME gpu_moe_gdn   COMMAND test-moe-gdn)
+872:    add_test(NAME gpu_e2e       COMMAND test-e2e "--gtest_filter=-${_unit_e2e_filter}")
+877:    add_test(NAME perf_compute   COMMAND test-compute   "--gtest_filter=${_perf_filter}")
+878:    add_test(NAME perf_attention COMMAND test-attention "--gtest_filter=${_perf_filter}")
+879:    add_test(NAME perf_quant     COMMAND test-quant     "--gtest_filter=${_perf_filter}")
+880:    add_test(NAME perf_e2e       COMMAND test-e2e       "--gtest_filter=${_perf_filter}")
+
+=== test file count + LOC ===
+172
+
+=== ctest labels ===
+865:        PROPERTIES LABELS "unit")
+874:        PROPERTIES LABELS "gpu")
+882:        PROPERTIES LABELS "perf")

@@ -1,0 +1,38 @@
+=== ModelArch / Architecture enum definition ===
+src/model/model_arch.h:7:enum class ModelArch {
+
+=== enum class list (all) ===
+      1 TensorKind
+      1 SwaSizingMode
+      1 StorageTier
+      1 State
+      1 SchemaType
+      1 SchemaPhase
+      1 RequestStatus
+      1 RegionTag
+      1 Qwen
+      1 QType
+      1 Phase
+      1 Op
+      1 NvFP
+      1 NormPlacement
+      1 MoePrefillPath
+      1 ModelType
+      1 ModelArch
+      1 MemError
+      1 LoraProj
+      1 LogLevel
+      1 JType
+      1 JsonState
+      1 HostPinnedKind
+      1 GgufWireType
+      1 GGUFValueType
+      1 GemmDispatchResult
+      1 FFNActivation
+      1 ExpertProj
+      1 DPQTag
+      1 ChatTemplateFamily
+      1 CancelReason
+      1 AttnVariant
+      1 AttnPrefillPath
+      1 AllocPhase

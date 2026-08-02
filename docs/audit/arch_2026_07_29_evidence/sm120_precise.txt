@@ -1,0 +1,32 @@
+=== precise stale-target census (case-sensitive, code+comments) ===
+  wgmma: 3
+  tcgen05: 2
+  sm_90: 10
+  sm_100: 2
+  TMEM: 3
+  Hopper: 3
+  B200: 1
+
+=== all sm_90 / sm_100 hits verbatim ===
+src/runtime/green_ctx.cu:11:// sm_90+ when prefill and decode overlap under a green context split.
+src/runtime/cluster_launch.h:5:// established for DSMEM K-broadcast across Q-heads (sm_90+; works on
+src/compute/attention_paged.cu:1437:        // Use pipelined cp.async kernel on sm_90+ for better memory/compute overlap.
+src/compute/attention_paged.cu:1543:        // Cluster GQA: share KV via DSMEM across Q-heads (sm_90+ only).
+src/compute/attention_fmha_sm120.cu:8:// Hopper- and datacenter-Blackwell-only (sm_90+/sm_100) and do not exist on
+src/compute/attention_fmha_sm120.cu:621:// inside the kernel so it compiles cleanly for sm_90/sm_100 too.
+src/compute/attention_fmha_sm120.h:12:// NOT wgmma: wgmma.mma_async / TMEM / tcgen05 are Hopper-and-later (sm_90+/
+src/compute/attention_paged_fp8.cu:586:        // Use pipelined cp.async kernel on sm_90+
+src/compute/attention_paged_int4.cu:317:// Pipelined Split-K: INT4 variant (cp.async prefetch, sm_90+)
+src/compute/attention_paged_int4.cu:545:        // Use pipelined kernel on sm_90+
+
+=== TMA (word) ===
+src/compute/gemm_cutlass_sm120.cu:767:    // C pointer must be valid even with beta=0 — CUTLASS creates a TMA
+src/compute/gemm_grouped_nvfp4_smallM.cu:22:// cp.async helpers — retained for the small SFA/SFB tiles where TMA's 16-byte
+src/compute/gemm_grouped_nvfp4_smallM.cu:41:// mbarrier + TMA PTX wrappers (mirrors tma_block_scale_bench.cu).
+src/compute/gemm_grouped_nvfp4_smallM.cu:196:// smallM kernel v2 — TMA loads + 3-stage producer/consumer pipeline.
+src/compute/gemm_grouped_nvfp4_smallM.cu:203://   * Single producer thread (lane 0 of warp 0) issues TMA for A and B at
+src/compute/gemm_grouped_nvfp4_smallM.cu:205://     for SFA/SFB (their gmem stride is K/16 bytes — too small for TMA on
+src/compute/gemm_grouped_nvfp4_smallM.cu:208://   * mbarrier_arrive_expect_tx covers TMA + cp.async transactions per stage.
+src/compute/gemm_grouped_nvfp4_smallM.cu:267:    // SMEM layout (aligned to 128 B for TMA):
+src/compute/gemm_grouped_nvfp4_smallM.cu:309:    //     • W0L0 contributes 1 arrival via mbarrier.arrive.expect_tx (also issues TMA).
+src/compute/gemm_grouped_nvfp4_smallM.cu:332:    // PRODUCER PATH (warps 0-3): TMA + cp.async, no MMA.

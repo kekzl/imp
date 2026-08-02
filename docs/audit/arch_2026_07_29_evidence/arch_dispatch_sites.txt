@@ -1,0 +1,28 @@
+=== files referencing ModelArch:: (count per file) ===
+src/model/model.cpp:78
+src/model/hf_config_loader.cpp:43
+tests/test_config.cpp:15
+src/model/chat_template.cpp:14
+tests/test_hf_config_loader.cpp:12
+src/model/safetensors_loader.cpp:11
+tests/test_routing_decision.cpp:10
+tests/test_chat_template.cpp:9
+tests/test_mla.cpp:6
+src/model/weight_upload.cu:5
+src/model/model_profile.cpp:5
+src/model/gguf_loader.cpp:5
+tests/test_quant_integration.cu:4
+src/model/weight_map.cpp:4
+tests/test_model_builder.h:3
+src/runtime/engine_scheduler.cpp:2
+src/model/model_config.h:2
+src/exec/executor_forward_moe_cutlass.cu:2
+tools/imp-bench/bench_e2e.cpp:1
+src/model/model_profile.h:1
+src/exec/moe_prefill_decision.h:1
+src/exec/executor_workspace.cu:1
+
+=== TOTAL files (src+tools): ===
+15
+=== TOTAL files src only: ===
+14

@@ -1,0 +1,87 @@
+=== model_profile.cpp ===
+42:    p.is_gemma3 = cfg.arch == ModelArch::GEMMA3;
+43:    p.is_gemma4 = cfg.arch == ModelArch::GEMMA4;
+44:    p.is_gpt_oss = cfg.arch == ModelArch::GPT_OSS;
+45:    p.is_llama4 = cfg.arch == ModelArch::LLAMA4;
+46:    p.is_encoder = cfg.arch == ModelArch::NOMIC_BERT;
+
+=== weight_map.cpp ===
+335:    const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
+337:    const bool is_qwen36_moe = (arch_ == ModelArch::QWEN36_MOE);
+338:    const bool is_nemotron_h = (arch_ == ModelArch::NEMOTRON_H_MOE);
+343:    const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe || (arch_ == ModelArch::QWEN35) ||
+
+=== safetensors_loader.cpp ===
+177:        return ModelArch::NEMOTRON_H_MOE;
+179:        return ModelArch::DEEPSEEK;
+181:        return ModelArch::MIXTRAL;
+183:        return ModelArch::LLAMA;
+184:    return ModelArch::GENERIC;
+842:    if (!has_config || cfg.arch == ModelArch::GENERIC) {
+844:        if (cfg.arch == ModelArch::GENERIC && detected != ModelArch::GENERIC) {
+864:    if (cfg.arch == ModelArch::LLAMA || cfg.arch == ModelArch::MISTRAL ||
+865:        cfg.arch == ModelArch::MIXTRAL || cfg.arch == ModelArch::LLAMA4) {
+926:        if (cfg.arch == ModelArch::GPT_OSS) {
+1199:    if (cfg.arch == ModelArch::GPT_OSS) {
+
+=== gguf_loader.cpp ===
+296:    if (is_encoder_only_arch(arch_str) && cfg.arch != ModelArch::NOMIC_BERT) {
+486:    if (cfg.arch == ModelArch::GPT_OSS) {
+775:        if (cfg.arch == ModelArch::GEMMA4) {
+818:        if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty() &&
+881:    if (cfg.arch == ModelArch::GPT_OSS) {
+
+=== weight_upload.cu ===
+862:    // wcache). Set true for ModelArch::GPT_OSS so upload_packed_experts skips
+2187:    const float arch_norm_offset = (config_.arch == ModelArch::QWEN35 ||
+2188:                                    config_.arch == ModelArch::QWEN35_MOE ||
+2189:                                    config_.arch == ModelArch::QWEN36_MOE)
+2192:    const bool is_gpt_oss = (config_.arch == ModelArch::GPT_OSS);
+
+=== chat_template.cpp ===
+79:        case ModelArch::LLAMA:
+81:        case ModelArch::MISTRAL:
+83:        case ModelArch::MIXTRAL:
+85:        case ModelArch::DEEPSEEK:
+87:        case ModelArch::NEMOTRON_H_MOE:
+89:        case ModelArch::QWEN3:
+91:        case ModelArch::QWEN3_MOE:
+93:        case ModelArch::QWEN35:
+95:        case ModelArch::QWEN35_MOE:
+97:        case ModelArch::QWEN36_MOE:
+99:        case ModelArch::GEMMA3:
+101:        case ModelArch::GEMMA4:
+103:        case ModelArch::LLAMA4:
+105:        case ModelArch::GPT_OSS:
+
+=== C API arch enum ===
+include/imp/types.h:26:    IMP_ARCH_LLAMA = 0,
+include/imp/types.h:27:    IMP_ARCH_MISTRAL = 1,
+include/imp/types.h:28:    IMP_ARCH_MIXTRAL = 2,
+include/imp/types.h:29:    IMP_ARCH_DEEPSEEK = 3,
+include/imp/types.h:30:    IMP_ARCH_NEMOTRON_H_MOE = 4,
+include/imp/types.h:31:    IMP_ARCH_QWEN3 = 5,
+include/imp/types.h:32:    IMP_ARCH_QWEN3_MOE = 6,
+include/imp/types.h:33:    IMP_ARCH_GEMMA3 = 7,
+include/imp/types.h:34:    IMP_ARCH_LLAMA4 = 8,
+include/imp/types.h:35:    IMP_ARCH_GENERIC = 9,
+include/imp/types.h:36:    IMP_ARCH_QWEN35 = 10,
+include/imp/types.h:37:    IMP_ARCH_QWEN35_MOE = 11,
+include/imp/types.h:38:    IMP_ARCH_GEMMA4 = 12,
+include/imp/types.h:39:    IMP_ARCH_QWEN36_MOE = 13,
+include/imp/types.h:40:    IMP_ARCH_GPT_OSS = 14,
+include/imp/types.h:41:    IMP_ARCH_NOMIC_BERT = 15,
+src/model/model.cpp:132:    int c_api_id;  // IMP_ARCH_* enum value
+src/model/model.cpp:148:// IMP_ARCH_* values from include/imp/types.h (avoid header dependency)
+src/model/model.cpp:150:    kApiLlama = 0,
+src/model/model.cpp:151:    kApiMistral = 1,
+src/model/model.cpp:152:    kApiMixtral = 2,
+src/model/model.cpp:153:    kApiDeepseek = 3,
+src/model/model.cpp:154:    kApiNemotronHMoe = 4,
+src/model/model.cpp:155:    kApiQwen3 = 5,
+src/model/model.cpp:156:    kApiQwen3Moe = 6,
+src/model/model.cpp:157:    kApiGemma3 = 7,
+src/model/model.cpp:158:    kApiLlama4 = 8,
+src/model/model.cpp:159:    kApiGeneric = 9,
+src/model/model.cpp:160:    kApiQwen35 = 10,
+src/model/model.cpp:161:    kApiQwen35Moe = 11,

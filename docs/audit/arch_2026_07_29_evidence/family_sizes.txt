@@ -1,0 +1,61 @@
+=== paged attention family sizes ===
+  1726 src/compute/attention_paged.cu
+   743 src/compute/attention_paged_fp8.cu
+   574 src/compute/attention_paged_fp8_tile.cu
+   648 src/compute/attention_paged_int4.cu
+   556 src/compute/attention_paged_int8.cu
+   545 src/compute/attention_paged_nvfp4.cu
+  1217 src/compute/attention_paged_nvfp4_tc.cu
+   466 src/compute/attention_paged_common.cuh
+  6475 total
+
+=== constrain family ===
+   160 src/compute/grammar_constrain.cu
+   707 src/compute/json_constrain.cu
+   269 src/compute/regex_constrain.cu
+  1573 src/compute/schema_constrain.cu
+   204 src/compute/constrain_common.h
+    98 src/compute/grammar_constrain.h
+   192 src/compute/json_constrain.h
+   105 src/compute/regex_constrain.h
+   290 src/compute/schema_constrain.h
+  3598 total
+
+=== mmq family ===
+   281 src/compute/mmq_q4k_hmma.cu
+   151 src/compute/mmq_q4k_imma_layout.cu
+   428 src/compute/mmq_q4k_imma_tile.cu
+   547 src/compute/mmq_q8_imma.cu
+   272 src/compute/mmq_q8_imma_q4k.cu
+   260 src/compute/mmq_q8_imma_q51.cu
+   296 src/compute/mmq_q8_imma_q6k.cu
+   269 src/compute/mmq_q8_imma_scratch.cu
+  2504 total
+
+=== gemm family ===
+   153 src/compute/gemm_batched.cu
+   340 src/compute/gemm_capture_fp16_sm120.cu
+   955 src/compute/gemm.cu
+   695 src/compute/gemm_cutlass_grouped_3x.cu
+   658 src/compute/gemm_cutlass_mxfp4_sm120.cu
+   850 src/compute/gemm_cutlass_sm120.cu
+   802 src/compute/gemm_dp4a.cu
+   575 src/compute/gemm_gemv_dtype.cu
+   418 src/compute/gemm_grouped.cu
+   961 src/compute/gemm_grouped_nvfp4_smallM.cu
+   175 src/compute/gemm_moe_fused.cu
+   283 src/compute/gemm_moe_fused_tc.cu
+   383 src/compute/gemm_moe_gemv.cu
+   653 src/compute/gemm_q4k.cu
+   240 src/compute/gemm_q6k.cu
+   136 src/exec/gemm_kernel_cutlass_nvfp4.cu
+   139 src/exec/gemm_kernel_fp8.cu
+    90 src/exec/gemm_kernel_generic_dequant.cu
+   298 src/exec/gemm_kernel_gguf.cu
+   114 src/exec/gemm_kernel_mxfp4.cu
+    62 src/exec/gemm_kernel_nvfp4_gemm.cu
+    60 src/exec/gemm_kernel_nvfp4_gemv.cu
+    29 src/exec/gemm_kernel_q4k_hmma.cu
+    80 src/exec/gemm_kernel_q4k_imma.cu
+    85 src/exec/gemm_kernel_registry.cu
+  9234 total

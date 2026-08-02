@@ -1,0 +1,12 @@
+== backward-edge tally ==
+compute -> runtime/config.h : 2 files
+compute -> runtime/pdl.h    : 7
+compute -> runtime/process_diag.h: 12
+exec -> runtime/config.h    : 22
+exec -> runtime/*           : 27
+quant -> runtime/*          : 4
+model -> runtime/*          : 4
+memory -> model/runtime     : 4
+compute -> model/*          : 9
+model -> vision/*           : 3
+exec -> vision/*            : 1

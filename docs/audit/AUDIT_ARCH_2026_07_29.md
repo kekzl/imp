@@ -1,7 +1,7 @@
 # imp — Full Architecture Audit — 2026-07-29
 
 Read-only structural audit of `imp` at `5474b6c2` (v0.20.2). Eight tracks, scored with evidence.
-Raw censuses in `audit_scratch/`. **No GPU job was run** — the card was 100 % busy with the user's
+Raw censuses in `docs/audit/arch_2026_07_29_evidence/`. **No GPU job was run** — the card was 100 % busy with the user's
 own workload all session; every number here is either **MEASURED (prior campaign, cited)** or
 **DERIVED** from source, and is marked as such.
 
@@ -334,9 +334,9 @@ turns the two mirrors from dead test-only code into the production dump, which a
 drift problem in §12. Effort **S** (~half a day).
 ## 6. Duplication census
 
-Method: own token-based clone detector (`audit_scratch/clones.py`, 60-token windows, identifiers
+Method: own token-based clone detector (`docs/audit/arch_2026_07_29_evidence/clones.py`, 60-token windows, identifiers
 and literals normalised away, stride 10) over `src/` + `tools/`, then adjudicated by hand. Raw
-output in `audit_scratch/clone_pairs.txt`. Candidates that survived reading are below; candidates
+output in `docs/audit/arch_2026_07_29_evidence/clone_pairs.txt`. Candidates that survived reading are below; candidates
 that did not are recorded as D6 (§15) or dropped.
 
 | ID | Class | Concept | Site A | Site B | Canonical | Other reachable in a default build? | Sev |
@@ -461,7 +461,7 @@ green build and a green test suite. This is D5 contract drift with a two-line fi
 every `Tensor`, so most references are `t.qtype == QType::F16` type checks, not dispatch.
 
 Actual *implementation-selecting* dispatch sites — a `switch` or if-chain over a qtype/tier that
-picks between kernels — are **30** (`audit_scratch/qtype_switches.txt`). Grouped:
+picks between kernels — are **30** (`docs/audit/arch_2026_07_29_evidence/qtype_switches.txt`). Grouped:
 
 | Group | Sites | Files |
 |---|---:|---|
@@ -666,7 +666,7 @@ Clean where it is applied. `cuda_raii.h` is textbook: deleted copy, `noexcept` m
 ### 9.2 Two-phase init — 21 classes
 
 `init()`/`setup()`/`create()` after construction, i.e. state machines the type system cannot
-enforce (`audit_scratch/ownership.txt`): `Engine` (`engine.h:145`), `GraphExecutor`
+enforce (`docs/audit/arch_2026_07_29_evidence/ownership.txt`): `Engine` (`engine.h:145`), `GraphExecutor`
 (`executor.h:75`), `Workspace` (`workspace.h:40`), `SSMState`, `ExpertLRUCache`, `LayerOffload`,
 `VRAMAllocator`, `GreenCtx`, `RecurrentSnapshotStore`, `VisionEncoder`, `VisionPipeline`,
 `Qwen3vlEncoder`, `Qwen3vlPipeline`, `ChatTemplate`, `CudaGraphConditionalRunner` (`cuda_graph.h:225`),
@@ -767,7 +767,7 @@ usable in `.cu` — but the split is not documented anywhere.
 
 Method: for every `.cu` in `src/`, count `<<<` lines against
 `IMP_CUDA_CHECK_LAUNCH()` / `cudaGetLastError` occurrences
-(`audit_scratch/launch_check_census.txt`).
+(`docs/audit/arch_2026_07_29_evidence/launch_check_census.txt`).
 
 | | count |
 |---|---:|
@@ -936,7 +936,7 @@ pinned baseline (`.github/workflows/roofline.yml:35`), which is the right mechan
 "the tool stopped finding the kernel". NVTX ranges: present but not systematically audited here.
 ## 11. Layering & dependency graph
 
-Derived from `#include` edges over `src/` (`audit_scratch/layering.txt`, `layering_tally.txt`).
+Derived from `#include` edges over `src/` (`docs/audit/arch_2026_07_29_evidence/layering.txt`, `layering_tally.txt`).
 
 ```mermaid
 graph TD
@@ -1413,7 +1413,7 @@ comment; the assert gets the guarantee without the dependency.
 `MEDIUM` · effort `S` · blast 1 file · confidence **HIGH**
 
 *Evidence:* reachable via `kv_cache.dtype = mxfp4` and the `--kv-mxfp4` flag in **both** binaries
-(`audit_scratch/args_dup.txt`); dispatched at `src/exec/executor_attention_decode.cu:243-251`.
+(`docs/audit/arch_2026_07_29_evidence/args_dup.txt`); dispatched at `src/exec/executor_attention_decode.cu:243-251`.
 `grep -rl "paged_attention_decode_mxfp4_kv" tests/` → empty, while every sibling dtype appears in
 `test_attention_paged_oracle.cu`.
 
@@ -1451,7 +1451,7 @@ is right.
 **F-10 — `runtime/config.h` (1124 LOC) is included by 22 files in `src/exec/`**
 `MEDIUM` · effort `L` · blast wide · confidence **HIGH**
 
-*Evidence:* `audit_scratch/layering_tally.txt` — `exec → runtime` 27 files, 22 of them `config.h`;
+*Evidence:* `docs/audit/arch_2026_07_29_evidence/layering_tally.txt` — `exec → runtime` 27 files, 22 of them `config.h`;
 `compute → runtime` 21. `ARCHMAP.md:43` describes these as "for diagnostics/PDL only
 (instrumentation, not algorithmic coupling)", which is doc drift: `config.h` in `exec/` is
 algorithmic.
@@ -1547,7 +1547,7 @@ capture-safety implications, not a cleanup.
 `MEDIUM` · effort `S` · blast 3 files · confidence **HIGH**
 
 *Evidence:* `tools/imp-cli/args.cpp` (252 LOC) and `tools/imp-server/args.cpp` (161 LOC) share 27
-identical flags (`audit_scratch/args_dup.txt`); the clone detector puts them at 17 shared windows.
+identical flags (`docs/audit/arch_2026_07_29_evidence/args_dup.txt`); the clone detector puts them at 17 shared windows.
 
 *Impact:* a flag fixed in one binary and not the other. Both write into the same `RuntimeConfig`.
 
@@ -1606,7 +1606,7 @@ scatter is a *different* kernel (`moe_routing_permute.cu:260`); this is the CUTL
 
 *Evidence:* `d_token_allow_` declared in `grammar_constrain.h`, `json_constrain.h`,
 `regex_constrain.h`, `schema_constrain.h`; `d_allowed_mask_` and `d_token_categories_` in two each
-(`audit_scratch/alloc_census.txt`). `constrain_common.h` (204 LOC) exists but does not own them.
+(`docs/audit/arch_2026_07_29_evidence/alloc_census.txt`). `constrain_common.h` (204 LOC) exists but does not own them.
 
 *Impact:* four buffer lifetimes to get right instead of one, and four allocation sites on the I1
 allowlist. #1197 (the `char`-is-signed category-mask bug) was in exactly this family.
@@ -1672,7 +1672,7 @@ the C ABI.
 **F-22 — 21 classes use two-phase init; 10 of them without `[[nodiscard]]`** — ✅ FIXED in #1206
 `LOW` · effort `S` · blast 10 files · confidence **HIGH**
 
-*Evidence:* `audit_scratch/ownership.txt`. `Engine::init` (`engine.h:145`), `GraphExecutor::init`
+*Evidence:* `docs/audit/arch_2026_07_29_evidence/ownership.txt`. `Engine::init` (`engine.h:145`), `GraphExecutor::init`
 (`executor.h:75`) and `VisionPipeline::init` are `[[nodiscard]]`; `Workspace::init`
 (`workspace.h:40`) and `RecurrentSnapshotStore::init` return `void`; the four constrainers,
 `SSMState`, `ExpertLRUCache`, `LayerOffload`, `GreenCtx`, `VRAMAllocator`, `ChatTemplate`,
@@ -1783,7 +1783,7 @@ branches"*. Arch #17 costs **6 files**, five of which are data edits into three 
 D2 that remains is the *unbound* duplicate C-API enum (F-7), not the dispatch.
 
 **4 — REFUTED as stated.** `QType::` appears in ~100 files but only **30** are
-implementation-selecting dispatch sites (`audit_scratch/qtype_switches.txt`), and GEMM/GEMV — the
+implementation-selecting dispatch sites (`docs/audit/arch_2026_07_29_evidence/qtype_switches.txt`), and GEMM/GEMV — the
 biggest of the five concerns — is **one table** (`gemm_kernel_registry.cu`, 85 LOC, pinned by a
 1214-LOC / 40-test contract suite). A new quant format on the GEMM path costs **2 files**.
 **CONFIRMED narrowly:** a new *KV* dtype costs 5+ sites that must agree, enforced by a `std::abort()`
@@ -1951,10 +1951,14 @@ and 11 came back REFUTED.
 
 ### Scratch directory
 
-`audit_scratch/` is **kept**, per the dispatch's option. It contains the raw censuses this report
-cites (clone-pair output, launch/sync/alloc censuses, layering tallies, the enum and dispatch-site
-dumps) plus the clone detector itself (`clones.py`) and `progress.md`. Everything in the report is
-reproducible from it. It is untracked; delete it with `rm -rf audit_scratch/` if it is not wanted.
+`docs/audit/arch_2026_07_29_evidence/` holds the raw censuses this report cites — clone-pair output,
+the launch/sync/alloc censuses, layering tallies, the enum and dispatch-site dumps — plus the clone
+detector itself (`clones.py`) and the run log (`progress.md`). 40 files, ~200 KB.
+
+It is committed for one reason: the twenty `docs/audit/arch_2026_07_29_evidence/...` citations in
+this report are only checkable if the evidence is where the reader is. A report whose evidence lives
+in one person's working tree is an assertion. Regenerating it needs the commands in §19 and a tree
+at `144d18b3`, which is a worse deal than 200 KB of text.
 ## 16. Doc drift
 
 Ordered by how likely the drift is to mislead someone into a wrong change.
@@ -1966,7 +1970,7 @@ Ordered by how likely the drift is to mislead someone into a wrong change.
 | 3 | The prefill gate code block, quoting `force_cublas_attn`, `s_matrix_fits`, `prefer_fmha` at *"~line 338"* | `docs/attention-dispatch.md:16-35` | **`force_cublas_attn` does not exist** — `grep` returns nothing. The gate is now per-layer (`executor_attention_prefill.cu:51-64`) so Gemma-4's hd=256 SWA layers take FA2 while its hd=512 layers do not; the doc says heterogeneous shapes force cuBLAS wholesale | **HIGH** |
 | 4 | *"the legacy materialized cuBLAS+softmax path is **0.0 % of prefill time**"* | `docs/attention-dispatch.md:9` | True for hd=128/256. **False for Gemma-4**, whose hd=512 global layers take `attention_cublas_prefill` by design and by measurement (F-16). An advertised model's default prefill path is the one the doc calls dead | **HIGH** |
 | 5 | The hd=512 sliced-cuBLAS tier (#1036) and MLA are absent | `docs/attention-dispatch.md` | `attention_cublas_prefill_sliced` (`executor_attention_prefill.cu:427`) and `ModelProfile::AttnVariant::MLA` exist; neither appears in the canonical attention-routing doc | MED |
-| 6 | *"~100k LOC (src/ + include/)"* | `CLAUDE.md` | **134 878** LOC in `src/` + `include/` (`audit_scratch/largest_files.txt`); 220k with `tests/`. The dispatch's "~161k" is also stale in the other direction | MED |
+| 6 | *"~100k LOC (src/ + include/)"* | `CLAUDE.md` | **134 878** LOC in `src/` + `include/` (`docs/audit/arch_2026_07_29_evidence/largest_files.txt`); 220k with `tests/`. The dispatch's "~161k" is also stale in the other direction | MED |
 | 7 | *"The only env vars still seeded are `IMP_DETERMINISTIC` and `IMP_FMHA_FA2`; don't reintroduce ad-hoc env reads"* | `CLAUDE.md` | Four more are read: `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_CONFIG` (F-23) | MED |
 | 8 | *"`src/{core,compute,memory,model,quant,graph,runtime,vision,api}`"* | the dispatch itself | There is no `src/graph/` — it was renamed to `src/exec/` (git history still shows `src/graph/executor_forward.cu` in the 6-month churn list). `src/lora/` exists and is unlisted | MED |
 | 9 | *"9 architectures"*, *"6 tested models"*, *"C++20"* | the dispatch itself | **16** architecture enumerators (`model_arch.h:7`), ~30 validated checkpoints (`docs/supported-models.md`), **C++23** (`docs/audit/cpp23_migration_2026_07_08.md`) | MED |
@@ -2123,8 +2127,8 @@ Things this audit could not resolve from source, ordered by how much the answer 
 
 | Step | Tool | Output |
 |---|---|---|
-| LOC / largest files | `find` + `wc` | `audit_scratch/largest_files.txt` |
-| Clone detection | **own** token-based detector, 60-token windows, identifiers+literals normalised, stride 10 | `audit_scratch/clones.py`, `clone_pairs.txt` |
+| LOC / largest files | `find` + `wc` | `docs/audit/arch_2026_07_29_evidence/largest_files.txt` |
+| Clone detection | **own** token-based detector, 60-token windows, identifiers+literals normalised, stride 10 | `docs/audit/arch_2026_07_29_evidence/clones.py`, `clone_pairs.txt` |
 | Arch dispatch census | `grep ModelArch::` per file | `arch_dispatch_sites.txt`, `arch10.txt` |
 | Quant dispatch census | `grep QType::` + `switch` census | `quant_dispatch_sites.txt`, `qtype_switches.txt` |
 | Legacy/suffix hunt | `_v2/_new/_old/legacy/fallback/ref/naive`, `#if 0` | `legacy_hunt.txt` |
@@ -2136,7 +2140,7 @@ Things this audit could not resolve from source, ordered by how much the answer 
 | Ownership / RAII | `cudaStreamCreate`/`EventCreate`/`cublasCreate` outside `cuda_raii.h`; copy/move on device-pointer types; `init()`/`setup()` census | `raii.txt`, `ownership.txt` |
 | Config / API / test / security surface | targeted greps | `config.txt`, `server.txt`, `tests.txt`, `security.txt`, `errors.txt` |
 
-Everything cited in this report is reproducible from `audit_scratch/`.
+Everything cited in this report is reproducible from `docs/audit/arch_2026_07_29_evidence/`.
 
 ### What was NOT run, and why
 
@@ -2185,5 +2189,5 @@ nothing was.
 ### Repository state
 
 Read-only with respect to source. `git status` shows only the new report and the untracked
-`audit_scratch/` directory. No file under `src/`, `tools/`, `tests/`, `docs/` or any config was
+`docs/audit/arch_2026_07_29_evidence/` directory. No file under `src/`, `tools/`, `tests/`, `docs/` or any config was
 modified.

@@ -1,0 +1,21 @@
+=== config keys registered in config.cpp ===
+170
+=== config sections ===
+"attention. "bench. "calibration. "constrained. "diagnostics. "ffn. "gdn. "gemm. "generation. "imp. "kv_cache. "moe. "paths. "rope. "runtime. "server. "speculative. "suspend. "vram. "warm_cache. 
+=== env vars read ===
+      4 getenv("IMP_SPEC_TRACE"
+      4 getenv("IMP_JUMP_TRACE"
+      4 getenv("HOME"
+      2 getenv("XDG_CACHE_HOME"
+      1 getenv("IMP_PPL_DUMP"
+      1 getenv("IMP_FMHA_FA2"
+      1 getenv("IMP_DETERMINISTIC"
+      1 getenv("IMP_CONFIG"
+      1 getenv("HUGGINGFACE_HUB_CACHE"
+      1 getenv("HF_HOME"
+      1 getenv("CUBLAS_WORKSPACE_CONFIG"
+
+=== CLI flags imp-cli ===
+62
+=== CLI flags imp-server ===
+41

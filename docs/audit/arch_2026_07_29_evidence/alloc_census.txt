@@ -1,0 +1,120 @@
+215 buffer families  (222 acquisitions, 290 releases)
+total  acq  rel files  buffer
+   10    7    3     4  d_packed  <- 5 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        4  src/quant/gpt_oss_mxfp4_convert.cu
+                        3  src/quant/nvfp4_quant.cu
+                        2  src/model/weight_upload.cu
+                        1  src/compute/gemm_cutlass_mxfp4_sm120.cu
+                      decl  src/compute/gemm_cutlass_mxfp4_sm120.cu
+                      decl  src/exec/pre_dequant_phase3_moe.cu
+                      decl  src/model/weight_upload.cu
+                      decl  src/quant/gpt_oss_mxfp4_convert.cu
+                      decl  src/quant/nvfp4_quant.cu
+   10    3    7     4  d_block_tables  <- 3 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        5  src/runtime/engine_graph_decode.cpp
+                        2  src/runtime/batch.cpp
+                        2  src/runtime/engine_scheduler.cpp
+                        1  src/runtime/engine_internal.h
+                      decl  src/runtime/batch.h
+                      decl  src/runtime/engine_graph_decode.cpp
+                      decl  src/runtime/engine_scheduler.cpp
+    8    4    4     4  d_token_allow_  <- 4 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/compute/grammar_constrain.cu
+                        2  src/compute/json_constrain.cu
+                        2  src/compute/regex_constrain.cu
+                        2  src/compute/schema_constrain.cu
+                      decl  src/compute/grammar_constrain.h
+                      decl  src/compute/json_constrain.h
+                      decl  src/compute/regex_constrain.h
+                      decl  src/compute/schema_constrain.h
+    8    4    4     1  d_absmax_buf
+    6    3    3     3  d_result  <- 4 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        3  src/compute/sampling_topk_topp.cu
+                        2  src/compute/sampling_penalties.cu
+                        1  src/compute/sampling.cu
+                      decl  src/compute/sampling.cu
+                      decl  src/compute/sampling.h
+                      decl  src/compute/sampling_penalties.cu
+                      decl  src/compute/sampling_topk_topp.cu
+    6    3    3     3  d_block_maxes  <- 3 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/exec/pre_dequant_phase2_fp8_cache.cu
+                        2  src/exec/pre_dequant_phase3_fp8.cu
+                        2  src/quant/fp8_quant.cu
+                      decl  src/exec/pre_dequant_phase2_fp8_cache.cu
+                      decl  src/exec/pre_dequant_phase3_fp8.cu
+                      decl  src/quant/fp8_quant.cu
+    6    3    3     3  d_absmax  <- 4 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/compute/quantize_fp16_nvfp4_moe_native.cu
+                        2  src/exec/pre_dequant_phase2_fp8_cache.cu
+                        2  src/exec/pre_dequant_phase3_fp8.cu
+                      decl  src/compute/quantize_fp16_nvfp4_moe_native.cu
+                      decl  src/exec/pre_dequant_phase2_fp8_cache.cu
+                      decl  src/exec/pre_dequant_phase3_fp8.cu
+                      decl  src/quant/fp8_quant.h
+    6    3    3     1  d_tscale_buf
+    6    2    4     2  d_block_tables_swa  <- 3 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        4  src/runtime/engine_graph_decode.cpp
+                        2  src/runtime/engine_scheduler.cpp
+                      decl  src/runtime/batch.h
+                      decl  src/runtime/engine_graph_decode.cpp
+                      decl  src/runtime/engine_scheduler.cpp
+    6    2    4     1  d_bt
+    5    4    1     2  d_sf  <- 2 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        4  src/compute/gemm_cutlass_mxfp4_sm120.cu
+                        1  src/compute/gemm_cutlass_sm120.cu
+                      decl  src/compute/gemm_cutlass_mxfp4_sm120.cu
+                      decl  src/compute/gemm_cutlass_sm120.cu
+    5    3    2     2  d_SFB  <- one declaration: genuinely threaded
+                        4  src/compute/gemm_grouped_nvfp4_smallM.cu
+                        1  src/exec/pre_dequant_phase4_tensor_registry.cu
+                      decl  src/exec/executor_forward_moe_cutlass.cu
+    5    2    3     3  d_token_ids  <- 2 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/runtime/batch.cpp
+                        2  src/runtime/engine_scheduler.cpp
+                        1  src/runtime/engine_internal.h
+                      decl  src/runtime/batch.h
+                      decl  src/runtime/engine_scheduler.cpp
+    5    2    3     3  d_positions  <- 3 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/runtime/batch.cpp
+                        2  src/runtime/engine_scheduler.cpp
+                        1  src/runtime/engine_internal.h
+                      decl  src/compute/encoder_forward.h
+                      decl  src/runtime/batch.h
+                      decl  src/runtime/engine_scheduler.cpp
+    5    2    3     3  d_context_lens  <- 2 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/runtime/batch.cpp
+                        2  src/runtime/engine_scheduler.cpp
+                        1  src/runtime/engine_internal.h
+                      decl  src/runtime/batch.h
+                      decl  src/runtime/engine_scheduler.cpp
+    5    1    4     1  d_a  [src/compute/attention_cublas.cu]
+    4    2    2     2  pool_  <- 7 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/exec/expert_cache.cu
+                        2  src/runtime/batch.cpp
+                      decl  src/exec/expert_cache.h
+                      decl  src/memory/block_pool.h
+                      decl  src/memory/graph_slots.h
+                      decl  src/memory/kv_cache.h
+                      decl  src/memory/recurrent_snapshot_store.h
+                      decl  src/memory/ssm_state.h
+                      decl  src/runtime/batch.h
+    4    2    2     2  d_token_categories_  <- 2 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/compute/json_constrain.cu
+                        2  src/compute/schema_constrain.cu
+                      decl  src/compute/json_constrain.h
+                      decl  src/compute/schema_constrain.h
+    4    2    2     2  d_alpha  <- 2 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        3  src/exec/executor_forward_moe_cutlass.cu
+                        1  src/exec/pre_dequant_phase4_tensor_registry.cu
+                      decl  src/compute/gemm_cutlass_grouped_3x.h
+                      decl  src/exec/executor_forward_moe_cutlass.cu
+    4    2    2     2  d_allowed_mask_  <- 2 declarations: SAME-NAMED SIBLINGS, not one buffer
+                        2  src/compute/json_constrain.cu
+                        2  src/compute/schema_constrain.cu
+                      decl  src/compute/json_constrain.h
+                      decl  src/compute/schema_constrain.h
+    4    2    2     1  tmp_buf
+    4    2    2     1  d_global_max
+    4    2    2     1  d_SFA
+    4    2    2     1  d_M  [src/compute/gemm_grouped_nvfp4_smallM.cu]
+    4    2    2     1  d_D  [src/compute/gemm_grouped_nvfp4_smallM.cu]

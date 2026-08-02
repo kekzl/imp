@@ -1,0 +1,2 @@
+I1: 74 files / 492 sites outside src/memory/ (allowlist: 74 files / 492 sites)
+OK — no new direct allocation sites.
