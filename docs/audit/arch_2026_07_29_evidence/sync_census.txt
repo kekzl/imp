@@ -1,0 +1,92 @@
+=== cudaDeviceSynchronize in src/ (non-test) ===
+47
+src/memory/weight_snapshot.cpp:179:    cudaError_t sync = cudaDeviceSynchronize();
+src/memory/mem_account.cu:380:    cudaDeviceSynchronize();
+src/exec/executor_perplexity.cu:498:    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+src/runtime/engine_workspace_warmup.cpp:472:    cudaDeviceSynchronize();
+src/runtime/engine_workspace_warmup.cpp:481:    cudaDeviceSynchronize();  // ensure all weight upload/dequant kernels are done
+src/runtime/cuda_graph.cu:1264:        cudaDeviceSynchronize();
+src/memory/weight_cache_file.cpp:169:    cudaError_t sync = cudaDeviceSynchronize();
+src/compute/attention_cublas.cu:103:    cudaDeviceSynchronize();
+src/api/imp_api_suspend.cpp:68:    cudaError_t sync = cudaDeviceSynchronize();
+src/runtime/engine_scheduler.cpp:375:    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+src/exec/activation_calibrator.cu:87:    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+src/exec/executor_forward_moe_batch.cu:146:    cudaDeviceSynchronize();
+src/exec/pre_dequant_phase3_moe.cu:188:            IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+src/api/imp_api.cpp:982:    cudaDeviceSynchronize();
+src/model/weight_upload.cu:2244:        cudaDeviceSynchronize();
+src/model/weight_upload.cu:2488:        cudaDeviceSynchronize();
+
+=== cudaStreamSynchronize count per file (src/) ===
+src/exec/executor_forward.cu:7
+src/exec/executor.cu:7
+src/exec/pre_dequant_phase3_cutlass.cu:6
+src/exec/pre_dequant_phase3_nvfp4_decode.cu:5
+src/exec/executor_forward_moe_batch.cu:5
+src/runtime/engine_scheduler.cpp:4
+src/runtime/cuda_graph.cu:4
+src/model/weight_upload.cu:4
+src/runtime/engine_spec_ngram.cpp:3
+src/quant/nvfp4_quant.cu:3
+src/exec/pre_dequant_phase3_moe.cu:3
+src/exec/pre_dequant_phase3c_mxfp4.cu:3
+src/exec/pre_dequant_phase2_fp8_cache.cu:3
+src/compute/sampling_penalties.cu:3
+src/compute/mtp_forward.cu:3
+src/vision/vision_pipeline.cpp:2
+src/runtime/engine_workspace_warmup.cpp:2
+src/runtime/engine_sampling_stop.cpp:2
+src/runtime/engine_graph_decode.cpp:2
+src/runtime/engine.cpp:2
+src/quant/fp8_quant.cu:2
+src/memory/kv_cache_manager.cpp:2
+src/exec/expert_cache.cu:2
+src/exec/executor_forward_moe_legacy.cu:2
+src/exec/executor_forward_moe_cutlass.cu:2
+src/compute/sampling_topk_topp.cu:2
+src/compute/sampling.cu:2
+src/compute/encoder_forward.cu:2
+src/runtime/engine_spec_mtp.cpp:1
+src/runtime/engine_kv_cache_init.cpp:1
+src/model/model.cpp:1
+src/exec/pre_dequant_phase4_tensor_registry.cu:1
+src/exec/pre_dequant_phase3_fp8.cu:1
+src/exec/pre_dequant_phase1_fp16_cache.cu:1
+src/exec/executor_workspace_buffers.cu:1
+src/exec/executor_perplexity.cu:1
+src/compute/weight_dispatch.cu:1
+src/compute/embedding.cu:1
+
+=== blocking cudaMemcpy (non-Async) per file src/ ===
+68
+src/exec/pre_dequant_phase3_nvfp4_decode.cu:5
+src/vision/vision_loader.cpp:4
+src/memory/kv_cache_manager.cpp:4
+src/exec/executor_forward_moe_batch.cu:4
+src/exec/executor_forward.cu:4
+src/exec/executor_attention_decode.cu:4
+src/runtime/engine_scheduler.cpp:3
+src/quant/gpt_oss_mxfp4_convert.cu:3
+src/exec/pre_dequant_phase4_tensor_registry.cu:3
+src/exec/executor_workspace.cu:3
+src/exec/executor.cu:3
+src/core/buffer.cpp:3
+src/compute/attention_cublas.cu:3
+src/vision/vision_encoder.cu:2
+src/runtime/engine_kv_cache_init.cpp:2
+src/compute/gemm.cu:2
+src/compute/gemm_batched.cu:2
+src/vision/qwen3vl_vision_upload.cpp:1
+src/runtime/engine_qwen3vl.cpp:1
+src/memory/weight_snapshot.cpp:1
+src/memory/weight_cache_file.cpp:1
+src/memory/kv_cache.cu:1
+src/lora/lora_adapter.cpp:1
+src/exec/pre_dequant_phase3_fp8.cu:1
+src/exec/pre_dequant_phase2_fp8_cache.cu:1
+src/exec/pre_dequant_phase0_nvfp4_loader.cu:1
+src/exec/executor_attention.cu:1
+src/exec/activation_calibrator.cu:1
+src/compute/schema_constrain.cu:1
+src/compute/json_constrain.cu:1
+src/compute/ffn_sparsity_probe.cu:1

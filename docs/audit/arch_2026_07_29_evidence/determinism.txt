@@ -1,0 +1,63 @@
+=== deterministic gate readers ===
+src/compute/moe_routing_permute.cu:180:    if (process_diag_deterministic_gemm()) {
+src/runtime/config.cpp:107:        // process_diag_deterministic_gemm() snapshot, so this one switch
+src/compute/gemm.cu:398:    const bool s_deterministic_gemm = imp::process_diag_deterministic_gemm();
+src/compute/sampling_topk_topp.cu:585:    const bool deterministic = process_diag_deterministic_gemm();
+src/compute/moe_routing.cu:606:    if (process_diag_deterministic_gemm()) {
+src/compute/moe_routing.cu:724:        if (process_diag_deterministic_gemm()) {
+src/runtime/engine.cpp:784:    // read process_diag_deterministic_gemm()), but process_diag_install()
+
+=== atomicAdd in moe/scatter ===
+src/compute/moe_routing_permute.cu:88:        atomicAdd(&dst[col], weight * to_float(src[col]));
+src/compute/moe_routing_permute.cu:95:// atomicAdd of moe_scatter_kernel_impl whose accumulation order is
+src/compute/moe_routing_permute.cu:177:    // Output is always FP32 for the scatter-add (atomicAdd on float)
+src/compute/moe_routing_permute.cu:260:// No atomicAdd, no output zeroing, no intermediate FP32 buffer.
+src/compute/gemm_moe_fused_tc.cu:102:            s_tile_idx = atomicAdd(d_tile_counter, 1);
+src/exec/executor_forward_moe.cu:609://   Fallback:  atomicAdd scatter into FP32 buffer + FP32→FP16 convert.
+src/exec/executor_forward_moe.cu:635:        // Fallback: atomicAdd scatter into FP32 buffer, then convert
+src/compute/moe_routing.cu:397:        atomicAdd(&s_counts[expert], 1);
+src/compute/moe_routing.cu:417:        int pos = atomicAdd(&s_write_pos[expert], 1);
+src/compute/moe_routing.cu:431:// warp scheduling. The default kernel uses atomicAdd on s_write_pos, so the
+src/compute/moe_routing.cu:464:        atomicAdd(&s_counts[expert], 1);
+
+=== determinism doc ===
+# Determinism
+
+What imp guarantees about run-to-run reproducibility, what `[runtime]
+deterministic` adds, and the documented limits (tracked in issue #554).
+
+## Shipped guarantees
+
+`[runtime] deterministic = true` (legacy env `IMP_DETERMINISTIC=1`) is the
+opt-in full-reproducibility mode for temperature=0 evals. It eliminates the
+known run-to-run non-determinism sources by selecting deterministic kernel
+variants:
+
+- **MoE token routing** — atomic expert-bucket scatter ordering.
+- **Top-k sampling** — atomicMax/atomicAdd softmax-stat races (single-block
+  path, `top_k <= 128`).
+- **GEMM** — implies `deterministic_gemm` (cuBLASLt `no_reduce_split`;
+  timing-based algo selection is itself a non-determinism source).
+
+With it ON, the gated guarantees (`DetEvalE2ETest`, PR #542) are:
+
+- **Greedy output bit-identical** across runs in the *same context* and
+  across *fresh processes* (incl. GDN/hybrid models such as Qwen3.6-35B).
+- **Perplexity NLL bit-stable** (`imp_perplexity` / `imp-cli --perplexity`)
+  — the teacher-forced harness is the determinism-proof A/B instrument.
+
+The mode is applied engine-side (effective through the C API and server, not
+just the CLI tools). Costs a little throughput; strictly OFF by default —
+the default path runs the exact same kernels as before with zero overhead.
+
+## Default-mode guarantee (since the request-order-independence fix)
+
+Without `[runtime] deterministic`, the DEFAULT path now guarantees greedy
+**request-order independence within a process**: identical greedy requests
+produce identical output no matter how many requests preceded them. Three
+pieces make this hold (all landed together):
+
+- `runtime.warmup` defaults to **true**: engine warmup pre-arms the decode
+  graph pool, so the first real request starts with the same graph state as
+  every later one.
+- `CudaGraphRunner::mark_process_warm()` — warmup's teardown used to reset

@@ -1,0 +1,27 @@
+=== error strategies ===
+throw sites in src/: 36
+std::abort/exit in src/: 13
+  -> files:
+src/memory/scratch_stack.cpp
+src/memory/backend.cpp
+src/memory/block_pool.cpp
+src/exec/executor_attention_prefill.cu
+src/exec/pre_dequant_phase4_tensor_registry.cu
+std::optional returns: 1
+std::expected: 0
+bool-returning init: 1
+MemError enum users: 87
+
+=== C API surface ===
+include/imp/config.h:0
+include/imp/types.h:0
+include/imp/imp.h:0
+include/imp/error.h:0
+config.h
+error.h
+imp.h
+types.h
+
+=== try/catch in imp_api.cpp ===
+12
+28

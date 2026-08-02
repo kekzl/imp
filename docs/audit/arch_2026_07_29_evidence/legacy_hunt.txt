@@ -1,0 +1,89 @@
+=== legacy/versioned suffix hunt (src+tools) ===
+src/memory/kv_cache.cu:326:BlockRef KVCache::acquire_block_ref() { return blocks_.acquire(); }
+src/memory/kv_cache.cu:348:void KVCache::inc_ref(int block_id) { blocks_.acquire_raw(block_id); }
+src/compute/sampling_penalties.cu:417:int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, float eta, float* mu,
+src/compute/sampling_penalties.cu:422:        IMP_LOG_ERROR("sample_mirostat_v2: cudaMalloc failed");
+src/compute/sampling_penalties.cu:428:int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, float eta, float* mu,
+src/memory/kv_cache_manager.cpp:687:    BlockRef ref = cache_->acquire_block_ref();
+src/memory/kv_cache_manager.cpp:695:        ref = cache_->acquire_block_ref();
+src/memory/kv_cache_manager.cpp:1486:        BlockRef block_ref = cache_->acquire_block_ref();
+src/memory/kv_cache_manager.cpp:1487:        const int block_id = block_ref.id();
+src/memory/kv_cache_manager.cpp:1488:        if (!block_ref) {
+src/memory/kv_cache_manager.cpp:1496:        load_entries.push_back({hash, block_id, buf_offset, true, std::move(block_ref)});
+src/runtime/constraint_manager.cpp:148:        const SchemaNode* probe_res = probe ? resolve_schema_ref(probe.get(), probe.get()) : nullptr;
+src/runtime/constraint_manager.cpp:237:        const SchemaNode* res = parsed ? resolve_schema_ref(parsed.get(), parsed.get()) : nullptr;
+src/runtime/process_diag.h:75:bool process_diag_force_splitk_fallback();
+src/runtime/process_diag.h:76:void process_diag_set_force_splitk_fallback(bool v);
+src/memory/block_pool.cpp:135:        IMP_LOG_ERROR("BlockPool: dec_ref on block %d with refcount %d (double release)", id, rc);
+src/compute/gdn.cu:162:            float h_new = g_t * H_reg[s] + s_k[s] * delta_d;
+src/compute/gdn.cu:163:            H_reg[s] = h_new;
+src/compute/gdn.cu:164:            y_partial += h_new * s_q[s];
+src/compute/gdn.cu:345:        size_t smem_old = 2 * state_size * sizeof(float) + 2 * sizeof(float);
+src/compute/gdn.cu:348:            gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_old, stream>>>(
+src/compute/gdn.cu:382:        size_t smem_old = 2 * state_size * sizeof(float) + 2 * sizeof(float);
+src/compute/gdn.cu:388:            gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_old, stream>>>(
+src/compute/gdn.cu:539:            float h_new = g_t * s_H[s * HD + d] + s_k[s] * delta_d;
+src/compute/gdn.cu:540:            s_H[s * HD + d] = h_new;
+src/compute/gdn.cu:541:            y_partial += h_new * s_q[s];
+src/compute/gdn.cu:745:        float h_new = g_t * H[s * head_dim_ssm + d] + s_k[s] * delta_d;
+src/compute/gdn.cu:746:        H[s * head_dim_ssm + d] = h_new;
+src/compute/gdn.cu:747:        y_partial += h_new * s_q[s];
+src/memory/kv_cache.h:57:    void inc_ref(int block_id);
+src/memory/kv_cache.h:62:    [[nodiscard]] BlockRef acquire_block_ref();
+src/compute/gemm_gemv_dtype.cu:5:#include <cublas_v2.h>
+src/compute/attention_paged_int8.cu:187:            float rescale, w_new;
+src/compute/attention_paged_int8.cu:188:            online_softmax_step(dot, m_w, l_w, rescale, w_new);
+src/compute/attention_paged_int8.cu:194:            float w_new_scaled = w_new * v_scale_f;
+src/compute/attention_paged_int8.cu:399:            float rescale, w_new;
+src/compute/attention_paged_int8.cu:400:            online_softmax_step(dot, m_w, l_w, rescale, w_new);
+src/compute/attention_paged_int8.cu:405:            float w_new_scaled = w_new * __half2float(v_sc);
+src/compute/attention_blackwell.cu:237:            float m_old = row_valid ? row_m[r] : -FLT_MAX;
+src/compute/attention_blackwell.cu:238:            float m_new = fmaxf(m_old, m_ij);
+src/compute/attention_blackwell.cu:239:            float alpha = __expf(m_old - m_new);  // fast math: correction for old accumulator
+src/compute/attention_blackwell.cu:248:                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
+src/compute/attention_blackwell.cu:260:            float l_old = row_valid ? row_l[r] : 0.0f;
+src/compute/attention_blackwell.cu:261:            float l_new = alpha * l_old + partial_sum;
+src/compute/attention_blackwell.cu:263:                row_m[r] = m_new;
+src/compute/attention_blackwell.cu:264:                row_l[r] = l_new;
+src/compute/attention_blackwell.cu:268:            float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
+src/compute/attention_blackwell.cu:283:            float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
+src/compute/attention_paged_nvfp4.cu:181:            float rescale, w_new;
+src/compute/attention_paged_nvfp4.cu:182:            online_softmax_step(dot, m_w, l_w, rescale, w_new);
+src/compute/attention_paged_nvfp4.cu:192:                    o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
+src/compute/attention_paged_nvfp4.cu:193:                    o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
+src/compute/attention_paged_nvfp4.cu:322:            float rescale, w_new;
+src/compute/attention_paged_nvfp4.cu:323:            online_softmax_step(dot, m_w, l_w, rescale, w_new);
+src/compute/attention_paged_nvfp4.cu:332:                    o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
+src/compute/attention_paged_nvfp4.cu:333:                    o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
+src/compute/ssm.cu:425:            float h_old;
+src/compute/ssm.cu:427:                h_old = __half2float(static_cast<half*>(h_state)[idx]);
+src/compute/ssm.cu:429:                h_old = static_cast<float*>(h_state)[idx];
+src/compute/ssm.cu:431:            float h_new = a_bar * h_old + dt_val * x_val * b_s;
+src/compute/ssm.cu:434:                    static_cast<half*>(h_state)[idx] = __float2half(h_new);
+src/compute/ssm.cu:436:                    static_cast<float*>(h_state)[idx] = h_new;
+src/compute/ssm.cu:439:            y_partial += h_new * c_s;
+src/runtime/process_diag.cpp:38:    bool force_splitk_fallback = false;  // test hook
+src/runtime/process_diag.cpp:139:bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
+src/runtime/process_diag.cpp:140:void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
+src/runtime/cuda_graph.cu:267:    cudaGraph_t raw_new = nullptr;
+src/runtime/cuda_graph.cu:268:    cudaError_t err = cudaStreamEndCapture(capture_stream_, &raw_new);
+src/runtime/cuda_graph.cu:276:    new_graph.reset(raw_new);
+src/compute/gemm_batched.cu:4:#include <cublas_v2.h>
+src/compute/gemm_cutlass_mxfp4_sm120.cu:35:#include "cutlass/tensor_ref.h"
+src/compute/json_schema.h:182:const SchemaNode* resolve_schema_ref(const SchemaNode* root, const SchemaNode* node);
+src/compute/attention_paged_nvfp4_tc.cu:311:        float m_new = fmaxf(m_w, m_local);
+src/compute/attention_paged_nvfp4_tc.cu:312:        float exp_diff = (m_w == -FLT_MAX) ? 0.0f : __expf(m_w - m_new);
+src/compute/attention_paged_nvfp4_tc.cu:316:            my_weight_p = __expf(my_dot_p - m_new);
+src/compute/attention_paged_nvfp4_tc.cu:327:        float l_new = exp_diff * l_w + l_local;
+src/compute/attention_paged_nvfp4_tc.cu:330:        float rescale_norm = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
+src/compute/attention_paged_nvfp4_tc.cu:331:        float l_inv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
+src/compute/attention_paged_nvfp4_tc.cu:333:        m_w = m_new;
+src/compute/attention_paged_nvfp4_tc.cu:334:        l_w = l_new;
+
+=== #if 0 blocks ===
+
+=== files named *legacy* / *_v2* / *old* ===
+tools/filesize_thresholds.toml
+src/exec/executor_forward_moe_legacy.cu
+src/model/image_placeholders.h
+src/model/image_placeholders.cpp

@@ -1,0 +1,33 @@
+=== KV cache impls ===
+   586 src/memory/kv_cache.cu
+   165 src/memory/kv_cache.h
+  1575 src/memory/kv_cache_manager.cpp
+   210 src/memory/block_pool.cpp
+    91 src/memory/ssm_state.cu
+   129 src/memory/recurrent_snapshot_store.cpp
+  2756 total
+
+=== allocator concepts ===
+src/memory/scratch_stack.h:29:class ScratchStack {
+src/memory/arena.h:28:class ArenaAllocator {
+src/memory/block_pool.h:34:class BlockPool;
+src/memory/block_pool.h:37:class BlockRef {
+src/memory/block_pool.h:86:class BlockPool {
+src/memory/graph_slots.h:38:class GraphSlotPool;
+src/memory/graph_slots.h:55:struct GraphSlotCaps {
+src/memory/graph_slots.h:70:struct GraphSlotView {
+src/memory/graph_slots.h:101:class GraphSlotLease {
+src/memory/graph_slots.h:141:class GraphSlotPool {
+src/memory/host_pinned.h:47:class HostPinnedAllocator {
+src/memory/host_pinned.h:74:class PinnedBuffer {
+src/memory/host_pinned.h:143:class HostRegistrar {
+src/memory/host_pinned.h:153:class HostRegistration {
+src/memory/vram_allocator.h:25:class VRAMAllocator {
+src/memory/engine_arena.h:28:class Backend;
+
+=== nvfp4 decode cache separate? ===
+src/exec/expert_cache.h:21:struct ExpertCacheKey {
+src/exec/expert_cache.h:29:struct ExpertCacheKeyHash {
+src/exec/expert_cache.h:65:struct ExpertLRUCache {
+src/exec/weight_caches.h:17:struct FP8CacheEntry {
+src/exec/weight_caches.h:33:struct WeightCaches {

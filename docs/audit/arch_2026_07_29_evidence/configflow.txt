@@ -1,0 +1,30 @@
+=== nina / gateway mentions in repo ===
+
+=== KV dtype representations ===
+1. CLI flag:
+181:        } else if (std::strcmp(arg, "--kv-fp8") == 0) {
+193:        } else if (std::strcmp(arg, "--kv-nvfp4") == 0) {
+2. config key:
+76:// Apply a single dotted key (e.g. "kv_cache.dtype") with raw value string.
+130:    S("kv_cache.dtype", cfg.kv_cache.dtype);
+3. RuntimeConfig field:
+157:        std::string dtype = "auto";
+4. resolver:
+166:void Engine::init_resolve_kv_dtype_policy_() {
+173:    // (--kv-fp8 / --kv-int4 / …) set config_.kv_cache_dtype directly and win — we
+179:    if (config_.kv_cache_dtype == QType::F16) {
+182:            config_.kv_cache_dtype = QType::FP8_E4M3;
+184:            config_.kv_cache_dtype = QType::INT8;
+5. EngineConfig:
+60:    QType kv_cache_dtype = QType::F16;
+6. KVCache:
+115:    QType qtype() const;
+7. kernel:
+150:        QType cache_dtype = cache->qtype();
+
+=== C API kv dtype ===
+16:    size_t kv_cache_max_blocks;  // Max KV cache blocks, 0 = auto
+39:    ImpDType kv_cache_dtype;  // FP16 (default), FP8_E4M3, INT8, INT4, NVFP4, or MXFP4_KV
+66:    int min_kv_tokens;  // Minimum KV cache capacity in tokens (0 = auto).
+80:    int streaming_kv_enabled;    // 0 = off (default), 1 = on
+81:    int streaming_kv_auto;       // 1 = auto-enable when KV cache >90% full (default)

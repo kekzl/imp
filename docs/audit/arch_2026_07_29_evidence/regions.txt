@@ -1,0 +1,33 @@
+=== RegionTag / pool tags ===
+
+=== who tags what ===
+src/memory/graph_slots.cpp:69:    auto got = backend.acquire(dev_total, kSubAlign, RegionTag::EnginePersistent);
+src/memory/backend.cpp:16:constexpr int kNumTags = static_cast<int>(RegionTag::Other) + 1;
+src/memory/backend.cpp:24:    return (i >= 0 && i < kNumTags) ? i : static_cast<int>(RegionTag::Other);
+src/memory/backend.cpp:31:        case RegionTag::ModelResident:      return "model_resident";
+src/memory/backend.cpp:32:        case RegionTag::EnginePersistent:   return "engine_persistent";
+src/memory/backend.cpp:33:        case RegionTag::KvBlockPool:        return "kv_block_pool";
+src/memory/backend.cpp:34:        case RegionTag::SwaBlockPool:       return "swa_block_pool";
+src/memory/backend.cpp:35:        case RegionTag::ResidualRing:       return "residual_ring";
+src/memory/backend.cpp:36:        case RegionTag::SsmState:           return "ssm_state";
+src/memory/backend.cpp:37:        case RegionTag::RecurrentSnapshots: return "recurrent_snapshots";
+src/memory/backend.cpp:38:        case RegionTag::ForwardScratch:     return "forward_scratch";
+src/memory/backend.cpp:39:        case RegionTag::HostStaging:        return "host_staging";
+src/memory/backend.cpp:40:        case RegionTag::Other:              return "other";
+src/memory/engine_arena.cpp:16:    MemError e = a.open(backend, capacity, RegionTag::EnginePersistent);
+src/memory/alloc_interpose.cpp:158:    record(g_dev_sync, size, imp::RegionTag::Other, __builtin_return_address(0), true);
+src/memory/alloc_interpose.cpp:165:    record(g_dev_async, size, imp::RegionTag::Other, __builtin_return_address(0), true);
+src/memory/alloc_interpose.cpp:174:    record(g_host_pinned, size, imp::RegionTag::HostStaging, __builtin_return_address(0), false);
+src/memory/alloc_interpose.cpp:179:    record(g_host_pinned, size, imp::RegionTag::HostStaging, __builtin_return_address(0), false);
+src/memory/plan.cpp:37:    push(v, "model weights + mandatory caches", RegionTag::ModelResident, model_resident);
+src/memory/plan.cpp:38:    push(v, "optional weight caches", RegionTag::ModelResident, optional_caches);
+src/memory/plan.cpp:39:    push(v, "KV pool", RegionTag::KvBlockPool, kv.bytes);
+src/memory/plan.cpp:40:    push(v, "KV pool (SWA group)", RegionTag::SwaBlockPool, kv.swa_bytes);
+src/memory/plan.cpp:41:    push(v, "engine-persistent", RegionTag::EnginePersistent, engine_persistent);
+src/memory/plan.cpp:42:    push(v, "forward scratch", RegionTag::ForwardScratch, forward_scratch);
+src/memory/plan.cpp:45:    push(v, "CUDA context + driver", RegionTag::Other, context_reserve);
+src/memory/plan.cpp:46:    push(v, "library reserve (measured)", RegionTag::Other, library_reserve);
+src/memory/plan.cpp:115:    push(p.pools, "SSM/GDN state", RegionTag::SsmState, in.features.ssm_state_bytes);
+src/memory/plan.cpp:116:    push(p.pools, "recurrent snapshots", RegionTag::RecurrentSnapshots,
+src/memory/plan.cpp:118:    push(p.pools, "residual FP16 ring", RegionTag::ResidualRing, in.features.residual_ring_bytes);
+src/memory/plan.cpp:194:            if (l.tag == RegionTag::KvBlockPool)

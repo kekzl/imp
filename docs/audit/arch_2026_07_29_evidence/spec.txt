@@ -1,0 +1,32 @@
+=== feature interaction gates: spec-decode ===
+src/runtime/engine_spec_ngram.cpp:88:        IMP_LOG_WARN("spec-ngram: buffer allocation failed — speculation disabled this step");
+src/runtime/engine_spec_ngram.cpp:137:                     "speculation disabled this step", bytes);
+src/runtime/engine_spec_capture.cpp:207:            IMP_LOG_WARN("[spec-capture] disabled after repeated failures (%s)", why);
+src/runtime/engine.h:831:    int spec_capture_ctx_cap_ = -1;    // resolved capacity; -1 = unresolved, 0 = disabled
+
+=== spec + constrained? ===
+src/runtime/engine_spec_ngram.cpp:20:// constraints, no think budget, chunked-prefill-capable archs only. The
+src/runtime/engine_spec_ngram.cpp:36:#include "compute/json_constrain.h"
+src/runtime/engine_spec_ngram.cpp:271:        !req.regex_pattern.empty() || !req.grammar.empty() || !req.tool_constraint_tools.empty())
+src/runtime/engine_spec_ngram.cpp:272:        return false;  // constrained decode: verify replicates no FSM masks (#1002)
+src/runtime/engine_spec_ngram.cpp:934:        if (req->constraints)
+src/runtime/engine_spec_ngram.cpp:935:            req->constraints->update(tokj);
+
+=== spec eligibility ===
+7:// (SuffixDraftIndex, speculative.suffix, default) with frequency-voted
+25:// Hybrid (SSM/GDN) models (speculative.hybrid): the chunk forward advances
+32:// match and an MTP head is enabled (--mtp-spec-decode / speculative.mtp_k),
+190:// (speculative.burst tokens) has completed gets a short probe window — two
+210:// Capped at speculative.burst so re-probing never stops entirely.
+289:        const int cap = runtime_config_.speculative.draft_ctx_cap;
+291:                                    runtime_config_.speculative.moe &&
+293:        const bool hybrid_path = ssm_state_ != nullptr;  // only reachable with speculative.hybrid
+298:    // hybrid verify path (speculative.hybrid) rides SSMState's contiguous
+300:    if (ssm_state_ && !runtime_config_.speculative.hybrid) return false;
+306:    // conditional-graph loop (as does everything when speculative.moe=false).
+308:        !(runtime_config_.speculative.moe && model_->profile().moe_experts_nvfp4))
+428:    if (runtime_config_.speculative.token_recycling) {
+553:    const bool decode_attn_route = runtime_config_.speculative.verify_decode_attn &&
+855:        runtime_config_.speculative.token_recycling
+856:            ? std::min({std::max(1, runtime_config_.speculative.recycle_slots),
+1067:        const float min_emit = runtime_config_.speculative.mtp_econ_min_emit;

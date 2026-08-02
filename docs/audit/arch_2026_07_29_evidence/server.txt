@@ -1,0 +1,51 @@
+=== server handler files ===
+ 11320 total
+  1025 tools/imp-server/handlers_chat_core.cpp
+   815 tools/imp-server/tool_call.cpp
+   747 tools/imp-server/handlers_chat.cpp
+   725 tools/imp-server/handlers_misc.cpp
+   709 tools/imp-server/handlers.cpp
+   589 tools/imp-server/anthropic.cpp
+   556 tools/imp-server/utils.cpp
+   536 tools/imp-server/stream_driver.cpp
+   497 tools/imp-server/handlers_messages.cpp
+   436 tools/imp-server/handlers_responses.cpp
+   435 tools/imp-server/handlers_chat_params.cpp
+   429 tools/imp-server/tool_stream_filter.h
+   373 tools/imp-server/main.cpp
+   368 tools/imp-server/batching_engine.cpp
+   339 tools/imp-server/reasoning_split.h
+   279 tools/imp-server/responses.cpp
+   273 tools/imp-server/handlers.h
+   261 tools/imp-server/tool_call_gemma.cpp
+   254 tools/imp-server/handlers_rerank.cpp
+   249 tools/imp-server/handlers_internal.h
+   225 tools/imp-server/handlers_chat_stream.cpp
+   177 tools/imp-server/utils.h
+   176 tools/imp-server/handlers_admin.cpp
+   161 tools/imp-server/args.cpp
+   142 tools/imp-server/batching_engine.h
+   135 tools/imp-server/tool_call.h
+    97 tools/imp-server/stream_pipeline.h
+    94 tools/imp-server/metrics_memory.cpp
+    84 tools/imp-server/stream_driver.h
+
+=== endpoints ===
+"/"
+"/admin/resume"
+"/admin/suspend"
+"/detokenize"
+"/health"
+"/info"
+"/metrics"
+"/props"
+"/rerank"
+"/tokenize"
+"/v1/chat/completions"
+"/v1/completions"
+"/v1/embeddings"
+"/v1/messages"
+"/v1/messages/count_tokens"
+"/v1/models"
+"/v1/rerank"
+"/v1/responses"

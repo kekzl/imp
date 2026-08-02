@@ -1,0 +1,43 @@
+=== silent-fallback hunt: 'fall back' / 'fallback' with no log nearby ===
+180
+--- log lines mentioning fallback ---
+14
+
+=== startup resolved-path summary? ===
+src/runtime/engine_init_resolver.cpp:47:    IMP_LOG_INFO(
+src/runtime/engine_init_resolver.cpp:149:        IMP_LOG_INFO("[rope] note: sliding-window layers keep freq_scale=1.0 by design — the "
+src/runtime/engine_init_resolver.cpp:152:    IMP_LOG_INFO("[rope] override applied: %s factor=%.2f orig_ctx=%d → model ctx %d "
+src/runtime/engine_init_resolver.cpp:194:            IMP_LOG_INFO("KV cache dtype: FP8_E4M3 (auto — honoring model author's "
+src/runtime/engine_init_resolver.cpp:203:            IMP_LOG_INFO("KV cache dtype: FP8_E4M3 (auto — %s measured PPL-neutral for "
+src/runtime/engine_init_resolver.cpp:212:        IMP_LOG_INFO("KV cache dtype: kv_cache.fp8_auto_legacy → FP8_E4M3 (legacy auto-upgrade)");
+src/runtime/engine_init_resolver.cpp:214:        IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
+src/runtime/engine_init_resolver.cpp:216:        IMP_LOG_INFO("KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)");
+src/runtime/engine_init_resolver.cpp:218:            IMP_LOG_INFO("NVFP4 KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
+src/runtime/engine_init_resolver.cpp:222:        IMP_LOG_INFO("KV cache dtype: MXFP4_KV (FP4 E2M1 + UE8M0 per-16-elem scales, ~3.6× compression)");
+src/runtime/engine_init_resolver.cpp:224:            IMP_LOG_INFO("MXFP4_KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
+src/runtime/engine_init_resolver.cpp:252:        IMP_LOG_INFO("FP8 KV cache: FA2 serves all attention (hd=128/256) — skipping the legacy "
+src/runtime/engine_init_resolver.cpp:267:        IMP_LOG_INFO(
+src/runtime/engine_init_resolver.cpp:333:        IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB, post-load headroom=%.1f GB, "
+src/runtime/engine_init_resolver.cpp:338:        IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
+src/runtime/engine_init_resolver.cpp:354:        IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)", mcfg.ssm_state_size);
+src/runtime/engine_init_resolver.cpp:367:        IMP_LOG_INFO("FP8 prefill: disabled for native NVFP4 (CUTLASS NVFP4 GEMM used instead)");
+src/runtime/engine_init_resolver.cpp:375:            IMP_LOG_INFO(
+src/runtime/engine_init_resolver.cpp:382:            IMP_LOG_INFO("FP8 prefill: auto → enabled");
+src/runtime/engine_init_resolver.cpp:385:        IMP_LOG_INFO("FP8 prefill: disabled (attention.fp8_prefill=never)");
+src/runtime/engine_init_resolver.cpp:409:        IMP_LOG_INFO("cuBLAS FP16-accumulate prefill: auto → %s (arch=%s)", deny ? "OFF" : "ON",
+src/runtime/engine_init_resolver.cpp:444:            IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (dense Q*_K — decode-first)");
+src/runtime/engine_init_resolver.cpp:449:            IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (sub-8-bit Q*_K + decode_all)");
+src/runtime/engine_init_resolver.cpp:455:            IMP_LOG_INFO(
+src/runtime/engine_init_resolver.cpp:461:            IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (%s)", why);
+src/runtime/engine_init_resolver.cpp:476:            IMP_LOG_INFO("FP8 prefill cache: auto-disabled (sub-8-bit weights → dequant fallback)");
+src/runtime/engine_init_resolver.cpp:488:            IMP_LOG_INFO("Dual-path quant: auto-enabling FP8 prefill for attention weight quality");
+src/runtime/engine_init_resolver.cpp:505:        IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
+src/runtime/engine_init_resolver.cpp:546:            IMP_LOG_INFO("Gemma 4: NVFP4 decode cache enabled (use_nvfp4_decode=%d, prequant=%d)",
+src/runtime/engine_init_resolver.cpp:551:            IMP_LOG_INFO("Gemma 4: disabling dual_path_quant");
+src/runtime/engine_init_resolver.cpp:572:            IMP_LOG_INFO(
+src/runtime/engine_init_resolver.cpp:577:            IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
+src/runtime/engine_init_resolver.cpp:582:            IMP_LOG_INFO("Gemma 4: disabling all CUDA graphs (gemma4.no_graphs=true)");
+src/runtime/engine_init_resolver.cpp:589:            IMP_LOG_INFO("Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)");
+src/runtime/engine_init_resolver.cpp:605:        IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
+src/runtime/engine_init_resolver.cpp:640:                IMP_LOG_INFO("max_seq_len auto: SWA sizing — %d/%d windowed layers excluded "
+src/runtime/engine_init_resolver.cpp:681:        IMP_LOG_INFO(

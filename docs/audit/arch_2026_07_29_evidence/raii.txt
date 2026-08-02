@@ -1,0 +1,68 @@
+=== cuda_raii.h contents (types) ===
+10:class CudaStream {
+26:    ~CudaStream() {
+34:    CudaStream(CudaStream&& o) noexcept : stream_(std::exchange(o.stream_, nullptr)) {}
+35:    CudaStream& operator=(CudaStream&& o) noexcept {
+44:    cudaStream_t get() const noexcept { return stream_; }
+45:    operator cudaStream_t() const noexcept { return stream_; }
+46:    explicit operator bool() const noexcept { return stream_ != nullptr; }
+49:    cudaStream_t release() noexcept { return std::exchange(stream_, nullptr); }
+57:class CudaEvent {
+72:    ~CudaEvent() {
+80:    CudaEvent(CudaEvent&& o) noexcept : event_(std::exchange(o.event_, nullptr)) {}
+81:    CudaEvent& operator=(CudaEvent&& o) noexcept {
+90:    cudaEvent_t get() const noexcept { return event_; }
+91:    operator cudaEvent_t() const noexcept { return event_; }
+92:    explicit operator bool() const noexcept { return event_ != nullptr; }
+102:    cudaEvent_t release() noexcept { return std::exchange(event_, nullptr); }
+110:class CudaGraph {
+114:    ~CudaGraph() {
+122:    CudaGraph(CudaGraph&& o) noexcept : graph_(std::exchange(o.graph_, nullptr)) {}
+123:    CudaGraph& operator=(CudaGraph&& o) noexcept {
+133:    void reset(cudaGraph_t g = nullptr) noexcept {
+139:    cudaGraph_t get() const noexcept { return graph_; }
+140:    operator cudaGraph_t() const noexcept { return graph_; }
+141:    explicit operator bool() const noexcept { return graph_ != nullptr; }
+144:    cudaGraph_t release() noexcept { return std::exchange(graph_, nullptr); }
+151:class CudaGraphExec {
+155:    ~CudaGraphExec() {
+163:    CudaGraphExec(CudaGraphExec&& o) noexcept : exec_(std::exchange(o.exec_, nullptr)) {}
+164:    CudaGraphExec& operator=(CudaGraphExec&& o) noexcept {
+174:    void reset(cudaGraphExec_t e = nullptr) noexcept {
+180:    cudaGraphExec_t get() const noexcept { return exec_; }
+181:    operator cudaGraphExec_t() const noexcept { return exec_; }
+182:    explicit operator bool() const noexcept { return exec_ != nullptr; }
+185:    cudaGraphExec_t release() noexcept { return std::exchange(exec_, nullptr); }
+
+=== raw stream/event/graph creation outside cuda_raii ===
+src/memory/layer_offload.cu:153:        err = cudaEventCreateWithFlags(&slots_[s].ready_event, cudaEventDisableTiming);
+src/memory/layer_offload.cu:159:        err = cudaStreamCreateWithFlags(&slots_[s].transfer_stream, cudaStreamNonBlocking);
+src/runtime/green_ctx.cu:202:    err = cudaStreamCreateWithPriority(&prefill_stream_, cudaStreamNonBlocking, low_prio);
+src/runtime/green_ctx.cu:208:    err = cudaStreamCreateWithPriority(&decode_stream_, cudaStreamNonBlocking, high_prio);
+src/runtime/engine_kv_cache_init.cpp:706:        if (cudaEventCreateWithFlags(&pf_staging_evt_, cudaEventDisableTiming) != cudaSuccess)
+src/runtime/cuda_graph.cu:990:        err = cudaGraphCreate(&raw_graph, 0);
+src/runtime/cuda_graph.cu:993:                "ConditionalRunner: cudaGraphCreate failed: %s — falling back to "
+src/compute/gemm.cu:59:        cublasStatus_t st = cublasCreate(&s_cublas_handle);
+src/compute/gemm.cu:61:            fprintf(stderr, "imp::gemm: cublasCreate failed (status %d)\n", (int)st);
+src/compute/gemm.cu:71:        cublasStatus_t st = cublasLtCreate(&s_cublaslt_handle);
+src/compute/gemm.cu:73:            fprintf(stderr, "imp::gemm: cublasLtCreate failed (status %d)\n", (int)st);
+src/compute/gemm.cu:462:    cudaEventCreate(&start);
+src/compute/gemm.cu:463:    cudaEventCreate(&stop);
+src/runtime/engine_graph_decode.cpp:417:              cudaEventCreateWithFlags(&p.ev, cudaEventDisableTiming) == cudaSuccess;
+src/compute/attention_cublas.cu:45:        cublasStatus_t st = cublasCreate(&s_attn_cublas_handle);
+src/compute/attention_cublas.cu:47:            fprintf(stderr, "imp::attention_cublas: cublasCreate failed (status %d)\n", (int)st);
+src/compute/attention_cublas.h:60:// inside a captured stream can reuse the handle without cublasCreate
+src/model/weight_upload.cu:102:            cudaEventCreateWithFlags(&done[i], cudaEventDisableTiming);
+src/compute/attention_mxfp4_prefill.cu:338:        cublasCreate(&s_cublas_handle);
+src/compute/gemm_grouped.cu:28:        cublasStatus_t st = cublasCreate(&s_grouped_cublas_handle);
+src/compute/gemm_grouped.cu:30:            fprintf(stderr, "imp::gemm_grouped: cublasCreate failed (status %d)\n", (int)st);
+src/vision/vision_encoder.cu:24:        cublasCreate(&s_vision_cublas_handle);
+src/exec/executor_workspace_buffers.cu:256:            cudaEventCreateWithFlags(&sample_gather_evt_[p], cudaEventDisableTiming) != cudaSuccess) {
+src/exec/executor_forward.cu:256:        cudaEventCreate(&ev_start);
+src/exec/executor_forward.cu:257:        cudaEventCreate(&ev_emb);
+src/exec/executor_forward.cu:258:        cudaEventCreate(&ev_lm);
+src/exec/executor_forward.cu:262:            cudaEventCreate(&ev_attn[i]);
+src/exec/executor_forward.cu:263:            cudaEventCreate(&ev_ffn[i]);
+src/exec/expert_cache.cu:85:    cudaError_t serr = cudaStreamCreateWithFlags(&prefetch_stream_, cudaStreamNonBlocking);
+src/exec/expert_cache.cu:93:            cudaError_t eerr = cudaEventCreateWithFlags(&prefetch_done_[li], cudaEventDisableTiming);
+src/vision/qwen3vl_encoder.cu:27:        cublasCreate(&s_handle);

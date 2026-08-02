@@ -1,0 +1,106 @@
+=== QType enum ===
+#pragma once
+
+#include <cstdint>
+#include <cstddef>
+
+namespace imp {
+
+// Unified data-type tag for tensors. Replaces the previous split between
+// the compute-side dtype enum and the block-quant qtype enum.
+//
+// Wire-stable values 0..31 match the on-disk block-quant numbering used by
+// GGUF and similar formats. Values >= 64 are engine-internal types that have
+// no on-disk representation.
+enum class QType : uint16_t {
+    // Wire-stable 0..31 (kompatibel mit GGUF block-quant Wire-Format)
+    F32 = 0,
+    F16 = 1,
+    Q4_0 = 2,
+    Q4_1 = 3,
+    Q5_0 = 6,
+    Q5_1 = 7,
+    Q8_0 = 8,
+    Q8_1 = 9,
+    Q2_K = 10,
+    Q3_K = 11,
+    Q4_K = 12,
+    Q5_K = 13,
+    Q6_K = 14,
+    Q8_K = 15,
+    IQ4_NL = 20,
+    IQ4_XS = 23,
+    BF16 = 30,
+    MXFP4 = 31,
+
+    // Engine-internal (>= 64, never collides with future wire values)
+    NONE = 64,
+    FP8_E4M3 = 65,
+    FP8_E5M2 = 66,
+    INT8 = 67,
+    INT4 = 68,
+    INT32 = 69,
+    FP4_E2M1 = 70,
+    NVFP4 = 71,
+    MXFP4_KV = 72,
+    // Values 80 and 81 (TURBOQUANT / TURBOQUANT_LITE) were removed in Phase 5
+    // (2026-05-17); the C-API aliases followed 2026-07-07.
+};
+
+// True for block-quantised disk formats (Q*_K, Q*_0, Q*_1, IQ4_*, MXFP4, NVFP4).
+// These types require a Sidecar scales tensor for reconstruction.
+constexpr bool is_block_quant(QType q) {
+    auto v = static_cast<uint16_t>(q);
+    return (v >= 2 && v <= 15) || q == QType::IQ4_NL || q == QType::IQ4_XS || q == QType::MXFP4 ||
+           q == QType::NVFP4;
+}
+
+// True for compute-side dtypes that map directly to a hardware FP/INT type.
+// These tensors store raw values; no Sidecar scales needed.
+constexpr bool is_compute_dtype(QType q) {
+    switch (q) {
+        case QType::F32:
+        case QType::F16:
+        case QType::BF16:
+        case QType::FP8_E4M3:
+        case QType::FP8_E5M2:
+        case QType::INT8:
+        case QType::INT4:
+        case QType::INT32:
+        case QType::FP4_E2M1:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Does this source qtype benefit from an NVFP4 decode-cache conversion?
+// (> 4.5 bits/elem, or no fast native decode kernel.) Single source of truth
+// for the pre-dequant phases AND the VRAM-budget heuristic — keep any policy
+// change here so the two can't drift.
+inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
+
+=== StorageTier ===
+#pragma once
+
+#include <cstdint>
+
+namespace imp {
+
+enum class StorageTier : uint8_t {
+    Undefined = 0,  // handle not yet populated — FATAL if dispatched
+    FP32 = 1,
+    FP16 = 2,
+    FP8 = 3,            // E4M3 with per-tensor scale
+    NVFP4 = 4,          // two-level micro-scale, native decode-GEMV path
+    CUTLASS_NVFP4 = 5,  // block-scaled NVFP4 (CUTLASS sm_120 FFN grouped GEMM path)
+    MXFP4 = 6,          // block-scaled MXFP4 (CUTLASS sm_120 attention FMHA path)
+};
+
+using TierMask = uint32_t;
+
+constexpr TierMask mask(StorageTier t) { return TierMask{1} << static_cast<int>(t); }
+
+constexpr bool mask_contains(TierMask m, StorageTier t) { return (m & mask(t)) != 0; }
+
+}  // namespace imp
