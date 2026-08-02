@@ -343,11 +343,8 @@ bool Engine::init_kv_cache() {
     // GDN-only models (Qwen3.5) are graph-compatible; pure SSM (Nemotron-H) is not yet.
     {
         has_pure_ssm_layers_ = model_->profile().has_pure_ssm;
-        if (has_pure_ssm_layers_ && config_.use_cuda_graphs) {
-            config_.use_cuda_graphs = false;
-            IMP_LOG_INFO("Mamba2 SSM layers detected: disabling CUDA graphs "
-                         "(recurrent state not yet graph-safe)");
-        }
+        if (has_pure_ssm_layers_)
+            demote_graphs_(GraphDemotionReason::PureSsmLayers);
     }
 
     // Dequant weights → FP16/FP8/NVFP4 caches

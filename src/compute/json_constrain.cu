@@ -15,20 +15,7 @@ namespace imp {
 // JsonConstrainer implementation
 // ============================================================================
 
-JsonConstrainer::~JsonConstrainer() {
-    if (d_token_categories_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_token_categories_));
-        d_token_categories_ = nullptr;
-    }
-    if (d_token_allow_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
-        d_token_allow_ = nullptr;
-    }
-    if (d_allowed_mask_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
-        d_allowed_mask_ = nullptr;
-    }
-}
+JsonConstrainer::~JsonConstrainer() = default;
 
 bool JsonConstrainer::init(const Tokenizer& tok) {
     vocab_size_ = tok.vocab_size();
@@ -55,24 +42,11 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     }
 
     // Upload to device
-    cudaError_t err = cudaMalloc(&d_token_categories_, vocab_size_ * sizeof(uint16_t));
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("JsonConstrainer: failed to allocate device categories: %s", cudaGetErrorString(err));
+    if (!dev_.alloc_categories("JsonConstrainer", token_categories_.data(), vocab_size_))
         return false;
-    }
-    err = cudaMemcpy(d_token_categories_, token_categories_.data(), vocab_size_ * sizeof(uint16_t),
-                     cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("JsonConstrainer: failed to copy categories to device: %s", cudaGetErrorString(err));
-        return false;
-    }
 
-    // Allocate mask buffer
-    err = cudaMalloc(&d_allowed_mask_, sizeof(uint16_t));
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("JsonConstrainer: failed to allocate mask buffer: %s", cudaGetErrorString(err));
+    if (!dev_.alloc_allowed_mask("JsonConstrainer"))
         return false;
-    }
 
     // Per-token allow list. Allocated HERE, not on first use (issue #1104).
     // The lazy version allocated it inside apply_mask() — i.e. mid-decode, on
@@ -84,13 +58,8 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     // fallback was taken. The three sibling constrainers (regex, grammar,
     // schema) have always allocated this at init and failed the load loudly;
     // this one was the outlier.
-    err = cudaMalloc(&d_token_allow_, static_cast<size_t>(vocab_size_));
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("JsonConstrainer: failed to allocate the %d-token allow list: %s", vocab_size_,
-                      cudaGetErrorString(err));
-        d_token_allow_ = nullptr;
+    if (!dev_.alloc_token_allow("JsonConstrainer", vocab_size_))
         return false;
-    }
 
     reset();
     initialized_ = true;
@@ -587,7 +556,7 @@ static bool string_token_needs_simulation(const std::string& text) {
 }
 
 void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
-    if (!initialized_ || !d_token_categories_ || !d_allowed_mask_)
+    if (!initialized_ || !dev_.categories() || !dev_.allowed_mask())
         return;
 
     if (preamble_.active())
@@ -670,7 +639,7 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
                      std::to_underlying(current_state_));
     }
 
-    if (!d_token_allow_) {
+    if (!dev_.has_token_allow()) {
         // Unreachable after a successful initialize(), which is the point: a
         // constrainer that cannot mask must SAY so rather than let the request
         // decode unconstrained and look like a model that ignored the schema
@@ -690,16 +659,17 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     // enough and copying the model width would run off the end of it.
     const size_t allow_bytes = std::min(static_cast<size_t>(vocab_size), static_cast<size_t>(vocab_size_));
     IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(d_token_allow_, token_allow_.data(), allow_bytes, cudaMemcpyHostToDevice, stream));
+        cudaMemcpyAsync(dev_.token_allow(), token_allow_.data(), allow_bytes, cudaMemcpyHostToDevice, stream));
 
     uint16_t any_mask = 0xFFFF;  // per-token allow already encodes the category mask
     IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(d_allowed_mask_, &any_mask, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
+        cudaMemcpyAsync(dev_.allowed_mask(), &any_mask, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
 
     int threads = 256;
     int blocks = (vocab_size + threads - 1) / threads;
-    constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_,
-                                                                d_token_allow_, d_allowed_mask_, vocab_size,
+    constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, dev_.categories(),
+                                                                dev_.token_allow(), dev_.allowed_mask(),
+                                                                vocab_size,
                                                                 n_classified, /*use_token_allow=*/true);
     IMP_CUDA_CHECK_LAUNCH();
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "compute/constrain_device_buffers.h"
+
 #include "compute/preamble_gate.h"
 #include "compute/json_schema.h"  // SchemaNode / RegexNfa
 #include "model/tokenizer.h"
@@ -138,7 +140,7 @@ public:
     // initialize() and never false again — the point of issue #1104, where it
     // was allocated lazily inside apply_mask() and a failure there produced a
     // silently UNCONSTRAINED reply instead of a refused one.
-    bool has_device_allow_list() const { return d_token_allow_ != nullptr; }
+    bool has_device_allow_list() const { return dev_.has_token_allow(); }
 
 private:
     bool initialized_ = false;
@@ -146,7 +148,6 @@ private:
 
     // Per-token category bitmask (host, copied to device at init)
     std::vector<uint16_t> token_categories_;
-    uint16_t* d_token_categories_ = nullptr;
 
     // Per-token decoded text (for FSM update)
     std::vector<std::string> token_texts_;
@@ -171,11 +172,10 @@ private:
     std::string partial_literal_;  // for tracking partial "true"/"false"/"null"
     std::string target_literal_;   // full expected literal
 
-    // Device buffer for allowed mask (1 uint16_t, stable address)
-    uint16_t* d_allowed_mask_ = nullptr;
-    // Per-token whole-token-validated allow list (host + device)
+    // Per-token whole-token-validated allow list (host side)
     std::vector<uint8_t> token_allow_;
-    uint8_t* d_token_allow_ = nullptr;
+    // categories + allowed-mask + token-allow, one lifetime (F-18)
+    ConstrainDeviceBuffers dev_;
     std::vector<int32_t> eos_ids_;
 
     // Preamble pass-through (reasoning models emit <think>...</think> first)

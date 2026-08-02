@@ -81,14 +81,7 @@ static const SchemaNode* xml_tool_params(const SchemaNode* root, const std::stri
 // Initialization
 // ---------------------------------------------------------------------------
 
-SchemaConstrainer::~SchemaConstrainer() {
-    if (d_token_categories_)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_token_categories_));
-    if (d_token_allow_)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
-    if (d_allowed_mask_)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
-}
+SchemaConstrainer::~SchemaConstrainer() = default;
 
 bool SchemaConstrainer::init_grammar_for_test(std::unique_ptr<SchemaNode> schema) {
     schema_ = std::move(schema);
@@ -132,12 +125,12 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
     }
 
     // Upload to GPU
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token_categories_, vocab_size_ * sizeof(uint16_t)));
-    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_token_categories_, token_categories_.data(),
-                                  vocab_size_ * sizeof(uint16_t), cudaMemcpyHostToDevice));
-
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token_allow_, vocab_size_ * sizeof(uint8_t)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_allowed_mask_, sizeof(uint16_t)));
+    if (!dev_.alloc_categories("SchemaConstrainer", token_categories_.data(), vocab_size_))
+        return false;
+    if (!dev_.alloc_token_allow("SchemaConstrainer", vocab_size_))
+        return false;
+    if (!dev_.alloc_allowed_mask("SchemaConstrainer"))
+        return false;
 
     reset();
     initialized_ = true;
@@ -623,12 +616,12 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
                 token_allow_[e] = 1;
         uint16_t all_cats = 0xFFFF;
         IMP_CUDA_CHECK_LOG(
-            cudaMemcpyAsync(d_allowed_mask_, &all_cats, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, token_allow_.data(), vocab_size_ * sizeof(uint8_t),
+            cudaMemcpyAsync(dev_.allowed_mask(), &all_cats, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev_.token_allow(), token_allow_.data(), vocab_size_ * sizeof(uint8_t),
                                            cudaMemcpyHostToDevice, stream));
         int t = 256, b = (vocab_size + t - 1) / t;
-        constrain_mask_allow_kernel<<<b, t, 0, stream>>>(d_logits, d_token_categories_, d_token_allow_,
-                                                         d_allowed_mask_, vocab_size,
+        constrain_mask_allow_kernel<<<b, t, 0, stream>>>(d_logits, dev_.categories(), dev_.token_allow(),
+                                                         dev_.allowed_mask(), vocab_size,
                                                          /*n_classified=*/vocab_size_, /*use_allow=*/true);
         IMP_CUDA_CHECK_LAUNCH();
         return;
@@ -665,11 +658,11 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
 
     // Upload category mask
     IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(d_allowed_mask_, &cat_mask, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
+        cudaMemcpyAsync(dev_.allowed_mask(), &cat_mask, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
 
     // Upload token allow mask if needed
     if (need_token_allow_) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, token_allow_.data(), vocab_size_ * sizeof(uint8_t),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev_.token_allow(), token_allow_.data(), vocab_size_ * sizeof(uint8_t),
                                            cudaMemcpyHostToDevice, stream));
     }
 
@@ -678,8 +671,9 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
     // vocab_size is the LOGITS width (model vocab); the category/allow buffers
     // only cover the tokenizer vocab — padding logits are masked via
     // n_classified (SafeTensors lm_head padding, see json_constrain.cu).
-    constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_, d_token_allow_,
-                                                                d_allowed_mask_, vocab_size,
+    constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, dev_.categories(),
+                                                                dev_.token_allow(), dev_.allowed_mask(),
+                                                                vocab_size,
                                                                 /*n_classified=*/vocab_size_,
                                                                 need_token_allow_);
     IMP_CUDA_CHECK_LAUNCH();

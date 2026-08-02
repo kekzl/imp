@@ -182,11 +182,8 @@ bool Engine::init_features() {
     // Pinned sample buffer for CUDA graphs
     if (!h_sample_pinned_) {
         h_sample_pinned_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
-        if (h_sample_pinned_.empty()) {
-            IMP_LOG_WARN("pinned sample buffer unavailable — disabling CUDA graphs");
-            if (config_.use_cuda_graphs)
-                config_.use_cuda_graphs = false;
-        }
+        if (h_sample_pinned_.empty())
+            demote_graphs_(GraphDemotionReason::PinnedSampleBufUnavailable);
     }
     if (!decode_done_)
         (void)decode_done_.create(cudaEventDisableTiming);

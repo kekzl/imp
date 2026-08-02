@@ -1,5 +1,7 @@
 #pragma once
 
+#include "compute/constrain_device_buffers.h"
+
 #include "compute/gbnf_grammar.h"
 #include "compute/preamble_gate.h"
 #include "model/tokenizer.h"
@@ -91,7 +93,7 @@ private:
 
     std::map<std::vector<int32_t>, std::vector<uint8_t>> mask_cache_;
 
-    uint8_t* d_token_allow_ = nullptr;
+    ConstrainDeviceBuffers dev_;
     PreambleGate preamble_;
 };
 

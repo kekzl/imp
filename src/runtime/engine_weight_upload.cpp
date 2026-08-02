@@ -45,10 +45,7 @@ bool Engine::init_weights() {
             IMP_LOG_INFO("Activation calibration ON — collecting per-channel activation magnitudes.");
             // The collector allocates an accumulator the first time it sees a
             // weight, which a graph capture rejects outright.
-            if (config_.use_cuda_graphs) {
-                IMP_LOG_INFO("Disabling CUDA Graphs while calibration is active.");
-                config_.use_cuda_graphs = false;
-            }
+            demote_graphs_(GraphDemotionReason::CalibrationActive);
         }
 
         if (config_.streaming_kv_enabled) {
@@ -74,12 +71,7 @@ bool Engine::init_weights() {
                     // begins; a CUDA graph captured against an old table
                     // would replay stale pointers. Re-capturing per step
                     // negates the graph's win, so disable graphs entirely.
-                    if (config_.use_cuda_graphs) {
-                        IMP_LOG_INFO(
-                            "Disabling CUDA Graphs while StreamingLLM is active "
-                            "(block table mutates per decode step).");
-                        config_.use_cuda_graphs = false;
-                    }
+                    demote_graphs_(GraphDemotionReason::StreamingKvConfigured);
                 } else {
                     IMP_LOG_WARN(
                         "StreamingLLM enabled but no sliding window configured "
@@ -263,7 +255,7 @@ bool Engine::init_weights() {
                     "selection. Set moe.prefetch_top_k high enough that the "
                     "captured top-K covers the router's hot set.");
             } else {
-                IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host");
+                demote_graphs_(GraphDemotionReason::ExpertsOnHost);
                 IMP_LOG_INFO(
                     "  Tip: if model+KV fits in VRAM, set IMP_EXPERT_OVERHEAD_PCT=10 "
                     "(default 30) to upload ALL experts and re-enable CUDA graphs "
@@ -271,13 +263,10 @@ bool Engine::init_weights() {
                 IMP_LOG_INFO(
                     "  Or set moe.allow_graphs_under_offload=true (experimental) "
                     "to opt into captured decode under host-offload.");
-                config_.use_cuda_graphs = false;
             }
         }
-        if (runtime_config_.runtime.cuda_graphs == "never" && config_.use_cuda_graphs) {
-            IMP_LOG_INFO("Disabling CUDA graphs: runtime.cuda_graphs=never");
-            config_.use_cuda_graphs = false;
-        }
+        if (runtime_config_.runtime.cuda_graphs == "never")
+            demote_graphs_(GraphDemotionReason::ConfigNever);
         // MoE decode fast path is fully device-side (no D2H memcpy) — graph-safe.
         // Only MoE prefill paths use D2H sync for expert_offsets, but prefill is
         // never captured in CUDA graphs.
