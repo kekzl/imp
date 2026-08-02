@@ -11,6 +11,20 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+- **`imp-cli --max-tokens` now defaults to 8192, not 256** (#1209). 256 predates
+  reasoning models: on a trace-reasoner the think block alone overruns it, so the
+  answer comes back empty with `finish_reason=length`. `imp-server` was already
+  at 8192; both tools now share the value. On a 32 GB card output length is not
+  the scarce resource — KV capacity is, and that is sized separately.
+- **The 26 flags `imp-cli` and `imp-server` both accept are parsed once**
+  (#1209, `tools/common/args_common.{h,cpp}`). They were two hand-written
+  else-if chains that had to agree by review alone, so a fix applied to one
+  binary and not the other stayed invisible. Verified before consolidating:
+  every handler was byte-identical and every default matched except
+  `max_tokens`. `CommonArgs` is a base class rather than a member, so every
+  existing `args.<field>` use site is unchanged.
+
 ### Added
 - **`--metrics-require-auth`** (#1207): fold `/metrics` back under the
   `--api-key` check. Off by default so a stock Prometheus scrape keeps working,

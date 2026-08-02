@@ -456,13 +456,15 @@ if(IMP_BUILD_TOOLS)
     # imp-cli
     add_executable(imp-cli
         tools/imp-cli/main.cpp
-        tools/imp-cli/args.cpp
+    tools/common/args_common.cpp
+    tools/imp-cli/args.cpp
     )
     target_link_libraries(imp-cli PRIVATE imp imp_warnings)
     if(IMP_ALLOC_INTERPOSE)
         target_link_options(imp-cli PRIVATE ${IMP_WRAP_LINK_FLAGS})
     endif()
-    target_include_directories(imp-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(imp-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                               ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 
     # imp-quantize — offline BF16/FP16 -> NVFP4 checkpoint conversion
     add_executable(imp-quantize
@@ -522,7 +524,8 @@ if(IMP_BUILD_SERVER)
     add_executable(imp-server
         ${IMP_WEBUI_HEADER}
         tools/imp-server/main.cpp
-        tools/imp-server/args.cpp
+    tools/common/args_common.cpp
+    tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
         tools/imp-server/tool_call.cpp
         tools/imp-server/tool_call_gemma.cpp
@@ -547,6 +550,7 @@ if(IMP_BUILD_SERVER)
         target_link_options(imp-server PRIVATE ${IMP_WRAP_LINK_FLAGS})
     endif()
     target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                                 ${CMAKE_CURRENT_SOURCE_DIR}/tools
                                                   ${CMAKE_CURRENT_BINARY_DIR}/generated)
     # Optional gcov instrumentation of the server TUs only (the CUDA imp lib is
     # left uninstrumented — nvcc can't take --coverage). Measures real line
@@ -688,7 +692,8 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/tool_call.cpp
             tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/tool_call_gemma.cpp
-            tools/imp-server/args.cpp
+        tools/common/args_common.cpp
+    tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
             tests/test_sse_stream_utils.cpp
@@ -700,12 +705,14 @@ if(IMP_BUILD_TESTS)
             tests/test_server_auth.cpp
             tests/test_server_args.cpp
             tests/test_base64.cpp)
-        target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+        target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
+                                                     ${CMAKE_CURRENT_SOURCE_DIR}/tools)
         target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
     endif()
     # test_stream_pipeline.cpp includes the self-contained pure header
     # tools/imp-server/stream_pipeline.h (no httplib/json deps).
-    target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+    target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
+                                                 ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 
     imp_add_test_module(test-text SOURCES
         tests/test_tokenizer.cpp
