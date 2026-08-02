@@ -1,6 +1,6 @@
 # imp — Project Instructions
 
-From-scratch C++23/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. ~100k LOC (src/ + include/). See [`docs/architecture.md`](docs/architecture.md) (canonical narrative) and [`docs/sm120.md`](docs/sm120.md).
+From-scratch C++23/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. ~135k LOC (src/ + include/; ~220k with tests/). See [`docs/architecture.md`](docs/architecture.md) (canonical narrative) and [`docs/sm120.md`](docs/sm120.md).
 
 **This file is the router, not the manual.** It holds what applies to every task; the playbooks live in the skills below and are loaded on demand. If something here is also in a skill, the skill is the copy that gets maintained.
 
@@ -67,7 +67,9 @@ make verify-fast           # ~90 s pre-push gate    make verify   # ~5 min full
   5% prefill). Refresh via `scripts/gen_perf_baseline.sh` only when a change
   intentionally moves perf, and say so in the PR.
 - Runtime config is `RuntimeConfig` in `src/runtime/config.h` (`imp.conf` +
-  `--config` + `--set`). The only env vars still seeded are `IMP_DETERMINISTIC`
+  `--config` + `--set`). The env vars seeded are `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`, and the three
+  trace knobs promoted to config keys in #1207 (`IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`,
+  `IMP_PPL_DUMP` → `diagnostics.spec_trace` / `.jump_trace` / `.ppl_dump`)
   and `IMP_FMHA_FA2`; don't reintroduce ad-hoc env reads.
 - Internal errors throw and are translated to `ImpError` at the
   `src/api/imp_api.cpp` boundary — intentional, don't convert them to status returns.

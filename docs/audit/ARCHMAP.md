@@ -17,8 +17,14 @@ vision ──▶ compute/model        lora ──▶ runtime/model
 - **core** — `Buffer`, `Tensor`, `cuda_raii.h` (`CudaStream`/`CudaEvent`, move-only),
   logging + `IMP_CUDA_CHECK*` macros, `ModelProfile` (centralized arch facts).
 - **memory** — three layers since #1106 (design doc: `docs/MEMORY_ARCHITECTURE.md`,
-  findings log: root `AUDIT.md`). `backend.{h,cpp}` is the **only** code that talks
-  to the driver about memory (invariant I1, gated by `tools/check_alloc_sites.py`);
+  findings log: root `AUDIT.md`). `backend.{h,cpp}` is the code that *should* be the
+  only thing talking to the driver about memory (invariant I1). In practice I1 is
+  a **ratchet, not an absolute**: `tools/check_alloc_sites.py` gates against
+  `tools/alloc_allowlist.txt`, which grandfathers **74 files / 492 direct
+  allocation sites** outside `src/memory/` (28 in `exec/`, 25 in `compute/`, 9 in
+  `runtime/`). The list only shrinks and the gate fails in both directions — a new
+  allocating file AND a listed file that stopped allocating — so the mechanism is
+  sound; the absolute phrasing was not (2026-08-02 audit, F-13);
   above it the tier allocators `arena` (T2 engine-persistent), `block_pool` (T3
   fixed-block, now backs `KVCache`), `scratch_stack` (T4 forward-scratch) and
   `graph_slots` (T2 slot pool for the conditional-graph loop); `span.h` encodes in
@@ -40,8 +46,15 @@ vision ──▶ compute/model        lora ──▶ runtime/model
 - **tools/imp-server** — httplib server, `handlers.cpp` (~4600 LOC, OpenAI +
   Anthropic), `BatchingEngine` (the HTTP→GPU bridge).
 
-Layer note (pass-1 D1): a few `compute/quant/memory → runtime` includes exist for
-diagnostics/PDL only (instrumentation, not algorithmic coupling).
+Layer note (revised 2026-08-02, audit F-10). The `compute/quant/memory → runtime`
+edges are mostly instrumentation as described (`pdl.h` 7 files, `process_diag.h`
+12). **`exec → runtime` is not**: 27 files, 22 of them `runtime/config.h` (1124
+LOC). `RuntimeConfig` is declared in the top layer and drives dispatch in the hot
+layer, which is *why* `process_diag` exists at all — see its header comment about
+leaf utilities that cannot carry a config. The durable fix is a small
+`DispatchPolicy` POD in `core/`, resolved once at init; until then this is the
+largest live layering inversion. (The one `core → compute` edge was removed in
+#1207 by making the cuda_static_reset hooks self-registering.)
 
 ## Concurrency / async model (HTTP → GPU bridge)
 
