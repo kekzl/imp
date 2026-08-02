@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/dispatch_paths.h"  // MoePrefillPath
 #include "model/model_arch.h"
 #include "runtime/config.h"
 
@@ -18,12 +19,9 @@
 
 namespace imp {
 
-enum class MoePrefillPath {
-    DEVICE_ARGS,   // CUTLASS 3.x NVFP4 device-args full path (fast)
-    SMALL_M,       // gemm_grouped_nvfp4_smallM (small token counts)
-    GROUPED,       // host-args CUTLASS 3.x grouped GEMM (+ gpt-oss bias seams)
-    LEGACY,        // per-expert legacy fallback (gather + serial GEMM)
-};
+// MoePrefillPath now lives in compute/dispatch_paths.h so the runtime recorder
+// (compute/dispatch_record.h) names the tiers with the same vocabulary this
+// model does — see #1205.
 
 // Workspace-readiness flags, mirroring the device-pointer / packed-tensor
 // conjunctions in the .cu. When false, that tier's preconditions are not met

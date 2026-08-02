@@ -160,6 +160,7 @@
         set_l2_persist_kv(stream, k_c.data, k_c.nbytes() + v_c.nbytes());
 
         if (cache_dtype == QType::INT4) {
+            dispatch_record::set_attn_decode(AttnDecodePath::INT4);
             // INT4 paged attention with per-head scales and INT4 unpack (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_int4(q4, k_c, v_c, o4,
@@ -169,6 +170,8 @@
                                         state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
                                         stream, state.max_blocks_per_seq);
         } else if (cache_dtype == QType::NVFP4) {
+            // TC vs non-TC is decided per shape below.
+            dispatch_record::set_attn_decode(AttnDecodePath::NVFP4);
             // NVFP4 paged attention: packed FP4 + UE4M3 per-group_of_16 scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             // BitDecoding TC dispatch opt-in: kv_cache.bitdecoding_qk routes to the WMMA-Q.K variant; default
@@ -184,6 +187,7 @@
                 const uint8_t* k_scales = static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0));
                 const uint8_t* v_scales = static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0));
                 if (!residual_on) {
+                    dispatch_record::set_attn_decode(AttnDecodePath::NVFP4_TC);
                     paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, layer_block_tables,
                                                     state.context_lens, kv_bs, scale, state.max_context_len,
                                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
@@ -222,6 +226,7 @@
                         res_count = rs.fill_count;
                         res_widx = rs.write_idx;
                     }
+                    dispatch_record::set_attn_decode(AttnDecodePath::NVFP4_TC);
                     paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, layer_block_tables,
                                                     state.context_lens, kv_bs, scale, state.max_context_len,
                                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
@@ -241,6 +246,7 @@
                                              cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
             }
         } else if (cache_dtype == QType::MXFP4_KV) {
+            dispatch_record::set_attn_decode(AttnDecodePath::MXFP4_KV);
             // MXFP4-KV paged attention: same kernel as NVFP4 but with UE8M0 scale decode.
             // BitDecoding TC path not supported for MXFP4_KV in Slice 2 — always scalar.
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
@@ -251,6 +257,7 @@
                                             state.max_context_len, layer_sliding_window,
                                             cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
         } else if (cache_dtype == QType::INT8) {
+            dispatch_record::set_attn_decode(AttnDecodePath::INT8);
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_int8(q4, k_c, v_c, o4,
@@ -260,6 +267,7 @@
                                         state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
                                         stream, state.max_blocks_per_seq);
         } else if (cache_dtype == QType::FP8_E4M3) {
+            dispatch_record::set_attn_decode(AttnDecodePath::FP8);
             // FP8 paged attention with on-the-fly dequant (Split-K enabled)
             float kv_scale = (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
                                  ? kv_scales_[kv_layer]
@@ -269,6 +277,7 @@
                                        kv_scale, state.max_context_len, layer_sliding_window,
                                        cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
         } else {
+            dispatch_record::set_attn_decode(AttnDecodePath::FP16);
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode(q4, k_c, v_c, o4, layer_block_tables, state.context_lens, kv_bs, scale,
                                    state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,

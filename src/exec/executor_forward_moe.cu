@@ -29,6 +29,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
+#include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
@@ -575,22 +576,27 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     debug_tensor_stats("L0_moe_norm_out_no", no, stream);
                 }
                 if (can_fp16_batch_nosync) {
+                    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP16_BATCH);
                     try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded,
                                                    non_gated_experts, up_qtype, routing,
                                                    fp32_down_active, fp32_down_buf);
                 } else if (can_fp8_batch) {
+                    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP8_BATCH);
                     try_run_moe_fp8_batch_prefill(layer, stream, n, d, eff, ne, expanded,
                                                   non_gated_experts, up_qtype, routing);
 
                     // Falls through to scatter (step 7)
 
                 } else if (try_run_moe_cutlass3x_nvfp4_prefill_(layer, stream, ctx)) {
+                    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::CUTLASS3X);
                     // Falls through to scatter (step 7)
 
                 } else if (try_run_moe_nvfp4_dequant_batch_prefill_(layer, stream, ctx)) {
+                    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::NVFP4_DEQUANT);
                     // Falls through to scatter (step 7)
 
                 } else {
+                    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::LEGACY);
                     run_moe_legacy_fallback_(layer, stream, ctx);
                 }
             }  // else of can_fp16/fp8_batch/legacy

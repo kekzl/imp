@@ -26,6 +26,7 @@
 #include "runtime/batch.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/mtp_forward.h"
+#include "compute/dispatch_record.h"  // resolved-path summary (#1205)
 #include "model/image_placeholders.h"
 #include "memory/kv_cache.h"
 #include "compute/sampling.h"
@@ -33,6 +34,7 @@
 #include "core/logging.h"
 
 #include <climits>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -102,7 +104,53 @@ bool Engine::step() {
         ensure_prefill_workspace(executor_.get());
     }
 
+    log_resolved_dispatch_once_();
+
     return scheduler_->has_pending() || scheduler_->active_count() > 0;
+}
+
+// One-shot summary of the kernels this model ACTUALLY resolved to (#1205).
+//
+// Emitted after the first step that has seen both a prefill and a decode, so
+// every chain has had a chance to record. Everything here is read back from
+// compute/dispatch_record.h — i.e. from the branches that ran, not from a
+// prediction — so it cannot drift away from the dispatch the way a second copy
+// of the routing rules would.
+//
+// Why this exists: the prefill chain has six tiers and the MoE chain five, and
+// every one of them declines by returning `false` with no log. Before this,
+// a model silently taking a slower or lower-quality path left no trace, which
+// made every future routing regression invisible.
+void Engine::log_resolved_dispatch_once_() {
+    if (dispatch_dump_done_)
+        return;
+    const auto& r = dispatch_record::current();
+    if (!r.has_prefill() || !r.has_decode())
+        return;
+    dispatch_dump_done_ = true;
+
+    const bool is_moe = model_ && model_->profile().is_moe;
+
+    char prefill[96];
+    if (r.attn_prefill_outer == AttnPrefillOuter::FMHA_CHAIN && r.attn_prefill_tier_set) {
+        snprintf(prefill, sizeof(prefill), "%s → %s", attn_prefill_outer_name(r.attn_prefill_outer),
+                 attn_prefill_path_name(r.attn_prefill_tier));
+    } else {
+        snprintf(prefill, sizeof(prefill), "%s", attn_prefill_outer_name(r.attn_prefill_outer));
+    }
+
+    char moe[96];
+    if (!is_moe) {
+        snprintf(moe, sizeof(moe), "%s", moe_prefill_outer_name(MoePrefillOuter::NONE));
+    } else if (r.moe_prefill_outer == MoePrefillOuter::CUTLASS3X && r.moe_prefill_tier_set) {
+        snprintf(moe, sizeof(moe), "%s → %s", moe_prefill_outer_name(r.moe_prefill_outer),
+                 moe_prefill_path_name(r.moe_prefill_tier));
+    } else {
+        snprintf(moe, sizeof(moe), "%s", moe_prefill_outer_name(r.moe_prefill_outer));
+    }
+
+    IMP_LOG_INFO("Resolved dispatch: attn_prefill=%s attn_decode=%s moe_prefill=%s graphs=%d", prefill,
+                 attn_decode_path_name(r.attn_decode), moe, (int)config_.use_cuda_graphs);
 }
 
 // =====================================================================

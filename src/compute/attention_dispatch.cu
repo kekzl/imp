@@ -11,6 +11,7 @@
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention_mxfp4_prefill.h"
+#include "compute/dispatch_record.h"
 
 namespace imp {
 
@@ -46,6 +47,7 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         if (rcfg.attention.fmha_sm120 != "never" &&
             fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset,
                                attn_sinks)) {
+            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
             return;
         }
         char msg[160];
@@ -64,6 +66,7 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     if (attention_mxfp4_available()) {
         if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
                                      process_diag_mxfp4_blockscale(), q_offset)) {
+            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::MXFP4);
             return;
         }
         // Fall through: head_dim not supported (e.g. < 32), use FP8/FP16 path
@@ -80,6 +83,7 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
             rcfg.attention.fa2_fp16qk == "never" && rcfg.attention.fp8_fmha == "on";
         if (fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset,
                                    /*fp16_qk=*/!fa2_fp8_optin)) {
+            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FA2);
             IMP_LOG_DEBUG("FMHA dispatch: using FA2 register-resident kernel (hd=%d)",
                           static_cast<int>(Q.shape[3]));
             return;
@@ -96,6 +100,7 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         bool fp8_ok = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
                                               q_offset);
         if (fp8_ok) {
+            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FP8);
             IMP_LOG_DEBUG("FMHA dispatch: using FP8 sm120 kernel (hd=%d)", static_cast<int>(Q.shape[3]));
             return;
         }
@@ -106,6 +111,7 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     const bool use_fmha_sm120 = rcfg.attention.fmha_sm120 != "never";
     if (use_fmha_sm120) {
         if (fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset)) {
+            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
             return;
         }
     }
@@ -114,6 +120,7 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // for unsupported configs — hd ∉ {64,96,128,256} or smem over the device
     // opt-in (hd=256 at Br=64 needs ~176 KB vs 99 KB on sm_120).
     if (flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset)) {
+        dispatch_record::set_attn_prefill_tier(AttnPrefillPath::BLACKWELL);
         return;
     }
 

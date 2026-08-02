@@ -298,17 +298,20 @@
                                             stream, state.context_lens)) {
                     throw std::runtime_error("chunked_prefill: FA2 declined a capture-replay chunk");
                 }
+                dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
             } else if (chunk_fa2_serves &&
                 try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
                                        nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                        q_offset, stream)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
+                dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
             } else if (smatrix_fits && !prefer_fmha) {
                 // cuBLAS: below-threshold reference for uniform models, learned
                 // sinks, AND the hd=512 Gemma-4 global layers whenever their
                 // S-matrix fits (measured faster than the SMEM-capped fused
                 // hd=512 kernel — docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md). The hd=256 SWA layers took FA2
                 // above; only the hd=512 layers land here.
+                dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
                                          layer_sliding_window, attn_sinks);
@@ -317,6 +320,7 @@
                                                        hd, scale, /*causal=*/true, cfg.attn_logit_softcap,
                                                        q_offset, stream, layer_sliding_window,
                                                        attn_sinks)) {
+                dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS_SLICED);
                 // hd=512 S-matrix overflow (long ctx): cuBLAS in workspace-sized
                 // q-row slices — 3.4-3.9× faster than the whole-chunk FMHA hd=512
                 // fallback at Skv 8k/16k (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md entry 4; the FMHA's Bq=16
@@ -336,6 +340,7 @@
                 Tensor k4 = k_full_t.reshape(4, kv4s);
                 Tensor v4 = v_full_t.reshape(4, kv4s);
                 Tensor o4 = ao.reshape(4, o4s);
+                dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
                 attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
                                            cfg.attn_logit_softcap, stream, runtime_config(), q_offset,
                                            static_cast<const half*>(attn_sinks));
@@ -414,11 +419,13 @@
                                    layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
                                    stream)) {
             // handled by FA2 f16 — no S-matrix needed (hd 128/256, incl. Gemma-4 SWA)
+            dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
         } else if (s_matrix_fits && !prefer_fmha) {
             // Materialized cuBLAS: below-threshold reference for uniform models
             // and learned sinks, AND the hd=512 Gemma-4 global layers whenever
             // the S-matrix fits (faster than the SMEM-capped fused hd=512 kernel
             // — docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md). The hd=256 SWA layers took FA2 above.
+            dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
             attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
                                      /*causal=*/true, cfg.attn_logit_softcap,
                                      /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
@@ -427,6 +434,7 @@
                                                    /*causal=*/true, cfg.attn_logit_softcap,
                                                    /*q_offset=*/0, stream, layer_sliding_window,
                                                    attn_sinks)) {
+            dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS_SLICED);
             // hd=512 S-matrix overflow: cuBLAS in workspace-sized q-row slices —
             // 3.4-3.9× faster than the whole-prompt FMHA hd=512 fallback
             // (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md entry 4). False only when even a 16-row slice
@@ -444,6 +452,7 @@
             Tensor k4 = kk.reshape(4, kv4s);
             Tensor v4 = vv.reshape(4, kv4s);
             Tensor o4 = ao.reshape(4, o4s);
+            dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
             attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
                                        cfg.attn_logit_softcap, stream, runtime_config(), /*q_offset=*/0,
                                        static_cast<const half*>(attn_sinks));

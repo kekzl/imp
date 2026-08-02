@@ -22,6 +22,7 @@
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention_paged.h"
+#include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/kv_gather.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"

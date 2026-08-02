@@ -11,6 +11,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
+#include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
 #include "compute/moe_routing.h"
@@ -294,6 +295,7 @@ bool device_args_done = false;
         }
         if (ok) {
             device_args_done = true;
+            dispatch_record::set_moe_prefill_tier(MoePrefillPath::DEVICE_ARGS);
         } else {
             IMP_LOG_ERROR(
                 "device-args full path failed; falling back to legacy");
@@ -625,6 +627,7 @@ bool smallM_done = false;
                         cudaFreeAsync(d_act_tscales_dn, stream));
                     if (ok_down) {
                         smallM_done = true;
+                        dispatch_record::set_moe_prefill_tier(MoePrefillPath::SMALL_M);
                     } else {
                         IMP_LOG_ERROR(
                             "smallM down dispatch failed; falling back to "
@@ -645,9 +648,11 @@ bool smallM_done = false;
     }
 }
 
-if (!smallM_done && layer == 0)
-    IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)",
-                 n, expanded);
+if (!smallM_done) {
+    dispatch_record::set_moe_prefill_tier(MoePrefillPath::GROUPED);
+    if (layer == 0)
+        IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)", n, expanded);
+}
 
 if (!smallM_done) {
 
