@@ -125,6 +125,11 @@ void nvfp4_gemm_reset_static_cuda_state() {
     s_nvfp4_dequant_buf_size = 0;
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(nvfp4_gemm_reset_static_cuda_state);
+}  // namespace
+
 // FP32 -> FP16 copy for the small-M batched-GEMV path (the batched kernel
 // accumulates and writes FP32; gemm_nvfp4's contract is an FP16 C).
 __global__ void nvfp4_fp32_to_fp16_kernel(const float* __restrict__ in, __half* __restrict__ out,

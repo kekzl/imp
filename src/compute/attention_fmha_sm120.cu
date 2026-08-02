@@ -1873,6 +1873,11 @@ void fmha_sm120_reset_static_cuda_state() {
     }
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(fmha_sm120_reset_static_cuda_state);
+}  // namespace
+
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset,
                             bool fp16_qk, const int* d_kv_len) {

@@ -536,6 +536,11 @@ void moe_batch_reset_static_cuda_state() {
     s_norm_fp32_d = 0;
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(moe_batch_reset_static_cuda_state);
+}  // namespace
+
 bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stream, int n, int d,
                                                     int eff, int top_k, QType up_qtype, float eps,
                                                     const MoeRoutingResult& routing,

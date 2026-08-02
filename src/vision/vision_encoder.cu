@@ -35,6 +35,11 @@ void vision_encoder_reset_static_cuda_state() {
     }
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(vision_encoder_reset_static_cuda_state);
+}  // namespace
+
 // ---- Helper: cuBLAS GEMM  C = alpha * A @ B^T ----
 // A: [M, K], B: [N, K], C: [M, N]  (row-major)
 static void vision_gemm(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta,

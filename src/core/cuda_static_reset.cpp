@@ -1,28 +1,42 @@
 #include "core/cuda_static_reset.h"
 
-#include "compute/gemm_cutlass_grouped_3x.h"  // gemm_grouped_3x_nvfp4_cleanup()
-
 #include <cuda_runtime.h>
+
+#include <vector>
 
 namespace imp {
 
-void reset_static_cuda_state() {
-    gemm_reset_static_cuda_state();
-    gemm_grouped_reset_static_cuda_state();
-    gemm_grouped_nvfp4_smallM_reset_static_cuda_state();
-    attention_cublas_reset_static_cuda_state();
-    attention_mxfp4_prefill_reset_static_cuda_state();
-    vision_encoder_reset_static_cuda_state();
-    qwen3vl_encoder_reset_static_cuda_state();
-    // gemm_cutlass_sm120 / gemm_cutlass_mxfp4 have no hook: A7 step 8 deleted
-    // the lazily-grown CUTLASS workspaces they existed to re-arm.
-    fmha_sm120_reset_static_cuda_state();
-    fmha_mxfp4_reset_static_cuda_state();
-    moe_batch_reset_static_cuda_state();
-    nvfp4_gemm_reset_static_cuda_state();
+namespace {
 
-    // Persistent CUTLASS 3x grouped-GEMM staging/workspace + gemm instance.
-    gemm_grouped_3x_nvfp4_cleanup();
+// Function-local static so a registrar in another TU cannot run before this
+// container is constructed (static-init order fiasco). Registration happens
+// during static init from arbitrary TUs, so the container has to be created
+// on first use, not at namespace scope.
+std::vector<void (*)()>& hooks() {
+    static std::vector<void (*)()> v;
+    return v;
+}
+
+}  // namespace
+
+namespace detail {
+
+CudaStaticResetRegistrar::CudaStaticResetRegistrar(void (*fn)()) {
+    if (fn)
+        hooks().push_back(fn);
+}
+
+}  // namespace detail
+
+int cuda_static_reset_hook_count() { return static_cast<int>(hooks().size()); }
+
+void reset_static_cuda_state() {
+    // Registration order is link order, which is arbitrary — every hook is
+    // independent and idempotent by contract, so that is fine. What is NOT
+    // fine is a hook missing entirely, which is what the old hand-maintained
+    // call list allowed; see the header.
+    for (auto* fn : hooks())
+        fn();
 
     // Best-effort teardown: clear any sticky error left by the frees above.
     (void)cudaGetLastError();

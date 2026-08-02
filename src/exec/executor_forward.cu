@@ -542,6 +542,15 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // `is_prefill` is part of the condition, not an optimisation: image
         // tokens only ever exist in the prompt, and a decode graph captured
         // with this branch taken would bake the add into every replay.
+        //
+        // Speculative decoding depends on this too (#1207). The spec gate in
+        // engine_spec_ngram.cpp rejects constrained decode, SSM state and
+        // non-NVFP4 MoE explicitly, but says nothing about vision — because it
+        // does not have to: the verify chunk forwards with is_prefill=false, so
+        // it never re-injects, and the image is already in the KV cache from the
+        // prompt. Extending this branch to decode would silently break
+        // speculation (verify and target would inject differently) — so if that
+        // ever becomes necessary, add a vision reject to the spec gate first.
         if (state.is_prefill && i < state.n_deepstack && state.deepstack_embeddings[i] &&
             state.n_vision_tokens > 0 && state.vision_token_id >= 0 && h.qtype == QType::F16) {
             launch_add_vision_embeddings(static_cast<half*>(h.data), state.token_ids,

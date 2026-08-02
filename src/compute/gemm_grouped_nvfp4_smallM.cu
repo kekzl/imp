@@ -770,6 +770,11 @@ void gemm_grouped_nvfp4_smallM_reset_static_cuda_state() {
     s_dummy_ready = 0;
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(gemm_grouped_nvfp4_smallM_reset_static_cuda_state);
+}  // namespace
+
 bool gemm_grouped_nvfp4_smallM(
     int n_experts, const int* host_M, int N, int K,
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,

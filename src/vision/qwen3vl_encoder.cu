@@ -1,4 +1,5 @@
 #include "vision/qwen3vl_encoder.h"
+#include "core/cuda_static_reset.h"
 
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
@@ -50,6 +51,11 @@ void qwen3vl_encoder_reset_static_cuda_state() {
         s_handle = nullptr;
     }
 }
+
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(qwen3vl_encoder_reset_static_cuda_state);
+}  // namespace
 
 Qwen3VLEncoder::~Qwen3VLEncoder() { free_buffers(); }
 

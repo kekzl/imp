@@ -368,6 +368,11 @@ void attention_mxfp4_prefill_reset_static_cuda_state() {
     }
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(attention_mxfp4_prefill_reset_static_cuda_state);
+}  // namespace
+
 // =============================================================================
 // Main entry point
 // =============================================================================

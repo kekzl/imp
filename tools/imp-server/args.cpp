@@ -20,7 +20,8 @@ void print_server_usage(const char* prog) {
             "  --gpu-layers <n>      Layers on GPU, -1 = all (default: -1)\n"
             "  --device <n>          CUDA device ID (default: 0)\n"
             "  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron, gemma\n"
-            "  --lora NAME=PATH      Load a PEFT LoRA adapter (repeatable); select per request via \"lora\" field\n"
+            "  --lora NAME=PATH      Load a PEFT LoRA adapter (repeatable); select per request via \"lora\" "
+            "field\n"
             "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
             "  --ssm-fp16            Use FP16 for SSM h_state\n"
             "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
@@ -39,6 +40,7 @@ void print_server_usage(const char* prog) {
             "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
             "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
             "  --api-key <key>       Require Bearer token authentication\n"
+            "  --metrics-require-auth  Also gate /metrics behind --api-key\n"
             "  --reasoning-format <f> deepseek (default) or none\n"
             "  --mem-report          Print the full VRAM attribution table at init\n"
             "  --vram-budget <mb>    Hard per-process VRAM cap in MiB — size everything as if\n"
@@ -126,6 +128,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.models_dir = argv[++i];
         } else if (std::strcmp(arg, "--api-key") == 0 && i + 1 < argc) {
             args.api_key = argv[++i];
+        } else if (std::strcmp(arg, "--metrics-require-auth") == 0) {
+            args.metrics_require_auth = true;
         } else if (std::strcmp(arg, "--reasoning-format") == 0 && i + 1 < argc) {
             args.reasoning_format = argv[++i];
         } else if (std::strcmp(arg, "--mem-report") == 0) {

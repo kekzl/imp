@@ -1632,6 +1632,11 @@ void fmha_mxfp4_reset_static_cuda_state() {
     s_promote_paged_cap = 0;
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(fmha_mxfp4_reset_static_cuda_state);
+}  // namespace
+
 bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                               bool causal, int sliding_window, float softcap, cudaStream_t stream,
                               bool use_blockscale, int q_offset) {

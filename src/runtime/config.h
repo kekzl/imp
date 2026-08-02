@@ -1031,6 +1031,16 @@ struct RuntimeConfig {
         int exit_layer = -1;
         bool profile = false;
         bool graph_diag = false;
+        // Trace knobs that used to be raw getenv() reads in the hot path
+        // (#1207). CLAUDE.md's rule is that IMP_DETERMINISTIC and IMP_FMHA_FA2
+        // are the only seeded env vars; IMP_SPEC_TRACE / IMP_JUMP_TRACE /
+        // IMP_PPL_DUMP had crept back in. The env names still work — they are
+        // debug aids people have in their shell history — but they are seeded
+        // into these keys at load, so `--set` and imp.conf reach them too and
+        // `imp-cli --help`/imp.conf.example can document them.
+        bool spec_trace = false;  // per-step speculative draft/verify trace
+        bool jump_trace = false;  // conditional-graph jump trace
+        std::string ppl_dump;     // path: dump per-token NLL from --perplexity
         std::string graph_dump_dir;
         // Force NVFP4 dispatch through dequant->FP16 GEMV (M=1 bisection
         // tool — see Mistral-Small-3.2-NVFP4 long-form repetition loops).

@@ -12,6 +12,10 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Added
+- **`--metrics-require-auth`** (#1207): fold `/metrics` back under the
+  `--api-key` check. Off by default so a stock Prometheus scrape keeps working,
+  but the endpoint discloses the loaded model name, `d_model` and cumulative
+  token counts to anyone who can reach the port.
 - **CI gate: every CUDA kernel launch must carry a post-launch error check**
   (#1206, `tools/check_launch_guards.py`, job `Launch guards`). An unguarded
   launch turns a launch-time failure — bad configuration, shared memory over the
@@ -23,6 +27,31 @@ there instead of retelling it.
   image embeddings. Now 407/407 in-scope launches are guarded; the 25 launches
   written inside `#define` bodies are reported as out of scope rather than
   guessed at, since deciding those needs the enclosing function.
+- **`Resolved dispatch:` log line — which attention and MoE kernels a model
+  actually ran** (#1205). Emitted once, after the first step that has seen both a
+  prefill and a decode, e.g.
+  `attn_prefill=fa2_fp16qk attn_decode=paged_fp8 moe_prefill=cutlass3x → device_args graphs=1`.
+  The six prefill tiers and five MoE branches all decline by returning `false`
+  with no log, so a model dropping to a slower or lower-quality path used to
+  leave no trace. Recorded from inside the real dispatch
+  (`compute/dispatch_record.h`), not predicted from a second copy of the routing
+  rules, so it cannot disagree with what ran.
+
+### Changed
+- **Pre-`cudaDeviceReset` hooks register themselves** (#1207). The eleven module
+  hooks that free lazily-created CUDA statics (cuBLAS handles, CUTLASS
+  workspaces, device scratch) were listed by hand in `cuda_static_reset.cpp`, so
+  a twelfth lazy static added without an entry dangled behind an armed guard —
+  the exact bug the file exists to prevent, with nothing to catch it. Each
+  owning TU now uses `IMP_REGISTER_CUDA_STATIC_RESET`. Side effect: `core/` no
+  longer includes a `compute/` header, removing the one `core → compute`
+  backward edge in the layer graph.
+- **`IMP_SPEC_TRACE`, `IMP_JUMP_TRACE` and `IMP_PPL_DUMP` are config keys**
+  (#1207). All three had crept back as raw `getenv()` calls at their use sites,
+  against the rule that only `IMP_DETERMINISTIC` and `IMP_FMHA_FA2` are seeded.
+  They are now `diagnostics.spec_trace` / `.jump_trace` / `.ppl_dump`, reachable
+  from `imp.conf` and `--set`; the env names still work (seeded at load) so
+  existing shell habits are unaffected.
 
 ### Fixed
 - **An unrecognised architecture string loaded silently as GENERIC** (#1206).
@@ -57,17 +86,6 @@ there instead of retelling it.
   hd=256 from the process-wide snapshot, so the two could disagree and walk the
   FMHA chain down to the #654 throw. `Engine::init()` now installs, before the
   arch resolvers that promote `cublas_fp16_acc`/`deterministic_gemm`.
-
-### Added
-- **`Resolved dispatch:` log line — which attention and MoE kernels a model
-  actually ran** (#1205). Emitted once, after the first step that has seen both a
-  prefill and a decode, e.g.
-  `attn_prefill=fa2_fp16qk attn_decode=paged_fp8 moe_prefill=cutlass3x → device_args graphs=1`.
-  The six prefill tiers and five MoE branches all decline by returning `false`
-  with no log, so a model dropping to a slower or lower-quality path used to
-  leave no trace. Recorded from inside the real dispatch
-  (`compute/dispatch_record.h`), not predicted from a second copy of the routing
-  rules, so it cannot disagree with what ran.
 
 ## [0.20.2] - 2026-08-02
 

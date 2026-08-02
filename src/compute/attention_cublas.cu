@@ -360,6 +360,11 @@ void attention_cublas_reset_static_cuda_state() {
     s_attn_d_ptrs_capacity = 0;
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(attention_cublas_reset_static_cuda_state);
+}  // namespace
+
 // Fill s_attn_d_ptrs device-side so the GQA cuBLAS batched path is
 // graph-capturable. The previous implementation built host stack arrays and
 // issued cudaMemcpyAsync — host pointers have no stable identity across

@@ -6,6 +6,7 @@
 // which CUTLASS then indexes directly for its GroupProblemShape scheduler.
 
 #include "compute/gemm_cutlass_grouped_3x.h"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 
@@ -390,6 +391,11 @@ void gemm_grouped_3x_nvfp4_cleanup() {
     s_can_impl_N = -1;
     s_can_impl_K = -1;
 }
+
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(gemm_grouped_3x_nvfp4_cleanup);
+}  // namespace
 
 // Compile-time verification: kernel type instantiates on SM120.
 static_assert(sizeof(GrpGemm) > 0, "GrpGemm type must instantiate");
