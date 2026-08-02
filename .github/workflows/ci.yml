@@ -17,6 +17,19 @@ on:
   # squashed), but the branch's reported status is stale, and this makes it
   # refreshable without a PAT or a merge queue.
   workflow_dispatch:
+  # Nightly, 03:17 UTC. Two jobs at once:
+  #
+  #  1. The GPU lane (`test`, below) is the only lane that runs the full ctest,
+  #     compute-sanitizer and the perf gate. It is gated on a self-hosted runner,
+  #     and a runner that only ever sees push/pull_request events tests whatever
+  #     someone happened to open a PR for — never `main` on its own schedule.
+  #  2. It refreshes `main`'s reported status, which the workflow_dispatch note
+  #     above exists to work around by hand: an auto-merge squash does not start
+  #     a run, so main's newest result can be many commits stale.
+  #
+  # Costs nothing while HAS_GPU_RUNNER is unset beyond one nightly CPU build.
+  schedule:
+    - cron: "17 3 * * *"
 
 jobs:
   build:
@@ -394,9 +407,19 @@ jobs:
   test:
     name: Test
     needs: build
-    # GPU tests need a self-hosted runner with NVIDIA GPU. Set the repo variable
-    # HAS_GPU_RUNNER=true (Settings → Secrets and variables → Actions → Variables)
-    # once a runner labeled [self-hosted, gpu, cuda] is registered. Until then,
+    # GPU tests need a self-hosted runner with NVIDIA GPU. To turn this lane on:
+    #
+    #   1. On the GPU box: Settings → Actions → Runners → New self-hosted runner,
+    #      and give it the labels  self-hosted, gpu, cuda  (all three; the
+    #      runs-on below requires the full set).
+    #   2. Settings → Secrets and variables → Actions → Variables → new variable
+    #      HAS_GPU_RUNNER = true.
+    #   3. Optional: set IMP_MODELS_DIR on the runner to the directory holding
+    #      the baseline GGUF, or the perf gate below skips instead of running.
+    #
+    # This is the only lane that runs the full ctest, compute-sanitizer and the
+    # perf gate — everything else in CI is CPU-only. Until step 2, the job is
+    # skipped rather than failing. Until then,
     # this job is skipped — same effective behavior as the prior `if: false`,
     # but flips automatically when a runner appears. Also skipped on docs-only
     # changes (build uploads no artifact then — nothing to download/test).

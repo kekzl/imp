@@ -12,6 +12,7 @@
 #include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention_mxfp4_prefill.h"
 #include "compute/dispatch_record.h"
+#include "compute/attention_dispatch_decision.h"
 
 namespace imp {
 
@@ -30,24 +31,64 @@ int get_device_sm_version() {
     return cached_sm_version;
 }
 
-// NOTE: the path-selection ORDER + config gates below are mirrored as a pure
-// host function `select_attn_prefill_path` in attention_dispatch_decision.h and
-// pinned by test_routing_decision.cpp (R2 / P1.4). The kernels are
-// called lazily here (each launches on accept, falls through on decline), so
-// this can't simply delegate to the pure function — but any reorder or gate
-// change MUST be reflected in that header or the unit test will diverge.
+// The path-selection ORDER + config gates below are mirrored as a pure host
+// function `select_attn_prefill_path` in attention_dispatch_decision.h.
+//
+// That mirror used to be TEST-ONLY: test_routing_decision.cpp was its sole
+// includer, so a reorder here left the test green and its stated purpose ("any
+// reorder or gate change shows up as a diff") unmet — audit finding F-3.
+//
+// This function now CONSULTS it. Each tier records the two booleans it already
+// discovers — did the config gate pass, did the kernel accept — and once a tier
+// wins, the model is replayed against those observations and must name the same
+// winner. A gate that drifts apart, a tier added here and not there, or a
+// reorder that moves a NON-accepting tier earlier now fires a loud one-shot
+// divergence log instead of nothing.
+//
+// KNOWN LIMIT, stated rather than implied: a tier reordered ahead of the winner
+// that WOULD have accepted is still invisible, because the dispatch short-
+// circuits and never asks it. Closing that needs a real `*_supports()` predicate
+// per kernel that the launcher itself consults — the kernels signal acceptance
+// by executing, and two of FA2's seven decline points depend on the tile
+// selection, so a predicate written beside them would be a THIRD copy of the
+// rules. That is a five-TU refactor of the hottest prefill kernel and is not
+// done here.
+// One-shot so a divergence cannot flood a serving log; the first occurrence is
+// the one that matters and it names both answers.
+static void verify_against_routing_model(const RuntimeConfig& rcfg, const AttnKernelSupport& sup,
+                                         bool has_sinks, AttnPrefillPath chosen) {
+    const AttnPrefillPath modeled = select_attn_prefill_path(rcfg, sup, has_sinks);
+    if (modeled == chosen)
+        return;
+    static bool warned = false;
+    if (warned)
+        return;
+    warned = true;
+    IMP_LOG_ERROR(
+        "attention routing model disagrees with the dispatch: dispatch ran %s, "
+        "select_attn_prefill_path() says %s. attention_dispatch.cu and "
+        "attention_dispatch_decision.h have drifted apart (F-3) — the routing unit "
+        "test is now describing a dispatch that does not exist.",
+        attn_prefill_path_name(chosen), attn_prefill_path_name(modeled));
+}
+
 void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                 bool causal, int sliding_window, float softcap, cudaStream_t stream,
                                 const RuntimeConfig& rcfg, int q_offset, const half* attn_sinks) {
+    // Observations, filled in as the chain is walked. A tier the chain never
+    // reaches keeps its `false` — see the KNOWN LIMIT above.
+    AttnKernelSupport sup{};
+    const bool has_sinks = (attn_sinks != nullptr);
     // Learned attention sinks (gpt-oss #547/#992): only the FP16 WMMA FMHA
     // tier folds them into its online softmax. Route straight there and fail
     // loudly on decline — falling through to a sink-blind kernel produces
     // silently wrong output (the pre-#992 executor WARN case).
-    if (attn_sinks != nullptr) {
+    if (has_sinks) {
         if (rcfg.attention.fmha_sm120 != "never" &&
-            fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset,
-                               attn_sinks)) {
+            (sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window,
+                                                         softcap, stream, q_offset, attn_sinks))) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
+            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FMHA_SM120);
             return;
         }
         char msg[160];
@@ -63,10 +104,13 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Enabled with [attention] mxfp4 = "always". Blockscale/ksmooth/pv_fp4
     // (#846 SageAttention3-recipe spike) are read from process_diag inside
     // the launcher.
-    if (attention_mxfp4_available()) {
-        if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
-                                     process_diag_mxfp4_blockscale(), q_offset)) {
+    sup.mxfp4_available = attention_mxfp4_available();
+    if (sup.mxfp4_available) {
+        if ((sup.mxfp4_accepts = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window,
+                                                          softcap, stream,
+                                                          process_diag_mxfp4_blockscale(), q_offset))) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::MXFP4);
+            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::MXFP4);
             return;
         }
         // Fall through: head_dim not supported (e.g. < 32), use FP8/FP16 path
@@ -81,9 +125,11 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     if (rcfg.attention.fmha_fa2 == "on") {
         const bool fa2_fp8_optin =
             rcfg.attention.fa2_fp16qk == "never" && rcfg.attention.fp8_fmha == "on";
-        if (fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset,
-                                   /*fp16_qk=*/!fa2_fp8_optin)) {
+        if ((sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                     stream, q_offset,
+                                                     /*fp16_qk=*/!fa2_fp8_optin))) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FA2);
+            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FA2);
             IMP_LOG_DEBUG("FMHA dispatch: using FA2 register-resident kernel (hd=%d)",
                           static_cast<int>(Q.shape[3]));
             return;
@@ -97,10 +143,11 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // gemma-3-12b 16.6 -> 549 / Qwen3-8B 40.5 -> 4506 when this kernel actually
     // serves prefill. Strictly opt-in: [attention] fp8_fmha = "on".
     if (rcfg.attention.fp8_fmha == "on") {
-        bool fp8_ok = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
-                                              q_offset);
-        if (fp8_ok) {
+        sup.fp8_accepts = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                 stream, q_offset);
+        if (sup.fp8_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FP8);
+            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FP8);
             IMP_LOG_DEBUG("FMHA dispatch: using FP8 sm120 kernel (hd=%d)", static_cast<int>(Q.shape[3]));
             return;
         }
@@ -110,8 +157,10 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Fallback when FP8 is disabled or unsupported config.
     const bool use_fmha_sm120 = rcfg.attention.fmha_sm120 != "never";
     if (use_fmha_sm120) {
-        if (fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset)) {
+        if ((sup.fmha_sm120_accepts =
+                 fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset))) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
+            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FMHA_SM120);
             return;
         }
     }
@@ -119,8 +168,10 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Final tier: WMMA 128x64 tiles for Blackwell. Declines (returns false)
     // for unsupported configs — hd ∉ {64,96,128,256} or smem over the device
     // opt-in (hd=256 at Br=64 needs ~176 KB vs 99 KB on sm_120).
-    if (flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream, q_offset)) {
+    if ((sup.blackwell_accepts = flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window,
+                                                           softcap, stream, q_offset))) {
         dispatch_record::set_attn_prefill_tier(AttnPrefillPath::BLACKWELL);
+        verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::BLACKWELL);
         return;
     }
 

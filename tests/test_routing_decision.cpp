@@ -177,23 +177,20 @@ TEST(MoePrefillTable, GptOssSkipsDeviceArgsTakesGrouped) {
 TEST(MoePrefillTable, DeviceArgsDisabledFallsToGrouped) {
     auto cfg = default_cfg();
     cfg.moe.nvfp4_device_args = false;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()),
-              MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()), MoePrefillPath::GROUPED);
 }
 
 TEST(MoePrefillTable, DeviceArgsWorkspaceNotReadyFallsToGrouped) {
     auto ws = all_ready();
     ws.device_args_ready = false;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, default_cfg(), ws),
-              MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, default_cfg(), ws), MoePrefillPath::GROUPED);
 }
 
 TEST(MoePrefillTable, SmallMWhenOptedInAndUnderThreshold) {
     auto cfg = default_cfg();
     cfg.moe.nvfp4_device_args = false;  // so device-args doesn't win first
     cfg.moe.nvfp4_smallM = true;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()),
-              MoePrefillPath::SMALL_M);
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()), MoePrefillPath::SMALL_M);
 }
 
 TEST(MoePrefillTable, SmallMOverThresholdFallsToGrouped) {
@@ -208,8 +205,7 @@ TEST(MoePrefillTable, SmallMOverThresholdFallsToGrouped) {
 TEST(MoePrefillTable, NoCutlass3xFallsToLegacy) {
     auto cfg = default_cfg();
     cfg.moe.no_cutlass3x = true;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()),
-              MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()), MoePrefillPath::LEGACY);
 }
 
 TEST(MoePrefillTable, GroupedUnavailableFallsToLegacy) {
@@ -232,8 +228,7 @@ TEST(MoePrefillTable, GptOssNoCutlass3xFallsToLegacy) {
     // Even gpt-oss drops to legacy when the grouped kernel is unavailable.
     auto cfg = default_cfg();
     cfg.moe.no_cutlass3x = true;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, cfg, all_ready()),
-              MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, cfg, all_ready()), MoePrefillPath::LEGACY);
 }
 
 // ---- #992: learned-sink pre-gate ------------------------------------------
@@ -250,13 +245,146 @@ TEST(AttnDispatchTable, SinksWithFMHADeclineIsNoneNotBlackwell) {
     // dispatcher throws (NONE), it must NOT fall through to Blackwell.
     auto sup = all_accept();
     sup.fmha_sm120_accepts = false;
-    EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true),
-              AttnPrefillPath::NONE);
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true), AttnPrefillPath::NONE);
 }
 
 TEST(AttnDispatchTable, SinksWithFMHANeverIsNone) {
     auto cfg = default_cfg();
     cfg.attention.fmha_sm120 = "never";
-    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept(), /*has_sinks=*/true),
-              AttnPrefillPath::NONE);
+    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept(), /*has_sinks=*/true), AttnPrefillPath::NONE);
+}
+
+// --------------------------------------------------------------------------
+// The coupling that makes this file mean something (audit finding F-3)
+// --------------------------------------------------------------------------
+//
+// Until #1210 this model was TEST-ONLY: attention_dispatch.cu mentioned
+// select_attn_prefill_path() in a comment and never called it, so a reorder in
+// the dispatch left every test above green while the header described a routing
+// order that no longer existed.
+//
+// The dispatch now replays the model at the moment a tier wins, against the
+// booleans it observed on the way down, and logs a divergence. These tests pin
+// the invariant that replay depends on: for each tier, the observation pattern
+// the dispatch can actually produce when THAT tier wins must make the model
+// name the same tier. If it did not, the production check would cry wolf on a
+// correct dispatch and get muted.
+namespace {
+
+// What attention_dispatch.cu has filled in by the time `winner` commits: every
+// tier it walked past declined (false), the winner accepted, and tiers below
+// the winner were never evaluated so they stay false.
+AttnKernelSupport observed_when(AttnPrefillPath winner) {
+    AttnKernelSupport s;  // all false — the dispatch's starting state
+    switch (winner) {
+        case AttnPrefillPath::MXFP4:
+            s.mxfp4_available = true;
+            s.mxfp4_accepts = true;
+            break;
+        case AttnPrefillPath::FA2:
+            s.fa2_accepts = true;
+            break;
+        case AttnPrefillPath::FP8:
+            s.fp8_accepts = true;
+            break;
+        case AttnPrefillPath::FMHA_SM120:
+            s.fmha_sm120_accepts = true;
+            break;
+        case AttnPrefillPath::BLACKWELL:
+            s.blackwell_accepts = true;
+            break;
+        case AttnPrefillPath::NONE:
+            break;
+    }
+    return s;
+}
+
+}  // namespace
+
+TEST(AttnRoutingModelCoupling, EveryTierReplaysToItself) {
+    auto cfg = default_cfg();
+    cfg.attention.fp8_fmha = "on";  // so the FP8 tier is reachable at all
+
+    const AttnPrefillPath tiers[] = {AttnPrefillPath::FA2, AttnPrefillPath::FP8, AttnPrefillPath::FMHA_SM120,
+                                     AttnPrefillPath::BLACKWELL};
+    for (AttnPrefillPath t : tiers) {
+        EXPECT_EQ(select_attn_prefill_path(cfg, observed_when(t)), t)
+            << "the dispatch would run " << attn_prefill_path_name(t) << " but the model replays to "
+            << attn_prefill_path_name(select_attn_prefill_path(cfg, observed_when(t)))
+            << " — verify_against_routing_model() would fire on a correct dispatch";
+    }
+}
+
+TEST(AttnRoutingModelCoupling, Mxfp4ReplaysToItselfWhenAvailable) {
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), observed_when(AttnPrefillPath::MXFP4)),
+              AttnPrefillPath::MXFP4);
+}
+
+// The sinks pre-gate (#992) is a separate entry point in the dispatch: it either
+// runs the FP16 WMMA tier or throws. Both arms must replay.
+TEST(AttnRoutingModelCoupling, SinksReplayToFmhaOrNone) {
+    auto sup = observed_when(AttnPrefillPath::FMHA_SM120);
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true), AttnPrefillPath::FMHA_SM120);
+
+    AttnKernelSupport declined;  // sink-capable tier said no -> dispatch throws
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), declined, /*has_sinks=*/true), AttnPrefillPath::NONE);
+}
+
+// The chain-exhausted case: nothing accepted, so the dispatch throws (#654) and
+// the model must agree rather than naming a tier that never ran.
+TEST(AttnRoutingModelCoupling, NothingAcceptsReplaysToNone) {
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), AttnKernelSupport{}), AttnPrefillPath::NONE);
+}
+
+// --------------------------------------------------------------------------
+// Tier PRECEDENCE — the tests that actually catch a reorder
+// --------------------------------------------------------------------------
+//
+// The replay tests above cannot: each of their support patterns has exactly ONE
+// accepting tier, so swapping two tiers in the chain leaves every answer
+// unchanged. Verified by mutation — reordering FP8 ahead of FA2 in
+// select_attn_prefill_path() left all of them green.
+//
+// Neither could the sixteen AttnDispatchTable cases, for a different reason:
+// every one that involves FP8 sets fmha_fa2="never" first, so FA2 and FP8 are
+// never both live. The relative order of the chain — the thing a reorder breaks
+// and the thing attention_dispatch.cu is now checked against at runtime — was
+// not asserted anywhere.
+//
+// These pin it: both gates on, both kernels accepting, earlier tier must win.
+TEST(AttnTierPrecedence, Mxfp4BeatsFA2) {
+    auto cfg = default_cfg();
+    auto sup = all_accept();
+    sup.mxfp4_available = true;
+    ASSERT_TRUE(sup.mxfp4_accepts && sup.fa2_accepts);
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::MXFP4);
+}
+
+TEST(AttnTierPrecedence, FA2BeatsFP8WhenBothOnAndBothAccept) {
+    auto cfg = default_cfg();
+    cfg.attention.fmha_fa2 = "on";
+    cfg.attention.fp8_fmha = "on";
+    auto sup = all_accept();
+    ASSERT_TRUE(sup.fa2_accepts && sup.fp8_accepts);
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FA2)
+        << "FA2 must precede FP8: the raw-e4m3 FP8 tier compounds ~10% score error "
+           "per layer (#511) and must never win a tie";
+}
+
+TEST(AttnTierPrecedence, FP8BeatsFmhaSm120WhenBothAccept) {
+    auto cfg = default_cfg();
+    cfg.attention.fmha_fa2 = "never";
+    cfg.attention.fp8_fmha = "on";
+    auto sup = all_accept();
+    ASSERT_TRUE(sup.fp8_accepts && sup.fmha_sm120_accepts);
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FP8);
+}
+
+TEST(AttnTierPrecedence, FmhaSm120BeatsBlackwellWhenBothAccept) {
+    auto cfg = default_cfg();
+    cfg.attention.fmha_fa2 = "never";
+    cfg.attention.fp8_fmha = "never";
+    auto sup = all_accept();
+    ASSERT_TRUE(sup.fmha_sm120_accepts && sup.blackwell_accepts);
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);
 }
