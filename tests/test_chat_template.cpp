@@ -375,7 +375,7 @@ TEST(ChatTemplateInitTest, PhiSuccess) {
 TEST(ChatTemplateApplyTest, ChatMLBasicStructure) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -410,7 +410,7 @@ TEST(ChatTemplateApplyTest, UseDefaultSystemPromptFalseInjectsSystem) {
     tok.set_use_default_system_prompt(false);
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -427,7 +427,7 @@ TEST(ChatTemplateApplyTest, UseDefaultSystemPromptTrueDoesNotInject) {
     EXPECT_TRUE(tok.use_default_system_prompt());
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -444,7 +444,7 @@ TEST(ChatTemplateApplyTest, UseDefaultSystemPromptFalseRespectsExplicitSystem) {
     tok.set_use_default_system_prompt(false);
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"system", "Be brief."}, {"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -460,7 +460,7 @@ TEST(ChatTemplateApplyTest, ChatMLNoBOSWhenDisabled) {
     tok.set_add_bos(false);
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -473,7 +473,7 @@ TEST(ChatTemplateApplyTest, ChatMLNoBOSWhenDisabled) {
 TEST(ChatTemplateApplyTest, ChatMLMultiTurn) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {
         {"system", "You help."},
@@ -496,7 +496,7 @@ TEST(ChatTemplateApplyTest, ChatMLMultiTurn) {
 TEST(ChatTemplateApplyTest, Llama3BasicStructure) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::LLAMA3, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::LLAMA3, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -516,7 +516,7 @@ TEST(ChatTemplateApplyTest, Llama3BasicStructure) {
 TEST(ChatTemplateApplyTest, Llama2BasicStructure) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::LLAMA2, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::LLAMA2, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -530,7 +530,7 @@ TEST(ChatTemplateApplyTest, Llama2BasicStructure) {
 TEST(ChatTemplateApplyTest, Llama2SystemMessage) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::LLAMA2, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::LLAMA2, tok));
 
     std::vector<ChatMessage> msgs = {
         {"system", "Be helpful."},
@@ -549,7 +549,7 @@ TEST(ChatTemplateApplyTest, Llama2SystemMessage) {
 TEST(ChatTemplateApplyTest, NemotronBasicStructure) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::NEMOTRON, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::NEMOTRON, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -570,7 +570,7 @@ TEST(ChatTemplateApplyTest, NemotronBasicStructure) {
 TEST(ChatTemplateApplyTest, GemmaBasicStructure) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::GEMMA, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::GEMMA, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -588,7 +588,7 @@ TEST(ChatTemplateApplyTest, GemmaBasicStructure) {
 TEST(ChatTemplateApplyTest, GemmaAssistantRoleMappedToModel) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::GEMMA, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::GEMMA, tok));
 
     std::vector<ChatMessage> msgs = {
         {"user", "Hi"},
@@ -604,7 +604,7 @@ TEST(ChatTemplateApplyTest, GemmaAssistantRoleMappedToModel) {
 TEST(ChatTemplateApplyTest, DeepSeekR1BasicStructure) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::DEEPSEEK_R1, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::DEEPSEEK_R1, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -622,7 +622,7 @@ TEST(ChatTemplateApplyTest, DeepSeekR1BasicStructure) {
 TEST(ChatTemplateApplyTest, PhiBasicStructure) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::PHI, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::PHI, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -640,7 +640,7 @@ TEST(ChatTemplateApplyTest, PhiBasicStructure) {
 TEST(ChatTemplateApplyTest, RawReturnsEmpty) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::RAW, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::RAW, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs);
@@ -659,7 +659,7 @@ TEST(ChatTemplateDefaultSysTest, ExtractFromJinja) {
         "{% endfor %}");
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
     EXPECT_EQ(tpl.default_system_message(), "You are a helpful assistant.");
 }
 
@@ -669,7 +669,7 @@ TEST(ChatTemplateDefaultSysTest, SkipsJinjaVariables) {
     tok.set_chat_template_str("<|im_start|>system\n{{ messages[0].content }}<|im_end|>\n");
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
     EXPECT_TRUE(tpl.default_system_message().empty());
 }
 
@@ -678,7 +678,7 @@ TEST(ChatTemplateDefaultSysTest, NoTemplateNoDefault) {
     // No chat_template_str set
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
     EXPECT_TRUE(tpl.default_system_message().empty());
 }
 
@@ -687,7 +687,7 @@ TEST(ChatTemplateDefaultSysTest, InjectDefaultWhenNoUserSystem) {
     tok.set_chat_template_str("<|im_start|>system\nDefault system.<|im_end|>\n");
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
     EXPECT_EQ(tpl.default_system_message(), "Default system.");
 
     // Apply without system message -> default system should be injected
@@ -704,7 +704,7 @@ TEST(ChatTemplateDefaultSysTest, NoInjectionWhenUserProvidesSystem) {
     tok.set_chat_template_str("<|im_start|>system\nDefault system.<|im_end|>\n");
 
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     // Apply with explicit system message -> no double injection
     std::vector<ChatMessage> msgs = {
@@ -723,7 +723,7 @@ TEST(ChatTemplateDefaultSysTest, NoInjectionWhenUserProvidesSystem) {
 TEST(ChatTemplateVisionTest, GemmaImageTokens) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::GEMMA, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::GEMMA, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "What is this?"}};
     auto ids = tpl.apply_with_image(tok, msgs, /*n_image_tokens=*/4);
@@ -744,7 +744,7 @@ TEST(ChatTemplateVisionTest, GemmaImageTokens) {
 TEST(ChatTemplateVisionTest, NonGemmaFallsBackToTextOnly) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto with_image = tpl.apply_with_image(tok, msgs, 4);
@@ -759,7 +759,7 @@ TEST(ChatTemplateVisionTest, NonGemmaFallsBackToTextOnly) {
 TEST(ChatTemplateApplyTest, ChatMLSuppressThinking) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids_suppress = tpl.apply(tok, msgs, /*suppress_thinking=*/true);
@@ -776,7 +776,7 @@ TEST(ChatTemplateApplyTest, ChatMLSuppressThinking) {
 TEST(ChatTemplateApplyTest, ChatMLNoSuppressThinking) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"user", "Hi"}};
     auto ids = tpl.apply(tok, msgs, /*suppress_thinking=*/false);
@@ -796,7 +796,7 @@ TEST(ChatTemplateApplyTest, ChatMLNoSuppressThinking) {
 TEST(ChatTemplateApplyTest, EmptyUserMessage) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {{"user", ""}};
     auto ids = tpl.apply(tok, msgs);
@@ -810,7 +810,7 @@ TEST(ChatTemplateApplyTest, EmptyUserMessage) {
 TEST(ChatTemplateApplyTest, VeryLongSystemMessage) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::string long_sys(10000, 'A');
     std::vector<ChatMessage> msgs = {{"system", long_sys}, {"user", "Hi"}};
@@ -824,7 +824,7 @@ TEST(ChatTemplateApplyTest, VeryLongSystemMessage) {
 TEST(ChatTemplateApplyTest, MultipleSystemMessages) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
-    tpl.init(ChatTemplateFamily::CHATML, tok);
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok));
 
     std::vector<ChatMessage> msgs = {
         {"system", "First system."},

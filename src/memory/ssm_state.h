@@ -22,8 +22,9 @@ public:
 
     // Allocate state for the given configuration.
     // h_dtype: QType::F32 (default) or QType::F16 for h_state storage.
-    bool init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel, int n_heads,
-              int head_dim_ssm, int state_size, QType h_dtype = QType::F32, VRAMAllocator* alloc = nullptr);
+    [[nodiscard]] bool init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel,
+                            int n_heads, int head_dim_ssm, int state_size, QType h_dtype = QType::F32,
+                            VRAMAllocator* alloc = nullptr);
 
     // Get pointers into the state pool for a given sequence and SSM layer index.
     void* conv_state(int seq_id, int ssm_layer_idx);

@@ -113,7 +113,7 @@ public:
     ~SchemaConstrainer();
 
     // Initialize with tokenizer (classifies all tokens) and schema.
-    bool init(const Tokenizer& tok, std::unique_ptr<SchemaNode> schema);
+    [[nodiscard]] bool init(const Tokenizer& tok, std::unique_ptr<SchemaNode> schema);
 
     // Grammar-only init for the CPU FSM tests: installs the schema and the
     // frame stack, skipping the tokenizer classification and the device

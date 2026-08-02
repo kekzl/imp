@@ -11,7 +11,41 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+- **CI gate: every CUDA kernel launch must carry a post-launch error check**
+  (#1206, `tools/check_launch_guards.py`, job `Launch guards`). An unguarded
+  launch turns a launch-time failure — bad configuration, shared memory over the
+  99 KB opt-in, missing kernel image — into silently wrong output instead of an
+  error, because the sticky error only surfaces at the next synchronizing call,
+  or not at all. The convention was ~99 % adopted and 0 % enforced: the whole
+  Qwen3-VL vision tower (`src/vision/qwen3vl_encoder_kernels.cu`) sat at 9
+  launches / 0 checks, where a launch failure would have produced silently wrong
+  image embeddings. Now 407/407 in-scope launches are guarded; the 25 launches
+  written inside `#define` bodies are reported as out of scope rather than
+  guessed at, since deciding those needs the enclosing function.
+
 ### Fixed
+- **An unrecognised architecture string loaded silently as GENERIC** (#1206).
+  `parse_model_arch()` falls back to a Llama-shaped decoder for any unknown
+  `general.architecture` / `architectures[]` value — deliberate, and it is how 30
+  mapped strings work — but the fallback said nothing, so a genuinely unsupported
+  checkpoint looked supported and produced plausible wrong output. It now names
+  the string it did not recognise. (`is_encoder_only_arch()` already covered the
+  one family that failed loudly, #818.)
+- **A failed chat-template init was discarded** (#1206). `ChatTemplate::init()`'s
+  result was ignored at `engine_workspace_warmup.cpp:72`; on failure the template
+  stays inert and every `/v1/chat/completions` request silently falls back to raw
+  prompt concatenation with no role markers — which reads as a model-quality
+  problem, not a load problem. Found by marking the 14 remaining two-phase
+  `init()`/`setup()` methods `[[nodiscard]]`.
+- **Nothing bound the public C enums to their internal counterparts** (#1206).
+  `src/model/model.cpp` re-declares all 16 `IMP_ARCH_*` values as `kApi*`
+  constants to keep the public header out of the model layer; no `static_assert`
+  and no test tied the two lists, so a wrong or forgotten id made
+  `imp_model_architecture()` report the wrong architecture to every C-API
+  consumer with a green build. `tests/test_c_api_enum_binding.cpp` now closes the
+  loop for arch ids, names, uniqueness and the `ImpDType` wire values (including
+  that the retired TurboQuant values 9/10 stay retired).
 - **A C-API embedding got different kernels than `imp-cli`/`imp-server` from the
   same config** (#1205). `process_diag_install()` — the snapshot 28 kernel- and
   dispatch-affecting flags are read from by leaf kernels that carry no

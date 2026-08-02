@@ -375,6 +375,22 @@ jobs:
       - name: I1 allowlist gate (blocking)
         run: python3 tools/check_alloc_sites.py
 
+  # Post-launch error checks after every CUDA kernel launch. Blocking: an
+  # unguarded launch turns a launch-time failure (bad config, smem over the
+  # opt-in, missing kernel image) into silently wrong output instead of an
+  # error. The convention was ~99% adopted and 0% enforced until the 2026-08-02
+  # audit found the whole Qwen3-VL tower at 9 launches / 0 checks.
+  launchguards:
+    name: Launch guards
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Post-launch check gate (blocking)
+        run: python3 tools/check_launch_guards.py
+
   test:
     name: Test
     needs: build

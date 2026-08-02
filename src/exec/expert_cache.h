@@ -153,8 +153,8 @@ struct ExpertLRUCache {
     // Initialize: allocate the slot pool (partitioned per-layer) + the
     // device mirror + the host source-pointer table. Returns false if GPU
     // allocation fails (cache disabled).
-    bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc,
-              int n_layers, int n_experts, bool debug_parity = false);
+    [[nodiscard]] bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc, int n_layers,
+                            int n_experts, bool debug_parity = false);
 
     // Lookup or insert an expert. Returns GPU pointer to cached expert data.
     // If cache miss: copies from host, evicts LRU entry within the layer's

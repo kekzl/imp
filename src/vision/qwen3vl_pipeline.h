@@ -49,7 +49,7 @@ public:
     // device here if it is still host-resident. `max_patches` bounds the image
     // size this pipeline will accept — it sizes every workspace, so it is also
     // what an oversized image is rejected against.
-    bool init(VisionModel& tower, VRAMAllocator& alloc, int max_patches);
+    [[nodiscard]] bool init(VisionModel& tower, VRAMAllocator& alloc, int max_patches);
 
     bool is_ready() const { return encoder_ != nullptr; }
     int max_patches() const { return max_patches_; }

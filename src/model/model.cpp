@@ -347,7 +347,23 @@ ModelArch parse_model_arch(const std::string& s) {
         {"CohereForCausalLM", ModelArch::LLAMA},
     };
     auto it = registry.find(s);
-    return (it != registry.end()) ? it->second : ModelArch::GENERIC;
+    if (it != registry.end())
+        return it->second;
+
+    // Unrecognised architecture → GENERIC, which loads and produces
+    // plausible-looking output rather than an error (#1206). That fallback is
+    // deliberate — the registry above maps 30 strings onto known archs and a
+    // Llama-shaped checkpoint usually works through it — but it used to be
+    // completely silent, so a genuinely unsupported model looked supported.
+    // is_encoder_only_arch() guards the one family where the failure was loud
+    // (BERT encoders: IMA on the first request, #818); everything else just
+    // ran. Say which string was not recognised, once, at parse time.
+    if (!s.empty())
+        IMP_LOG_WARN(
+            "Unrecognised architecture '%s' — loading as GENERIC (Llama-shaped decoder). "
+            "Output may be wrong if the checkpoint needs arch-specific handling.",
+            s.c_str());
+    return ModelArch::GENERIC;
 }
 
 bool is_encoder_only_arch(const std::string& s) {

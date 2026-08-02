@@ -17,7 +17,7 @@ public:
 
     // Initialize with SM partitioning: prefill gets prefill_sm_ratio of SMs,
     // decode gets the remainder. device is the CUDA device ordinal.
-    bool init(int device, float prefill_sm_ratio = 0.8f);
+    [[nodiscard]] bool init(int device, float prefill_sm_ratio = 0.8f);
     void destroy();
 
     // Reconfigure SM split at runtime (requires destroy + reinit under the hood)

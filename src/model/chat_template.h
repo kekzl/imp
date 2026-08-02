@@ -52,7 +52,8 @@ public:
     // Initialize: resolve special token IDs via tokenizer.
     // jinja_str: raw Jinja2 template from GGUF (optional). When provided and
     // parseable, the engine renders via Jinja2 instead of hardcoded families.
-    bool init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str = "");
+    [[nodiscard]] bool init(ChatTemplateFamily family, const Tokenizer& tokenizer,
+                            const std::string& jinja_str = "");
 
     // Build token ID vector: special tokens as raw IDs, text segments encoded.
     // suppress_thinking: inject /no_think + stamp enable_thinking=false so the

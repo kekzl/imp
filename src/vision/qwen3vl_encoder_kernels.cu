@@ -1,5 +1,7 @@
 #include "vision/qwen3vl_encoder_kernels.h"
 
+#include "core/logging.h"  // IMP_CUDA_CHECK_LAUNCH
+
 #include <cmath>
 
 namespace imp {
@@ -200,29 +202,35 @@ int reduce_threads(int dim) {
 void launch_qwen3vl_pos_embed_add(half* hidden, const half* table, const int32_t* taps, const float* weights,
                                   int tokens, int dim, int taps_per_token, cudaStream_t stream) {
     pos_embed_add_kernel<<<tokens, kBlock, 0, stream>>>(hidden, table, taps, weights, dim, taps_per_token);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_qwen3vl_layernorm(const half* x, const half* weight, const half* bias, half* out, int rows,
                               int dim, float eps, cudaStream_t stream) {
     const int threads = reduce_threads(dim);
     layernorm_kernel<<<rows, threads, threads * sizeof(float), stream>>>(x, weight, bias, out, dim, eps);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_qwen3vl_add_bias(half* x, const half* bias, int rows, int dim, cudaStream_t stream) {
     const int64_t n = static_cast<int64_t>(rows) * dim;
     add_bias_kernel<<<static_cast<int>((n + kBlock - 1) / kBlock), kBlock, 0, stream>>>(x, bias, n, dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_qwen3vl_residual_add(half* dst, const half* src, int64_t n, cudaStream_t stream) {
     residual_add_kernel<<<static_cast<int>((n + kBlock - 1) / kBlock), kBlock, 0, stream>>>(dst, src, n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_qwen3vl_gelu_tanh(half* x, int64_t n, cudaStream_t stream) {
     gelu_tanh_kernel<<<static_cast<int>((n + kBlock - 1) / kBlock), kBlock, 0, stream>>>(x, n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_qwen3vl_gelu_erf(half* x, int64_t n, cudaStream_t stream) {
     gelu_erf_kernel<<<static_cast<int>((n + kBlock - 1) / kBlock), kBlock, 0, stream>>>(x, n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_qwen3vl_split_qkv_rope(const half* qkv, const int32_t* row, const int32_t* col, half* q, half* k,
@@ -230,16 +238,19 @@ void launch_qwen3vl_split_qkv_rope(const half* qkv, const int32_t* row, const in
                                    cudaStream_t stream) {
     dim3 grid(tokens, heads);
     split_qkv_rope_kernel<<<grid, 64, 0, stream>>>(qkv, row, col, q, k, v, tokens, heads, head_dim, theta);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_qwen3vl_softmax_rows(half* scores, int rows, int cols, cudaStream_t stream) {
     const int threads = reduce_threads(cols);
     softmax_rows_kernel<<<rows, threads, threads * sizeof(float), stream>>>(scores, cols);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void launch_qwen3vl_merge_heads(const half* per_head, half* out, int tokens, int heads, int head_dim,
                                 cudaStream_t stream) {
     merge_heads_kernel<<<tokens, kBlock, 0, stream>>>(per_head, out, tokens, heads, head_dim);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

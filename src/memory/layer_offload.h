@@ -28,7 +28,7 @@ public:
     // gpu_layers: number of layers to keep on GPU (0 = all offloaded,
     //             -1 = all on GPU i.e. disabled).
     // Priority: attention layers first, then SSM, then MoE-only.
-    bool init(Model* model, int gpu_layers);
+    [[nodiscard]] bool init(Model* model, int gpu_layers);
 
     // Ensure layer's weights are accessible on GPU. If the layer is resident
     // (not offloaded), this is a no-op. Otherwise, waits for the prefetch

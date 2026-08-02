@@ -67,7 +67,7 @@ public:
 
     // Initialize: classify all tokens in the vocabulary.
     // Must be called once before use.
-    bool init(const Tokenizer& tok);
+    [[nodiscard]] bool init(const Tokenizer& tok);
 
     // Apply logit mask: set logits of invalid tokens to -inf.
     // Called after penalties, before sampling.
