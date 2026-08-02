@@ -125,6 +125,7 @@ int main(int argc, char** argv) {
 
     // Store API key and limits in state
     state.api_key = args.api_key;
+    state.metrics_require_auth = args.metrics_require_auth;
     state.max_concurrent = args.max_concurrent;
     state.request_timeout = args.request_timeout;
     state.rate_limit = args.rate_limit;
@@ -144,8 +145,12 @@ int main(int argc, char** argv) {
         res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-        // Skip auth/limits for health checks and CORS preflight
-        if (req.path == "/health" || req.path == "/metrics" || req.method == "OPTIONS")
+        // Skip auth/limits for health checks and CORS preflight. /metrics is
+        // exempt by default so a stock Prometheus scrape works, but it leaks the
+        // loaded model name, d_model and cumulative token counts — so
+        // --metrics-require-auth folds it back under the api_key check (#1207).
+        const bool metrics_exempt = (req.path == "/metrics" && !state.metrics_require_auth);
+        if (req.path == "/health" || metrics_exempt || req.method == "OPTIONS")
             return httplib::Server::HandlerResponse::Unhandled;
 
         // Rate limiting (per-IP, inference endpoints only)

@@ -36,6 +36,11 @@ struct ServerArgs {
     std::string mmproj_path;                    // --mmproj: vision encoder GGUF
     std::string models_dir;                     // --models-dir: scan for .gguf files
     std::string api_key;                        // --api-key: require Bearer token auth
+    // --metrics-require-auth: also gate /metrics behind --api-key. Off by
+    // default because the standard Prometheus scrape (monitoring/) is
+    // unauthenticated; on, because /metrics discloses the loaded model name,
+    // d_model and cumulative token counts to anyone who can reach the port.
+    bool metrics_require_auth = false;
     std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
     bool mem_report = false;  // --mem-report: full VRAM attribution table at init
     int vram_budget_mb = 0;  // --vram-budget: hard per-process VRAM cap in MiB (0 = uncapped)

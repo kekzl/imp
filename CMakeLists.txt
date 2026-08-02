@@ -622,6 +622,9 @@ if(IMP_BUILD_TESTS)
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
         tests/test_c_api_enum_binding.cpp
+        # Pre-cudaDeviceReset hook registry (#1207): self-registration replaced a
+        # hand-maintained call list, so the new failure mode is an EMPTY registry.
+        tests/test_cuda_static_reset.cpp
         # Generative FSM battery for the schema-less json_object grammar. Lives
         # in the CPU lane on purpose: the FSM is CUDA-free without init(), and
         # every past grammar bug escaped CI because its tests need a GPU.

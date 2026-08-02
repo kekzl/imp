@@ -173,6 +173,9 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("attention.force_cublas_decode", cfg.attention.force_cublas_decode);
     B("attention.mla_absorb", cfg.attention.mla_absorb);
     B("attention.no_qknorm_fused", cfg.attention.no_qknorm_fused);
+    B("diagnostics.spec_trace", cfg.diagnostics.spec_trace);
+    B("diagnostics.jump_trace", cfg.diagnostics.jump_trace);
+    S("diagnostics.ppl_dump", cfg.diagnostics.ppl_dump);
     B("attention.splitk_pipe", cfg.attention.splitk_pipe);
     B("attention.fp8_tile", cfg.attention.fp8_tile);
     B("attention.fp8_tile_gqa", cfg.attention.fp8_tile_gqa);
@@ -354,6 +357,10 @@ std::string home_dir() {
 //     inject determinism through the public API without a config file.
 //   IMP_FMHA_FA2 — set by the roofline A/B harness (tools/roofline/roofline.py)
 //     to toggle the FA2 prefill kernel per subprocess.
+// Three trace vars are seeded here as of #1207 (IMP_SPEC_TRACE, IMP_JUMP_TRACE,
+// IMP_PPL_DUMP). They had crept back as raw getenv() calls at their use sites —
+// unreachable from imp.conf/--set and undocumented. Seeding keeps the shell
+// habit working while making the keys first-class.
 void seed_from_env(RuntimeConfig& cfg) {
     // runtime.deterministic — IMP_DETERMINISTIC: '1'/'true' enables full
     // reproducibility (also implies deterministic_gemm).
@@ -367,6 +374,16 @@ void seed_from_env(RuntimeConfig& cfg) {
     // prefill kernel (A/B vs the legacy FP8 FMHA), '0' forces it off.
     if (const char* e = std::getenv("IMP_FMHA_FA2"))
         cfg.attention.fmha_fa2 = (std::atoi(e) != 0) ? "on" : "never";
+
+    // diagnostics.spec_trace / jump_trace / ppl_dump — presence-is-truth for the
+    // two booleans (the old getenv() call sites tested `if (getenv(...))`, so an
+    // empty value counted as ON; keep that so existing shell habits behave).
+    if (std::getenv("IMP_SPEC_TRACE"))
+        cfg.diagnostics.spec_trace = true;
+    if (std::getenv("IMP_JUMP_TRACE"))
+        cfg.diagnostics.jump_trace = true;
+    if (const char* e = std::getenv("IMP_PPL_DUMP"))
+        cfg.diagnostics.ppl_dump = e;
 }
 
 }  // anonymous namespace

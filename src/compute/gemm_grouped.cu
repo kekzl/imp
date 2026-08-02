@@ -43,6 +43,11 @@ void gemm_grouped_reset_static_cuda_state() {
     }
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(gemm_grouped_reset_static_cuda_state);
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Helper: map QType -> cudaDataType
 // ---------------------------------------------------------------------------

@@ -446,7 +446,8 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     // IMP_PPL_DUMP=full: every position — needed for cross-mode forensics;
     // the sparse form hid that per-position values diverge between chunked
     // and single-shot runs (#655).
-    if (const char* dump = getenv("IMP_PPL_DUMP")) {
+    if (!runtime_config_.diagnostics.ppl_dump.empty()) {
+        const char* dump = runtime_config_.diagnostics.ppl_dump.c_str();
         const bool full = (strcmp(dump, "full") == 0);
         fprintf(stderr, "[PPL-DUMP] per-pos nll:");
         for (int i = 0; i < n - 1; ++i) {

@@ -276,7 +276,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
                 think_limit = std::max(
                     1, static_cast<int>(req->max_tokens * req->think_budget) - used);
             }
-            if (getenv("IMP_SPEC_TRACE"))
+            if (runtime_config_.diagnostics.spec_trace)
                 IMP_LOG_INFO("[burst-launch] REARM seed=%d pos=%d ctx=%d limit=%d", (int)first_token,
                              ctx - 1, ctx, step_limit);
             if (async_graph_runner_.rearm(first_token, /*position=*/ctx - 1, /*context_len=*/ctx,
@@ -345,7 +345,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
     }
 
-    if (getenv("IMP_SPEC_TRACE"))
+    if (runtime_config_.diagnostics.spec_trace)
         IMP_LOG_INFO("[burst-launch] FRESH seed=%d ctx=%d limit=%d remaining=%d", (int)first_token,
                      req->context_len(), step_limit, remaining);
     auto gcfg = build_graph_config(*req, remaining);
@@ -603,7 +603,7 @@ int Engine::step_constrained_pipeline() {
             p.fnext++;
             return 1;
         }
-        if (getenv("IMP_JUMP_TRACE")) {
+        if (runtime_config_.diagnostics.jump_trace) {
             Tokenizer* tk = model_->tokenizer();
             const int32_t want = p.fnext <= p.frows ? p.fdraft[p.fnext - 1] : -1;
             IMP_LOG_INFO("[jump] exit at %d/%d: sampled %d [%s] draft %d [%s]", p.fnext, p.frows,
@@ -645,7 +645,7 @@ int Engine::step_constrained_pipeline() {
             }
             return 1;
         }
-        if (getenv("IMP_JUMP_TRACE")) {
+        if (runtime_config_.diagnostics.jump_trace) {
             Tokenizer* tk = model_->tokenizer();
             IMP_LOG_INFO("[jump] pending dropped at %d: sampled %d [%s] draft %d [%s]",
                          p.fpend_cursor, token,
@@ -698,7 +698,7 @@ void Engine::constrained_jump_probe_(std::shared_ptr<Request>& req) {
         return;
     p.fpending = std::move(draft);
     p.fpend_cursor = 0;
-    if (getenv("IMP_JUMP_TRACE"))
+    if (runtime_config_.diagnostics.jump_trace)
         IMP_LOG_INFO("[jump] pended %d tokens for forced span \"%s\"",
                      static_cast<int>(p.fpending.size()), text.c_str());
 }
@@ -804,7 +804,7 @@ void Engine::constrained_jump_commit_(std::shared_ptr<Request>& req, cudaStream_
     p.fbase_pos = pos1 + 1;
     p.frows = K;
     p.jumps++;
-    if (getenv("IMP_JUMP_TRACE")) {
+    if (runtime_config_.diagnostics.jump_trace) {
         std::string ids;
         for (int32_t t : p.fdraft) ids += std::to_string(t) + " ";
         IMP_LOG_INFO("[jump] committed %d-token chunk after free first-token match (ids: %s)", K,

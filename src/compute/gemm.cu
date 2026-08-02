@@ -562,6 +562,11 @@ void gemm_reset_static_cuda_state() {
     s_bench_scratch_size = 0;
 }
 
+// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
+namespace {
+IMP_REGISTER_CUDA_STATIC_RESET(gemm_reset_static_cuda_state);
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // gemm:  C = alpha * A @ B^T + beta * C
 //   A [M, K]  B [N, K]  C [M, N]   -- all row-major

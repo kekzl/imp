@@ -134,6 +134,10 @@ struct ServerState {
     ServerArgs default_args;
     std::string models_dir;       // directory to scan for available .gguf files
     std::string api_key;          // if non-empty, require Bearer token auth
+    // --metrics-require-auth: gate /metrics behind api_key too (#1207). Default
+    // off — the Prometheus scrape in monitoring/ is unauthenticated — but the
+    // endpoint discloses model name, d_model and cumulative token counts.
+    bool metrics_require_auth = false;
     bool is_think_model = false;  // model has <think> token (DeepSeek R1 etc.)
     int32_t think_start_id = -1;  // <think> token ID (-1 if not present)
     int32_t think_end_id = -1;    // </think> token ID (-1 if not present)

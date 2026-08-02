@@ -228,7 +228,7 @@ bool Engine::spec_burst_launch_ok_(const Request& req) const {
     // IMP_SPEC_TRACE: dump every term — the launch decision decides WHICH
     // kernel mix (loop vs pooled/eager) serves the next tokens, so an
     // asymmetric term here shows up as a greedy flip between requests.
-    if (getenv("IMP_SPEC_TRACE")) {
+    if (runtime_config_.diagnostics.spec_trace) {
         IMP_LOG_INFO("[burst-ok?] req=%d out=%zu pool_avail=%d offload=%d graphs=%d setup=%d parked=%d "
                      "think=%d think_end=%d status=%d",
                      req.id, req.output_tokens.size(),
@@ -881,7 +881,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         return false;
     }
 
-    if (getenv("IMP_SPEC_TRACE")) {
+    if (runtime_config_.diagnostics.spec_trace) {
         std::string s = "[verify] p0=" + std::to_string(p0) + " t0=" + std::to_string(t0) +
                         (mc_on ? " mc_cands=" + std::to_string(mc.size()) : "") + " draft=[";
         const auto& dref = mc_on ? mc[0] : draft;
