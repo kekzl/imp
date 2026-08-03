@@ -293,7 +293,24 @@ Still open from 07-29 with the reason each was not shipped blind — see
   nightly trigger stay dormant in `.github/workflows/ci.yml`. Consequence: `make verify-fast`
   locally is the only thing that ever runs a CUDA kernel against correctness or perf.
 - **F-9** — cuBLASLt algorithm selection unpinned (mechanism confirmed, magnitude refuted).
-- **F-10** — `src/runtime/config.h` included by 22 files in `src/exec/`.
+- **F-10** — `src/runtime/config.h` included by 22 files in `src/exec/`. **Scoped by
+  measurement 2026-08-03, and the audit's estimate is low by 2x.** It proposes extracting
+  "the ~30 dispatch-relevant keys" into a `DispatchPolicy` POD; `src/exec/` actually reads
+  **59 distinct RuntimeConfig leaves** across nine sections — gemm 15, attention 13, moe 12,
+  diagnostics 7, gdn 6, generation 2, ffn 2, speculative 1, kv_cache 1 — at 91 read sites in
+  21 of the 22 files. So the POD is 59 fields and every read site changes.
+  **Access is per-object, not global**: `runtime_config()` in `exec/` is a member accessor
+  on `GraphExecutor` (`src/exec/executor.h:422`) and `QuantPipeline`
+  (`src/exec/quant_pipeline.h:86`), reached as implicit `this->`. `exec/` includes no
+  `engine.h`. Anyone reading the 79 unqualified call sites as a process-global will
+  mis-model the fix — there is still no process-global `RuntimeConfig`.
+  **Both cheap alternatives are closed, tested:** forward-declaring instead of including
+  fails because 21 of 22 files read real members and the owning classes hold the type by
+  reference; and splitting `config.h` by section does not help for the same reason, even
+  though **roughly half the churn (Runtime 67, Vram 19, Server 5, Rope 5 of ~194 hunks)
+  lands in sections `exec/` never reads**. The saving is real but unreachable without
+  changing what the owning classes hold — which is the POD extraction itself.
+  Cost of leaving it: 85 TUs x 130 commits/6mo, the highest in the repo.
 - **F-12** — `src/memory/vram_allocator.cu`: **67** live references (2026-08-03), down from
   the audit's 84. Still open, but shrinking; count with the allocator's own files and comment
   lines excluded or you get 103 and read a regression that is not there.
