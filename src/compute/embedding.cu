@@ -1,5 +1,5 @@
 #include "compute/embedding.h"
-#include "model/model_config.h"  // QType
+#include "core/qtype.h"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>

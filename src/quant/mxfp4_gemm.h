@@ -1,6 +1,6 @@
 #pragma once
 
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/cutlass_mxfp4_weight.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 

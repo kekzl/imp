@@ -1,6 +1,6 @@
 #pragma once
 
-#include "exec/weight_handle.h"
+#include "core/weight_handle.h"
 #include "core/tensor.h"
 
 #include <cublasLt.h>
