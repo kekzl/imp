@@ -2633,13 +2633,4 @@ std::string Template::render(const Context& ctx) const {
     return eval.render(nodes_);
 }
 
-std::string Template::render_string(const std::string& source, const Context& ctx) {
-    Template tmpl;
-    if (!tmpl.parse(source)) {
-        IMP_LOG_WARN("jinja: failed to parse template: %s", tmpl.error().c_str());
-        return "";
-    }
-    return tmpl.render(ctx);
-}
-
 }  // namespace imp::jinja

@@ -108,6 +108,30 @@ loop, and the shared part is already factored out.
   boundary, and the 2-D `bt[seq * max_blocks_per_seq + block_idx]` indexing every paged
   write kernel shares — the only direct assertion on that indexing in the write path.
 
+- **The non-kernel decl-only sweep ran on 2026-08-03** (the sibling of the kernel sweep
+  above: `ccg coverage` only looks at `__global__`). Ten functions were declaration +
+  definition and nothing else, and were removed: the four CuTe builders
+  `build_tma_a/_b/_sfa/_sfb` (superseded by `build_tma_2d_u8` in the same file — their
+  removal also dropped three `cute/` includes from that TU), the four **empty-bodied**
+  `// Legacy stubs` `gdn_decode/_prefill/gdn_scan_decode/_prefill` (GDN really runs through
+  `gdn_scan_chunkwise_*` / `gdn_scan_fused_*`), `GraphExecutor::forward_batch`, and
+  `jinja::Template::render_string`.
+  **Do not re-run this sweep raw.** It starts at 530 candidates and is dominated by four
+  false-positive families the graph cannot see through: self-registering hooks bound by
+  macro (`*_reset_static_cuda_state` — the R-11 mechanism, and it looks deadest of all),
+  C-ABI exports under `include/` whose consumers are outside the repo, device-side inline
+  helpers in `.cuh` used inside kernel bodies, and templates. 530 → 201 by occurrence count
+  → 27 by the decl+def signature → 10 after reading each one.
+  **Still unverified, do not treat as dead:** `gemm_grouped_nvfp4_smallM_cleanup`,
+  `attention_mxfp4_workspace_estimate`, `reset_residual`, `tier_of`,
+  `token_keeps_pattern_alive`, `clear_journal`, `find_by_source_data`, `encode_memory`,
+  `log_shadow_plan`, `process_diag_set_mxfp4_blockscale`, `steps_completed`,
+  `gemv_q4k_ggml_compat`, and the five `Buffer` copy helpers.
+- **`process_diag_set_mxfp4_blockscale` is a redundant mutator, NOT a dead knob** — checked
+  because it looked like one. `process_diag.cpp` installs the flag from
+  `cfg.attention.mxfp4_blockscale` and `attention_dispatch.cu` reads it, so the config path
+  works; only the standalone setter is unused.
+
 **Method note for "is this dead" findings.** A call-graph tool reporting *no callers* is
 only evidence if the tool can see calls at all. Control it against a symbol you have
 already proven live before you trust the negative — for the sweep above, `codegraph callers
@@ -165,6 +189,14 @@ one command.
 Still open from 07-29 with the reason each was not shipped blind — see
 [`AUDIT_ARCH_2026_07_29.md`](AUDIT_ARCH_2026_07_29.md) for the full argument.
 
+- **All 76 `IMP_LOG_DEBUG` sites are unreachable** (found 2026-08-03, not fixed). Every one
+  is guarded by `log_get_level() <= LogLevel::DEBUG`; `g_log_level` in
+  `src/core/logging.cpp` initialises to `INFO`, and its **only** writer is `log_set_level`,
+  which nothing calls. There is no config key and no CLI flag for the level. So the engine
+  has a debug-logging facility that cannot be switched on. `log_set_level` was left in
+  place deliberately — it was on the decl-only removal list, and deleting it would have
+  cemented the gap and taken away the obvious hook. The fix is a `RuntimeConfig` key that
+  calls it (no ad-hoc env read), not a removal.
 - **F-3 (rest)** — routing replica. **This entry understated the gap until 2026-08-03**: it
   described the residual limit of the *attention* half (a tier reordered ahead of the winner
   stays invisible, because the chain short-circuits and never asks it) as if that were all

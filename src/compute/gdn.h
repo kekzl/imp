@@ -158,14 +158,4 @@ void vhead_tiled_to_grouped(const half* src, half* dst, int n_tokens, int n_head
 void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int n_heads, int head_dim,
                                 int n_groups, cudaStream_t stream);
 
-// Legacy stubs
-void gdn_scan_decode(const half*, const half*, const half*, const half*, const half*, const float*,
-                     const float*, float*, half*, const half*, int, int, int, int, cudaStream_t);
-void gdn_scan_prefill(const half*, const half*, const half*, const half*, const half*, const float*,
-                      const float*, float*, half*, const half*, int, int, int, int, int, cudaStream_t);
-void gdn_decode(const half*, const half*, const half*, const half*, const half*, float*, half*, const half*,
-                int, int, int, int, cudaStream_t);
-void gdn_prefill(const half*, const half*, const half*, const half*, const half*, float*, half*, const half*,
-                 int, int, int, int, int, cudaStream_t);
-
 }  // namespace imp

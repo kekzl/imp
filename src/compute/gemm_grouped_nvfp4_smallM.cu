@@ -11,10 +11,6 @@
 #include <cstdint>
 #include <cstdio>
 
-#include "cute/tensor.hpp"
-#include "cute/atom/copy_atom.hpp"
-#include "cute/atom/copy_traits_sm90_tma.hpp"  // SM90_TMA_LOAD / make_tma_copy
-
 namespace imp {
 
 namespace {
@@ -627,46 +623,6 @@ extern "C" void smallM_smoke_single_mma(
 #endif  // SMALLM_TEST_HOOKS
 
 namespace detail {
-
-using namespace cute;
-
-// Legacy CuTe TMA descriptor builders (referenced by the test file via
-// indirect template instantiation; retained for source-level continuity with
-// T1.6 spec). The production launcher below builds CUtensorMap descriptors
-// via the CUDA driver API directly — same wire format, simpler to pass to
-// the kernel.
-template <int TILE_M, int TILE_K>
-auto build_tma_a(const void* d_ptr, int M_e, int K) {
-    auto tensor = make_tensor(
-        make_gmem_ptr(static_cast<const uint8_t*>(d_ptr)),
-        make_layout(make_shape(M_e, K / 2), make_stride(K / 2, _1{})));
-    auto smem_layout = make_layout(Shape<Int<TILE_M>, Int<TILE_K / 2>>{});
-    return make_tma_copy(SM90_TMA_LOAD{}, tensor, smem_layout);
-}
-template <int TILE_N, int TILE_K>
-auto build_tma_b(const void* d_ptr, int N, int K) {
-    auto tensor = make_tensor(
-        make_gmem_ptr(static_cast<const uint8_t*>(d_ptr)),
-        make_layout(make_shape(N, K / 2), make_stride(K / 2, _1{})));
-    auto smem_layout = make_layout(Shape<Int<TILE_N>, Int<TILE_K / 2>>{});
-    return make_tma_copy(SM90_TMA_LOAD{}, tensor, smem_layout);
-}
-template <int TILE_M, int TILE_K>
-auto build_tma_sfa(const void* d_ptr, int M_e, int K) {
-    auto tensor = make_tensor(
-        make_gmem_ptr(static_cast<const uint8_t*>(d_ptr)),
-        make_layout(make_shape(M_e, K / 16), make_stride(K / 16, _1{})));
-    auto smem_layout = make_layout(Shape<Int<TILE_M>, Int<TILE_K / 16>>{});
-    return make_tma_copy(SM90_TMA_LOAD{}, tensor, smem_layout);
-}
-template <int TILE_N, int TILE_K>
-auto build_tma_sfb(const void* d_ptr, int N, int K) {
-    auto tensor = make_tensor(
-        make_gmem_ptr(static_cast<const uint8_t*>(d_ptr)),
-        make_layout(make_shape(N, K / 16), make_stride(K / 16, _1{})));
-    auto smem_layout = make_layout(Shape<Int<TILE_N>, Int<TILE_K / 16>>{});
-    return make_tma_copy(SM90_TMA_LOAD{}, tensor, smem_layout);
-}
 
 int pick_m_tile(int M_e) {
     if (M_e <= 16) return 16;
