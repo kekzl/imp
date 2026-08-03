@@ -53,57 +53,6 @@ Buffer Buffer::host(size_t nbytes) {
     return buf;
 }
 
-void Buffer::copy_from_host(const void* src, size_t nbytes) {
-    if (nbytes == 0)
-        return;
-    if (on_device_) {
-        check_cuda(cudaMemcpy(data_, src, nbytes, cudaMemcpyHostToDevice), "cudaMemcpy H2D");
-    } else {
-        std::memcpy(data_, src, nbytes);
-    }
-}
-
-void Buffer::copy_to_host(void* dst, size_t nbytes) const {
-    if (nbytes == 0)
-        return;
-    if (on_device_) {
-        check_cuda(cudaMemcpy(dst, data_, nbytes, cudaMemcpyDeviceToHost), "cudaMemcpy D2H");
-    } else {
-        std::memcpy(dst, data_, nbytes);
-    }
-}
-
-void Buffer::copy_from(const Buffer& src, size_t nbytes) {
-    if (nbytes == 0)
-        return;
-    cudaMemcpyKind kind;
-    if (on_device_ && src.on_device_) {
-        kind = cudaMemcpyDeviceToDevice;
-    } else if (on_device_ && !src.on_device_) {
-        kind = cudaMemcpyHostToDevice;
-    } else if (!on_device_ && src.on_device_) {
-        kind = cudaMemcpyDeviceToHost;
-    } else {
-        std::memcpy(data_, src.data_, nbytes);
-        return;
-    }
-    check_cuda(cudaMemcpy(data_, src.data_, nbytes, kind), "cudaMemcpy");
-}
-
-void Buffer::copy_from_host_async(const void* src, size_t nbytes, void* stream) {
-    if (nbytes == 0)
-        return;
-    check_cuda(cudaMemcpyAsync(data_, src, nbytes, cudaMemcpyHostToDevice, static_cast<cudaStream_t>(stream)),
-               "cudaMemcpyAsync H2D");
-}
-
-void Buffer::copy_to_host_async(void* dst, size_t nbytes, void* stream) const {
-    if (nbytes == 0)
-        return;
-    check_cuda(cudaMemcpyAsync(dst, data_, nbytes, cudaMemcpyDeviceToHost, static_cast<cudaStream_t>(stream)),
-               "cudaMemcpyAsync D2H");
-}
-
 void Buffer::zero() {
     if (!data_ || size_ == 0)
         return;

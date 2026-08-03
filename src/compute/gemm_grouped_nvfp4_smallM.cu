@@ -710,8 +710,6 @@ bool gemm_grouped_nvfp4_smallM_available() {
     return s_smallM_available;
 }
 
-void gemm_grouped_nvfp4_smallM_cleanup() {}
-
 // Dummy buffer backing TMA descriptors of inactive experts (lazily created
 // in gemm_grouped_nvfp4_smallM below; file-scope so the reset hook can free it).
 static uint8_t* s_dummy = nullptr;

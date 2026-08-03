@@ -26,7 +26,6 @@ public:
     // device-or-pageable one. Removed rather than migrated — a second owner
     // wrapped around the first would have removed no free.
 
-
     // Accessors
     void* ptr() const { return data_; }
     size_t size() const { return size_; }
@@ -37,15 +36,6 @@ public:
     T* as() const {
         return static_cast<T*>(data_);
     }
-
-    // Copy operations (synchronous)
-    void copy_from_host(const void* src, size_t nbytes);
-    void copy_to_host(void* dst, size_t nbytes) const;
-    void copy_from(const Buffer& src, size_t nbytes);
-
-    // Async copy operations
-    void copy_from_host_async(const void* src, size_t nbytes, void* stream);
-    void copy_to_host_async(void* dst, size_t nbytes, void* stream) const;
 
     // Memset
     void zero();

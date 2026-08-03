@@ -225,10 +225,6 @@ void KVCacheManager::advance_residual(int seq_id) {
     if (s.fill_count < residual_n_tokens_) s.fill_count++;
 }
 
-void KVCacheManager::reset_residual(int seq_id) {
-    seq_residual_state_.erase(seq_id);
-}
-
 // ─── Hashing utility ─────────────────────────────────────────────────
 
 size_t KVCacheManager::compute_block_hash(std::span<const int32_t> tokens, size_t parent_hash) {

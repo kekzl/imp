@@ -63,8 +63,9 @@ __device__ __forceinline__ float q6k_dp4a_group_preloaded(
 // 6-bit scale/min unpacker matching ggml get_scale_min_k4, register variant
 // (#598): the 12 scale bytes arrive as three words (s0 = sc[0..3],
 // s1 = sc[4..7], s2 = sc[8..11]) from a single uint4 header load instead of
-// per-byte L1 traffic. Byte-pointer reference copies live in
-// mmq_q4k_imma_layout.cu / gemv_ggml_compat.cu.
+// per-byte L1 traffic. A byte-pointer reference copy lives in
+// mmq_q4k_imma_layout.cu (gemv_ggml_compat.cu carried a second one and was
+// removed — nothing called it).
 __device__ __forceinline__ void get_scale_min_k4_reg(uint32_t s0, uint32_t s1, uint32_t s2, int sub,
                                                      uint8_t& sc_val, uint8_t& min_val) {
     auto byte_of = [](uint32_t w, int i) -> uint32_t { return (w >> (8 * i)) & 0xFFu; };

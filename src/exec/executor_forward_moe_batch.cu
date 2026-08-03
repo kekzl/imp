@@ -11,7 +11,6 @@
 #include "runtime/config.h"
 #include <atomic>
 #include "compute/embedding.h"
-#include "compute/gemv_ggml_compat.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
@@ -1086,6 +1085,5 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     }
     elementwise_add(h, sh_down, stream);
 }
-
 
 }  // namespace imp

@@ -81,12 +81,29 @@ section "settled-prior anchors"
 if [ ! -e docs/audit/SETTLED.md ]; then
     fail "docs/audit/SETTLED.md is missing — the audit priors ledger is load-bearing"
 else
+    # The ledger also RECORDS removals, so a handful of the paths it names are
+    # deliberately gone. Listing them is a two-way ratchet, the same mechanism as
+    # tools/alloc_allowlist.txt: absent is expected, and a listed path that comes
+    # BACK is a failure too, because then the entry describing its removal is
+    # false. Do not use this to silence an anchor that merely moved — that is the
+    # case the gate exists for.
+    SETTLED_REMOVED="src/compute/gemv_ggml_compat.h src/compute/gemv_ggml_compat.cu
+                     src/core/threading.h src/core/threading.cpp"
     ANCHORS=$(grep -ohE '\b(src|tests|tools|scripts|docs|include|cmake)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+\b' \
               docs/audit/SETTLED.md | sort -u || true)
     ANCHORBROKEN=0
     ANCHORN=0
     while IFS= read -r anchor; do
         [ -z "$anchor" ] && continue
+        case " $(echo $SETTLED_REMOVED) " in
+            *" $anchor "*)
+                if [ -e "$anchor" ]; then
+                    echo "  resurrected: $anchor is listed as removed in SETTLED.md but exists"
+                    ANCHORBROKEN=$((ANCHORBROKEN+1))
+                fi
+                continue
+                ;;
+        esac
         ANCHORN=$((ANCHORN+1))
         if [ ! -e "$anchor" ]; then
             echo "  dead anchor: $anchor"

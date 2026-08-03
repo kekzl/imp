@@ -330,10 +330,6 @@ public:
     // Increments write_idx (mod residual_n) and fill_count (capped at residual_n).
     void advance_residual(int seq_id);
 
-    // Reset ring state for a sequence (called from free_sequence). Does NOT
-    // release the slot — use release_residual_slot for that.
-    void reset_residual(int seq_id);
-
     // ── Hashing utility (public for testing) ─────────────────────────
 
     // Compute the hash for a block of tokens. `parent_hash` is the hash

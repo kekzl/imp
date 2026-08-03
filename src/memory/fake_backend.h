@@ -52,7 +52,6 @@ public:
     void fail_acquisition(uint64_t nth, MemError err = MemError::OutOfMemory);
 
     const std::vector<AllocEvent>& journal() const { return journal_; }
-    void clear_journal();
 
     // Σ acquired − Σ released, recomputed from the journal. V1 (conservation)
     // asserts this equals stats().live_bytes after every operation.
