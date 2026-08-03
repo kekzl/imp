@@ -161,9 +161,6 @@ public:
     // Returns the rendered string, or empty string on error.
     std::string render(const Context& ctx) const;
 
-    // Combined parse + render convenience
-    static std::string render_string(const std::string& source, const Context& ctx);
-
     // Last error message (set on parse/render failure)
     const std::string& error() const { return error_; }
 

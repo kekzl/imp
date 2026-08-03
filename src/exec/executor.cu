@@ -644,12 +644,6 @@ const int32_t* GraphExecutor::sample_slot_base(int parity) const {
                                                 SAMPLE_SCRATCH_BYTES);
 }
 
-std::vector<int32_t> GraphExecutor::forward_batch(const InferenceState& state, cudaStream_t stream) {
-    Tensor logits;
-    forward_logits(state, logits, stream);
-    return sample_from_logits(logits, state, stream);
-}
-
 // ---------------------------------------------------------------------------
 // Async decode: embedding from device token → forward → sample to device
 // ---------------------------------------------------------------------------

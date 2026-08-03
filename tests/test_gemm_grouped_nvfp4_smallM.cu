@@ -1,9 +1,12 @@
 // tests/test_gemm_grouped_nvfp4_smallM.cu
 //
-// Note: TMA descriptor builders (build_tma_a/b/sfa/sfb) are file-local
-// templates in gemm_grouped_nvfp4_smallM.cu. They are exercised
-// indirectly by the kernel-level tests in later tasks. This file
-// has no test for them by design.
+// This file used to carry a note explaining why the CuTe TMA descriptor
+// builders (build_tma_a/b/sfa/sfb) had no test — "exercised indirectly by the
+// kernel-level tests in later tasks". They were not: nothing called them, and
+// the note in their own source claimed the opposite, that the *test* file
+// referenced them. Two comments citing each other, neither true. Removed with
+// the builders themselves; the production launcher uses build_tma_2d_u8 via
+// the driver API and is covered here.
 #include <gtest/gtest.h>
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"

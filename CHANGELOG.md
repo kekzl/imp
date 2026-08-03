@@ -68,6 +68,16 @@ there instead of retelling it.
   rules, so it cannot disagree with what ran.
 
 ### Removed
+- **Ten functions that were declared, defined and never called** — the non-kernel
+  sibling of the sweep below. Four CuTe TMA descriptor builders
+  (`build_tma_a/_b/_sfa/_sfb`), whose removal also drops three `cute/` includes
+  from that translation unit; four **empty-bodied** `// Legacy stubs` in `gdn.h`
+  (`gdn_decode`, `gdn_prefill`, `gdn_scan_decode`, `gdn_scan_prefill` — a caller
+  would have got a silent no-op, while GDN really runs through
+  `gdn_scan_chunkwise_*`); `GraphExecutor::forward_batch`; and
+  `jinja::Template::render_string`. No behaviour change. The sweep, its four
+  false-positive families and the candidates left unverified are recorded in
+  `docs/audit/SETTLED.md` so the next pass does not re-run it raw.
 - **Three KV/bias kernels that were built and linked but never launched** (#1216) —
   `write_kv_cache_kernel`, `write_kv_cache_fp8_kernel` and
   `add_fp16_bias_to_fp32_kernel`, plus an inert `pdl::enable` registration on the

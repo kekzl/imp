@@ -106,9 +106,6 @@ public:
     // Run the full forward pass and return the sampled token ID.
     int32_t forward(const InferenceState& state, cudaStream_t stream = nullptr);
 
-    // Batched forward: returns one sampled token per sequence.
-    std::vector<int32_t> forward_batch(const InferenceState& state, cudaStream_t stream = nullptr);
-
     // Run the forward pass but return raw logits instead of sampling.
     // logits_out will be a view into the internal logits buffer.
     void forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream = nullptr);

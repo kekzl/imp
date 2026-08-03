@@ -778,14 +778,4 @@ void gdn_scan_prefill_f32(const float* x, const float* B, const float* C, const 
     }
 }
 
-// Legacy stubs
-void gdn_scan_decode(const half*, const half*, const half*, const half*, const half*, const float*,
-                     const float*, float*, half*, const half*, int, int, int, int, cudaStream_t) {}
-void gdn_scan_prefill(const half*, const half*, const half*, const half*, const half*, const float*,
-                      const float*, float*, half*, const half*, int, int, int, int, int, cudaStream_t) {}
-void gdn_decode(const half*, const half*, const half*, const half*, const half*, float*, half*, const half*,
-                int, int, int, int, cudaStream_t) {}
-void gdn_prefill(const half*, const half*, const half*, const half*, const half*, float*, half*, const half*,
-                 int, int, int, int, int, cudaStream_t) {}
-
 }  // namespace imp
