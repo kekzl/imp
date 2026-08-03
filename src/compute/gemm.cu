@@ -24,12 +24,12 @@
 #include <vector>
 #include <utility>
 
-#define CUBLASLT_CHECK(call)                                                        \
-    do {                                                                            \
-        cublasStatus_t _st = (call);                                                \
-        if (_st != CUBLAS_STATUS_SUCCESS) {                                         \
-            fprintf(stderr, "imp::gemm: %s failed (status %d)\n", #call, (int)_st); \
-        }                                                                           \
+#define CUBLASLT_CHECK(call)                                                    \
+    do {                                                                        \
+        cublasStatus_t _st = (call);                                            \
+        if (_st != CUBLAS_STATUS_SUCCESS) {                                     \
+            IMP_LOG_ERROR("imp::gemm: %s failed (status %d)", #call, (int)_st); \
+        }                                                                       \
     } while (0)
 
 namespace imp {
@@ -58,7 +58,7 @@ static cublasHandle_t get_cublas_handle() {
     if (!s_cublas_handle) {
         cublasStatus_t st = cublasCreate(&s_cublas_handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm: cublasCreate failed (status %d)\n", (int)st);
+            IMP_LOG_ERROR("imp::gemm: cublasCreate failed (status %d)", (int)st);
             abort();
         }
         cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
@@ -70,7 +70,7 @@ static cublasLtHandle_t get_cublaslt_handle() {
     if (!s_cublaslt_handle) {
         cublasStatus_t st = cublasLtCreate(&s_cublaslt_handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm: cublasLtCreate failed (status %d)\n", (int)st);
+            IMP_LOG_ERROR("imp::gemm: cublasLtCreate failed (status %d)", (int)st);
             abort();
         }
     }
@@ -170,7 +170,7 @@ static cudaDataType_t dtype_to_cuda(QType dt) {
         case QType::INT32:
             return CUDA_R_32I;
         default:
-            fprintf(stderr, "imp::gemm: unsupported dtype %d\n", std::to_underlying(dt));
+            IMP_LOG_ERROR("imp::gemm: unsupported dtype %d", std::to_underlying(dt));
             return CUDA_R_16F;  // fallback (caller guard should prevent reaching here)
     }
 }
@@ -382,15 +382,15 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     // [diag] diagnostics.log_gemm_algo: dump shape + per-candidate algoId/tileId.
     // Helps identify which shapes are stuck on legacy WMMA candidates.
     if (gemm_algo_log_enabled() && M > 0) {
-        fprintf(stderr, "[gemm-algo] shape M=%d N=%d K=%d  candidates=%d\n", M, N, K, nresults);
+        IMP_LOG_DEBUG("[gemm-algo] shape M=%d N=%d K=%d  candidates=%d", M, N, K, nresults);
         for (int i = 0; i < nresults; i++) {
             int algo_id = -1, tile_id = -1;
             cublasLtMatmulAlgoCapGetAttribute(&results[i].algo, CUBLASLT_ALGO_CAP_NUMERICAL_IMPL_FLAGS,
                                               &algo_id, sizeof(algo_id), nullptr);
             cublasLtMatmulAlgoConfigGetAttribute(&results[i].algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile_id,
                                                  sizeof(tile_id), nullptr);
-            fprintf(stderr, "[gemm-algo]   cand[%d]: numImplFlags=0x%x tile=%d ws=%zu\n", i, algo_id, tile_id,
-                    results[i].workspaceSize);
+            IMP_LOG_DEBUG("[gemm-algo]   cand[%d]: numImplFlags=0x%x tile=%d ws=%zu", i, algo_id, tile_id,
+                          results[i].workspaceSize);
         }
     }
     // [runtime] deterministic_gemm = true skips timing-based selection so
@@ -444,7 +444,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
             (results[pick].workspaceSize <= s_workspace_size) ? results[pick].workspaceSize : 0;
         entry.has_algo = true;
         if (gemm_algo_log_enabled() && M > 0) {
-            fprintf(stderr, "[gemm-algo]   PICKED cand[%d] (deterministic, warmup-validated)\n", pick);
+            IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] (deterministic, warmup-validated)", pick);
         }
         return;
     }
@@ -524,8 +524,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         int picked_tile = -1;
         cublasLtMatmulAlgoConfigGetAttribute(&entry.algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &picked_tile,
                                              sizeof(picked_tile), nullptr);
-        fprintf(stderr, "[gemm-algo]   PICKED cand[%d] tile=%d  best_ms=%.3f\n", best_idx, picked_tile,
-                best_ms);
+        IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] tile=%d  best_ms=%.3f", best_idx, picked_tile, best_ms);
     }
 }
 

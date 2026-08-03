@@ -39,7 +39,7 @@ inline const char* dump_hidden_dir() { return imp::process_diag_dump_hidden_dir(
 inline void write_npy_fp32(const std::string& path, const float* data, int rows, int cols) {
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {
-        std::fprintf(stderr, "[DUMP_NPY] open failed: %s\n", path.c_str());
+        IMP_LOG_ERROR("[DUMP_NPY] open failed: %s", path.c_str());
         return;
     }
     // Build header. Total = 6(magic) + 2(version) + 2(hlen) + header.size
@@ -136,7 +136,7 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
                                            n * sizeof(float), cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
     } else {
-        fprintf(stderr, "[DEBUG_FWD] %s: unsupported dtype %d\n", name, std::to_underlying(t.qtype));
+        IMP_LOG_ERROR("[DEBUG_FWD] %s: unsupported dtype %d", name, std::to_underlying(t.qtype));
         return;
     }
 
@@ -161,13 +161,13 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
     }
     float mean = vsum / std::max(n - nan_count - inf_count, 1);
     float l2 = std::sqrt(vl2);
-    fprintf(stderr, "[DEBUG_FWD] %-30s  min=%+.6e  max=%+.6e  mean=%+.6e  sum=%+.4f  L2=%.6e", name, vmin,
-            vmax, mean, vsum, l2);
+    std::string extra;
     if (nan_count > 0)
-        fprintf(stderr, "  NaN=%d", nan_count);
+        extra += "  NaN=" + std::to_string(nan_count);
     if (inf_count > 0)
-        fprintf(stderr, "  Inf=%d", inf_count);
-    fprintf(stderr, "\n");
+        extra += "  Inf=" + std::to_string(inf_count);
+    IMP_LOG_DEBUG("[DEBUG_FWD] %-30s  min=%+.6e  max=%+.6e  mean=%+.6e  sum=%+.4f  L2=%.6e%s", name, vmin,
+                  vmax, mean, vsum, l2, extra.c_str());
 }
 
 // Multi-row variant: dump stats over ALL rows of a tensor for cross-impl
@@ -188,8 +188,8 @@ inline void debug_tensor_rows(const char* name, const Tensor& t, cudaStream_t st
     const int max_rows = (nrows < 6) ? nrows : 6;
     const size_t elem_sz = (t.qtype == QType::F16) ? sizeof(half) : sizeof(float);
     // Print one header line with shape/stride so layout bugs are visible.
-    fprintf(stderr, "[DEBUG_FWD_ROW] %s: shape=[%d,%d] stride0=%lld nrows_dump=%d\n", name, nrows, cols,
-            (long long)row_stride, max_rows);
+    IMP_LOG_DEBUG("[DEBUG_FWD_ROW] %s: shape=[%d,%d] stride0=%lld nrows_dump=%d", name, nrows, cols,
+                  (long long)row_stride, max_rows);
     std::vector<float> row_f(cols);
     for (int r = 0; r < max_rows; r++) {
         const char* src = static_cast<const char*>(t.data) + (int64_t)r * row_stride * elem_sz;
@@ -205,9 +205,9 @@ inline void debug_tensor_rows(const char* name, const Tensor& t, cudaStream_t st
         double ss = 0.0;
         for (int i = 0; i < cols; i++)
             ss += (double)row_f[i] * row_f[i];
-        fprintf(stderr, "[DEBUG_FWD_ROW] %s[%d] L2=%.4f  %+.4f %+.4f %+.4f ...  %+.4f %+.4f %+.4f\n", name, r,
-                std::sqrt(ss), row_f[0], row_f[1], row_f[2], row_f[cols - 3], row_f[cols - 2],
-                row_f[cols - 1]);
+        IMP_LOG_DEBUG("[DEBUG_FWD_ROW] %s[%d] L2=%.4f  %+.4f %+.4f %+.4f ...  %+.4f %+.4f %+.4f", name, r,
+                      std::sqrt(ss), row_f[0], row_f[1], row_f[2], row_f[cols - 3], row_f[cols - 2],
+                      row_f[cols - 1]);
     }
 }
 
@@ -219,7 +219,7 @@ inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream
     int nrows = static_cast<int>(t.shape[0]);
     int64_t n = static_cast<int64_t>(cols) * nrows;
     if (t.qtype != QType::F16 && t.qtype != QType::F32) {
-        fprintf(stderr, "[DEBUG_FWD_ALL] %s: unsupported dtype %d\n", name, std::to_underlying(t.qtype));
+        IMP_LOG_ERROR("[DEBUG_FWD_ALL] %s: unsupported dtype %d", name, std::to_underlying(t.qtype));
         return;
     }
     std::vector<float> host(n);
@@ -236,8 +236,8 @@ inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream
         vsum += host[i];
         vss += host[i] * host[i];
     }
-    fprintf(stderr, "[DEBUG_FWD_ALL] %-30s  rows=%d cols=%d  sum=%+.4f  L2=%.4f\n", name, nrows, cols, vsum,
-            std::sqrt(vss));
+    IMP_LOG_DEBUG("[DEBUG_FWD_ALL] %-30s  rows=%d cols=%d  sum=%+.4f  L2=%.4f", name, nrows, cols, vsum,
+                  std::sqrt(vss));
 }
 
 }  // namespace imp

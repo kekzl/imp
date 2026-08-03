@@ -802,16 +802,14 @@ bool gemm_grouped_nvfp4_smallM(
                               const_cast<void*>(host_ptr_A[e]),
                               /*gmem_rows=*/M_e, /*gmem_cols=*/K / 2,
                               /*box_rows=*/TILE_M_rt, /*box_cols=*/TILE_K_rt / 2)) {
-            std::fprintf(stderr, "[smallM] cuTensorMapEncodeTiled(A) failed (e=%d M=%d K=%d)\n",
-                         e, M_e, K);
+            IMP_LOG_ERROR("[smallM] cuTensorMapEncodeTiled(A) failed (e=%d M=%d K=%d)", e, M_e, K);
             return false;
         }
         if (!build_tma_2d_u8(&h_descs[2 * e + 1],
                               const_cast<void*>(host_ptr_B[e]),
                               /*gmem_rows=*/N, /*gmem_cols=*/K / 2,
                               /*box_rows=*/TILE_N, /*box_cols=*/TILE_K_rt / 2)) {
-            std::fprintf(stderr, "[smallM] cuTensorMapEncodeTiled(B) failed (e=%d N=%d K=%d)\n",
-                         e, N, K);
+            IMP_LOG_ERROR("[smallM] cuTensorMapEncodeTiled(B) failed (e=%d N=%d K=%d)", e, N, K);
             return false;
         }
     }

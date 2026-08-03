@@ -27,7 +27,11 @@ bool log_level_from_string(const char* s, LogLevel& out);
 extern std::atomic<LogLevel> g_log_level;
 inline LogLevel log_get_level() { return g_log_level.load(std::memory_order_relaxed); }
 
-void log_message(LogLevel level, const char* file, int line, const char* fmt, ...);
+// printf-style format checking. Without it a %s/%d mismatch in one of the ~1400
+// call sites compiles clean and prints garbage at runtime — which is how the raw
+// fprintf sites migrated in this change could have gone wrong silently.
+void log_message(LogLevel level, const char* file, int line, const char* fmt, ...)
+    __attribute__((format(printf, 4, 5)));
 
 }  // namespace imp
 

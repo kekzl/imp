@@ -139,22 +139,19 @@ void flush_ffn_sparsity_probe_log() {
         for (int t = 0; t < kNumThresholds; ++t) {
             const unsigned long long under = row[t];
             const double frac = static_cast<double>(under) / static_cast<double>(total);
-            std::fprintf(stderr,
-                         "[ffn-sparsity] layer=%3d thr=%.4f skip_frac=%.4f under=%llu total=%llu\n",
-                         L, h_thresholds[t], frac, under, total);
+            IMP_LOG_DEBUG("[ffn-sparsity] layer=%3d thr=%.4f skip_frac=%.4f under=%llu total=%llu", L,
+                          h_thresholds[t], frac, under, total);
             model_under[t] += under;
         }
         model_total += total;
     }
 
     if (model_total > 0ull) {
-        std::fprintf(stderr, "[ffn-sparsity] MODEL n_layers=%d total_rows_seen=%llu\n",
-                     n_layers, model_total);
+        IMP_LOG_DEBUG("[ffn-sparsity] MODEL n_layers=%d total_rows_seen=%llu", n_layers, model_total);
         for (int t = 0; t < kNumThresholds; ++t) {
             const double frac = static_cast<double>(model_under[t]) / static_cast<double>(model_total);
-            std::fprintf(stderr,
-                         "[ffn-sparsity] MODEL thr=%.4f skip_frac=%.4f under=%llu total=%llu\n",
-                         h_thresholds[t], frac, model_under[t], model_total);
+            IMP_LOG_DEBUG("[ffn-sparsity] MODEL thr=%.4f skip_frac=%.4f under=%llu total=%llu",
+                          h_thresholds[t], frac, model_under[t], model_total);
         }
     }
 

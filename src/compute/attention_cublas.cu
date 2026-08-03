@@ -44,7 +44,7 @@ static cublasHandle_t get_attn_cublas_handle() {
     if (!s_attn_cublas_handle) {
         cublasStatus_t st = cublasCreate(&s_attn_cublas_handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::attention_cublas: cublasCreate failed (status %d)\n", (int)st);
+            IMP_LOG_ERROR("imp::attention_cublas: cublasCreate failed (status %d)", (int)st);
             abort();
         }
         cublasSetMathMode(s_attn_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);

@@ -150,10 +150,13 @@ void dump_top8_gate_logits(int layer, int n, int ne, const float* d_logits) {
     for (int i = 0; i < ne; ++i) sorted.emplace_back(h_logits[i], i);
     std::partial_sort(sorted.begin(), sorted.begin() + 8, sorted.end(),
                       [](auto& a, auto& b) { return a.first > b.first; });
-    fprintf(stderr, "[LOGITS] L%02d tok=%d top8_by_value: ", layer, last_tok);
-    for (int i = 0; i < 8; ++i)
-        fprintf(stderr, "[e=%d v=%.4f] ", sorted[i].second, sorted[i].first);
-    fprintf(stderr, "\n");
+    std::string top8;
+    for (int i = 0; i < 8; ++i) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "[e=%d v=%.4f] ", sorted[i].second, sorted[i].first);
+        top8 += buf;
+    }
+    IMP_LOG_DEBUG("[LOGITS] L%02d tok=%d top8_by_value: %s", layer, last_tok, top8.c_str());
 }
 
 }  // anonymous namespace
@@ -758,9 +761,8 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                        ne * sizeof(float), cudaMemcpyDeviceToHost);
             double rsum = 0, rss = 0;
             for (auto v : rl) { rsum += v; rss += v * v; }
-            fprintf(stderr,
-                    "[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
-                    last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
+            IMP_LOG_DEBUG("[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f",
+                          last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
         }
         if (dump_logits) dump_top8_gate_logits(layer, n, ne, static_cast<const float*>(gate_logits_f32.data));
         run_topk(gate_logits_f32);
@@ -779,12 +781,11 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
             cudaMemcpy(h_wts.data(),
                        static_cast<const float*>(routing.expert_weights.data) + last_tok * top_k,
                        top_k * sizeof(float), cudaMemcpyDeviceToHost);
-            fprintf(stderr,
-                    "[ROUTE] L%02d tok=%d experts=[%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d] "
-                    "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
-                    layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5],
-                    h_idx[6], h_idx[7], h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5],
-                    h_wts[6], h_wts[7]);
+            IMP_LOG_DEBUG(
+                "[ROUTE] L%02d tok=%d experts=[%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d] "
+                "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",
+                layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6],
+                h_idx[7], h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
         }
     }
 
@@ -959,7 +960,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         if (!non_gated_experts) {
             if (cfg.ffn_activation == FFNActivation::GEGLU) {
                 if (layer == 0 && runtime_config().diagnostics.debug_forward)
-                    fprintf(stderr, "[DEBUG_MoE] Using GEGLU activation for MoE experts\n");
+                    IMP_LOG_DEBUG("[DEBUG_MoE] Using GEGLU activation for MoE experts");
                 geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
             } else {
                 swiglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);

@@ -1,6 +1,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
 
+#include "core/logging.h"
 #include <cublas_v2.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
@@ -72,7 +73,7 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
                                                    CUBLAS_COMPUTE_32F, kGemmAlgo);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)\n", (int)st);
+        IMP_LOG_ERROR("imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)", (int)st);
     }
 }
 
@@ -99,7 +100,7 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& 
                                                    CUBLAS_COMPUTE_32F, kGemmAlgo);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)\n", (int)st);
+        IMP_LOG_ERROR("imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)", (int)st);
     }
 }
 

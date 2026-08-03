@@ -27,7 +27,7 @@ static cublasHandle_t get_cublas_handle() {
     if (!s_grouped_cublas_handle) {
         cublasStatus_t st = cublasCreate(&s_grouped_cublas_handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm_grouped: cublasCreate failed (status %d)\n", (int)st);
+            IMP_LOG_ERROR("imp::gemm_grouped: cublasCreate failed (status %d)", (int)st);
             abort();
         }
         cublasSetMathMode(s_grouped_cublas_handle, CUBLAS_DEFAULT_MATH);
@@ -68,7 +68,7 @@ static cudaDataType_t dtype_to_cuda(QType dt) {
         case QType::INT32:
             return CUDA_R_32I;
         default:
-            fprintf(stderr, "imp::gemm_grouped: unsupported dtype %d\n", std::to_underlying(dt));
+            IMP_LOG_ERROR("imp::gemm_grouped: unsupported dtype %d", std::to_underlying(dt));
             abort();
     }
 }
@@ -128,10 +128,10 @@ static void run_expert_matmul(cublasHandle_t handle, const Tensor& Ai, const Ten
                                          Bi.data, cuda_dt_B, (int)K, Ai.data, cuda_dt_A, (int)K, &beta,
                                          Ci.data, cuda_dt_C, (int)N, compute_type, kGemmAlgo);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr,
-                    "imp::gemm_grouped: cublasGemmEx failed for expert "
-                    "(M=%lld, K=%lld, N=%lld, status %d)\n",
-                    (long long)Mi, (long long)K, (long long)N, (int)st);
+            IMP_LOG_ERROR(
+                "imp::gemm_grouped: cublasGemmEx failed for expert "
+                "(M=%lld, K=%lld, N=%lld, status %d)",
+                (long long)Mi, (long long)K, (long long)N, (int)st);
         }
     } else {
         float alpha = 1.0f;
@@ -140,10 +140,10 @@ static void run_expert_matmul(cublasHandle_t handle, const Tensor& Ai, const Ten
                                          Bi.data, cuda_dt_B, (int)K, Ai.data, cuda_dt_A, (int)K, &beta,
                                          Ci.data, cuda_dt_C, (int)N, compute_type, kGemmAlgo);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr,
-                    "imp::gemm_grouped: cublasGemmEx failed for expert "
-                    "(M=%lld, K=%lld, N=%lld, status %d)\n",
-                    (long long)Mi, (long long)K, (long long)N, (int)st);
+            IMP_LOG_ERROR(
+                "imp::gemm_grouped: cublasGemmEx failed for expert "
+                "(M=%lld, K=%lld, N=%lld, status %d)",
+                (long long)Mi, (long long)K, (long long)N, (int)st);
         }
     }
 }
@@ -171,10 +171,10 @@ void gemm_grouped(const std::vector<Tensor>& A, const std::vector<Tensor>& B, st
     if (num_experts == 0)
         return;
     if (B.size() != num_experts || C.size() != num_experts) {
-        fprintf(stderr,
-                "imp::gemm_grouped: A/B/C vector sizes must match "
-                "(got %zu, %zu, %zu)\n",
-                A.size(), B.size(), C.size());
+        IMP_LOG_DEBUG(
+            "imp::gemm_grouped: A/B/C vector sizes must match "
+            "(got %zu, %zu, %zu)",
+            A.size(), B.size(), C.size());
         return;
     }
 
@@ -394,10 +394,10 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
             cuda_dt_c, ldc_arr.data(), group_count, group_size_arr.data(), compute_type);
 
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr,
-                    "imp::gemm_moe_batched: cublasGemmGroupedBatchedEx failed "
-                    "(groups=%d, active=%d, K=%d, N=%d, status %d)\n",
-                    group_count, n_active, K, N, (int)st);
+            IMP_LOG_ERROR(
+                "imp::gemm_moe_batched: cublasGemmGroupedBatchedEx failed "
+                "(groups=%d, active=%d, K=%d, N=%d, status %d)",
+                group_count, n_active, K, N, (int)st);
             // Fallback: per-group cublasGemmBatchedEx
             for (const auto& g : groups) {
                 float g_alpha = g.alpha;
