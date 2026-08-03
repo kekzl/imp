@@ -59,7 +59,7 @@ there instead of retelling it.
   rules, so it cannot disagree with what ran.
 
 ### Removed
-- **Three KV/bias kernels that were built and linked but never launched** —
+- **Three KV/bias kernels that were built and linked but never launched** (#1216) —
   `write_kv_cache_kernel`, `write_kv_cache_fp8_kernel` and
   `add_fp16_bias_to_fp32_kernel`, plus an inert `pdl::enable` registration on the
   first. The FP8 one was orphaned when the fused FP8 KV write replaced its four
