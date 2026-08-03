@@ -152,6 +152,19 @@ loop, and the shared part is already factored out.
   runs confirmed to have actually loaded the model (the first attempt compared two *failed*
   runs at 0 vs 0 because the model path was wrong — a control that proves nothing).
 
+- **F-6 (VRAM attribution) is CLOSED — and it was closed before this ledger listed it as
+  open.** The 07-29 audit measured 20-39 % of steady-state VRAM unattributed against a
+  ≥95 % criterion. The memory campaign then fixed it (`AUDIT.md` B80/B81: the pool ledger
+  is always on instead of gated behind `--mem-report`, and the library charge is measured
+  over the whole init rather than the warmup-forward window). Re-measured 2026-08-03 on the
+  three config families the audit named plus one more — dense GGUF (was 39 %), MoE (was
+  20 %), and two NVFP4 dense — **all read 99.9-100.0 % accounted, residual 0-16 MiB**.
+  `docs/MEMORY_ARCHITECTURE.md` still carried the old 61-80 % table, which is where the
+  stale prior came from; corrected there too. **This is the ledger's own failure mode
+  caught in the act**: an entry that was true when written, describing a subsystem whose
+  running log (`AUDIT.md`) recorded the fix, in a section headed "NOT settled". Reading the
+  per-area log at step 0 is what stopped a day of re-measuring something already done.
+
 **`ccg coverage` is a ONE-LEVEL check, not reachability.** It asks "does this kernel have a
 launcher", not "is that launcher reachable from a live root". `gemv_q4k_ggml_compat_kernel`
 counted toward its 420/423 *live* precisely because its launcher existed — and the launcher
@@ -250,10 +263,11 @@ Still open from 07-29 with the reason each was not shipped blind — see
 - **F-5 (rest)** — GPU CI lane: **declined by the repo owner, 2026-08-03.** The job and its
   nightly trigger stay dormant in `.github/workflows/ci.yml`. Consequence: `make verify-fast`
   locally is the only thing that ever runs a CUDA kernel against correctness or perf.
-- **F-6 (rest)** — 20-39 % of steady-state VRAM unattributed.
 - **F-9** — cuBLASLt algorithm selection unpinned (mechanism confirmed, magnitude refuted).
 - **F-10** — `src/runtime/config.h` included by 22 files in `src/exec/`.
-- **F-12** — `src/memory/vram_allocator.cu` still has 84 references.
+- **F-12** — `src/memory/vram_allocator.cu`: **67** live references (2026-08-03), down from
+  the audit's 84. Still open, but shrinking; count with the allocator's own files and comment
+  lines excluded or you get 103 and read a regression that is not there.
 - **F-24** — `src/runtime/engine.h` god-header.
 
 ## Per-area running logs
