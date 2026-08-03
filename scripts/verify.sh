@@ -22,6 +22,9 @@
 #   IMP_VERIFY_SKIP_PERF=1    skip perf-baseline regression check (use when the
 #                             baseline is known-stale; refresh with
 #                             scripts/gen_perf_baseline.sh)
+#   IMP_VERIFY_TRIALS=3       independent PROCESSES the perf gate medians over.
+#                             1 restores the old single-shot behaviour (fast,
+#                             but see the note at the gate itself).
 #   IMP_VERIFY_IN_DOCKER=1    sentinel set by the auto-re-exec block; do not set manually
 #
 # Auto-Docker fallback: if cmake is not on PATH (Clean-Host workflow), the
@@ -56,6 +59,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_SKIP_PERF="${IMP_VERIFY_SKIP_PERF:-0}" \
         -e IMP_VERIFY_BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}" \
         -e IMP_VERIFY_CHUNK_SIZE="${IMP_VERIFY_CHUNK_SIZE:-0}" \
+        -e IMP_VERIFY_TRIALS="${IMP_VERIFY_TRIALS:-3}" \
         --entrypoint bash imp:test scripts/verify.sh "$@"
 fi
 
@@ -354,17 +358,48 @@ else
             # (~99.9% draft accept), so with speculation ON tg measures the
             # batched spec-verify GEMMs — restart-volatile like cuBLAS prefill
             # (observed 11% swing across healthy-clock restarts, 2026-07-15).
-            # The gate guards the decode GEMV hot path, which is stable (<1%).
+            #
+            # MEDIAN OVER INDEPENDENT PROCESSES, not one shot. --bench-reps
+            # averages WITHIN a process; it cannot see the variance that lives
+            # BETWEEN them (cuBLASLt heuristic re-selection, allocator layout,
+            # clock/host state at load). Measured 2026-08-03 on an idle host,
+            # six runs of near-identical code: 278.59 … 289.77 tok/s — a 4.01 %
+            # spread against a 3.00 % threshold. A single-shot gate that tight
+            # reports its own noise: the same tree failed at -3.25 % and passed
+            # at +0.90 % on the same day.
+            #
+            # The line this replaces claimed "the decode GEMV hot path ... is
+            # stable (<1%)". That is true within a process and false across
+            # them, which is the number the gate actually compares.
+            #
+            # What the median does and does not buy: it drops single-run
+            # outliers, which is the failure that produced the -3.25 % scare.
+            # It does NOT flatten the hours-scale host drift — three runs taken
+            # back to back spread 0.09 %, the same binary hours apart spread
+            # 4.01 %. That is why the spread is PRINTED: a tight spread means
+            # the median is worth believing, a wide one means the host moved
+            # mid-gate and the verdict is about the box, not the diff.
+            TRIALS="${IMP_VERIFY_TRIALS:-3}"
+            TG_ALL=""; PP_ALL=""
             gpu_sample_start
-            "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
-                  --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 \
-                  --set speculative.ngram=false >/dev/null 2>"$ERR"
+            for _t in $(seq 1 "$TRIALS"); do
+                "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
+                      --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 \
+                      --set speculative.ngram=false >/dev/null 2>"$ERR"
+                _tg=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+                _pp=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+                [ -n "$_tg" ] && TG_ALL="$TG_ALL$_tg\n"
+                [ -n "$_pp" ] && PP_ALL="$PP_ALL$_pp\n"
+            done
             gpu_sample_stop
+            median() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR==0)exit 1; print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}'; }
+            spread() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR<2)exit 0; printf "%.2f", (a[NR]-a[1])/a[1]*100}'; }
             # Bench lines (stderr) have variable spacing inside parens for short numbers:
             #   "pp   512 tokens  avg    38.47 ms  (13310.12 tok/s)  [3 reps]"
             #   "tg   128 tokens  avg   861.50 ms  ( 148.58 tok/s)  [3 reps]"
-            PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-            TG=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+            PP=$(median "$PP_ALL" || true)
+            TG=$(median "$TG_ALL" || true)
+            TG_SPREAD=$(spread "$TG_ALL")
             if [ -z "$PP" ] || [ -z "$TG" ]; then
                 fail "could not parse bench output (see $ERR)"
                 tail -15 "$ERR"
@@ -375,6 +410,10 @@ else
                 DEC_REG=$(awk -v d="$DEC_DELTA" -v t="$DEC_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
                 PRE_REG=$(awk -v d="$PRE_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
 
+                if [ "$TRIALS" -gt 1 ]; then
+                    printf "  perf gate: median of %s independent runs (spread %s%%)\n" "$TRIALS" \
+                           "${TG_SPREAD:-n/a}"
+                fi
                 printf "  decode  tg128 = %7.2f tok/s  (baseline %7.2f, delta %+s%%)\n" "$TG" "$BL_TG" "$DEC_DELTA"
                 printf "  prefill pp512 = %7.2f tok/s  (baseline %7.2f, delta %+s%%)\n" "$PP" "$BL_PP" "$PRE_DELTA"
                 [ -n "${GPU_DRIFT_DESC:-}" ] && echo "  GPU during bench: $GPU_DRIFT_DESC"
