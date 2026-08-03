@@ -62,8 +62,4 @@ PlanInput shadow_plan_input(const ShadowPlanProbe& probe);
 std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& shadow,
                                int live_kv_blocks);
 
-// Convenience for the engine: builds the input, runs the plan, logs the report
-// at INFO. No allocation, no device query, no effect on the live budget.
-void log_shadow_plan(const ShadowPlanProbe& probe, const VRAMBudget& live, int live_kv_blocks);
-
 }  // namespace imp

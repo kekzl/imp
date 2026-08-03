@@ -68,6 +68,19 @@ there instead of retelling it.
   rules, so it cannot disagree with what ran.
 
 ### Removed
+- **Two dead modules and sixteen more uncalled functions.**
+  `src/compute/gemv_ggml_compat.{h,cu}` (174 lines): its only export had no
+  callers, its kernel was launched only by that dead wrapper, and the three
+  `#include`s of it in the MoE executors were the sole mention in those files.
+  `src/core/threading.{h,cpp}` (88 lines): a `ThreadPool` whose header was
+  included by exactly one file — its own `.cpp`. Plus sixteen functions with a
+  declaration, a definition and nothing else, among them another empty-bodied
+  stub in a public header (`gemm_grouped_nvfp4_smallM_cleanup`) and five unused
+  `Buffer` copy helpers. No behaviour change.
+  Found by BFS over the call graph from live roots rather than the one-level
+  "does it have a launcher" check — `ccg coverage` counted the `gemv_ggml_compat`
+  kernel as live because its launcher existed, though the launcher was itself
+  dead. `SETTLED.md` records the method, the blind spots and the correction.
 - **Ten functions that were declared, defined and never called** — the non-kernel
   sibling of the sweep below. Four CuTe TMA descriptor builders
   (`build_tma_a/_b/_sfa/_sfb`), whose removal also drops three `cute/` includes

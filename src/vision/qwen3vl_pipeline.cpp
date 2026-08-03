@@ -243,11 +243,4 @@ bool Qwen3VLPipeline::encode_file(const std::string& path, Qwen3VLImage& out, cu
     return ok;
 }
 
-bool Qwen3VLPipeline::encode_memory(const uint8_t* data, size_t len, Qwen3VLImage& out, cudaStream_t stream) {
-    QwenPatches patches;
-    if (!preprocess(data, len, patches))
-        return false;
-    return encode_patches(patches, out, stream);
-}
-
 }  // namespace imp

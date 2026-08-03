@@ -35,7 +35,4 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
 // Check if MXFP4 attention is available and enabled.
 bool attention_mxfp4_available();
 
-// Workspace estimate for VRAM budget planning.
-size_t attention_mxfp4_workspace_estimate(int seq_q, int seq_kv, int head_dim);
-
 }  // namespace imp

@@ -123,13 +123,6 @@ public:
 
     void clear();
 
-    // Lookup by the source GGUF data pointer that Phase 4 stamped into
-    // `source_data`. Returns nullptr if no handle was registered for this
-    // pointer. Used by the migrating dispatch helpers to find the
-    // pre-registered handle when callers still pass raw Tensor (Phase 5
-    // Commit 5.1.3.b/c — see weight_dispatch.cu).
-    const WeightHandle* find_by_source_data(const void* p) const;
-
     // Free VRAM for any handle whose `owned_bytes > 0`. Borrowed handles
     // (owned_bytes == 0) are left alone — their storage is managed by the
     // original allocator (e.g. wcache_ maps or Model::gpu_allocations_).

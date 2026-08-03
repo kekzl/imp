@@ -142,7 +142,6 @@ const std::string& process_diag_attention_mxfp4_mode() { return slot().attention
 bool process_diag_mxfp4_blockscale() { return slot().mxfp4_blockscale; }
 bool process_diag_mxfp4_ksmooth() { return slot().mxfp4_ksmooth; }
 bool process_diag_mxfp4_pv_fp4() { return slot().mxfp4_pv_fp4; }
-void process_diag_set_mxfp4_blockscale(bool v) { slot().mxfp4_blockscale = v; }
 void process_diag_set_mxfp4_ksmooth(bool v) { slot().mxfp4_ksmooth = v; }
 void process_diag_set_mxfp4_pv_fp4(bool v) { slot().mxfp4_pv_fp4 = v; }
 float process_diag_mxfp4_promote_budget() { return slot().mxfp4_promote_budget; }

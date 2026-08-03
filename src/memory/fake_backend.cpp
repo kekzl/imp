@@ -39,11 +39,6 @@ void FakeBackend::fail_acquisition(uint64_t nth, MemError err) {
     fail_err_ = err;
 }
 
-void FakeBackend::clear_journal() {
-    std::lock_guard<std::mutex> lock(mu_);
-    journal_.clear();
-}
-
 size_t FakeBackend::journal_live_bytes() const {
     std::lock_guard<std::mutex> lock(mu_);
     long long live = 0;

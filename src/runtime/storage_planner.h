@@ -43,10 +43,6 @@ struct StoragePlan {
     bool failed = false;
     std::string failure_reason;
 
-    // O(1) lookup of the planned tier for a source pointer. Returns
-    // StorageTier::Undefined if the pointer is not in the plan (e.g. native
-    // GGUF blocks that bypass the overlay layer). Built lazily on first call.
-    StorageTier tier_of(const void* src) const;
     const Entry* entry_of(const void* src) const;
 
   private:

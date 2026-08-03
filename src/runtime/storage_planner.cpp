@@ -234,9 +234,4 @@ const StoragePlan::Entry* StoragePlan::entry_of(const void* src) const {
     return it == by_src_.end() ? nullptr : it->second;
 }
 
-StorageTier StoragePlan::tier_of(const void* src) const {
-    const Entry* e = entry_of(src);
-    return e ? e->tier : StorageTier::Undefined;
-}
-
 }  // namespace imp

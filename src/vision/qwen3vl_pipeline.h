@@ -57,7 +57,6 @@ public:
     int64_t max_pixels() const;
 
     bool encode_file(const std::string& path, Qwen3VLImage& out, cudaStream_t stream);
-    bool encode_memory(const uint8_t* data, size_t len, Qwen3VLImage& out, cudaStream_t stream);
 
     // --- Per-request path (the server) --------------------------------
     // CPU only — decode, resize, patchify. Safe to call off the batch worker

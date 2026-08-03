@@ -121,16 +121,40 @@ loop, and the shared part is already factored out.
   macro (`*_reset_static_cuda_state` — the R-11 mechanism, and it looks deadest of all),
   C-ABI exports under `include/` whose consumers are outside the repo, device-side inline
   helpers in `.cuh` used inside kernel bodies, and templates. 530 → 201 by occurrence count
-  → 27 by the decl+def signature → 10 after reading each one.
-  **Still unverified, do not treat as dead:** `gemm_grouped_nvfp4_smallM_cleanup`,
-  `attention_mxfp4_workspace_estimate`, `reset_residual`, `tier_of`,
-  `token_keeps_pattern_alive`, `clear_journal`, `find_by_source_data`, `encode_memory`,
-  `log_shadow_plan`, `process_diag_set_mxfp4_blockscale`, `steps_completed`,
-  `gemv_q4k_ggml_compat`, and the five `Buffer` copy helpers.
-- **`process_diag_set_mxfp4_blockscale` is a redundant mutator, NOT a dead knob** — checked
-  because it looked like one. `process_diag.cpp` installs the flag from
+  → 27 by the decl+def signature → 10 after reading each one. The other 17 were verified in
+  a second pass the same day and removed too, so **the 27 are fully resolved** — do not
+  re-open them.
+- **`process_diag_set_mxfp4_blockscale` was a redundant mutator, NOT a dead knob** — worth
+  keeping straight, because it looked like one. `process_diag.cpp` installs the flag from
   `cfg.attention.mxfp4_blockscale` and `attention_dispatch.cu` reads it, so the config path
-  works; only the standalone setter is unused.
+  never depended on the setter. The setter is gone; the knob works.
+- **Two whole modules were dead and are gone (2026-08-03):**
+  - `src/compute/gemv_ggml_compat.h` + `src/compute/gemv_ggml_compat.cu` (174 lines). Its only export had no callers, its
+    kernel was launched only by that dead wrapper, and the three
+    `#include "compute/gemv_ggml_compat.h"` in the MoE executors were the sole mention in
+    those files.
+  - `src/core/threading.h` + `src/core/threading.cpp` (88 lines) — a `ThreadPool` class that appeared nowhere
+    but its own declaration and definition. `core/threading.h` was included by exactly one
+    file: its own `.cpp`. (Grepping `ThreadPool` across the repo hits Python files where
+    the word is coincidental — restrict to C++ globs.)
+
+**`ccg coverage` is a ONE-LEVEL check, not reachability.** It asks "does this kernel have a
+launcher", not "is that launcher reachable from a live root". `gemv_q4k_ggml_compat_kernel`
+counted toward its 420/423 *live* precisely because its launcher existed — and the launcher
+was itself dead. So "every kernel has a caller" is a weaker statement than it sounds, and an
+earlier note in this file that read as "all 423 kernels are explained" was too strong.
+For the real question, BFS the `calls`/`references`/`instantiates` edges from roots in
+`tools/`, `tests/` and `src/api/`: 3242 `src/` functions, 688 unreached. Cluster by file
+before reading anything — a file where *every* symbol is unreached is the signal; single
+symbols are mostly the blind spots below.
+
+**Blind spots that dominate the unreached set — do not re-flag these:**
+`src/exec/gemm_kernel_*.cu` (the registry leaves of S-2, bound through a table),
+`src/core/logging.cpp` (reached only through the `IMP_LOG_*` macros),
+`src/memory/alloc_interpose.cpp` (behind `IMP_ALLOC_INTERPOSE`, default OFF),
+`src/quant/turboquant_fp4.cuh` (device inline helpers), and **destructors** —
+`src/vision/vision_model.cpp` looked dead and is not: it holds `~VisionModel()` and
+`free_gpu()`, and implicit destructor calls are invisible to the graph.
 
 **Method note for "is this dead" findings.** A call-graph tool reporting *no callers* is
 only evidence if the tool can see calls at all. Control it against a symbol you have

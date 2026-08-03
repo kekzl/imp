@@ -269,9 +269,6 @@ public:
     // A conditional-loop burst is currently running on the device.
     bool launch_in_flight() const { return launched_; }
 
-    // Get number of steps completed so far (non-blocking).
-    int steps_completed() const;
-
     void cleanup();
 
     bool is_setup() const { return static_cast<bool>(exec_); }
