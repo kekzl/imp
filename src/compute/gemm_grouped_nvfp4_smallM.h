@@ -38,7 +38,6 @@ bool gemm_grouped_nvfp4_smallM(
     cudaStream_t stream);
 
 bool gemm_grouped_nvfp4_smallM_available();
-void gemm_grouped_nvfp4_smallM_cleanup();
 
 namespace detail {
 

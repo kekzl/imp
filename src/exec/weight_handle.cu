@@ -23,21 +23,6 @@ TensorID WeightRegistry::reserve(TensorKind kind, int64_t rows, int64_t cols) {
 
 void WeightRegistry::clear() { handles_.clear(); }
 
-const WeightHandle* WeightRegistry::find_by_source_data(const void* p) const {
-    if (p == nullptr)
-        return nullptr;
-    // Linear scan — registry is < ~400 entries for production models, and this
-    // is called once per GEMM dispatch (decode pass: ~5 dispatches per layer,
-    // <2000 calls per decode token). At 400 entries * 8 ns/cmp = 3.2 us / token,
-    // negligible. If this becomes hot, switch to an unordered_map<const void*,
-    // TensorID> built once in Phase 4.
-    for (const auto& h : handles_) {
-        if (h.source_data == p)
-            return &h;
-    }
-    return nullptr;
-}
-
 size_t WeightRegistry::free_owned_storage(VRAMAllocator* alloc) {
     if (!alloc)
         return 0;

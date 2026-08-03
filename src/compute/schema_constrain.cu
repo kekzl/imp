@@ -236,31 +236,6 @@ bool SchemaConstrainer::is_valid_enum_prefix(const std::vector<std::string>& val
     return false;
 }
 
-bool SchemaConstrainer::token_keeps_pattern_alive(const SchemaFrame& f, const std::string& content,
-                                                  std::vector<int>& out_states, int& out_len) const {
-    out_states = f.regex_states;
-    out_len = f.string_len;
-
-    bool has_nfa = f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled();
-    int max_len = f.node ? f.node->max_length : -1;
-
-    for (char ch : content) {
-        // Reject control chars / quote / backslash inside a constrained string.
-        unsigned char uc = static_cast<unsigned char>(ch);
-        if (uc < 32 || ch == '"' || ch == '\\')
-            return false;
-        if (max_len >= 0 && out_len + 1 > max_len)
-            return false;
-        if (has_nfa) {
-            out_states = f.node->pattern_nfa->step(out_states, uc);
-            if (out_states.empty())
-                return false;  // prefix died -> no string can complete
-        }
-        out_len++;
-    }
-    return true;
-}
-
 bool SchemaConstrainer::can_close_string(const SchemaFrame& f, const std::vector<int>& states,
                                          int len) const {
     bool has_nfa = f.node && f.node->pattern_nfa && f.node->pattern_nfa->compiled();

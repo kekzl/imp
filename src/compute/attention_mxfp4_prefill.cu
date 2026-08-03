@@ -529,13 +529,4 @@ bool attention_mxfp4_available() {
     return true;
 }
 
-size_t attention_mxfp4_workspace_estimate(int seq_q, int seq_kv, int hd) {
-    size_t q_packed = (size_t)seq_q * (hd / 2);
-    size_t q_sf = cutlass_mxfp4_sf_size(seq_q, hd);
-    size_t k_packed = (size_t)seq_kv * (hd / 2);
-    size_t k_sf = cutlass_mxfp4_sf_size(seq_kv, hd);
-    size_t s_matrix = (size_t)seq_q * seq_kv * sizeof(half);
-    return q_packed + q_sf + k_packed + k_sf + s_matrix + (1 << 20);
-}
-
 }  // namespace imp

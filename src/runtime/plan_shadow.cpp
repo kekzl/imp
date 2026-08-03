@@ -103,11 +103,4 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
     return out;
 }
 
-void log_shadow_plan(const ShadowPlanProbe& probe, const VRAMBudget& live, int live_kv_blocks) {
-    (void)live;  // the live figures the report needs are already in the probe
-    const PlanInput in = shadow_plan_input(probe);
-    const PlanResult shadow = plan_memory(in);
-    IMP_LOG_INFO("%s", shadow_plan_report(probe, shadow, live_kv_blocks).c_str());
-}
-
 }  // namespace imp

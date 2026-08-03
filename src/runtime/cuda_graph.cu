@@ -1219,10 +1219,6 @@ int CudaGraphConditionalRunner::poll_new_tokens(std::vector<int32_t>& out_tokens
     return new_count;
 }
 
-int CudaGraphConditionalRunner::steps_completed() const {
-    return h_step_counter_ ? __atomic_load_n(h_step_counter_, __ATOMIC_ACQUIRE) : 0;
-}
-
 bool CudaGraphConditionalRunner::try_finish_burst(cudaStream_t stream) {
     if (!launched_)
         return true;

@@ -117,7 +117,6 @@ set(IMP_CORE_SOURCES
     src/core/qtype.cpp
     src/core/buffer.cpp
     src/core/logging.cpp
-    src/core/threading.cpp
     src/core/cuda_static_reset.cpp
 )
 
@@ -199,7 +198,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/weight_dispatch.cu
     src/compute/gemm_dp4a.cu
     src/compute/gemm_grouped.cu
-    src/compute/gemv_ggml_compat.cu
     src/compute/ggml_mmvq.cu
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
