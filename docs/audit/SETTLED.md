@@ -165,6 +165,38 @@ loop, and the shared part is already factored out.
   running log (`AUDIT.md`) recorded the fix, in a section headed "NOT settled". Reading the
   per-area log at step 0 is what stopped a day of re-measuring something already done.
 
+**Layering: two backward edges the 07-29 audit's §11.1 table does not list, both closed
+(2026-08-03).** That table is otherwise complete and its verdicts stand — `model → vision`,
+`exec → runtime`, `compute → runtime`, `core → compute` are all there with reasons. Two were
+missing:
+
+- **`compute → exec`** — `src/compute/weight_dispatch.h` included `exec/weight_handle.h`
+  because its three signatures take `const WeightHandle&`. One backward edge against forty
+  the other way. `WeightHandle` depended on nothing but `core/`, so it moved to
+  `src/core/weight_handle.h`; `WeightRegistry` stays in `exec/`, being the executor's
+  container rather than something the kernels need. Edge count now **0**.
+- **`quant → compute`** — `src/quant/mxfp4_gemm.h` included
+  `compute/gemm_cutlass_mxfp4_sm120.h` for `CutlassMxFP4Weight`, a POD with no project
+  dependencies that describes a *quantised weight layout*. Moved to
+  `src/quant/cutlass_mxfp4_weight.h`, which is where it belongs by meaning as well as by
+  layer. **One `quant → compute` edge remains and is NOT an include artefact:**
+  `src/quant/nvfp4_gemm.cu` calls `gemm()` because the NVFP4 fallback dequantises to FP16
+  and hands off to the dense GEMM. Inverting that moves a dispatch decision on a GEMM path,
+  which is not a thing to do unmeasured on a repo with no GPU CI lane.
+
+Also closed: the two `compute → model` includes §11.1 called avoidable —
+`embedding.cu` and `gemm_dp4a.cu` pulled the 800-LOC `model/model_config.h` with the comment
+`// QType` while using neither `ModelConfig` nor `FFNActivation`. `QType` is in
+`core/qtype.h`. **9 → 7**; the remaining seven are the real ones (tokenizer for the four
+constrainers, `model.h` for `encoder_forward`, `mtp_head`, `FFNActivation`).
+
+**Checked on the same sweep and NOT findings:** god-functions by callee count — the list is
+led by `forward_logits` (216), which is the forward pass this ledger already records as
+intrinsically coupled; and repeated function names — the top entries are `operator=` (27
+files), `init` (19), `reset` (16), i.e. noise, not copy-paste. `kv_cache_dtype` "in 4
+representations" (audit Track F) could not be confirmed either way: the name barely appears
+in the tree today, and reconstructing the 07-29 vocabulary was out of scope.
+
 **Build cost, quantified (2026-08-03).** CLAUDE.md says the metric is recompile blast
 radius, not line count — this is what that actually costs. Transitive header fan-in across
 the 450 translation units, multiplied by commits in the last six months:

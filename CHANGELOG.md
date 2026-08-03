@@ -26,6 +26,16 @@ there instead of retelling it.
   existing `args.<field>` use site is unchanged.
 
 ### Changed
+- **Two layering cycles closed by moving a type down, not by adding an include.**
+  `src/compute/weight_dispatch.h` included `exec/weight_handle.h` for
+  `WeightHandle` — one backward edge against forty forward ones; the struct
+  depends on nothing but `core/` and now lives in `src/core/weight_handle.h`.
+  `src/quant/mxfp4_gemm.h` included a compute header for `CutlassMxFP4Weight`,
+  a dependency-free POD describing a quantised weight layout, now in
+  `src/quant/cutlass_mxfp4_weight.h`. Also: `compute/embedding.cu` and
+  `compute/gemm_dp4a.cu` pulled the 800-LOC `model/model_config.h` just to
+  reach `QType`, which is in `core/qtype.h` — `compute → model` goes 9 → 7.
+  No behaviour change.
 - **The engine logs through one mechanism again.** All 90 raw
   `fprintf(stderr, ...)` sites in `src/` now go through `IMP_LOG_*`, so they
   obey `diagnostics.log_level`, carry a timestamp and `file:line`, and can be
