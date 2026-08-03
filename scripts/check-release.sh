@@ -70,6 +70,44 @@ done <<< "$DOCREFS"
 [ "$DOCBROKEN" -eq 0 ] && pass "every docs/*.md path named in code resolves" \
                       || fail "$DOCBROKEN dead doc pointer(s) in code"
 
+# ---------------------------------------------------- 1c. settled-prior anchors
+# docs/audit/SETTLED.md is the ledger an audit reads BEFORE generating
+# hypotheses; each entry names the file that makes it settled. If that anchor
+# stops resolving, the entry is no longer a statement about this engine — it is
+# the next stale prior, which is exactly what cost the 2026-07-29 audit eight of
+# its thirteen hypotheses. Fail loudly so the entry gets re-opened rather than
+# silently repointed. Same shape as 1b, different corpus.
+section "settled-prior anchors"
+if [ ! -e docs/audit/SETTLED.md ]; then
+    fail "docs/audit/SETTLED.md is missing — the audit priors ledger is load-bearing"
+else
+    ANCHORS=$(grep -ohE '\b(src|tests|tools|scripts|docs|include|cmake)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+\b' \
+              docs/audit/SETTLED.md | sort -u || true)
+    ANCHORBROKEN=0
+    ANCHORN=0
+    while IFS= read -r anchor; do
+        [ -z "$anchor" ] && continue
+        ANCHORN=$((ANCHORN+1))
+        if [ ! -e "$anchor" ]; then
+            echo "  dead anchor: $anchor"
+            ANCHORBROKEN=$((ANCHORBROKEN+1))
+        fi
+    done <<< "$ANCHORS"
+    # Floor, because "0 anchors, all resolving" is a PASS that checked nothing —
+    # the same shape as a --gtest_filter matching no tests and reporting PASSED,
+    # or the `gpu` ctest label that is defined and never runs. The ledger had 49
+    # anchors when this was written; 20 catches a gutted file without tripping on
+    # ordinary edits.
+    ANCHOR_FLOOR=20
+    if [ "$ANCHORN" -lt "$ANCHOR_FLOOR" ]; then
+        fail "only $ANCHORN anchors in docs/audit/SETTLED.md (expected >= $ANCHOR_FLOOR) — ledger gutted or the extraction broke"
+    elif [ "$ANCHORBROKEN" -eq 0 ]; then
+        pass "all $ANCHORN settled-prior anchors resolve"
+    else
+        fail "$ANCHORBROKEN dead anchor(s) in docs/audit/SETTLED.md"
+    fi
+fi
+
 # --------------------------------------------------------- 2. personal paths
 # Flag real personal paths but allow the standard /home/user/ placeholder.
 section "personal path leaks"

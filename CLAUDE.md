@@ -18,7 +18,7 @@ Match the task, invoke that skill first.
 | imp-server / OpenAI+Anthropic HTTP API | skill **server-api** |
 | Add a new model architecture | skill **add-model-arch** |
 | Open/merge a PR, cut a release | skill **shipping-prs** |
-| Structure audit / dead code / god-files | skill **codebase-audit** |
+| Structure audit / dead code / god-files | skill **codebase-audit** — read [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) **before** forming hypotheses |
 | Keep docs in sync after a change | skill **docs-sync** |
 | VRAM / ownership / lifetime / "where did the memory go" | read [`docs/MEMORY_ARCHITECTURE.md`](docs/MEMORY_ARCHITECTURE.md) **first** |
 

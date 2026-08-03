@@ -26,6 +26,13 @@ there instead of retelling it.
   existing `args.<field>` use site is unchanged.
 
 ### Added
+- **`docs/audit/SETTLED.md`** (#1215) — the ledger an audit reads *before* forming
+  hypotheses, gated by a new `settled-prior anchors` section in
+  `scripts/check-release.sh` (CI job `Release hygiene`, 49 anchors). Eight of the
+  2026-07-29 audit's thirteen hypotheses were REFUTED because they described
+  duplication earlier campaigns had already collapsed, and five facts in its own
+  brief were stale; the ledger records both, and the gate fails when an anchor
+  stops resolving so an entry cannot quietly become the next stale prior.
 - **`--metrics-require-auth`** (#1207): fold `/metrics` back under the
   `--api-key` check. Off by default so a stock Prometheus scrape keeps working,
   but the endpoint discloses the loaded model name, `d_model` and cumulative
