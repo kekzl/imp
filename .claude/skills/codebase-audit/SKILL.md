@@ -5,14 +5,31 @@ description: Use when auditing the imp codebase for structural debt, dead code, 
 
 # Codebase audit & structural debt — imp
 
-## The one hard rule
+## The two hard rules
 
-**Never act on a raw finding. Verify every finding against the real code first.**
+**1. Never act on a raw finding. Verify every finding against the real code first.**
 Fan-out audits (Explore agents, grep sweeps) systematically **over-flag**. On the
 2026-06-09 pass, the big-ticket findings C1/C2/C4 were all REFUTED on inspection,
 and several "dead flags/files" were live. Treat a finding as a *candidate*, not a
 fact, until a targeted check confirms it. Most of an audit's value is in the
 verification, not the sweep.
+
+**2. Read [`docs/audit/SETTLED.md`](../../../docs/audit/SETTLED.md) before you generate
+hypotheses, not while you verify them.** Rule 1 puts the filter *after* unbounded
+generation, which makes the expensive stage pay for the cheap one. The 2026-07-29 audit
+is the cost of getting this backwards: eight of thirteen hypotheses came back REFUTED
+because they described duplication earlier campaigns had already collapsed (its §15), and
+five facts in its own brief were stale — 9 vs 16 architectures, C++20 vs C++23,
+`src/graph/` vs `src/exec/` (its §19). One of the refuted hypotheses contradicted a prior
+written *in this file*. So:
+
+- Generate hypotheses **against** the ledger. A candidate that contradicts an entry is not
+  reportable until you disprove that entry's **anchor** — "the code changed since then" is
+  the claim, show it.
+- **Verify the facts your brief rests on** before generating from them. `SETTLED.md` §F
+  lists the five that were wrong last time, each with a one-command counter-check.
+- Recording a refutation is part of finishing the audit. One you leave out of `SETTLED.md`
+  is one the next pass pays for again.
 
 ## Verification recipes (the load-bearing checks)
 
@@ -27,10 +44,17 @@ verification, not the sweep.
 
 ## Workflow
 
-1. **Fan out** — Explore agents / grep to surface candidates (breadth is fine here).
+0. **Read the ledger first** — `docs/audit/SETTLED.md`, plus the running log for the axis
+   you are about to sweep (root `AUDIT.md` for `src/memory/`). Re-derive any brief fact the
+   hypotheses depend on. This step is what makes step 1 cheap.
+1. **Fan out** — Explore agents / grep to surface candidates. Breadth is fine, but a
+   candidate that contradicts a `SETTLED.md` entry needs that entry's anchor disproven
+   before it is worth reporting.
 2. **Verify each** with the recipe above. Demote refuted ones immediately.
-3. **Write it up** — `docs/audit/structural_debt_YYYY_MM_DD.md`. Counts are evidence,
-   not estimates. Keep a **"Refuted (do not re-chase)"** section so the next pass
+3. **Write it up** — `docs/audit/structural_debt_YYYY_MM_DD.md`, **and append the
+   refutations to `docs/audit/SETTLED.md`** with their anchors — that is what stops the
+   next pass re-chasing them, and `scripts/check-release.sh` gates the anchors. Counts are
+   evidence, not estimates. Keep a **"Refuted (do not re-chase)"** section so the next pass
    doesn't re-flag the same false positives. Exception: the memory subsystem has a
    running findings log at repo root, **`AUDIT.md`** (CONFIRMED / REFUTED / OPEN per
    finding, negative results included) — append there rather than opening a parallel
@@ -49,13 +73,14 @@ verification, not the sweep.
 
 ## Priors — settled, do NOT re-flag
 
+**Canonical list: [`docs/audit/SETTLED.md`](../../../docs/audit/SETTLED.md)** — the
+collapsed-duplication entries (S-1…S-11), the deliberate specialisations that are the
+classic false positive, the hunted-and-absent negatives, and the findings that were
+themselves wrong. Read it at step 0, not here. What follows is only what has not moved
+into the ledger yet.
+
 From the structural-debt audit chain (D1–D4 / C1–C8, archived in `docs/archive/README.md`;
 current verdicts in `docs/audit/housekeeping_2026_06_13.md`):
-- **exec/ god-object** (`GraphExecutor`) is intrinsically forward-pass-coupled; the
-  D2 runner-extraction track ENDED (cosmetic friend-backdoor only). Header split done
-  (1188→584 lines). Don't re-attempt runner classes.
-- **ModelProfile (D1)** centralized arch facts — don't reintroduce scattered `cfg.arch==`.
-- `gdn.cu` is domain-cohesive ("don't touch"); the compute/ files are not god-files.
 - The two-config-systems split (`RuntimeConfig` global vs `ModelConfig::Overrides`) is
   known and deliberate; config keys use the typed-binder `B/I/F/S(...)` ladder (PR #626).
 - **Audit #5 (2026-07-07, `docs/audit/structural_debt_2026_07_07.md`)**: server layer is
@@ -75,6 +100,10 @@ current verdicts in `docs/audit/housekeeping_2026_06_13.md`):
 
 ## Red flags — you are about to over-flag
 
+- About to report a finding that contradicts a `SETTLED.md` entry → did you disprove its
+  anchor, or are you re-running a sweep someone already paid for?
+- Your hypotheses came from the brief rather than the tree → did you re-derive the facts
+  they rest on? Five of the 07-29 brief's were wrong.
 - About to delete code because a sweep said "no references" → did you grep `tools/`?
 - About to split a file because it's big → is it *conflated* or just one large domain?
 - About to rewrite a working ladder/loader for elegance → where's the concrete bug?

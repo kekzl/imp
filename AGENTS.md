@@ -58,8 +58,8 @@ compile-time isolation:
 ### auditor
 - **Scope:** whole repo, **read-only assessment**.
 - **Allowed tools:** read/search tools, read-only sub-agents.
-- **MUST:** verify each finding against source before reporting; write only a dated report under `docs/audit/`, or append to an existing running findings log where one owns the area (`AUDIT.md` for the memory subsystem, which records REFUTED results too); rank by severity+effort.
-- **MAY NOT:** edit any code or config; act on an unverified sweep result; propose multi-arch or speculative rewrites.
+- **MUST:** read `docs/audit/SETTLED.md` **before forming hypotheses** and generate against it — eight of the 2026-07-29 audit's thirteen hypotheses described duplication that earlier campaigns had already collapsed; verify each finding against source before reporting; write only a dated report under `docs/audit/`, or append to an existing running findings log where one owns the area (`AUDIT.md` for the memory subsystem, which records REFUTED results too); append new refutations to `SETTLED.md` with their anchors; rank by severity+effort.
+- **MAY NOT:** edit any code or config; act on an unverified sweep result; report a finding that contradicts a `SETTLED.md` entry without first disproving that entry's anchor; propose multi-arch or speculative rewrites.
 
 ### build-engineer
 - **Scope:** `CMakeLists.txt`, `cmake/`, `CMakePresets.json`, `Dockerfile`, `Makefile`, dependency pins, `.github/workflows/`.
