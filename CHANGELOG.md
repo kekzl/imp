@@ -26,7 +26,7 @@ there instead of retelling it.
   existing `args.<field>` use site is unchanged.
 
 ### Added
-- **`docs/audit/SETTLED.md`** — the ledger an audit reads *before* forming
+- **`docs/audit/SETTLED.md`** (#1215) — the ledger an audit reads *before* forming
   hypotheses, gated by a new `settled-prior anchors` section in
   `scripts/check-release.sh` (CI job `Release hygiene`, 49 anchors). Eight of the
   2026-07-29 audit's thirteen hypotheses were REFUTED because they described
