@@ -165,6 +165,35 @@ loop, and the shared part is already factored out.
   running log (`AUDIT.md`) recorded the fix, in a section headed "NOT settled". Reading the
   per-area log at step 0 is what stopped a day of re-measuring something already done.
 
+**Build cost, quantified (2026-08-03).** CLAUDE.md says the metric is recompile blast
+radius, not line count — this is what that actually costs. Transitive header fan-in across
+the 450 translation units, multiplied by commits in the last six months:
+
+| header | TUs rebuilt | commits/6mo | cost |
+|---|---:|---:|---:|
+| `src/runtime/config.h` | 85 | 130 | **11050** |
+| `src/runtime/engine.h` | 41 | 129 | 5289 |
+| `src/exec/executor.h` | 77 | 55 | 4235 |
+| `src/model/model_config.h` | 133 | 31 | 4123 |
+
+So the two open findings **F-10 and F-24 are the #1 and #2 build-cost items in the repo** —
+the audit argued them on coupling and churn, and did not have the product. `core/qtype.h`
+and `core/tensor.h` have the widest fan-in (254, 248) and are nowhere near the top: they
+barely change, which is what a core type should do.
+
+**Three cheap-win hypotheses died on measurement — do not re-run them:**
+- *Trim the includes and forward-declare instead.* Dead on all three top headers: 31 of 33
+  `config.h` includers read real members, 22 of 24 for `engine.h`, 42 of 43 for
+  `executor.h`. This confirms the audit's wording that `config.h` in `exec/` is
+  **algorithmic**, not incidental — the only real fix is the deferred `DispatchPolicy`
+  extraction.
+- *The file-size gate must be missing the big churny `.cu`s.* No: `check_filesize.py`
+  reports `violations=0`, and `weight_upload.cu`, `executor_workspace_buffers.cu` and
+  `cuda_graph.cu` are all allowlisted with reasons. A hand-rolled LOC grep reads ~11 %
+  higher than the tool because it strips comments differently — use the tool.
+- *Some `.cu` is a split candidate on cost alone.* The repo's rule is split on conflation,
+  never on size, and the top of the churn×LOC ranking is allowlisted on cohesion grounds.
+
 **`ccg coverage` is a ONE-LEVEL check, not reachability.** It asks "does this kernel have a
 launcher", not "is that launcher reachable from a live root". `gemv_q4k_ggml_compat_kernel`
 counted toward its 420/423 *live* precisely because its launcher existed — and the launcher
