@@ -5,52 +5,17 @@
 
 namespace imp {
 
-// Copy K/V for a set of tokens into paged KV cache blocks.
-// Each token's K (or V) slice is copied to the correct slot in the right block.
+// Shared parameter contract for the paged KV-write kernels below. Each token's
+// K (and V) slice is copied into the correct slot of the right block.
 //
-// data_in:          [n_tokens, n_kv_heads * head_dim] contiguous
+// k_in / v_in:      [n_tokens, n_kv_heads * head_dim] contiguous
 // positions:        [n_tokens] position of each token in the sequence
 // block_tables:     [n_sequences, max_blocks_per_seq] or [max_blocks] block IDs
-// cache_base:       base pointer of the KV pool for this layer (block 0)
+// *_cache_base:     base pointer of the KV pool for this layer (block 0)
 // block_stride:     elements per block = kKVBlockSize * n_kv_heads * head_dim
 // row_elems:        n_kv_heads * head_dim (elements per token)
 // max_blocks_per_seq: stride for 2D block table (0 = legacy flat)
 // n_sequences:      number of sequences in the batch
-__global__ __launch_bounds__(256) void write_kv_cache_kernel(const half* __restrict__ data_in,
-                                                             const int* __restrict__ positions,
-                                                             const int* __restrict__ block_tables,
-                                                             half* __restrict__ cache_base, int block_stride,
-                                                             int row_elems, int block_size, int n_tokens,
-                                                             int max_blocks_per_seq, int n_sequences) {
-    int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens)
-        return;
-
-    int pos = positions[token_idx];
-    int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
-                                   slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
-    if (block_id < 0)
-        return;
-
-    half* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
-                static_cast<int64_t>(slot_in_block) * row_elems;
-    const half* src = data_in + static_cast<int64_t>(token_idx) * row_elems;
-
-    // Vectorized 128-bit copy (8 FP16 per store) — row_elems is always a
-    // multiple of 8 (n_kv_heads * head_dim, where head_dim is power of 2).
-    const int vec_elems = row_elems / 8;
-    const float4* src4 = reinterpret_cast<const float4*>(src);
-    float4* dst4 = reinterpret_cast<float4*>(dst);
-    for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
-        dst4[i] = src4[i];
-    }
-}
 
 // Fused K+V write to paged KV cache in a single launch.
 // blockIdx.x = token index, blockIdx.y = 0 (K) or 1 (V).
@@ -97,52 +62,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
     float4* dst4 = reinterpret_cast<float4*>(dst);
     for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
         dst4[i] = src4[i];
-    }
-}
-
-// FP16 -> FP8 E4M3 quantization + write to paged KV cache
-__global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
-    const half* __restrict__ data_in, const int* __restrict__ positions, const int* __restrict__ block_tables,
-    __nv_fp8_e4m3* __restrict__ cache_base,  // FP8 cache
-    float inv_scale,                         // 1.0 / kv_scale
-    int block_stride, int row_elems, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
-    int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens)
-        return;
-
-    int pos = positions[token_idx];
-    int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
-                                   slot_in_block);
-    // Defense-in-depth (F-A12): a negative block_id — a freed StreamingLLM -1
-    // sentinel, or a future block-table bug — would index the KV pool OOB.
-    // block_id is uniform across the block (derived from blockIdx.x), so this
-    // skips the whole write without divergence. Never fires today (host-side
-    // admission guarantees every written position has a real block).
-    if (block_id < 0)
-        return;
-
-    __nv_fp8_e4m3* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
-                         static_cast<int64_t>(slot_in_block) * row_elems;
-    const half* src = data_in + static_cast<int64_t>(token_idx) * row_elems;
-
-    // Packed PTX cvt: 2 paired conversions per 4 elements (half→e4m3x2).
-    // Scale applied in FP16 before conversion — sufficient precision for E4M3.
-    const half inv_scale_h = __float2half(inv_scale);
-    const half2 inv_scale_h2 = make_half2(inv_scale_h, inv_scale_h);
-    const int vec_elems = row_elems / 4;
-    const half2* src2 = reinterpret_cast<const half2*>(src);
-    uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
-    for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
-        half2 lo = __hmul2(src2[2 * i], inv_scale_h2);
-        half2 hi = __hmul2(src2[2 * i + 1], inv_scale_h2);
-        uint16_t e4m3_lo = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&lo));
-        uint16_t e4m3_hi = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&hi));
-        dst4[i] = static_cast<uint32_t>(e4m3_lo) | (static_cast<uint32_t>(e4m3_hi) << 16);
-    }
-    // Scalar tail for non-aligned remainder
-    for (int i = vec_elems * 4 + threadIdx.x; i < row_elems; i += blockDim.x) {
-        dst[i] = __nv_fp8_e4m3(__half2float(src[i]) * inv_scale);
     }
 }
 

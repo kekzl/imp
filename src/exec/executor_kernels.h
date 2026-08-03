@@ -58,22 +58,10 @@ __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restric
 __global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __restrict__ a,
                                                                    const float* __restrict__ b, int64_t n);
 
-__global__ __launch_bounds__(256) void write_kv_cache_kernel(const half* __restrict__ data_in,
-                                                             const int* __restrict__ positions,
-                                                             const int* __restrict__ block_tables,
-                                                             half* __restrict__ cache_base, int block_stride,
-                                                             int row_elems, int block_size, int n_tokens,
-                                                             int max_blocks_per_seq, int n_sequences);
-
 __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables, half* __restrict__ k_cache_base, half* __restrict__ v_cache_base,
     int block_stride, int row_elems, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences);
-
-__global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
-    const half* __restrict__ data_in, const int* __restrict__ positions, const int* __restrict__ block_tables,
-    __nv_fp8_e4m3* __restrict__ cache_base, float inv_scale, int block_stride, int row_elems, int block_size,
-    int n_tokens, int max_blocks_per_seq, int n_sequences);
 
 __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
@@ -169,10 +157,6 @@ __global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(half* __restrict_
                                                                int head_dim, float theta, float inv_scaling,
                                                                int rope_pairs, bool neox,
                                                                const float* __restrict__ longrope_inv_freqs);
-
-__global__ __launch_bounds__(256) void add_fp16_bias_to_fp32_kernel(float* __restrict__ data,
-                                                                    const half* __restrict__ bias,
-                                                                    int n_tokens, int n_cols);
 
 __global__ __launch_bounds__(256) void scale_fp32_kernel(float* __restrict__ data, float scale, int64_t n);
 

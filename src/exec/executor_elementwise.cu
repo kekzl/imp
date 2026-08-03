@@ -362,20 +362,6 @@ __global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __rest
     }
 }
 
-// Add FP16 bias to each row of FP32 matrix: out[i,j] += bias[j]
-// Grid: n_tokens, Block: 256, each thread handles multiple expert indices.
-__global__ __launch_bounds__(256) void add_fp16_bias_to_fp32_kernel(float* __restrict__ data,
-                                                                    const half* __restrict__ bias,
-                                                                    int n_tokens, int n_cols) {
-    int token = blockIdx.x;
-    if (token >= n_tokens)
-        return;
-    float* row = data + static_cast<int64_t>(token) * n_cols;
-    for (int j = threadIdx.x; j < n_cols; j += blockDim.x) {
-        row[j] += __half2float(bias[j]);
-    }
-}
-
 // Scale FP32 expert weights in-place: weights[i] *= scale
 __global__ __launch_bounds__(256) void scale_fp32_kernel(float* __restrict__ data, float scale, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
