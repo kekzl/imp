@@ -58,6 +58,17 @@ there instead of retelling it.
   (`compute/dispatch_record.h`), not predicted from a second copy of the routing
   rules, so it cannot disagree with what ran.
 
+### Removed
+- **Three KV/bias kernels that were built and linked but never launched** —
+  `write_kv_cache_kernel`, `write_kv_cache_fp8_kernel` and
+  `add_fp16_bias_to_fp32_kernel`, plus an inert `pdl::enable` registration on the
+  first. The FP8 one was orphaned when the fused FP8 KV write replaced its four
+  launch sites; the bias one was never launched at all, from the commit that
+  introduced it. No behaviour change — nothing called them. The two tests that
+  covered the non-fused FP16 write moved onto `write_kv_cache_fused_kernel`, so
+  the shared block-table indexing is now asserted on the kernel the engine
+  actually launches. Sweep and method recorded in `docs/audit/SETTLED.md`.
+
 ### Changed
 - **Pre-`cudaDeviceReset` hooks register themselves** (#1207). The eleven module
   hooks that free lazily-created CUDA statics (cuBLAS handles, CUTLASS

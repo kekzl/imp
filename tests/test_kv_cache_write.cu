@@ -58,7 +58,11 @@ struct MockPagedCache {
 };
 
 // =========================================================================
-// write_kv_cache_kernel: single K or V write to paged blocks
+// Paged slot resolution — multiple tokens, flat block table, crossing a
+// block boundary. Exercised through write_kv_cache_fused_kernel: the
+// non-fused write_kv_cache_kernel was removed once it had no production
+// caller, so the shared kv_resolve_slot() logic is asserted on the kernel
+// the engine actually launches.
 // =========================================================================
 
 TEST(KVCacheWriteTest, BasicPagedWrite) {
@@ -67,15 +71,19 @@ TEST(KVCacheWriteTest, BasicPagedWrite) {
     const int n_tokens = 2;
     const int row_elems = n_kv_heads * head_dim;
 
-    // Input data: token 0 = all 1.0, token 1 = all 2.0
-    std::vector<half> h_data(n_tokens * row_elems);
+    // Input data: token t → K = t+1, V = 10*(t+1), so a K/V mix-up is visible.
+    std::vector<half> h_k(n_tokens * row_elems), h_v(n_tokens * row_elems);
     for (int t = 0; t < n_tokens; t++)
-        for (int i = 0; i < row_elems; i++)
-            h_data[t * row_elems + i] = __float2half(static_cast<float>(t + 1));
+        for (int i = 0; i < row_elems; i++) {
+            h_k[t * row_elems + i] = __float2half(static_cast<float>(t + 1));
+            h_v[t * row_elems + i] = __float2half(10.0f * static_cast<float>(t + 1));
+        }
 
-    half* d_data;
-    cudaMalloc(&d_data, h_data.size() * sizeof(half));
-    cudaMemcpy(d_data, h_data.data(), h_data.size() * sizeof(half), cudaMemcpyHostToDevice);
+    half *d_k, *d_v;
+    cudaMalloc(&d_k, h_k.size() * sizeof(half));
+    cudaMalloc(&d_v, h_v.size() * sizeof(half));
+    cudaMemcpy(d_k, h_k.data(), h_k.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, h_v.data(), h_v.size() * sizeof(half), cudaMemcpyHostToDevice);
 
     // Positions: token 0 → pos 3, token 1 → pos 19
     int h_positions[2] = {3, 19};
@@ -91,35 +99,43 @@ TEST(KVCacheWriteTest, BasicPagedWrite) {
     cudaMalloc(&d_bt, 2 * sizeof(int));
     cudaMemcpy(d_bt, h_bt, 2 * sizeof(int), cudaMemcpyHostToDevice);
 
-    // Allocate cache with 8 physical blocks
-    MockPagedCache cache(n_kv_heads, head_dim, 8);
+    // Allocate caches with 8 physical blocks
+    MockPagedCache k_cache(n_kv_heads, head_dim, 8);
+    MockPagedCache v_cache(n_kv_heads, head_dim, 8);
 
-    // Launch kernel
-    write_kv_cache_kernel<<<n_tokens, 256, 0, nullptr>>>(d_data, d_positions, d_bt, cache.d_cache,
-                                                         cache.block_stride, row_elems, kBlockSize, n_tokens,
-                                                         0 /* max_blocks_per_seq=0 → flat */,
-                                                         1 /* n_sequences */);
+    dim3 grid(n_tokens, 2);  // blockIdx.y: 0=K, 1=V
+    write_kv_cache_fused_kernel<<<grid, 256, 0, nullptr>>>(d_k, d_v, d_positions, d_bt, k_cache.d_cache,
+                                                           v_cache.d_cache, k_cache.block_stride, row_elems,
+                                                           kBlockSize, n_tokens,
+                                                           0 /* max_blocks_per_seq=0 → flat */,
+                                                           1 /* n_sequences */);
     cudaDeviceSynchronize();
 
-    // Verify: block 5, slot 3 should have all 1.0
-    auto slot0 = cache.read_slot(5, 3);
+    // Verify: block 5, slot 3 holds token 0 (K=1.0, V=10.0)
+    auto k_slot0 = k_cache.read_slot(5, 3);
+    auto v_slot0 = v_cache.read_slot(5, 3);
     for (int i = 0; i < row_elems; i++) {
-        EXPECT_NEAR(slot0[i], 1.0f, 0.01f) << "Block 5, slot 3, index " << i;
+        EXPECT_NEAR(k_slot0[i], 1.0f, 0.01f) << "K block 5, slot 3, index " << i;
+        EXPECT_NEAR(v_slot0[i], 10.0f, 0.01f) << "V block 5, slot 3, index " << i;
     }
 
-    // Verify: block 2, slot 3 should have all 2.0
-    auto slot1 = cache.read_slot(2, 3);
+    // Verify: block 2, slot 3 holds token 1 (K=2.0, V=20.0) — block_idx 1, i.e.
+    // the position crossed a block boundary.
+    auto k_slot1 = k_cache.read_slot(2, 3);
+    auto v_slot1 = v_cache.read_slot(2, 3);
     for (int i = 0; i < row_elems; i++) {
-        EXPECT_NEAR(slot1[i], 2.0f, 0.01f) << "Block 2, slot 3, index " << i;
+        EXPECT_NEAR(k_slot1[i], 2.0f, 0.01f) << "K block 2, slot 3, index " << i;
+        EXPECT_NEAR(v_slot1[i], 20.0f, 0.01f) << "V block 2, slot 3, index " << i;
     }
 
     // Verify: block 0, slot 0 should still be zero (untouched)
-    auto untouched = cache.read_slot(0, 0);
+    auto untouched = k_cache.read_slot(0, 0);
     for (int i = 0; i < row_elems; i++) {
         EXPECT_FLOAT_EQ(untouched[i], 0.0f) << "Block 0, slot 0 should be untouched";
     }
 
-    cudaFree(d_data);
+    cudaFree(d_k);
+    cudaFree(d_v);
     cudaFree(d_positions);
     cudaFree(d_bt);
 }
@@ -184,7 +200,10 @@ TEST(KVCacheWriteTest, FusedKVWrite) {
 }
 
 // =========================================================================
-// write_kv_cache_kernel with batched block table (n_sequences > 1)
+// Batched block table (n_sequences > 1) — the 2-D indexing
+// bt[seq * max_blocks_per_seq + block_idx] that every paged write kernel
+// shares. This is the only direct assertion on it in the write path, so it
+// rides the fused kernel now that the non-fused one is gone.
 // =========================================================================
 
 TEST(KVCacheWriteTest, BatchedBlockTable) {
@@ -195,16 +214,20 @@ TEST(KVCacheWriteTest, BatchedBlockTable) {
     const int n_tokens = 2;
     const int max_blocks_per_seq = 3;
 
-    // Input: token 0 = 10.0, token 1 = 20.0
-    std::vector<half> h_data(n_tokens * row_elems);
+    // Input: token 0 → K 10.0 / V 100.0, token 1 → K 20.0 / V 200.0
+    std::vector<half> h_k(n_tokens * row_elems), h_v(n_tokens * row_elems);
     for (int i = 0; i < row_elems; i++) {
-        h_data[i] = __float2half(10.0f);
-        h_data[row_elems + i] = __float2half(20.0f);
+        h_k[i] = __float2half(10.0f);
+        h_k[row_elems + i] = __float2half(20.0f);
+        h_v[i] = __float2half(100.0f);
+        h_v[row_elems + i] = __float2half(200.0f);
     }
 
-    half* d_data;
-    cudaMalloc(&d_data, h_data.size() * sizeof(half));
-    cudaMemcpy(d_data, h_data.data(), h_data.size() * sizeof(half), cudaMemcpyHostToDevice);
+    half *d_k, *d_v;
+    cudaMalloc(&d_k, h_k.size() * sizeof(half));
+    cudaMalloc(&d_v, h_v.size() * sizeof(half));
+    cudaMemcpy(d_k, h_k.data(), h_k.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, h_v.data(), h_v.size() * sizeof(half), cudaMemcpyHostToDevice);
 
     // Positions: seq0 at pos 8, seq1 at pos 33
     // pos 8 → block_idx 0, slot 8
@@ -222,26 +245,34 @@ TEST(KVCacheWriteTest, BatchedBlockTable) {
     cudaMalloc(&d_bt, 6 * sizeof(int));
     cudaMemcpy(d_bt, h_bt, 6 * sizeof(int), cudaMemcpyHostToDevice);
 
-    MockPagedCache cache(n_kv_heads, head_dim, 10);
+    MockPagedCache k_cache(n_kv_heads, head_dim, 10);
+    MockPagedCache v_cache(n_kv_heads, head_dim, 10);
 
-    write_kv_cache_kernel<<<n_tokens, 256, 0, nullptr>>>(d_data, d_pos, d_bt, cache.d_cache,
-                                                         cache.block_stride, row_elems, kBlockSize, n_tokens,
-                                                         max_blocks_per_seq, 2 /* n_sequences */);
+    dim3 grid(n_tokens, 2);  // blockIdx.y: 0=K, 1=V
+    write_kv_cache_fused_kernel<<<grid, 256, 0, nullptr>>>(d_k, d_v, d_pos, d_bt, k_cache.d_cache,
+                                                           v_cache.d_cache, k_cache.block_stride, row_elems,
+                                                           kBlockSize, n_tokens, max_blocks_per_seq,
+                                                           2 /* n_sequences */);
     cudaDeviceSynchronize();
 
     // seq0: pos 8 → block_idx 0, slot 8. bt[0*3+0]=1 → physical block 1
-    auto s0 = cache.read_slot(1, 8);
+    auto k0 = k_cache.read_slot(1, 8);
+    auto v0 = v_cache.read_slot(1, 8);
     for (int i = 0; i < row_elems; i++) {
-        EXPECT_NEAR(s0[i], 10.0f, 0.01f) << "Seq0 mismatch at " << i;
+        EXPECT_NEAR(k0[i], 10.0f, 0.01f) << "Seq0 K mismatch at " << i;
+        EXPECT_NEAR(v0[i], 100.0f, 0.01f) << "Seq0 V mismatch at " << i;
     }
 
     // seq1: pos 33 → block_idx 2, slot 1. bt[1*3+2]=0 → physical block 0
-    auto s1 = cache.read_slot(0, 1);
+    auto k1 = k_cache.read_slot(0, 1);
+    auto v1 = v_cache.read_slot(0, 1);
     for (int i = 0; i < row_elems; i++) {
-        EXPECT_NEAR(s1[i], 20.0f, 0.01f) << "Seq1 mismatch at " << i;
+        EXPECT_NEAR(k1[i], 20.0f, 0.01f) << "Seq1 K mismatch at " << i;
+        EXPECT_NEAR(v1[i], 200.0f, 0.01f) << "Seq1 V mismatch at " << i;
     }
 
-    cudaFree(d_data);
+    cudaFree(d_k);
+    cudaFree(d_v);
     cudaFree(d_pos);
     cudaFree(d_bt);
 }

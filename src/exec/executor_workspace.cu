@@ -189,7 +189,6 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     if (use_pdl_ && pdl::is_available()) {
         pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp16_kernel));
         pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp32_kernel));
-        pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_kernel));
         pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_fused_kernel));
         pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_rope_fused_kernel));
         pdl::enable(reinterpret_cast<const void*>(&fp16_to_fp32_kernel));

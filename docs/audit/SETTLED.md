@@ -92,6 +92,27 @@ loop, and the shared part is already factored out.
   clutter and they are load-bearing — they stop the next reader reaching for a
   datacenter-Blackwell design.
 - **A `VramOwned` type does not exist.** Past audits hallucinated it.
+- **The `src/exec/executor_kernels.h` decl-only sweep ran on 2026-08-03.** Three kernels had
+  a declaration and a definition and nothing else — no launch, no address-taken use, no
+  test — and were removed: `add_fp16_bias_to_fp32_kernel`, `write_kv_cache_fp8_kernel`,
+  `write_kv_cache_kernel`. **Every other kernel declared in that header has a caller**; do
+  not re-run this sweep on it without a reason. Two of the three are worth remembering
+  because they are different failure modes: the FP8 one was orphaned by `d5dd4bbd`, which
+  replaced its four launch sites with one `write_kv_cache_fp8_fused_kernel`; the bias one
+  was **never launched at all** — it entered the tree under the old `src/graph/` path with
+  no caller, gained a header declaration it never needed, and was carried through the
+  file-size split #784 by three commits that each moved it without noticing.
+- **`write_kv_cache_fused_kernel` is the only FP16 KV-write path, deliberately.** The
+  non-fused twin is gone (above), so its absence is not a gap. Its coverage moved onto the
+  fused kernel in `tests/test_kv_cache_write.cu`: multi-token writes across a block
+  boundary, and the 2-D `bt[seq * max_blocks_per_seq + block_idx]` indexing every paged
+  write kernel shares — the only direct assertion on that indexing in the write path.
+
+**Method note for "is this dead" findings.** A call-graph tool reporting *no callers* is
+only evidence if the tool can see calls at all. Control it against a symbol you have
+already proven live before you trust the negative — for the sweep above, `codegraph callers
+write_kv_cache_fp8_fused_kernel` and `… write_kv_cache_nvfp4_kernel` both correctly returned
+`write_kv_cache`, which is what made the two empty answers meaningful.
 
 ## D — Load-bearing; a "cleanup" here is a regression
 
