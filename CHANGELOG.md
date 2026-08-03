@@ -26,6 +26,15 @@ there instead of retelling it.
   existing `args.<field>` use site is unchanged.
 
 ### Added
+- **The MoE prefill dispatch now checks itself against its routing model**, the
+  same treatment the attention half got in the F-3 campaign. `select_moe_prefill_path`
+  had zero production callers — ten test callers and a comment asking for the two
+  predicates to be kept in sync by hand — so a reorder in
+  `executor_forward_moe_cutlass.cu` left the routing test green while describing a
+  dispatch that no longer existed. Each tier now replays the model against what the
+  chain observed and logs a one-shot error on divergence. Six new CPU tests; the
+  reorder-catching ones are the tier-precedence pair, verified by mutation (the
+  replay tests stay green under a reorder, exactly as on the attention side).
 - **`docs/audit/SETTLED.md`** (#1215) — the ledger an audit reads *before* forming
   hypotheses, gated by a new `settled-prior anchors` section in
   `scripts/check-release.sh` (CI job `Release hygiene`, 49 anchors). Eight of the

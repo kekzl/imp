@@ -7,6 +7,7 @@
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_forward_moe_internal.h"
+#include "exec/moe_prefill_decision.h"  // select_moe_prefill_path — the mirror this file verifies against
 #include "runtime/config.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
@@ -29,6 +30,44 @@
 
 namespace imp {
 
+// The path-selection ORDER + arch/config gates below are mirrored as a pure host
+// function `select_moe_prefill_path` in moe_prefill_decision.h.
+//
+// That mirror used to be TEST-ONLY: test_routing_decision.cpp was its sole
+// caller, so a reorder here left the test green and its stated purpose unmet —
+// audit finding F-3. The attention half of F-3 got its runtime check
+// (verify_against_routing_model, attention_dispatch.cu); this half did not, and
+// the comment at executor_forward_moe.cu asked for the two predicates to be kept
+// in sync by hand. Nothing enforced that.
+//
+// This function now CONSULTS the mirror. Each tier records what it actually did
+// — not what its preconditions promised, since device-args and smallM can both
+// fail *inside* and fall through — and once a tier wins, the model is replayed
+// against those observations and must name the same winner.
+//
+// KNOWN LIMIT, same as the attention side and stated rather than implied: a tier
+// reordered ahead of the winner that WOULD have accepted stays invisible,
+// because the chain short-circuits and never asks it.
+//
+// One-shot so a divergence cannot flood a serving log; the first occurrence is
+// the one that matters and it names both answers.
+static void verify_against_moe_routing_model(ModelArch arch, const RuntimeConfig& rcfg,
+                                             const MoePrefillWorkspace& obs, MoePrefillPath chosen) {
+    const MoePrefillPath modeled = select_moe_prefill_path(arch, rcfg, obs);
+    if (modeled == chosen)
+        return;
+    static bool warned = false;
+    if (warned)
+        return;
+    warned = true;
+    IMP_LOG_ERROR(
+        "MoE routing model disagrees with the dispatch: dispatch ran %s, "
+        "select_moe_prefill_path() says %s. executor_forward_moe_cutlass.cu and "
+        "moe_prefill_decision.h have drifted apart (F-3) — the routing unit test "
+        "is now describing a dispatch that does not exist.",
+        moe_prefill_path_name(chosen), moe_prefill_path_name(modeled));
+}
+
 // ---------------------------------------------------------------------------
 bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream,
                                                           MoeFfnContext& ctx) {
@@ -42,20 +81,6 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
     bool& non_gated_experts = ctx.non_gated_experts;
     MoeRoutingResult& routing = ctx.routing;
 
-    // Predicate: CUTLASS 3.x NVFP4 grouped path.
-    // Measured on Qwen3-Coder-30B-A3B-FP4:
-    //   Prefill n=120: ~2750 tok/s (vs legacy ~77)   — 35x win
-    //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
-    // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
-    // The moe.no_cutlass3x config flag (was IMP_NO_CUTLASS3X_MOE env) forces
-    // legacy for debugging.
-    static const bool force_off = runtime_config().moe.no_cutlass3x;
-    if (force_off)
-        return false;
-    if (!cutlass_grouped_3x_nvfp4_available())
-        return false;
-    if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
-        return false;
     auto covers_ids = [&](const std::vector<TensorID>& ids) {
         if (static_cast<int>(ids.size()) < ctx.ne)
             return false;
@@ -67,12 +92,28 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
         }
         return true;
     };
-    if (!covers_ids(ly.expert_up_ids))
+    // Predicate: CUTLASS 3.x NVFP4 grouped path.
+    // Measured on Qwen3-Coder-30B-A3B-FP4:
+    //   Prefill n=120: ~2750 tok/s (vs legacy ~77)   — 35x win
+    //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
+    // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
+    // The moe.no_cutlass3x config flag (was IMP_NO_CUTLASS3X_MOE env) forces
+    // legacy for debugging.
+    //
+    // Observations for the routing-model replay, filled in as the chain is
+    // walked. A tier the chain never reaches keeps its `false` — see the KNOWN
+    // LIMIT above. Same short-circuit order as the six early returns this
+    // conjunction replaces, so the cheap checks still gate the expensive ones.
+    MoePrefillWorkspace obs{};
+    static const bool force_off = runtime_config().moe.no_cutlass3x;
+    obs.grouped_available = !force_off && cutlass_grouped_3x_nvfp4_available() && moe_.cutlass3x_packed &&
+                            moe_.cutlass3x_sf && covers_ids(ly.expert_up_ids) &&
+                            covers_ids(ly.expert_down_ids) &&
+                            (ctx.non_gated_experts || covers_ids(ly.expert_gate_ids));
+    if (!obs.grouped_available) {
+        verify_against_moe_routing_model(cfg.arch, runtime_config(), obs, MoePrefillPath::LEGACY);
         return false;
-    if (!covers_ids(ly.expert_down_ids))
-        return false;
-    if (!ctx.non_gated_experts && !covers_ids(ly.expert_gate_ids))
-        return false;
+    }
 
 // =========================================================================
 // CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM path (NVFP4 × NVFP4 → FP16).
@@ -295,7 +336,12 @@ bool device_args_done = false;
         }
         if (ok) {
             device_args_done = true;
+            // What the tier DID, not what its preconditions promised: the block
+            // above can still fail on dispatch and fall through to the legacy
+            // host-args path below.
+            obs.device_args_ready = true;
             dispatch_record::set_moe_prefill_tier(MoePrefillPath::DEVICE_ARGS);
+            verify_against_moe_routing_model(cfg.arch, runtime_config(), obs, MoePrefillPath::DEVICE_ARGS);
         } else {
             IMP_LOG_ERROR(
                 "device-args full path failed; falling back to legacy");
@@ -627,7 +673,13 @@ bool smallM_done = false;
                         cudaFreeAsync(d_act_tscales_dn, stream));
                     if (ok_down) {
                         smallM_done = true;
+                        // Again the outcome, not the gate: a smallM gate/up or
+                        // down dispatch failure falls through to GROUPED below.
+                        obs.smallM_available = true;
+                        obs.smallM_under_threshold = true;
                         dispatch_record::set_moe_prefill_tier(MoePrefillPath::SMALL_M);
+                        verify_against_moe_routing_model(cfg.arch, runtime_config(), obs,
+                                                         MoePrefillPath::SMALL_M);
                     } else {
                         IMP_LOG_ERROR(
                             "smallM down dispatch failed; falling back to "
@@ -650,6 +702,8 @@ bool smallM_done = false;
 
 if (!smallM_done) {
     dispatch_record::set_moe_prefill_tier(MoePrefillPath::GROUPED);
+    obs.grouped_ready = true;
+    verify_against_moe_routing_model(cfg.arch, runtime_config(), obs, MoePrefillPath::GROUPED);
     if (layer == 0)
         IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)", n, expanded);
 }

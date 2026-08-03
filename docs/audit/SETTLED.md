@@ -165,7 +165,18 @@ one command.
 Still open from 07-29 with the reason each was not shipped blind — see
 [`AUDIT_ARCH_2026_07_29.md`](AUDIT_ARCH_2026_07_29.md) for the full argument.
 
-- **F-3 (rest)** — routing replica: a tier reordered ahead of the winner stays invisible.
+- **F-3 (rest)** — routing replica. **This entry understated the gap until 2026-08-03**: it
+  described the residual limit of the *attention* half (a tier reordered ahead of the winner
+  stays invisible, because the chain short-circuits and never asks it) as if that were all
+  that was left. The **MoE** half had no runtime check at all — `select_moe_prefill_path`
+  had zero production callers, ten test callers, and a comment in
+  `src/exec/executor_forward_moe.cu` asking for the two predicates to be kept in sync by
+  hand. Found with the call graph, confirmed by grep. Both halves now replay the model
+  against what the chain observed (`verify_against_moe_routing_model` in
+  `src/exec/executor_forward_moe_cutlass.cu`, mirroring
+  `src/compute/attention_dispatch.cu`); the short-circuit limit above is what genuinely
+  remains, for both. **Lesson for this ledger: an open entry that records one half of a
+  symmetric problem reads as if the other half were closed.**
 - **F-5 (rest)** — GPU CI lane: **declined by the repo owner, 2026-08-03.** The job and its
   nightly trigger stay dormant in `.github/workflows/ci.yml`. Consequence: `make verify-fast`
   locally is the only thing that ever runs a CUDA kernel against correctness or perf.
