@@ -270,6 +270,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("paths.mmproj", cfg.paths.mmproj);
 
     // [diagnostics]
+    S("diagnostics.log_level", cfg.diagnostics.log_level);
     B("diagnostics.debug_forward", cfg.diagnostics.debug_forward);
     B("diagnostics.debug_template", cfg.diagnostics.debug_template);
     S("diagnostics.dump_hidden_dir", cfg.diagnostics.dump_hidden_dir);

@@ -1,5 +1,6 @@
 #include "runtime/process_diag.h"
 #include "runtime/config.h"
+#include "core/logging.h"
 
 namespace imp {
 
@@ -63,6 +64,21 @@ ProcessDiag& slot() {
 
 void process_diag_install(const RuntimeConfig& cfg) {
     auto& d = slot();
+    // Log level first, so anything this function or its callers log afterwards
+    // already obeys it. An unknown word warns rather than silently picking a
+    // level: the whole point of this key is that the level used to be
+    // unsettable, and a typo that quietly resolves to INFO would restore that.
+    {
+        LogLevel lvl;
+        if (log_level_from_string(cfg.diagnostics.log_level.c_str(), lvl)) {
+            log_set_level(lvl);
+        } else {
+            IMP_LOG_WARN(
+                "diagnostics.log_level: unknown value '%s' — keeping the current level "
+                "(expected debug|info|warn|error|fatal)",
+                cfg.diagnostics.log_level.c_str());
+        }
+    }
     d.debug_forward = cfg.diagnostics.debug_forward;
     d.debug_template = cfg.diagnostics.debug_template;
     d.graph_diag = cfg.diagnostics.graph_diag;

@@ -26,6 +26,16 @@ there instead of retelling it.
   existing `args.<field>` use site is unchanged.
 
 ### Added
+- **`diagnostics.log_level`** (`debug` | `info` | `warn` | `error` | `fatal`) —
+  the engine's debug logging could not be switched on at all. `log_set_level()`
+  was the only writer of the level and nothing called it; there was no config
+  key and no flag, so `g_log_level` stayed at `info` and all 76
+  `IMP_LOG_DEBUG` sites were unreachable. Applied in `process_diag_install()`,
+  which runs from both tool mains and `Engine::init`, so a C-API consumer gets
+  it too. An unrecognised value warns and keeps the current level instead of
+  falling back to `info` — a silent fallback is what the bug was.
+  Measured: same model and prompt, 0 debug lines by default, 359 from 10 source
+  files with `--set diagnostics.log_level=debug`.
 - **The MoE prefill dispatch now checks itself against its routing model**, the
   same treatment the attention half got in the F-3 campaign. `select_moe_prefill_path`
   had zero production callers — ten test callers and a comment asking for the two

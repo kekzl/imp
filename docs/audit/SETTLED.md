@@ -138,6 +138,20 @@ loop, and the shared part is already factored out.
     file: its own `.cpp`. (Grepping `ThreadPool` across the repo hits Python files where
     the word is coincidental — restrict to C++ globs.)
 
+- **The debug-logging facility could not be switched on, and now can** (found and fixed
+  2026-08-03). All 76 `IMP_LOG_DEBUG` sites are guarded by
+  `log_get_level() <= LogLevel::DEBUG`; `g_log_level` initialises to `INFO` and its only
+  writer, `log_set_level`, had no callers and no config key — so the guard never opened.
+  `log_set_level` was on the decl-only removal list by signature; removing it would have
+  cemented the gap and taken away the hook. Fixed with `diagnostics.log_level`, applied in
+  `process_diag_install()` — the one function that runs from both tool mains *and*
+  `Engine::init`, so a C-API consumer reaches it too. An unrecognised word warns and keeps
+  the current level rather than falling back to `INFO`, which would have restored the same
+  silent-default failure. **Measured, not assumed:** same model, same prompt, default level
+  → 0 `[DEBUG]` lines, `--set diagnostics.log_level=debug` → 359 from 10 source files, both
+  runs confirmed to have actually loaded the model (the first attempt compared two *failed*
+  runs at 0 vs 0 because the model path was wrong — a control that proves nothing).
+
 **`ccg coverage` is a ONE-LEVEL check, not reachability.** It asks "does this kernel have a
 launcher", not "is that launcher reachable from a live root". `gemv_q4k_ggml_compat_kernel`
 counted toward its 420/423 *live* precisely because its launcher existed — and the launcher
@@ -213,14 +227,6 @@ one command.
 Still open from 07-29 with the reason each was not shipped blind — see
 [`AUDIT_ARCH_2026_07_29.md`](AUDIT_ARCH_2026_07_29.md) for the full argument.
 
-- **All 76 `IMP_LOG_DEBUG` sites are unreachable** (found 2026-08-03, not fixed). Every one
-  is guarded by `log_get_level() <= LogLevel::DEBUG`; `g_log_level` in
-  `src/core/logging.cpp` initialises to `INFO`, and its **only** writer is `log_set_level`,
-  which nothing calls. There is no config key and no CLI flag for the level. So the engine
-  has a debug-logging facility that cannot be switched on. `log_set_level` was left in
-  place deliberately — it was on the decl-only removal list, and deleting it would have
-  cemented the gap and taken away the obvious hook. The fix is a `RuntimeConfig` key that
-  calls it (no ad-hoc env read), not a removal.
 - **F-3 (rest)** — routing replica. **This entry understated the gap until 2026-08-03**: it
   described the residual limit of the *attention* half (a tier reordered ahead of the winner
   stays invisible, because the chain short-circuits and never asks it) as if that were all
@@ -233,6 +239,14 @@ Still open from 07-29 with the reason each was not shipped blind — see
   `src/compute/attention_dispatch.cu`); the short-circuit limit above is what genuinely
   remains, for both. **Lesson for this ledger: an open entry that records one half of a
   symmetric problem reads as if the other half were closed.**
+  **The MoE verifier is runtime-verified**, on Qwen3-30B-A3B-NVFP4-Modelopt, all three
+  tiers, both directions — the real image silent and a build with
+  `select_moe_prefill_path` forced to `LEGACY` firing and naming both answers, for
+  `device_args`, `grouped` (`--set moe.nvfp4_device_args=false`) and `small_m`
+  (`+ --set moe.nvfp4_smallM=true`). The silent run alone would not have shown this: a
+  check that is never reached is silent too, which is exactly how #1205's resolved-dispatch
+  line went unnoticed. The one-shot guard also holds — one error line although the tier
+  fires on every layer.
 - **F-5 (rest)** — GPU CI lane: **declined by the repo owner, 2026-08-03.** The job and its
   nightly trigger stay dormant in `.github/workflows/ci.yml`. Consequence: `make verify-fast`
   locally is the only thing that ever runs a CUDA kernel against correctness or perf.
