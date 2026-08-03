@@ -1171,7 +1171,8 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
                 IMP_LOG_ERROR("Failed to dequant GPTQ %s for layer %d", name, i);
                 return false;
             }
-            IMP_LOG_DEBUG("GPTQ dequant %s layer %d -> [%lld, %lld] FP16", name, i, w.shape[0], w.shape[1]);
+            IMP_LOG_DEBUG("GPTQ dequant %s layer %d -> [%lld, %lld] FP16", name, i, (long long)w.shape[0],
+                          (long long)w.shape[1]);
         }
     }
 
@@ -1267,7 +1268,8 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
     // rope_freqs: upload as raw FP32 (NOT converted to FP16).
     // The RoPE kernel reads these as float* — FP16 conversion would corrupt them.
     if (L.rope_freqs.data && !L.rope_freqs.on_device && L.rope_freqs.qtype == QType::F32) {
-        IMP_LOG_INFO("Layer %d: uploading rope_freqs as raw FP32 (%lld elements)", i, L.rope_freqs.numel());
+        IMP_LOG_INFO("Layer %d: uploading rope_freqs as raw FP32 (%lld elements)", i,
+                     (long long)L.rope_freqs.numel());
         size_t bytes = L.rope_freqs.nbytes();
         void* d_data = nullptr;
         IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_data, bytes, ctx.stream));
@@ -1311,7 +1313,8 @@ static bool upload_layer_ffn_weights(TransformerLayer& L, int i, const UploadCtx
                 IMP_LOG_ERROR("Failed to dequant GPTQ %s for layer %d", name, i);
                 return false;
             }
-            IMP_LOG_DEBUG("GPTQ dequant %s layer %d -> [%lld, %lld] FP16", name, i, w.shape[0], w.shape[1]);
+            IMP_LOG_DEBUG("GPTQ dequant %s layer %d -> [%lld, %lld] FP16", name, i, (long long)w.shape[0],
+                          (long long)w.shape[1]);
         }
     }
 

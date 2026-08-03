@@ -25,6 +25,19 @@ there instead of retelling it.
   `max_tokens`. `CommonArgs` is a base class rather than a member, so every
   existing `args.<field>` use site is unchanged.
 
+### Changed
+- **The engine logs through one mechanism again.** All 90 raw
+  `fprintf(stderr, ...)` sites in `src/` now go through `IMP_LOG_*`, so they
+  obey `diagnostics.log_level`, carry a timestamp and `file:line`, and can be
+  silenced. Before this, setting `log_level=error` still produced `[gemm-algo]`,
+  `[DEBUG_FWD]` and `[DEBUG_TPL]` output, because those bypassed the framework
+  entirely. `tools/` keeps its `fprintf` — a CLI writing to stderr is program
+  output, not logging.
+- **`log_message()` is now `__attribute__((format(printf, 4, 5)))`.** Roughly
+  1400 call sites had no compile-time format checking at all; turning it on
+  found five real `%lld`-vs-`int64_t` mismatches in `weight_upload.cu`, fixed
+  here.
+
 ### Added
 - **`diagnostics.log_level`** (`debug` | `info` | `warn` | `error` | `fatal`) —
   the engine's debug logging could not be switched on at all. `log_set_level()`

@@ -98,7 +98,7 @@ void print_sites() {
         return;
     std::sort(g_sites.begin(), g_sites.end(),
               [](const Site& a, const Site& b) { return a.calls > b.calls; });
-    std::fprintf(stderr, "    by call site (addr2line -e <binary> <offset>):\n");
+    IMP_LOG_DEBUG("    by call site (addr2line -e <binary> <offset>):");
     for (const auto& s : g_sites) {
         Dl_info info{};
         const char* obj = "?";
@@ -107,12 +107,12 @@ void print_sites() {
             obj = info.dli_fname ? info.dli_fname : "?";
             off = (unsigned long long)((const char*)s.ret - (const char*)info.dli_fbase);
         }
-        std::fprintf(stderr, "      %8llu calls  %9.3f MiB   %s +0x%llx\n",
-                     (unsigned long long)s.calls, s.bytes / (1024.0 * 1024.0), obj, off);
+        IMP_LOG_DEBUG("      %8llu calls  %9.3f MiB   %s +0x%llx", (unsigned long long)s.calls,
+                      s.bytes / (1024.0 * 1024.0), obj, off);
     }
     if (g_sites_overflow_calls)
-        std::fprintf(stderr, "      %8llu calls  (further sites, table full)\n",
-                     (unsigned long long)g_sites_overflow_calls);
+        IMP_LOG_DEBUG("      %8llu calls  (further sites, table full)",
+                      (unsigned long long)g_sites_overflow_calls);
 }
 
 void record(Counter& c, size_t bytes, imp::RegionTag tag, const void* site, bool device) {
@@ -132,19 +132,19 @@ struct Reporter {
         const uint64_t ds = g_dev_sync.calls.load(), da = g_dev_async.calls.load(),
                        hp = g_host_pinned.calls.load();
         if ((ds | da | hp) == 0) {
-            std::fprintf(stderr,
-                         "[alloc-interpose] steady state clean: 0 cudaMalloc, "
-                         "0 cudaMallocAsync, 0 pinned-host allocations while serving\n");
+            IMP_LOG_DEBUG(
+                "[alloc-interpose] steady state clean: 0 cudaMalloc, "
+                "0 cudaMallocAsync, 0 pinned-host allocations while serving");
             return;
         }
-        std::fprintf(stderr,
-                     "[alloc-interpose] I2 VIOLATIONS while serving:\n"
-                     "    cudaMalloc       %8llu calls  %10.2f MiB\n"
-                     "    cudaMallocAsync  %8llu calls  %10.2f MiB\n"
-                     "    pinned host      %8llu calls  %10.2f MiB\n",
-                     (unsigned long long)ds, g_dev_sync.bytes.load() / (1024.0 * 1024.0),
-                     (unsigned long long)da, g_dev_async.bytes.load() / (1024.0 * 1024.0),
-                     (unsigned long long)hp, g_host_pinned.bytes.load() / (1024.0 * 1024.0));
+        IMP_LOG_DEBUG(
+            "[alloc-interpose] I2 VIOLATIONS while serving:"
+            "    cudaMalloc       %8llu calls  %10.2f MiB\n"
+            "    cudaMallocAsync  %8llu calls  %10.2f MiB\n"
+            "    pinned host      %8llu calls  %10.2f MiB\n",
+            (unsigned long long)ds, g_dev_sync.bytes.load() / (1024.0 * 1024.0), (unsigned long long)da,
+            g_dev_async.bytes.load() / (1024.0 * 1024.0), (unsigned long long)hp,
+            g_host_pinned.bytes.load() / (1024.0 * 1024.0));
         print_sites();
     }
 };

@@ -2,6 +2,20 @@
 #include "core/logging.h"
 #include "runtime/process_diag.h"
 
+namespace {
+// These debug dumps used to be a prefix fprintf, a loop of partial writes and a
+// trailing newline — three calls the logging framework cannot express, which is
+// exactly why they bypassed it. Build the line, then log it once.
+std::string join_token_ids(const std::vector<int32_t>& t) {
+    std::string s;
+    for (int32_t id : t) {
+        s += ' ';
+        s += std::to_string(id);
+    }
+    return s;
+}
+}  // namespace
+
 #include <algorithm>
 #include <functional>
 
@@ -78,10 +92,7 @@ std::vector<int32_t> ChatTemplate::apply_chatml(const Tokenizer& tok, const std:
     tokens.insert(tokens.end(), asst_ids.begin(), asst_ids.end());
 
     if (imp::process_diag_debug_template()) {
-        fprintf(stderr, "[DEBUG_TPL] chatml %zu tokens:", tokens.size());
-        for (size_t i = 0; i < tokens.size(); i++)
-            fprintf(stderr, " %d", tokens[i]);
-        fprintf(stderr, "\n");
+        IMP_LOG_DEBUG("[DEBUG_TPL] chatml %zu tokens:%s", tokens.size(), join_token_ids(tokens).c_str());
     }
 
     return tokens;
@@ -224,10 +235,7 @@ std::vector<int32_t> ChatTemplate::apply_gemma(const Tokenizer& tok,
 
     // Debug: print template token IDs
     if (imp::process_diag_debug_template()) {
-        fprintf(stderr, "[DEBUG_TPL] %zu tokens:", tokens.size());
-        for (size_t i = 0; i < tokens.size(); i++)
-            fprintf(stderr, " %d", tokens[i]);
-        fprintf(stderr, "\n");
+        IMP_LOG_DEBUG("[DEBUG_TPL] %zu tokens:%s", tokens.size(), join_token_ids(tokens).c_str());
     }
 
     return tokens;
@@ -300,26 +308,23 @@ std::vector<int32_t> ChatTemplate::apply_phi(const Tokenizer& tok,
 
     // Debug: print template token IDs
     if (imp::process_diag_debug_template()) {
-        fprintf(stderr, "[DEBUG_TPL] phi %zu tokens:", tokens.size());
-        for (size_t i = 0; i < tokens.size(); i++)
-            fprintf(stderr, " %d", tokens[i]);
-        fprintf(stderr, "\n");
+        IMP_LOG_DEBUG("[DEBUG_TPL] phi %zu tokens:%s", tokens.size(), join_token_ids(tokens).c_str());
         // Also decode back to text for verification
-        fprintf(stderr, "[DEBUG_TPL] decoded: ");
+        std::string decoded;
         for (size_t i = 0; i < tokens.size(); i++) {
             std::string piece = tok.decode_token(tokens[i]);
             // Escape control chars for readability
             for (char c : piece) {
                 if (c == '\n')
-                    fprintf(stderr, "\\n");
+                    decoded += "\\n";
                 else if (c == '\r')
-                    fprintf(stderr, "\\r");
+                    decoded += "\\r";
                 else
-                    fputc(c, stderr);
+                    decoded += c;
             }
-            fprintf(stderr, "|");
+            decoded += '|';
         }
-        fprintf(stderr, "\n");
+        IMP_LOG_DEBUG("[DEBUG_TPL] decoded: %s", decoded.c_str());
     }
 
     return tokens;
@@ -381,10 +386,7 @@ std::vector<int32_t> ChatTemplate::apply_harmony(const Tokenizer& tok,
     open_role("assistant");
 
     if (imp::process_diag_debug_template()) {
-        fprintf(stderr, "[DEBUG_TPL] harmony %zu tokens:", tokens.size());
-        for (size_t i = 0; i < tokens.size(); i++)
-            fprintf(stderr, " %d", tokens[i]);
-        fprintf(stderr, "\n");
+        IMP_LOG_DEBUG("[DEBUG_TPL] harmony %zu tokens:%s", tokens.size(), join_token_ids(tokens).c_str());
     }
 
     return tokens;

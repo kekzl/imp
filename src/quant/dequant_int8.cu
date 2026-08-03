@@ -1,4 +1,5 @@
 #include "quant/dequant_int8.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -80,7 +81,7 @@ void dequant_int8_fp16(const void* input, void* output, const void* scales, int 
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "dequant_int8_fp16 launch failed: %s\n", cudaGetErrorString(err));
+        IMP_LOG_ERROR("dequant_int8_fp16 launch failed: %s", cudaGetErrorString(err));
     }
 }
 

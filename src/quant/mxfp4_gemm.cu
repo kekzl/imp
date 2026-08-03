@@ -454,8 +454,8 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_ke
 void gemv_mxfp4_kpar(const CutlassMxFP4Weight& W, const half* x, half* y, int N, int K, cudaStream_t stream) {
     static int kpar_dbg = 0;
     if (++kpar_dbg <= 200 && (K != 5120 || kpar_dbg <= 3))
-        fprintf(stderr, "[GEMV_DBG] N=%d K=%d W.N=%lld W.K=%lld data=%p scales=%p x=%p y=%p\n", N, K,
-                (long long)W.N, (long long)W.K, W.data, W.linear_scales, x, y);
+        IMP_LOG_DEBUG("[GEMV_DBG] N=%d K=%d W.N=%lld W.K=%lld data=%p scales=%p x=%p y=%p", N, K,
+                      (long long)W.N, (long long)W.K, W.data, W.linear_scales, x, y);
     int n_groups = K / kMxGroupSize;
     int mr_blocks = (N + kMRWarps - 1) / kMRWarps;
     if (use_multirow(n_groups, mr_blocks)) {

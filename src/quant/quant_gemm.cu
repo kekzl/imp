@@ -202,7 +202,7 @@ void quant_gemm_int4(const Tensor& A, const Tensor& B_quant, const Tensor& scale
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "quant_gemm_int4 launch failed: %s\n", cudaGetErrorString(err));
+        IMP_LOG_ERROR("quant_gemm_int4 launch failed: %s", cudaGetErrorString(err));
     }
 }
 

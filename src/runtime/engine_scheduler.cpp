@@ -490,12 +490,15 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     if (!runtime_config_.diagnostics.ppl_dump.empty()) {
         const char* dump = runtime_config_.diagnostics.ppl_dump.c_str();
         const bool full = (strcmp(dump, "full") == 0);
-        fprintf(stderr, "[PPL-DUMP] per-pos nll:");
+        std::string nll_line;
         for (int i = 0; i < n - 1; ++i) {
-            if (full || i < 16 || i % 16 == 0 || i > n - 6)
-                fprintf(stderr, " [%d]=%.3f", i, h_nll_pos[i]);
+            if (full || i < 16 || i % 16 == 0 || i > n - 6) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), " [%d]=%.3f", i, h_nll_pos[i]);
+                nll_line += buf;
+            }
         }
-        fprintf(stderr, "\n");
+        IMP_LOG_DEBUG("[PPL-DUMP] per-pos nll:%s", nll_line.c_str());
     }
     double h_nll = 0.0;
     for (int i = first; i <= last; ++i)

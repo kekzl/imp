@@ -80,7 +80,7 @@ bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, fl
                                     &beta, static_cast<float*>(C.data), (int)N  // ldc = N
     );
     if (st != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "imp::gemm: cublasSgemm failed (status %d)\n", (int)st);
+        IMP_LOG_ERROR("imp::gemm: cublasSgemm failed (status %d)", (int)st);
     }
     return true;
 }

@@ -120,8 +120,8 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
         mx = std::max(mx, host[i]);
         ss += (double)host[i] * host[i];
     }
-    fprintf(stderr, "[DEBUG_FWD] logits row=%d/%d  min=%+.4f max=%+.4f L2=%.4f\n", row, nrows, mn, mx,
-            std::sqrt(ss));
+    IMP_LOG_DEBUG("[DEBUG_FWD] logits row=%d/%d  min=%+.4f max=%+.4f L2=%.4f", row, nrows, mn, mx,
+                  std::sqrt(ss));
 
     // Find top-k by partial sort
     std::vector<std::pair<float, int>> scored(vocab);
@@ -129,9 +129,9 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
         scored[i] = {host[i], i};
     std::partial_sort(scored.begin(), scored.begin() + std::min(topk, vocab), scored.end(),
                       [](auto& a, auto& b) { return a.first > b.first; });
-    fprintf(stderr, "[DEBUG_FWD] Top-%d logits:\n", topk);
+    IMP_LOG_DEBUG("[DEBUG_FWD] Top-%d logits:", topk);
     for (int i = 0; i < std::min(topk, vocab); i++) {
-        fprintf(stderr, "  [%2d] token_id=%6d  logit=%+.6f\n", i, scored[i].second, scored[i].first);
+        IMP_LOG_DEBUG("  [%2d] token_id=%6d  logit=%+.6f", i, scored[i].second, scored[i].first);
     }
 }
 
@@ -274,18 +274,22 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         std::vector<int32_t> h_ids(n);
         IMP_CUDA_CHECK_LOG(
             cudaMemcpy(h_ids.data(), state.token_ids, n * sizeof(int32_t), cudaMemcpyDeviceToHost));
-        fprintf(stderr, "[DEBUG_FWD] [step=%d] input_tokens (%d):", decode_step, n);
-        for (int i = 0; i < n; i++)
-            fprintf(stderr, " %d", h_ids[i]);
-        fprintf(stderr, "\n");
+        std::string ids_line;
+        for (int i = 0; i < n; i++) {
+            ids_line += ' ';
+            ids_line += std::to_string(h_ids[i]);
+        }
+        IMP_LOG_DEBUG("[DEBUG_FWD] [step=%d] input_tokens (%d):%s", decode_step, n, ids_line.c_str());
         // Dump positions
         std::vector<int> h_pos(n);
         IMP_CUDA_CHECK_LOG(
             cudaMemcpy(h_pos.data(), state.positions, n * sizeof(int), cudaMemcpyDeviceToHost));
-        fprintf(stderr, "[DEBUG_FWD] [step=%d] positions (%d):", decode_step, n);
-        for (int i = 0; i < std::min(n, 30); i++)
-            fprintf(stderr, " %d", h_pos[i]);
-        fprintf(stderr, "\n");
+        std::string pos_line;
+        for (int i = 0; i < std::min(n, 30); i++) {
+            pos_line += ' ';
+            pos_line += std::to_string(h_pos[i]);
+        }
+        IMP_LOG_DEBUG("[DEBUG_FWD] [step=%d] positions (%d):%s", decode_step, n, pos_line.c_str());
     }
     Tensor h = view_tokens(hidden_, n);
     embedding_lookup(model_->token_embedding(), state.token_ids, n, h, model_->tok_emb_.qtype, stream);
@@ -331,8 +335,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         cudaMemcpyAsync(tmp, view_tokens(fp32_hidden_, n).data, 4 * sizeof(float), cudaMemcpyDeviceToHost,
                         stream);
         cudaStreamSynchronize(stream);
-        fprintf(stderr, "[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]\n", decode_step, tmp[0],
-                tmp[1], tmp[2], tmp[3]);
+        IMP_LOG_DEBUG("[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]", decode_step, tmp[0],
+                      tmp[1], tmp[2], tmp[3]);
     }
     // Binary dump: write the full FP16 hidden state to file
     if (!runtime_config().diagnostics.dump_hidden_dir.empty()) {
@@ -345,7 +349,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             fwrite(h_buf.data(), sizeof(half), h_buf.size(), f);
             fclose(f);
         }
-        fprintf(stderr, "[DUMP_BIN] Wrote %s (%zu halfs)\n", fname, h_buf.size());
+        IMP_LOG_DEBUG("[DUMP_BIN] Wrote %s (%zu halfs)", fname, h_buf.size());
     }
 
     if (profile_active)
@@ -462,17 +466,17 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                     cudaStreamSynchronize(stream);
                     sval = __half2float(h_scale);
                     if (i == 0 || i == 29)
-                        fprintf(stderr, "[DEBUG_FWD] L%d_out_scale = %.6f\n", i, sval);
+                        IMP_LOG_DEBUG("[DEBUG_FWD] L%d_out_scale = %.6f", i, sval);
                     // Dump FP16 hidden after scale for all layers (decode only)
                     if (n == 1 && debug_forward_enabled()) {
                         half h_tmp[8];
                         cudaMemcpyAsync(h_tmp, view_tokens(h, n).data, 8 * sizeof(half),
                                         cudaMemcpyDeviceToHost, stream);
                         cudaStreamSynchronize(stream);
-                        fprintf(stderr, "[DUMP] step=%d L%02d h=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]\n",
-                                decode_step, i, __half2float(h_tmp[0]), __half2float(h_tmp[1]),
-                                __half2float(h_tmp[2]), __half2float(h_tmp[3]), __half2float(h_tmp[4]),
-                                __half2float(h_tmp[5]), __half2float(h_tmp[6]), __half2float(h_tmp[7]));
+                        IMP_LOG_DEBUG("[DUMP] step=%d L%02d h=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]",
+                                      decode_step, i, __half2float(h_tmp[0]), __half2float(h_tmp[1]),
+                                      __half2float(h_tmp[2]), __half2float(h_tmp[3]), __half2float(h_tmp[4]),
+                                      __half2float(h_tmp[5]), __half2float(h_tmp[6]), __half2float(h_tmp[7]));
                     }
                     // Binary dump: full hidden state for selected layers.
                     // [diagnostics] dump_hidden_dir = "<path>"  → layers 0/5/15/29.
@@ -718,7 +722,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 Tensor w_fp16(w_fp16_dev, QType::F16, 2, w_shape, true);
                 gemm(no_last, w_fp16, lg, 1.0f, 0.0f, stream);
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(w_fp16_dev, stream));
-                fprintf(stderr, "[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path\n");
+                IMP_LOG_DEBUG("[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path");
             } else {
                 auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
                 rmsnorm_quantize_q8_1(static_cast<const half*>(h_last.data),

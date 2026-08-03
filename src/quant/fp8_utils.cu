@@ -1,4 +1,5 @@
 #include "quant/fp8_utils.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -201,7 +202,7 @@ void cast_fp16_to_fp8(const void* input, void* output, int n, cudaStream_t strea
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "cast_fp16_to_fp8 launch failed: %s\n", cudaGetErrorString(err));
+        IMP_LOG_ERROR("cast_fp16_to_fp8 launch failed: %s", cudaGetErrorString(err));
     }
 }
 
@@ -217,7 +218,7 @@ void cast_fp8_to_fp16(const void* input, void* output, int n, cudaStream_t strea
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "cast_fp8_to_fp16 launch failed: %s\n", cudaGetErrorString(err));
+        IMP_LOG_ERROR("cast_fp8_to_fp16 launch failed: %s", cudaGetErrorString(err));
     }
 }
 

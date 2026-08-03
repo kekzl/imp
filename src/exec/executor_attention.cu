@@ -172,11 +172,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // is mathematically identical for both Gemma-3 and Gemma-4 (normalize-then-add).
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm);
     if (debug_forward_enabled() && layer <= 1) {
-        fprintf(stderr,
-                "[DEBUG_FWD] L%d attn: has_post_attn_norm=%d using_fp32_accum=%d "
-                "post_attn_norm=%p ffn_norm=%p\n",
-                layer, (int)has_post_attn_norm, (int)using_fp32_accum, ly.post_attn_norm.data,
-                ly.ffn_norm.data);
+        IMP_LOG_DEBUG(
+            "[DEBUG_FWD] L%d attn: has_post_attn_norm=%d using_fp32_accum=%d "
+            "post_attn_norm=%p ffn_norm=%p",
+            layer, (int)has_post_attn_norm, (int)using_fp32_accum, ly.post_attn_norm.data, ly.ffn_norm.data);
     }
     const StorageTier wo_tier = (ly.wo_id != kInvalidTensorID) ? registry_.handle(ly.wo_id).primary_tier
                                                                : StorageTier::Undefined;
@@ -640,8 +639,8 @@ after_attention:
             debug_tensor_rows("po_wo-0", view_tokens(po, n), stream);
             debug_tensor_rows("ao_pre_wo-0", view_tokens(ao, n), stream);
             // dump wo weight shape info
-            fprintf(stderr, "[DEBUG_FWD] wo_shape: ndim=%d shape=[%ld,%ld] qtype=%d\n", ly.wo.ndim,
-                    (long)ly.wo.shape[0], (long)ly.wo.shape[1], std::to_underlying(ly.wo.qtype));
+            IMP_LOG_DEBUG("[DEBUG_FWD] wo_shape: ndim=%d shape=[%ld,%ld] qtype=%d", ly.wo.ndim,
+                          (long)ly.wo.shape[0], (long)ly.wo.shape[1], std::to_underlying(ly.wo.qtype));
         }
         if (has_post_attn_norm && using_fp32_accum) {
             // Sandwich norm with FP32 accumulator (Gemma-3):
@@ -649,8 +648,8 @@ after_attention:
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             float eps = model_->config().rms_norm_eps;
             if (layer == 0 && debug_attn_steps) {
-                fprintf(stderr, "[DEBUG_FWD] L0 fp32_accum_kernel: po=%p h=%p fp32_h=%p d=%d n=%d\n", po.data,
-                        h.data, fp32_h.data, model_->config().d_model, n);
+                IMP_LOG_DEBUG("[DEBUG_FWD] L0 fp32_accum_kernel: po=%p h=%p fp32_h=%p d=%d n=%d", po.data,
+                              h.data, fp32_h.data, model_->config().d_model, n);
             }
             // Add attn output to FP32 accumulator, apply post_attn_norm, write FP16
             // 256 threads: d_model_v = d_model/8 (e.g. 480 for Gemma-3 3840),
@@ -670,8 +669,8 @@ after_attention:
                         fs += v;
                         fss += v * v;
                     }
-                    fprintf(stderr, "[DEBUG_FWD] L0_fp32_accum_pre: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
-                            fs, std::sqrt(fss), fp32_tmp[0], fp32_tmp[1], fp32_tmp[2]);
+                    IMP_LOG_DEBUG("[DEBUG_FWD] L0_fp32_accum_pre: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f", fs,
+                                  std::sqrt(fss), fp32_tmp[0], fp32_tmp[1], fp32_tmp[2]);
                     // Last row (row n-1)
                     int off = (n - 1) * model_->config().d_model;
                     double rs = 0, rss = 0;
@@ -679,9 +678,9 @@ after_attention:
                         rs += fp32_tmp[off + i];
                         rss += fp32_tmp[off + i] * fp32_tmp[off + i];
                     }
-                    fprintf(stderr,
-                            "[DEBUG_FWD] L0_fp32_accum_pre[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
-                            n - 1, rs, std::sqrt(rss), fp32_tmp[off], fp32_tmp[off + 1], fp32_tmp[off + 2]);
+                    IMP_LOG_DEBUG("[DEBUG_FWD] L0_fp32_accum_pre[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f",
+                                  n - 1, rs, std::sqrt(rss), fp32_tmp[off], fp32_tmp[off + 1],
+                                  fp32_tmp[off + 2]);
                 }
             }
             if (fp32_attn_out) {

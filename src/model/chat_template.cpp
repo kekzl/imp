@@ -804,7 +804,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::
             else
                 escaped += c;
         }
-        fprintf(stderr, "[DEBUG_TPL_JINJA] rendered: \"%s\"\n", escaped.c_str());
+        IMP_LOG_DEBUG("[DEBUG_TPL_JINJA] rendered: \"%s\"", escaped.c_str());
     }
 
     auto result = tokenize_rendered(tok, rendered);
