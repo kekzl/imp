@@ -388,3 +388,111 @@ TEST(AttnTierPrecedence, FmhaSm120BeatsBlackwellWhenBothAccept) {
     ASSERT_TRUE(sup.fmha_sm120_accepts && sup.blackwell_accepts);
     EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);
 }
+
+// --------------------------------------------------------------------------
+// MoE model/dispatch COUPLING — the same treatment the attention half got
+// --------------------------------------------------------------------------
+//
+// executor_forward_moe_cutlass.cu now replays select_moe_prefill_path() against
+// what the chain observed and logs loudly on divergence
+// (verify_against_moe_routing_model). These pin the replay so the check cannot
+// fire on a *correct* dispatch.
+//
+// The observations mirror what the .cu records, which is what each tier DID —
+// not what its preconditions promised. Device-args and smallM can both pass
+// their gate and then fail inside, falling through to a later tier, so the
+// dispatch sets the flag only after the tier has actually completed.
+
+namespace {
+
+MoePrefillWorkspace moe_observed_when(MoePrefillPath winner) {
+    MoePrefillWorkspace ws;  // all false — the dispatch's starting state
+    switch (winner) {
+        case MoePrefillPath::DEVICE_ARGS:
+            ws.grouped_available = true;
+            ws.device_args_ready = true;
+            break;
+        case MoePrefillPath::SMALL_M:
+            ws.grouped_available = true;
+            ws.smallM_available = true;
+            ws.smallM_under_threshold = true;
+            break;
+        case MoePrefillPath::GROUPED:
+            ws.grouped_available = true;
+            ws.grouped_ready = true;
+            break;
+        case MoePrefillPath::LEGACY:
+            break;  // the six entry gates refused → grouped_available stays false
+    }
+    return ws;
+}
+
+}  // namespace
+
+TEST(MoeRoutingModelCoupling, EveryTierReplaysToItself) {
+    auto cfg = default_cfg();
+    cfg.moe.nvfp4_smallM = true;  // so the smallM tier is reachable at all
+
+    const MoePrefillPath tiers[] = {MoePrefillPath::DEVICE_ARGS, MoePrefillPath::SMALL_M,
+                                    MoePrefillPath::GROUPED, MoePrefillPath::LEGACY};
+    for (MoePrefillPath t : tiers) {
+        EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, moe_observed_when(t)), t)
+            << "the dispatch would run " << moe_prefill_path_name(t) << " but the model replays to "
+            << moe_prefill_path_name(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, moe_observed_when(t)))
+            << " — verify_against_moe_routing_model() would fire on a correct dispatch";
+    }
+}
+
+// gpt-oss enters the same chain but is arch-gated off the two fast tiers, so its
+// only non-legacy answer is GROUPED. The dispatch records exactly that.
+TEST(MoeRoutingModelCoupling, GptOssReplaysToGrouped) {
+    auto cfg = default_cfg();
+    cfg.moe.nvfp4_smallM = true;
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, cfg, moe_observed_when(MoePrefillPath::GROUPED)),
+              MoePrefillPath::GROUPED);
+}
+
+// --------------------------------------------------------------------------
+// MoE tier PRECEDENCE — same reasoning as AttnTierPrecedence above
+// --------------------------------------------------------------------------
+//
+// The replay tests cannot catch a reorder: each observation pattern has exactly
+// one eligible tier, so swapping two tiers in select_moe_prefill_path() leaves
+// every answer unchanged. These make two tiers eligible at once and assert the
+// earlier one wins.
+
+TEST(MoeTierPrecedence, DeviceArgsBeatsSmallM) {
+    auto cfg = default_cfg();
+    cfg.moe.nvfp4_smallM = true;
+    auto ws = all_ready();
+    ASSERT_TRUE(cfg.moe.nvfp4_device_args && ws.device_args_ready);
+    ASSERT_TRUE(ws.smallM_available && ws.smallM_under_threshold);
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::DEVICE_ARGS);
+}
+
+TEST(MoeTierPrecedence, SmallMBeatsGrouped) {
+    auto cfg = default_cfg();
+    cfg.moe.nvfp4_device_args = false;  // device-args out of the way
+    cfg.moe.nvfp4_smallM = true;
+    auto ws = all_ready();
+    ASSERT_TRUE(ws.smallM_available && ws.smallM_under_threshold && ws.grouped_ready);
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::SMALL_M);
+}
+
+TEST(MoeTierPrecedence, GroupedBeatsLegacyWhenReady) {
+    auto cfg = default_cfg();
+    cfg.moe.nvfp4_device_args = false;
+    auto ws = all_ready();
+    ws.smallM_available = false;  // smallM out of the way
+    ASSERT_TRUE(ws.grouped_available && ws.grouped_ready);
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::GROUPED);
+}
+
+// The entry gate short-circuits every CUTLASS tier, however ready they look.
+TEST(MoeTierPrecedence, EntryGateBeatsEveryReadyTier) {
+    auto cfg = default_cfg();
+    cfg.moe.nvfp4_smallM = true;
+    auto ws = all_ready();
+    ws.grouped_available = false;  // the six early returns in the .cu
+    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::LEGACY);
+}
