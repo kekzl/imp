@@ -138,6 +138,62 @@ loop, and the shared part is already factored out.
     file: its own `.cpp`. (Grepping `ThreadPool` across the repo hits Python files where
     the word is coincidental — restrict to C++ globs.)
 
+- **The debug-logging facility could not be switched on, and now can** (found and fixed
+  2026-08-03). All 76 `IMP_LOG_DEBUG` sites are guarded by
+  `log_get_level() <= LogLevel::DEBUG`; `g_log_level` initialises to `INFO` and its only
+  writer, `log_set_level`, had no callers and no config key — so the guard never opened.
+  `log_set_level` was on the decl-only removal list by signature; removing it would have
+  cemented the gap and taken away the hook. Fixed with `diagnostics.log_level`, applied in
+  `process_diag_install()` — the one function that runs from both tool mains *and*
+  `Engine::init`, so a C-API consumer reaches it too. An unrecognised word warns and keeps
+  the current level rather than falling back to `INFO`, which would have restored the same
+  silent-default failure. **Measured, not assumed:** same model, same prompt, default level
+  → 0 `[DEBUG]` lines, `--set diagnostics.log_level=debug` → 359 from 10 source files, both
+  runs confirmed to have actually loaded the model (the first attempt compared two *failed*
+  runs at 0 vs 0 because the model path was wrong — a control that proves nothing).
+
+- **F-6 (VRAM attribution) is CLOSED — and it was closed before this ledger listed it as
+  open.** The 07-29 audit measured 20-39 % of steady-state VRAM unattributed against a
+  ≥95 % criterion. The memory campaign then fixed it (`AUDIT.md` B80/B81: the pool ledger
+  is always on instead of gated behind `--mem-report`, and the library charge is measured
+  over the whole init rather than the warmup-forward window). Re-measured 2026-08-03 on the
+  three config families the audit named plus one more — dense GGUF (was 39 %), MoE (was
+  20 %), and two NVFP4 dense — **all read 99.9-100.0 % accounted, residual 0-16 MiB**.
+  `docs/MEMORY_ARCHITECTURE.md` still carried the old 61-80 % table, which is where the
+  stale prior came from; corrected there too. **This is the ledger's own failure mode
+  caught in the act**: an entry that was true when written, describing a subsystem whose
+  running log (`AUDIT.md`) recorded the fix, in a section headed "NOT settled". Reading the
+  per-area log at step 0 is what stopped a day of re-measuring something already done.
+
+**Build cost, quantified (2026-08-03).** CLAUDE.md says the metric is recompile blast
+radius, not line count — this is what that actually costs. Transitive header fan-in across
+the 450 translation units, multiplied by commits in the last six months:
+
+| header | TUs rebuilt | commits/6mo | cost |
+|---|---:|---:|---:|
+| `src/runtime/config.h` | 85 | 130 | **11050** |
+| `src/runtime/engine.h` | 41 | 129 | 5289 |
+| `src/exec/executor.h` | 77 | 55 | 4235 |
+| `src/model/model_config.h` | 133 | 31 | 4123 |
+
+So the two open findings **F-10 and F-24 are the #1 and #2 build-cost items in the repo** —
+the audit argued them on coupling and churn, and did not have the product. `core/qtype.h`
+and `core/tensor.h` have the widest fan-in (254, 248) and are nowhere near the top: they
+barely change, which is what a core type should do.
+
+**Three cheap-win hypotheses died on measurement — do not re-run them:**
+- *Trim the includes and forward-declare instead.* Dead on all three top headers: 31 of 33
+  `config.h` includers read real members, 22 of 24 for `engine.h`, 42 of 43 for
+  `executor.h`. This confirms the audit's wording that `config.h` in `exec/` is
+  **algorithmic**, not incidental — the only real fix is the deferred `DispatchPolicy`
+  extraction.
+- *The file-size gate must be missing the big churny `.cu`s.* No: `check_filesize.py`
+  reports `violations=0`, and `weight_upload.cu`, `executor_workspace_buffers.cu` and
+  `cuda_graph.cu` are all allowlisted with reasons. A hand-rolled LOC grep reads ~11 %
+  higher than the tool because it strips comments differently — use the tool.
+- *Some `.cu` is a split candidate on cost alone.* The repo's rule is split on conflation,
+  never on size, and the top of the churn×LOC ranking is allowlisted on cohesion grounds.
+
 **`ccg coverage` is a ONE-LEVEL check, not reachability.** It asks "does this kernel have a
 launcher", not "is that launcher reachable from a live root". `gemv_q4k_ggml_compat_kernel`
 counted toward its 420/423 *live* precisely because its launcher existed — and the launcher
@@ -213,14 +269,6 @@ one command.
 Still open from 07-29 with the reason each was not shipped blind — see
 [`AUDIT_ARCH_2026_07_29.md`](AUDIT_ARCH_2026_07_29.md) for the full argument.
 
-- **All 76 `IMP_LOG_DEBUG` sites are unreachable** (found 2026-08-03, not fixed). Every one
-  is guarded by `log_get_level() <= LogLevel::DEBUG`; `g_log_level` in
-  `src/core/logging.cpp` initialises to `INFO`, and its **only** writer is `log_set_level`,
-  which nothing calls. There is no config key and no CLI flag for the level. So the engine
-  has a debug-logging facility that cannot be switched on. `log_set_level` was left in
-  place deliberately — it was on the decl-only removal list, and deleting it would have
-  cemented the gap and taken away the obvious hook. The fix is a `RuntimeConfig` key that
-  calls it (no ad-hoc env read), not a removal.
 - **F-3 (rest)** — routing replica. **This entry understated the gap until 2026-08-03**: it
   described the residual limit of the *attention* half (a tier reordered ahead of the winner
   stays invisible, because the chain short-circuits and never asks it) as if that were all
@@ -233,13 +281,22 @@ Still open from 07-29 with the reason each was not shipped blind — see
   `src/compute/attention_dispatch.cu`); the short-circuit limit above is what genuinely
   remains, for both. **Lesson for this ledger: an open entry that records one half of a
   symmetric problem reads as if the other half were closed.**
+  **The MoE verifier is runtime-verified**, on Qwen3-30B-A3B-NVFP4-Modelopt, all three
+  tiers, both directions — the real image silent and a build with
+  `select_moe_prefill_path` forced to `LEGACY` firing and naming both answers, for
+  `device_args`, `grouped` (`--set moe.nvfp4_device_args=false`) and `small_m`
+  (`+ --set moe.nvfp4_smallM=true`). The silent run alone would not have shown this: a
+  check that is never reached is silent too, which is exactly how #1205's resolved-dispatch
+  line went unnoticed. The one-shot guard also holds — one error line although the tier
+  fires on every layer.
 - **F-5 (rest)** — GPU CI lane: **declined by the repo owner, 2026-08-03.** The job and its
   nightly trigger stay dormant in `.github/workflows/ci.yml`. Consequence: `make verify-fast`
   locally is the only thing that ever runs a CUDA kernel against correctness or perf.
-- **F-6 (rest)** — 20-39 % of steady-state VRAM unattributed.
 - **F-9** — cuBLASLt algorithm selection unpinned (mechanism confirmed, magnitude refuted).
 - **F-10** — `src/runtime/config.h` included by 22 files in `src/exec/`.
-- **F-12** — `src/memory/vram_allocator.cu` still has 84 references.
+- **F-12** — `src/memory/vram_allocator.cu`: **67** live references (2026-08-03), down from
+  the audit's 84. Still open, but shrinking; count with the allocator's own files and comment
+  lines excluded or you get 103 and read a regression that is not there.
 - **F-24** — `src/runtime/engine.h` god-header.
 
 ## Per-area running logs

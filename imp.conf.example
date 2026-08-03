@@ -638,6 +638,11 @@ sparsity_probe       = false
 sparsity_threshold   = 0.0
 
 [diagnostics]
+# Process log level: debug | info | warn | error | fatal.
+# "debug" is what unlocks the IMP_LOG_DEBUG statements throughout the engine;
+# before this key existed the level was pinned at info and they never printed.
+# An unrecognised value warns and keeps the current level.
+log_level            = info
 # Verbose per-layer forward dumps. Heavy I/O — use only for bisecting bugs.
 debug_forward        = false
 # Print intermediate Jinja2 chat-template rendering steps.

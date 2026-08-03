@@ -17,6 +17,11 @@ enum class LogLevel : int {
 
 void log_set_level(LogLevel level);
 
+// "debug" | "info" | "warn" | "error" | "fatal" (case-insensitive) → level.
+// Returns false and leaves `out` untouched on anything else, so the caller can
+// warn instead of silently picking a level nobody asked for.
+bool log_level_from_string(const char* s, LogLevel& out);
+
 // Inline for zero-overhead log level check in hot paths.
 // The atomic is defined in logging.cpp; declared here for inlining.
 extern std::atomic<LogLevel> g_log_level;

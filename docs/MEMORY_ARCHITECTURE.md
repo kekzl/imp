@@ -159,7 +159,25 @@ Per-pool `note()` attribution at steady state:
 | **tracked total** | **11238.3** | **19311.0** | **10473.2** |
 | **untracked residual** | **7177.2 (39 %)** | **4738.5 (20 %)** | **4516.4 (30 %)** |
 
-Acceptance criterion 6 asks for ≥95 % accounted. Today it is **61–80 %**.
+Acceptance criterion 6 asks for ≥95 % accounted. The table above is the state that
+**motivated** the campaign, kept because the shape of the gap is what the fixes were aimed
+at — it is not the state today.
+
+**Criterion 6 is met.** The pool ledger is always on rather than gated behind
+`--mem-report` (`AUDIT.md` B80/B81), and the library charge is measured over the whole
+init instead of the warmup-forward window, so the residual means what it says on every
+start. Re-measured 2026-08-03 with `--mem-report`, one run each:
+
+| config | accounted | residual |
+|---|---:|---:|
+| Qwen3-4B-Q8_0 (dense GGUF — was 39 % untracked) | **99.9 %** | 16 MiB |
+| Qwen3-30B-A3B-NVFP4 (MoE — was 20 %) | **99.9 %** | 12 MiB |
+| Qwen3-8B-NVFP4 | **99.9 %** | 0 MiB |
+| Qwen3-14B-NVFP4 | **99.9 %** | 0 MiB |
+
+The 07-29 architecture audit's F-6 was written against the old table and stayed open in
+`docs/audit/SETTLED.md` until this measurement retired it. Do not re-open it from the
+numbers above.
 
 ### A1.5 F4 — the ~3.9 GiB first-forward claim
 

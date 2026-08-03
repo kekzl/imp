@@ -1011,6 +1011,14 @@ struct RuntimeConfig {
     } ffn;
 
     struct Diagnostics {
+        // Process log level: "debug" | "info" | "warn" | "error" | "fatal".
+        // Applied by process_diag_install(), which runs from both tool mains
+        // AND Engine::init, so a C-API consumer reaches it too.
+        // Until 2026-08-03 there was no way to set this at all: log_set_level()
+        // was the only writer of g_log_level and nothing called it, so the level
+        // was pinned at INFO and all 76 IMP_LOG_DEBUG sites were unreachable —
+        // a debug facility that could not be switched on.
+        std::string log_level = "info";
         bool debug_forward = false;
         bool debug_template = false;
         std::string dump_hidden_dir;

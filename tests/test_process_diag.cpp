@@ -18,6 +18,9 @@
 // process_diag indirection and it keeps the check in the CI unit lane.
 
 #include "runtime/config.h"
+#include "core/logging.h"
+
+#include <utility>
 #include "runtime/process_diag.h"
 
 #include <gtest/gtest.h>
@@ -75,7 +78,14 @@ RuntimeConfig make_non_default() {
 // Restores the process-wide slot so test ordering inside the binary cannot
 // leak a non-default snapshot into an unrelated test.
 struct ProcessDiagGuard {
-    ~ProcessDiagGuard() { process_diag_install(RuntimeConfig{}); }
+    // install() now also sets the process log level, so restoring the defaults
+    // has to put that back too — otherwise one test leaks DEBUG into every
+    // later test in this binary.
+    LogLevel saved_level = log_get_level();
+    ~ProcessDiagGuard() {
+        process_diag_install(RuntimeConfig{});
+        log_set_level(saved_level);
+    }
 };
 
 }  // namespace
@@ -177,4 +187,71 @@ TEST(ProcessDiag, DumpHiddenDirShorthandResolves) {
     process_diag_install(c);
     ASSERT_NE(process_diag_dump_hidden_dir(), nullptr);
     EXPECT_EQ(std::string(process_diag_dump_hidden_dir()), "/tmp");
+}
+
+// --------------------------------------------------------------------------
+// Log level (2026-08-03)
+// --------------------------------------------------------------------------
+//
+// `log_set_level` was the only writer of g_log_level and NOTHING called it, so
+// the level was pinned at INFO and all 76 IMP_LOG_DEBUG sites in the engine
+// were unreachable — a debug facility that could not be switched on. The fix is
+// a config key applied here, in the one function that runs from both tool mains
+// AND Engine::init. These tests pin both halves: the parse and the transfer.
+
+TEST(LogLevel, FromStringMapsEveryWordCaseInsensitively) {
+    const std::pair<const char*, LogLevel> cases[] = {
+        {"debug", LogLevel::DEBUG}, {"DEBUG", LogLevel::DEBUG}, {"Info", LogLevel::INFO},
+        {"warn", LogLevel::WARN},   {"error", LogLevel::ERROR}, {"FATAL", LogLevel::FATAL},
+    };
+    for (const auto& [word, expected] : cases) {
+        LogLevel got = LogLevel::FATAL;
+        ASSERT_TRUE(log_level_from_string(word, got)) << word;
+        EXPECT_EQ(got, expected) << word;
+    }
+}
+
+// Rejection has to be explicit, not "falls back to INFO": a typo that silently
+// resolves to the default would restore exactly the state this key fixed.
+TEST(LogLevel, FromStringRejectsAnythingElseAndLeavesOutAlone) {
+    for (const char* bad : {"", "verbose", "dbg", "informational", "debug ", "0"}) {
+        LogLevel got = LogLevel::WARN;  // sentinel: must survive untouched
+        EXPECT_FALSE(log_level_from_string(bad, got)) << "'" << bad << "'";
+        EXPECT_EQ(got, LogLevel::WARN) << "'" << bad << "' modified out";
+    }
+    LogLevel got = LogLevel::WARN;
+    EXPECT_FALSE(log_level_from_string(nullptr, got));
+}
+
+TEST(ProcessDiag, InstallAppliesTheConfiguredLogLevel) {
+    ProcessDiagGuard restore;
+    RuntimeConfig c;
+    c.diagnostics.log_level = "debug";
+    process_diag_install(c);
+    EXPECT_EQ(log_get_level(), LogLevel::DEBUG);
+
+    c.diagnostics.log_level = "error";
+    process_diag_install(c);
+    EXPECT_EQ(log_get_level(), LogLevel::ERROR);
+}
+
+TEST(ProcessDiag, InstallKeepsTheCurrentLevelOnAnUnknownWord) {
+    ProcessDiagGuard restore;
+    RuntimeConfig c;
+    c.diagnostics.log_level = "warn";
+    process_diag_install(c);
+    ASSERT_EQ(log_get_level(), LogLevel::WARN);
+
+    c.diagnostics.log_level = "louder-please";
+    process_diag_install(c);
+    EXPECT_EQ(log_get_level(), LogLevel::WARN) << "an unknown word must not silently reset the level";
+}
+
+// The default must be the level the engine had before the key existed, so
+// adding it changed nothing for anyone who does not set it.
+TEST(ProcessDiag, DefaultConfigLeavesTheLevelAtInfo) {
+    ProcessDiagGuard restore;
+    log_set_level(LogLevel::ERROR);
+    process_diag_install(RuntimeConfig{});
+    EXPECT_EQ(log_get_level(), LogLevel::INFO);
 }
