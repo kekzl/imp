@@ -1217,7 +1217,7 @@ blast = files touched by the fix; confidence in the finding itself.
 | # | Finding | Why it is still open |
 |---|---|---|
 | F-3 (rest) | routing replica | A tier reordered *ahead* of the winner that would have accepted stays invisible. Needs per-kernel `*_supports()` predicates; two of FA2's seven decline points depend on the computed tile selection, so predicates written beside them would be a **third** copy of the rules. Five-TU refactor of the hottest prefill kernel. |
-| F-5 (rest) | GPU CI lane | Schedule and enablement steps landed; registering a `[self-hosted, gpu, cuda]` runner is a repo-settings action. |
+| F-5 (rest) | GPU CI lane | **Declined by the repo owner, 2026-08-03: there will be no GPU runner for now.** The job and its nightly trigger stay in `ci.yml`, dormant. The consequence is load-bearing and stated below. |
 | F-6 (rest) | 20-39 % VRAM unattributed | The reporting bug is fixed; the attribution needs a per-consumer measurement loop, not a formatting change. |
 | F-9 | cuBLASLt algo unpinned | Needs a cache-file format with invalidation on driver/CUDA version — a feature, not a cleanup. |
 | F-10 | `config.h` in 22 `exec/` files | The `DispatchPolicy` extraction (~30 files) changes what dispatch reads. The perf gate currently passes with **0.06 percentage points** of margin and the GPU test lane does not run in CI; this is the wrong week to land it unmeasured. |
@@ -1345,7 +1345,19 @@ same guarantee the gate gives.
 
 ---
 
-**F-5 — No CI job verifies that any kernel produces the right numbers — but the job exists and is one repo variable away from running** — ⚠️ schedule + enablement steps landed in #1211; registering the runner is a repo-settings action
+**F-5 — No CI job verifies that any kernel produces the right numbers — but the job exists and is one repo variable away from running** — ⛔ WON'T FIX (owner decision 2026-08-03: no GPU runner). Schedule + enablement steps landed in #1211 and the job stays dormant in `ci.yml`.
+
+> **The consequence, since it constrains every other decision in this report.** With no GPU
+> runner, `make verify-fast` on the developer's box is the *only* thing that ever executes a
+> CUDA kernel against a correctness or perf bar. Nothing in GitHub-hosted CI can — the runners
+> have no GPU. So:
+>
+> - The full `ctest`, compute-sanitizer and the perf gate run only when someone runs them.
+> - A change that alters what dispatch or allocation reads at runtime (F-10, F-12) has no
+>   automated net beneath it. That is why those two are deferred rather than shipped.
+> - The local gate therefore has to be trustworthy. #1214 medians it over three independent
+>   processes and prints the spread, because a single-shot 3.00 % threshold on a host with
+>   4.01 % run-to-run spread was reporting its own noise.
 `HIGH` · effort **`S`** · blast infra · confidence **HIGH**
 
 *Evidence:* the `Build` job runs `ctest -L unit` and is the only required check. The **`Test` job

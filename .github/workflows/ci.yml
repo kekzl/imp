@@ -17,7 +17,13 @@ on:
   # squashed), but the branch's reported status is stale, and this makes it
   # refreshable without a PAT or a merge queue.
   workflow_dispatch:
-  # Nightly, 03:17 UTC. Two jobs at once:
+  # Nightly, 03:17 UTC.
+  #
+  # NOTE (2026-08-03): the repo owner has decided against a self-hosted GPU
+  # runner for now, so the `test` job below stays skipped and this schedule
+  # currently buys only reason 2. Reason 1 is kept because the job is written
+  # and the decision is reversible — if a runner is ever registered, the lane
+  # starts covering `main` on its own cadence with no further change here.
   #
   #  1. The GPU lane (`test`, below) is the only lane that runs the full ctest,
   #     compute-sanitizer and the perf gate. It is gated on a self-hosted runner,
