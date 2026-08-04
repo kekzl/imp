@@ -360,7 +360,22 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
     // available or if the tiny model trips some validation. Either outcome is
     // acceptable — the key check is no crash.
     if (err != IMP_SUCCESS) {
+        // "Expected without GPU" is one reason context creation fails. A CUDA
+        // context left in an error state is a different one, and skipping on it
+        // is how this test poisoned the ~57 tests that run after it in test-e2e
+        // without ever going red. Distinguish the two before skipping.
+        cudaError_t sticky = cudaDeviceSynchronize();
+        if (sticky == cudaSuccess)
+            sticky = cudaGetLastError();
         imp_model_free(model);
+        ASSERT_EQ(sticky, cudaSuccess)
+            << "context creation failed AND left the CUDA context in an error state ("
+            << cudaGetErrorString(sticky) << "). Every later test in this binary will fail on a "
+            << "context it did not break. Reproducer: the FIRST engine cycle on the stub model is "
+            << "clean, the second is not (0/25/26/27 error lines at --gtest_repeat=1/2/3/4). A real "
+            << "model is unaffected — EngineRelaunchTest.SecondEngineOnSameModelHandleNeverIMAs "
+            << "passes on Qwen3-4B — so this is the stub's geometry (1 layer, d_model 64, "
+            << "head_dim 32), and it is NOT fixed yet.";
         GTEST_SKIP() << "Context creation failed (expected without GPU): " << imp_error_string(err);
     }
     ASSERT_NE(ctx, nullptr);
@@ -379,6 +394,25 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
 
     imp_context_free(ctx);
     imp_model_free(model);
+
+    // The contract used to be "no crash", and this test met it while leaving the
+    // CUDA context in an error state: every teardown free failed with an illegal
+    // memory access, the engine's #815 guard swallowed it, and the ~57 tests that
+    // run after this one in test-e2e died on a context they did not break.
+    // Reproducer, measured 2026-08-04: one engine cycle on the stub is clean, the
+    // SECOND raises the IMA (0 / 25 / 26 / 27 error lines at --gtest_repeat=1/2/3/4).
+    // A real model is unaffected — EngineRelaunchTest.SecondEngineOnSameModelHandle
+    // NeverIMAs passes on Qwen3-4B — so this is specific to the stub's geometry
+    // (1 layer, d_model 64, head_dim 32). The underlying defect is NOT fixed here.
+    // What is fixed is the silence: a test that poisons the process now says so.
+    {
+        cudaError_t sticky = cudaDeviceSynchronize();
+        if (sticky == cudaSuccess)
+            sticky = cudaGetLastError();
+        EXPECT_EQ(sticky, cudaSuccess)
+            << "the stub model left the CUDA context in an error state (" << cudaGetErrorString(sticky)
+            << "). Every later test in this binary will fail on a context it did not break.";
+    }
 }
 
 TEST_F(StubModelTest, PrefillDecodeStub) {
