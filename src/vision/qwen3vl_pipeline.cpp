@@ -1,4 +1,5 @@
 #include "vision/qwen3vl_pipeline.h"
+#include "vision/qwen3vl_vision_load.h"
 
 #include "core/logging.h"
 #include "memory/engine_arena.h"
@@ -36,6 +37,11 @@ void Qwen3VLPipeline::free_buffers() {
 
 size_t Qwen3VLPipeline::taken_bytes() const {
     return taken_bytes_ + (encoder_ ? encoder_->taken_bytes() : 0);
+}
+
+size_t qwen3vl_vision_arena_bytes(VisionModel& tower, int configured_max_patches) {
+    const int patches = Qwen3VLPipeline::patch_budget(tower, configured_max_patches);
+    return qwen3vl_vision_tower_device_bytes(tower) + Qwen3VLPipeline::demand_bytes(tower, patches);
 }
 
 int Qwen3VLPipeline::patch_budget(const VisionModel& tower, int configured) {

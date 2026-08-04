@@ -46,4 +46,10 @@ void qwen3vl_visit_vision_tensors(VisionModel& model,
 // the tower at open time, which happens long before the vision warmup runs.
 size_t qwen3vl_vision_tower_device_bytes(VisionModel& model);
 
+// Everything the T2 arena owes the Qwen3-VL half: the tower plus the pipeline and
+// encoder scratch at the budget the engine will actually use. Engine::init asks
+// this one question instead of composing three, which keeps the arena's sizing
+// from knowing the vision layer's internal split.
+size_t qwen3vl_vision_arena_bytes(VisionModel& tower, int configured_max_patches);
+
 }  // namespace imp
