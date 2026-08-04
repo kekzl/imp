@@ -12,6 +12,16 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Changed
+- **The Qwen3-VL vision tower is now an engine-arena (T2) tenant** (F-12,
+  `src/vision/qwen3vl_vision_upload.cpp`). It was the one engine-lifetime consumer
+  still allocating through `VRAMAllocator`, so 792.2 MiB on Qwen3-VL-4B sat outside
+  the tier model and outside the arena reservation. The arena is now sized for it at
+  open time from `qwen3vl_vision_tower_device_bytes()`, which walks the same tensor
+  list the upload walks — predicted and uploaded agree exactly. Removes the per-block
+  free, and with it the use-after-free the caller-owned scheme had to document.
+  Vision pipeline scratch and Gemma's mmproj tower are unchanged and stay on
+  `VRAMAllocator`; why, and what the next increment needs, is in
+  [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) F-12.
 - **GEMM algo selection now repeats across process restarts** (F-9,
   `src/compute/gemm.cu`). Each candidate was timed exactly once, and at M=16 that
   window is ~30-120 us — mostly launch overhead — so the pick was noise: 4 of 8

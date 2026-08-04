@@ -14,6 +14,8 @@
 #include "model/safetensors_loader.h"
 #include "vision/image_processor.h"
 #include "vision/qwen3vl_pipeline.h"
+#include "vision/qwen3vl_vision_load.h"
+#include "scoped_engine_arena.h"
 #include "vision/vision_model.h"
 
 #include <cuda_fp16.h>
@@ -48,6 +50,13 @@ protected:
         model_ = load_safetensors(model_dir(), /*load_mtp_head=*/false);
         ASSERT_NE(model_, nullptr);
         ASSERT_NE(model_->vision_tower, nullptr) << "checkpoint carries no vision tower";
+        // The tower is a T2 arena tenant, so this fixture has to open an arena the
+        // way Engine::init does — and size it the way Engine::init does too, from
+        // the tower's own tensor list rather than from a guess that silently rots
+        // when the fixture checkpoint changes.
+        const size_t tower_bytes = qwen3vl_vision_tower_device_bytes(*model_->vision_tower);
+        arena_ = std::make_unique<ScopedEngineArena>(tower_bytes + tower_bytes / 8);
+        ASSERT_TRUE(arena_->opened());
         ASSERT_TRUE(alloc_.init(0.10f));
         // 4096 patches = a 1024x1024 image at patch 16, and enough to cross the
         // encoder's attention chunk boundary.
@@ -55,6 +64,7 @@ protected:
     }
 
     std::unique_ptr<Model> model_;
+    std::unique_ptr<ScopedEngineArena> arena_;
     VRAMAllocator alloc_;
     Qwen3VLPipeline pipeline_;
 };

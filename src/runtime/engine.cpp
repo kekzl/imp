@@ -1,6 +1,7 @@
 #include "runtime/engine.h"
 #include "core/buffer.h"
 #include "vision/image_processor.h"
+#include "vision/qwen3vl_vision_load.h"
 #include "runtime/request.h"
 #include "lora/lora_adapter.h"
 #include "runtime/engine_internal.h"
@@ -901,10 +902,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
                                       config_.use_fp8_prefill, runtime_config_.attention.mla_absorb,
                                       capture_cap);
+        // The Qwen3-VL tower is engine-lifetime and an arena tenant, but it uploads
+        // during warmup — long after this point — so its demand has to be read off
+        // the model's shapes here or the arena is sized without it. Gemma's mmproj
+        // tower is a separate file that is not loaded yet and stays outside the
+        // arena for now (docs/audit/SETTLED.md F-12).
+        const size_t vision_bytes =
+            model_->vision_tower ? qwen3vl_vision_tower_device_bytes(*model_->vision_tower) : 0;
         // +1/8 for 256-byte alignment padding across the arena's takes.
-        const size_t cap = std::max(kEngineArenaDefaultBytes, d.total() + d.total() / 8);
-        IMP_LOG_INFO("engine arena demand: %s -> %.1f MiB reserved", d.describe().c_str(),
-                     cap / (1024.0 * 1024.0));
+        const size_t t2_total = d.total() + vision_bytes;
+        const size_t cap = std::max(kEngineArenaDefaultBytes, t2_total + t2_total / 8);
+        IMP_LOG_INFO("engine arena demand: %s + vision tower %.1f MiB -> %.1f MiB reserved",
+                     d.describe().c_str(), vision_bytes / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
         (void)engine_arena_open(cuda_malloc_backend(), cap);
         // Name the two charges that are already known, HERE rather than after
         // warmup. Both are facts by now — the context was measured above, the
