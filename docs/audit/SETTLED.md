@@ -399,8 +399,8 @@ Still open from 07-29 with the reason each was not shipped blind — see
   reference exists across `src/ tools/ tests/`.
   What remains is volume, not uncertainty: lift nine structs into `core/`, fill
   the policy at `:972`, rename 91 accessors, drop the include from 22 files.
-- **F-12** — `src/memory/vram_allocator.cu`: **56** live references (2026-08-04), down from
-  67 a day earlier and from the audit's 84. Still open, but shrinking; count with the allocator's own files and comment
+- **F-12** — `src/memory/vram_allocator.cu`: **48** live references (2026-08-05), down from
+  56, 67 and the audit's 84. `src/vision/` is at **zero**. Still open, but shrinking; count with the allocator's own files and comment
   lines excluded or you get 103 and read a regression that is not there — and count the type
   name alone, since adding `vram_alloc`/`vram_alloc_force` gives 104.
   **First consumer migrated 2026-08-04: the Qwen3-VL vision tower** (`qwen3vl_vision_upload.cpp`),
@@ -426,33 +426,33 @@ Still open from 07-29 with the reason each was not shipped blind — see
   keep on the first run by failing: `taken_bytes()` counted only the pipeline's own 32.0 MiB and
   not the encoder's 192.1 MiB. **Mutation-validated**: dropping the FFN term from
   `Qwen3VLEncoder::demand_bytes` under-reserves by 32 MiB and the test fails.
-  **Still NOT migrated — and scoped 2026-08-04, because the one-line version of this note was
-  misleading.** It said only that Gemma's mmproj is "not loaded at arena-open time", which reads
-  like the `max_patches` case: find the number earlier and you are done. It is not that.
+  **Gemma's mmproj path migrated 2026-08-05 — F-12's vision line item is closed.**
+  `src/vision/` now has **zero** `VRAMAllocator` references (19 at the start of this campaign),
+  and the I1 allowlist loses three files outright: **482 -> 473 direct allocation sites**, with
+  `vision_encoder.cu`, `vision_loader.cpp` and `vision_model.cpp` deleted from
+  `tools/alloc_allowlist.txt`. What remains in `vision_pipeline.cpp` is a per-image fallback for
+  when the pre-taken pixel buffer is too small — request-scoped, so it belongs to a scratch tier
+  and not to T2; leaving it is deliberate.
+  **The scoping note this replaces was right about the problem and wrong about the fix.** It
+  proposed splitting `load_vision_gguf` into parse and upload so the arena could be sized before
+  the file loads. That would have meant keeping the mmap alive across two phases and widening
+  every tensor slot with its wire type and transpose flag. **The cheaper answer is to run the
+  same function twice, once counting**: `VisionUpload{dry}` replaces every allocation with an
+  addition, so `vision_gguf_probe()` and the real load are literally the same code path and
+  cannot drift. Cost is one extra header/descriptor parse — the dry pass never touches tensor
+  payloads and mmap is lazy.
+  **Both anti-drift guards are mutation-validated, and they are checked inside the golden runs
+  rather than in tests of their own** (`tests/test_vision_golden.cu`): `load_vision_gguf` reports
+  its raw byte total so probe-vs-actual is an exact comparison, and the encoder asserts
+  `demand_bytes() == taken_bytes()`. Dropping the FFN term from `VisionEncoder::demand_bytes`
+  fails the second; making the dry pass skip the transposed tensor fails the first.
+  **Measured on Gemma-3-4b:** mmproj-F16 is 812 MiB on disk, and the tower plus encoder and
+  pipeline workspace now come out of the arena instead of 9 raw `cudaMalloc` sites.
+  **One trap worth keeping:** the first version of the arena guard compared the arena's `used()`
+  against the raw byte sums and failed — the arena pads every take to 256 bytes. Compare raw
+  sums to raw sums, or budget the alignment explicitly; `used()` is not the number the demand
+  functions produce.
 
-  1. **The Gemma tower never touches `VRAMAllocator` at all.** `upload_tensor_fp16` in
-     `src/vision/vision_loader.cpp` calls **raw `cudaMalloc`**. Counting the whole Gemma vision
-     path there are **15** `cudaMalloc`/`cudaFree` sites across `vision_loader.cpp` (4),
-     `vision_pipeline.cpp` (4), `vision_encoder.cu` (6) and `vision_model.cpp` (1). All are
-     already on the I1 allowlist (`tools/alloc_allowlist.txt`) with counts, so
-     `tools/check_alloc_sites.py` is green — accepted baseline, not a new violation. Migrating
-     therefore closes **I1 sites as well as** the 8 remaining `VRAMAllocator` type references,
-     which is more value than the reference count alone suggests.
-  2. **There is no parse/upload split to hang the sizing on.** `load_vision_gguf` interleaves
-     both in one function — the `cudaMalloc` sits inside the tensor loop. A metadata-only
-     pre-pass would have to re-parse header, KVs and tensor descriptors, ~100 duplicated lines
-     whose drift from the real upload is exactly what `ReservedBytesMatchTakenBytes` had to be
-     invented for on the Qwen3-VL side. **Do not write a second parser.** Split
-     `load_vision_gguf` into `parse` (host tensors, no device memory) and `upload` (arena), which
-     is the structure Qwen3-VL already has; `Engine::init` then parses before opening the arena
-     and sizes from the parsed model, and the warmup uploads.
-  3. **`stat()` as an upper bound is not cheap enough to shrug at:** mmproj-F16 is 812 MiB and
-     the Gemma-4 BF16 tower 1139 MiB, so a file-size bound wastes on the order of a GiB of arena.
-  4. **Validation is GPU-only.** `VisionGolden.Gemma3SigLIP` and `Gemma4v` (need `IMP_TEST_MMPROJ`
-     / `IMP_TEST_MMPROJ_GEMMA4`) are the only things that exercise this path. The
-     symbol-size-identity trick that made F-24 provable on CPU does not apply — this change
-     really does alter the generated code. Budget a quiet card for it, and note this repo's
-     history of *silent* vision failures when scoping the risk.
   **Ownership note:** the previous scheme documented the tower's blocks as caller-owned
   precisely because "a tower holding pointers into an allocator it does not own is a
   use-after-free the moment a teardown order puts the allocator first". The arena removes the

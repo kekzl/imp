@@ -98,7 +98,8 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
     if (!probe.workspace_estimate_available)
         emit("  note: executor workspaces not modelled in this probe");
     if (probe.vision_tower_unmodelled)
-        emit("  note: vision tower not modelled (size unknown until the mmproj loads)");
+        emit("  note: vision tower not in the shadow plan (the arena does reserve it, from a "
+             "pre-load probe)");
     emit("  note: forward scratch not modelled until A7 step 4 measures its high-water");
     return out;
 }

@@ -1,5 +1,6 @@
 #include "vision/vision_loader.h"
 #include "model/gguf_loader.h"
+#include "memory/engine_arena.h"
 #include "core/logging.h"
 
 #include <fcntl.h>
@@ -206,17 +207,41 @@ uint64_t val_uint(const VGGUFValue& v) {
     }
 }
 
+// One sink for both passes over a mmproj. `dry` runs the whole load with every
+// allocation replaced by an addition, which is how the arena reservation is
+// computed: the counting pass and the real pass are the SAME code, so the number
+// cannot drift from what the upload takes. The alternative — a second parser that
+// walks header, KVs and tensor descriptors on its own — is ~100 duplicated lines
+// whose drift is precisely what the Qwen3-VL side needed a test to catch.
+struct VisionUpload {
+    bool dry = false;
+    size_t bytes = 0;
+};
+
 // Upload raw tensor data to GPU as FP16.
 // Handles F32 -> FP16 conversion and F16 passthrough.
 bool upload_tensor_fp16(const void* src, GgufWireType type, int64_t n_elements, void** d_out,
-                        std::vector<void*>& gpu_allocs) {
+                        VisionUpload& up) {
     size_t fp16_bytes = static_cast<size_t>(n_elements) * sizeof(half);
-    half* d_ptr = nullptr;
-    if (cudaMalloc(&d_ptr, fp16_bytes) != cudaSuccess) {
-        IMP_LOG_ERROR("Vision: cudaMalloc failed for %zu bytes", fp16_bytes);
+    // Validate before counting so a dry run cannot report a size for a load that
+    // will fail on the type.
+    if (type != GgufWireType::F16 && type != GgufWireType::F32 && type != GgufWireType::BF16) {
+        IMP_LOG_ERROR("Vision: unsupported GGML type %u for tensor upload", std::to_underlying(type));
         return false;
     }
-    gpu_allocs.push_back(d_ptr);
+    up.bytes += fp16_bytes;
+    if (up.dry) {
+        *d_out = nullptr;
+        return true;
+    }
+    auto slab = engine_arena().take_bytes(fp16_bytes);
+    if (slab.empty()) {
+        IMP_LOG_ERROR("Vision: engine arena exhausted for %zu bytes — the arena was reserved "
+                      "without this mmproj",
+                      fp16_bytes);
+        return false;
+    }
+    half* d_ptr = reinterpret_cast<half*>(slab.data());
 
     if (type == GgufWireType::F16) {
         IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, src, fp16_bytes, cudaMemcpyHostToDevice));
@@ -255,8 +280,17 @@ bool upload_tensor_fp16(const void* src, GgufWireType type, int64_t n_elements, 
 // where the LLaVA-style projectors store ne0=in). Transposing at load lets the
 // same vision_gemm projection path consume it unchanged.
 bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t rows, int64_t cols,
-                                   void** d_out, std::vector<void*>& gpu_allocs) {
+                                   void** d_out, VisionUpload& up) {
     int64_t n = rows * cols;
+    if (type != GgufWireType::F16 && type != GgufWireType::F32 && type != GgufWireType::BF16) {
+        IMP_LOG_ERROR("Vision: unsupported GGML type %u for transposed upload", std::to_underlying(type));
+        return false;
+    }
+    up.bytes += static_cast<size_t>(n) * sizeof(half);
+    if (up.dry) {
+        *d_out = nullptr;
+        return true;
+    }
     std::vector<half> h_src(static_cast<size_t>(n));
     if (type == GgufWireType::F16) {
         std::memcpy(h_src.data(), src, static_cast<size_t>(n) * sizeof(half));
@@ -283,13 +317,13 @@ bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t r
         for (int64_t c = 0; c < cols; c++)
             h_dst[c * rows + r] = h_src[r * cols + c];
 
-    half* d_ptr = nullptr;
-    if (cudaMalloc(&d_ptr, static_cast<size_t>(n) * sizeof(half)) != cudaSuccess) {
-        IMP_LOG_ERROR("Vision: cudaMalloc failed for transposed %zu bytes",
+    auto slab = engine_arena().take_bytes(static_cast<size_t>(n) * sizeof(half));
+    if (slab.empty()) {
+        IMP_LOG_ERROR("Vision: engine arena exhausted for transposed %zu bytes",
                       static_cast<size_t>(n) * sizeof(half));
         return false;
     }
-    gpu_allocs.push_back(d_ptr);
+    half* d_ptr = reinterpret_cast<half*>(slab.data());
     IMP_CUDA_CHECK_LOG(
         cudaMemcpy(d_ptr, h_dst.data(), static_cast<size_t>(n) * sizeof(half), cudaMemcpyHostToDevice));
     *d_out = d_ptr;
@@ -298,7 +332,7 @@ bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t r
 
 }  // anonymous namespace
 
-std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
+static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& path, VisionUpload& up) {
     // 1. Open and mmap
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) {
@@ -517,7 +551,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
                 out_dim = ne0;
                 in_dim = ne1;
                 if (!upload_tensor_fp16_transposed(tensor_data, info.type, in_dim, out_dim, &dp,
-                                                   model->gpu_allocs)) {
+                                                   up)) {
                     IMP_LOG_ERROR("Vision: failed to upload mm.input_projection.weight (transposed)");
                     munmap(mmap_base, file_size);
                     return nullptr;
@@ -526,7 +560,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
                 // ne0=in=hidden (LLaVA convention): raw layout already matches.
                 out_dim = ne1;
                 in_dim = ne0;
-                if (!upload_tensor_fp16(tensor_data, info.type, ne0 * ne1, &dp, model->gpu_allocs)) {
+                if (!upload_tensor_fp16(tensor_data, info.type, ne0 * ne1, &dp, up)) {
                     IMP_LOG_ERROR("Vision: failed to upload mm.input_projection.weight");
                     munmap(mmap_base, file_size);
                     return nullptr;
@@ -540,7 +574,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
 
         // Upload to GPU as FP16
         void* d_ptr = nullptr;
-        if (!upload_tensor_fp16(tensor_data, info.type, n_elements, &d_ptr, model->gpu_allocs)) {
+        if (!upload_tensor_fp16(tensor_data, info.type, n_elements, &d_ptr, up)) {
             IMP_LOG_ERROR("Vision: failed to upload tensor %s", info.name.c_str());
             munmap(mmap_base, file_size);
             return nullptr;
@@ -668,7 +702,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
     }
 
     // Determine LLM d_model from mm_proj output dimension
-    if (model->mm_proj_w.data) {
+    if (model->mm_proj_w.shape[0] > 0) {
         model->lm_d_model = static_cast<int>(model->mm_proj_w.shape[0]);
         IMP_LOG_INFO("Vision: LLM d_model = %d (from mm_proj)", model->lm_d_model);
     }
@@ -679,6 +713,27 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
     munmap(mmap_base, file_size);
 
     return model;
+}
+
+std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path, size_t* out_device_bytes) {
+    VisionUpload up;
+    auto model = load_vision_gguf_impl(path, up);
+    if (out_device_bytes)
+        *out_device_bytes = up.bytes;
+    return model;
+}
+
+size_t vision_gguf_probe(const std::string& path, VisionConfig* out_cfg, int* out_lm_d_model) {
+    VisionUpload up;
+    up.dry = true;
+    auto model = load_vision_gguf_impl(path, up);
+    if (!model)
+        return 0;
+    if (out_cfg)
+        *out_cfg = model->config;
+    if (out_lm_d_model)
+        *out_lm_d_model = model->lm_d_model;
+    return up.bytes;
 }
 
 }  // namespace imp

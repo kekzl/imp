@@ -157,7 +157,7 @@ bool Engine::init_features() {
 
     // Vision
     if (!config_.mmproj_path.empty()) {
-        if (!vision_.init(config_.mmproj_path, mcfg.d_model, model_.get(), vram_alloc_, stream_))
+        if (!vision_.init(config_.mmproj_path, mcfg.d_model, model_.get(), stream_))
             return false;
     }
     // Qwen3-VL's tower came in with the checkpoint, so there is no mmproj path

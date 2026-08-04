@@ -46,6 +46,8 @@
 #include "vision/vision_model.h"
 
 #include "refs/vision_encoder_golden.h"
+#include "scoped_engine_arena.h"
+#include "memory/engine_arena.h"
 
 namespace imp {
 namespace {
@@ -85,7 +87,26 @@ bool file_exists(const std::string& p) {
 // skips are decided before we get here, on file presence).
 bool run_vision_pipeline(const std::string& mmproj_path, const std::string& image_path,
                          std::vector<float>& out, int& num_tokens, int& d_model, std::string& err) {
-    std::unique_ptr<VisionModel> model = load_vision_gguf(mmproj_path);
+    // The tower and the encoder workspace are T2 arena tenants (F-12), so this
+    // harness has to open an arena the way Engine::init does — and size it the
+    // same way, from the probe rather than a literal, so a different mmproj
+    // cannot silently outgrow it.
+    VisionConfig probe_cfg;
+    int probe_lm_d = 0;
+    const size_t tower_bytes = vision_gguf_probe(mmproj_path, &probe_cfg, &probe_lm_d);
+    if (tower_bytes == 0) {
+        err = "vision_gguf_probe failed for " + mmproj_path;
+        return false;
+    }
+    const size_t need = tower_bytes + VisionEncoder::demand_bytes(probe_cfg);
+    ScopedEngineArena arena(need + need / 8);
+    if (!arena.opened()) {
+        err = "engine arena unavailable";
+        return false;
+    }
+
+    size_t tower_actual = 0;
+    std::unique_ptr<VisionModel> model = load_vision_gguf(mmproj_path, &tower_actual);
     if (!model) {
         err = "load_vision_gguf failed";
         return false;
@@ -110,8 +131,24 @@ bool run_vision_pipeline(const std::string& mmproj_path, const std::string& imag
     }
 
     VisionEncoder encoder;
-    if (!encoder.init(*model, d_model, stream, &alloc)) {
+    if (!encoder.init(*model, d_model, stream)) {
         err = "VisionEncoder init failed";
+        cudaStreamDestroy(stream);
+        return false;
+    }
+
+    // Anti-drift, checked on every golden run rather than in a test of its own:
+    // demand_bytes() and the reservation are two expressions of one buffer list,
+    // and a buffer added to init() without updating demand_bytes() under-reserves
+    // the arena — which surfaces on whichever model happens to be tight, not here.
+    // The arena's own `used` covers the tower too, so this pins the probe as well.
+    if (encoder.taken_bytes() != VisionEncoder::demand_bytes(model->config)) {
+        err = "encoder demand_bytes != taken_bytes";
+        cudaStreamDestroy(stream);
+        return false;
+    }
+    if (tower_actual != tower_bytes) {
+        err = "vision_gguf_probe disagrees with what the real load took";
         cudaStreamDestroy(stream);
         return false;
     }

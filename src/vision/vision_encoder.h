@@ -7,16 +7,20 @@
 
 namespace imp {
 
-class VRAMAllocator;
-
 class VisionEncoder {
 public:
     VisionEncoder() = default;
     ~VisionEncoder();
 
     // Initialize workspace buffers. lm_d_model = LLM hidden dim.
-    [[nodiscard]] bool init(const VisionModel& model, int lm_d_model, cudaStream_t stream,
-                            VRAMAllocator* alloc = nullptr);
+    [[nodiscard]] bool init(const VisionModel& model, int lm_d_model, cudaStream_t stream);
+
+    // Device bytes init() takes from the T2 arena, answerable from config alone so
+    // Engine::init can size the arena before the mmproj is loaded. taken_bytes()
+    // reports what was actually taken; a test asserts they agree, because these are
+    // two expressions of one buffer list and nothing else stops them drifting.
+    static size_t demand_bytes(const VisionConfig& cfg);
+    size_t taken_bytes() const { return taken_bytes_; }
 
     // Encode a preprocessed image.
     // d_pixels: [3, image_size, image_size] FP16 on device
@@ -24,7 +28,7 @@ public:
     bool encode(const half* d_pixels, half* d_output, cudaStream_t stream);
 
 private:
-    VRAMAllocator* alloc_ = nullptr;
+    size_t taken_bytes_ = 0;
     const VisionModel* model_ = nullptr;
     int lm_d_model_ = 0;
 

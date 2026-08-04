@@ -1,4 +1,5 @@
 #include "vision/vision_pipeline.h"
+#include "memory/engine_arena.h"
 #include "vision/vision_loader.h"
 #include "vision/image_processor.h"
 #include "model/model.h"
@@ -8,20 +9,40 @@
 
 namespace imp {
 
+// Arena slices: the arena releases wholesale on close, so this only drops
+// pointers (F-12).
 VisionPipeline::~VisionPipeline() {
-    if (d_embeddings_ && alloc_) {
-        alloc_->free(d_embeddings_);
-        d_embeddings_ = nullptr;
-    }
-    if (d_pixels_ && alloc_) {
-        alloc_->free(d_pixels_);
-        d_pixels_ = nullptr;
-    }
+    d_embeddings_ = nullptr;
+    d_pixels_ = nullptr;
+}
+
+// Everything the T2 arena owes the mmproj (Gemma-3 / Gemma-4v) path: the SigLIP
+// tower plus the pipeline and encoder workspace. Engine::init asks this one
+// question before the arena opens; the probe runs the real loader in counting
+// mode, so the answer cannot drift from what the warmup then takes.
+size_t vision_mmproj_arena_bytes(const std::string& mmproj_path, int lm_d_model) {
+    VisionConfig cfg;
+    int probed_lm_d = 0;
+    const size_t tower = vision_gguf_probe(mmproj_path, &cfg, &probed_lm_d);
+    if (tower == 0)
+        return 0;
+    const int lm_d = probed_lm_d > 0 ? probed_lm_d : lm_d_model;
+    return tower + VisionPipeline::demand_bytes(cfg, lm_d);
+}
+
+size_t VisionPipeline::taken_bytes() const {
+    return taken_bytes_ + (encoder_ ? encoder_->taken_bytes() : 0);
+}
+
+size_t VisionPipeline::demand_bytes(const VisionConfig& cfg, int lm_d_model) {
+    size_t total = static_cast<size_t>(cfg.num_image_tokens) * lm_d_model * sizeof(half);  // embeddings
+    total += static_cast<size_t>(3) * cfg.image_size * cfg.image_size * sizeof(half);  // pixels
+    return total + VisionEncoder::demand_bytes(cfg);
 }
 
 bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model* text_model,
-                          VRAMAllocator& alloc, cudaStream_t stream) {
-    alloc_ = &alloc;
+                          cudaStream_t stream) {
+    taken_bytes_ = 0;
 
     model_ = load_vision_gguf(mmproj_path);
     if (!model_) {
@@ -32,7 +53,7 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
     int lm_d = model_->lm_d_model > 0 ? model_->lm_d_model : lm_d_model;
     lm_d_ = lm_d;
     encoder_ = std::make_unique<VisionEncoder>();
-    if (!encoder_->init(*model_, lm_d, stream, &alloc)) {
+    if (!encoder_->init(*model_, lm_d, stream)) {
         IMP_LOG_ERROR("Failed to init vision encoder");
         encoder_.reset();
         model_.reset();
@@ -42,7 +63,12 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
     // Allocate device buffer for vision embeddings
     int n_img_tokens = model_->config.num_image_tokens;
     size_t emb_bytes = static_cast<size_t>(n_img_tokens) * lm_d * sizeof(half);
-    d_embeddings_ = static_cast<half*>(alloc.allocate(emb_bytes, "vision_embeddings"));
+    {
+        auto slab = engine_arena().take_bytes(emb_bytes);
+        d_embeddings_ = slab.empty() ? nullptr : reinterpret_cast<half*>(slab.data());
+        if (d_embeddings_)
+            taken_bytes_ += emb_bytes;
+    }
     if (!d_embeddings_) {
         IMP_LOG_ERROR("Failed to allocate vision embedding buffer (%zu bytes)", emb_bytes);
         encoder_.reset();
@@ -53,7 +79,12 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
     // Pre-allocate pixel buffer to avoid per-image cudaMalloc/Free
     int img_sz = model_->config.image_size;
     d_pixels_size_ = static_cast<size_t>(3) * img_sz * img_sz * sizeof(half);
-    d_pixels_ = static_cast<half*>(alloc.allocate(d_pixels_size_, "vision_pixels"));
+    {
+        auto slab = engine_arena().take_bytes(d_pixels_size_);
+        d_pixels_ = slab.empty() ? nullptr : reinterpret_cast<half*>(slab.data());
+        if (d_pixels_)
+            taken_bytes_ += d_pixels_size_;
+    }
     if (!d_pixels_) {
         IMP_LOG_WARN("Failed to pre-allocate vision pixel buffer (%.1f MiB), will alloc per-image",
                      d_pixels_size_ / (1024.0 * 1024.0));
