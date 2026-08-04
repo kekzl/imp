@@ -12,6 +12,15 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Changed
+- **`runtime/engine.h` now reaches 23 translation units instead of 33** (F-24,
+  `src/api/imp_internal.h`). It was the repo's #2 build-cost header (fan-in x
+  commits); `imp_internal.h` pulled it in front of 17 includers while storing
+  nothing but a `std::unique_ptr<imp::Engine>`. Forward-declaring `imp::Engine`
+  and moving `ImpContext_T`'s ctor/dtor out of line cuts the rebuild set 30 %.
+  Consumers that genuinely use `Engine` — two, established by deleting every
+  candidate include and reading the compiler's failures — include it directly.
+  The audit's own proposal for F-24 is refuted with numbers in
+  [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md).
 - **The Qwen3-VL vision tower is now an engine-arena (T2) tenant** (F-12,
   `src/vision/qwen3vl_vision_upload.cpp`). It was the one engine-lifetime consumer
   still allocating through `VRAMAllocator`, so 792.2 MiB on Qwen3-VL-4B sat outside

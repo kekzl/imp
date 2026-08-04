@@ -462,7 +462,32 @@ Still open from 07-29 with the reason each was not shipped blind — see
   `engine.cpp:915`** — that is where a missing tenant actually under-reserves, and that is where
   the vision tower was added. Do not "fix" the plan fields in isolation and read it as closing a
   VRAM gap.
-- **F-24** — `src/runtime/engine.h` god-header.
+- **F-24** — `src/runtime/engine.h` god-header. **Its proposed fix is REFUTED by measurement,
+  and a different lever was shipped instead (2026-08-04).**
+  The audit proposes extracting the spec-decode member block into a `SpecDecodeState` struct,
+  "the largest self-contained cluster". Largest by member count — **not where the churn is**.
+  Of the 130 commits touching `engine.h` in six months, **3 (2 %) change spec/MTP lines only**;
+  92 (71 %) do not touch spec at all. So the extraction removes ~2 % of the churn at best, and
+  only if `Engine` held the struct by pointer — held by value, `engine.h` includes the new
+  header and the same TUs rebuild for **zero** gain. Do not build it.
+  **Churn is spread across every concern, which is the actual diagnosis:** request/sched 58
+  commits, kv/cache 52, memory/vram 44, graph 40, spec/mtp 38, sampling 35, vision 11.
+  `engine.h` changes because `Engine` is the coordination point for all of it, not because one
+  extractable cluster is hot. **A full pimpl of the private state has a measured ceiling of
+  42 %** (54 of 130 commits touch only the private section) — that is the honest number for
+  anyone considering it, against an indirection on the decode path.
+  **What was shipped attacks the other factor.** Cost is fan-in × churn, and fan-in was the
+  cheap half: `src/api/imp_internal.h` had 17 includers and pulled `runtime/engine.h` in for all
+  of them, while storing nothing but a `std::unique_ptr<imp::Engine>`. Forward-declaring
+  `imp::Engine` there and moving `ImpContext_T`'s ctor/dtor out of line (the single point where
+  `unique_ptr` needs the complete type) took `engine.h` from **33 to 23 rebuilt TUs, -30 %** —
+  cost 4257 → 2967, better than the refuted extraction's 2 % and a fraction of the risk.
+  **Method note, because a loose grep cost me a wrong answer here:** `rg 'engine\.|Engine::'`
+  reported nine consumers needing the include, three of which were matches on
+  `batching_engine.`. Deleting every candidate include and letting the compiler name the
+  failures gave the true set — **two**. Measure fan-in with reverse BFS over the include graph;
+  a forward walk with memoisation silently poisons its cache on include cycles and reported
+  2 of 463 TUs.
 
 ## Per-area running logs
 
