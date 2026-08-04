@@ -37,6 +37,9 @@ there instead of retelling it.
   0 / 25 / 26 / 27 IMA lines at `--gtest_repeat=1/2/3/4` before, 0 / 0 / 0 / 0
   after. The full GPU suite goes from **57 failures to 1** (the remaining one
   is pre-existing and passes in isolation), and from 111 IMA lines to none.
+  The `cublasLtMatmul failed (status 14)` line that preceded every IMA was the
+  same symptom rather than a second defect — it appears in every run with the
+  dangling pointer and in none without, before or after the fix.
 - **`StubModelTest.CreateContextAndInfer` no longer hides a poisoned context.**
   Its contract was "the key check is no crash", and it met that while corrupting
   the CUDA context; the failure path skipped with "expected without GPU", which
