@@ -399,8 +399,8 @@ Still open from 07-29 with the reason each was not shipped blind — see
   reference exists across `src/ tools/ tests/`.
   What remains is volume, not uncertainty: lift nine structs into `core/`, fill
   the policy at `:972`, rename 91 accessors, drop the include from 22 files.
-- **F-12** — `src/memory/vram_allocator.cu`: **67** live references (2026-08-03), down from
-  the audit's 84. Still open, but shrinking; count with the allocator's own files and comment
+- **F-12** — `src/memory/vram_allocator.cu`: **56** live references (2026-08-04), down from
+  67 a day earlier and from the audit's 84. Still open, but shrinking; count with the allocator's own files and comment
   lines excluded or you get 103 and read a regression that is not there — and count the type
   name alone, since adding `vram_alloc`/`vram_alloc_force` gives 104.
   **First consumer migrated 2026-08-04: the Qwen3-VL vision tower** (`qwen3vl_vision_upload.cpp`),
@@ -412,12 +412,24 @@ Still open from 07-29 with the reason each was not shipped blind — see
   time cannot be charged. `qwen3vl_vision_tower_device_bytes()` answers it from shapes alone by
   walking `qwen3vl_visit_vision_tensors` — the same list the upload walks, so the reservation
   cannot drift from what is taken. Verified exact: predicted 792.2 MiB, uploaded 792.2 MiB.
-  **What is deliberately NOT migrated, with the reason:** the pipeline's own scratch
-  (`vision_patches`, `vision_out`, deepstack) is sized from `max_patches`, which is not known at
-  arena-open time, so the same trick does not work — it stays on `VRAMAllocator`. Gemma's mmproj
-  tower is a separate GGUF that is not loaded at arena-open time either, so `vision_pipeline.cpp`
-  and `vision_encoder.cu` stay too. Migrating those needs `max_patches` (and the mmproj size)
-  hoisted to before the arena opens; that is the next increment, not an oversight.
+  **Second increment, 2026-08-04: the pipeline and encoder scratch followed** (a further
+  224.1 MiB on Qwen3-VL-4B at the default 4096-patch budget). The "`max_patches` is not known at
+  arena-open time" objection this entry recorded an hour earlier was **wrong**: the budget is
+  `runtime.vision_max_patches` (or 4096) rounded down to the merge unit, all config, none of it
+  weights. It now lives in one place, `Qwen3VLPipeline::patch_budget()`, called by both
+  `Engine::init` for sizing and the vision warmup for the actual init, so the two cannot drift.
+  `src/vision/` references: **19 → 8**, repo-wide **67 → 56**.
+  **The anti-drift device is the finding worth keeping.** Tower sizing could reuse the upload's
+  own visitor; the scratch cannot, because the buffers are assigned to named members. So
+  `demand_bytes()` duplicates the list and `taken_bytes()` accumulates what init actually took,
+  and `Qwen3VLPipelineTest.ReservedBytesMatchTakenBytes` asserts they are equal. It earned its
+  keep on the first run by failing: `taken_bytes()` counted only the pipeline's own 32.0 MiB and
+  not the encoder's 192.1 MiB. **Mutation-validated**: dropping the FFN term from
+  `Qwen3VLEncoder::demand_bytes` under-reserves by 32 MiB and the test fails.
+  **Still NOT migrated:** Gemma's mmproj tower is a separate GGUF that genuinely is not loaded at
+  arena-open time (`vision_pipeline.cpp`, `vision_encoder.cu`, 8 references). Migrating it needs
+  the mmproj either loaded or stat-ed before the arena opens — unlike `max_patches`, that is a
+  real ordering change, not an arithmetic one.
   **Ownership note:** the previous scheme documented the tower's blocks as caller-owned
   precisely because "a tower holding pointers into an allocator it does not own is a
   use-after-free the moment a teardown order puts the allocator first". The arena removes the

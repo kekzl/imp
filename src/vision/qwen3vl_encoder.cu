@@ -2,7 +2,7 @@
 #include "core/cuda_static_reset.h"
 
 #include "core/logging.h"
-#include "memory/vram_allocator.h"
+#include "memory/engine_arena.h"
 #include "vision/qwen3vl_encoder_kernels.h"
 
 #include <cublas_v2.h>
@@ -59,12 +59,30 @@ IMP_REGISTER_CUDA_STATIC_RESET(qwen3vl_encoder_reset_static_cuda_state);
 
 Qwen3VLEncoder::~Qwen3VLEncoder() { free_buffers(); }
 
+size_t Qwen3VLEncoder::demand_bytes(const VisionConfig& c, int max_tokens) {
+    const int64_t n = max_tokens;
+    const int64_t H = c.hidden_size;
+    const size_t h = sizeof(half);
+    size_t total = 0;
+    total += static_cast<size_t>(n * H) * h;                       // hidden
+    total += static_cast<size_t>(n * H) * h;                       // normed
+    total += static_cast<size_t>(n * H) * h;                       // proj
+    total += static_cast<size_t>(n * 3 * H) * h;                   // qkv
+    total += static_cast<size_t>(n * H) * h * 4;                   // q, k, v, attn
+    total += static_cast<size_t>(c.num_heads * std::min<int64_t>(kAttnChunk, n) * n) * h;  // scores
+    total += static_cast<size_t>(n * c.intermediate_size) * h;     // ffn
+    total += static_cast<size_t>(n * H) * h * 2;                   // merge_norm, merge_fc
+    total += static_cast<size_t>(n) * sizeof(int32_t) * 2;         // row, col
+    total += static_cast<size_t>(n * kQwenVisionPosTaps) * sizeof(int32_t);  // taps
+    total += static_cast<size_t>(n * kQwenVisionPosTaps) * sizeof(float);    // weights
+    return total;
+}
+
 void Qwen3VLEncoder::free_buffers() {
-    if (alloc_) {
-        for (void* p : allocs_)
-            alloc_->free(p);
-    }
-    allocs_.clear();
+    // The buffers are arena slices; the arena releases wholesale on close, so
+    // there is nothing to hand back here. Dropping the pointers is what keeps a
+    // re-init from reading slices that a closed arena no longer backs.
+    taken_bytes_ = 0;
     d_hidden_ = d_normed_ = d_proj_ = d_qkv_ = nullptr;
     d_q_ = d_k_ = d_v_ = d_attn_ = d_scores_ = d_ffn_ = nullptr;
     d_merge_norm_ = d_merge_fc_ = nullptr;
@@ -80,10 +98,10 @@ int Qwen3VLEncoder::merged_tokens(int tokens) const {
     return tokens / unit;
 }
 
-bool Qwen3VLEncoder::init(const VisionModel& model, VRAMAllocator* alloc, int max_tokens) {
+bool Qwen3VLEncoder::init(const VisionModel& model, int max_tokens) {
     free_buffers();
-    if (!alloc || max_tokens <= 0) {
-        IMP_LOG_ERROR("Qwen3-VL encoder: needs an allocator and a positive token budget");
+    if (max_tokens <= 0) {
+        IMP_LOG_ERROR("Qwen3-VL encoder: needs a positive token budget");
         return false;
     }
     const VisionConfig& c = model.config;
@@ -98,8 +116,8 @@ bool Qwen3VLEncoder::init(const VisionModel& model, VRAMAllocator* alloc, int ma
         return false;
     }
     model_ = &model;
-    alloc_ = alloc;
     max_tokens_ = max_tokens;
+    taken_bytes_ = 0;
 
     const int64_t n = max_tokens;
     const int64_t H = c.hidden_size;
@@ -107,14 +125,17 @@ bool Qwen3VLEncoder::init(const VisionModel& model, VRAMAllocator* alloc, int ma
     auto take = [&](int64_t elems, size_t elem_bytes, const char* tag) -> void* {
         if (!ok)
             return nullptr;
-        void* p = alloc->allocate(static_cast<size_t>(elems) * elem_bytes, tag);
-        if (!p) {
-            IMP_LOG_ERROR("Qwen3-VL encoder: out of VRAM for %s", tag);
+        const size_t bytes = static_cast<size_t>(elems) * elem_bytes;
+        auto slab = engine_arena().take_bytes(bytes);
+        if (slab.empty()) {
+            IMP_LOG_ERROR("Qwen3-VL encoder: engine arena exhausted for %s (%zu bytes) — the arena "
+                          "was reserved without this encoder",
+                          tag, bytes);
             ok = false;
             return nullptr;
         }
-        allocs_.push_back(p);
-        return p;
+        taken_bytes_ += bytes;
+        return slab.data();
     };
     auto take_half = [&](int64_t elems, const char* tag) {
         return static_cast<half*>(take(elems, sizeof(half), tag));

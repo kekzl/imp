@@ -165,12 +165,9 @@ bool Engine::init_features() {
     // not fatal: the text half of the model works, and refusing to load at all
     // would be a worse answer than "images are unavailable".
     if (model_->vision_tower) {
-        const int unit = model_->vision_tower->config.merge_size * model_->vision_tower->config.merge_size;
-        int budget = runtime_config_.runtime.vision_max_patches;
-        if (budget <= 0)
-            budget = 4096;  // a 1024x1024 image at patch 16
-        budget -= budget % unit;
-        if (!qwen_vision_.init(*model_->vision_tower, vram_alloc_, budget)) {
+        const int budget =
+            Qwen3VLPipeline::patch_budget(*model_->vision_tower, runtime_config_.runtime.vision_max_patches);
+        if (!qwen_vision_.init(*model_->vision_tower, budget)) {
             IMP_LOG_WARN("Qwen3-VL vision tower failed to initialise — continuing text-only");
         } else if (model_->tokenizer()) {
             qwen_image_pad_id_ = model_->tokenizer()->find_token("<|image_pad|>");

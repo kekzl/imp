@@ -410,7 +410,7 @@ void run_case(int grid_h, int grid_w) {
               cudaSuccess);
 
     Qwen3VLEncoder enc;
-    ASSERT_TRUE(enc.init(tower.model, &alloc, kTokens));
+    ASSERT_TRUE(enc.init(tower.model, kTokens));
     EXPECT_EQ(enc.merged_tokens(kTokens), kMerged);
     ASSERT_TRUE(enc.encode(d_patches, grid, d_out, {d_deep}, nullptr));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);

@@ -18,7 +18,6 @@
 
 namespace imp {
 
-class VRAMAllocator;
 
 class Qwen3VLEncoder {
 public:
@@ -29,8 +28,16 @@ public:
 
     // `model` must already be uploaded (qwen3vl_upload_vision_tower). Its
     // lifetime must outlast this encoder — only the pointer is kept.
-    [[nodiscard]] bool init(const VisionModel& model, VRAMAllocator* alloc, int max_tokens);
+    [[nodiscard]] bool init(const VisionModel& model, int max_tokens);
     void free_buffers();
+
+    // Device bytes init() will take from the T2 arena, answerable before the
+    // arena opens (it reads config, not weights). init() records what it actually
+    // took in taken_bytes(); the two are asserted equal in the encoder tests, so a
+    // buffer added to init() without updating this shows up as a test failure
+    // rather than as an arena exhaustion on some other model.
+    static size_t demand_bytes(const VisionConfig& c, int max_tokens);
+    size_t taken_bytes() const { return taken_bytes_; }
 
     int max_tokens() const { return max_tokens_; }
     // Merged image tokens produced for a `tokens`-patch image.
@@ -50,8 +57,8 @@ private:
     bool attention(int tokens, cudaStream_t stream);
 
     const VisionModel* model_ = nullptr;
-    VRAMAllocator* alloc_ = nullptr;
     int max_tokens_ = 0;
+    size_t taken_bytes_ = 0;
 
     half* d_hidden_ = nullptr;  // [max_tokens, hidden]
     half* d_normed_ = nullptr;  // [max_tokens, hidden]
@@ -71,7 +78,6 @@ private:
     int32_t* d_taps_ = nullptr;
     float* d_weights_ = nullptr;
 
-    std::vector<void*> allocs_;
 };
 
 }  // namespace imp
