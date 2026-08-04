@@ -40,6 +40,15 @@ there instead of retelling it.
   The `cublasLtMatmul failed (status 14)` line that preceded every IMA was the
   same symptom rather than a second defect — it appears in every run with the
   dangling pointer and in none without, before or after the fix.
+- **`EngineRelaunchTest.ReloadAfterInferenceReleasesVramAndDoesNotCrash` asserted
+  on a process-wide counter.** Its bound on `cudaMemPoolAttrUsedMemCurrent` was
+  absolute (1024 MiB), so it only held when the test ran first: in the full
+  test-e2e run earlier tests leave blocks in the default pool and it read 1792
+  MiB, while passing in isolation. The test already rejected the *device* figure
+  for exactly this reason (`AUDIT B36`); the pool figure is process-wide too. It
+  now takes a baseline and asserts on the delta this cycle owns. Still catches
+  what it exists for — reverting #834's `cudaFreeAsync` makes it fire at 4076
+  MiB retained.
 - **`StubModelTest.CreateContextAndInfer` no longer hides a poisoned context.**
   Its contract was "the key check is no crash", and it met that while corrupting
   the CUDA context; the failure path skipped with "expected without GPU", which
