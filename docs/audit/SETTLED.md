@@ -401,7 +401,55 @@ Still open from 07-29 with the reason each was not shipped blind — see
   the policy at `:972`, rename 91 accessors, drop the include from 22 files.
 - **F-12** — `src/memory/vram_allocator.cu`: **67** live references (2026-08-03), down from
   the audit's 84. Still open, but shrinking; count with the allocator's own files and comment
-  lines excluded or you get 103 and read a regression that is not there.
+  lines excluded or you get 103 and read a regression that is not there — and count the type
+  name alone, since adding `vram_alloc`/`vram_alloc_force` gives 104.
+  **First consumer migrated 2026-08-04: the Qwen3-VL vision tower** (`qwen3vl_vision_upload.cpp`),
+  which the audit named as the place the tier model was never applied. 792.2 MiB on
+  Qwen3-VL-4B now comes from the T2 engine arena instead of `VRAMAllocator`.
+  **The blocker that had to be solved first — and the reason to solve it the same way for the
+  next consumer:** the arena opens at `engine.cpp:915`, *before* `init_weights()` and long
+  before the vision warmup uploads anything, so a tenant whose bytes are only known at upload
+  time cannot be charged. `qwen3vl_vision_tower_device_bytes()` answers it from shapes alone by
+  walking `qwen3vl_visit_vision_tensors` — the same list the upload walks, so the reservation
+  cannot drift from what is taken. Verified exact: predicted 792.2 MiB, uploaded 792.2 MiB.
+  **What is deliberately NOT migrated, with the reason:** the pipeline's own scratch
+  (`vision_patches`, `vision_out`, deepstack) is sized from `max_patches`, which is not known at
+  arena-open time, so the same trick does not work — it stays on `VRAMAllocator`. Gemma's mmproj
+  tower is a separate GGUF that is not loaded at arena-open time either, so `vision_pipeline.cpp`
+  and `vision_encoder.cu` stay too. Migrating those needs `max_patches` (and the mmproj size)
+  hoisted to before the arena opens; that is the next increment, not an oversight.
+  **Ownership note:** the previous scheme documented the tower's blocks as caller-owned
+  precisely because "a tower holding pointers into an allocator it does not own is a
+  use-after-free the moment a teardown order puts the allocator first". The arena removes the
+  per-block free entirely, so that hazard is gone rather than relocated.
+  **Test trap, hit and fixed:** `Qwen3VLPipelineTest` builds its own `VRAMAllocator` and no
+  arena, so all four cases failed the moment the tower became an arena tenant. Fixtures now open
+  a `ScopedEngineArena` sized from `qwen3vl_vision_tower_device_bytes()` rather than a literal,
+  so a changed fixture checkpoint cannot silently outgrow it. **Mutation-validated**: halving the
+  fixture arena fails all four. Note these tests were *skipped*, not passing, until
+  `IMP_TEST_MODEL_QWEN3VL` was set — the run that looked greenest tested nothing.
+  **Second trap, found by setting that variable: `Qwen3VLPipelineTest` only runs from the source
+  tree.** It loads `tests/fixtures/vision_test_64.png` by relative path and the `imp:test` image
+  ships no `tests/` directory, so setting `IMP_TEST_MODEL_QWEN3VL` for an image run turns three
+  silent skips into three `encode_file` failures that look like a code defect and are not. Run
+  them with the repo mounted (`-v $PWD:/src -w /src ./build-dev/test-e2e`), or leave the variable
+  unset for image runs — the documented full-suite recipe does the latter, which is why its
+  reference state is 1 failure.
+
+- **The memory plan is a SHADOW today — `PlanInput::features` is mostly unfilled, and that is
+  not a bug.** `plan.cpp:111` sums `vision_tower_bytes` and `spec_decode_bytes` into
+  `engine_persistent`, but production writes neither: `plan_shadow.cpp:29-31` fills only
+  `ssm_state_bytes`, `n_swa_layers` and `swa_live_tokens`, and the only writers of
+  `vision_tower_bytes` in the tree are `tests/test_memory_plan.cpp:172,279`. A field that only
+  tests set looks exactly like the vacuous-pass pattern this ledger keeps recording, so it is
+  worth stating plainly why it is not: `plan_shadow.cpp`'s own comment says the plan gets its
+  real shape at **A7 step 6**, "where the plan runs BEFORE the upload and charges everything
+  from a clean slate", and `AUDIT.md` B80 records what step 6 is waiting on (always-on pool
+  bookkeeping). Until then the plan advises and does not allocate, so an unset feature field
+  costs nothing at runtime. **The number that IS authoritative is the arena capacity at
+  `engine.cpp:915`** — that is where a missing tenant actually under-reserves, and that is where
+  the vision tower was added. Do not "fix" the plan fields in isolation and read it as closing a
+  VRAM gap.
 - **F-24** — `src/runtime/engine.h` god-header.
 
 ## Per-area running logs

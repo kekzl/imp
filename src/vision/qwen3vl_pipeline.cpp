@@ -19,8 +19,11 @@ Qwen3VLPipeline::~Qwen3VLPipeline() { free_buffers(); }
 
 void Qwen3VLPipeline::free_buffers() {
     encoder_.reset();
-    // Order matters: the tower's slots point into `allocs_`, so they are
-    // invalidated before the memory goes away rather than after.
+    // The tower's blocks live in the T2 arena and are not in `allocs_`; releasing
+    // its slots here keeps a tower that outlives the arena from being read. What
+    // `allocs_` still holds is this pipeline's own scratch, which is sized from
+    // max_patches and so cannot be pre-charged to the arena at open time
+    // (docs/audit/SETTLED.md F-12).
     if (tower_ && uploaded_tower_)
         qwen3vl_release_vision_tower(*tower_);
     uploaded_tower_ = false;
@@ -63,7 +66,7 @@ bool Qwen3VLPipeline::init(VisionModel& tower, VRAMAllocator& alloc, int max_pat
     if (!tower.patch_embd_w.on_device) {
         size_t bytes = 0;
         std::string err;
-        if (!qwen3vl_upload_vision_tower(tower, &alloc, allocs_, bytes, err)) {
+        if (!qwen3vl_upload_vision_tower(tower, bytes, err)) {
             IMP_LOG_ERROR("Qwen3-VL pipeline: %s", err.c_str());
             free_buffers();
             return false;

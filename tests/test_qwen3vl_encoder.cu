@@ -23,6 +23,7 @@
 #include "vision/qwen3vl_encoder.h"
 #include "vision/qwen3vl_vision_grid.h"
 #include "vision/qwen3vl_vision_upload.h"
+#include "scoped_engine_arena.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -374,12 +375,17 @@ void run_case(int grid_h, int grid_w) {
     W.deep.resize(1);
     fill_merger(tower.model.deepstack_mergers[0], W.deep[0], true);
 
+    // The tower is a T2 arena tenant now, so this test has to open an arena the
+    // way Engine::init does. Without one, take_bytes() returns empty and the
+    // upload fails — which is the intended signal, not a fallback.
+    ScopedEngineArena arena(64ull << 20);
+    ASSERT_TRUE(arena.opened());
+    // The test's own scratch stays on VRAMAllocator — only the tower moved.
     VRAMAllocator alloc;
     ASSERT_TRUE(alloc.init(0.10f));
     size_t bytes = 0;
     std::string err;
-    std::vector<void*> tower_allocs;
-    ASSERT_TRUE(qwen3vl_upload_vision_tower(tower.model, &alloc, tower_allocs, bytes, err)) << err;
+    ASSERT_TRUE(qwen3vl_upload_vision_tower(tower.model, bytes, err)) << err;
     EXPECT_GT(bytes, 0u);
 
     QwenVisionGrid grid;
@@ -443,8 +449,6 @@ void run_case(int grid_h, int grid_w) {
     alloc.free(d_out);
     alloc.free(d_deep);
     qwen3vl_release_vision_tower(tower.model);
-    for (void* p : tower_allocs)
-        alloc.free(p);
 }
 
 TEST(Qwen3VLEncoder, MatchesAnIndependentCpuReference) {

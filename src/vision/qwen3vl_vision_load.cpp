@@ -258,6 +258,15 @@ bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& 
     return stats.missing == 0;
 }
 
+size_t qwen3vl_vision_tower_device_bytes(VisionModel& model) {
+    size_t total = 0;
+    // sizeof(half): the upload runs every slot through to_fp16() regardless of the
+    // source qtype, so the device figure is numel * 2 and not the host size.
+    qwen3vl_visit_vision_tensors(
+        model, [&](Tensor& t, const std::string&) { total += static_cast<size_t>(t.numel()) * sizeof(uint16_t); });
+    return total;
+}
+
 void qwen3vl_visit_vision_tensors(VisionModel& model,
                                   const std::function<void(Tensor&, const std::string&)>& fn) {
     fn(model.patch_embd_w, "patch_embed.proj.weight");

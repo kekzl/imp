@@ -39,4 +39,11 @@ bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& 
 void qwen3vl_visit_vision_tensors(VisionModel& model,
                                   const std::function<void(Tensor&, const std::string&)>& fn);
 
+// Device bytes the tower will occupy once uploaded. Walks the same list as
+// qwen3vl_visit_vision_tensors for the reason given above — a slot added to the
+// upload cannot be missed here — and reads shapes only, never data, so it is
+// answerable BEFORE the upload. That is what lets the engine arena be sized for
+// the tower at open time, which happens long before the vision warmup runs.
+size_t qwen3vl_vision_tower_device_bytes(VisionModel& model);
+
 }  // namespace imp

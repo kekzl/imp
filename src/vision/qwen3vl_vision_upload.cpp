@@ -1,7 +1,7 @@
 #include "vision/qwen3vl_vision_upload.h"
 
 #include "core/logging.h"
-#include "memory/vram_allocator.h"
+#include "memory/engine_arena.h"
 #include "vision/qwen3vl_vision_load.h"
 
 #include <cuda_fp16.h>
@@ -48,16 +48,12 @@ bool to_fp16(const Tensor& t, std::vector<half>& out, std::string& err) {
 
 }  // namespace
 
-bool qwen3vl_upload_vision_tower(VisionModel& model, VRAMAllocator* alloc, std::vector<void*>& out_allocs,
-                                 size_t& bytes_out, std::string& err) {
-    if (!alloc) {
-        err = "no VRAM allocator for the vision tower";
-        return false;
-    }
-
-    // Collected first, applied last: on any failure the already-allocated blocks
-    // are released and every Tensor still points at the host mapping, which is
-    // the only state the caller can safely drop the tower from.
+bool qwen3vl_upload_vision_tower(VisionModel& model, size_t& bytes_out, std::string& err) {
+    // Collected first, applied last: on any failure every Tensor still points at
+    // the host mapping, which is the only state the caller can safely drop the
+    // tower from. The arena takes are not rewound on that path — it is a bump
+    // allocator — but a failed tower upload ends vision for this engine anyway,
+    // and the bytes go back when the arena closes.
     struct Pending {
         Tensor* slot;
         void* device;
@@ -82,14 +78,15 @@ bool qwen3vl_upload_vision_tower(VisionModel& model, VRAMAllocator* alloc, std::
             return;
         }
         const size_t bytes = staging.size() * sizeof(half);
-        void* d = alloc->allocate(bytes, "vision_tower");
-        if (!d) {
-            err = "out of VRAM uploading vision tower tensor '" + what + "'";
+        auto slab = engine_arena().take_bytes(bytes);
+        if (slab.empty()) {
+            err = "engine arena exhausted uploading vision tower tensor '" + what +
+                  "' — the arena was reserved without this tower";
             ok = false;
             return;
         }
+        void* d = slab.data();
         if (cudaMemcpy(d, staging.data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-            alloc->free(d);
             err = "upload failed for vision tower tensor '" + what + "'";
             ok = false;
             return;
@@ -98,18 +95,14 @@ bool qwen3vl_upload_vision_tower(VisionModel& model, VRAMAllocator* alloc, std::
         total += bytes;
     });
 
-    if (!ok) {
-        for (const auto& p : pending)
-            alloc->free(p.device);
+    if (!ok)
         return false;
-    }
 
     for (const auto& p : pending) {
         p.slot->data = p.device;
         p.slot->qtype = QType::F16;
         p.slot->on_device = true;
         p.slot->compute_strides();
-        out_allocs.push_back(p.device);
     }
     bytes_out = total;
     IMP_LOG_INFO("Vision tower: %zu tensors uploaded, %.1f MiB", pending.size(),
