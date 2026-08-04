@@ -25,6 +25,23 @@ there instead of retelling it.
   `max_tokens`. `CommonArgs` is a base class rather than a member, so every
   existing `args.<field>` use site is unchanged.
 
+### Fixed
+- **A second engine in one process ran on freed memory** — the module statics
+  that take a slice from the engine's T2 arena were only re-armed by
+  `reset_static_cuda_state()`, which was wired to `imp_api_suspend.cpp` alone
+  and never to `~Engine`. `gemm.cu`'s `gemm_init()` guards with
+  `if (!s_workspace)`, so the stale pointer survived the arena's close and
+  cuBLASLt matmul'd into it: `status 14`, fallback, illegal memory access, and
+  every later test in the process died on a context it did not break. The reset
+  now runs after `engine_arena_close()`. Reproducer, stub model:
+  0 / 25 / 26 / 27 IMA lines at `--gtest_repeat=1/2/3/4` before, 0 / 0 / 0 / 0
+  after. The full GPU suite goes from **57 failures to 1** (the remaining one
+  is pre-existing and passes in isolation), and from 111 IMA lines to none.
+- **`StubModelTest.CreateContextAndInfer` no longer hides a poisoned context.**
+  Its contract was "the key check is no crash", and it met that while corrupting
+  the CUDA context; the failure path skipped with "expected without GPU", which
+  is indistinguishable from a real skip. It now separates the two.
+
 ### Changed
 - **Two layering cycles closed by moving a type down, not by adding an include.**
   `src/compute/weight_dispatch.h` included `exec/weight_handle.h` for

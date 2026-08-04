@@ -32,6 +32,7 @@
 #include "compute/attention.h"
 #include "compute/layernorm.h"
 #include "core/logging.h"
+#include "core/cuda_static_reset.h"
 
 #include <cstring>
 #include <cstdlib>
@@ -79,6 +80,16 @@ Engine::~Engine() {
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
     engine_arena_close();
+    // The arena is gone; every module static that took a slice from it is now
+    // holding a dangling pointer. reset_static_cuda_state() re-arms exactly
+    // those (gemm_reset_static_cuda_state's own comment says "the region
+    // belongs to the T2 arena, which ~Engine closes") — it was only ever wired
+    // to imp_api_suspend.cpp, so a SECOND engine in one process reused freed
+    // memory. gemm_init() guards with `if (!s_workspace)`, so the stale pointer
+    // survived and cuBLASLt matmul'd into it: status 14, fallback, illegal
+    // memory access, and every later test in the process died on a context it
+    // did not break. Must run AFTER the arena closes, not before.
+    reset_static_cuda_state();
 
     // Save prefix cache to disk before shutdown (dense only — hybrid reuse
     // needs recurrent snapshots, which are device-resident and not persisted)
