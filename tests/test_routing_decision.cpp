@@ -18,7 +18,7 @@ using namespace imp;
 namespace {
 
 // Default config: fmha_fa2="on", fp8_fmha="never" (opt-in, #511), fmha_sm120="auto".
-RuntimeConfig default_cfg() { return RuntimeConfig{}; }
+DispatchPolicy default_cfg() { return DispatchPolicy{}; }
 
 // Typical hd=128 F16 prefill: every specialized kernel would accept.
 AttnKernelSupport all_accept() {

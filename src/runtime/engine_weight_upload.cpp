@@ -28,7 +28,21 @@ bool Engine::init_weights() {
     // Initialize graph executor (Phase 1: compute sizes, no GPU allocation)
     executor_ = std::make_unique<GraphExecutor>();
     executor_->set_vram_allocator(&vram_alloc_);
-    executor_->set_runtime_config(runtime_config_);
+    // Fill the dispatch snapshot HERE, not earlier: init_resolve_* still mutates
+    // runtime_config_ (deterministic_gemm, kv dtype policy, fp8 prefill, quant
+    // flags) and those run before init_weights(). Filling before them would hand
+    // exec/ pre-resolution values, which is exactly the class of bug that has no
+    // symptom other than the wrong kernel running.
+    dispatch_policy_.kv_cache = runtime_config_.kv_cache;
+    dispatch_policy_.attention = runtime_config_.attention;
+    dispatch_policy_.moe = runtime_config_.moe;
+    dispatch_policy_.gdn = runtime_config_.gdn;
+    dispatch_policy_.gemm = runtime_config_.gemm;
+    dispatch_policy_.generation = runtime_config_.generation;
+    dispatch_policy_.speculative = runtime_config_.speculative;
+    dispatch_policy_.ffn = runtime_config_.ffn;
+    dispatch_policy_.diagnostics = runtime_config_.diagnostics;
+    executor_->set_runtime_config(dispatch_policy_);
     {
         int eff_batch = config_.max_batch_size;
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, config_.max_seq_len,

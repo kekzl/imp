@@ -1,3 +1,4 @@
+#include "core/dispatch_policy.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
 #include "exec/gemm_kernel_registry.h"
@@ -5,7 +6,6 @@
 #include "compute/weight_dispatch.h"
 #include "core/tensor_kind.h"
 #include "core/logging.h"
-#include "runtime/config.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"

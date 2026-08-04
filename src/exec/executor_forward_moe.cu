@@ -9,12 +9,12 @@
 //   4. Batch path (cuBLAS/CUTLASS for large batches)
 //   5. Shared expert path (parallel dense FFN when present)
 
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/gemm_context.h"
 #include "exec/executor_debug.h"
-#include "runtime/config.h"
 #include <atomic>
 #include "compute/embedding.h"
 #include "compute/ggml_mmvq.h"

@@ -1,6 +1,7 @@
 // MoE batch prefill paths: NVFP4 dequant, Q6K, FP8, FP16, Gemma-4 ggml.
 // Extracted from executor_forward_moe.cu for maintainability.
 
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "compute/mmq_q8_imma.h"
 #include "core/cuda_static_reset.h"
@@ -8,7 +9,6 @@
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
 #include "exec/executor_debug.h"
-#include "runtime/config.h"
 #include <atomic>
 #include "compute/embedding.h"
 #include "compute/ggml_mmvq.h"

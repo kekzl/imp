@@ -31,7 +31,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                           wcache_, qscratch_, registry_, hints_, moe_, max_tokens_);
 }
 
-void QuantPipeline::build(const Model& model, const RuntimeConfig& rcfg, VRAMAllocator& alloc,
+void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAllocator& alloc,
                           const VRAMBudget& budget, cudaStream_t stream, WeightCaches& wcache,
                           QuantScratch& qscratch, WeightRegistry& registry, PlanHints& hints,
                           MoEWorkspace& moe, int max_tokens) {

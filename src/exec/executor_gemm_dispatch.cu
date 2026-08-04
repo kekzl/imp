@@ -1,4 +1,5 @@
 // executor_gemm_dispatch.cu — GEMM dispatch entry for the executor.
+#include "core/dispatch_policy.h"
 #include <utility>
 //
 // Extracted from executor_kernels.cu (D3, structural-debt audit): the
@@ -12,7 +13,6 @@
 #include "compute/weight_dispatch.h"
 #include "core/tensor_kind.h"
 #include "core/logging.h"
-#include "runtime/config.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"

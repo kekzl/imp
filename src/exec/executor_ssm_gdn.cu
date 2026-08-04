@@ -1,3 +1,4 @@
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_debug.h"
@@ -8,7 +9,6 @@
 #include "compute/gdn.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
-#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

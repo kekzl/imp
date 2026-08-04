@@ -13,6 +13,7 @@
 //
 // See pre_dequant_internal.h for shared helpers.
 
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
@@ -26,7 +27,6 @@
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
-#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

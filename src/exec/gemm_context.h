@@ -1,7 +1,7 @@
 #pragma once
 
 #include "exec/quant_scratch.h"
-#include "runtime/config.h"
+#include "core/dispatch_policy.h"
 #include <cuda_runtime.h>
 
 namespace imp {
@@ -56,8 +56,8 @@ struct GemmContext {
     // (replaces the former RuntimeConfig::current() reads in gemm_dispatch
     // and gemm_kernel_gguf).
     static GemmContext make(cudaStream_t s, const WeightCaches& wc, const QuantScratch& qs,
-                            const RuntimeConfig& rcfg, bool force_fp16 = false,
-                            bool force_mmvq = false, bool spec_verify = false) {
+                            const DispatchPolicy& rcfg, bool force_fp16 = false, bool force_mmvq = false,
+                            bool spec_verify = false) {
         GemmContext ctx;
         ctx.stream = s;
         ctx.wcache = &wc;

@@ -1,3 +1,4 @@
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "vision/deepstack_inject.h"
 #include "exec/executor_gemv_helpers.h"
@@ -5,7 +6,6 @@
 #include "exec/executor_helpers.h"
 #include "exec/executor_debug.h"
 #include "exec/gemm_context.h"
-#include "runtime/config.h"
 #include <cstdio>
 #include <stdexcept>
 #include "compute/embedding.h"

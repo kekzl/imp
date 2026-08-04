@@ -1,7 +1,7 @@
 #include "compute/attention.h"
 #include "compute/attention_tc.h"
 #include "core/logging.h"
-#include "runtime/config.h"
+#include "core/dispatch_policy.h"
 #include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -55,7 +55,7 @@ int get_device_sm_version() {
 // done here.
 // One-shot so a divergence cannot flood a serving log; the first occurrence is
 // the one that matters and it names both answers.
-static void verify_against_routing_model(const RuntimeConfig& rcfg, const AttnKernelSupport& sup,
+static void verify_against_routing_model(const DispatchPolicy& rcfg, const AttnKernelSupport& sup,
                                          bool has_sinks, AttnPrefillPath chosen) {
     const AttnPrefillPath modeled = select_attn_prefill_path(rcfg, sup, has_sinks);
     if (modeled == chosen)
@@ -74,7 +74,7 @@ static void verify_against_routing_model(const RuntimeConfig& rcfg, const AttnKe
 
 void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                 bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                                const RuntimeConfig& rcfg, int q_offset, const half* attn_sinks) {
+                                const DispatchPolicy& rcfg, int q_offset, const half* attn_sinks) {
     // Observations, filled in as the chain is walked. A tier the chain never
     // reaches keeps its `false` — see the KNOWN LIMIT above.
     AttnKernelSupport sup{};

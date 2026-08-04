@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/dispatch_policy.h"
+
 #include "model/model.h"
 #include "memory/host_pinned.h"
 #include "memory/kv_cache.h"
@@ -26,7 +28,6 @@
 #include "exec/workspace.h"
 #include "runtime/storage_planner.h"
 #include "runtime/vram_budget.h"
-#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -407,7 +408,7 @@ public:
     // set_runtime_config() during init; the contract is now "set before
     // first access". Tests that build a bare GraphExecutor without an
     // owning Engine must wire a RuntimeConfig themselves.
-    void set_runtime_config(const RuntimeConfig& cfg) noexcept { runtime_config_ = &cfg; }
+    void set_runtime_config(const DispatchPolicy& p) noexcept { runtime_config_ = &p; }
 
     // Activation calibration ([calibration] enabled): collect per-input-channel
     // activation magnitudes off gemm_via_handle_ for an offline quantizer.
@@ -419,10 +420,10 @@ public:
     }
     const ActivationCalibrator* calibration() const { return calib_.get(); }
 
-    const RuntimeConfig& runtime_config() const noexcept {
+    const DispatchPolicy& runtime_config() const noexcept {
         // CRITICAL: set_runtime_config() must be called before any forward.
         // Hard-failing here would crash unit tests; cold default is acceptable.
-        static const RuntimeConfig kDefault;
+        static const DispatchPolicy kDefault;
         return runtime_config_ ? *runtime_config_ : kDefault;
     }
 
@@ -713,7 +714,7 @@ private:
     // --- Per-Engine RuntimeConfig (Phase 5 Track D, non-owning) ---
     // Engine wires this via set_runtime_config() during Engine::init.
     // Replaces RuntimeConfig::current() inside GraphExecutor::* methods.
-    const RuntimeConfig* runtime_config_ = nullptr;
+    const DispatchPolicy* runtime_config_ = nullptr;
 
     // --- Allocation and configuration methods ---
     // The shared/persistent/decode scratch arena (allocate_*_workspace,

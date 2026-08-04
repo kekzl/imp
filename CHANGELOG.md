@@ -55,6 +55,19 @@ there instead of retelling it.
   is indistinguishable from a real skip. It now separates the two.
 
 ### Changed
+- **The nine dispatch config sections moved to `core/` (audit F-10).**
+  `runtime/config.h` was included by 22 files in `src/exec/`, 85 translation
+  units transitively, and changed 130 times in six months — the highest build
+  cost in the repo. `kv_cache attention moe gdn gemm generation speculative ffn
+  diagnostics` now live in `src/core/dispatch_policy.h` under `imp::cfg`, and
+  `Engine` hands `exec/` a `DispatchPolicy` snapshot instead of a pointer to the
+  live config. `exec/` and `compute/` no longer include `runtime/config.h` at
+  all; the nine remaining includers are all inside `src/runtime/`, which owns it.
+  `config.h` 1143 -> 403 lines, TUs pulling it 85 -> 18. No behaviour change:
+  the resolved-dispatch lines are bit-identical across the GPU suite, all twelve
+  patterns at identical frequencies.
+
+### Changed
 - **Two layering cycles closed by moving a type down, not by adding an include.**
   `src/compute/weight_dispatch.h` included `exec/weight_handle.h` for
   `WeightHandle` — one backward edge against forty forward ones; the struct

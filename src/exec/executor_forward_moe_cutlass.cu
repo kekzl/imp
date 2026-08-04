@@ -8,7 +8,7 @@
 #include "exec/executor_kernels.h"
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/moe_prefill_decision.h"  // select_moe_prefill_path — the mirror this file verifies against
-#include "runtime/config.h"
+#include "core/dispatch_policy.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
@@ -51,7 +51,7 @@ namespace imp {
 //
 // One-shot so a divergence cannot flood a serving log; the first occurrence is
 // the one that matters and it names both answers.
-static void verify_against_moe_routing_model(ModelArch arch, const RuntimeConfig& rcfg,
+static void verify_against_moe_routing_model(ModelArch arch, const DispatchPolicy& rcfg,
                                              const MoePrefillWorkspace& obs, MoePrefillPath chosen) {
     const MoePrefillPath modeled = select_moe_prefill_path(arch, rcfg, obs);
     if (modeled == chosen)

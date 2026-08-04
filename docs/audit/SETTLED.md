@@ -343,6 +343,23 @@ Still open from 07-29 with the reason each was not shipped blind — see
   lands in sections `exec/` never reads**. The saving is real but unreachable without
   changing what the owning classes hold — which is the POD extraction itself.
   Cost of leaving it: 85 TUs x 130 commits/6mo, the highest in the repo.
+  **Design settled 2026-08-04, three facts the R-18 sketch does not mention:**
+  (a) `engine_init_resolver.cpp` still *mutates* the config after load
+  (`runtime.deterministic_gemm = true`, two sites), and `GraphExecutor` holds a
+  live `const RuntimeConfig*`, not a copy — so a resolved-once POD is a semantic
+  change, not only a mechanical one. It is safe **only** if filled after the
+  resolvers: they run at `engine.cpp:851-856`, `set_runtime_config()` fires from
+  `init_weights()` at `:972`, and nothing writes the config after that.
+  (b) The cheaper shape is not the audit's 59-field POD but the **nine sections
+  by value** — `gemm attention moe diagnostics gdn generation ffn speculative
+  kv_cache` — which turns all 91 read sites into a prefix rename
+  (`runtime_config().gemm.x` -> `dispatch_policy().gemm.x`) and removes the
+  drift risk between POD and config that a hand-enumerated field list carries.
+  (c) Those sections are nested inside `RuntimeConfig`, so they must be lifted
+  out — and that is nearly free: **exactly one** explicit `RuntimeConfig::<Section>`
+  reference exists across `src/ tools/ tests/`.
+  What remains is volume, not uncertainty: lift nine structs into `core/`, fill
+  the policy at `:972`, rename 91 accessors, drop the include from 22 files.
 - **F-12** — `src/memory/vram_allocator.cu`: **67** live references (2026-08-03), down from
   the audit's 84. Still open, but shrinking; count with the allocator's own files and comment
   lines excluded or you get 103 and read a regression that is not there.

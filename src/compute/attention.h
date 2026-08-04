@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/dispatch_policy.h"
+
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -17,7 +19,7 @@ struct RuntimeConfig;  // fwd, defined in runtime/config.h
 // of falling through to a sink-blind kernel (silent-wrong-output guard).
 void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                 bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                                const RuntimeConfig& rcfg, int q_offset = 0,
+                                const DispatchPolicy& rcfg, int q_offset = 0,
                                 const half* attn_sinks = nullptr);
 
 // Query the compute capability of the current device.
