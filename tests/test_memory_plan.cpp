@@ -362,7 +362,10 @@ TEST(ShadowPlan, ReportSaysWhatItDoesNotModel) {
         << "the report still describes itself as a shadow";
     EXPECT_NE(r.find("workspaces not modelled"), std::string::npos)
         << "a probe that hides its gaps is worse than no probe";
-    EXPECT_NE(r.find("vision tower not modelled"), std::string::npos);
+    // The note says the shadow plan does not model the tower — it no longer claims
+    // the size is unknowable, because since F-12 the arena reserves it from a
+    // pre-load probe. Match on what stayed true, not on the old reason.
+    EXPECT_NE(r.find("vision tower not in the shadow plan"), std::string::npos);
     EXPECT_NE(r.find("forward scratch not modelled"), std::string::npos);
 }
 

@@ -24,7 +24,13 @@ public:
 
     // Initialize vision encoder from mmproj GGUF. Returns false on failure.
     [[nodiscard]] bool init(const std::string& mmproj_path, int lm_d_model, Model* model,
-                            VRAMAllocator& alloc, cudaStream_t stream);
+                            cudaStream_t stream);
+
+    // Device bytes init() takes from the T2 arena, encoder included. Answerable
+    // from the probed config before the mmproj is loaded, which is what lets
+    // Engine::init size the arena for it.
+    static size_t demand_bytes(const VisionConfig& cfg, int lm_d_model);
+    size_t taken_bytes() const;
 
     // Encode an image from file path. Blocks on stream sync.
     [[nodiscard]] bool set_image(const std::string& path, cudaStream_t stream);
@@ -62,7 +68,7 @@ public:
 private:
     std::unique_ptr<VisionModel> model_;
     std::unique_ptr<VisionEncoder> encoder_;
-    VRAMAllocator* alloc_ = nullptr;
+    size_t taken_bytes_ = 0;
 
     half* d_embeddings_ = nullptr;
     half* d_pixels_ = nullptr;
@@ -77,5 +83,8 @@ private:
     // Internal: upload pixels and encode
     bool encode_image(const half* h_pixels, int n_pixels, cudaStream_t stream);
 };
+
+// Arena demand for the mmproj vision path, answerable before the file is loaded.
+size_t vision_mmproj_arena_bytes(const std::string& mmproj_path, int lm_d_model);
 
 }  // namespace imp

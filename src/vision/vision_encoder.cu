@@ -1,4 +1,5 @@
 #include "vision/vision_encoder.h"
+#include "memory/engine_arena.h"
 #include "compute/warp_reduce.cuh"
 #include "core/cuda_static_reset.h"
 #include "memory/vram_allocator.h"
@@ -398,42 +399,39 @@ __global__ void replace_vision_embeddings_v2_kernel(half* __restrict__ hidden,
 
 VisionEncoder::~VisionEncoder() { free_buffers(); }
 
+// The workspace is T2 arena slices; the arena releases wholesale on close, so
+// this only drops pointers. Freeing them individually would hand arena memory
+// back to the driver.
 void VisionEncoder::free_buffers() {
-    auto safe_free = [this](half*& p) {
-        if (p) {
-            if (alloc_)
-                alloc_->free(p);
-            else
-                cudaFree(p);
-            p = nullptr;
-        }
-    };
-    safe_free(d_patches_);
-    safe_free(d_hidden_);
-    safe_free(d_residual_);
-    safe_free(d_q_);
-    safe_free(d_k_);
-    safe_free(d_v_);
-    safe_free(d_attn_out_);
-    safe_free(d_attn_scores_);
-    safe_free(d_ffn_);
-    safe_free(d_pooled_);
-    safe_free(d_gate_);
-    if (d_pos_x_) {
-        cudaFree(d_pos_x_);
-        d_pos_x_ = nullptr;
-    }
-    if (d_pos_y_) {
-        cudaFree(d_pos_y_);
-        d_pos_y_ = nullptr;
-    }
+    d_patches_ = d_hidden_ = d_residual_ = nullptr;
+    d_q_ = d_k_ = d_v_ = d_attn_out_ = nullptr;
+    d_attn_scores_ = d_ffn_ = d_pooled_ = d_gate_ = nullptr;
+    d_pos_x_ = d_pos_y_ = nullptr;
+    taken_bytes_ = 0;
 }
 
-bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t stream,
-                         VRAMAllocator* alloc_in) {
+size_t VisionEncoder::demand_bytes(const VisionConfig& cfg) {
+    const int64_t np = cfg.num_patches;
+    const int64_t hd = cfg.hidden_size;
+    const int64_t ff = cfg.intermediate_size;
+    const int64_t nh = cfg.num_heads;
+    const int64_t pd = static_cast<int64_t>(cfg.patch_size) * cfg.patch_size * 3;
+    size_t total = static_cast<size_t>(np * pd) * sizeof(half);          // patches
+    total += static_cast<size_t>(np * hd) * sizeof(half) * 6;            // hidden,residual,q,k,v,attn_out
+    total += static_cast<size_t>(nh * np * np) * sizeof(half);           // attn scores
+    total += static_cast<size_t>(np * ff) * sizeof(half);                // ffn
+    total += static_cast<size_t>(cfg.num_image_tokens * hd) * sizeof(half);  // pooled
+    if (cfg.is_gemma4v) {
+        total += static_cast<size_t>(np * ff) * sizeof(half);            // geglu gate
+        total += static_cast<size_t>(np) * sizeof(int) * 2;              // axial pos x/y
+    }
+    return total;
+}
+
+bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t stream) {
     model_ = &model;
     lm_d_model_ = lm_d_model;
-    alloc_ = alloc_in;
+    taken_bytes_ = 0;
 
     const auto& cfg = model.config;
     int np = cfg.num_patches;                      // 4096
@@ -442,13 +440,20 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
     int nh = cfg.num_heads;                        // 16
     int pd = cfg.patch_size * cfg.patch_size * 3;  // 588
 
-    auto alloc = [this](half*& ptr, size_t n) -> bool {
-        size_t bytes = n * sizeof(half);
-        if (alloc_) {
-            ptr = static_cast<half*>(alloc_->allocate(bytes, "vision_encoder"));
-            return ptr != nullptr;
+    auto take = [this](size_t bytes) -> void* {
+        auto slab = engine_arena().take_bytes(bytes);
+        if (slab.empty()) {
+            IMP_LOG_ERROR("Vision encoder: engine arena exhausted for %zu bytes — the arena was "
+                          "reserved without this encoder",
+                          bytes);
+            return nullptr;
         }
-        return cudaMalloc(&ptr, bytes) == cudaSuccess;
+        taken_bytes_ += bytes;
+        return slab.data();
+    };
+    auto alloc = [&take](half*& ptr, size_t n) -> bool {
+        ptr = reinterpret_cast<half*>(take(n * sizeof(half)));
+        return ptr != nullptr;
     };
 
     if (!alloc(d_patches_, np * pd) || !alloc(d_hidden_, np * hd) || !alloc(d_residual_, np * hd) ||
@@ -464,9 +469,9 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
     // indices (column = patch % grid, row = patch / grid).
     if (cfg.is_gemma4v) {
         int grid = cfg.image_size / cfg.patch_size;
-        if (!alloc(d_gate_, np * ff) ||
-            cudaMalloc(&d_pos_x_, np * sizeof(int)) != cudaSuccess ||
-            cudaMalloc(&d_pos_y_, np * sizeof(int)) != cudaSuccess) {
+        d_pos_x_ = static_cast<int*>(take(np * sizeof(int)));
+        d_pos_y_ = static_cast<int*>(take(np * sizeof(int)));
+        if (!alloc(d_gate_, np * ff) || !d_pos_x_ || !d_pos_y_) {
             IMP_LOG_ERROR("Vision encoder: gemma4v workspace allocation failed");
             free_buffers();
             return false;

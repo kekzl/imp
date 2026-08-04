@@ -5,7 +5,6 @@
 
 namespace imp {
 
-class VRAMAllocator;
 
 struct VisionConfig {
     int image_size = 896;
@@ -98,17 +97,14 @@ struct VisionModel {
     // Transformer layers
     std::vector<VisionLayerWeights> layers;
 
-    // GPU allocations for cleanup (the legacy GGUF mmproj path, which allocates
-    // them itself). The Qwen3-VL path does NOT use this: its device copies are
-    // owned by the pipeline that made them, because a VisionModel outliving the
-    // allocator it borrowed from is a use-after-free waiting for a teardown
-    // order to expose it.
-    std::vector<void*> gpu_allocs;
-
     int lm_d_model = 0;  // LLM hidden dimension (from mm_proj output)
 
+    // Both towers are T2 arena tenants now (F-12), so a VisionModel owns no device
+    // memory and needs no teardown of its own. The old per-tensor cudaFree list is
+    // gone with the last raw cudaMalloc in this path; the note it carried — that a
+    // VisionModel outliving the allocator it borrowed from is a use-after-free — is
+    // answered by the arena outliving every model it served.
     ~VisionModel();
-    void free_gpu();
 };
 
 }  // namespace imp

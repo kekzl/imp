@@ -12,6 +12,16 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Changed
+- **The Gemma mmproj vision path is a T2 arena tenant; `src/vision/` no longer
+  uses `VRAMAllocator` at all** (F-12). The SigLIP tower, the encoder workspace
+  and the pipeline buffers came from 9 raw `cudaMalloc` sites outside the tier
+  model; they now come from the engine arena, which is sized for them before the
+  mmproj is loaded. `tools/alloc_allowlist.txt` loses three files — **482 -> 473**
+  direct allocation sites. Sizing runs the real loader in counting mode rather
+  than through a second parser, so the reservation cannot drift from the upload;
+  the golden runs assert that exactly, and both guards are mutation-validated.
+  What stays on `cudaMalloc` is the per-image pixel fallback, which is
+  request-scoped rather than engine-lifetime.
 - **`runtime/engine.h` now reaches 23 translation units instead of 33** (F-24,
   `src/api/imp_internal.h`). It was the repo's #2 build-cost header (fan-in x
   commits); `imp_internal.h` pulled it in front of 17 includers while storing

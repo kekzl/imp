@@ -2,6 +2,7 @@
 #include "core/buffer.h"
 #include "vision/image_processor.h"
 #include "vision/qwen3vl_vision_load.h"
+#include "vision/vision_pipeline.h"
 #include "runtime/request.h"
 #include "lora/lora_adapter.h"
 #include "runtime/engine_internal.h"
@@ -696,10 +697,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // the model's shapes here or the arena is sized without it. Gemma's mmproj
         // tower is a separate file that is not loaded yet and stays outside the
         // arena for now (docs/audit/SETTLED.md F-12).
-        const size_t vision_bytes =
+        size_t vision_bytes =
             model_->vision_tower ? qwen3vl_vision_arena_bytes(*model_->vision_tower,
                                                               runtime_config_.runtime.vision_max_patches)
                                  : 0;
+        if (!config_.mmproj_path.empty())
+            vision_bytes += vision_mmproj_arena_bytes(config_.mmproj_path, model_->config_.d_model);
         // *9/8 for 256-byte alignment padding across the arena's takes (integer
         // identical to t + t/8, just one expression instead of two).
         const size_t cap = std::max(kEngineArenaDefaultBytes, (d.total() + vision_bytes) * 9 / 8);
