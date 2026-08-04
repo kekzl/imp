@@ -2,6 +2,7 @@
 // Handles: dequant scratch, sampling, MMVQ, split-K, attention S-matrix, FMHA,
 // MoE workspace, FP8 activation, CUTLASS NVFP4/MXFP4 activation buffers.
 
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "memory/vram_query.h"
 #include "exec/executor_kernels.h"
@@ -12,7 +13,6 @@
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/sampling.h"
-#include "runtime/config.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_gemm.h"
@@ -493,8 +493,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // measured 2026-06-12.)
     if (runtime_config().attention.fmha_prefill_threshold == -1) {
         int auto_threshold = attn_scores_cap() > 0 ? attn_scores_cap() + 1 : 1;
-        const_cast<RuntimeConfig::Attention&>(runtime_config().attention).fmha_prefill_threshold =
-            auto_threshold;
+        const_cast<cfg::Attention&>(runtime_config().attention).fmha_prefill_threshold = auto_threshold;
         IMP_LOG_INFO("auto fmha_prefill_threshold = %d (S-matrix cap + 1)", auto_threshold);
     }
 

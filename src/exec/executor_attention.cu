@@ -1,3 +1,4 @@
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include <stdexcept>
 #include "lora/lora_adapter.h"
@@ -39,7 +40,6 @@
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
-#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

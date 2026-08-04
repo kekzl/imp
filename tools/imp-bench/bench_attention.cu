@@ -2,7 +2,7 @@
 #include "compute/attention_tc.h"
 #include "compute/attention_paged.h"
 #include "core/tensor.h"
-#include "runtime/config.h"
+#include "core/dispatch_policy.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -68,8 +68,10 @@ static float bench_kernel(const AttentionConfig& cfg, int seq_len, bool use_cutl
     Tensor V(d_v, QType::F16, 4, kv_shape, true);
     Tensor O(d_o, QType::F16, 4, o_shape, true);
 
-    // Default runtime config for the dispatch (microbench — no overrides).
-    const RuntimeConfig rcfg;
+    // Default dispatch policy for the microbench — no overrides. Takes the
+    // snapshot type rather than RuntimeConfig since F-10; the defaults are the
+    // same because DispatchPolicy holds the very same section structs.
+    const DispatchPolicy rcfg;
 
     // Select kernel path
     auto run_kernel = [&]() {

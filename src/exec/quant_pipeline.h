@@ -1,9 +1,10 @@
 #pragma once
 
+#include "core/dispatch_policy.h"
+
 #include "core/tensor.h"            // Tensor, QType (used by Nvfp4DecodeContext + signatures)
 #include "runtime/storage_planner.h" // StoragePlan, PlanHints, StorageTier
 #include "exec/weight_handle.h"      // WeightRegistry
-#include "runtime/config.h"          // RuntimeConfig (runtime_config() accessor)
 #include <cuda_runtime.h>
 #include <cstddef>
 #include <vector>
@@ -58,17 +59,16 @@ public:
     // Runs the full init-time quantization pipeline once. Populates the four
     // long-lived caches (owned by the caller) from the model's weights; owns the
     // transient StoragePlan + decode context internally.
-    void build(const Model& model, const RuntimeConfig& rcfg, VRAMAllocator& alloc,
-               const VRAMBudget& budget, cudaStream_t stream, WeightCaches& wcache,
-               QuantScratch& qscratch, WeightRegistry& registry, PlanHints& hints,
-               MoEWorkspace& moe, int max_tokens);
+    void build(const Model& model, const DispatchPolicy& rcfg, VRAMAllocator& alloc, const VRAMBudget& budget,
+               cudaStream_t stream, WeightCaches& wcache, QuantScratch& qscratch, WeightRegistry& registry,
+               PlanHints& hints, MoEWorkspace& moe, int max_tokens);
 
 private:
     // Build context (set at the top of build(); the phase methods read these
     // exactly as they read the same-named GraphExecutor members today).
     const Model* model_ = nullptr;
     VRAMAllocator* vram_alloc_ = nullptr;
-    const RuntimeConfig* runtime_config_ = nullptr;
+    const DispatchPolicy* runtime_config_ = nullptr;
     WeightCaches* wcache_ = nullptr;
     QuantScratch* qscratch_ = nullptr;
     WeightRegistry* registry_ = nullptr;
@@ -83,8 +83,8 @@ private:
     // runtime_config() call sites in the moved phases byte-identical. When the
     // next GraphExecutor component (MoeRunner/Workspace) needs a 3rd copy, hoist
     // this to a shared free helper in runtime/config.h instead.
-    const RuntimeConfig& runtime_config() const noexcept {
-        static const RuntimeConfig kDefault;
+    const DispatchPolicy& runtime_config() const noexcept {
+        static const DispatchPolicy kDefault;
         return runtime_config_ ? *runtime_config_ : kDefault;
     }
 

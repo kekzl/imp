@@ -9,13 +9,13 @@
 // Extracted from executor_pre_dequant.cu in Phase 3 of the architecture
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/logging.h"
 #include "quant/nvfp4_quant.h"
-#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cstdlib>

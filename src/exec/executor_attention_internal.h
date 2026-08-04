@@ -10,7 +10,7 @@
 #include "exec/executor_gemv_helpers.h"
 #include "compute/attention_fmha_sm120.h"
 #include "core/tensor.h"
-#include "runtime/config.h"
+#include "core/dispatch_policy.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -30,7 +30,7 @@ namespace imp {
 // apply, and no [n × ctx] S-matrix is materialized. Declined configs
 // (hd!=128, non-F16, chunk continuation) return false → caller stays on
 // cuBLAS; the fp8 FMHA family is intentionally NOT a fallback here.
-static bool try_fa2_fp16qk_prefill(const RuntimeConfig& rcfg, const Tensor& q, const Tensor& k,
+static bool try_fa2_fp16qk_prefill(const DispatchPolicy& rcfg, const Tensor& q, const Tensor& k,
                                    const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv, int hd,
                                    float scale, int sliding_window, float softcap, int q_offset,
                                    cudaStream_t stream, const int* d_kv_len = nullptr) {

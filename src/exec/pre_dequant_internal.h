@@ -13,7 +13,7 @@
 #include "memory/vram_allocator.h"
 #include "model/model.h"
 #include "model/model_config.h"
-#include "runtime/config.h"
+#include "core/dispatch_policy.h"
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -41,8 +41,8 @@ namespace imp::pre_dequant_internal {
 //    cache is a 4x byte win (+8-16% decode, +2.2% PPL, owner-accepted trade,
 //    GOAL-listed). auto → ON (unchanged).
 // GDN/SSM hybrids remain additionally gated by gemm.nvfp4_lm_head_gdn.
-inline bool nvfp4_lm_head_enabled(const RuntimeConfig& rc, bool quantized_source, bool is_dense,
-                                  int d_model, bool is_gdn_hybrid = false) {
+inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, bool is_dense, int d_model,
+                                  bool is_gdn_hybrid = false) {
     const std::string& v = rc.gemm.nvfp4_lm_head;
     if (v == "on" || v == "true" || v == "1")
         return true;

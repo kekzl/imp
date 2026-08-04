@@ -11,6 +11,7 @@
 #include "vision/qwen3vl_pipeline.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/config.h"
+#include "core/dispatch_policy.h"
 #include "runtime/graph_eligibility.h"
 #include "runtime/suffix_draft.h"
 #include "runtime/token_recycle_draft.h"
@@ -333,6 +334,10 @@ private:
     // by engine_init_resolver helpers for arch-specific defaults
     // (deterministic_gemm, prefill_graph, etc.).
     RuntimeConfig runtime_config_;
+    // Snapshot of the nine sections src/exec reads, filled once in init_weights()
+    // after the init resolvers have run (F-10). exec/ holds a pointer to THIS,
+    // which is what lets it stop including runtime/config.h.
+    DispatchPolicy dispatch_policy_;
     std::shared_ptr<Model> model_;
     EngineConfig config_;
 

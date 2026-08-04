@@ -2,7 +2,7 @@
 
 #include "compute/dispatch_paths.h"  // MoePrefillPath
 #include "model/model_arch.h"
-#include "runtime/config.h"
+#include "core/dispatch_policy.h"
 
 // Pure host-side model of the MoE-prefill GEMM path selection in
 // executor_forward_moe_cutlass.cu (and its precondition mirror
@@ -44,7 +44,7 @@ struct MoePrefillWorkspace {
 // gpt-oss (#574/#547) is arch-gated OFF the device-args and smallM tiers (the
 // fused act+quantize kernel has no GLU-clamp / per-expert-bias hooks) — it
 // takes the GROUPED tier, which applies the bias seams + GPT_OSS_GLU activation.
-inline MoePrefillPath select_moe_prefill_path(ModelArch arch, const RuntimeConfig& rcfg,
+inline MoePrefillPath select_moe_prefill_path(ModelArch arch, const DispatchPolicy& rcfg,
                                               const MoePrefillWorkspace& ws) {
     const bool is_gpt_oss = (arch == ModelArch::GPT_OSS);
 

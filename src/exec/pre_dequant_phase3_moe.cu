@@ -5,6 +5,7 @@
 // kernel file-size threshold. See pre_dequant_internal.h / quant_pipeline.h
 // for shared declarations.
 
+#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
@@ -16,7 +17,6 @@
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
-#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

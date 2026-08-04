@@ -1,7 +1,7 @@
 #pragma once
 
 #include "compute/dispatch_paths.h"  // AttnPrefillPath
-#include "runtime/config.h"
+#include "core/dispatch_policy.h"
 
 // Pure host-side model of the attention-prefill dispatch ordering in
 // attention_dispatch.cu. Extracted so the routing table (which kernel serves a
@@ -50,8 +50,7 @@ struct AttnKernelSupport {
 // has_sinks mirrors the #992 pre-gate: learned sinks (gpt-oss) route straight
 // to the FP16 WMMA FMHA (the only sink-capable tier) and the dispatch THROWS
 // on decline instead of falling through to a sink-blind kernel.
-inline AttnPrefillPath select_attn_prefill_path(const RuntimeConfig& rcfg,
-                                                const AttnKernelSupport& sup,
+inline AttnPrefillPath select_attn_prefill_path(const DispatchPolicy& rcfg, const AttnKernelSupport& sup,
                                                 bool has_sinks = false) {
     // 0. Learned sinks (#992): FP16 WMMA FMHA or nothing.
     if (has_sinks) {
