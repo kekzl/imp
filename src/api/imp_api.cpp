@@ -19,6 +19,12 @@
 
 #include <cuda_runtime.h>
 
+// Out-of-line so imp_internal.h can forward-declare imp::Engine: this is the
+// single point where unique_ptr<Engine> needs the complete type.
+ImpContext_T::ImpContext_T() = default;
+ImpContext_T::~ImpContext_T() = default;
+
+
 
 // --- Error string ---
 

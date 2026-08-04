@@ -8,6 +8,7 @@
 #include "runtime/presets.h"
 #include "runtime/config.h"
 #include "runtime/process_diag.h"
+#include "runtime/engine.h"
 
 #include <chrono>
 #include <cstdio>

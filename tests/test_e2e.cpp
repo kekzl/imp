@@ -3,6 +3,7 @@
 #include "api/imp_internal.h"
 #include "gguf_stub.h"
 #include "test_models.h"
+#include "runtime/engine.h"
 
 #include <cuda_runtime.h>
 

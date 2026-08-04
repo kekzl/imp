@@ -3,10 +3,18 @@
 #include "imp/imp.h"
 #include "memory/weight_snapshot.h"
 #include "model/model.h"
-#include "runtime/engine.h"
 #include "runtime/request.h"
 
 #include <memory>
+
+namespace imp {
+// Forward-declared on purpose. ImpContext_T only stores an Engine, and pulling
+// runtime/engine.h in here put it in front of every TU that includes this header
+// — most of which never touch Engine at all. The out-of-line destructor below is
+// what makes the forward declaration legal: std::unique_ptr needs the complete
+// type where the deleter is instantiated, and that is now imp_api.cpp alone.
+class Engine;
+}  // namespace imp
 
 // Internal handle types backing the opaque C API handles.
 // Shared between imp_api.cpp and tool binaries that need
@@ -21,6 +29,9 @@ struct ImpWeightSnapshot_T {
 };
 
 struct ImpContext_T {
+    ImpContext_T();
+    ~ImpContext_T();
+
     ImpModel model_handle = nullptr;
     std::unique_ptr<imp::Engine> engine;
 
