@@ -324,7 +324,46 @@ Still open from 07-29 with the reason each was not shipped blind — see
 - **F-5 (rest)** — GPU CI lane: **declined by the repo owner, 2026-08-03.** The job and its
   nightly trigger stay dormant in `.github/workflows/ci.yml`. Consequence: `make verify-fast`
   locally is the only thing that ever runs a CUDA kernel against correctness or perf.
-- **F-9** — cuBLASLt algorithm selection unpinned (mechanism confirmed, magnitude refuted).
+- **F-9** — cuBLASLt algorithm selection unpinned. **Closed 2026-08-04 by fixing the
+  estimator, not by persisting the result** (`src/compute/gemm.cu`). The magnitude the audit
+  inherited was never measured; measuring it is what redirected the fix.
+  **Measured on Qwen3-1.7B, 5 fresh processes, 8 shapes** (`diagnostics.log_gemm_algo`, and
+  note the path is only reachable at all from dense BF16/FP16 SafeTensors and the vision
+  encoders — a Q8_0 GGUF, including the perf-gate model, never enters it):
+  the instability is **entirely in near-ties**. Every shape whose best candidate is genuinely
+  ahead already picked the same one every time — M=512 N=6144 K=2048 spans 0.196-0.449 ms and
+  chose cand[0] in 5/5, its cost reproducing to **0.3 %**, and it chose right even in a run
+  where cold clocks inflated everything ~5x. Every unstable shape had its top candidates inside
+  ~5-10 %, i.e. inside the measurement's own error, so what a flip costs is bounded by how close
+  the tie is. Result 4/8 shapes stable before, **7/8 after**, the eighth alternating between two
+  candidates that are equal within noise *and* both 8-45 % ahead of the heuristic — so it now
+  takes a gain it previously threw away. No load-time cost (alternating A/B: 60.6 s vs 61.8 s
+  median) and no throughput cost (311.0 vs 308.8 tok/s).
+  **R-16 (persist the algo per shape+dtype) is REJECTED, not deferred.** Selection timed each
+  candidate exactly once; a cache would have frozen whatever that noisy first run chose and
+  handed it to every later process, converting a per-process mispick into a permanent one — on
+  top of needing invalidation against driver and cuBLAS version, for an opaque blob cuBLAS does
+  not promise is portable across library versions. Anchor: the timing loop in
+  `benchmark_and_select_algo`, `src/compute/gemm.cu`.
+  **Two designs were built and measured and did NOT work — do not re-try them blind:**
+  (1) *k interleaved rounds, per-candidate minimum across rounds.* Assumes per-sample jitter.
+  The noise is not jitter but **sustained slow windows**: a contaminated run inflates every
+  candidate together (one run put all 8 candidates within 20 % where a quiet run spreads them
+  over 40 %), so a minimum taken inside that window is just as wrong, and the longer selection
+  window even made the previously-stable M=512 shapes flip.
+  (2) *Requiring the same candidate to win every round.* Two challengers that are tied with each
+  other but both clearly ahead of the heuristic split the round wins, unanimity fails, and the
+  fallback keeps a base that is 8-45 % slower.
+  What works is a **paired comparison inside each round** — every candidate against `base` timed
+  in that same round, and it must win by `kAlgoMargin` in *every* round. Contamination scales
+  both sides, so the ratio still carries signal where absolute times carry none. Plus sizing the
+  timed window (`kTargetWindowMs`) instead of fixing the rep count: five reps at M=16 timed
+  ~30-120 us, which is mostly launch overhead, and that is why small M was a coin flip while
+  M=512 was not. **Mutation-validated**: with `base` forced to the *last* valid candidate, the
+  switch fires on all four shapes with a real spread (M=512 N=6144 back to cand[0], 2.2x) and
+  correctly stays put on the two where nothing is 10 % better.
+  **A 3 % margin was tried first and was useless** — it sat below the residual noise. Set a
+  threshold like this from the measured spread, not from what sounds tight.
 - **F-10** — `src/runtime/config.h` included by 22 files in `src/exec/`. **Scoped by
   measurement 2026-08-03, and the audit's estimate is low by 2x.** It proposes extracting
   "the ~30 dispatch-relevant keys" into a `DispatchPolicy` POD; `src/exec/` actually reads

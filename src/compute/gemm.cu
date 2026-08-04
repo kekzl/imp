@@ -18,6 +18,7 @@
 #include <cuda_bf16.h>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <unordered_map>
 #include <mutex>
 #include <stdexcept>
@@ -348,6 +349,50 @@ static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const fl
 static constexpr int kMaxAlgoCandidates = 8;
 static constexpr int kBenchmarkIters = 5;
 
+// Selection stability (F-9). A single timed sample per candidate made the choice
+// a coin flip at small M: measured over 5 fresh processes on Qwen3-1.7B, all four
+// M=512 shapes picked the same tile every time, while all four M=16 shapes picked
+// 3-4 *different* tiles, and the winning time for one shape ranged 0.055-0.321 ms
+// (5.8x). At M=16 a candidate runs ~0.05 ms, so kBenchmarkIters spans ~0.25 ms —
+// short enough that one scheduling hiccup decides the winner.
+//
+// Two fixes, both on the estimator rather than on persistence. An on-disk algo
+// cache (the other candidate fix) would freeze whatever the first noisy run chose
+// and hand it to every later process, turning a per-process mispick into a
+// permanent one — on top of needing invalidation against driver/cuBLAS version.
+//
+// Logging every candidate's cost (not just the winner's) showed where the
+// instability actually lives: shapes whose best candidate is genuinely ahead pick
+// the same one every time — M=512 N=6144 K=2048 spans 0.196-0.449 ms and chose
+// cand[0] in 4/4 runs, its cost reproducing to 0.3 % (0.1961/0.1964/0.1961/0.1966),
+// and it chose right even in a run where cold clocks inflated everything 5x. Every
+// unstable shape instead has its top candidates bunched within ~5-10 %, i.e. inside
+// the measurement's own error. So the flips are ties resolved by noise, and the
+// throughput at stake in a flip is bounded by how close the tie is.
+//
+// Two fixes, both on the estimator rather than on persistence. An on-disk algo
+// cache (the other candidate fix) would freeze whatever the first noisy run chose
+// and hand it to every later process, turning a per-process mispick into a
+// permanent one — on top of needing invalidation against driver/cuBLAS version.
+//
+//  1. Size the timed window instead of fixing the rep count. A fixed
+//     kBenchmarkIters makes the window scale with the shape, and at M=16 a
+//     candidate runs ~6-24 us, so five reps time ~30-120 us — mostly launch
+//     overhead. A probe round now sizes each candidate's reps for a
+//     ~kTargetWindowMs window, which puts every shape at comparable measurement
+//     quality. Costs are then compared per rep.
+//  2. kAlgoMargin hysteresis toward heuristic order. A candidate replaces the
+//     incumbent only if it beats it by more than the margin; otherwise the lower
+//     heuristic index wins. Heuristic order is deterministic for a given shape and
+//     device, so candidates inside the margin resolve the same way in every process
+//     instead of by measurement noise. The margin is set from the measured residual
+//     spread, not guessed — an earlier 3 % attempt sat below the noise and left the
+//     picks as unstable as before.
+static constexpr int kBenchmarkRounds = 3;
+static constexpr float kTargetWindowMs = 0.5f;
+static constexpr int kMaxBenchIters = 512;
+static constexpr float kAlgoMargin = 0.10f;
+
 // Diagnostic: when diagnostics.log_gemm_algo is set, log shape + per-candidate algoId/tileId + chosen algo for every
 // benchmark_and_select_algo call. Used to enumerate which exact GEMM shapes
 // select cuBLAS legacy WMMA kernels (Finding 1/5).
@@ -461,8 +506,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-    float best_ms = 1e30f;
-    int best_idx = 0;
+    std::vector<float> cand_ms(nresults, 1e30f);
 
     // Warmup all candidates first so steady-state caches are warm before any
     // candidate is timed. One warmup call per candidate (the previous policy)
@@ -491,11 +535,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         }
     }
 
-    for (int i = 0; i < nresults; i++) {
-        if (!algo_ok[i])
-            continue;
+    auto time_candidate = [&](int i, int iters) {
         cudaEventRecord(start, stream);
-        for (int r = 0; r < kBenchmarkIters; r++)
+        for (int r = 0; r < iters; r++)
             cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data, entry.Adesc, p_zero, temp_c,
                            entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
                            results[i].workspaceSize, stream);
@@ -503,16 +545,91 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         cudaEventSynchronize(stop);
         float ms = 0;
         cudaEventElapsedTime(&ms, start, stop);
-        if (ms < best_ms) {
-            best_ms = ms;
-            best_idx = i;
+        return ms / static_cast<float>(iters);
+    };
+
+    // Probe round — its timings are thrown away, they only size the real rounds.
+    std::vector<int> reps(nresults, kBenchmarkIters);
+    for (int i = 0; i < nresults; i++) {
+        if (!algo_ok[i])
+            continue;
+        const float per_rep = time_candidate(i, kBenchmarkIters);
+        const int want = (per_rep > 1e-5f) ? static_cast<int>(kTargetWindowMs / per_rep) : kMaxBenchIters;
+        reps[i] = std::clamp(want, kBenchmarkIters, kMaxBenchIters);
+    }
+
+    // The heuristic's own first choice, among candidates that survived warmup.
+    // Everything below is measured against it.
+    int base = -1;
+    for (int i = 0; i < nresults && base < 0; i++) {
+        if (algo_ok[i])
+            base = i;
+    }
+
+    // Interleaved rounds. Each round compares every candidate against `base`
+    // timed in that SAME round, and a candidate keeps its claim only by beating
+    // base by kAlgoMargin in every round. Pairing the comparison inside a round is
+    // what makes it survive a bad one: cold clocks or a busy host inflate base and
+    // challenger together, so their ratio still carries signal where their absolute
+    // times carry none. Comparing per-candidate minima across rounds does not have
+    // this property, and measurably did not work.
+    std::vector<bool> beats_base(nresults, base >= 0);
+    for (int round = 0; round < kBenchmarkRounds && base >= 0; round++) {
+        // Base is timed first and explicitly — every other candidate in this round
+        // is judged against this number, so it must exist before they are timed.
+        const float base_ms = time_candidate(base, reps[base]);
+        if (base_ms < cand_ms[base])
+            cand_ms[base] = base_ms;
+        beats_base[base] = false;
+        for (int i = 0; i < nresults; i++) {
+            if (i == base)
+                continue;
+            if (!algo_ok[i]) {
+                beats_base[i] = false;
+                continue;
+            }
+            const float per_rep = time_candidate(i, reps[i]);
+            if (per_rep < cand_ms[i])
+                cand_ms[i] = per_rep;
+            if (per_rep >= base_ms * (1.0f - kAlgoMargin))
+                beats_base[i] = false;
         }
     }
 
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
-    if (!algo_ok[best_idx]) {
+    // [diag] per-candidate cost, so the margin below can be chosen from measured
+    // spread instead of guessed. Without this only the winner's time is logged,
+    // which cannot answer "how much does the choice actually matter for this shape".
+    if (gemm_algo_log_enabled() && M > 0) {
+        for (int i = 0; i < nresults; i++)
+            IMP_LOG_DEBUG("[gemm-algo]   cost[%d] per_ms=%.5f reps=%d%s", i, cand_ms[i], reps[i],
+                          algo_ok[i] ? "" : " REJECTED");
+    }
+
+    // Lowest-indexed candidate that beat base in every round wins; otherwise base.
+    // Taking the lowest index rather than the smallest time matters: where two
+    // challengers are tied with each other but both clearly ahead of base — which is
+    // exactly what M=512 N=1024 K=2048 does here, cand[3] and cand[5] both ~8-45 %
+    // ahead — picking by time flips between them run to run, and demanding a single
+    // undisputed winner throws away a real gain to keep the slower base. Index order
+    // is stable across processes, so this takes the gain and stays reproducible.
+    //
+    // The reason the timing loop exists is preserved: a legacy WMMA candidate whose
+    // steady-state cost is 3-9x worse never beats base by the margin in any round,
+    // and a base that bad loses to every challenger in every round.
+    int best_idx = base;
+    for (int i = 0; i < nresults; i++) {
+        if (beats_base[i]) {
+            best_idx = i;
+            break;
+        }
+    }
+
+    const float best_ms = (best_idx >= 0) ? cand_ms[best_idx] : 0.0f;
+
+    if (best_idx < 0 || !algo_ok[best_idx]) {
         entry.has_algo = false;
         entry.workspace_size = 0;
         return;

@@ -12,6 +12,18 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Changed
+- **GEMM algo selection now repeats across process restarts** (F-9,
+  `src/compute/gemm.cu`). Each candidate was timed exactly once, and at M=16 that
+  window is ~30-120 us — mostly launch overhead — so the pick was noise: 4 of 8
+  shapes on Qwen3-1.7B chose 3-4 different kernels over 5 fresh processes. Timed
+  windows are now sized to a target duration, and a candidate must beat the
+  heuristic's own first choice by 10 % in *every* round, compared against it inside
+  that same round. 7 of 8 shapes now pick identically; the eighth alternates between
+  two candidates that are equal within noise and both 8-45 % faster than the previous
+  fallback. No load-time or throughput cost (alternating A/B). Reachable only from
+  dense BF16/FP16 SafeTensors and the vision encoders. Rationale, the rejected algo
+  cache, and the two designs that were measured and failed:
+  [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) F-9.
 - **`imp-cli --max-tokens` now defaults to 8192, not 256** (#1209). 256 predates
   reasoning models: on a trace-reasoner the think block alone overruns it, so the
   answer comes back empty with `finish_reason=length`. `imp-server` was already
