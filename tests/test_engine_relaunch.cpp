@@ -99,6 +99,22 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
     size_t free_before = device_free_mib();
     ASSERT_GT(free_before, 0u);
 
+    // Pool "used" is a PROCESS-wide counter, so an absolute bound on it is only
+    // true when this test runs first. It did not: in the full test-e2e run
+    // earlier tests leave blocks in the default pool and the figure read 1792
+    // MiB against a 1024 MiB bound, while the same test passed in isolation.
+    // That is the same category error the comment below rejects for the DEVICE
+    // figure, one level down — so take a baseline and assert on the delta,
+    // which is the part this cycle actually owns.
+    unsigned long long pool_used_before = 0;
+    {
+        cudaMemPool_t p0 = nullptr;
+        int d0 = 0;
+        cudaGetDevice(&d0);
+        if (cudaDeviceGetDefaultMemPool(&p0, d0) == cudaSuccess)
+            (void)cudaMemPoolGetAttribute(p0, cudaMemPoolAttrUsedMemCurrent, &pool_used_before);
+    }
+
     run_one_cycle(get_model_path());
     if (::testing::Test::HasFatalFailure())
         return;
@@ -135,13 +151,14 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
         // that regression.
         unsigned long long used = 0;
         ASSERT_EQ(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used), cudaSuccess);
-        EXPECT_LT(used >> 20, 1024u)
-            << "the default mempool still holds " << (used >> 20)
-            << " MiB as USED after model teardown — the weights were freed with an API that "
-            << "does not return stream-ordered blocks to the pool (#507/#834), so the trim can "
-            << "reclaim nothing. Device-reported free went " << free_before << " -> "
-            << free_between << " MiB, which is expected on this platform (AUDIT B36) and is "
-            << "NOT what this assertion is about.";
+        const unsigned long long retained = used > pool_used_before ? used - pool_used_before : 0;
+        EXPECT_LT(retained >> 20, 1024u)
+            << "this cycle left " << (retained >> 20) << " MiB in the default mempool as USED ("
+            << (pool_used_before >> 20) << " -> " << (used >> 20)
+            << " MiB) — the weights were freed with an API that does not return stream-ordered "
+            << "blocks to the pool (#507/#834), so the trim can reclaim nothing. Device-reported "
+            << "free went " << free_before << " -> " << free_between << " MiB, which is expected "
+            << "on this platform (AUDIT B36) and is NOT what this assertion is about.";
     }
 
     // Re-init after inference: before the prewarm stream-rebind fix this

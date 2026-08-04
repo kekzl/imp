@@ -371,11 +371,11 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
         ASSERT_EQ(sticky, cudaSuccess)
             << "context creation failed AND left the CUDA context in an error state ("
             << cudaGetErrorString(sticky) << "). Every later test in this binary will fail on a "
-            << "context it did not break. Reproducer: the FIRST engine cycle on the stub model is "
-            << "clean, the second is not (0/25/26/27 error lines at --gtest_repeat=1/2/3/4). A real "
-            << "model is unaffected — EngineRelaunchTest.SecondEngineOnSameModelHandleNeverIMAs "
-            << "passes on Qwen3-4B — so this is the stub's geometry (1 layer, d_model 64, "
-            << "head_dim 32), and it is NOT fixed yet.";
+            << "context it did not break. This guard exists because that is exactly what happened: "
+            << "~Engine closed the T2 arena without re-arming the module statics that had taken a "
+            << "slice from it, so the second engine matmul'd into freed memory. Fixed by calling "
+            << "reset_static_cuda_state() after engine_arena_close(); this assertion is what makes "
+            << "a regression of that class loud instead of silent.";
         GTEST_SKIP() << "Context creation failed (expected without GPU): " << imp_error_string(err);
     }
     ASSERT_NE(ctx, nullptr);
@@ -399,12 +399,14 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
     // CUDA context in an error state: every teardown free failed with an illegal
     // memory access, the engine's #815 guard swallowed it, and the ~57 tests that
     // run after this one in test-e2e died on a context they did not break.
-    // Reproducer, measured 2026-08-04: one engine cycle on the stub is clean, the
-    // SECOND raises the IMA (0 / 25 / 26 / 27 error lines at --gtest_repeat=1/2/3/4).
-    // A real model is unaffected — EngineRelaunchTest.SecondEngineOnSameModelHandle
-    // NeverIMAs passes on Qwen3-4B — so this is specific to the stub's geometry
-    // (1 layer, d_model 64, head_dim 32). The underlying defect is NOT fixed here.
-    // What is fixed is the silence: a test that poisons the process now says so.
+    // Root cause (fixed): ~Engine closed the T2 arena without re-arming the module
+    // statics holding a slice of it, so the SECOND engine in a process matmul'd
+    // into freed memory. Measured before/after, --gtest_repeat=1/2/3/4:
+    // 0/25/26/27 illegal-memory-access lines -> 0/0/0/0, and the full GPU suite
+    // 57 failures -> 1. The "cublasLtMatmul failed (status 14)" line that preceded
+    // the IMA was the same symptom, not a separate defect: it appears in every run
+    // that has the dangling pointer and in none that does not.
+    // This assertion stays because the class is silent by construction.
     {
         cudaError_t sticky = cudaDeviceSynchronize();
         if (sticky == cudaSuccess)
