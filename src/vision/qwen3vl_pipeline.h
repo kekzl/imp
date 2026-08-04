@@ -23,7 +23,6 @@
 
 namespace imp {
 
-class VRAMAllocator;
 
 // One encoded image. The buffers belong to the pipeline and stay valid until
 // the next encode call.
@@ -49,7 +48,22 @@ public:
     // device here if it is still host-resident. `max_patches` bounds the image
     // size this pipeline will accept — it sizes every workspace, so it is also
     // what an oversized image is rejected against.
-    [[nodiscard]] bool init(VisionModel& tower, VRAMAllocator& alloc, int max_patches);
+    [[nodiscard]] bool init(VisionModel& tower, int max_patches);
+
+    // Device bytes init() will take from the T2 arena — tower excluded, that is
+    // qwen3vl_vision_tower_device_bytes(). Answerable before the arena opens: it
+    // reads config and tensor shapes, not weights. taken_bytes() reports what was
+    // actually taken, and the two are asserted equal in the pipeline tests.
+    static size_t demand_bytes(const VisionModel& tower, int max_patches);
+
+    // The patch budget the engine will actually use, from the configured value
+    // (0 = default). Engine::init sizes the arena with this and the vision warmup
+    // initialises with it; going through one function is what keeps the
+    // reservation and the allocation from drifting apart.
+    static int patch_budget(const VisionModel& tower, int configured);
+    // Includes the encoder's slices: demand_bytes() covers both, so the pair the
+    // drift test compares has to cover both as well.
+    size_t taken_bytes() const;
 
     bool is_ready() const { return encoder_ != nullptr; }
     int max_patches() const { return max_patches_; }
@@ -86,7 +100,7 @@ private:
     void free_buffers();
 
     VisionModel* tower_ = nullptr;
-    VRAMAllocator* alloc_ = nullptr;
+    size_t taken_bytes_ = 0;
     std::unique_ptr<Qwen3VLEncoder> encoder_;
     int max_patches_ = 0;
     // Whether THIS pipeline uploaded the tower, and so has to invalidate it.

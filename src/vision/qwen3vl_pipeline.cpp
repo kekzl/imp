@@ -1,7 +1,7 @@
 #include "vision/qwen3vl_pipeline.h"
 
 #include "core/logging.h"
-#include "memory/vram_allocator.h"
+#include "memory/engine_arena.h"
 #include "vision/image_processor.h"
 #include "vision/qwen3vl_vision_grid.h"
 #include "vision/qwen3vl_vision_upload.h"
@@ -27,14 +27,37 @@ void Qwen3VLPipeline::free_buffers() {
     if (tower_ && uploaded_tower_)
         qwen3vl_release_vision_tower(*tower_);
     uploaded_tower_ = false;
-    if (alloc_)
-        for (void* p : allocs_)
-            alloc_->free(p);
-    allocs_.clear();
+    taken_bytes_ = 0;
     d_patches_ = nullptr;
     d_out_ = nullptr;
     d_deepstack_.clear();
     max_patches_ = 0;
+}
+
+size_t Qwen3VLPipeline::taken_bytes() const {
+    return taken_bytes_ + (encoder_ ? encoder_->taken_bytes() : 0);
+}
+
+int Qwen3VLPipeline::patch_budget(const VisionModel& tower, int configured) {
+    const int unit = tower.config.merge_size * tower.config.merge_size;
+    int budget = configured > 0 ? configured : 4096;  // a 1024x1024 image at patch 16
+    if (unit > 0)
+        budget -= budget % unit;
+    return budget;
+}
+
+size_t Qwen3VLPipeline::demand_bytes(const VisionModel& tower, int max_patches) {
+    const VisionConfig& c = tower.config;
+    const int unit = c.merge_size * c.merge_size;
+    if (unit <= 0 || max_patches <= 0)
+        return 0;
+    const int64_t features = tower.patch_embd_w.shape[1];
+    const int64_t merged = max_patches / unit;
+    const size_t emb = static_cast<size_t>(merged) * c.out_hidden_size * sizeof(half);
+    size_t total = static_cast<size_t>(max_patches) * features * sizeof(half);  // patches
+    total += emb;                                                              // out
+    total += emb * c.deepstack_indexes.size();                                 // deepstack taps
+    return total + Qwen3VLEncoder::demand_bytes(c, max_patches);
 }
 
 int64_t Qwen3VLPipeline::max_pixels() const {
@@ -44,7 +67,7 @@ int64_t Qwen3VLPipeline::max_pixels() const {
     return static_cast<int64_t>(max_patches_) * p * p;
 }
 
-bool Qwen3VLPipeline::init(VisionModel& tower, VRAMAllocator& alloc, int max_patches) {
+bool Qwen3VLPipeline::init(VisionModel& tower, int max_patches) {
     free_buffers();
     const VisionConfig& c = tower.config;
     if (!c.is_qwen3vl) {
@@ -58,7 +81,6 @@ bool Qwen3VLPipeline::init(VisionModel& tower, VRAMAllocator& alloc, int max_pat
         return false;
     }
     tower_ = &tower;
-    alloc_ = &alloc;
     max_patches_ = max_patches;
 
     // Idempotent: a tower already on the device (a second pipeline over the same
@@ -75,7 +97,7 @@ bool Qwen3VLPipeline::init(VisionModel& tower, VRAMAllocator& alloc, int max_pat
     }
 
     encoder_ = std::make_unique<Qwen3VLEncoder>();
-    if (!encoder_->init(tower, &alloc, max_patches)) {
+    if (!encoder_->init(tower, max_patches)) {
         free_buffers();
         return false;
     }
@@ -86,14 +108,16 @@ bool Qwen3VLPipeline::init(VisionModel& tower, VRAMAllocator& alloc, int max_pat
     auto take = [&](size_t bytes, const char* tag) -> half* {
         if (!ok)
             return nullptr;
-        void* p = alloc.allocate(bytes, tag);
-        if (!p) {
-            IMP_LOG_ERROR("Qwen3-VL pipeline: out of VRAM for %s", tag);
+        auto slab = engine_arena().take_bytes(bytes);
+        if (slab.empty()) {
+            IMP_LOG_ERROR("Qwen3-VL pipeline: engine arena exhausted for %s (%zu bytes) — the arena "
+                          "was reserved without this pipeline",
+                          tag, bytes);
             ok = false;
             return nullptr;
         }
-        allocs_.push_back(p);
-        return static_cast<half*>(p);
+        taken_bytes_ += bytes;
+        return reinterpret_cast<half*>(slab.data());
     };
     d_patches_ = take(static_cast<size_t>(max_patches) * features * sizeof(half), "vision_patches");
     const size_t emb_bytes = static_cast<size_t>(merged) * c.out_hidden_size * sizeof(half);

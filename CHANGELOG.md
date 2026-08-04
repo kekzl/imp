@@ -19,8 +19,12 @@ there instead of retelling it.
   open time from `qwen3vl_vision_tower_device_bytes()`, which walks the same tensor
   list the upload walks — predicted and uploaded agree exactly. Removes the per-block
   free, and with it the use-after-free the caller-owned scheme had to document.
-  Vision pipeline scratch and Gemma's mmproj tower are unchanged and stay on
-  `VRAMAllocator`; why, and what the next increment needs, is in
+  The pipeline and encoder scratch followed in the same series — a further
+  224.1 MiB — once the patch budget turned out to be pure config and moved into
+  one `Qwen3VLPipeline::patch_budget()` shared by the sizing and the init. A test
+  asserts the reservation equals what is actually taken, which caught a 192 MiB
+  undercount on its first run. Gemma's mmproj tower stays on `VRAMAllocator`: it
+  is a separate GGUF that genuinely is not loaded when the arena opens. Details:
   [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) F-12.
 - **GEMM algo selection now repeats across process restarts** (F-9,
   `src/compute/gemm.cu`). Each candidate was timed exactly once, and at M=16 that

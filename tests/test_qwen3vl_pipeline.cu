@@ -54,13 +54,14 @@ protected:
         // way Engine::init does — and size it the way Engine::init does too, from
         // the tower's own tensor list rather than from a guess that silently rots
         // when the fixture checkpoint changes.
-        const size_t tower_bytes = qwen3vl_vision_tower_device_bytes(*model_->vision_tower);
-        arena_ = std::make_unique<ScopedEngineArena>(tower_bytes + tower_bytes / 8);
+        const size_t vision_bytes = qwen3vl_vision_tower_device_bytes(*model_->vision_tower) +
+                                    Qwen3VLPipeline::demand_bytes(*model_->vision_tower, 4096);
+        arena_ = std::make_unique<ScopedEngineArena>(vision_bytes + vision_bytes / 8);
         ASSERT_TRUE(arena_->opened());
         ASSERT_TRUE(alloc_.init(0.10f));
         // 4096 patches = a 1024x1024 image at patch 16, and enough to cross the
         // encoder's attention chunk boundary.
-        ASSERT_TRUE(pipeline_.init(*model_->vision_tower, alloc_, 4096));
+        ASSERT_TRUE(pipeline_.init(*model_->vision_tower, 4096));
     }
 
     std::unique_ptr<Model> model_;
@@ -68,6 +69,14 @@ protected:
     VRAMAllocator alloc_;
     Qwen3VLPipeline pipeline_;
 };
+
+// The reservation and the allocation are two separate expressions of the same
+// buffer list, and nothing but this test stops them drifting: a buffer added to
+// init() without updating demand_bytes() under-reserves the arena, which would
+// surface as an exhaustion on whichever model happens to be tight.
+TEST_F(Qwen3VLPipelineTest, ReservedBytesMatchTakenBytes) {
+    EXPECT_EQ(pipeline_.taken_bytes(), Qwen3VLPipeline::demand_bytes(*model_->vision_tower, 4096));
+}
 
 TEST_F(Qwen3VLPipelineTest, EncodesTheFixtureImage) {
     Qwen3VLImage img;
