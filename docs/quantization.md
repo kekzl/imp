@@ -243,13 +243,65 @@ and `fp16` score identically to four decimals).
 That leaves the scale search's objective, which is a **local proxy**: it
 minimises per-group weight-reconstruction error, and it improved on every group
 of the 14B run. A checkpoint whose weights are each reconstructed better can
-still be a worse model, and at 40 layers apparently is. Why that flips between
-1.7B and 14B is open — it is the first `--calib` result at this size, because
-until this measurement nobody could produce one.
+still be a worse model, and at 40 layers apparently is.
+
+**Why it flips between 1.7B and 14B — measured 2026-08-05.** The planner has four
+groups per layer (`awq_plan.cpp`), and `--calib-groups` runs any subset of them, so
+the result can be attributed instead of guessed. Scored the same way as everything
+above, against each model's own round-to-nearest baseline:
+
+| subset | Qwen3-14B (`n_rep=5`) | Qwen3-0.6B (`n_rep=2`) |
+|---|---|---|
+| A — q,k,v | +0.6522 | +0.2751 |
+| C — o_proj | +0.0159 | **−0.6115** |
+| A+C | +2.0326 | −0.1276 |
+| B+A+D (C off) | +0.7641 | −0.6475 |
+| ABCD | **+2.6764** | **−1.2111** |
+| **interaction C × ABD** | **+1.8964** | **+0.0479** |
+
+**The groups stop being independent.** At `n_rep=2` the interaction is +0.05 — the
+effects simply add, and since C is worth −0.61 on its own, the sum helps. At
+`n_rep=5` the *same* interaction is +1.90, forty times larger, and it is **71 % of
+the total damage**. So no single group is at fault: C alone is nearly neutral on the
+14B (+0.02), and blaming it would have been wrong.
+
+The mechanism the numbers point at is in the ordering. C and D run first because
+their folds rewrite `v_proj` and `up_proj` — and those two tensors are *members* of
+groups A and B. A therefore searches its scale on a `v_proj` that C has already
+divided, with `search_group_scale` summing one objective over q, k and v together.
+What makes it `n_rep`-dependent is C's own statistic: it must be tied across the
+query heads sharing a KV head (`awq_plan.cpp:302-313`), and that tie is a `max`, so
+it inflates a channel's weight in the error term by a median factor of 1.346 at
+`n_rep=5` against 1.000 at `n_rep=2` — 20.5 % of channels inflated ≥2x versus 8.3 %.
+Since `a_j` is the *weight* in the objective (`err += (a_j/s_j)^2 * (...)^2`), a
+distorted `a_j` makes the search optimise the wrong thing, faithfully.
+
+Two findings worth keeping separately. **Group A hurts both models** (+0.28 / +0.65),
+which has nothing to do with `n_rep` and was not previously known. And on the 14B
+**no measured subset beats round-to-nearest** — the closest, C alone, is still
++0.0159. Not yet measured: B and D isolated on the 14B (the runs were cut short by
+an unrelated VRAM shortage); they contribute only +0.11 together inside ABD, so they
+cannot carry the effect.
+
+This also explains why the earlier eliminations found nothing: an incomplete plan,
+degenerate statistics, a magnitude effect, the FP8 KV path and the calibration
+source are all tests for a **single** cause. An effect that is 71 % interaction
+between two individually harmless steps is invisible to every one of them.
 
 So: `imp-quantize --calib` is validated on Qwen3-0.6B and Qwen3-1.7B and
 measured harmful on Qwen3-14B. The tool now says so, and the rule is to score
 the calibrated checkpoint against the uncalibrated one before using it.
+
+**For anything larger, use round-to-nearest.** `n_rep` is 8 on most 70B-class
+checkpoints, i.e. further along the axis that makes calibration harmful here, and
+round-to-nearest carries none of this risk — on the 14B it beat a genuine Modelopt
+export (9.9252 vs 10.0301). It is also the path with no VRAM ceiling: **the
+quantizer never resides the model.** `search_group_scale` uploads one group and
+`main.cpp` quantizes one tensor at a time, so demand scales with the largest single
+weight matrix — roughly 0.7 GiB for a 14B and 1.8 GiB for a 70B — not with the
+checkpoint. Only *calibration* and *scoring* have to run the model, which is what
+the twin recipe above is for, and what bounds the calibrated route at roughly
+40-50B on a 32 GiB card.
 
 #### MoE, and two roles that must stay full precision
 

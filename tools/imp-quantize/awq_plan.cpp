@@ -238,7 +238,20 @@ std::vector<uint16_t> raw_to_fp16(const RawTensor& t) {
 }
 
 bool build_plan(const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,
-                const std::string& config_json_path, Plan& plan, std::string& err) {
+                const std::string& config_json_path, const std::string& groups, Plan& plan,
+                std::string& err) {
+    const bool want_a = groups.find('A') != std::string::npos;
+    const bool want_b = groups.find('B') != std::string::npos;
+    const bool want_c = groups.find('C') != std::string::npos;
+    const bool want_d = groups.find('D') != std::string::npos;
+    if (!want_a && !want_b && !want_c && !want_d) {
+        err = "--calib-groups '" + groups + "' selects no group; use a subset of ABCD";
+        return false;
+    }
+    if (groups != kAwqAllGroups)
+        plan.notes.push_back("group selector: " + groups + " (default " + kAwqAllGroups +
+                             ") — this is a diagnostic subset, not a normal checkpoint");
+
     std::ifstream f(config_json_path, std::ios::binary);
     if (!f) {
         err = "cannot read " + config_json_path + " (needed for the architecture check)";
@@ -294,7 +307,7 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
         // friendlier to FP8 KV than the unscaled one.
         Shape2 osh, vsh;
         const CalibrationEntry* o_stat = stats.find(static_cast<int>(L), "WO");
-        if (o_stat && tensor_shape(index, o_name, osh) && tensor_shape(index, v_name, vsh) &&
+        if (want_c && o_stat && tensor_shape(index, o_name, osh) && tensor_shape(index, v_name, vsh) &&
             static_cast<int64_t>(o_stat->mean_abs.size()) == osh.K && osh.K == n_heads * head_dim &&
             vsh.N == n_kv_heads * head_dim) {
             // Tie the statistic across the query heads that share a KV head, so
@@ -325,13 +338,16 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
                 if (index.count(v_bias))
                     plan.vec_div[v_bias] = row_div;
             }
+        } else if (!want_c) {
+            plan.groups_disabled++;
         } else {
             plan.groups_skipped++;
         }
 
         // ---- Group D: down_proj, folded into up_proj's output rows ----
         Shape2 dsh, ush;
-        if (tensor_shape(index, down_name, dsh) && tensor_shape(index, up_name, ush) && dsh.K == ush.N) {
+        if (want_d && tensor_shape(index, down_name, dsh) && tensor_shape(index, up_name, ush) &&
+            dsh.K == ush.N) {
             if (!run_group(index, stats, static_cast<int>(L), "W_DOWN", {down_name}, {}, plan, res, err))
                 return false;
             if (res.alpha != 0.0f && plan.col_scale.count(down_name)) {
@@ -340,6 +356,8 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
                 if (index.count(up_bias))
                     plan.vec_div[up_bias] = plan.col_scale[down_name];
             }
+        } else if (!want_d) {
+            plan.groups_disabled++;
         } else {
             plan.groups_skipped++;
         }
@@ -374,12 +392,14 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
             std::string blocker;
             const std::vector<std::string> extra = unlisted_consumers(index, base + "self_attn.", members,
                                                                       {"o_proj.weight"});
-            if (!members.empty() && !act.empty() && index.count(norm) &&
+            if (want_a && !members.empty() && !act.empty() && index.count(norm) &&
                 fold_is_safe(index, extra, blocker)) {
                 if (!run_group(index, stats, static_cast<int>(L), "WQ", members, act, plan, res, err))
                     return false;
                 if (res.alpha != 0.0f)
                     plan.vec_div[norm] = res.s;
+            } else if (!want_a) {
+                plan.groups_disabled++;
             } else {
                 plan.groups_skipped++;
                 if (!blocker.empty())
@@ -417,12 +437,14 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
             std::string blocker;
             const std::vector<std::string> extra = unlisted_consumers(index, base + "mlp.", members,
                                                                       {"down_proj.weight"});
-            if (!members.empty() && !act.empty() && index.count(norm) &&
+            if (want_b && !members.empty() && !act.empty() && index.count(norm) &&
                 fold_is_safe(index, extra, blocker)) {
                 if (!run_group(index, stats, static_cast<int>(L), "W_GATE", members, act, plan, res, err))
                     return false;
                 if (res.alpha != 0.0f)
                     plan.vec_div[norm] = res.s;
+            } else if (!want_b) {
+                plan.groups_disabled++;
             } else {
                 plan.groups_skipped++;
                 if (!blocker.empty()) {

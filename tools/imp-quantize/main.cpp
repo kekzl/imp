@@ -77,6 +77,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -94,6 +95,8 @@ namespace {
 struct Options {
     std::string in_dir, out_dir;
     std::string calib_file;         // --calib: activation statistics for AWQ scaling
+    // --calib-groups: which AWQ scale groups run, for attributing a bad result.
+    std::string calib_groups = awq::kAwqAllGroups;
     bool quantize_lm_head = false;  // imp has its own lm_head NVFP4 policy (#982)
     bool dry_run = false;
 };
@@ -109,6 +112,13 @@ void usage() {
         "                  imp-cli --model DIR --perplexity <corpus> --calibrate FILE\n"
         "                Without it the quantization is plain round-to-nearest,\n"
         "                which costs measurably more quality (see the header).\n"
+        "  --calib-groups ABCD\n"
+        "                DIAGNOSTIC: which AWQ scale groups run (default ABCD).\n"
+        "                  A q,k,v  <- input_layernorm        C o_proj   <- v_proj\n"
+        "                  B gate,up<- post_attention_norm    D down_proj<- up_proj\n"
+        "                Use to attribute a bad calibrated result to one group.\n"
+        "                Group C ties its statistic across the query heads sharing\n"
+        "                a KV head, so it is lossy in proportion to GQA n_rep.\n"
         "  --lm-head     also quantize lm_head (default: excluded, imp applies its\n"
         "                own measured lm_head policy at runtime)\n"
         "  --dry-run     report what would be quantized, write nothing\n");
@@ -271,7 +281,19 @@ int main(int argc, char** argv) {
             opt.quantize_lm_head = true;
         else if (a == "--calib")
             opt.calib_file = next();
-        else if (a == "--dry-run")
+        else if (a == "--calib-groups") {
+            opt.calib_groups = next();
+            for (char& c : opt.calib_groups)
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            // An unknown letter here would silently select fewer groups than the
+            // caller meant and quietly change what the checkpoint is — the same
+            // shape as the `--set` unknown-key hole closed in #1186.
+            if (opt.calib_groups.find_first_not_of(awq::kAwqAllGroups) != std::string::npos) {
+                fprintf(stderr, "imp-quantize: --calib-groups '%s' has a letter outside %s\n",
+                        opt.calib_groups.c_str(), awq::kAwqAllGroups);
+                return 2;
+            }
+        } else if (a == "--dry-run")
             opt.dry_run = true;
         else if (a == "-h" || a == "--help") {
             usage();
@@ -370,12 +392,16 @@ int main(int argc, char** argv) {
                 index[t.name] = &t;
         printf("AWQ calibration: %zu entries from %s\n", stats.entries.size(),
                stats.model_id.empty() ? opt.calib_file.c_str() : stats.model_id.c_str());
-        if (!awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(), plan, err)) {
+        if (!awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(), opt.calib_groups,
+                             plan, err)) {
             fprintf(stderr, "%s\n", err.c_str());
             return 1;
         }
-        printf("AWQ: %d groups scaled, %d kept round-to-nearest, %d skipped\n", plan.groups_scaled,
+        printf("AWQ: %d groups scaled, %d kept round-to-nearest, %d skipped", plan.groups_scaled,
                plan.groups_rtn, plan.groups_skipped);
+        if (plan.groups_disabled > 0)
+            printf(", %d disabled (--calib-groups %s)", plan.groups_disabled, opt.calib_groups.c_str());
+        printf("\n");
         for (const auto& n : plan.notes)
             printf("  note: %s\n", n.c_str());
         if (plan.groups_scaled == 0) {
