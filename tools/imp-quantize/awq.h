@@ -64,11 +64,20 @@ struct Plan {
 // to one of them instead of to "calibration". Default is all four.
 //
 // This exists because --calib measurably HELPS Qwen3-0.6B/1.7B and measurably
-// HURTS Qwen3-14B (9.93 -> 12.60 PPL), and the groups differ in how exact their
-// fold is: A and B are exact for any plain RMSNorm, D is exact elementwise, but
-// C must tie its statistic across the n_rep query heads sharing a KV head, which
-// is lossy in proportion to n_rep — 2 on the models where it helps, 5 on the one
-// where it hurts. Attribution needs them separable.
+// HURTS Qwen3-14B (9.93 -> 12.60 PPL). Measured 2026-08-05, the cause is the
+// ATTENTION pair on wide GQA, and mostly their INTERACTION rather than either
+// group alone: on the 14B (n_rep=5) C alone is +0.02 and A alone +0.65, but
+// A x C adds a further +1.36. The FFN groups are clean — BD scores -0.13, i.e.
+// better than round-to-nearest, and BD x C is +0.03. At n_rep=2 the same
+// interaction is +0.05 and the full set wins.
+//
+// The n_rep dependence sits in C: its statistic must be constant across the
+// query heads sharing a KV head, the tie is a max, and that statistic is the
+// WEIGHT in the search objective — so a wide GQA group makes the search
+// minimise the wrong function faithfully.
+//
+// So this is a production switch, not only a diagnostic: prefer "BD" on
+// wide-GQA models and the default on narrow-GQA ones.
 constexpr const char* kAwqAllGroups = "ABCD";
 
 // Builds the transform from a calibration file and the checkpoint's own

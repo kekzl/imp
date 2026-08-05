@@ -14,13 +14,14 @@ there instead of retelling it.
 ### Added
 
 - **`imp-quantize --calib-groups ABCD`** — runs any subset of the AWQ planner's
-  four scale groups, so a bad calibrated result can be attributed instead of
-  guessed. This answers why `--calib` helps at 0.6B/1.7B and hurts at 14B: the
-  groups **stop being independent**. Their interaction is +0.05 PPL at GQA
-  `n_rep=2` and **+1.90 at `n_rep=5` — 71 % of the total damage**. No single
-  group is at fault; group C alone is +0.02 on the 14B. Two spin-offs: group A
-  hurts both models, and no measured subset beats round-to-nearest on the 14B.
-  See [`docs/quantization.md`](docs/quantization.md).
+  four scale groups. It answers why `--calib` helps at 0.6B/1.7B and hurts at
+  14B, and **fixes it**: the failure is the *attention* half only.
+  `--calib-groups BD` (the two FFN groups) scores **9.7922 on Qwen3-14B against
+  round-to-nearest's 9.9252** — the best measured configuration, where the
+  default `ABCD` costs +2.68. The harm is mostly interaction, not the sum of
+  parts: A × C is +1.36 and C × ABD is +1.90 (71 % of the total) at GQA
+  `n_rep=5`, against +0.05 at `n_rep=2`. So use `BD` on wide-GQA models and the
+  default on narrow-GQA ones. See [`docs/quantization.md`](docs/quantization.md).
 
 ### Changed
 

@@ -113,12 +113,15 @@ void usage() {
         "                Without it the quantization is plain round-to-nearest,\n"
         "                which costs measurably more quality (see the header).\n"
         "  --calib-groups ABCD\n"
-        "                DIAGNOSTIC: which AWQ scale groups run (default ABCD).\n"
+        "                Which AWQ scale groups run (default ABCD).\n"
         "                  A q,k,v  <- input_layernorm        C o_proj   <- v_proj\n"
         "                  B gate,up<- post_attention_norm    D down_proj<- up_proj\n"
-        "                Use to attribute a bad calibrated result to one group.\n"
-        "                Group C ties its statistic across the query heads sharing\n"
-        "                a KV head, so it is lossy in proportion to GQA n_rep.\n"
+        "                The ATTENTION groups (A, C) are what breaks on wide GQA:\n"
+        "                on Qwen3-14B (n_rep=5) ABCD costs +2.68 PPL while BD --\n"
+        "                the two FFN groups -- GAINS 0.13 over round-to-nearest.\n"
+        "                Use 'BD' on wide-GQA models, the default on narrow ones,\n"
+        "                or any subset to attribute a bad result. See\n"
+        "                docs/quantization.md.\n"
         "  --lm-head     also quantize lm_head (default: excluded, imp applies its\n"
         "                own measured lm_head policy at runtime)\n"
         "  --dry-run     report what would be quantized, write nothing\n");
@@ -540,12 +543,19 @@ int main(int argc, char** argv) {
         // can still come out worse. Measured 2026-08-01 on Qwen3-14B, from two
         // independently produced calibration files (imp's own round-to-nearest
         // checkpoint and NVIDIA's Modelopt export): PPL 9.93 round-to-nearest
-        // vs 12.60 / 12.29 calibrated. Score the result before trusting it.
-        printf("\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest."
-               "\n      Validated to HELP on Qwen3-0.6B/1.7B and measured to HURT on Qwen3-14B"
-               "\n      (PPL 9.93 -> 12.3-12.6). Score this checkpoint with --perplexity against"
-               "\n      the uncalibrated one before using it; see docs/quantization.md.",
-               plan.groups_scaled, plan.groups_rtn);
+        // vs 12.60 / 12.29 calibrated. Attributed 2026-08-05 with --calib-groups:
+        // the harm is the ATTENTION groups on wide GQA, and mostly their
+        // interaction (A x C +1.36). BD alone GAINS 0.13 there, so the warning
+        // names the way out instead of just the hazard.
+        printf("\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest.%s"
+               "\n      Score this checkpoint with --perplexity against the uncalibrated one"
+               "\n      before using it; see docs/quantization.md.",
+               plan.groups_scaled, plan.groups_rtn,
+               opt.calib_groups == std::string(awq::kAwqAllGroups)
+                   ? "\n      NOTE: the full set is validated on Qwen3-0.6B/1.7B but measured HARMFUL"
+                     "\n      on Qwen3-14B (PPL 9.93 -> 12.3-12.6). The attention groups are the cause:"
+                     "\n      on wide-GQA models prefer --calib-groups BD (14B: 9.79, better than RTN)."
+                   : "");
     if (n_moe_skipped)
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
     if (!opt.dry_run)
