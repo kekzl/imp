@@ -289,7 +289,18 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         IMP_LOG_DEBUG("MoE reserve: %.0f MiB (n_attn=%d, kv_heads=%d, hd=%d → %.0f MiB KV at 16K + 256 MiB workspace)",
                       kMoeReserve / (1024.0 * 1024.0), n_attn_layers, kv_heads, hd,
                       kv_reserve / (1024.0 * 1024.0));
-        constexpr size_t kRuntimeHeadroom = 512ULL * 1024 * 1024;
+        // The runtime headroom must cover what the KV sizing subtracts, not just
+        // what the runtime touches. init_kv_cache computes its pool from
+        // (free - vram_allocator_headroom(total)); reserving less than that
+        // headroom here leaves a residual that is ENTIRELY headroom, so kv_room
+        // evaluates to 0 and the pool drops to the 16-block / 512-token floor
+        // however many blocks the plan granted. Qwen3.6-35B-A3B UD-Q4_K_M hit
+        // exactly that: 1088 MiB reserved here, 1630 MiB headroom subtracted
+        // there, KV 4096 -> 16 blocks and every generation cancelled at
+        // admission (#1251). Keep the 512 MiB as the floor for cards where 5%
+        // is smaller than that.
+        const size_t kRuntimeHeadroom =
+            std::max(static_cast<size_t>(512ULL * 1024 * 1024), vram_allocator_headroom(total_mem));
         size_t total_reserve = kMoeReserve + kRuntimeHeadroom;
         moe_budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
         // Prequant models: the plan grants the MoE

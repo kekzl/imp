@@ -11,6 +11,18 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A MoE GGUF could load fine and then cancel every generation** (#1251). The
+  NVFP4 MoE cache reserved room for the KV pool without counting the allocator
+  headroom that KV sizing subtracts moments later, so the residual it left was
+  *entirely* headroom and the pool fell to the 16-block / 512-token floor.
+  Qwen3.6-35B-A3B-UD-Q4_K_M went from **16 blocks (512 tokens)** and
+  `finish_reason: "cancelled"` at ~476 tokens to **1257 blocks (40224 tokens)**
+  and a full 1200-token reply. Allocation is byte-identical on Qwen3-30B-A3B-Q4_K_M
+  and Gemma-4-26B-A4B-UD-Q4_K_M, where the MoE budget is not the binding
+  constraint.
+
 ## [0.22.0] - 2026-08-05
 
 ### Added
