@@ -11,6 +11,17 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- **The obvious fix for the AWQ attention failure is REFUTED and documented as
+  such** — splitting group C's tied statistic into "shapes the scale" vs
+  "weights the error" makes Qwen3-0.6B **worse by 0.71 PPL** (28.89 → 29.59) and
+  does not rescue the 14B (12.48, still +2.55 over round-to-nearest). When `s`
+  is forced constant per KV group, weighting by channels the search cannot steer
+  separately is inconsistent with its own constraint; the `max` tie is a real
+  coupling, not a bug. No code change — the measurement is the deliverable.
+  See [`docs/quantization.md`](docs/quantization.md).
+
 ### Added
 
 - **`imp-quantize --calib-groups ABCD`** — runs any subset of the AWQ planner's

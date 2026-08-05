@@ -293,6 +293,29 @@ it inflates a channel's weight in the error term by a median factor of 1.346 at
 Since `a_j` is the *weight* in the objective (`err += (a_j/s_j)^2 * (...)^2`), a
 distorted `a_j` makes the search optimise the wrong thing, faithfully.
 
+**The obvious fix for that follows directly, was built, and is REFUTED — do not
+re-try it.** The tie serves two roles at once: it shapes `s` (a genuine constraint,
+since C's fold writes `s` into `v_proj`'s rows and those rows are shared per KV
+head) *and* it weights the error (a measurement, which nothing constrains). Splitting
+them — tied statistic for the scale, recorded statistic for the weight — is a
+15-line change to `search_group_scale`. Measured 2026-08-05:
+
+| | before | with the split |
+|---|---|---|
+| 14B `BD` *(control: C not involved)* | 9.7922 | **9.7922** — bit-identical |
+| 14B `C` | 9.9411 | **10.0098** *(worse)* |
+| 14B `ABCD` | 12.6016 | 12.4794 *(still +2.55 over RTN)* |
+| **0.6B `ABCD`** | **28.8868** | **29.5937** *(worse by 0.71)* |
+
+It does not rescue the 14B and it **damages the configuration that worked**, giving
+back more than half of the 0.6B's −1.21 gain. The reason is that the split is not
+actually more correct: when `s` is forced constant across a KV group, the search can
+only pick *one* value for that whole group, so weighting the error by individual
+channels it cannot steer separately makes the objective inconsistent with its own
+constraint. The `max` tie is a conservative aggregation that matches what the search
+can control — a real coupling, not a bug. Whatever fixes the attention half will have
+to change the *constraint* (how the fold works), not the weighting.
+
 Two findings worth keeping separately. **Group A hurts both models** (+0.28 / +0.65),
 which has nothing to do with `n_rep` and was not previously known. And **`--calib`
 is not the thing that fails at 14B — the attention half of it is.** `--calib-groups
