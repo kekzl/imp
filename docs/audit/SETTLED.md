@@ -400,7 +400,34 @@ Still open from 07-29 with the reason each was not shipped blind — see
   What remains is volume, not uncertainty: lift nine structs into `core/`, fill
   the policy at `:972`, rename 91 accessors, drop the include from 22 files.
 - **F-12** — `src/memory/vram_allocator.cu`: **48** live references (2026-08-05), down from
-  56, 67 and the audit's 84. `src/vision/` is at **zero**. Still open, but shrinking; count with the allocator's own files and comment
+  56, 67 and the audit's 84. `src/vision/` is at **zero**.
+  **RE-SCOPED 2026-08-05: the remaining 48 are mostly NOT a migration backlog, and treating them
+  as one would burn a campaign on something that cannot work.** The audit frames `VRAMAllocator`
+  as "a sixth allocator" coexisting with the tier design. For the consumers migrated so far that
+  was right. For most of what is left it is not, and the reason is structural:
+  **the engine arena is a fixed-capacity bump allocator opened in `Engine::init` BEFORE the
+  weights upload, while the remaining consumers are sized from what is left AFTER it.**
+  - **The KV pool cannot be an arena tenant.** `kv_cache.cu:42` sizes it
+    `n_layers * max_blocks * 2 * block_bytes`, and `max_blocks` comes from the measured residual
+    — that is the whole point of the #1103 fix (`AUDIT.md` B23: caches build first, KV takes the
+    residual). You cannot pre-reserve a fixed arena for a quantity defined as "whatever is left".
+    Same for the pre-dequant phase caches: `effective_free_vram`/`cudaMemGetInfo` appears in
+    `pre_dequant_phase3_{moe,nvfp4_decode,cutlass}.cu` and `engine_kv_cache_init.cpp`, which is
+    exactly the set still on the allocator.
+  - **Grow-on-demand buffers cannot be arena tenants either.** `d_penalty_tokens_`
+    (`engine_sampling_stop.cpp:219-223`) frees and re-allocates larger when a request needs more;
+    a bump allocator has no free.
+  - **What genuinely remains migratable is small:** `GPUBatchPool` (`batch.cpp:180-205`, 2 sites).
+    Its dimensions are config-derived — `blocks_per_seq = (max_seq_len + kv_bs - 1) / kv_bs` — so
+    it is answerable at arena-open time, unlike everything above.
+  **So the honest reading is that `VRAMAllocator`'s residual job is the acquisition path for
+  tiers sized after the upload, and F-12 should be judged on that, not on driving the count to
+  zero.** Do not re-open it as "48 to go". Anchors: `src/memory/kv_cache.cu`,
+  `src/runtime/engine_sampling_stop.cpp`, `src/runtime/batch.cpp`.
+  **One prior in `AUDIT.md` B80 is out of date and cost me a wrong turn:** it says always-on pool
+  bookkeeping is "what A7 step 6 is actually waiting on". That shipped — `MemAccount::note()`
+  (`src/memory/mem_account.cu:48`) is now deliberately NOT gated on `enabled_`, with the 35B KV
+  collapse recorded in the comment right there. Step 6 is not blocked on it any more. Still open, but shrinking; count with the allocator's own files and comment
   lines excluded or you get 103 and read a regression that is not there — and count the type
   name alone, since adding `vram_alloc`/`vram_alloc_force` gives 104.
   **First consumer migrated 2026-08-04: the Qwen3-VL vision tower** (`qwen3vl_vision_upload.cpp`),
