@@ -1282,7 +1282,7 @@ be turned off; the once-at-init dump is what an operator actually reads.
 
 ---
 
-**F-3 — The routing tests test a hand-maintained replica, not the dispatch** — ⚠️ MOSTLY FIXED in #1205 + #1211 (residual named below)
+**F-3 — The routing tests test a hand-maintained replica, not the dispatch** — ✅ RESOLVED: FIXED in #1205 + #1211 (attention) and the MoE half in #1212; the residual is ⛔ WON'T FIX **with a mechanism** in #1239 — a chain whose predicates include "did this tier work" can only ever be replayed against a prefix
 `HIGH` · effort `S` · blast 3 files · confidence **HIGH**
 
 *Evidence:* `src/compute/attention_dispatch_decision.h:57-95` and
@@ -1382,7 +1382,7 @@ allocators; it cannot validate numerics.
 
 ---
 
-**F-6 — 20-39 % of steady-state VRAM is unattributed** — ⚠️ REPORTING FIXED in #1211; the attribution itself is open
+**F-6 — 20-39 % of steady-state VRAM is unattributed** — ✅ RESOLVED: reporting FIXED in #1211, and the attribution itself re-measured 2026-08-03 across four config families at **99.9-100.0 % accounted** (residual 0-16 MiB) against the ≥95 % criterion
 `HIGH` · effort `M` · blast `memory/` · confidence **HIGH** (project's own measurement)
 
 *Evidence:* `docs/MEMORY_ARCHITECTURE.md:150-160` — tracked total 19 311 of 23 872 MiB on the
@@ -1438,7 +1438,7 @@ the harness for the other five dtypes.
 
 ---
 
-**F-9 — cuBLASLt algorithm selection is neither cached nor pinned** — ⚠️ mechanism CONFIRMED, magnitude REFUTED (3.50 %, not 2.6×; see open question 5)
+**F-9 — cuBLASLt algorithm selection is neither cached nor pinned** — ✅ FIXED in #1228 by repairing the estimator, not by persisting the result (mechanism CONFIRMED, magnitude REFUTED — 3.50 %, not 2.6×; R-16 REJECTED, see open question 5)
 `MEDIUM` · effort `M` · blast 2 files · confidence **MEDIUM** (mechanism confirmed; the 2.6× figure
 is from the dispatch, not re-measured)
 
@@ -1460,7 +1460,7 @@ is right.
 
 ---
 
-**F-10 — `runtime/config.h` (1124 LOC) is included by 22 files in `src/exec/`**
+**F-10 — `runtime/config.h` (1124 LOC) is included by 22 files in `src/exec/`** — ✅ FIXED in #1227
 `MEDIUM` · effort `L` · blast wide · confidence **HIGH**
 
 *Evidence:* `docs/audit/arch_2026_07_29_evidence/layering_tally.txt` — `exec → runtime` 27 files, 22 of them `config.h`;
@@ -1500,7 +1500,7 @@ attention/GEMM/vision paths is a change with its own risk.
 
 ---
 
-**F-12 — `VRAMAllocator` is a sixth allocator with 84 live references**
+**F-12 — `VRAMAllocator` is a sixth allocator with 84 live references** — ✅ RESOLVED in #1229-#1238, and RE-SCOPED: the migratable consumers moved to the T2 arena, the residual is structural
 `MEDIUM` · effort `L` · blast 20 files · confidence **HIGH**
 
 *Evidence:* `src/memory/vram_allocator.{h,cu}`; 84 references across 20 files including
@@ -1717,7 +1717,7 @@ and touches every construction site.
 
 ---
 
-**F-24 — `Engine` is a 1200-LOC header with ~150 members and 131 commits in six months**
+**F-24 — `Engine` is a 1200-LOC header with ~150 members and 131 commits in six months** — ✅ RESOLVED in #1233: the proposed extraction was REFUTED on churn, fan-in was cut instead (33 → 23 TUs)
 `LOW` · effort `L` · blast wide · confidence **HIGH**
 
 *Evidence:* `src/runtime/engine.h`; churn `engine.cpp` 253 / `engine.h` 131 (six months), the
