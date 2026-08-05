@@ -703,11 +703,19 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                  : 0;
         if (!config_.mmproj_path.empty())
             vision_bytes += vision_mmproj_arena_bytes(config_.mmproj_path, model_->config_.d_model);
+        // The decode batch pool is engine-lifetime and config-sized, but allocated
+        // after KV sizing, so reserve for it here. with_swa_tables is a KV-init
+        // decision not known yet; assume it — the pool is a few hundred KiB, so
+        // guessing high costs nothing and guessing low would exhaust the arena.
+        const int kv_bs = config_.kv_block_size > 0 ? config_.kv_block_size : 16;
+        const size_t batch_pool_bytes = GPUBatchPool::demand_bytes(
+            config_.max_batch_size, (config_.max_seq_len + kv_bs - 1) / kv_bs, /*with_swa_tables=*/true);
         // *9/8 for 256-byte alignment padding across the arena's takes (integer
         // identical to t + t/8, just one expression instead of two).
-        const size_t cap = std::max(kEngineArenaDefaultBytes, (d.total() + vision_bytes) * 9 / 8);
-        IMP_LOG_INFO("engine arena demand: %s + vision %.1f MiB -> %.1f MiB reserved",
-                     d.describe().c_str(), vision_bytes / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
+        const size_t cap = std::max(kEngineArenaDefaultBytes, (d.total() + vision_bytes + batch_pool_bytes) * 9 / 8);
+        IMP_LOG_INFO("engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> %.1f MiB reserved",
+                     d.describe().c_str(), vision_bytes / (1024.0 * 1024.0),
+                     batch_pool_bytes / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
         (void)engine_arena_open(cuda_malloc_backend(), cap);
         // Name the two charges that are already known, HERE rather than after
         // warmup. Both are facts by now — the context was measured above, the

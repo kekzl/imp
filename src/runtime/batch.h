@@ -7,7 +7,6 @@
 
 namespace imp {
 
-class VRAMAllocator;
 
 // CPU-side batch data (built by BatchBuilder)
 struct Batch {
@@ -60,8 +59,13 @@ public:
     // Allocate pool for the given max configuration. Call once at init.
     // with_swa_tables adds a second block-table region for the SWA-group
     // tables (kv_cache.swa_sizing) — same stride, stable pointer.
-    void allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllocator* alloc = nullptr,
-                  bool with_swa_tables = false);
+    // The pool is one contiguous engine-lifetime slab out of the T2 arena, sized
+    // entirely from config. demand_bytes() is the ONLY place that sum lives —
+    // allocate() calls it too — so Engine::init can reserve for it before the
+    // pool exists without a second formula that could drift.
+    static size_t demand_bytes(int max_batch_size, int max_blocks_per_seq, bool with_swa_tables);
+
+    void allocate(int max_batch_size, int max_blocks_per_seq, bool with_swa_tables);
 
     // Upload a CPU batch into the pre-allocated pool (async).
     // Returns a GPUBatch with pointers into the pool (caller must NOT free them).
@@ -81,7 +85,6 @@ public:
     int32_t* d_sample_result() const { return d_sample_result_; }
 
 private:
-    VRAMAllocator* alloc_ = nullptr;
     void* pool_ = nullptr;
     size_t pool_size_ = 0;
 

@@ -417,9 +417,16 @@ Still open from 07-29 with the reason each was not shipped blind — see
   - **Grow-on-demand buffers cannot be arena tenants either.** `d_penalty_tokens_`
     (`engine_sampling_stop.cpp:219-223`) frees and re-allocates larger when a request needs more;
     a bump allocator has no free.
-  - **What genuinely remains migratable is small:** `GPUBatchPool` (`batch.cpp:180-205`, 2 sites).
+  - **`GPUBatchPool` was the one genuinely migratable consumer, and it is done (2026-08-05).**
     Its dimensions are config-derived — `blocks_per_seq = (max_seq_len + kv_bs - 1) / kv_bs` — so
-    it is answerable at arena-open time, unlike everything above.
+    it is answerable at arena-open time, unlike everything above. I1 **473 -> 471**.
+    **State the value honestly: the pool is 0.06 MiB on an 8B/4096 config**, so this bought no
+    VRAM and the arena's 1/8 alignment slack (~43 MiB there) would have absorbed it regardless.
+    What it bought is two fewer driver call sites and the last config-sized tenant sitting in the
+    tier it belongs to. No anti-drift test was added and none is needed — unlike the vision case,
+    `allocate()` calls `demand_bytes()` itself, so there is only ever one formula.
+    `with_swa_tables` is a KV-init decision not known when the arena opens, so the reservation
+    assumes it; guessing high costs a few hundred KiB and guessing low would exhaust the arena.
   **So the honest reading is that `VRAMAllocator`'s residual job is the acquisition path for
   tiers sized after the upload, and F-12 should be judged on that, not on driving the count to
   zero.** Do not re-open it as "48 to go". Anchors: `src/memory/kv_cache.cu`,

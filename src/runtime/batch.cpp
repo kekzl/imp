@@ -1,4 +1,5 @@
 #include "runtime/batch.h"
+#include "memory/engine_arena.h"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <algorithm>
@@ -177,18 +178,27 @@ Batch BatchBuilder::build() {
 
 GPUBatchPool::~GPUBatchPool() { free_pool(); }
 
-void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllocator* alloc,
-                            bool with_swa_tables) {
+// 256-byte alignment per sub-buffer, so the offsets below stay valid.
+static size_t align256(size_t x) { return (x + 255) & ~size_t(255); }
+
+size_t GPUBatchPool::demand_bytes(int max_batch_size, int max_blocks_per_seq, bool with_swa_tables) {
+    const size_t block_tab_sz =
+        align256(static_cast<size_t>(max_batch_size) * max_blocks_per_seq * sizeof(int));
+    return align256(static_cast<size_t>(max_batch_size) * sizeof(int32_t)) +      // token ids
+           align256(static_cast<size_t>(max_batch_size) * sizeof(int)) +          // positions
+           align256(static_cast<size_t>(max_batch_size + 1) * sizeof(int)) +      // seq offsets
+           block_tab_sz + (with_swa_tables ? block_tab_sz : 0) +                  // block tables
+           align256(static_cast<size_t>(max_batch_size) * sizeof(int)) +          // ctx lens
+           align256(sizeof(int32_t));                                             // sample result
+}
+
+void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, bool with_swa_tables) {
     free_pool();
-    alloc_ = alloc;
 
     max_batch_size_ = max_batch_size;
     max_blocks_per_seq_ = max_blocks_per_seq;
     last_upload_block_tables_.clear();
     last_upload_block_tables_swa_.clear();
-
-    // Compute sizes with 256-byte alignment per sub-buffer
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
 
     size_t token_ids_sz = align256(static_cast<size_t>(max_batch_size) * sizeof(int32_t));
     size_t positions_sz = align256(static_cast<size_t>(max_batch_size) * sizeof(int));
@@ -196,22 +206,19 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllo
     size_t block_tab_sz = align256(static_cast<size_t>(max_batch_size) * max_blocks_per_seq * sizeof(int));
     size_t swa_tab_sz = with_swa_tables ? block_tab_sz : 0;
     size_t ctx_lens_sz = align256(static_cast<size_t>(max_batch_size) * sizeof(int));
-    size_t sample_res_sz = align256(sizeof(int32_t));
 
-    pool_size_ = token_ids_sz + positions_sz + seq_offsets_sz + block_tab_sz + swa_tab_sz + ctx_lens_sz +
-                 sample_res_sz;
+    pool_size_ = demand_bytes(max_batch_size, max_blocks_per_seq, with_swa_tables);
 
-    if (alloc_) {
-        pool_ = alloc_->allocate(pool_size_, "batch_pool");
-    } else {
-        cudaError_t err = cudaMalloc(&pool_, pool_size_);
-        if (err != cudaSuccess)
-            pool_ = nullptr;
-    }
-    if (!pool_) {
+    auto slab = engine_arena().take_bytes(pool_size_);
+    if (slab.empty()) {
+        IMP_LOG_ERROR("decode batch pool: engine arena exhausted for %zu bytes — the arena was "
+                      "reserved without this pool",
+                      pool_size_);
+        pool_ = nullptr;
         pool_size_ = 0;
         return;
     }
+    pool_ = slab.data();
 
     char* ptr = static_cast<char*>(pool_);
     d_token_ids_ = reinterpret_cast<int32_t*>(ptr);
@@ -300,14 +307,10 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
     return gpu;
 }
 
+// An arena slice: released wholesale when the arena closes, so this only drops
+// pointers. allocate() runs once per engine, so nothing is leaked by not freeing.
 void GPUBatchPool::free_pool() {
-    if (pool_) {
-        if (alloc_)
-            alloc_->free(pool_);
-        else
-            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
-        pool_ = nullptr;
-    }
+    pool_ = nullptr;
     pool_size_ = 0;
     d_token_ids_ = nullptr;
     d_positions_ = nullptr;
