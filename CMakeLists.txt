@@ -378,6 +378,7 @@ set(IMP_EXEC_SOURCES
 set(IMP_VISION_SOURCES
     src/vision/vision_model.cpp
     src/vision/vision_loader.cpp
+    src/vision/vision_loader_check.cpp
     src/vision/qwen3vl_vision_map.cpp
     src/vision/qwen3vl_vision_config.cpp
     src/vision/qwen3vl_vision_load.cpp
@@ -608,6 +609,7 @@ if(IMP_BUILD_TESTS)
         tests/test_safetensors_loader.cpp
         tests/test_safetensors_writer.cpp
         tests/test_awq_calibration.cpp
+        tests/test_vision_loader_check.cpp
         tests/test_qwen3vl_vision_map.cpp
         tests/test_qwen3vl_vision_config.cpp
         tests/test_qwen3vl_vision_load.cpp

@@ -1,4 +1,5 @@
 #include "vision/vision_loader.h"
+#include "vision/vision_loader_check.h"
 #include "model/gguf_loader.h"
 #include "memory/engine_arena.h"
 #include "core/logging.h"
@@ -495,6 +496,14 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
             it = metadata.find("clip.vision.projector_type");
         if (it != metadata.end())
             projector = it->second.str_val;
+        // Refuse a dialect we know we cannot read before uploading a byte of it.
+        // Without this the load "succeeds" with most slots filled — see
+        // vision_loader_check.h.
+        if (std::string reason = vision_projector_reject_reason(projector); !reason.empty()) {
+            IMP_LOG_ERROR("Vision: refusing %s — %s", path.c_str(), reason.c_str());
+            munmap(mmap_base, file_size);
+            return nullptr;
+        }
         if (projector == "gemma4v") {
             cfg.is_gemma4v = true;
             cfg.n_merge = 3;
@@ -522,6 +531,9 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
 
     // 8. Assign tensors
     int assigned = 0;
+    // Names this loader had no slot for. Only ever read to explain a refusal:
+    // "247 / 316" says something is wrong, "attn_qkv" says what.
+    std::vector<std::string> unrecognized;
     for (const auto& info : tensor_infos) {
         // Compute total elements and data pointer
         int64_t n_elements = 1;
@@ -693,11 +705,13 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
                 layer.ffn_gate_w = t;
             else {
                 IMP_LOG_DEBUG("Vision: unrecognized layer tensor: %s", name.c_str());
+                unrecognized.push_back(name);
                 continue;
             }
             assigned++;
         } else {
             IMP_LOG_DEBUG("Vision: unrecognized tensor: %s", name.c_str());
+            unrecognized.push_back(name);
         }
     }
 
@@ -708,6 +722,24 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
     }
 
     IMP_LOG_INFO("Vision: assigned %d / %lu tensors", assigned, (unsigned long)tensor_count);
+
+    // A tower with a null slot must not reach the encoder — it would hand the
+    // null to vision_gemm and return embeddings unrelated to the image. Named
+    // dialects are already out (above); this is the net under the unnamed ones.
+    if (std::string missing = vision_model_missing_slot(*model); !missing.empty()) {
+        std::string sample;
+        for (size_t i = 0; i < unrecognized.size() && i < 4; i++)
+            sample += (i ? ", " : "") + unrecognized[i];
+        if (unrecognized.size() > 4)
+            sample += ", … (" + std::to_string(unrecognized.size()) + " total)";
+        IMP_LOG_ERROR(
+            "Vision: refusing %s — tower slot '%s' was never filled (assigned %d / %lu). "
+            "This mmproj is not in a layout this loader reads%s%s",
+            path.c_str(), missing.c_str(), assigned, (unsigned long)tensor_count,
+            sample.empty() ? "" : "; unrecognized: ", sample.c_str());
+        munmap(mmap_base, file_size);
+        return nullptr;
+    }
 
     // Cleanup mmap — data is on GPU now
     munmap(mmap_base, file_size);
