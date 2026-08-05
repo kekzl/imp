@@ -11,6 +11,15 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **`tools/analysis/vision_sight_check.py`** — answers "is this tower blind or
+  just weak?" in about two minutes. Scores a counting battery against the **best
+  constant answer**, not raw accuracy: #1246 reported 4/6 correct, which was
+  exactly the score of always replying "1". On Gemma-4-26B + mmproj it reads
+  **8/8 against a 2/8 constant baseline**; with the image withheld it reports
+  BLIND, which is how the check itself is validated.
+
 ### Fixed
 
 - **An mmproj GGUF this loader cannot read is now refused, not half-loaded.**
