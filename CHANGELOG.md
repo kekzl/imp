@@ -11,6 +11,18 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An mmproj GGUF this loader cannot read is now refused, not half-loaded.**
+  Qwen3-VL's mmproj assigned **247 of 316** tensors and reported success; the 69
+  it dropped were exactly its fused `attn_qkv` (48), DeepStack mergers (18),
+  second projector layer (2) and temporal patch conv (1), so the encoder passed
+  null slots to `vision_gemm`.
+  `projector_type: qwen3vl_merger` is now rejected by name — Qwen3-VL loads from
+  its SafeTensors checkpoint, no `--mmproj` — and behind that, any tower with an
+  unfilled required slot fails the load naming the slot. Gemma-3 (439/439) and
+  Gemma-4v (356/356) are unaffected.
+
 ### Changed
 
 - **The obvious fix for the AWQ attention failure is REFUTED and documented as
