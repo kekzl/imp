@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-05
+
 ### Added
 
 - **`tools/analysis/vision_sight_check.py`** — answers "is this tower blind or
@@ -19,6 +21,37 @@ there instead of retelling it.
   exactly the score of always replying "1". On Gemma-4-26B + mmproj it reads
   **8/8 against a 2/8 constant baseline**; with the image withheld it reports
   BLIND, which is how the check itself is validated.
+
+- **`imp-quantize --calib-groups ABCD`** — runs any subset of the AWQ planner's
+  four scale groups. It answers why `--calib` helps at 0.6B/1.7B and hurts at
+  14B, and **fixes it**: the failure is the *attention* half only.
+  `--calib-groups BD` (the two FFN groups) scores **9.7922 on Qwen3-14B against
+  round-to-nearest's 9.9252** — the best measured configuration, where the
+  default `ABCD` costs +2.68. The harm is mostly interaction, not the sum of
+  parts: A × C is +1.36 and C × ABD is +1.90 (71 % of the total) at GQA
+  `n_rep=5`, against +0.05 at `n_rep=2`. So use `BD` on wide-GQA models and the
+  default on narrow-GQA ones. See [`docs/quantization.md`](docs/quantization.md).
+
+### Changed
+
+- **The obvious fix for the AWQ attention failure is REFUTED and documented as
+  such** — splitting group C's tied statistic into "shapes the scale" vs
+  "weights the error" makes Qwen3-0.6B **worse by 0.71 PPL** (28.89 → 29.59) and
+  does not rescue the 14B (12.48, still +2.55 over round-to-nearest). When `s`
+  is forced constant per KV group, weighting by channels the search cannot steer
+  separately is inconsistent with its own constraint; the `max` tie is a real
+  coupling, not a bug. No code change — the measurement is the deliverable.
+  See [`docs/quantization.md`](docs/quantization.md).
+- **The 2026-07-29 architecture audit is closed at 25/25**, and the ledger now
+  says so: `SETTLED.md` §G had kept six resolved findings under "Open: NOT
+  settled", and F-10, F-12 and F-24 carried no status line in the report at all.
+  Each entry keeps its measurements — three of the six closed by refuting their
+  own proposed fix.
+- **`check-release.sh` section 1d cross-checks finding status** between
+  `AUDIT_ARCH_2026_07_29.md` and `SETTLED.md`. Section 1c only proves the files
+  a ledger entry names still exist; this proves the entry is still true. The
+  ledger had gone stale the same way three times (F-6, F-15, F-10), each time
+  pointing a later pass at work already done.
 
 ### Fixed
 
@@ -41,42 +74,6 @@ there instead of retelling it.
   its SafeTensors checkpoint, no `--mmproj` — and behind that, any tower with an
   unfilled required slot fails the load naming the slot. Gemma-3 (439/439) and
   Gemma-4v (356/356) are unaffected.
-
-### Changed
-
-- **The obvious fix for the AWQ attention failure is REFUTED and documented as
-  such** — splitting group C's tied statistic into "shapes the scale" vs
-  "weights the error" makes Qwen3-0.6B **worse by 0.71 PPL** (28.89 → 29.59) and
-  does not rescue the 14B (12.48, still +2.55 over round-to-nearest). When `s`
-  is forced constant per KV group, weighting by channels the search cannot steer
-  separately is inconsistent with its own constraint; the `max` tie is a real
-  coupling, not a bug. No code change — the measurement is the deliverable.
-  See [`docs/quantization.md`](docs/quantization.md).
-
-### Added
-
-- **`imp-quantize --calib-groups ABCD`** — runs any subset of the AWQ planner's
-  four scale groups. It answers why `--calib` helps at 0.6B/1.7B and hurts at
-  14B, and **fixes it**: the failure is the *attention* half only.
-  `--calib-groups BD` (the two FFN groups) scores **9.7922 on Qwen3-14B against
-  round-to-nearest's 9.9252** — the best measured configuration, where the
-  default `ABCD` costs +2.68. The harm is mostly interaction, not the sum of
-  parts: A × C is +1.36 and C × ABD is +1.90 (71 % of the total) at GQA
-  `n_rep=5`, against +0.05 at `n_rep=2`. So use `BD` on wide-GQA models and the
-  default on narrow-GQA ones. See [`docs/quantization.md`](docs/quantization.md).
-
-### Changed
-
-- **The 2026-07-29 architecture audit is closed at 25/25**, and the ledger now
-  says so: `SETTLED.md` §G had kept six resolved findings under "Open: NOT
-  settled", and F-10, F-12 and F-24 carried no status line in the report at all.
-  Each entry keeps its measurements — three of the six closed by refuting their
-  own proposed fix.
-- **`check-release.sh` section 1d cross-checks finding status** between
-  `AUDIT_ARCH_2026_07_29.md` and `SETTLED.md`. Section 1c only proves the files
-  a ledger entry names still exist; this proves the entry is still true. The
-  ledger had gone stale the same way three times (F-6, F-15, F-10), each time
-  pointing a later pass at work already done.
 
 ## [0.21.0] - 2026-08-05
 
