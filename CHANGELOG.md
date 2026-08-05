@@ -11,7 +11,63 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-05
+
+### Added
+
+- **`diagnostics.log_level`** (`debug` | `info` | `warn` | `error` | `fatal`) —
+  the engine's debug logging could not be switched on at all. `log_set_level()`
+  was the only writer of the level and nothing called it; there was no config
+  key and no flag, so `g_log_level` stayed at `info` and all 76
+  `IMP_LOG_DEBUG` sites were unreachable. Applied in `process_diag_install()`,
+  which runs from both tool mains and `Engine::init`, so a C-API consumer gets
+  it too. An unrecognised value warns and keeps the current level instead of
+  falling back to `info` — a silent fallback is what the bug was.
+  Measured: same model and prompt, 0 debug lines by default, 359 from 10 source
+  files with `--set diagnostics.log_level=debug`.
+- **The MoE prefill dispatch now checks itself against its routing model**, the
+  same treatment the attention half got in the F-3 campaign. `select_moe_prefill_path`
+  had zero production callers — ten test callers and a comment asking for the two
+  predicates to be kept in sync by hand — so a reorder in
+  `executor_forward_moe_cutlass.cu` left the routing test green while describing a
+  dispatch that no longer existed. Each tier now replays the model against what the
+  chain observed and logs a one-shot error on divergence. Six new CPU tests; the
+  reorder-catching ones are the tier-precedence pair, verified by mutation (the
+  replay tests stay green under a reorder, exactly as on the attention side).
+- **`docs/audit/SETTLED.md`** (#1215) — the ledger an audit reads *before* forming
+  hypotheses, gated by a new `settled-prior anchors` section in
+  `scripts/check-release.sh` (CI job `Release hygiene`, 49 anchors). Eight of the
+  2026-07-29 audit's thirteen hypotheses were REFUTED because they described
+  duplication earlier campaigns had already collapsed, and five facts in its own
+  brief were stale; the ledger records both, and the gate fails when an anchor
+  stops resolving so an entry cannot quietly become the next stale prior.
+- **`--metrics-require-auth`** (#1207): fold `/metrics` back under the
+  `--api-key` check. Off by default so a stock Prometheus scrape keeps working,
+  but the endpoint discloses the loaded model name, `d_model` and cumulative
+  token counts to anyone who can reach the port.
+- **CI gate: every CUDA kernel launch must carry a post-launch error check**
+  (#1206, `tools/check_launch_guards.py`, job `Launch guards`). An unguarded
+  launch turns a launch-time failure — bad configuration, shared memory over the
+  99 KB opt-in, missing kernel image — into silently wrong output instead of an
+  error, because the sticky error only surfaces at the next synchronizing call,
+  or not at all. The convention was ~99 % adopted and 0 % enforced: the whole
+  Qwen3-VL vision tower (`src/vision/qwen3vl_encoder_kernels.cu`) sat at 9
+  launches / 0 checks, where a launch failure would have produced silently wrong
+  image embeddings. Now 407/407 in-scope launches are guarded; the 25 launches
+  written inside `#define` bodies are reported as out of scope rather than
+  guessed at, since deciding those needs the enclosing function.
+- **`Resolved dispatch:` log line — which attention and MoE kernels a model
+  actually ran** (#1205). Emitted once, after the first step that has seen both a
+  prefill and a decode, e.g.
+  `attn_prefill=fa2_fp16qk attn_decode=paged_fp8 moe_prefill=cutlass3x → device_args graphs=1`.
+  The six prefill tiers and five MoE branches all decline by returning `false`
+  with no log, so a model dropping to a slower or lower-quality path used to
+  leave no trace. Recorded from inside the real dispatch
+  (`compute/dispatch_record.h`), not predicted from a second copy of the routing
+  rules, so it cannot disagree with what ran.
+
 ### Changed
+
 - **The decode batch pool comes from the T2 arena** (F-12, `src/runtime/batch.cpp`).
   It was the last consumer whose size is knowable before the weights upload, so it
   is the last one the arena can own; I1 direct allocation sites go **473 -> 471**.
@@ -77,7 +133,57 @@ there instead of retelling it.
   `max_tokens`. `CommonArgs` is a base class rather than a member, so every
   existing `args.<field>` use site is unchanged.
 
+- **The nine dispatch config sections moved to `core/` (audit F-10).**
+  `runtime/config.h` was included by 22 files in `src/exec/`, 85 translation
+  units transitively, and changed 130 times in six months — the highest build
+  cost in the repo. `kv_cache attention moe gdn gemm generation speculative ffn
+  diagnostics` now live in `src/core/dispatch_policy.h` under `imp::cfg`, and
+  `Engine` hands `exec/` a `DispatchPolicy` snapshot instead of a pointer to the
+  live config. `exec/` and `compute/` no longer include `runtime/config.h` at
+  all; the nine remaining includers are all inside `src/runtime/`, which owns it.
+  `config.h` 1143 -> 403 lines, TUs pulling it 85 -> 18. No behaviour change:
+  the resolved-dispatch lines are bit-identical across the GPU suite, all twelve
+  patterns at identical frequencies.
+
+- **Two layering cycles closed by moving a type down, not by adding an include.**
+  `src/compute/weight_dispatch.h` included `exec/weight_handle.h` for
+  `WeightHandle` — one backward edge against forty forward ones; the struct
+  depends on nothing but `core/` and now lives in `src/core/weight_handle.h`.
+  `src/quant/mxfp4_gemm.h` included a compute header for `CutlassMxFP4Weight`,
+  a dependency-free POD describing a quantised weight layout, now in
+  `src/quant/cutlass_mxfp4_weight.h`. Also: `compute/embedding.cu` and
+  `compute/gemm_dp4a.cu` pulled the 800-LOC `model/model_config.h` just to
+  reach `QType`, which is in `core/qtype.h` — `compute → model` goes 9 → 7.
+  No behaviour change.
+- **The engine logs through one mechanism again.** All 90 raw
+  `fprintf(stderr, ...)` sites in `src/` now go through `IMP_LOG_*`, so they
+  obey `diagnostics.log_level`, carry a timestamp and `file:line`, and can be
+  silenced. Before this, setting `log_level=error` still produced `[gemm-algo]`,
+  `[DEBUG_FWD]` and `[DEBUG_TPL]` output, because those bypassed the framework
+  entirely. `tools/` keeps its `fprintf` — a CLI writing to stderr is program
+  output, not logging.
+- **`log_message()` is now `__attribute__((format(printf, 4, 5)))`.** Roughly
+  1400 call sites had no compile-time format checking at all; turning it on
+  found five real `%lld`-vs-`int64_t` mismatches in `weight_upload.cu`, fixed
+  here.
+
+- **Pre-`cudaDeviceReset` hooks register themselves** (#1207). The eleven module
+  hooks that free lazily-created CUDA statics (cuBLAS handles, CUTLASS
+  workspaces, device scratch) were listed by hand in `cuda_static_reset.cpp`, so
+  a twelfth lazy static added without an entry dangled behind an armed guard —
+  the exact bug the file exists to prevent, with nothing to catch it. Each
+  owning TU now uses `IMP_REGISTER_CUDA_STATIC_RESET`. Side effect: `core/` no
+  longer includes a `compute/` header, removing the one `core → compute`
+  backward edge in the layer graph.
+- **`IMP_SPEC_TRACE`, `IMP_JUMP_TRACE` and `IMP_PPL_DUMP` are config keys**
+  (#1207). All three had crept back as raw `getenv()` calls at their use sites,
+  against the rule that only `IMP_DETERMINISTIC` and `IMP_FMHA_FA2` are seeded.
+  They are now `diagnostics.spec_trace` / `.jump_trace` / `.ppl_dump`, reachable
+  from `imp.conf` and `--set`; the env names still work (seeded at load) so
+  existing shell habits are unaffected.
+
 ### Fixed
+
 - **A second engine in one process ran on freed memory** — the module statics
   that take a slice from the engine's T2 arena were only re-armed by
   `reset_static_cuda_state()`, which was wired to `imp_api_suspend.cpp` alone
@@ -106,145 +212,6 @@ there instead of retelling it.
   the CUDA context; the failure path skipped with "expected without GPU", which
   is indistinguishable from a real skip. It now separates the two.
 
-### Changed
-- **The nine dispatch config sections moved to `core/` (audit F-10).**
-  `runtime/config.h` was included by 22 files in `src/exec/`, 85 translation
-  units transitively, and changed 130 times in six months — the highest build
-  cost in the repo. `kv_cache attention moe gdn gemm generation speculative ffn
-  diagnostics` now live in `src/core/dispatch_policy.h` under `imp::cfg`, and
-  `Engine` hands `exec/` a `DispatchPolicy` snapshot instead of a pointer to the
-  live config. `exec/` and `compute/` no longer include `runtime/config.h` at
-  all; the nine remaining includers are all inside `src/runtime/`, which owns it.
-  `config.h` 1143 -> 403 lines, TUs pulling it 85 -> 18. No behaviour change:
-  the resolved-dispatch lines are bit-identical across the GPU suite, all twelve
-  patterns at identical frequencies.
-
-### Changed
-- **Two layering cycles closed by moving a type down, not by adding an include.**
-  `src/compute/weight_dispatch.h` included `exec/weight_handle.h` for
-  `WeightHandle` — one backward edge against forty forward ones; the struct
-  depends on nothing but `core/` and now lives in `src/core/weight_handle.h`.
-  `src/quant/mxfp4_gemm.h` included a compute header for `CutlassMxFP4Weight`,
-  a dependency-free POD describing a quantised weight layout, now in
-  `src/quant/cutlass_mxfp4_weight.h`. Also: `compute/embedding.cu` and
-  `compute/gemm_dp4a.cu` pulled the 800-LOC `model/model_config.h` just to
-  reach `QType`, which is in `core/qtype.h` — `compute → model` goes 9 → 7.
-  No behaviour change.
-- **The engine logs through one mechanism again.** All 90 raw
-  `fprintf(stderr, ...)` sites in `src/` now go through `IMP_LOG_*`, so they
-  obey `diagnostics.log_level`, carry a timestamp and `file:line`, and can be
-  silenced. Before this, setting `log_level=error` still produced `[gemm-algo]`,
-  `[DEBUG_FWD]` and `[DEBUG_TPL]` output, because those bypassed the framework
-  entirely. `tools/` keeps its `fprintf` — a CLI writing to stderr is program
-  output, not logging.
-- **`log_message()` is now `__attribute__((format(printf, 4, 5)))`.** Roughly
-  1400 call sites had no compile-time format checking at all; turning it on
-  found five real `%lld`-vs-`int64_t` mismatches in `weight_upload.cu`, fixed
-  here.
-
-### Added
-- **`diagnostics.log_level`** (`debug` | `info` | `warn` | `error` | `fatal`) —
-  the engine's debug logging could not be switched on at all. `log_set_level()`
-  was the only writer of the level and nothing called it; there was no config
-  key and no flag, so `g_log_level` stayed at `info` and all 76
-  `IMP_LOG_DEBUG` sites were unreachable. Applied in `process_diag_install()`,
-  which runs from both tool mains and `Engine::init`, so a C-API consumer gets
-  it too. An unrecognised value warns and keeps the current level instead of
-  falling back to `info` — a silent fallback is what the bug was.
-  Measured: same model and prompt, 0 debug lines by default, 359 from 10 source
-  files with `--set diagnostics.log_level=debug`.
-- **The MoE prefill dispatch now checks itself against its routing model**, the
-  same treatment the attention half got in the F-3 campaign. `select_moe_prefill_path`
-  had zero production callers — ten test callers and a comment asking for the two
-  predicates to be kept in sync by hand — so a reorder in
-  `executor_forward_moe_cutlass.cu` left the routing test green while describing a
-  dispatch that no longer existed. Each tier now replays the model against what the
-  chain observed and logs a one-shot error on divergence. Six new CPU tests; the
-  reorder-catching ones are the tier-precedence pair, verified by mutation (the
-  replay tests stay green under a reorder, exactly as on the attention side).
-- **`docs/audit/SETTLED.md`** (#1215) — the ledger an audit reads *before* forming
-  hypotheses, gated by a new `settled-prior anchors` section in
-  `scripts/check-release.sh` (CI job `Release hygiene`, 49 anchors). Eight of the
-  2026-07-29 audit's thirteen hypotheses were REFUTED because they described
-  duplication earlier campaigns had already collapsed, and five facts in its own
-  brief were stale; the ledger records both, and the gate fails when an anchor
-  stops resolving so an entry cannot quietly become the next stale prior.
-- **`--metrics-require-auth`** (#1207): fold `/metrics` back under the
-  `--api-key` check. Off by default so a stock Prometheus scrape keeps working,
-  but the endpoint discloses the loaded model name, `d_model` and cumulative
-  token counts to anyone who can reach the port.
-- **CI gate: every CUDA kernel launch must carry a post-launch error check**
-  (#1206, `tools/check_launch_guards.py`, job `Launch guards`). An unguarded
-  launch turns a launch-time failure — bad configuration, shared memory over the
-  99 KB opt-in, missing kernel image — into silently wrong output instead of an
-  error, because the sticky error only surfaces at the next synchronizing call,
-  or not at all. The convention was ~99 % adopted and 0 % enforced: the whole
-  Qwen3-VL vision tower (`src/vision/qwen3vl_encoder_kernels.cu`) sat at 9
-  launches / 0 checks, where a launch failure would have produced silently wrong
-  image embeddings. Now 407/407 in-scope launches are guarded; the 25 launches
-  written inside `#define` bodies are reported as out of scope rather than
-  guessed at, since deciding those needs the enclosing function.
-- **`Resolved dispatch:` log line — which attention and MoE kernels a model
-  actually ran** (#1205). Emitted once, after the first step that has seen both a
-  prefill and a decode, e.g.
-  `attn_prefill=fa2_fp16qk attn_decode=paged_fp8 moe_prefill=cutlass3x → device_args graphs=1`.
-  The six prefill tiers and five MoE branches all decline by returning `false`
-  with no log, so a model dropping to a slower or lower-quality path used to
-  leave no trace. Recorded from inside the real dispatch
-  (`compute/dispatch_record.h`), not predicted from a second copy of the routing
-  rules, so it cannot disagree with what ran.
-
-### Removed
-- **Two dead modules and sixteen more uncalled functions.**
-  `src/compute/gemv_ggml_compat.{h,cu}` (174 lines): its only export had no
-  callers, its kernel was launched only by that dead wrapper, and the three
-  `#include`s of it in the MoE executors were the sole mention in those files.
-  `src/core/threading.{h,cpp}` (88 lines): a `ThreadPool` whose header was
-  included by exactly one file — its own `.cpp`. Plus sixteen functions with a
-  declaration, a definition and nothing else, among them another empty-bodied
-  stub in a public header (`gemm_grouped_nvfp4_smallM_cleanup`) and five unused
-  `Buffer` copy helpers. No behaviour change.
-  Found by BFS over the call graph from live roots rather than the one-level
-  "does it have a launcher" check — `ccg coverage` counted the `gemv_ggml_compat`
-  kernel as live because its launcher existed, though the launcher was itself
-  dead. `SETTLED.md` records the method, the blind spots and the correction.
-- **Ten functions that were declared, defined and never called** — the non-kernel
-  sibling of the sweep below. Four CuTe TMA descriptor builders
-  (`build_tma_a/_b/_sfa/_sfb`), whose removal also drops three `cute/` includes
-  from that translation unit; four **empty-bodied** `// Legacy stubs` in `gdn.h`
-  (`gdn_decode`, `gdn_prefill`, `gdn_scan_decode`, `gdn_scan_prefill` — a caller
-  would have got a silent no-op, while GDN really runs through
-  `gdn_scan_chunkwise_*`); `GraphExecutor::forward_batch`; and
-  `jinja::Template::render_string`. No behaviour change. The sweep, its four
-  false-positive families and the candidates left unverified are recorded in
-  `docs/audit/SETTLED.md` so the next pass does not re-run it raw.
-- **Three KV/bias kernels that were built and linked but never launched** (#1216) —
-  `write_kv_cache_kernel`, `write_kv_cache_fp8_kernel` and
-  `add_fp16_bias_to_fp32_kernel`, plus an inert `pdl::enable` registration on the
-  first. The FP8 one was orphaned when the fused FP8 KV write replaced its four
-  launch sites; the bias one was never launched at all, from the commit that
-  introduced it. No behaviour change — nothing called them. The two tests that
-  covered the non-fused FP16 write moved onto `write_kv_cache_fused_kernel`, so
-  the shared block-table indexing is now asserted on the kernel the engine
-  actually launches. Sweep and method recorded in `docs/audit/SETTLED.md`.
-
-### Changed
-- **Pre-`cudaDeviceReset` hooks register themselves** (#1207). The eleven module
-  hooks that free lazily-created CUDA statics (cuBLAS handles, CUTLASS
-  workspaces, device scratch) were listed by hand in `cuda_static_reset.cpp`, so
-  a twelfth lazy static added without an entry dangled behind an armed guard —
-  the exact bug the file exists to prevent, with nothing to catch it. Each
-  owning TU now uses `IMP_REGISTER_CUDA_STATIC_RESET`. Side effect: `core/` no
-  longer includes a `compute/` header, removing the one `core → compute`
-  backward edge in the layer graph.
-- **`IMP_SPEC_TRACE`, `IMP_JUMP_TRACE` and `IMP_PPL_DUMP` are config keys**
-  (#1207). All three had crept back as raw `getenv()` calls at their use sites,
-  against the rule that only `IMP_DETERMINISTIC` and `IMP_FMHA_FA2` are seeded.
-  They are now `diagnostics.spec_trace` / `.jump_trace` / `.ppl_dump`, reachable
-  from `imp.conf` and `--set`; the env names still work (seeded at load) so
-  existing shell habits are unaffected.
-
-### Fixed
 - **An unrecognised architecture string loaded silently as GENERIC** (#1206).
   `parse_model_arch()` falls back to a Llama-shaped decoder for any unknown
   `general.architecture` / `architectures[]` value — deliberate, and it is how 30
@@ -277,6 +244,41 @@ there instead of retelling it.
   hd=256 from the process-wide snapshot, so the two could disagree and walk the
   FMHA chain down to the #654 throw. `Engine::init()` now installs, before the
   arch resolvers that promote `cublas_fp16_acc`/`deterministic_gemm`.
+
+### Removed
+
+- **Two dead modules and sixteen more uncalled functions.**
+  `src/compute/gemv_ggml_compat.{h,cu}` (174 lines): its only export had no
+  callers, its kernel was launched only by that dead wrapper, and the three
+  `#include`s of it in the MoE executors were the sole mention in those files.
+  `src/core/threading.{h,cpp}` (88 lines): a `ThreadPool` whose header was
+  included by exactly one file — its own `.cpp`. Plus sixteen functions with a
+  declaration, a definition and nothing else, among them another empty-bodied
+  stub in a public header (`gemm_grouped_nvfp4_smallM_cleanup`) and five unused
+  `Buffer` copy helpers. No behaviour change.
+  Found by BFS over the call graph from live roots rather than the one-level
+  "does it have a launcher" check — `ccg coverage` counted the `gemv_ggml_compat`
+  kernel as live because its launcher existed, though the launcher was itself
+  dead. `SETTLED.md` records the method, the blind spots and the correction.
+- **Ten functions that were declared, defined and never called** — the non-kernel
+  sibling of the sweep below. Four CuTe TMA descriptor builders
+  (`build_tma_a/_b/_sfa/_sfb`), whose removal also drops three `cute/` includes
+  from that translation unit; four **empty-bodied** `// Legacy stubs` in `gdn.h`
+  (`gdn_decode`, `gdn_prefill`, `gdn_scan_decode`, `gdn_scan_prefill` — a caller
+  would have got a silent no-op, while GDN really runs through
+  `gdn_scan_chunkwise_*`); `GraphExecutor::forward_batch`; and
+  `jinja::Template::render_string`. No behaviour change. The sweep, its four
+  false-positive families and the candidates left unverified are recorded in
+  `docs/audit/SETTLED.md` so the next pass does not re-run it raw.
+- **Three KV/bias kernels that were built and linked but never launched** (#1216) —
+  `write_kv_cache_kernel`, `write_kv_cache_fp8_kernel` and
+  `add_fp16_bias_to_fp32_kernel`, plus an inert `pdl::enable` registration on the
+  first. The FP8 one was orphaned when the fused FP8 KV write replaced its four
+  launch sites; the bias one was never launched at all, from the commit that
+  introduced it. No behaviour change — nothing called them. The two tests that
+  covered the non-fused FP16 write moved onto `write_kv_cache_fused_kernel`, so
+  the shared block-table indexing is now asserted on the kernel the engine
+  actually launches. Sweep and method recorded in `docs/audit/SETTLED.md`.
 
 ## [0.20.2] - 2026-08-02
 
