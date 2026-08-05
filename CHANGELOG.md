@@ -12,6 +12,13 @@ there instead of retelling it.
 ## [Unreleased]
 
 ### Changed
+- **The decode batch pool comes from the T2 arena** (F-12, `src/runtime/batch.cpp`).
+  It was the last consumer whose size is knowable before the weights upload, so it
+  is the last one the arena can own; I1 direct allocation sites go **473 -> 471**.
+  `demand_bytes()` is the only place the size sum lives — `allocate()` calls it too
+  — so `Engine::init` can reserve for it without a second formula. The pool is
+  0.06 MiB on an 8B/4096 config: this buys tier ownership and two fewer driver
+  call sites, not VRAM. The arena demand line now itemises it.
 - **The Gemma mmproj vision path is a T2 arena tenant; `src/vision/` no longer
   uses `VRAMAllocator` at all** (F-12). The SigLIP tower, the encoder workspace
   and the pipeline buffers came from 9 raw `cudaMalloc` sites outside the tier

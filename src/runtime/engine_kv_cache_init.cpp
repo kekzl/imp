@@ -653,7 +653,7 @@ bool Engine::init_kv_cache() {
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
 
     // Pre-allocate decode batch pool + penalty buffer
-    decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq, &vram_alloc_,
+    decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq,
                                 /*with_swa_tables=*/swa_sizing_active_);
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
