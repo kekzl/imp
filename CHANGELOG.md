@@ -22,6 +22,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A system message no longer costs an image its tokens** (#1246). The Gemma
+  vision prompt keyed its image block on *"message index 0 is the user
+  message"*, so any request opening with a system prompt — the normal shape for
+  a pipeline — rendered text-only: the picture was decoded and encoded, the
+  prompt held no soft tokens for the embeddings to replace, and the model
+  answered fluently that it could not see an image. On gemma-3-4b + mmproj the
+  same request goes from **37 prompt tokens and "Bitte stelle mir das Bild zur
+  Verfügung"** to **296 tokens and a correct description**. The block now rides
+  the first *user* turn, matching the Qwen3-VL path. `vision_sight_check.py`
+  sends a system message by default for the same reason.
 - **An mmproj GGUF this loader cannot read is now refused, not half-loaded.**
   Qwen3-VL's mmproj assigned **247 of 316** tensors and reported success; the 69
   it dropped were exactly its fused `attn_qkv` (48), DeepStack mergers (18),

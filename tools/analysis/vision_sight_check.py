@@ -22,6 +22,11 @@ Two checks, in order of how hard they are to fake:
 Images are generated here (stdlib zlib only, no Pillow), so ground truth is
 exact and nothing binary lands in the repo.
 
+Requests carry a system message by default. That is not cosmetic: the second
+half of #1246 was a prompt builder that keyed the image block on "message index
+0 is the user message", so every request opening with a system prompt rendered
+text-only. A check without a system message walks straight past that.
+
 Usage:
   tools/analysis/vision_sight_check.py --url http://127.0.0.1:8080 --model NAME
   tools/analysis/vision_sight_check.py --model NAME --images 8 --save-dir /tmp/x
@@ -81,20 +86,33 @@ def make_image(n_circles: int, size: int = 448) -> bytes:
     return png(size, size, rows)
 
 
+# Sent by default, and not decoration. The #1246 regression lived exactly here:
+# the image block was keyed on "message index 0 is the user message", so any
+# request opening with a system prompt — the normal shape for a pipeline —
+# rendered text-only. A check that omits the system message passes straight over
+# it. `--no-system` drops it, which is useful for isolating whether a failure is
+# the system message's doing.
+DEFAULT_SYSTEM = "You describe images briefly and factually."
+
+
 def ask(url: str, model: str, prompt: str, image: bytes, max_tokens: int,
-        timeout: float) -> str:
+        timeout: float, system: str | None = DEFAULT_SYSTEM) -> str:
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64," + base64.b64encode(image).decode()}},
+        ],
+    })
     body = {
         "model": model,
         "max_tokens": max_tokens,
         "temperature": 0,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {
-                    "url": "data:image/png;base64," + base64.b64encode(image).decode()}},
-            ],
-        }],
+        "messages": messages,
     }
     req = urllib.request.Request(
         url.rstrip("/") + "/v1/chat/completions",
@@ -134,6 +152,9 @@ def main() -> int:
                     help="counting-battery size (rounded down to a multiple of "
                          f"{len(COUNTS)} so the counts stay balanced)")
     ap.add_argument("--timeout", type=float, default=180.0)
+    ap.add_argument("--no-system", action="store_true",
+                    help="omit the system message (the default sends one, because "
+                         "that is the request shape #1246 broke on)")
     ap.add_argument("--save-dir", help="also write the generated PNGs here")
     args = ap.parse_args()
 
@@ -150,9 +171,12 @@ def main() -> int:
 
     # ---- Check 1: distinctness ----
     print("== 1. distinctness (different pictures -> different answers) ==")
+    print(f"   system message: {'omitted' if args.no_system else 'sent'}")
     describe = "Describe exactly what is in this image."
     probes = [images[truth.index(c)] for c in (COUNTS[0], COUNTS[-1])]
-    answers = [ask(args.url, args.model, describe, img, 48, args.timeout) for img in probes]
+    system = None if args.no_system else DEFAULT_SYSTEM
+    answers = [ask(args.url, args.model, describe, img, 48, args.timeout, system)
+               for img in probes]
     for count, answer in zip((COUNTS[0], COUNTS[-1]), answers):
         print(f"   {count} circle(s): {answer[:100]!r}")
     identical = answers[0] == answers[1]
@@ -164,7 +188,7 @@ def main() -> int:
                 "Answer with a single digit and nothing else.")
     correct, guesses = 0, []
     for i, (t, img) in enumerate(zip(truth, images)):
-        reply = ask(args.url, args.model, question, img, 8, args.timeout)
+        reply = ask(args.url, args.model, question, img, 8, args.timeout, system)
         got = first_int(reply)
         guesses.append(got)
         ok = got == t
@@ -184,6 +208,9 @@ def main() -> int:
         print("  Check the load log for 'Vision: assigned X / Y tensors' (X<Y is fatal),")
         print("  and that the prompt token count rises by the image-token count when an")
         print("  image is attached — if it does not, the placeholders were never inserted.")
+        if not args.no_system:
+            print("  Then re-run with --no-system: if it passes without the system message,")
+            print("  the prompt builder is dropping the image block off the first user turn.")
     return 0 if sees else 1
 
 

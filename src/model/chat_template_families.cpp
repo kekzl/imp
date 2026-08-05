@@ -402,6 +402,27 @@ std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
         return apply(tok, messages, suppress_thinking, force_thinking);
     }
 
+    // The image rides the FIRST USER turn — not message index 0. Keying it on
+    // index 0 meant any request opening with a system prompt (the normal shape
+    // for a pipeline) rendered text-only: the picture was still decoded and
+    // encoded, but the prompt held no soft tokens for the embeddings to replace,
+    // so the model answered fluently that it could not see an image (#1246).
+    //
+    // "First user turn" matches what the Qwen3-VL path does with its placeholder
+    // blocks: the request parser keeps pictures in order but not which message
+    // they came from, so this is the position that is known rather than guessed.
+    size_t image_turn = messages.size();  // == none
+    for (size_t mi = 0; mi < messages.size(); mi++) {
+        if (messages[mi].role == "user") {
+            image_turn = mi;
+            break;
+        }
+    }
+    // Nowhere to put it: fall back to the text-only render rather than drop the
+    // block on an unrelated turn.
+    if (image_turn == messages.size())
+        return apply(tok, messages, suppress_thinking, force_thinking);
+
     // Gemma vision format:
     // <bos><start_of_turn>user\n<boi><img_soft>*N<eoi>\n{text}<end_of_turn>\n<start_of_turn>model\n
     std::vector<int32_t> tokens;
@@ -416,8 +437,8 @@ std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
 
         std::string role = (msg.role == "assistant") ? "model" : msg.role;
 
-        if (mi == 0 && msg.role == "user") {
-            // First user message: inject image tokens before text
+        if (mi == image_turn) {
+            // The user turn that carries the picture.
             auto role_ids = tok.encode(role + "\n");
             tokens.insert(tokens.end(), role_ids.begin(), role_ids.end());
 

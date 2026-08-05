@@ -741,6 +741,66 @@ TEST(ChatTemplateVisionTest, GemmaImageTokens) {
     EXPECT_GT(eoi_pos, boi_pos);
 }
 
+// A system message must not cost the image its tokens (#1246).
+//
+// The block used to be keyed on "message index 0 is a user message", so any
+// request that opened with a system prompt — the normal shape for a pipeline —
+// silently produced a text-only prompt. The picture was still decoded and
+// encoded, and the model answered fluently that it could not see an image, which
+// is the hardest kind of failure to attribute.
+TEST(ChatTemplateVisionTest, SystemMessageDoesNotDropTheImage) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::GEMMA, tok));
+
+    std::vector<ChatMessage> msgs = {{"system", "Answer briefly."}, {"user", "What is this?"}};
+    auto ids = tpl.apply_with_image(tok, msgs, /*n_image_tokens=*/4);
+
+    ASSERT_FALSE(ids.empty());
+    EXPECT_TRUE(contains(ids, BOI));
+    EXPECT_TRUE(contains(ids, EOI));
+    EXPECT_EQ(std::count(ids.begin(), ids.end(), IMG_SOFT), 4);
+    EXPECT_GT(find_pos(ids, EOI), find_pos(ids, BOI));
+
+    // And the prompt has to be strictly longer than the text-only render —
+    // the count is what the request accounting reports, and a prompt that did
+    // not grow is the observable that this bug presented as.
+    EXPECT_GT(ids.size(), tpl.apply(tok, msgs).size());
+}
+
+// The image rides the FIRST user turn, matching the Qwen3-VL path: the request
+// parser keeps pictures in order but not which message they came from, so this
+// is the position that is known rather than guessed.
+TEST(ChatTemplateVisionTest, ImageGoesOnFirstUserTurnInMultiTurn) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::GEMMA, tok));
+
+    std::vector<ChatMessage> msgs = {{"system", "Answer briefly."},
+                                     {"user", "What is this?"},
+                                     {"assistant", "A cat."},
+                                     {"user", "And now?"}};
+    auto ids = tpl.apply_with_image(tok, msgs, /*n_image_tokens=*/4);
+
+    EXPECT_EQ(std::count(ids.begin(), ids.end(), IMG_SOFT), 4);
+    EXPECT_EQ(std::count(ids.begin(), ids.end(), BOI), 1);
+    EXPECT_EQ(std::count(ids.begin(), ids.end(), EOI), 1);
+}
+
+// A conversation with no user message at all must not lose the block silently —
+// it has nowhere to go, and a text-only prompt beside an encoded image is the
+// exact failure this test file now guards.
+TEST(ChatTemplateVisionTest, NoUserTurnFallsBackToTextOnly) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::GEMMA, tok));
+
+    std::vector<ChatMessage> msgs = {{"system", "Answer briefly."}};
+    auto ids = tpl.apply_with_image(tok, msgs, /*n_image_tokens=*/4);
+
+    EXPECT_EQ(ids, tpl.apply(tok, msgs));
+}
+
 TEST(ChatTemplateVisionTest, NonGemmaFallsBackToTextOnly) {
     Tokenizer tok = make_chat_tokenizer();
     ChatTemplate tpl;
