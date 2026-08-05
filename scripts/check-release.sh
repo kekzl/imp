@@ -125,6 +125,94 @@ else
     fi
 fi
 
+# ------------------------------------------------ 1d. finding-status coherence
+# 1c checks that the FILES the ledger names still exist. It cannot check that
+# the ledger's CLAIMS are still true, and that is the failure mode that has now
+# hit three times, always in the same direction — a finding gets fixed and the
+# ledger keeps listing it as open:
+#   F-6  closed before SETTLED.md ever listed it as open (the file says so itself)
+#   F-15 fixed in #1209; S-10 read "still open" for two days
+#   F-10 fixed in #1227; section G read "Open: NOT settled" for a day
+# A stale *open* entry is strictly worse than a stale closed one: it sends the
+# next audit pass to work that is already done, which is the exact cost this
+# ledger exists to prevent (eight of thirteen hypotheses in the 07-29 pass).
+#
+# The report is the authority on status: every finding there carries one status
+# line. This cross-checks it against the ledger, both ways.
+#   * every F-nn headline must carry a status mark  — no mark is how F-10, F-12
+#     and F-24 sat statusless for a day, which is what let G go stale unnoticed
+#   * ✅ / ⛔ mean resolved; ⚠️ means still open
+#   * the set the report calls open must equal the set the ledger files under an
+#     "Open" heading — a fixed finding left under "Open", or an open one missing
+#     from the ledger entirely, both fail
+#
+# Note honestly: with 25/25 resolved the set comparison currently compares two
+# empty sets. It is a ratchet for the next campaign, not a check that is doing
+# work today. The per-finding status-mark check IS doing work today — it runs
+# over all 25 — and the floor below is what stops the whole section degrading
+# into a vacuous pass if the extraction ever silently stops matching.
+#
+# Known and deliberate: the ledger side collects EVERY F-nn mentioned under an
+# "Open" heading, prose included, not just the entry headers. Mutation-testing
+# this section surfaced it — renaming G back to "Open: NOT settled" reported
+# eight findings because the section's preamble names F-6 and F-15 while
+# explaining how they went stale. Tightening it to entry headers only would
+# make the check miss a finding discussed but never given its own bullet, which
+# is the likelier drift. A false positive here prints both sets and costs one
+# read; a false negative costs the next audit pass a day.
+#
+# Mutation-validated 2026-08-05, all four fail as intended: strip a status mark
+# (F-21) -> statusless; mark F-8 ⚠️ with no ledger entry -> sets disagree; rename
+# G back to "Open: NOT settled" -> sets disagree; rename the F-nn headlines ->
+# floor trips at 0.
+section "finding-status coherence"
+ARCH_REPORT=docs/audit/AUDIT_ARCH_2026_07_29.md
+if [ ! -e "$ARCH_REPORT" ] || [ ! -e docs/audit/SETTLED.md ]; then
+    fail "$ARCH_REPORT or docs/audit/SETTLED.md is missing — the audit ledger is load-bearing"
+else
+    STATUSLESS=""
+    OPEN_IN_REPORT=""
+    FINDINGN=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        id=$(echo "$line" | grep -oE '^\*\*F-[0-9]+' | tr -d '*' || true)
+        [ -z "$id" ] && continue
+        FINDINGN=$((FINDINGN+1))
+        # Resolved marks win over the open mark: F-3 is "✅ RESOLVED … the
+        # residual is ⛔ WON'T FIX", which carries both and is resolved.
+        if echo "$line" | grep -q '✅\|⛔'; then
+            :
+        elif echo "$line" | grep -q '⚠️'; then
+            OPEN_IN_REPORT="$OPEN_IN_REPORT $id"
+        else
+            STATUSLESS="$STATUSLESS $id"
+        fi
+    done <<< "$(grep -E '^\*\*F-[0-9]+ ' "$ARCH_REPORT" || true)"
+
+    # Findings the ledger files under a heading that says "Open".
+    OPEN_IN_LEDGER=$(awk '
+        /^## / { open = (tolower($0) ~ /open/) }
+        open && match($0, /F-[0-9]+/) { print substr($0, RSTART, RLENGTH) }
+    ' docs/audit/SETTLED.md | sort -u | tr '\n' ' ')
+
+    norm() { echo " $* " | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' || true; }
+    R_OPEN=$(norm "$OPEN_IN_REPORT")
+    L_OPEN=$(norm "$OPEN_IN_LEDGER")
+
+    FINDING_FLOOR=20
+    if [ "$FINDINGN" -lt "$FINDING_FLOOR" ]; then
+        fail "only $FINDINGN findings parsed from $ARCH_REPORT (expected >= $FINDING_FLOOR) — the extraction broke"
+    elif [ -n "$STATUSLESS" ]; then
+        fail "finding(s) with no status mark in $ARCH_REPORT:$STATUSLESS — add ✅ FIXED / ⚠️ open / ⛔ WON'T FIX"
+    elif [ "$R_OPEN" != "$L_OPEN" ]; then
+        echo "  report calls open: ${R_OPEN:-<none>}"
+        echo "  ledger calls open: ${L_OPEN:-<none>}"
+        fail "the report and docs/audit/SETTLED.md disagree on which findings are open"
+    else
+        pass "all $FINDINGN findings carry a status; report and ledger agree on ${R_OPEN:-none} open"
+    fi
+fi
+
 # --------------------------------------------------------- 2. personal paths
 # Flag real personal paths but allow the standard /home/user/ placeholder.
 section "personal path leaks"

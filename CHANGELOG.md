@@ -11,6 +11,19 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- **The 2026-07-29 architecture audit is closed at 25/25**, and the ledger now
+  says so: `SETTLED.md` §G had kept six resolved findings under "Open: NOT
+  settled", and F-10, F-12 and F-24 carried no status line in the report at all.
+  Each entry keeps its measurements — three of the six closed by refuting their
+  own proposed fix.
+- **`check-release.sh` section 1d cross-checks finding status** between
+  `AUDIT_ARCH_2026_07_29.md` and `SETTLED.md`. Section 1c only proves the files
+  a ledger entry names still exist; this proves the entry is still true. The
+  ledger had gone stale the same way three times (F-6, F-15, F-10), each time
+  pointing a later pass at work already done.
+
 ## [0.21.0] - 2026-08-05
 
 ### Added

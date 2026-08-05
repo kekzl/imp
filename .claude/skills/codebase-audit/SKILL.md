@@ -30,6 +30,15 @@ written *in this file*. So:
   lists the five that were wrong last time, each with a one-command counter-check.
 - Recording a refutation is part of finishing the audit. One you leave out of `SETTLED.md`
   is one the next pass pays for again.
+- **Closing a finding means updating both sides — the report's status line *and* the
+  ledger.** This is the failure that actually keeps happening, and it is the mirror of the
+  one above: not a refutation left unrecorded, but a *fix* left unrecorded, so the ledger
+  goes on calling a closed finding open. It hit three times in the 07-29 campaign — F-6 was
+  closed before the ledger ever listed it as open, `S-10` read "F-15, still open" for two
+  days after #1209, and §G was headed "Open: NOT settled" for a day after the last of its
+  six closed. A stale *open* entry is worse than a stale closed one: it sends the next pass
+  at work already done. `scripts/check-release.sh` section 1d now fails CI on it, so the
+  cheapest time to fix this is in the PR that closes the finding.
 
 ## Verification recipes (the load-bearing checks)
 

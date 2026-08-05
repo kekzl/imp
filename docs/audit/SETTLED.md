@@ -28,6 +28,13 @@ The **anchor** column is the point. It names the file that makes the entry settl
 resolving — so an entry cannot quietly become the next stale prior. If an anchor moves,
 re-open the entry; do not just fix the path.
 
+An anchor only proves the *file* still exists, never that the *claim* is still true. The
+claim is covered by **section 1d**, which cross-checks this file against the status lines in
+[`AUDIT_ARCH_2026_07_29.md`](AUDIT_ARCH_2026_07_29.md): every finding must carry a status,
+and the set the report calls open must equal the set filed here under an "Open" heading.
+It exists because this ledger went stale in the same direction three times (F-6, F-15,
+F-10) — always a finding that got fixed while the ledger kept calling it open.
+
 ## How to use it
 
 1. Read this file **before** fanning out. Generate hypotheses *against* it.
@@ -51,7 +58,7 @@ re-open the entry; do not just fix the path.
 | S-7 | Sampling is several overlapping chains and constrained decode bypasses part of it | **REFUTED** | `apply_constraint_mask()` at `src/exec/executor.cu:56` — nine lines called from every sampling path. **Keep the comment with the code**: it records that four copies of this chain is exactly how an unmasked path ships | 2026-07-29 |
 | S-8 | The legacy materialised cuBLAS prefill is a vestige (~18 % of prefill) | **REFUTED, with one exception** | 0.0 % on hd=128/256. **Gemma-4's hd=512 global layers take it by design and by measurement** — `src/compute/attention_cublas.cu`, gated per layer at `src/exec/executor_attention_prefill.cu`. It is a deliberately retained tier, not a vestige | 2026-07-29 (F-16) |
 | S-9 | Nemotron-H / SSM carries a private mini-runtime | **REFUTED for SSM**; CONFIRMED for vision | `src/compute/ssm.cu` and `src/memory/recurrent_snapshot_store.h` sit in the shared tree, not beside the model | 2026-07-29 |
-| S-10 | `tools/`, `tests/` and the bench CLI duplicate benchmark logic | **REFUTED for benching** — CONFIRMED for arg parsing (27 flags, F-15, still open) | `tools/imp-bench/` has no overlap against `tests/`; the perf gate reads `tests/perf_baseline.json` through `scripts/bench_gate.sh` | 2026-07-29 |
+| S-10 | `tools/`, `tests/` and the bench CLI duplicate benchmark logic | **REFUTED for benching** — was CONFIRMED for arg parsing (27 flags, F-15), **fixed in #1209**: the shared table lives in `tools/common/args_common.cpp` | `tools/imp-bench/` has no overlap against `tests/`; the perf gate reads `tests/perf_baseline.json` through `scripts/bench_gate.sh`; `tools/common/args_common.h` | 2026-07-29, F-15 closed 2026-08-02 |
 | S-11 | NVFP4 grouped-GEMM has two competing paths | **CONFIRMED — but a designed 4-tier ladder, not a twin** | `src/exec/moe_prefill_decision.h` documents the tiers; each is selected by explicit preconditions and the bottom one serves host-offloaded experts. No death date exists for it | 2026-07-29 |
 
 ## B — Deliberate specialisation (consolidating this is the classic false positive)
@@ -296,10 +303,31 @@ one command.
 | no p50/p99 histograms | Prometheus histograms exist | `grep _bucket` in `tools/imp-server/handlers_misc.cpp` |
 | `/v1/messages` streaming is synthetic | real handler plus the shared stream driver | `tools/imp-server/handlers_messages.cpp` |
 
-## G — Open: NOT settled, and not to be treated as closed
+## G — The six that closed last, and what each verdict rests on
 
-Still open from 07-29 with the reason each was not shipped blind — see
-[`AUDIT_ARCH_2026_07_29.md`](AUDIT_ARCH_2026_07_29.md) for the full argument.
+**The 07-29 campaign is finished: 25 of 25 findings resolved as of 2026-08-05.** Nothing in
+this section is open. It is kept because each entry carries the *measurements* behind its
+verdict, and three of the six were closed by refuting their own proposed fix — a next pass
+that re-derives them pays for that work twice. See
+[`AUDIT_ARCH_2026_07_29.md`](AUDIT_ARCH_2026_07_29.md) for the full argument per finding.
+
+| Finding | Verdict | Landed |
+|---|---|---|
+| F-3 (rest) | WON'T FIX **with a mechanism** — the chain's predicates include "did this tier work", so the model can only ever be replayed against a prefix | #1239 |
+| F-5 (rest) | WON'T FIX — no GPU runner, repo-owner decision 2026-08-03; the consequence is load-bearing and stated below | #1211 (dormant) |
+| F-9 | FIXED by repairing the estimator, **not** by persisting the result; R-16 REJECTED | #1228 |
+| F-10 | FIXED — the nine dispatch sections lifted into `core/DispatchPolicy`; `src/exec/` includes `runtime/config.h` **zero** times | #1227 |
+| F-12 | RE-SCOPED and closed — migratable consumers moved to the T2 arena; the residual is `VRAMAllocator`'s acquisition job for tiers sized *after* the upload | #1229-#1238 |
+| F-24 | Proposed extraction REFUTED on churn (2 % of commits); fan-in cut instead, 33 → 23 TUs | #1233 |
+
+**This section was headed "Open: NOT settled" for a day after the last of them landed, and
+that is the third time this ledger has gone stale in the same direction** (F-6 was closed
+before the file listed it as open; S-10 carried "F-15, still open" for two days after #1209).
+A stale *open* entry is worse than a stale closed one: it sends the next pass to work that is
+already done. `scripts/check-release.sh` section 1d now cross-checks this file against the
+report's status lines so the fourth occurrence fails CI instead of costing a day.
+
+**Where the open work actually is: [`docs/roadmap.md`](../roadmap.md), not here.**
 
 - **F-3 (rest)** — routing replica. **This entry understated the gap until 2026-08-03**: it
   described the residual limit of the *attention* half (a tier reordered ahead of the winner
@@ -382,7 +410,11 @@ Still open from 07-29 with the reason each was not shipped blind — see
   correctly stays put on the two where nothing is 10 % better.
   **A 3 % margin was tried first and was useless** — it sat below the residual noise. Set a
   threshold like this from the measured spread, not from what sounds tight.
-- **F-10** — `src/runtime/config.h` included by 22 files in `src/exec/`. **Scoped by
+- **F-10** — `src/runtime/config.h` included by 22 files in `src/exec/`. **CLOSED 2026-08-04
+  (#1227): the nine sections are lifted into `src/core/dispatch_policy.h` and `src/exec/`
+  includes `runtime/config.h` zero times.** The scoping below is kept because it is what
+  redirected the fix away from the audit's proposal — read it before proposing a POD
+  extraction anywhere else in this repo. **Scoped by
   measurement 2026-08-03, and the audit's estimate is low by 2x.** It proposes extracting
   "the ~30 dispatch-relevant keys" into a `DispatchPolicy` POD; `src/exec/` actually reads
   **59 distinct RuntimeConfig leaves** across nine sections — gemm 15, attention 13, moe 12,
@@ -415,8 +447,11 @@ Still open from 07-29 with the reason each was not shipped blind — see
   (c) Those sections are nested inside `RuntimeConfig`, so they must be lifted
   out — and that is nearly free: **exactly one** explicit `RuntimeConfig::<Section>`
   reference exists across `src/ tools/ tests/`.
-  What remains is volume, not uncertainty: lift nine structs into `core/`, fill
-  the policy at `:972`, rename 91 accessors, drop the include from 22 files.
+  What remained was volume, not uncertainty — and that is what shipped in #1227: nine
+  structs lifted into `core/`, the policy filled after the resolvers, 91 accessors
+  renamed, the include dropped from 22 files. **Prediction (b) held**: sections-by-value
+  made every read site a prefix rename, instead of a hand-enumerated 59-field POD that
+  could drift from the config it mirrors.
 - **F-12** — `src/memory/vram_allocator.cu`: **48** live references (2026-08-05), down from
   56, 67 and the audit's 84. `src/vision/` is at **zero**.
   **RE-SCOPED 2026-08-05: the remaining 48 are mostly NOT a migration backlog, and treating them
