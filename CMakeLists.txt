@@ -653,6 +653,10 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_backend.cpp
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
+        # The KV-pool sizing arithmetic (#1251). Pure integers, so it belongs in
+        # the lane CI runs — it used to be inline in engine_kv_cache_init.cpp,
+        # unreachable without a GPU and a 22 GB checkpoint.
+        tests/test_kv_residual_sizing.cpp
         tests/test_graph_slots.cpp
         # T5's engine-persistent half. The property that matters — freed exactly
         # once, never after a move — is ownership, not CUDA, so it belongs in the
