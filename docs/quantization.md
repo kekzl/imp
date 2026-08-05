@@ -252,18 +252,35 @@ above, against each model's own round-to-nearest baseline:
 
 | subset | Qwen3-14B (`n_rep=5`) | Qwen3-0.6B (`n_rep=2`) |
 |---|---|---|
-| A — q,k,v | +0.6522 | +0.2751 |
+| **B+D — the two FFN groups** | **−0.1330** *(best)* | — |
+| B+C+D | −0.0825 | — |
 | C — o_proj | +0.0159 | **−0.6115** |
+| A — q,k,v | +0.6522 | +0.2751 |
+| A+B+D (C off) | +0.7641 | −0.6475 |
 | A+C | +2.0326 | −0.1276 |
-| B+A+D (C off) | +0.7641 | −0.6475 |
-| ABCD | **+2.6764** | **−1.2111** |
-| **interaction C × ABD** | **+1.8964** | **+0.0479** |
+| ABCD | **+2.6764** | **−1.2111** *(best)* |
 
-**The groups stop being independent.** At `n_rep=2` the interaction is +0.05 — the
-effects simply add, and since C is worth −0.61 on its own, the sum helps. At
-`n_rep=5` the *same* interaction is +1.90, forty times larger, and it is **71 % of
-the total damage**. So no single group is at fault: C alone is nearly neutral on the
-14B (+0.02), and blaming it would have been wrong.
+Interactions, same baselines:
+
+| | Qwen3-14B | Qwen3-0.6B |
+|---|---|---|
+| A × C | **+1.3645** | +0.2088 |
+| A × BD | +0.2449 | — |
+| **BD × C** | **+0.0346** | — |
+| C × ABD | **+1.8964** | **+0.0479** |
+
+**The split is attention versus FFN, and the groups stop being independent only on
+the attention side.** The two FFN groups are clean at both sizes: on the 14B `BD`
+is the *best measured configuration of all* at **−0.1330, beating round-to-nearest**,
+and it barely interacts with C (+0.03). Everything harmful involves **A**, whose
+interaction with C is +1.36 — and C × ABD reaches +1.90, i.e. **71 % of ABCD's total
+damage is interaction, not the sum of parts**. At `n_rep=2` the same C × ABD
+interaction is +0.05, forty times smaller, so there the effects simply add and the
+full set wins.
+
+So no single group is "broken": C alone is +0.016 on the 14B, essentially neutral,
+and blaming it — the obvious reading of the GQA tie — would have been wrong. What
+fails is the *attention* pair once GQA gets wide.
 
 The mechanism the numbers point at is in the ordering. C and D run first because
 their folds rewrite `v_proj` and `up_proj` — and those two tensors are *members* of
@@ -277,11 +294,14 @@ Since `a_j` is the *weight* in the objective (`err += (a_j/s_j)^2 * (...)^2`), a
 distorted `a_j` makes the search optimise the wrong thing, faithfully.
 
 Two findings worth keeping separately. **Group A hurts both models** (+0.28 / +0.65),
-which has nothing to do with `n_rep` and was not previously known. And on the 14B
-**no measured subset beats round-to-nearest** — the closest, C alone, is still
-+0.0159. Not yet measured: B and D isolated on the 14B (the runs were cut short by
-an unrelated VRAM shortage); they contribute only +0.11 together inside ABD, so they
-cannot carry the effect.
+which has nothing to do with `n_rep` and was not previously known. And **`--calib`
+is not the thing that fails at 14B — the attention half of it is.** `--calib-groups
+BD` scores 9.7922 against round-to-nearest's 9.9252, so calibration *does* pay at
+this size once the attention groups are left out. That makes `--calib-groups` a
+production switch and not only a diagnostic: **use `BD` on wide-GQA models, and the
+default `ABCD` on narrow-GQA ones** (0.6B: ABCD −1.21, clearly the best there).
+The −0.133 is well outside reproduction noise — the round-to-nearest checkpoint
+re-scores to 9.9225-9.9252, a spread of 0.03 %, against a 1.34 % gain.
 
 This also explains why the earlier eliminations found nothing: an incomplete plan,
 degenerate statistics, a magnitude effect, the FP8 KV path and the calibration
@@ -292,16 +312,20 @@ So: `imp-quantize --calib` is validated on Qwen3-0.6B and Qwen3-1.7B and
 measured harmful on Qwen3-14B. The tool now says so, and the rule is to score
 the calibrated checkpoint against the uncalibrated one before using it.
 
-**For anything larger, use round-to-nearest.** `n_rep` is 8 on most 70B-class
-checkpoints, i.e. further along the axis that makes calibration harmful here, and
-round-to-nearest carries none of this risk — on the 14B it beat a genuine Modelopt
-export (9.9252 vs 10.0301). It is also the path with no VRAM ceiling: **the
-quantizer never resides the model.** `search_group_scale` uploads one group and
-`main.cpp` quantizes one tensor at a time, so demand scales with the largest single
-weight matrix — roughly 0.7 GiB for a 14B and 1.8 GiB for a 70B — not with the
-checkpoint. Only *calibration* and *scoring* have to run the model, which is what
-the twin recipe above is for, and what bounds the calibrated route at roughly
-40-50B on a 32 GiB card.
+**For anything larger, calibrate the FFN only (`--calib-groups BD`), or use
+round-to-nearest.** `n_rep` is 8 on most 70B-class checkpoints, i.e. further along
+the axis that breaks the attention groups, while the FFN groups showed no such
+dependence. Both routes are safe against the failure above; `BD` is the one that
+also gains something, and `ABCD` at that size is the one to avoid. Round-to-nearest
+remains a solid floor — on the 14B it beat a genuine Modelopt export (9.9252 vs
+10.0301). Whether `BD` still pays at 70B is untested; score it before trusting it.
+
+Neither route has a VRAM ceiling, because **the quantizer never resides the model.**
+`search_group_scale` uploads one group and `main.cpp` quantizes one tensor at a
+time, so demand scales with the largest single weight matrix — roughly 0.7 GiB for a
+14B and 1.8 GiB for a 70B — not with the checkpoint. Only *calibration* and
+*scoring* have to run the model, which is what the twin recipe above is for, and
+what bounds the calibrated route at roughly 40-50B on a 32 GiB card.
 
 #### MoE, and two roles that must stay full precision
 
