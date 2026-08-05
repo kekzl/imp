@@ -11,6 +11,17 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **`imp-quantize --calib-groups ABCD`** — runs any subset of the AWQ planner's
+  four scale groups, so a bad calibrated result can be attributed instead of
+  guessed. This answers why `--calib` helps at 0.6B/1.7B and hurts at 14B: the
+  groups **stop being independent**. Their interaction is +0.05 PPL at GQA
+  `n_rep=2` and **+1.90 at `n_rep=5` — 71 % of the total damage**. No single
+  group is at fault; group C alone is +0.02 on the 14B. Two spin-offs: group A
+  hurts both models, and no measured subset beats round-to-nearest on the 14B.
+  See [`docs/quantization.md`](docs/quantization.md).
+
 ### Changed
 
 - **The 2026-07-29 architecture audit is closed at 25/25**, and the ledger now

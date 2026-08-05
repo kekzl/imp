@@ -54,14 +54,29 @@ struct Plan {
     int groups_scaled = 0;   // a non-zero alpha won
     int groups_rtn = 0;      // alpha = 0 won, weights left alone
     int groups_skipped = 0;  // missing tensors or missing calibration
+    // Switched off via the group selector (own line: a longer name here would
+    // re-align the comment column of every field above it).
+    int groups_disabled = 0;
     std::vector<std::string> notes;
 };
 
+// The four groups of awq_plan.cpp, selectable so a bad result can be attributed
+// to one of them instead of to "calibration". Default is all four.
+//
+// This exists because --calib measurably HELPS Qwen3-0.6B/1.7B and measurably
+// HURTS Qwen3-14B (9.93 -> 12.60 PPL), and the groups differ in how exact their
+// fold is: A and B are exact for any plain RMSNorm, D is exact elementwise, but
+// C must tie its statistic across the n_rep query heads sharing a KV head, which
+// is lossy in proportion to n_rep — 2 on the models where it helps, 5 on the one
+// where it hurts. Attribution needs them separable.
+constexpr const char* kAwqAllGroups = "ABCD";
+
 // Builds the transform from a calibration file and the checkpoint's own
-// config.json. Returns false with `err` set when the architecture is not one
-// whose pre-norm layout this transform is valid for.
+// config.json. `groups` selects which of A/B/C/D run. Returns false with `err`
+// set when the architecture is not one whose pre-norm layout this transform is
+// valid for.
 bool build_plan(const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,
-                const std::string& config_json_path, Plan& plan, std::string& err);
+                const std::string& config_json_path, const std::string& groups, Plan& plan, std::string& err);
 
 // One matrix of a scale group, host-side FP16 bits, row-major [N, K].
 struct GroupMatrix {
