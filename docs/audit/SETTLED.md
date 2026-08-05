@@ -311,7 +311,25 @@ Still open from 07-29 with the reason each was not shipped blind — see
   against what the chain observed (`verify_against_moe_routing_model` in
   `src/exec/executor_forward_moe_cutlass.cu`, mirroring
   `src/compute/attention_dispatch.cu`); the short-circuit limit above is what genuinely
-  remains, for both. **Lesson for this ledger: an open entry that records one half of a
+  remains, for both — **and as of 2026-08-05 it is CLOSED as WON'T FIX with a mechanism, not a
+  shrug.** The obvious dissolution is the one that worked twice elsewhere this week: make the
+  model the single source of the order and have the dispatch *call* it, so the two cannot drift
+  (`GPUBatchPool::demand_bytes` and `Qwen3VLPipeline::patch_budget` both do exactly that).
+  **It does not apply here, and the code says why in its own comment.** The observations the
+  verifier replays are partly **outcomes of attempting a tier**, not predicates evaluable in
+  advance: `obs.smallM_available` is set at `src/exec/executor_forward_moe_cutlass.cu:678`
+  *after* the down-dispatch succeeded, under the comment *"Again the outcome, not the gate: a
+  smallM gate/up or down dispatch failure falls through to GROUPED below"*, and
+  `obs.grouped_ready` the same way at `:705`. Filling the observation set eagerly would mean
+  running every tier, which is the cost the short-circuit exists to avoid. So the model can only
+  ever be replayed against a **prefix** of the chain, and a tier reordered ahead of the winner is
+  invisible by construction — a property of a chain whose predicates include "did this actually
+  work", not a gap to close.
+  **Grep trap, third of this session:** `rg 'obs\.[a-z_]+ ='` reports three assignments and
+  misses `obs.smallM_available` / `obs.smallM_under_threshold`, because `[a-z_]+` does not match
+  the capital M — two of five fields read as never assigned. Same family as `-h` being `--help`
+  and `-E` being `--encoding`: a pattern that returns a plausible smaller number.
+  **Lesson for this ledger: an open entry that records one half of a
   symmetric problem reads as if the other half were closed.**
   **The MoE verifier is runtime-verified**, on Qwen3-30B-A3B-NVFP4-Modelopt, all three
   tiers, both directions — the real image silent and a build with
