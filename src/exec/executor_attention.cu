@@ -303,17 +303,40 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         }
     }
 
-    // Attention output gate (fused Q + gate projection). Two known layouts:
+    // Attention output gate (fused Q + gate projection). Two layouts exist:
     //   (a) Per-head interleaved: [Q_h0(hd), Gate_h0(hd), Q_h1(hd), Gate_h1(hd), ...]
-    //       — original Qwen 3.5 layout imp was built for.
     //   (b) Feature-dim concat:   [Q_all(nh*hd) | Gate_all(nh*hd)]
-    //       — Qwen 3.6 / Qwen3-Next layout used by llama.cpp `qwen3next.cpp`.
-    // Select via the attention.gate_concat config flag (was IMP_ATTN_GATE_CONCAT env) — default
-    // stays on interleaved for
-    // backwards compat with Qwen 3.5 GDN models. Planned: auto-detect via
-    // arch or config, once Qwen 3.6 passes an E2E test.
+    // (a) is the DEFAULT and is correct for every checkpoint tested, Qwen 3.5 and
+    // Qwen 3.6 alike. This comment used to claim (b) was "the Qwen 3.6 /
+    // Qwen3-Next layout" and that auto-detection was pending an E2E test, which
+    // sent the #1273 investigation down a dead end. Two independent checks, both
+    // in 2026-08:
+    //   - Reference: HF `modular_qwen3_next.py` splits with
+    //     `torch.chunk(q_proj(x).view(*shape, -1, head_dim * 2), 2, dim=-1)` —
+    //     grouping 2*head_dim per head and cutting inside it IS per-head
+    //     interleaved, Q first. Same as (a).
+    //   - Checkpoints: per-row NVFP4 block-scale means alternate with period
+    //     head_dim on gated models (Qwen3.6-27B ratio 1.34, 35B 1.08-1.22) and
+    //     not at all on a dense control (1.001) — the periodicity only exists
+    //     where a gate exists, i.e. Q and gate interleave per head on disk.
+    // `attention.gate_concat` stays as an escape hatch for a future checkpoint
+    // that really ships (b). It is not a knob to reach for when a hybrid looks
+    // wrong: on all three staged hybrids, flipping it is what breaks them.
     Tensor attn_gate_buf;
     if (has_attn_output_gate) {
+        // The gate does not own storage — it borrows the SSM z buffer, which is
+        // carved only by configure_ssm_workspace(), which in turn runs only from
+        // run_ssm()/run_gdn(). Every gated checkpoint today is also recurrent AND
+        // puts a recurrent layer before its first attention layer, so the buffer
+        // is always live by the time we get here. Neither is guaranteed by
+        // construction, and getting it wrong writes the gate through a null or
+        // stale pointer — silently, and only in prefill.
+        if (ssm_z_buf_.data == nullptr) {
+            throw std::runtime_error(
+                "attention output gate has no buffer: it borrows the SSM z buffer, which this "
+                "model never carved (no recurrent layer ran before the first attention layer). "
+                "See exec_ssm_z_cols() — the gate needs its own allocation on such a model.");
+        }
         size_t es_q = dtype_size(compute_dtype_);
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
         attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
