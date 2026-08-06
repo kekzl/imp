@@ -340,6 +340,18 @@ json anthropic_to_openai_body(const json& anth) {
     if (anth.contains("stop_sequences"))
         oai["stop"] = anth["stop_sequences"];
 
+    // Constrained decoding. These are imp/vLLM/llama.cpp extensions with no
+    // Anthropic equivalent, and the shim used to leave them behind — so the
+    // SAME server honoured `guided_regex` on /v1/chat/completions and ignored
+    // it on /v1/messages (measured: 'ZZZ6' vs free-form prose). Nothing
+    // documented was violated, but one server answering the same extension two
+    // ways is a trap, and the silence was total: a malformed pattern was not
+    // rejected here either, because the admission check never saw the field.
+    // Carrying them through fixes both halves at once.
+    for (const char* key : {"guided_regex", "guided_grammar", "grammar", "response_format"})
+        if (anth.contains(key))
+            oai[key] = anth[key];
+
     // Extended-thinking control. Anthropic uses a `thinking` object:
     //   {"type":"enabled","budget_tokens":N}  |  {"type":"disabled"}
     // imp's orchestrator (handlers.cpp) reads `enable_thinking` (bool) and
