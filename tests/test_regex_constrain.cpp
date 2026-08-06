@@ -154,6 +154,34 @@ TEST(RegexConstrain, InteriorAnchorsStillRefused) {
     }
 }
 
+// `(?:…)` passed the support check ("a plain non-capturing group and is fine")
+// but the engine had no `?:` form: `?` was read as a quantifier with no atom and
+// `:` as a literal, so `(?:a|b)c` compiled to `(:a|b)c` — it accepted "bc",
+// rejected "ac", and reported a successful compile throughout. Accepted AND
+// enforced as something else is the one outcome this layer exists to prevent.
+TEST(RegexConstrain, NonCapturingGroupIsHonoured) {
+    auto plain = make("(?:abc)");
+    EXPECT_TRUE(plain->would_accept("abc"));
+
+    auto alt = make("(?:a|b)c");
+    EXPECT_TRUE(alt->would_accept("ac")) << "the first branch was lost to the ':' literal";
+    EXPECT_TRUE(alt->would_accept("bc"));
+    EXPECT_FALSE(alt->would_accept(":ac")) << "':' must not be matchable";
+
+    EXPECT_TRUE(make("x(?:yz)")->would_accept("xyz"));
+
+    // Quantified — the reason non-capturing groups get written at all.
+    // would_accept asks "is this still inside the language", so a partial
+    // repetition passes it; completeness is is_done()'s question.
+    auto rep = make("(?:ab)+");
+    ASSERT_TRUE(rep->update_text("abab"));
+    EXPECT_TRUE(rep->is_done());
+
+    auto partial = make("(?:ab)+");
+    ASSERT_TRUE(partial->update_text("aba"));
+    EXPECT_FALSE(partial->is_done()) << "half a repetition is not a complete match";
+}
+
 // Documented tolerance rather than a silent surprise: the shared engine reads a
 // reversed bound as the lower one instead of rejecting it, so `a{2,1}` enforces
 // exactly two. Pinned so a future engine change that starts rejecting it is a

@@ -747,6 +747,15 @@ bool RegexNfa::parse_atom(Frag& out) {
 
     if (c == '(') {
         pos_++;  // consume '('
+        // `(?:…)` is a non-capturing group. Nothing here captures and
+        // backreferences are refused upstream, so the marker carries no
+        // matching semantics — skip it and parse the body as an ordinary group.
+        // Without this, `?` was read as a quantifier with no atom and `:` as a
+        // literal, so `(?:a|b)c` compiled to `(:a|b)c`: it matched "bc", not
+        // "ac", while reporting a successful compile. A wrong pattern enforced
+        // silently is the one failure mode this parser must not have.
+        if (pos_ + 1 < src_->size() && (*src_)[pos_] == '?' && (*src_)[pos_ + 1] == ':')
+            pos_ += 2;
         if (!parse_alt(out))
             return false;
         if (pos_ >= src_->size() || (*src_)[pos_] != ')') {

@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`(?:…)` is honoured instead of mis-compiled.** The support check let
+  non-capturing groups through as "fine", but the pattern engine had no `?:`
+  form — `?` was read as a quantifier with no atom and `:` as a literal, so
+  `(?:a|b)c` compiled to `(:a|b)c`: it matched `bc`, rejected `ac`, and reported
+  a successful compile. Affects `response_format: regex` and JSON-Schema
+  `pattern`, which share the engine.
+
 - **`response_format: regex` now honours `^…$`.** Edge anchors are redundant
   under whole-output matching, but they were refused outright — so the most
   natural way to write a pattern was the one that got *no* constraint at all,
