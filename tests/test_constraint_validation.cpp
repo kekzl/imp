@@ -119,3 +119,44 @@ TEST(ConstraintValidation, NonStringConstraintFieldsAreIgnored) {
     EXPECT_TRUE(accepts(json{{"response_format", {{"type", "regex"}, {"regex", nullptr}}}}));
     EXPECT_TRUE(accepts(json{{"response_format", "not-an-object"}}));
 }
+
+// ---------------------------------------------------------------------------
+// JSON Schema. The failure here is quieter than the regex one: the engine fell
+// back to any-JSON, so the reply was still JSON and still looked right, while
+// the structure the caller asked for was never enforced.
+// ---------------------------------------------------------------------------
+
+namespace {
+json schema_body(const json& schema) {
+    return json{{"response_format", {{"type", "json_schema"}, {"json_schema", {{"schema", schema}}}}}};
+}
+}  // namespace
+
+TEST(ConstraintValidation, EnforceableSchemasAreAccepted) {
+    EXPECT_TRUE(accepts(schema_body(json::parse(R"({"type":"object","properties":{"a":{"type":"string"}}})"))));
+    EXPECT_TRUE(accepts(schema_body(json::parse(R"({"type":"string","enum":["a","b"]})"))));
+    // A local $ref resolves and must keep working.
+    EXPECT_TRUE(accepts(schema_body(json::parse(
+        R"({"$defs":{"S":{"type":"string"}},"type":"object","properties":{"a":{"$ref":"#/$defs/S"}}})"))));
+}
+
+TEST(ConstraintValidation, UnresolvableRefIsRejected) {
+    const std::string msg = rejection_message(schema_body(json::parse(R"({"$ref":"#/definitions/missing"})")));
+    EXPECT_NE(msg.find("$ref"), std::string::npos) << "got: " << msg;
+}
+
+TEST(ConstraintValidation, NonLocalRefIsRejected) {
+    EXPECT_FALSE(accepts(schema_body(json::parse(R"({"$ref":"https://example.com/x.json"})"))));
+}
+
+// Tolerances, not failures — turning these into 400s would break working
+// clients, so they are pinned as accepted on purpose.
+TEST(ConstraintValidation, SchemaTolerancesStayAccepted) {
+    // Free-form object: documented to mean json_object.
+    EXPECT_TRUE(accepts(schema_body(json::parse(R"({"type":"object"})"))));
+    // Unknown type falls back to string rather than failing the parse.
+    EXPECT_TRUE(accepts(schema_body(json::parse(R"({"type":"nonsense"})"))));
+    // json_schema with no schema member at all carries nothing to validate.
+    EXPECT_TRUE(accepts(json{{"response_format", {{"type", "json_schema"}}}}));
+    EXPECT_TRUE(accepts(json{{"response_format", {{"type", "json_schema"}, {"json_schema", {{"name", "x"}}}}}}));
+}

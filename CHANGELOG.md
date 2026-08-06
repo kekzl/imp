@@ -22,7 +22,9 @@ there instead of retelling it.
   not distinguish from a satisfied constraint. **Breaking:** a client sending a
   pattern imp refuses now gets an error instead of an answer. The two *false*
   rejections that would have made this fire on legitimate input were removed
-  first (`^…$`, `(?:…)`). JSON-Schema validation is not covered yet.
+  first (`^…$`, `(?:…)`). JSON Schema is covered too: an unresolvable or
+  non-local `$ref` is a 400, while the documented tolerances (a free-form
+  `{"type":"object"}`, an unknown `type`) stay accepted.
 
 ### Fixed
 

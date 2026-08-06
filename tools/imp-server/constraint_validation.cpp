@@ -10,6 +10,7 @@
 
 #include "compute/regex_constrain.h"
 #include "compute/gbnf_grammar.h"
+#include "compute/json_schema.h"
 
 #include <string>
 #include <vector>
@@ -35,10 +36,15 @@ bool validate_constraints(const json& body, httplib::Response& res) {
 
     // Every spelling the parameter parser accepts, so validation cannot be
     // sidestepped by using the vLLM/llama.cpp aliases.
-    std::string pattern, grammar;
+    std::string pattern, grammar, schema;
     if (body.contains("response_format") && body["response_format"].is_object()) {
         const auto& rf = body["response_format"];
         const std::string fmt = rf.value("type", "text");
+        if (fmt == "json_schema" && rf.contains("json_schema") && rf["json_schema"].is_object()) {
+            const auto& js = rf["json_schema"];
+            if (js.contains("schema") && js["schema"].is_object())
+                schema = dump_safe(js["schema"]);
+        }
         if (fmt == "regex") {
             if (rf.contains("regex") && rf["regex"].is_string())
                 pattern = rf["regex"].get<std::string>();
@@ -76,6 +82,24 @@ bool validate_constraints(const json& body, httplib::Response& res) {
         if (!imp::parse_gbnf(grammar, rules, root, &err))
             return reject("the GBNF grammar cannot be enforced as a constraint: " + err);
     }
+
+    // A schema the parser cannot build rejects for a narrow set of reasons — an
+    // unresolvable or unsupported `$ref`, or a document that is not JSON. The
+    // engine logged "Failed to parse JSON schema" and carried on, which for a
+    // `json_schema` request means falling back to any-JSON: the reply is still
+    // JSON, so it looks right, while the structure the caller asked for was
+    // never enforced. That is harder to notice than the regex case, not easier.
+    //
+    // Deliberately NOT rejected here: a schema the parser accepts but cannot
+    // extract structure from (`{"type":"object"}` with no properties) is
+    // documented to mean json_object, and an unknown `type` falls back to
+    // string rather than failing. Those are tolerances, not failures, so
+    // turning them into 400s would break working clients.
+    if (!schema.empty() && !imp::parse_json_schema(schema))
+        return reject("the JSON schema cannot be enforced as a constraint: it could not be "
+                      "parsed. An unresolvable or non-local \"$ref\" is the usual cause; "
+                      "only local \"#/$defs/...\" and \"#/definitions/...\" references are "
+                      "supported.");
 
     return true;
 }
