@@ -576,6 +576,12 @@ private:
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
     bool experts_on_host_ = false;
     bool dequant_done_ = false;
+    // max_seq_len came from the operator (--max-seq-len / runtime.max_seq_len /
+    // C-API), not from the auto resolver. The KV pool check needs the two apart:
+    // an auto value is a projection the measured residual is allowed to
+    // undercut, an explicit one is a request that has to be honoured or said
+    // out loud.
+    bool max_seq_len_explicit_ = false;
     // One-shot guard for the resolved-dispatch summary (#1205).
     bool dispatch_dump_done_ = false;
     // Why CUDA graphs were turned off, if they were. First reason wins: a model
