@@ -106,8 +106,25 @@ inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t strea
         }
     }
 
+    // A snapshot may point at a shared workspace whose tail is uninitialised, or
+    // whose valid extent for THIS model is narrower than the view (attn_out_ is
+    // both: its layout depends on head count, vhd-vs-hd and the MLA compaction
+    // path). The file then looks like data and is not, and a diff against another
+    // model reads as a finding — a relative error of 28.6 on one model and
+    // exactly 1.0000 on another, which is what uncorrelated garbage looks like.
+    // Say so instead of writing it silently.
+    size_t bad = 0;
+    for (size_t i = 0; i < n; i++)
+        if (!std::isfinite(host[i]))
+            bad++;
+
     char fname[512];
     std::snprintf(fname, sizeof(fname), "%s/imp_step%02d_L%02d_%s.npy", dir, step, layer, tag);
+    if (bad > 0) {
+        IMP_LOG_WARN("[DUMP_NPY] %s: %zu/%zu values are not finite — this view likely covers "
+                     "workspace beyond the valid region; do not diff it against another model",
+                     fname, bad, n);
+    }
     write_npy_fp32(fname, host.data(), rows, cols);
 }
 
