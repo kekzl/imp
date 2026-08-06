@@ -70,16 +70,39 @@ reasoning about shapes:
 |---|---|---|
 | MLA latent projections (`kv_a_proj`, `kv_b_proj`) | the runtime slices and reshapes both | bisection on DeepSeek-V2-Lite: quantizing them gave a checkpoint that loaded and emitted cross-script garbage |
 | MoE router (`.gate.weight`) | FP4 across 16 shared-scale values changes the top-k pick | measured separately, with the MLA pair already excluded |
-| **fused Q+gate `q_proj`** (Qwen3.5 / Qwen3-Next `attn_output_gate`) | the gate half feeds a **sigmoid**, and E2M1 is coarsest near zero — exactly where a sigmoid is most sensitive | #1273: rounding *only* that half on a healthy GGUF twin reproduces the real defect (+0.0169 injected divergence per attention block vs +0.0156 for the actual NVFP4 checkpoint); the Q half sits below the noise floor |
+| **fused Q+gate `q_proj`** (Qwen3.5 / Qwen3-Next `attn_output_gate`) | reported, **not excluded** — see below | #1273 |
 
-The last one is **not** a 4-bit problem: the same half in Q4_K is healthy at
-6.55 perplexity. It is specific to NVFP4/E2M1, which offers 8 magnitudes per
-micro-block.
+The last row is a correction. The gate half feeds a **sigmoid**, and E2M1 is
+coarsest near zero — exactly where a sigmoid is most sensitive — so it is where
+#1273's divergence is created: rounding *only* that half on a healthy GGUF twin
+reproduces the real defect (+0.0169 injected divergence per attention block
+against +0.0156 for the actual NVFP4 checkpoint), while the Q half sits below
+the noise floor. The same half in Q4_K is healthy, so this is specific to E2M1.
 
-imp cannot exclude half a tensor, so the whole `q_proj` is kept — 230 MiB on
-Qwen3.6-35B-A3B (10 gated layers of 40) and 552 MiB on the 27B (16 of 64), about
-1% and 4% of the checkpoint, against a 2.08x–6x perplexity penalty.
-`--quantize-attn-gate` opts back in and warns.
+**That divergence does not translate into a quality win for excluding it**, and
+this briefly shipped asserting it did. Measured end to end on Qwen3.5-4B (8
+gated layers of 32), perplexity over `ppl_corpus_45k.txt`, three runs each:
+
+| arm | runs | spread |
+|---|---|---|
+| gate quantized (default) | **14.6665 / 14.6476 / 14.6716** | 0.16% |
+| gate excluded | 14.8672 / 14.9339 / 14.8672 | 0.45% |
+| BF16 reference | 12.6735 | — |
+
+Excluding it is **~1.5% worse**, consistently, with non-overlapping spreads —
+and it costs 1-4% of the checkpoint on top. Divergence measured against a twin
+and quality measured against a corpus are different questions, and only the
+second one decides this.
+
+`--keep-attn-gate` keeps the option available: the one checkpoint that could be
+measured has a lower gate share than the worst #1273 offender (8/32 against
+16/64), so the trade may still turn on a model with more of them. imp cannot
+exclude half a tensor, so the flag keeps the whole `q_proj`.
+
+A gated `q_proj` is detected from shapes rather than a config flag: it emits
+twice what its own layer's `o_proj` consumes. Note that **published exports
+quantize it too** — both llm-compressor and Modelopt exclude `linear_attn.*`
+but not this tensor.
 
 A gated `q_proj` is detected from shapes rather than a config flag: it emits
 twice what its own layer's `o_proj` consumes. Note that **published exports have
