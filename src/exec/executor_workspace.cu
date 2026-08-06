@@ -160,6 +160,35 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
              &logits_, &fp32_accum_buf_, &fp32_hidden_);
 
     // Compute shared workspace sizes (no allocation — deferred to allocate_workspaces()).
+    // Detect GDN layers (Gated DeltaNet, e.g., Qwen3.5) BEFORE the shared sizes
+    // are computed. GDN carries its input projection in FP32 for precision, so
+    // compute_shared_sizes() charges 4 bytes/elem for it — but only if it knows
+    // the model is GDN. Reading has_gdn_ while it is still false reserved HALF
+    // the bytes the pointer carve then handed out, and configure_ssm_workspace()
+    // ran later, when the flag WAS set, so the two disagreed by exactly 2x.
+    //
+    // On a GDN+MoE model the MoE phase dominates the shared arena and hid this;
+    // on a GDN+dense model (Qwen3.5-4B) the SSM phase is the maximum, and the
+    // overrun corrupted every token past the halfway point — NaN from the first
+    // recurrent layer whose block exceeded it, silently and prefill-only (#1282).
+    //
+    // Deliberately placed AFTER the max_tokens cap above, which reads has_gdn_
+    // while it is still false. That is the AS-BUILT behaviour the T2 reservation
+    // replicates on purpose (AUDIT B18) — moving this any earlier would change
+    // the cap and under-reserve the arena by 2x instead.
+    {
+        int gdn_idx = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            if (model_->layer(i).gdn_gate.data != nullptr) {
+                gdn_idx++;
+            }
+        }
+        if (gdn_idx > 0) {
+            has_gdn_ = true;
+            IMP_LOG_INFO("GDN layers: %d out of %d total", gdn_idx, cfg.n_layers);
+        }
+    }
+
     // Deferring GPU allocation maximizes VRAM available for expert weight upload.
     ws_.compute_shared_sizes(max_tokens_);
 
@@ -175,19 +204,6 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
         IMP_LOG_INFO("SSM layers: %d out of %d total", ssm_idx, cfg.n_layers);
     }
 
-    // Detect GDN layers (Gated DeltaNet, e.g., Qwen3.5)
-    {
-        int gdn_idx = 0;
-        for (int i = 0; i < cfg.n_layers; i++) {
-            if (model_->layer(i).gdn_gate.data != nullptr) {
-                gdn_idx++;
-            }
-        }
-        if (gdn_idx > 0) {
-            has_gdn_ = true;
-            IMP_LOG_INFO("GDN layers: %d out of %d total", gdn_idx, cfg.n_layers);
-        }
-    }
 
     // Enable Programmatic Dependent Launch on custom kernels if requested.
     if (use_pdl_ && pdl::is_available()) {
