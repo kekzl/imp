@@ -222,6 +222,10 @@ bool validate_constraints(const json& body, httplib::Response& res);
 // image_url part) instead of answering as if it had been understood.
 bool validate_content_parts(const json& body, httplib::Response& res);
 
+// Rejects a tool_choice that contradicts the request (names a tool that is not
+// there, or demands a call with no tools).
+bool validate_tool_choice(const json& body, httplib::Response& res);
+
 // Defined in handlers_chat_core.cpp.
 void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
                        const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
