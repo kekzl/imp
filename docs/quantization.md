@@ -60,6 +60,33 @@ packed nibbles), `.weight_scale` (F8_E4M3 micro-scales), `.weight_scale_2`
 config files, and rebuilds the shard index when the source is sharded.
 Embeddings, norms and (unless `--lm-head`) the LM head stay full precision.
 
+#### Roles that stay full precision, and why
+
+Three weight roles are 2-D and K-aligned — every shape check waves them through
+— and must not be quantized anyway. Each was found by measurement, not by
+reasoning about shapes:
+
+| role | why | found by |
+|---|---|---|
+| MLA latent projections (`kv_a_proj`, `kv_b_proj`) | the runtime slices and reshapes both | bisection on DeepSeek-V2-Lite: quantizing them gave a checkpoint that loaded and emitted cross-script garbage |
+| MoE router (`.gate.weight`) | FP4 across 16 shared-scale values changes the top-k pick | measured separately, with the MLA pair already excluded |
+| **fused Q+gate `q_proj`** (Qwen3.5 / Qwen3-Next `attn_output_gate`) | the gate half feeds a **sigmoid**, and E2M1 is coarsest near zero — exactly where a sigmoid is most sensitive | #1273: rounding *only* that half on a healthy GGUF twin reproduces the real defect (+0.0169 injected divergence per attention block vs +0.0156 for the actual NVFP4 checkpoint); the Q half sits below the noise floor |
+
+The last one is **not** a 4-bit problem: the same half in Q4_K is healthy at
+6.55 perplexity. It is specific to NVFP4/E2M1, which offers 8 magnitudes per
+micro-block.
+
+imp cannot exclude half a tensor, so the whole `q_proj` is kept — 230 MiB on
+Qwen3.6-35B-A3B (10 gated layers of 40) and 552 MiB on the 27B (16 of 64), about
+1% and 4% of the checkpoint, against a 2.08x–6x perplexity penalty.
+`--quantize-attn-gate` opts back in and warns.
+
+A gated `q_proj` is detected from shapes rather than a config flag: it emits
+twice what its own layer's `o_proj` consumes. Note that **published exports have
+the same gap** — both llm-compressor and Modelopt exclude `linear_attn.*` but
+quantize this tensor whole, which is why every hybrid NVFP4 checkpoint tested
+degrades.
+
 #### What `--calib` does
 
 NVFP4's error scales with the magnitude of what it quantizes, so multiplying an
