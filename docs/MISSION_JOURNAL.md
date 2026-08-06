@@ -623,3 +623,52 @@ something else by it* (a `system` role rendered as a user turn, a `video_url` pa
 a prompt that never contained it, a `tool_choice` naming an absent function that came back
 calling a different one). Only the second earns a fix; the first is filed in #1262 with the
 reasoning, because a 400 there would break working clients for a portability argument.
+
+### 2026-08-06 (later) — hybrid GDN + NVFP4 is broken; 27 candidates eliminated
+
+Started from #1248 ("one model produces garbage under sampling") and ended at a
+reproducible engine defect, filed as #1273. **Hybrid (GDN) + NVFP4 degrades on
+every checkpoint tested, from both quantizers**: PPL 1.05x on dense against
+2.08x / 2.49x / 6x on hybrid, across 3 checkpoints, 2 quantizers, 3 base models.
+
+**Localised** with per-layer A/B snapshots against GGUF twins: the *attention
+blocks* create the divergence (+0.0156 median per block), GDN blocks carry it
+(−0.0017), and healthy dense attention **with a matched 4-bit reference** injects
++0.0000. So it is not attention, not NVFP4, not MoE, not softmax nonlinearity —
+it is attention layers *in a hybrid*.
+
+**Characterised**: static (flat across a 16x chunk sweep), position-independent
+(full effect at a one-token prompt), survives FP16 attention weights and both
+attention kernel routes, no NaN or overflow, residual stream bit-continuous
+between layers, unchanged across RoPE.
+
+**The question inverted at the end.** Both healthy and broken models amplify
+divergence at the Q projection (2.56x vs 3.24x — normal). Only in the healthy one
+is it gone again by the block output. So probably nothing *creates* extra error in
+the hybrid's attention block; something that normally *cancels* does not. That is
+a different search from the one 15 iterations were spent on, and it explains why
+every individual component checks out.
+
+**Measurement traps this cost, all of the same shape — using a metric without
+checking its semantics:**
+
+- **`usage.input_tokens` is not prompt length.** It counts newly *processed*
+  tokens, so a prefix-cache hit deflates it. What settles a "did this reach the
+  prompt" question is the cache hit appearing *symmetrically* under both orderings.
+- **Decode dumps are graph-captured and useless.** The host-side copy sees only
+  the final buffer, so every layer's file is identical — RMS matching to four
+  decimals across 40 layers, which reads as a discovery until you notice it is
+  impossible. Prefill only.
+- **A `rel_err` claim needs a control on its denominator.** A 2x "asymmetry" at
+  the partial-RoPE boundary turned out to be the rotated dims carrying 1.6-1.9x
+  the magnitude — same absolute error, smaller relative one.
+- **Differences compare across model pairs; ratios do not.** An amplification
+  ratio measured against an 8-bit reference cannot be compared to one measured
+  against a 4-bit reference. The block-injection figure (B − A) survives that;
+  the ratio does not.
+- **RoPE cannot amplify a relative divergence** — it is a rotation, hence
+  orthogonal. That is a structural elimination, worth more than any measurement.
+
+Tools that came out of it: `tools/analysis/layer_ab_diff.py` (which block makes a
+quantization worse), a `diagnostics.dump_hidden_dir` that fires outside Gemma-4
+(#1274) and warns when it writes non-finite values (#1276).
