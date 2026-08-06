@@ -103,3 +103,39 @@ bool validate_constraints(const json& body, httplib::Response& res) {
 
     return true;
 }
+
+// A content part this server cannot read used to fall through the parsing chain
+// in silence: `video_url` (imp has no video path at all) produced a 200
+// answering a prompt the model never saw, and an `image_url` part with the
+// object missing did the same. Answering as if the input had been understood is
+// worse than refusing it — the caller cannot tell that reply apart from one that
+// actually used its picture.
+//
+// Checked at admission alongside the constraints, and in this TU for the same
+// reason: the CPU lane compiles it, so the rule runs in CI.
+bool validate_content_parts(const json& body, httplib::Response& res) {
+    if (!body.contains("messages") || !body["messages"].is_array())
+        return true;
+    for (const auto& msg : body["messages"]) {
+        if (!msg.is_object() || !msg.contains("content") || !msg["content"].is_array())
+            continue;
+        for (const auto& part : msg["content"]) {
+            if (!part.is_object())
+                continue;
+            const std::string type = part.value("type", "");
+            if (type == "text")
+                continue;
+            if (type == "image_url" && part.contains("image_url"))
+                continue;
+            res.status = 400;
+            json err = {{"error",
+                         {{"message", "unsupported content part \"" +
+                                          (type.empty() ? std::string("(missing type)") : type) +
+                                          "\": this endpoint reads \"text\" and \"image_url\" parts"},
+                          {"type", "invalid_request_error"}}}};
+            res.set_content(dump_safe(err), "application/json");
+            return false;
+        }
+    }
+    return true;
+}
