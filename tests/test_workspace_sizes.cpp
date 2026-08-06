@@ -459,3 +459,61 @@ TEST(ExecT2Demand, SampleScratchFollowsTheBATCHNotTheContext) {
     // Sanity on the order of magnitude that made the wrong call wrong.
     EXPECT_LT(exec_t2_demand(long_ctx, 131072).sample_scratch, 4ull * 1024 * 1024);
 }
+
+// ── exec_ssm_z_cols ──────────────────────────────────────────────────
+//
+// The Qwen3.5-style attention output gate does not own a buffer. It splits the
+// gate half out of the fused q_proj into an allocation BORROWED from the SSM z
+// buffer, which is sized from ssm_inner_size alone. Every hybrid staged today
+// makes the two exactly equal — 4096 == 4096 on Qwen3.6-35B-A3B and
+// Ornith-1.0-35B, 6144 == 6144 on Qwen3.6-27B — so the borrow fits by
+// arithmetic coincidence rather than by construction. These pin the coupling so
+// the next checkpoint with a narrower recurrent path fails a test instead of
+// overrunning the neighbouring buffer, silently and only in prefill.
+
+// A gated hybrid: recurrent layers plus full-attention layers whose q_proj is
+// twice n_heads * head_dim (Q and gate fused).
+ExecShape gated_hybrid_shape() {
+    ExecShape s;
+    s.max_seq_len_cfg = 4096;
+    s.d_model = 2048;
+    s.d_ff = 6144;
+    s.is_ssm = true;
+    s.n_heads = 16;
+    s.head_dim = 256;         // gate needs 16 * 256 = 4096 columns
+    s.ssm_inner_size = 4096;  // what every staged checkpoint happens to have
+    s.attn_gate_cols = 4096;
+    s.weights = {{4096, 2048}};
+    return s;
+}
+
+TEST(ExecSsmZCols, CoversTheAttentionGateWhenTheRecurrentInnerIsNarrower) {
+    ExecShape s = gated_hybrid_shape();
+    s.ssm_inner_size = 2048;  // a narrower recurrent path than the gate needs
+    EXPECT_EQ(exec_ssm_z_cols(s), 4096) << "the attention gate borrows this buffer and would overrun it";
+}
+
+TEST(ExecSsmZCols, KeepsTheRecurrentInnerWhenItIsTheLargerTenant) {
+    ExecShape s = gated_hybrid_shape();
+    s.ssm_inner_size = 8192;
+    EXPECT_EQ(exec_ssm_z_cols(s), 8192);
+}
+
+TEST(ExecSsmZCols, ChargesNothingExtraForAModelWithoutAGate) {
+    ExecShape s = gated_hybrid_shape();
+    s.attn_gate_cols = 0;  // no layer's q_proj is wider than n_heads * head_dim
+    EXPECT_EQ(exec_ssm_z_cols(s), s.ssm_inner_size);
+}
+
+TEST(ExecSsmZCols, MatchesTheRecurrentInnerOnEveryHybridStagedToday) {
+    // The coincidence itself, pinned: if a future change moves either sizing,
+    // this is the test that says the two were equal on purpose-by-accident.
+    ExecShape s = gated_hybrid_shape();
+    EXPECT_EQ(exec_ssm_z_cols(s), 4096);
+
+    ExecShape wide = gated_hybrid_shape();  // the 27B: 24 heads x 256
+    wide.n_heads = 24;
+    wide.attn_gate_cols = 6144;
+    wide.ssm_inner_size = 6144;
+    EXPECT_EQ(exec_ssm_z_cols(wide), 6144);
+}

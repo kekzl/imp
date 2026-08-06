@@ -1,5 +1,6 @@
 #include "exec/executor.h"
 #include "exec/workspace.h"
+#include "exec/workspace_sizes.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "memory/mem_account.h"
@@ -82,6 +83,9 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     has_ssm_ = (cfg.ssm_inner_size > 0);
     has_gdn_ = false;  // detected from tensor presence below
     has_dense_ffn_ = (cfg.d_ff > 0);
+    // Scans all layers, so it is taken once here rather than per recurrent layer
+    // in configure_ssm_workspace().
+    ssm_z_cols_ = exec_ssm_z_cols(model);
 
     // Compute max expert FFN hidden dim from actual packed tensor shapes.
     // cfg.expert_d_ff may not match the actual tensor dimensions (e.g. Nemotron-H).
@@ -438,11 +442,15 @@ void Workspace::compute_shared_sizes(int max_tokens) {
 
         size_t proj_elem_size = *has_gdn_ ? sizeof(float) : es;
         int fused_total_out = conv_channels + inner + 2 * n_heads;
+        // z serves two tenants: the recurrent gate and the attention output
+        // gate, which borrows it. Charge the wider one, or the borrow overruns
+        // the neighbouring buffer on any model where the gate is wider.
+        int z_cols = exec_ssm_z_cols(*model_);
         ssm_shared_size_ = align256(static_cast<size_t>(max_tokens) * ssm_in_dim *
                                     proj_elem_size)  // proj (FP32 for GDN)
                            + align256(static_cast<size_t>(max_tokens) * conv_channels * es)  // xBC
                            + align256(static_cast<size_t>(max_tokens) * inner * es)          // y
-                           + align256(static_cast<size_t>(max_tokens) * inner * es)          // z
+                           + align256(static_cast<size_t>(max_tokens) * z_cols * es)         // z
                            + align256(static_cast<size_t>(max_tokens) * d * es)              // out
                            + align256(static_cast<size_t>(max_tokens) * n_heads * (*has_gdn_ ? 2 : 1) *
                                       es)  // dt (2x for GDN: alpha + beta)

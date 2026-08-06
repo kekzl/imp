@@ -704,6 +704,11 @@ private:
     // Max expert FFN hidden dim from actual packed tensor shapes (may differ from cfg.expert_d_ff)
     int max_expert_eff_ = 0;
 
+    // Columns of the SSM z buffer, which the attention output gate borrows
+    // (exec_ssm_z_cols). Cached at init: configure_ssm_workspace() runs on every
+    // recurrent layer of every forward, and computing it scans all layers.
+    int ssm_z_cols_ = 0;
+
     // The dual prefill/decode workspace swap state (decode_workspace_,
     // decode_shared_workspace_, the sizes, decode_max_batch_, active_workspace_,
     // SavedWorkspace saved_prefill_ws_) moved into ws_ (exec/workspace.h).
