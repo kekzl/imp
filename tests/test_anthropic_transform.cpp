@@ -585,3 +585,94 @@ TEST(AnthropicResponse, ChatcmplIdRewrittenToMsg) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// The Messages API has no "system" role — sending one is an error there. imp
+// accepts it, and used to render it as a USER turn: the text reached the model
+// (measured: prompt_tokens 4 -> 74 with a 20-word marker, so never data loss)
+// but with user semantics, silently. Clients ported from the OpenAI dialect,
+// where the role IS legal, write their system prompt exactly this way.
+// ---------------------------------------------------------------------------
+
+TEST(AnthropicSystemRole, LeadingSystemMessageBecomesTheSystemPrompt) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "system"}, {"content", "You are terse."}},
+                                          {{"role", "user"}, {"content", "hi"}}})}};
+    json oai = anthropic_to_openai_body(req);
+    ASSERT_EQ(oai["messages"].size(), 2u) << "the system message must not also remain a turn";
+    EXPECT_EQ(oai["messages"][0]["role"], "system");
+    EXPECT_EQ(oai["messages"][0]["content"], "You are terse.");
+    EXPECT_EQ(oai["messages"][1]["role"], "user");
+    EXPECT_EQ(oai["messages"][1]["content"], "hi");
+}
+
+TEST(AnthropicSystemRole, FoldedAfterTheTopLevelSystemField) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"system", "Top-level."},
+                {"messages", json::array({{{"role", "system"}, {"content", "From the array."}},
+                                          {{"role", "user"}, {"content", "hi"}}})}};
+    json oai = anthropic_to_openai_body(req);
+    ASSERT_EQ(oai["messages"].size(), 2u);
+    EXPECT_EQ(oai["messages"][0]["role"], "system");
+    EXPECT_EQ(oai["messages"][0]["content"], "Top-level.\n\nFrom the array.")
+        << "both survive, top-level first";
+}
+
+TEST(AnthropicSystemRole, SeveralLeadingSystemMessagesAllFold) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "system"}, {"content", "A"}},
+                                          {{"role", "system"}, {"content", "B"}},
+                                          {{"role", "user"}, {"content", "hi"}}})}};
+    json oai = anthropic_to_openai_body(req);
+    ASSERT_EQ(oai["messages"].size(), 2u);
+    EXPECT_EQ(oai["messages"][0]["content"], "A\n\nB");
+}
+
+// Only LEADING ones: a "system" role mid-conversation is not a system prompt in
+// any dialect, so it keeps its previous handling rather than being hoisted in
+// front of turns that came before it.
+TEST(AnthropicSystemRole, MidConversationSystemIsNotHoisted) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "user"}, {"content", "first"}},
+                                          {{"role", "system"}, {"content", "late"}},
+                                          {{"role", "user"}, {"content", "second"}}})}};
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_EQ(oai["messages"][0]["role"], "user");
+    EXPECT_EQ(oai["messages"][0]["content"], "first");
+    // Still present, still a user turn — unchanged behaviour, not silently dropped.
+    bool found = false;
+    for (const auto& m : oai["messages"])
+        if (m.value("content", "") == "late")
+            found = true;
+    EXPECT_TRUE(found) << "a mid-conversation system message must not vanish";
+}
+
+// Content blocks, not just strings — Anthropic allows both.
+TEST(AnthropicSystemRole, BlockContentIsFlattened) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "system"},
+                                           {"content", json::array({{{"type", "text"}, {"text", "Blocked."}}})}},
+                                          {{"role", "user"}, {"content", "hi"}}})}};
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_EQ(oai["messages"][0]["role"], "system");
+    EXPECT_EQ(oai["messages"][0]["content"], "Blocked.");
+}
+
+// A conversation with no system role at all must be byte-identical to before.
+TEST(AnthropicSystemRole, NoSystemRoleIsUnchanged) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "user"}, {"content", "hi"}},
+                                          {{"role", "assistant"}, {"content", "hello"}},
+                                          {{"role", "user"}, {"content", "again"}}})}};
+    json oai = anthropic_to_openai_body(req);
+    ASSERT_EQ(oai["messages"].size(), 3u);
+    EXPECT_EQ(oai["messages"][0]["role"], "user");
+    EXPECT_EQ(oai["messages"][1]["role"], "assistant");
+    EXPECT_EQ(oai["messages"][2]["role"], "user");
+}

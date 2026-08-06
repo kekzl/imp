@@ -382,6 +382,33 @@ json anthropic_to_openai_body(const json& anth) {
     // Prepend system as a role=system message. `system` is a top-level
     // field in Anthropic, not part of messages.
     std::string system_text = flatten_system(anth.value("system", json(nullptr)));
+
+    // The Messages API has no "system" role — it says so explicitly, and sending
+    // one is an error there. imp accepted it and, falling through to the
+    // not-assistant branch below, rendered it as a USER turn: the text reached
+    // the model (verified by prompt-token count, so this was never data loss),
+    // but with user semantics instead of system semantics, and nothing said so.
+    // Clients ported from the OpenAI dialect, where the role IS legal, write
+    // their system prompt exactly this way.
+    //
+    // Fold LEADING system messages into the system prompt, which is what the
+    // caller means. Only leading ones: a "system" role appearing mid-conversation
+    // is not a system prompt in any dialect, and keeps its existing handling.
+    size_t leading_system = 0;
+    if (anth.contains("messages") && anth["messages"].is_array()) {
+        for (const auto& m : anth["messages"]) {
+            if (!m.is_object() || m.value("role", "user") != "system")
+                break;
+            const std::string folded = flatten_system(m.value("content", json(nullptr)));
+            if (!folded.empty()) {
+                if (!system_text.empty())
+                    system_text += "\n\n";
+                system_text += folded;
+            }
+            leading_system++;
+        }
+    }
+
     if (!system_text.empty()) {
         oai_messages.push_back({{"role", "system"}, {"content", system_text}});
         if (anth.contains("system") && blocks_have_cache_marker(anth["system"]))
@@ -389,7 +416,10 @@ json anthropic_to_openai_body(const json& anth) {
     }
 
     if (anth.contains("messages") && anth["messages"].is_array()) {
+        size_t idx = 0;
         for (const auto& m : anth["messages"]) {
+            if (idx++ < leading_system)
+                continue;  // already folded into the system prompt above
             std::string role = m.value("role", "user");
             if (role == "assistant") {
                 push_assistant_turn(oai_messages, m);
