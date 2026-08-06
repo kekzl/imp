@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **`tools/analysis/layer_ab_diff.py`** — per-layer, per-snapshot divergence
+  between two runs of the same architecture. Answers *which block* makes a
+  checkpoint worse, not just that it is worse: diffing `A_pre_attn` against
+  `B_post_attn` isolates what the attention block itself contributes. That is
+  what settled #1273 — attention blocks add divergence (median +0.0156) while
+  GDN blocks are slightly corrective (−0.0017), which rules out "softmax
+  amplifies an error created elsewhere".
+
 ### Fixed
 
 - **`diagnostics.dump_hidden_dir` works on models other than Gemma-4.** The
