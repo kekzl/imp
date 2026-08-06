@@ -36,6 +36,32 @@ is the auditable summary.)
    server defaults on a model that benches far higher. `--mem-report` prints the
    free-VRAM figure; a successful allocation is not evidence.
 
+## Context-dependent changes need their own A/B
+
+The gate measures `tg128` at **`pp512`**. A change whose effect depends on context
+length is invisible there **by construction**. #1270 shipped a split-count
+heuristic that gained +10.0% at 32k on Qwen3-8B-Q8_0, cost **−7.30% at 32k on
+Qwen3-30B-A3B-NVFP4**, and passed `verify-fast` at +0.33% because the boost is
+inactive at pp512. It was reverted in #1271.
+
+```bash
+scripts/bench_longctx_ab.sh <A> <B> [ctx-list] [model-list]
+```
+
+A and B are docker images or build directories. Two rules it encodes:
+
+- **Two models minimum.** Six context lengths on one checkpoint gave a clean
+  monotone curve with sub-0.5% spreads and was still wrong. The default pair has
+  deliberately different GQA shapes (`n_kv_heads` 8/`g` 4 vs 4/8) — that is what
+  caught #1270. Precision is not coverage.
+- **Spec-OFF.** n-gram speculation puts **14-17%** spread on short-context points,
+  enough to hide a 1% effect and to make a −11% median look real. The script
+  passes `speculative.ngram=false`, matching the gate.
+
+It refuses to run on a busy GPU, alternates the arms so host drift hits both
+equally, and marks any delta smaller than the larger spread as `(within spread)`
+rather than reporting it as a result.
+
 ## The gate
 
 - Canonical baseline: **`tests/perf_baseline.json`** — thresholds **3 % decode /
