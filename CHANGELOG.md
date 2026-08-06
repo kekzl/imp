@@ -11,6 +11,17 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `"system"` message on `/v1/messages` now acts as a system prompt.** The
+  Messages API has no `system` role, so imp fell through to its
+  not-assistant branch and rendered it as a **user** turn — the text reached the
+  model, but with user semantics, and nothing said so. Clients ported from the
+  OpenAI dialect, where the role is legal, write their system prompt exactly
+  that way. Leading `system` messages now fold into the system prompt (after a
+  top-level `system` field, if both are present); one appearing
+  mid-conversation keeps its previous handling.
+
 ### Changed
 
 - **A constraint imp cannot compile is now a `400`, not an unconstrained
