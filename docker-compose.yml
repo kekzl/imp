@@ -15,6 +15,12 @@ services:
       - "${IMP_PORT:-8080}:${IMP_PORT:-8080}"
     volumes:
       - ${IMP_MODELS_DIR:-./models}:/models
+      # Survives `up --force-recreate` and image updates. Holds the
+      # library-reserve measurement (a model that charges the 3900 MiB constant
+      # instead of its measured value gives up that much KV pool — 2725 MiB on
+      # Qwen3.6-35B-A3B-UD-Q4_K_M) and the warm weight cache (#956, cold boots
+      # skip weight conversion). Both are rebuilt if the volume is dropped.
+      - imp-cache:/home/imp/.cache/imp
     environment:
       - IMP_MODEL=${IMP_MODEL:-}
       - IMP_HOST=0.0.0.0
@@ -119,6 +125,7 @@ services:
       - prometheus
 
 volumes:
+  imp-cache:
   open-webui:
   prometheus-data:
   grafana-data:

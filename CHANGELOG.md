@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- **The container keeps its caches across recreation.** `docker-compose.yml`
+  gives imp-server a named `imp-cache` volume, and the image now creates
+  `/home/imp/.cache/imp` so a fresh volume inherits `imp`'s ownership — without
+  that, mounting one leaves a root-owned directory the server cannot write, which
+  disables *both* the warm weight cache (#956) and the library-reserve
+  measurement. Cold init on Qwen3-14B-NVFP4 drops from **7949 ms to 2099 ms**
+  (median of 3, spreads 1106/178 ms) once the volume is populated.
+
 ### Fixed
 
 - **A MoE GGUF could load fine and then cancel every generation** (#1251). The
