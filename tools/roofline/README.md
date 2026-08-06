@@ -17,6 +17,23 @@ tools/roofline/roofline issues --run latest     # dry-run; --create files GitHub
 tools/roofline/roofline ab --knob fa2           # unprofiled A/B (FA2 on vs never)
 ```
 
+### Decode shapes: `tg256` is NOT representative of agent workloads
+
+`tg256` prefills 64 tokens, so it profiles decode at a ~320-token context. The
+KV cache is negligible there and `attn_decode_paged` reads almost nothing. Agent
+sessions run 20k-100k. Measured on q8-dense, one restart each:
+
+| kernel class | `tg256` (ctx ~320) | `tg256_ctx8k` (ctx ~8.4k) |
+|---|---|---|
+| `gemv_nvfp4` | 89.0% time, 62.6% roofline | 63.2% time, 39.4% roofline |
+| `attn_decode_paged` | **4.3%** time, 5.0% roofline | **31.0%** time, **10.5%** roofline, occ 17% |
+
+The attention share moves **7.2x** with context, and at long context it is the
+second-largest class running at a tenth of peak bandwidth. Profile `tg256_ctx8k`
+alongside `tg256` before concluding anything about decode for this project's
+target workload — a lever ranked off `tg256` alone is ranked on a context length
+no agent session ever has.
+
 ## Architecture
 
 - **Measurement** (`measure`): per cell (model × shape × restart), two passes in

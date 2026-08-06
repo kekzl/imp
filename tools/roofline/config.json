@@ -162,6 +162,12 @@
       "bench_pp": 64,
       "bench_reps": 1,
       "max_tokens": 256
+    },
+    "tg256_ctx8k": {
+      "phase": "decode",
+      "bench_pp": 8192,
+      "bench_reps": 1,
+      "max_tokens": 256
     }
   },
   "capture_regex": {
