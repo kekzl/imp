@@ -11,6 +11,15 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`diagnostics.dump_hidden_dir` works on models other than Gemma-4.** The
+  per-layer hidden-state dump sat inside the Gemma-4 `layer_out_scale` branch
+  *and* behind `debug_forward_enabled()`, so on every Qwen3, every GDN hybrid and
+  everything else it produced no files and said nothing. It now keys off its own
+  switch, writes to the configured directory rather than always `/tmp`, and names
+  the token count so prefill and decode dumps are distinguishable.
+
 ### Reverted
 
 - **The GQA tile split-count boost (#1270) is reverted (#1271).** It measured
