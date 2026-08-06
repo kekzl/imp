@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Performance
+
+- **Long-context decode is up to 10% faster.** The GQA tile attention kernel is
+  grid-limited, not resource-limited, so past a context threshold it takes
+  `4*SMs` blocks instead of `2*SMs`. Qwen3-8B-Q8_0, Spec-OFF, median of 3
+  alternating rounds: **8k +1.3%, 16k +4.8%, 32k +10.0%**, and 512/2048/4096
+  unchanged (the boost declines below the crossover). Greedy output changes
+  where it engages — the reduce sums in a different order — but stays
+  deterministic per build.
+
 The 2026-08-06 error-path campaign (#1252-#1265) is written up in
 [`docs/MISSION_JOURNAL.md`](docs/MISSION_JOURNAL.md) — the KV-floor mechanism, the
 ordering constraint behind the constrained-decoding fixes, and the measurement traps.

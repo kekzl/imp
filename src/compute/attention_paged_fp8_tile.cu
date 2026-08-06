@@ -536,6 +536,28 @@ int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int 
     const int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
     const int bh_kv = batch_size * n_kv_heads;
     int s = (2 * sms + bh_kv - 1) / bh_kv;
+
+    // Long context: aim for 4*SMs blocks instead of 2*SMs. This kernel is
+    // GRID-limited rather than resource-limited — 9 KB of static smem and
+    // WARP_SIZE*g threads leave room for several blocks per SM — so past a
+    // point the extra parallelism outruns the extra reduce.
+    //
+    // Only past that point. Each split must keep enough KV blocks for the
+    // reduce to amortise, and measured on Qwen3-8B-Q8_0 (Spec-OFF, 3 alternating
+    // rounds per context, spreads all <0.5%) the crossover is sharp:
+    //
+    //   ctx  2048  -0.02%   4096  -0.35%   8192  +1.26%   16384  +4.75%   32768  +9.96%
+    //
+    // `num_ctx_blocks >= 4 * s4` reproduces that split. On this model
+    // (n_kv_heads=8 -> kv_block_size 16, sms=170, s4=85 -> threshold 340) it
+    // declines the boost at 4096 (256 blocks) and takes it from 8192 (512)
+    // upward. A threshold of 3 was tried first and measured -0.35% at 4096,
+    // because 256 clears 255 by one block — the boost has to start after the
+    // crossover, not on it.
+    const int s4 = (4 * sms + bh_kv - 1) / bh_kv;
+    if (num_ctx_blocks >= 4 * s4)
+        s = s4;
+
     s = min(s, num_ctx_blocks);
     void* sk_ptr = nullptr;
     size_t sk_size = 0;
