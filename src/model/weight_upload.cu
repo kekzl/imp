@@ -1402,7 +1402,6 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
     for (Tensor* t : {&L.ssm_a, &L.ssm_d, &L.ssm_dt_b}) {
         if (!t->data || t->on_device)
             continue;
-        const bool is_ssm_a_hf = (t == &L.ssm_a) && (t->qtype == QType::BF16 || t->qtype == QType::F16);
         const int64_t n_elem = t->numel();
         const size_t fp32_bytes = static_cast<size_t>(n_elem) * sizeof(float);
         void* d_data = nullptr;
@@ -1414,13 +1413,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
 
         std::vector<float> h_fp32(static_cast<size_t>(n_elem));
         if (t->qtype == QType::F32 || t->qtype == QType::NONE) {
-            // GGUF path — already FP32, ssm_a already pre-transformed by converter.
-            h2d_copy(d_data, t->data, fp32_bytes, ctx.stream);
-            ctx.gpu_allocs.push_back(d_data);
-            t->data = d_data;
-            t->qtype = QType::F32;
-            t->on_device = true;
-            continue;
+            std::memcpy(h_fp32.data(), t->data, fp32_bytes);
         } else if (t->qtype == QType::BF16) {
             const uint16_t* src = static_cast<const uint16_t*>(t->data);
             for (int64_t k = 0; k < n_elem; ++k) {
@@ -1439,7 +1432,30 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         }
 
         // Apply HF-to-GGUF A_log transform: A_log_GGUF = -exp(A_log_HF).
-        // Only for ssm_a, only when source is BF16/F16 (= HF SafeTensors path).
+        //
+        // Deciding this from the dtype does NOT work. It used to read "F32 means
+        // GGUF, already transformed" and skip — but an HF checkpoint may store
+        // A_log as F32, and Qwen3.5-4B does. Its raw A_log then reached the scan
+        // as a positive decay rate (up to +2.05), so the state grew instead of
+        // decaying: per-token absmax 0.04, 0.06, 0.40, 2.51, 110, 31680, inf.
+        // FP16 overflows between token 5 and 6, rmsnorm(inf) makes NaN, and the
+        // model emitted one token forever (#1282).
+        //
+        // Decide from the VALUES, which is decidable: -exp(x) is strictly
+        // negative for every real x, so any value >= 0 can only be a raw HF
+        // A_log. The dtype signal is kept as an OR because BF16/F16 storage is
+        // HF-only regardless of sign — a GGUF file never gets here in those
+        // types. When every value is negative AND the source is F32, this stays
+        // a no-op, exactly as before, so no existing GGUF model changes.
+        bool has_nonnegative = false;
+        for (int64_t k = 0; k < n_elem; ++k) {
+            if (h_fp32[k] >= 0.0f) {
+                has_nonnegative = true;
+                break;
+            }
+        }
+        const bool is_ssm_a_hf = (t == &L.ssm_a) &&
+                                 (t->qtype == QType::BF16 || t->qtype == QType::F16 || has_nonnegative);
         if (is_ssm_a_hf) {
             for (int64_t k = 0; k < n_elem; ++k) {
                 h_fp32[k] = -std::exp(h_fp32[k]);
