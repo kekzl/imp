@@ -99,10 +99,58 @@ TEST(RegexConstrain, CharacterClassesAndNegation) {
 // An unsupported pattern must be refused, not quietly enforced as something
 // else — a wrong grammar is worse than no grammar.
 TEST(RegexConstrain, RefusesPatternsItCannotEnforce) {
-    for (const char* bad : {"(unclosed", "[z-a]", "(?=lookahead)x", "^anchored$", "a\\b", "(a)\\1"}) {
+    for (const char* bad : {"(unclosed", "[z-a]", "(?=lookahead)x", "a\\b", "(a)\\1"}) {
         RegexConstrainer rc;
         EXPECT_FALSE(rc.init_pattern_only(bad)) << "should have been refused: " << bad;
         EXPECT_FALSE(rc.is_initialized());
+    }
+}
+
+// `^...$` used to sit in the list above. It is the most natural way to write a
+// pattern, and refusing it meant a client asking for `^[0-9]{3}$` got free-form
+// text back with HTTP 200 — the constraint it asked for silently absent. Under
+// whole-output matching the anchors are redundant, so they are stripped and the
+// pattern is enforced.
+TEST(RegexConstrain, EdgeAnchorsAreRedundantAndAccepted) {
+    auto rc = make("^[0-9]{3}$");
+    EXPECT_TRUE(rc->is_initialized());
+    EXPECT_TRUE(rc->would_accept("123"));
+    EXPECT_FALSE(rc->would_accept("12a"));
+    ASSERT_TRUE(rc->update_text("123"));
+    EXPECT_TRUE(rc->is_done()) << "three digits satisfies the pattern";
+
+    // Diagnostics must quote what the caller sent, not the rewritten form.
+    EXPECT_EQ(rc->pattern(), "^[0-9]{3}$");
+
+    // One-sided anchors too.
+    EXPECT_TRUE(make("^abc")->would_accept("abc"));
+    EXPECT_TRUE(make("abc$")->would_accept("abc"));
+}
+
+// The remainder is wrapped, so a top-level alternation still binds to the whole
+// output: `^a|b$` means "a or b", not "starts with a" or "ends with b".
+TEST(RegexConstrain, EdgeAnchorsAroundAlternationBindToWholeOutput) {
+    auto rc = make("^yes|no$");
+    EXPECT_TRUE(rc->is_initialized());
+    EXPECT_TRUE(rc->would_accept("yes"));
+    EXPECT_TRUE(rc->would_accept("no"));
+    EXPECT_FALSE(rc->would_accept("yesno"));
+}
+
+// A `$` the caller escaped is a literal dollar and must survive.
+TEST(RegexConstrain, EscapedDollarIsNotAnAnchor) {
+    auto rc = make("[0-9]+\\$");
+    EXPECT_TRUE(rc->is_initialized());
+    ASSERT_TRUE(rc->update_text("42$"));
+    EXPECT_TRUE(rc->is_done());
+}
+
+// Anchors that are NOT at the edges keep being refused — there the literal
+// reading really would enforce something the caller never asked for.
+TEST(RegexConstrain, InteriorAnchorsStillRefused) {
+    for (const char* bad : {"a^b", "a$b", "^a^b$"}) {
+        RegexConstrainer rc;
+        EXPECT_FALSE(rc.init_pattern_only(bad)) << "should have been refused: " << bad;
     }
 }
 

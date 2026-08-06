@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`response_format: regex` now honours `^…$`.** Edge anchors are redundant
+  under whole-output matching, but they were refused outright — so the most
+  natural way to write a pattern was the one that got *no* constraint at all,
+  and the reply came back as free-form text with HTTP 200. `^[0-9]{3}$` now
+  returns `221` where it used to return `How can I assist you today?`. Anchors
+  in the interior (`a^b`) are still refused, where the literal reading really
+  would enforce something else.
+
 ### Changed
 
 - **The container keeps its caches across recreation.** `docker-compose.yml`

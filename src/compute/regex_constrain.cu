@@ -70,6 +70,43 @@ static const char* unsupported_construct(const std::string& p) {
     return nullptr;
 }
 
+// A constrained reply must match as a WHOLE, so a leading `^` and a trailing
+// `$` state what the matcher already enforces. RegexNfa would read them as
+// literals, so they were refused outright — and that made the most natural way
+// to write a pattern the one that silently got no constraint at all: a client
+// sending `^[0-9]{3}$` over `response_format: regex` got free-form text back
+// with HTTP 200 and only a server-side WARN to show for it.
+//
+// Strip them instead. No grouping is needed around the remainder: the matcher
+// already binds the pattern to the entire output, so a top-level alternation
+// like `^yes|no$` -> `yes|no` still means "the whole reply is yes, or it is no".
+// (Wrapping it in `(…)` was tried and dropped — no test could tell the two
+// apart, which is the evidence that the group did nothing.)
+//
+// Anchors anywhere else are left alone and still refused below, because there
+// they are NOT redundant and the literal reading really would be wrong.
+static std::string strip_redundant_anchors(const std::string& p) {
+    size_t begin = 0, end = p.size();
+    bool stripped = false;
+    if (begin < end && p[begin] == '^') {  // index 0: always an anchor, never a class negation
+        begin++;
+        stripped = true;
+    }
+    if (end > begin && p[end - 1] == '$') {
+        // `\$` is a literal dollar; an odd number of preceding backslashes escapes it.
+        size_t backslashes = 0;
+        for (size_t i = end - 1; i > begin && p[i - 1] == '\\'; i--)
+            backslashes++;
+        if (backslashes % 2 == 0) {
+            end--;
+            stripped = true;
+        }
+    }
+    if (!stripped)
+        return p;
+    return p.substr(begin, end - begin);
+}
+
 bool RegexConstrainer::init_pattern_only(const std::string& pattern) {
     // The manager is pooled and reused across requests, so a new pattern lands
     // in the SAME object. Without clearing here, the cached masks of the
@@ -79,11 +116,14 @@ bool RegexConstrainer::init_pattern_only(const std::string& pattern) {
     mask_cache_.clear();
     initialized_ = false;
     pattern_ = pattern;
-    if (const char* bad = unsupported_construct(pattern)) {
+    // Keep `pattern_` as the caller wrote it — diagnostics should quote what was
+    // sent, not the rewritten form the engine compiles.
+    const std::string effective = strip_redundant_anchors(pattern);
+    if (const char* bad = unsupported_construct(effective)) {
         IMP_LOG_WARN("RegexConstrainer: pattern '%s' uses %s — not enforcing it", pattern.c_str(), bad);
         return false;
     }
-    if (!nfa_.compile(pattern)) {
+    if (!nfa_.compile(effective)) {
         IMP_LOG_WARN("RegexConstrainer: unsupported or malformed pattern '%s'", pattern.c_str());
         return false;
     }
