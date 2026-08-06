@@ -11,6 +11,10 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+The 2026-08-06 error-path campaign (#1252-#1265) is written up in
+[`docs/MISSION_JOURNAL.md`](docs/MISSION_JOURNAL.md) — the KV-floor mechanism, the
+ordering constraint behind the constrained-decoding fixes, and the measurement traps.
+
 ### Fixed
 
 - **A `tool_choice` that contradicts the request is a `400`.** Naming a function

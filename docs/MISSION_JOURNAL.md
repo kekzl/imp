@@ -576,3 +576,50 @@ rule (native + small-dense-GGUF heads ON, ≥14B/MoE GGUF heads OFF → default 
 (PR #988): under graphs+PDL, no-graphs kernel-time shares overstate tiny-kernel classes ~1.8× —
 router-chain fusion measured 0% e2e despite bit-identical outputs, split-K caps regressed −21…−35%.
 Only bytes-on-critical-path levers transfer.
+
+### 2026-08-06 — error-path campaign: constrained decoding was a guarantee that failed silently
+
+Twelve PRs from one autonomous run (#1252-#1265), all correctness/API, none touching the hot
+path. Decode held at 288.5 tok/s across nine gate runs (pin 287.19, spreads 0.03-0.27%),
+`own_peak` 20718 MiB throughout, test-core 887 → 935.
+
+**The KV floor (#1251 → #1252/#1253).** Qwen3.6-35B-A3B-UD-Q4_K_M loaded fine and cancelled
+every generation at ~476 tokens. Three places computed a KV reserve and disagreed: the planner
+granted 4096 blocks, phase-3-MoE set aside `kKvFloorTokens=16384` capped at 1 GiB, and
+`init_kv_cache` subtracted `vram_allocator_headroom` (1630 MiB on a 32 GiB card). The MoE cache
+left 1264 MiB standing, KV sizing took 1630 off it, `kv_room` evaluated to **0**, and the pool
+fell to the 16-block floor. **`vram_query.h` has documented this exact coupling since #1103**
+("they used to disagree by 1118 MiB") — #1251 was its third consumer, never reconciled. Fixed
+by flooring the phase-3 reserve at the same headroom (16 → 1257 blocks); the rescue path now
+warns instead of being silent, and the arithmetic moved next to the constant it depends on with
+its first tests. **A `--bench` run could never have caught this**: the bench sizes
+`max_seq_len` to its own workload (28 blocks), so it never collides with the weight caches —
+which is why the model sat in `supported-models.md` with an honest 243 tok/s (re-measured:
+280.09) while being unusable under server defaults.
+
+**Constrained decoding (#1255 → #1257 → #1258 → #1259, then #1263).** A constraint imp could
+not compile was dropped and the request answered anyway: HTTP 200, free-form text, nothing in
+the reply distinguishing it from a satisfied constraint. The order of the fixes was the whole
+job. First the two FALSE rejections — `^…$` refused although edge anchors are redundant under
+whole-output matching, and `(?:…)` accepted by the support check but mis-compiled by an engine
+with no `?:` form (`(?:a|b)c` became `(:a|b)c`: matched "bc", rejected "ac", reported success).
+Only then the 400, because starting there would have broken every client sending `^\d+$`.
+`/v1/messages` needed one more pass: the shim dropped `guided_*` entirely, so that route both
+ignored constraints and could not report a broken one.
+
+**Method notes worth keeping.** (a) `usage.input_tokens` counts NEWLY PROCESSED tokens, not
+prompt length — a prefix-cache hit deflates it, and reading it as length made a working fix look
+like it deleted the system prompt. What settled that case was the cache hit appearing
+**symmetrically** (71→7 one order, 69→5 the other): only possible if both requests build the
+same prompt, and a property no model output can show. (b) A 3B model's answer is a useless
+detector for "did this text reach the prompt" — it ignores instructions regardless of the role
+carrying them. (c) Mutation testing twice corrected the *rationale* rather than the code: a
+`(...)` wrapper added "so alternation binds to the whole output" killed zero tests, because the
+matcher already binds there; it was removed rather than kept with a test written to justify it.
+
+**The distinction that decided four judgement calls.** *Accepting more than the spec* (missing
+`max_tokens`, a loose tool schema) is not the same as *accepting the input and quietly meaning
+something else by it* (a `system` role rendered as a user turn, a `video_url` part answered with
+a prompt that never contained it, a `tool_choice` naming an absent function that came back
+calling a different one). Only the second earns a fix; the first is filed in #1262 with the
+reasoning, because a 400 there would break working clients for a portability argument.
