@@ -11,6 +11,19 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- **A constraint imp cannot compile is now a `400`, not an unconstrained
+  answer** (#1256). `response_format: regex`/`grammar` and the `guided_regex` /
+  `guided_grammar` / `grammar` aliases are validated at admission with the same
+  parsers the engine uses; the reply names the pattern and, for GBNF, forwards
+  the parser's own diagnostic. Previously the rejection was logged server-side
+  and the request answered with free-form text at HTTP 200, which a caller could
+  not distinguish from a satisfied constraint. **Breaking:** a client sending a
+  pattern imp refuses now gets an error instead of an answer. The two *false*
+  rejections that would have made this fire on legitimate input were removed
+  first (`^…$`, `(?:…)`). JSON-Schema validation is not covered yet.
+
 ### Fixed
 
 - **`(?:…)` is honoured instead of mis-compiled.** The support check let

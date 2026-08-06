@@ -532,6 +532,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/anthropic.cpp
         tools/imp-server/responses.cpp
         tools/imp-server/handlers.cpp
+        tools/imp-server/constraint_validation.cpp
         tools/imp-server/handlers_chat.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/handlers_chat_params.cpp
@@ -712,6 +713,11 @@ if(IMP_BUILD_TESTS)
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
+            # Admission-time rejection of unenforceable constraints (#1256). The
+            # alias coverage is the part that rots: a new spelling in the
+            # parameter parser without a line here is a validation bypass.
+            tools/imp-server/constraint_validation.cpp
+            tests/test_constraint_validation.cpp
             tests/test_server_args.cpp
             tests/test_base64.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server

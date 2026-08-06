@@ -705,5 +705,9 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
         }
     }
 
+    if (!validate_constraints(body, res))
+        return false;
+
     return true;
 }
+

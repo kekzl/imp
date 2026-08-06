@@ -214,6 +214,10 @@ extern thread_local bool g_in_anthropic_shim;
 bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res);
 bool validate_sampling_params(const json& body, httplib::Response& res);
 
+// Rejects a constraint imp cannot compile with 400 instead of answering
+// unconstrained (#1256). Called from validate_sampling_params.
+bool validate_constraints(const json& body, httplib::Response& res);
+
 // Defined in handlers_chat_core.cpp.
 void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
                        const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
