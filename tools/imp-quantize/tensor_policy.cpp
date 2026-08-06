@@ -1,5 +1,7 @@
 #include "tensor_policy.h"
 
+#include <map>
+
 namespace imp::quantize {
 namespace {
 
@@ -83,6 +85,30 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
         return false;
     }
     return true;
+}
+
+std::vector<const RawTensor*> find_fused_gate_q_projections(const std::vector<RawTensor>& tensors) {
+    static const std::string kQ = ".q_proj.weight";
+    static const std::string kO = ".o_proj.weight";
+    // Compared per LAYER, keyed on the shared prefix. Pairing a q_proj against
+    // some other layer's o_proj would report the wrong set the moment a hybrid
+    // gives its layers different head counts.
+    std::map<std::string, int64_t> o_proj_cols;
+    for (const auto& t : tensors) {
+        if (t.shape.size() == 2 && ends_with(t.name, kO))
+            o_proj_cols[t.name.substr(0, t.name.size() - kO.size())] = t.shape[1];
+    }
+    std::vector<const RawTensor*> out;
+    for (const auto& t : tensors) {
+        if (t.shape.size() != 2 || !ends_with(t.name, kQ))
+            continue;
+        const auto it = o_proj_cols.find(t.name.substr(0, t.name.size() - kQ.size()));
+        // No o_proj for this layer means no reference; a bare "shape[0] is even"
+        // test would flag every ordinary projection, so say nothing instead.
+        if (it != o_proj_cols.end() && t.shape[0] == 2 * it->second)
+            out.push_back(&t);
+    }
+    return out;
 }
 
 std::vector<const RawTensor*> find_stacked_expert_tensors(const std::vector<RawTensor>& tensors) {

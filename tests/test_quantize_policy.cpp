@@ -123,5 +123,71 @@ TEST(StackedExperts, IgnoresNonFloatStacks) {
     EXPECT_TRUE(find_stacked_expert_tensors(tensors).empty());
 }
 
+// ── fused Q + gate projections ───────────────────────────────────────
+//
+// #1273's root cause. A Qwen3.5 / Qwen3-Next `attn_output_gate` layer emits Q
+// and the sigmoid gate from ONE q_proj, so the tensor carries two roles with
+// very different sensitivity to NVFP4. Detection is by shape rather than by a
+// config flag: a gated q_proj emits twice what the layer's o_proj consumes.
+
+// A gated hybrid attention layer: 16 heads x 256, so o_proj consumes 4096 and
+// q_proj emits 8192 (Q + gate). Matches Qwen3.6-35B-A3B.
+std::vector<RawTensor> gated_layer(const std::string& prefix) {
+    return {tensor(prefix + ".self_attn.q_proj.weight", {8192, 2048}),
+            tensor(prefix + ".self_attn.k_proj.weight", {512, 2048}),
+            tensor(prefix + ".self_attn.v_proj.weight", {512, 2048}),
+            tensor(prefix + ".self_attn.o_proj.weight", {2048, 4096})};
+}
+
+// A dense attention layer: q_proj emits exactly what o_proj consumes.
+std::vector<RawTensor> plain_layer(const std::string& prefix) {
+    return {tensor(prefix + ".self_attn.q_proj.weight", {4096, 4096}),
+            tensor(prefix + ".self_attn.o_proj.weight", {4096, 4096})};
+}
+
+TEST(FusedGateQProj, FindsTheGatedProjectionAndLeavesADenseOneAlone) {
+    std::vector<RawTensor> ts = gated_layer("model.layers.3");
+    const auto found = find_fused_gate_q_projections(ts);
+    ASSERT_EQ(found.size(), 1u) << "a q_proj emitting 2x the o_proj input carries a gate";
+    EXPECT_EQ(found[0]->name, "model.layers.3.self_attn.q_proj.weight");
+
+    std::vector<RawTensor> dense = plain_layer("model.layers.3");
+    EXPECT_TRUE(find_fused_gate_q_projections(dense).empty()) << "a dense q_proj must not match";
+}
+
+TEST(FusedGateQProj, MatchesPerLayerRatherThanAcrossTheCheckpoint) {
+    // Two gated layers with DIFFERENT head counts: 16x256 (o_proj takes 4096)
+    // and 24x256 (o_proj takes 6144). Pairing a q_proj against some other
+    // layer's o_proj finds only one of them.
+    //
+    // Written this way after a mutation run: the first version used a gated
+    // layer plus a DENSE one, and replacing the per-layer lookup with "any
+    // o_proj" left all four tests green — the dense layer failed to match under
+    // both the right rule and the wrong one, so it could not tell them apart.
+    std::vector<RawTensor> ts = gated_layer("model.layers.3");
+    ts.push_back(tensor("model.layers.7.self_attn.q_proj.weight", {12288, 2048}));
+    ts.push_back(tensor("model.layers.7.self_attn.o_proj.weight", {2048, 6144}));
+
+    const auto found = find_fused_gate_q_projections(ts);
+    ASSERT_EQ(found.size(), 2u) << "each q_proj must be compared against its OWN layer's o_proj";
+    EXPECT_EQ(found[0]->name, "model.layers.3.self_attn.q_proj.weight");
+    EXPECT_EQ(found[1]->name, "model.layers.7.self_attn.q_proj.weight");
+}
+
+TEST(FusedGateQProj, FindsThemUnderTheNestedLanguageModelPrefix) {
+    // The staged NVFP4 hybrids name them model.language_model.layers.N.*
+    std::vector<RawTensor> ts = gated_layer("model.language_model.layers.31");
+    const auto found = find_fused_gate_q_projections(ts);
+    ASSERT_EQ(found.size(), 1u);
+    EXPECT_EQ(found[0]->name, "model.language_model.layers.31.self_attn.q_proj.weight");
+}
+
+TEST(FusedGateQProj, DoesNotGuessWhenTheLayerHasNoOProj) {
+    // Without the o_proj there is nothing to compare against, and a bare
+    // "shape[0] is even" heuristic would flag every ordinary projection.
+    std::vector<RawTensor> ts = {tensor("model.layers.3.self_attn.q_proj.weight", {8192, 2048})};
+    EXPECT_TRUE(find_fused_gate_q_projections(ts).empty()) << "no reference — must not guess";
+}
+
 }  // namespace
 }  // namespace imp::quantize

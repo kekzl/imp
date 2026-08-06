@@ -379,6 +379,31 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Warn, do not refuse: this is a quality trade the caller owns, and the
+    // checkpoint still works — it is measurably worse, not broken on load.
+    {
+        std::vector<const RawTensor*> gated;
+        for (const auto& src : opened) {
+            auto found = quantize::find_fused_gate_q_projections(src->tensors());
+            gated.insert(gated.end(), found.begin(), found.end());
+        }
+        if (!gated.empty()) {
+            fprintf(stderr,
+                    "warning: %zu q_proj tensor(s) carry a fused attention output GATE alongside Q\n"
+                    "(Qwen3.5 / Qwen3-Next `attn_output_gate`). The gate half feeds a sigmoid, and\n"
+                    "NVFP4 there is the measured root cause of #1273 — hybrid checkpoints degrade\n"
+                    "2.08x-6x on perplexity while dense ones cost 1.05x. The same half in Q4_K is\n"
+                    "healthy, so this is specific to E2M1: 8 magnitudes per micro-block, coarsest\n"
+                    "near zero, which is where a sigmoid is most sensitive.\n"
+                    "imp cannot exclude half a tensor yet, so these are quantized whole.\n",
+                    gated.size());
+            for (size_t i = 0; i < gated.size() && i < 3; ++i)
+                fprintf(stderr, "  %s\n", gated[i]->name.c_str());
+            if (gated.size() > 3)
+                fprintf(stderr, "  ... and %zu more\n", gated.size() - 3);
+        }
+    }
+
     awq::Plan plan;
     // A dry run reports what would be quantized; the scale search costs a GPU
     // pass per layer and changes nothing it would report.
