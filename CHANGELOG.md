@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A content part this server cannot read is a `400`, not an answer.** A
+  `video_url` part (imp has no video path) produced a 200 replying to a prompt
+  the model never saw, and an `image_url` part with the object missing took the
+  same silent route — indistinguishable, from the caller's side, from a reply
+  that used the input. Only `text` and `image_url` are read, and anything else
+  now says so by name.
+
 - **Constrained decoding now works the same on `/v1/messages` as on
   `/v1/chat/completions`.** `guided_regex`, `guided_grammar`, `grammar` and
   `response_format` were dropped by the Anthropic shim, so the same server

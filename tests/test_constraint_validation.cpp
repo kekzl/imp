@@ -192,3 +192,66 @@ TEST(ConstraintValidation, ResponsesDialectGoodSchemaStillPasses) {
                                           R"({"type":"object","properties":{"a":{"type":"string"}}})")}}}}}};
     EXPECT_TRUE(accepts(imp_server::responses::responses_to_openai_body(rsp)));
 }
+
+// ---------------------------------------------------------------------------
+// Content parts. A part this server cannot read used to fall through the
+// parsing chain in silence: `video_url` (imp has no video path) produced a 200
+// answering a prompt the model never saw. The caller cannot tell that reply
+// apart from one that actually used its input.
+// ---------------------------------------------------------------------------
+
+namespace {
+json parts_body(const json& parts) {
+    return json{{"messages", json::array({{{"role", "user"}, {"content", parts}}})}};
+}
+bool parts_ok(const json& parts) {
+    httplib::Response res;
+    return validate_content_parts(parts_body(parts), res);
+}
+}  // namespace
+
+TEST(ContentParts, TextAndImageAreAccepted) {
+    EXPECT_TRUE(parts_ok(json::array({{{"type", "text"}, {"text", "hi"}}})));
+    EXPECT_TRUE(parts_ok(json::array({{{"type", "image_url"}, {"image_url", {{"url", "data:image/png;base64,AA"}}}}})));
+    EXPECT_TRUE(parts_ok(json::array({{{"type", "text"}, {"text", "what is this"}},
+                                      {{"type", "image_url"}, {"image_url", {{"url", "x"}}}}})));
+}
+
+TEST(ContentParts, UnknownTypeIsRejectedAndNamed) {
+    httplib::Response res;
+    ASSERT_FALSE(validate_content_parts(
+        parts_body(json::array({{{"type", "video_url"}, {"video_url", {{"url", "x"}}}}})), res));
+    EXPECT_EQ(res.status, 400);
+    EXPECT_NE(res.body.find("video_url"), std::string::npos)
+        << "the message must name the part it could not read";
+}
+
+// `{"type":"image_url"}` with the object missing took the same silent path.
+TEST(ContentParts, ImagePartWithoutTheObjectIsRejected) {
+    EXPECT_FALSE(parts_ok(json::array({{{"type", "image_url"}}})));
+}
+
+TEST(ContentParts, MissingTypeIsRejected) {
+    httplib::Response res;
+    ASSERT_FALSE(validate_content_parts(parts_body(json::array({{{"text", "hi"}}})), res));
+    EXPECT_NE(res.body.find("missing type"), std::string::npos);
+}
+
+// A plain string content (the overwhelmingly common shape) must not be touched.
+TEST(ContentParts, StringContentIsUntouched) {
+    httplib::Response res;
+    json body = {{"messages", json::array({{{"role", "user"}, {"content", "plain text"}}})}};
+    EXPECT_TRUE(validate_content_parts(body, res));
+    // ...and so must a request with no messages at all.
+    EXPECT_TRUE(validate_content_parts(json::object(), res));
+}
+
+// Later messages are checked too, not just the first.
+TEST(ContentParts, EveryMessageIsChecked) {
+    json body = {{"messages", json::array({
+        {{"role", "user"}, {"content", "fine"}},
+        {{"role", "assistant"}, {"content", "also fine"}},
+        {{"role", "user"}, {"content", json::array({{{"type", "audio"}, {"audio", "x"}}})}}})}};
+    httplib::Response res;
+    EXPECT_FALSE(validate_content_parts(body, res));
+}

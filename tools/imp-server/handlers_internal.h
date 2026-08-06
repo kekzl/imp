@@ -218,6 +218,10 @@ bool validate_sampling_params(const json& body, httplib::Response& res);
 // unconstrained (#1256). Called from validate_sampling_params.
 bool validate_constraints(const json& body, httplib::Response& res);
 
+// Rejects a content part this server cannot read (video_url, a malformed
+// image_url part) instead of answering as if it had been understood.
+bool validate_content_parts(const json& body, httplib::Response& res);
+
 // Defined in handlers_chat_core.cpp.
 void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
                        const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
