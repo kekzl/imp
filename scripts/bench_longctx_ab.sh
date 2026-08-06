@@ -33,7 +33,7 @@ CTXS="${3:-2048 8192 32768}"
 MODELS="${4:-/models/Qwen3-8B-Q8_0.gguf /models/Qwen3-30B-A3B-NVFP4-Modelopt}"
 ROUNDS="${LONGCTX_ROUNDS:-3}"
 THRESHOLD="${LONGCTX_THRESHOLD:-3.0}"   # percent; regressions worse than this fail
-MODELS_DIR="${IMP_MODELS_DIR:-/home/kekz/models}"
+MODELS_DIR="${IMP_MODELS_DIR:-$HOME/models}"
 
 # A busy GPU makes every number below meaningless.
 if command -v nvidia-smi >/dev/null 2>&1; then
