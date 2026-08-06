@@ -13,6 +13,14 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Constrained decoding now works the same on `/v1/messages` as on
+  `/v1/chat/completions`.** `guided_regex`, `guided_grammar`, `grammar` and
+  `response_format` were dropped by the Anthropic shim, so the same server
+  honoured a constraint on one route and ignored it on the other (measured:
+  `'ZZZ6'` vs free-form prose) — and a malformed one was not rejected there
+  either, because the admission check never saw the field. Both halves close
+  together.
+
 - **A `"system"` message on `/v1/messages` now acts as a system prompt.** The
   Messages API has no `system` role, so imp fell through to its
   not-assistant branch and rendered it as a **user** turn — the text reached the

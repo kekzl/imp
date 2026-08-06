@@ -676,3 +676,45 @@ TEST(AnthropicSystemRole, NoSystemRoleIsUnchanged) {
     EXPECT_EQ(oai["messages"][1]["role"], "assistant");
     EXPECT_EQ(oai["messages"][2]["role"], "user");
 }
+
+// ---------------------------------------------------------------------------
+// Constrained-decoding extensions have no Anthropic equivalent, and the shim
+// used to drop them: the same server honoured guided_regex on
+// /v1/chat/completions and ignored it on /v1/messages (measured: 'ZZZ6' vs
+// free-form prose). The silence was total — a malformed pattern was not
+// rejected either, because the admission check never saw the field.
+// ---------------------------------------------------------------------------
+
+TEST(AnthropicGuidedPassthrough, GuidedFieldsSurviveTheShim) {
+    for (const char* key : {"guided_regex", "guided_grammar", "grammar"}) {
+        json req = {{"model", "m"},
+                    {"max_tokens", 16},
+                    {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}};
+        req[key] = "ZZZ[0-9]";
+        json oai = anthropic_to_openai_body(req);
+        ASSERT_TRUE(oai.contains(key)) << "dropped by the shim: " << key;
+        EXPECT_EQ(oai[key], "ZZZ[0-9]");
+    }
+}
+
+TEST(AnthropicGuidedPassthrough, ResponseFormatSurvivesTheShim) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})},
+                {"response_format", {{"type", "regex"}, {"regex", "[0-9]{3}"}}}};
+    json oai = anthropic_to_openai_body(req);
+    ASSERT_TRUE(oai.contains("response_format"));
+    EXPECT_EQ(oai["response_format"]["regex"], "[0-9]{3}");
+}
+
+// A request carrying none of them must not grow the fields.
+TEST(AnthropicGuidedPassthrough, AbsentFieldsAreNotInvented) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}};
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_FALSE(oai.contains("guided_regex"));
+    EXPECT_FALSE(oai.contains("guided_grammar"));
+    EXPECT_FALSE(oai.contains("grammar"));
+    EXPECT_FALSE(oai.contains("response_format"));
+}
