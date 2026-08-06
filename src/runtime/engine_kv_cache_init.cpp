@@ -362,14 +362,31 @@ bool Engine::init_kv_cache() {
         size_t free_now = 0, total_now = 0;
         vram_budget_mem_get_info(&free_now, &total_now);
         const size_t headroom = vram_allocator_headroom(total_now);
-        const size_t kv_room = (free_now > headroom) ? (free_now - headroom) : 0;
-        const int fits = static_cast<int>(kv_room / per_block_total_bytes);
-        if (fits < max_blocks) {
+        const int max_blocks_planned = max_blocks;
+        const auto sizing =
+            kv_blocks_from_residual(free_now, headroom, per_block_total_bytes, max_blocks, 16);
+        if (sizing.clamped) {
             IMP_LOG_INFO("KV cache: %d -> %d blocks from the measured post-cache residual "
                          "(%.0f MiB free, %.0f MiB allocator headroom kept)",
-                         max_blocks, std::max(fits, 16), free_now / (1024.0 * 1024.0),
+                         max_blocks, sizing.blocks, free_now / (1024.0 * 1024.0),
                          headroom / (1024.0 * 1024.0));
-            max_blocks = std::max(fits, 16);
+            max_blocks = sizing.blocks;
+        }
+        // The floor is a rescue, not a size: nothing was left to size the pool
+        // from, so every request longer than the floor will be cancelled at
+        // admission while the load still reports success. The hard failure
+        // below only fires with an explicit --vram-budget, so without this the
+        // default path learns about it from cancelled generations (#1251).
+        if (sizing.floored) {
+            IMP_LOG_WARN(
+                "KV cache: only %.0f MiB was left after the weight caches, and the allocator "
+                "keeps %.0f MiB of it as headroom — nothing remained to size the pool from, so "
+                "it fell back to the %d-block floor (%.0f tokens) instead of the planned %d "
+                "blocks. Requests longer than %.0f tokens will be cancelled at admission. "
+                "Lower the weight-cache demand (moe.reserve_mib, --kv-fp8) or raise --vram-budget.",
+                free_now / (1024.0 * 1024.0), headroom / (1024.0 * 1024.0), sizing.blocks,
+                static_cast<double>(sizing.blocks) * kv_bs, max_blocks_planned,
+                static_cast<double>(sizing.blocks) * kv_bs);
         }
     }
 
