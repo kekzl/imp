@@ -433,6 +433,33 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 snprintf(rbuf, sizeof(rbuf), "[step=%d] moe_out-%d", decode_step, i);
                 debug_tensor_rows(rbuf, view_tokens(h, n), stream);
             }
+
+            // Binary dump of the full hidden state, for diffing two builds or two
+            // quantizations of the same model layer by layer.
+            //   diagnostics.dump_hidden_dir = "<path>"  -> layers 0/5/15/29
+            //   diagnostics.dump_hidden_dir = "all"     -> every layer
+            //
+            // This used to sit inside the Gemma-4 `layer_out_scale` branch AND
+            // behind debug_forward_enabled(), so on any model without that scale
+            // — every Qwen3, every GDN hybrid — it produced no files at all and
+            // reported nothing. It is a diagnostic, so it keys off its own switch
+            // and nothing else; the default is empty and costs a string check.
+            {
+                const std::string& dh = runtime_config().diagnostics.dump_hidden_dir;
+                if (!dh.empty() && (dh == "all" || i == 0 || i == 5 || i == 15 || i == 29)) {
+                    std::vector<half> h_buf(static_cast<size_t>(n) * cfg.d_model);
+                    cudaStreamSynchronize(stream);
+                    cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half),
+                               cudaMemcpyDeviceToHost);
+                    char fname[512];
+                    snprintf(fname, sizeof(fname), "%s/imp_L%02d_step%d_n%d.bin",
+                             dh == "all" ? "/tmp" : dh.c_str(), i, decode_step, n);
+                    if (FILE* f = fopen(fname, "wb")) {
+                        fwrite(h_buf.data(), sizeof(half), h_buf.size(), f);
+                        fclose(f);
+                    }
+                }
+            }
         }
 
         // Gemma 4: per-layer output scale (a scalar weight). llama.cpp's
@@ -477,26 +504,6 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                       decode_step, i, __half2float(h_tmp[0]), __half2float(h_tmp[1]),
                                       __half2float(h_tmp[2]), __half2float(h_tmp[3]), __half2float(h_tmp[4]),
                                       __half2float(h_tmp[5]), __half2float(h_tmp[6]), __half2float(h_tmp[7]));
-                    }
-                    // Binary dump: full hidden state for selected layers.
-                    // [diagnostics] dump_hidden_dir = "<path>"  → layers 0/5/15/29.
-                    // [diagnostics] dump_hidden_dir = "all"     → every layer.
-                    const std::string& dh = runtime_config().diagnostics.dump_hidden_dir;
-                    if (!dh.empty()) {
-                        const bool dump_all = (dh == "all");
-                        bool sel = dump_all || (i == 0 || i == 5 || i == 15 || i == 29);
-                        if (sel) {
-                            std::vector<half> h_buf(n * cfg.d_model);
-                            cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half),
-                                       cudaMemcpyDeviceToHost);
-                            char fname[256];
-                            snprintf(fname, sizeof(fname), "/tmp/imp_L%02d_step%d.bin", i, decode_step);
-                            FILE* f = fopen(fname, "wb");
-                            if (f) {
-                                fwrite(h_buf.data(), sizeof(half), h_buf.size(), f);
-                                fclose(f);
-                            }
-                        }
                     }
                 }
             }
