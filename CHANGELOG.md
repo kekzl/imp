@@ -11,15 +11,13 @@ there instead of retelling it.
 
 ## [Unreleased]
 
-### Performance
+### Reverted
 
-- **Long-context decode is up to 10% faster.** The GQA tile attention kernel is
-  grid-limited, not resource-limited, so past a context threshold it takes
-  `4*SMs` blocks instead of `2*SMs`. Qwen3-8B-Q8_0, Spec-OFF, median of 3
-  alternating rounds: **8k +1.3%, 16k +4.8%, 32k +10.0%**, and 512/2048/4096
-  unchanged (the boost declines below the crossover). Greedy output changes
-  where it engages — the reduce sums in a different order — but stays
-  deterministic per build.
+- **The GQA tile split-count boost (#1270) is reverted (#1271).** It measured
+  +1.3/+4.8/+10.0% at 8k/16k/32k on Qwen3-8B-Q8_0 and **−7.30% at 32k on
+  Qwen3-30B-A3B-NVFP4**, a pinned hero. One model is not a heuristic. The
+  mechanism is real and the measurements are kept in the issue; the condition
+  separating the two cases is not established, so the change does not ship.
 
 The 2026-08-06 error-path campaign (#1252-#1265) is written up in
 [`docs/MISSION_JOURNAL.md`](docs/MISSION_JOURNAL.md) — the KV-floor mechanism, the
