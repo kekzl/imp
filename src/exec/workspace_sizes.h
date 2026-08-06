@@ -56,6 +56,11 @@ struct ExecShape {
     int ssm_inner_size = 0;
     int ssm_conv_channels = 0;
     int ssm_dt_rank = 0;
+    // Columns the Qwen3.5-style attention output gate writes. The gate half of a
+    // fused q_proj is split out into a buffer BORROWED from the SSM z buffer
+    // (executor_attention.cu), so the two sizings are coupled. 0 when the model
+    // has no gate, i.e. when no layer's q_proj is wider than n_heads * head_dim.
+    int attn_gate_cols = 0;
     // (N, logical K) of every weight the MMVQ / dequant paths can see. Logical
     // K means NVFP4's packed byte dim already doubled.
     std::vector<std::pair<int64_t, int64_t>> weights;
@@ -207,6 +212,20 @@ ExecShape exec_shape_of(const Model& model);
 int exec_max_tokens(const ExecShape& shape, int max_seq_len);
 int exec_max_weight_k(const ExecShape& shape);
 ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len);
+
+// Columns the SSM z buffer must hold. It serves two tenants: the recurrent z /
+// gate projection (ssm_inner_size) and the attention output gate, which borrows
+// the same allocation. On every hybrid staged today the two are exactly equal
+// (4096 == 4096 on Qwen3.6-35B-A3B and Ornith-35B, 6144 == 6144 on the 27B), so
+// the borrow currently fits by arithmetic coincidence rather than by
+// construction — a checkpoint whose recurrent inner size is narrower than
+// n_heads * head_dim would overrun it, silently and only in prefill.
+int exec_ssm_z_cols(const ExecShape& shape);
+int exec_ssm_z_cols(const Model& model);
+
+// Width of the attention output gate, 0 when the model has no gate. Both SSM z
+// sizings call this so the buffer and its charge cannot drift apart.
+int exec_attn_gate_cols(const Model& model);
 
 // The (rows, K) pair the `imma_scratch` charge was computed from — the larger
 // of the dense and MoE routes. engine.cpp hands it to

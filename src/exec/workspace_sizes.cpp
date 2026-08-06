@@ -87,6 +87,7 @@ ExecShape exec_shape_of(const Model& model) {
     s.ssm_inner_size = cfg.ssm_inner_size;
     s.ssm_conv_channels = cfg.ssm_inner_size > 0 ? cfg.ssm_conv_channels() : 0;
     s.ssm_dt_rank = cfg.ssm_dt_rank;
+    s.attn_gate_cols = exec_attn_gate_cols(model);
     s.n_experts_active = cfg.n_experts_active;
     s.n_layers = cfg.n_layers;
     // Per-layer maxima for the chunk-capture scratch — see ExecShape.
@@ -176,6 +177,30 @@ int exec_max_weight_k(const ExecShape& shape) {
         max_k = std::max(max_k, k);
     }
     return static_cast<int>(max_k);
+}
+
+int exec_ssm_z_cols(const ExecShape& shape) { return std::max(shape.ssm_inner_size, shape.attn_gate_cols); }
+
+int exec_attn_gate_cols(const Model& model) {
+    const auto& cfg = model.config();
+    const int q_cols = cfg.n_heads * cfg.head_dim;
+    if (q_cols <= 0)
+        return 0;
+    // The gate exists when a layer's q_proj is wider than Q alone; the gate half
+    // it is split into is exactly q_cols wide (executor_attention.cu).
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& ly = model.layer(i);
+        if (ly.wq.data && static_cast<int>(ly.wq.shape[0]) > q_cols)
+            return q_cols;
+    }
+    return 0;
+}
+
+int exec_ssm_z_cols(const Model& model) {
+    ExecShape s;
+    s.ssm_inner_size = model.config().ssm_inner_size;
+    s.attn_gate_cols = exec_attn_gate_cols(model);
+    return exec_ssm_z_cols(s);
 }
 
 ImmaScratchShape exec_imma_scratch_shape(const ExecShape& shape, int max_seq_len) {

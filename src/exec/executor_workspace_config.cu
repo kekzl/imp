@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "exec/workspace_sizes.h"
 #include "exec/workspace.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
@@ -112,8 +113,11 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
                                          align256(static_cast<size_t>(max_tokens) * conv_channels * es));
     ssm_y_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
                                        align256(static_cast<size_t>(max_tokens) * inner * es));
-    ssm_z_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
-                                       align256(static_cast<size_t>(max_tokens) * inner * es));
+    // The attention output gate borrows this buffer, so it is sized for the
+    // wider of the two tenants (exec_ssm_z_cols) — not for `inner` alone.
+    const int z_cols = ssm_z_cols_ > 0 ? ssm_z_cols_ : inner;
+    ssm_z_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, z_cols,
+                                       align256(static_cast<size_t>(max_tokens) * z_cols * es));
     ssm_out_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
                                          align256(static_cast<size_t>(max_tokens) * d * es));
     // GDN layers store BOTH alpha and beta projections in ssm_dt_buf_ (sequentially).
