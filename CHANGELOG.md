@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A `tool_choice` that contradicts the request is a `400`.** Naming a function
+  absent from `tools` had the model invent a call to something the caller never
+  described (a request naming `nonexistent` came back calling `g`), and
+  `"required"` with no tools was answered as an ordinary turn. Distinct from a
+  tool whose *schema* cannot be enforced — that still degrades to prompt-hint
+  choice, because `tools` offers capabilities rather than promising a shape.
+
 - **A content part this server cannot read is a `400`, not an answer.** A
   `video_url` part (imp has no video path) produced a 200 replying to a prompt
   the model never saw, and an `image_url` part with the object missing took the

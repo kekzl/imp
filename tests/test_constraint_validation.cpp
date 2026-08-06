@@ -255,3 +255,64 @@ TEST(ContentParts, EveryMessageIsChecked) {
     httplib::Response res;
     EXPECT_FALSE(validate_content_parts(body, res));
 }
+
+// ---------------------------------------------------------------------------
+// tool_choice contradictions. Distinct from a tool whose SCHEMA cannot be
+// enforced — that legitimately degrades to prompt-hint choice, because `tools`
+// offers capabilities rather than promising a shape. Naming a tool that is not
+// there is not loose, it is self-contradictory, and answering it anyway had the
+// model invent a call to a function the caller never described.
+// ---------------------------------------------------------------------------
+
+namespace {
+json tool(const std::string& name) {
+    return json{{"type", "function"},
+                {"function", {{"name", name}, {"parameters", {{"type", "object"}}}}}};
+}
+bool tc_ok(const json& body) {
+    httplib::Response res;
+    return validate_tool_choice(body, res);
+}
+}  // namespace
+
+TEST(ToolChoice, ConsistentRequestsAreAccepted) {
+    EXPECT_TRUE(tc_ok(json::object())) << "no tool_choice at all";
+    EXPECT_TRUE(tc_ok(json{{"tool_choice", "auto"}}));
+    EXPECT_TRUE(tc_ok(json{{"tool_choice", "none"}})) << "satisfiable without tools";
+    EXPECT_TRUE(tc_ok(json{{"tool_choice", "required"}, {"tools", json::array({tool("f")})}}));
+    EXPECT_TRUE(tc_ok(json{{"tool_choice", {{"type", "function"}, {"function", {{"name", "f"}}}}},
+                           {"tools", json::array({tool("g"), tool("f")})}}))
+        << "named tool present, not necessarily first";
+}
+
+TEST(ToolChoice, RequiredWithoutToolsIsRejected) {
+    httplib::Response res;
+    ASSERT_FALSE(validate_tool_choice(json{{"tool_choice", "required"}}, res));
+    EXPECT_EQ(res.status, 400);
+    EXPECT_NE(res.body.find("required"), std::string::npos);
+
+    // An empty array is the same contradiction as none at all.
+    EXPECT_FALSE(tc_ok(json{{"tool_choice", "required"}, {"tools", json::array()}}));
+}
+
+TEST(ToolChoice, NamedToolMustExistAndIsNamedInTheError) {
+    httplib::Response res;
+    json body = {{"tool_choice", {{"type", "function"}, {"function", {{"name", "nonexistent"}}}}},
+                 {"tools", json::array({tool("f")})}};
+    ASSERT_FALSE(validate_tool_choice(body, res));
+    EXPECT_NE(res.body.find("nonexistent"), std::string::npos)
+        << "the error must name the function that was asked for";
+}
+
+TEST(ToolChoice, NamedToolWithNoToolsAtAllIsRejected) {
+    EXPECT_FALSE(tc_ok(json{{"tool_choice", {{"type", "function"}, {"function", {{"name", "f"}}}}}}));
+}
+
+// Shapes this server does not interpret must pass through rather than 400 —
+// rejecting an unfamiliar dialect would be worse than ignoring it.
+TEST(ToolChoice, UnrecognisedShapesArePassedThrough) {
+    EXPECT_TRUE(tc_ok(json{{"tool_choice", 42}}));
+    EXPECT_TRUE(tc_ok(json{{"tool_choice", {{"type", "function"}}}})) << "no function object";
+    EXPECT_TRUE(tc_ok(json{{"tool_choice", {{"type", "function"}, {"function", {{"name", ""}}}}}}))
+        << "empty name carries no requirement";
+}

@@ -139,3 +139,50 @@ bool validate_content_parts(const json& body, httplib::Response& res) {
     }
     return true;
 }
+
+// `tool_choice` naming a tool that is not in `tools`, or demanding a tool call
+// with no tools at all, is a CONTRADICTORY request rather than a loose one —
+// unlike a tool whose schema simply cannot be enforced, which legitimately
+// degrades to prompt-hint choice. Answering it anyway produced a model
+// inventing a call to a function the caller never described (measured: a
+// request naming "nonexistent" came back with a call to "g"). OpenAI answers
+// 400 for both.
+bool validate_tool_choice(const json& body, httplib::Response& res) {
+    if (!body.contains("tool_choice"))
+        return true;
+
+    auto reject = [&res](const std::string& message) {
+        res.status = 400;
+        json err = {{"error", {{"message", message}, {"type", "invalid_request_error"}}}};
+        res.set_content(dump_safe(err), "application/json");
+        return false;
+    };
+
+    const json& tc = body["tool_choice"];
+    const bool has_tools = body.contains("tools") && body["tools"].is_array() && !body["tools"].empty();
+
+    // "none" is satisfiable without tools; "auto" is a no-op there.
+    if (tc.is_string()) {
+        const std::string s = tc.get<std::string>();
+        if (s == "required" && !has_tools)
+            return reject("\"tool_choice\": \"required\" needs a non-empty \"tools\" array");
+        return true;
+    }
+
+    if (!tc.is_object() || !tc.contains("function") || !tc["function"].is_object())
+        return true;  // shapes this server does not interpret are left alone
+    const std::string want = tc["function"].value("name", "");
+    if (want.empty())
+        return true;
+    if (!has_tools)
+        return reject("\"tool_choice\" names the function \"" + want +
+                      "\" but the request carries no \"tools\"");
+    for (const auto& t : body["tools"]) {
+        if (!t.is_object() || !t.contains("function") || !t["function"].is_object())
+            continue;
+        if (t["function"].value("name", "") == want)
+            return true;
+    }
+    return reject("\"tool_choice\" names the function \"" + want +
+                  "\", which is not among the tools in this request");
+}
