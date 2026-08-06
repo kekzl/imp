@@ -99,11 +99,12 @@ struct Options {
     // --calib-groups: which AWQ scale groups run, for attributing a bad result.
     std::string calib_groups = awq::kAwqAllGroups;
     bool quantize_lm_head = false;  // imp has its own lm_head NVFP4 policy (#982)
-    // A fused Q+gate q_proj is excluded by default: NVFP4 in the gate half is
-    // the measured root cause of #1273. Costs 230 MiB on Qwen3.6-35B-A3B (10
-    // gated layers of 40) and 552 MiB on the 27B (16 of 64) — ~1% and ~4% of the
-    // checkpoint, against a 2.08x-6x perplexity penalty. This opts back in.
-    bool quantize_attn_gate = false;
+    // Keep a fused Q+gate q_proj out of NVFP4. OFF by default: the gate half
+    // demonstrably carries the #1273 divergence, but excluding it did NOT
+    // improve perplexity when measured end to end — it cost ~1.5% (see the
+    // header). Kept as an opt-in so the trade stays available on models where
+    // the gate share is higher than the one checkpoint that could be measured.
+    bool keep_attn_gate = false;
     bool dry_run = false;
 };
 
@@ -130,12 +131,12 @@ void usage() {
         "                docs/quantization.md.\n"
         "  --lm-head     also quantize lm_head (default: excluded, imp applies its\n"
         "                own measured lm_head policy at runtime)\n"
-        "  --quantize-attn-gate\n"
-        "                also quantize a fused Q+gate q_proj (Qwen3.5 / Qwen3-Next\n"
-        "                `attn_output_gate`). Excluded by default: NVFP4 in the gate\n"
-        "                half is the measured root cause of #1273 and costs 2.08x-6x\n"
-        "                perplexity. Keeping it full precision costs ~1-4% of the\n"
-        "                checkpoint (230 MiB on Qwen3.6-35B-A3B, 552 on the 27B).\n"
+        "  --keep-attn-gate\n"
+        "                keep a fused Q+gate q_proj (Qwen3.5 / Qwen3-Next\n"
+        "                `attn_output_gate`) out of NVFP4. OFF by default: the gate\n"
+        "                half carries #1273's divergence, but excluding it measured\n"
+        "                ~1.5%% WORSE on perplexity, not better, and costs 1-4% of\n"
+        "                the checkpoint. Kept for models with a higher gate share.\n"
         "  --dry-run     report what would be quantized, write nothing\n");
 }
 
@@ -294,8 +295,8 @@ int main(int argc, char** argv) {
             opt.out_dir = next();
         else if (a == "--lm-head")
             opt.quantize_lm_head = true;
-        else if (a == "--quantize-attn-gate")
-            opt.quantize_attn_gate = true;
+        else if (a == "--keep-attn-gate")
+            opt.keep_attn_gate = true;
         else if (a == "--calib")
             opt.calib_file = next();
         else if (a == "--calib-groups") {
@@ -393,18 +394,27 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Fused Q+gate projections stay full precision by default. NVFP4 in the gate
-    // half is the measured root cause of #1273: rounding ONLY that half on a
-    // healthy GGUF twin reproduces the real defect (+0.0169 divergence injected
-    // per attention block against the +0.0156 the actual NVFP4 checkpoint
-    // injects), while the Q half sits below the noise floor. Not a 4-bit
-    // problem — the same half in Q4_K is healthy; E2M1 is coarsest near zero,
-    // where a sigmoid is most sensitive.
+    // Fused Q+gate projections are quantized like anything else. They are
+    // reported because the gate half is where #1273's divergence is created:
+    // rounding ONLY that half on a healthy GGUF twin reproduces the real defect
+    // (+0.0169 injected per attention block vs +0.0156 for the actual NVFP4
+    // checkpoint), while the Q half sits below the noise floor.
     //
-    // imp cannot exclude half a tensor, so the whole q_proj is kept. That costs
-    // 230 MiB on Qwen3.6-35B-A3B and 552 MiB on the 27B (~1% and ~4%) against a
-    // 2.08x-6x perplexity penalty, which is why it is the default rather than a
-    // flag the user has to know about.
+    // That divergence is real. What does NOT follow from it is a quality win
+    // for excluding the tensor, and this shipped briefly asserting one. Measured
+    // end to end on Qwen3.5-4B (8 gated layers of 32), perplexity over
+    // ppl_corpus_45k, three runs each:
+    //
+    //   gate quantized  14.6665 / 14.6476 / 14.6716   (spread 0.16%)
+    //   gate excluded   14.8672 / 14.9339 / 14.8672   (spread 0.45%)
+    //   BF16 reference  12.6735
+    //
+    // Excluding it is ~1.5% WORSE, consistently, with non-overlapping spreads —
+    // so it also costs 1-4% of the checkpoint for nothing. Divergence against a
+    // twin is not the same measurement as quality, and only the latter decides
+    // this. `--keep-attn-gate` retains the option: the one checkpoint that could
+    // be measured has a lower gate share than the worst #1273 offender (8/32
+    // against 16/64), so the trade may still turn on a model with more of them.
     std::set<std::string> gated_q_proj;
     {
         std::vector<const RawTensor*> gated;
@@ -418,17 +428,17 @@ int main(int argc, char** argv) {
                 // What keeping it full precision costs over quantizing it.
                 const size_t nvfp4 = t->numel() / 2 + t->numel() / 16;
                 extra_bytes += t->nbytes > nvfp4 ? t->nbytes - nvfp4 : 0;
-                if (!opt.quantize_attn_gate)
+                if (opt.keep_attn_gate)
                     gated_q_proj.insert(t->name);
             }
             printf("%s %zu fused Q+gate projection(s), %.0f MiB %s (#1273)\n",
-                   opt.quantize_attn_gate ? "  QUANTIZING" : "  KEEPING", gated.size(),
+                   opt.keep_attn_gate ? "  KEEPING" : "  QUANTIZING", gated.size(),
                    double(extra_bytes) / (1024.0 * 1024.0),
-                   opt.quantize_attn_gate ? "saved, at a 2.08x-6x perplexity penalty" : "larger");
-            if (opt.quantize_attn_gate)
+                   opt.keep_attn_gate ? "larger (--keep-attn-gate)" : "saved");
+            if (opt.keep_attn_gate)
                 fprintf(stderr,
-                        "warning: --quantize-attn-gate puts the attention gate half in NVFP4, which\n"
-                        "is the measured root cause of #1273. Expect 2.08x-6x worse perplexity.\n");
+                        "note: --keep-attn-gate excludes the gate half. On the one checkpoint this\n"
+                        "could be measured on it cost ~1.5%% perplexity rather than gaining any.\n");
         }
     }
 
@@ -495,8 +505,7 @@ int main(int argc, char** argv) {
             // know a q_proj is gated — that needs the layer's o_proj too.
             const bool gated = gated_q_proj.count(t.name) != 0;
             if (gated)
-                why = "fused Q+gate projection — NVFP4 in the gate half is #1273 "
-                      "(use --quantize-attn-gate to include it anyway)";
+                why = "fused Q+gate projection (--keep-attn-gate)";
             if (gated || !quantize::should_quantize(t, opt.quantize_lm_head, why)) {
                 if (contains(why, "3-D stacked")) {
                     n_moe_skipped++;
