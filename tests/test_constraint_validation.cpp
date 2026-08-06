@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include "handlers_internal.h"
+#include "responses.h"
 
 #include <nlohmann/json.hpp>
 #include <httplib.h>
@@ -159,4 +160,35 @@ TEST(ConstraintValidation, SchemaTolerancesStayAccepted) {
     // json_schema with no schema member at all carries nothing to validate.
     EXPECT_TRUE(accepts(json{{"response_format", {{"type", "json_schema"}}}}));
     EXPECT_TRUE(accepts(json{{"response_format", {{"type", "json_schema"}, {"json_schema", {{"name", "x"}}}}}}));
+}
+
+// ---------------------------------------------------------------------------
+// Dialect coverage. validate_constraints() is called once, from
+// validate_sampling_params, which every dialect reaches through
+// parse_chat_request_params. /v1/responses gets there via a shim that BUILDS
+// the response_format, so the validation sees the converted body — asserted
+// here rather than assumed, because a shim that stopped converting (or started
+// converting after validation) would reopen the hole for that dialect only.
+// ---------------------------------------------------------------------------
+
+TEST(ConstraintValidation, ResponsesDialectSchemaReachesValidation) {
+    // What a /v1/responses caller sends: text.format, not response_format.
+    json rsp = {{"model", "m"},
+                {"input", "hi"},
+                {"text", {{"format", {{"type", "json_schema"},
+                                      {"name", "r"},
+                                      {"schema", json::parse(R"({"$ref":"#/definitions/missing"})")}}}}}};
+    const json converted = imp_server::responses::responses_to_openai_body(rsp);
+    ASSERT_TRUE(converted.contains("response_format")) << "the shim must produce a response_format";
+    EXPECT_FALSE(accepts(converted)) << "an unenforceable schema must not survive the shim";
+}
+
+TEST(ConstraintValidation, ResponsesDialectGoodSchemaStillPasses) {
+    json rsp = {{"model", "m"},
+                {"input", "hi"},
+                {"text", {{"format", {{"type", "json_schema"},
+                                      {"name", "r"},
+                                      {"schema", json::parse(
+                                          R"({"type":"object","properties":{"a":{"type":"string"}}})")}}}}}};
+    EXPECT_TRUE(accepts(imp_server::responses::responses_to_openai_body(rsp)));
 }
