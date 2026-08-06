@@ -133,10 +133,20 @@ COPY --from=builder /tmp/test-gd[n] /usr/local/bin/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Non-root user with write access to /models
+# Non-root user with write access to /models and to the cache directory.
+#
+# The cache dir must EXIST in the image and be owned by imp, even though nothing
+# is shipped in it: Docker only copies ownership into a fresh named volume from
+# a directory that is already there. Mounting a volume over a path the image
+# does not create yields a root-owned mount that `imp` cannot write, which
+# silently disables both caches that live here — the library-reserve
+# measurement (A1.5) and the warm weight cache (#956). Measured: with the volume
+# and without this line, "library reserve: could not write" and "Warm cache: not
+# writable — skipping", i.e. mounting the volume was WORSE than not mounting it.
 RUN useradd -m -s /bin/bash imp \
-    && mkdir -p /models \
-    && chown imp:imp /models
+    && mkdir -p /models /home/imp/.cache/imp \
+    && chown imp:imp /models \
+    && chown -R imp:imp /home/imp/.cache
 
 USER imp
 WORKDIR /home/imp

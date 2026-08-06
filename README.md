@@ -98,8 +98,11 @@ x86-64 + sm_120a):
 # Drop a GGUF or SafeTensors model into ./models/
 mkdir -p models
 
-# Run the server from the prebuilt image
-docker run --gpus all -v ./models:/models -p 8080:8080 \
+# Run the server from the prebuilt image. The cache volume is optional but
+# pays for itself on the second start: it holds the transformed weights
+# (Qwen3-14B-NVFP4 init 7.9 s -> 2.1 s) and the measured library reserve.
+docker run --gpus all -v ./models:/models -v imp-cache:/home/imp/.cache/imp \
+  -p 8080:8080 \
   ghcr.io/kekzl/imp:latest --model /models/your-model.gguf
 
 # Hit the OpenAI-compatible endpoint (the model id is the file/dir basename;
