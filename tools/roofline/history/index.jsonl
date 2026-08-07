@@ -10,3 +10,4 @@
 {"cells": ["gptoss-moe|pp512", "gptoss-moe|tg256"], "commit": "6a30cb7e", "config_version": 4, "dirty": false, "note": "post-#990 fp8_attn_proj + post-#993 sink-FMHA re-measure", "run_id": "6a30cb7e_20260713_165954", "timestamp": "20260713_165954"}
 {"cells": ["q8-dense|tg256"], "commit": "dca16b71", "config_version": 5, "dirty": false, "note": "", "run_id": "dca16b71_20260806_041710", "timestamp": "20260806_041710"}
 {"cells": ["q8-dense|tg256_ctx8k"], "commit": "dca16b71", "config_version": 5, "dirty": true, "note": "", "run_id": "dca16b71-dirty_20260806_042150", "timestamp": "20260806_042150"}
+{"cells": ["q8-dense|tg256_ctx8k"], "commit": "120bc0d7", "config_version": 5, "dirty": false, "note": "", "run_id": "120bc0d7_20260807_091356", "timestamp": "20260807_091356"}
