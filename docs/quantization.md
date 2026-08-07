@@ -117,11 +117,32 @@ the same gap** — both llm-compressor and Modelopt exclude `linear_attn.*` but
 quantize this tensor whole.
 
 That gap used to be offered here as the reason every hybrid NVFP4 checkpoint
-degrades. Treat that as open: #1287 measures the same degradation on a hybrid
-loaded at **BF16**, where no NVFP4 exists to blame, while a dense control on the
-same loader and corpus is correctly ordered. Every degraded checkpoint in #1273
-is a hybrid read from SafeTensors and every healthy twin it is compared against
-is a GGUF, and that confound was never controlled.
+degrades. **It was not the reason.** #1287 found the real one: the model's final
+RMSNorm was the single norm that did not receive Qwen3.5/3.6's `gamma = 1 + W`
+offset, so a SafeTensors checkpoint scaled the last hidden state by `W` instead
+of `1 + W`. Every layer was correct and only the input to the LM head was wrong,
+which is why the model stayed coherent and merely got much worse.
+
+| checkpoint | before | after | its GGUF twin |
+|---|---|---|---|
+| Qwen3.6-27B-Text-NVFP4-MTP | 65.1275 | **7.5302** | none staged |
+| Ornith-1.0-35B-NVFP4 | 16.1630 | **7.0702** | 6.4974 (1.09×) |
+| Qwen3.6-35B-A3B-NVFP4 | 13.6486 | **6.8184** | 6.5465 (1.04×) |
+
+2.1–2.5× their twins before, 1.04–1.09× after — ordinary NVFP4 cost. Dense and
+GGUF checkpoints are byte-identical either way (Qwen3-14B-NVFP4 10.0301,
+Qwen3-8B-NVFP4 11.6677, ornith Q4_K_M 6.4974).
+
+**What made it findable, after a dozen candidates had been ruled out:** the
+degradation was still there at **BF16**, where nothing is quantised, and the
+per-layer hidden states matched an HF `transformers` reference to within 0.4%
+across all 32 layers while perplexity was 41% off. States right, output wrong,
+localises to what happens after the last layer.
+
+**The lesson worth keeping is about the twin comparison.** Every degraded
+checkpoint in #1273 was a hybrid read from SafeTensors, and every healthy twin
+it was measured against was a GGUF. Format and load path were confounded in
+every row of that table, and the conclusion followed the format.
 
 #### What `--calib` does
 

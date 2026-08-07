@@ -23,6 +23,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The final RMSNorm missed Qwen3.5/3.6's `gamma = 1 + W` offset (#1287), which
+  is what #1273 actually was.** Every other norm took the offset; the model's
+  output norm went through the no-offset upload, so a Qwen3.5/3.6 SafeTensors
+  checkpoint scaled the last hidden state by `W` instead of `1 + W` — all 32
+  layers correct, only the input to the LM head wrong. Perplexity on
+  `ppl_corpus_45k`: Qwen3.6-27B-Text-NVFP4 **65.13 → 7.53**, Ornith-1.0-35B-NVFP4
+  **16.16 → 7.07**, Qwen3.6-35B-A3B-NVFP4 **13.65 → 6.82** — from 2.1–2.5× their
+  GGUF twins to 1.04–1.09×. GGUF and dense checkpoints are byte-identical before
+  and after. Investigation in [`docs/quantization.md`](docs/quantization.md).
+
 - **`diagnostics.dump_hidden_dir` works on models other than Gemma-4.** The
   per-layer hidden-state dump sat inside the Gemma-4 `layer_out_scale` branch
   *and* behind `debug_forward_enabled()`, so on every Qwen3, every GDN hybrid and

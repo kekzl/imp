@@ -926,10 +926,18 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
         }
     }
 
-    // Upload output norm
+    // Upload output norm — with ctx.arch_norm_offset, like every other norm.
+    //
+    // This is the model's final RMSNorm, the one that feeds the LM head. It
+    // used to go through the no-offset path while attn_norm, ffn_norm, the QK
+    // norms and even the MTP head's norms all took the offset, so on a
+    // Qwen3.5/3.6 SafeTensors checkpoint it ran with gamma = W instead of
+    // gamma = 1 + W. Every layer was correct and only the last scaling before
+    // the logits was wrong, which is why the damage never looked like a load
+    // bug: the model stayed coherent and merely got much worse.
     if (out_norm.data && !out_norm.on_device) {
-        if (!upload_unquantized_weight(out_norm, out_norm.qtype, ctx.compute_dtype, ctx.stream,
-                                       ctx.gpu_allocs, true, "out_norm")) {
+        if (!upload_weight(out_norm, out_norm.qtype, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs,
+                           /*raw_quant=*/true, ctx.arch_norm_offset, "out_norm")) {
             IMP_LOG_ERROR("Failed to upload output norm");
             return false;
         }
