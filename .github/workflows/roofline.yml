@@ -17,6 +17,11 @@ on:
     branches: [main]
     paths:
       - "tools/roofline/**"
+  # Refreshable by hand, for the same reason ci.yml carries this: an auto-merge
+  # squash is attributed to GITHUB_TOKEN and starts no further run, so main's
+  # reported status for this job can be many commits stale — it stayed red for
+  # a day after the baseline was already fixed on a branch.
+  workflow_dispatch:
 
 jobs:
   roofline-check:
