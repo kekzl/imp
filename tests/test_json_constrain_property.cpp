@@ -409,6 +409,83 @@ TEST(JsonConstrainFsm, ForceCloseStillReachesAValidDocument) {
     EXPECT_TRUE(fsm.sim_token_valid("}")) << "grammar rejects the closer the mask offers";
 }
 
+// --- #1291: the force-close has to walk out of a state that owes something ---
+//
+// #1096 forbids a closer straight after a comma so `[1,]` cannot happen. #1104
+// demands a closer once the budget is spent. Where they meet, the narrowing
+// used to leave NOTHING legal, the empty-allow net retried with the ordinary
+// mask, and the reply came back truncated anyway — the exact outcome the
+// force-close exists to prevent. Measured on Qwen3.6-35B-A3B-NVFP4 at
+// max_tokens=40: the mask narrowed to `}`/`]` in ARRAY_NEED_VALUE and the
+// model emitted a quote instead (#1291).
+//
+// The mask must therefore offer the cheapest step OUT of the owing state, and
+// the budget must cover the whole walk.
+
+TEST(JsonConstrainFsm, ForceCloseOffersAValueAfterAnArrayComma) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"a\":[1,");  // ARRAY_NEED_VALUE — ']' is illegal here
+    fsm.set_remaining_budget(1);
+    const uint16_t m = fsm.allowed_categories_for_test();
+    EXPECT_TRUE(m & CAT_NUMBER_START) << "no way out of ARRAY_NEED_VALUE — this is #1291";
+    EXPECT_FALSE(m & CAT_CLOSE_BRACKET) << "offered a closer the grammar forbids after a comma";
+}
+
+TEST(JsonConstrainFsm, ForceCloseOffersAKeyAfterAnObjectComma) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"a\":1,");  // OBJECT_NEED_KEY — '}' is illegal here
+    fsm.set_remaining_budget(1);
+    const uint16_t m = fsm.allowed_categories_for_test();
+    EXPECT_TRUE(m & CAT_QUOTE) << "no way out of OBJECT_NEED_KEY";
+    EXPECT_FALSE(m & CAT_CLOSE_BRACE) << "offered a closer the grammar forbids after a comma";
+}
+
+TEST(JsonConstrainFsm, ForceCloseOffersAColonAfterAKey) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"a\"");  // AFTER_KEY — the grammar demands ':' next
+    fsm.set_remaining_budget(1);
+    const uint16_t m = fsm.allowed_categories_for_test();
+    EXPECT_TRUE(m & CAT_COLON) << "no way out of AFTER_KEY";
+    EXPECT_FALSE(m & CAT_CLOSE_BRACE) << "offered a closer before the value exists";
+}
+
+// The walk has to actually terminate, not just take one legal step. Follow the
+// mask from the state that broke on the 35B and require a closable document.
+TEST(JsonConstrainFsm, ForceCloseWalksOutOfAnArrayCommaToAClosableDocument) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"a\":[1,");
+    fsm.set_remaining_budget(1);
+    ASSERT_TRUE(fsm.allowed_categories_for_test() & CAT_NUMBER_START);
+    fsm.advance_text("0");  // the value the mask offered
+    EXPECT_TRUE(fsm.sim_token_valid("]")) << "array still not closable after the forced value";
+    fsm.advance_text("]");
+    EXPECT_TRUE(fsm.sim_token_valid("}")) << "object still not closable after the array";
+}
+
+// The walk needs one token more than the states it passes through suggest: the
+// forced value itself enters a frame (a number lands in IN_NUMBER *inside* its
+// container). Without that margin the e2e walk emits `-1]` and runs out before
+// the `}` — measured on the #1291 repro. At `{"a":[1,` the stack owes 1, the
+// array owes 1, the value owes 1, so the narrowing has to be live at 4.
+TEST(JsonConstrainFsm, ForceCloseKeepsAMarginForTheForcedValuesOwnFrame) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"a\":[1,");
+    fsm.set_remaining_budget(4);
+    EXPECT_EQ(fsm.allowed_categories_for_test(), CAT_NUMBER_START)
+        << "narrowing not yet live at 4 — the walk will land one token short";
+}
+
+// The narrowing must stay off while the budget is comfortable, in these states
+// too — otherwise every array in a long reply gets a forced `0`.
+TEST(JsonConstrainFsm, ForceCloseStaysOffInNeedStatesWithBudget) {
+    JsonConstrainer fsm;
+    fsm.advance_text("{\"a\":[1,");
+    fsm.set_remaining_budget(100);
+    const uint16_t m = fsm.allowed_categories_for_test();
+    EXPECT_TRUE(m & CAT_QUOTE) << "a string value is legal here and the budget is ample";
+    EXPECT_TRUE(m & CAT_OPEN_BRACKET) << "a nested array is legal here and the budget is ample";
+}
+
 // #1104: raw control characters must never reach a string. The grammar has
 // always rejected them; apply_mask's in-string fast path skipped the check for
 // any token without a quote or a backslash, which is exactly what a newline
