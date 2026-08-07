@@ -113,6 +113,38 @@ struct KvResidualSizing {
 // plan is a projection, the residual is the truth) from "there was nothing
 // left to size from" (always an operator-visible fault), so the caller can
 // be quiet about the first and loud about the second.
+// Blocks one max_seq_len sequence occupies. 0 when either input is unset,
+// which reads as "no requirement to check against".
+inline int kv_blocks_per_sequence(int max_seq_len, int block_size) {
+    if (max_seq_len <= 0 || block_size <= 0)
+        return 0;
+    return (max_seq_len + block_size - 1) / block_size;
+}
+
+// What the operator has to be told about the pool this sizing produced.
+//
+// `Floored` has had its own message since #1251: nothing was left to size
+// from. `ShortOfOneSequence` is the quiet half of the same fault and had
+// none — the pool is a real size, just too small for a single max_seq_len
+// request, so the load reports success and every full-length generation is
+// cancelled at admission instead. Both are operator faults; only the first
+// was audible.
+enum class KvPoolVerdict {
+    Sufficient,          // holds at least one full-length sequence
+    ShortOfOneSequence,  // sized, but no full-length request can be admitted
+    Floored,             // nothing was left to size from
+};
+
+inline KvPoolVerdict kv_pool_verdict(const KvResidualSizing& sizing, int max_seq_len,
+                                     int block_size) {
+    if (sizing.floored)
+        return KvPoolVerdict::Floored;
+    const int need = kv_blocks_per_sequence(max_seq_len, block_size);
+    if (need > 0 && sizing.blocks < need)
+        return KvPoolVerdict::ShortOfOneSequence;
+    return KvPoolVerdict::Sufficient;
+}
+
 inline KvResidualSizing kv_blocks_from_residual(size_t free_bytes, size_t headroom_bytes,
                                                 size_t per_block_bytes, int planned_blocks,
                                                 int floor_blocks) {

@@ -602,6 +602,11 @@ void Engine::init_compute_max_seq_len_() {
         config_.max_seq_len = v;
         IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
     }
+    // Whoever set it before the auto resolver runs is the operator: the CLI
+    // flag, runtime.max_seq_len, or a C-API embedding. Recorded here because
+    // the value itself no longer says where it came from once auto has filled
+    // it in, and the KV pool check downstream turns on exactly that.
+    max_seq_len_explicit_ = config_.max_seq_len > 0;
     if (config_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
         size_t free_vram = 0, total_vram = 0;

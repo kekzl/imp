@@ -388,6 +388,35 @@ bool Engine::init_kv_cache() {
                 static_cast<double>(sizing.blocks) * kv_bs, max_blocks_planned,
                 static_cast<double>(sizing.blocks) * kv_bs);
         }
+        // The quiet half of the same fault: the pool is a real size — not the
+        // floor — and still holds less than one max_seq_len sequence, so the
+        // load reports success and every full-length request is cancelled at
+        // admission. With an explicit --vram-budget the check below turns this
+        // into a hard failure; without one the path stays best-effort by
+        // design, so it has to at least say so (#1251).
+        //
+        // Only for an operator-set max_seq_len. An AUTO value is a projection
+        // that this clamp is *expected* to undercut — init_compute_max_seq_len_
+        // sizes the GGUF path from raw free VRAM on purpose and leaves the
+        // overshoot for exactly this clamp to absorb. Warning there would fire
+        // on healthy loads and bury the case that is a fault.
+        if (vram_budget_bytes() == 0 && max_seq_len_explicit_ &&
+            kv_pool_verdict(sizing, config_.max_seq_len, kv_bs) ==
+                KvPoolVerdict::ShortOfOneSequence) {
+            const int need_blocks = kv_blocks_per_sequence(config_.max_seq_len, kv_bs);
+            const double need_mib =
+                double(need_blocks) * double(per_block_total_bytes) / (1024.0 * 1024.0);
+            const double have_mib =
+                double(sizing.blocks) * double(per_block_total_bytes) / (1024.0 * 1024.0);
+            IMP_LOG_WARN(
+                "KV cache: the pool ends up at %d blocks (%.0f MiB, %.0f tokens) but the "
+                "requested max_seq_len=%d needs %d blocks (%.0f MiB). Every full-length request "
+                "will be cancelled at admission even though this load reports success. Lower "
+                "--max-seq-len, lower the weight-cache demand (moe.reserve_mib, --kv-fp8), or "
+                "free at least %.0f MiB for the KV pool.",
+                sizing.blocks, have_mib, static_cast<double>(sizing.blocks) * kv_bs,
+                config_.max_seq_len, need_blocks, need_mib, need_mib - have_mib);
+        }
     }
 
     // I6, plan-time half: an explicit --vram-budget that cannot hold one
@@ -400,7 +429,7 @@ bool Engine::init_kv_cache() {
     // Only when a budget is installed. Without one this is the pre-existing
     // best-effort path and must keep its current behaviour.
     if (vram_budget_bytes() > 0 && per_block_total_bytes > 0) {
-        const int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
+        const int blocks_per_seq = kv_blocks_per_sequence(config_.max_seq_len, kv_bs);
         if (max_blocks < blocks_per_seq) {
             const double need_mib =
                 double(blocks_per_seq) * double(per_block_total_bytes) / (1024.0 * 1024.0);
