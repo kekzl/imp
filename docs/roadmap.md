@@ -145,7 +145,12 @@ Closed competitive records (kept for the record, not active work):
 
 - **Draft-model speculative decoding** -- separate draft models don't amortize weight reads on a single bandwidth-bound GPU. What *did* ship instead: prompt-lookup n-gram speculation (default-on for batch-1 greedy dense, #668-#670) and MTP self-drafts with hybrid-safe verify (#852) -- the drafts are free, so the economics work.
 - **FFN contextual sparsity** -- warp-cooperative layout masks the skip. +0-1% measured.
-- **BitDecoding (TC KV decode)** -- decode is weight-bound, not attention-bound. 0% gain.
+- **BitDecoding (TC KV decode) -- shelved, and the scope now stated** (#1268, 2026-08-07). The original entry read "decode is weight-bound, not attention-bound, 0% gain" with no context length attached, and that omission is what made it misleading: it was measured at `tg256`, which prefills 64 tokens. Paged attention is 4.3% of the decode window there and **31.1% at 8k, 45.1% at 32k** -- at long context it is the second-largest class, not noise. Still shelved, but for a different reason than "attention doesn't matter": the two levers built on the finding are dead, and the third reading it rested on did not survive measurement.
+  - *Split-count boost* (#1270, reverted #1271): +10.0% at 32k on Qwen3-8B (`n_kv_heads=8, g=4`), **-7.30% at 32k on Qwen3-30B-A3B** (`n_kv_heads=4, g=8`). One model is not a heuristic; the condition separating the two was never established.
+  - *KV block size 16 -> 32*: neutral everywhere (-0.48% .. +0.07%), with the 30B as a null control that came out null.
+  - *"Latency/occupancy-bound at 192 GB/s"*: **retracted by measurement.** The same kernel reaches **629.6 GB/s at 32k -- 3.4x -- at unchanged 16-17% occupancy** (roofline runs `dca16b71_20260806_041710` and `120bc0d7_20260807_091356`). The low bandwidth at 8k is a kernel short of work, not one held back by occupancy; the occupancy figure itself is a deliberate smem-for-L2 trade the tile dispatch documents.
+  - Amdahl, re-estimated where the class actually weighs most (32k): closing 629.6 -> 1127 GB/s (what the GEMV reaches at that length) is ~20% of the decode window -- against a kernel already at 35% of roofline, not the 3.8x gap the 8k figure suggested.
+  - Re-open on a mechanism, not on the share: the share is real and will keep growing with context.
 - **NVFP4 GEMV tuning** -- 6 approaches refuted; decode GEMV runs at 64-73% of HBM peak, structurally bandwidth-bound.
 - **FMHA rewrites** -- cluster, TMA bulk, long-context heuristic all A/B tested. cuBLAS wins.
 - **MoE offload + CUDA Graphs** -- `expert_overhead_pct=10` default keeps most models on-device. Full kernel-driven slot resolution deferred (multi-week, marginal user impact).
