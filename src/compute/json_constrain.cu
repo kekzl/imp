@@ -102,25 +102,82 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
     // returning unparseable output. Disabled while the budget is unknown (-1).
     force_close_active_ = false;
     if (remaining_budget_ >= 0 && current_state_ != JsonState::DONE) {
-        const bool in_escape = (current_state_ == JsonState::IN_STRING_ESCAPE);
-        const bool in_string = (current_state_ == JsonState::IN_STRING ||
-                                current_state_ == JsonState::OBJECT_KEY);
+        // A closer is not legal in every state, and demanding one where the
+        // grammar forbids it is worse than not narrowing at all: the safety
+        // net below then retries with the ordinary mask, the model carries on
+        // freely, and the document is truncated anyway. Measured on
+        // Qwen3.6-35B-A3B-NVFP4 at max_tokens=40 — the narrowing fired in
+        // ARRAY_NEED_VALUE, where #1096 forbids ']' precisely so `[1,]` cannot
+        // happen, so nothing was allowed and the reply came back unparseable
+        // (#1291).
+        //
+        // So the narrowing first has to walk OUT of a state that owes
+        // something, and the budget has to cover that walk. escape_mask is the
+        // cheapest legal step; escape_cost is how many tokens the whole walk
+        // takes, counted high on purpose — closing early beats not closing.
+        uint16_t escape_mask = 0;
+        int escape_cost = 0;
+        switch (current_state_) {
+            case JsonState::IN_STRING:
+                escape_mask = CAT_QUOTE;  // close it, then AFTER_VALUE takes closers
+                escape_cost = 1;
+                break;
+            case JsonState::OBJECT_KEY:
+                escape_mask = CAT_QUOTE;  // close key → AFTER_KEY still owes ':' + a value
+                escape_cost = 3;
+                break;
+            case JsonState::IN_STRING_ESCAPE:
+                escape_mask = CAT_STRING_CHAR;  // finish the escape, then close the string
+                escape_cost = 2;
+                break;
+            case JsonState::AFTER_KEY:
+                escape_mask = CAT_COLON;  // ':' then a value
+                escape_cost = 2;
+                break;
+            case JsonState::AFTER_COLON:
+            case JsonState::ARRAY_NEED_VALUE:
+                // A number is the only value that both starts and ends in one
+                // token — a string opens another frame, a container opens two.
+                escape_mask = CAT_NUMBER_START;
+                escape_cost = 1;
+                break;
+            case JsonState::OBJECT_NEED_KEY:
+                escape_mask = CAT_QUOTE;  // "…" then ':' then a value
+                escape_cost = 4;
+                break;
+            case JsonState::IN_LITERAL:
+                // A closer ends a *complete* literal; a partial one owes its
+                // tail first. 4 covers the longest ("false").
+                if (target_literal_.empty() || partial_literal_.size() < target_literal_.size()) {
+                    escape_mask = CAT_LITERAL_CONT;
+                    escape_cost = 4;
+                }
+                break;
+            case JsonState::START:
+                escape_mask = CAT_OPEN_BRACE;  // nothing is open yet; open then close
+                escape_cost = 1;
+                break;
+            default:
+                break;  // OBJECT_START / ARRAY_START / *_AFTER_VALUE / IN_NUMBER take a closer
+        }
         // state_stack_ holds only the RETURN states of *nested* values, not the
         // container we are currently inside — at `{"a"` the stack is empty
         // while a '}' is still owed. Count that container explicitly, or the
         // narrowing releases one token too early and the document is truncated
         // anyway (observed: needed=0 in AFTER_KEY with an object still open).
         const bool in_container = (current_state_ != JsonState::START && current_state_ != JsonState::DONE);
-        const int needed = static_cast<int>(state_stack_.size()) + (in_container ? 1 : 0) +
-                           (in_escape   ? 2
-                            : in_string ? 1
-                                        : 0);
+        // +1 margin: the escape step can itself push a frame (a forced number
+        // enters IN_NUMBER inside its container), so an estimate that is exact
+        // at the moment it is taken can still land one token short. Measured
+        // on the #1291 repro: without it the walk emits `-1]` and runs out
+        // before the `}`. Erring high costs a token of content; erring low
+        // costs the whole document.
+        const int needed =
+            static_cast<int>(state_stack_.size()) + (in_container ? 1 : 0) + escape_cost + 1;
         if (remaining_budget_ <= needed) {
             force_close_active_ = true;
-            if (in_escape)
-                return CAT_STRING_CHAR;  // finish the escape, close on the next tick
-            if (in_string)
-                return CAT_QUOTE;  // close the string, then the structures
+            if (escape_mask != 0)
+                return escape_mask;
             return CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
         }
     }
