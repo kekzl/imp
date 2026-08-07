@@ -83,6 +83,26 @@ inline int count_reasoning_tokens(const std::vector<int32_t>& output_tokens, int
 // its leak) whenever the model finishes thinking naturally within that window.
 inline constexpr int kMaxAnswerReserve = 256;
 
+// ...but a FLAT cap makes the answer length independent of max_tokens, and that
+// is its own bug. `think_limit` takes the LATER of the two limits, so once
+// max_tokens > 2*kMaxAnswerReserve the reserve always wins and the answer is
+// pinned at 256 tokens forever: raising max_tokens buys the model more thinking
+// room and never one token more of answer. Measured on Qwen3.6-35B-A3B-NVFP4,
+// same request, only max_tokens varied — 600/1500/3000/4096 returned
+// 935/1084/968/934 characters, five times the budget for fifty more characters,
+// and never `finish_reason: "stop"` (#1248). A structured answer that needs more
+// than 256 tokens is truncated mid-field, so nothing downstream can parse it.
+//
+// The flat cap encodes "a reasoning model's final answer is usually short",
+// which holds for prose and fails for structured output. An operator asking for
+// 4096 tokens is saying they expect a long answer, so the reserve follows them:
+// a quarter of the budget, never below the flat floor. Below 1024 this changes
+// nothing — which is where the leak the cap was introduced for was reported.
+inline constexpr int answer_reserve_for(int max_tokens) {
+    const int scaled = max_tokens / 4;
+    return scaled > kMaxAnswerReserve ? scaled : kMaxAnswerReserve;
+}
+
 // Should the sampler force a </think> token this step? True when budgeting is
 // active, a </think> id exists, the model is still thinking, and the reasoning
 // count has reached the limit. The limit is the LATER of the fractional budget
@@ -94,7 +114,7 @@ inline bool should_force_think_end(float think_budget, int32_t think_end_id, int
     if (!(think_budget > 0.0f) || think_end_id < 0 || output_tokens.empty())
         return false;
     int frac_limit = static_cast<int>(max_tokens * think_budget);
-    int reserve_limit = max_tokens - kMaxAnswerReserve;
+    int reserve_limit = max_tokens - answer_reserve_for(max_tokens);
     int think_limit = frac_limit > reserve_limit ? frac_limit : reserve_limit;
     bool currently_thinking = false;
     int n_reasoning = count_reasoning_tokens(output_tokens, think_start_id, think_end_id, started_in_think,

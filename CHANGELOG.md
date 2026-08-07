@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Raising `max_tokens` now buys answer room on a reasoning model (#1297).**
+  The think budget reserved a FLAT 256 tokens for the answer and took the later
+  of that and the fractional limit, so above `max_tokens = 512` the answer was
+  pinned at 256 tokens whatever the caller asked for — 600/1500/3000/4096
+  returned 935/1084/968/934 characters on Qwen3.6-35B-A3B-NVFP4, and never
+  `finish_reason: "stop"`. The reserve now scales (`max(256, max_tokens/4)`);
+  at or below 1024 nothing changes.
+
 ## [0.23.0] - 2026-08-07
 
 ### Added
