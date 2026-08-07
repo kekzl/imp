@@ -672,3 +672,57 @@ checking its semantics:**
 Tools that came out of it: `tools/analysis/layer_ab_diff.py` (which block makes a
 quantization worse), a `diagnostics.dump_hidden_dir` that fires outside Gemma-4
 (#1274) and warns when it writes non-finite values (#1276).
+
+### 2026-08-07 — #1273 resolved: it was the final RMSNorm, not the quantisation
+
+The entry above concluded that hybrid GDN + NVFP4 is broken and that something which
+normally cancels in attention fails to. That was wrong, and the way it was wrong is the
+part worth keeping.
+
+**Cause (#1289).** Qwen3.5/3.6 SafeTensors stores RMSNorm gammas as deltas — the actual
+gamma is `1 + W`. `ctx.arch_norm_offset` bakes the +1 in on the BF16→FP16 upload, and every
+norm took it: `attn_norm`, `ffn_norm`, the QK norms, even the MTP head's seven. The model's
+own output norm did not; it went through `upload_unquantized_weight`, which has no offset
+parameter. So the last hidden state was scaled by `W` instead of `1 + W` before the LM head.
+
+| checkpoint | before | after | its GGUF twin |
+|---|---|---|---|
+| Qwen3.6-27B-Text-NVFP4-MTP | 65.1275 | **7.5302** | none staged |
+| Ornith-1.0-35B-NVFP4 | 16.1630 | **7.0702** | 6.4974 → 2.49× becomes 1.09× |
+| Qwen3.6-35B-A3B-NVFP4 | 13.6486 | **6.8184** | 6.5465 → 2.08× becomes 1.04× |
+
+Dense and GGUF checkpoints byte-identical either way — the offset only applies on the
+BF16-source path.
+
+**Why 27 candidates missed it.** Every row of #1273's table compared a degraded checkpoint
+(hybrid, **SafeTensors**, NVFP4) against a healthy twin (**GGUF**, Q4_K_M). Format and load
+path were confounded in every row, and the conclusion followed the format — so every
+candidate lived on the format axis. The per-layer localisation was sound and still is: the
+attention blocks really do carry the injected divergence. It was the wrong question.
+
+**What opened it: an impossible number.** Qwen3.5-4B at BF16 scored 12.6794 against its own
+mxfp4 GGUF at 9.3869. Four bits add no information, so the defect could not be about the
+quant format. (Second time in this campaign an impossible number was the entry point; the
+first was a perplexity of exactly `vocab_size`, i.e. uniform logits.)
+
+**What localised it: an independent reference.** The two imp paths agreed on every
+inspectable input, so comparing them further could not say which was right. HF
+`transformers` on the same checkpoint and tokens gave 4.6990 against imp's 6.6238 at the
+same BF16 precision, and its per-layer hidden-state RMS matched imp **within 0.4% across all
+32 layers**. States right, output wrong ⇒ the error is after the last layer. One comparison
+later: the final norm needs the offset (`max|gguf − (hf+1)| = 0.0000`) and was the one norm
+not getting it.
+
+Recipe, since the imp containers carry no torch: `pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime`
++ `pip install 'transformers>=4.60' accelerate`; `model(ids, labels=ids).loss` for perplexity,
+`output_hidden_states=True` for the per-layer profile.
+
+**Method note.** Fourteen candidates were eliminated by flipping each switch and showing the
+opposite *destroys* the model (654 / 79026 / 88974 / 474573 perplexity) rather than by
+reading the code — a default that merely looks right is not checked. That emptied the format
+axis, but it could never have found this one: the missing line had no switch to flip.
+
+**And a control has to isolate the dimension it claims.** The first control here (Qwen3-14B,
+dense) was dense *and* text-only, leaving "hybrid" confounded with "multimodal SafeTensors +
+M-RoPE". Qwen3-VL-4B — dense, multimodal, GGUF twin staged — separated them and cleared
+M-RoPE before any conclusion was published.
