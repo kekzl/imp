@@ -94,21 +94,34 @@ and it costs 1-4% of the checkpoint on top. Divergence measured against a twin
 and quality measured against a corpus are different questions, and only the
 second one decides this.
 
-`--keep-attn-gate` keeps the option available: the one checkpoint that could be
-measured has a lower gate share than the worst #1273 offender (8/32 against
-16/64), so the trade may still turn on a model with more of them. imp cannot
-exclude half a tensor, so the flag keeps the whole `q_proj`.
+`--keep-attn-gate` keeps the option available, but not for the reason first
+given here. That reason was that the measured checkpoint has "a lower gate share
+than the worst #1273 offender (8/32 against 16/64)" — it does not. Every gated
+checkpoint staged here carries the same share:
 
-A gated `q_proj` is detected from shapes rather than a config flag: it emits
-twice what its own layer's `o_proj` consumes. Note that **published exports
-quantize it too** — both llm-compressor and Modelopt exclude `linear_attn.*`
-but not this tensor.
+| checkpoint | layers | full-attention | share |
+|---|---|---|---|
+| Qwen3.5-4B | 32 | 8 | 0.250 |
+| Qwen3.6-27B-Text | 64 | 16 | 0.250 |
+| Qwen3.6-35B-A3B | 40 | 10 | 0.250 |
+| Ornith-1.0-35B | 40 | 10 | 0.250 |
+
+8/32 and 16/64 are the same fraction, so the measurement above is *not* limited
+in the way that sentence claimed, and the negative result carries further than
+it was given credit for. The flag stays for a model that genuinely does have a
+higher share. imp cannot exclude half a tensor, so it keeps the whole `q_proj`.
 
 A gated `q_proj` is detected from shapes rather than a config flag: it emits
 twice what its own layer's `o_proj` consumes. Note that **published exports have
 the same gap** — both llm-compressor and Modelopt exclude `linear_attn.*` but
-quantize this tensor whole, which is why every hybrid NVFP4 checkpoint tested
-degrades.
+quantize this tensor whole.
+
+That gap used to be offered here as the reason every hybrid NVFP4 checkpoint
+degrades. Treat that as open: #1287 measures the same degradation on a hybrid
+loaded at **BF16**, where no NVFP4 exists to blame, while a dense control on the
+same loader and corpus is correctly ordered. Every degraded checkpoint in #1273
+is a hybrid read from SafeTensors and every healthy twin it is compared against
+is a GGUF, and that confound was never controlled.
 
 #### What `--calib` does
 
