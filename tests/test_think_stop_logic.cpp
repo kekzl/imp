@@ -190,6 +190,48 @@ TEST(ForceThinkEnd, ReserveCapDoesNotChangeSmallMaxTokens) {
     EXPECT_FALSE(should_force_think_end(0.5f, 200, 200, below, 100, /*started_in_think=*/true));
 }
 
+// --- The reserve scales above the flat floor (#1248) -----------------------
+//
+// A FLAT reserve makes the answer length independent of max_tokens: think_limit
+// takes the LATER of the two limits, so past 2*kMaxAnswerReserve the reserve
+// always wins and the answer is pinned at 256 tokens whatever the caller asks
+// for. Measured on Qwen3.6-35B-A3B-NVFP4, same request, only max_tokens varied:
+// 600/1500/3000/4096 returned 935/1084/968/934 characters — five times the
+// budget for fifty more characters, and never finish_reason "stop".
+
+TEST(ForceThinkEnd, AnswerRoomGrowsWithMaxTokens) {
+    // The property the flat cap broke: a bigger budget must buy answer room.
+    auto answer_tokens = [](int max_tokens) {
+        int frac = static_cast<int>(max_tokens * 0.5f);
+        int reserve = max_tokens - answer_reserve_for(max_tokens);
+        return max_tokens - (frac > reserve ? frac : reserve);
+    };
+    EXPECT_GT(answer_tokens(3000), answer_tokens(1500)) << "5x the budget bought no answer room";
+    EXPECT_GT(answer_tokens(4096), answer_tokens(3000));
+    EXPECT_EQ(answer_tokens(4096), 1024);
+    EXPECT_EQ(answer_tokens(3000), 750);
+}
+
+TEST(ForceThinkEnd, ScaledReserveLeavesSmallBudgetsAlone) {
+    // Everything at or below 4*kMaxAnswerReserve keeps the flat floor — that is
+    // the range the reasoning-into-content leak was reported in, and the range
+    // the two tests above pin.
+    EXPECT_EQ(answer_reserve_for(200), kMaxAnswerReserve);
+    EXPECT_EQ(answer_reserve_for(600), kMaxAnswerReserve);
+    EXPECT_EQ(answer_reserve_for(1024), kMaxAnswerReserve);
+    // 1024 is the boundary: one token more and the scaled reserve takes over.
+    EXPECT_EQ(answer_reserve_for(1028), 257);
+}
+
+TEST(ForceThinkEnd, ScaledReserveStillForcesTheCloseInTime) {
+    // The forced close must still fire while the answer room is intact:
+    // max_tokens=4096 -> reserve 1024, think_limit = max(2048, 3072) = 3072.
+    std::vector<int32_t> below(3000, 1);
+    EXPECT_FALSE(should_force_think_end(0.5f, 200, 4096, below, 100, /*started_in_think=*/true));
+    std::vector<int32_t> at(3072, 1);
+    EXPECT_TRUE(should_force_think_end(0.5f, 200, 4096, at, 100, /*started_in_think=*/true));
+}
+
 // ---------------------------------------------------------------------------
 // Text-tail </think> detection across token boundaries (bug (c))
 // ---------------------------------------------------------------------------
