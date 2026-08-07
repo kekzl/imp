@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-07
+
 ### Added
 
 - **`tools/analysis/layer_ab_diff.py`** — per-layer, per-snapshot divergence
@@ -22,6 +24,19 @@ there instead of retelling it.
   amplifies an error created elsewhere".
 
 ### Fixed
+
+- **A `json_object` reply that hits `max_tokens` now parses (#1291).** #1096
+  forbids a closer straight after a comma and #1104 demands one once the budget
+  is spent; where they met, nothing was legal and the constraint was released,
+  so the document was truncated anyway. The narrowing now walks out of the owing
+  state first. Qwen3.6-35B-A3B-NVFP4 at `max_tokens=40`: 0/12 valid → 6/6.
+
+- **A KV pool too small for the requested context says so at load (#1251).**
+  The floor case has warned since #1251; a pool that is a real size and still
+  cannot hold one `max_seq_len` sequence was silent, and every full-length
+  request was cancelled at admission while the load reported success. Only for
+  an operator-set `max_seq_len` — an auto value is a projection the clamp is
+  expected to undercut.
 
 - **The final RMSNorm missed Qwen3.5/3.6's `gamma = 1 + W` offset (#1287), which
   is what #1273 actually was.** Every other norm took the offset; the model's
