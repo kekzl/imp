@@ -384,6 +384,55 @@ TEST(PrefixEquivTest, MaxReuseBlocksCapsSharing) {
     mgr->free_sequence(1);
 }
 
+// ── (9b) rollback of a partial allocation must drop the hashes it took ────
+// `allocate_blocks_with_prefix` can move a cached block's reference into the
+// new sequence and only THEN fail to allocate a fresh block, at which point
+// rollback_partial_allocation() returns everything. Those moved-in blocks left
+// cached_blocks_map_ but their entries are still in the prefix-hash table, so
+// the rollback has to drop them (kv_cache_manager.cpp:549/562 →
+// drop_stale_hash_if_last). If it does not, the next request for the same
+// prefix could "hit" a block that is back in the free pool — the
+// double-ownership bug the trim path's own comment names.
+//
+// Measured, so the comment does not overclaim: stubbing drop_stale_hash_if_last
+// out entirely does NOT change the outcome. The lookup site (:509) independently
+// rejects a hash whose block is ref-0-and-not-cached, logs
+// "prefix cache: stale hash entry for free block N — dropping", and treats it as
+// a miss. So the eager cleanup is defence in depth, not the load-bearing guard.
+// This test exists because nothing else drove the rollback path at all —
+// ManagerAllocateRollback never registers hashes first, and
+// EvictionThenRefillIsNewNotStaleHit goes through a different cleanup.
+TEST(PrefixEquivTest, RollbackOfPartialAllocationDropsItsHashes) {
+    SKIP_IF_NO_CUDA();
+    auto mgr = MakeManager(4);  // tiny pool: 4 blocks total
+    mgr->set_prefix_caching_enabled(true);
+
+    // Cache a 2-block prefix, then free → 2 cached blocks, 2 free.
+    std::vector<int32_t> p(32);
+    std::iota(p.begin(), p.end(), 0);
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(0, p), 0);
+    mgr->register_block_hashes(0, p);
+    mgr->free_sequence(0);
+    ASSERT_EQ(mgr->num_cached_blocks(), 2);
+
+    // Ask for 5 blocks sharing that prefix: 2 come from the cache, 2 more fit,
+    // the 5th cannot be allocated (pool is 4) → full rollback.
+    std::vector<int32_t> too_big(80);
+    std::iota(too_big.begin(), too_big.end(), 0);  // same first 32 tokens
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(1, too_big), -1)
+        << "a 5-block request must not fit a 4-block pool";
+    ASSERT_TRUE(mgr->block_table(1).empty());
+    ASSERT_EQ(mgr->num_free_blocks(), 4) << "rollback must return every block";
+
+    // The rolled-back blocks are free again, so their hash entries must be gone.
+    // A hit here would hand out a block nobody owns.
+    const int reused = mgr->allocate_blocks_with_prefix(2, p);
+    EXPECT_EQ(reused, 0)
+        << "rolled-back prefix falsely re-hit a block that went back to the free pool "
+           "— STALE-HASH BUG";
+    mgr->free_sequence(2);
+}
+
 // ── (10) longest_cached_prefix_blocks probe ───────────────────────────────
 // Read-only probe used by the hybrid snapshot lookup: reports the contiguous
 // cached chain length without allocating, and fills the per-block chain
