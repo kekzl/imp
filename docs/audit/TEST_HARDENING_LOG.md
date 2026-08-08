@@ -804,3 +804,77 @@ Second pass continues with `I2`. The seams worth re-mining are the ones where
 the first pass found the tests good but the *inputs* narrow — that pattern has
 now produced three findings and is cheaper per finding than anything else this
 campaign has done.
+
+---
+
+## Iteration 9 — 2026-08-08 — focus: constrained decoding — commit: `5a0e3027`
+
+**Mutation score: 90.4 %** (47/52) — prev 90.0 % (45/50). Five mutants written
+(M52–M56); two scored, both killed after one new test, two ruled equivalent,
+one refused by the harness.
+
+| Category | score |
+|---|---|
+| **constrain** (new) | **2/2 = 100 %** |
+| everything else | unchanged |
+
+**Bugs found:** none.
+
+### The point of this iteration was to falsify my own claim
+
+The iteration-1 assertion audit measured the constrained-decoding suites as
+overwhelmingly A0 — `test_json_constrain.cu` 40/44, `test_gbnf_grammar.cpp`
+22/22 — and I softened that in the report: *"for an acceptor, `EXPECT_TRUE
+(accepts(s))` is the value under test, not a smoke check"*. That was an
+argument, not a measurement. Mutating the FSM settles it.
+
+**The claim holds, and for a sharper reason than I gave.** Two mutants re-open
+#1096 in `compute_allowed_mask()` — `ARRAY_NEED_VALUE` admitting `]` again,
+`OBJECT_NEED_KEY` admitting `}` — and nothing fails. That looks damning for
+about ten minutes. It is not: `apply_mask()` uses the mask only as a
+**pre-filter** and then runs `sim_token_valid()` on every candidate that passes
+it (`json_constrain.cu:645-655`), and `advance_char()` enforces the
+trailing-comma rule independently. So M52 and M53 are **equivalent mutants** —
+the mask half of #1096 is defence in depth over the half that decides.
+
+That makes three equivalent mutants found this campaign (M25, M52, M53), all
+three the same shape: a redundant guard layered over a load-bearing one. Worth
+naming as a pattern, because "surviving mutant ⇒ test gap" would have produced
+three wrong issues.
+
+### What was actually missing
+
+| Mutant | Verdict |
+|---|---|
+| M54 — a number ending at whitespace no longer needs a digit (`"1. 1"`, #1104) | KILLED by `JsonConstrainFsm.NumberGrammarMatchesRfc8259` |
+| M55 — GBNF `kMaxStackDepth` cap removed | **SURVIVED** — genuine gap |
+| M56 — schema depth cap | refused: the anchor matched two sites, so the harness declined to mutate an arbitrary one |
+
+`expand()` drops a continuation once it is 128 rule references deep, because a
+self-referential grammar otherwise grows the work list without bound. **No test
+in `test_gbnf_grammar.cpp` nested anything at all**, so removing the cap left
+all 22 green while turning a recursive grammar into a hang.
+
+**Tests added: 2, both verified against the fault they target.**
+
+- `GbnfGrammarTest.DeepSelfRecursionStaysBounded` — `root ::= "[" root "]" | "x"`
+  driven 512 deep. Kills M55.
+- `JsonConstrainPropertyTest.RejectsTrailingCommas` — `[1,]`, `{"a":1,}` and
+  four relatives, cross-checked against `nlohmann::json::accept`. It does **not**
+  kill M52/M53, and its comment says so outright, with the measurement: the
+  generator never produces a trailing comma, so the shape had no coverage, but
+  the path it covers is the one that decides.
+
+Both run in CI.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No.
+2. **Did every mutant get reverted?** Yes — and M56 never applied, because the
+   harness refuses an ambiguous anchor rather than guessing.
+3. **Did I watch every new test fail before it passed?** For M55, yes. For the
+   trailing-comma test, no — and rather than dress that up, the test's own
+   comment records that the mask mutants do not move it and why.
+4. **Is every bug claim backed by a script I ran twice?** No bugs claimed.
+5. **Did I fix any production code?** No.
+6. **Are all new tests wired into CI?** Yes — both `test-core`.
