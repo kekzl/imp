@@ -878,3 +878,73 @@ Both run in CI.
 4. **Is every bug claim backed by a script I ran twice?** No bugs claimed.
 5. **Did I fix any production code?** No.
 6. **Are all new tests wired into CI?** Yes — both `test-core`.
+
+---
+
+## Iteration 10 — 2026-08-08 — closing out `controlflow` — commit: `d584c530`
+
+**Mutation score: unchanged at 90.4 %** (47/52). No tests committed, and that is
+the result rather than a shortfall.
+
+### M30 is reachable, but not from where I attacked it
+
+`controlflow` has been the one category below the 70 % floor for eight
+iterations. M29 was resolved in #1309 by measurement — the perf gate sees it at
+−36 %, twelve times its threshold. M30, the split-K scratch-capacity guard, was
+the last open item in the campaign.
+
+Built the test: an FP16 decode with a deliberately undersized *advertised*
+scratch and a canary filling the slack past it, so that an overrun becomes an
+assertion rather than a silent write into memory nothing reads. It passes with
+the mutant applied.
+
+The reason is that the guard has no caller on that path:
+
+```
+$ rg -n 'compute_splitk_splits' src/compute/*.cu
+attention_paged_nvfp4.cu:377      attention_paged_int4.cu:535
+attention_paged_nvfp4.cu:473      attention_paged_int8.cu:481
+attention_paged_nvfp4_tc.cu:1080  attention_paged_fp8.cu:576
+```
+
+`paged_attention_decode` (FP16) makes its own split decision inline. The tests
+were **reverted rather than committed**: a test whose comment claims to exercise
+a guard it cannot reach is the same defect this campaign has filed four times
+under E6, and shipping one would have been the worst possible way to close a
+category.
+
+### Two mutants, one seam
+
+M31 (#1303, the sink term) and M30 both live in `attention_paged_common.cuh` and
+are both reachable only from the cluster kernel and the five quantised-KV decode
+launchers — and every test touching those passes `n_sinks=0` and a default-sized
+scratch. Recorded as an addendum on #1303 with a recipe that closes both from
+`tests/test_fp8_kv_cache.cu`, which already builds the FP8 KV cache, the CPU
+reference, and split-K scratch.
+
+The canary is the load-bearing part of that recipe and is worth keeping in mind:
+`cudaMalloc` rounds up generously, so an overrun lands in slack nothing reads and
+the output stays correct. Comparing outputs alone cannot see it — measured here,
+not assumed.
+
+### Where the campaign stands against its own stopping rule
+
+> Two consecutive iterations find zero new S1/S2 **and** mutation score ≥ 85 %
+> with no category below 70 %.
+
+| condition | status |
+|---|---|
+| two consecutive iterations without a new S1/S2 | **met** — iterations 8, 9 and 10 |
+| mutation score ≥ 85 % | **met** — 90.4 % (47/52) |
+| no category below 70 % | **not met** — `controlflow` 0/2 |
+
+`controlflow` cannot clear the bar without changing what the suite is for. Its
+two mutants are a throughput regression the perf gate already catches by design
+(#1309) and a memory-safety guard on a launcher family the suite does not
+exercise (#1303). Reaching 70 % would mean either importing a perf assertion the
+repo deliberately keeps outside the test suite, or writing the FP8 test — which
+is worth doing and is now specified, but belongs to whoever owns that area
+rather than to an audit that must not touch production code.
+
+The substantive stopping condition is met. The letter of it is not, and the gap
+is one named, specified test.
