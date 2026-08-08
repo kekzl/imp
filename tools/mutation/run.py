@@ -32,16 +32,17 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 DEV_IMG = os.environ.get('IMP_DEV_IMG', 'imp:toolchain')
 DEV_DIR = os.environ.get('IMP_DEV_DIR', 'build-dev')
-MODELS = os.environ.get('IMP_MODELS', '/home/kekz/models')
-BACKUP = Path(os.environ.get(
-    'IMP_MUT_BACKUP',
-    '/tmp/claude-1000/-home-kekz-github-com-kekzl-imp/mutation-backup'))
+MODELS = os.environ.get('IMP_MODELS_DIR',
+                        os.path.join(os.path.expanduser('~'), 'models'))
+BACKUP = Path(os.environ.get('IMP_MUT_BACKUP',
+                             os.path.join(tempfile.gettempdir(), 'imp-mutation-backup')))
 
 # Model env for the GPU lanes — without these ~63 tests skip silently and the
 # run looks green for the wrong reason (see loop/run_gpu_suite.sh).
@@ -52,7 +53,7 @@ MODEL_ENV = {
     'IMP_TEST_MODEL_LLAMA': '/models/Llama-3.2-3B-Instruct-Q8_0.gguf',
     'IMP_TEST_MODEL_GDN': '/models/Qwen3.5-4B-mxfp4.gguf',
     'IMP_TEST_MODEL_GEMMA4': '/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf',
-    'IMP_TEST_MOE_MODEL': '/models/Qwen3-30B-A3B-Q4_K_M.gguf',
+    'IMP_TEST_MOE_MODEL': '/models/gpt-oss-20b-mxfp4.gguf',
     'IMP_TEST_MODEL_DEEPSEEK': '/models/DeepSeek-V2-Lite',
     'IMP_TEST_MODEL_QWEN3VL': '/models/Qwen3-VL-4B-GGUF/Qwen3-VL-4B-Instruct-Q4_K_M.gguf',
     'IMP_TEST_MMPROJ': '/models/Qwen3-VL-4B-GGUF/mmproj-F16.gguf',
