@@ -207,3 +207,96 @@ exists at `mtp_forward.cu:260`.
 Stopping criteria still not met: score 84.8 % (< 85 %), `controlflow` at 0 %,
 one new S1 this round. Focus `I2` (paging / KV / prefix cache) and the two
 indeterminate mutants, which unblock as soon as #1299 lands.
+
+---
+
+## Iteration 3 — 2026-08-08 — focus: `I2` paging / KV / prefix cache — commit: `d1906167`
+
+**Mutation score: 87.8 %** (36/41) — prev 84.8 % (28/33). Eight new mutants
+(M35–M42) aimed at the KV manager, the prefix hash chain and StreamingLLM
+eviction; the denominator grows with them.
+
+| Category | now | was |
+|---|---|---|
+| **kvcache** | **8/8 = 100 %** | 2/2 |
+| masking | 6/7 = 86 % | 5/6 = 83 % |
+| indexing | 5/6 = 83 % | 4/5 = 80 % |
+| sampling | 2/3 = 67 % | unchanged |
+| controlflow | 0/2 = 0 % | unchanged |
+| rope / scaling / quantization / memory / numerics | 100 % | unchanged |
+
+**Bugs found:** none. S1: 0 · S2: 0 · S3: 0 · S4: 0 · S5: 0
+
+**Escape distribution (new):** E1: 1 (M35 — no test ever passed a `content_salt`)
+
+**Tests added: 2, both verified against the fault they target: yes**
+
+| Test | Binary | Kills |
+|---|---|---|
+| `PrefixEquivTest.ContentSaltSeparatesIdenticalTokenPrefixes` | test-kv | M35 |
+| `PrefixEquivTest.RandomisedWorkloadKeepsProbeAllocationAndPoolConsistent` | test-kv | M38 |
+
+The randomised one is a property harness rather than a scenario: a seeded
+workload of overlapping prefixes, frees and evictions, with sequence lengths
+sitting on and either side of the block boundary, asserting three invariants in
+every state — probe equals actual reuse, no block appears twice in one
+sequence's table, and the pool comes back whole once everything is freed and the
+cache drained (the shape of #1115). It earned its place immediately by killing
+M38 alongside the existing `LongestCachedPrefixProbe`.
+
+**The one survivor was a genuine hole and is now closed.** M35 drops
+`content_salt`, the seed that keeps two multimodal prompts with identical token
+ids but different images from sharing KV. Both production call sites pass
+`req->vision_content_hash` (`engine_scheduler.cpp:598`, `scheduler.cpp:88`), and
+**no test in the suite passed a non-zero salt** — so the parameter could be
+deleted outright and everything stayed green, while the second request answered
+about the first request's picture.
+
+**Attacked and clean — do not re-mine:**
+
+- Prefix reuse contiguity after a miss (`ChainHoleStopsReuse` kills it).
+- Partial trailing blocks registered as cacheable, and block-count rounding
+  (`PrefixCachingWithPartialLastBlock` kills both).
+- Stale hash entries on cached-block reclaim (`EvictionThenRefillIsNewNotStaleHit`).
+- StreamingLLM: the extra boundary block from #963, and sink pinning.
+  `EvictMiddleBlocksRetainsKernelWindowStart` is the #963 regression test and it
+  still bites; sink pinning is covered by `EvictMiddleBlocksKeepsSinksAndWindow`.
+- The SWA snapshot suite writes real byte patterns to device memory and asserts
+  exact block indices — A4-grade, left alone.
+
+**A source-level inconsistency that is not a bug.** `longest_cached_prefix_blocks`
+is called without a `content_salt` at `engine_sampling_stop.cpp:337` and `:405`
+while the allocator is called with one, so the two hash chains would diverge for
+a multimodal request. It cannot fire: `hybrid_prefix_reuse_limit_` returns 0 for
+any vision request twelve lines earlier (`:329`). Recorded so the next reader
+does not re-derive it — and so that if that guard is ever relaxed, the salt has
+to be threaded through with it.
+
+**Blocked on:** unchanged — #1299 still blocks M10 and M22.
+
+**Tree clean:** production code untouched.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No.
+2. **Did every mutant get reverted?** Yes — 8 mutants, tree checked after each.
+3. **Did I watch every new test fail before it passed?** Yes: M35 against
+   `ContentSaltSeparatesIdenticalTokenPrefixes`, M38 against the randomised
+   harness.
+4. **Is every bug claim backed by a script I ran twice?** No bugs claimed this
+   iteration.
+5. **Did I fix any production code?** No.
+6. **Are all new tests wired into CI?** No — both are `test-kv` (GPU). The
+   manager's own bookkeeping is CUDA-gated because the fixture allocates a real
+   pool, which is the standing finding in #1304.
+
+### Next iteration
+
+87.8 % is above the 85 % bar, but `controlflow` sits at 0 % (< 70 %), so the
+stopping criteria are still not met. That category is M29/M30 — both
+perf-only, and the suite has no perf oracle at all; closing it means either a
+kernel-level timing assertion or accepting that `tests/perf_baseline.json` is
+the gate and saying so explicitly.
+
+Remaining survivors overall: M10, M22 (indeterminate, blocked on #1299), M29,
+M30 (perf-only), M31 (#1303, needs an FP8-KV decode with sinks).
