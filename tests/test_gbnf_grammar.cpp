@@ -42,6 +42,36 @@ std::string compile_error(const std::string& src) {
 }  // namespace
 
 // -----------------------------------------------------------------------------
+// Pathological nesting
+// -----------------------------------------------------------------------------
+
+// expand() drops a continuation once it is kMaxStackDepth (128) rule references
+// deep, because a self-referential grammar otherwise grows the work list without
+// bound. No test in this file nested anything, so removing that cap left the
+// whole suite green while turning a recursive grammar into a hang.
+//
+// A grammar that recurses on every open bracket, driven past the cap: the
+// matcher must stay responsive and simply stop accepting deeper opens, never
+// spin. `would_accept` returning either answer is fine — the assertion is that
+// it returns at all, with a bounded amount of work, and that shallow nesting
+// still behaves.
+TEST(GbnfGrammarTest, DeepSelfRecursionStaysBounded) {
+    GbnfMatcher m = make("root ::= \"[\" root \"]\" | \"x\"\n");
+    ASSERT_TRUE(m.compiled());
+
+    // Well inside the cap: must accept.
+    EXPECT_TRUE(m.would_accept(std::string(8, '[') + "x" + std::string(8, ']')));
+
+    // Well past it: the cap makes this unreachable, and the call must still
+    // return rather than expanding for ever.
+    const std::string deep_open(512, '[');
+    EXPECT_FALSE(m.would_accept(deep_open + "x" + std::string(512, ']')));
+
+    // The matcher is not wedged by the pathological input.
+    EXPECT_TRUE(m.would_accept("x"));
+}
+
+// -----------------------------------------------------------------------------
 // Refusals: a grammar we cannot enforce must be rejected, never approximated.
 // -----------------------------------------------------------------------------
 

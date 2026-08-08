@@ -210,6 +210,28 @@ TEST(JsonConstrainPropertyTest, RejectsSwappedFinalCloser) {
     EXPECT_GT(checked, 0);
 }
 
+// P4c - trailing commas (#1096). gen_document() never produces one, and the two
+// rejection families above (swapped final closer, trailing content after the
+// root) cannot create one either, so this shape had no coverage at all.
+//
+// Measured, so the comment does not overclaim: re-admitting CLOSE_BRACKET in
+// ARRAY_NEED_VALUE and CLOSE_BRACE in OBJECT_NEED_KEY - i.e. undoing #1096 in
+// compute_allowed_mask() - does NOT make this test fail. apply_mask() uses the
+// mask only as a pre-filter and then runs sim_token_valid() on every candidate
+// that passes it, and advance_char() enforces the rule independently. The mask
+// half of #1096 is defence in depth; this test covers the half that decides.
+TEST(JsonConstrainPropertyTest, RejectsTrailingCommas) {
+    static const char* kDocs[] = {
+        "[1,]", "[1, 2,]", "[[1],]", "[{\"a\":1},]",
+        "{\"a\":1,}", "{\"a\":1, \"b\":2,}", "{\"a\":[1],}",
+    };
+    for (const char* d : kDocs) {
+        ASSERT_FALSE(nlohmann::json::accept(d)) << "oracle thinks it is valid: " << d;
+        JsonConstrainer c;
+        EXPECT_FALSE(c.sim_token_valid(d)) << "FSM accepted a trailing comma: " << d;
+    }
+}
+
 TEST(JsonConstrainPropertyTest, RejectsTrailingContentAfterRoot) {
     static const char* kTrailers[] = {"{", "[", "\"", "1", "}", "]", ",", ":", "x"};
     std::mt19937 rng(kSeed + 4);

@@ -468,6 +468,51 @@
       "focus": "test-core",
       "find": "        if (cached > prompt_tokens)\n            cached = prompt_tokens;",
       "replace": "        // [MUTANT] clamp removed"
+    },
+    {
+      "id": "M52",
+      "category": "constrain",
+      "file": "src/compute/json_constrain.cu",
+      "desc": "ARRAY_NEED_VALUE allows a closing bracket again, so the FSM accepts a trailing comma: [1,]  (#1096).",
+      "focus": "test-core",
+      "find": "        case JsonState::ARRAY_NEED_VALUE:\n            // After , in array: a value is mandatory \u2014 no closer (#1096).\n            mask |= CAT_VALUE_START;",
+      "replace": "        case JsonState::ARRAY_NEED_VALUE:\n            mask |= CAT_VALUE_START | CAT_CLOSE_BRACKET;  // [MUTANT] trailing comma allowed"
+    },
+    {
+      "id": "M53",
+      "category": "constrain",
+      "file": "src/compute/json_constrain.cu",
+      "desc": "OBJECT_NEED_KEY allows a closing brace, so the FSM accepts {\"a\":1,} .",
+      "focus": "test-core",
+      "find": "        case JsonState::OBJECT_NEED_KEY:\n            // After , in object: a key is mandatory \u2014 no closer (#1096).\n            mask |= CAT_QUOTE;",
+      "replace": "        case JsonState::OBJECT_NEED_KEY:\n            mask |= CAT_QUOTE | CAT_CLOSE_BRACE;  // [MUTANT] trailing comma allowed"
+    },
+    {
+      "id": "M54",
+      "category": "constrain",
+      "file": "src/compute/json_constrain.cu",
+      "desc": "A number terminated by whitespace no longer requires a digit, so \"1. 1\" and \"1e \" are accepted (#1104).",
+      "focus": "test-core",
+      "find": "        if (num_need_digit_)\n            return false;  // \"1.\" / \"1e\" / \"-\" cannot end here",
+      "replace": "        // [MUTANT] incomplete number may end at whitespace"
+    },
+    {
+      "id": "M55",
+      "category": "constrain",
+      "file": "src/compute/gbnf_grammar.cpp",
+      "desc": "GBNF stack-depth cap removed, so a deeply nested grammar can overflow the stack.",
+      "focus": "test-core",
+      "find": "        if (static_cast<size_t>(depth) >= kMaxStackDepth)",
+      "replace": "        if (false)  // [MUTANT] depth cap removed"
+    },
+    {
+      "id": "M56",
+      "category": "constrain",
+      "file": "src/compute/schema_constrain.cu",
+      "desc": "Schema stack-depth cap removed at the object-push site.",
+      "focus": "test-core",
+      "find": "                    if (c == '{') {\n                        if (stk.size() >= kMaxSchemaStackDepth)\n                            return false;\n                        f.phase = SchemaPhase::OBJECT_OPEN;",
+      "replace": "                    if (c == '{') {\n                        // [MUTANT] schema depth cap removed\n                        f.phase = SchemaPhase::OBJECT_OPEN;"
     }
   ]
 }
