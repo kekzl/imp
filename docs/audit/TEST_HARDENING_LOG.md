@@ -274,6 +274,35 @@ to be threaded through with it.
 
 **Blocked on:** unchanged — #1299 still blocks M10 and M22.
 
+### Resolved: the perf gate does see M29
+
+Iteration 1 left this open as a stated limitation — "no *test* catches M29" was
+proven, "nothing catches it" was not, because the real gate
+(`tests/perf_baseline.json` via `make verify-fast`) needs a full `make build`
+per mutant. Measured instead as an alternating A/B on the same tree
+(`tools/mutation/perf_ab.sh`, Qwen3-4B-Q8_0, the gate's own bench invocation):
+
+```
+round 1: clean=450.88  M29=288.12
+round 2: clean=451.12  M29=287.51
+round 3: clean=450.69  M29=287.45
+```
+
+**−36 % decode**, twelve times the gate's 3 % threshold, with the arms
+alternating so drift cancels. So M29 is caught — by the perf gate, not by a
+test. `controlflow` at 0 % measures the test suite, and for M29 that is the
+whole truth: it is a gate-layer responsibility, not a missing test. **M30**
+(the split-K scratch-capacity guard) is still unmeasured; it is a safety check
+whose removal is neither correctness- nor throughput-visible in the shapes the
+suite exercises.
+
+One false alarm worth recording so nobody re-derives it: the M29 arm lands at
+~287.5 tok/s and `tests/perf_baseline.json` pins `tg128: 287.19`, which briefly
+looked like "the baseline is pinned 36 % low and would accept split-K being
+disabled". It is not. The pin is for **Qwen3-8B-Q8_0**; the A/B ran Qwen3-**4B**.
+The same 8B bench on the current tree gives **288.47 tok/s vs the 287.19 pin
+(+0.45 %)** — the baseline is accurate. Two different models, one coincidence.
+
 **Tree clean:** production code untouched.
 
 ### Self-check
