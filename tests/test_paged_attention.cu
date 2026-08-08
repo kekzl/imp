@@ -676,11 +676,14 @@ TEST(PagedAttentionTest, GQALongContext) {
 // first hd=64 model; the rest of the zoo is hd>=128).
 // =========================================================================
 
-void run_gptoss_shape_splitk_case(bool with_sinks) {
+void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256) {
     constexpr int batch = 1, n_heads = 64, n_kv_heads = 8, head_dim = 64;
-    constexpr int seq_len = 256;  // 16 blocks >= 8 → split-K heuristics fire
-    constexpr int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    constexpr int max_blocks = num_blocks;
+    // seq_len 256 = 16 blocks >= 4 → split-K heuristics fire (compute_splitk_splits).
+    // seq_len  48 =  3 blocks  < 4 → they do not, which is the ONLY way to reach
+    // crosswarp_reduce_and_write's sink term; the split-K reduction handles sinks
+    // in a different function entirely.
+    const int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const int max_blocks = num_blocks;
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
     std::vector<float> h_Q(n_heads * head_dim);
@@ -798,6 +801,17 @@ void run_gptoss_shape_splitk_case(bool with_sinks) {
 
 TEST(PagedAttentionTest, GQA_SplitK_HD64) { run_gptoss_shape_splitk_case(/*with_sinks=*/false); }
 TEST(PagedAttentionTest, GQA_SplitK_HD64_Sinks) { run_gptoss_shape_splitk_case(/*with_sinks=*/true); }
+
+// Same shape, short enough that split-K does NOT fire, so the decode goes
+// through crosswarp_reduce_and_write. Without this the sink term in that
+// function can be deleted with the whole suite still green (mutant M31, #1303):
+// both cases above are sized so the split-K path takes over.
+TEST(PagedAttentionTest, GQA_NoSplitK_HD64_Sinks) {
+    run_gptoss_shape_splitk_case(/*with_sinks=*/true, /*seq_len=*/48);
+}
+TEST(PagedAttentionTest, GQA_NoSplitK_HD64) {
+    run_gptoss_shape_splitk_case(/*with_sinks=*/false, /*seq_len=*/48);
+}
 
 // =========================================================================
 // GQA with HD=256: exercises split-K and cluster paths for Gemma-3 config

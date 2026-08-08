@@ -181,6 +181,121 @@ TEST(SamplingTest, TopPFiltering) {
     free_gpu_tensor(d_logits);
 }
 
+// =========================================================================
+// top_p must actually truncate (#1300)
+//
+// TopPFiltering above documents top_p=0.5 but passes 0.99, against logits whose
+// tail mass is ~e^-105 — nucleus truncation is a no-op on that fixture, so both
+// sampler paths pass with the top_p cutoff removed entirely (mutants M20/M21).
+// Across the whole suite top_p only ever took the values 1.0, 0.95 and 0.99.
+//
+// This builds a genuinely spread distribution and computes the nucleus IN the
+// test from the same probabilities — an oracle, not a golden. The control
+// assertion (the same seeds DO reach outside the nucleus at top_p=1.0) is what
+// stops this test from degenerating the way the old one did: a fixture whose
+// tail is unreachable would satisfy the main assertion while proving nothing.
+// =========================================================================
+void run_top_p_truncation_case(int top_k, const char* path_name, float logit_offset = 0.0f) {
+    constexpr int V = 512;
+    constexpr int kSeeds = 200;
+    constexpr float kTopP = 0.75f;
+
+    // p: 0.40 / 0.25 / 0.15 on the head (cum 0.80 crosses kTopP at rank 2),
+    // 0.02 on each of ten tail tokens (0.20 of reachable mass), ~0 elsewhere.
+    //
+    // The head deliberately does NOT sit at index 0: a sampler that silently
+    // returns its error sentinel (token 0) must be distinguishable from one
+    // that always returns the argmax, and both from one that samples.
+    constexpr int kHead[3] = {137, 42, 301};
+    constexpr int kTail[10] = {5, 63, 99, 150, 188, 222, 260, 333, 400, 470};
+    std::vector<float> probs(V, 1e-9f);
+    probs[kHead[0]] = 0.40f;
+    probs[kHead[1]] = 0.25f;
+    probs[kHead[2]] = 0.15f;
+    for (int t : kTail)
+        probs[t] = 0.02f;
+
+    // Softmax is shift-invariant, so adding a constant to every logit must not
+    // change the sampled distribution at all. Both offsets are exercised below.
+    std::vector<float> logits(V);
+    for (int i = 0; i < V; i++)
+        logits[i] = std::log(probs[i]) + logit_offset;
+
+    // Oracle: the nucleus is the shortest descending prefix whose cumulative
+    // probability reaches kTopP. The token that crosses the threshold is IN,
+    // matching the `cumsum >= top_p` cutoff in both kernels.
+    std::vector<int> order(V);
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return probs[a] > probs[b]; });
+
+    std::vector<char> in_nucleus(V, 0);
+    int nucleus_size = 0;
+    float cum = 0.0f;
+    for (int i = 0; i < std::min(top_k, V); i++) {
+        in_nucleus[order[i]] = 1;
+        nucleus_size++;
+        cum += probs[order[i]];
+        if (cum >= kTopP)
+            break;
+    }
+    ASSERT_LT(nucleus_size, top_k) << path_name
+                                   << ": fixture is degenerate — the nucleus is the whole "
+                                      "candidate list, so top_p cannot be observed";
+
+    Tensor d_logits = make_logits(logits.data(), V);
+
+    std::map<int32_t, int> drawn;
+    for (unsigned int seed = 0; seed < kSeeds; seed++) {
+        int32_t tok = sample_topk_topp(d_logits, top_k, kTopP, /*temperature=*/1.0f, seed);
+        drawn[tok]++;
+        EXPECT_TRUE(tok >= 0 && tok < V && in_nucleus[tok])
+            << path_name << ": sampled token " << tok << " lies outside the top_p=" << kTopP
+            << " nucleus (seed " << seed << ")";
+    }
+    if (drawn.size() == 1) {
+        const int32_t only = drawn.begin()->first;
+        ADD_FAILURE() << path_name << ": all " << kSeeds << " seeds drew token " << only
+                      << (only == kHead[0]  ? " (the argmax — the sampler is ignoring the "
+                                              "distribution and behaving greedily)"
+                          : only == 0       ? " (token 0 — the sampler's error sentinel)"
+                                            : " (a single fixed token)");
+    }
+
+    // Control: without truncation the same seeds must land outside the nucleus.
+    int outside = 0;
+    for (unsigned int seed = 0; seed < kSeeds; seed++) {
+        int32_t tok = sample_topk_topp(d_logits, top_k, /*top_p=*/1.0f, /*temperature=*/1.0f, seed);
+        if (tok >= 0 && tok < V && !in_nucleus[tok])
+            outside++;
+    }
+    EXPECT_GT(outside, 0) << path_name
+                          << ": the tail is unreachable even at top_p=1.0 — this fixture cannot "
+                             "tell a working nucleus filter from a missing one";
+
+    free_gpu_tensor(d_logits);
+}
+
+TEST(SamplingTest, TopPTruncatesMultiblockPath) {
+    run_top_p_truncation_case(/*top_k=*/50, "multiblock, all-negative logits");
+}
+
+TEST(SamplingTest, TopPTruncatesMultiblockPathShifted) {
+    run_top_p_truncation_case(/*top_k=*/50, "multiblock, shifted logits", /*logit_offset=*/5.0f);
+}
+
+TEST(SamplingTest, TopPTruncatesCubPath) {
+    // top_k > SAMPLE_MAX_TOP_K (128) routes to sample_topk_topp_cub().
+    run_top_p_truncation_case(/*top_k=*/200, "CUB, all-negative logits");
+}
+
+TEST(SamplingTest, TopPTruncatesCubPathShifted) {
+    // Same distribution, every logit shifted by +5 so the maximum is positive.
+    // Softmax is shift-invariant: this must behave identically to the case
+    // above. If only one of the two passes, the sampler's max reduction is
+    // sign-dependent.
+    run_top_p_truncation_case(/*top_k=*/200, "CUB, shifted logits", /*logit_offset=*/5.0f);
+}
+
 TEST(SamplingTest, SamplingDistribution) {
     // Verify sampling roughly follows the probability distribution
     // Token 0: logit 2.0, Token 1: logit 1.0, Token 2: logit 0.0

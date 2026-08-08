@@ -531,6 +531,30 @@ TEST(KVCacheManagerTest, BlockHashChaining) {
     EXPECT_NE(h_parent0, h_parent1);
 }
 
+// 21b. BlockHashDiscriminatesEveryTokenPosition
+//
+// BlockHashDeterministic above proves "different tokens → different hash" by
+// changing tokens[0]. A hash that folds in every token EXCEPT the last passes
+// it unchanged — and a prefix cache that collides on a block differing only in
+// its final token hands one sequence's KV to another (the #1044/#1045 class).
+// This walks every position, so no partial window survives.
+TEST(KVCacheManagerTest, BlockHashDiscriminatesEveryTokenPosition) {
+    std::vector<int32_t> base(16);
+    std::iota(base.begin(), base.end(), 1);
+    const size_t h_base = KVCacheManager::compute_block_hash(base, 0);
+
+    std::unordered_set<size_t> seen{h_base};
+    for (size_t i = 0; i < base.size(); ++i) {
+        std::vector<int32_t> t = base;
+        t[i] += 1000;
+        const size_t h = KVCacheManager::compute_block_hash(t, 0);
+        EXPECT_NE(h, h_base) << "changing token " << i << " of " << base.size()
+                             << " left the block hash unchanged";
+        EXPECT_TRUE(seen.insert(h).second)
+            << "token " << i << " hashes to the same value as an earlier single-token change";
+    }
+}
+
 // 22. ContentAddressedPrefixCaching
 TEST(KVCacheManagerTest, ContentAddressedPrefixCaching) {
     SKIP_IF_NO_CUDA();

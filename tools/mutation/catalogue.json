@@ -1,0 +1,320 @@
+{
+  "_comment": [
+    "Mutant catalogue for the imp test-hardening audit.",
+    "Each entry injects ONE semantically meaningful fault drawn from a real bug",
+    "class in LLM-inference engines \u2014 not arithmetic noise. `find` must match",
+    "exactly once in `file`; run.py refuses the mutant otherwise, so a source",
+    "edit that de-uniquifies an anchor fails loudly instead of mutating the",
+    "wrong site. `focus` names the test binary most likely to catch it (run",
+    "first, purely a speed optimisation \u2014 survival is only declared after the",
+    "full suite has run)."
+  ],
+  "mutants": [
+    {
+      "id": "M01",
+      "category": "masking",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Causal mask off by one: a query may attend to the key one position in its future.",
+      "focus": "test-attention",
+      "find": "            if (causal && gq < gk)\n                val = -FLT_MAX;",
+      "replace": "            if (causal && gq < gk - 1)\n                val = -FLT_MAX;"
+    },
+    {
+      "id": "M02",
+      "category": "masking",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Sliding-window boundary flipped from exclusive to inclusive (one extra token in window).",
+      "focus": "test-attention",
+      "find": "            if (sliding_window > 0 && (gq - gk) >= sliding_window)",
+      "replace": "            if (sliding_window > 0 && (gq - gk) > sliding_window)"
+    },
+    {
+      "id": "M03",
+      "category": "masking",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Out-of-range score tile entries are left unmasked instead of set to -inf (padding leakage).",
+      "focus": "test-attention",
+      "find": "        } else {\n            S_tile[i] = -FLT_MAX;\n        }",
+      "replace": "        } else {\n            S_tile[i] = 0.0f;\n        }"
+    },
+    {
+      "id": "M04",
+      "category": "scaling",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Drop the 1/sqrt(d) attention scale in the WMMA prefill score path.",
+      "focus": "test-attention",
+      "find": "            float val = S_tile[i] * scale;",
+      "replace": "            float val = S_tile[i];"
+    },
+    {
+      "id": "M05",
+      "category": "scaling",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Apply the attention scale twice in the WMMA prefill score path.",
+      "focus": "test-attention",
+      "find": "            float val = S_tile[i] * scale;\n            if (softcap > 0.0f)",
+      "replace": "            float val = S_tile[i] * scale * scale;\n            if (softcap > 0.0f)"
+    },
+    {
+      "id": "M06",
+      "category": "indexing",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Causal KV-tile bound drops the last tile: queries never see the newest keys.",
+      "focus": "test-attention",
+      "find": "        int furthest_kv_tile = (max_q_global + Bc) / Bc;",
+      "replace": "        int furthest_kv_tile = max_q_global / Bc;"
+    },
+    {
+      "id": "M07",
+      "category": "indexing",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Sliding-window first-tile bound rounds the wrong way, skipping one KV tile.",
+      "focus": "test-attention",
+      "find": "        int earliest_kv = q_offset + q_start - sliding_window + 1;",
+      "replace": "        int earliest_kv = q_offset + q_start - sliding_window + 1 + Bc;"
+    },
+    {
+      "id": "M08",
+      "category": "masking",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "StreamingLLM window start off by one block: the oldest window token is dropped.",
+      "focus": "test-attention",
+      "find": "        r.window_start_block = window_start / block_size;",
+      "replace": "        r.window_start_block = window_start / block_size + 1;"
+    },
+    {
+      "id": "M09",
+      "category": "masking",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Sink region clamp uses <= so one non-sink token leaks into the sink range.",
+      "focus": "test-attention",
+      "find": "            int rel_end = r.sink_end - tok_start;\n            if (rel_end < last_tok)",
+      "replace": "            int rel_end = r.sink_end - tok_start + 1;\n            if (rel_end < last_tok)"
+    },
+    {
+      "id": "M10",
+      "category": "indexing",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "block_token_range clamps to ctx_len+1: decode reads one uninitialised KV slot past the context.",
+      "focus": "test-attention",
+      "find": "    int tok_start = blk * block_size;\n    int tok_end = tok_start + block_size;\n    if (tok_end > ctx_len)\n        tok_end = ctx_len;",
+      "replace": "    int tok_start = blk * block_size;\n    int tok_end = tok_start + block_size;\n    if (tok_end > ctx_len + 1)\n        tok_end = ctx_len + 1;"
+    },
+    {
+      "id": "M11",
+      "category": "scaling",
+      "file": "src/compute/attention_paged.cu",
+      "desc": "GQA paged decode: drop the QK scale before softmax.",
+      "focus": "test-attention",
+      "find": "                dot = warp_reduce_sum(dot);\n                dot *= scale;\n                dot = apply_softcap(dot, softcap);",
+      "replace": "                dot = warp_reduce_sum(dot);\n                dot = apply_softcap(dot, softcap);"
+    },
+    {
+      "id": "M12",
+      "category": "indexing",
+      "file": "src/compute/attention_paged.cu",
+      "desc": "Paged decode reads the block table of the next sequence in the batch (page-table off-by-one).",
+      "focus": "test-attention",
+      "find": "    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;\n    const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;\n    const int kv_slot_stride = n_kv_heads * HEAD_DIM;\n\n    float m_w = -FLT_MAX;",
+      "replace": "    const int* bt = block_tables + (int64_t)(batch_idx + 1) * max_num_blocks;\n    const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;\n    const int kv_slot_stride = n_kv_heads * HEAD_DIM;\n\n    float m_w = -FLT_MAX;"
+    },
+    {
+      "id": "M13",
+      "category": "indexing",
+      "file": "src/compute/attention_paged.cu",
+      "desc": "GQA paged decode: KV block stride computed without the head dimension (wrong stride).",
+      "focus": "test-attention",
+      "find": "    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;\n    const int kv_block_stride = block_size * n_kv_heads * head_dim;",
+      "replace": "    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;\n    const int kv_block_stride = block_size * n_kv_heads;"
+    },
+    {
+      "id": "M14",
+      "category": "memory",
+      "file": "src/compute/attention_paged.cu",
+      "desc": "Drop the __syncthreads() guarding shared-memory reuse between pipelined KV loads.",
+      "focus": "test-attention",
+      "find": "    __syncthreads();  // guard smem reuse from pipelined loads",
+      "replace": "    // __syncthreads();  // guard smem reuse from pipelined loads [MUTANT: removed]"
+    },
+    {
+      "id": "M15",
+      "category": "memory",
+      "file": "src/compute/attention_paged.cu",
+      "desc": "Drop the __syncthreads() between the next-block load and the current-block compute.",
+      "focus": "test-attention",
+      "find": "        __syncthreads();  // Wait for both next-block load and current compute",
+      "replace": "        // __syncthreads();  [MUTANT: removed] next-block load / current compute"
+    },
+    {
+      "id": "M16",
+      "category": "rope",
+      "file": "src/compute/rope.cu",
+      "desc": "RoPE base frequency uses 2*theta: every rotary angle is wrong.",
+      "focus": "test-compute",
+      "find": "        float freq = 1.0f / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));",
+      "replace": "        float freq = 1.0f / powf(theta * 2.0f, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));"
+    },
+    {
+      "id": "M17",
+      "category": "rope",
+      "file": "src/compute/rope.cu",
+      "desc": "NeoX rotary pairs the wrong half of the head dim (pair_idx + rope_pairs/2).",
+      "focus": "test-compute",
+      "find": "    const int idx1 = neox ? (pair_idx + rope_pairs) : (2 * pair_idx + 1);",
+      "replace": "    const int idx1 = neox ? (pair_idx + rope_pairs / 2) : (2 * pair_idx + 1);"
+    },
+    {
+      "id": "M18",
+      "category": "rope",
+      "file": "src/compute/rope.cu",
+      "desc": "Rotation applied to Q but not K (K is stored unrotated).",
+      "focus": "test-compute",
+      "find": "        float k0 = Traits::load(K, base + idx0);\n        float k1 = Traits::load(K, base + idx1);\n        Traits::store(K, base + idx0, k0 * cos_val - k1 * sin_val);\n        Traits::store(K, base + idx1, k0 * sin_val + k1 * cos_val);",
+      "replace": "        float k0 = Traits::load(K, base + idx0);\n        float k1 = Traits::load(K, base + idx1);\n        Traits::store(K, base + idx0, k0);\n        Traits::store(K, base + idx1, k1);"
+    },
+    {
+      "id": "M19",
+      "category": "rope",
+      "file": "src/compute/rope.cu",
+      "desc": "Position offset off by one for every token (cached tokens rotate to the wrong slot).",
+      "focus": "test-compute",
+      "find": "    if (!m.positions)\n        return fallback + (m.pos_delta ? m.pos_delta[token_idx] : 0);",
+      "replace": "    if (!m.positions)\n        return fallback + 1 + (m.pos_delta ? m.pos_delta[token_idx] : 0);"
+    },
+    {
+      "id": "M20",
+      "category": "sampling",
+      "file": "src/compute/sampling_topk_topp.cu",
+      "desc": "Multiblock sampler ignores top_p entirely (nucleus filter never truncates).",
+      "focus": "test-compute",
+      "find": "    float cumsum = 0.0f;\n    int cutoff = top_k;\n    for (int i = 0; i < top_k; ++i) {\n        cumsum += s_val[i];\n        if (cumsum >= top_p) {",
+      "replace": "    float cumsum = 0.0f;\n    int cutoff = top_k;\n    for (int i = 0; i < top_k; ++i) {\n        cumsum += s_val[i];\n        if (false && cumsum >= top_p) {"
+    },
+    {
+      "id": "M21",
+      "category": "sampling",
+      "file": "src/compute/sampling_topk_topp.cu",
+      "desc": "CUB sampler path ignores top_p (nucleus filter never truncates).",
+      "focus": "test-compute",
+      "find": "    float cumsum = 0.0f;\n    int cutoff = top_k;\n    for (int i = 0; i < top_k; i++) {\n        cumsum += sorted_probs[i];\n        if (cumsum >= top_p) {",
+      "replace": "    float cumsum = 0.0f;\n    int cutoff = top_k;\n    for (int i = 0; i < top_k; i++) {\n        cumsum += sorted_probs[i];\n        if (false && cumsum >= top_p) {"
+    },
+    {
+      "id": "M22",
+      "category": "sampling",
+      "file": "src/exec/executor.cu",
+      "desc": "temperature<=0 no longer routes to greedy in the batched decode path (deterministic request becomes stochastic).",
+      "focus": "test-e2e",
+      "find": "        const bool greedy = (state.temperature <= 0.0f || state.top_k == 1);",
+      "replace": "        const bool greedy = (state.top_k == 1);"
+    },
+    {
+      "id": "M23",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "Prefix-cache block hash skips the last token, so a prefix differing only in its final token hits the cache.",
+      "focus": "test-kv",
+      "find": "    size_t hash = parent_hash ^ 0xcbf29ce484222325ULL;",
+      "replace": "    size_t hash = parent_hash ^ 0xcbf29ce484222325ULL;\n    // [MUTANT] ignore the final token of the block\n    if (!tokens.empty())\n        tokens = tokens.first(tokens.size() - 1);"
+    },
+    {
+      "id": "M24",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "Block hash no longer chains the parent, so identical blocks match across different prefixes.",
+      "focus": "test-kv",
+      "find": "    size_t hash = parent_hash ^ 0xcbf29ce484222325ULL;\n",
+      "replace": "    size_t hash = 0xcbf29ce484222325ULL;\n"
+    },
+    {
+      "id": "M25",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "Stale block->hash entries are never dropped, so a reused block keeps serving its old content.",
+      "focus": "test-kv",
+      "find": "void KVCacheManager::drop_stale_hash_if_last(int block_id) {",
+      "replace": "void KVCacheManager::drop_stale_hash_if_last(int block_id) {\n    return;  // [MUTANT] never drop the stale hash"
+    },
+    {
+      "id": "M26",
+      "category": "quantization",
+      "file": "src/quant/dequant_gpu.cu",
+      "desc": "Q4_K nibble order swapped (high/low nibble selection inverted).",
+      "focus": "test-quant",
+      "find": "    int use_high = (i / 32) & 1;\n    uint8_t packed = qs[qs_byte];\n    int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);\n\n    float val = d * static_cast<float>(sc_val) * static_cast<float>(q4)",
+      "replace": "    int use_high = (i / 32) & 1;\n    uint8_t packed = qs[qs_byte];\n    int q4 = use_high ? (packed & 0xF) : ((packed >> 4) & 0xF);\n\n    float val = d * static_cast<float>(sc_val) * static_cast<float>(q4)"
+    },
+    {
+      "id": "M27",
+      "category": "quantization",
+      "file": "src/quant/dequant_gpu.cu",
+      "desc": "Q4_K dequant drops the block minimum (zero-point), leaving only the scale term.",
+      "focus": "test-quant",
+      "find": "    float val = d * static_cast<float>(sc_val) * static_cast<float>(q4) - dmin * static_cast<float>(min_val);",
+      "replace": "    float val = d * static_cast<float>(sc_val) * static_cast<float>(q4);"
+    },
+    {
+      "id": "M28",
+      "category": "quantization",
+      "file": "src/quant/dequant_gpu.cu",
+      "desc": "Q5_K dequant swaps the scale and the zero-point terms.",
+      "focus": "test-quant",
+      "find": "    float val = d * static_cast<float>(sc_val) * static_cast<float>(q5) - dmin * static_cast<float>(min_val);",
+      "replace": "    float val = dmin * static_cast<float>(sc_val) * static_cast<float>(q5) - d * static_cast<float>(min_val);"
+    },
+    {
+      "id": "M29",
+      "category": "controlflow",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Split-K is never used (fast path disabled): correctness unchanged, decode throughput drops.",
+      "focus": "test-attention",
+      "find": "    if (num_ctx_blocks >= 4 && total_blocks_nosplit < 2 * num_sms_cached && scratch_ptr != nullptr) {",
+      "replace": "    if (false && num_ctx_blocks >= 4 && total_blocks_nosplit < 2 * num_sms_cached && scratch_ptr != nullptr) {"
+    },
+    {
+      "id": "M30",
+      "category": "controlflow",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Split-K scratch-size guard removed: split-K runs even when the partial buffer is too small.",
+      "focus": "test-attention",
+      "find": "        size_t needed = (size_t)batch_size * n_heads * num_splits * partial_stride * sizeof(float);\n        if (needed > scratch_size) {\n            num_splits = 1;\n        }",
+      "replace": "        size_t needed = (size_t)batch_size * n_heads * num_splits * partial_stride * sizeof(float);\n        (void)needed;  // [MUTANT] scratch-capacity guard removed"
+    },
+    {
+      "id": "M31",
+      "category": "masking",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Attention sink logit is dropped from the softmax denominator (gpt-oss sinks disabled).",
+      "focus": "test-attention",
+      "find": "        if (attn_sinks)\n            global_l += expf(__half2float(attn_sinks[head_idx]) - global_max);",
+      "replace": "        // [MUTANT] sink term dropped from the denominator"
+    },
+    {
+      "id": "M32",
+      "category": "scaling",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Split-K partial merge drops the per-split rescale weight (wrong cross-split softmax).",
+      "focus": "test-attention",
+      "find": "            for (int w = 0; w < NUM_WARPS; w++) {\n                float weight = expf(warp_max[w] - global_max) * warp_l[w];\n                o_val += weight * warp_o[w * HEAD_DIM + d];\n            }\n            out[2 + d] = o_val;",
+      "replace": "            for (int w = 0; w < NUM_WARPS; w++) {\n                o_val += warp_o[w * HEAD_DIM + d];\n            }\n            out[2 + d] = o_val;"
+    },
+    {
+      "id": "M33",
+      "category": "numerics",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Online softmax skips the running-max rescale, so long contexts overflow instead of staying stable.",
+      "focus": "test-attention",
+      "find": "    float m_new = fmaxf(m_w, dot);\n    float exp_diff = expf(m_w - m_new);",
+      "replace": "    float m_new = m_w;\n    float exp_diff = expf(m_w - m_new);"
+    },
+    {
+      "id": "M34",
+      "category": "numerics",
+      "file": "src/compute/attention_paged_common.cuh",
+      "desc": "Softcap applied without the tanh (linear clamp instead of the model's saturating cap).",
+      "focus": "test-attention",
+      "find": "    return (softcap > 0.0f) ? (softcap * tanhf(dot / softcap)) : dot;",
+      "replace": "    return (softcap > 0.0f) ? dot : dot;"
+    }
+  ]
+}
