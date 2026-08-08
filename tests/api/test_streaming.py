@@ -55,6 +55,50 @@ def test_streaming_content_matches_nonstream(client, model):
     assert content == expected
 
 
+def test_stream_nonstream_agree_across_truncation_points(client, model):
+    """Transport must not change content, at any truncation point.
+
+    test_streaming_content_matches_nonstream above asserts the same invariant
+    but pins max_tokens=16 on "What is 1+1?", which never truncates inside a
+    multi-byte character. Against the mock it cannot: mock_server.py has no
+    tokenizer and emits whole ASCII words, so the assertion passes without
+    exercising the code that fails.
+
+    Sweeping max_tokens walks the truncation point across the generation. When
+    it lands mid-character the non-streaming path emits U+FFFD while the
+    streaming path holds the incomplete bytes back (#1310), so the two
+    transports return different bytes for one request.
+    """
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Hi"}],
+        "temperature": 0,
+        "seed": 123,
+    }
+    for max_tokens in range(1, 9):
+        body = {**payload, "max_tokens": max_tokens}
+
+        r1 = client.post("/v1/chat/completions", json=body)
+        assert r1.status_code == 200
+        nonstream = r1.json()["choices"][0]["message"]["content"]
+
+        r2 = client.post("/v1/chat/completions", json={**body, "stream": True})
+        assert r2.status_code == 200
+        stream = ""
+        for ev in parse_sse(r2.text):
+            stream += (ev["choices"][0].get("delta") or {}).get("content") or ""
+
+        assert stream == nonstream, (
+            f"max_tokens={max_tokens}: transports disagree\n"
+            f"  non-stream: {nonstream!r} ({nonstream.encode('utf-8').hex()})\n"
+            f"  stream:     {stream!r} ({stream.encode('utf-8').hex()})"
+        )
+        assert "\ufffd" not in nonstream, (
+            f"max_tokens={max_tokens}: non-streaming content carries U+FFFD, "
+            f"a character no generated token produced: {nonstream!r}"
+        )
+
+
 def test_streaming_include_usage(client, model):
     r = client.post("/v1/chat/completions", json={
         "model": model,
