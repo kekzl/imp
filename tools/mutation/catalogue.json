@@ -423,6 +423,51 @@
       "focus": "test-core",
       "find": "        if (alignment == 0)\n            alignment = GGUF_DEFAULT_ALIGNMENT;",
       "replace": "        // [MUTANT] zero alignment accepted"
+    },
+    {
+      "id": "M47",
+      "category": "api",
+      "file": "tools/imp-server/utils.cpp",
+      "desc": "Utf8Stitch releases an incomplete trailing sequence instead of carrying it to the next piece.",
+      "focus": "test-core",
+      "find": "    if (complete < buf.size() && buf.size() - complete <= 3) {\n        carry_.assign(buf, complete, buf.size() - complete);\n        buf.resize(complete);\n    }",
+      "replace": "    // [MUTANT] incomplete tail released immediately\n    (void)complete;"
+    },
+    {
+      "id": "M48",
+      "category": "api",
+      "file": "tools/imp-server/utils.cpp",
+      "desc": "Utf8Stitch carry bound widened, so genuinely invalid input is held back forever and the stream stalls.",
+      "focus": "test-core",
+      "find": "    if (complete < buf.size() && buf.size() - complete <= 3) {",
+      "replace": "    if (complete < buf.size()) {  // [MUTANT] no 3-byte bound"
+    },
+    {
+      "id": "M49",
+      "category": "api",
+      "file": "tools/imp-server/anthropic.cpp",
+      "desc": "Anthropic usage no longer subtracts prefix-cache hits, so input_tokens double-counts cached tokens.",
+      "focus": "test-core",
+      "find": "        usage_out[\"input_tokens\"] = prompt_tokens - cached;",
+      "replace": "        usage_out[\"input_tokens\"] = prompt_tokens;  // [MUTANT] cached not subtracted"
+    },
+    {
+      "id": "M50",
+      "category": "api",
+      "file": "tools/imp-server/anthropic.cpp",
+      "desc": "finish_reason=length maps to end_turn, so a truncated Anthropic response claims it finished normally.",
+      "focus": "test-core",
+      "find": "    else if (finish == \"length\")\n        stop_reason = \"max_tokens\";",
+      "replace": "    else if (finish == \"length\")\n        stop_reason = \"end_turn\";  // [MUTANT] truncation reported as a clean stop"
+    },
+    {
+      "id": "M51",
+      "category": "api",
+      "file": "tools/imp-server/anthropic.cpp",
+      "desc": "The cached>prompt clamp is dropped, so a bad cache count yields a negative input_tokens.",
+      "focus": "test-core",
+      "find": "        if (cached > prompt_tokens)\n            cached = prompt_tokens;",
+      "replace": "        // [MUTANT] clamp removed"
     }
   ]
 }
