@@ -112,6 +112,20 @@ def run_binary(name, timeout=1800, extra_args=None):
     return rc, out
 
 
+def crashed(rc, output):
+    """True when the binary died instead of reporting failures.
+
+    A SIGFPE/SIGSEGV leaves no `[  FAILED  ]` line, so a kill-by-crash reads as
+    "no failures" and the mutant is scored SURVIVED. That happened once (M46,
+    rc=136 = SIGFPE from `pos_ % 0` after removing the zero-alignment guard) and
+    is exactly the shape of a harness that flatters the suite. A run that neither
+    exits 0 nor names a failing test did not pass.
+    """
+    if rc in (0, 124):
+        return False
+    return not failing_tests(output)
+
+
 def failing_tests(output):
     """gtest names reported as FAILED, in order."""
     names = []
@@ -192,9 +206,12 @@ def run_one(m, log_dir, full_timeout):
             tag = b + ('-ci' if extra else '')
             (log_dir / f"{m['id']}-{tag}.log").write_text(out[-200000:])
             fails = failing_tests(out)
-            res['lanes'].append({'binary': tag, 'rc': rc, 'failed': fails, 'ci': True})
-            if fails and res['ci_killed_by'] is None:
-                res['ci_killed_by'] = f"{tag}: " + ', '.join(fails[:5])
+            crash = crashed(rc, out)
+            res['lanes'].append({'binary': tag, 'rc': rc, 'failed': fails,
+                                 'crashed': crash, 'ci': True})
+            if (fails or crash) and res['ci_killed_by'] is None:
+                res['ci_killed_by'] = (f"{tag}: " + ', '.join(fails[:5])) if fails \
+                    else f"{tag}: crashed (rc={rc})"
 
         if res['ci_killed_by']:
             res['status'] = 'KILLED'
@@ -211,13 +228,15 @@ def run_one(m, log_dir, full_timeout):
             rc, out = run_binary(b, timeout=full_timeout)
             (log_dir / f"{m['id']}-{b}.log").write_text(out[-200000:])
             fails = failing_tests(out)
-            res['lanes'].append({'binary': b, 'rc': rc, 'failed': fails})
+            crash = crashed(rc, out)
+            res['lanes'].append({'binary': b, 'rc': rc, 'failed': fails, 'crashed': crash})
             if rc == 124:
                 res['status'] = 'TIMEOUT'
                 return res
-            if fails:
+            if fails or crash:
                 res['status'] = 'KILLED'
-                res['killed_by'] = f"{b}: " + ', '.join(fails[:5])
+                res['killed_by'] = (f"{b}: " + ', '.join(fails[:5])) if fails \
+                    else f"{b}: crashed (rc={rc})"
                 return res
         res['status'] = 'SURVIVED'
         return res
@@ -278,7 +297,8 @@ def main():
         rc, out = run_binary(b, timeout=args.timeout, extra_args=extra)
         tag = b + ('-ci' if extra else '')
         (log_dir / f'baseline-{tag}.log').write_text(out[-200000:])
-        baseline[tag] = {'rc': rc, 'failed': failing_tests(out)}
+        baseline[tag] = {'rc': rc, 'failed': failing_tests(out),
+                         'crashed': crashed(rc, out)}
         print(f'  baseline {tag}: rc={rc} failed={baseline[tag]["failed"]}', flush=True)
     (REPO / 'loop' / 'evidence' / 'mutation-baseline.json').write_text(
         json.dumps(baseline, indent=1))
@@ -293,6 +313,8 @@ def main():
         # Discount tests that were already red on the clean tree.
         if r['status'] == 'KILLED':
             for lane in r['lanes']:
+                if lane.get('crashed'):
+                    continue  # a crash is never "pre-existing" — the baseline ran clean
                 pre = set(baseline.get(lane['binary'], {}).get('failed', []))
                 new = [f for f in lane['failed'] if f not in pre]
                 if lane['failed'] and not new:
