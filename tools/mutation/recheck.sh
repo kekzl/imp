@@ -12,12 +12,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 MID=$1 BIN=$2 FILTER=$3 REPEATS=${4:-1}
+MODELS=${IMP_MODELS_DIR:-$HOME/models}
 CAT=tools/mutation/catalogue.json
 OUT=loop/evidence/recheck
 mkdir -p "$OUT"
 
 run() {
-  docker run --rm --gpus all -v "$PWD":/src -v /home/kekz/models:/models \
+  docker run --rm --gpus all -v "$PWD":/src -v "$MODELS":/models \
     -w /src/build-dev \
     -e IMP_TEST_MODEL=/models/Qwen3-8B-Q8_0.gguf \
     -e IMP_TEST_MOE_MODEL=/models/gpt-oss-20b-mxfp4.gguf \
@@ -28,12 +29,13 @@ run() {
 build() { docker run --rm -v "$PWD":/src -w /src imp:toolchain ninja -C /src/build-dev 2>&1; }
 
 python3 - "$MID" <<'PY'
-import json, sys, pathlib
+import json, os, sys, pathlib
 mid = sys.argv[1]
 m = [x for x in json.load(open('tools/mutation/catalogue.json'))['mutants'] if x['id'] == mid][0]
 p = pathlib.Path(m['file']); t = p.read_text()
 assert t.count(m['find']) == 1, f'{mid}: anchor not unique'
-pathlib.Path('/tmp/imp_recheck_orig').write_text(t)
+orig = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / 'imp_recheck_orig'
+orig.write_text(t)
 p.write_text(t.replace(m['find'], m['replace'], 1))
 print(f'{mid} applied to {m["file"]}')
 PY
@@ -48,10 +50,11 @@ done
 cp "$OUT/$MID-mutant-r1.log" "$OUT/$MID-mutant.log"
 
 python3 - "$MID" <<'PY'
-import json, sys, pathlib
+import json, os, sys, pathlib
 mid = sys.argv[1]
 m = [x for x in json.load(open('tools/mutation/catalogue.json'))['mutants'] if x['id'] == mid][0]
-pathlib.Path(m['file']).write_text(pathlib.Path('/tmp/imp_recheck_orig').read_text())
+orig = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / 'imp_recheck_orig'
+pathlib.Path(m['file']).write_text(orig.read_text())
 print(f'{mid} reverted')
 PY
 build > "$OUT/$MID-rebuild.log" 2>&1
