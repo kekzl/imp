@@ -4,8 +4,9 @@ Date: 2026-08-08 · Commit `ad067d76` (v0.23.0, `main`) · RTX 5090 / WSL2 / CUD
 Harness: `tools/mutation/run.py` · Catalogue: `tools/mutation/catalogue.json` ·
 Patches: `loop/mutants/M*.patch` · Raw results: `loop/evidence/mutation-results.json`
 
-34 mutants across 10 categories, each a semantically meaningful fault from a
-real bug class in LLM inference — not arithmetic noise. Every mutant: inject →
+42 mutants across 10 categories (34 in iteration 1, eight paging/KV additions
+in iteration 3), each a semantically meaningful fault from a real bug class in
+LLM inference — not arithmetic noise. Every mutant: inject →
 incremental rebuild → run the suite → revert → verify `git status --porcelain`
 is empty. The tree was clean after all 34.
 
@@ -17,6 +18,7 @@ is empty. The tree was clean after all 34.
 |---|---:|
 | **Baseline mutation score, full local suite** | **25 / 33 = 75.8 %** |
 | **After the iteration-2 tests** | **28 / 33 = 84.8 %** |
+| **After iteration 3 (8 paging/KV mutants added)** | **36 / 41 = 87.8 %** |
 | **Mutation score, GitHub CI (`ctest -L unit`)** | **1 / 33 = 3.0 %** (baseline) |
 | Equivalent mutants (excluded from the denominator) | 1 — M25 |
 | Build failures (broken mutants) | 0 |
@@ -51,9 +53,17 @@ binary that only a human on a 5090 ever runs.
 | **sampling** | **0/3** | **0 %** | |
 | **controlflow** | **0/2** | **0 %** | |
 
-After iteration 2 (`docs/audit/TEST_HARDENING_LOG.md`): sampling 2/3 = 67 %
-(M20, M21 killed by the new `TopPTruncates*` tests), kvcache 2/2 = 100 %
-(M23 killed by `BlockHashDiscriminatesEveryTokenPosition`, which runs in CI).
+After iterations 2–3 (`docs/audit/TEST_HARDENING_LOG.md`): sampling 2/3 = 67 %
+(M20, M21 killed by the new `TopPTruncates*` tests), **kvcache 8/8 = 100 %**
+(M23 by `BlockHashDiscriminatesEveryTokenPosition`, which runs in CI; M35 by
+`ContentSaltSeparatesIdenticalTokenPrefixes`; M36–M42 by tests that already
+existed), masking 6/7, indexing 5/6.
+
+The eight iteration-3 mutants (M35–M42) targeted the KV manager, the prefix hash
+chain and StreamingLLM eviction. Seven were killed by tests that were already
+there — including both halves of the #963 boundary-block fix — which is the
+strongest single piece of evidence in this campaign that the KV subsystem's
+*tests* are good and its problem is only that CI cannot run them.
 
 Attention numerics, RoPE and dequantisation are genuinely well covered — the
 kills come from real oracle tests (a CPU reference, an FP16 reference, an fp64

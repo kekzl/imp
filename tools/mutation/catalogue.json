@@ -315,6 +315,78 @@
       "focus": "test-attention",
       "find": "    return (softcap > 0.0f) ? (softcap * tanhf(dot / softcap)) : dot;",
       "replace": "    return (softcap > 0.0f) ? dot : dot;"
+    },
+    {
+      "id": "M35",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "content_salt is ignored, so two prompts with identical token ids but different images share KV.",
+      "focus": "test-kv",
+      "find": "    auto& hashes = seq_block_hashes_[seq_id];\n    int reused_blocks = 0;\n    size_t parent_hash = content_salt;",
+      "replace": "    auto& hashes = seq_block_hashes_[seq_id];\n    int reused_blocks = 0;\n    size_t parent_hash = 0;  // [MUTANT] content_salt dropped"
+    },
+    {
+      "id": "M36",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "Prefix reuse is no longer forced to be contiguous: a hit after a miss is shared, leaving uncomputed KV in the skipped range.",
+      "focus": "test-kv",
+      "find": "            // No cache hit (or reuse closed) \u2014 allocate a fresh block.\n            reuse_open = false;",
+      "replace": "            // No cache hit (or reuse closed) \u2014 allocate a fresh block.\n            // [MUTANT] reuse stays open across a miss"
+    },
+    {
+      "id": "M37",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "Partial (non-full) trailing blocks are registered in the prefix hash table as if they were full.",
+      "focus": "test-kv",
+      "find": "        if (block_tokens < cache_->block_size())\n            break;  // Only full blocks are cacheable.",
+      "replace": "        if (block_tokens < 0)\n            break;  // [MUTANT] partial blocks registered too"
+    },
+    {
+      "id": "M38",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "The probe reports a cached prefix one block longer than the chain actually reaches.",
+      "focus": "test-kv",
+      "find": "        if (chain_intact && block_hash_to_id_.find(h) != block_hash_to_id_.end())\n            cached = b + 1;",
+      "replace": "        if (chain_intact && block_hash_to_id_.find(h) != block_hash_to_id_.end())\n            cached = b + 2;  // [MUTANT] off by one"
+    },
+    {
+      "id": "M39",
+      "category": "indexing",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "Block count rounds down, so a sequence whose length is not a block multiple loses its trailing partial block.",
+      "focus": "test-kv",
+      "find": "    int total_blocks = (num_tokens + cache_->block_size() - 1) / cache_->block_size();\n    auto& blocks = seq_blocks_[seq_id];",
+      "replace": "    int total_blocks = num_tokens / cache_->block_size();  // [MUTANT] rounds down\n    auto& blocks = seq_blocks_[seq_id];"
+    },
+    {
+      "id": "M40",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "Reclaiming a cached block no longer removes its prefix-hash entry, so the table points at a free block.",
+      "focus": "test-kv",
+      "find": "    auto hash_it = block_id_to_hash_.find(block_id);\n    if (hash_it != block_id_to_hash_.end()) {\n        block_hash_to_id_.erase(hash_it->second);\n        block_id_to_hash_.erase(hash_it);\n    }\n\n    // Dropping the cache's reference is what returns the block to the pool \u2014",
+      "replace": "    // [MUTANT] stale hash entry left behind on reclaim\n\n    // Dropping the cache's reference is what returns the block to the pool \u2014"
+    },
+    {
+      "id": "M41",
+      "category": "masking",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "StreamingLLM drops the extra boundary block (#963), so the kernels' floor-aligned window start reads a -1 sentinel.",
+      "focus": "test-kv",
+      "find": "    const int window_start_block = std::max(0, total_blocks - window_block_count - 1);",
+      "replace": "    const int window_start_block = std::max(0, total_blocks - window_block_count);  // [MUTANT] no boundary block"
+    },
+    {
+      "id": "M42",
+      "category": "kvcache",
+      "file": "src/memory/kv_cache_manager.cpp",
+      "desc": "StreamingLLM sink blocks are no longer pinned, so LRU reclaim can take them while the sequence is live.",
+      "focus": "test-kv",
+      "find": "    if (sink_end_block > already)\n        pin_prefix(seq_id, sink_end_block);",
+      "replace": "    (void)already;  // [MUTANT] sink blocks left unpinned"
     }
   ]
 }

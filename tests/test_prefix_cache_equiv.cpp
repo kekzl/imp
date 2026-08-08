@@ -40,6 +40,7 @@
 #include <memory>
 #include <cstdio>
 #include <numeric>
+#include <unordered_set>
 #include <vector>
 
 #include "test_cuda_skip.h"
@@ -431,6 +432,158 @@ TEST(PrefixEquivTest, RollbackOfPartialAllocationDropsItsHashes) {
         << "rolled-back prefix falsely re-hit a block that went back to the free pool "
            "— STALE-HASH BUG";
     mgr->free_sequence(2);
+}
+
+// ── (9d) content_salt separates prompts that share token ids ──────────────
+// A multimodal prompt's image is not in its token ids — every image token
+// carries the same placeholder id — so two requests with the same text and
+// DIFFERENT pictures produce byte-identical token sequences. `content_salt`
+// seeds the hash chain with the image content so the two chains diverge at
+// block 0; both production call sites pass `req->vision_content_hash`
+// (engine_scheduler.cpp:598, scheduler.cpp:88).
+//
+// Nothing exercised it: no test in the suite passed a non-zero salt, so the
+// parameter could be dropped entirely and the suite stayed green — the second
+// request would have inherited the first one's KV, i.e. answered about the
+// wrong picture.
+TEST(PrefixEquivTest, ContentSaltSeparatesIdenticalTokenPrefixes) {
+    SKIP_IF_NO_CUDA();
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+
+    constexpr size_t kImageA = 0xA11CE;
+    constexpr size_t kImageB = 0xB0B;
+    std::vector<int32_t> tokens(32);  // 2 full blocks, identical for both requests
+    std::iota(tokens.begin(), tokens.end(), 500);
+
+    // Request 1 carries image A. Cache it, then free so the blocks are cached.
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(0, tokens, /*max_reuse_blocks=*/-1, kImageA), 0);
+    mgr->register_block_hashes(0, tokens, kImageA);
+    mgr->free_sequence(0);
+    ASSERT_EQ(mgr->num_cached_blocks(), 2);
+
+    // Same tokens, different image: must NOT hit.
+    std::vector<size_t> chain_b;
+    EXPECT_EQ(mgr->longest_cached_prefix_blocks(tokens, chain_b, kImageB), 0)
+        << "probe matched a prefix cached under a different image";
+    const int reused_b = mgr->allocate_blocks_with_prefix(1, tokens, /*max_reuse_blocks=*/-1, kImageB);
+    ASSERT_GE(reused_b, 0);
+    EXPECT_EQ(reused_b, 0) << "a different image reused the first image's KV blocks";
+    mgr->free_sequence(1);
+
+    // Same tokens, same image: must hit, or the salt has broken caching outright.
+    std::vector<size_t> chain_a;
+    EXPECT_EQ(mgr->longest_cached_prefix_blocks(tokens, chain_a, kImageA), 2);
+    const int reused_a = mgr->allocate_blocks_with_prefix(2, tokens, /*max_reuse_blocks=*/-1, kImageA);
+    EXPECT_EQ(reused_a, 2) << "same image failed to reuse its own cached prefix";
+    mgr->free_sequence(2);
+
+    // And a text prompt (salt 0) is a third, distinct chain.
+    std::vector<size_t> chain_text;
+    EXPECT_EQ(mgr->longest_cached_prefix_blocks(tokens, chain_text, /*content_salt=*/0), 0);
+    EXPECT_NE(chain_a[0], chain_b[0]);
+    EXPECT_NE(chain_a[0], chain_text[0]);
+}
+
+// ── (9c) randomised invariants over the whole manager ─────────────────────
+// The cases above each pin one hand-built scenario. This one hammers the
+// manager with a seeded pseudo-random workload — overlapping prefixes, frees,
+// evictions, sequences sized around the block boundary — and asserts three
+// invariants that must hold in EVERY state:
+//
+//   (a) probe == reuse. longest_cached_prefix_blocks() is a read-only oracle
+//       the hybrid snapshot lookup uses to pick a restore boundary BEFORE
+//       allocating (engine_sampling_stop.cpp:337/405). It checks only the hash
+//       table; allocate_blocks_with_prefix() additionally rejects an entry
+//       whose block is ref-0-and-not-cached (:509). If those two ever disagree,
+//       the snapshot boundary is chosen for a prefix that is not actually
+//       reused.
+//   (b) no double ownership. A physical block may appear in two live
+//       sequences only when it was legitimately shared as a prefix; it must
+//       never appear twice within ONE sequence's table.
+//   (c) no leak. Free every sequence, drain the cache, and the pool must be
+//       whole again — the shape of #1115, where exactly one block per request
+//       never came back.
+//
+// Seeded and fixed-iteration, so a failure reproduces exactly.
+TEST(PrefixEquivTest, RandomisedWorkloadKeepsProbeAllocationAndPoolConsistent) {
+    SKIP_IF_NO_CUDA();
+    constexpr int kPool = 12;
+    constexpr int kBlock = 16;  // kKVBlockSize
+    auto mgr = MakeManager(kPool);
+    mgr->set_prefix_caching_enabled(true);
+
+    // Deterministic LCG — no <random> engine differences across toolchains.
+    uint32_t rng = 0xC0FFEEu;
+    auto next = [&rng](int n) {
+        rng = rng * 1664525u + 1013904223u;
+        return static_cast<int>((rng >> 16) % static_cast<uint32_t>(n));
+    };
+
+    // A handful of shared roots so prefixes actually collide, and lengths that
+    // sit on, just below and just above block boundaries.
+    const int kRoots[4] = {1000, 2000, 3000, 4000};
+    const int kLens[6] = {kBlock - 1, kBlock, kBlock + 1, 2 * kBlock, 3 * kBlock - 1, 3 * kBlock + 1};
+
+    std::vector<int> live;
+    int next_seq = 0;
+
+    for (int round = 0; round < 300; ++round) {
+        if (!live.empty() && next(100) < 35) {
+            const int idx = next(static_cast<int>(live.size()));
+            mgr->free_sequence(live[idx]);
+            live.erase(live.begin() + idx);
+            continue;
+        }
+        if (next(100) < 10) {
+            mgr->evict_cached_block();
+            continue;
+        }
+
+        const int root = kRoots[next(4)];
+        const int len = kLens[next(6)];
+        std::vector<int32_t> tokens(static_cast<size_t>(len));
+        std::iota(tokens.begin(), tokens.end(), root);
+
+        std::vector<size_t> chain;
+        const int probed = mgr->longest_cached_prefix_blocks(tokens, chain);
+        ASSERT_EQ(static_cast<int>(chain.size()), len / kBlock)
+            << "round " << round << ": probe must hash every FULL block";
+
+        const int seq = next_seq++;
+        const int reused = mgr->allocate_blocks_with_prefix(seq, tokens);
+        if (reused < 0)
+            continue;  // pool could not fit it; rollback is covered separately
+
+        // (a)
+        EXPECT_EQ(reused, probed)
+            << "round " << round << ": probe said " << probed << " cached blocks, allocation reused "
+            << reused << " — the snapshot restore boundary would be wrong";
+
+        // (b)
+        const std::vector<int>& table = mgr->block_table(seq);
+        EXPECT_EQ(static_cast<int>(table.size()), (len + kBlock - 1) / kBlock) << "round " << round;
+        std::unordered_set<int> seen_in_seq;
+        for (int id : table) {
+            ASSERT_GE(id, 0) << "round " << round;
+            ASSERT_LT(id, kPool) << "round " << round;
+            EXPECT_TRUE(seen_in_seq.insert(id).second)
+                << "round " << round << ": block " << id << " appears twice in one sequence";
+        }
+
+        mgr->register_block_hashes(seq, tokens);
+        live.push_back(seq);
+    }
+
+    // (c)
+    for (int seq : live)
+        mgr->free_sequence(seq);
+    live.clear();
+    while (mgr->evict_cached_block()) {
+    }
+    EXPECT_EQ(mgr->num_cached_blocks(), 0);
+    EXPECT_EQ(mgr->num_free_blocks(), kPool)
+        << "pool did not come back whole after every sequence was freed and the cache drained";
 }
 
 // ── (10) longest_cached_prefix_blocks probe ───────────────────────────────
