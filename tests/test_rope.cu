@@ -158,6 +158,72 @@ TEST(RoPETest, RopeBasicFP32) {
 // Test 2 -- RopeBasicFP16
 //   Same small shape but FP16.  Tolerance 1e-2.
 // =========================================================================
+// =========================================================================
+// RoPE across the long-context position range.
+//
+// Every other RoPE test in this file uses positions <= 40; this model family
+// trains to 131072, so the whole long-context regime was unverified. rope.cu
+// uses the fast intrinsics __cosf/__sinf, whose argument reduction NVIDIA
+// specifies as accurate only for |x| < 48039 — and at pair_idx 0 the frequency
+// is exactly 1.0, so the angle IS the position.
+//
+// Measured against the same CPU reference the other tests use (which computes
+// the angle identically in float and then calls the accurate cosf/sinf, so the
+// difference isolates the intrinsic, not the angle's representation):
+//
+//     pos      40   3e-6        pos    8000   8.5e-4
+//     pos     500   5.7e-5      pos   16000   1.6e-3
+//     pos    1000   9.3e-5      pos   32768   8.9e-4
+//     pos    2000   2.3e-4      pos  131071   1.0e-2
+//
+// The envelope grows with position (not monotonically point-to-point, since
+// the error depends on where the angle lands modulo 2*pi). Note what that
+// means for the tests above: RopeBasicFP32 holds itself to 1e-4 and would fail
+// from pos ~2000; RopePositionInvariance holds itself to 1e-5 and would fail
+// from pos ~300. Neither ever runs there.
+//
+// kTol below is the MEASURED ENVELOPE with headroom, not a specification. It
+// exists to catch this getting worse, and to put the range under test at all.
+// Whether 1e-2 at the context limit degrades output quality is not established
+// here — that needs a long-context perplexity measurement. See #1316.
+// =========================================================================
+TEST(RoPETest, LongContextPositionsMatchCpuReference) {
+    const int batch = 1, seq_len = 1, n_heads = 1, n_kv_heads = 1, head_dim = 8;
+    const float theta = 10000.0f, scaling = 1.0f;
+    constexpr float kTol = 2e-2f;
+    const std::vector<int> positions = {0, 40, 500, 1000, 2000, 4000, 8000, 16000, 32768, 131071};
+
+    for (int pos : positions) {
+        const int64_t n = (int64_t)batch * seq_len * n_heads * head_dim;
+        std::vector<float> q_host(n), k_host(n);
+        fill_linear(q_host);
+        fill_linear(k_host);
+        std::vector<float> q_ref(q_host), k_ref(k_host);
+        std::vector<int> pos_host = {pos};
+        cpu_rope(q_ref.data(), k_ref.data(), pos_host.data(), batch, seq_len, n_heads, n_kv_heads,
+                 head_dim, theta, scaling);
+
+        float* q_dev = to_device(q_host.data(), n);
+        float* k_dev = to_device(k_host.data(), n);
+        int* pos_dev = to_device(pos_host.data(), pos_host.size());
+        Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
+        Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
+        rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        auto q_out = to_host(q_dev, n);
+        auto k_out = to_host(k_dev, n);
+        for (int64_t i = 0; i < n; i++) {
+            EXPECT_NEAR(q_out[i], q_ref[i], kTol) << "Q mismatch at pos=" << pos << " index " << i;
+            EXPECT_NEAR(k_out[i], k_ref[i], kTol) << "K mismatch at pos=" << pos << " index " << i;
+        }
+
+        cudaFree(q_dev);
+        cudaFree(k_dev);
+        cudaFree(pos_dev);
+    }
+}
+
 TEST(RoPETest, RopeBasicFP16) {
     const int batch = 1;
     const int seq_len = 2;
