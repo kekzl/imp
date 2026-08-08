@@ -329,3 +329,111 @@ the gate and saying so explicitly.
 
 Remaining survivors overall: M10, M22 (indeterminate, blocked on #1299), M29,
 M30 (perf-only), M31 (#1303, needs an FP8-KV decode with sinks).
+
+---
+
+## Iteration 4 — 2026-08-08 — focus: `I1` API surface & streaming — commit: `ce64a1cb`
+
+**Mutation score: unchanged at 87.8 %** — no mutants were run. This iteration
+was a hunt, and it was pointed at the one surface where a finding is guaranteed
+novel: CI never executes `tools/imp-server/` (#1302), so nothing there has ever
+been under test.
+
+**Bugs found:** S1: 0 · S2: 0 · S3: 0 · S4: 0 · **S5→S1: 1 (#1310)**
+
+**Escape distribution (new):** E5: 1 — the test exists, asserts exactly the
+broken invariant, and runs against a reimplementation that cannot exhibit it.
+
+### Method: differential probe, real server vs the mock CI tests
+
+`tools/mutation/api_diff.py` sends one table of edge-case requests to both a
+real `imp-server` and `tests/api/mock_server.py`, and reports where they
+disagree. 46 cases, five status divergences:
+
+| case | real | mock | |
+|---|---:|---:|---|
+| `n=2` | 200 | 400 | mock rejects `n>1`; the server returns two choices |
+| unknown `model` | 404 | 200 | mock ignores the model field on chat completions |
+| `max_tokens: null` | 200 | crash | `TypeError: '<' not supported between 'int' and 'NoneType'` |
+| JSON array body | 400 | crash | `AttributeError: 'list' object has no attribute 'get'` |
+| JSON scalar body | 400 | crash | `TypeError: argument of type 'int' is not iterable` |
+
+Three are the mock 500-ing where the server answers correctly — the stand-in is
+*weaker* than the thing it stands for. The `n=2` row is the sharper one:
+`tests/api/test_errors.py` asserts a 400 with `"n" must be 1`, so CI encodes a
+constraint the shipping server does not have.
+
+Everything else matched case for case, which is worth stating: the server's
+parameter validation is not the problem.
+
+### #1310 — transport changes content
+
+Comparing *content* rather than status found what the mock structurally cannot.
+The model's third token opens `😊` (`f0 9f 98 8a`); with `max_tokens=3`:
+
+```
+non-streaming bytes: 48656c6c6f2120efbfbd    'Hello! <U+FFFD>'
+streaming     bytes: 48656c6c6f2120          'Hello! '
+```
+
+`Utf8Stitch::feed` (`tools/imp-server/utils.cpp:12`) holds an incomplete tail
+back and is wired into the streaming driver only. On the other path the dangling
+bytes reach `dump_safe` (`utils.cpp:6`), whose `json::error_handler_t::replace`
+substitutes U+FFFD. `stream_pipeline.h:91` already documents that mechanism in a
+comment — the guard was added for one path and not the other. `/v1/messages` is
+affected identically. Reproduced 2/2 (`loop/repro/BUG-3.sh`).
+
+**Tests added: 1, verified to fail against the fault: yes**
+
+`test_stream_nonstream_agree_across_truncation_points` sweeps `max_tokens` 1–8
+and asserts both that the transports agree and that non-streaming introduces no
+U+FFFD. It is the campaign's cleanest single artefact for #1302:
+
+```
+$ IMP_USE_MOCK=1 pytest test_streaming.py -q          # the CI lane
+5 passed in 0.05s
+$ IMP_TEST_URL=<real server> pytest -k truncation -q
+E   AssertionError: max_tokens=3: transports disagree
+```
+
+Green against the mock, red against the server, same test, same commit. It
+therefore does **not** turn CI red; it turns `make test-server` red, which is
+correct until #1310 is fixed.
+
+`tests/api/test_streaming.py:36` already asserted the same invariant and passed,
+for two independent reasons: the mock has no tokenizer and emits whole ASCII
+words, and it pins `max_tokens=16`, which does not truncate mid-character even
+against a real server.
+
+**Attacked and clean:** `max_tokens` at 0 / −1 / 10⁹ / null / missing / string;
+`temperature` and `top_p` bounds and type errors; `top_k` 0 and −1; missing,
+non-array and empty `messages`; empty, whitespace and null content; missing,
+unknown and out-of-order roles; system-only prompts; unknown fields; stop
+sequences empty, empty-list, ten-deep and matching text in the prompt; emoji,
+combining marks, RTL, escaped lone surrogate; a 200 000-character message;
+structured content blocks; malformed, empty, array and scalar request bodies.
+The server answered all of them the way the mock does or better.
+
+**Blocked on:** unchanged — #1299 still blocks M10 and M22.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No — one test added.
+2. **Did every mutant get reverted?** No mutants run this iteration.
+3. **Did I watch every new test fail before it passed?** Yes, against a real
+   server at `max_tokens=3`; and confirmed green against the mock, which is the
+   finding, not an accident.
+4. **Is every bug claim backed by a script I ran twice?** Yes —
+   `loop/repro/BUG-3.sh`, 2/2.
+5. **Did I fix any production code?** No.
+6. **Are all new tests wired into CI?** The new test runs in CI and passes
+   there — against the mock. Making it meaningful in CI is #1302, not something
+   a test can fix.
+
+### Next iteration
+
+`I5` (model ingestion & error paths) is untouched: truncated weight files, a
+missing tensor, wrong shapes, metadata that disagrees with the tensors — all of
+which must produce a clear diagnostic rather than a segfault.
+`tests/test_gguf_fault_injection.cpp` exists (18 cases) and is CPU-only, so
+mutants there would land in the lane that gates a merge.
