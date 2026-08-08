@@ -638,3 +638,90 @@ limitation of the environment, not a decision.
 at and beyond the trained context length, RoPE scaling at the extremes, and the
 sliding-window boundaries that `evict_middle_blocks` already showed are
 delicate.
+
+---
+
+## Iteration 7 — 2026-08-08 — focus: `I7` long context & window boundaries — commit: `2d1d0500`
+
+**Mutation score: unchanged at 88.9 %** — a hunt, no mutants.
+
+**Bugs found:** S1: 0 · S2: 0 · S3: 0 · **S4: 1 (#1316)** · S5: 0
+
+**Escape distribution (new):** E6: 1 — the RoPE tests use a proper CPU-reference
+oracle and are only ever run at positions where the fault is invisible.
+
+### #1316 — the whole long-context RoPE regime was unverified
+
+The hypothesis came from reading, not from a sweep: `rope.cu:101` uses the fast
+intrinsics `__cosf`/`__sinf`, whose argument reduction NVIDIA specifies as
+accurate only for |x| < 48039 — and at `pair_idx == 0` the frequency is exactly
+`1.0f`, so the angle *is* the position. This model family trains to 131072.
+
+Measured against the same CPU reference the existing tests use (which computes
+the angle identically in float, so the comparison isolates the transcendental
+and not the angle's representation):
+
+```
+pos      40   3.0e-6        pos    8000   8.5e-4
+pos     500   5.7e-5        pos   16000   1.6e-3
+pos    1000   9.3e-5        pos   32768   8.9e-4
+pos    2000   2.3e-4        pos  131071   1.0e-2
+```
+
+Every RoPE test in the file stops at position 40:
+
+```
+121:  pos_host = {0, 5}      247:  pos_host(batch*seq_len, 0)
+192:  pos_host = {0, 5}      301:  pos_host = {3, 7}
+373:  pos_host = {0, 1, 2, 3, 10, 20, 30, 40}
+```
+
+The sharp part is not the coverage gap but what it concealed: **the existing
+tolerances are already incompatible with the existing kernel at ordinary context
+lengths.** `RopeBasicFP32` holds itself to `1e-4`, exceeded from about position
+2000; `RopePositionInvariance` holds itself to `1e-5`, exceeded from about
+position 300. Neither has ever had to reconcile its tolerance with the kernel it
+tests, because neither runs there.
+
+**Filed S4, not S1, on purpose.** What is established is numerical drift, not a
+wrong answer — no long-context perplexity measurement was made, and the issue
+says so. Two facts argue against dismissing it: 1e-2 absolute on unit-scale
+activations is well above FP16 noise, and it lands on the lowest-frequency
+rotary pair, which is the one carrying long-range position information.
+
+**Tests added: 1** — `RoPETest.LongContextPositionsMatchCpuReference`, sweeping
+to 131071 with `kTol = 2e-2`. That bound is the **measured envelope with
+headroom, not a specification**: it puts the range under test for the first time
+and catches a regression, without asserting that 1e-2 is acceptable. The test
+and its comment say this explicitly so nobody later reads the tolerance as a
+blessing.
+
+**Not measured:** the YaRN and LongRoPE branches. YaRN's `inv_scaling < 1`
+shrinks the angle so it is probably less exposed — an expectation, not a
+measurement, and labelled as such in #1316.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No. In particular the two
+   tolerances this iteration calls into question (`1e-4`, `1e-5`) were left
+   exactly as they are — they are correct at the positions they run at, and
+   changing them to accommodate a finding would be the precise inversion of the
+   job.
+2. **Did every mutant get reverted?** No mutants this iteration.
+3. **Did I watch every new test fail before it passed?** No — and it would be
+   dishonest to claim otherwise. This test bounds a measured envelope rather
+   than targeting an injected fault; it was written from the sweep, and the
+   sweep is quoted in the source so the numbers can be rechecked.
+4. **Is every bug claim backed by a script I ran twice?** The sweep is a gtest,
+   run repeatedly across two position sets while narrowing the crossing point.
+5. **Did I fix any production code?** No.
+6. **Are all new tests wired into CI?** No — `test-compute` is GPU. Standing
+   finding, #1304.
+
+### Rotation complete
+
+All seven foci have now had a pass: `I1` API surface (it. 4), `I2` paging/KV
+(it. 3), `I3` numerics & quantisation (covered by the iteration-1 mutant
+categories, 100 % across rope/scaling/quantization/numerics), `I4` concurrency
+(it. 6), `I5` ingestion (it. 5), `I6` sampling (it. 2), `I7` long context (this
+one).
