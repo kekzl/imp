@@ -541,3 +541,100 @@ context & window boundaries). `I4` is the one with a documented history on this
 box — #1044/#1045 was cross-request KV corruption under load — and the dispatch's
 cancel-storm and eviction-under-pressure cases have no equivalent anywhere in
 the suite.
+
+---
+
+## Iteration 6 — 2026-08-08 — focus: `I4` concurrency, cancellation, VRAM pressure — commit: `863df810`
+
+**Mutation score: unchanged at 88.9 %** — a hunt, no mutants. Chosen because
+this is the focus with history on this box (#1044/#1045 was cross-request KV
+corruption under load) and because the dispatch's cancel-storm and
+eviction-under-pressure cases have no equivalent anywhere in the suite.
+
+**Bugs found:** **S1: 1 (#1314)** · S2: 0 · S3: 0 · S4: 0 · S5: 0
+
+**Escape distribution (new):** E1: 1 — no test asserts batch invariance in any
+form.
+
+### #1314 — greedy output depends on who else is in the batch
+
+`tools/mutation/cancel_storm.py` runs five survivor prompts alone, then
+alongside 45 unrelated 512-token requests, and compares byte for byte.
+
+```
+solo, 5 runs each:                 distinct outputs
+  List the first five prime numbers.        1
+  Name three primary colours.               1
+  What is the capital of France?            1
+  Count from one to seven.                  1
+
+under 45 concurrent requests:
+  DIVERGED 'Name three primary colours.'
+    alone: '... primary colors are red, blue, and yellow.'
+    storm: '... primary colours are red, blue, and yellow.'
+  DIVERGED 'List the first five prime numbers.'
+    alone: '**2, 3, 5, 7, 11**\n\nA prime number is a natural number greater ...'
+    storm: '**2, 3, 5, 7, 11**. ✅'
+```
+
+One greedy argmax flip (`colors` → `colours`) is enough to redirect the whole
+continuation, which is what the second case shows.
+
+### Four hypotheses, separated by experiment
+
+| | result |
+|---|---|
+| the prompts are simply unstable | **no** — 5/5 identical solo runs each |
+| cancellation corrupts survivors (#1044/#1045 class) | **no** — victims run to completion, same divergence |
+| cancel → resubmit serves a half-evicted prefix | **no** — clean in every round |
+| `IMP_DETERMINISTIC=1` prevents it | **no** — same two prompts, both rounds |
+
+So cancellation is exonerated, the prefix cache is exonerated, and the remaining
+variable is batch composition — which survives the strongest reproducibility
+switch the engine has. Reproduced 2/2 with `loop/repro/BUG-5.sh`, 4/4 counting
+the deterministic-mode rounds.
+
+Distinct from #1299: these prompts are byte-stable back-to-back on one context
+here, which is precisely what #1299 shows failing elsewhere. Same symptom class,
+different trigger, different fix surface.
+
+`docs/determinism.md` and #554 list the documented boundaries — dense greedy
+logit ties, CUB top-k > 128, `typical_p` atomicAdd, GDN cross-context. Batch
+invariance appears in neither the guarantees nor the exclusions.
+
+**Tests added: 0.** The right oracle for this is logit-level, not text-level:
+run a sequence alone, run it batched with unrelated padding sequences of
+different lengths, assert the logits match within a stated tolerance and the
+argmax is identical at every step. That belongs in `test-e2e` next to the
+executor, needs no server, and localises the fault to a kernel instead of a text
+diff. Writing it against a fault I have localised only to "batch composition"
+would be guessing at the seam; #1314 carries the recipe.
+
+**Attacked and clean:** cancel storm with 45 abortive clients (survivors
+unaffected); cancel → immediate resubmit of the same prompt (prefix cache
+serves correctly); 50 concurrent requests against a server whose max batch is
+smaller (queueing does not corrupt state — the three non-diverging survivors are
+byte-identical in every round).
+
+**Not attacked:** deliberate VRAM exhaustion and the allocation-failure path.
+`compute-sanitizer` is unusable on WSL2 (recorded previously), so racecheck /
+initcheck /synccheck remain out of reach on this box; that is a standing
+limitation of the environment, not a decision.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No.
+2. **Did every mutant get reverted?** No mutants this iteration.
+3. **Did I watch every new test fail before it passed?** No tests added — and
+   the reason is stated above rather than papered over.
+4. **Is every bug claim backed by a script I ran twice?** Yes —
+   `loop/repro/BUG-5.sh`, 2/2, plus two deterministic-mode rounds.
+5. **Did I fix any production code?** No.
+6. **Are all new tests wired into CI?** N/A.
+
+### Next iteration
+
+`I7` (long context & window boundaries) is the last untouched focus: behaviour
+at and beyond the trained context length, RoPE scaling at the extremes, and the
+sliding-window boundaries that `evict_middle_blocks` already showed are
+delicate.
