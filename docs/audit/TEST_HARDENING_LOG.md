@@ -725,3 +725,82 @@ All seven foci have now had a pass: `I1` API surface (it. 4), `I2` paging/KV
 categories, 100 % across rope/scaling/quantization/numerics), `I4` concurrency
 (it. 6), `I5` ingestion (it. 5), `I6` sampling (it. 2), `I7` long context (this
 one).
+
+---
+
+## Iteration 8 — 2026-08-08 — focus: `I1` (second pass) — commit: `a960aa7a`
+
+**Mutation score: 90.0 %** (45/50) — prev 88.9 % (40/45). Five new mutants
+(M47–M51), all killed after one new test.
+
+| Category | score |
+|---|---|
+| **api** (new) | **5/5 = 100 %** |
+| everything else | unchanged |
+
+**Bugs found:** none.
+
+**Escape distribution (new):** E6: 1 — the test targets the right property with
+an input that cannot reach it.
+
+### Attacking the API from the other side
+
+Iteration 4 attacked the running server and found #1310. This pass attacked the
+half of the server that CI *does* compile: `anthropic.cpp`, `tool_call.cpp`,
+`responses.cpp`, `utils.cpp` and `constraint_validation.cpp` are all linked into
+`test-core`, so a mutant there is measured against the merge gate rather than
+against a local GPU run. That half had never been mutated.
+
+Four of five died to tests that already existed:
+
+| Mutant | Killed by |
+|---|---|
+| `Utf8Stitch` releases an incomplete tail instead of carrying it | `RejoinsCharacterSplitAcrossTwoPieces`, `ReassemblesFourByteCharacterOneByteAtATime` |
+| Anthropic usage stops subtracting prefix-cache hits | `CacheReadAndCreationMapped`, `UsageSplitsCacheReadFromInput`, `UsageCachedClampedToPrompt` |
+| `finish_reason=length` maps to `end_turn` | `FinishReasonMapping` |
+| the `cached > prompt` clamp is dropped | `UsageCachedClampedToPrompt` |
+
+So the Anthropic transform and the UTF-8 stitcher are genuinely defended, in the
+lane that gates a merge. Worth stating plainly after seven iterations of
+cataloguing what CI cannot see.
+
+### The one gap: a guard whose test cannot reach it
+
+M48 widens `Utf8Stitch::feed`'s `<= 3` bound, which exists so that genuinely
+invalid input is passed through instead of parked forever. There *is* a test for
+that property — `Utf8Stitch.DoesNotStallOrLoseBytesOnInvalidInput` — and it
+survives the mutant.
+
+The reason is in `utf8_complete_len`: it walks back from the end **over
+continuation bytes** (0x80–0xBF) to the last lead byte, so the tail it parks is
+`1 + trailing continuations`. The existing test feeds `"\xFF\xFE\xFD\xFC\xFB"`,
+in which no byte is a continuation — the walk-back stops at the final byte, the
+tail is **1**, and the `<= 3` bound never binds. The guard is never exercised.
+
+Reaching it needs an invalid lead followed by at least three continuation bytes:
+`"\xFF\x80\x80\x80"` parks at index 0, tail 4. Added as
+`Utf8Stitch.InvalidLeadFollowedByContinuationsIsNotHeldBackForever`; verified to
+fail against M48 and to pass on `main`. It runs in CI.
+
+This is the same shape as #1300 and #1316: a correct test aimed at the right
+property, written with an input under which the fault is invisible. Third
+occurrence of that pattern in this campaign, and the cheapest class to fix.
+
+**Tests added: 1, verified against the fault it targets: yes.**
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No.
+2. **Did every mutant get reverted?** Yes — five mutants, tree checked after
+   each, and again after the `recheck.sh` verification.
+3. **Did I watch every new test fail before it passed?** Yes — M48.
+4. **Is every bug claim backed by a script I ran twice?** No bugs claimed.
+5. **Did I fix any production code?** No.
+6. **Are all new tests wired into CI?** Yes — `test-core`.
+
+### Next
+
+Second pass continues with `I2`. The seams worth re-mining are the ones where
+the first pass found the tests good but the *inputs* narrow — that pattern has
+now produced three findings and is cheaper per finding than anything else this
+campaign has done.
