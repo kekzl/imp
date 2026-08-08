@@ -437,3 +437,107 @@ missing tensor, wrong shapes, metadata that disagrees with the tensors — all o
 which must produce a clear diagnostic rather than a segfault.
 `tests/test_gguf_fault_injection.cpp` exists (18 cases) and is CPU-only, so
 mutants there would land in the lane that gates a merge.
+
+---
+
+## Iteration 5 — 2026-08-08 — focus: `I5` model ingestion & error paths — commit: `cda991a6`
+
+**Mutation score: 88.9 %** (40/45) — prev 87.8 % (36/41). Four new loader
+mutants (M43–M46), all killed.
+
+| Category | score |
+|---|---|
+| **ingestion** (new) | **4/4 = 100 %** |
+| everything else | unchanged |
+
+**Bugs found:** S1: 0 · S2: 0 · **S3: 1 (#1312)** · S4: 0 · S5: 0
+
+**Escape distribution (new):** E1: 1 (#1312 — no test covers the semantic layer)
+
+### The GGUF container layer is genuinely well defended
+
+`tests/test_gguf_fault_injection.cpp` has 18 cases and they hold:
+
+| Mutant | Killed by |
+|---|---|
+| M43 per-tensor bounds guard removed | `TensorOffsetPastEof`, `TensorOffsetMaxU64`, `TensorDimOverflow`, `TensorDimNegative`, `NonexistentTensorType` — five at once |
+| M44 magic unchecked | `BadMagic` |
+| M45 version gate widened | `GgufLoaderTest.UnsupportedVersion`, `BadVersion` |
+| M46 zero-alignment guard removed | `ZeroAlignmentMetadata` — by SIGFPE, see below |
+
+All four land in `test-core`, i.e. **the lane that gates a merge**. This is the
+one area of the codebase where CI genuinely protects against the fault class.
+
+### #1312 — the semantic layer has no tests at all
+
+Every one of those 18 cases attacks the binary container. None checks whether
+the tensors present match what the metadata claims. So:
+
+```
+GGUF declaring llama.block_count = 2, shipping no layer tensor
+  -> load_gguf returns a Model, n_layers=2
+  -> layer 0: wq=(nil) wk=(nil) ffn_down=(nil)
+  -> layer 1: wq=(nil) wk=(nil) ffn_down=(nil)
+  -> the only log line is an unrelated "No tokenizer data found"
+```
+
+`n_attn` is counted (`gguf_loader.cpp:730`) and printed next to `cfg.n_layers`
+in one format string (`:769`) but never compared. All three consistency checks
+in the file are `WARN` (`:855`, `:862`, `:866`) and none covers this case.
+`engine_weight_upload.cpp:145-149` then papers over it: `if (n_attn == 0)
+n_attn = mcfg.n_layers;`.
+
+**Scope discipline:** verified at the loader boundary only. No forward pass was
+run on such a model, so no IMA or wrong-output claim is made — S3, not S1. The
+same class has shipped here before in a different loader (Qwen3-VL: 247/316
+tensors, `nullptr` into `vision_gemm`).
+
+The committed test is a **characterisation** test, not the invariant. This file
+runs in the CI lane, and a red required check blocks every merge in the repo —
+that call belongs to the owner. #1312 carries the strict version, which is the
+same test with its assertions inverted.
+
+### A defect in this harness, found by a mutant that should have died
+
+M46 first scored SURVIVED. It does not survive: removing the zero-alignment
+guard makes `align()` execute `pos_ % 0`, and the binary dies with **rc=136
+(SIGFPE)**. A crashed gtest binary prints no `[  FAILED  ]` line, and `run.py`
+only looked for those — so a kill-by-crash read as "no failures" and scored as a
+survival. That is precisely the shape of a harness that flatters the suite it
+measures.
+
+Fixed: `crashed(rc, output)` now treats "neither exited 0 nor named a failing
+test" as a kill, on every lane including the CI ones, and a crash is never
+discounted as pre-existing (the baseline ran clean). Re-scored: **M46 KILLED,
+`test-core: crashed (rc=136)`**.
+
+**Audited every earlier run for the same mistake** — `rc != 0` with an empty
+failure list across all `loop/evidence/mutation-results*.json`: M46 is the only
+occurrence. All previously reported scores stand.
+
+**Attacked and clean:** magic, version, three truncation points, KV and tensor
+count overflows, string length past EOF and overflowing, unknown array element
+type with a huge count, tensor offset past EOF and at U64 max, dim overflow and
+negative dims, nonexistent tensor type, zero alignment.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No — one added.
+2. **Did every mutant get reverted?** Yes; and the one manual apply/restore
+   outside the harness was byte-restored from a saved copy and verified with
+   `git status`.
+3. **Did I watch every new test fail before it passed?** The committed test is a
+   characterisation test, so this does not apply; it is labelled as such in the
+   source and in #1312.
+4. **Is every bug claim backed by a script I ran twice?** Yes — the probe ran
+   2/2 from fresh processes before anything was written down.
+5. **Did I fix any production code?** No. The only fix was to my own harness.
+6. **Are all new tests wired into CI?** Yes — `test-core`.
+
+### Next iteration
+
+Untouched foci: `I4` (concurrency, cancellation, VRAM pressure) and `I7` (long
+context & window boundaries). `I4` is the one with a documented history on this
+box — #1044/#1045 was cross-request KV corruption under load — and the dispatch's
+cancel-storm and eviction-under-pressure cases have no equivalent anywhere in
+the suite.

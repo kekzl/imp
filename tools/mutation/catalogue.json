@@ -387,6 +387,42 @@
       "focus": "test-kv",
       "find": "    if (sink_end_block > already)\n        pin_prefix(seq_id, sink_end_block);",
       "replace": "    (void)already;  // [MUTANT] sink blocks left unpinned"
+    },
+    {
+      "id": "M43",
+      "category": "ingestion",
+      "file": "src/model/gguf_loader.cpp",
+      "desc": "Per-tensor bounds guard removed: a corrupt offset yields a wild pointer into the mmap instead of a skip.",
+      "focus": "test-core",
+      "find": "        if (!gguf_tensor_in_bounds(info)) {",
+      "replace": "        if (false && !gguf_tensor_in_bounds(info)) {  // [MUTANT] bounds guard removed"
+    },
+    {
+      "id": "M44",
+      "category": "ingestion",
+      "file": "src/model/gguf_loader.cpp",
+      "desc": "GGUF magic is no longer checked, so any file is parsed with v3 field-layout assumptions.",
+      "focus": "test-core",
+      "find": "    if (magic != GGUF_MAGIC) {\n        IMP_LOG_ERROR(\"Invalid GGUF magic: 0x%08x\", magic);",
+      "replace": "    if (false) {  // [MUTANT] magic unchecked\n        IMP_LOG_ERROR(\"Invalid GGUF magic: 0x%08x\", magic);"
+    },
+    {
+      "id": "M45",
+      "category": "ingestion",
+      "file": "src/model/gguf_loader.cpp",
+      "desc": "Version gate widened to accept v1 and v4+, whose field layout differs from v2/v3.",
+      "focus": "test-core",
+      "find": "    if (version < 2 || version > 3) {",
+      "replace": "    if (version < 0) {  // [MUTANT] any version accepted"
+    },
+    {
+      "id": "M46",
+      "category": "ingestion",
+      "file": "src/model/gguf_loader.cpp",
+      "desc": "A declared alignment of 0 is no longer replaced by the default, so align() divides by zero.",
+      "focus": "test-core",
+      "find": "        if (alignment == 0)\n            alignment = GGUF_DEFAULT_ALIGNMENT;",
+      "replace": "        // [MUTANT] zero alignment accepted"
     }
   ]
 }

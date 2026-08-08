@@ -47,6 +47,7 @@ struct GgufBytes {
     size_t off_tensor_dim0 = 0;       // u64 ne[0] of the tensor
     size_t off_tensor_type = 0;       // u32 ggml type of the tensor
     size_t off_tensor_data_offset = 0;  // u64 data-section-relative offset
+    size_t off_block_count = 0;         // u32 value of llama.block_count
 };
 
 class Writer {
@@ -105,6 +106,7 @@ GgufBytes build_valid_gguf() {
     // llama.block_count = 0  (no layers — keeps the model trivially small)
     w.str("llama.block_count");
     w.u32(T_UINT32);
+    g.off_block_count = w.pos();
     w.u32(0);
 
     // --- tensor info ---
@@ -200,6 +202,41 @@ TEST(GgufFaultInjection, ValidBaselineLoads) {
     auto model = load_gguf(path);
     EXPECT_NE(model, nullptr) << "baseline GGUF must load, else corruption tests are meaningless";
     unlink(path.c_str());
+}
+
+// ---- Config vs tensors ----
+//
+// CHARACTERISATION, not an invariant. A GGUF whose metadata declares N
+// transformer blocks but ships no layer tensor at all loads *successfully*:
+// load_gguf returns a Model reporting n_layers == N with every layer weight
+// null, and emits no diagnostic about it. That is #1312.
+//
+// This test pins the behaviour that exists so the change is visible when it is
+// fixed — it deliberately does NOT assert the invariant the loader ought to
+// enforce ("declared layers must have weights, or the load fails"), because
+// this file runs in the CI lane and a red required check blocks every merge.
+// The strict version is one edit away and is written out in #1312.
+//
+// Every config/tensor consistency check in the loader is a WARN
+// (gguf_loader.cpp:855, :862, :866) and none covers this case: n_attn is
+// counted at :730 and printed at :769, never compared against cfg.n_layers.
+TEST(GgufFaultInjection, DeclaredLayersWithoutTensorsLoadWithNullWeights) {
+    GgufBytes g = build_valid_gguf();
+    patch_u32(g.buf, g.off_block_count, 2);
+    auto model = load_buf(g.buf);
+
+    ASSERT_NE(model, nullptr) << "documenting today's behaviour: the load succeeds";
+    EXPECT_EQ(model->config().n_layers, 2);
+    ASSERT_EQ(model->layers_.size(), 2u);
+    for (size_t i = 0; i < model->layers_.size(); ++i) {
+        EXPECT_EQ(model->layers_[i].wq.data, nullptr)
+            << "layer " << i << ": if this is now non-null the loader changed — see #1312";
+        EXPECT_EQ(model->layers_[i].wk.data, nullptr) << "layer " << i;
+        EXPECT_EQ(model->layers_[i].w_down.data, nullptr) << "layer " << i;
+    }
+    // The one thing the file did supply is present, so the null layers above
+    // are a missing-tensor consequence and not a wholesale load failure.
+    EXPECT_NE(model->token_embedding().data, nullptr);
 }
 
 // ---- Magic / version ----
