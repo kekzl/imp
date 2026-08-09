@@ -313,7 +313,7 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
 // can ask the same question without the per-request checks. Nothing here
 // depends on a request, so a false answer means "this model never speculates,
 // whatever the flag says".
-bool Engine::spec_ngram_model_capable_() const {
+bool Engine::spec_ngram_model_capable_uncached_() const {
     if (ssm_state_ && !runtime_config_.speculative.hybrid)
         return false;
     // GGUF-MoE verify re-dequants every activated expert per step (-22%), so

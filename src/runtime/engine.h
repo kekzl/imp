@@ -917,8 +917,18 @@ private:
                                             : runtime_config_.speculative.ngram;
     }
     // The model-level half of spec_ngram_gates_ok_: facts that cannot change
-    // between requests or between steps.
-    bool spec_ngram_model_capable_() const;
+    // between requests or between steps — so it is computed once and cached.
+    // spec_ngram_enabled_ sits on the per-step decode path; recomputing this
+    // there (it reaches into supports_chunked_prefill_) would put avoidable
+    // work on the hot path of every model, including the ones this change does
+    // not affect at all.
+    bool spec_ngram_model_capable_() const { return spec_ngram_model_capable_flag_; }
+    // Computed ONCE at the end of Engine::init, never lazily: a lazy cache
+    // filled on the first call locks in whatever the answer was before
+    // `ssm_state_` and the model profile were final, which measured as the MoE
+    // determinism cases going from 0 failing back to 7.
+    bool spec_ngram_model_capable_uncached_() const;
+    bool spec_ngram_model_capable_flag_ = false;
     bool spec_ngram_gates_ok_(const Request& req, bool ignore_think = false) const;
     bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;

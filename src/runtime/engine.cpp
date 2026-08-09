@@ -838,6 +838,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     MemAccount::instance().sampler_start(2000);
     MemAccount::instance().report("init_complete");
 
+    // Model + profile + ssm_state_ are final here, and none of the inputs can
+    // change afterwards — so the answer is taken once, off the per-step path.
+    spec_ngram_model_capable_flag_ = spec_ngram_model_capable_uncached_();
+
     return true;
 }
 
