@@ -9,6 +9,24 @@ std::string dump_safe(const json& j) {
     return j.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
+// Drop an incomplete trailing UTF-8 sequence from a FINISHED string (#1310).
+//
+// Utf8Stitch carries such a tail forward to the next piece, which is right for
+// a stream. At the end of a generation there is no next piece: max_tokens can
+// stop mid-codepoint, and those bytes then reach dump_safe(), whose
+// error_handler_t::replace substitutes U+FFFD - so `message.content` carries a
+// character no generated token produced. The streaming path never showed this
+// because the stitcher simply never releases the tail.
+//
+// Same 3-byte bound as Utf8Stitch::feed: a split codepoint is at most 3 bytes
+// short, and a longer tail is genuinely ill-formed input rather than a
+// truncation, so it is left alone for dump_safe to handle.
+void drop_incomplete_utf8_tail(std::string& s) {
+    const size_t complete = imp::stream::utf8_complete_len(s);
+    if (complete < s.size() && s.size() - complete <= 3)
+        s.resize(complete);
+}
+
 std::string Utf8Stitch::feed(const std::string& piece) {
     std::string buf = carry_ + piece;
     carry_.clear();

@@ -834,6 +834,10 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         total_output_tokens += n_output_tokens;
         std::string content = !ctx.params.stop_sequences.empty() ? output_text
                                                                  : ctx.snap.tok->decode(output_ids);
+        // max_tokens can stop mid-codepoint; the streaming path holds those
+        // bytes back, so this one must drop them or the two transports return
+        // different text for the same request (#1310).
+        drop_incomplete_utf8_tail(content);
 
         // Extract reasoning content (DeepSeek format) or strip think blocks.
         // enable_thinking also covers text-level thinkers (Nemotron) whose
