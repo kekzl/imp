@@ -304,10 +304,26 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     // draft-poor floor (miss_burst hybrid). GGUF-MoE verify re-dequants every
     // activated expert per step and measured -22% — those stay on the async
     // conditional-graph loop (as does everything when speculative.moe=false).
+    if (!spec_ngram_model_capable_())
+        return false;
+    return true;
+}
+
+// Model-level gates, split out of spec_ngram_gates_ok_ so spec_ngram_enabled_
+// can ask the same question without the per-request checks. Nothing here
+// depends on a request, so a false answer means "this model never speculates,
+// whatever the flag says".
+bool Engine::spec_ngram_model_capable_() const {
+    if (ssm_state_ && !runtime_config_.speculative.hybrid)
+        return false;
+    // GGUF-MoE verify re-dequants every activated expert per step (-22%), so
+    // these stay on the async conditional-graph loop — as does everything when
+    // speculative.moe=false.
     if (model_->profile().is_moe &&
         !(runtime_config_.speculative.moe && model_->profile().moe_experts_nvfp4))
         return false;
-    if (!supports_chunked_prefill_()) return false;
+    if (!supports_chunked_prefill_())
+        return false;
     return true;
 }
 

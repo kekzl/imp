@@ -903,9 +903,22 @@ private:
     // Effective n-gram speculation state for a request: honors the per-request
     // tri-state override (Request::spec_ngram_override), else the global default.
     bool spec_ngram_enabled_(const Request& req) const {
+        // A model that can never speculate must not look "enabled" to anyone:
+        // the decode loop chops itself into miss_burst bursts whenever this
+        // says yes (engine_scheduler.cpp), so a model whose gates always fail
+        // paid the chopping for drafts that could not happen — and the burst
+        // boundaries, not the drafts, are what made greedy output depend on
+        // request history (#1299). The comment in spec_ngram_gates_ok_ already
+        // says GGUF-MoE "stays on the async conditional-graph loop"; this is
+        // what makes that true.
+        if (!spec_ngram_model_capable_())
+            return false;
         return req.spec_ngram_override >= 0 ? req.spec_ngram_override == 1
                                             : runtime_config_.speculative.ngram;
     }
+    // The model-level half of spec_ngram_gates_ok_: facts that cannot change
+    // between requests or between steps.
+    bool spec_ngram_model_capable_() const;
     bool spec_ngram_gates_ok_(const Request& req, bool ignore_think = false) const;
     bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
