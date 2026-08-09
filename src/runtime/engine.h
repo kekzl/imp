@@ -903,9 +903,32 @@ private:
     // Effective n-gram speculation state for a request: honors the per-request
     // tri-state override (Request::spec_ngram_override), else the global default.
     bool spec_ngram_enabled_(const Request& req) const {
+        // A model that can never speculate must not look "enabled" to anyone:
+        // the decode loop chops itself into miss_burst bursts whenever this
+        // says yes (engine_scheduler.cpp), so a model whose gates always fail
+        // paid the chopping for drafts that could not happen — and the burst
+        // boundaries, not the drafts, are what made greedy output depend on
+        // request history (#1299). The comment in spec_ngram_gates_ok_ already
+        // says GGUF-MoE "stays on the async conditional-graph loop"; this is
+        // what makes that true.
+        if (!spec_ngram_model_capable_())
+            return false;
         return req.spec_ngram_override >= 0 ? req.spec_ngram_override == 1
                                             : runtime_config_.speculative.ngram;
     }
+    // The model-level half of spec_ngram_gates_ok_: facts that cannot change
+    // between requests or between steps — so it is computed once and cached.
+    // spec_ngram_enabled_ sits on the per-step decode path; recomputing this
+    // there (it reaches into supports_chunked_prefill_) would put avoidable
+    // work on the hot path of every model, including the ones this change does
+    // not affect at all.
+    bool spec_ngram_model_capable_() const { return spec_ngram_model_capable_flag_; }
+    // Computed ONCE at the end of Engine::init, never lazily: a lazy cache
+    // filled on the first call locks in whatever the answer was before
+    // `ssm_state_` and the model profile were final, which measured as the MoE
+    // determinism cases going from 0 failing back to 7.
+    bool spec_ngram_model_capable_uncached_() const;
+    bool spec_ngram_model_capable_flag_ = false;
     bool spec_ngram_gates_ok_(const Request& req, bool ignore_think = false) const;
     bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
