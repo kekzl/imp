@@ -14,6 +14,7 @@ import json
 import pytest
 
 
+@pytest.mark.nomodel
 class TestHealthEndpoint:
     def test_health_returns_200(self, client):
         r = client.get("/health")
@@ -37,6 +38,7 @@ class TestHealthEndpoint:
         assert isinstance(body["queue_depth"], int)
 
 
+@pytest.mark.nomodel
 class TestModelsEndpoint:
     def test_models_returns_200(self, client):
         r = client.get("/v1/models")
@@ -222,6 +224,7 @@ class TestStreamingSchema:
         assert u["total_tokens"] == u["prompt_tokens"] + u["completion_tokens"]
 
 
+@pytest.mark.nomodel
 class TestMetricsEndpoint:
     def test_metrics_returns_200(self, client):
         r = client.get("/metrics")

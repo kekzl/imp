@@ -11,7 +11,28 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **`imp-server` starts without `--model`.** `--help` has always called the flag
+  optional and the auto-load path has always existed; startup refused it anyway.
+  Model-less, the server answers `/health`, `/v1/models`, `/metrics` and the
+  whole parameter-validation surface, and the first request naming a model under
+  `--models-dir` loads it. Requests that resolve to no model get 503.
+- **CI now tests the shipping server, not only its stand-in (#1302).** A new
+  `Real API contract` job starts the built `imp-server` model-less on the
+  GPU-less runner and runs the 42 API tests marked `nomodel` against the binary.
+  Until now every one of the suite's 82 assertions described
+  `tests/api/mock_server.py`.
+
 ### Fixed
+
+- **An unmatched route now answers with a JSON error envelope.** `POST /v1/nope`
+  returned 404 with a zero-length body, so a client reading
+  `error.message` got a parse error instead of a reason; `/v1/messages*` paths
+  get the Anthropic shape. Found by pointing the API suite at the real server.
+- **`n` on `/v1/chat/completions` is documented and tested as `[1,4]`.** The
+  suite asserted that `n=2` is a 400 — true of the mock, never of the server,
+  which runs n independent generations.
 
 - **Raising `max_tokens` now buys answer room on a reasoning model (#1297).**
   The think budget reserved a FLAT 256 tokens for the answer and took the later

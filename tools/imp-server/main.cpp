@@ -33,11 +33,6 @@ static bool is_inference_endpoint(const std::string& path) {
 int main(int argc, char** argv) {
     ServerArgs args = parse_server_args(argc, argv);
 
-    if (args.model_path.empty()) {
-        fprintf(stderr, "Error: --model is required\n");
-        return 1;
-    }
-
     printf("IMP Server %s\n", imp_version());
 
     ServerState state;
@@ -64,21 +59,31 @@ int main(int argc, char** argv) {
     imp::process_diag_install(state.runtime_config);
     imp::set_pending_runtime_config(state.runtime_config);
 
+    // --model is optional (it has always been documented that way in --help).
+    // Without it the server starts model-less: the request-validation surface,
+    // /health, /v1/models and /metrics all answer, and the first request that
+    // names a model in --models-dir auto-loads it (ensure_model_loaded). A
+    // request that cannot resolve a model gets 503 — never a silent success.
+    // This is also what lets CI run the shipping binary on a GPU-less runner
+    // instead of a Python stand-in (#1302).
     ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
-    std::string resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
-    if (resolved_model.empty()) {
-        fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
-        return 1;
-    }
-    if (resolved_model != args.model_path) {
-        printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(), resolved_model.c_str(),
-               resolved_format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
+    std::string resolved_model;
+    if (!args.model_path.empty()) {
+        resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
+        if (resolved_model.empty()) {
+            fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
+            return 1;
+        }
+        if (resolved_model != args.model_path) {
+            printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(), resolved_model.c_str(),
+                   resolved_format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
+        }
     }
 
     // Models directory: explicit --models-dir overrides, else the resolved model's parent.
     if (!args.models_dir.empty()) {
         state.models_dir = args.models_dir;
-    } else {
+    } else if (!resolved_model.empty()) {
         auto parent = std::filesystem::path(resolved_model).parent_path().string();
         if (!parent.empty())
             state.models_dir = parent;
@@ -98,8 +103,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("Loading model: %s\n", resolved_model.c_str());
-    {
+    if (resolved_model.empty()) {
+        if (state.models_dir.empty()) {
+            printf(
+                "No model: started model-less and no --models-dir to auto-load from — "
+                "inference endpoints answer 503.\n");
+        } else {
+            printf(
+                "No model: started model-less — the first request naming a model in %s "
+                "loads it.\n",
+                state.models_dir.c_str());
+        }
+    } else {
+        printf("Loading model: %s\n", resolved_model.c_str());
         std::string error = load_model_into_state(state, resolved_model);
         if (!error.empty()) {
             fprintf(stderr, "%s\n", error.c_str());
@@ -108,6 +124,12 @@ int main(int argc, char** argv) {
     }
 
     // --lora NAME=PATH: load PEFT adapters once; requests select by name.
+    // An adapter needs its base model resident, so this combination is refused
+    // at startup rather than silently dropping the adapters.
+    if (!args.loras.empty() && !state.model_loaded()) {
+        fprintf(stderr, "Error: --lora requires --model (adapters attach to a loaded base model)\n");
+        return 1;
+    }
     for (const auto& [name, path] : args.loras) {
         int32_t id = 0;
         if (imp_lora_load(state.ctx, path.c_str(), &id) != IMP_SUCCESS) {
@@ -313,6 +335,34 @@ int main(int argc, char** argv) {
                 send_json_error(res, 500, "server_error", "unknown internal error");
             }
         });
+
+    // Any error response that would go out with an empty body gets the same
+    // JSON envelope every handler uses. The reachable case is an unmatched
+    // route: httplib answers 404 with zero bytes, so a client that does
+    // `r.json()["error"]["message"]` on a typo'd path got a parse error instead
+    // of a message. The mock CI tests against has always sent an envelope here
+    // (#1302). Responses that already carry a body — i.e. everything a handler
+    // produced — are left untouched: this callback runs for EVERY status >= 400.
+    svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
+        if (!res.body.empty())
+            return httplib::Server::HandlerResponse::Unhandled;
+        const bool not_found = res.status == 404;
+        const std::string msg = not_found ? "Unknown endpoint: " + req.method + " " + req.path
+                                          : "Request failed with status " + std::to_string(res.status);
+        if (req.path.rfind("/v1/messages", 0) == 0) {
+            json err = {{"type", "error"},
+                        {"error",
+                         {{"type", not_found ? "not_found_error" : "invalid_request_error"},
+                          {"message", msg}}}};
+            res.set_content(err.dump(), "application/json");
+        } else {
+            json err = {
+                {"error",
+                 {{"message", msg}, {"type", res.status >= 500 ? "server_error" : "invalid_request_error"}}}};
+            res.set_content(err.dump(), "application/json");
+        }
+        return httplib::Server::HandlerResponse::Handled;
+    });
 
     // Track failed requests via post-routing
     svr.set_post_routing_handler([&state](const httplib::Request&, httplib::Response& res) {

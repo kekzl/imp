@@ -246,11 +246,16 @@ Benchmark / eval:
 
 ## Server — imp-server (OpenAI + Anthropic compatible)
 
-`--model` is required at startup. Both GGUF and SafeTensors are accepted.
+Both GGUF and SafeTensors are accepted. `--model` is optional: without it the
+server starts model-less and the first request naming a model under
+`--models-dir` loads it (requests that resolve to nothing get a 503).
 
 ```bash
 # Start with GGUF
 ./build/imp-server --model model.gguf --port 8080
+
+# No model at startup — pick one per request from a directory
+./build/imp-server --models-dir ~/models --port 8080
 
 # Start with SafeTensors (NVFP4 prequant)
 ./build/imp-server --model ./Qwen3-Coder-30B-A3B-FP4 --port 8080

@@ -102,6 +102,15 @@ mutant in the dispatch's "API" category would survive by construction, which is
 why none were written: the experiment's outcome is already known from the job
 definition.
 
+**Closed in iteration 12 (#1302).** `--model` became optional, so the shipping
+binary starts model-less and answers its whole request-validation surface
+without a GPU. The `Real API contract` job runs the 42 tests marked `nomodel`
+against `build/imp-server` itself. Pointing the suite at the real server
+immediately falsified two of its assertions and found one server defect — see
+`TEST_HARDENING_LOG.md`, iteration 12. What remains mock-only is generation:
+anything that needs tokens back still needs a GPU, and the split is now visible
+as a marker rather than implicit in the job definition.
+
 ## E6 — the test exists, the inputs cannot trigger the fault
 
 ### M20 / M21 — `top_p` is never given a value that truncates anything

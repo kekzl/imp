@@ -1029,3 +1029,106 @@ Verified in both lanes: mock 8 passed / 3 skipped (CI unchanged), real server
 6. **Are all new tests wired into CI?** The test runs in CI and skips there, for
    a stated reason. Making it meaningful in CI is #1302; making it
    self-validating anywhere is #1321.
+
+---
+
+## Iteration 12 — 2026-08-09 — focus: `imp-server` under test at all (#1302) — commit: `b83a79dd`
+
+**Mutation score: unchanged at 90.4 %** — this iteration moves a different
+number: the API layer's score was **0 % by construction**, because no gate ever
+executed `tools/imp-server/`. It is now 42 tests against the shipping binary.
+
+**Bugs found:** S3: 1 (unmatched route answered 404 with an empty body) ·
+**assertions falsified: 2** (both green in CI, both wrong about the server).
+
+### The blocker was a flag that documented itself as optional
+
+`imp-server --help` has said `--model <path> … (optional)` since it was written,
+`main.cpp:51` describes "auto-load on first request when started without
+`--model`", and `ensure_model_loaded()` implements exactly that. Startup refused
+it anyway — `if (args.model_path.empty()) return 1`. So the one thing standing
+between CI and the real server was four lines that contradicted the two comments
+above them.
+
+Model-less, the server answers `/health`, `/v1/models`, `/props`, `/info`,
+`/metrics` and — the part that matters — every parameter check, because
+validation runs in `parse_chat_request_params` *before*
+`snapshot_state_and_tokenize_` ever looks for weights. Measured against the
+46-case table from iteration 4: all **15** cases that a model-loaded server
+answers 4xx answer identically model-less; the other 31 turn into 503. No GPU,
+no model, no CUDA call — verified by running the binary in a container started
+without `--gpus`.
+
+### What the real server said when the suite finally asked it
+
+| assertion (green in CI for a year) | the shipping server |
+|---|---|
+| `n=2` on `/v1/chat/completions` → 400 | **200 with two choices** — `n` is validated against `[1,4]` and `handlers_chat_core.cpp` runs that many generations |
+| `POST /v1/nope` → 404 with `error.message` | **404 with a zero-length body** — httplib's default |
+
+The first is a mock invention: `mock_server.py` rejected everything but `n=1`,
+and `test_n_greater_than_1` asserted the mock. The second is a real defect —
+a client doing `r.json()["error"]["message"]` on a typo'd path got a JSON parse
+error instead of a reason. Fixed with a body-aware `set_error_handler` (it fires
+for *every* status ≥ 400, so it must leave handler-produced bodies alone) that
+answers in the dialect of the path: OpenAI shape, Anthropic shape under
+`/v1/messages*`.
+
+Three more divergences from the same table were mock-side crashes: `max_tokens:
+null` (the SDK spelling of "unset") and any non-object JSON body killed the
+connection instead of answering. `RemoteProtocolError` in a probe, invisible to
+the suite because nothing sent those.
+
+### Tests added / changed
+
+- **`nomodel` marker + `IMP_SERVER_BIN` lane** (`conftest.py`): starts the
+  binary model-less and shuts it down at session end. `-m nomodel` selects the
+  42 cases that need no weights.
+- **New CI job `Real API contract`** — same CUDA image the Build job compiled
+  in (the binary is linked against that libstdc++), artifact + `chmod +x`,
+  pytest. Non-required, like `Mock API contract`.
+- `TestParameterValidation` split: rejection stays and is now `nomodel`;
+  acceptance ("temperature=2 must be **accepted**") moved to
+  `TestParameterAcceptance`, which needs weights and says so.
+- New: non-object JSON bodies (4), `max_tokens: null`, unknown-route envelope
+  in both dialects, `n` out of range, `n=2` returns two choices.
+
+Watched failing first, both directions: the 7 mock-lane tests against the
+unpatched `mock_server.py`, and the 4 unknown-route tests against a rebuilt
+server with the error handler removed (`JSONDecodeError: Expecting value` —
+i.e. the empty body).
+
+### Verification
+
+| lane | result |
+|---|---|
+| mock (`IMP_USE_MOCK=1`, = CI job) | 85 passed, 12 skipped |
+| **real binary, model-less** (= new CI job) | **42 passed** |
+| real binary + Qwen3-4B-IQ4_NL, full suite | **96 passed, 1 skipped** |
+| real binary + Llama-3.2-3B-IQ4_XS, full suite | 93 passed, **3 failed** |
+| `ctest -L unit` | 4/4 |
+
+The three Llama failures are model-dependent, not server defects: two tool tests
+need a model that emits tool calls, and `test_temperature_zero_deterministic`
+fails on `'2 + 2 = 4'` vs `'2 + 2 = 4.'` — the greedy-divergence class of #1299 /
+#1314, reproduced here from the HTTP surface for the first time.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** Yes, one, and it is the
+   point of the iteration: `test_n_greater_than_1` asserted a contract the
+   shipping server never had. It is not loosened — it now pins `[1,4]` on both
+   ends *and* gained a positive case (n=2 → two choices) that the old assertion
+   made impossible.
+2. **Did every mutant get reverted?** No mutants this iteration. The two
+   temporary reverts (mock, error handler) were restored from a scratchpad copy
+   and the tree diff was checked afterwards.
+3. **Did I watch every new test fail before it passed?** Yes — see above.
+4. **Is every bug claim backed by a script I ran twice?** The empty-body 404 was
+   seen by `curl -D-` and then by the failing test on a rebuilt binary. The
+   `n=2` claim was measured on a model-less server, on a model-loaded server,
+   and read out of `handlers.cpp`.
+5. **Did I fix any production code?** Yes: `--model` optional (main.cpp) and the
+   JSON error envelope for bodyless errors.
+6. **Are all new tests wired into CI?** Yes — that is the iteration. What is
+   *not* wired is generation; it needs a GPU runner, which remains a WON'T FIX.

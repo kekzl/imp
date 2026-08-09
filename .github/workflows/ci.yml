@@ -202,6 +202,7 @@ jobs:
           name: imp-build
           path: |
             build/imp-cli
+            build/imp-server
             build/imp-tests
             build/test-core
             build/test-text
@@ -299,6 +300,46 @@ jobs:
         env:
           IMP_USE_MOCK: "1"
         run: python -m pytest tests/api -m "not perf and not tools" --tb=short -q
+
+  # Real-server API contract (#1302). `Mock API contract` above validates
+  # mock_server.py; this job runs the SHIPPING binary. imp-server started
+  # without --model answers its whole request-validation surface — parameter
+  # bounds, error envelopes, /health, /v1/models, /metrics, unmatched routes —
+  # before it ever looks for weights, so none of it needs a GPU. Tests that
+  # need generated tokens are the ones NOT marked `nomodel`; they stay in the
+  # local `make test-server` lane.
+  #
+  # Runs in the same CUDA image the Build job compiled in: the binary is linked
+  # against that libstdc++, so a plain ubuntu-24.04 runner cannot load it.
+  real-api:
+    name: Real API contract
+    needs: build
+    if: needs.build.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: imp-build
+          path: build
+
+      - name: Install python
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-pip
+          pip install --break-system-packages -r tests/api/requirements.txt
+
+      - name: Run the API contract against imp-server
+        run: |
+          chmod +x build/imp-server
+          # conftest.py starts it model-less and shuts it down at session end.
+          IMP_SERVER_BIN="$PWD/build/imp-server" \
+            python3 -m pytest tests/api -m nomodel --tb=short -q
 
   # Format check (CI1). clang-format on CHANGED LINES only (git clang-format).
   # ADVISORY: it surfaces the diff but does not fail the job — the repo is not
