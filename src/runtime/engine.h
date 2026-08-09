@@ -301,6 +301,22 @@ public:
     // Accessors for C API
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }
     KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
+
+    // Speculative-decode counters, for /metrics and for tests that need to
+    // prove the drafter actually ran (#1321). Without this, a spec-decoding
+    // test passes whether or not a single token was drafted: the n-gram matcher
+    // only fires on repetitive context, and on ordinary prompts the engine logs
+    // drafted=0 for every request while the test compares the non-speculative
+    // path against itself.
+    struct SpecStats {
+        long long verify_steps = 0;  // verify forwards run
+        long long miss_steps = 0;    // decode steps with no usable draft
+        long long drafted = 0;       // draft tokens proposed
+        long long accepted = 0;      // draft tokens accepted
+        long long emitted = 0;       // tokens emitted by verify steps
+        double verify_wall_ms = 0;   // host wall inside step_spec_verify_ (verify steps only)
+    };
+    const SpecStats& spec_stats() const noexcept { return spec_stats_; }
     KVCache* kv_cache() const noexcept { return kv_cache_raw_; }
     Model* model() const noexcept { return model_.get(); }
     // Effective context window actually allocated by the engine (after VRAM-aware
@@ -949,14 +965,6 @@ private:
     bool ensure_spec_state_scratch_();
     int recurrent_slot_for_(int req_id) const;
     // Session telemetry (logged when a request finishes).
-    struct SpecStats {
-        long long verify_steps = 0;  // verify forwards run
-        long long miss_steps = 0;    // decode steps with no usable draft
-        long long drafted = 0;       // draft tokens proposed
-        long long accepted = 0;      // draft tokens accepted
-        long long emitted = 0;       // tokens emitted by verify steps
-        double verify_wall_ms = 0;   // host wall inside step_spec_verify_ (verify steps only)
-    };
     SpecStats spec_stats_{};
 
     // ── SWA-aware KV sizing (kv_cache.swa_sizing) ────────────────────

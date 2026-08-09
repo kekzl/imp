@@ -175,3 +175,87 @@ class TestPredictedOutputs:
             ]},
         })
         assert r.status_code == 200
+
+
+class TestSpeculativeDecoding:
+    """Speculative decoding must not change what is generated, only how fast.
+
+    The accept/reject step is distribution-preserving by construction, so with
+    a fixed seed and temperature 0 the drafted path must return the same bytes
+    as the undrafted one. Nothing asserted that: tests/test_ngram_draft.py and
+    its C++ siblings cover the draft SOURCES in isolation, never the end-to-end
+    equality.
+
+    VACUITY WARNING, learned the hard way. The obvious version of this test --
+    short, non-repetitive prompts -- passes without the speculative path ever
+    running: the n-gram matcher needs repetition in the context, and on
+    "List the first five prime numbers." the engine logs
+    `drafted=0 accepted=0` for every request. The prompts below are chosen to
+    force repetition (verified: drafted=250 accepted=218, 87%).
+
+    The guard below reads imp_spec_drafted_total from /metrics before and after
+    and asserts it moved (#1321). An earlier version guarded on the FIXTURE
+    instead -- "is the output repetitive enough that drafting was possible" --
+    which is a conservative proxy with false negatives: a "count from 1 to 60"
+    prompt drafts well because its token pattern repeats, yet has no repeated
+    word n-gram at all. The counter removes the guesswork.
+    """
+
+    # Only prompts whose repetition the guard below can actually see. A
+    # "count from 1 to 60" prompt drafts well (its token pattern repeats) but
+    # has no repeated word 8-gram at all, so the guard would reject a fixture
+    # that works. A guard with false negatives is worse than none, so that
+    # prompt is deliberately not here.
+    REPETITIVE = [
+        "Repeat this line exactly twenty times:\nthe quick brown fox jumps over the lazy dog",
+        "Output the word STATUS: OK exactly fifteen times, one per line.",
+    ]
+
+    @staticmethod
+    def _drafted(client):
+        """imp_spec_drafted_total from /metrics, or None if unavailable."""
+        r = client.get("/metrics")
+        if r.status_code != 200:
+            return None
+        for line in r.text.splitlines():
+            if line.startswith("imp_spec_drafted_total "):
+                return int(line.split()[1])
+        return None
+
+    @pytest.mark.parametrize("prompt", REPETITIVE)
+    def test_speculative_on_matches_off(self, client, model, is_mock, prompt):
+        if is_mock:
+            # Not silencing a failure: mock_server.py has no tokenizer and no
+            # drafter, so there is nothing here for it to be right or wrong
+            # about. Skipping with a reason keeps that visible instead of
+            # letting the test pass vacuously, which is the #1302 pattern.
+            pytest.skip("speculative decoding cannot be exercised against the mock (#1302)")
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 192,
+            "temperature": 0,
+            "seed": 1234,
+        }
+        off = client.post("/v1/chat/completions", json={**body, "speculative": False})
+        before = self._drafted(client)
+        on = client.post("/v1/chat/completions", json={**body, "speculative": True})
+        after = self._drafted(client)
+        assert off.status_code == 200 and on.status_code == 200
+        off_text = off.json()["choices"][0]["message"]["content"]
+        on_text = on.json()["choices"][0]["message"]["content"]
+
+        # Vacuity guard: the comparison below is meaningless unless the drafter
+        # actually ran. On non-repetitive prompts the n-gram matcher never
+        # fires and the "speculative" arm is just the ordinary path (#1321).
+        assert before is not None and after is not None, "/metrics has no imp_spec_drafted_total"
+        assert after > before, (
+            f"speculative decoding drafted nothing ({before} -> {after}); this "
+            f"comparison would pass whether or not the feature works"
+        )
+
+        assert on_text == off_text, (
+            "speculative decoding changed the generated text\n"
+            f"  off: {off_text[:160]!r}\n"
+            f"  on : {on_text[:160]!r}"
+        )
