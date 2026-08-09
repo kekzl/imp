@@ -127,6 +127,17 @@ The batch=1 *competitive campaigns* are closed as programs -- every lever they l
 - **FP8 SSM projection sidecar** (#949) -- per-row-scale FP8 for GDN in/out projections; Qwen3.6-35B NVFP4 decode +19% (tg ~320). Extended to GGUF hybrids' Q8_0-kept GDN projections (dequant→FP8 at init): 35B UD-Q4_K_M decode +21% (tg 272, ahead of llama.cpp) -- closed the last decode combo where llama.cpp led.
 - **Speculative decoding economics** (#852/#862-#866) -- hybrid-safe verify + MTP drafts; echo-heavy agent workloads up to +156% on 27B.
 
+**Candidate, not committed: CPU-resident cold experts (no measurement yet).**
+
+A MoE with a small active set touches only a fraction of its weights per token; the rest occupies VRAM without ever being read on that step. The idea is not to *stream* those experts over PCIe — at ~55 GB/s effective that is far too slow once 20B+ is active per token — but to compute the cold ones **on the CPU with AVX-512** while the hot ones stay resident on the GPU. ktransformers demonstrates the shape carries in practice. On this box (9800X3D, DDR5-6000) it is the difference between comfortably running a 30B-A3B and reaching the 80B-120B class — [`GOAL.md`](GOAL.md) now names that as the ambition for MoE — which no amount of kernel work on the GPU side can buy.
+
+The pieces imp would need mostly exist: grouped GEMM, expert routing and paged memory are all in place, and `expert_overhead_pct` already models the on-device/off-device split. So this is engineering, not a breakthrough.
+
+Two things have to be said plainly before anyone starts:
+
+- **It collides with a stated non-goal.** [`GOAL.md`](GOAL.md) says "Not a CPU engine. GPU only. No AVX kernels." Taking this on means amending that line deliberately — the scope decision comes first, the code second.
+- **DDR5 bandwidth is a hard ceiling, and whether it lands at usable tok/s is a measurement question, not a matter of belief.** The honest first step is a bandwidth-and-latency budget for one decode step with a realistic hot/cold split, measured on this host, before a line of kernel code is written. If that budget says the CPU half cannot keep up with the GPU half, the idea is dead and the measurement is what kills it.
+
 Closed competitive records (kept for the record, not active work):
 
 - **NVFP4 prefill vs vLLM -- CLOSED** (re-measured 2026-06-13, commit `290a163a`). FP16-QK FA2 as primary hd=128 prefill lifted pp4096 +21-24%: MoE pp4096 +4% ahead of vLLM, MoE pp2048 +27%, dense pp2048 ~tie. The lone residual gap -- dense pp4096 at ~1.04× -- is structural: every bounded kernel idea (cross-tile pipeline, grouped-GEMM tile axis, chunk-4096, occupancy/2-CTA, fp8-QK, scaled fp8-KV) was measurement-refuted; at pp4096 FA2 sits at ~5% DRAM and the dominant cost is the NVFP4 GEMMs (~59%), a separately-refuted ceiling.
