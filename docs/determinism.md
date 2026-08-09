@@ -87,6 +87,25 @@ FP values are bit-identical.
 rest of deterministic mode. The `[runtime] deterministic` guarantee in the first
 section is unaffected — it already covers this.
 
+Its decode cost, measured the way `bench_gate.sh` measures (discarded warm-up
+run per process, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, `--prefill-chunk-size 0`),
+four alternating pairs on Qwen3-4B-IQ4_NL, `tg128` tok/s:
+
+| pair | off | on |
+|---|---|---|
+| 1 | 295.99 | 285.80 |
+| 2 | 268.77 | 280.03 |
+| 3 | 278.02 | 281.24 |
+| 4 | 266.91 | 271.08 |
+
+Medians 273.4 off / 280.6 on — the arms are separated by less than the off arm's
+own spread (10.9 %), and `on` wins three pairs of four. So on this shape the
+"slower but reproducible" note above overstates it: **the decode cost is below
+this host's noise floor.** Prefill is deliberately not quoted — `docs/BENCHMARKING.md`
+rules it out as an A/B signal, and split-k reduction is exactly where a cost
+would be most plausible, so "no measurable cost" is a statement about decode on
+one model, not a general one.
+
 `PrefixCacheE2ETest.FreshVsPrefixHitTokenEqual` asserts the strong version of
 this property and passes: it uses a long multi-block prompt whose decisions have
 no margin this narrow. The gate is right about what it measures; the promise is
