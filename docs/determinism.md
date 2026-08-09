@@ -55,6 +55,43 @@ algo selection; see `deterministic_gemm` for the hard guarantee).
 `runtime.warmup=false` restores the old init time and with it the
 first-request asymmetry — acceptable for dev/CI, not for evals.
 
+### Known hole: a prefix-cache hit is not bit-equal to a fresh prefill (#1314)
+
+The guarantee above has one measured exception. A request served from the
+prefix cache prefills only the uncached tail, so the same prompt reaches
+cuBLASLt with a different M dimension than on a fresh prefill — different algo
+pick, possibly a different split-k reduction, and results that agree closely but
+not bitwise. Any greedy decision whose margin is smaller than that drift can
+then land either way, and the first request of a process is the one that runs
+fresh, so it is the one that differs.
+
+Measured on `Llama-3.2-3B-Instruct-IQ4_XS`, whole `tests/api/test_chat.py`
+against a freshly started server, five fresh servers per arm:
+
+| arm | runs with a divergence |
+|---|---|
+| default | **5/5** |
+| `server.prefix_cache = false` | 0/5 |
+| `runtime.deterministic = true` | 0/5 |
+| `runtime.deterministic_gemm = true` | 0/5 |
+
+Scale: the two paths agree to ≤ 5e-3 in logprob at every position and produce
+identical top-5 candidate sets; the flip happened on a 0.018-nat margin between
+`.` and `<|eot_id|>`. So this is a numerical difference between two ways of
+computing the same thing, not the cache serving different content — but it is
+not covered by known limit 1 either, which is about *exactly tied* logits whose
+FP values are bit-identical.
+
+**If you need order-independent greedy output today**, set
+`runtime.deterministic_gemm = true`; it is sufficient on its own, without the
+rest of deterministic mode. The `[runtime] deterministic` guarantee in the first
+section is unaffected — it already covers this.
+
+`PrefixCacheE2ETest.FreshVsPrefixHitTokenEqual` asserts the strong version of
+this property and passes: it uses a long multi-block prompt whose decisions have
+no margin this narrow. The gate is right about what it measures; the promise is
+wider than what the gate can see.
+
 ## Known limits
 
 These are the documented boundaries of the guarantee. They are deliberate
