@@ -207,7 +207,28 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16) {
+    // FP8 KV decode is broken at head_dim=64 (#1339): the paged split-K FP8
+    // pipeline kernel faults with `misaligned address` at its HD=64
+    // instantiation (attention_paged_fp8.cu, the `case 64:` launch), and the
+    // fault takes the CUDA context with it — every later launch and even
+    // cudaFree fails, so a server wedges with 0-token completions instead of
+    // erroring out. `ELEMS = HEAD_DIM / WARP_SIZE` is 2 there against 4 at
+    // hd=128, so the vectorised load path (FP8_VEC4 = ELEMS / 4) degenerates.
+    //
+    // Fall back rather than refuse: FP8 KV is a memory optimisation, and losing
+    // it is strictly better than losing the process. The kernel bug itself is
+    // still open — this only stops it being reachable by configuration.
+    if (config_.kv_cache_dtype == QType::FP8_E4M3 && mcfg.head_dim == 64) {
+        IMP_LOG_WARN("KV cache dtype: FP8_E4M3 requested but head_dim=64 — falling back to FP16. "
+                     "The FP8 paged decode kernel faults at this head dim (#1339); FP8 KV is "
+                     "available on head_dim 96/128/256/512.");
+        config_.kv_cache_dtype = QType::F16;
+    }
+
+    // head_dim != 64: the legacy auto-upgrade must not undo the #1339 fallback
+    // above — it runs on exactly the F16 state that fallback produces.
+    if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16 &&
+        mcfg.head_dim != 64) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: kv_cache.fp8_auto_legacy → FP8_E4M3 (legacy auto-upgrade)");
     } else if (config_.kv_cache_dtype == QType::F16) {
