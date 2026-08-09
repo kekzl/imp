@@ -42,7 +42,7 @@ ENV CUDA_HOME=/usr/local/cuda
 # --build-arg from that file. The defaults below keep a bare `docker build .`
 # working and MUST match cmake/imp-deps.cmake.
 ARG IMP_DEP_GOOGLETEST_TAG=v1.17.0
-ARG IMP_DEP_CUTLASS_TAG=v4.6.0
+ARG IMP_DEP_CUTLASS_TAG=v4.6.2
 ARG IMP_DEP_HTTPLIB_TAG=v0.50.1
 ARG IMP_DEP_NLOHMANN_JSON_TAG=v3.12.0
 RUN git clone --depth=1 --branch ${IMP_DEP_GOOGLETEST_TAG} https://github.com/google/googletest.git /deps/googletest \
