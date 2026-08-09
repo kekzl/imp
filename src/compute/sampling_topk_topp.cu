@@ -394,7 +394,7 @@ __global__ void softmax_max_kernel(const float* __restrict__ logits, int vocab_s
         for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++)
             if (s_max[w] > mx)
                 mx = s_max[w];
-        atomicMax(reinterpret_cast<int*>(d_max), __float_as_int(mx));
+        atomic_max_float(d_max, mx);
     }
 }
 

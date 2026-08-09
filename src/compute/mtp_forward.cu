@@ -12,6 +12,7 @@
 //   token     = argmax(logits)
 // =============================================================================
 
+#include "compute/warp_reduce.cuh"
 #include "compute/mtp_forward.h"
 #include "compute/activation.h"     // swiglu, shared_expert_gate_scale
 #include "compute/embedding.h"      // embedding_lookup (handles quantized tables)
@@ -257,7 +258,7 @@ __global__ void mtp_attn_kv_scan_kernel(
     __shared__ float s_block_max;
     if (tid == 0) s_block_max = -1.0e30f;
     __syncthreads();
-    atomicMax(reinterpret_cast<int*>(&s_block_max), __float_as_int(max_score));
+    atomic_max_float(&s_block_max, max_score);
     __syncthreads();
     float gmax = s_block_max;
 
