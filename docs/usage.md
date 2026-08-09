@@ -9,9 +9,9 @@ Build instructions, CLI/server usage, configuration, C API, project structure.
 - **NVIDIA Blackwell GB202** (sm_120a) — RTX 5090, RTX PRO 5000 Blackwell, or RTX PRO 6000 Blackwell. Same binary, same kernels; the workstation cards just have more VRAM (48 / 96 GB) for bigger MoE models without expert offload.
 - **CUDA Toolkit 13.3** (13.2 minimum enforced by CMake; 13.3 is the canonical toolchain Docker and CI build with) — `cudart`, `cuda_driver`, `cublas`, `cublasLt`
 - **CMake 3.25+**
-- **C++20 compiler** (GCC 11+, Clang 14+)
+- **C++23 compiler** (GCC 13+, Clang 16+) — `CMAKE_CXX_STANDARD 23` is required, not a preference
 
-CUTLASS v4.5.1 and Google Test v1.17.0 are fetched automatically via
+CUTLASS v4.6.2 and Google Test v1.17.0 are fetched automatically via
 `FetchContent`. `stb_image` and `stb_image_resize2` are vendored in
 `third_party/stb/`.
 
@@ -33,7 +33,7 @@ make verify          # full pre-merge gate (~5 min)
 
 | CMake option | Default | Description |
 |---|---|---|
-| `IMP_BUILD_TESTS` | ON | GTest suite (~700 tests across 8 binaries) |
+| `IMP_BUILD_TESTS` | ON | GTest suite (2125 cases across 8 binaries) |
 | `IMP_BUILD_TOOLS` | ON | imp-cli |
 | `IMP_BUILD_BENCH` | ON | imp-bench |
 | `IMP_BUILD_SERVER` | ON | imp-server |
@@ -440,7 +440,7 @@ imp/
 │   ├── imp-cli/          CLI (interactive + single-prompt + benchmark)
 │   ├── imp-server/       OpenAI + Anthropic-compatible HTTP server
 │   └── imp-bench/        Standalone benchmarks
-├── tests/                Google Test suite (~700 tests across 8 binaries)
+├── tests/                Google Test suite (2125 cases across 8 binaries)
 └── third_party/stb/      stb_image (image loading for vision)
 ```
 
