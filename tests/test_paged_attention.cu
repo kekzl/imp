@@ -676,7 +676,7 @@ TEST(PagedAttentionTest, GQALongContext) {
 // first hd=64 model; the rest of the zoo is hd>=128).
 // =========================================================================
 
-void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256) {
+void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_scratch = true) {
     constexpr int batch = 1, n_heads = 64, n_kv_heads = 8, head_dim = 64;
     // seq_len 256 = 16 blocks >= 4 → split-K heuristics fire (compute_splitk_splits).
     // seq_len  48 =  3 blocks  < 4 → they do not, which is the ONLY way to reach
@@ -696,8 +696,16 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256) {
         h_V[i] = sinf(static_cast<float>(i) * 0.011f + 0.5f);
     }
     std::vector<float> h_sinks(n_heads);
-    for (int h = 0; h < n_heads; h++)
-        h_sinks[h] = -1.0f + 0.05f * static_cast<float>(h);  // mix of weak/strong sinks
+    for (int h = 0; h < n_heads; h++) {
+        // The sink logit has to compete with the SUM of seq_len score
+        // exponentials, so a value near the score range contributes almost
+        // nothing. At the original -1.0 + 0.05h the sink carried 0-13% of the
+        // mass and deleting it moved the output by at most 0.0017 — under the
+        // tolerance this test compared with, which is why mutant M31 (#1303)
+        // survived a test written to catch it. At 4.0 + 0.05h it carries
+        // 0.5-96% and deleting it moves the output by up to 0.057.
+        h_sinks[h] = 4.0f + 0.05f * static_cast<float>(h);
+    }
 
     // CPU reference: softmax over [scores, sink]; sink column dropped.
     std::vector<float> h_O(n_heads * head_dim, 0.0f);
@@ -753,12 +761,19 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    // Force split-K: provide scratch (64 blocks < 2*SMs on any modern GPU).
+    // Split-K needs scratch: with it and >=4 blocks the split path takes over,
+    // without it num_splits stays 1 and the dispatch falls through to the GQA
+    // branch — which is how the cluster kernel becomes reachable (see the test
+    // list at the bottom of this block).
     constexpr int kMaxSplits = 64;
     size_t scratch_size = static_cast<size_t>(batch) * n_heads * kMaxSplits * (2 + head_dim) * sizeof(float);
     void* d_scratch = nullptr;
-    cudaMalloc(&d_scratch, scratch_size);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
+    if (with_scratch) {
+        cudaMalloc(&d_scratch, scratch_size);
+        paged_attention_set_splitk_scratch(d_scratch, scratch_size);
+    } else {
+        paged_attention_set_splitk_scratch(nullptr, 0);
+    }
 
     half* d_sinks = nullptr;
     if (with_sinks) {
@@ -781,14 +796,21 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256) {
         for (int d = 0; d < head_dim; d++) {
             int idx = qh * head_dim + d;
             max_err = std::max(max_err, static_cast<double>(std::abs(result[idx] - h_O[idx])));
-            EXPECT_NEAR(result[idx], h_O[idx], 0.05f)
-                << "split-K hd64 mismatch at Q-head " << qh << " dim " << d
-                << " (with_sinks=" << with_sinks << ")";
+            // 2e-3, not the 0.05 this used to allow: measured max error against
+            // the fp32 host reference is 1.7e-4 (seq_len 48) / 7.1e-5 (256), so
+            // 0.05 was ~300x looser than the kernel needs and swallowed the
+            // whole sink term. 2e-3 keeps a 12x margin over the kernel and still
+            // catches a dropped sink by 4.7x (seq_len 256) to 28x (seq_len 48).
+            EXPECT_NEAR(result[idx], h_O[idx], 2e-3f)
+                << "hd64 decode mismatch at Q-head " << qh << " dim " << d << " (with_sinks=" << with_sinks
+                << ", seq_len=" << seq_len << ", splitk_scratch=" << with_scratch << ", max_err=" << max_err
+                << ")";
         }
     }
 
     paged_attention_set_splitk_scratch(nullptr, 0);
-    cudaFree(d_scratch);
+    if (d_scratch)
+        cudaFree(d_scratch);
     if (d_sinks)
         cudaFree(d_sinks);
     free_gpu(d_Q);
@@ -811,6 +833,25 @@ TEST(PagedAttentionTest, GQA_NoSplitK_HD64_Sinks) {
 }
 TEST(PagedAttentionTest, GQA_NoSplitK_HD64) {
     run_gptoss_shape_splitk_case(/*with_sinks=*/false, /*seq_len=*/48);
+}
+
+// Third sink implementation, third test. `crosswarp_reduce_and_write` in
+// attention_paged_common.cuh is shared by the cluster kernel and every
+// quantised-KV decode (int4/int8/nvfp4/nvfp4_tc/fp8) — but only the cluster
+// kernel passes it a sink pointer; the others leave the argument at its nullptr
+// default. So the sink branch in that helper is reachable through exactly one
+// launch configuration: no split-K scratch (num_splits stays 1), n_q_per_kv in
+// {2,4,8}, >=8 context blocks and head_dim in {64,96,128,256}.
+//
+// That is what mutant M31 (#1303) deletes. The two cases above cannot reach it:
+// 48 tokens is 3 blocks (< 8, so the plain GQA kernel runs, which handles sinks
+// inline) and 256 tokens with scratch goes split-K (its own reduction, also
+// inline). Both stayed green with the term removed.
+TEST(PagedAttentionTest, GQA_Cluster_HD64_Sinks) {
+    run_gptoss_shape_splitk_case(/*with_sinks=*/true, /*seq_len=*/256, /*with_scratch=*/false);
+}
+TEST(PagedAttentionTest, GQA_Cluster_HD64) {
+    run_gptoss_shape_splitk_case(/*with_sinks=*/false, /*seq_len=*/256, /*with_scratch=*/false);
 }
 
 // =========================================================================

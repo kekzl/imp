@@ -169,6 +169,20 @@ same lesson one iteration earlier: *"The split-K branch only activates when
 scratch is set — none of the older tests set it, so the hd=64 split-K path was
 never covered."*
 
+**Closed in iteration 13.** The recipe above (an FP8-KV decode with sinks) would
+not have worked either: `paged_attention_decode_fp8` has no sink parameter at
+all, and neither do the int4/int8/nvfp4 launchers — all six quantised callers
+leave `attn_sinks` at its `nullptr` default. The branch is reachable through
+exactly one launch configuration, the cluster kernel's: no split-K scratch
+(`num_splits` stays 1), `n_q_per_kv` in {2,4,8}, head_dim in {64,96,128,256} and
+**at least 8 context blocks**. `GQA_Cluster_HD64_Sinks` (256 tokens, scratch
+withheld) hits it; with M31 injected it is the only one of the 16
+`PagedAttentionTest` cases that fails.
+
+A second defect had to be fixed for that test to be able to fail at all: the
+sink values were numerically invisible. See `TEST_HARDENING_LOG.md`,
+iteration 13.
+
 ## E1 — no test exists
 
 ### M29 / M30 — nothing in the suite can observe performance

@@ -1132,3 +1132,135 @@ fails on `'2 + 2 = 4'` vs `'2 + 2 = 4.'` — the greedy-divergence class of #129
    JSON error envelope for bodyless errors.
 6. **Are all new tests wired into CI?** Yes — that is the iteration. What is
    *not* wired is generation; it needs a GPU runner, which remains a WON'T FIX.
+
+---
+
+## Iteration 13 — 2026-08-09 — focus: the mutant that two tests failed to kill — commit: `583923bc`
+
+**Mutation score: 48/52 = 92.3 %** (prev 47/52 = 90.4 %) — M31 killed, so
+`masking` closes at 6/6. `controlflow` is still 0/2, so the campaign's stopping
+rule is unchanged: substance met, letter not, for the reasons iteration 10 gave · **Bugs found:** none in production. **Test defects: 2
+(both in tests written to close this exact gap) · coverage gaps filed: 1 (#1329).**
+
+### #1303, third attempt
+
+M31 deletes the attention-sink term from `crosswarp_reduce_and_write`. Iteration 1
+filed it, iteration 2 added `GQA_NoSplitK_HD64_Sinks` from the diagnosis "the
+mutated function is the non-split reduction", iteration 3 corrected that
+diagnosis in `ESCAPE_ANALYSIS.md` — and the issue stayed open because nobody
+re-ran the mutant. Re-run:
+
+```
+[1/1] M31 masking: Attention sink logit is dropped from the softmax denominator.
+    -> SURVIVED (565.4s)
+```
+
+Two independent defects were keeping it alive.
+
+**1. The sink was numerically invisible.** The sink logit competes against the
+*sum* of `seq_len` score exponentials, so a value inside the score range
+contributes almost nothing. Computed independently of the kernel:
+
+| sinks | share of softmax mass | max &#124;Δ output&#124; when the term is dropped |
+|---|---|---|
+| `-1.0 + 0.05h` (as written) | 0 – 12.6 % | **0.00167** |
+| `+4.0 + 0.05h` | 0.5 – 95.6 % | 0.0566 |
+
+and the comparison was `EXPECT_NEAR(..., 0.05f)`. **The signal was 30x smaller
+than the tolerance.** The tolerance was itself unmoored: measured max error
+against the fp32 host reference on the clean build is 1.7e-4 (seq_len 48) and
+7.1e-5 (256), so `0.05` was ~300x looser than the kernel needs — loose enough to
+swallow most faults this test nominally covers, not only the sink.
+
+**2. Neither test could reach the mutated line even in principle.** There are
+three sink implementations, and `crosswarp_reduce_and_write` is the shared one.
+Six of its seven call sites — int4, int8, nvfp4, nvfp4_tc, fp8 and the tc
+variant — leave `attn_sinks` at its `nullptr` default. Exactly one passes a sink
+pointer: the SM120 thread-block-**cluster** kernel (`attention_paged.cu:1342`).
+So the branch is reachable through one launch configuration:
+
+- no split-K scratch, so `num_splits` stays 1
+- `n_q_per_kv` ∈ {2,4,8}, `head_dim` ∈ {64,96,128,256}
+- **≥ 8 context blocks**
+
+The two existing cases miss it from both sides: 48 tokens is 3 blocks (< 8 → the
+plain GQA kernel, which handles sinks inline), and 256 tokens *with* scratch goes
+split-K (its own reduction, also inline). Green either way.
+
+**Fixed:** sinks that carry real mass, tolerance `2e-3` (12x over the measured
+kernel error, 4.7x–28x under the sink signal), and two new cases —
+`GQA_Cluster_HD64_Sinks` / `GQA_Cluster_HD64` — at 256 tokens with the split-K
+scratch withheld, which is the only shape that enters the cluster kernel.
+
+### The harness's second verdict was a false KILL
+
+The re-run after the tolerance fix reported `-> KILLED (658.7s)`, on
+`test-e2e`: `LongContext8k`, `MultiDecodeOutputIsolation`,
+`GenerateCoherentOutput`, `MultiTurnConversation`, **`TokenizeRoundtrip`**. A
+tokenizer round-trip cannot observe a softmax denominator. That lane's own
+baseline is red for environmental reasons (11 failures from the documented
+WSL2/WDDM peak-VRAM behaviour when three large models load in one process), and
+iteration 1 already recorded that it *"cost this audit two false 'survivor'
+verdicts"*. This time it produced the opposite error.
+
+So the verdict used here is not the harness's. It is the isolated injection:
+with M31 in the tree, exactly **one** of the 16 `PagedAttentionTest` cases fails
+— `GQA_Cluster_HD64_Sinks` — and the other 15 pass, including both older sink
+tests. That is a deterministic unit-lane kill, and it doubles as proof of the
+reachability claim.
+
+**The lesson is one level up from E6.** This campaign has filed E6 five times as
+"the inputs cannot reach the fault". Here the *fix* for an E6 was itself an E6,
+twice over: wrong reachability, and an assertion that could not see the
+difference even where the code was reached. A test aimed at a mutant is not
+evidence until the mutant has been run against it — the campaign's own rule,
+applied to its own output.
+
+### /v1/messages: the Anthropic surface is pinned by nothing (#1329)
+
+With the real-binary lane from iteration 12 in place, the next question is what
+else it can reach. `tests/api/mock_server.py` implements four POST endpoints; the
+server ships eleven. `/v1/messages` — the headline Anthropic-compatibility
+feature, native per-token SSE since #754 — **has no test file at all**, and the
+mock cannot answer it, so nothing in CI has ever sent it a request.
+`tests/test_anthropic_transform.cpp` covers the transform as a unit; status
+codes, error envelope, SSE order and `usage` are all downstream of it.
+
+Probed model-less: the endpoint is correct today. Every error arrives in the
+Anthropic envelope (top-level `type: error` plus `error.type`), including the
+parse-error path — the one most likely to fall back to the OpenAI shape used two
+files away.
+
+**A truncated dump nearly turned that into a false bug report.** The probe
+printed `json.dumps(j)[:80]`, and nlohmann orders object keys alphabetically, so
+`"error"` came first and `"type": "error"` sat past the cutoff. "The envelope
+leaks the OpenAI shape" survived until it was checked with `curl`. Same class as
+this campaign's other measurement traps: the tool's output format, not the
+system, produced the signal.
+
+Two deliberate leniencies are now pinned as decisions rather than left implicit:
+`max_tokens` may be omitted (the Anthropic API requires it) and `temperature` is
+validated against `[0,2]` rather than `[0,1]`, both because the OpenAI validator
+is shared.
+
+**Tests added:** `tests/api/test_messages.py`, 20 cases. The validation half is
+`nomodel` and runs in CI against the shipping binary; generation and SSE order
+need weights and stay in the local lane.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** One was *tightened*
+   (sink tolerance 5e-2 → 2e-3, stronger sink values). Nothing loosened or
+   skipped.
+2. **Did every mutant get reverted?** Yes — `git status --porcelain` after each
+   run showed only untracked files.
+3. **Did I watch every new test fail before it passed?** Yes: M31 survived
+   before, and the new cluster cases were run against the injected mutant.
+4. **Is every bug claim backed by a script I ran twice?** The sink arithmetic was
+   computed independently of the kernel and then confirmed on the GPU by the
+   measured `max_err`; the reachability claim was read out of all seven call
+   sites and then confirmed by the mutant run.
+5. **Did I fix any production code?** No — both defects were in tests.
+6. **Are all new tests wired into CI?** The `/v1/messages` validation half, yes.
+   The sink tests are GPU-only, like every kernel test in this repo — which is
+   the standing consequence of the no-GPU-runner decision, not a new gap.
