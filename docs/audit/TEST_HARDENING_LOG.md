@@ -1139,8 +1139,10 @@ fails on `'2 + 2 = 4'` vs `'2 + 2 = 4.'` — the greedy-divergence class of #129
 
 **Mutation score: 48/52 = 92.3 %** (prev 47/52 = 90.4 %) — M31 killed, so
 `masking` closes at 6/6. `controlflow` is still 0/2, so the campaign's stopping
-rule is unchanged: substance met, letter not, for the reasons iteration 10 gave · **Bugs found:** none in production. **Test defects: 2
-(both in tests written to close this exact gap) · coverage gaps filed: 1 (#1329).**
+rule is unchanged: substance met, letter not, for the reasons iteration 10 gave.
+
+**Bugs found:** none in production. **Test defects: 2** (both in tests written to
+close this exact gap) · **coverage gaps filed: 1** (#1329).
 
 ### #1303, third attempt
 
@@ -1264,3 +1266,69 @@ need weights and stay in the local lane.
 6. **Are all new tests wired into CI?** The `/v1/messages` validation half, yes.
    The sink tests are GPU-only, like every kernel test in this repo — which is
    the standing consequence of the no-GPU-runner decision, not a new gap.
+
+---
+
+## Iteration 14 — 2026-08-09 — focus: measuring the number iteration 1 asserted — commit: `76a58c21`
+
+**Mutation score: unchanged at 92.3 %** for the kernel catalogue. The number that
+moves is the one this campaign has carried since Phase 0 as an argument rather
+than a measurement.
+
+### "0 % by construction" was a prediction, and predictions get tested
+
+Iteration 1 wrote:
+
+> no mutant injected into `tools/imp-server/` can be detected by any automated
+> gate, so the API layer's mutation score is 0 % by construction. That is why the
+> mutation baseline contains no API-category mutants — the outcome is knowable
+> from the job definition.
+
+It was knowable, it was right, and it stopped being true in iteration 12. Leaving
+it as an argument would have been the same mistake in the other direction, so:
+four mutants in `tools/imp-server/`, injected, built, run against the `nomodel`
+lane exactly as CI runs it, bytes restored in a `finally`.
+
+| mutant | verdict |
+|---|---|
+| A1 — `temperature` upper bound 2 → 3 | **KILLED** (4 failed / 54 passed) |
+| A2 — `n` upper bound 4 → 400 | **KILLED** (2 failed / 56 passed) |
+| A3 — `/v1/messages` parse error loses the top-level `type: error` | **KILLED** (2 failed / 56 passed) |
+| A4 — unmatched route drops its JSON body again | **KILLED** (5 failed / 53 passed) |
+
+**4/4, in 2.1 s per run, on a container with no GPU.** A3 and A4 are the
+interesting pair: A4 is literally the defect iteration 12 found and fixed, so the
+lane demonstrably holds the fix in place; A3 is a dialect regression in a file
+two directories from where the envelope shape is decided, which is the exact
+failure mode `test_messages.py` was written to prevent.
+
+`git status --porcelain` after the run: clean.
+
+### What the campaign's headline numbers are now
+
+| | iteration 1 | now |
+|---|---|---|
+| kernel catalogue, full local suite | 73.5 % (25/34) | **92.3 % (48/52)** |
+| kernel catalogue, the gate that blocks a merge | 2.9 % (1/34) | 2.9 %, structurally |
+| `tools/imp-server/`, the gate that runs on every PR | 0 % by construction | **4/4 measured** |
+
+The middle row is the one that does not move, and it is not a defect of this
+campaign: `ctest -L unit` runs on a container with no device, and the repo owner
+decided against a self-hosted GPU runner on 2026-08-03 (F-5, WON'T FIX). Every
+kernel mutant that dies, dies in a binary only a human on a 5090 ever runs. The
+campaign's answer to that has been to make the *reachable* half worth more —
+which is what rows one and three record.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No.
+2. **Did every mutant get reverted?** Yes — byte-restore in a `finally`, tree
+   verified clean afterwards.
+3. **Did I watch every new test fail before it passed?** No new tests this
+   iteration; the four mutants are the inverse experiment.
+4. **Is every bug claim backed by a script I ran twice?** No bug claimed. The
+   measurement script is in the scratchpad and is deterministic — same anchors,
+   same lane, same verdicts.
+5. **Did I fix any production code?** No.
+6. **Are all new tests wired into CI?** Nothing new to wire; this iteration
+   measured what iteration 12 wired.
