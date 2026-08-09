@@ -1137,8 +1137,9 @@ fails on `'2 + 2 = 4'` vs `'2 + 2 = 4.'` — the greedy-divergence class of #129
 
 ## Iteration 13 — 2026-08-09 — focus: the mutant that two tests failed to kill — commit: `583923bc`
 
-**Mutation score: M31 killed in the unit lane — the campaign's only remaining
-survivors are the two perf-only `controlflow` mutants (M29/M30)** · **Bugs found:** none in production. **Test defects: 2
+**Mutation score: 48/52 = 92.3 %** (prev 47/52 = 90.4 %) — M31 killed, so
+`masking` closes at 6/6. `controlflow` is still 0/2, so the campaign's stopping
+rule is unchanged: substance met, letter not, for the reasons iteration 10 gave · **Bugs found:** none in production. **Test defects: 2
 (both in tests written to close this exact gap) · coverage gaps filed: 1 (#1329).**
 
 ### #1303, third attempt
