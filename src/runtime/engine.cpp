@@ -558,9 +558,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // later refactor). imp.conf is the user's persistent preference; a CLI
     // flag / C-API value can additionally ENABLE a knob (OR), so a library
     // embedder's explicit choice is never clobbered. --mmproj (explicit
-    // one-shot) overrides imp.conf. RuntimeConfig defaults for these match the
-    // EngineConfig defaults (off), so no-imp.conf embedders are unaffected.
-    config_.use_prefix_caching = config_.use_prefix_caching || runtime_config_.server.prefix_cache;
+    // one-shot) overrides imp.conf.
+    //
+    // `use_prefix_caching` is deliberately NOT in that OR. The reasoning above
+    // holds only while the RuntimeConfig default matches the EngineConfig
+    // default; #758 flipped `server.prefix_cache` to true for the shipped
+    // image, and from then on OR-ing it meant a C-API embedder that set
+    // `use_prefix_caching = 0` — the documented default — got caching anyway,
+    // with no way to refuse it. Both shipped tools already pass their own
+    // value (`handlers.cpp` from imp.conf, `imp-cli/main.cpp` from its flag
+    // OR imp.conf), so nothing that ships loses caching. #1299/#1314.
     config_.use_green_contexts = config_.use_green_contexts || runtime_config_.server.green_contexts;
     if (config_.prefix_pin_budget_pct == 25)  // EngineConfig default untouched → take imp.conf
         config_.prefix_pin_budget_pct = runtime_config_.server.prefix_pin_budget_pct;
