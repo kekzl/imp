@@ -948,3 +948,84 @@ rather than to an audit that must not touch production code.
 
 The substantive stopping condition is met. The letter of it is not, and the gap
 is one named, specified test.
+
+---
+
+## Iteration 11 — 2026-08-09 — focus: speculative decoding — commit: `69411feb`
+
+**Mutation score: unchanged at 90.4 %** — a hunt.
+
+**Bugs found:** none. **S4/observability: 1 (#1321).**
+
+### The invariant held; the first test that said so was worthless
+
+The dispatch names it: *"With a fixed seed, spec-on vs spec-off must match."*
+Nothing asserted it — `test_ngram_draft.cpp`, `test_suffix_draft.cpp` and
+`test_token_recycle_draft.cpp` cover the draft **sources** in isolation, never
+the end-to-end equality. The per-request toggle from #522 (`"speculative": bool`,
+`handlers_chat_params.cpp:246`) makes the A/B a same-process comparison.
+
+First attempt, five ordinary prompts, greedy, seed pinned:
+
+```
+List the first five prime numbers.   ok
+Explain why the sky is blue.         ok
+Write the word banana five times.    ok
+Count from one to twelve.            ok
+Name three primary colours.          ok
+0 divergence(s)
+```
+
+The server log for those same requests:
+
+```
+[spec-ngram] verify_steps=0 miss_steps=155 drafted=0 accepted=0 (0.0%)
+[spec-ngram] verify_steps=0 miss_steps=167 drafted=0 accepted=0 (0.0%)
+```
+
+**`drafted=0` on every one.** The n-gram matcher needs repetition in the
+context; on those prompts it never fires, so the test compared the
+non-speculative path against itself. Five green ticks proving nothing — the
+exact shape this campaign has filed five times as E6, produced here by my own
+hand.
+
+With repetition-inducing prompts the drafter engages (`drafted=250
+accepted=218`, 87.2 %) and the invariant **holds byte for byte**. Clean negative
+result, and this time an earned one.
+
+### #1321 — the guard that should exist cannot be written
+
+`Engine::spec_stats_` is private with no accessor; `/metrics` has no spec
+series. So a test's only vacuity guard is a proxy on the *fixture* — "is the
+output repetitive enough that drafting was possible" — which is conservative and
+has false negatives. A `count from 1 to 60` prompt drafts well (its token
+pattern repeats) but has no repeated word n-gram at all, so a word-level guard
+rejects a fixture that works. That prompt was dropped from the committed test
+for exactly that reason, and the reason is written next to it: **a guard with
+false negatives is worse than none.**
+
+**Tests added: 1** — `tests/api/test_chat.py::TestSpeculativeDecoding`, two
+repetitive prompts, asserting byte equality plus the fixture guard. It skips
+under `IMP_USE_MOCK=1` with a reason naming #1302: the mock has no tokenizer and
+no drafter, so there is nothing there for it to be right or wrong about.
+Skipping visibly beats passing vacuously — and that skip is itself an argument
+for #1302 rather than a way around it.
+
+Verified in both lanes: mock 8 passed / 3 skipped (CI unchanged), real server
+2 passed.
+
+### Self-check
+
+1. **Did I modify, skip or loosen any existing test?** No. The one skip added is
+   a gate condition on a stand-in that cannot implement the feature, stated at
+   the call site, not a silenced failure.
+2. **Did every mutant get reverted?** No mutants this iteration.
+3. **Did I watch every new test fail before it passed?** Yes, twice over — first
+   against the mock (the fixture guard fired), then the counting-prompt case
+   that exposed the guard's false negative.
+4. **Is every bug claim backed by a script I ran twice?** No product bug
+   claimed; the vacuity finding is backed by the server's own counters, quoted.
+5. **Did I fix any production code?** No.
+6. **Are all new tests wired into CI?** The test runs in CI and skips there, for
+   a stated reason. Making it meaningful in CI is #1302; making it
+   self-validating anywhere is #1321.

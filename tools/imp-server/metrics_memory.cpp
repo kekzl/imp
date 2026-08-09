@@ -74,6 +74,24 @@ if (state.ctx && state.ctx->engine) {
             out += "imp_kv_blocks_live " + std::to_string(total_blocks - free_blocks - cached) +
                    "\n";
         }
+
+        // Speculative decoding (#1321). Without these a spec-decoding test
+        // cannot tell whether the drafter ran: the n-gram matcher only fires on
+        // repetitive context, so on ordinary prompts drafted stays 0 and the
+        // test compares the non-speculative path against itself and passes.
+        const auto& sp = state.ctx->engine->spec_stats();
+        out += "# HELP imp_spec_drafted_total Draft tokens proposed by speculative decoding\n";
+        out += "# TYPE imp_spec_drafted_total counter\n";
+        out += "imp_spec_drafted_total " + std::to_string(sp.drafted) + "\n";
+        out += "# HELP imp_spec_accepted_total Draft tokens the verify step accepted\n";
+        out += "# TYPE imp_spec_accepted_total counter\n";
+        out += "imp_spec_accepted_total " + std::to_string(sp.accepted) + "\n";
+        out += "# HELP imp_spec_verify_steps_total Verify forwards run\n";
+        out += "# TYPE imp_spec_verify_steps_total counter\n";
+        out += "imp_spec_verify_steps_total " + std::to_string(sp.verify_steps) + "\n";
+        out += "# HELP imp_spec_miss_steps_total Decode steps with no usable draft\n";
+        out += "# TYPE imp_spec_miss_steps_total counter\n";
+        out += "imp_spec_miss_steps_total " + std::to_string(sp.miss_steps) + "\n";
     }
 }
 // --vram-budget adherence. own_bytes is this process's allocations since
