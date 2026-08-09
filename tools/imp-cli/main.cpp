@@ -234,8 +234,10 @@ int main(int argc, char** argv) {
         config.use_mxfp4_prefill = 1;
     if (args.dual_path_quant)
         config.dual_path_quant = 1;
-    if (args.prefix_caching)
-        config.use_prefix_caching = 1;
+    // --prefix-caching, else imp.conf ([server] prefix_cache, default on). The
+    // engine used to OR the imp.conf value in for every embedder; it no longer
+    // does, so the CLI states its own choice (#1299).
+    config.use_prefix_caching = (args.prefix_caching || runtime_cfg.server.prefix_cache) ? 1 : 0;
     if (args.streaming_kv) {
         config.streaming_kv_enabled = 1;
         config.streaming_kv_n_sinks = args.streaming_sinks;
