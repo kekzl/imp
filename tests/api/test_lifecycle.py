@@ -115,6 +115,7 @@ class TestErrorResilience:
         })
         assert r2.status_code == 200
 
+    @pytest.mark.nomodel
     def test_multiple_errors_no_crash(self, client, model):
         """Rapid-fire invalid requests don't crash the server."""
         for _ in range(20):

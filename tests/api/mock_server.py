@@ -101,6 +101,15 @@ class MockHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_error(self, status: int, message: str, error_type: str = "invalid_request_error"):
+        # Anthropic clients read `type` at the top level; imp-server switches
+        # envelope by path (main.cpp pre-routing + error handler), so the mock
+        # has to as well or the two disagree on every /v1/messages error.
+        if urlparse(self.path).path.startswith("/v1/messages"):
+            if error_type == "invalid_request_error" and status == 404:
+                error_type = "not_found_error"
+            self._send_json(status, {"type": "error",
+                                     "error": {"type": error_type, "message": message}})
+            return
         self._send_json(status, {"error": {"message": message, "type": error_type}})
 
     def _check_model(self, model: str) -> bool:
@@ -204,10 +213,18 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def _parse_json_body(self, raw: bytes) -> dict | None:
         try:
-            return json.loads(raw)
+            body = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as e:
             self._send_error(400, f"Invalid JSON: {e}")
             return None
+        # A well-formed JSON body that is not an object used to fall through and
+        # raise inside the handler thread, so the client saw a dropped
+        # connection instead of a status. imp-server answers 400 (nlohmann
+        # type_error.306) — match the status, not the wording.
+        if not isinstance(body, dict):
+            self._send_error(400, "request body must be a JSON object")
+            return None
+        return body
 
     def _validate_sampling(self, body: dict) -> bool:
         """Validate sampling parameters. Returns False and sends error if invalid."""
@@ -231,8 +248,14 @@ class MockHandler(BaseHTTPRequestHandler):
                 return False
         if "n" in body:
             n = body["n"]
-            if n != 1:
-                self._send_error(400, '"n" must be 1. n > 1 is not supported.')
+            # imp-server accepts n in [1,4] on /v1/chat/completions and runs that
+            # many independent generations (handlers.cpp validate_sampling_params
+            # + handlers_chat_core.cpp). This used to reject everything but n=1,
+            # and the suite asserted that — a contract the shipping server never
+            # had. /v1/completions still refuses n>1; that check lives in its own
+            # handler, as it does in the server.
+            if not isinstance(n, int) or n < 1 or n > 4:
+                self._send_error(400, '"n" must be between 1 and 4.')
                 return False
         return True
 
@@ -283,7 +306,9 @@ class MockHandler(BaseHTTPRequestHandler):
 
         metrics.inc_request()
 
-        max_tokens = body.get("max_tokens", 16)
+        # `max_tokens: null` is "unset" in every OpenAI SDK. Passing None
+        # through reached min(None, 32) and killed the connection.
+        max_tokens = body.get("max_tokens") or 16
         seed = body.get("seed", 42)
         stream = body.get("stream", False)
         include_usage = False
@@ -307,23 +332,27 @@ class MockHandler(BaseHTTPRequestHandler):
             self._stream_chat_response(req_id, created, model, tokens,
                                        prompt_tokens, include_usage)
         else:
+            # n independent generations, like handlers_chat_core.cpp. The mock
+            # repeats the same text; what the suite checks is the choice count
+            # and the index numbering.
+            n_choices = body.get("n", 1)
             self._send_json(200, {
                 "id": req_id,
                 "object": "chat.completion",
                 "created": created,
                 "model": model,
                 "choices": [{
-                    "index": 0,
+                    "index": i,
                     "message": {
                         "role": "assistant",
                         "content": content,
                     },
                     "finish_reason": "stop" if completion_tokens < max_tokens else "length",
-                }],
+                } for i in range(n_choices)],
                 "usage": {
                     "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
+                    "completion_tokens": completion_tokens * n_choices,
+                    "total_tokens": prompt_tokens + completion_tokens * n_choices,
                 },
             })
 
@@ -408,6 +437,13 @@ class MockHandler(BaseHTTPRequestHandler):
         if not self._validate_sampling(body):
             return
 
+        # Multi-choice generation is chat-only in imp-server; /v1/completions
+        # refuses n>1 rather than silently returning one choice.
+        if body.get("n", 1) > 1:
+            self._send_error(
+                400, "n>1 is not supported on /v1/completions; request one completion per call")
+            return
+
         model = body.get("model", "")
         if not model:
             self._send_error(400, '"model" is required')
@@ -432,7 +468,9 @@ class MockHandler(BaseHTTPRequestHandler):
 
         metrics.inc_request()
 
-        max_tokens = body.get("max_tokens", 16)
+        # `max_tokens: null` is "unset" in every OpenAI SDK. Passing None
+        # through reached min(None, 32) and killed the connection.
+        max_tokens = body.get("max_tokens") or 16
         seed = body.get("seed", 42)
         tokens = self._generate_tokens(seed, max_tokens)
         content = "".join(tokens)
