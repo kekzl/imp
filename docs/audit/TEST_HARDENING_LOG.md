@@ -1138,7 +1138,7 @@ fails on `'2 + 2 = 4'` vs `'2 + 2 = 4.'` — the greedy-divergence class of #129
 ## Iteration 13 — 2026-08-09 — focus: the mutant that two tests failed to kill — commit: `583923bc`
 
 **Mutation score: 48/52 = 92.3 %** (prev 47/52 = 90.4 %) — M31 killed, so
-`masking` closes at 6/6. `controlflow` is still 0/2, so the campaign's stopping
+`masking` closes at 7/7 (it was 6/7 after iteration 3 added a mutant to it). `controlflow` is still 0/2, so the campaign's stopping
 rule is unchanged: substance met, letter not, for the reasons iteration 10 gave.
 
 **Bugs found:** none in production. **Test defects: 2** (both in tests written to
@@ -1284,8 +1284,17 @@ Iteration 1 wrote:
 > mutation baseline contains no API-category mutants — the outcome is knowable
 > from the job definition.
 
-It was knowable, it was right, and it stopped being true in iteration 12. Leaving
-it as an argument would have been the same mistake in the other direction, so:
+It was knowable, it was right, and it stopped being true in iteration 12.
+
+Note what it is *not* about. The `api` category iteration 8 opened at 5/5 covers
+the half of the server that CI already compiles — `anthropic.cpp`,
+`tool_call.cpp`, `responses.cpp`, `utils.cpp`, `constraint_validation.cpp` are
+linked into `test-core`, so a mutant there was always measured against the merge
+gate. The 0 % claim was about the other half: the HTTP handlers, which no gate
+executed. That is where these four go.
+
+Leaving it as an argument would have been the same mistake in the other
+direction, so:
 four mutants in `tools/imp-server/`, injected, built, run against the `nomodel`
 lane exactly as CI runs it, bytes restored in a `finally`.
 
