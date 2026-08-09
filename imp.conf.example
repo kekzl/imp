@@ -13,10 +13,10 @@
 # Lines starting with '#' are comments; section headers in [brackets].
 
 [runtime]
-# Force deterministic GEMM (cuBLASLt no_reduce_split). Slower but reproducible.
-# Also the switch that makes a prefix-cache hit bit-equal to a fresh prefill —
-# without it, the first request of a process can differ from the identical ones
-# after it on a narrow enough margin (#1314, docs/determinism.md).
+# Force deterministic GEMM (cuBLASLt no_reduce_split). Slower but reproducible
+# (decode cost measured below this host's noise floor; ~2-4 % on large-M FP16).
+# It does NOT make a prefix-cache hit bit-equal to a fresh prefill — for that
+# use server.prefix_cache = false (#1314, docs/determinism.md).
 deterministic_gemm   = false
 # Full reproducibility mode for temp=0 evals: deterministic MoE routing /
 # expert-scatter and top-k sampling kernels, implies deterministic_gemm.
