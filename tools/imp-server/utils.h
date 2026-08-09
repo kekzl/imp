@@ -67,6 +67,9 @@ bool api_key_matches(const std::string& authorization, const std::string& x_api_
 json safe_token_json(const std::string& text);
 json token_bytes_json(const std::string& text);
 size_t utf8_complete_len(const std::string& s);
+
+// Trim a trailing incomplete UTF-8 sequence from a finished string (#1310).
+void drop_incomplete_utf8_tail(std::string& s);
 void json_escape_into(std::string& out, const char* s, size_t len);
 
 int b64_val(unsigned char c);
