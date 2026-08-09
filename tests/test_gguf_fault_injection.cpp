@@ -206,36 +206,32 @@ TEST(GgufFaultInjection, ValidBaselineLoads) {
 
 // ---- Config vs tensors ----
 //
-// CHARACTERISATION, not an invariant. A GGUF whose metadata declares N
-// transformer blocks but ships no layer tensor at all loads *successfully*:
-// load_gguf returns a Model reporting n_layers == N with every layer weight
-// null, and emits no diagnostic about it. That is #1312.
+// A GGUF whose metadata declares N transformer blocks but ships no layer tensor
+// must not load. Before #1312 it did: load_gguf returned a Model reporting
+// n_layers == N with every layer weight null, and the only log line was an
+// unrelated tokenizer warning, so a truncated download was indistinguishable
+// from a complete file at the API boundary.
 //
-// This test pins the behaviour that exists so the change is visible when it is
-// fixed — it deliberately does NOT assert the invariant the loader ought to
-// enforce ("declared layers must have weights, or the load fails"), because
-// this file runs in the CI lane and a red required check blocks every merge.
-// The strict version is one edit away and is written out in #1312.
-//
-// Every config/tensor consistency check in the loader is a WARN
-// (gguf_loader.cpp:855, :862, :866) and none covers this case: n_attn is
-// counted at :730 and printed at :769, never compared against cfg.n_layers.
-TEST(GgufFaultInjection, DeclaredLayersWithoutTensorsLoadWithNullWeights) {
+// The check is deliberately weak per layer — attention, GDN and SSM blocks mix
+// freely across the architectures here, so no single tensor is universally
+// required — and rejects only a block that carries none of them and no FFN
+// either, which cannot be executed under any architecture.
+TEST(GgufFaultInjection, DeclaredLayersWithoutTensorsAreRejected) {
     GgufBytes g = build_valid_gguf();
     patch_u32(g.buf, g.off_block_count, 2);
-    auto model = load_buf(g.buf);
+    EXPECT_EQ(load_buf(g.buf), nullptr)
+        << "a GGUF declaring layers it has no tensors for must not load";
+}
 
-    ASSERT_NE(model, nullptr) << "documenting today's behaviour: the load succeeds";
-    EXPECT_EQ(model->config().n_layers, 2);
-    ASSERT_EQ(model->layers_.size(), 2u);
-    for (size_t i = 0; i < model->layers_.size(); ++i) {
-        EXPECT_EQ(model->layers_[i].wq.data, nullptr)
-            << "layer " << i << ": if this is now non-null the loader changed — see #1312";
-        EXPECT_EQ(model->layers_[i].wk.data, nullptr) << "layer " << i;
-        EXPECT_EQ(model->layers_[i].w_down.data, nullptr) << "layer " << i;
-    }
-    // The one thing the file did supply is present, so the null layers above
-    // are a missing-tensor consequence and not a wholesale load failure.
+// The zero-layer baseline must keep loading: block_count=0 has no block to be
+// empty, so the check above must not fire on it. Without this, tightening the
+// rule to "every declared layer needs weights" could silently start rejecting
+// embedding-only models.
+TEST(GgufFaultInjection, ZeroDeclaredLayersStillLoads) {
+    GgufBytes g = build_valid_gguf();  // block_count = 0
+    auto model = load_buf(g.buf);
+    ASSERT_NE(model, nullptr);
+    EXPECT_EQ(model->config().n_layers, 0);
     EXPECT_NE(model->token_embedding().data, nullptr);
 }
 

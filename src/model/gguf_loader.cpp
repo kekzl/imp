@@ -719,12 +719,28 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     {
         int n_attn = 0, n_moe = 0, n_dense_ffn = 0, n_shared_exp = 0;
         int n_qk_norm = 0, n_ssm = 0, n_gdn = 0, n_remapped = 0;
+        int n_empty = 0;
+        int first_empty = -1;
 
         for (int i = 0; i < cfg.n_layers; i++) {
             auto& ly = model->layers_[i];
             bool has_moe = (ly.moe_gate.data != nullptr);
             bool has_dense = (ly.w_up.data != nullptr);
             bool has_shared = (ly.w_up_shared.data != nullptr);
+
+            // A declared block must carry SOMETHING. Every architecture here
+            // mixes attention, GDN and SSM blocks freely, so no single tensor
+            // is universally required — but a block with none of them and no
+            // FFN either cannot be executed (#1312). Before this check a
+            // truncated download or an interrupted conversion produced a Model
+            // reporting n_layers=N with every weight null and no diagnostic
+            // beyond an unrelated tokenizer warning.
+            if (ly.wq.data == nullptr && ly.gdn_gate.data == nullptr && ly.ssm_in.data == nullptr &&
+                !has_moe && !has_dense && !has_shared) {
+                if (first_empty < 0)
+                    first_empty = i;
+                n_empty++;
+            }
 
             if (ly.wq.data != nullptr)
                 n_attn++;
@@ -767,6 +783,15 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             "Layer census: %d attn, %d GDN, %d MoE, %d dense FFN, %d shared expert, "
             "%d QK-norm, %d SSM  (of %d layers)",
             n_attn, n_gdn, n_moe, n_dense_ffn, n_shared_exp, n_qk_norm, n_ssm, cfg.n_layers);
+
+        if (n_empty > 0) {
+            IMP_LOG_ERROR(
+                "GGUF declares %d layers but %d of them carry no attention, GDN, SSM or FFN "
+                "tensors at all (first: layer %d) — the file is incomplete or truncated",
+                cfg.n_layers, n_empty, first_empty);
+            munmap(mmap_base, file_size);
+            return nullptr;
+        }
 
         if (n_remapped > 0) {
             IMP_LOG_INFO("Remapped %d layers: dense FFN tensors -> shared expert", n_remapped);
