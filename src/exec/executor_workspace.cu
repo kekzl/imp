@@ -88,8 +88,52 @@ void GraphExecutor::dump_moe_expert_hist_() {
     moe_.expert_hist = nullptr;
 }
 
+// Write the per-token expert trace (diagnostics.moe_expert_trace) and release
+// it. Same destructor-ordering argument as the histogram above.
+void GraphExecutor::dump_moe_expert_trace_() {
+    if (moe_.expert_trace == nullptr)
+        return;
+    const std::string& path = runtime_config().diagnostics.moe_expert_trace;
+    unsigned int used = 0;
+    cudaError_t rc = cudaMemcpy(&used, moe_.trace_cursor, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    if (rc == cudaSuccess) {
+        bool truncated = used > moe_.trace_capacity;
+        size_t n = std::min(static_cast<size_t>(used), moe_.trace_capacity);
+        std::vector<int> t(n, 0);
+        if (n > 0)
+            rc = cudaMemcpy(t.data(), moe_.expert_trace, n * sizeof(int), cudaMemcpyDeviceToHost);
+        const int rec = 1 + moe_.trace_top_k;
+        size_t records = (rc == cudaSuccess) ? n / rec : 0;
+        FILE* f = path.empty() ? nullptr : fopen(path.c_str(), "w");
+        if (!f) {
+            IMP_LOG_WARN("moe expert trace: cannot open %s for writing", path.c_str());
+        } else {
+            fprintf(f, "{\n  \"top_k\": %d,\n  \"records\": %zu,\n  \"truncated\": %s,\n", moe_.trace_top_k,
+                    records, truncated ? "true" : "false");
+            fprintf(f, "  \"trace\": [\n");
+            for (size_t r = 0; r < records; r++) {
+                fprintf(f, "    [");
+                for (int j = 0; j < rec; j++)
+                    fprintf(f, "%s%d", j ? "," : "", t[r * rec + j]);
+                fprintf(f, "]%s\n", r + 1 < records ? "," : "");
+            }
+            fprintf(f, "  ]\n}\n");
+            fclose(f);
+            IMP_LOG_INFO("moe expert trace: %zu records (top_k=%d)%s -> %s", records, moe_.trace_top_k,
+                         truncated ? " TRUNCATED" : "", path.c_str());
+        }
+    } else {
+        IMP_LOG_WARN("moe expert trace: cursor readback failed (%s)", cudaGetErrorString(rc));
+    }
+    vram_free(vram_alloc_, moe_.expert_trace);
+    vram_free(vram_alloc_, moe_.trace_cursor);
+    moe_.expert_trace = nullptr;
+    moe_.trace_cursor = nullptr;
+}
+
 GraphExecutor::~GraphExecutor() {
     dump_moe_expert_hist_();
+    dump_moe_expert_trace_();
     free_buffers();
 }
 

@@ -190,7 +190,24 @@ Three caveats on the band, none of them small: it is measured on an **idle** GPU
 
 **The first prompt buys almost all of it, and then the curve goes flat.** Calibration is worth 38 → 63 tok/s; eight times the calibration data adds 8 more. What it does *not* buy is the last ~20 points: the gap to the oracle is genuine per-prompt variation in which experts run hot, and no static set closes it. So the 103 tok/s "matched workload" row above is not an operating point — 63-71 is, and 142 is what an oracle would get.
 
-That leaves the remaining 2x reachable only by an **adaptive** resident set, whose eviction traffic none of these budgets include — and that is now the question, rather than whether calibration is worth doing. It is measurable with the histogram already in the tree, needs no AVX kernel, and no amendment to the [`GOAL.md`](GOAL.md) non-goal, which stands unamended.
+*Is an adaptive resident set worth its eviction traffic?* Measured with a per-token expert trace (`diagnostics.moe_expert_trace`), and the answer redirects this entry away from its own premise.
+
+**Expert selection has strong temporal locality.** Median reuse distance is **2 tokens** — 45 % of selections repeat at the very next token, 80 % within eight. An LRU at the same 40 % residency therefore needs almost no traffic once warm: over three prompts on Qwen3-30B-A3B, steady-state hit rates are **94.7 % / 90.0 % / 95.3 %**, i.e. only **0.38-0.80 experts per layer per token** are new. The cache warms in ~64 tokens (13.8 % miss over the first 64, 5.3 % thereafter).
+
+That is 4-5x fewer misses than the corpus-calibrated static set achieves, and it needs no calibration at all — the cache converges on the prompt it is actually serving.
+
+**Which makes host-side compute the weaker design.** Two ways to serve a miss, priced for a 120B-A5B shape (~5.9 MB per expert, 48 layers):
+
+| design | per token | cost |
+|---|---|---|
+| static calibrated split, host computes the cold half | 105 experts, 620 MB from host RAM @ 62.5 GB/s | 9.9 ms + 4.1 ms round trips = **14.0 ms** |
+| LRU, stream the missing expert into VRAM, GPU computes | 20-39 experts, 120-228 MB over PCIe @ 25.6 GB/s | **4.7-8.9 ms** |
+
+Streaming also deletes the per-layer host round trip entirely, because the GPU never stops being the thing that computes. Measured PCIe H2D is 25.6 GB/s at a single expert's 6 MiB but 50.6 GB/s at 64 MiB, so batching several promotions is worth more than any host-side kernel would be.
+
+**And imp already has that mechanism**: `ExpertCache::get_or_load()` (`executor_forward_moe_legacy.cu`), with `moe.no_expert_cache` to switch it off. So the work this entry was reaching for is not an AVX kernel and not a `GOAL.md` amendment — it is whether that cache holds this hit rate for a model whose experts do not fit, and whether a promotion can be issued early enough. The latter is the same structural constraint entry 6 records for KV spill: routing for layer N is known only at layer N, so the fetch sits in front of the kernels rather than behind them.
+
+Caveats: one model as proxy, three prompts, 512 tokens each; expert size and layer count assumed for the 120B shape rather than measured; promotions priced as if serialised on the critical path, and the existing cache's behaviour under a genuinely non-fitting model is untested here.
 
 Sample caveats: one model, 512 tokens per prompt, and the k=8 row has a single held-out prompt per split (spread +-8.8 points against +-1.7 at k=3), so the flat middle of the curve is the trustworthy part, not its ends.
 

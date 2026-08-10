@@ -277,6 +277,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("diagnostics.dump_logits_dir", cfg.diagnostics.dump_logits_dir);
     S("diagnostics.dump_routing_dir", cfg.diagnostics.dump_routing_dir);
     S("diagnostics.moe_expert_hist", cfg.diagnostics.moe_expert_hist);
+    S("diagnostics.moe_expert_trace", cfg.diagnostics.moe_expert_trace);
     B("diagnostics.dump_tokens", cfg.diagnostics.dump_tokens);
     I("diagnostics.ppl_first", cfg.diagnostics.ppl_first);
     I("diagnostics.ppl_last", cfg.diagnostics.ppl_last);

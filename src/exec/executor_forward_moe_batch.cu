@@ -708,6 +708,24 @@ __global__ void moe_expert_hist_kernel(const int32_t* __restrict__ expert_indice
     atomicAdd(&hist[static_cast<size_t>(layer) * n_experts + e], 1u);
 }
 
+// Per-token expert trace. One record per (token, layer): [layer, e0..e_{k-1}],
+// appended at an atomically claimed offset so records stay whole even though the
+// claim is concurrent. Capacity is checked before the claim is committed —
+// overrunning would corrupt the tail of a trace that is read as evidence.
+__global__ void moe_expert_trace_kernel(const int32_t* __restrict__ expert_indices, int* __restrict__ trace,
+                                        unsigned int* __restrict__ cursor, unsigned long long capacity,
+                                        int top_k, int layer) {
+    if (threadIdx.x != 0 || blockIdx.x != 0)
+        return;
+    unsigned int rec = 1u + static_cast<unsigned int>(top_k);
+    unsigned int off = atomicAdd(cursor, rec);
+    if (static_cast<unsigned long long>(off) + rec > capacity)
+        return;  // full: stop appending, the reader sees a short trace
+    trace[off] = layer;
+    for (int j = 0; j < top_k; j++)
+        trace[off + 1 + j] = expert_indices[j];
+}
+
 void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
                                         int top_k, const Tensor& router_in,
                                         bool fp32_gate_logits_ready, bool will_decode_fast,
@@ -842,6 +860,40 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
             moe_expert_hist_kernel<<<blocks, threads, 0, stream>>>(static_cast<const int32_t*>(
                                                                        routing.expert_indices.data),
                                                                    moe_.expert_hist, n_dec, ne, layer);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+    }
+
+    // Per-token expert trace. Decode only: a prefill call routes n tokens at once
+    // and would append n*top_k behind a single record header, which the reader
+    // cannot split back apart. Prefill decisions are not what a cache is judged
+    // on anyway — the per-token stream is.
+    if (n == 1 && !runtime_config().diagnostics.moe_expert_trace.empty()) {
+        if (moe_.expert_trace == nullptr) {
+            // 8M ints ~= 32 MiB: 512 tokens x 48 layers x (1+8) is 221k, so this
+            // holds a very long run before the capacity guard bites.
+            moe_.trace_capacity = 8u << 20;
+            moe_.expert_trace = static_cast<int*>(
+                vram_alloc(vram_alloc_, moe_.trace_capacity * sizeof(int), "moe_expert_trace"));
+            moe_.trace_cursor = static_cast<unsigned int*>(
+                vram_alloc(vram_alloc_, sizeof(unsigned int), "moe_trace_cursor"));
+            if (moe_.expert_trace != nullptr && moe_.trace_cursor != nullptr) {
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.trace_cursor, 0, sizeof(unsigned int), stream));
+                moe_.trace_top_k = top_k;
+                IMP_LOG_INFO("moe expert trace: recording -> %s",
+                             runtime_config().diagnostics.moe_expert_trace.c_str());
+            } else {
+                vram_free(vram_alloc_, moe_.expert_trace);
+                vram_free(vram_alloc_, moe_.trace_cursor);
+                moe_.expert_trace = nullptr;
+                moe_.trace_cursor = nullptr;
+                IMP_LOG_WARN("moe expert trace: allocation failed — not recording");
+            }
+        }
+        if (moe_.expert_trace != nullptr && top_k == moe_.trace_top_k) {
+            moe_expert_trace_kernel<<<1, 32, 0, stream>>>(
+                static_cast<const int32_t*>(routing.expert_indices.data), moe_.expert_trace,
+                moe_.trace_cursor, static_cast<unsigned long long>(moe_.trace_capacity), top_k, layer);
             IMP_CUDA_CHECK_LAUNCH();
         }
     }
