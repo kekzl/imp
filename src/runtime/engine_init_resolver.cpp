@@ -207,28 +207,28 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    // FP8 KV decode is broken at head_dim=64 (#1339): the paged split-K FP8
-    // pipeline kernel faults with `misaligned address` at its HD=64
-    // instantiation (attention_paged_fp8.cu, the `case 64:` launch), and the
-    // fault takes the CUDA context with it — every later launch and even
-    // cudaFree fails, so a server wedges with 0-token completions instead of
-    // erroring out. `ELEMS = HEAD_DIM / WARP_SIZE` is 2 there against 4 at
-    // hd=128, so the vectorised load path (FP8_VEC4 = ELEMS / 4) degenerates.
+    // Learned attention sinks are applied by the FP16 paged decode kernels and
+    // by nothing else: paged_attention_decode() takes an `attn_sinks` pointer,
+    // paged_attention_decode_fp8() has only `n_sinks` and no pointer at all. So
+    // a quantised KV cache on a sink model silently drops the sink term from
+    // the softmax denominator. executor_attention_decode.cu already WARNs about
+    // exactly this — but at decode time, long after the dtype was chosen, so
+    // the user got a line in the log and wrong output anyway.
     //
-    // Fall back rather than refuse: FP8 KV is a memory optimisation, and losing
-    // it is strictly better than losing the process. The kernel bug itself is
-    // still open — this only stops it being reachable by configuration.
-    if (config_.kv_cache_dtype == QType::FP8_E4M3 && mcfg.head_dim == 64) {
-        IMP_LOG_WARN("KV cache dtype: FP8_E4M3 requested but head_dim=64 — falling back to FP16. "
-                     "The FP8 paged decode kernel faults at this head dim (#1339); FP8 KV is "
-                     "available on head_dim 96/128/256/512.");
+    // Measured on gpt-oss-20b-mxfp4 (#1339), greedy, 300 tokens: FP16 KV answers
+    // ("Paris", the prime list, both finish_reason=stop) while FP8 KV emits no
+    // content at all on either prompt (finish_reason=length, empty). Decide it
+    // here, where the choice can still be changed.
+    if (config_.kv_cache_dtype != QType::F16 && mcfg.arch == ModelArch::GPT_OSS) {
+        IMP_LOG_WARN("KV cache dtype: %s requested, but this architecture carries learned attention "
+                     "sinks and only the FP16 paged decode kernels apply them (#1339) — falling back "
+                     "to FP16 KV rather than serving a wrong softmax denominator.",
+                     qtype_name(config_.kv_cache_dtype));
         config_.kv_cache_dtype = QType::F16;
     }
 
-    // head_dim != 64: the legacy auto-upgrade must not undo the #1339 fallback
-    // above — it runs on exactly the F16 state that fallback produces.
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16 &&
-        mcfg.head_dim != 64) {
+        mcfg.arch != ModelArch::GPT_OSS) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: kv_cache.fp8_auto_legacy → FP8_E4M3 (legacy auto-upgrade)");
     } else if (config_.kv_cache_dtype == QType::F16) {
