@@ -178,7 +178,21 @@ A trap worth recording, because it is what made the old figure look plausible: a
 
 Three caveats on the band, none of them small: it is measured on an **idle** GPU, so queueing under real decode load can only make the transfer term worse; it assumes the host compute is fully overlapped, which the sequential layer dependency makes non-trivial; and the residency figure is in-sample. Treat 52 tok/s as the honest end and 103 as the ceiling nobody should plan against.
 
-The open question is therefore back to being a *quality* one: can a resident set be chosen that survives workload drift — an LRU over experts, with its eviction traffic priced in. That is measurable with the histogram already in the tree, and it needs no AVX kernel and no amendment to the [`GOAL.md`](GOAL.md) non-goal, which stands unamended.
+*Can a calibrated resident set survive workload drift?* Measured, since that was the question this entry ended on. Nine prompts on Qwen3-30B-A3B (essay, code, arithmetic, lists, dialogue, explanation, history, science, verse, networking), 512 tokens each; resident set pooled from k of them, coverage evaluated on the held-out rest, 300 random splits per k:
+
+| calibration prompts | held-out coverage | ceiling |
+|---|---|---|
+| 0 (flat, no calibration) | 40.0 % | 38 tok/s |
+| **1** | **67.6 %** | **63 tok/s** |
+| 3 | 70.3 % | 67 tok/s |
+| 8 | 72.6 % | 71 tok/s |
+| oracle, set chosen per prompt | 92.1 % | 142 tok/s |
+
+**The first prompt buys almost all of it, and then the curve goes flat.** Calibration is worth 38 → 63 tok/s; eight times the calibration data adds 8 more. What it does *not* buy is the last ~20 points: the gap to the oracle is genuine per-prompt variation in which experts run hot, and no static set closes it. So the 103 tok/s "matched workload" row above is not an operating point — 63-71 is, and 142 is what an oracle would get.
+
+That leaves the remaining 2x reachable only by an **adaptive** resident set, whose eviction traffic none of these budgets include — and that is now the question, rather than whether calibration is worth doing. It is measurable with the histogram already in the tree, needs no AVX kernel, and no amendment to the [`GOAL.md`](GOAL.md) non-goal, which stands unamended.
+
+Sample caveats: one model, 512 tokens per prompt, and the k=8 row has a single held-out prompt per split (spread +-8.8 points against +-1.7 at k=3), so the flat middle of the curve is the trustworthy part, not its ends.
 
 Reproduce: `bash tools/analysis/moe_routing_skew.sh` for the skew, `tools/analysis/host_transfer_latency.cu` for the transfer term.
 
