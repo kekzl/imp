@@ -82,7 +82,8 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
                                  const half* K_scales, const half* V_scales, const int* block_tables,
                                  const int* context_lens, int block_size, float scale, int max_context_len,
                                  int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                 int max_blocks_per_seq = 0, int n_sinks = 0);
+                                 int max_blocks_per_seq = 0, int n_sinks = 0,
+                                 const void* attn_sinks = nullptr);
 
 // INT4 Paged attention for decode: KV cache stored in packed INT4 with per-head scales.
 // Q: [batch, 1, n_heads, head_dim] FP16
@@ -93,7 +94,8 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
                                  const half* K_scales, const half* V_scales, const int* block_tables,
                                  const int* context_lens, int block_size, float scale, int max_context_len,
                                  int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                 int max_blocks_per_seq = 0, int n_sinks = 0);
+                                 int max_blocks_per_seq = 0, int n_sinks = 0,
+                                 const void* attn_sinks = nullptr);
 
 // NVFP4 Paged attention for decode: KV cache stored as packed FP4 (E2M1) with
 // per-token-head-group_of_16 UE4M3 (FP8 E4M3) scales.
@@ -104,8 +106,9 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
 void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                                   const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
                                   const int* context_lens, int block_size, float scale, int max_context_len,
-                                  int sliding_window = 0, float softcap = 0.0f,
-                                  cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0);
+                                  int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
+                                  int max_blocks_per_seq = 0, int n_sinks = 0,
+                                  const void* attn_sinks = nullptr);
 
 // MXFP4-KV paged attention for decode: same layout as NVFP4 but scales are
 // UE8M0 bytes instead of E4M3. Structurally identical to NVFP4 per design
@@ -119,7 +122,8 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                                      const int* block_tables, const int* context_lens, int block_size,
                                      float scale, int max_context_len, int sliding_window = 0,
                                      float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                     int max_blocks_per_seq = 0, int n_sinks = 0);
+                                     int max_blocks_per_seq = 0, int n_sinks = 0,
+                                     const void* attn_sinks = nullptr);
 
 // BitDecoding-style TC variant: same signature + semantics as
 // paged_attention_decode_nvfp4 but routes the inner Q.K dot through

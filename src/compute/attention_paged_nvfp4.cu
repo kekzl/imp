@@ -75,13 +75,13 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
 template <int HEAD_DIM, ScaleDtype SCALE_DTYPE = ScaleDtype::E4M3>
 __global__ void paged_attention_decode_nvfp4_kernel(
     const half* __restrict__ Q,
-    const uint8_t* __restrict__ K_cache,    // packed FP4 pairs
-    const uint8_t* __restrict__ V_cache,    // packed FP4 pairs
-    const uint8_t* __restrict__ K_scales,   // UE4M3 per group
-    const uint8_t* __restrict__ V_scales,   // UE4M3 per group
-    half* __restrict__ O, const int* __restrict__ block_tables,
-    const int* __restrict__ context_lens, int batch_size, int n_heads, int n_kv_heads, int block_size,
-    float scale, int max_context_len, int max_num_blocks, int sliding_window, float softcap) {
+    const uint8_t* __restrict__ K_cache,   // packed FP4 pairs
+    const uint8_t* __restrict__ V_cache,   // packed FP4 pairs
+    const uint8_t* __restrict__ K_scales,  // UE4M3 per group
+    const uint8_t* __restrict__ V_scales,  // UE4M3 per group
+    half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens,
+    int batch_size, int n_heads, int n_kv_heads, int block_size, float scale, int max_context_len,
+    int max_num_blocks, int sliding_window, float softcap, const half* __restrict__ attn_sinks) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     static_assert(HEAD_DIM % 16 == 0, "HEAD_DIM must be divisible by 16 (NVFP4 group size)");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
@@ -198,7 +198,7 @@ __global__ void paged_attention_decode_nvfp4_kernel(
 
     extern __shared__ char smem_nvfp4[];
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_nvfp4), m_w, l_w, o_reg, warp_id,
-                                         lane_id, lane_offset, O, batch_idx, n_heads, head_idx);
+                                         lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
 
 // ---------------------------------------------------------------------------
@@ -360,8 +360,9 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                                   const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
                                   const int* context_lens, int block_size, float scale, int max_context_len,
                                   int sliding_window, float softcap, cudaStream_t stream,
-                                  int max_blocks_per_seq, int n_sinks) {
-    (void)n_sinks;  // streaming not yet wired
+                                  int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
+    (void)n_sinks;  // StreamingLLM not yet wired; LEARNED sinks are (#1345)
+    const half* sinks_h = reinterpret_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
     const int head_dim = static_cast<int>(Q.shape[3]);
@@ -412,7 +413,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
 #undef LAUNCH_SPLITK_NVFP4
 
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
-                                      num_splits, stream);
+                                      num_splits, stream, sinks_h);
     } else {
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
@@ -422,7 +423,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
         reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),               \
         reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales, reinterpret_cast<half*>(O.data), \
         block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len,     \
-        max_num_blocks, sliding_window, softcap);                                                            \
+        max_num_blocks, sliding_window, softcap, sinks_h);                                                   \
     IMP_CUDA_CHECK_LAUNCH()
 
         switch (head_dim) {
@@ -456,8 +457,10 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                                      const uint8_t* K_scales, const uint8_t* V_scales,
                                      const int* block_tables, const int* context_lens, int block_size,
                                      float scale, int max_context_len, int sliding_window, float softcap,
-                                     cudaStream_t stream, int max_blocks_per_seq, int n_sinks) {
-    (void)n_sinks;  // streaming not yet wired
+                                     cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
+                                     const void* attn_sinks) {
+    (void)n_sinks;  // StreamingLLM not yet wired; LEARNED sinks are (#1345)
+    const half* sinks_h = reinterpret_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
     const int head_dim = static_cast<int>(Q.shape[3]);
@@ -508,7 +511,7 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
 #undef LAUNCH_SPLITK_MXFP4KV
 
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
-                                      num_splits, stream);
+                                      num_splits, stream, sinks_h);
     } else {
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
@@ -518,7 +521,7 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
         reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),               \
         reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales, reinterpret_cast<half*>(O.data), \
         block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len,     \
-        max_num_blocks, sliding_window, softcap);                                                            \
+        max_num_blocks, sliding_window, softcap, sinks_h);                                                   \
     IMP_CUDA_CHECK_LAUNCH()
 
         switch (head_dim) {

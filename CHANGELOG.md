@@ -26,6 +26,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Learned attention sinks reach the INT8 / INT4 / NVFP4 / MXFP4 KV decode
+  kernels (#1345).** Only FP16 and FP8 applied them, so gpt-oss on any other
+  quantised KV served a softmax denominator short one column and answered
+  nothing at all. gpt-oss-20b now answers on INT8, NVFP4 and MXFP4 KV instead of
+  falling back to FP16 — INT4 keeps the fallback (its sink term is correct, the
+  4-bit grid is not).
+- **An unknown `kv_cache.dtype` says so instead of silently staying FP16.**
 - **`kv_cache.dtype=int8` now survives a prefix-cache hit (#1348).** INT8 was the
   one quantised KV dtype without a `paged_kv_gather` kernel, so the partial
   prefill after a cache hit aborted the process and the client got no HTTP
