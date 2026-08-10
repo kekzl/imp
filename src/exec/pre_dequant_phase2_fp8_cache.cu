@@ -274,7 +274,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     // the FULL-PRECISION attention projections. "auto" = full q/k/v/o on
     // gpt-oss only — its BF16 dense projections get no NVFP4 decode cache
     // (nvfp4_beneficial is GGUF-only) and decode as 2 B/elem FP16 GEMVs,
-    // 33.5% of the decode window (docs/audit/roofline_gptoss_2026_07_13.md);
+    // 33.5% of the decode window (docs/archive/roofline_gptoss_2026_07_13.md);
     // measured +12.1% decode. Teacher-forced PPL is UNAFFECTED by
     // construction (nsys-verified: zero FP8 GEMV kernels in a --perplexity
     // run — the apparent +2.6% in a naive PPL A/B was cuBLAS algo re-selection

@@ -836,7 +836,7 @@ diagnostics/robustness sweep. Decode measured neutral at every step
 (Qwen3-Coder-30B NVFP4 spec-OFF tg256 402.6 ± 0.3 tok/s across all A/Bs;
 `docs/audit/PERF_LOG.md`). Baseline snapshot and the claim-verification
 matrix for the external hardening brief that seeded the campaign:
-`docs/audit/DISPATCH_BASELINE_2026_07_17.md`.
+`docs/archive/DISPATCH_BASELINE_2026_07_17.md`.
 
 ### Fixed
 - **KV prefix-cache block double-ownership after rollback** (PR #1044):
@@ -1001,7 +1001,7 @@ suspend/resume and warm weight cache; competitive re-sweep vs llama.cpp b9976
 - **`diagnostics.ppl_first` / `diagnostics.ppl_last`**: NLL counting window for
   `imp-cli --perplexity`, matching llama-perplexity's `first = n_ctx/2` for exact
   cross-engine alignment. Recipe and results:
-  `docs/audit/ppl_parity_2026_07_12.md`.
+  `docs/archive/ppl_parity_2026_07_12.md`.
 
 ### Changed
 - **Dense n-gram speculation now WINS on long context** (#964). The verify chunk
@@ -1055,7 +1055,7 @@ suspend/resume and warm weight cache; competitive re-sweep vs llama.cpp b9976
   "qwen35"` fell through to the gpt2 per-char-punct fallback, over-splitting
   symbol runs by +13% tokens on a 95 KB corpus. It now routes to the qwen2
   scanner, with token streams verified identical to `llama-tokenize`. Found by
-  the first PPL-parity sweep (`docs/audit/ppl_parity_2026_07_12.md`).
+  the first PPL-parity sweep (`docs/archive/ppl_parity_2026_07_12.md`).
 - **The NVFP4-LM-head opt-outs were dead on GGUF checkpoints**: the
   quantized-source cache collector added the head unconditionally, so
   `gemm.nvfp4_lm_head=false` and the GOAL-listed `gemm.nvfp4_lm_head_gdn=false`
@@ -1200,7 +1200,7 @@ suspend/resume and warm weight cache; competitive re-sweep vs llama.cpp b9976
   All references (README, CLAUDE.md, AGENTS.md, skills, CI, scripts, code
   comments) updated. The root now holds only README / CHANGELOG / CONTRIBUTING
   / AGENTS.md / CLAUDE.md.
-- **Structural audit #6** (`docs/audit/structural_debt_2026_07_10.md`): swept the
+- **Structural audit #6** (`docs/archive/structural_debt_2026_07_10.md`): swept the
   ~40 PRs since audit #5. Confirmed findings filed as #941 (responses-stream
   metrics/keepalive drift), #942 (pre-upload KV reserve computes 0 bytes for
   4-bit KV dtypes), #943 (`workspace_estimate()` still reserves the S-matrix on
@@ -2445,7 +2445,7 @@ audit that mapped the remaining decode/prefill ceilings. Benchmarks refreshed
   SWA/NoPE dispatch (#622/#623/#625).
 - **VRAM cache rebuild** — RAII ownership of all 8 caches (double-free is now a
   compile error), one authoritative storage tier, honest diagnostics (#621).
-- **Roofline audit** (`docs/audit/roofline_2026_06_07.md` + the
+- **Roofline audit** (`docs/archive/roofline_2026_06_07.md` + the
   `tools/roofline/` ncu+nsys pipeline): shipped the `attn_fa2` f16-acc lever
   (#597) and documented the structural ceilings of MoE-decode `gemv_nvfp4`
   (#600), MoE-prefill `gemm_grouped_nvfp4` (#601), and hd=256 prefill coverage

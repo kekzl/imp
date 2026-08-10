@@ -753,7 +753,7 @@ include blast radius"; `runtime/config.h` is 1124 LOC and is included by **22 fi
 
 ### 9.9 C++23 usage
 
-`CMakeLists` targets C++23 and `docs/audit/cpp23_migration_2026_07_08.md` records the migration.
+`CMakeLists` targets C++23 and `docs/archive/cpp23_migration_2026_07_08.md` records the migration.
 Evidence of deliberate use: `std::exchange` throughout `cuda_raii.h`, `std::to_underlying`
 (`executor_attention_decode.cu:283`), `[[nodiscard]]`, `constexpr` predicates in `qtype.h`,
 `enum class` everywhere (34 distinct). Evidence of *un*even modernisation: `std::expected` unused
@@ -1770,7 +1770,7 @@ Prometheus scrape setup in `monitoring/`.
 
 **1 — REFUTED, with one exception.** The materialised cuBLAS path is not ~18 % of prefill; the
 measured figure is **0.0 %** at pp512-pp4096 on hd=128 models
-(`docs/audit/roofline_2026_06_07.md`, quoted at `docs/attention-dispatch.md:7-14`), and since #932
+(`docs/archive/roofline_2026_06_07.md`, quoted at `docs/attention-dispatch.md:7-14`), and since #932
 hd=256 rides FA2 too. The engine has *six* prefill tiers, not two, ordered by an explicit
 short-circuit chain that terminates in `throw` rather than a silent fallback
 (`attention_dispatch.cu:130`, #654). **The exception is Gemma-4's hd=512 global layers**, which take
@@ -1985,7 +1985,7 @@ Ordered by how likely the drift is to mislead someone into a wrong change.
 | 6 | *"~100k LOC (src/ + include/)"* | `CLAUDE.md` | **134 878** LOC in `src/` + `include/` (`docs/audit/arch_2026_07_29_evidence/largest_files.txt`); 220k with `tests/`. The dispatch's "~161k" is also stale in the other direction | MED |
 | 7 | *"The only env vars still seeded are `IMP_DETERMINISTIC` and `IMP_FMHA_FA2`; don't reintroduce ad-hoc env reads"* | `CLAUDE.md` | Four more are read: `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_CONFIG` (F-23) | MED |
 | 8 | *"`src/{core,compute,memory,model,quant,graph,runtime,vision,api}`"* | the dispatch itself | There is no `src/graph/` — it was renamed to `src/exec/` (git history still shows `src/graph/executor_forward.cu` in the 6-month churn list). `src/lora/` exists and is unlisted | MED |
-| 9 | *"9 architectures"*, *"6 tested models"*, *"C++20"* | the dispatch itself | **16** architecture enumerators (`model_arch.h:7`), ~30 validated checkpoints (`docs/supported-models.md`), **C++23** (`docs/audit/cpp23_migration_2026_07_08.md`) | MED |
+| 9 | *"9 architectures"*, *"6 tested models"*, *"C++20"* | the dispatch itself | **16** architecture enumerators (`model_arch.h:7`), ~30 validated checkpoints (`docs/supported-models.md`), **C++23** (`docs/archive/cpp23_migration_2026_07_08.md`) | MED |
 | 10 | *"no p50/p99 histograms"*, *"synthetic `/v1/messages` streaming (TTFT = full latency)"* | the dispatch itself | Prometheus histograms exist with `_bucket{le=…}` for `imp_request_duration_seconds`, `imp_ttft_seconds`, `imp_inter_token_seconds` (`handlers_misc.cpp:186-224`). `/v1/messages` has a real handler (`handlers_messages.cpp`, 497 LOC) plus the shared `stream_driver` | MED |
 | 11 | `ProcessDiag` is documented as *"snapshotted from RuntimeConfig once at startup (tool main calls `process_diag_install()`)"* | `runtime/process_diag.h:3-4` | **Accurate — and that is the problem.** The header honestly states the limitation; nothing states the *consequence* for C-API consumers, and `engine.cpp:783-790` patches exactly one of 28 flags without noting the other 27 (F-1) | MED |
 | 12 | *"`check-release.sh` runs in CI"* (prior state, per MEMORY) | — | **Now true** — `.github/workflows/ci.yml` job `Release hygiene` at `:352-356`. Recorded here as drift *repaired*, so nobody re-fixes it | — |

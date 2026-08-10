@@ -62,12 +62,15 @@ What imp guarantees, and where the edges are.
 - [`audit/AUDIT_FILESIZE.md`](audit/AUDIT_FILESIZE.md) — per-file rationale for the size gate
 - [`audit/TEST_INVENTORY.md`](audit/TEST_INVENTORY.md), [`audit/ESCAPE_ANALYSIS.md`](audit/ESCAPE_ANALYSIS.md), [`audit/MUTATION_BASELINE.md`](audit/MUTATION_BASELINE.md), [`audit/TEST_HARDENING_LOG.md`](audit/TEST_HARDENING_LOG.md) — what the suite covers, what escaped it, and how well it kills mutants
 
-**Dated campaign reports** — snapshots of one investigation, kept because their
-numbers are still cited. They are history, not current state: `roofline_*`,
-`structural_debt_*`, `prefill_gap_*`, `housekeeping_*`, `vram_audit_*`,
-`cpp23_migration_*`, `ppl_parity_*`, `PERF_AUDIT_*`, `DISPATCH_BASELINE_*`, and
+Plus [`audit/PERF_LOG.md`](audit/PERF_LOG.md) (append-only) and
 [`audit/AUDIT_ARCH_2026_07_29.md`](audit/AUDIT_ARCH_2026_07_29.md) with its
-evidence directory.
+evidence directory — the latter stays here because `check-release.sh`
+cross-checks it against `SETTLED.md`, and the gate fails if either moves.
+
+**Dated campaign reports live in [`archive/`](archive/)**, not here: roofline
+sweeps, structural-debt audits, the prefill-gap investigation, perplexity parity
+and the rest. They are history rather than current state, and their numbers are
+still cited from code — see [`archive/README.md`](archive/README.md).
 
 [`audit/decisions/`](audit/decisions/) holds ADRs — a decision outliving its
 context is the point of one.

@@ -429,7 +429,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // Q8_0 INT8 IMMA fast path (gemm.q8_imma_enabled, default off): fused
         // dequant on the int8 tensor cores instead of the materialize-to-FP16
         // → cuBLAS round-trip (the dominant Q8_0 prefill tax, see
-        // docs/audit/prefill_gap_2026_06_07.md §4.1). Covers beta=0 and the
+        // docs/archive/prefill_gap_2026_06_07.md §4.1). Covers beta=0 and the
         // beta=1 residual-add form; declines (shape / capture-guard) fall
         // through to the dequant fallback below.
         // M >= 2 (was >= 64): below 64 the dequant tax dominates even harder —

@@ -113,7 +113,7 @@ def render_body_consolidated(c, run, key):
         f"- History run: `{run['run_id']}` (commit `{meta['git']['commit']}`, "
         f"{meta['timestamp']}), raw exports: "
         f"`tools/roofline/history/raw/{run['run_id']}/`",
-        f"- Report: `docs/audit/roofline_2026_06_07.md` · Reproduce: "
+        f"- Report: `docs/archive/roofline_2026_06_07.md` · Reproduce: "
         f"`tools/roofline/roofline report --run {run['run_id']}`",
         "",
         "## Expected lever",

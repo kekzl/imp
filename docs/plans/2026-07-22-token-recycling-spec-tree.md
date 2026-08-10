@@ -19,7 +19,7 @@ hypothesis is refuted for this class**. Route (b) (true tree mask) is NOT
 warranted by these accept numbers (kill criterion §Risks: <1.3 applies to
 the deeper-hop accept, which collapses to ~0.05). TR stays default-off;
 re-evaluate only if the remaining #1055 work pushes the verify ratio below
-~1.3×. Full numbers: docs/audit/PERF_AUDIT_2026_07_23.md.
+~1.3×. Full numbers: docs/archive/PERF_AUDIT_2026_07_23.md.
 
 ## Motivation (measured, not assumed)
 

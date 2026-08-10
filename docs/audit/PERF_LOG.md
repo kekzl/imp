@@ -486,7 +486,7 @@ one-line follow-up: clear it at the fallback site.
 ## 2026-07-17 · Post-launch error checks (399 sites) + KV prefix-hash double-free fix — decode neutral
 
 Hardening WI-1/WI-2 (branch hardening/launch-checks-and-kv-churn, baseline
-`docs/audit/DISPATCH_BASELINE_2026_07_17.md`):
+`docs/archive/DISPATCH_BASELINE_2026_07_17.md`):
 `IMP_CUDA_CHECK_LAUNCH()` (cudaPeekAtLastError — logs at the launch site, does
 NOT clear, downstream propagation unchanged) after 399 previously-unchecked
 kernel launches in 82 .cu files, plus the KVCacheManager stale-prefix-hash
@@ -720,7 +720,7 @@ request reports `cached=4512/4524` (shared, not recomputed).
 Model: Qwen3-Coder-30B-A3B NVFP4, CUDA 13.3, `imp-cli --bench`, 7 reps/run, 2 cold
 restarts. Decode tg256 is the gate signal (prefill pp512 carries the ±2.6× cuBLAS
 restart variance). GPU verified free + warm-clocked. Full ledger: AUDIT.md (pass 2),
-docs/audit/AUDIT_REPORT.md.
+docs/archive/AUDIT_REPORT.md.
 
 ### Phase-0 baseline → post-fix (all soundness fixes)
 | shape | baseline | post-fix | gate (3% band) |

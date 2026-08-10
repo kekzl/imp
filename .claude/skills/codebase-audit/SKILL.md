@@ -89,13 +89,13 @@ themselves wrong. Read it at step 0, not here. What follows is only what has not
 into the ledger yet.
 
 From the structural-debt audit chain (D1–D4 / C1–C8, archived in `docs/archive/README.md`;
-current verdicts in `docs/audit/housekeeping_2026_06_13.md`):
+current verdicts in `docs/archive/housekeeping_2026_06_13.md`):
 - The two-config-systems split (`RuntimeConfig` global vs `ModelConfig::Overrides`) is
   known and deliberate; config keys use the typed-binder `B/I/F/S(...)` ladder (PR #626).
-- **Audit #5 (2026-07-07, `docs/audit/structural_debt_2026_07_07.md`)**: server layer is
+- **Audit #5 (2026-07-07, `docs/archive/structural_debt_2026_07_07.md`)**: server layer is
   the dominant debt source → issues #888–#897 filed. Before a new pass, read that
   report's **NOT-flagged list** — re-flagging its verified negatives wastes the sweep.
-  Companion: `docs/audit/vram_audit_2026_07_07.md` (note: a `VramOwned` type does NOT
+  Companion: `docs/archive/vram_audit_2026_07_07.md` (note: a `VramOwned` type does NOT
   exist — past audits hallucinated it).
 - **Memory-subsystem priors (2026-07-29, `AUDIT.md`)**: the "engine teardowns leak
   ~15 GiB" finding is **REFUTED as a leak** — every CUDA-level release works

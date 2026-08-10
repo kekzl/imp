@@ -4,7 +4,7 @@ Companion doc to [`architecture.md`](architecture.md) — covers exactly which a
 
 If this doc and the code disagree, the code wins. Source of truth is `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cu` for the FMHA chain.
 
-> **Measured coverage (2026-06-07, [`docs/audit/roofline_2026_06_07.md`](audit/roofline_2026_06_07.md)):**
+> **Measured coverage (2026-06-07, [`docs/archive/roofline_2026_06_07.md`](archive/roofline_2026_06_07.md)):**
 > on hd=128 models (Qwen3 dense/MoE — Q8_0, Q4_K_M, NVFP4) the legacy
 > materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512–pp4096
 > — FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range.
