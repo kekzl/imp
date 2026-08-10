@@ -275,7 +275,8 @@
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_fp8(q4, k_c, v_c, o4, layer_block_tables, state.context_lens, kv_bs, scale,
                                        kv_scale, state.max_context_len, layer_sliding_window,
-                                       cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
+                                       cfg.attn_logit_softcap, stream, state.max_blocks_per_seq,
+                                       layer_n_sinks, attn_sinks);
         } else {
             dispatch_record::set_attn_decode(AttnDecodePath::FP16);
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
@@ -283,7 +284,7 @@
                                    state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
                                    stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks, vhd);
         }
-        if (attn_sinks && cache_dtype != QType::F16) {
+        if (attn_sinks && cache_dtype != QType::F16 && cache_dtype != QType::FP8_E4M3) {
             static bool warned_sinks_kv = false;
             if (!warned_sinks_kv) {
                 warned_sinks_kv = true;

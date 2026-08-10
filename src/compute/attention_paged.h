@@ -70,7 +70,8 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                                 const int* block_tables, const int* context_lens, int block_size, float scale,
                                 float kv_scale, int max_context_len, int sliding_window = 0,
                                 float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                int max_blocks_per_seq = 0, int n_sinks = 0);
+                                int max_blocks_per_seq = 0, int n_sinks = 0,
+                                const void* attn_sinks = nullptr);
 
 // INT8 dp4a Paged attention for decode: KV cache stored in INT8 with per-head scales.
 // Q: [batch, 1, n_heads, head_dim] FP16
@@ -180,6 +181,7 @@ void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
 
 // Launch the split-K reduce kernel (shared across FP16/FP8/INT8).
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
-                                   int num_splits, cudaStream_t stream);
+                                   int num_splits, cudaStream_t stream,
+                                   const half* attn_sinks = nullptr);
 
 }  // namespace imp
