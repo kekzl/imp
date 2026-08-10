@@ -219,7 +219,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // ("Paris", the prime list, both finish_reason=stop) while FP8 KV emits no
     // content at all on either prompt (finish_reason=length, empty). Decide it
     // here, where the choice can still be changed.
-    if (config_.kv_cache_dtype != QType::F16 && mcfg.arch == ModelArch::GPT_OSS) {
+    if (config_.kv_cache_dtype != QType::F16 && config_.kv_cache_dtype != QType::FP8_E4M3 &&
+        mcfg.arch == ModelArch::GPT_OSS) {
         IMP_LOG_WARN("KV cache dtype: %s requested, but this architecture carries learned attention "
                      "sinks and only the FP16 paged decode kernels apply them (#1339) — falling back "
                      "to FP16 KV rather than serving a wrong softmax denominator.",
@@ -228,7 +229,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16 &&
-        mcfg.arch != ModelArch::GPT_OSS) {
+        true) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: kv_cache.fp8_auto_legacy → FP8_E4M3 (legacy auto-upgrade)");
     } else if (config_.kv_cache_dtype == QType::F16) {

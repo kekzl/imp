@@ -1142,11 +1142,14 @@ void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size) {
 }
 
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
-                                   int num_splits, cudaStream_t stream) {
+                                   int num_splits, cudaStream_t stream, const half* attn_sinks) {
     dim3 grid(batch_size, n_heads);
     dim3 block(128);
+    // The reduce kernel has always applied the sink term; this launcher used to
+    // hard-code nullptr, so every quantised-KV split-K path silently dropped it
+    // (#1345). Callers that have no sinks still pass nullptr and are unchanged.
     paged_attention_reduce_kernel<<<grid, block, 0, stream>>>(partial, O, n_heads, head_dim, num_splits,
-                                                              /*attn_sinks=*/nullptr);
+                                                              attn_sinks);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
