@@ -400,6 +400,33 @@ constraint. The `max` tie is a conservative aggregation that matches what the se
 can control — a real coupling, not a bug. Whatever fixes the attention half will have
 to change the *constraint* (how the fold works), not the weighting.
 
+**The second variant of the same idea is now measured too, and it is REFUTED for the
+same reason** (2026-08-10). Where the split above kept `max` and changed *which*
+statistic weights the error, this one keeps the single role and changes the
+*aggregation*: `mean` over the `n_rep` query-head channels instead of `max` — the
+weight that minimises their summed error rather than the loudest of them. Same
+harness, RTN re-measured in the same pipeline rather than quoted:
+
+| | RTN | `ABCD` with `max` | `ABCD` with `mean` | mean − max |
+|---|---|---|---|---|
+| 14B (`n_rep=5`) | 9.9766 | 18.0223 | 17.7464 | **−0.276** |
+| 0.6B (`n_rep=2`) | 30.3977 | 27.4846 | 27.5326 | +0.048 |
+
+The tie behaves exactly as the mechanism predicts — the effect is ~6x larger on the
+wide-GQA model and reverses sign on the narrow one, which is the `n_rep` dependence
+the `max` was accused of causing. **And it is worth 0.276 of an 8.05 problem, i.e.
+3 %.** So the aggregation is a real but minor consequence of the coupling, not its
+cause; the paragraph above is right that only the constraint can fix this. The flag
+that produced these numbers was removed again rather than shipped — a knob buying
+3 % would invite exactly the re-try this section warns against.
+
+One caveat on the magnitudes: `ABCD` costs **+8.05** over RTN here against the
++2.68 recorded above, on a run whose RTN reproduces (9.9766 vs 9.9252). The
+difference between the two setups is the calibration corpus — this run calibrated on
+`ppl_corpus_45k.txt`, the same text it scored on, where the numbers above deliberately
+calibrated on general prose that is *not* the scoring corpus. Same sign, 3x the
+magnitude, and unexplained; if anyone chases the attention half, that is a free lead.
+
 Two findings worth keeping separately. **Group A hurts both models** (+0.28 / +0.65),
 which has nothing to do with `n_rep` and was not previously known. And **`--calib`
 is not the thing that fails at 14B — the attention half of it is.** `--calib-groups
