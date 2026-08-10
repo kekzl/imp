@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-10
+
 ### Added
 
 - **`imp-server` starts without `--model`.** `--help` has always called the flag
@@ -52,6 +54,20 @@ there instead of retelling it.
   returned 935/1084/968/934 characters on Qwen3.6-35B-A3B-NVFP4, and never
   `finish_reason: "stop"`. The reserve now scales (`max(256, max_tokens/4)`);
   at or below 1024 nothing changes.
+
+### Changed
+
+- **Batch invariance is now a stated boundary, not an open question (#1314).**
+  `docs/determinism.md` says what holds instead: a batch neighbour's *content*
+  cannot reach another row (asserted bit-exactly), and joining a batch costs
+  rounding only (measured 0.22 % of the logit range). Output that must not
+  depend on concurrent traffic needs pinned batch composition — no flag makes
+  batched and solo bit-equal.
+- **The deterministic-mode E2E suite runs again (#1299).** It was gated on an
+  env var nothing set, so it had skipped since #542; `make test-e2e` now sets it
+  and covers a dense model as well as the MoE one. `DetEvalE2ETest` is
+  value-parameterised, so filters must use `*DetEvalE2ETest*` — the old
+  `DetEvalE2ETest.*` matches nothing and gtest calls that PASSED.
 
 ## [0.23.0] - 2026-08-07
 
