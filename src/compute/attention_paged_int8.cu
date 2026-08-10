@@ -259,7 +259,7 @@ __global__ void paged_attention_decode_int8_kernel(
     const half* __restrict__ K_scales, const half* __restrict__ V_scales, half* __restrict__ O,
     const int* __restrict__ block_tables, const int* __restrict__ context_lens, int batch_size, int n_heads,
     int n_kv_heads, int block_size, float scale, int max_context_len, int max_num_blocks, int sliding_window,
-    float softcap) {
+    float softcap, const half* __restrict__ attn_sinks) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     constexpr int DP4A_CALLS = (ELEMS + 3) / 4;
@@ -450,7 +450,7 @@ __global__ void paged_attention_decode_int8_kernel(
     // ---- Cross-warp reduction ----
     extern __shared__ char smem_int8[];
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_int8), m_w, l_w, o_reg, warp_id,
-                                         lane_id, lane_offset, O, batch_idx, n_heads, head_idx);
+                                         lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
 
 // ===========================================================================
@@ -461,10 +461,15 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
                                  const half* K_scales, const half* V_scales, const int* block_tables,
                                  const int* context_lens, int block_size, float scale, int max_context_len,
                                  int sliding_window, float softcap, cudaStream_t stream,
-                                 int max_blocks_per_seq, int n_sinks) {
-    // StreamingLLM (n_sinks > 0) not yet wired into INT8 decode; falls back
-    // to sliding-window when n_sinks is non-zero.
+                                 int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
+    // StreamingLLM (n_sinks > 0, evicted-token bookkeeping) is still not wired
+    // into the INT8 kernels; classical sliding-window applies instead.
+    //
+    // LEARNED sinks (attn_sinks, gpt-oss) now are (#1345) — same wiring as the
+    // FP8 path took in #1346. Without it a quantised KV cache served a softmax
+    // denominator missing the sink column.
     (void)n_sinks;
+    const half* sinks_h = reinterpret_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
     const int head_dim = static_cast<int>(Q.shape[3]);
@@ -518,7 +523,7 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
 
         // Phase 2: reuse shared reduce launcher
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
-                                      num_splits, stream);
+                                      num_splits, stream, sinks_h);
     } else {
         // Non-Split-K INT8 fallback (templated + vectorized dp4a)
         dim3 grid(batch_size, n_heads);
@@ -529,7 +534,7 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
         reinterpret_cast<const half*>(Q.data), reinterpret_cast<const int8_t*>(K_cache.data),               \
         reinterpret_cast<const int8_t*>(V_cache.data), K_scales, V_scales, reinterpret_cast<half*>(O.data), \
         block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len,    \
-        max_num_blocks, sliding_window, softcap);                                                           \
+        max_num_blocks, sliding_window, softcap, sinks_h);                                                  \
     IMP_CUDA_CHECK_LAUNCH()
 
         switch (head_dim) {

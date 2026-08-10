@@ -168,7 +168,7 @@
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
                                         layer_block_tables, state.context_lens, kv_bs, scale,
                                         state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                        stream, state.max_blocks_per_seq);
+                                        stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks);
         } else if (cache_dtype == QType::NVFP4) {
             // TC vs non-TC is decided per shape below.
             dispatch_record::set_attn_decode(AttnDecodePath::NVFP4);
@@ -176,7 +176,23 @@
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             // BitDecoding TC dispatch opt-in: kv_cache.bitdecoding_qk routes to the WMMA-Q.K variant; default
             // keeps the scalar-FFMA path unchanged.
-            const bool use_bitdecoding_tc = runtime_config().kv_cache.bitdecoding_qk;
+            // The BitDecoding TC variant has no sink pointer, and its residual
+            // reduce is a second reduction that would need its own (#1345). A
+            // sink model therefore stays on the scalar NVFP4 kernel, which
+            // applies them — silently dropping the sink column is what this
+            // whole issue is about.
+            bool use_bitdecoding_tc = runtime_config().kv_cache.bitdecoding_qk;
+            if (use_bitdecoding_tc && attn_sinks) {
+                static bool warned_tc_sinks = false;
+                if (!warned_tc_sinks) {
+                    warned_tc_sinks = true;
+                    IMP_LOG_WARN(
+                        "kv_cache.bitdecoding_qk: the NVFP4 tensor-core decode kernel does not "
+                        "apply learned attention sinks — using the scalar NVFP4 kernel for this "
+                        "model instead (#1345).");
+                }
+                use_bitdecoding_tc = false;
+            }
             if (use_bitdecoding_tc) {
                 // QW6 from review/phase5_synthesis.md §2.1: gate the entire
                 // residual-arg marshalling (8+ trailing args) behind a single
@@ -243,7 +259,8 @@
                                              static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
                                              layer_block_tables, state.context_lens, kv_bs, scale,
                                              state.max_context_len, layer_sliding_window,
-                                             cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
+                                             cfg.attn_logit_softcap, stream, state.max_blocks_per_seq,
+                                             layer_n_sinks, attn_sinks);
             }
         } else if (cache_dtype == QType::MXFP4_KV) {
             dispatch_record::set_attn_decode(AttnDecodePath::MXFP4_KV);
@@ -255,7 +272,8 @@
                                             static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
                                             layer_block_tables, state.context_lens, kv_bs, scale,
                                             state.max_context_len, layer_sliding_window,
-                                            cfg.attn_logit_softcap, stream, state.max_blocks_per_seq);
+                                            cfg.attn_logit_softcap, stream, state.max_blocks_per_seq,
+                                            layer_n_sinks, attn_sinks);
         } else if (cache_dtype == QType::INT8) {
             dispatch_record::set_attn_decode(AttnDecodePath::INT8);
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
@@ -265,7 +283,7 @@
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
                                         layer_block_tables, state.context_lens, kv_bs, scale,
                                         state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                        stream, state.max_blocks_per_seq);
+                                        stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks);
         } else if (cache_dtype == QType::FP8_E4M3) {
             dispatch_record::set_attn_decode(AttnDecodePath::FP8);
             // FP8 paged attention with on-the-fly dequant (Split-K enabled)
@@ -284,7 +302,7 @@
                                    state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
                                    stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks, vhd);
         }
-        if (attn_sinks && cache_dtype != QType::F16 && cache_dtype != QType::FP8_E4M3) {
+        if (attn_sinks && !paged_attention_applies_sinks(cache_dtype)) {
             static bool warned_sinks_kv = false;
             if (!warned_sinks_kv) {
                 warned_sinks_kv = true;

@@ -189,6 +189,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
             config_.kv_cache_dtype = QType::NVFP4;
         } else if (kv_str == "mxfp4") {
             config_.kv_cache_dtype = QType::MXFP4_KV;
+        } else if (kv_str != "auto" && kv_str != "fp16" && !kv_str.empty()) {
+            // An unrecognised value used to fall through in silence and leave
+            // FP16 — so `kv_cache.dtype=mxfp4_kv` (the QType's name, not the
+            // config's) looked like it applied, and the log line naming the
+            // resolved dtype was the only hint that it had not.
+            IMP_LOG_WARN(
+                "kv_cache.dtype=\"%s\" is not a known value "
+                "(auto|fp16|fp8|int8|int4|nvfp4|mxfp4) — keeping FP16 KV.",
+                kv_str.c_str());
         } else if (kv_str == "auto" && mcfg.kv_cache_quant_hint == "FP8" &&
                    kv_fp8_hint_default_safe(mcfg.arch)) {
             config_.kv_cache_dtype = QType::FP8_E4M3;
@@ -220,11 +229,24 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // ("Paris", the prime list, both finish_reason=stop) while FP8 KV emits no
     // content at all on either prompt (finish_reason=length, empty). Decide it
     // here, where the choice can still be changed.
-    if (!paged_attention_applies_sinks(config_.kv_cache_dtype) && mcfg.arch == ModelArch::GPT_OSS) {
-        IMP_LOG_WARN("KV cache dtype: %s requested, but this architecture carries learned attention "
-                     "sinks, and the decode kernels for this dtype do not apply them (#1345) — "
-                     "falling back to FP16 KV rather than serving a wrong softmax denominator.",
-                     qtype_name(config_.kv_cache_dtype));
+    // Two questions here, and they are not the same one:
+    //   1. does this dtype's decode kernel apply the sink term? — kernel capability,
+    //      answered by paged_attention_applies_sinks();
+    //   2. is the result usable on a sink model? — measured, per dtype.
+    // INT4 answers YES to (1) since #1345 (PagedAttentionTest.INT4_*_Sinks hold
+    // against a sink-aware reference) and NO to (2): gpt-oss returns empty
+    // completions on INT4 KV, which is 4 bits per value on a 64-wide head. That
+    // failure looks exactly like a dropped sink from the outside, which is why
+    // the unit tests above exist — they are what says it is the quantiser and
+    // not the sink. So INT4 keeps the fallback.
+    const bool sink_dtype_ok = paged_attention_applies_sinks(config_.kv_cache_dtype) &&
+                               config_.kv_cache_dtype != QType::INT4;
+    if (!sink_dtype_ok && mcfg.arch == ModelArch::GPT_OSS) {
+        IMP_LOG_WARN(
+            "KV cache dtype: %s requested, but this architecture carries learned attention "
+            "sinks and this dtype cannot serve them (#1345) — falling back to FP16 KV "
+            "rather than serving a wrong softmax denominator.",
+            qtype_name(config_.kv_cache_dtype));
         config_.kv_cache_dtype = QType::F16;
     }
 

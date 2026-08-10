@@ -1142,7 +1142,11 @@ void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size) {
 }
 
 bool paged_attention_applies_sinks(QType kv_dtype) {
-    return kv_dtype == QType::F16 || kv_dtype == QType::FP8_E4M3;
+    // Every paged decode kernel that takes an attn_sinks pointer. The
+    // BitDecoding NVFP4 tensor-core variant does NOT — the executor routes sink
+    // models off it onto the scalar NVFP4 kernel, so NVFP4 still qualifies here.
+    return kv_dtype == QType::F16 || kv_dtype == QType::FP8_E4M3 || kv_dtype == QType::INT8 ||
+           kv_dtype == QType::INT4 || kv_dtype == QType::NVFP4 || kv_dtype == QType::MXFP4_KV;
 }
 
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,

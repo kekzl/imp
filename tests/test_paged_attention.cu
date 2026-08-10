@@ -855,6 +855,273 @@ TEST(PagedAttentionTest, GQA_Cluster_HD64) {
 }
 
 // =========================================================================
+// Learned attention sinks on the INT8 KV decode path (#1345)
+// =========================================================================
+//
+// gpt-oss is the only architecture shipping learned sinks, and its KV cache is
+// the one under the most long-context pressure — so "use fp16 KV for this
+// model" was an expensive guard. INT8 has two decode implementations and the
+// sink term enters each in a different place: the split-K path applies it in
+// the shared reduce kernel, the non-split-K fallback in
+// `crosswarp_reduce_and_write`. Both are covered below; either one left unwired
+// serves a softmax denominator short one column.
+//
+// The reference is built from the DEQUANTIZED K/V, not the original FP16. That
+// is deliberate and is the opposite of what tests/test_attention_paged_oracle.cu
+// wants: the property under test here is the sink term, not the quantizer, and
+// referencing the quant grid removes INT8 noise from the comparison so a 2e-3
+// tolerance can see a sink term that INT8 error would otherwise swallow. The
+// quantizer itself is held to account in the oracle test.
+//
+// Tolerance alone is not trusted: each case also asserts the result is far
+// CLOSER to the sink-aware reference than to the sink-free one. A dropped sink
+// then fails on the ratio even if someone later loosens the tolerance.
+enum class QuantKV { INT8, INT4 };
+
+void run_quant_sink_case(QuantKV kind, bool with_sinks, int seq_len, bool with_scratch) {
+    const bool is_int4 = (kind == QuantKV::INT4);
+    const int qmax = is_int4 ? 7 : 127;
+    constexpr int batch = 1, n_heads = 8, n_kv_heads = 2, head_dim = 64;  // gpt-oss GQA shape
+    const int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const int max_blocks = num_blocks;
+    const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+
+    std::vector<float> h_Q(n_heads * head_dim);
+    for (int i = 0; i < n_heads * head_dim; i++)
+        h_Q[i] = 0.6f * sinf(static_cast<float>(i) * 0.021f);
+    std::vector<float> h_K(seq_len * n_kv_heads * head_dim);
+    std::vector<float> h_V(seq_len * n_kv_heads * head_dim);
+    for (size_t i = 0; i < h_K.size(); i++) {
+        h_K[i] = 0.5f * cosf(static_cast<float>(i) * 0.013f);
+        // V carries a DC component on purpose. With a zero-mean V the softmax
+        // average over 256 tokens cancels to ~0.002, and the sink term — which
+        // scales the whole output by the mass it takes — then moves it by 4e-4,
+        // below any tolerance a quantised path can hold. The vacuity guard
+        // below catches that; the offset is what makes the case non-vacuous.
+        h_V[i] = 0.5f + 0.4f * sinf(static_cast<float>(i) * 0.017f + 0.5f);
+    }
+
+    // Sink magnitude matches the FP16 sink tests: at 4.0 + 0.05h the sink term
+    // carries real mass, so deleting it moves the output far outside 2e-3.
+    std::vector<float> h_sinks(n_heads);
+    for (int h = 0; h < n_heads; h++)
+        h_sinks[h] = 4.0f + 0.05f * static_cast<float>(h);
+
+    // Host quantize into the INT8 cache layout the kernel reads:
+    //   data   [num_blocks, BLOCK_SIZE, n_kv_heads, head_dim] int8
+    //   scales [num_blocks, BLOCK_SIZE, n_kv_heads]           half
+    // Mirrors write_kv_cache_int8_kernel (per-head absmax / 127, round-to-nearest).
+    const size_t cache_elems = (size_t)num_blocks * BLOCK_SIZE * n_kv_heads *
+                               (is_int4 ? head_dim / 2 : head_dim);
+    const size_t row_elems = is_int4 ? head_dim / 2 : head_dim;
+    const size_t scale_elems = (size_t)num_blocks * BLOCK_SIZE * n_kv_heads;
+    std::vector<int8_t> k_q(cache_elems, 0), v_q(cache_elems, 0);
+    std::vector<half> k_sc(scale_elems, __float2half(0.0f)), v_sc(scale_elems, __float2half(0.0f));
+    // Dequantized copies — the reference is computed from these.
+    std::vector<float> k_deq(h_K.size(), 0.0f), v_deq(h_V.size(), 0.0f);
+
+    auto quantize = [&](const std::vector<float>& src, std::vector<int8_t>& dst, std::vector<half>& sc,
+                        std::vector<float>& deq) {
+        for (int s = 0; s < seq_len; s++) {
+            int blk = s / BLOCK_SIZE, slot = s % BLOCK_SIZE;
+            for (int kvh = 0; kvh < n_kv_heads; kvh++) {
+                size_t src_base = ((size_t)s * n_kv_heads + kvh) * head_dim;
+                float amax = 0.0f;
+                for (int d = 0; d < head_dim; d++)
+                    amax = std::max(amax, std::fabs(src[src_base + d]));
+                float step = (amax > 1e-8f) ? amax / (float)qmax : 0.0f;
+                float inv = (amax > 1e-8f) ? (float)qmax / amax : 0.0f;
+                size_t dst_base = ((size_t)blk * BLOCK_SIZE + slot) * n_kv_heads * row_elems +
+                                  (size_t)kvh * row_elems;
+                sc[((size_t)blk * BLOCK_SIZE + slot) * n_kv_heads + kvh] = __float2half(step);
+                float step_h = __half2float(__float2half(step));  // the scale the kernel reads back
+                for (int d = 0; d < head_dim; d++) {
+                    int q = static_cast<int>(std::lround(src[src_base + d] * inv));
+                    q = std::max(-qmax, std::min(qmax, q));
+                    if (is_int4) {
+                        // low nibble = even d, high nibble = odd d (write_kv_cache_int4_kernel)
+                        uint8_t& byte = reinterpret_cast<uint8_t&>(dst[dst_base + d / 2]);
+                        if (d % 2 == 0)
+                            byte = static_cast<uint8_t>((byte & 0xF0) | (q & 0x0F));
+                        else
+                            byte = static_cast<uint8_t>((byte & 0x0F) | ((q & 0x0F) << 4));
+                    } else {
+                        dst[dst_base + d] = static_cast<int8_t>(q);
+                    }
+                    deq[src_base + d] = static_cast<float>(q) * step_h;
+                }
+            }
+        }
+    };
+    quantize(h_K, k_q, k_sc, k_deq);
+    quantize(h_V, v_q, v_sc, v_deq);
+
+    // Two fp32 references over the dequantized grid: with and without the sink
+    // column in the denominator.
+    auto reference = [&](bool sinks_on) {
+        std::vector<float> O(n_heads * head_dim, 0.0f);
+        for (int qh = 0; qh < n_heads; qh++) {
+            int kvh = qh / (n_heads / n_kv_heads);
+            std::vector<float> scores(seq_len);
+            float m = sinks_on ? h_sinks[qh] : -FLT_MAX;
+            for (int s = 0; s < seq_len; s++) {
+                float dot = 0.0f;
+                for (int d = 0; d < head_dim; d++)
+                    dot += h_Q[qh * head_dim + d] * k_deq[((size_t)s * n_kv_heads + kvh) * head_dim + d];
+                scores[s] = dot * scale;
+                m = std::max(m, scores[s]);
+            }
+            float denom = sinks_on ? expf(h_sinks[qh] - m) : 0.0f;
+            for (int s = 0; s < seq_len; s++)
+                denom += expf(scores[s] - m);
+            for (int d = 0; d < head_dim; d++) {
+                float acc = 0.0f;
+                for (int s = 0; s < seq_len; s++)
+                    acc += expf(scores[s] - m) / denom * v_deq[((size_t)s * n_kv_heads + kvh) * head_dim + d];
+                O[qh * head_dim + d] = acc;
+            }
+        }
+        return O;
+    };
+    const std::vector<float> ref_sinks = reference(true);
+    const std::vector<float> ref_nosinks = reference(false);
+    const std::vector<float>& ref_want = with_sinks ? ref_sinks : ref_nosinks;
+    const std::vector<float>& ref_other = with_sinks ? ref_nosinks : ref_sinks;
+
+    std::vector<int> bt(max_blocks);
+    std::iota(bt.begin(), bt.end(), 0);
+
+    Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
+    Tensor d_K{}, d_V{};
+    for (Tensor* t : {&d_K, &d_V}) {
+        t->qtype = QType::INT8;
+        t->ndim = 4;
+        t->shape[0] = num_blocks;
+        t->shape[1] = BLOCK_SIZE;
+        t->shape[2] = n_kv_heads;
+        t->shape[3] = (int64_t)row_elems;
+        t->compute_strides();
+        t->on_device = true;
+        cudaMalloc(&t->data, cache_elems);
+    }
+    cudaMemcpy(d_K.data, k_q.data(), cache_elems, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_V.data, v_q.data(), cache_elems, cudaMemcpyHostToDevice);
+    Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
+
+    half *d_ks = nullptr, *d_vs = nullptr;
+    cudaMalloc(&d_ks, scale_elems * sizeof(half));
+    cudaMalloc(&d_vs, scale_elems * sizeof(half));
+    cudaMemcpy(d_ks, k_sc.data(), scale_elems * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vs, v_sc.data(), scale_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    int *d_bt = nullptr, *d_ctx = nullptr;
+    cudaMalloc(&d_bt, max_blocks * sizeof(int));
+    cudaMalloc(&d_ctx, sizeof(int));
+    cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
+    int ctx = seq_len;
+    cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
+
+    // Scratch present → split-K takes over (sink applied in the reduce kernel);
+    // absent → num_splits stays 1 and the fallback kernel runs (sink applied in
+    // crosswarp_reduce_and_write).
+    constexpr int kMaxSplits = 64;
+    size_t scratch_size = static_cast<size_t>(batch) * n_heads * kMaxSplits * (2 + head_dim) * sizeof(float);
+    void* d_scratch = nullptr;
+    if (with_scratch) {
+        cudaMalloc(&d_scratch, scratch_size);
+        paged_attention_set_splitk_scratch(d_scratch, scratch_size);
+    } else {
+        paged_attention_set_splitk_scratch(nullptr, 0);
+    }
+
+    half* d_sinks = nullptr;
+    if (with_sinks) {
+        std::vector<half> hs(n_heads);
+        for (int h = 0; h < n_heads; h++)
+            hs[h] = __float2half(h_sinks[h]);
+        cudaMalloc(&d_sinks, n_heads * sizeof(half));
+        cudaMemcpy(d_sinks, hs.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
+    }
+
+    if (is_int4) {
+        paged_attention_decode_int4(d_Q, d_K, d_V, d_O, d_ks, d_vs, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len,
+                                    /*sliding_window=*/0, /*softcap=*/0.0f, /*stream=*/nullptr,
+                                    /*max_blocks_per_seq=*/max_blocks, /*n_sinks=*/0, d_sinks);
+    } else {
+        paged_attention_decode_int8(d_Q, d_K, d_V, d_O, d_ks, d_vs, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len,
+                                    /*sliding_window=*/0, /*softcap=*/0.0f, /*stream=*/nullptr,
+                                    /*max_blocks_per_seq=*/max_blocks, /*n_sinks=*/0, d_sinks);
+    }
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+    auto result = read_gpu_fp16(d_O);
+    double err_want = 0.0, err_other = 0.0;
+    for (int i = 0; i < n_heads * head_dim; i++) {
+        err_want = std::max(err_want, static_cast<double>(std::abs(result[i] - ref_want[i])));
+        err_other = std::max(err_other, static_cast<double>(std::abs(result[i] - ref_other[i])));
+        EXPECT_NEAR(result[i], ref_want[i], is_int4 ? 6e-3f : 2e-3f)
+            << (is_int4 ? "INT4" : "INT8") << " sink decode mismatch at " << i
+            << " (with_sinks=" << with_sinks << ", seq_len=" << seq_len << ", splitk_scratch=" << with_scratch
+            << ")";
+    }
+    // Discriminator: the two references must be far apart, and the kernel must
+    // land on the right one. Without this a loosened tolerance would let a
+    // dropped sink pass silently — how M31 survived on the FP16 side (#1303).
+    double ref_gap = 0.0;
+    for (int i = 0; i < n_heads * head_dim; i++)
+        ref_gap = std::max(ref_gap, static_cast<double>(std::abs(ref_sinks[i] - ref_nosinks[i])));
+    EXPECT_GT(ref_gap, 1e-2) << "sink term too weak to discriminate — test would be vacuous";
+    EXPECT_LT(err_want * 4.0, err_other)
+        << (is_int4 ? "INT4" : "INT8") << " decode is not closer to its own reference than to the other one "
+        << "(err_want=" << err_want << ", err_other=" << err_other << ", with_sinks=" << with_sinks << ")";
+
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    if (d_scratch)
+        cudaFree(d_scratch);
+    if (d_sinks)
+        cudaFree(d_sinks);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_ks);
+    cudaFree(d_vs);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+}
+
+TEST(PagedAttentionTest, INT8_SplitK_HD64_Sinks) {
+    run_quant_sink_case(QuantKV::INT8, /*with_sinks=*/true, /*seq_len=*/256, /*with_scratch=*/true);
+}
+TEST(PagedAttentionTest, INT8_SplitK_HD64) {
+    run_quant_sink_case(QuantKV::INT8, /*with_sinks=*/false, /*seq_len=*/256, /*with_scratch=*/true);
+}
+TEST(PagedAttentionTest, INT8_NoSplitK_HD64_Sinks) {
+    run_quant_sink_case(QuantKV::INT8, /*with_sinks=*/true, /*seq_len=*/256, /*with_scratch=*/false);
+}
+TEST(PagedAttentionTest, INT8_NoSplitK_HD64) {
+    run_quant_sink_case(QuantKV::INT8, /*with_sinks=*/false, /*seq_len=*/256, /*with_scratch=*/false);
+}
+
+// INT4 runs the same oracle. gpt-oss answers EMPTY on INT4 KV end to end, which
+// is exactly the signature of a dropped sink — these cases are what separate
+// "the sink term is missing" from "4 bits per value on a 64-wide head is too
+// coarse for this model". They pass, so it is the latter.
+TEST(PagedAttentionTest, INT4_SplitK_HD64_Sinks) {
+    run_quant_sink_case(QuantKV::INT4, /*with_sinks=*/true, /*seq_len=*/256, /*with_scratch=*/true);
+}
+TEST(PagedAttentionTest, INT4_SplitK_HD64) {
+    run_quant_sink_case(QuantKV::INT4, /*with_sinks=*/false, /*seq_len=*/256, /*with_scratch=*/true);
+}
+TEST(PagedAttentionTest, INT4_NoSplitK_HD64_Sinks) {
+    run_quant_sink_case(QuantKV::INT4, /*with_sinks=*/true, /*seq_len=*/256, /*with_scratch=*/false);
+}
+TEST(PagedAttentionTest, INT4_NoSplitK_HD64) {
+    run_quant_sink_case(QuantKV::INT4, /*with_sinks=*/false, /*seq_len=*/256, /*with_scratch=*/false);
+}
+
+// =========================================================================
 // GQA with HD=256: exercises split-K and cluster paths for Gemma-3 config
 // =========================================================================
 
