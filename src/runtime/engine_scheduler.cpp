@@ -333,9 +333,9 @@ bool Engine::step_schedule() {
 // supports_chunked_prefill_ / resolve_prefill_chunk_size_
 // Whether the model arch + KV dtype combination supports chunked prefill.
 // Returns true for full-attention models (Qwen3, Llama, Mistral) and hybrid
-// GDN+MoE / Mamba2+MoE models (Qwen3.5/3.6, Nemotron-H) with FP16, FP8, or
-// NVFP4 KV cache. Returns false for SWA models (Gemma-3/4, Llama-4) and
-// sub-byte KV dtypes (INT4, TurboQuant) lacking gather kernels.
+// GDN+MoE / Mamba2+MoE models (Qwen3.5/3.6, Nemotron-H) with any KV dtype that
+// has a paged_kv_gather kernel (FP16, FP8, NVFP4, MXFP4_KV, INT4, INT8).
+// Returns false for Llama-4 and KV dtypes lacking a gather kernel.
 // =====================================================================
 
 bool Engine::supports_chunked_prefill_() const {
@@ -378,12 +378,12 @@ bool Engine::supports_chunked_prefill_() const {
             if (cfg.arch != ModelArch::GEMMA4) return false;
         }
     }
-    // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4, MXFP4_KV, INT4.
-    // INT8 and TurboQuant variants would need their own gather kernels.
+    // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4, MXFP4_KV,
+    // INT4, INT8. TurboQuant variants would need their own gather kernels.
     if (kv_cache_raw_) {
         QType kvt = kv_cache_raw_->qtype();
-        if (kvt != QType::F16 && kvt != QType::FP8_E4M3 &&
-            kvt != QType::NVFP4 && kvt != QType::MXFP4_KV && kvt != QType::INT4)
+        if (kvt != QType::F16 && kvt != QType::FP8_E4M3 && kvt != QType::NVFP4 && kvt != QType::MXFP4_KV &&
+            kvt != QType::INT4 && kvt != QType::INT8)
             return false;
     }
     return true;

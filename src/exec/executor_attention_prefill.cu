@@ -22,7 +22,7 @@
             // Defense-in-depth: engine resolves out-of-scope models to chunk_size=0,
             // so this code only runs for FP16 / FP8 / NVFP4 / MXFP4_KV KV.
             const bool kvt_ok = (kvt == QType::F16 || kvt == QType::FP8_E4M3 || kvt == QType::NVFP4 ||
-                                 kvt == QType::MXFP4_KV || kvt == QType::INT4);
+                                 kvt == QType::MXFP4_KV || kvt == QType::INT4 || kvt == QType::INT8);
             // sliding_active and attn_shapes_vary are now both supported:
             //   - cuBLAS softmax accepts a sliding_window argument (PR feat(attn): sw),
             //   - the rectangular cuBLAS path dispatches per-layer with nh/nkv/hd.
@@ -231,6 +231,13 @@
                                                  static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
                                                  layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
                                                  d_past);
+            } else if (kvt == QType::INT8) {  // symmetric 8-bit, per-head FP16 scale
+                paged_kv_gather_int8_to_fp16(k_full, static_cast<const int8_t*>(cache->k_ptr(kv_layer, 0)),
+                                             static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
+                                             layer_block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                paged_kv_gather_int8_to_fp16(v_full, static_cast<const int8_t*>(cache->v_ptr(kv_layer, 0)),
+                                             static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
+                                             layer_block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
             } else {  // INT4 — symmetric 4-bit with per-head FP16 scale
                 paged_kv_gather_int4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),

@@ -26,6 +26,10 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`kv_cache.dtype=int8` now survives a prefix-cache hit (#1348).** INT8 was the
+  one quantised KV dtype without a `paged_kv_gather` kernel, so the partial
+  prefill after a cache hit aborted the process and the client got no HTTP
+  response: three identical requests scored 200/000/000, now 200/200/200.
 - **An unmatched route now answers with a JSON error envelope.** `POST /v1/nope`
   returned 404 with a zero-length body, so a client reading
   `error.message` got a parse error instead of a reason; `/v1/messages*` paths

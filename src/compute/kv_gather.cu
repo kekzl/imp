@@ -400,6 +400,72 @@ void paged_kv_gather_int4_to_fp16(half* dst, const uint8_t* src_packed,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
+// INT8 → FP16 dequant gather. Symmetric 8-bit, per-head FP16 scale — the same
+// scale layout as INT4, one byte per element instead of a nibble. Matches
+// write_kv_cache_int8_kernel / paged_attention_decode_int8.
+__global__ void paged_kv_gather_int8_to_fp16_kernel(
+    half* __restrict__ dst,
+    const int8_t* __restrict__ src,       // [block, slot, nkv, hd]
+    const half* __restrict__ src_scales,  // [block, slot, nkv]
+    const int* __restrict__ block_table, int n_past, int block_size, int nkv, int hd,
+    const int* __restrict__ d_n_past) {
+    const int block_group = blockIdx.x;
+    const int kv_head = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int threads_per_token = blockDim.x / TOKENS_PER_BLOCK;
+    const int token_in_block = tid / threads_per_token;
+    const int d_lane = tid % threads_per_token;
+
+    if (d_n_past)
+        n_past = __ldg(d_n_past);
+    const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
+    if (pos >= n_past)
+        return;
+
+    const int blk_idx = pos / block_size;
+    const int slot = pos % block_size;
+    const int phys_block = block_table[blk_idx];
+
+    const int kv_block_stride = block_size * nkv * hd;
+    const int kv_slot_stride = nkv * hd;
+    const int sc_block_stride = block_size * nkv;
+    const int sc_slot_stride = nkv;
+
+    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    if (phys_block < 0) {
+        // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
+        // paged_kv_gather_fp16_kernel).
+        for (int d = d_lane; d < hd; d += threads_per_token)
+            dst_row[d] = __float2half(0.0f);
+        return;
+    }
+
+    const int8_t* src_row = src + (size_t)phys_block * kv_block_stride + (size_t)slot * kv_slot_stride +
+                            (size_t)kv_head * hd;
+    float scale = __half2float(
+        src_scales[(size_t)phys_block * sc_block_stride + (size_t)slot * sc_slot_stride + (size_t)kv_head]);
+
+    for (int d = d_lane; d < hd; d += threads_per_token) {
+        // Streaming load on the raw byte (INT8 is 1 byte), same hint as the
+        // FP8 gather.
+        signed char q = __ldcs(reinterpret_cast<const signed char*>(src_row + d));
+        dst_row[d] = __float2half(static_cast<float>(q) * scale);
+    }
+}
+
+void paged_kv_gather_int8_to_fp16(half* dst, const int8_t* src, const half* src_scales,
+                                  const int* block_table, int n_past, int block_size, int nkv, int hd,
+                                  cudaStream_t stream, const int* d_n_past) {
+    if (n_past <= 0 || nkv <= 0 || hd <= 0)
+        return;
+    int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
+    dim3 grid(n_block_groups, nkv);
+    int threads = 256;
+    paged_kv_gather_int8_to_fp16_kernel<<<grid, threads, 0, stream>>>(dst, src, src_scales, block_table,
+                                                                      n_past, block_size, nkv, hd, d_n_past);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 // Chunk append at device-computed row offset (see kv_gather.h). n ≤ ~65 rows,
 // row_elems = nkv*hd — a single thread block per row keeps this trivial.
 __global__ void kv_chunk_append_fp16_kernel(half* __restrict__ dst, const half* __restrict__ src,
