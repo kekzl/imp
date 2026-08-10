@@ -24,8 +24,14 @@
 // before imp_context_reset, leaking the KV sequence + SSM/GDN slot per call
 // (fixed in imp_api.cpp alongside this test).
 //
-// Gated on IMP_TEST_MOE_MODEL (point it at an MoE/hybrid model dir or .gguf;
-// dense models pass trivially since they skip the routed-expert kernels).
+// Runs against EVERY model env var below that names something on disk:
+// IMP_TEST_MOE_MODEL (the MoE/hybrid case this suite was written for) and
+// IMP_TEST_MODEL (dense). The header used to claim "dense models pass
+// trivially since they skip the routed-expert kernels" — #1299 disproved that:
+// the dense half failed on its own root cause (a prefix-cache hit reaching a
+// test that had asked for none, #1337) and a single-model gate could not see
+// it. Parameterising is what makes the second row exist.
+//
 // The deterministic flag reaches the engine via the legacy IMP_DETERMINISTIC
 // env seed: library users without a tool-main RuntimeConfig::load() get
 // env-seeded defaults from take_pending_runtime_config() at engine init.
@@ -35,24 +41,44 @@
 #include "imp/imp.h"
 #include "test_models.h"
 
+#include <sys/stat.h>
+
 #include <cstdlib>
 #include <string>
 #include <vector>
 
 namespace {
 
-const char* model_path() { return std::getenv(imp_test::kEnvMoeModel); }
-
 bool is_safetensors_dir(const std::string& p) {
     return p.size() < 5 || p.substr(p.size() - 5) != ".gguf";
 }
 
-class DetEvalE2ETest : public ::testing::Test {
+bool path_exists(const char* p) {
+    struct stat st;
+    return p != nullptr && ::stat(p, &st) == 0;
+}
+
+// One row per model env var. A row whose variable is unset, or set to a path
+// that is not there, SKIPS — tests/README.md:5 promises they "never fail for a
+// missing prerequisite", and the old predicate only honoured that for an unset
+// variable: a wrong path produced hard failures.
+struct DetModel {
+    const char* env;
+    const char* label;
+};
+
+std::vector<DetModel> det_models() {
+    return {{imp_test::kEnvMoeModel, "moe"}, {imp_test::kEnvModel, "dense"}};
+}
+
+class DetEvalE2ETest : public ::testing::TestWithParam<DetModel> {
 protected:
     void SetUp() override {
-        const char* path = model_path();
-        if (!path)
-            GTEST_SKIP() << "Set IMP_TEST_MOE_MODEL to run deterministic-mode E2E";
+        const char* path = std::getenv(GetParam().env);
+        if (path == nullptr)
+            GTEST_SKIP() << "Set " << GetParam().env << " to run deterministic-mode E2E";
+        if (!path_exists(path))
+            GTEST_SKIP() << GetParam().env << " points at " << path << ", which does not exist";
         // Must be set BEFORE imp_context_create: engine init pulls the
         // env-seeded RuntimeConfig via take_pending_runtime_config().
         setenv("IMP_DETERMINISTIC", "1", 1);
@@ -119,7 +145,7 @@ constexpr int kGen = 96;
 //    request on a context runs partially eager while the conditional graph
 //    captures; later requests replay the graph — a different kernel mix for
 //    the same step. Graphs-off isolates the underlying kernels from that mix.
-TEST_F(DetEvalE2ETest, GreedyReproducibleSameContextGraphsOff) {
+TEST_P(DetEvalE2ETest, GreedyReproducibleSameContextGraphsOff) {
     MakeContext(/*cuda_graphs=*/false);
     for (const char* prompt : kPrompts) {
         std::string first = gen(prompt, kGen);
@@ -135,7 +161,7 @@ TEST_F(DetEvalE2ETest, GreedyReproducibleSameContextGraphsOff) {
 
 // 1. Greedy output must be byte-identical for repeated requests on ONE
 //    context — the serving/eval steady state (server process, many requests).
-TEST_F(DetEvalE2ETest, GreedyReproducibleSameContext) {
+TEST_P(DetEvalE2ETest, GreedyReproducibleSameContext) {
     MakeContext();
     for (const char* prompt : kPrompts) {
         std::string first = gen(prompt, kGen);
@@ -152,7 +178,7 @@ TEST_F(DetEvalE2ETest, GreedyReproducibleSameContext) {
 // 2. KNOWN LIMIT (see header): cross-context greedy in one process is flaky
 //    — DISABLED_ is the gate; enable when the layout-sensitive source is
 //    pinned and fixed.
-TEST_F(DetEvalE2ETest, DISABLED_GreedyReproducibleAcrossFreshContexts) {
+TEST_P(DetEvalE2ETest, DISABLED_GreedyReproducibleAcrossFreshContexts) {
     for (const char* prompt : kPrompts) {
         MakeContext();
         std::string first = gen(prompt, kGen);
@@ -173,7 +199,7 @@ TEST_F(DetEvalE2ETest, DISABLED_GreedyReproducibleAcrossFreshContexts) {
 //    one context — the eval number itself is the artifact agent evals
 //    compare. (Guards the per-position NLL reduction: the old cross-block
 //    double atomicAdd accumulated in scheduling-dependent order.)
-TEST_F(DetEvalE2ETest, PerplexityBitIdenticalSameContext) {
+TEST_P(DetEvalE2ETest, PerplexityBitIdenticalSameContext) {
     // Token IDs are model-agnostic small IDs; content doesn't matter for
     // reproducibility, only that the same sequence is scored twice.
     std::vector<int32_t> tokens;
@@ -195,7 +221,7 @@ TEST_F(DetEvalE2ETest, PerplexityBitIdenticalSameContext) {
 
 // 4. KNOWN LIMIT companion (see header): cross-context perplexity in one
 //    process — flaky on the GDN-hybrid like the greedy variant.
-TEST_F(DetEvalE2ETest, DISABLED_PerplexityBitIdenticalAcrossFreshContexts) {
+TEST_P(DetEvalE2ETest, DISABLED_PerplexityBitIdenticalAcrossFreshContexts) {
     std::vector<int32_t> tokens;
     for (int i = 0; i < 256; ++i)
         tokens.push_back(1000 + (i * 37) % 4000);
@@ -213,5 +239,10 @@ TEST_F(DetEvalE2ETest, DISABLED_PerplexityBitIdenticalAcrossFreshContexts) {
     EXPECT_EQ(ppl1, ppl2) << "perplexity differs across fresh contexts under deterministic=1: "
                           << ppl1 << " vs " << ppl2;
 }
+
+INSTANTIATE_TEST_SUITE_P(Models, DetEvalE2ETest, ::testing::ValuesIn(det_models()),
+                         [](const ::testing::TestParamInfo<DetModel>& info) {
+                             return std::string(info.param.label);
+                         });
 
 }  // namespace

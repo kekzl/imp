@@ -126,12 +126,24 @@ test-all: build
 
 # E2E model tests: load real models, generate, verify output
 # Uses Qwen3-4B (dense) + Qwen3.5-4B (GDN hybrid) + Gemma-4-26B-A4B (MoE) from ./models/
+#
+# IMP_TEST_MOE_MODEL drives the deterministic-mode suite. It was set in exactly
+# one place — tests/.env.test, which nothing sources — so DetEvalE2ETest skipped
+# on every invocation the repo knew how to launch, from #542 until #1299 found
+# it red (escape class E3). Setting it here is what makes that suite runnable.
+# Override with `make test-e2e MOE_MODEL=/models/<other>`; a path that is not
+# there skips rather than fails.
+# NOTE: the *DetEvalE2ETest* form is required — it is a TEST_P suite, so
+# `DetEvalE2ETest.*` matches nothing and gtest calls that PASSED.
+# guard_det_suite_filter (CMakeLists.txt, unit lane) holds both to that.
+MOE_MODEL ?= /models/gpt-oss-20b-mxfp4.gguf
 test-e2e: build
 	docker run --rm --gpus all -v $(PWD)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-Q8_0.gguf \
 		-e IMP_TEST_MODEL_GEMMA4=/models/gemma-4-26B-A4B-it-Q4_K_M.gguf \
-		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*"
+		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
+		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:*DetEvalE2ETest*"
 
 # Vision GPU golden (R9 / #583): SigLIP + gemma4v encoder + projector tail.
 # Mounts $(HOME)/models (symlink targets resolve) + the committed fixture.

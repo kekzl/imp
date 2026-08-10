@@ -898,7 +898,21 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_COMMAND} -E env
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_e2e_lane_split.sh
                 $<TARGET_FILE:test-e2e> "${_unit_e2e_filter}")
+
+    # The deterministic-mode suite is value-parameterised over model env vars
+    # (#1299), so its names carry the instantiation prefix and the model label.
+    # A stale `DetEvalE2ETest.*` filter matches nothing and gtest calls that
+    # PASSED — this asserts the filter `make test-e2e` uses still resolves, and
+    # still covers every model row. Listing tests runs no bodies, so it is a
+    # CPU-lane check. Keep the literal in sync with the Makefile's test-e2e.
+    set(_det_e2e_filter "*DetEvalE2ETest*")
+    add_test(NAME guard_det_suite_filter
+        COMMAND ${CMAKE_COMMAND} -E env
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_det_suite_filter.sh
+                $<TARGET_FILE:test-e2e> "${_det_e2e_filter}")
+
     set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split
+                         guard_det_suite_filter
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)

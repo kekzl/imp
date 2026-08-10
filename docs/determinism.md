@@ -157,15 +157,29 @@ accumulated via shared-memory FP `atomicAdd`, whose ordering is
 scheduling-dependent. Under deterministic mode this remains a documented
 exception — `typical_p` is not part of the temp=0 eval surface.
 
-### 4. GDN cross-context-in-process
+### 4. Cross-context-in-process
 
 `tests/test_determinism_e2e.cpp`:
 `DISABLED_GreedyReproducibleAcrossFreshContexts` /
-`DISABLED_PerplexityBitIdenticalAcrossFreshContexts` — on GDN/hybrid models,
-creating a *new context inside the same process* may not reproduce
-bit-identically (VRAM-layout-sensitive recurrent-state slots). Same-context
-and fresh-process reproducibility ARE guaranteed (see above). For
-reproducible eval sweeps over multiple contexts: one process per context.
+`DISABLED_PerplexityBitIdenticalAcrossFreshContexts` — creating a *new context
+inside the same process* may not reproduce bit-identically. Same-context and
+fresh-process reproducibility ARE guaranteed (see above). For reproducible eval
+sweeps over multiple contexts: one process per context.
+
+This limit used to be written as GDN-only, attributed to VRAM-layout-sensitive
+recurrent-state slots. That is not what the test finds. Measured 2026-08-10 on
+`main`, isolated runs, `deterministic=1`:
+
+| model | same context (graphs on / off) | fresh contexts |
+|---|---|---|
+| `gpt-oss-20b-mxfp4` (MoE) | pass 3/3 / pass 3/3 | **fail 2/2** |
+| `Qwen3-4B-Instruct-2507-Q8_0` (dense) | pass 2/2 / pass 2/2 | pass |
+
+So it is the MoE row that carries this limit today, not the GDN one — and the
+same-context guarantee holds on both, which it did not when #1299 was filed.
+#1337 is the identified fix for the dense half; the MoE half was last seen red
+before #1341, whose own rationale names #1299 (decode-loop burst boundaries),
+but that attribution is the code's, not an A/B I ran.
 
 ## Recipe: reproducible evals
 
