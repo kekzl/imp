@@ -1141,6 +1141,10 @@ void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size) {
         *out_size = s_splitk_scratch_size;
 }
 
+bool paged_attention_applies_sinks(QType kv_dtype) {
+    return kv_dtype == QType::F16 || kv_dtype == QType::FP8_E4M3;
+}
+
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
                                    int num_splits, cudaStream_t stream, const half* attn_sinks) {
     dim3 grid(batch_size, n_heads);

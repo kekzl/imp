@@ -179,6 +179,22 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
 // Returns pointer + size. Either can be nullptr/0 if unset.
 void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
 
+// Does the paged DECODE path for this KV dtype apply learned attention sinks
+// (gpt-oss, #547)? This is the single source of truth for the question, and it
+// lives here because the answer is a property of the kernels, not of the model.
+//
+// It exists because the resolver used to answer it with a hand-maintained dtype
+// list (#1339, #1345): the sink term reaches the output only if the decode
+// kernel takes an `attn_sinks` pointer and hands it to
+// crosswarp_reduce_and_write, and every dtype wired up since had to be
+// remembered in a second place. Wire a dtype, add it here, and the fallback
+// stops firing for it — one edit, not two.
+//
+// FP16 has applied sinks since #547; FP8 since #1346. The rest route their
+// NON-split decode through crosswarp_reduce_and_write with no sink pointer, so
+// the shared split-K reduce being wired is not enough to make them correct.
+bool paged_attention_applies_sinks(QType kv_dtype);
+
 // Launch the split-K reduce kernel (shared across FP16/FP8/INT8).
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
                                    int num_splits, cudaStream_t stream,
