@@ -25,6 +25,9 @@ mkdir -p "$OUT"
 cd "$(git rev-parse --show-toplevel)"
 
 MAX_TOKENS="${MAX_TOKENS:-512}"
+# Where the checkpoints live. Not hardcoded to a home directory: check-release.sh
+# rejects maintainer paths in tracked files, and rightly so.
+MODELS_DIR="${MODELS_DIR:-$HOME/models}"
 
 # Short prompts, long answers — see the methodology note above. Three different
 # subjects, because a single prompt measures one trajectory's expert taste and
@@ -60,7 +63,7 @@ for entry in "${MODELS[@]}"; do
     # $OUT is mounted at /out rather than reached through /src: it defaults to an
     # absolute path outside the repo, and "/src/$OUT" would silently become
     # "/src//tmp/..." — a path the container happily creates and nobody reads.
-    docker run --rm --gpus all -v "$PWD":/src -v /home/kekz/models:/models \
+    docker run --rm --gpus all -v "$PWD":/src -v "$MODELS_DIR":/models \
       -v "$(cd "$OUT" && pwd)":/out -w /src/build-dev \
       imp:toolchain ./imp-cli --model "$path" \
       --set "diagnostics.moe_expert_hist=/out/${name}.p${i}.json" \

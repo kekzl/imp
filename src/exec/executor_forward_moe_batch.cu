@@ -6,6 +6,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "core/cuda_static_reset.h"
 #include "exec/executor_forward_moe_internal.h"
+#include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
 #include "exec/executor_debug.h"
@@ -817,15 +818,19 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         if (moe_.expert_hist == nullptr) {
             int n_layers = cfg.n_layers;
             size_t bytes = static_cast<size_t>(n_layers) * ne * sizeof(unsigned int);
-            if (cudaMalloc(&moe_.expert_hist, bytes) == cudaSuccess) {
-                cudaMemset(moe_.expert_hist, 0, bytes);
+            // vram_alloc, not cudaMalloc: I1 (docs/MEMORY_ARCHITECTURE.md) keeps
+            // direct CUDA allocation out of everything but src/memory/, against
+            // a list that only shrinks. A diagnostic is no reason to grow it.
+            moe_.expert_hist = static_cast<unsigned int*>(vram_alloc(vram_alloc_, bytes, "moe_expert_hist"));
+            if (moe_.expert_hist != nullptr) {
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_hist, 0, bytes, stream));
                 moe_.hist_layers = n_layers;
                 moe_.hist_experts = ne;
                 moe_.hist_top_k = top_k;
                 IMP_LOG_INFO("moe expert histogram: recording %d layers x %d experts -> %s", n_layers, ne,
                              runtime_config().diagnostics.moe_expert_hist.c_str());
             } else {
-                IMP_LOG_WARN("moe expert histogram: cudaMalloc failed — not recording");
+                IMP_LOG_WARN("moe expert histogram: allocation failed — not recording");
             }
         }
         // ne can differ per layer in principle; a mismatch would alias buckets,

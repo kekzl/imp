@@ -47,11 +47,11 @@ namespace imp {
 // or the key was set after init — and it must not look like a flat
 // distribution in the JSON.
 //
-// Reading runtime_config() from a destructor is safe by declaration order, not
-// by luck: Engine declares runtime_config_ (engine.h:352) before executor_
-// (engine.h:377), so the executor is destroyed first and the config it points
-// at is still alive. Reordering those two members would turn this into a
-// use-after-free.
+// Reading runtime_config() and freeing through vram_alloc_ from a destructor is
+// safe by declaration order, not by luck: Engine declares runtime_config_
+// (engine.h:352) and vram_alloc_ (engine.h:342) before executor_ (engine.h:377),
+// so the executor is destroyed first and both are still alive. Reordering those
+// members would turn this into a use-after-free.
 void GraphExecutor::dump_moe_expert_hist_() {
     if (moe_.expert_hist == nullptr)
         return;
@@ -84,7 +84,7 @@ void GraphExecutor::dump_moe_expert_hist_() {
                          moe_.hist_layers, moe_.hist_experts, path.c_str());
         }
     }
-    cudaFree(moe_.expert_hist);
+    vram_free(vram_alloc_, moe_.expert_hist);
     moe_.expert_hist = nullptr;
 }
 
