@@ -228,6 +228,25 @@ void Engine::init_resolve_kv_dtype_policy_() {
         config_.kv_cache_dtype = QType::F16;
     }
 
+    // INT8 KV and the prefix cache do not compose. A cache hit prefills only the
+    // uncached tail, and that partial prefill routes its attention through the
+    // chunk path, whose KV dtypes are F16/FP8/NVFP4/MXFP4/INT4 — INT8 has no
+    // paged_kv_gather kernel. The failure is not a clean refusal: the second
+    // request for any prompt dies with
+    //   "chunked_prefill: unsupported KV dtype 67 — engine should have prevented this"
+    // and the client gets no HTTP response at all. Measured on Qwen3-4B-Q8_0,
+    // three identical requests: prefix_cache=true -> HTTP 200/000/000,
+    // prefix_cache=false -> 200/200/200.
+    //
+    // Prefix caching is the one that yields: it is a latency optimisation, while
+    // dropping INT8 would cost the memory the operator explicitly asked for.
+    if (config_.kv_cache_dtype == QType::INT8 && config_.use_prefix_caching) {
+        IMP_LOG_WARN("prefix cache: disabled because kv_cache.dtype=int8 — a cache hit prefills only "
+                     "the tail, and the partial-prefill attention path has no INT8 KV gather kernel "
+                     "(#1348). Use fp8/nvfp4/int4 KV to keep prefix caching.");
+        config_.use_prefix_caching = false;
+    }
+
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16 &&
         true) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
