@@ -687,6 +687,26 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
     return true;
 }
 
+// Expert-activation histogram (diagnostics.moe_expert_hist). One increment per
+// (token, k) routing decision, bucketed by absolute layer index — non-MoE layers
+// of a hybrid simply stay zero. Kept off the hot path by the null check on
+// `hist`; when on, it is one atomicAdd per decision (n * top_k per layer per
+// forward), which is noise next to the expert GEMMs it precedes.
+__global__ void moe_expert_hist_kernel(const int32_t* __restrict__ expert_indices,
+                                       unsigned int* __restrict__ hist, int n_decisions, int n_experts,
+                                       int layer) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_decisions)
+        return;
+    int e = expert_indices[i];
+    // Defense-in-depth: a routing kernel that ever wrote an out-of-range id
+    // would corrupt neighbouring layers' counts rather than fail, and this
+    // buffer is read as evidence.
+    if (e < 0 || e >= n_experts)
+        return;
+    atomicAdd(&hist[static_cast<size_t>(layer) * n_experts + e], 1u);
+}
+
 void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
                                         int top_k, const Tensor& router_in,
                                         bool fp32_gate_logits_ready, bool will_decode_fast,
@@ -786,6 +806,38 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                 "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",
                 layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6],
                 h_idx[7], h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
+        }
+    }
+
+    // Expert-activation histogram. Hooked HERE, at the end of the routing
+    // funnel, and not inside run_topk: the fused gate+top-k decode branch above
+    // never calls run_topk, so a hook there would silently miss every
+    // single-token decode — which is the case this measurement is about.
+    if (!runtime_config().diagnostics.moe_expert_hist.empty()) {
+        if (moe_.expert_hist == nullptr) {
+            int n_layers = cfg.n_layers;
+            size_t bytes = static_cast<size_t>(n_layers) * ne * sizeof(unsigned int);
+            if (cudaMalloc(&moe_.expert_hist, bytes) == cudaSuccess) {
+                cudaMemset(moe_.expert_hist, 0, bytes);
+                moe_.hist_layers = n_layers;
+                moe_.hist_experts = ne;
+                moe_.hist_top_k = top_k;
+                IMP_LOG_INFO("moe expert histogram: recording %d layers x %d experts -> %s", n_layers, ne,
+                             runtime_config().diagnostics.moe_expert_hist.c_str());
+            } else {
+                IMP_LOG_WARN("moe expert histogram: cudaMalloc failed — not recording");
+            }
+        }
+        // ne can differ per layer in principle; a mismatch would alias buckets,
+        // so refuse rather than record something that reads plausible.
+        if (moe_.expert_hist != nullptr && ne == moe_.hist_experts && layer < moe_.hist_layers) {
+            int n_dec = n * top_k;
+            int threads = 256;
+            int blocks = (n_dec + threads - 1) / threads;
+            moe_expert_hist_kernel<<<blocks, threads, 0, stream>>>(static_cast<const int32_t*>(
+                                                                       routing.expert_indices.data),
+                                                                   moe_.expert_hist, n_dec, ne, layer);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 

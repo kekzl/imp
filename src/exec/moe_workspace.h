@@ -42,6 +42,16 @@ struct MoEWorkspace {
     void* fp32_down_buf = nullptr;
     size_t fp32_down_buf_size = 0;
 
+    // Expert-activation histogram (diagnostics.moe_expert_hist), off unless the
+    // key names a path. [n_layers * n_experts] device counters, incremented once
+    // per (token, k) routing decision. Answers "how skewed is expert selection",
+    // which is what decides whether a resident/host split of MoE experts can pay
+    // (docs/roadmap.md, "CPU-resident cold experts").
+    unsigned int* expert_hist = nullptr;
+    int hist_layers = 0;
+    int hist_experts = 0;
+    int hist_top_k = 0;
+
     // Pre-allocated device pointer array for batched MoE GEMM.
     // Layout: [A_ptrs..., B_ptrs..., C_ptrs...] = 3 * n_experts void pointers.
     void** d_work_ptrs = nullptr;

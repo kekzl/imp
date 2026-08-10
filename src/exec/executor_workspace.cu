@@ -38,7 +38,60 @@ namespace imp {
 // GraphExecutor lifetime
 // ---------------------------------------------------------------------------
 
-GraphExecutor::~GraphExecutor() { free_buffers(); }
+// Write the MoE expert-activation histogram (diagnostics.moe_expert_hist) and
+// release it. Called from the destructor, so it captures the whole process:
+// a decode run's skew is the sum over every token it produced.
+//
+// The total is logged whether or not it is zero. A histogram that recorded
+// nothing is the failure mode that matters here — the model had no MoE layers,
+// or the key was set after init — and it must not look like a flat
+// distribution in the JSON.
+//
+// Reading runtime_config() from a destructor is safe by declaration order, not
+// by luck: Engine declares runtime_config_ (engine.h:352) before executor_
+// (engine.h:377), so the executor is destroyed first and the config it points
+// at is still alive. Reordering those two members would turn this into a
+// use-after-free.
+void GraphExecutor::dump_moe_expert_hist_() {
+    if (moe_.expert_hist == nullptr)
+        return;
+    const std::string& path = runtime_config().diagnostics.moe_expert_hist;
+    size_t n = static_cast<size_t>(moe_.hist_layers) * moe_.hist_experts;
+    std::vector<unsigned int> h(n, 0u);
+    cudaError_t rc = cudaMemcpy(h.data(), moe_.expert_hist, n * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    if (rc != cudaSuccess) {
+        IMP_LOG_WARN("moe expert histogram: readback failed (%s) — not written", cudaGetErrorString(rc));
+    } else {
+        unsigned long long total = 0;
+        for (unsigned int c : h)
+            total += c;
+        FILE* f = path.empty() ? nullptr : fopen(path.c_str(), "w");
+        if (!f) {
+            IMP_LOG_WARN("moe expert histogram: cannot open %s for writing", path.c_str());
+        } else {
+            fprintf(f, "{\n  \"n_layers\": %d,\n  \"n_experts\": %d,\n  \"top_k\": %d,\n", moe_.hist_layers,
+                    moe_.hist_experts, moe_.hist_top_k);
+            fprintf(f, "  \"total_activations\": %llu,\n  \"counts\": [\n", total);
+            for (int l = 0; l < moe_.hist_layers; l++) {
+                fprintf(f, "    [");
+                for (int e = 0; e < moe_.hist_experts; e++)
+                    fprintf(f, "%s%u", e ? "," : "", h[static_cast<size_t>(l) * moe_.hist_experts + e]);
+                fprintf(f, "]%s\n", l + 1 < moe_.hist_layers ? "," : "");
+            }
+            fprintf(f, "  ]\n}\n");
+            fclose(f);
+            IMP_LOG_INFO("moe expert histogram: %llu activations over %d layers x %d experts -> %s", total,
+                         moe_.hist_layers, moe_.hist_experts, path.c_str());
+        }
+    }
+    cudaFree(moe_.expert_hist);
+    moe_.expert_hist = nullptr;
+}
+
+GraphExecutor::~GraphExecutor() {
+    dump_moe_expert_hist_();
+    free_buffers();
+}
 
 bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, int max_batch_size,
                          int max_seq_len, bool use_fp8_prefill, int use_nvfp4_decode,
