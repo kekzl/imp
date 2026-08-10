@@ -61,6 +61,14 @@ void paged_kv_gather_int4_to_fp16(half* dst, const uint8_t* src_packed,
                                   int n_past, int block_size, int nkv, int hd,
                                   cudaStream_t stream, const int* d_n_past = nullptr);
 
+// INT8 paged → FP16 flat with per-head FP16 scale dequant (symmetric, range [-127,127]).
+// src layout:        [num_blocks, block_size, nkv, hd] int8.
+// src_scales layout: [num_blocks, block_size, nkv]     FP16 (one scale per head per token).
+// Matches `write_kv_cache_int8_kernel`. Used by chunked prefill for INT8 KV.
+void paged_kv_gather_int8_to_fp16(half* dst, const int8_t* src, const half* src_scales,
+                                  const int* block_table, int n_past, int block_size, int nkv, int hd,
+                                  cudaStream_t stream, const int* d_n_past = nullptr);
+
 // Append the current chunk's contiguous FP16 K (or V) rows behind the gathered
 // past rows, at a DEVICE-computed row offset: dst[*d_past_len + i] = src[i]
 // for i in [0, n). Replaces the host-offset cudaMemcpyAsync in the chunked
