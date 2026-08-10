@@ -101,6 +101,32 @@ does **not** hold on the server path with prefix caching on — which is what
 #1314's title says, and what a 5/5 result on a 16-token answer briefly appeared
 to refute.
 
+### The scope decision, written down: batch invariance is not guaranteed
+
+#1314's other half is the same mechanism reached from the other side: a request
+served alongside 45 unrelated ones can answer differently than the same request
+served alone. Until now the project had neither claimed batch invariance nor
+listed it as out of scope, which the issue correctly called the actual problem.
+It is out of scope, and these are the two properties that replace it — both
+asserted by `ForwardPassTest.DecodeLogitsInvariantToBatchComposition`:
+
+1. **A batch neighbour's content cannot reach another row — bit-exactly.** Two
+   batches of identical shape and row lengths, differing only in what the
+   neighbouring sequences contain, produce *bit-identical* logits for the row
+   under test. This is the hard guarantee; a mask fault, a padding leak or a
+   block-table mixup (the #1044/#1045 class) breaks it, and the test kills a
+   mutant that makes one row read its neighbour's KV blocks.
+2. **Joining a batch may cost rounding, and only rounding.** Solo and batched
+   runs of the same sequence genuinely hand the GEMMs different shapes, so they
+   are not bitwise equal. Measured on the synthetic 2-layer harness: max
+   |delta| 3.1e-3 over a logit range of 1.41 (0.22 %), identical greedy argmax.
+   The gate allows 1 % of the range.
+
+Property 2 is why the end-to-end symptom exists: on a near-tie, a margin that
+small decides the token, and one flipped token forks the continuation. If you
+need output that does not depend on concurrent traffic, pin batch composition
+(or serve at batch 1); there is no flag that makes batched and solo bit-equal.
+
 `deterministic_gemm`'s decode cost, measured the way `bench_gate.sh` measures (discarded warm-up
 run per process, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, `--prefill-chunk-size 0`),
 four alternating pairs on Qwen3-4B-IQ4_NL, `tg128` tok/s:
