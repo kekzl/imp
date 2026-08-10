@@ -153,19 +153,34 @@ So the router is genuinely skewed, and **more so at the higher expert count** �
 
 *The catch, and it is the reason this is not a green light.* That coverage is **in-sample**: it assumes the resident set is chosen for the workload being served. Cross-validated — resident set picked on prompt 0, applied to the others — the 30B loses 15.2 and 29.5 points against those prompts' own oracles (78.8 % and 58.7 % against 94.0 % and 88.1 %). **The hot expert set is prompt-dependent**, so a static split calibrated once does not transfer, and an adaptive one pays PCIe traffic this budget does not model. Three prompts is a small sample and two of them are topically far apart, so treat the 29.5-point figure as a magnitude, not a constant.
 
+*The transfer term, measured rather than assumed.* The 165 µs figure quoted above for a blocking transfer is what a *host call* costs, not what a completed round trip costs, and using it twice per layer overstates the real thing by ~3.8x. Measured directly on this box at 8 KiB (one token's activations at d_model 4096), medians over 300 reps, idle GPU:
+
+| | µs |
+|---|---|
+| single D2H + synchronize | 45.4 |
+| **D2H + H2D, no kernel between — the cold-expert shape** | **86.2** |
+| D2H + kernel + H2D | 126.5 |
+| bare kernel launch + synchronize | 34.6 |
+
+The three add up, so the split is clean: a GPU kernel between the transfers costs its own launch, and the cold-expert path has none there — the host is what computes. The cost is also **size-independent** (8 KiB, 64 KiB and 1 MiB all land within noise of each other), which is what makes it latency and not bandwidth. So one MoE layer's round trip is 86 µs and 48 of them are **4.1 ms/token**, not 15.8.
+
+A trap worth recording, because it is what made the old figure look plausible: a small **pageable** H2D returns before the transfer has completed — CUDA stages it — so timing `cudaMemcpy` on pageable memory measures the staging, not the arrival. Pinned memory times *slower* here (45 vs 22 µs) for exactly that reason, not because pinning is worse. Only synchronized numbers are comparable.
+
 *The resulting band*, for a 120B-A5B shape (4.3B active routed params, 0.53 B/param, 48 MoE layers):
 
 | assumption | cold/token | bandwidth | transfer | total | ceiling |
 |---|---|---|---|---|---|
-| pooled / matched workload | 0.35 GB | 5.6 ms | 15.8 ms | 21.4 ms | **47 tok/s** |
-| held-out prompt | 0.94 GB | 15.1 ms | 15.8 ms | 30.9 ms | **32 tok/s** |
-| flat, i.e. this entry's own prior | 1.37 GB | 21.9 ms | 15.8 ms | 37.7 ms | 27 tok/s |
+| pooled / matched workload | 0.35 GB | 5.6 ms | 4.1 ms | 9.7 ms | **103 tok/s** |
+| held-out prompt | 0.94 GB | 15.1 ms | 4.1 ms | 19.2 ms | **52 tok/s** |
+| flat, i.e. this entry's own prior | 1.37 GB | 21.9 ms | 4.1 ms | 26.0 ms | 38 tok/s |
 
-**The finding that matters is the middle column, not the last one.** Skew cuts the bandwidth term by up to 4x, and the moment it does, **the per-layer blocking round trip becomes the dominant cost — 74 % of the best case, and it is workload-independent.** Faster memory buys nothing here. What decides this idea is whether the two transfers per MoE layer can be batched, overlapped or made non-blocking; at 165 µs each, 48 layers cost 15.8 ms/token before a single weight is read.
+**So the binding constraint is the cold-weight stream after all, and it is set by how well the resident set matches the workload** — not by the round trip, which is a fifth of the budget at the pessimistic end. An intermediate revision of this entry claimed the opposite ("the round trip is 74 % of the best case, faster memory buys nothing"); that rested on the 165 µs estimate and is withdrawn by the measurement above.
 
-So the next question is no longer "can DDR5 keep up" — it can — but **"can the round trip be hidden"**, and that is answerable in the existing engine without writing one AVX kernel. Until it is answered, the non-goal in [`GOAL.md`](GOAL.md) stands unamended.
+Three caveats on the band, none of them small: it is measured on an **idle** GPU, so queueing under real decode load can only make the transfer term worse; it assumes the host compute is fully overlapped, which the sequential layer dependency makes non-trivial; and the residency figure is in-sample. Treat 52 tok/s as the honest end and 103 as the ceiling nobody should plan against.
 
-Reproduce: `bash tools/analysis/moe_routing_skew.sh`.
+The open question is therefore back to being a *quality* one: can a resident set be chosen that survives workload drift — an LRU over experts, with its eviction traffic priced in. That is measurable with the histogram already in the tree, and it needs no AVX kernel and no amendment to the [`GOAL.md`](GOAL.md) non-goal, which stands unamended.
+
+Reproduce: `bash tools/analysis/moe_routing_skew.sh` for the skew, `tools/analysis/host_transfer_latency.cu` for the transfer term.
 
 Closed competitive records (kept for the record, not active work):
 
