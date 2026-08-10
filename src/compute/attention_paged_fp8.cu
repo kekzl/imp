@@ -22,6 +22,43 @@ __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
 // Pipelined Split-K: FP8 E4M3 variant
 // ---------------------------------------------------------------------------
 
+// Copy exactly ELEMS bytes per lane from global KV into the per-warp smem
+// staging buffer. The valid cp.async transfer sizes are 4, 8 and 16 bytes, and
+// each lane's address is `lane_id * ELEMS`, so the instruction size has to
+// match ELEMS *and* the resulting alignment:
+//
+//   ELEMS 16 (hd=512) -> 16 B, lane_id*16 is 16 B aligned
+//   ELEMS  8 (hd=256) ->  8 B, lane_id*8  is  8 B aligned
+//   ELEMS  4 (hd=128) ->  4 B, lane_id*4  is  4 B aligned
+//   ELEMS  2 (hd=64), 3 (hd=96) -> no cp.async size fits
+//
+// The old code had one branch for `ELEMS >= 8` (always 8 B — so hd=512 copied
+// half its bytes and left the rest of K/V unwritten) and a hard-coded 4 B
+// otherwise, which at hd=64 both over-copied (4 B for a 2 B slice, running past
+// k_buf0 into k_buf1) and misaligned (odd lanes land on offset 2 mod 4). That
+// misalignment is #1339: the kernel faulted and took the CUDA context with it.
+//
+// For the two head dims no cp.async size fits, the copy is synchronous. The
+// pipeline loses its overlap there and nothing else changes — correct and
+// slower beats fast and faulting, and hd=64/96 are not the shapes this kernel
+// was tuned for.
+template <int ELEMS>
+__device__ __forceinline__ void fp8_kv_stage_lane(uint8_t* smem_dst, const uint8_t* glob_src) {
+    if constexpr (ELEMS == 16) {
+        cp_async_ca_16(smem_dst, glob_src);
+    } else if constexpr (ELEMS == 8) {
+        cp_async_ca_8(smem_dst, glob_src);
+    } else if constexpr (ELEMS == 4) {
+        asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(
+                         static_cast<uint32_t>(__cvta_generic_to_shared(smem_dst))),
+                     "l"(glob_src));
+    } else {
+#pragma unroll
+        for (int i = 0; i < ELEMS; i++)
+            smem_dst[i] = glob_src[i];
+    }
+}
+
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_fp8_pipeline_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -120,13 +157,7 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
         // FP8: ELEMS bytes per thread (4 for HD=128, 8 for HD=256)
         {
             const uint8_t* K_tok = K_block + first_tok * kv_slot_stride + kv_head * HEAD_DIM;
-            if constexpr (ELEMS >= 8) {
-                cp_async_ca_8(&k_buf0[lane_offset], &K_tok[lane_offset]);
-            } else {
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(
-                                 static_cast<uint32_t>(__cvta_generic_to_shared(&k_buf0[lane_offset]))),
-                             "l"(&K_tok[lane_offset]));
-            }
+            fp8_kv_stage_lane<ELEMS>(&k_buf0[lane_offset], &K_tok[lane_offset]);
             cp_async_commit();
         }
 
@@ -140,17 +171,8 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
             // Start async V[t] + K[t+1] loads (branchless: clamp to last valid token)
             int t_next = min(t + 1, first_tok + n_toks - 1);
             const uint8_t* K_next = K_block + t_next * kv_slot_stride + kv_head * HEAD_DIM;
-            if constexpr (ELEMS >= 8) {
-                cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
-                cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
-            } else {
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(
-                                 static_cast<uint32_t>(__cvta_generic_to_shared(&v_buf[lane_offset]))),
-                             "l"(&V_tok[lane_offset]));
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(static_cast<uint32_t>(
-                                 __cvta_generic_to_shared(&k_bufs[1 - cur][lane_offset]))),
-                             "l"(&K_next[lane_offset]));
-            }
+            fp8_kv_stage_lane<ELEMS>(&v_buf[lane_offset], &V_tok[lane_offset]);
+            fp8_kv_stage_lane<ELEMS>(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             cp_async_commit();
             cp_async_wait_group<1>();
 
