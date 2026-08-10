@@ -207,7 +207,21 @@ Streaming also deletes the per-layer host round trip entirely, because the GPU n
 
 **And imp already has that mechanism**: `ExpertCache::get_or_load()` (`executor_forward_moe_legacy.cu`), with `moe.no_expert_cache` to switch it off. So the work this entry was reaching for is not an AVX kernel and not a `GOAL.md` amendment — it is whether that cache holds this hit rate for a model whose experts do not fit, and whether a promotion can be issued early enough. The latter is the same structural constraint entry 6 records for KV spill: routing for layer N is known only at layer N, so the fetch sits in front of the kernels rather than behind them.
 
-Caveats: one model as proxy, three prompts, 512 tokens each; expert size and layer count assumed for the 120B shape rather than measured; promotions priced as if serialised on the critical path, and the existing cache's behaviour under a genuinely non-fitting model is untested here.
+*What a promotion actually costs, and whether it can be hidden.* Measured with `tools/analysis/expert_promotion_overlap.cu`: 48 layers, one 6 MiB expert, a spin kernel standing in for per-layer compute, medians over 20 reps.
+
+| per-layer compute | baseline | promotion on the compute stream | prefetched one layer ahead on a copy stream |
+|---|---|---|---|
+| 100 µs | 4.80 ms | 15.47 ms (**+10.67**) | 5.45 ms (+0.66) |
+| 200 µs | 9.50 ms | 20.02 ms (**+10.53**) | 9.85 ms (+0.36) |
+| 400 µs | 18.86 ms | 29.56 ms (**+10.70**) | 19.19 ms (+0.32) |
+
+So copy/compute overlap **does** work on this box: given ≥100 µs of compute per layer, a prefetched promotion is all but free, while the same transfer issued in front of its consumer costs the full ~10.7 ms and hides nothing.
+
+**But the prefetch column is not reachable, and the reason is not engineering.** Issuing a fetch a layer early means knowing layer N+1's routing at layer N, and routing depends on that layer's own attention output. The obvious substitute — prefetch whatever the previous token used — was evaluated on the traces and does not carry: **42-47 % of a token's selections repeat from the token before** (63-68 % from a four-token window, at the price of holding ~19 experts per layer). Worse, it fails precisely where it would be needed: a miss is by definition an expert that was *not* recently used, which is the one case a recency predictor cannot supply.
+
+So promotions land in the first column, at the measured LRU rate rather than one per layer: 0.42 experts/layer/token is **~4.4 ms/token** of unhidden PCIe traffic for a 120B shape. Still ~3x better than the 14.0 ms of the host-compute design, and now the largest single term in it.
+
+Caveats: one model as proxy, three prompts, 512 tokens each; expert size and layer count assumed for the 120B shape rather than measured; the spin kernel is a stand-in for real per-layer compute; and the existing `ExpertCache`'s behaviour under a genuinely non-fitting model is still untested — that measurement, not another model, is the next thing worth doing.
 
 Sample caveats: one model, 512 tokens per prompt, and the k=8 row has a single held-out prompt per split (spread +-8.8 points against +-1.7 at k=3), so the flat middle of the curve is the trustworthy part, not its ends.
 
