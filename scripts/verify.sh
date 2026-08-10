@@ -230,7 +230,11 @@ else
         # SKIP_IF_NO_CUDA and the GPU-less CI lane skips it. Three of its tests
         # were red for three PRs before anyone looked (AUDIT B63). The pre-push
         # gate is the only place that can catch that class.
-        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:AttentionTest.*:VramBudget*"
+        # ForwardPassTest is here for the same reason: it is SKIP_IF_NO_CUDA, so
+        # CI cannot run it, and DecodeLogitsInvariantToBatchComposition (#1314)
+        # is the only assert in the tree that a sequence's logits do not depend
+        # on its batch neighbours — the class #1044/#1045 came from.
+        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:AttentionTest.*:VramBudget*:ForwardPassTest.*"
         if "$TESTS_BIN" --gtest_filter="$FILTER" >/tmp/imp_verify_tests.log 2>&1; then
             pass "fast gtest filter"
         else
