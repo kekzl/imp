@@ -551,7 +551,7 @@ k                    = 16
 # default OFF: cold-start accept on fresh reasoning measures ~1.4
 # emitted/verify vs the ~1.5x verify break-even (2026-07-23, single
 # request; the cross-request warm table is the open question — see
-# docs/audit/PERF_AUDIT_2026_07_23.md).
+# docs/archive/PERF_AUDIT_2026_07_23.md).
 token_recycling      = false
 recycle_slots        = 8
 recycle_depth        = 3

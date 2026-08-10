@@ -157,7 +157,7 @@ arch-limited — but the GDN-projection part of the FP16 tax is gone.
 ¹ᵈ 2026-07-13, commit `63df2d30` (PR #990) + `gemm.fp8_attn_proj` (default
 auto since that PR): FP8 E4M3 per-row-scale decode sidecar for the BF16
 q/k/v/o attention projections — the roofline cell
-(`docs/audit/roofline_gptoss_2026_07_13.md`) showed them at 33.5% of the
+(`docs/archive/roofline_gptoss_2026_07_13.md`) showed them at 33.5% of the
 decode window as 2 B/elem FP16 GEMVs. tg128 ~350 → **391.2** (+12%).
 Teacher-forced PPL unaffected by construction (decode-only sidecar;
 nsys-verified zero FP8 kernels in a `--perplexity` run); degen_suite 33/33.

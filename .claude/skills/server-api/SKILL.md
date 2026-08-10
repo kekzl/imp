@@ -93,4 +93,4 @@ After any server-side inference change, run the `check-degeneration` skill batte
 
 ## Known structural debt (don't re-discover)
 
-The 2026-07-07 structural audit (`docs/audit/structural_debt_2026_07_07.md`) flagged the server layer as the main debt source — open issues #888–#897 (p1: admission-control bypass, `/health` lock contention, SSE-loop drift). Check those issues before filing "new" findings in this layer.
+The 2026-07-07 structural audit (`docs/archive/structural_debt_2026_07_07.md`) flagged the server layer as the main debt source — open issues #888–#897 (p1: admission-control bypass, `/health` lock contention, SSE-loop drift). Check those issues before filing "new" findings in this layer.

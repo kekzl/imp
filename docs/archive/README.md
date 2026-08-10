@@ -1,4 +1,39 @@
-# Archive — summary index
+# Archive
+
+Two different things live here, and the distinction matters.
+
+**Files still present in this directory** are full documents whose numbers are
+cited from source comments or from living docs — a summary would not serve them.
+`check-release.sh` gates those citations, so none of these can simply be deleted.
+
+**Everything under the section headings further down** is a *summary* of a
+document that was consolidated away on 2026-06-13 and removed from the tree. The
+full text of each is in git history; the recipe for reading one is below.
+
+## What is in this directory
+
+| file | subject | cited from |
+|---|---|---|
+| `prefill_gap_2026_06_07.md` | the prefill gap against llama.cpp | code (3) + docs |
+| `roofline_2026_06_07.md` | first roofline campaign | code (1) + docs |
+| `roofline_gptoss_2026_07_13.md` | roofline on gpt-oss | code (1) + docs |
+| `tile-fa2-dispatch-shelved.md` | the shelved tiled-FA2 dispatch | code (1) + docs |
+| `roofline_2026_07_11.md` | roofline re-measure | docs |
+| `structural_debt_2026_07_07.md`, `structural_debt_2026_07_10.md` | structure audits | docs |
+| `prefill`/`perf` snapshots: `PERF_AUDIT_2026_07_23.md`, `DISPATCH_BASELINE_2026_07_17.md` | performance audit, dispatch baseline | docs |
+| `ppl_parity_2026_07_12.md` | cross-engine perplexity parity | docs |
+| `vram_audit_2026_07_07.md` | VRAM accounting snapshot | docs |
+| `cpp23_migration_2026_07_08.md` | the C++23 move | docs |
+| `housekeeping_2026_06_13.md` | the consolidation pass described below | docs |
+| `AUDIT_REPORT.md` | the soundness-hardening branch report | docs |
+
+Moved here from `audit/` on 2026-08-11 so that `audit/` holds only the ledgers
+you are meant to consult. **`AUDIT_ARCH_2026_07_29.md` deliberately stayed in
+`audit/`**: `check-release.sh` cross-checks it against `SETTLED.md` for
+finding-status coherence, and the gate fails if either leaves that directory —
+which is how this move discovered it had misclassified the file.
+
+## Summaries of documents consolidated away on 2026-06-13
 
 This directory used to hold ~70 historical documents (~25k lines): closed design
 memos, brainstorm→spec→plan→findings cycles, dated benchmark snapshots, early
@@ -65,7 +100,7 @@ layout), `cudnn_nvfp4_moe_audit`, `vllm_kernel_audit`. Outcome: the NVFP4 groupe
 GEMM fast path landed; **cuDNN NVFP4 MoE on sm_120 was refuted** (no usable path);
 the "20× / 1258 tok/s" premise from `vllm_kernel_audit` was later refuted (real gap
 ~1.4×). All superseded by the CUTLASS-3.x grouped-GEMM rework and
-`docs/audit/prefill_gap_2026_06_07.md`.
+`docs/archive/prefill_gap_2026_06_07.md`.
 
 ## `cross_engine_bench_2026_05_24.md`
 
@@ -116,7 +151,7 @@ implementation plan and (often) a findings memo:
 A second sweep of dated one-off material whose conclusions are now embedded in code,
 the live `audit/` memos, or shipped PRs. Originals removed; full text in git history.
 
-**Structural-audit chain (superseded by `audit/housekeeping_2026_06_13.md` + the 2026-06-17
+**Structural-audit chain (superseded by `archive/housekeeping_2026_06_13.md` + the 2026-06-17
 root audit ledger, itself since removed — git history; *not* today's root `AUDIT.md`):**
 - `audit/structural_debt_2026_06_08.md` — D1–D4 debt audit (ModelProfile / GraphExecutor /
   god-functions / flag sprawl). D1 shipped #622–#623; rest re-verified later.
@@ -192,8 +227,8 @@ PRs. Originals removed; full text in git history.
 - `audit/performance_agent_readiness_2026_05_31.md` — perf-agent-readiness audit. Its own Executive
   Summary declared the central premise dead ("'1258 tok/s, 20× behind vLLM' no longer holds"), its
   only lever (A1) is annotated DONE (#525), and its "~18% materialized attention" finding was
-  re-measured to 0.0% on hd=128. Superseded by `audit/prefill_gap_2026_06_07.md` +
-  `audit/roofline_2026_06_07.md` (both still live).
+  re-measured to 0.0% on hd=128. Superseded by `archive/prefill_gap_2026_06_07.md` +
+  `archive/roofline_2026_06_07.md` (both still live).
 - `ptx-status-2026-05-29-cuda133-sm120a.md` — sm_120a ptxas-acceptance survey. Frozen 494-line
   machine-generated snapshot; the filename said `cuda133` but the captured toolkit header was
   `V13.2.78` (compute_120f). Re-run the survey on the real 13.3 toolchain if a fresh PTX-acceptance
@@ -215,7 +250,7 @@ outright (point-in-time reports, superseded; full text in git history):
 
 - `AUDIT.md` (root) — 2026-06-17 whole-repo structural/hardening audit ledger (469 lines,
   append-only through 06-29). Its confirmed findings shipped via the June/July fix PRs;
-  later passes live in `audit/structural_debt_2026_07_07.md` / `_2026_07_10.md`.
+  later passes live in `archive/structural_debt_2026_07_07.md` / `_2026_07_10.md`.
   (Not the current root `AUDIT.md`, which is the 2026-07-29 memory-subsystem audit.)
 - `AUDIT/agentic_server_scout.md` — 2026-06-23 phase-0 read-only scout for the agentic
   server hardening campaign; the campaign shipped (PRs #772–#774 and follow-ups).

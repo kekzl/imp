@@ -70,7 +70,7 @@ Four independent read-only scouts verified each brief claim against code/docs.
 | Brief claim | Verdict | Evidence |
 |---|---|---|
 | "C++20, ~161k LOC" | STALE | C++23 since PR #916 (`CMakeLists.txt:4-7`); 119,813 LOC src+include |
-| G: README carries stale "1258 tok/s / 20× behind" | ALREADY FIXED | zero live-doc hits; survives only in archive/audit docs marked *refuted* (`docs/GOAL.md:99`, `docs/audit/housekeeping_2026_06_13.md`) |
+| G: README carries stale "1258 tok/s / 20× behind" | ALREADY FIXED | zero live-doc hits; survives only in archive/audit docs marked *refuted* (`docs/GOAL.md:99`, `docs/archive/housekeeping_2026_06_13.md`) |
 | G: stale multi-arch language in CLAUDE.md/AGENTS.md | NOT FOUND | all sm_90/sm_100/Hopper/WGMMA mentions are explicit *exclusion* statements (`AGENTS.md:11`, `CLAUDE.md:84`, `README.md:27,29,83,147`, `docs/sm120.md:23`) |
 | G: README should say "~200 tok/s decode, pp ≈ 16.5k/17.2k/18.2k" | STALE — WOULD REGRESS DOCS | current README numbers (07-12 sweep) are higher and SHA-anchored: decode 271–390 tok/s NVFP4 heroes; measured today: pp2048 = 46.8k tok/s. Applying the brief's numbers would be a factual downgrade → refused per invariant §0 |
 | B: "primary lever = FA2 coverage on MoE prefill; legacy path ~18% overhead" | STALE — NO HOT TARGET | legacy path = 0.0% of prefill window on all cells (roofline Module 2); hd=128 (incl. Coder-30B) is 100% FA2 since #478/#525/#932. Remaining cuBLAS tail is deliberate: Gemma-4 hd=512 globals (cuBLAS 2.8–4.6× FASTER than fused, PR #1042), gpt-oss sinks < threshold (accuracy reference), q_offset>0 short chunks (<1% upside), vision (non-causal), debug/parity paths. "Retire legacy" would regress Gemma-4 |

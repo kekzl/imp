@@ -14,7 +14,7 @@ attention shapes fall back to a materialized `causal_softmax + cuBLAS` path carr
 **~18 % prefill overhead across many shapes**, and asks to extend FA2 to close it.
 
 **That work has already shipped.** The repo's own prefill-gap audit states it
-explicitly (`docs/audit/prefill_gap_2026_06_07.md:142-144`):
+explicitly (`docs/archive/prefill_gap_2026_06_07.md:142-144`):
 
 > "Legacy materialized attention is **0.0 % on every hd=128 model** (the 2026-05-31
 > "~18 % materialized attention" figure is dead — fixed by #525/#478). Only hd≠128
@@ -114,7 +114,7 @@ infeasible on sm_120. Freezing this as the target-shape set per the orchestrator
 
 - `docs/attention-dispatch.md` — canonical routing table, lines 7-14 (0.0 % on hd=128),
   39-42 (gate), 52 (hd=256/512 SMEM), 50 (e4m3 PPL catastrophe).
-- `docs/audit/prefill_gap_2026_06_07.md:142-144` — "~18 % figure is dead, fixed by #525/#478".
+- `docs/archive/prefill_gap_2026_06_07.md:142-144` — "~18 % figure is dead, fixed by #525/#478".
 - `git log src/compute/attention_dispatch.cu src/exec/executor_attention_prefill.cu`:
   #525 "FP16-QK FA2 for short prefill — replace materialized cuBLAS path",
   #493 default-on hd=128, #932 fa2_hd256 default-on, #992 sink-capable WMMA FMHA,

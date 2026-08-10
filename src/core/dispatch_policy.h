@@ -339,7 +339,7 @@ struct GEMM {
     // ~32-rows-per-expert routing at pp512). Covers Q8_0/Q4_K expert
     // tensors; others (Q6_K down_proj) stay on dequant→cuBLAS. This is
     // lever #1 for the 2.4-2.6x GGUF-MoE prefill gap
-    // (docs/audit/prefill_gap_2026_06_07.md §4.2). Default on.
+    // (docs/archive/prefill_gap_2026_06_07.md §4.2). Default on.
     bool moe_imma_prefill = true;
     // Extend NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
     // not just the default Q8_0/Q6_K/Q5_K set. Trades VRAM for decode

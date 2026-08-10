@@ -451,7 +451,7 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     // MoE IMMA prefill (gemm.moe_imma_prefill): Q8_0/Q4_K expert tensors run
     // the grouped INT8 IMMA kernel — fused dequant, one launch over all
     // experts — instead of materializing every expert to FP16 (the 63-65%-of-
-    // window dequant tax, docs/audit/prefill_gap_2026_06_07.md §4.2). Other
+    // window dequant tax, docs/archive/prefill_gap_2026_06_07.md §4.2). Other
     // qtypes (Q6_K down_proj) and FP32-out fall through to the legacy path.
     int max_rows_per_expert = 0;
     for (int e = 0; e < ne; ++e)

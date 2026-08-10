@@ -2,7 +2,7 @@
 
 Investigation cell for the gpt-oss decode tie vs llama.cpp b9976 (imp ~344 tok/s,
 llama.cpp 329–345, mid-estimate +2% — below the ≥5% bar-2 lead). Analog to the
-35B hybrid cell from the cv4 re-pin (`docs/audit/roofline_2026_07_11.md`).
+35B hybrid cell from the cv4 re-pin (`docs/archive/roofline_2026_07_11.md`).
 
 - Commit: `1d7bbf5a` · config_version: 4 (additive: `gptoss-moe` model entry +
   regexes that only match gpt-oss-only kernels — cv4 runs stay comparable)
