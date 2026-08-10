@@ -52,6 +52,15 @@ struct MoEWorkspace {
     int hist_experts = 0;
     int hist_top_k = 0;
 
+    // Per-token expert trace (diagnostics.moe_expert_trace). Flat append of
+    // records [layer, e0..e_{top_k-1}], one per (token, layer), in stream order.
+    // Decode only — a prefill call would append n*top_k at once and break the
+    // fixed record stride the reader relies on.
+    int* expert_trace = nullptr;
+    unsigned int* trace_cursor = nullptr;  // device counter, in ints
+    size_t trace_capacity = 0;             // ints
+    int trace_top_k = 0;
+
     // Pre-allocated device pointer array for batched MoE GEMM.
     // Layout: [A_ptrs..., B_ptrs..., C_ptrs...] = 3 * n_experts void pointers.
     void** d_work_ptrs = nullptr;

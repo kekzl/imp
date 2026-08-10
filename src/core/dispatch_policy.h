@@ -735,6 +735,12 @@ struct Diagnostics {
     // token's top-k as a DEBUG line, this counts EVERY routing decision of the
     // run — the dataset the resident/host expert-split question needs.
     std::string moe_expert_hist;
+    // Path for a per-token MoE expert TRACE (JSON), written at executor
+    // teardown. Empty = off. The histogram above is an aggregate and cannot see
+    // temporal locality, which is the whole question for a cache: an LRU pays
+    // only if an expert selected now is selected again soon. Decode only (n==1),
+    // so each record is one (token, layer).
+    std::string moe_expert_trace;
     bool dump_tokens = false;
     // Teacher-forced perplexity: restrict the NLL sum to logit rows
     // i in [ppl_first, ppl_last] (row i predicts token i+1); ppl_last=-1
