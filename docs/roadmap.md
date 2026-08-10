@@ -138,6 +138,35 @@ Two things have to be said plainly before anyone starts:
 - **It collides with a stated non-goal.** [`GOAL.md`](GOAL.md) says "Not a CPU engine. GPU only. No AVX kernels." Taking this on means amending that line deliberately — the scope decision comes first, the code second.
 - **DDR5 bandwidth is a hard ceiling, and whether it lands at usable tok/s is a measurement question, not a matter of belief.** The honest first step is a bandwidth-and-latency budget for one decode step with a realistic hot/cold split, measured on this host, before a line of kernel code is written. If that budget says the CPU half cannot keep up with the GPU half, the idea is dead and the measurement is what kills it.
 
+**That budget was measured 2026-08-10. It does not kill the idea — and it moves the bottleneck somewhere else than this entry assumed.**
+
+*Host bandwidth.* Streaming read, 16 threads, 24 GiB buffer, 512-bit non-temporal loads: **62.5 GB/s**, three runs within 0.2 % (4 threads already reach 62.4 — the bandwidth saturates well before the core count does). That is ~65 % of the DDR5-6000 dual-channel theoretical, which is what a real streaming load gets.
+
+*Routing skew*, the input this entry never had. `diagnostics.moe_expert_hist` records a per-layer expert-activation histogram; `tools/analysis/moe_routing_skew.py` turns it into the coverage curve. Three prompts x 512 tokens, decode-dominated:
+
+| model | experts | top_k | coverage at 40 % resident | vs flat |
+|---|---|---|---|---|
+| Qwen3-30B-A3B-NVFP4 | 128 | 8 | **84.7 %** | 2.12x |
+| gpt-oss-20b-mxfp4 | 32 | 4 | 71.6 % | 1.79x |
+
+So the router is genuinely skewed, and **more so at the higher expert count** — which is the favourable direction, since the 80B-120B targets carry 128 (gpt-oss-120b) to 512 (Qwen3-Next-80B) experts.
+
+*The catch, and it is the reason this is not a green light.* That coverage is **in-sample**: it assumes the resident set is chosen for the workload being served. Cross-validated — resident set picked on prompt 0, applied to the others — the 30B loses 15.2 and 29.5 points against those prompts' own oracles (78.8 % and 58.7 % against 94.0 % and 88.1 %). **The hot expert set is prompt-dependent**, so a static split calibrated once does not transfer, and an adaptive one pays PCIe traffic this budget does not model. Three prompts is a small sample and two of them are topically far apart, so treat the 29.5-point figure as a magnitude, not a constant.
+
+*The resulting band*, for a 120B-A5B shape (4.3B active routed params, 0.53 B/param, 48 MoE layers):
+
+| assumption | cold/token | bandwidth | transfer | total | ceiling |
+|---|---|---|---|---|---|
+| pooled / matched workload | 0.35 GB | 5.6 ms | 15.8 ms | 21.4 ms | **47 tok/s** |
+| held-out prompt | 0.94 GB | 15.1 ms | 15.8 ms | 30.9 ms | **32 tok/s** |
+| flat, i.e. this entry's own prior | 1.37 GB | 21.9 ms | 15.8 ms | 37.7 ms | 27 tok/s |
+
+**The finding that matters is the middle column, not the last one.** Skew cuts the bandwidth term by up to 4x, and the moment it does, **the per-layer blocking round trip becomes the dominant cost — 74 % of the best case, and it is workload-independent.** Faster memory buys nothing here. What decides this idea is whether the two transfers per MoE layer can be batched, overlapped or made non-blocking; at 165 µs each, 48 layers cost 15.8 ms/token before a single weight is read.
+
+So the next question is no longer "can DDR5 keep up" — it can — but **"can the round trip be hidden"**, and that is answerable in the existing engine without writing one AVX kernel. Until it is answered, the non-goal in [`GOAL.md`](GOAL.md) stands unamended.
+
+Reproduce: `bash tools/analysis/moe_routing_skew.sh`.
+
 Closed competitive records (kept for the record, not active work):
 
 - **NVFP4 prefill vs vLLM -- CLOSED** (re-measured 2026-06-13, commit `290a163a`). FP16-QK FA2 as primary hd=128 prefill lifted pp4096 +21-24%: MoE pp4096 +4% ahead of vLLM, MoE pp2048 +27%, dense pp2048 ~tie. The lone residual gap -- dense pp4096 at ~1.04× -- is structural: every bounded kernel idea (cross-tile pipeline, grouped-GEMM tile axis, chunk-4096, occupancy/2-CTA, fp8-QK, scaled fp8-KV) was measurement-refuted; at pp4096 FA2 sits at ~5% DRAM and the dominant cost is the NVFP4 GEMMs (~59%), a separately-refuted ceiling.

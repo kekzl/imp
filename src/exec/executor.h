@@ -809,6 +809,9 @@ private:
                              bool fp32_gate_logits_ready, bool will_decode_fast,
                              const void* router_bias_ptr, bool use_sigmoid,
                              bool norm_weights, MoeRoutingResult& routing);
+    // Write + release the expert-activation histogram (diagnostics.moe_expert_hist).
+    // Destructor-time, so it covers the whole process rather than one request.
+    void dump_moe_expert_hist_();
     // Fused Q6_K prefill MoE path: reads Q6_K weights directly (no FP16
     // dequant scratch), TC variant uses gather-free sorted_token_ids
     // indirection, scalar variant materializes the gathered buffer.

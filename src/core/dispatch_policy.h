@@ -730,6 +730,11 @@ struct Diagnostics {
     std::string dump_hidden_dir;
     std::string dump_logits_dir;   // path or empty
     std::string dump_routing_dir;  // path or empty
+    // Path for the per-layer MoE expert-activation histogram (JSON), written at
+    // executor teardown. Empty = off. Unlike dump_routing_dir, which logs one
+    // token's top-k as a DEBUG line, this counts EVERY routing decision of the
+    // run — the dataset the resident/host expert-split question needs.
+    std::string moe_expert_hist;
     bool dump_tokens = false;
     // Teacher-forced perplexity: restrict the NLL sum to logit rows
     // i in [ppl_first, ppl_last] (row i predicts token i+1); ppl_last=-1
