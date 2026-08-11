@@ -19,9 +19,10 @@ there instead of retelling it.
   them slot indices instead of expert ids makes the whole family reachable with
   no new kernel and no staging copy. Qwen3-30B-A3B-Q4_K_M with all 48 MoE layers
   on host: decode 22.9 -> 48.3 tok/s (median), CUDA launches 197809 -> 61585
-  (-69%, against 52024 for the same model fully resident). Perplexity matches the
-  resident path to 0.019% (10.9616 vs 10.9637). Detail:
-  [`docs/roadmap.md`](docs/roadmap.md).
+  (-69%, against 52024 for the same model fully resident). Validated on two model
+  families; the perplexity figure first cited here measured prefill, which the
+  change does not touch — see [`docs/roadmap.md`](docs/roadmap.md) for what the
+  decode evidence actually is.
 
 ### Changed
 
