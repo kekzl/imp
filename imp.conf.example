@@ -339,8 +339,9 @@ expert_cache_debug_parity = false
 # Async H2D prefetch of next layer's top-K (proj, expert) pairs under
 # host-offload (0 = off; sensible 3..16).
 prefetch_top_k       = 0
-# Allow CUDA Graphs while experts are host-offloaded (experimental;
-# correct only with 1:1 prefetch coverage).
+# Allow CUDA Graphs while experts are host-offloaded. Currently a no-op in
+# practice: the MoE decode path reads routing on the host, so capture aborts
+# on every attempt and falls back to per-step decode (measured 2026-08-11).
 allow_graphs_under_offload = false
 # Per-process MoE workspace reserve override in MiB (0 = computed default).
 reserve_mib          = 0
