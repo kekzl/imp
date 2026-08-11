@@ -94,6 +94,19 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             if (h_offsets[e + 1] > h_offsets[e])
                 ++n_active_experts;
         const int dispatch_cells = n_active_experts * kExpertProjCount;
+        // NOTE the asymmetry with the decode-fast path: there the pool holding
+        // the whole working set is a CORRECTNESS requirement (all 3*top_k
+        // experts are staged before the kernels run, so a short pool would
+        // evict its own entries). Here each expert is consumed by a kernel
+        // launched immediately after, so eviction is harmless and this is a
+        // performance heuristic.
+        //
+        // Tested 2026-08-11 whether the full-fit rule is too strict at the
+        // margin — a pool at 79% of the working set ought to keep most of the
+        // reuse. It does not: measured hit rate is 0.0-0.4% at 14 and 19 slots
+        // against a 24-cell set, and using the cache there is SLOWER than
+        // bypassing it (5.6-6.3 vs 6.8-6.9 tok/s). Below full fit the cache
+        // retains nothing, so the threshold stays exact.
         const bool use_expert_cache = expert_cache_.n_slots_ > 0 &&
                                       dispatch_cells <= expert_cache_.slots_per_layer_;
 
