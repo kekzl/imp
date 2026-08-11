@@ -239,6 +239,12 @@ struct MoE {
     bool skip = false;
     bool force_fp16_sync = false;
     bool no_expert_cache = false;
+    // Share of free VRAM the expert LRU cache may claim, in percent. The pool
+    // depth this yields is what decides how many tokens of routing history the
+    // cache can hold — 73 slots/layer on a 30B-A3B is ~3 tokens, which catches
+    // the ~45% next-token reuse but not the ~80%-within-8 band. Exposed so that
+    // trade is measurable rather than hardcoded; 15 is the long-standing value.
+    int expert_cache_budget_pct = 15;
     // Phase 2 (MoE host-offload Graphs design): assert device-side mirror
     // == host-side LRU state after every cache mutation. Off by default;
     // turn on via `moe.expert_cache_debug_parity = true` in imp.conf for

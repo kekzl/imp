@@ -336,6 +336,17 @@ no_cutlass3x         = false
 # Assert device-mirror == host LRU after every expert-cache mutation
 # (CI/regression diagnosis; costly D2H readback — never in perf runs).
 expert_cache_debug_parity = false
+# Share of FREE VRAM the expert LRU cache may claim (percent, 1..90).
+# The pool depth this yields decides how many tokens of routing history the
+# cache holds, and on the host-offload path that is the dominant lever:
+# Qwen3-30B-A3B-Q4_K_M, all experts host-resident, 256 cold decode tokens —
+#   5%  ->  24 slots/layer, 36.6% hit, 10.51 tok/s
+#  15%  ->  73            , 74.1%    , 20.99   (default)
+#  30%  -> 146            , 89.4%    , 30.51
+#  50%  -> 244            , 96.2%    , 51.86
+# Raise it when the KV pool and weight caches do not need the room; the
+# default stays conservative because they usually do.
+expert_cache_budget_pct = 15
 # Async H2D prefetch of next layer's top-K (proj, expert) pairs under
 # host-offload (0 = off; sensible 3..16).
 prefetch_top_k       = 0
