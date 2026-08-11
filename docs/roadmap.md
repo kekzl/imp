@@ -221,7 +221,25 @@ So copy/compute overlap **does** work on this box: given ≥100 µs of compute p
 
 So promotions land in the first column, at the measured LRU rate rather than one per layer: 0.42 experts/layer/token is **~4.4 ms/token** of unhidden PCIe traffic for a 120B shape. Still ~3x better than the 14.0 ms of the host-compute design, and now the largest single term in it.
 
-Caveats: one model as proxy, three prompts, 512 tokens each; expert size and layer count assumed for the 120B shape rather than measured; the spin kernel is a stand-in for real per-layer compute; and the existing `ExpertCache`'s behaviour under a genuinely non-fitting model is still untested — that measurement, not another model, is the next thing worth doing.
+Caveats: one model as proxy, three prompts, 512 tokens each; expert size and layer count assumed for the 120B shape rather than measured; and the spin kernel is a stand-in for real per-layer compute.
+
+*Does the existing `ExpertCache` hold up when the experts genuinely do not fit? Measured 2026-08-11, and the answer is yes — but it was never the binding constraint.* `moe.force_host_experts=N` pins the last N MoE layers to host regardless of fit, which makes the whole range reachable on a model that otherwise fits. Qwen3-30B-A3B-Q4_K_M (48 layers, 128 experts, top_k 8, 1.23 MiB per expert matrix), all 48 MoE layers host-resident, `--bench-reps 3`:
+
+| arm | pp512 tok/s | tg256 tok/s | hit rate |
+|---|---|---|---|
+| experts fully resident (`N=0`) | 10580 | **311.24** | — |
+| host-resident, LRU cache | 254.20 | **24.98** | 88.7 % |
+| host-resident, staging buffer only | 308.11 | **6.63** | — |
+
+**The cache holds its hit rate and earns its keep: 88.7 % at full offload, ~0.9 new experts/layer/token — the same order as the 0.38-0.80 the traces predicted — and 3.8x the decode of the staging fallback it replaces.** The design this entry reached for is therefore not missing; it is in the tree and it works.
+
+**What the measurement moves is the ceiling.** Full offload still costs 12.5x against resident decode (311.24 → 24.98), and residual PCIe explains only part of it: at 88.7 % the misses move ~4.7 GB/s averaged over the run, well under the 25.6 GB/s this box reaches at a single expert's size. The rest is the dispatch shape — a host-resident layer fails the `on_device` test that selects the grouped GEMM, so it runs the serial per-expert path at 3·top_k = 24 launches per layer per token. **So the next lever is the dispatch, not the cache.**
+
+**Two things worth keeping, because neither was predicted.** *First, the budget runs the wrong way and it does not matter.* The pool is 15 % of **free** VRAM, so moving layers to host makes the cache **bigger** — 32 slots/layer at N=2 up to 73 at N=48, hit rate climbing 37.3 % → 89.4 % with it. The starvation this looked like it would produce never happens. *Second, prefill was thrashing the cache.* One dispatch touches `kExpertProjCount` cells per **active** expert, and at pp512 essentially every expert is active: 3·128 = 384 cells against 73 slots, i.e. a 73/384 = **19 % structural ceiling**, and a prefill-dominated run measures 24.3 % against it. Below that threshold the cache retains nothing and is strictly more work than the single-slot staging buffer for identical H2D bytes. Gating the cache on working-set fit is worth a median **+5.6 % pp512 (5/5 paired rounds positive)** at no decode cost, and lifts decode's own hit rate 88.7 % → 95.7 % once the thrashing accesses stop evicting it. Shipped.
+
+**A measurement trap on this path, recorded because it invalidated a first pass:** prefill throughput under host-resident experts varies ~15 % between two runs of the *same* arm, which is larger than every effect above. Only paired, alternating rounds decide anything here — and the decode number moves with how long the prefill was, because prefill is what warms the cache (pp8 → 72.7 % → 13.82 tok/s; pp512 → 88.7 % → 24.98). Two runs with different prompt histories are not an A/B.
+
+Reproduce: `tools/analysis/expert_cache_offload_sweep.sh` (`MODE=ab ROUNDS=5` for the paired comparison).
 
 Sample caveats: one model, 512 tokens per prompt, and the k=8 row has a single held-out prompt per split (spread +-8.8 points against +-1.7 at k=3), so the flat middle of the curve is the trustworthy part, not its ends.
 
