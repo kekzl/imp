@@ -590,6 +590,13 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                                  expert_cache_.n_slots_,
                                  expert_cache_.n_slots_ * max_expert_raw / (1024.0 * 1024.0),
                                  budget / (1024.0 * 1024.0));
+                    // Slot-index buffer for the host-offload decode path: one
+                    // block of top_k int32 per projection.
+                    int idx_count = kExpertProjCount * std::max(1, mcfg.n_experts_active);
+                    size_t idx_bytes = static_cast<size_t>(idx_count) * sizeof(int32_t);
+                    moe_.d_slot_idx = static_cast<int32_t*>(
+                        vram_alloc(vram_alloc_, idx_bytes, "moe_slot_idx"));
+                    moe_.d_slot_idx_count = moe_.d_slot_idx ? idx_count : 0;
                 }
             } else if (has_host_experts) {
                 IMP_LOG_INFO("Expert LRU cache disabled via IMP_NO_EXPERT_CACHE (staging fallback)");
