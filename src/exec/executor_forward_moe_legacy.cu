@@ -73,6 +73,30 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                                            cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
 
+        // Use the LRU cache only when this dispatch's working set fits the
+        // layer's slot pool. One dispatch touches kExpertProjCount cells per
+        // ACTIVE expert; the pool holds slots_per_layer. Above that the cache
+        // retains nothing across the dispatch — every access misses and
+        // evicts — so it does strictly more work than the single-slot staging
+        // buffer for the same H2D bytes.
+        //
+        // Decode stays on the cache (top_k experts -> 3*top_k cells, well
+        // under the pool). Prefill is what overflows: at pp512 essentially
+        // every expert is active, so Qwen3-30B-A3B asks for 3*128 = 384 cells
+        // against 73 slots and the cache measures a 24.3% hit rate against a
+        // 73/384 = 19% structural ceiling. Skipping it there is worth a
+        // median +5.6% pp512 (5/5 paired rounds positive) at no decode cost;
+        // decode's own hit rate rises 88.7% -> 95.7% once the thrashing
+        // prefill accesses stop polluting the pool. Harness:
+        // tools/analysis/expert_cache_offload_sweep.sh
+        int n_active_experts = 0;
+        for (int e = 0; e < ne; ++e)
+            if (h_offsets[e + 1] > h_offsets[e])
+                ++n_active_experts;
+        const int dispatch_cells = n_active_experts * kExpertProjCount;
+        const bool use_expert_cache = expert_cache_.n_slots_ > 0 &&
+                                      dispatch_cells <= expert_cache_.slots_per_layer_;
+
         // Helper: dequant one expert's weight from packed tensor into dequant scratch slot 0.
         // Returns a Tensor view into the scratch buffer with shape [rows, cols], FP16.
         // Uses slot 0 always -- safe because all ops are on the same stream, so the previous
@@ -111,7 +135,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                 // Expert weights offloaded to host — try LRU cache first, then staging
                 // buffer.
                 const char* host_ptr = static_cast<const char*>(packed.data) + offset;
-                if (expert_cache_.n_slots_ > 0) {
+                if (use_expert_cache) {
                     ExpertCacheKey ck{packed.data, expert_idx};
                     void* cached = expert_cache_.get_or_load(layer, proj, ck, host_ptr,
                                                              expert_raw, stream);
@@ -269,7 +293,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     size_t expert_raw = (size_t)rows * rb;
                     size_t offset = (size_t)eidx * expert_raw;
                     const char* host_ptr = static_cast<const char*>(packed.data) + offset;
-                    if (expert_cache_.n_slots_ > 0) {
+                    if (use_expert_cache) {
                         ExpertCacheKey ck{packed.data, eidx};
                         w = expert_cache_.get_or_load(layer, proj, ck, host_ptr,
                                                        expert_raw, stream);

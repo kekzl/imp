@@ -11,6 +11,18 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- **MoE host-offload: the expert LRU cache is skipped for a dispatch it cannot
+  hold.** One dispatch touches three cells per *active* expert, so prefill asks
+  for 384 against the 73 slots a Qwen3-30B-A3B gets and the cache retains
+  nothing — measured 24.3 % hit rate against a 19 % structural ceiling. Gating
+  on working-set fit is worth a median +5.6 % pp512 (5/5 paired rounds) at no
+  decode cost, and lifts decode's own hit rate 88.7 % → 95.7 %. Output is
+  byte-identical. Measurement and the rest of the offload picture:
+  [`docs/roadmap.md`](docs/roadmap.md); harness
+  `tools/analysis/expert_cache_offload_sweep.sh`.
+
 ## [0.24.0] - 2026-08-10
 
 ### Added
