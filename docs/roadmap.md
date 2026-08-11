@@ -272,7 +272,17 @@ So the 19x splits cleanly and multiplicatively: **2.47x from losing CUDA graphs*
 
 So the shape is: make a layer's active experts resident (at the measured 88.7 % hit rate that is ~2.7 H2D per layer per token, not 24), gather `slot_idx[k] = d_lookup[layer][proj][expert_indices[k]]` in one small kernel, then call the existing fused kernel against the pool. Per layer that is ~3-4 launches against today's 48 — the 16x — with **no new kernel, no staging copy and no change to the cache's data structures**. The gate shipped in #1365 already guarantees the precondition, since it only uses the cache when `3 · n_active ≤ slots_per_layer`.
 
-Unmeasured — a design note, not a result. It also predicts its own test: if it works the path stops being issue-bound and lands where this entry's PCIe budget put it, which is the first point at which the 52-103 tok/s band above becomes measurable rather than modelled. The other half of the 19x (CUDA graphs, 2.47x) stays out of reach while `moe.allow_graphs_under_offload` remains experimental.
+**Built and measured 2026-08-11 (#1370) — it holds.** Qwen3-30B-A3B-Q4_K_M with all 48 MoE layers host-resident:
+
+| | before | after |
+|---|---|---|
+| decode tg256 | 22.9 tok/s (median of 17 runs, 21.0-25.0) | **48.3** (median of 5, 45.8-50.0) |
+| `cudaLaunchKernel` | 197 809 | **61 585** (−69 %; 52 024 for the same model resident) |
+| prefill pp512 | ~300-340 | unchanged — `n>1` still takes the legacy path |
+
+**2.1x on decode, and the launch count now lands within 18 % of the fully-resident model** — the gap this entry opened is closed as far as the dispatch shape can close it. The correctness argument is that offload decode now runs the *same* dp4a kernels as the resident path, so the resident path is the reference: perplexity over `ppl_corpus_45k.txt` reads **10.9616 against 10.9637**, a 0.019 % difference.
+
+What did **not** materialise is the rest of the 19x. Establishing residency needs the routing on the host, so the path still pays one D2H + sync per layer — the serial fallback paid it too, which is why this is 2.1x rather than the ~16x the launch ratio alone suggested. Removing it means predicting routing a layer ahead, which the trace study above already refuted. The other factor, CUDA graphs (2.47x), stays out of reach while `moe.allow_graphs_under_offload` is experimental — and it is now the largest single remaining term on this path. The 52-103 tok/s band for a 120B shape is no longer obviously out of reach: a 30B at 48 tok/s with 3.8x the parameters to stream is the same order.
 
 Reproduce the profile: `nsys profile --sample=none --cpuctxsw=none --backtrace=none -t cuda --stats=true` around `imp-cli --set moe.force_host_experts=48`. **Put `--set runtime.cuda_graphs=never` on any resident arm you compare against**, or nsys hides the graph-replayed kernels and the launch counts are not comparable.
 
