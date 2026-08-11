@@ -187,6 +187,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("moe.skip", cfg.moe.skip);
     B("moe.force_fp16_sync", cfg.moe.force_fp16_sync);
     B("moe.no_expert_cache", cfg.moe.no_expert_cache);
+    I("moe.expert_cache_budget_pct", cfg.moe.expert_cache_budget_pct);
     B("moe.expert_cache_debug_parity", cfg.moe.expert_cache_debug_parity);
     I("moe.prefetch_top_k", cfg.moe.prefetch_top_k);
     B("moe.allow_graphs_under_offload", cfg.moe.allow_graphs_under_offload);

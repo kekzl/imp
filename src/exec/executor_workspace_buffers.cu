@@ -581,7 +581,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 vram_budget_mem_get_info(&free_mem, &total_mem);
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
-                budget = static_cast<size_t>(budget * 0.15);  // 15% of available
+                int pct = runtime_config().moe.expert_cache_budget_pct;
+                pct = std::clamp(pct, 1, 90);
+                budget = static_cast<size_t>(budget * (pct / 100.0));
                 const auto& mcfg = model_->config();
                 bool debug_parity = runtime_config().moe.expert_cache_debug_parity;
                 if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers,
