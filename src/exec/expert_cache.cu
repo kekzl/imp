@@ -106,9 +106,17 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     misses_ = 0;
 
     // Device-side lookup mirror. Cell value is **layer-relative** slot_idx
-    // (0..slots_per_layer_-1) or -1. n_experts == 0 means caller does not
-    // want the mirror — skip the alloc entirely.
-    if (n_experts_ > 0) {
+    // (0..slots_per_layer_-1) or -1.
+    //
+    // Only built under debug_parity_. NOTHING on the device reads it: the plan
+    // was for dispatch kernels to resolve slots from it, but the host-offload
+    // decode path (#1370) instead derives the slot from get_or_load's returned
+    // pointer, which leaves the mirror write-only in production — two extra
+    // 4-byte cudaMemcpyAsync per cache miss maintaining a structure with no
+    // consumer. Its only reader is check_parity(), which is a debug facility.
+    // If a kernel ever does read it, re-enable maintenance in get_or_load and
+    // prefetch_layer alongside this allocation.
+    if (n_experts_ > 0 && debug_parity_) {
         size_t cells = static_cast<size_t>(n_layers_) * kExpertProjCount * n_experts_;
         size_t bytes = cells * sizeof(int);
         cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&d_lookup_), bytes);
@@ -122,7 +130,10 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
             // (int32_t)-1 = 0xFFFFFFFF — memset 0xFF gives -1 in every cell.
             IMP_CUDA_CHECK_LOG(cudaMemset(d_lookup_, 0xFF, bytes));
         }
+    }
 
+    // Host-side tables — used in production regardless of the mirror above.
+    if (n_experts_ > 0) {
         // Host source-pointer table: [layer][proj * n_experts + expert].
         // Lazy-populated by get_or_load() — the value is stable for the
         // model's lifetime once stamped.
@@ -130,12 +141,11 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
                                   std::vector<const void*>(static_cast<size_t>(kExpertProjCount) *
                                                               n_experts_,
                                                           nullptr));
-        // Canonical packed_ptr per (layer, proj) — Phase 4 needs this to
+        // Canonical packed_ptr per (layer, proj) — the prefetcher needs this to
         // rebuild cache keys that match dispatch's get_or_load calls.
         host_packed_ptrs_.assign(static_cast<size_t>(n_layers_) * kExpertProjCount, nullptr);
-        // Per-(layer, proj) expert byte size — Phase 5 prereq. Avoids
-        // overflowing pinned host regions when projections have different
-        // sizes (e.g. Qwen3.6 gate < down).
+        // Per-(layer, proj) expert byte size. Avoids overflowing pinned host
+        // regions when projections have different sizes (Qwen3.6 gate < down).
         host_expert_bytes_.assign(static_cast<size_t>(n_layers_) * kExpertProjCount, 0);
     }
 
@@ -261,8 +271,9 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
         const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
         plru.lookup.erase(slots_[flat].key);
         // Invalidate the evicted slot's device mirror cell before reusing.
-        write_lookup_cell(d_lookup_, n_experts_, slots_[flat].layer, slots_[flat].proj,
-                          slots_[flat].expert, -1, stream);
+        if (debug_parity_)
+            write_lookup_cell(d_lookup_, n_experts_, slots_[flat].layer, slots_[flat].proj,
+                              slots_[flat].expert, -1, stream);
         slots_[flat].occupied = false;
     }
 
@@ -278,8 +289,8 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
     slot.expert = key.expert_idx;
     plru.lru_order.push_front(slot_in_layer);
     plru.lookup[key] = {slot_in_layer, plru.lru_order.begin()};
-    write_lookup_cell(d_lookup_, n_experts_, layer, proj_idx, key.expert_idx, slot_in_layer,
-                      stream);
+    if (debug_parity_)
+        write_lookup_cell(d_lookup_, n_experts_, layer, proj_idx, key.expert_idx, slot_in_layer, stream);
 
     if (debug_parity_)
         check_parity(stream);
@@ -369,8 +380,9 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
             plru.lru_order.pop_back();
             const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
             plru.lookup.erase(slots_[flat].key);
-            write_lookup_cell(d_lookup_, n_experts_, slots_[flat].layer, slots_[flat].proj,
-                              slots_[flat].expert, -1, prefetch_stream_);
+            if (debug_parity_)
+                write_lookup_cell(d_lookup_, n_experts_, slots_[flat].layer, slots_[flat].proj,
+                                  slots_[flat].expert, -1, prefetch_stream_);
             slots_[flat].occupied = false;
         }
 
@@ -394,8 +406,8 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
         slot.expert = expert;
         plru.lru_order.push_front(slot_in_layer);
         plru.lookup[key] = {slot_in_layer, plru.lru_order.begin()};
-        write_lookup_cell(d_lookup_, n_experts_, layer, proj, expert, slot_in_layer,
-                          prefetch_stream_);
+        if (debug_parity_)
+            write_lookup_cell(d_lookup_, n_experts_, layer, proj, expert, slot_in_layer, prefetch_stream_);
         ++prefetch_h2ds_;
         ++issued;
     }

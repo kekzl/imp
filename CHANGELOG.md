@@ -11,6 +11,19 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **MoE host-offload decode ~2x faster again: the expert cache stopped
+  maintaining a device mirror nothing reads.** `d_lookup_` was built for
+  dispatch kernels to resolve slots from; #1370 instead derives the slot from
+  `get_or_load`'s returned pointer, leaving the mirror write-only — two extra
+  4-byte `cudaMemcpyAsync` per cache miss with no consumer. Now built and
+  maintained only under `moe.expert_cache_debug_parity`, its sole reader.
+  Qwen3-30B-A3B-Q4_K_M, all experts host-resident, 256 cold decode tokens:
+  `cudaMemcpyAsync` 519638 -> 212454 (-59%), decode ~20 -> ~41 tok/s. Cache hit
+  rate is identical to three digits (74.1%) and generated output is
+  byte-identical, as a write-only structure implies.
+
 ### Changed
 
 - **MoE host-offload decode is ~2.1x faster: the fused decode kernels now reach
