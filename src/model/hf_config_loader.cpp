@@ -766,11 +766,17 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     if (vc && vc->type == JType::OBJECT) {
         std::string vision_type;
         jobj_get_string(*vc, "model_type", vision_type);
-        // Qwen3-VL's tower is understood: parse its geometry here and let
-        // weight_map fill the weights. Everything else still degrades to
-        // text-only, loudly.
+        // Which vision_config model_types use the Qwen3-VL tower layout.
+        // Qwen3.6 (`qwen3_5_moe`) ships the same tower under a different name:
+        // 333 `model.visual.*` tensors whose names are a strict subset of
+        // Qwen3-VL's patterns, the same nine geometry fields, and an empty
+        // `deepstack_visual_indexes` (which the loader already handles). It is
+        // an allowlist rather than a shape fingerprint on purpose — anything
+        // unrecognised must keep hitting the loud text-only path below rather
+        // than being parsed on a resemblance.
+        const bool qwen3vl_tower = (vision_type == "qwen3_vl" || vision_type == "qwen3_5_moe");
         bool parsed = false;
-        if (vision_type == "qwen3_vl" && out_vision_tower) {
+        if (qwen3vl_tower && out_vision_tower) {
             auto tower = std::make_unique<VisionModel>();
             std::string verr;
             if (parse_qwen3vl_vision_config(*vc, tower->config, verr)) {
