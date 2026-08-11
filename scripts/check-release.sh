@@ -273,6 +273,22 @@ else
     fail "version drift — CMakeLists '$CM_VER', CHANGELOG '${CL_VER:-none}', BENCHMARKS '${BM_VER:-none}'"
 fi
 
+# ------------------------------------------- 5b. changelog section hygiene
+# Entries get prepended to [Unreleased] one PR at a time, and prepending a
+# "### Changed" block in front of an existing one produces a section with the
+# same heading twice. Keep-a-Changelog readers (and the release cut, which
+# renames the whole block) then silently carry the duplicate into a tag.
+# Mechanical, so gate it rather than rely on noticing.
+section "changelog section hygiene"
+UNREL=$(awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)
+DUP=$(printf '%s\n' "$UNREL" | grep -E '^### ' | sort | uniq -d)
+if [ -n "$DUP" ]; then
+    printf '%s\n' "$DUP" | sed 's/^/  duplicate heading: /'
+    fail "[Unreleased] repeats a '###' heading — merge the blocks"
+else
+    pass "[Unreleased] has no repeated '###' heading"
+fi
+
 # ----------------------------------------------- 6. defer to make verify-fast
 section "make verify-fast"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
