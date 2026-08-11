@@ -4,6 +4,8 @@
 #include "compute/activation.h"
 #include "compute/ssm.h"
 #include "quant/dequant_gpu.h"
+#include "exec/expert_cache.h"
+#include "exec/moe_workspace.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -63,6 +65,22 @@ inline size_t expert_stride(const Tensor& packed, QType qtype) {
     int64_t rows = packed.shape[1];
     int64_t cols = packed.shape[2];
     return static_cast<size_t>(rows) * qtype_row_bytes(qtype, cols);
+}
+
+// Can the fused MoE decode kernels address host-resident experts through the
+// LRU cache's per-layer slot pool? They read `base + idx * stride`, and the
+// pool is exactly that (fixed `slot_size_` stride), so `idx` becomes a slot
+// index. Lives here because the DISPATCH predicate and run_moe_decode_fast
+// must agree exactly: if the dispatch says yes and the function then declines,
+// a host pointer reaches a kernel. One definition, two call sites.
+//
+// The whole working set must fit the layer's pool, or one projection's loads
+// evict another's — the same threshold the cache gate in #1365 enforces.
+inline bool host_expert_pool_ready(const Tensor& up_packed, const ExpertLRUCache& cache,
+                                   const MoEWorkspace& moe, int top_k) {
+    return (!up_packed.on_device && cache.n_slots_ > 0 && cache.pool_ != nullptr && cache.slot_size_ > 0 &&
+            moe.d_slot_idx != nullptr && moe.d_slot_idx_count >= kExpertProjCount * top_k &&
+            cache.slots_per_layer_ >= kExpertProjCount * top_k);
 }
 
 }  // namespace imp

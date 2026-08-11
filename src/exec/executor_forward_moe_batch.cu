@@ -998,6 +998,87 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         return;
     }
 
+    // ---- Host-resident experts: address the LRU cache's slot pool ----------
+    // The fused MoE decode kernels read an expert as `base + idx * stride`.
+    // With experts on host the contiguous array is the cache's per-layer slot
+    // pool (fixed stride slot_size_), so `idx` is a SLOT index rather than an
+    // expert id — no new kernel, no staging copy. Establishing residency needs
+    // the routing on the host, hence one D2H per layer; that is what the
+    // serial fallback this replaces already paid, and CUDA graphs are disabled
+    // on this path anyway. Requires the whole working set to fit the layer's
+    // pool, or one projection's loads would evict another's.
+    const bool host_experts = (ly.expert_up_packed.data != nullptr &&
+                               host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_, top_k));
+
+    const void* gate_base = ly.expert_gate_packed.data;
+    const void* up_base = ly.expert_up_packed.data;
+    const void* down_base = ly.expert_down_packed.data;
+    const int32_t* gate_idx = expert_indices;
+    const int32_t* up_idx = expert_indices;
+    const int32_t* down_idx = expert_indices;
+    size_t slot_stride = 0;  // non-zero once the pool is the array
+    bool pool_addressed = false;
+
+    if (host_experts) {
+        moe_host_args_capture_guard(stream);
+        std::vector<int32_t> h_experts(top_k);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts.data(), expert_indices,
+                                           static_cast<size_t>(top_k) * sizeof(int32_t),
+                                           cudaMemcpyDeviceToHost, stream));
+        cudaStreamSynchronize(stream);
+
+        std::vector<int32_t> h_slots(static_cast<size_t>(kExpertProjCount) * top_k, -1);
+        auto stage = [&](const Tensor& packed, ExpertProj proj, int off) -> bool {
+            if (!packed.data)
+                return true;  // non-gated model has no gate tensor
+            size_t rb = qtype_row_bytes(packed.qtype, packed.shape[2]);
+            size_t expert_raw = static_cast<size_t>(packed.shape[1]) * rb;
+            for (int k = 0; k < top_k; ++k) {
+                int e = h_experts[k];
+                if (e < 0 || e >= packed.shape[0])
+                    return false;
+                const char* host_ptr = static_cast<const char*>(packed.data) +
+                                       static_cast<size_t>(e) * expert_raw;
+                ExpertCacheKey ck{packed.data, e};
+                void* p = expert_cache_.get_or_load(layer, proj, ck, host_ptr, expert_raw, stream);
+                if (!p)
+                    return false;
+                size_t flat = static_cast<size_t>(static_cast<char*>(p) -
+                                                  static_cast<char*>(expert_cache_.pool_)) /
+                              expert_cache_.slot_size_;
+                h_slots[off + k] = static_cast<int32_t>(flat) - layer * expert_cache_.slots_per_layer_;
+            }
+            return true;
+        };
+        if (stage(ly.expert_gate_packed, ExpertProj::Gate, 0) &&
+            stage(ly.expert_up_packed, ExpertProj::Up, top_k) &&
+            stage(ly.expert_down_packed, ExpertProj::Down, 2 * top_k)) {
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx, h_slots.data(),
+                                               h_slots.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                               stream));
+            char* layer_pool = static_cast<char*>(expert_cache_.pool_) + static_cast<size_t>(layer) *
+                                                                             expert_cache_.slots_per_layer_ *
+                                                                             expert_cache_.slot_size_;
+            gate_base = up_base = down_base = layer_pool;
+            gate_idx = moe_.d_slot_idx;
+            up_idx = moe_.d_slot_idx + top_k;
+            down_idx = moe_.d_slot_idx + 2 * top_k;
+            slot_stride = expert_cache_.slot_size_;
+            pool_addressed = true;
+        } else {
+            // Unreachable by construction: host_expert_pool_ready() is the same
+            // predicate the dispatch used to send us here, and staging can only
+            // fail on an out-of-range expert id or layer. Say so loudly rather
+            // than fall through — the fall-through would hand a HOST pointer to
+            // a device kernel.
+            IMP_LOG_FATAL(
+                "MoE decode fast: host-resident experts could not be staged into the LRU pool "
+                "(layer %d, top_k %d, slots/layer %d). The dispatch predicate and this path "
+                "have diverged.",
+                layer, top_k, expert_cache_.slots_per_layer_);
+        }
+    }
+
     // dp4a/FP16 sub-path: gate+up projection (fused if gated)
     bool use_dp4a = (qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr);
 
@@ -1006,30 +1087,47 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         if (!moe_fused_norm_q8)
             quantize_fp16_to_q8_1(norm_ptr, q8, qscratch_.d8_buf, d, stream);
 
-        size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
+        size_t up_stride_bytes = pool_addressed ? slot_stride : expert_stride(ly.expert_up_packed, up_qtype);
+
+        auto select_moe_gemv = [](QType qt) {
+            return (qt == QType::Q6_K)   ? gemv_q6k_q8_1_moe_decode
+                   : (qt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
+                   : (qt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
+                   : (qt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
+                   : (qt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
+                   : (qt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
+                                         : gemv_q8_0_q8_1_moe_decode;
+        };
 
         if (!non_gated_experts) {
-            size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
-            auto gate_up_fused = (up_qtype == QType::Q6_K) ? gemv_q6k_q8_1_moe_gate_up_fused
-                               : (up_qtype == QType::Q4_K) ? gemv_q4_k_q8_1_moe_gate_up_fused
-                               : (up_qtype == QType::Q5_K) ? gemv_q5_k_q8_1_moe_gate_up_fused
-                               : (up_qtype == QType::Q4_0) ? gemv_q4_0_q8_1_moe_gate_up_fused
-                               : (up_qtype == QType::Q2_K) ? gemv_q2_k_q8_1_moe_gate_up_fused
-                               : (up_qtype == QType::Q3_K) ? gemv_q3_k_q8_1_moe_gate_up_fused
-                                                           : gemv_q8_0_q8_1_moe_gate_up_fused;
-            gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data, expert_indices, q8,
-                          qscratch_.d8_buf, gate_buf, up_buf, eff, d, gate_stride, up_stride_bytes,
-                          /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+            size_t gate_stride = pool_addressed
+                                     ? slot_stride
+                                     : expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
+            if (pool_addressed) {
+                // gate and up sit in different slots, so the one-index fused
+                // kernel cannot express both. Two decodes still collapse
+                // 2*top_k weight launches into 2.
+                select_moe_gemv(ly.expert_gate_packed.qtype)(gate_base, gate_idx, q8, qscratch_.d8_buf,
+                                                             gate_buf, eff, d, gate_stride,
+                                                             /*q8_1_stride=*/0, /*d8_stride=*/0, top_k,
+                                                             stream);
+                select_moe_gemv(up_qtype)(up_base, up_idx, q8, qscratch_.d8_buf, up_buf, eff, d,
+                                          up_stride_bytes, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+            } else {
+                auto gate_up_fused = (up_qtype == QType::Q6_K)   ? gemv_q6k_q8_1_moe_gate_up_fused
+                                     : (up_qtype == QType::Q4_K) ? gemv_q4_k_q8_1_moe_gate_up_fused
+                                     : (up_qtype == QType::Q5_K) ? gemv_q5_k_q8_1_moe_gate_up_fused
+                                     : (up_qtype == QType::Q4_0) ? gemv_q4_0_q8_1_moe_gate_up_fused
+                                     : (up_qtype == QType::Q2_K) ? gemv_q2_k_q8_1_moe_gate_up_fused
+                                     : (up_qtype == QType::Q3_K) ? gemv_q3_k_q8_1_moe_gate_up_fused
+                                                                 : gemv_q8_0_q8_1_moe_gate_up_fused;
+                gate_up_fused(gate_base, up_base, expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf, eff,
+                              d, gate_stride, up_stride_bytes,
+                              /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+            }
         } else {
-            auto up_gemv = (up_qtype == QType::Q6_K) ? gemv_q6k_q8_1_moe_decode
-                         : (up_qtype == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
-                         : (up_qtype == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
-                         : (up_qtype == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
-                         : (up_qtype == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
-                         : (up_qtype == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
-                                                     : gemv_q8_0_q8_1_moe_decode;
-            up_gemv(ly.expert_up_packed.data, expert_indices, q8, qscratch_.d8_buf, up_buf, eff, d,
-                    up_stride_bytes, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+            select_moe_gemv(up_qtype)(up_base, up_idx, q8, qscratch_.d8_buf, up_buf, eff, d, up_stride_bytes,
+                                      /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
         }
     } else {
         // FP16 dequant fallback — only Q6_K / Q8_0 wired.
@@ -1086,9 +1184,9 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                        : (dqt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
                        : (dqt == QType::Q5_1) ? gemv_q5_1_q8_1_moe_decode
                                               : gemv_q8_0_q8_1_moe_decode;
-        size_t down_stride = expert_stride(ly.expert_down_packed, dqt);
-        down_gemv(ly.expert_down_packed.data, expert_indices, q8, qscratch_.d8_buf, down_buf, d, eff,
-                  down_stride, /*q8_1_stride=*/eff_q8_blocks, /*d8_stride=*/eff_q8_blocks, top_k, stream);
+        size_t down_stride = pool_addressed ? slot_stride : expert_stride(ly.expert_down_packed, dqt);
+        down_gemv(down_base, down_idx, q8, qscratch_.d8_buf, down_buf, d, eff, down_stride,
+                  /*q8_1_stride=*/eff_q8_blocks, /*d8_stride=*/eff_q8_blocks, top_k, stream);
     } else {
         apply_expert_activation(gate_buf, up_buf, act_buf, non_gated_experts, top_k, eff, compute_dtype_,
                                 cfg.ffn_activation, stream);

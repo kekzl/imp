@@ -133,6 +133,14 @@ struct MoEWorkspace {
     void* raw_staging_buf = nullptr;
     size_t raw_staging_size = 0;
 
+    // Slot indices for the host-offload decode path: [3 * top_k] int32, one
+    // block per projection (gate, up, down). The fused MoE decode kernels
+    // address an expert as `base + idx * stride`; with host-resident experts
+    // the contiguous array is the LRU cache's per-layer slot pool, so `idx` is
+    // the expert's slot rather than its id. See docs/roadmap.md.
+    int32_t* d_slot_idx = nullptr;
+    int d_slot_idx_count = 0;
+
     // CUTLASS 3.x NVFP4 grouped GEMM staging:
     //   packed: [max_expanded, max_K/2] — contiguous FP4 activations
     //   sf:     per-expert SfAtom slabs (worst-case padded to 128 rows per expert)

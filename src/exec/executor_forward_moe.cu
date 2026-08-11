@@ -88,10 +88,16 @@ __global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n) {
 
 namespace {
 
+// `host_pool_ok` lets host-resident experts through: the fused decode kernels
+// address `base + idx * stride`, and the expert cache's per-layer slot pool is
+// exactly that shape, so run_moe_decode_fast can feed them slot indices instead
+// of expert ids. Without it a host-resident layer drops to the serial fallback,
+// which measured ~48 kernel launches per layer against this path's ~3
+// (docs/roadmap.md).
 static bool can_decode_fast(int n, const Tensor& expert_up_packed, QType up_qtype, void* dequant_buf,
-                            QType compute_dtype) {
+                            QType compute_dtype, bool host_pool_ok) {
     return (n == 1 && expert_up_packed.data != nullptr && dequant_buf != nullptr &&
-            compute_dtype == QType::F16 && expert_up_packed.on_device &&
+            compute_dtype == QType::F16 && (expert_up_packed.on_device || host_pool_ok) &&
             (up_qtype == QType::Q6_K || up_qtype == QType::Q8_0 || up_qtype == QType::Q4_0 ||
              up_qtype == QType::Q4_K || up_qtype == QType::Q5_K || up_qtype == QType::Q2_K ||
              up_qtype == QType::Q3_K || up_qtype == QType::Q5_1 || up_qtype == QType::NVFP4));
@@ -179,10 +185,12 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     }
 
     // Pre-check decode fast path (same logic as will_decode_fast below)
-    ctx.will_skip_residual_copy = can_decode_fast(ctx.n, ly.expert_up_packed, ly.expert_up_packed.qtype,
-                                                  moe_.dequant_buf, compute_dtype_) &&
-                                  ly.w_up_shared.data ==
-                                      nullptr;  // must not have shared expert for full residual fusion
+    ctx.will_skip_residual_copy =
+        can_decode_fast(ctx.n, ly.expert_up_packed, ly.expert_up_packed.qtype, moe_.dequant_buf,
+                        compute_dtype_,
+                        host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_,
+                                               model_->config().n_experts_active)) &&
+        ly.w_up_shared.data == nullptr;  // must not have shared expert for full residual fusion
 
     if (!ctx.will_skip_residual_copy) {
         // Kernel copy, not cudaMemcpyAsync: the D2D DMA submission blocked
@@ -306,7 +314,9 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
 
     ctx.up_qtype         = ly.expert_up_packed.qtype;
     ctx.will_decode_fast = can_decode_fast(ctx.n, ly.expert_up_packed, ctx.up_qtype, moe_.dequant_buf,
-                                           compute_dtype_);
+                                           compute_dtype_,
+                                           host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_,
+                                                                  cfg.n_experts_active));
     // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
     // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
     // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.

@@ -13,6 +13,18 @@ there instead of retelling it.
 
 ### Changed
 
+- **MoE host-offload decode is ~2.1x faster: the fused decode kernels now reach
+  host-resident experts.** They address an expert as `base + idx * stride`, and
+  the LRU cache's per-layer slot pool is already exactly that shape — feeding
+  them slot indices instead of expert ids makes the whole family reachable with
+  no new kernel and no staging copy. Qwen3-30B-A3B-Q4_K_M with all 48 MoE layers
+  on host: decode 22.9 -> 48.3 tok/s (median), CUDA launches 197809 -> 61585
+  (-69%, against 52024 for the same model fully resident). Perplexity matches the
+  resident path to 0.019% (10.9616 vs 10.9637). Detail:
+  [`docs/roadmap.md`](docs/roadmap.md).
+
+### Changed
+
 - **MoE host-offload: the expert LRU cache is skipped for a dispatch it cannot
   hold.** One dispatch touches three cells per *active* expert, so prefill asks
   for 384 against the 73 slots a Qwen3-30B-A3B gets and the cache retains
