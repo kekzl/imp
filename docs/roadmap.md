@@ -295,6 +295,18 @@ Note the trap the first attempt walked into: **resident-vs-offload generated tex
 
 What did **not** materialise is the rest of the 19x. Establishing residency needs the routing on the host, so the path still pays one D2H + sync per layer — the serial fallback paid it too, which is why this is 2.1x rather than the ~16x the launch ratio alone suggested. Removing it means predicting routing a layer ahead, which the trace study above already refuted. The other factor, **CUDA graphs (2.47x), is now the largest single remaining term on this path — and `moe.allow_graphs_under_offload` does not reach it.** Measured 2026-08-11: with the flag on, capture is attempted and **aborts every time** (three attempts, three aborts, per-step decode throughout), because every MoE path that serves host-resident experts reads routing on the host and `moe_host_args_capture_guard` throws under capture. That was already true of the serial fallback before #1370, so the flag has never delivered captured decode; its old description — "correct only when prefetch coverage matches router selection" — oversold it, since capture never gets far enough for coverage to be the question. The guard does its job: the abort is clean and falls back, so this was never a correctness risk, only a promise the flag could not keep. Descriptions corrected in #1373; the flag is kept as the escape hatch for the day the blocker lifts.
 
+*Where the path stands after all of it, re-profiled 2026-08-11 on the shipped build.* The entry opened by calling this path issue-bound; after #1370 and #1376 **it is not any more, and that retires the framing rather than confirming it.** Same config (256 cold decode tokens, all experts host-resident), tg phase 7.06 s:
+
+| term | per token | share |
+|---|---|---|
+| H2D expert traffic | 186 786 ops, **150 GB** total, ~51 GB/s achieved | **41 %** of the step |
+| kernel time | — | ~26 % |
+| `cudaLaunchKernel` | ~1341 | ~24 % |
+
+The remaining memcpys are no longer bookkeeping — median size 0.885 MB, i.e. expert weights — and they move at ~51 GB/s, which is the batched PCIe figure this entry measured earlier, not a stalled one. **So the path is now transfer-bound, which is the regime the PCIe budget at the top of this entry modelled all along.**
+
+That narrows the remaining lever to one thing: **move fewer bytes**, which means a higher hit rate, which means cache capacity — already exposed as `moe.expert_cache_budget_pct` (#1374). Overlapping the transfers instead does not pay here: per-layer compute is 3 GEMVs at ~6.4 µs, far under the ~100 µs this entry measured as the point where a prefetched promotion becomes free. And the launch term that remains is dominated by the ~1100 non-MoE launches per token, which only CUDA graphs collapse — blocked as recorded above.
+
 *And the largest lever on this path is neither of those — it is cache capacity, which was a hardcoded constant.* The pool is a share of free VRAM, fixed at 15 % since it was written, and that number decides how many tokens of routing history the cache holds: 73 slots/layer on this model is ~3 tokens, which catches the ~45 % next-token reuse the traces found but not the ~80 %-within-8 band. `moe.expert_cache_budget_pct` makes it measurable (#1374); swept on Qwen3-30B-A3B-Q4_K_M with all experts host-resident, 256 **cold** decode tokens (`--bench-pp 8 --bench-reps 1`, so no cross-rep cache warmth):
 
 | budget | slots/layer | hit rate | tg tok/s |
