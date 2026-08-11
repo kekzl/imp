@@ -11,18 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- **MoE host-offload decode ~2x faster again: the expert cache stopped
-  maintaining a device mirror nothing reads.** `d_lookup_` was built for
-  dispatch kernels to resolve slots from; #1370 instead derives the slot from
-  `get_or_load`'s returned pointer, leaving the mirror write-only — two extra
-  4-byte `cudaMemcpyAsync` per cache miss with no consumer. Now built and
-  maintained only under `moe.expert_cache_debug_parity`, its sole reader.
-  Qwen3-30B-A3B-Q4_K_M, all experts host-resident, 256 cold decode tokens:
-  `cudaMemcpyAsync` 519638 -> 212454 (-59%), decode ~20 -> ~41 tok/s. Cache hit
-  rate is identical to three digits (74.1%) and generated output is
-  byte-identical, as a write-only structure implies.
+- **`moe.expert_cache_budget_pct`** — the share of free VRAM the MoE expert LRU
+  cache may claim, previously hardcoded at 15. On the host-offload path this is
+  the dominant lever, because the pool depth decides how many tokens of routing
+  history the cache holds: Qwen3-30B-A3B-Q4_K_M with all experts host-resident,
+  256 cold decode tokens, 5 % → 50 % moves decode 10.51 → 51.86 tok/s (hit rate
+  36.6 % → 96.2 %). **Default unchanged at 15** — on a model that genuinely does
+  not fit, the same VRAM is what the KV pool and weight caches want. Sweep and
+  the floor below which the cache is bypassed entirely: [`docs/roadmap.md`](docs/roadmap.md).
 
 ### Changed
 
@@ -36,9 +34,6 @@ there instead of retelling it.
   families; the perplexity figure first cited here measured prefill, which the
   change does not touch — see [`docs/roadmap.md`](docs/roadmap.md) for what the
   decode evidence actually is.
-
-### Changed
-
 - **MoE host-offload: the expert LRU cache is skipped for a dispatch it cannot
   hold.** One dispatch touches three cells per *active* expert, so prefill asks
   for 384 against the 73 slots a Qwen3-30B-A3B gets and the cache retains
@@ -48,6 +43,26 @@ there instead of retelling it.
   byte-identical. Measurement and the rest of the offload picture:
   [`docs/roadmap.md`](docs/roadmap.md); harness
   `tools/analysis/expert_cache_offload_sweep.sh`.
+- **A Qwen3.6 checkpoint's vision tower is now recognised instead of dismissed.**
+  Its `vision_config.model_type` is `qwen3_5_moe`, which failed a literal string
+  compare even though the tower layout is Qwen3-VL's — 333 `model.visual.*`
+  tensors, the same nine geometry fields. **This does not yet enable vision on
+  Qwen3.6**: the weights are still dropped a layer lower, and the log now names
+  the missing tensor and count rather than shrugging. Second gate scoped in
+  [`docs/roadmap.md`](docs/roadmap.md).
+
+### Fixed
+
+- **MoE host-offload decode ~2x faster again: the expert cache stopped
+  maintaining a device mirror nothing reads.** `d_lookup_` was built for
+  dispatch kernels to resolve slots from; the change above instead derives the
+  slot from `get_or_load`'s returned pointer, leaving the mirror write-only —
+  two extra 4-byte `cudaMemcpyAsync` per cache miss with no consumer. Now built
+  and maintained only under `moe.expert_cache_debug_parity`, its sole reader.
+  Qwen3-30B-A3B-Q4_K_M, all experts host-resident, 256 cold decode tokens:
+  `cudaMemcpyAsync` 519638 -> 212454 (-59%), decode ~20 -> ~41 tok/s. Cache hit
+  rate is identical to three digits (74.1%) and generated output is
+  byte-identical, as a write-only structure implies.
 
 ## [0.24.0] - 2026-08-10
 
