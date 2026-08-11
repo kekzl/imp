@@ -53,6 +53,17 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`imp-quantize` refuses `--keep-attn-gate` together with `--calib` instead of
+  writing a silently wrong checkpoint.** A fused Q+gate `q_proj` is copied
+  through without the group's column scale, but the calibration planner has no
+  idea that exclusion exists — it builds group A from `{q,k,v}` unconditionally
+  and folds that group's `1/s` into `input_layernorm`. The result is an input
+  divided by `s` whose columns were never multiplied by it: a checkpoint that
+  loads and generates and is wrong. Latent rather than live (every arch with a
+  fused attention gate currently fails `--calib`'s architecture check), so this
+  is armed for whoever widens that check. Same call as #1188 made for stacked
+  experts: refuse rather than mangle.
+
 - **MoE host-offload decode ~2x faster again: the expert cache stopped
   maintaining a device mirror nothing reads.** `d_lookup_` was built for
   dispatch kernels to resolve slots from; the change above instead derives the

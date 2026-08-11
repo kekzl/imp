@@ -423,6 +423,27 @@ int main(int argc, char** argv) {
             gated.insert(gated.end(), found.begin(), found.end());
         }
         if (!gated.empty()) {
+            // --keep-attn-gate + --calib is mathematically unsound and would be
+            // SILENT. A fused Q+gate q_proj is copied through below without the
+            // group's column scale, but the planner has no idea this set exists
+            // — it builds group A from {q,k,v} unconditionally and folds that
+            // group's 1/s into input_layernorm. The result is an input divided
+            // by s whose columns were never multiplied by it: a wrong
+            // checkpoint that loads and generates.
+            //
+            // Unreachable today only because every arch with a fused attention
+            // gate (qwen3_5, qwen3_next) fails arch_uses_plain_rmsnorm() — i.e.
+            // it is armed for whoever widens that allowlist. Refuse rather than
+            // mangle, the same call #1188 made for stacked experts.
+            if (opt.keep_attn_gate && !opt.calib_file.empty()) {
+                fprintf(stderr,
+                        "Error: --keep-attn-gate cannot be combined with --calib. The gate half is\n"
+                        "excluded from the group scale, but the calibration plan still folds that\n"
+                        "group's 1/s into input_layernorm — the checkpoint would be silently wrong.\n"
+                        "Drop one of the two flags (%zu fused Q+gate projection(s) found).\n",
+                        gated.size());
+                return 1;
+            }
             size_t extra_bytes = 0;
             for (const RawTensor* t : gated) {
                 // What keeping it full precision costs over quantizing it.
