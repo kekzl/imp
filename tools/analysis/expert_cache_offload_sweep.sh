@@ -23,6 +23,7 @@
 set -u
 
 MODEL=${MODEL:-/models/Qwen3-30B-A3B-Q4_K_M/Qwen3-30B-A3B-Q4_K_M.gguf}
+MODELS_DIR="${MODELS_DIR:-$HOME/models}"
 IMG=${IMG:-imp:test}
 OUT=${OUT:-/tmp/expert_cache_sweep}
 MODE=${MODE:-sweep}
@@ -41,7 +42,7 @@ fi
 # Run one arm; echo "<pp tok/s> <tg tok/s> <hit rate>".
 run_arm() {
     local log=$1; shift
-    docker run --rm --gpus all -v /home/kekz/models:/models "$IMG" \
+    docker run --rm --gpus all -v "$MODELS_DIR":/models "$IMG" \
         imp-cli --model "$MODEL" "$@" \
         --bench --bench-pp "$PP" --bench-reps "$REPS" \
         --max-tokens "$TOKENS" --temperature 0 \
