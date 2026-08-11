@@ -55,8 +55,10 @@ MODEL_ENV = {
     'IMP_TEST_MODEL_GEMMA4': '/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf',
     'IMP_TEST_MOE_MODEL': '/models/gpt-oss-20b-mxfp4.gguf',
     'IMP_TEST_MODEL_DEEPSEEK': '/models/DeepSeek-V2-Lite',
-    'IMP_TEST_MODEL_QWEN3VL': '/models/Qwen3-VL-4B-GGUF/Qwen3-VL-4B-Instruct-Q4_K_M.gguf',
-    'IMP_TEST_MMPROJ': '/models/Qwen3-VL-4B-GGUF/mmproj-F16.gguf',
+    # Qwen3VLPipelineTest calls load_safetensors() on a DIRECTORY — pointing it
+    # at the GGUF made it fail rather than run.
+    'IMP_TEST_MODEL_QWEN3VL': '/models/Qwen3-VL-4B-Instruct',
+    'IMP_TEST_MMPROJ': '/models/gemma-3-4b-vl/mmproj-F16.gguf',
     'IMP_TEST_MMPROJ_GEMMA4': '/models/gemma-3-4b-vl/mmproj-gemma4-26b-bf16.gguf',
     'IMP_VISION_TEST_IMAGE': '/src/tests/fixtures/vision_test_64.png',
     'IMP_TEST_IMAGE_ALT': '/src/tests/fixtures/vision_test_green_bar.png',

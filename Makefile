@@ -155,6 +155,14 @@ test-vision: build
 		-e IMP_VISION_TEST_IMAGE=/fixtures/vision_test_64.png \
 		-e IMP_VISION_GOLDEN_DUMP=$(IMP_VISION_GOLDEN_DUMP) \
 		$(DOCKER_IMG) imp-tests --gtest_filter="VisionGolden.*"
+	@# Qwen3VLPipelineTest was runnable from no target at all: its env var was
+	@# set nowhere, and it resolves the fixture RELATIVELY, so it needs the repo
+	@# mounted as the working directory (the image ships no tests/). Until this
+	@# line existed, "Qwen3-VL runs end to end" rested on one manual run.
+	docker run --rm --gpus all -v $(HOME)/models:/models -v $(PWD):/work -w /work \
+		-e IMP_TEST_MODEL_QWEN3VL=/models/Qwen3-VL-4B-Instruct \
+		-e IMP_TEST_IMAGE_ALT=/work/tests/fixtures/vision_test_green_bar.png \
+		$(DOCKER_IMG) test-e2e --gtest_filter="*Qwen3VLPipeline*"
 
 # Full benchmark suite: all baseline models (requires GPU to be free)
 bench: build check-gpu
