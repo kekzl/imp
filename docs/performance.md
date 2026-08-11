@@ -46,7 +46,7 @@ tg256 in the 250–340 range (e.g. Qwen3-Coder-30B 338, Qwen3.6-35B 320 since th
 
 Decode is measured with CUDA Graphs ON, 10 reps, isolated + clock-warmed. Healthy-host
 sanity check: ~2850 MHz SM / 13801 MHz mem / ~500 W during the bench — decode can read
-8–15% low on depressed-host days (issue #526).
+8–15% low on depressed-host days (issue #526). **Rule out held VRAM before reaching for that explanation**: `nvidia-smi --query-gpu=memory.used` against the ~1.3–1.6 GiB WSLg baseline, because `--query-compute-apps` is blank on WSL2 even while memory is committed. A 16.4 GiB leftover from a killed container read −5.5% at healthy clocks on 2026-08-11 and passed at −1.24% once it cleared.
 
 ## Prefill Throughput (pp512) — historical (2026-05-27)
 
