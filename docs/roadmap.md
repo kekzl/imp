@@ -280,7 +280,18 @@ So the shape is: make a layer's active experts resident (at the measured 88.7 % 
 | `cudaLaunchKernel` | 197 809 | **61 585** (−69 %; 52 024 for the same model resident) |
 | prefill pp512 | ~300-340 | unchanged — `n>1` still takes the legacy path |
 
-**2.1x on decode, and the launch count now lands within 18 % of the fully-resident model** — the gap this entry opened is closed as far as the dispatch shape can close it. The correctness argument is that offload decode now runs the *same* dp4a kernels as the resident path, so the resident path is the reference: perplexity over `ppl_corpus_45k.txt` reads **10.9616 against 10.9637**, a 0.019 % difference.
+**2.1x on decode, and the launch count now lands within 18 % of the fully-resident model** — the gap this entry opened is closed as far as the dispatch shape can close it.
+
+**Correcting the correctness argument this entry shipped with.** #1370 cited perplexity — 10.9616 host against 10.9637 resident — as the evidence. **That measurement cannot see the change.** `--perplexity` is teacher-forced, so it runs prefill (`n=2048`, and the log says `legacy FP16 fallback path`), while the new path is gated on `n == 1`. The number is real and worth keeping for what it does show — prefill is untouched — but it is not evidence about decode. Textbook E6: right test, right property, an input that cannot reach the code.
+
+What does support it, gathered afterwards:
+
+- **The kernels and the bytes are not new.** Offload decode now runs the same dp4a kernels every on-device Q4_K MoE decode already uses, against a byte copy of the same weights. The only new thing is the *addressing*.
+- **Addressing failure is loud, not subtle.** A wrong slot index reads a different expert's weight matrix, which degenerates; it does not drift.
+- **Old vs new decode with prefill held constant** (`moe.no_expert_cache` toggled, so both arms take the legacy prefill): the two agree token-for-token for ~25 tokens and then diverge at a tie, both coherent and correct — the signature of a small numerical difference, which is expected because the old path was dequant→FP16→GEMV and the new one is dp4a Q4_K×Q8_1.
+- **Two model families** on the offload decode path — Qwen3-30B-A3B-Q4_K_M and Gemma-4-26B-A4B-Q4_K_M — give coherent single-turn, multi-turn and long-decode output with a clean `stderr`.
+
+Note the trap the first attempt walked into: **resident-vs-offload generated text is NOT a decode test either**, because prefill still differs between those two arms, so greedy decoding diverges from the first token for reasons that have nothing to do with the change.
 
 What did **not** materialise is the rest of the 19x. Establishing residency needs the routing on the host, so the path still pays one D2H + sync per layer — the serial fallback paid it too, which is why this is 2.1x rather than the ~16x the launch ratio alone suggested. Removing it means predicting routing a layer ahead, which the trace study above already refuted. The other factor, CUDA graphs (2.47x), stays out of reach while `moe.allow_graphs_under_offload` is experimental — and it is now the largest single remaining term on this path. The 52-103 tok/s band for a 120B shape is no longer obviously out of reach: a 30B at 48 tok/s with 3.8x the parameters to stream is the same order.
 
