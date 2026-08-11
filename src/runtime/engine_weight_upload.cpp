@@ -252,31 +252,34 @@ bool Engine::init_weights() {
             }
         }
         if (experts_on_host_ && config_.use_cuda_graphs) {
-            // Phase 5: the opt-in `moe.allow_graphs_under_offload` flag skips
-            // this guard so the user can experiment with captured decode
-            // under host-offload. Correctness is conditional on prefetch
-            // coverage matching router selection — captured cudaMemcpyAsync
-            // nodes have fixed (src host ptr, dst slot) pairs that don't
-            // adapt to per-token routing changes. See config.h doc for the
-            // architectural caveat; Phase 5.1+ refactors dispatch kernels
-            // to read the device mirror at runtime so the captured graph
-            // adapts correctly.
+            // The opt-in `moe.allow_graphs_under_offload` flag skips this
+            // guard. It does NOT currently buy captured decode, and the old
+            // wording here ("correctness depends on prefetch coverage")
+            // oversold it: capture never gets far enough for that to be the
+            // question. Every MoE path that serves host-resident experts reads
+            // routing on the host — the serial fallback and, since #1370, the
+            // slot-pool decode path — and `moe_host_args_capture_guard` throws
+            // unconditionally under capture. Measured 2026-08-11: three capture
+            // attempts, three aborts, per-step decode throughout.
+            //
+            // The flag is kept because it is the escape hatch the day that
+            // changes: making this capturable means resolving routing AND
+            // expert residency device-side, and residency needs a host-issued
+            // H2D on a miss. See docs/roadmap.md.
             if (runtime_config_.moe.allow_graphs_under_offload) {
                 IMP_LOG_WARN(
-                    "CUDA graphs ENABLED under host-offload "
-                    "(moe.allow_graphs_under_offload=true). EXPERIMENTAL: output "
-                    "correctness depends on prefetch coverage matching router "
-                    "selection. Set moe.prefetch_top_k high enough that the "
-                    "captured top-K covers the router's hot set.");
+                    "moe.allow_graphs_under_offload=true: the graphs-off guard is skipped, but "
+                    "capture will still ABORT on every attempt and fall back to per-step decode "
+                    "— the MoE decode path reads routing on the host, which is not capturable. "
+                    "This flag currently changes nothing except adding failed capture attempts.");
             } else {
                 demote_graphs_(GraphDemotionReason::ExpertsOnHost);
                 IMP_LOG_INFO(
                     "  Tip: if model+KV fits in VRAM, set IMP_EXPERT_OVERHEAD_PCT=10 "
                     "(default 30) to upload ALL experts and re-enable CUDA graphs "
                     "(+~180%% decode on Qwen 3.6 35B Q4_K_M).");
-                IMP_LOG_INFO(
-                    "  Or set moe.allow_graphs_under_offload=true (experimental) "
-                    "to opt into captured decode under host-offload.");
+                // Deliberately no longer advertised as an alternative: it
+                // does not deliver captured decode (see the branch above).
             }
         }
         if (runtime_config_.runtime.cuda_graphs == "never")

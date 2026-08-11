@@ -251,15 +251,16 @@ struct MoE {
     // (default — safety first, Phase 4 perf gains depend on workload
     // and need per-model measurement). Sensible values: 3..16.
     int prefetch_top_k = 0;
-    // Phase 5 (CUDA Graphs under host-offload): drop the "experts on
-    // host → graphs off" guard at engine.cpp:1158. Default false because
-    // it is opt-in experimental — the dispatch path's host-side
-    // get_or_load() captures cudaMemcpyAsync nodes with fixed (src host
-    // ptr, dst slot) pairs that don't adapt to per-token routing changes.
-    // Output is correct only when prefetch coverage matches router
-    // selection 1:1 (workloads with extremely stable expert patterns).
-    // Phase 5.1+ will refactor the dispatch kernels to read the device
-    // mirror at runtime so captured graphs adapt correctly.
+    // Drop the "experts on host → graphs off" guard. Kept as an escape
+    // hatch, but measured 2026-08-11 it currently buys NOTHING: every MoE
+    // path serving host-resident experts reads routing on the host, so
+    // moe_host_args_capture_guard throws under capture and the runner
+    // aborts to per-step decode on every attempt. The older note here —
+    // "correct only when prefetch coverage matches router selection" —
+    // oversold it; capture never reaches the point where that would be the
+    // question. Making this real needs routing AND expert residency
+    // resolved device-side, and residency needs a host-issued H2D on a
+    // miss. See docs/roadmap.md.
     bool allow_graphs_under_offload = false;
     bool zero_workspace = false;
     bool no_shared_mlp = false;
