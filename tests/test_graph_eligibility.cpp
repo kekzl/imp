@@ -28,7 +28,6 @@ const GraphDemotionReason kAll[] = {
     GraphDemotionReason::None,
     GraphDemotionReason::ConfigNever,
     GraphDemotionReason::Gemma4NoGraphs,
-    GraphDemotionReason::PureSsmLayers,
     GraphDemotionReason::CalibrationActive,
     GraphDemotionReason::StreamingKvConfigured,
     GraphDemotionReason::ExpertsOnHost,

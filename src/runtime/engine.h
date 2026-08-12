@@ -588,7 +588,6 @@ private:
     // A replay for a request in a DIFFERENT slot would read/write the wrong
     // sequence's state — invalidate (graph-exec update) on slot change.
     int decode_graph_recurrent_slot_ = -1;
-    bool has_pure_ssm_layers_ = false;  // true if model has Mamba2 SSM layers (not GDN)
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
     bool experts_on_host_ = false;
     bool dequant_done_ = false;
