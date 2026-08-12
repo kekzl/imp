@@ -220,6 +220,18 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
                 e.fp16_companion = true;
         }
     }
+
+    // Weights stored as FP8 on disk (Modelopt MIXED_PRECISION — Nemotron-3.5
+    // puts its Mamba in/out projections there while the experts stay NVFP4).
+    // sm_120 has no FP8 prefill GEMM, so the tier the planner picks for them
+    // (FP8, their source floor) has no way to reach cuBLAS: the raw bytes go
+    // out as dtB=CUDA_R_8F_E4M3 and the call fails with status 15. An FP16
+    // companion gives the prefill path something it can actually multiply;
+    // decode still re-quantizes to FP8 through the usual sidecar.
+    for (auto& e : plan.entries) {
+        if (e.source_qtype == QType::FP8_E4M3)
+            e.fp16_companion = true;
+    }
 }
 
 }  // namespace imp

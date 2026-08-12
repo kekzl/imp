@@ -18,6 +18,7 @@
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_runtime.h>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -55,9 +56,41 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     int n_nonfinite_after_flip = 0;
     int n_with_input_scale = 0;
     int n_wrong_scale_dtype = 0;
+    int n_native_fp8 = 0;
     auto promote = [&](const NvFP4PreQuantWeight& sc, Tensor& w, const char* key) {
         if (!sc.valid() || !w.data)
             return false;
+
+        // Native FP8 weights are not NVFP4 and must not be promoted as such.
+        // A Modelopt MIXED_PRECISION export (Nemotron-3.5) stores the Mamba
+        // in/out projections as F8_E4M3 with a single FP32 `weight_scale` and
+        // no `weight_scale_2`. Everything below assumes NVFP4's two-level
+        // layout — it would attach that scalar as if it were the per-16
+        // micro-scale array and relabel the weight NVFP4, which decodes to
+        // garbage. Record the scalar on the tensor and stop: Phase 1 expands
+        // it to FP16 (sm_120 has no FP8 prefill GEMM), keyed off this scale.
+        if (w.qtype == QType::FP8_E4M3) {
+            float s = 1.0f;
+            if (sc.weight_scale.data) {
+                // Unlike NVFP4 micro-scales this one is a scalar, so it is
+                // readable wherever it happens to live — it is not uploaded.
+                if (sc.weight_scale.on_device)
+                    cudaMemcpy(&s, sc.weight_scale.data, sizeof(float), cudaMemcpyDeviceToHost);
+                else
+                    memcpy(&s, sc.weight_scale.data, sizeof(float));
+            }
+            if (!(s > 0.0f) || !std::isfinite(s)) {
+                IMP_LOG_WARN(
+                    "FP8 weight %s has a non-finite or non-positive weight_scale (%.6g) — "
+                    "using 1.0; check this checkpoint",
+                    key, s);
+                s = 1.0f;
+            }
+            w.tensor_scale = s;
+            n_native_fp8++;
+            return false;  // not an NVFP4 promotion — nothing else to do here
+        }
+
         if (!w.on_device || !sc.weight_scale.on_device) {
             IMP_LOG_DEBUG("NVFP4 prequant: skipping %s (data_dev=%d, scale_dev=%d)", key, w.on_device,
                           sc.weight_scale.on_device);
@@ -362,6 +395,12 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                 "set diagnostics.audit_nvfp4_scales=true for stats).",
                 n_with_input_scale);
         }
+    }
+    if (n_native_fp8 > 0) {
+        IMP_LOG_INFO(
+            "Mixed precision: %d native FP8 weight(s) carry a per-tensor scale — "
+            "expanded to FP16 in Phase 1 (sm_120 has no FP8 prefill GEMM)",
+            n_native_fp8);
     }
 }
 

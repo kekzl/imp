@@ -13,6 +13,15 @@ there instead of retelling it.
 
 ### Added
 
+- **Native FP8 weights load — `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` runs**
+  (~137 tok/s decode, 45/45 on `degen_suite.py`). Its Modelopt `MIXED_PRECISION`
+  export puts the 46 Mamba in/out projections in FP8 and 5935 MoE expert tensors
+  in NVFP4. sm_120 has no FP8 prefill GEMM, so those weights previously reached
+  cuBLAS raw and aborted (`status 15, dtB=28`). They now get an FP16 companion at
+  load: Phase 0 records the per-tensor scale instead of mis-promoting them to
+  NVFP4, Phase 1 expands them via the existing `dequantize_fp8_e4m3_to_fp16`.
+  Costs 1698 MiB of FP16 cache here; init lands at 24.4 of 32.6 GB.
+
 - **Modelopt `quant_algo: MIXED_PRECISION` is parsed** — a per-tensor
   `quantized_layers` table instead of one global algorithm. Nemotron-3.5-Lightning
   uses it to put the 46 Mamba in/out projections on FP8 and 5935 MoE expert

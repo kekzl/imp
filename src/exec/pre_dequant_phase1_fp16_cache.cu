@@ -16,6 +16,7 @@
 #include "exec/pre_dequant_internal.h"
 #include "model/tensor_kind_table.h"
 #include "quant/dequant_gpu.h"
+#include "quant/fp8_quant.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -54,7 +55,13 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
     //     corruption guard) — without a scattered arch check here.
     auto cache_weight = [&](const Tensor& w, QType qtype, TensorKind kind) {
         (void)kind;
-        if (!w.data || !dequant_gpu_supported(qtype))
+        // A weight that is already FP8 on disk (Modelopt MIXED_PRECISION) is not
+        // something dequant_gpu handles — GGUF blocks carry their scales inline,
+        // this one has a single per-tensor scalar that Phase 0 put on the
+        // tensor. It still has to land here, because sm_120 has no FP8 prefill
+        // GEMM: left alone it reaches cuBLAS raw and fails with status 15.
+        const bool native_fp8 = (qtype == QType::FP8_E4M3);
+        if (!w.data || (!dequant_gpu_supported(qtype) && !native_fp8))
             return;
         if (wcache_->fp16.count(w.data))
             return;  // already cached
@@ -86,7 +93,11 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
             return;
         }
 
-        dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
+        if (native_fp8) {
+            dequantize_fp8_e4m3_to_fp16(w.data, fp16_buf, rows * cols, w.tensor_scale, stream);
+        } else {
+            dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
+        }
 
         Tensor fp16_tensor(fp16_buf, QType::F16, w.ndim, w.shape, true);
         wcache_->fp16[w.data] = fp16_tensor;
