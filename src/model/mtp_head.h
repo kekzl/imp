@@ -119,6 +119,14 @@ struct MtpHead {
     // ignores experts_*_packed.
     std::vector<Tensor> experts_up;    // [n_experts] each [d_ff_e, hidden]
     std::vector<Tensor> experts_down;  // [n_experts] each [hidden, d_ff_e]
+    // The same weights restacked contiguously at upload, so the decode GEMV can
+    // index them from a device-side expert id (gemv_f16_moe_decode) instead of
+    // the host reading routing back and issuing one GEMM per chosen expert.
+    // That host round trip is what kept the draft out of CUDA graph capture.
+    // Same storage, not a second copy: the per-expert Tensors above are views
+    // into these slabs once packing has run.
+    Tensor experts_up_stacked;    // [n_experts, d_ff_e, hidden] FP16
+    Tensor experts_down_stacked;  // [n_experts, hidden, d_ff_e] FP16
     // DeepSeek-style additive score bias on the router logits. Null when absent.
     Tensor router_score_bias;  // [n_experts] FP32
     // Experts have no gate_proj: activation is squared ReLU, not SwiGLU. This is

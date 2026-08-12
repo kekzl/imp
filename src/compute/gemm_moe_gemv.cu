@@ -139,6 +139,68 @@ void gemv_q8_0_moe_decode(const void* packed_weights, const int32_t* expert_indi
 }
 
 // ---------------------------------------------------------------------------
+// FP16 variant of the same shape. The quantized siblings above all exist
+// because the main model's experts are quantized; the MTP draft head's are not
+// (BF16 on disk, FP16 resident), and without this the draft had to read the
+// routing back to the host and issue one GEMM per chosen expert — which is
+// what kept the whole draft path out of CUDA graph capture.
+//
+// Straight dot product per row, one warp per row, vectorised 2-wide: at
+// K = d_model this is bandwidth-bound on the weight read, so the only thing
+// that matters is that each warp walks its row contiguously.
+__global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ packed_weights,
+                                           const int32_t* __restrict__ expert_indices,
+                                           const half* __restrict__ x, half* __restrict__ y, int rows, int K,
+                                           size_t expert_stride_elems, int x_stride, int blocks_per_expert) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+
+    const int expert_slot = blockIdx.x / blocks_per_expert;
+    const int local_block = blockIdx.x % blocks_per_expert;
+    const int row = local_block * warps_per_block + warp_id;
+
+    if (row >= rows)
+        return;
+
+    const int expert_id = expert_indices[expert_slot];
+    const half* W_row = packed_weights + (size_t)expert_id * expert_stride_elems + (size_t)row * K;
+    const half* x_ptr = x + expert_slot * x_stride;
+
+    float sum = 0.0f;
+    // half2 path when both row start and K allow it (K is a model dim: even).
+    if ((K & 1) == 0 && ((reinterpret_cast<uintptr_t>(W_row) & 3) == 0) &&
+        ((reinterpret_cast<uintptr_t>(x_ptr) & 3) == 0)) {
+        const half2* W2 = reinterpret_cast<const half2*>(W_row);
+        const half2* x2 = reinterpret_cast<const half2*>(x_ptr);
+        const int K2 = K >> 1;
+        for (int i = lane; i < K2; i += 32) {
+            const float2 w = __half22float2(W2[i]);
+            const float2 v = __half22float2(x2[i]);
+            sum += w.x * v.x + w.y * v.y;
+        }
+    } else {
+        for (int i = lane; i < K; i += 32)
+            sum += __half2float(W_row[i]) * __half2float(x_ptr[i]);
+    }
+
+    sum = warp_reduce_sum(sum);
+
+    if (lane == 0)
+        y[expert_slot * rows + row] = __float2half(sum);
+}
+
+void gemv_f16_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
+                         int rows, int K, size_t expert_stride_elems, int x_stride, int top_k,
+                         cudaStream_t stream) {
+    const int blocks_per_expert = gemv_blocks(rows);
+    gemv_f16_moe_decode_kernel<<<top_k * blocks_per_expert, kGemvThreads, 0, stream>>>(
+        static_cast<const half*>(packed_weights), expert_indices, x, y, rows, K, expert_stride_elems,
+        x_stride, blocks_per_expert);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+// ---------------------------------------------------------------------------
 // FP16 GEMV with FP32 output for MoE gate logits: y = W @ x
 // W: [M, K] FP16 (row-major), x: [K] FP16, y: [M] FP32.
 // Designed for M=n_experts (64-256), K=d_model (2048-8192), n=1 decode.
