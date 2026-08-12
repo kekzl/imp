@@ -176,6 +176,86 @@ TEST(LlmCompressorTranslate, SkipsMultiModalProjector) {
     EXPECT_EQ(c.vision_skipped, 1);
 }
 
+// ---- keep_vision: the tower survives when the checkpoint declares one ----
+
+TEST(LlmCompressorKeepVision, EmitsVisualPrefixVerbatim) {
+    TranslationCounters c{};
+    auto t = translate_name("model.visual.blocks.0.attn.qkv.weight", c, /*keep_vision=*/true);
+    ASSERT_EQ(t.action, NameTranslation::EMIT);
+    // Verbatim: the vision mapper strips `model.visual.` itself and then matches
+    // the remainder literally, so any rewrite here unmaps the slot silently.
+    EXPECT_EQ(t.out_name, "model.visual.blocks.0.attn.qkv.weight");
+    EXPECT_EQ(c.vision_kept, 1);
+    EXPECT_EQ(c.vision_skipped, 0);
+}
+
+// The rename steps run after the vision check on purpose. A vision tensor whose
+// name happens to end in a translated suffix must still come out untouched —
+// otherwise a quantized tower would load with every slot missing and only the
+// "tower incomplete" warning to show for it.
+TEST(LlmCompressorKeepVision, DoesNotRenameSuffixesOnVisionTensors) {
+    TranslationCounters c{};
+    auto t = translate_name("model.visual.blocks.0.attn.qkv.weight_packed", c, /*keep_vision=*/true);
+    ASSERT_EQ(t.action, NameTranslation::EMIT);
+    EXPECT_EQ(t.out_name, "model.visual.blocks.0.attn.qkv.weight_packed");
+    EXPECT_EQ(c.suffix_renames, 0);
+}
+
+// keep_vision is about the vision tower only — the MTP head has its own gate
+// (load_mtp_head) and must not ride in on this one.
+TEST(LlmCompressorKeepVision, StillSkipsMtp) {
+    TranslationCounters c{};
+    EXPECT_EQ(translate_name("mtp.layers.0.self_attn.q_proj.weight", c, /*keep_vision=*/true).action,
+              NameTranslation::SKIP);
+    EXPECT_EQ(translate_name("model.mtp.fc.weight", c, /*keep_vision=*/true).action, NameTranslation::SKIP);
+    EXPECT_EQ(c.vision_kept, 0);
+}
+
+TEST(LlmCompressorKeepVision, LeavesTextTensorsIdentical) {
+    TranslationCounters off{}, on{};
+    const std::string in = "model.language_model.layers.0.self_attn.q_proj.weight_packed";
+    auto a = translate_name(in, off, /*keep_vision=*/false);
+    auto b = translate_name(in, on, /*keep_vision=*/true);
+    EXPECT_EQ(a.action, b.action);
+    EXPECT_EQ(a.out_name, b.out_name);
+    EXPECT_EQ(off.suffix_renames, on.suffix_renames);
+    EXPECT_EQ(off.prefix_strips, on.prefix_strips);
+}
+
+// The shard-drop in load_sharded() calls name_is_skipped() while load_shard()
+// calls translate_name(). If the two ever disagree, the shard carrying the
+// tower is discarded before a single tensor is translated — the exact failure
+// this pair of functions exists to prevent.
+TEST(LlmCompressorKeepVision, PredicateAgreesWithTranslate) {
+    const char* names[] = {
+        "model.visual.blocks.0.attn.qkv.weight",
+        "model.visual.patch_embed.proj.bias",
+        "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight",
+        "vision_tower.transformer.layers.0.attention.q.weight",
+        "multi_modal_projector.linear_1.weight",
+        "mtp.layers.0.self_attn.q_proj.weight",
+        "model.mtp.fc.weight",
+        "model.layers.0.self_attn.q_proj.weight_packed",
+        "model.embed_tokens.weight",
+    };
+    for (bool keep : {false, true}) {
+        for (const char* n : names) {
+            TranslationCounters c{};
+            const bool translated_skips = translate_name(n, c, keep).action == NameTranslation::SKIP;
+            EXPECT_EQ(name_is_skipped(n, keep), translated_skips) << "name=" << n << " keep_vision=" << keep;
+        }
+    }
+}
+
+// Default argument = today's behaviour, so every text-only checkpoint that
+// loaded before this flag existed still translates byte-for-byte the same.
+TEST(LlmCompressorKeepVision, DefaultsToDropping) {
+    EXPECT_TRUE(name_is_skipped("model.visual.blocks.0.attn.qkv.weight"));
+    EXPECT_TRUE(name_is_vision("model.visual.blocks.0.attn.qkv.weight"));
+    EXPECT_FALSE(name_is_vision("mtp.layers.0.self_attn.q_proj.weight"));
+    EXPECT_FALSE(name_is_vision("model.layers.0.self_attn.q_proj.weight_packed"));
+}
+
 #include <fstream>
 #include <cstdlib>
 #include <unistd.h>

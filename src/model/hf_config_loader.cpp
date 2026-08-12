@@ -766,15 +766,11 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     if (vc && vc->type == JType::OBJECT) {
         std::string vision_type;
         jobj_get_string(*vc, "model_type", vision_type);
-        // Which vision_config model_types use the Qwen3-VL tower layout.
-        // Qwen3.6 (`qwen3_5_moe`) ships the same tower under a different name:
-        // 333 `model.visual.*` tensors whose names are a strict subset of
-        // Qwen3-VL's patterns, the same nine geometry fields, and an empty
-        // `deepstack_visual_indexes` (which the loader already handles). It is
-        // an allowlist rather than a shape fingerprint on purpose — anything
-        // unrecognised must keep hitting the loud text-only path below rather
-        // than being parsed on a resemblance.
-        const bool qwen3vl_tower = (vision_type == "qwen3_vl" || vision_type == "qwen3_5_moe");
+        // Which vision_config model_types use the Qwen3-VL tower layout. Shared
+        // with the SafeTensors loader's keep-the-vision-tensors gate, which must
+        // make exactly this decision one step earlier — see
+        // vision_tower_supported().
+        const bool qwen3vl_tower = vision_tower_supported(vision_type);
         bool parsed = false;
         if (qwen3vl_tower && out_vision_tower) {
             auto tower = std::make_unique<VisionModel>();
@@ -1083,6 +1079,18 @@ bool file_exists_at(const std::string& path) {
 }
 
 }  // namespace
+
+bool HFConfigLoader::probe_vision_tower(const std::string& model_dir) {
+    JValue root;
+    if (!parse_json_file(model_dir + "/config.json", root))
+        return false;
+    const JValue* vc = jobj_find(root, "vision_config");
+    if (!vc || vc->type != JType::OBJECT)
+        return false;
+    std::string vision_type;
+    jobj_get_string(*vc, "model_type", vision_type);
+    return vision_tower_supported(vision_type);
+}
 
 bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg) {
     bool has_modelopt = file_exists_at(model_dir + "/hf_quant_config.json");

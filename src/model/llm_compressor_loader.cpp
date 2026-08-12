@@ -90,17 +90,31 @@ std::vector<std::string> parse_bracket_array(std::string_view body) {
 
 }  // namespace
 
-bool name_is_skipped(const std::string& in) {
+bool name_is_vision(const std::string& in) {
     return starts_with(in, "model.vision_tower.") || starts_with(in, "model.visual.") ||
-           starts_with(in, "vision_tower.") || starts_with(in, "multi_modal_projector.") ||
-           starts_with(in, "mtp.") || starts_with(in, "model.mtp.");
+           starts_with(in, "vision_tower.") || starts_with(in, "multi_modal_projector.");
 }
 
-NameTranslation translate_name(const std::string& in, TranslationCounters& counters) {
+bool name_is_skipped(const std::string& in, bool keep_vision) {
+    if (name_is_vision(in))
+        return !keep_vision;
+    return starts_with(in, "mtp.") || starts_with(in, "model.mtp.");
+}
+
+NameTranslation translate_name(const std::string& in, TranslationCounters& counters, bool keep_vision) {
     std::string out = in;
 
+    // Step 0: vision tensors the caller asked to keep leave untouched. They are
+    // returned BEFORE the rename steps on purpose — the vision mapper matches
+    // the literal checkpoint spelling, so a prefix strip or a `.weight_packed`
+    // rename here would silently unmap a slot rather than fail.
+    if (keep_vision && name_is_vision(out)) {
+        counters.vision_kept++;
+        return {NameTranslation::EMIT, std::move(out)};
+    }
+
     // Step 1: skip patterns (vision tower / multimodal projector / MTP head).
-    if (name_is_skipped(out)) {
+    if (name_is_skipped(out, keep_vision)) {
         counters.vision_skipped++;
         return {NameTranslation::SKIP, ""};
     }
@@ -160,9 +174,10 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
 void log_summary(const TranslationCounters& c) {
     IMP_LOG_INFO(
         "llm-compressor format: %d suffix renames, %d prefix strips, "
-        "%d vision tensors skipped, %d Gemma-4 extras emitted, "
+        "%d vision tensors skipped, %d vision tensors kept, %d Gemma-4 extras emitted, "
         "%d pass-through",
-        c.suffix_renames, c.prefix_strips, c.vision_skipped, c.gemma4_extras, c.passed_through);
+        c.suffix_renames, c.prefix_strips, c.vision_skipped, c.vision_kept, c.gemma4_extras,
+        c.passed_through);
 }
 
 // Count leading spaces (tabs counted as 4) to track YAML block scope.

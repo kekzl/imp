@@ -133,5 +133,22 @@ TEST(Qwen3VLVisionConfig, MissingDeepstackIsFine) {
     EXPECT_EQ(c.num_layers, 24);
 }
 
+// The allowlist is read twice per load — once by the SafeTensors loader to
+// decide whether to keep the `model.visual.*` tensors, once here to decide
+// whether to parse the geometry. Both go through this one predicate.
+TEST(Qwen3VLVisionConfig, TowerAllowlist) {
+    EXPECT_TRUE(vision_tower_supported("qwen3_vl"));
+    // Qwen3.6 ships the same tower layout under its text model_type.
+    EXPECT_TRUE(vision_tower_supported("qwen3_5_moe"));
+
+    // Everything else keeps hitting the loud text-only path. Recognising a
+    // tower on a resemblance is what this list exists to prevent.
+    EXPECT_FALSE(vision_tower_supported(""));
+    EXPECT_FALSE(vision_tower_supported("qwen2_vl"));
+    EXPECT_FALSE(vision_tower_supported("siglip_vision_model"));
+    EXPECT_FALSE(vision_tower_supported("pixtral"));
+    EXPECT_FALSE(vision_tower_supported("gemma3"));
+}
+
 }  // namespace
 }  // namespace imp

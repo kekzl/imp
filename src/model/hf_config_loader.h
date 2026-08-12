@@ -117,6 +117,17 @@ struct HFConfigLoader {
     };
     static bool load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg);
 
+    // True if config.json declares a `vision_config` whose model_type this build
+    // can actually build a tower from (vision_tower_supported()).
+    //
+    // Exists because the SafeTensors loader has to decide whether to keep the
+    // `model.visual.*` tensors BEFORE load_config() runs — the shards are mapped
+    // first, and a dropped shard cannot be recovered later. Deliberately answers
+    // only "is there a tower worth keeping weights for": the geometry is still
+    // validated by load_config(), and a checkpoint that passes here but fails
+    // there just carries the tensors unused.
+    static bool probe_vision_tower(const std::string& model_dir);
+
     // MXFP4 quantization config (e.g. GPT-OSS). Sourced from `config.json`
     // top-level `quantization_config` block (`quant_method == "mxfp4"`).
     // Only the metadata is parsed; the SafeTensors decode path is not yet

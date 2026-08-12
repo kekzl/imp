@@ -301,8 +301,11 @@ struct ShardInfo {
 // translate_name otherwise SKIPs — are collected there under their raw
 // `mtp.*` name (the `model.` prefix stripped). Dense Qwen3.6 checkpoints
 // embed the MTP head in the main shard instead of a sidecar.
+//
+// keep_vision: pass through to translate_name — see its header comment. Not
+// defaulted, because a caller that forgets it silently loses the tower.
 static bool load_shard(const std::string& path, std::unordered_map<std::string, Tensor>& tensor_map,
-                       ShardInfo& shard, bool llm_compressor_format,
+                       ShardInfo& shard, bool llm_compressor_format, bool keep_vision,
                        imp::llm_compressor::TranslationCounters& counters,
                        std::unordered_map<std::string, Tensor>* mtp_out = nullptr) {
     int fd = open(path.c_str(), O_RDONLY);
@@ -388,7 +391,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         // Translate llm-compressor names → modelopt names if applicable.
         bool divert_to_mtp = false;
         if (llm_compressor_format) {
-            auto translated = imp::llm_compressor::translate_name(tensor_name, counters);
+            auto translated = imp::llm_compressor::translate_name(tensor_name, counters, keep_vision);
             if (translated.action == imp::llm_compressor::NameTranslation::SKIP) {
                 // Embedded MTP head: keep the tensor, but route it to the
                 // separate MTP map under its raw mtp.* name.
@@ -518,7 +521,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
 // ---- Sharded SafeTensors loading ----
 
 static bool load_sharded(const std::string& model_dir, std::unordered_map<std::string, Tensor>& tensor_map,
-                         std::vector<ShardInfo>& shards) {
+                         std::vector<ShardInfo>& shards, bool keep_vision) {
     std::string index_path = model_dir + "/model.safetensors.index.json";
 
     // Read the index file
@@ -555,10 +558,16 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
 
     // Drop shards where every tensor would be skipped by translate_name.
     // Saves the mmap + header parse + page cache pressure for an unused file.
+    //
+    // `keep_vision` has to reach this loop, not just translate_name: a vision
+    // tower usually ships as its own shard (`model_visual.safetensors`), so the
+    // drop decides the tower's fate before any tensor is looked at.
     std::set<std::string> shard_files;
     for (auto& [fname, tensors] : shard_tensors) {
         bool all_skip = !tensors.empty() &&
-                        std::all_of(tensors.begin(), tensors.end(), imp::llm_compressor::name_is_skipped);
+                        std::all_of(tensors.begin(), tensors.end(), [keep_vision](const std::string& n) {
+                            return imp::llm_compressor::name_is_skipped(n, keep_vision);
+                        });
         if (all_skip) {
             IMP_LOG_INFO("Skipping shard %s (%zu tensors are MTP/vision-only and unused)", fname.c_str(),
                          tensors.size());
@@ -587,7 +596,7 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     const size_t total_shards = shard_list.size();
     auto worker = [&](size_t i) {
         std::string shard_path = model_dir + "/" + shard_list[i];
-        if (!load_shard(shard_path, per_shard_maps[i], per_shard_info[i], llm_compressor_format,
+        if (!load_shard(shard_path, per_shard_maps[i], per_shard_info[i], llm_compressor_format, keep_vision,
                         per_shard_counters[i])) {
             IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
             any_failure.store(true);
@@ -618,6 +627,7 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
         tcounters.suffix_renames += c.suffix_renames;
         tcounters.prefix_strips += c.prefix_strips;
         tcounters.vision_skipped += c.vision_skipped;
+        tcounters.vision_kept += c.vision_kept;
         tcounters.gemma4_extras += c.gemma4_extras;
         tcounters.passed_through += c.passed_through;
         IMP_LOG_INFO("Loaded shard: %s (%zu tensors total)", shard_list[i].c_str(), tensor_map.size());
@@ -658,6 +668,13 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                                  probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
     imp::llm_compressor::TranslationCounters tcounters{};
 
+    // Whether to keep `model.visual.*` instead of dropping it. Decided here,
+    // from config.json alone, because load_config() runs only after the shards
+    // are mapped and a shard dropped by then cannot be recovered. A checkpoint
+    // with no vision_config — every text-only one — answers false and loads
+    // byte-for-byte as before.
+    const bool keep_vision = imp::HFConfigLoader::probe_vision_tower(model_dir);
+
     // Try loading tensors. embedded_mtp_map collects `mtp.*` tensors that
     // dense Qwen3.6 checkpoints embed in the main shard (no sidecar); only
     // populated when the caller asked for the MTP head.
@@ -668,7 +685,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     if (!single_file.empty()) {
         // Single file mode
         ShardInfo shard;
-        loaded = load_shard(single_file, tensor_map, shard, llm_compressor_format, tcounters,
+        loaded = load_shard(single_file, tensor_map, shard, llm_compressor_format, keep_vision, tcounters,
                             mtp_collect);
         if (loaded)
             shards.push_back(shard);
@@ -676,13 +693,13 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         // Directory mode: try sharded first, then single
         std::string index_path = model_dir + "/model.safetensors.index.json";
         if (fs::exists(index_path)) {
-            loaded = load_sharded(model_dir, tensor_map, shards);
+            loaded = load_sharded(model_dir, tensor_map, shards, keep_vision);
         }
         if (!loaded) {
             std::string st_path = model_dir + "/model.safetensors";
             if (fs::exists(st_path)) {
                 ShardInfo shard;
-                loaded = load_shard(st_path, tensor_map, shard, llm_compressor_format, tcounters,
+                loaded = load_shard(st_path, tensor_map, shard, llm_compressor_format, keep_vision, tcounters,
                                     mtp_collect);
                 if (loaded)
                     shards.push_back(shard);
@@ -695,7 +712,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // with its own counters — tcounters is only populated by the two load_shard calls above.
     if (llm_compressor_format &&
         (tcounters.suffix_renames + tcounters.prefix_strips + tcounters.vision_skipped +
-         tcounters.gemma4_extras + tcounters.passed_through) > 0) {
+         tcounters.vision_kept + tcounters.gemma4_extras + tcounters.passed_through) > 0) {
         imp::llm_compressor::log_summary(tcounters);
     }
 
@@ -786,7 +803,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             // MTP tensor names need to stay literal for dispatch.
             imp::llm_compressor::TranslationCounters mtp_counters{};
             bool mtp_loaded = load_shard(mtp_path, mtp_tensor_map, mtp_shard,
-                                          /*llm_compressor_format=*/false, mtp_counters);
+                                         /*llm_compressor_format=*/false,
+                                         /*keep_vision=*/false, mtp_counters);
             if (mtp_loaded) {
                 mtp_local = dispatch_mtp(mtp_tensor_map, mtp_path, static_cast<size_t>(sz));
             } else {

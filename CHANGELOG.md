@@ -13,6 +13,16 @@ there instead of retelling it.
 
 ### Added
 
+- **Qwen3.6-35B-A3B sees images.** The checkpoint already shipped a complete
+  Qwen3-VL tower (333 `model.visual.*` tensors, 851.8 MiB); two gates dropped it.
+  `vision_config.model_type` is `qwen3_5_moe`, which failed a literal string
+  compare (#1379), and the llm-compressor loader skipped `model.visual.*`
+  unconditionally — which also made the shard-drop discard the whole
+  `model_visual.safetensors`. The skip is now conditional on config.json
+  declaring a tower this build supports, so text-only checkpoints translate
+  exactly as before. No new encoder: it is the Qwen3-VL tower under a different
+  `model_type`. Validated on two fixtures with distinct correct descriptions.
+
 - **`moe.expert_cache_budget_pct`** — the share of free VRAM the MoE expert LRU
   cache may claim, previously hardcoded at 15. On the host-offload path this is
   the dominant lever, because the pool depth decides how many tokens of routing
