@@ -17,6 +17,7 @@
 #include "model/tensor_kind_table.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
+#include "runtime/config.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -33,6 +34,7 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
     (void)budget;  // strategy gate retired — plan-driven now
     size_t total_cache_bytes = 0;
     int cached_count = 0;
+    int native_fp8_decode = 0;
     bool budget_exhausted = false;
 
     if (wcache_->use_fp8) {
@@ -103,6 +105,26 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         wcache_->fp16[w.data] = fp16_tensor;
         total_cache_bytes += fp16_bytes;
         cached_count++;
+
+        // Decode keeps the checkpoint's own FP8 bytes. The FP16 copy above
+        // exists only because sm_120 has no FP8 prefill GEMM; spending it on
+        // the M=1 GEMV too would read 2 B/elem where the file has 1, on the
+        // one path that is bandwidth-bound — the opposite of why this
+        // checkpoint ships FP8. Phase 4 reads `native_source` and routes
+        // prefill to the FP16 companion, decode here.
+        //
+        // Unlike the fp8_ssm_proj sidecar this costs no extra VRAM and is
+        // lossless: these ARE the published weights, not a requantization.
+        // Same config gate, so `gemm.fp8_ssm_proj = false` falls back to the
+        // FP16 copy for both paths.
+        if (native_fp8 && runtime_config().gemm.fp8_ssm_proj) {
+            FP8CacheEntry fe;
+            fe.weight = Tensor(w.data, QType::FP8_E4M3, w.ndim, w.shape, true);
+            fe.host_scale = w.tensor_scale;  // per-tensor: d_row_scales stays null
+            fe.native_source = true;
+            wcache_->fp8[w.data] = fe;
+            native_fp8_decode++;
+        }
     };
 
     // Priority order: attention weights first (critical for cuBLAS prefill),
@@ -169,6 +191,12 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         wcache_->fp16_bytes = total_cache_bytes;
         IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV, %d fused gate+up)",
                      cached_count, total_cache_bytes / (1024.0 * 1024.0), fused_kv_count, fused_gu_count);
+    }
+    if (native_fp8_decode > 0) {
+        IMP_LOG_INFO(
+            "Native FP8 decode: %d weight(s) serve the M=1 GEMV from the checkpoint's own FP8 "
+            "bytes (the FP16 copy above is prefill-only)",
+            native_fp8_decode);
     }
 
     // Deduct Phase 1 allocation from shared budget

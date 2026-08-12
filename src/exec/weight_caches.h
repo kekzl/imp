@@ -21,6 +21,15 @@ struct FP8CacheEntry {
     // Per-row (output-channel) scales — set by the fp8_ssm_proj sidecar
     // (points into fp8_ssm_sidecar_row_scales); null = per-tensor scale.
     const float* d_row_scales{};
+    // True when `weight` borrows the checkpoint's own FP8 bytes rather than
+    // pointing into a cache this pipeline allocated (Modelopt
+    // MIXED_PRECISION — Nemotron-3.5). Three consequences, all load-bearing:
+    //   - the entry owns no memory, so nothing here may be freed;
+    //   - it is a DECODE sidecar, never the primary tier: sm_120 has no FP8
+    //     prefill GEMM, so phase 4 demotes prefill to the FP16 companion;
+    //   - it is therefore NOT an alternative to that FP16 copy, and phase 3
+    //     must keep it — same reason native NVFP4 keeps its own.
+    bool native_source = false;
 };
 
 // ---------------------------------------------------------------------------
