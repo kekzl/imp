@@ -440,3 +440,99 @@ TEST(LlmCompressorFormatDetect, ReturnsFalseWhenNoConfigPresent) {
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+// ---- MIXED_PRECISION (Modelopt): a per-tensor algorithm table ----
+//
+// Nemotron-3.5-Lightning exports one: the Mamba in/out projections are FP8 and
+// the MoE experts NVFP4, so there is no single top-level `quant_algo` to match.
+
+namespace {
+std::string write_quant_config(const std::string& tag, const std::string& json) {
+    std::string dir = tmpdir() + "/qc_" + tag + "_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir + "/hf_quant_config.json") << json;
+    return dir;
+}
+}  // namespace
+
+TEST(ModeloptMixedPrecision, AcceptsTableThatNamesNvfp4) {
+    std::string dir = write_quant_config("mixed", R"({"quantization":{
+      "quant_algo": "MIXED_PRECISION",
+      "kv_cache_quant_algo": "FP8",
+      "quantized_layers": {
+        "backbone.layers.0.mixer.in_proj":  {"quant_algo": "FP8"},
+        "backbone.layers.0.mixer.out_proj": {"quant_algo": "FP8"},
+        "backbone.layers.1.mixer.experts.0.up_proj":   {"quant_algo": "W4A16_NVFP4", "group_size": 16},
+        "backbone.layers.1.mixer.experts.0.down_proj": {"quant_algo": "W4A16_NVFP4", "group_size": 16}
+      }}})");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    EXPECT_TRUE(cfg.mixed_precision);
+    EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::MODELOPT);
+    EXPECT_EQ(cfg.n_nvfp4_tensors, 2);
+    EXPECT_EQ(cfg.n_fp8_tensors, 2);
+    EXPECT_EQ(cfg.n_other_tensors, 0);
+    // group_size rides on the NVFP4 entries, not the top level.
+    EXPECT_EQ(cfg.group_size, 16);
+    EXPECT_EQ(cfg.kv_cache_quant_algo, "FP8");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// The return value sets `is_nvfp4_prequant`, which drives the MoE expert cache
+// and the VRAM budget. An all-FP8 export claiming it would misplan both, so a
+// table without a single NVFP4 tensor must NOT be accepted as one.
+TEST(ModeloptMixedPrecision, RejectsTableWithoutNvfp4) {
+    std::string dir = write_quant_config("mixed_fp8", R"({"quantization":{
+      "quant_algo": "MIXED_PRECISION",
+      "quantized_layers": {
+        "backbone.layers.0.mixer.in_proj":  {"quant_algo": "FP8"},
+        "backbone.layers.0.mixer.out_proj": {"quant_algo": "FP8"}
+      }}})");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    EXPECT_FALSE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST(ModeloptMixedPrecision, RejectsMissingTable) {
+    std::string dir = write_quant_config("mixed_notable",
+                                         R"({"quantization":{"quant_algo":"MIXED_PRECISION"}})");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    EXPECT_FALSE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// An algorithm this build does not know must be counted and surfaced, not
+// folded into the NVFP4 count — silence there is how a half-understood
+// checkpoint passes as "some NVFP4 model".
+TEST(ModeloptMixedPrecision, CountsUnrecognisedAlgorithmsSeparately) {
+    std::string dir = write_quant_config("mixed_unknown", R"({"quantization":{
+      "quant_algo": "MIXED_PRECISION",
+      "quantized_layers": {
+        "backbone.layers.1.mixer.experts.0.up_proj": {"quant_algo": "W4A16_NVFP4", "group_size": 16},
+        "backbone.layers.2.mixer.in_proj": {"quant_algo": "W8A8_INT8"},
+        "backbone.layers.3.mixer.in_proj": {"quant_algo": "AWQ_W4A16"}
+      }}})");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    EXPECT_EQ(cfg.n_nvfp4_tensors, 1);
+    EXPECT_EQ(cfg.n_other_tensors, 2);
+    EXPECT_EQ(cfg.n_fp8_tensors, 0);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// Plain NVFP4 must be untouched by the MIXED_PRECISION branch.
+TEST(ModeloptMixedPrecision, PlainNvfp4Unchanged) {
+    std::string dir = write_quant_config("plain", R"({"quantization":{
+      "quant_algo": "NVFP4", "group_size": 16, "exclude_modules": ["lm_head"]}})");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    EXPECT_FALSE(cfg.mixed_precision);
+    EXPECT_EQ(cfg.n_nvfp4_tensors, 0);
+    EXPECT_EQ(cfg.exclude_modules.size(), 1u);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}

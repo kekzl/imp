@@ -114,6 +114,16 @@ struct HFConfigLoader {
         std::string kv_cache_quant_algo;           // "FP8" or empty (modelopt only)
         std::vector<std::string> exclude_modules;  // e.g. ["lm_head"]
         NvFP4Format format = NvFP4Format::MODELOPT;
+        // Modelopt `quant_algo: MIXED_PRECISION`: instead of one global algorithm
+        // there is a per-tensor `quantized_layers` table. Nemotron-3.5 uses it to
+        // put the Mamba in/out projections on FP8 and the MoE experts on NVFP4.
+        // Only the counts are kept: nothing downstream consumes a per-tensor
+        // algorithm, because the storage tier is decided from each tensor's
+        // actual dtype at load. They exist so the log can state what was seen.
+        bool mixed_precision = false;
+        int n_nvfp4_tensors = 0;
+        int n_fp8_tensors = 0;
+        int n_other_tensors = 0;  // an algorithm this build does not recognise
     };
     static bool load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg);
 
