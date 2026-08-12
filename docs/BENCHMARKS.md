@@ -139,7 +139,7 @@ Decode carries ±5–10 % day-to-day variance (issue #526); clocks logged health
 | Qwen3-Coder-30B-A3B | 30B (3B) | 338 |
 | Qwen3.6-35B-A3B | 35B (3B) | 257 → **320**¹ᵇ |
 | Gemma-4-26B-A4B | 26B (4B) | 266 |
-| Nemotron-3-Nano-30B | 30B (3B) | 128 → **148**¹ᶜ |
+| Nemotron-3-Nano-30B | 30B (3B) | 148 → **386**¹ᶜ |
 | gpt-oss-20b¹ | 21B (3.6B) | 325 → **391**¹ᵈ |
 
 ¹ᵇ 2026-07-10, commit `80864b06` + `gemm.fp8_ssm_proj` (default on since that
@@ -148,11 +148,12 @@ PR): FP8 E4M3 per-row-scale decode sidecar for the BF16 GDN in/out projections
 speculation; PPL flat (8.021 → 8.012 same-session teacher-forced). Same
 command pattern as the table; healthy-host clocks sampled during the run.
 
-¹ᶜ 2026-07-11, commit `6946a6cd` + `gemm.fp8_ssm_proj`: the same FP8
-SSM-projection sidecar (221 MiB on Nemotron's 12 GDN projections) lifts
-Nemotron-3-Nano-30B decode 128 → **148** tok/s (+16%), PPL flat (4.184 →
-4.117). Still the slowest 30B — the Mamba2 scan + attention-projection share is
-arch-limited — but the GDN-projection part of the FP16 tax is gone.
+¹ᶜ 2026-08-12, PR #1389: **148 → 386 tok/s**. The FP8 SSM-projection sidecar
+had taken it 128 → 148 on 2026-07-11 (`6946a6cd`, PPL flat 4.184 → 4.117), and
+this table then called the remainder "arch-limited". That was wrong: CUDA graphs
+were being demoted for pure-SSM layers on an unverified assumption, so the model
+decoded eagerly. Removing the demotion is the 2.6x. Nothing about the Mamba2
+scan was the limit.
 
 ¹ᵈ 2026-07-13, commit `63df2d30` (PR #990) + `gemm.fp8_attn_proj` (default
 auto since that PR): FP8 E4M3 per-row-scale decode sidecar for the BF16
@@ -192,8 +193,8 @@ gap:** MoE pp4096 went 30 300 → 37 639 (**+24%**, now *ahead* of vLLM) and den
 pp4096 19 938 → 24 232 (**+21%**, gap 1.27× → 1.04×). pp2048 moved +3.8–4.7%.
 imp also wins TTFT/pp512 outright (2.1–3.4×, vLLM has a flat-cost small-M regime).
 The lone surviving NVFP4-prefill gap is dense pp4096 at ~1.04×. Decode (tg256
-@ctx2048): 14B 159, 30B-A3B ~317. Nemotron-3-Nano is arch-limited (hybrid
-Mamba2 + attention FP16-projection mix).
+@ctx2048): 14B 159, 30B-A3B ~317. (The claim that once stood here — that
+Nemotron-3-Nano is arch-limited — was disproved on 2026-08-12; see note ¹ᶜ.)
 
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
