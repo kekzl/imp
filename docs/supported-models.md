@@ -64,6 +64,7 @@ checkpoint, so there is no second file and no second flag.
 | Model | Quant | Format | Notes |
 |---|---|---|---|
 | [Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct) | BF16 | SafeTensors | Tower ships with the checkpoint — no `--mmproj`. Dynamic resolution (a 1795x2397 photo becomes 972 image tokens), DeepStack taps into the LM's first layers, three-axis M-RoPE |
+| [Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4) | NVFP4 | SafeTensors (llm-compressor) | Same tower under a different `vision_config.model_type` (`qwen3_5_moe`), 27 blocks, no DeepStack. Text weights NVFP4, tower BF16 (851.8 MiB) — the mixed precision is the checkpoint's, not a conversion. Tight: init lands at ~31.1 of 32.6 GB. The `mmangkad` Modelopt export in the text table above is a different upload and was not tested for vision |
 | [Gemma-3-12B-it](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF) | Q8_0 | GGUF | text + vision, `tg256` 129 |
 | [Gemma-3-27B-it](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | Q4_K_M | GGUF | largest Gemma-3 |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | GGUF | text + vision via the gemma4v encoder (separate BF16 mmproj), `tg128` 273 — see [`vision_gemma4v_spec.md`](vision_gemma4v_spec.md) |
@@ -71,16 +72,23 @@ checkpoint, so there is no second file and no second flag.
 Several images in one request are supported on this tower — repeat `--image`, or
 send several `image_url` parts — and they are read in prompt order.
 
-`Qwen3VLForConditionalGeneration` and `Qwen3VLMoeForConditionalGeneration` are both
-registered; only the dense 4B is validated end to end here. A VL checkpoint also
-loads text-only — the tower is simply never run if no image is passed.
+`Qwen3VLForConditionalGeneration`, `Qwen3VLMoeForConditionalGeneration` and
+`Qwen3_5MoeForConditionalGeneration` are all registered; the dense 4B and the
+Qwen3.6-35B MoE are validated end to end here. A VL checkpoint also loads
+text-only — the tower is simply never run if no image is passed.
+
+What decides is `vision_config.model_type`, matched against an allowlist
+(`vision_tower_supported()`): `qwen3_vl` and `qwen3_5_moe` both name the same
+tower layout. It is an allowlist rather than a shape fingerprint on purpose — a
+checkpoint that merely *resembles* the layout must keep hitting the loud
+text-only path rather than be parsed on the resemblance.
 
 ### What cannot see, and how you find out
 
 The list above is exhaustive: **a multimodal SafeTensors checkpoint from any other
-family loads text-only.** `Gemma-4-26B-A4B-it-NVFP4` and the Qwen3.5/Qwen3.6 MoE
+family loads text-only.** `Gemma-4-26B-A4B-it-NVFP4` and the Qwen3.5 MoE
 checkpoints carry a `vision_config`, but imp's SafeTensors loader only understands
-the Qwen3-VL tower — for everything else it logs
+the Qwen3-VL tower layout — for everything else it logs
 
 ```
 WARN Multimodal model detected (vision_config present, model_type='…').

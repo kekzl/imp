@@ -27,6 +27,18 @@ bool get_int(const JValue& v, const char* key, int& out) {
 
 }  // namespace
 
+bool vision_tower_supported(const std::string& vision_model_type) {
+    // Qwen3.6 (`qwen3_5_moe`) ships the same tower under a different name: 333
+    // `model.visual.*` tensors whose names are a strict subset of Qwen3-VL's
+    // patterns, the same nine geometry fields, and an empty
+    // `deepstack_visual_indexes` (which the loader already handles).
+    //
+    // An allowlist rather than a shape fingerprint on purpose — anything
+    // unrecognised must keep hitting the loud text-only path rather than being
+    // parsed on a resemblance.
+    return vision_model_type == "qwen3_vl" || vision_model_type == "qwen3_5_moe";
+}
+
 bool parse_qwen3vl_vision_config(const JValue& vision_cfg, VisionConfig& out, std::string& err) {
     // Everything lands in a scratch config first: a partially-filled VisionConfig
     // is worse than none, because the caller cannot tell which fields are real.

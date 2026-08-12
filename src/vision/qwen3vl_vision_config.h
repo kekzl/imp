@@ -23,4 +23,12 @@ namespace imp {
 // square grid: 2304 = 48^2).
 bool parse_qwen3vl_vision_config(const JValue& vision_cfg, VisionConfig& out, std::string& err);
 
+// True if `vision_config.model_type` names a tower this parser covers.
+//
+// One definition on purpose: the config parser and the SafeTensors loader's
+// keep-the-vision-tensors gate must agree exactly. If the loader keeps a family
+// the parser then rejects, the tensors ride along as dead weight; if the parser
+// accepts one the loader dropped, the tower loads with null slots.
+bool vision_tower_supported(const std::string& vision_model_type);
+
 }  // namespace imp
