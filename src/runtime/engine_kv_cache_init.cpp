@@ -339,13 +339,18 @@ bool Engine::init_kv_cache() {
 
     // (Gemma 4 FP8 prefill disabled earlier, before executor init)
 
-    // Detect pure Mamba2 SSM layers (layers with ssm_in but without gdn_gate).
-    // GDN-only models (Qwen3.5) are graph-compatible; pure SSM (Nemotron-H) is not yet.
-    {
-        has_pure_ssm_layers_ = model_->profile().has_pure_ssm;
-        if (has_pure_ssm_layers_)
-            demote_graphs_(GraphDemotionReason::PureSsmLayers);
-    }
+    // Pure Mamba2 SSM layers (ssm_in without gdn_gate) used to demote graphs
+    // here, on the assumption that the recurrent state was not capture-safe.
+    // It is: the scan's device work is all stream-async, and the state lives in
+    // one pool allocated once, so replay writes it in place exactly as an eager
+    // step does. Measured 2026-08-12 on this box, decode, spec off:
+    //   Nemotron-3.5-Lightning  126.2 -> 365.6 tok/s
+    //   Nemotron-3-Nano         127.2 -> 381.7 tok/s
+    // with 45/45 degen_suite, a clean 700-token generation, multi-turn, and
+    // four concurrent requests keeping their states apart. `AUDIT_ARCH` called
+    // this "eager decode by design" and supported-models.md called the model
+    // "arch-limited" — both were describing this demotion, not the
+    // architecture. `runtime.cuda_graphs=never` remains the way out.
 
     // Dequant weights → FP16/FP8/NVFP4 caches
     executor_->pre_dequant_weights(stream_, vram_budget);

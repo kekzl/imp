@@ -10,8 +10,6 @@ const char* graph_demotion_reason_name(GraphDemotionReason r) {
             return "runtime.cuda_graphs=never";
         case GraphDemotionReason::Gemma4NoGraphs:
             return "gemma4.no_graphs=true";
-        case GraphDemotionReason::PureSsmLayers:
-            return "mamba2_ssm_layers";
         case GraphDemotionReason::CalibrationActive:
             return "calibration_active";
         case GraphDemotionReason::StreamingKvConfigured:

@@ -31,7 +31,6 @@ enum class GraphDemotionReason {
     // ── init-time ────────────────────────────────────────────────────
     ConfigNever,                 // runtime.cuda_graphs = "never"
     Gemma4NoGraphs,              // [gemma4] no_graphs = true (regression bisect knob)
-    PureSsmLayers,               // Mamba2 recurrent state is not graph-safe yet
     CalibrationActive,           // the collector allocates on first sight of a weight
     StreamingKvConfigured,       // block table mutates per decode step
     ExpertsOnHost,               // MoE host-offload; captured decode would replay stale pointers
