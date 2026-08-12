@@ -77,6 +77,14 @@ there instead of retelling it.
 
 ### Changed
 
+- **Dependencies: CUTLASS v4.6.2 → 4.7.0, googletest v1.17.0 → v1.18.0,
+  cpp-httplib v0.50.1 → v0.53.0** (nlohmann/json already current). CUTLASS is
+  the primary GEMM path on sm_120, so it was A/B'd rather than assumed:
+  decode is neutral to within 0.05% on Qwen3-14B-NVFP4 (171.5 vs 171.6) and
+  Qwen3.6-35B-A3B-NVFP4 (319.1 vs 318.9), prefill within the known cuBLAS
+  restart noise. Note for the next bump: NVIDIA dropped the `v` prefix — the
+  tag is `4.7.0`, and `v4.7.0` does not exist.
+
 - **MoE host-offload decode is ~2.1x faster: the fused decode kernels now reach
   host-resident experts.** They address an expert as `base + idx * stride`, and
   the LRU cache's per-layer slot pool is already exactly that shape — feeding

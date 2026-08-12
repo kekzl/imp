@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | Hardware | Single NVIDIA RTX 5090, 32 GB GDDR7, `sm_120a`, custom water loop |
-| Toolchain | CUDA 13.3 (rows dated before 2026-05-30: 13.2.1), CUTLASS v4.5.1, GCC 13.3, Release Docker build |
+| Toolchain | CUDA 13.3 (rows dated before 2026-05-30: 13.2.1), CUTLASS 4.7.0 (rows before 2026-08-13: v4.5.1–v4.6.2), GCC 13.3, Release Docker build |
 | imp config | NVFP4 decode cache + FP16 prefill (FP8 auto-disabled on sm_120), CUDA Graphs on |
 | llama.cpp | `b8445+`, flash attention on, full offload (`-ngl 99`) |
 | Sampling | Greedy (temp = 0) |
