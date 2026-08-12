@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`check-release.sh` aborted silently right after a release cut.** Its
+  changelog-hygiene step greps `[Unreleased]` for duplicate `###` headings, and
+  an empty `[Unreleased]` — exactly what cutting a release leaves behind — makes
+  grep exit 1, which under the script's `set -euo pipefail` killed the run with
+  no FAIL line and before `make verify-fast` had a chance to execute. v0.25.0
+  was cut with the check dying at that point. The grep is now `|| true`.
+
+
 ## [0.25.0] - 2026-08-13
 
 ### Added

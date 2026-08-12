@@ -281,7 +281,11 @@ fi
 # Mechanical, so gate it rather than rely on noticing.
 section "changelog section hygiene"
 UNREL=$(awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)
-DUP=$(printf '%s\n' "$UNREL" | grep -E '^### ' | sort | uniq -d)
+# `|| true`: right after a release cut [Unreleased] is empty by design, grep
+# then exits 1, and under `set -euo pipefail` that aborted the whole script —
+# silently, with no FAIL line, before `make verify-fast` ever ran. v0.25.0 was
+# cut with this check dying at exactly this point.
+DUP=$(printf '%s\n' "$UNREL" | grep -E '^### ' | sort | uniq -d || true)
 if [ -n "$DUP" ]; then
     printf '%s\n' "$DUP" | sed 's/^/  duplicate heading: /'
     fail "[Unreleased] repeats a '###' heading — merge the blocks"
