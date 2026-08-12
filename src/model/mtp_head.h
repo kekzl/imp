@@ -40,6 +40,27 @@
 //     mtp.norm                        [2048]
 //
 //   LM head: SHARED with main model's `model.lm_head.weight` (not stored here).
+//
+// Second layout (Nemotron-3.5-Lightning, 2.6 GB BF16, 270 tensors). Same idea,
+// but it is a miniature Nemotron rather than a miniature Qwen: the head spans
+// TWO blocks — attention in `layers.0`, MoE in `layers.1` — mirroring the
+// hybrid main model, and every name differs:
+//
+//     mtp.layers.0.enorm / hnorm      [2688]         = pre_fc_norm_{embedding,hidden}
+//     mtp.layers.0.eh_proj            [2688, 5376]   = fc (concat(emb,h) → hidden)
+//     mtp.layers.0.norm               [2688]         = input_layernorm
+//     mtp.layers.0.mixer.{q,k,v,o}_proj              = self_attn.* (no q/k norm)
+//     mtp.layers.1.norm               [2688]         = post_attention_layernorm
+//     mtp.layers.1.mixer.gate.weight  [128, 2688]    router
+//     mtp.layers.1.mixer.gate.e_score_correction_bias [128]  DeepSeek-style bias
+//     mtp.layers.1.mixer.experts.{e}.up_proj   [1856, 2688]  128 experts, PER-EXPERT
+//     mtp.layers.1.mixer.experts.{e}.down_proj [2688, 1856]  2-D, not packed 3-D
+//     mtp.layers.1.mixer.shared_experts.{up,down}_proj
+//     mtp.layers.1.final_layernorm    [2688]         = final norm
+//
+// Two structural differences the forward pass has to honour, not just the
+// names: the experts are NON-GATED (no `gate_proj` — squared-ReLU, like the
+// main Nemotron FFN) and there is no sigmoid `shared_expert_gate`.
 // =============================================================================
 
 #include "core/tensor.h"
@@ -91,6 +112,26 @@ struct MtpHead {
     Tensor shared_expert_gate;              // [1, hidden] sigmoid gate
 
     Tensor final_norm;                      // mtp.norm.weight
+
+    // --- Nemotron-3.5 layout (see header comment) -----------------------------
+    // Per-expert 2-D weights instead of the packed 3-D pair above. Empty on the
+    // Qwen layout; when non-empty the forward pass indexes these directly and
+    // ignores experts_*_packed.
+    std::vector<Tensor> experts_up;    // [n_experts] each [d_ff_e, hidden]
+    std::vector<Tensor> experts_down;  // [n_experts] each [hidden, d_ff_e]
+    // DeepSeek-style additive score bias on the router logits. Null when absent.
+    Tensor router_score_bias;  // [n_experts] FP32
+    // Experts have no gate_proj: activation is squared ReLU, not SwiGLU. This is
+    // a property of the checkpoint, so it is recorded rather than re-derived
+    // from which tensors happen to be present at each use site.
+    bool experts_non_gated = false;
+    // Qwen3.6's MTP attention is attn_output_gate=True: q_proj emits
+    // [num_heads, 2*head_dim] and the second half gates the output. Nemotron's
+    // does not, and its attention is NoPE — the hybrid's Mamba layers carry
+    // position, so applying RoPE here would rotate against the main model.
+    // Both default to the Qwen behaviour so that path is untouched.
+    bool attn_output_gate = true;
+    bool attn_rope = true;
 
     // Status flag set true when ALL of the above tensors are populated.
     bool loaded = false;

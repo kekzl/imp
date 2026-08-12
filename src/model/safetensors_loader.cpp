@@ -753,6 +753,71 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             dst = it->second;
             return true;
         };
+        // Nemotron-3.5 layout: a miniature Nemotron rather than a miniature
+        // Qwen — attention in layers.0, MoE in layers.1, `mixer` where Qwen
+        // says `self_attn`/`mlp`, and per-expert 2-D weights instead of one
+        // packed 3-D stack. Detected on a name only this layout has, so the
+        // Qwen path below is reached byte-for-byte as before.
+        if (tm.count("mtp.layers.0.eh_proj.weight")) {
+            bool nok = true;
+            nok &= take("mtp.layers.0.enorm.weight", head.pre_fc_norm_embedding);
+            nok &= take("mtp.layers.0.hnorm.weight", head.pre_fc_norm_hidden);
+            nok &= take("mtp.layers.0.eh_proj.weight", head.fc);
+            nok &= take("mtp.layers.0.norm.weight", head.input_layernorm);
+            nok &= take("mtp.layers.0.mixer.q_proj.weight", head.q_proj);
+            nok &= take("mtp.layers.0.mixer.k_proj.weight", head.k_proj);
+            nok &= take("mtp.layers.0.mixer.v_proj.weight", head.v_proj);
+            nok &= take("mtp.layers.0.mixer.o_proj.weight", head.o_proj);
+            // No q_norm / k_norm in this layout — left null on purpose.
+            nok &= take("mtp.layers.1.norm.weight", head.post_attention_layernorm);
+            nok &= take("mtp.layers.1.final_layernorm.weight", head.final_norm);
+            nok &= take("mtp.layers.1.mixer.gate.weight", head.router);
+            // Router bias is optional: absent means plain top-k.
+            take("mtp.layers.1.mixer.gate.e_score_correction_bias", head.router_score_bias);
+            nok &= take("mtp.layers.1.mixer.shared_experts.up_proj.weight", head.shared_expert_up_proj);
+            nok &= take("mtp.layers.1.mixer.shared_experts.down_proj.weight", head.shared_expert_down_proj);
+            // shared_expert_gate_proj / shared_expert_gate stay null: these
+            // experts are non-gated (squared ReLU), like the main Nemotron FFN.
+            head.experts_non_gated = true;
+            // No attn_output_gate (q_proj is n_heads*head_dim, not twice that)
+            // and NoPE attention, both as in the main Nemotron-H layers.
+            head.attn_output_gate = false;
+            head.attn_rope = false;
+
+            // Per-expert weights. Count is taken from the router's row count so
+            // a checkpoint with a different expert count still loads, and a gap
+            // in the numbering is a hard failure rather than a silent short read.
+            const int n_exp = head.router.data && head.router.ndim >= 1
+                                  ? static_cast<int>(head.router.shape[0])
+                                  : 0;
+            if (n_exp <= 0) {
+                nok = false;
+            } else {
+                head.experts_up.resize(static_cast<size_t>(n_exp));
+                head.experts_down.resize(static_cast<size_t>(n_exp));
+                for (int e = 0; e < n_exp && nok; ++e) {
+                    const std::string p = "mtp.layers.1.mixer.experts." + std::to_string(e) + ".";
+                    nok &= take((p + "up_proj.weight").c_str(), head.experts_up[static_cast<size_t>(e)]);
+                    nok &= take((p + "down_proj.weight").c_str(), head.experts_down[static_cast<size_t>(e)]);
+                }
+            }
+
+            head.loaded = nok;
+            if (nok) {
+                IMP_LOG_INFO(
+                    "MTP head loaded: %s (%d tensors, Nemotron layout, %d non-gated "
+                    "experts%s, BF16)",
+                    src.c_str(), head.info.n_tensors, n_exp,
+                    head.router_score_bias.data ? " + router bias" : "");
+            } else {
+                IMP_LOG_WARN(
+                    "MTP head at %s uses the Nemotron layout but is incomplete "
+                    "(router=%d experts=%d); spec-decode disabled",
+                    src.c_str(), head.router.data ? 1 : 0, n_exp);
+            }
+            return head;
+        }
+
         bool ok = true;
         ok &= take("mtp.pre_fc_norm_embedding.weight", head.pre_fc_norm_embedding);
         ok &= take("mtp.pre_fc_norm_hidden.weight",    head.pre_fc_norm_hidden);

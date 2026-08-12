@@ -11,25 +11,20 @@ there instead of retelling it.
 
 ## [Unreleased]
 
-### Fixed
-
-- **The entire Nemotron-H family decodes ~3x faster: CUDA graphs were demoted
-  for pure-SSM layers on an assumption that does not hold.** `has_pure_ssm`
-  forced `use_cuda_graphs=false` with the comment "pure SSM (Nemotron-H) is not
-  yet [graph-compatible]". Nothing in the Mamba2 scan is capture-hostile — its
-  device work is stream-async and the recurrent state lives in one pool
-  allocated once, so replay writes it in place exactly as an eager step does.
-  Measured (tg256, spec off): **Nemotron-3-Nano 148 → 386**, **Nemotron-Elastic
-  70 → 381**, **Nemotron-3.5-Lightning 126 → 362 tok/s**. For scale: vLLM 0.27.1
-  reads 351 tok/s on the same card and checkpoint, so this closes a 2.8x deficit
-  and passes it. Verified with 45/45 `degen_suite`, a clean 700-token
-  generation, multi-turn, and four concurrent requests keeping their states
-  apart. `docs/supported-models.md` blamed the architecture ("arch-limited") and
-  `AUDIT_ARCH` called it "eager decode by design" — both were describing this
-  demotion; both corrected.
-
 ### Added
 
+- **Nemotron-3.5's MTP head loads and drafts — and measurably should not be
+  used.** Its 270 `mtp.*` tensors were logged as unrecognised: the loader only
+  knew the Qwen3.6 shape, and this head is a miniature Nemotron (attention in
+  `layers.0`, MoE in `layers.1`, `mixer` naming, per-expert 2-D non-gated
+  squared-ReLU experts, DeepSeek-style router bias, NoPE attention, no
+  `attn_output_gate`). Wired up it drafts at **43.9 % top-1 accept**, but costs
+  **-41 % decode at k=1** (364 → 216 tok/s): the draft path still runs outside
+  CUDA graphs while the main decode no longer does (#1389), so a draft step now
+  prices like a whole decode step. imp's economics gate unbinds it after 8
+  verifies; `--mtp-spec-decode` is opt-in and the default uploads nothing.
+  Capturing the draft path is the one lever that could change this — see
+  [`docs/roadmap.md`](docs/roadmap.md).
 - **Native-FP8 weights decode from their own bytes: +7.5% on Nemotron-3.5-Lightning.**
   Loading them (previous entry) gave prefill an FP16 companion because sm_120 has
   no FP8 prefill GEMM — but decode was reading that copy too, 2 B/elem where the
@@ -108,6 +103,23 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The entire Nemotron-H family decodes ~3x faster: CUDA graphs were demoted
+  for pure-SSM layers on an assumption that does not hold.** `has_pure_ssm`
+  forced `use_cuda_graphs=false` with the comment "pure SSM (Nemotron-H) is not
+  yet [graph-compatible]". Nothing in the Mamba2 scan is capture-hostile — its
+  device work is stream-async and the recurrent state lives in one pool
+  allocated once, so replay writes it in place exactly as an eager step does.
+  Measured (tg256, spec off): **Nemotron-3-Nano 148 → 386**, **Nemotron-Elastic
+  70 → 381**, **Nemotron-3.5-Lightning 126 → 362 tok/s**. For scale: vLLM 0.27.1
+  reads 351 tok/s on the same card and checkpoint, so this closes a 2.8x deficit
+  and passes it. Verified with 45/45 `degen_suite`, a clean 700-token
+  generation, multi-turn, and four concurrent requests keeping their states
+  apart. `docs/supported-models.md` blamed the architecture ("arch-limited") and
+  `AUDIT_ARCH` called it "eager decode by design" — both were describing this
+  demotion; both corrected.
+
+
+
 - **The "not one expert tensor was recognised" guard no longer fires on every
   up/down-only MoE.** It asked only about `expert_w_gate`, which the whole
   Nemotron-H family never has — its experts are `(up_proj, down_proj)`. The
@@ -136,6 +148,7 @@ there instead of retelling it.
   `cudaMemcpyAsync` 519638 -> 212454 (-59%), decode ~20 -> ~41 tok/s. Cache hit
   rate is identical to three digits (74.1%) and generated output is
   byte-identical, as a write-only structure implies.
+
 
 ## [0.24.0] - 2026-08-10
 

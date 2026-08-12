@@ -286,12 +286,24 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // (mapped onto the shared_expert fields), and the 35B head's expert d_ff
     // differs from the main model's.
     const auto& head = *model_->mtp_;
-    const bool head_moe = head.router.data != nullptr && head.experts_gate_up_packed.data != nullptr;
+    // Two expert layouts. Qwen packs gate+up into one 3-D stack, so its per-expert
+    // d_ff is half the packed row count; Nemotron keeps per-expert 2-D weights and
+    // has no gate half, so d_ff is the up_proj row count as-is.
+    const bool head_moe_packed = head.router.data != nullptr && head.experts_gate_up_packed.data != nullptr;
+    const bool head_moe_per_expert = head.router.data != nullptr && !head.experts_up.empty() &&
+                                     head.experts_up[0].data != nullptr;
+    const bool head_moe = head_moe_packed || head_moe_per_expert;
     const int n_experts = head_moe ? static_cast<int>(head.router.shape[0]) : 0;
     const int top_k = head_moe ? model_->config_.n_experts_active : 0;
-    const int expert_d_ff = head_moe ? static_cast<int>(head.experts_gate_up_packed.shape[1]) / 2 : 0;
+    const int expert_d_ff = head_moe_packed       ? static_cast<int>(head.experts_gate_up_packed.shape[1]) / 2
+                            : head_moe_per_expert ? static_cast<int>(head.experts_up[0].shape[0])
+                                                  : 0;
+    // The shared expert is sized off gate_proj on the Qwen layout; the Nemotron
+    // one is non-gated, so up_proj is the only tensor that carries the width.
     const int shared_d_ff = head.shared_expert_gate_proj.data != nullptr
                                 ? static_cast<int>(head.shared_expert_gate_proj.shape[0])
+                            : head.shared_expert_up_proj.data != nullptr
+                                ? static_cast<int>(head.shared_expert_up_proj.shape[0])
                                 : 0;
 
     // MTP attention dims: derived from the MTP head's q_proj / v_proj shapes
@@ -307,8 +319,16 @@ bool Engine::enable_mtp_spec_decode(int k) {
         const int v_out = static_cast<int>(model_->mtp_->v_proj.shape[0]);
         mtp_head_dim = model_->config_.head_dim;
         if (mtp_head_dim > 0) {
-            // q_proj outputs 2 × num_heads × head_dim (attn_output_gate=True).
-            mtp_num_heads = q_out / (2 * mtp_head_dim);
+            // Qwen3.6 doubles Q per head for attn_output_gate; Nemotron does
+            // not. Assuming the doubling unconditionally halves the head count
+            // (32 → 16 on Nemotron-3.5), which still runs and still drafts —
+            // just from the wrong half of Q, so nothing is ever accepted.
+            // Decide from the tensor: match the main model's head count first,
+            // and only fall back to the gated reading if that does not fit.
+            const int plain = q_out / mtp_head_dim;
+            const bool gated = (plain != model_->config_.n_heads) && (plain % 2 == 0) &&
+                               (plain / 2 == model_->config_.n_heads);
+            mtp_num_heads = gated ? plain / 2 : plain;
             mtp_num_kv_heads = v_out / mtp_head_dim;
         }
     }
