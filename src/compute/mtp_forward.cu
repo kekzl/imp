@@ -896,89 +896,119 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                                  /*score_bias=*/mtp.router_score_bias.data);
 
         // 5.B.3 — D2H copy of expert indices + weights so the host loop can
-        //         dispatch per-expert GEMVs. This is non-graph-safe but
-        //         drafts run outside graph capture for now.
-        cudaMemcpyAsync(ws.h_expert_indices.as<int>(), ws.routing_buf.expert_indices,
-                        top_k * sizeof(int), cudaMemcpyDeviceToHost, stream);
-        cudaMemcpyAsync(ws.h_expert_weights.as<float>(), ws.routing_buf.expert_weights,
-                        top_k * sizeof(float), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-
-        // 5.B.4 — For each chosen expert: GEMV gate_up_packed[e] @ post_norm,
-        //         swiglu, GEMV down_packed[e] @ act, store into d_expert_outputs[k].
+        //         dispatch per-expert GEMVs.
         //
-        // Layout of packed tensors:
-        //   experts_gate_up_packed shape: [ne, 2*d_ff_e, hd]   FP16
-        //   experts_down_packed   shape: [ne,   hd,    d_ff_e] FP16
-        const size_t gu_per_expert_bytes  = static_cast<size_t>(2) * d_ff_e * hd * sizeof(__half);
-        const size_t dn_per_expert_bytes  = static_cast<size_t>(hd) * d_ff_e * sizeof(__half);
-
-        int64_t gu_shape[2] = {2 * d_ff_e, hd};
-        int64_t dn_shape[2] = {hd, d_ff_e};
-
-        for (int k = 0; k < top_k; ++k) {
-            int   e_idx = ws.h_expert_indices.as<int>()[k];
-            if (e_idx < 0 || e_idx >= ne) {
-                IMP_LOG_WARN("mtp MoE: invalid expert index %d (top_k=%d)", e_idx, k);
-                continue;
-            }
-
-            // Two layouts. Qwen: one packed [ne, 2*d_ff_e, hd] stack, addressed
-            // by offset, gate+up → SwiGLU. Nemotron: per-expert 2-D tensors and
-            // no gate half at all — squared ReLU, exactly like its main FFN.
-            const bool non_gated = mtp.experts_non_gated;
-            Tensor gu_view, dn_view;
-            if (non_gated) {
-                gu_view = mtp.experts_up[static_cast<size_t>(e_idx)];
-                dn_view = mtp.experts_down[static_cast<size_t>(e_idx)];
-            } else {
-                char* gu_base = static_cast<char*>(mtp.experts_gate_up_packed.data) +
-                                static_cast<size_t>(e_idx) * gu_per_expert_bytes;
-                char* dn_base = static_cast<char*>(mtp.experts_down_packed.data) +
-                                static_cast<size_t>(e_idx) * dn_per_expert_bytes;
-                gu_view = Tensor(gu_base, QType::F16, 2, gu_shape, true);
-                dn_view = Tensor(dn_base, QType::F16, 2, dn_shape, true);
-            }
-
-            // gate_up = gu_view @ post_norm  (width 2*d_ff_e gated, d_ff_e not)
+        // Device-side path (Nemotron layout, experts restacked at upload): the
+        // GEMV takes the expert id from device memory, so nothing about the
+        // routing has to reach the host. This is the difference between a draft
+        // that can be captured and one that cannot — the host round trip below
+        // costs a full pipeline stall per draft token.
+        const bool device_side_experts = mtp.experts_up_stacked.data != nullptr &&
+                                         mtp.experts_down_stacked.data != nullptr;
+        if (device_side_experts) {
+            const int32_t* d_idx = static_cast<const int32_t*>(ws.routing_buf.expert_indices);
+            const size_t up_stride = static_cast<size_t>(d_ff_e) * hd;
+            const size_t dn_stride = static_cast<size_t>(hd) * d_ff_e;
+            // up: y[k] = W_up[e_k] @ post_norm  (shared input → x_stride 0)
+            imp::gemv_f16_moe_decode(mtp.experts_up_stacked.data, d_idx,
+                                     static_cast<const __half*>(ws.d_post_norm),
+                                     static_cast<__half*>(ws.d_expert_gate_up), d_ff_e, hd, up_stride,
+                                     /*x_stride=*/0, top_k, stream);
+            // act = relu(up)^2 over all top_k slots at once.
             {
-                int64_t in_shape[2]  = {1, hd};
-                int64_t out_shape[2] = {1, non_gated ? d_ff_e : 2 * d_ff_e};
-                Tensor in_view (ws.d_post_norm,      QType::F16, 2, in_shape,  true);
-                Tensor out_view(ws.d_expert_gate_up, QType::F16, 2, out_shape, true);
-                imp::gemm(in_view, gu_view, out_view, 1.0f, 0.0f, stream);
+                int64_t act_shape[2] = {top_k, d_ff_e};
+                Tensor act_t(ws.d_expert_gate_up, QType::F16, 2, act_shape, true);
+                imp::relu_sqr_inplace(act_t, stream);
             }
-            if (non_gated) {
-                // act = relu(up)^2, in place — then copied to the act buffer the
-                // down projection reads, keeping the two paths' plumbing identical.
-                int64_t act_shape[2] = {1, d_ff_e};
-                Tensor up_t(ws.d_expert_gate_up, QType::F16, 2, act_shape, true);
-                imp::relu_sqr_inplace(up_t, stream);
-                cudaMemcpyAsync(ws.d_expert_act, ws.d_expert_gate_up,
-                                static_cast<size_t>(d_ff_e) * sizeof(__half), cudaMemcpyDeviceToDevice,
-                                stream);
-            } else {
-                // swiglu: gate = first half, up = second half → act = silu(gate)*up
-                int64_t half_shape[2] = {1, d_ff_e};
-                Tensor gate_view(ws.d_expert_gate_up,
-                                  QType::F16, 2, half_shape, true);
-                Tensor up_view(  static_cast<char*>(ws.d_expert_gate_up) + d_ff_e * sizeof(__half),
-                                  QType::F16, 2, half_shape, true);
-                Tensor act_view(ws.d_expert_act, QType::F16, 2, half_shape, true);
-                imp::swiglu(gate_view, up_view, act_view, stream);
+            // down: y[k] = W_down[e_k] @ act[k]  (per-expert input → x_stride d_ff_e)
+            imp::gemv_f16_moe_decode(mtp.experts_down_stacked.data, d_idx,
+                                     static_cast<const __half*>(ws.d_expert_gate_up),
+                                     static_cast<__half*>(ws.d_expert_outputs), hd, d_ff_e, dn_stride,
+                                     /*x_stride=*/d_ff_e, top_k, stream);
+        } else {
+            cudaMemcpyAsync(ws.h_expert_indices.as<int>(), ws.routing_buf.expert_indices, top_k * sizeof(int),
+                            cudaMemcpyDeviceToHost, stream);
+            cudaMemcpyAsync(ws.h_expert_weights.as<float>(), ws.routing_buf.expert_weights,
+                            top_k * sizeof(float), cudaMemcpyDeviceToHost, stream);
+            cudaStreamSynchronize(stream);
+
+            // 5.B.4 — For each chosen expert: GEMV gate_up_packed[e] @ post_norm,
+            //         swiglu, GEMV down_packed[e] @ act, store into d_expert_outputs[k].
+            //
+            // Layout of packed tensors:
+            //   experts_gate_up_packed shape: [ne, 2*d_ff_e, hd]   FP16
+            //   experts_down_packed   shape: [ne,   hd,    d_ff_e] FP16
+            const size_t gu_per_expert_bytes = static_cast<size_t>(2) * d_ff_e * hd * sizeof(__half);
+            const size_t dn_per_expert_bytes = static_cast<size_t>(hd) * d_ff_e * sizeof(__half);
+
+            int64_t gu_shape[2] = {2 * d_ff_e, hd};
+            int64_t dn_shape[2] = {hd, d_ff_e};
+
+            for (int k = 0; k < top_k; ++k) {
+                int e_idx = ws.h_expert_indices.as<int>()[k];
+                if (e_idx < 0 || e_idx >= ne) {
+                    IMP_LOG_WARN("mtp MoE: invalid expert index %d (top_k=%d)", e_idx, k);
+                    continue;
+                }
+
+                // Two layouts. Qwen: one packed [ne, 2*d_ff_e, hd] stack, addressed
+                // by offset, gate+up → SwiGLU. Nemotron: per-expert 2-D tensors and
+                // no gate half at all — squared ReLU, exactly like its main FFN.
+                const bool non_gated = mtp.experts_non_gated;
+                Tensor gu_view, dn_view;
+                if (non_gated) {
+                    gu_view = mtp.experts_up[static_cast<size_t>(e_idx)];
+                    dn_view = mtp.experts_down[static_cast<size_t>(e_idx)];
+                } else {
+                    char* gu_base = static_cast<char*>(mtp.experts_gate_up_packed.data) +
+                                    static_cast<size_t>(e_idx) * gu_per_expert_bytes;
+                    char* dn_base = static_cast<char*>(mtp.experts_down_packed.data) +
+                                    static_cast<size_t>(e_idx) * dn_per_expert_bytes;
+                    gu_view = Tensor(gu_base, QType::F16, 2, gu_shape, true);
+                    dn_view = Tensor(dn_base, QType::F16, 2, dn_shape, true);
+                }
+
+                // gate_up = gu_view @ post_norm  (width 2*d_ff_e gated, d_ff_e not)
+                {
+                    int64_t in_shape[2] = {1, hd};
+                    int64_t out_shape[2] = {1, non_gated ? d_ff_e : 2 * d_ff_e};
+                    Tensor in_view(ws.d_post_norm, QType::F16, 2, in_shape, true);
+                    Tensor out_view(ws.d_expert_gate_up, QType::F16, 2, out_shape, true);
+                    imp::gemm(in_view, gu_view, out_view, 1.0f, 0.0f, stream);
+                }
+                if (non_gated) {
+                    // act = relu(up)^2, in place — then copied to the act buffer the
+                    // down projection reads, keeping the two paths' plumbing identical.
+                    int64_t act_shape[2] = {1, d_ff_e};
+                    Tensor up_t(ws.d_expert_gate_up, QType::F16, 2, act_shape, true);
+                    imp::relu_sqr_inplace(up_t, stream);
+                    cudaMemcpyAsync(ws.d_expert_act, ws.d_expert_gate_up,
+                                    static_cast<size_t>(d_ff_e) * sizeof(__half), cudaMemcpyDeviceToDevice,
+                                    stream);
+                } else {
+                    // swiglu: gate = first half, up = second half → act = silu(gate)*up
+                    int64_t half_shape[2] = {1, d_ff_e};
+                    Tensor gate_view(ws.d_expert_gate_up, QType::F16, 2, half_shape, true);
+                    Tensor up_view(static_cast<char*>(ws.d_expert_gate_up) + d_ff_e * sizeof(__half),
+                                   QType::F16, 2, half_shape, true);
+                    Tensor act_view(ws.d_expert_act, QType::F16, 2, half_shape, true);
+                    imp::swiglu(gate_view, up_view, act_view, stream);
+                }
+                // down = dn_view @ act → write directly into d_expert_outputs[k * hd]
+                {
+                    int64_t in_shape[2] = {1, d_ff_e};
+                    int64_t out_shape[2] = {1, hd};
+                    Tensor in_view(ws.d_expert_act, QType::F16, 2, in_shape, true);
+                    __half* out_base = static_cast<__half*>(ws.d_expert_outputs) + k * hd;
+                    Tensor out_view(out_base, QType::F16, 2, out_shape, true);
+                    imp::gemm(in_view, dn_view, out_view, 1.0f, 0.0f, stream);
+                }
             }
-            // down = dn_view @ act → write directly into d_expert_outputs[k * hd]
-            {
-                int64_t in_shape[2]  = {1, d_ff_e};
-                int64_t out_shape[2] = {1, hd};
-                Tensor in_view (ws.d_expert_act, QType::F16, 2, in_shape, true);
-                __half* out_base = static_cast<__half*>(ws.d_expert_outputs) + k * hd;
-                Tensor out_view(out_base, QType::F16, 2, out_shape, true);
-                imp::gemm(in_view, dn_view, out_view, 1.0f, 0.0f, stream);
-            }
-        }
+        }  // device_side_experts ? ... : host-loop
 
         // 5.B.5 — Weighted sum + residual: moe_out = fc_out + Σ_k w[k]*expert_outputs[k]
+        // Reads expert_weights straight from device memory, so it needs no host
+        // copy either — true for both paths above.
         imp::moe_weighted_sum_residual(
             /*expert_outputs=*/ws.d_expert_outputs,
             /*expert_weights=*/ws.routing_buf.expert_weights,

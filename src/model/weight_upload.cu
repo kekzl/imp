@@ -1039,6 +1039,56 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
         ok &= up(head.experts_up[e], "mtp_expert_up");
     for (size_t e = 0; e < head.experts_down.size() && ok; ++e)
         ok &= up(head.experts_down[e], "mtp_expert_down");
+
+    // Restack the per-expert weights into one contiguous slab each, so the
+    // decode GEMV can address an expert by a device-side id. Without this the
+    // draft has to copy routing D2H and loop on the host, which is exactly what
+    // makes the draft path uncapturable.
+    //
+    // The per-expert Tensors are then repointed INTO the slab and the originals
+    // freed, so this costs no steady-state VRAM — only a transient second copy
+    // of one expert-set while the slab is filled.
+    if (ok && !head.experts_up.empty() && head.experts_up[0].data != nullptr) {
+        auto stack = [&](std::vector<Tensor>& parts, Tensor& out, const char* what) -> bool {
+            const int64_t ne = static_cast<int64_t>(parts.size());
+            const int64_t rows = parts[0].shape[0];
+            const int64_t cols = parts[0].shape[1];
+            const size_t per = static_cast<size_t>(rows) * cols * sizeof(half);
+            void* slab = nullptr;
+            checked_cuda_malloc(&slab, per * static_cast<size_t>(ne), ctx.stream);
+            if (!slab) {
+                IMP_LOG_ERROR("MTP %s: slab allocation failed (%zu MiB)", what,
+                              per * static_cast<size_t>(ne) / (1024 * 1024));
+                return false;
+            }
+            ctx.gpu_allocs.push_back(slab);
+            for (int64_t e = 0; e < ne; ++e) {
+                // A shape mismatch here would silently stride into the wrong
+                // expert, so it fails loud instead.
+                if (parts[e].shape[0] != rows || parts[e].shape[1] != cols || !parts[e].data) {
+                    IMP_LOG_ERROR("MTP %s: expert %lld has shape [%lld,%lld], expected [%lld,%lld]", what,
+                                  (long long)e, (long long)parts[e].shape[0], (long long)parts[e].shape[1],
+                                  (long long)rows, (long long)cols);
+                    return false;
+                }
+                char* dst = static_cast<char*>(slab) + static_cast<size_t>(e) * per;
+                IMP_CUDA_CHECK_LOG(
+                    cudaMemcpyAsync(dst, parts[e].data, per, cudaMemcpyDeviceToDevice, ctx.stream));
+            }
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(ctx.stream));
+            int64_t shape[4] = {ne, rows, cols, 0};
+            out = Tensor(slab, QType::F16, 3, shape, /*on_device=*/true);
+            // Repoint the per-expert views into the slab; the standalone
+            // allocations stay owned by gpu_allocs and are freed at teardown.
+            for (int64_t e = 0; e < ne; ++e)
+                parts[e].data = static_cast<char*>(slab) + static_cast<size_t>(e) * per;
+            return true;
+        };
+        ok &= stack(head.experts_up, head.experts_up_stacked, "experts_up");
+        ok &= stack(head.experts_down, head.experts_down_stacked, "experts_down");
+        if (ok)
+            IMP_LOG_INFO("MTP experts restacked contiguously for device-side decode dispatch");
+    }
     return ok;
 }
 

@@ -23,7 +23,10 @@ there instead of retelling it.
   CUDA graphs while the main decode no longer does (#1389), so a draft step now
   prices like a whole decode step. imp's economics gate unbinds it after 8
   verifies; `--mtp-spec-decode` is opt-in and the default uploads nothing.
-  Capturing the draft path is the one lever that could change this — see
+  The draft MoE is device-side as of this change (`gemv_f16_moe_decode`, a new
+  FP16 indexed MoE GEMV — the quantized siblings all existed, the FP16 one did
+  not): +14…+23 % on the speculative path, verdict unchanged at −32 % vs no
+  speculation. The remaining cost is the verify chunk — see
   [`docs/roadmap.md`](docs/roadmap.md).
 - **Native-FP8 weights decode from their own bytes: +7.5% on Nemotron-3.5-Lightning.**
   Loading them (previous entry) gave prefill an FP16 companion because sm_120 has
