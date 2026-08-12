@@ -1031,6 +1031,14 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     ok &= up(head.shared_expert_up_proj,    "shared_expert_up_proj");
     ok &= up(head.shared_expert_down_proj,  "shared_expert_down_proj");
     ok &= up(head.shared_expert_gate,       "shared_expert_gate");
+    // Nemotron layout: per-expert 2-D weights instead of the packed pair above.
+    // Left on the host these would be read as device pointers by the draft
+    // forward, so they upload here with everything else.
+    ok &= up(head.router_score_bias, "router_score_bias");
+    for (size_t e = 0; e < head.experts_up.size() && ok; ++e)
+        ok &= up(head.experts_up[e], "mtp_expert_up");
+    for (size_t e = 0; e < head.experts_down.size() && ok; ++e)
+        ok &= up(head.experts_down[e], "mtp_expert_down");
     return ok;
 }
 

@@ -356,6 +356,19 @@ Closed competitive records (kept for the record, not active work):
 
 ## Known limitations
 
+- **MTP speculative decoding on Nemotron-3.5: loaded, correct, and uneconomic — because the draft path is not captured (measured 2026-08-12).** The head is wired (a miniature Nemotron: attention in `layers.0`, MoE in `layers.1`, per-expert 2-D non-gated squared-ReLU experts, DeepSeek-style router bias, NoPE attention, no `attn_output_gate`) and drafts well: **43.9 % top-1 accept** at depth 1, 17.3 % / 9.7 % at depths 2-3. It still loses badly:
+
+    | k | tok/s | vs no spec |
+    |---|---:|---:|
+    | 0 | 364 | — |
+    | 1 | 216 | -41 % |
+    | 2 | 166 | -54 % |
+    | 3 | 129 | -65 % |
+
+    **The reason is now unambiguous, and it changed with #1389.** Measured before that fix, when the main decode was graph-demoted at 126 tok/s, MTP cost only -1.3 % at k=1 — draft and decode were both eager, so a draft step was priced like a decode step. With graphs restored the main decode is ~2.75 ms/token while the draft still runs eager (`mtp_forward.cu`: "drafts run outside graph capture for now", three `cudaStreamSynchronize` per draft token). A draft step now costs roughly a *whole* decode step despite the head being a fraction of the model, so every speculative token is a bad trade.
+
+    **That is also the one lever worth trying**, and it is a real one now: capturing the draft path would cut its cost by the same order the main decode gained. Until then the built-in tree probe caps the other direction — a top-4 tree reaches E[accept] 1.08 vs 0.52, nowhere near the break-even. `speculative.mtp_econ_min_emit` detects the loss after 8 verifies and unbinds, so the default costs nothing and `--mtp-spec-decode` is opt-in. For context, NVIDIA's own DSpark drafter measured **-42 % in vLLM** on this card (351 -> 202), and the model card recommends no speculation at all for H100-class bandwidth.
+
 - **Single GPU only.** No tensor parallelism, no multi-GPU.
 - **Blackwell only.** No Hopper, Ada, Ampere. No AMD, Intel, Apple, CPU.
 - **Qwen3.5-27B MXFP4 untested** -- the old wording ("fails at load, blocked on no public MXFP4 GGUF + NaN bug") is stale in each part. The alpha/beta NaN is moot: GDN alpha/beta are pinned `FP16_ONLY` (`tensor_kind_table.cu`) and dequantised at load, so that kernel is unreachable for them. The GGUF framing is wrong too — the SafeTensors loader no longer refuses MXFP4, it warns; the real blocker is that no MXFP4 SafeTensors *decode* path exists outside gpt-oss. And the original load failure was VRAM, not NaN, for which `attention.mxfp4_fp16_cache_policy = "pruned"` (#244) exists but has never been verified on this model. Net: blocked on a checkpoint imp can decode, not on a bug.

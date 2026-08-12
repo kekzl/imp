@@ -20,6 +20,8 @@
 #include "quant/nvfp4_gemm.h"       // gemv_nvfp4_kpar_fp32 (NVFP4 chain lm_head)
 #include "compute/layernorm.h"
 #include "compute/moe_routing.h"
+// relu_sqr_inplace — activation for the non-gated (Nemotron) MTP experts.
+#include "compute/ssm.h"
 #include "compute/rope.h"           // qknorm_rope_fused
 #include "compute/rope_yarn.cuh"    // rope_yarn (shared YaRN device math)
 #include "core/logging.h"
@@ -716,16 +718,19 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                             ws.max_seq_len > 0 && ws.mtp_pos < ws.max_seq_len);
         if (use_kv_scan) {
             // 5.A.4.pre — Extract Q (without gate) from q_full[h, 0..head_dim).
-            // q_full layout per head: [q (head_dim), gate (head_dim)]. We need
-            // a contiguous [num_heads * head_dim] Q-only buffer for per-head norm.
+            // q_full layout per head: [q (head_dim), gate (head_dim)] when the
+            // head is attn_output_gate=True (Qwen3.6). Nemotron has no gate
+            // half, so its q_full is already the contiguous Q buffer and the
+            // strided copy would interleave garbage from the next head.
+            const size_t q_src_pitch = static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) *
+                                       sizeof(__half);
             cudaMemcpy2DAsync(
-                /*dst=*/ ws.d_q_attn,
-                /*dpitch=*/ static_cast<size_t>(hdh) * sizeof(__half),
-                /*src=*/ ws.d_q_full,
-                /*spitch=*/ static_cast<size_t>(2 * hdh) * sizeof(__half),
-                /*width=*/  static_cast<size_t>(hdh) * sizeof(__half),
-                /*height=*/ static_cast<size_t>(nh),
-                cudaMemcpyDeviceToDevice, stream);
+                /*dst=*/ws.d_q_attn,
+                /*dpitch=*/static_cast<size_t>(hdh) * sizeof(__half),
+                /*src=*/ws.d_q_full,
+                /*spitch=*/q_src_pitch,
+                /*width=*/static_cast<size_t>(hdh) * sizeof(__half),
+                /*height=*/static_cast<size_t>(nh), cudaMemcpyDeviceToDevice, stream);
             // 5.A.4.qknorm — Per-head RMSNorm on Q and K (Qwen3-style).
             // Reshape to [n_heads, head_dim] and apply rmsnorm with arch_norm_offset
             // for Qwen3.5/3.6's gamma=1+W convention. Independent of RoPE so
@@ -747,7 +752,12 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             // reducing to standard partial-rope mathematically. The kernel
             // is structured to support distinct T/H/W positions for future
             // multimodal token handling. NeoX-style pairing only.
-            if (ws.rope_dim > 0 && ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
+            // Skipped entirely on a NoPE head (Nemotron-H): its main-model
+            // attention layers carry no position either — the Mamba layers do.
+            // Rotating here would put the draft in a different frame from the
+            // model it drafts for, which costs accept rate, not correctness.
+            if (mtp.attn_rope && ws.rope_dim > 0 &&
+                ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
                 // RoPE-scaling params mirrored from the main forward (issue #897):
                 // inv_scaling = 1/freq_scale; ext_factor>0 → YaRN. Defaults leave
                 // the base (unscaled) rope unchanged. Text-only → single position.
@@ -787,8 +797,10 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                     seq_len, nh, nkv, hdh, ws.max_seq_len, scale);
                 IMP_CUDA_CHECK_LAUNCH();
             }
-            // 5.A.4.c — silu(gate) * attn_out (in-place)
-            {
+            // 5.A.4.c — silu(gate) * attn_out (in-place). Only when the head
+            // actually has a gate half; without one this would multiply the
+            // output by a sigmoid of Q itself.
+            if (mtp.attn_output_gate) {
                 int block = 256;
                 int grid  = (nh * hdh + block - 1) / block;
                 mtp_gate_attn_out_kernel<<<grid, block, 0, stream>>>(
@@ -798,7 +810,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 IMP_CUDA_CHECK_LAUNCH();
             }
             ws.mtp_pos = pos + 1;
-        } else {
+        } else if (mtp.attn_output_gate) {
             // MVP fallback: silu(gate) * V_broadcast
             int block = 256;
             int grid  = (nh * hdh + block - 1) / block;
@@ -808,6 +820,16 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 static_cast<__half*>(ws.d_attn_out),
                 nh, nkv, hdh);
             IMP_CUDA_CHECK_LAUNCH();
+        } else {
+            // Same fallback without a gate: softmax over one token is identity,
+            // so attn_out[h] is just V broadcast across the GQA group.
+            const int group = (nkv > 0) ? (nh / nkv) : 1;
+            for (int h = 0; h < nh; ++h) {
+                const int kv = (group > 0) ? (h / group) : 0;
+                cudaMemcpyAsync(static_cast<__half*>(ws.d_attn_out) + static_cast<size_t>(h) * hdh,
+                                static_cast<const __half*>(ws.d_v_proj) + static_cast<size_t>(kv) * hdh,
+                                static_cast<size_t>(hdh) * sizeof(__half), cudaMemcpyDeviceToDevice, stream);
+            }
         }
         // 5.A.5 — o_proj @ d_attn_out → d_attn_residual
         {
@@ -865,9 +887,13 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         // 5.B.2 — Router + top-k. moe_gate_topk_fused: router @ post_norm,
         //         softmax, top-k. Writes into ws.routing_buf.
         MoeRoutingResult routing{};
-        imp::moe_gate_topk_fused(mtp.router.data, ws.d_post_norm, ne, hd, top_k,
-                                  ws.routing_buf, routing, stream,
-                                  /*use_sigmoid=*/false, /*normalize_weights=*/true);
+        // Nemotron adds a DeepSeek-style additive bias to the router logits
+        // before top-k (`e_score_correction_bias`). Null on the Qwen layout, so
+        // that path is unchanged.
+        imp::moe_gate_topk_fused(mtp.router.data, ws.d_post_norm, ne, hd, top_k, ws.routing_buf, routing,
+                                 stream,
+                                 /*use_sigmoid=*/false, /*normalize_weights=*/true,
+                                 /*score_bias=*/mtp.router_score_bias.data);
 
         // 5.B.3 — D2H copy of expert indices + weights so the host loop can
         //         dispatch per-expert GEMVs. This is non-graph-safe but
@@ -897,24 +923,42 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 continue;
             }
 
-            // Build view tensors into the packed buffers for this expert.
-            char* gu_base = static_cast<char*>(mtp.experts_gate_up_packed.data)
-                            + static_cast<size_t>(e_idx) * gu_per_expert_bytes;
-            char* dn_base = static_cast<char*>(mtp.experts_down_packed.data)
-                            + static_cast<size_t>(e_idx) * dn_per_expert_bytes;
-            Tensor gu_view(gu_base, QType::F16, 2, gu_shape, true);
-            Tensor dn_view(dn_base, QType::F16, 2, dn_shape, true);
+            // Two layouts. Qwen: one packed [ne, 2*d_ff_e, hd] stack, addressed
+            // by offset, gate+up → SwiGLU. Nemotron: per-expert 2-D tensors and
+            // no gate half at all — squared ReLU, exactly like its main FFN.
+            const bool non_gated = mtp.experts_non_gated;
+            Tensor gu_view, dn_view;
+            if (non_gated) {
+                gu_view = mtp.experts_up[static_cast<size_t>(e_idx)];
+                dn_view = mtp.experts_down[static_cast<size_t>(e_idx)];
+            } else {
+                char* gu_base = static_cast<char*>(mtp.experts_gate_up_packed.data) +
+                                static_cast<size_t>(e_idx) * gu_per_expert_bytes;
+                char* dn_base = static_cast<char*>(mtp.experts_down_packed.data) +
+                                static_cast<size_t>(e_idx) * dn_per_expert_bytes;
+                gu_view = Tensor(gu_base, QType::F16, 2, gu_shape, true);
+                dn_view = Tensor(dn_base, QType::F16, 2, dn_shape, true);
+            }
 
-            // gate_up = gu_view @ post_norm
+            // gate_up = gu_view @ post_norm  (width 2*d_ff_e gated, d_ff_e not)
             {
                 int64_t in_shape[2]  = {1, hd};
-                int64_t out_shape[2] = {1, 2 * d_ff_e};
+                int64_t out_shape[2] = {1, non_gated ? d_ff_e : 2 * d_ff_e};
                 Tensor in_view (ws.d_post_norm,      QType::F16, 2, in_shape,  true);
                 Tensor out_view(ws.d_expert_gate_up, QType::F16, 2, out_shape, true);
                 imp::gemm(in_view, gu_view, out_view, 1.0f, 0.0f, stream);
             }
-            // swiglu: gate = first half, up = second half → act = silu(gate)*up
-            {
+            if (non_gated) {
+                // act = relu(up)^2, in place — then copied to the act buffer the
+                // down projection reads, keeping the two paths' plumbing identical.
+                int64_t act_shape[2] = {1, d_ff_e};
+                Tensor up_t(ws.d_expert_gate_up, QType::F16, 2, act_shape, true);
+                imp::relu_sqr_inplace(up_t, stream);
+                cudaMemcpyAsync(ws.d_expert_act, ws.d_expert_gate_up,
+                                static_cast<size_t>(d_ff_e) * sizeof(__half), cudaMemcpyDeviceToDevice,
+                                stream);
+            } else {
+                // swiglu: gate = first half, up = second half → act = silu(gate)*up
                 int64_t half_shape[2] = {1, d_ff_e};
                 Tensor gate_view(ws.d_expert_gate_up,
                                   QType::F16, 2, half_shape, true);
@@ -954,10 +998,14 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         //         optionally scaled by sigmoid(shared_expert_gate · x) (MoE
         //         checkpoints only), added to moe_out (which already includes
         //         the attention residual).
-        if (d_ff_s > 0 && mtp.shared_expert_gate_proj.data && mtp.shared_expert_up_proj.data &&
-            mtp.shared_expert_down_proj.data) {
+        // The Nemotron shared expert is non-gated: up_proj + down_proj only, so
+        // gate_proj being null must not disable it the way it does for a Qwen
+        // dense-MLP head.
+        const bool shared_non_gated = mtp.experts_non_gated;
+        if (d_ff_s > 0 && (mtp.shared_expert_gate_proj.data || shared_non_gated) &&
+            mtp.shared_expert_up_proj.data && mtp.shared_expert_down_proj.data) {
             // shared_gate = shared_expert_gate_proj @ post_norm  → [d_ff_s]
-            {
+            if (!shared_non_gated) {
                 int64_t in_shape[2]  = {1, hd};
                 int64_t out_shape[2] = {1, d_ff_s};
                 Tensor in_view (ws.d_post_norm,   QType::F16, 2, in_shape,  true);
@@ -972,13 +1020,22 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
                 Tensor out_view(ws.d_shared_up, QType::F16, 2, out_shape, true);
                 imp::gemm(in_view, mtp.shared_expert_up_proj, out_view, 1.0f, 0.0f, stream);
             }
-            // shared_act = silu(shared_gate) * shared_up
+            // shared_act = silu(shared_gate) * shared_up, or relu(up)^2 when the
+            // checkpoint has no gate half.
             {
                 int64_t s_shape[2] = {1, d_ff_s};
-                Tensor gate_view(ws.d_shared_gate, QType::F16, 2, s_shape, true);
-                Tensor up_view  (ws.d_shared_up,   QType::F16, 2, s_shape, true);
-                Tensor act_view (ws.d_shared_act,  QType::F16, 2, s_shape, true);
-                imp::swiglu(gate_view, up_view, act_view, stream);
+                if (shared_non_gated) {
+                    Tensor up_t(ws.d_shared_up, QType::F16, 2, s_shape, true);
+                    imp::relu_sqr_inplace(up_t, stream);
+                    cudaMemcpyAsync(ws.d_shared_act, ws.d_shared_up,
+                                    static_cast<size_t>(d_ff_s) * sizeof(__half), cudaMemcpyDeviceToDevice,
+                                    stream);
+                } else {
+                    Tensor gate_view(ws.d_shared_gate, QType::F16, 2, s_shape, true);
+                    Tensor up_view(ws.d_shared_up, QType::F16, 2, s_shape, true);
+                    Tensor act_view(ws.d_shared_act, QType::F16, 2, s_shape, true);
+                    imp::swiglu(gate_view, up_view, act_view, stream);
+                }
             }
             // shared_out = shared_expert_down_proj @ shared_act  → [hd]
             {
