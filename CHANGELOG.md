@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-13
+
 ### Added
 
 - **Nemotron-3.5's MTP head loads and drafts — and measurably should not be
