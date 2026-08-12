@@ -13,6 +13,15 @@ there instead of retelling it.
 
 ### Added
 
+- **Modelopt `quant_algo: MIXED_PRECISION` is parsed** — a per-tensor
+  `quantized_layers` table instead of one global algorithm. Nemotron-3.5-Lightning
+  uses it to put the 46 Mamba in/out projections on FP8 and 5935 MoE expert
+  tensors on NVFP4. Accepted only when the table actually names NVFP4, because
+  the return value sets `is_nvfp4_prequant`, which drives the MoE expert cache
+  and the VRAM budget. **This does not yet make that checkpoint load** — native
+  FP8 *weights* have no dequant path (`gemm: status 15, dtB=28`); see
+  [`docs/roadmap.md`](docs/roadmap.md).
+
 - **Qwen3.6-35B-A3B sees images.** The checkpoint already shipped a complete
   Qwen3-VL tower (333 `model.visual.*` tensors, 851.8 MiB); two gates dropped it.
   `vision_config.model_type` is `qwen3_5_moe`, which failed a literal string
@@ -63,6 +72,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The "not one expert tensor was recognised" guard no longer fires on every
+  up/down-only MoE.** It asked only about `expert_w_gate`, which the whole
+  Nemotron-H family never has — its experts are `(up_proj, down_proj)`. The
+  error went unnoticed because the caller discards the bool: Nemotron-3-Nano
+  logged it and then loaded and generated correctly at ~112 tok/s. A guard that
+  cries wolf on a working model, and whose verdict nobody reads, is worse than
+  no guard. Now checks all three projections; 5 tests, both directions pinned.
 - **`imp-quantize` refuses `--keep-attn-gate` together with `--calib` instead of
   writing a silently wrong checkpoint.** A fused Q+gate `q_proj` is copied
   through without the group's column scale, but the calibration planner has no

@@ -1114,10 +1114,61 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
         const JValue* algo = jobj_find(*quant, "quant_algo");
         if (!algo || algo->type != JType::STRING)
             return false;
-        if (algo->str_val != "NVFP4" && algo->str_val != "nvfp4")
+        const bool plain_nvfp4 = (algo->str_val == "NVFP4" || algo->str_val == "nvfp4");
+        const bool mixed = (algo->str_val == "MIXED_PRECISION");
+        if (!plain_nvfp4 && !mixed)
             return false;
 
+        // Read first so the per-tensor table below can override it: on a
+        // MIXED_PRECISION export the group size belongs to the NVFP4 entries,
+        // and a top-level value (if any) is the less specific statement.
         jobj_get_int(*quant, "group_size", cfg.group_size);
+
+        // MIXED_PRECISION carries no top-level algorithm: `quantized_layers` maps
+        // each tensor to its own. Accepting it as an NVFP4 checkpoint is only
+        // right if NVFP4 is actually in there — the flag this function sets
+        // (`is_nvfp4_prequant`) drives the MoE expert cache and the VRAM budget,
+        // and claiming it for an all-FP8 export would misplan both.
+        //
+        // The per-tensor algorithms are counted, not stored: the storage tier is
+        // decided from each tensor's real dtype at load, so a table saying "FP8"
+        // about a tensor that arrives as F8_E4M3 adds nothing. What the counts
+        // buy is a log line that names any algorithm this build did not expect,
+        // instead of it passing silently as "some NVFP4 model".
+        if (mixed) {
+            const JValue* layers = jobj_find(*quant, "quantized_layers");
+            if (!layers || layers->type != JType::OBJECT) {
+                IMP_LOG_WARN(
+                    "MIXED_PRECISION quant config without a quantized_layers table — "
+                    "treating %s as unquantized",
+                    path.c_str());
+                return false;
+            }
+            for (const auto& [tensor_name, spec] : layers->obj) {
+                (void)tensor_name;
+                std::string ta;
+                if (spec.type == JType::OBJECT)
+                    jobj_get_string(spec, "quant_algo", ta);
+                if (ta.find("NVFP4") != std::string::npos) {
+                    cfg.n_nvfp4_tensors++;
+                    // group_size rides on the NVFP4 entries, not the top level.
+                    if (cfg.n_nvfp4_tensors == 1)
+                        jobj_get_int(spec, "group_size", cfg.group_size);
+                } else if (ta.find("FP8") != std::string::npos) {
+                    cfg.n_fp8_tensors++;
+                } else {
+                    cfg.n_other_tensors++;
+                }
+            }
+            if (cfg.n_nvfp4_tensors == 0) {
+                IMP_LOG_WARN(
+                    "MIXED_PRECISION quant config names no NVFP4 tensor (fp8=%d other=%d) — "
+                    "not an NVFP4 checkpoint, treating %s as unquantized",
+                    cfg.n_fp8_tensors, cfg.n_other_tensors, path.c_str());
+                return false;
+            }
+            cfg.mixed_precision = true;
+        }
 
         const JValue* kv_algo = jobj_find(*quant, "kv_cache_quant_algo");
         if (kv_algo && kv_algo->type == JType::STRING)
@@ -1132,8 +1183,22 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
         }
 
         cfg.format = NvFP4Format::MODELOPT;
-        IMP_LOG_INFO("NVFP4 model (Model Optimizer): group_size=%d, kv_cache=%s, exclude=%zu modules",
-                     cfg.group_size, cfg.kv_cache_quant_algo.c_str(), cfg.exclude_modules.size());
+        if (cfg.mixed_precision) {
+            IMP_LOG_INFO(
+                "NVFP4 model (Model Optimizer, MIXED_PRECISION): group_size=%d, kv_cache=%s, "
+                "per-tensor algos: %d NVFP4, %d FP8, %d unrecognised",
+                cfg.group_size, cfg.kv_cache_quant_algo.c_str(), cfg.n_nvfp4_tensors, cfg.n_fp8_tensors,
+                cfg.n_other_tensors);
+            if (cfg.n_other_tensors > 0) {
+                IMP_LOG_WARN(
+                    "  %d tensor(s) name a quantization algorithm this build does not know. "
+                    "They load as whatever dtype they carry — check the output.",
+                    cfg.n_other_tensors);
+            }
+        } else {
+            IMP_LOG_INFO("NVFP4 model (Model Optimizer): group_size=%d, kv_cache=%s, exclude=%zu modules",
+                         cfg.group_size, cfg.kv_cache_quant_algo.c_str(), cfg.exclude_modules.size());
+        }
         return true;
     }
 

@@ -684,6 +684,7 @@ if(IMP_BUILD_TESTS)
         tests/test_vision_preprocess.cpp
         tests/test_mrope_positions.cpp
         tests/test_mla.cpp
+        tests/test_weight_map_expert_gate.cpp
         # imp-quantize's tensor-selection rule. The tool is not otherwise
         # covered, and this is the part of it that has already shipped a broken
         # checkpoint (#1159), so it is compiled into the CPU lane directly.

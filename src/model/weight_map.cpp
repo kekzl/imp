@@ -1359,16 +1359,26 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // expert-shaped name is seen, so a non-empty vector says nothing — the
         // entries can all be default Tensors. Only a non-null `data` means a
         // weight actually arrived.
+        // Checking only `expert_w_gate` made this fire on every up/down-only MoE
+        // — the whole Nemotron-H family, whose experts are (up_proj, down_proj)
+        // with no gate projection at all. It went unnoticed because the caller
+        // discards this function's bool: Nemotron-3-Nano logs the error and then
+        // loads and generates correctly at 113 tok/s. A guard against garbage
+        // that cries wolf on a working model, and whose verdict nobody reads, is
+        // worse than no guard — so ask about the projections that actually have
+        // to be there.
         bool any_experts = false;
+        auto any_data = [](const std::vector<Tensor>& v) {
+            for (const auto& w : v)
+                if (w.data)
+                    return true;
+            return false;
+        };
         for (const auto& layer : model.layers_) {
-            for (const auto& w : layer.expert_w_gate) {
-                if (w.data) {
-                    any_experts = true;
-                    break;
-                }
-            }
-            if (any_experts || layer.expert_gate_packed.data || layer.expert_gate_up_packed_blocks.data ||
-                layer.expert_down_packed.data || layer.expert_down_packed_blocks.data) {
+            if (any_data(layer.expert_w_gate) || any_data(layer.expert_w_up) ||
+                any_data(layer.expert_w_down) || layer.expert_gate_packed.data ||
+                layer.expert_gate_up_packed_blocks.data || layer.expert_down_packed.data ||
+                layer.expert_down_packed_blocks.data) {
                 any_experts = true;
                 break;
             }
