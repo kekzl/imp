@@ -49,14 +49,23 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         // source is the sidecar only when the entry carries per-row scales —
         // the sidecar's marker — since the phase-2 FP8 *prefill* cache also
         // keys quantized sources (per-tensor scale) and must stay primary.
+        // A native-FP8 source (Modelopt MIXED_PRECISION) is the third way in
+        // here, and it matches neither test above: its qtype is FP8_E4M3, not
+        // F16, and dequant_gpu does not handle it. It is decidedly a sidecar —
+        // the entry borrows the checkpoint's bytes and sm_120 has no FP8
+        // prefill GEMM to run them through, so prefill must take the FP16
+        // companion or it reaches cuBLAS raw (status 15). The entry says so
+        // itself rather than being inferred from a scale layout.
         bool fp8_decode_sidecar = false;
         if (tier == StorageTier::FP8) {
-            if (t.qtype == QType::F16) {
+            auto it = wcache_->fp8.find(t.data);
+            const bool native = it != wcache_->fp8.end() && it->second.native_source;
+            if (native) {
+                fp8_decode_sidecar = true;
+            } else if (t.qtype == QType::F16) {
                 fp8_decode_sidecar = true;
             } else if (dequant_gpu_supported(t.qtype)) {
-                auto it = wcache_->fp8.find(t.data);
-                fp8_decode_sidecar =
-                    it != wcache_->fp8.end() && it->second.d_row_scales != nullptr;
+                fp8_decode_sidecar = it != wcache_->fp8.end() && it->second.d_row_scales != nullptr;
             }
         }
         if (fp8_decode_sidecar)

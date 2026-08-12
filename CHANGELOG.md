@@ -13,6 +13,16 @@ there instead of retelling it.
 
 ### Added
 
+- **Native-FP8 weights decode from their own bytes: +7.5% on Nemotron-3.5-Lightning.**
+  Loading them (previous entry) gave prefill an FP16 companion because sm_120 has
+  no FP8 prefill GEMM — but decode was reading that copy too, 2 B/elem where the
+  checkpoint ships 1, on the bandwidth-bound path. Phase 4 already had the rule
+  that keeps an FP8 cache entry out of the primary tier while setting
+  `decode_tier = FP8`; it just did not recognise a native-FP8 source. Measured
+  median **+7.5%** decode over 27 order-balanced pairs (t=3.33), matching the
+  +6.9% predicted from bytes/bandwidth. No extra VRAM, and lossless — these are
+  the published weights, not a requantization.
+
 - **Native FP8 weights load — `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` runs**
   (~137 tok/s decode, 45/45 on `degen_suite.py`). Its Modelopt `MIXED_PRECISION`
   export puts the 46 Mamba in/out projections in FP8 and 5935 MoE expert tensors
