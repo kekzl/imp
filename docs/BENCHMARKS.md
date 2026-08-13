@@ -1,3 +1,10 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # Benchmarks
 
 Reproducibly anchored measurements. Every row states **when**, **on what
@@ -17,7 +24,7 @@ reliable A/B signal; prefill (pp) varies up to 2.6× across container restarts
 The CI-gated canonical baseline lives in
 [`tests/perf_baseline.json`](../tests/perf_baseline.json) (8% decode / 8%
 prefill regression gate, plus a 10% peak-VRAM ceiling over the pinned
-`metrics.memory_mb.own_peak_mb` — see [`BENCHMARKING.md`](BENCHMARKING.md));
+`metrics.memory_mb.own_peak_mb` — see [`BENCHMARKING.md`](internals/BENCHMARKING.md));
 refresh it via `scripts/gen_perf_baseline.sh`.
 
 **Toolchain (current: `v0.25.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.3
@@ -169,7 +176,9 @@ CUTLASS grouped-GEMM prefill — pp512 ≈ 16-19k tok/s. Attention stays on the
 cuBLAS path (attention sinks). Decode 310-345 depending on host state.
 
 On `sm_120`, native-NVFP4 decode is effectively uncontested (vLLM gates its
-NVFP4 path on `tcgen05`/falls back to Marlin on the 5090; llama.cpp has no
+NVFP4 path on an opcode family consumer Blackwell does not have (see
+[`internals/ARCHITECTURE.md`](internals/ARCHITECTURE.md)) and falls back to
+Marlin on the 5090; llama.cpp has no
 native NVFP4 path).
 
 ## NVFP4 prefill (post FP16-QK FA2 primary hd=128 prefill, #687)

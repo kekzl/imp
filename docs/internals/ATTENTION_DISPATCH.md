@@ -1,10 +1,17 @@
+---
+layer: L2
+audience: kernel-devs
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # Attention dispatch
 
-Companion doc to [`architecture.md`](architecture.md) — covers exactly which attention kernel runs for each (phase × dtype × layer) combination.
+Companion doc to [`architecture.md`](ARCHITECTURE.md) — covers exactly which attention kernel runs for each (phase × dtype × layer) combination.
 
 If this doc and the code disagree, the code wins. Source of truth is `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cu` for the FMHA chain.
 
-> **Measured coverage (2026-06-07, [`docs/archive/roofline_2026_06_07.md`](archive/roofline_2026_06_07.md)):**
+> **Measured coverage (2026-06-07, [`docs/archive/roofline_2026_06_07.md`](../archive/roofline_2026_06_07.md)):**
 > on hd=128 models (Qwen3 dense/MoE — Q8_0, Q4_K_M, NVFP4) the legacy
 > materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512–pp4096
 > — FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range.
@@ -14,7 +21,7 @@ If this doc and the code disagree, the code wins. Source of truth is `src/exec/e
 > layers are hd=512 and take `attention_cublas_prefill` — or, when the S-matrix
 > overflows, `attention_cublas_prefill_sliced` (#1036) — *by design and by
 > measurement*: both beat the SMEM-capped fused hd=512 kernel
-> ([`docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md`](audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md)).
+> ([`docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md`](../audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md)).
 > So on an advertised model the "legacy" path is the *default* prefill path for
 > half the layer stack, and the 384 MiB `attn_scores` workspace is retained for it.
 
@@ -59,7 +66,7 @@ Tried in order, first hit wins:
 5. **`flash_attention_blackwell`** — WMMA 128×64 tiles, last tier. Declines hd ∉ {64,96,128,256} and smem-over-limit configs (hd=256 needs ~176 KB at Br=64 vs the 99 KB sm_120 opt-in).
 6. **Chain exhausted → `std::runtime_error`** (#654). The old silent fallback to `flash_attention_prefill_tc` swallowed launch failures at hd=256 (smem over limit, unchecked `cudaGetLastError`) and produced garbage logits (teacher-forced PPL ~1e10); tc also lacks `q_offset`, so chunked continuations would mask wrongly even when it launches. Reaching this tier means a config override disabled the FP16 WMMA tier or an unsupported head_dim — both error loudly now.
 
-The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) are summarized in [`archive/README.md`](archive/README.md); their full source is in git history.
+The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) are summarized in [`archive/README.md`](../archive/README.md); their full source is in git history.
 
 ### Chunked prefill carve-out (default for most archs)
 
@@ -94,7 +101,7 @@ no standard RoPE on the latent path — the YaRN `mscale` ratio bug fixed
 
 ## Sliding-window mask
 
-cuBLAS path uses `attention_cublas_prefill`'s `sliding_window` parameter (Gemma-4 SWA layers). FMHA path uses `fmha_sm120_prefill`'s `sliding_window` argument (every FMHA variant accepts it). Naive FP32 SWA path is archived (see [`archive/README.md`](archive/README.md); source in git history).
+cuBLAS path uses `attention_cublas_prefill`'s `sliding_window` parameter (Gemma-4 SWA layers). FMHA path uses `fmha_sm120_prefill`'s `sliding_window` argument (every FMHA variant accepts it). Naive FP32 SWA path is archived (see [`archive/README.md`](../archive/README.md); source in git history).
 
 ## Soft-cap (logit cap)
 

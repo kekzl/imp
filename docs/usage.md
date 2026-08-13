@@ -1,3 +1,10 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # imp — Usage & Reference
 
 Build instructions, CLI/server usage, configuration, C API, project structure.

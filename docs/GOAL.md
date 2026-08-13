@@ -1,3 +1,10 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # imp — Goal Definition
 
 ## Mission
@@ -40,7 +47,7 @@ Anything below this bar is a bug.
 2. **RTX PRO 6000 Blackwell** (sm_120, 96 GB) — same arch, more VRAM. Free win if 5090 is fast.
 3. **Consumer Blackwell siblings** (5080, 5070 Ti, etc.) — same sm_120, covered by the `compute_120f` PTX fallback in the fatbin, lower priority for tuning.
 
-Everything else is **unsupported by design**. There is no Hopper (sm_90a), Ada, Ampere, or datacenter-Blackwell (sm_100) path in the tree — the engine is built against `sm_120a` exclusively (see README "Consumer Blackwell only"). Not a goal.
+Everything else is **unsupported by design**: no other GPU generation or vendor has a path in the tree, and the engine is built against `sm_120a` exclusively. What that architecture has and lacks is in [`internals/ARCHITECTURE.md`](internals/ARCHITECTURE.md). Not a goal.
 
 ---
 

@@ -1,6 +1,13 @@
+---
+layer: L3
+audience: agents
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # imp — Project Instructions
 
-From-scratch C++23/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. ~135k LOC (src/ + include/; ~220k with tests/). See [`docs/architecture.md`](docs/architecture.md) (canonical narrative) and [`docs/sm120.md`](docs/sm120.md).
+From-scratch C++23/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. ~135k LOC (src/ + include/; ~220k with tests/). See [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md) (canonical narrative) and [`docs/internals/SM120.md`](docs/internals/SM120.md).
 
 **This file is the router, not the manual.** It holds what applies to every task; the playbooks live in the skills below and are loaded on demand. If something here is also in a skill, the skill is the copy that gets maintained.
 
@@ -21,9 +28,17 @@ Match the task, invoke that skill first.
 | Who calls / launches X, blast radius, "is this still used" | skill **code-graph** — ask the index before grepping the tree |
 | Structure audit / dead code / god-files | skill **codebase-audit** — read [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) **before** forming hypotheses |
 | Keep docs in sync after a change | skill **docs-sync** |
-| VRAM / ownership / lifetime / "where did the memory go" | read [`docs/MEMORY_ARCHITECTURE.md`](docs/MEMORY_ARCHITECTURE.md) **first** |
+| VRAM / ownership / lifetime / "where did the memory go" | read [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md) **first** |
 
-Canonical references: `docs/architecture.md` (narrative), `docs/sm120.md` (hardware), `docs/MEMORY_ARCHITECTURE.md` (memory subsystem: tiers, allocators, invariants I1-I7), `AGENTS.md` (subagent roles + guardrails), `docs/BENCHMARKING.md` (measurement contract).
+**Read the `CLAUDE.md` in the directory you are editing first.** `src/compute/`,
+`src/runtime/`, `src/model/`, `tools/imp-server/` and `tests/` each carry their
+invariants, entry points, local build/test commands and known pitfalls. They hold
+no perf numbers, only a link to `docs/PERF.md`.
+
+Docs are layered and gated by `scripts/docs_lint.py`: `README.md` L0,
+`docs/*.md` L1, `docs/internals/*.md` L2, the `CLAUDE.md` tree L3.
+
+Canonical references: `docs/internals/ARCHITECTURE.md` (narrative), `docs/internals/SM120.md` (hardware), `docs/internals/MEMORY.md` (memory subsystem: tiers, allocators, invariants I1-I7), `AGENTS.md` (subagent roles + guardrails), `docs/internals/BENCHMARKING.md` (measurement contract).
 
 ## Two facts about this box that mislead rather than fail
 

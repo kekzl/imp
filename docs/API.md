@@ -1,0 +1,127 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
+# API
+
+What the HTTP surface actually accepts, as opposed to what an OpenAI-shaped
+client might assume. Status legend is the one from
+[`FEATURES.md`](FEATURES.md): ✅ code path plus a gated test, 🟡 code path, no
+test.
+
+**Two dialects, both native.** imp is not an OpenAI server with an Anthropic
+shim bolted on, nor the reverse. `/v1/messages` is implemented against the
+Anthropic wire format directly, and all three dialects share one per-token
+streaming driver, so a fix in streaming lands in all of them at once.
+
+## Endpoints
+
+| endpoint | status | notes |
+|---|---|---|
+| `POST /v1/chat/completions` | ✅ | the main one. Text and image content parts |
+| `POST /v1/completions` | ✅ | legacy text completion |
+| `POST /v1/messages` | ✅ | Anthropic. Real per-token SSE, `ping` keepalives |
+| `POST /v1/messages/count_tokens` | ✅ | |
+| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default |
+| `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
+| `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |
+| `POST /tokenize`, `POST /detokenize` | ✅ | |
+| `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false` |
+| `GET /health`, `/metrics`, `/props`, `/info` | ✅ | `/props` is the llama.cpp shape, `/info` the TGI one |
+| `POST /admin/suspend`, `/admin/resume` | ✅ | see [`DEPLOYMENT.md`](DEPLOYMENT.md) |
+| `GET /` | ✅ | built-in chat UI |
+
+## Sampling and generation fields
+
+| field | status | notes |
+|---|---|---|
+| `model` | ✅ | **required**; basename of the file or directory |
+| `messages`, `prompt` | ✅ | |
+| `max_tokens` | ✅ | on a reasoning model the answer reserve scales with it (`max(256, max_tokens/4)`) |
+| `temperature`, `top_p`, `top_k`, `min_p` | ✅ | |
+| `presence_penalty`, `frequency_penalty`, `repetition_penalty` | ✅ | |
+| `seed` | ✅ | greedy is reproducible; see [`determinism.md`](determinism.md) for the exact guarantee, which is narrower than "same seed, same bytes" |
+| `stop` | ✅ | |
+| `stream` | ✅ | per token, all three dialects |
+| `n` | ✅ | documented and tested as `[1,4]` |
+| `logprobs` | 🟡 | in the parameter surface, no dedicated gate. Listed in [`LIMITATIONS.md`](LIMITATIONS.md) |
+| DRY, mirostat, typical_p, logit_bias | ✅ | |
+| `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape |
+| `"lora": "name"` | ✅ | PEFT adapter hot-swap, works with every quant path |
+
+## Constrained decoding
+
+Four flavours, all enforced by masking at decode time rather than by
+post-validation.
+
+| form | status |
+|---|---|
+| `response_format: {"type": "json_object"}` | ✅ |
+| `response_format: {"type": "json_schema", ...}` | ✅ whole-token validated |
+| `response_format: {"type": "regex"}` / `guided_regex` | ✅ |
+| `response_format: {"type": "grammar"}` / `grammar` / `guided_grammar` | ✅ GBNF, a pushdown simulator, so recursive and bracket-balanced formats work |
+
+**A constraint imp cannot compile is a `400`, not an unconstrained answer.** That
+changed in v0.23.0 and it is a breaking difference from servers that log the
+rejection and answer anyway. Left recursion, undefined rules and a missing
+`root` are rejected at compile time.
+
+Constrained replies parse even when they hit `max_tokens`: the closer-narrowing
+and the no-closer-after-comma rules used to cancel each other out and release the
+constraint entirely.
+
+## Tool calling
+
+✅, and gated by real clients rather than by our own idea of correct: `make
+test-agents-external` drives imp with aider over the OpenAI dialect, Claude Code
+over the Anthropic one and the OpenAI Agents SDK over `/v1/responses`, each
+having to land an actual edit in a throwaway repository.
+
+`tool_choice` that contradicts the request is a `400`: naming a function absent
+from `tools`, or `"required"` with no tools.
+
+Reasoning models separate their chain of thought into `reasoning_content`
+(Anthropic: `thinking`) rather than emitting it as the answer. This holds on the
+streaming path too, which is where it was once wrong.
+
+## Prompt caching
+
+✅ on by default for the server. Prefix blocks are reused across requests that
+share a prefix, which is what makes a growing agent transcript cheaper per turn
+rather than more expensive.
+
+`cache_control` is honoured per breakpoint: the **last** marked block bounds the
+pinned region, rather than pinning the whole prompt. Usage reporting carries
+`cache_read_input_tokens` and `cache_creation_input_tokens`.
+
+The cache is keyed on the picture as well as the token ids for image requests,
+and it is model-fingerprint-gated on disk, so a cache file from another model is
+never replayed.
+
+## Images
+
+✅ on `/v1/chat/completions`, as `image_url` content parts, data-URI or fetched
+over HTTP. Several images in one request are encoded in prompt order.
+
+Two refusals worth knowing, both deliberate:
+
+- An `image_url` that cannot be read is a `400`, not a skipped picture. Dropping
+  one would slide every later image onto the wrong placeholder.
+- A model whose vision tower imp cannot read loads **text-only** and says so; a
+  request that sends it an image gets `400 vision_unavailable` rather than a
+  confident description of a picture the model never received.
+
+No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
+
+## Errors
+
+Every error is a JSON envelope, never a bare status with an empty body, and
+`/v1/messages*` paths get the Anthropic error shape rather than the OpenAI one.
+An unmatched route answers with an envelope too.
+
+Internal engine errors are translated to `ImpError` at the C API boundary
+(`src/api/imp_api.cpp`); this is intentional and is why a load failure surfaces
+as a typed message rather than a crash.

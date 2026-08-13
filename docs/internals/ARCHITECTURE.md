@@ -1,11 +1,59 @@
+---
+layer: L2
+audience: kernel-devs
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # imp — Architecture
 
-This document is the canonical narrative companion to [`architecture.svg`](architecture.svg).
+This document is the canonical narrative companion to [`architecture.svg`](../architecture.svg).
 The SVG shows the structural overview; this file explains each phase in
 prose and points at the source files that implement it.
 
 If the code and this document disagree, the code wins — but a disagreement
 is a bug in this document and should be fixed.
+
+## Target architecture
+
+**This is the one place in the repository that states what consumer Blackwell
+has and lacks.** Every other document links here rather than restating it; the
+`docs_lint.py` forbidden-token check exists to keep it that way, because the same
+delimitation used to appear in eight files and a reader could not tell which one
+was maintained.
+
+imp compiles for **`sm_120a` exclusively**, emitting raw SASS via direct
+gencode, with a `compute_120f` PTX fallback for the other consumer Blackwell
+SKUs. There is no portability layer and no second target.
+
+**Consumer Blackwell is not a smaller datacenter Blackwell.** `sm_120a` does
+*not* have:
+
+| absent on `sm_120a` | where it does exist | consequence for imp |
+|---|---|---|
+| `tcgen05` async MMA | datacenter Blackwell (`sm_100`, B200) | the MMA always blocks the issuing warp, so a producer/consumer pipeline cannot be built around it |
+| TMEM | `sm_100` | no tensor-memory accumulator ring; accumulators live in registers |
+| `wgmma` | Hopper and `sm_100` | the tensor-core path is register-based `mma.sync`, and the FA4-style warpgroup split is not expressible |
+
+What `sm_120a` *does* have, and imp uses:
+
+- **NVFP4 block-scaled `mma.sync` with `kind::mxf4nvf4`**, which is the FP4 path.
+  FlashAttention-2-style block scaling rather than a B200 kernel design.
+- **FP8 MMA `kind::f8f6f4`**, enabled by the `f` family-feature suffix, used for
+  attention scores.
+- **TMA bulk-tensor loads.** `src/compute/gemm_grouped_nvfp4_smallM.cu:65` wraps
+  `cp.async.bulk.tensor.2d...` and emits `UTMALDG`. Whether the CUTLASS
+  *warp-specialized grouped GEMM tactic* is selectable on this arch is
+  **unresolved** and deliberately not claimed either way; see
+  [`OPEN_QUESTIONS.md`](../audit/docs-rewrite/OPEN_QUESTIONS.md) Q1.
+
+**The practical consequence, stated once so nobody re-derives it:** kernel
+designs published for B200 or Hopper do not port. When a paper or a competing
+engine reports a large FP4 win, check which architecture it was measured on
+before treating it as a lever here.
+
+Deeper hardware notes, MMA shapes and the measured ceilings:
+[`SM120.md`](SM120.md).
 
 ## At a glance
 
@@ -20,7 +68,7 @@ imp runs LLM inference end-to-end in four phases:
 4. **Decode** — replay the captured CUDA graph per token: attention → FFN →
    LM head → penalties → sampler → stop check, looping until EOS or limit.
 
-See [`architecture.svg`](architecture.svg) for the full graph including
+See [`architecture.svg`](../architecture.svg) for the full graph including
 the attention dispatcher, memory subsystem, and kernel subsystem.
 
 ## Phase 1 — Load (one-time, `src/model/`)
@@ -110,7 +158,7 @@ softmax → cuBLAS PV) stays the fallback for the configs FA2 declines — `hd �
 sinks / truly heterogeneous per-layer shapes; uniform GDN/Mamba2-hybrid shapes
 are FA2-servable since #932).
 Everything else falls through to `attention_prefill_dispatch`, which selects among
-the per-dtype FMHA kernels. Full coverage matrix: [`attention-dispatch.md`](attention-dispatch.md).
+the per-dtype FMHA kernels. Full coverage matrix: [`attention-dispatch.md`](ATTENTION_DISPATCH.md).
 
 `force_cublas_attn` is set per-layer for Gemma-4 hd=512 global layers
 where FMHA OOMs the 100 KiB smem cap.
@@ -154,9 +202,9 @@ Per token:
 
 ## Subsystems referenced across phases
 
-- **Memory** — has its own design document: [`docs/MEMORY_ARCHITECTURE.md`](MEMORY_ARCHITECTURE.md)
+- **Memory** — has its own design document: [`docs/MEMORY_ARCHITECTURE.md`](MEMORY.md)
   is canonical for anything about ownership, lifetime or capacity, and
-  [`AUDIT.md`](../AUDIT.md) records what was measured on the way (including the
+  [`AUDIT.md`](../../AUDIT.md) records what was measured on the way (including the
   negative results). The short version: five lifetime tiers (T1 model-resident,
   T2 engine-persistent, T3 pooled fixed-block, T4 forward-scratch, T5 host
   staging — split into T5a transient and T5b engine-persistent pinned, because a

@@ -400,6 +400,24 @@ jobs:
       - name: File-size hard-review gate (blocking)
         run: python3 tools/check_filesize.py
 
+  # Documentation layer contract (docs/audit/docs-rewrite/). Seven checks, all
+  # of which map to a defect this repo actually shipped: a datacenter-Blackwell
+  # feature named as an imp feature, a throughput number that outlived its
+  # measurement, a generated block hand-edited away from the baseline it claims
+  # to mirror. Ubuntu job, no toolchain, seconds.
+  docs:
+    name: Docs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Generated perf blocks match tests/perf_baseline.json
+        run: python3 scripts/sync_docs.py --check
+      - name: Doc lint (layers, provenance, links, budgets)
+        run: python3 scripts/docs_lint.py
+
   # Publishable-tree hygiene: the cheap half of scripts/check-release.sh (doc
   # links, maintainer paths, credential-shaped strings, tracked binaries,
   # LICENSE). SKIP_VERIFY=1 drops the `make verify-fast` step — that one needs a

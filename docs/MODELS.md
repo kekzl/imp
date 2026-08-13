@@ -1,4 +1,19 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # Supported models
+
+The decode column is a per-model figure, not a gate. Each one comes from the
+sweep named below; the gated number that CI defends is a different model and
+lives in [`PERF.md`](PERF.md).
+
+[PROV: commit=2230e1c2 date=2026-07-12 hw=RTX5090 model=per-row quant=per-row
+       cuda=13.3 path=per-row cmd=`imp-cli --bench --bench-pp 512 --bench-reps 5`
+       n=5x5 note=greedy, spec off, CUDA graphs on; full detail per row in BENCHMARKS.md]
 
 Model families with a known-working code path on `main`. Throughput numbers come from [`performance.md`](performance.md) — see that doc for methodology and the cuBLAS prefill-variance caveat. VRAM figures are model weights only. The KV cache is sized *on top* of that from whatever is left once the weight caches are built, so it scales with free VRAM and the configured context rather than sitting in a fixed band — a dense server default lands around 4.6 GiB, and a small model on an otherwise idle card takes far more. Bound it with `--max-seq-len` / `kv_cache` settings and read the actual split with `--mem-report`.
 

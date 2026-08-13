@@ -1,3 +1,10 @@
+---
+layer: L2
+audience: kernel-devs
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # The Optimal sm_120a Attention Kernel
 
 Canonical design reference for the imp hot-path attention kernel on RTX 5090
@@ -6,7 +13,7 @@ must measure themselves against. It is grounded in the profiling ground-truth
 and the empirical refutations accumulated through 2026-06, not in datacenter
 (B200 / FA4) assumptions that do not port.
 
-Companion docs: [`sm120.md`](sm120.md) (kernel notes), [`performance.md`](performance.md)
+Companion docs: [`sm120.md`](SM120.md) (kernel notes), [`performance.md`](../PERF.md)
 (baselines + methodology). Hot-path source, both in
 `src/compute/attention_fmha_sm120.cu`: `fmha_sm120_fa2_kernel` (the primary
 register-resident FA2, dispatched by `fmha_sm120_fa2_prefill`) and

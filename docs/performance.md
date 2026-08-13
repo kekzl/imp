@@ -1,3 +1,10 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # Performance
 
 ## Methodology

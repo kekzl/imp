@@ -1,3 +1,10 @@
+---
+layer: L3
+audience: agents
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # AGENTS.md — subagent roles & guardrails for imp
 
 This file defines focused agent roles for working on imp. It is the cross-tool companion to

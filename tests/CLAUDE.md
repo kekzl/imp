@@ -1,0 +1,61 @@
+---
+layer: L3
+audience: agents
+verified: 2026-08-13
+commit: 81ffa573
+---
+
+# tests — lanes, and which one actually gates
+
+206 files, ~955 GTest cases in test-core and ~2125 executable cases overall.
+**934 of them (44 %) need a GPU that has no automatic gate.**
+
+## Invariants
+
+- **The CI lane is `ctest -L unit`**, which is `make dev-test`: test-core +
+  test-text + an e2e subset. `make test-unit` runs a **different binary**; green
+  there is not green in CI.
+- **New CPU tests go to test-core**, and must be added to the explicit source
+  list in `CMakeLists.txt`.
+- **A green test proves nothing until it has been mutation-validated.** Break the
+  code the test claims to cover and confirm the test fails. This is the standard
+  here, not an extra.
+- **A test whose input cannot reach the defect is worthless even when correct.**
+  The most common escape class in this repo is exactly that.
+
+## Entry points
+
+- `tests/test_*.cpp` — the CPU lane
+- `tests/api/` — the HTTP battery; runs against both the mock and the real server
+- `tests/refs/` — reference vectors
+- `tools/mutation/` — the mutation harness (`run.py`, `catalogue.json`)
+
+## Build & test
+
+```
+make dev-test        # the CI lane, 0.39 s, no CUDA kernel runs
+make test-gpu        # the GPU suite; start it correctly or it silently skips 63
+make verify-fast     # the only gate that runs a kernel against a check
+```
+
+## Pitfalls
+
+- **`--gtest_filter` on a `TEST_P` or `TYPED_TEST` suite without wildcards
+  matches zero tests and reports `PASSED`.** `DetEvalE2ETest.*` matches nothing;
+  `*DetEvalE2ETest*` is correct. A CPU-lane guard now asserts this.
+- **A surviving mutant is only a test hole if it is not equivalent.** Three
+  mutants here were redundant guards over load-bearing ones; treating survival as
+  proof would have filed three false issues.
+- A mutation run that times out leaves the mutation in the tree. Back the file up
+  to the scratchpad first, and never `git checkout` to undo it.
+- Test-model env vars pointing at a wrong path skip whole batteries silently.
+
+## Do not touch
+
+`tests/refs/*` reference vectors without regenerating them deliberately.
+
+## See also
+
+[`docs/audit/TEST_INVENTORY.md`](../docs/audit/TEST_INVENTORY.md),
+[`docs/audit/MUTATION_BASELINE.md`](../docs/audit/MUTATION_BASELINE.md). Skill
+`building-and-testing`.

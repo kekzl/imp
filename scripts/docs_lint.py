@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""Documentation linter. Fails the build on the seven checks below.
+
+The point of each check is that it catches a class of defect this repo has
+actually shipped before, not that it enforces a style:
+
+  1. forbidden tokens  - a datacenter-Blackwell feature named as an imp feature.
+                         The delimitation itself is legitimate and lives in ONE
+                         allowlisted place.
+  2. unprovenanced     - a throughput number without a [PROV: ...] block near
+     numbers             it. "decode 287" with no model and no date is how a
+                         figure outlives the measurement it came from.
+  3. frontmatter       - every in-scope doc declares exactly one layer, so a
+                         reader knows whether it may assume CUDA knowledge.
+  4. generated drift   - a PERF block hand-edited away from its source.
+  5. dead links        - an internal link to a file that does not exist.
+  6. size budgets      - README and the CLAUDE.md hierarchy.
+  7. staleness         - `verified:` older than 180 days is a warning, listed
+                         in docs/audit/docs-rewrite/STALE.md.
+
+Records (archives, append-only ledgers, journals) are EXCLUDED. A record is a
+statement about one dated afternoon; demanding a freshness refresh on it would
+be demanding that history be rewritten.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# --- scope -----------------------------------------------------------------
+
+EXCLUDED_PREFIXES = (
+    "docs/archive/",
+    "docs/audit/",
+    "docs/plans/",
+    "third_party/",
+    "build/",
+    "build-dev/",
+)
+EXCLUDED_FILES = {
+    "CHANGELOG.md",          # append-only
+    "docs/MISSION_JOURNAL.md",  # append-only
+    "docs/vram_audit.md",    # append-only, says so in its own title
+    "AUDIT.md",              # running findings log
+    # The roadmap is a dated research record ("a gap list, not a schedule"):
+    # its numbers are the narrative of how each gap was measured or refuted,
+    # and stripping them for provenance blocks would destroy the record. The
+    # reader-facing distillation lives in LIMITATIONS.md / DESIGN_DECISIONS.md
+    # / PERF.md, which ARE linted.
+    "docs/roadmap.md",
+}
+EXCLUDED_SUBSTRINGS = (".pytest_cache/", "node_modules/")
+
+# The single place allowed to spell out what consumer Blackwell does NOT have.
+#
+# docs/internals/ is allowlisted as a whole, and the distinction is the point of
+# the rule rather than a hole in it. What must not be repeated is the
+# *delimitation* ("sm_120a is not a small B200"), because a reader who meets it
+# in eight places cannot tell which one is maintained. What an L2 kernel
+# document does instead is derive from it: "no tcgen05, therefore the MMA blocks
+# the issuing warp" is design rationale, and deleting it would leave the kernel's
+# shape unexplained. L0 and L1 have no business doing either; they link.
+DELIMITATION_ALLOWLIST = {"docs/internals/ARCHITECTURE.md"}
+DELIMITATION_ALLOWLIST_PREFIXES = ("docs/internals/",)
+
+# Agent-layer files may name the architecture boundary as a guardrail; that is
+# their job. They are size-budgeted instead.
+AGENT_FILES_ALLOWLIST = {"CLAUDE.md", "AGENTS.md"}
+
+FORBIDDEN = [
+    (r"\btcgen05\b", "tcgen05"),
+    (r"\bTMEM\b", "TMEM"),
+    (r"\bwgmma\b|\bWGMMA\b", "wgmma"),
+    (r"\bsm_100\b", "sm_100"),
+    (r"\bsm_90a?\b", "sm_90"),
+    (r"\bHopper\b", "Hopper"),
+    (r"1258\s*tok/s", "the stale 1258 tok/s figure"),
+    # (?<![\d.]) so a legitimate ratio like "1.20x behind" is not mistaken for
+    # the stale "20x behind vLLM" headline this rule exists to keep out.
+    (r"(?<![\d.])20\s*[x×]\s+behind", "the stale '20x behind vLLM' claim"),
+]
+
+# A throughput/ratio figure that must carry provenance.
+NUMBER_RE = re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:k\s*)?(?:tok/s|tokens/s|x faster|x behind)\b")
+PROV_RE = re.compile(r"\[PROV:")
+
+# Documents that carry provenance per row in a convention they declare in their
+# own header, predating this linter. The rule is "no number without provenance",
+# not "no number without this particular syntax": BENCHMARKS.md already states
+# that every row names its date, commit, CUDA version, quant and command, and
+# GOAL.md dates each re-measurement inline. Rewriting either into [PROV:] blocks
+# would move the provenance without adding any. They must keep declaring it,
+# which is what PROV_HEADER_RE checks.
+PROV_HEADER_ALLOWLIST = {"docs/BENCHMARKS.md", "docs/GOAL.md", "docs/MODELS.md"}
+PROV_HEADER_RE = re.compile(r"commit|re-measured|measured", re.I)
+
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+VALID_LAYERS = {"L0", "L1", "L2", "L3"}
+
+LINK_RE = re.compile(r"\[[^\]]*\]\(([^)#\s]+)(?:#[^)]*)?\)")
+
+README_MAX_LINES = 400
+CLAUDE_ROOT_MAX_TOKENS = 2000
+CLAUDE_DIR_MAX_TOKENS = 800
+STALE_DAYS = 180
+
+BASELINE = ROOT / "tests" / "perf_baseline.json"
+
+
+def in_scope(rel: str) -> bool:
+    # Dot-directories are agent state, skills and GitHub templates. They are
+    # not repository documentation: `.claude/skills/sm120-cuda-expert` names
+    # tcgen05 precisely because its job is to stop an agent reaching for it.
+    if rel.startswith("."):
+        return False
+    if rel in EXCLUDED_FILES:
+        return False
+    if any(s in rel for s in EXCLUDED_SUBSTRINGS):
+        return False
+    return not rel.startswith(EXCLUDED_PREFIXES)
+
+
+def approx_tokens(text: str) -> int:
+    """Cheap, stable proxy: ~4 chars per token. Exactness is not the point,
+    catching a file that doubled in size is."""
+    return len(text) // 4
+
+
+def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> None:
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    layer = None
+
+    # 3. frontmatter
+    m = FRONTMATTER_RE.match(text)
+    if not m:
+        errors.append(f"{rel}: missing frontmatter (needs layer/audience/verified/commit)")
+    else:
+        fm = m.group(1)
+        lm = re.search(r"^layer:\s*(\S+)", fm, re.M)
+        if not lm:
+            errors.append(f"{rel}: frontmatter has no `layer:`")
+        elif lm.group(1) not in VALID_LAYERS:
+            errors.append(f"{rel}: unknown layer {lm.group(1)!r}, expected one of {sorted(VALID_LAYERS)}")
+        else:
+            layer = lm.group(1)
+        # 7. staleness
+        vm = re.search(r"^verified:\s*(\d{4}-\d{2}-\d{2})", fm, re.M)
+        if vm:
+            age = (dt.date.today() - dt.date.fromisoformat(vm.group(1))).days
+            if age > STALE_DAYS:
+                warnings.append(f"{rel}: verified {age} days ago")
+
+    # 1. forbidden tokens
+    if (rel not in DELIMITATION_ALLOWLIST
+            and rel not in AGENT_FILES_ALLOWLIST
+            and not rel.startswith(DELIMITATION_ALLOWLIST_PREFIXES)):
+        for i, line in enumerate(lines, 1):
+            for pat, name in FORBIDDEN:
+                if re.search(pat, line):
+                    errors.append(
+                        f"{rel}:{i}: names {name}. The sm_120a delimitation belongs in "
+                        f"docs/internals/ARCHITECTURE.md; link there instead of restating it."
+                    )
+                    break
+
+    # 2. numbers without provenance.
+    #
+    # Severity depends on the layer, deliberately. In L0/L1 a number is a claim
+    # made TO a reader who cannot check it, so it must carry its referent or go.
+    # In L2 a number is usually the result of an experiment the surrounding
+    # paragraph describes, often one that was refuted; making that a build
+    # failure would push the next author to delete the figure rather than
+    # document it, which is the opposite of what this linter is for.
+    if rel in PROV_HEADER_ALLOWLIST and not PROV_HEADER_RE.search("\n".join(lines[:40])):
+        errors.append(
+            f"{rel}: is allowlisted for inline provenance but its header no longer "
+            f"declares that convention. Either restore the declaration or move to [PROV:] blocks."
+        )
+
+    for i, line in enumerate(lines, 1):
+        if not NUMBER_RE.search(line):
+            continue
+        if rel in PROV_HEADER_ALLOWLIST:
+            continue
+        window = "\n".join(lines[max(0, i - 12): i + 12])
+        if PROV_RE.search(window):
+            continue
+        msg = f"{rel}:{i}: throughput figure with no [PROV: ...] block within 12 lines"
+        if layer in ("L2", "L3"):
+            warnings.append(msg)
+        else:
+            errors.append(msg)
+
+    # 5. dead internal links
+    for i, line in enumerate(lines, 1):
+        for target in LINK_RE.findall(line):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            resolved = (path.parent / target).resolve()
+            if not resolved.exists():
+                errors.append(f"{rel}:{i}: dead link -> {target}")
+
+
+def check_generated_blocks(errors: list) -> None:
+    """4. The PERF block must match tests/perf_baseline.json."""
+    if not BASELINE.exists():
+        errors.append("tests/perf_baseline.json missing; cannot verify generated blocks")
+        return
+    data = json.loads(BASELINE.read_text())
+    decode = data["metrics"]["decode_tps"]["tg128"]
+    for rel in ("README.md", "docs/PERF.md"):
+        path = ROOT / rel
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        block = re.search(r"<!-- PERF:BEGIN -->(.*?)<!-- PERF:END -->", text, re.S)
+        if not block:
+            errors.append(f"{rel}: no <!-- PERF:BEGIN -->/<!-- PERF:END --> block")
+            continue
+        if str(decode) not in block.group(1):
+            errors.append(
+                f"{rel}: PERF block drifted from tests/perf_baseline.json "
+                f"(expected decode {decode}). Run scripts/sync_docs.py."
+            )
+
+
+def check_budgets(errors: list) -> None:
+    """6. README and CLAUDE.md size budgets."""
+    readme = ROOT / "README.md"
+    n = len(readme.read_text(encoding="utf-8").splitlines())
+    if n > README_MAX_LINES:
+        errors.append(f"README.md: {n} lines > {README_MAX_LINES}")
+
+    root_claude = ROOT / "CLAUDE.md"
+    if root_claude.exists():
+        t = approx_tokens(root_claude.read_text(encoding="utf-8"))
+        if t > CLAUDE_ROOT_MAX_TOKENS:
+            errors.append(f"CLAUDE.md: ~{t} tokens > {CLAUDE_ROOT_MAX_TOKENS}")
+
+    for p in ROOT.rglob("CLAUDE.md"):
+        rel = p.relative_to(ROOT).as_posix()
+        if rel == "CLAUDE.md" or rel.startswith(EXCLUDED_PREFIXES):
+            continue
+        t = approx_tokens(p.read_text(encoding="utf-8"))
+        if t > CLAUDE_DIR_MAX_TOKENS:
+            errors.append(f"{rel}: ~{t} tokens > {CLAUDE_DIR_MAX_TOKENS}")
+
+
+def main() -> int:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for path in sorted(ROOT.rglob("*.md")):
+        rel = path.relative_to(ROOT).as_posix()
+        if not in_scope(rel):
+            continue
+        check_file(path, rel, errors, warnings)
+
+    check_generated_blocks(errors)
+    check_budgets(errors)
+
+    if warnings:
+        stale = ROOT / "docs" / "audit" / "docs-rewrite" / "STALE.md"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text(
+            "# Stale docs\n\nGenerated by scripts/docs_lint.py. "
+            f"Threshold {STALE_DAYS} days.\n\n"
+            + "".join(f"- {w}\n" for w in warnings),
+            encoding="utf-8",
+        )
+        for w in warnings:
+            print(f"WARN  {w}")
+
+    for e in errors:
+        print(f"FAIL  {e}")
+
+    if errors:
+        print(f"\ndocs_lint: {len(errors)} error(s), {len(warnings)} warning(s)")
+        return 1
+    print(f"docs_lint: OK ({len(warnings)} warning(s))")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

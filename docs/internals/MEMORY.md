@@ -1,3 +1,10 @@
+---
+layer: L2
+audience: kernel-devs
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # imp Memory Architecture
 
 > **Status: Phase B in progress.** Section A1 is measured current state; A2–A7

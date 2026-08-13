@@ -1,6 +1,13 @@
+---
+layer: L2
+audience: kernel-devs
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # Quant / dequant pipeline
 
-Companion doc to [`architecture.md`](architecture.md) — explains the two parallel layers that handle quantized weights and the boundary between them.
+Companion doc to [`architecture.md`](ARCHITECTURE.md) — explains the two parallel layers that handle quantized weights and the boundary between them.
 
 ## Two layers, one direction
 
