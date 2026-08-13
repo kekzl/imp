@@ -361,6 +361,17 @@ Decode does not move because its cache hits 96-98 % and barely transfers; prefil
 
 So the dequant is not waste a threshold can recover; it is the price of having no grouped NVFP4 GEMM on this path. Closing it means feeding CUTLASS grouped from the slot pool in chunks, which is a project rather than a tuning change, and it is the honest next step for whoever picks this up.
 
+*Scoped 2026-08-13, not built. Read this before starting it.* The shape that fits is **per-layer staging**, not chunking: copy one layer's experts into a contiguous device buffer, run the ordinary resident prefill against it, reuse the buffer for the next layer. It moves the same 15.8 GB per prefill pass as today, but as 144 large transfers instead of 18 432 small ones, and the resident path it hands off to has no dequant. Budget: **~331 MiB** for 128 experts x 3 projections at this model's sizes, one layer live at a time.
+
+Four things that decide the work, each checked against the tree rather than assumed:
+
+- **The staging copy is nearly free to write, because #1409 already made the sources contiguous.** `pin_host_experts` lays every expert of a projection into one pinned slab back to back, so a whole projection is *one* `cudaMemcpyAsync`. Without that flag the mmap offsets are not guaranteed adjacent and it needs a per-expert fallback.
+- **`run_proj` (the smallM branch) consumes the NATIVE `[ne, N, K/16]` layout**, addressing `packed_data + e*stride` and `micro_scales + e*stride`. A staged buffer satisfies it as-is: **no SfAtom conversion needed**. But `moe.nvfp4_smallM` defaults to **off** and the branch only fires up to `max_M <= 64`.
+- **The main CUTLASS 3.x path does NOT take that layout.** It wants SfAtom scale factors plus `wcache_->cutlass_nvfp4` entries, which host-resident experts deliberately do not have (registering a host pointer there is what caused the illegal access this entry opens with). Using it means running `convert_nvfp4_moe_scales_to_sfatom` per staged layer — the converter exists — and building the weight entries per layer rather than once at load.
+- **The injection point is small**: the prefill reads `ly.nvfp4_moe_{gate,up,down}_ptr` in exactly **9 places** in `executor_forward_moe_cutlass.cu`, all in one function. A staged `NvFP4MoEQuantResult` carried on `MoeFfnContext` covers all of them.
+
+So the decision to make first is which GEMM it targets: smallM is a far smaller change and already accepts the layout, but is opt-in, unproven here and capped at M<=64; the main path is the fast one and costs a per-layer SfAtom conversion plus weight-entry bookkeeping. Either way the transfer batching is worth having on its own — it is the larger half of the 784 ms, and it does not depend on which GEMM wins.
+
 *Where the path stands after all of it, re-profiled 2026-08-11 on the shipped build.* The entry opened by calling this path issue-bound; after #1370 and #1376 **it is not any more, and that retires the framing rather than confirming it.** Same config (256 cold decode tokens, all experts host-resident), tg phase 7.06 s:
 
 | term | per token | share |
