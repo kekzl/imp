@@ -1,6 +1,6 @@
 #pragma once
 
-// Persisted library-reserve measurements (docs/MEMORY_ARCHITECTURE.md A1.5,
+// Persisted library-reserve measurements (docs/internals/MEMORY.md A1.5,
 // AUDIT B41/B42/B49).
 //
 // The planner's largest fixed charge is what cuBLAS/CUTLASS claim on the FIRST

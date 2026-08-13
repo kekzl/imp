@@ -83,7 +83,7 @@ public:
     // in. Set from Engine::init once the numbers are known.
     //   context  — CUDA primary context + driver, i.e. checkpoint 00_pre_init
     //   library  — the fixed charge CUDA/cuBLAS/CUTLASS claim on the first
-    //              forward pass (docs/MEMORY_ARCHITECTURE.md A1.5)
+    //              forward pass (docs/internals/MEMORY.md A1.5)
     //   arena    — engine-persistent tier reservation (its high-water is what
     //              the planner should eventually use)
     size_t unattributed_bytes() const;
@@ -149,7 +149,7 @@ private:
 void trim_device_mempool();
 
 // ─────────────────────────────────────────────────────────────────────
-// I7 — capacity is not occupancy (docs/MEMORY_ARCHITECTURE.md).
+// I7 — capacity is not occupancy (docs/internals/MEMORY.md).
 //
 // A single "VRAM used" number cannot distinguish a KV pool that is 90 % full
 // from one that is 90 % reserved and empty, and every capacity question an

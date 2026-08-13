@@ -113,7 +113,7 @@ bool library_reserve_cache_store(const std::string& path, const LibraryReserveKe
             return false;
         out << "# imp library-reserve cache — what the first forward pass actually\n"
                "# claimed, per (model, quant path, CUDA runtime). Safe to delete;\n"
-               "# imp re-measures and rewrites it. See docs/MEMORY_ARCHITECTURE.md A1.5.\n";
+               "# imp re-measures and rewrites it. See docs/internals/MEMORY.md A1.5.\n";
         for (const auto& [name, v] : entries)
             out << name << '\t' << v << '\n';
         if (!out)

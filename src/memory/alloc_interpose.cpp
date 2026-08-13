@@ -1,5 +1,5 @@
 // Link-time interposition on the CUDA allocation symbols
-// (docs/MEMORY_ARCHITECTURE.md A6, AUDIT B8/B26).
+// (docs/internals/MEMORY.md A6, AUDIT B8/B26).
 //
 // Why this exists. Acceptance criterion 3 — "an instrumented soak shows zero
 // driver allocations after warmup" — needs a detector that sees EVERY device

@@ -62,7 +62,7 @@ option(IMP_BUILD_BENCH "Build benchmarks" ON)
 option(IMP_BUILD_SERVER "Build imp-server (OpenAI-compatible HTTP server)" ON)
 # Link-time interposition on the CUDA allocation symbols, so acceptance
 # criterion 3 can be measured against EVERY device allocation rather than only
-# the ones routed through Backend (docs/MEMORY_ARCHITECTURE.md A6, AUDIT B26).
+# the ones routed through Backend (docs/internals/MEMORY.md A6, AUDIT B26).
 # Off by default: --wrap belongs on a measurement build, not a shipping one.
 option(IMP_ALLOC_INTERPOSE "Wrap cudaMalloc/cudaMallocAsync to attribute steady-state allocations" OFF)
 set(IMP_WRAP_LINK_FLAGS "")
@@ -650,7 +650,7 @@ if(IMP_BUILD_TESTS)
         # model/expert_placement.h takes the placement as data, so no GPU and no
         # checkpoint are needed to pin the refusal.
         tests/test_expert_placement.cpp
-        # Memory subsystem L1 (docs/MEMORY_ARCHITECTURE.md). FakeBackend is the
+        # Memory subsystem L1 (docs/internals/MEMORY.md). FakeBackend is the
         # substitution seam that keeps the whole allocator stack testable in the
         # CPU lane; it is test scaffolding, so it is compiled here rather than
         # shipped in the imp library.

@@ -75,7 +75,7 @@ struct EngineConfig {
     float kv_fraction = 0.8f;
     int vram_reserve_floor_pct = 10;
     // library_reserve_mb: what cuBLAS/CUTLASS claim on the first forward pass
-    // (docs/MEMORY_ARCHITECTURE.md A1.5). -1 = the measured default. This is a
+    // (docs/internals/MEMORY.md A1.5). -1 = the measured default. This is a
     // FIXED charge — it does not shrink because --vram-budget asked for a
     // smaller slice — so it floors the reserve above, which is otherwise all
     // percentages of total.

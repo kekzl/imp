@@ -1,7 +1,7 @@
 #pragma once
 
 // T5's engine-persistent half: pinned host memory with an owner
-// (docs/MEMORY_ARCHITECTURE.md §A2, and the correction to it recorded there).
+// (docs/internals/MEMORY.md §A2, and the correction to it recorded there).
 //
 // `Backend` covers DEVICE memory only, which left every pinned host buffer in
 // the engine allocating through the driver directly — 26 acquisition sites in

@@ -1,5 +1,5 @@
 // Memory metrics for /metrics — invariant I7 (capacity is not occupancy,
-// docs/MEMORY_ARCHITECTURE.md).
+// docs/internals/MEMORY.md).
 //
 // Its own translation unit because handlers_misc.cpp is a grab-bag of unrelated
 // endpoints, and adding 44 lines to it pushed the file past the file-size warn
@@ -20,7 +20,7 @@
 
 void append_memory_metrics(std::string& out, ServerState& state) {
 // Memory: capacity AND occupancy, per tier (invariant I7,
-// docs/MEMORY_ARCHITECTURE.md). A single "VRAM used" gauge cannot tell a KV
+// docs/internals/MEMORY.md). A single "VRAM used" gauge cannot tell a KV
 // pool that is 90 % full from one that is 90 % reserved and empty, and both
 // capacity questions an operator asks — "can this box take another
 // concurrent request?", "is the budget doing anything?" — need the split.

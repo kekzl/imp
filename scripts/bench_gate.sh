@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Perf regression gate: run imp-cli --bench and compare decode/prefill against a
-# baseline json. Single-session, warmed clocks (see docs/BENCHMARKING.md). Decode
+# baseline json. Single-session, warmed clocks (see docs/internals/BENCHMARKING.md). Decode
 # tg128 is the headline. Extracted from ci.yml so the same logic runs locally
 # (scripts/verify.sh) and in the GPU CI job.
 #
@@ -36,7 +36,7 @@ run_bench() {
 }
 
 # Warm the clocks: the GPU downclocks at idle and the first ~1s reads low. One
-# discarded run before the measured run (docs/BENCHMARKING.md).
+# discarded run before the measured run (docs/internals/BENCHMARKING.md).
 echo "warming clocks (discarded run)..."
 run_bench >/dev/null 2>&1 || true
 

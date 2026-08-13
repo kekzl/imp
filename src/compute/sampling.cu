@@ -152,7 +152,7 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
 
     // Four bytes, allocated ONCE. This used to cudaMalloc and cudaFree per call
     // — an I2 violation on a sampling path, and the kind that hides because the
-    // allocation is trivially small (docs/MEMORY_ARCHITECTURE.md A3.2). The
+    // allocation is trivially small (docs/internals/MEMORY.md A3.2). The
     // buffer is write-then-read within this call and reused by every later one,
     // so engine-persistent is the correct tier.
     //

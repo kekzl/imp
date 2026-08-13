@@ -1,7 +1,7 @@
 #pragma once
 
 // FakeBackend — the substitution seam that makes the memory subsystem testable
-// without a GPU (docs/MEMORY_ARCHITECTURE.md §A6).
+// without a GPU (docs/internals/MEMORY.md §A6).
 //
 // imp's CI has no GPU runner; the lane that actually runs is `ctest -L unit`.
 // Every allocator, the planner, and all the refcount logic therefore have to be

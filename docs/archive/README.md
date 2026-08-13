@@ -50,8 +50,8 @@ git show <commit>:docs/archive/<path>
 ```
 
 Everything here is **historical / superseded / refuted** — it is not the current
-state of the engine. For current docs see [`../architecture.md`](../architecture.md),
-[`../sm120.md`](../sm120.md), [`../BENCHMARKS.md`](../BENCHMARKS.md), and the
+state of the engine. For current docs see [`../architecture.md`](../internals/ARCHITECTURE.md),
+[`../sm120.md`](../internals/SM120.md), [`../BENCHMARKS.md`](../BENCHMARKS.md), and the
 live audit memos in [`../audit/`](../audit/).
 
 ---
@@ -216,7 +216,7 @@ history.
 
 **Outcome:** both stages shipped — Stage A materialized (#802), Phase 3 absorbed latent-KV-cache
 decode (#803, opt-in). First MLA arch in imp; validated on DeepSeek-V2-Lite (same-corpus PPL within ~3% of HF bf16 after the 2026-07-07 YaRN rope-mscale fix; the original "6.06 vs 5.07" was cross-corpus).
-Current state lives in [`../supported-models.md`](../supported-models.md), [`../roadmap.md`](../roadmap.md),
+Current state lives in [`../supported-models.md`](../MODELS.md), [`../roadmap.md`](../roadmap.md),
 and the `src/compute/mla_*.{cu,h}` headers.
 
 ## 2026-06-29 consolidation — frozen/superseded snapshots

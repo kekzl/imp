@@ -1,7 +1,7 @@
 #pragma once
 
 // T4 (forward-scratch) of the lifetime taxonomy
-// (docs/MEMORY_ARCHITECTURE.md §A2/§A3.3).
+// (docs/internals/MEMORY.md §A2/§A3.3).
 //
 // A LIFO stack over one Region. A forward pass opens a Mark on entry, every
 // intermediate takes from the stack, and the Mark's destructor rewinds. Two

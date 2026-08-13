@@ -16,7 +16,7 @@
 namespace imp {
 
 // The tower is engine-lifetime, so its blocks come from the T2 engine arena
-// (docs/MEMORY_ARCHITECTURE.md). The arena is sized for exactly this in
+// (docs/internals/MEMORY.md). The arena is sized for exactly this in
 // Engine::init, from qwen3vl_vision_tower_device_bytes() — the tower uploads long
 // after the arena opens, so the two numbers have to be derived from the same
 // tensor list to stay in step.

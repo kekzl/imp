@@ -26,25 +26,22 @@ fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 # Every (./*.md or docs/*.md) link of the form ](path) — where path looks
 # like a relative file — must resolve to a tracked file.
 section "doc links"
-LINKS=$(grep -rEho '\]\(([^)#]+\.(md|example|json|sh|cmake|h|cpp|cu))\)' \
-        --include='*.md' \
-        README.md CONTRIBUTING.md CHANGELOG.md docs/ 2>/dev/null \
-        | sed -E 's/^\]\(//; s/\)$//' | sort -u || true)
+# Resolve each link against the file that CONTAINS it, which is the only
+# correct answer. The previous version deduplicated targets globally and then
+# guessed a prefix from a fixed list (repo root, docs/, docs/audit/); adding
+# docs/internals/ broke every sibling link inside it, and the next new
+# subdirectory would have broken again.
 BROKEN=0
-while IFS= read -r link; do
-    [ -z "$link" ] && continue
-    # Skip URLs.
-    case "$link" in http*|https*) continue ;; esac
-    # Each .md doc is a different cwd; resolve against repo root for absolute
-    # links, otherwise against each containing doc. Cheap heuristic: try repo
-    # root + any docs/ subdir.
-    if [ -e "$link" ] || [ -e "docs/$link" ] || [ -e "docs/audit/$link" ] || [ -e "$(dirname "$link")/$(basename "$link")" ]; then
-        :
-    else
-        echo "  broken: $link"
-        BROKEN=$((BROKEN+1))
-    fi
-done <<< "$LINKS"
+while IFS= read -r docfile; do
+    [ -z "$docfile" ] && continue
+    dir=$(dirname "$docfile")
+    while IFS= read -r link; do
+        [ -z "$link" ] && continue
+        case "$link" in http*|https*|mailto:*) continue ;; esac
+        [ -e "$dir/$link" ] || { echo "  broken: $docfile -> $link"; BROKEN=$((BROKEN+1)); }
+    done < <(grep -Eho '\]\(([^)# ]+\.(md|example|json|sh|cmake|h|cpp|cu))\)' "$docfile" 2>/dev/null \
+             | sed -E 's/^\]\(//; s/\)$//' | sort -u)
+done < <(git ls-files -- 'README.md' 'CONTRIBUTING.md' 'CHANGELOG.md' 'docs/**/*.md' 'docs/*.md')
 [ "$BROKEN" -eq 0 ] && pass "all internal doc links resolve" \
                    || fail "$BROKEN broken internal doc link(s)"
 

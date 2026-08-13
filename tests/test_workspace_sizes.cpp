@@ -1,5 +1,5 @@
 // exec_t2_demand / exec_max_tokens — the arithmetic the T2 arena is sized from
-// (docs/MEMORY_ARCHITECTURE.md A7 step 4b).
+// (docs/internals/MEMORY.md A7 step 4b).
 //
 // This is the #1103 failure class in miniature: under-reserve here and the
 // pre-dequant cache build expands into the space the arena should have held,

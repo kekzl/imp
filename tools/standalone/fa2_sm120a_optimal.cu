@@ -4,7 +4,7 @@
 // RTX 5090 (GB202, sm_120a — consumer Blackwell). No imp engine headers, no
 // CUTLASS, no cuDNN. One file: kernel + CPU reference + correctness check +
 // timing. This is the *reference* shape of the optimal sm_120a attention kernel
-// described in docs/sm120_optimal_kernel.md — meant to be read and run, not to
+// described in docs/internals/KERNELS.md — meant to be read and run, not to
 // beat imp's production FA2 (which adds f16-acc variants, TWOSLOT, INT8/FP8-QK,
 // and per-head GQA plumbing on top of exactly this skeleton).
 //
@@ -473,7 +473,7 @@ int main(int argc, char** argv) {
 
     // timing — warm the clocks for >1.5s of wall time first (sm_120 idles at
     // ~360-810 MHz and takes ~1s to ramp to ~2850 MHz under load; a short
-    // warmup reads artificially LOW — see docs/sm120_optimal_kernel.md notes).
+    // warmup reads artificially LOW — see docs/internals/KERNELS.md notes).
     cudaEvent_t a, b;
     cudaEventCreate(&a); cudaEventCreate(&b);
     {

@@ -1,5 +1,5 @@
 // L1 of the memory architecture: Backend, the allocation-phase guard, and the
-// FakeBackend test seam (docs/MEMORY_ARCHITECTURE.md A3.1/A3.2/A6).
+// FakeBackend test seam (docs/internals/MEMORY.md A3.1/A3.2/A6).
 //
 // CPU-only on purpose. imp has no GPU runner and the lane CI actually runs is
 // `ctest -L unit`; the whole point of the Backend interface is that the

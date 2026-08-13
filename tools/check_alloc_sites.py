@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """I1 gate: exactly one module talks to the CUDA driver about memory.
 
-docs/MEMORY_ARCHITECTURE.md invariant I1 — no cudaMalloc / cudaMallocAsync /
+docs/internals/MEMORY.md invariant I1 — no cudaMalloc / cudaMallocAsync /
 cudaFree / cuMemCreate / thrust::device_vector / pinned-host allocation outside
 src/memory/. Everything else receives typed views.
 
@@ -296,7 +296,7 @@ def main() -> int:
     if offenders:
         rc = 1
         print("\nFAIL: these files allocate but are not on the I1 allowlist.")
-        print("Route them through src/memory/ (docs/MEMORY_ARCHITECTURE.md A3),")
+        print("Route them through src/memory/ (docs/internals/MEMORY.md A3),")
         print("or, if that is genuinely not possible yet, justify the addition in review.")
         for rel in offenders:
             for line_no, api in hits[rel][:5]:

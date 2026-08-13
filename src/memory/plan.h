@@ -1,6 +1,6 @@
 #pragma once
 
-// The planner (docs/MEMORY_ARCHITECTURE.md §A4).
+// The planner (docs/internals/MEMORY.md §A4).
 //
 // compute_vram_budget() calls itself "pure computation — just arithmetic". It
 // is pure in the functional sense and impure in the useful one: its dominant

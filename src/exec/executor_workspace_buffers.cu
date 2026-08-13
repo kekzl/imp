@@ -67,7 +67,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // anyway. It now FAILS THE LOAD instead: with the arena sized from
         // exec_t2_demand, a member that cannot be served means the plan was
         // wrong, and I6 says that is a typed refusal at load — not a downgrade
-        // and not a crash (docs/MEMORY_ARCHITECTURE.md B5 point 2).
+        // and not a crash (docs/internals/MEMORY.md B5 point 2).
         bool mla_ok = true;
         auto alloc = [&](void** p, size_t cols, const char* name) {
             size_t sz = T * cols * sizeof(half);

@@ -190,7 +190,7 @@ struct RuntimeConfig {
         // batch (1..16) and context (1024..4096) — it is not a workspace imp
         // allocates, and the old budget pass cannot see it, which is why it
         // hands the KV pool a number that much too optimistic
-        // (docs/MEMORY_ARCHITECTURE.md A1.5).
+        // (docs/internals/MEMORY.md A1.5).
         //   -1 = use the built-in measured constant (default)
         //    0 = charge nothing (for a driver/toolkit where it does not apply)
         //   >0 = the measured value for THIS host, in MiB

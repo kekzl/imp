@@ -1,5 +1,5 @@
 // GraphSlotPool — the T2 slot pool behind the conditional graph loop
-// (docs/MEMORY_ARCHITECTURE.md A7 step 5.3).
+// (docs/internals/MEMORY.md A7 step 5.3).
 //
 // CPU lane on purpose. The pool's device side goes through Backend and its
 // pinned-host side through HostPinnedAllocator, so both halves substitute and

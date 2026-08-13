@@ -1,6 +1,6 @@
 #pragma once
 
-// L1 of the memory architecture (docs/MEMORY_ARCHITECTURE.md §A3.1/§A3.2):
+// L1 of the memory architecture (docs/internals/MEMORY.md §A3.1/§A3.2):
 // physical acquisition, the allocation-phase guard, and accounting.
 //
 // This is the ONLY layer that is allowed to talk to the CUDA driver about

@@ -166,7 +166,7 @@ loop, and the shared part is already factored out.
   over the whole init rather than the warmup-forward window). Re-measured 2026-08-03 on the
   three config families the audit named plus one more — dense GGUF (was 39 %), MoE (was
   20 %), and two NVFP4 dense — **all read 99.9-100.0 % accounted, residual 0-16 MiB**.
-  `docs/MEMORY_ARCHITECTURE.md` still carried the old 61-80 % table, which is where the
+  `docs/internals/MEMORY.md` still carried the old 61-80 % table, which is where the
   stale prior came from; corrected there too. **This is the ledger's own failure mode
   caught in the act**: an entry that was true when written, describing a subsystem whose
   running log (`AUDIT.md`) recorded the fix, in a section headed "NOT settled". Reading the
@@ -297,7 +297,7 @@ one command.
 | Brief said | Reality | Counter-check |
 |---|---|---|
 | 9 architectures | **16** enumerators | count them in `src/model/model_arch.h` |
-| 6 tested models | ~30 validated checkpoints | `docs/supported-models.md` |
+| 6 tested models | ~30 validated checkpoints | `docs/MODELS.md` |
 | C++20 | **C++23** | the standard in `CMakeLists.txt` |
 | `src/graph/` exists | renamed to `src/exec/`; `src/lora/` exists and was unlisted | `ls src/` |
 | no p50/p99 histograms | Prometheus histograms exist | `grep _bucket` in `tools/imp-server/handlers_misc.cpp` |
@@ -603,7 +603,7 @@ report's status lines so the fourth occurrence fails CI instead of costing a day
 
 - **Memory subsystem** — root `AUDIT.md` (CONFIRMED / REFUTED / OPEN per finding, negative
   results included). Read it before sweeping `src/memory/`; design lives in
-  `docs/MEMORY_ARCHITECTURE.md`.
+  `docs/internals/MEMORY.md`.
 - **Architecture / dispatch** — this file, plus
   [`AUDIT_ARCH_2026_07_29.md`](AUDIT_ARCH_2026_07_29.md) for the evidence behind each entry.
 - **File size** — [`AUDIT_FILESIZE.md`](AUDIT_FILESIZE.md), per-file rationale.

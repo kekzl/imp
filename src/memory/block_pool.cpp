@@ -81,7 +81,7 @@ void BlockPool::close() {
     const size_t outstanding = refcount_.size() - free_list_.size();
     if (outstanding != 0) {
         IMP_LOG_ERROR("BlockPool::close with %zu blocks still referenced — a block outlived its "
-                      "owner (docs/MEMORY_ARCHITECTURE.md A5.1)",
+                      "owner (docs/internals/MEMORY.md A5.1)",
                       outstanding);
 #ifndef NDEBUG
         std::abort();
