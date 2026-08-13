@@ -151,6 +151,22 @@ struct MoEWorkspace {
     size_t layer_stage_size = 0;          // total allocation
     int layer_stage_experts = 0;          // n_experts the buffer was sized for
 
+    // CUTLASS device-args view of the staged layer. The grouped NVFP4 GEMM
+    // wants SfAtom-ordered scale factors and device arrays of per-expert
+    // pointers; the staged bytes carry the native per-16 layout instead, so
+    // the scales are converted once per staged layer into `layer_stage_sf`
+    // and the three pointer arrays are rebuilt to match.
+    //
+    // This is what lets a host-resident layer take the SAME prefill path as a
+    // resident one, instead of the per-expert dequant→cuBLAS fallback that was
+    // 52 % of this path's kernel time.
+    void* layer_stage_sf = nullptr;        // [kExpertProjCount][n_experts * sf_size]
+    size_t layer_stage_sf_proj_bytes = 0;  // per-projection span
+    size_t layer_stage_sf_size = 0;
+    const void** layer_stage_b_ptrs = nullptr;    // [kExpertProjCount * n_experts]
+    const void** layer_stage_sfb_ptrs = nullptr;  // [kExpertProjCount * n_experts]
+    float* layer_stage_alpha = nullptr;           // [kExpertProjCount * n_experts]
+
     // Slot indices for the host-offload decode path: [3 * top_k] int32, one
     // block per projection (gate, up, down). The fused MoE decode kernels
     // address an expert as `base + idx * stride`; with host-resident experts

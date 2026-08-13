@@ -25,6 +25,13 @@ there instead of retelling it.
   only work together. Decode is unaffected. Off by default because it costs
   4.4x model-load time. ([`docs/roadmap.md`](docs/roadmap.md))
 
+- **`moe.staged_cutlass_prefill`** (default off) runs host-resident NVFP4 experts
+  through the CUTLASS grouped prefill instead of a per-expert dequant, lifting
+  pp512 from 663 to **1564 tok/s** on Qwen3-30B-A3B-NVFP4 with every MoE layer
+  host-resident. Needs `moe.pin_host_experts`. Opt-in: decode measures 36 % lower
+  after a long prefill in the same test, which is reproducible but unexplained
+  and reverses on a short one. ([`docs/roadmap.md`](docs/roadmap.md))
+
 ### Fixed
 
 - **`ghcr.io/kekzl/imp:latest` pointed at v0.22.0**, three releases behind, because

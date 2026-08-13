@@ -676,6 +676,48 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                             "MoE layer staging buffer: %.2f MiB (%d experts x 3 projections, "
                             "one layer at a time)",
                             total / (1024.0 * 1024.0), stage_cfg.n_experts);
+
+                        // SfAtom scales + per-expert pointer arrays, so the
+                        // staged layer can take the CUTLASS device-args path
+                        // instead of the per-expert dequant fallback. Sized
+                        // from the largest projection; gate/up and down differ.
+                        const int64_t d_model = stage_cfg.d_model;
+                        const int64_t eff_ff =
+                            stage_cfg.expert_d_ff > 0 ? stage_cfg.expert_d_ff : stage_cfg.d_ff;
+                        const size_t sf_gate = cutlass_nvfp4_sf_size(
+                            static_cast<int>(eff_ff), static_cast<int>(d_model));
+                        const size_t sf_down = cutlass_nvfp4_sf_size(
+                            static_cast<int>(d_model), static_cast<int>(eff_ff));
+                        const size_t sf_proj =
+                            static_cast<size_t>(stage_cfg.n_experts) * std::max(sf_gate, sf_down);
+                        const size_t sf_total =
+                            static_cast<size_t>(kExpertProjCount) * sf_proj;
+                        const size_t ptr_count =
+                            static_cast<size_t>(kExpertProjCount) * stage_cfg.n_experts;
+                        moe_.layer_stage_sf = vram_alloc(vram_alloc_, sf_total, "moe_layer_stage_sf");
+                        moe_.layer_stage_b_ptrs = static_cast<const void**>(
+                            vram_alloc(vram_alloc_, ptr_count * sizeof(void*), "moe_stage_bptr"));
+                        moe_.layer_stage_sfb_ptrs = static_cast<const void**>(
+                            vram_alloc(vram_alloc_, ptr_count * sizeof(void*), "moe_stage_sfbptr"));
+                        moe_.layer_stage_alpha = static_cast<float*>(
+                            vram_alloc(vram_alloc_, ptr_count * sizeof(float), "moe_stage_alpha"));
+                        if (moe_.layer_stage_sf && moe_.layer_stage_b_ptrs &&
+                            moe_.layer_stage_sfb_ptrs && moe_.layer_stage_alpha) {
+                            moe_.layer_stage_sf_proj_bytes = sf_proj;
+                            moe_.layer_stage_sf_size = sf_total;
+                            IMP_LOG_INFO(
+                                "MoE layer staging: CUTLASS device-args view enabled "
+                                "(+%.2f MiB SfAtom)",
+                                sf_total / (1024.0 * 1024.0));
+                        } else {
+                            // Staging still works, it just falls back to the
+                            // per-expert dequant path for the GEMM.
+                            moe_.layer_stage_sf_proj_bytes = 0;
+                            IMP_LOG_WARN(
+                                "MoE layer staging: SfAtom view alloc failed (%.2f MiB) — "
+                                "prefill keeps the per-expert dequant path",
+                                sf_total / (1024.0 * 1024.0));
+                        }
                     }
                 } else {
                     IMP_LOG_INFO(

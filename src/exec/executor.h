@@ -819,6 +819,17 @@ private:
     // Defined in executor_forward_moe_nvfp4_host.cu.
     bool stage_nvfp4_layer_(int layer, cudaStream_t stream, StagedProj out[kExpertProjCount]);
 
+    // Build a CUTLASS device-args view over a layer staged by the call above,
+    // so a host-resident layer dispatches like a device-resident one. Returns
+    // false when the layer was not staged, a projection could not build its
+    // SfAtom view, or the opt-in is off. Defined alongside the stager.
+    bool build_staged_device_args_(const MoeFfnContext& ctx, bool non_gated,
+                                   MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const;
+
+    // Stage a host-resident layer (once per MoE call, carried on ctx) and say
+    // whether the staged copy can carry the CUTLASS prefill.
+    bool stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+
 public:
     // Throws when a MoE layer's NVFP4 experts are host-resident and nothing
     // can serve them from there. Call after pre_dequant_weights(): it needs
