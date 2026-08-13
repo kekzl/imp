@@ -1,9 +1,9 @@
----
+<!--
 layer: L0
 audience: newcomers
 verified: 2026-08-13
 commit: 81ffa573
----
+-->
 
 <p align="center">
   <img src="docs/logo.svg" alt="imp" width="500">

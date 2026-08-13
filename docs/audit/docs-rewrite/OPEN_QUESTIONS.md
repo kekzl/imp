@@ -1,9 +1,9 @@
----
+<!--
 layer: L3
 audience: agents
 verified: 2026-08-13
 commit: 1e4fad60
----
+-->
 
 # Open questions from the docs rewrite
 

@@ -1,14 +1,14 @@
----
+<!--
 layer: L3
 audience: agents
 verified: 2026-08-13
 commit: 81ffa573
----
+-->
 
 # src/compute — CUDA kernels
 
-Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. 144 files, all compiled for
-`sm_120a` only. This is the hot path.
+Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. 144 files, `sm_120a` only.
+This is the hot path.
 
 ## Invariants
 
@@ -17,7 +17,7 @@ Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. 144 files, all compiled fo
   instantiations when recompiles bite. `tools/check_filesize.py` gates it.
 - **No portability branches.** No other arch, no FP16 dequant in decode.
 - **Every `<<<>>>` carries `IMP_CUDA_CHECK_LAUNCH()`** (CI job `Launch guards`).
-- **Numeric code is bit-sensitive.** Move a kernel verbatim, and say so.
+- **Numeric code is bit-sensitive:** move a kernel verbatim, and say so.
 - **A kernel that cannot serve its input fails loud.** Copy `gemm()`'s
   scale-less-weight guard.
 
@@ -54,7 +54,7 @@ docker run --rm --gpus all -v $PWD:/src -w /src imp:test \
     ./build/test-attention --gtest_filter='*Paged*'
 ```
 
-`ctest` registers only the `unit`/`gpu`/`perf` aggregates: filter inside a
+`ctest` registers only the `unit`/`gpu`/`perf` aggregates: filter inside the
 binary, not with `ctest -R`.
 
 CI has **no GPU**. Green in GitHub Actions says nothing about a kernel.
