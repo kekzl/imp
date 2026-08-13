@@ -24,9 +24,10 @@
       "own_peak_note": "peak device memory this PROCESS allocates after engine init (vram_own_peak_bytes), measured by the verify.sh peak-VRAM gate with --bench-pp 128 --bench-reps 1 --max-tokens 8 --mem-report. Excludes the CUDA primary context (~1680 MiB here) and any neighbour process, so unlike device peak_used it does not move for reasons unrelated to the change under test. Byte-identical across repeat runs."
     }
   },
+  "_thresholds_note": "Throughput thresholds were 3%/5% until 2026-08-13 and sat below this host's own between-session movement: the same tree reads 287.63 one day and 276.92 the next at healthy clocks (six quiet runs spanned 278.59-289.77), while three processes within one session agree to 0.16%. Desktop use costs a few percent more. 8% still catches what the gate exists for - the split-K mutation M29 measured -36%. own_peak_mb is byte-identical across repeat runs, so its 10% stays. Rationale: docs/BENCHMARKING.md.",
   "thresholds": {
-    "decode_regression_pct": 3,
-    "prefill_regression_pct": 5,
+    "decode_regression_pct": 8,
+    "prefill_regression_pct": 8,
     "vram_increase_pct": 10
   }
 }

@@ -47,7 +47,7 @@ and every *bounded* lever for it was empirically closed in the 06-12 campaign.
 timed reps (built-in `Warmup...` is too few iters); nsys with CUDA Graphs ON hides captured kernels.
 
 **Canonical references (not this journal — it lagged the 06-xx campaign):**
-- Perf gate: `tests/perf_baseline.json` (3% decode / 5% prefill). Reproducible numbers (SHA-anchored):
+- Perf gate: `tests/perf_baseline.json` (8% decode / 8% prefill). Reproducible numbers (SHA-anchored):
   `BENCHMARKS.md`. User-visible changes: `CHANGELOG.md`. Current focus: `docs/roadmap.md`.
 - Detailed campaign index lives in the agent's private memory (`perf_baselines_detail_2026_06_11` et al.).
 - North-star: Qwen3-14B Q6_K decode @ctx2048 = 157.71 tok/s.
