@@ -72,6 +72,9 @@ Single source of truth for the version is **`CMakeLists.txt`** `project(imp … 
 2. `CHANGELOG.md`: rename the `## [Unreleased]` section to `## [X.Y.Z] - YYYY-MM-DD` (Keep-a-Changelog format; Added / Changed / Fixed). Leave a fresh empty `[Unreleased]`.
 3. `docs/BENCHMARKS.md`: update the "current: **vX.Y.Z**" line — tagged releases snapshot a SHA, so published numbers must name the release they were taken on.
 4. Merge that PR (squash) as usual, then tag the merged commit on `main`: `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`. Tags are `vX.Y.Z` (e.g. `v0.18.0`). `scripts/check-release.sh` gates release-touching PRs in CI.
+5. **Publish a GitHub Release on that tag — the tag alone is not the release.** Every version back to v0.20.x has one, and it is what a reader actually sees: `gh release create vX.Y.Z --title "vX.Y.Z — <what changed, in words>" --notes-file <file> --verify-tag`. House style, from the existing ones: PR count since the last tag, then `## Highlights` with the measured numbers inline, `## Also in here`, and a `## Gate` paragraph quoting the verify-fast figures **from a run on the tagged tree**. `check-release.sh` prints only `PASS make verify-fast` and swallows those figures, so run `make verify-fast` separately if you need to quote them. Publish negative results too — a lever that measured worse is a finding.
+
+**Run the release check before tagging, and read its exit code.** `bash scripts/check-release.sh; echo $?` — grepping its output for `FAIL` is not enough, because a gate that aborts prints no FAIL line at all (that is #1394: an empty `[Unreleased]` made a `grep` exit 1 and `set -euo pipefail` killed the script silently, before `make verify-fast` ran).
 
 ## Common mistakes → fix
 
