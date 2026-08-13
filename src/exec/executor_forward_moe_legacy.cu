@@ -111,6 +111,16 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         const bool use_expert_cache = expert_cache_.n_slots_ > 0 &&
                                       dispatch_cells <= expert_cache_.slots_per_layer_;
 
+        // Host-resident NVFP4 experts, n > 1: stage the WHOLE layer once
+        // instead of two H2D per expert per projection. Prefill activates
+        // essentially every expert anyway, so this moves the same bytes in
+        // ~6 transfers rather than ~768, and small transfers are what this
+        // path was losing to. Decode is excluded deliberately: it wants
+        // top_k experts, and staging all of them to get 8 would be strictly
+        // more traffic than the slot cache it already uses.
+        StagedProj staged[kExpertProjCount];
+        const bool layer_staged = (n > 1) && stage_nvfp4_layer_(layer, stream, staged);
+
         // Helper: dequant one expert's weight from packed tensor into dequant scratch slot 0.
         // Returns a Tensor view into the scratch buffer with shape [rows, cols], FP16.
         // Uses slot 0 always -- safe because all ops are on the same stream, so the previous
@@ -273,12 +283,43 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                 const Tensor& w = fallback[eidx];
                 if (w.data && !w.on_device && w.scales && w.ndim == 2) {
                     const auto layout = nvfp4_slot_layout(w.shape[0], w.shape[1] * 2);
-                    void* staged = nullptr;
+
+                    // Whole-layer staging already put this expert on the
+                    // device — read it there and skip the per-expert copies
+                    // entirely.
+                    const StagedProj& sp = staged[std::to_underlying(proj)];
+                    if (layer_staged && sp.covers(eidx)) {
+                        NvFP4QuantResult nw;
+                        nw.packed_data = const_cast<char*>(sp.packed) +
+                                         static_cast<size_t>(eidx) * sp.packed_stride;
+                        nw.micro_scales = const_cast<char*>(sp.ms) +
+                                          static_cast<size_t>(eidx) * sp.ms_stride;
+                        nw.tensor_scale = w.tensor_scale;
+                        nw.N = static_cast<int>(w.shape[0]);
+                        nw.K = static_cast<int>(w.shape[1] * 2);
+                        const int M = static_cast<int>(a.shape[0]);
+                        if (M == 1) {
+                            gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
+                                            static_cast<half*>(c.data), nw.N, nw.K, stream);
+                        } else {
+                            int64_t a_shape[2] = {static_cast<int64_t>(M),
+                                                  static_cast<int64_t>(nw.K)};
+                            int64_t c_shape[2] = {static_cast<int64_t>(M),
+                                                  static_cast<int64_t>(nw.N)};
+                            Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
+                                       QType::F16, 2, a_shape, true);
+                            Tensor c_t(c.data, QType::F16, 2, c_shape, true);
+                            gemm_nvfp4(nw, a_t, c_t, stream);
+                        }
+                        return;
+                    }
+
+                    void* staged_ptr = nullptr;
                     if (layout.slot_bytes() > 0) {
                         if (use_expert_cache && nvfp4_host_pool_ready_for_staging(expert_cache_) &&
                             layout.slot_bytes() <= expert_cache_.slot_size_) {
                             ExpertCacheKey ck{fallback[0].data, eidx};
-                            staged = expert_cache_.get_or_load_nvfp4(
+                            staged_ptr = expert_cache_.get_or_load_nvfp4(
                                 layer, proj, ck, w.data, layout.packed_bytes, w.scales,
                                 layout.ms_bytes, layout.packed_off(), w.tensor_scale, stream);
                         } else if (moe_.raw_staging_buf &&
@@ -292,13 +333,13 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(st + layout.packed_off(), w.scales,
                                                                layout.ms_bytes,
                                                                cudaMemcpyHostToDevice, stream));
-                            staged = st;
+                            staged_ptr = st;
                         }
                     }
-                    if (staged) {
+                    if (staged_ptr) {
                         NvFP4QuantResult nw;
-                        nw.packed_data = staged;
-                        nw.micro_scales = static_cast<char*>(staged) + layout.packed_off();
+                        nw.packed_data = staged_ptr;
+                        nw.micro_scales = static_cast<char*>(staged_ptr) + layout.packed_off();
                         nw.tensor_scale = w.tensor_scale;
                         nw.N = static_cast<int>(w.shape[0]);
                         nw.K = static_cast<int>(w.shape[1] * 2);

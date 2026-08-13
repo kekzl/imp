@@ -639,6 +639,51 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             } else if (has_host_experts) {
                 IMP_LOG_INFO("Expert LRU cache disabled via IMP_NO_EXPERT_CACHE (staging fallback)");
             }
+
+            // Whole-layer staging buffer for the NVFP4 host prefill. Sized for
+            // ONE layer and reused across layers — the forward is sequential,
+            // so each layer overwrites the previous one after its kernels have
+            // run on the same stream.
+            //
+            // This exists to make the transfers big. Per expert they are
+            // ~768 KiB + ~96 KiB, which does not reach PCIe bandwidth; a whole
+            // projection at once is one transfer of ~110 MiB. Same bytes, and
+            // it is the larger half of this path's prefill cost.
+            // Only useful together with `moe.pin_host_experts`, and measurably
+            // so: with pinning it is worth 2.5x on prefill, without it exactly
+            // nothing (252-286 tok/s either way). Large transfers only pay off
+            // from a pinned source — a pageable one is staged inside the driver
+            // whatever its size — and the per-projection slabs that make the
+            // experts contiguous in the first place are what pinning builds.
+            // So do not spend the VRAM when it cannot be spent well.
+            const auto& stage_cfg = model_->config();
+            if (nvfp4_host_experts && stage_cfg.n_experts > 0 &&
+                runtime_config().moe.pin_host_experts) {
+                const size_t proj_bytes =
+                    static_cast<size_t>(stage_cfg.n_experts) * max_expert_raw;
+                const size_t total = static_cast<size_t>(kExpertProjCount) * proj_bytes;
+                // Only worth it if it fits comfortably: this runs on a model
+                // that already did not fit, so never take the last of VRAM.
+                size_t free_mem = 0, total_mem = 0;
+                vram_budget_mem_get_info(&free_mem, &total_mem);
+                if (total + (512u << 20) < free_mem) {
+                    moe_.layer_stage_buf = vram_alloc(vram_alloc_, total, "moe_layer_stage");
+                    if (moe_.layer_stage_buf) {
+                        moe_.layer_stage_proj_bytes = proj_bytes;
+                        moe_.layer_stage_size = total;
+                        moe_.layer_stage_experts = stage_cfg.n_experts;
+                        IMP_LOG_INFO(
+                            "MoE layer staging buffer: %.2f MiB (%d experts x 3 projections, "
+                            "one layer at a time)",
+                            total / (1024.0 * 1024.0), stage_cfg.n_experts);
+                    }
+                } else {
+                    IMP_LOG_INFO(
+                        "MoE layer staging buffer: skipped, needs %.2f MiB and %.2f MiB free "
+                        "— prefill stays on the per-expert path",
+                        total / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
+                }
+            }
         }
 
         // ST-NVFP4 experts run the CUTLASS 3.x grouped path for ALL prefill

@@ -102,6 +102,21 @@ inline bool nvfp4_host_experts_servable(const std::vector<Tensor>& experts) {
     return true;
 }
 
+// One projection's experts staged contiguously on the device, in the layout
+// the NVFP4 GEMMs already expect: `packed + e * packed_stride` and
+// `ms + e * ms_stride`. Empty `packed` means this projection was not staged
+// (a non-gated model has no gate) and the caller falls back per expert.
+struct StagedProj {
+    const char* packed = nullptr;
+    const char* ms = nullptr;
+    size_t packed_stride = 0;
+    size_t ms_stride = 0;
+    int n_experts = 0;
+
+    bool valid() const { return packed != nullptr && ms != nullptr && n_experts > 0; }
+    bool covers(int expert) const { return valid() && expert >= 0 && expert < n_experts; }
+};
+
 // An nvfp4_scratch_ key naming one per-expert MoE weight.
 // Key form: "L{layer}.expert_w_{gate,up,down}.{expert}". Dense weights
 // ("L5.wq", "out_proj") deliberately do not parse — they have no host path,

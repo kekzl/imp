@@ -255,9 +255,15 @@ struct MoE {
     // Qwen3-30B-A3B-NVFP4 with all 48 MoE layers host-resident, SIX alternating
     // paired rounds (the switch exists partly so the arms can alternate without
     // a rebuild):
-    //   prefill pp512  276.6 -> 317.6 tok/s   +14.8 %, 6/6 pairs positive
+    //   prefill pp512  276.6 -> 790.8 tok/s   2.9x
     //   decode  tg256  no effect              3 pairs up, 3 down
     //   model load     5.1 s -> 22.6 s        4.4x, for ~14 GiB of pinned copies
+    //
+    // The prefill figure is 2.9x rather than the +14.8 % first measured because
+    // this flag also gates whole-layer staging: the per-projection slabs it
+    // builds are what make one memcpy per projection possible, and a pageable
+    // source is driver-staged whatever its size. With this off, layer staging
+    // measures 252-286 tok/s, i.e. nothing, so its 324 MiB is not allocated.
     // Decode is unaffected because its cache hits 96-98 % and barely transfers;
     // prefill touches every expert and is what the transfers cost.
     //

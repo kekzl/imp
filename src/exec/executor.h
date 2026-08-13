@@ -18,6 +18,7 @@
 #include "compute/sampling.h"  // TopkRowArgs (row-batched sampler staging)
 #include "exec/activation_calibrator.h"
 #include "exec/expert_cache.h"
+#include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
 #include "exec/moe_ffn_context.h"
 #include "exec/weight_caches.h"
@@ -810,6 +811,13 @@ private:
                                    const Tensor& r, bool moe_use_fp32_residual,
                                    bool will_skip_residual_copy, bool& residual_fused,
                                    bool non_gated_experts);
+
+    // Stage every expert of one host-resident NVFP4 layer into
+    // moe_.layer_stage_buf, so the prefill reads them from device memory
+    // instead of issuing two H2D per expert. Fills `out` with one view per
+    // projection and returns true when at least one was staged.
+    // Defined in executor_forward_moe_nvfp4_host.cu.
+    bool stage_nvfp4_layer_(int layer, cudaStream_t stream, StagedProj out[kExpertProjCount]);
 
 public:
     // Throws when a MoE layer's NVFP4 experts are host-resident and nothing
