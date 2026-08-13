@@ -646,6 +646,10 @@ if(IMP_BUILD_TESTS)
         # Pre-dequant VRAM budget split (#1100). CPU-only: pure arithmetic in
         # runtime/vram_budget.h, and it belongs in the lane CI actually runs.
         tests/test_pre_dequant_budget.cpp
+        # Which MoE expert placements can be served. CPU-only: the predicate in
+        # model/expert_placement.h takes the placement as data, so no GPU and no
+        # checkpoint are needed to pin the refusal.
+        tests/test_expert_placement.cpp
         # Memory subsystem L1 (docs/MEMORY_ARCHITECTURE.md). FakeBackend is the
         # substitution seam that keeps the whole allocator stack testable in the
         # CPU lane; it is test scaffolding, so it is compiled here rather than
