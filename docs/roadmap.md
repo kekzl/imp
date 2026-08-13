@@ -378,6 +378,10 @@ So the decision to make first is which GEMM it targets: smallM is a far smaller 
 
 That also re-prices `moe.pin_host_experts` itself, and it is now a much better trade than when it shipped: **276.6 → 790.8 tok/s prefill (2.9x) for 17.5 s of model-load time**, so break-even falls from ~32k prompt tokens to **~7.5k**. It stays off by default because the load cost is still the first thing an operator would notice, but for a long-lived server on this path it is close to a straight win. Against resident prefill the gap narrows from 61x to 22x.
 
+*Re-profiled after it, and the remaining lever is unchanged in kind but now dominant.* Kernel time is where it was — `dequantize_nvfp4_kernel` is still **52 %** of it (344 ms over 17 049 instances, i.e. one per expert per projection per layer) — but it is now ~53 % of the prefill rather than one term among several. Staging fixed the transfers and did nothing for the dequant, exactly as intended.
+
+**One correction to the scoping above, found by running it rather than reading it: the smallM branch is unreachable, so it is not the cheap option.** Resident prefill logs `CUTLASS 3.x device-args full path`, which is selected at `executor_forward_moe_cutlass.cu:159` — *before* the smallM branch at :405 is ever consulted. So "smallM already accepts the native layout" is true and irrelevant: nothing reaches it on this model. Closing the dequant means the device-args path, which needs SfAtom scale factors and `wcache_->cutlass_nvfp4` entries built per staged layer. The converter exists (`convert_nvfp4_moe_scales_to_sfatom`) and the staged buffer is the right shape to feed it; the work is the per-layer weight-entry bookkeeping, not the conversion.
+
 *Where the path stands after all of it, re-profiled 2026-08-11 on the shipped build.* The entry opened by calling this path issue-bound; after #1370 and #1376 **it is not any more, and that retires the framing rather than confirming it.** Same config (256 cold decode tokens, all experts host-resident), tg phase 7.06 s:
 
 | term | per token | share |
