@@ -11,12 +11,13 @@
 namespace imp {
 
 bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc,
-                          int n_layers, int n_experts, bool debug_parity) {
+                          int n_layers, int n_experts, bool debug_parity, bool nvfp4_slots) {
     if (max_expert_raw == 0 || budget_bytes == 0)
         return false;
 
     alloc_ = alloc;
     slot_size_ = max_expert_raw;
+    nvfp4_slots_ = nvfp4_slots;
 
     // Phase 3: partition the pool per-layer. When n_layers == 0 (tests that
     // don't care about the per-layer split or callers that haven't migrated
@@ -132,6 +133,36 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
         }
     }
 
+    // Per-slot tensor-scale mirror. Unlike d_lookup_ above this one IS read on
+    // the device — the fused NVFP4 kernels index it with the slot number the
+    // dispatch feeds them as `expert_indices`. Zero-init so a slot that is
+    // read before it is filled contributes 0 rather than a stale scale; the
+    // dispatch cannot produce that ordering, but a zero is a recognisable
+    // wrong answer where garbage is not.
+    if (nvfp4_slots_) {
+        const size_t bytes = static_cast<size_t>(n_slots_) * sizeof(float);
+        d_slot_scales_ = static_cast<float*>(
+            alloc_ ? alloc_->allocate(bytes, "expert_cache_slot_scales") : nullptr);
+        if (!alloc_) {
+            if (cudaMalloc(reinterpret_cast<void**>(&d_slot_scales_), bytes) != cudaSuccess)
+                d_slot_scales_ = nullptr;
+        }
+        if (!d_slot_scales_) {
+            IMP_LOG_WARN("Expert LRU cache: per-slot NVFP4 scale mirror alloc failed (%zu bytes) — "
+                         "cache disabled, experts fall back to the staging path.",
+                         bytes);
+            if (alloc_)
+                alloc_->free(pool_);
+            else
+                cudaFree(pool_);
+            pool_ = nullptr;
+            n_slots_ = 0;
+            slots_per_layer_ = 0;
+            return false;
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemset(d_slot_scales_, 0, bytes));
+    }
+
     // Host-side tables — used in production regardless of the mirror above.
     if (n_experts_ > 0) {
         // Host source-pointer table: [layer][proj * n_experts + expert].
@@ -196,12 +227,12 @@ void* ExpertLRUCache::find(int layer, ExpertCacheKey key) {
     return slots_[flat_slot(layer, slot_in_layer, slots_per_layer_)].gpu_ptr;
 }
 
-void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key,
-                                  const void* src_host, size_t expert_bytes,
-                                  cudaStream_t stream) {
-    const int proj_idx = std::to_underlying(proj);
+ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, ExpertCacheKey key,
+                                                    const void* src_host, size_t stamp_bytes,
+                                                    cudaStream_t stream, bool* hit) {
+    *hit = false;
     if (layer < 0 || layer >= n_layers_) {
-        IMP_LOG_ERROR("ExpertLRUCache::get_or_load: layer %d out of range [0, %d)", layer,
+        IMP_LOG_ERROR("ExpertLRUCache::acquire_slot_: layer %d out of range [0, %d)", layer,
                       n_layers_);
         return nullptr;
     }
@@ -227,8 +258,8 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
     // (not slot_size_) to avoid reading past the pinned host region.
     if (!host_expert_bytes_.empty()) {
         size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj_idx;
-        if (pp_off < host_expert_bytes_.size() && expert_bytes > 0)
-            host_expert_bytes_[pp_off] = expert_bytes;
+        if (pp_off < host_expert_bytes_.size() && stamp_bytes > 0)
+            host_expert_bytes_[pp_off] = stamp_bytes;
     }
 
     // Phase 4: record the access into the per-layer history ring (regardless
@@ -248,7 +279,9 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
     if (cached) {
         if (debug_parity_)
             check_parity(stream);
-        return cached;
+        *hit = true;
+        auto it = plru.lookup.find(key);
+        return &slots_[flat_slot(layer, it->second.first, slots_per_layer_)];
     }
 
     misses_++;
@@ -279,8 +312,6 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
 
     const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
     Slot& slot = slots_[flat];
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slot.gpu_ptr, src_host, expert_bytes, cudaMemcpyHostToDevice,
-                                       stream));
 
     slot.key = key;
     slot.occupied = true;
@@ -295,7 +326,85 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
     if (debug_parity_)
         check_parity(stream);
 
-    return slot.gpu_ptr;
+    return &slot;
+}
+
+void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key,
+                                  const void* src_host, size_t expert_bytes,
+                                  cudaStream_t stream) {
+    if (nvfp4_slots_) {
+        // A slot in this mode holds packed weights AND micro-scales; filling
+        // it from a single range would leave the scales as whatever the
+        // previous occupant left behind, which decodes to fluent nonsense
+        // rather than failing. Refuse where the two paths disagree.
+        IMP_LOG_FATAL(
+            "ExpertLRUCache::get_or_load called on an NVFP4 slot pool (layer %d) — "
+            "this pool's slots carry packed weights + micro-scales and must be filled "
+            "via get_or_load_nvfp4().",
+            layer);
+    }
+    bool hit = false;
+    Slot* slot = acquire_slot_(layer, std::to_underlying(proj), key, src_host, expert_bytes, stream, &hit);
+    if (!slot)
+        return nullptr;
+    if (!hit)
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slot->gpu_ptr, src_host, expert_bytes,
+                                           cudaMemcpyHostToDevice, stream));
+    return slot->gpu_ptr;
+}
+
+void* ExpertLRUCache::get_or_load_nvfp4(int layer, ExpertProj proj, ExpertCacheKey key,
+                                        const void* src_packed, size_t packed_bytes,
+                                        const void* src_ms, size_t ms_bytes, size_t ms_off,
+                                        float tensor_scale, cudaStream_t stream) {
+    if (!nvfp4_slots_ || !d_slot_scales_) {
+        IMP_LOG_FATAL(
+            "ExpertLRUCache::get_or_load_nvfp4 called on a pool that was not initialised for "
+            "NVFP4 slots (layer %d) — there is no per-slot scale mirror to write.",
+            layer);
+    }
+    if (ms_off + ms_bytes > slot_size_ || packed_bytes > ms_off) {
+        IMP_LOG_FATAL(
+            "ExpertLRUCache::get_or_load_nvfp4: layout does not fit the slot (layer %d, "
+            "packed %zu B, ms_off %zu, ms %zu B, slot %zu B).",
+            layer, packed_bytes, ms_off, ms_bytes, slot_size_);
+    }
+    bool hit = false;
+    Slot* slot = acquire_slot_(layer, std::to_underlying(proj), key, src_packed, packed_bytes, stream,
+                               &hit);
+    if (!slot)
+        return nullptr;
+
+    if (hit) {
+        // The dispatch derives the kernel's micro_scales base from its own copy
+        // of the layout. If that ever stops matching what this slot was filled
+        // with, the kernel reads scales from the wrong offset — coherent-looking
+        // and wrong. Assert the agreement instead of assuming it.
+        if (slot->ms_off != ms_off) {
+            IMP_LOG_FATAL(
+                "ExpertLRUCache: slot layout disagreement on layer %d expert %d — slot was "
+                "filled with ms_off %zu, dispatch now says %zu.",
+                layer, key.expert_idx, slot->ms_off, ms_off);
+        }
+        return slot->gpu_ptr;
+    }
+
+    char* dst = static_cast<char*>(slot->gpu_ptr);
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(dst, src_packed, packed_bytes, cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(dst + ms_off, src_ms, ms_bytes, cudaMemcpyHostToDevice, stream));
+    slot->ms_off = ms_off;
+
+    // The scale mirror is indexed by the layer-relative slot index — the same
+    // number the dispatch hands the kernels as `expert_indices`.
+    const int slot_in_layer = static_cast<int>(
+        (static_cast<char*>(slot->gpu_ptr) - static_cast<char*>(pool_)) / slot_size_) -
+        layer * slots_per_layer_;
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_slot_scales_ + static_cast<size_t>(layer) * slots_per_layer_ +
+                                           slot_in_layer,
+                                       &tensor_scale, sizeof(float), cudaMemcpyHostToDevice, stream));
+    return slot->gpu_ptr;
 }
 
 int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fallback) {
@@ -505,6 +614,14 @@ void ExpertLRUCache::destroy() {
         cudaFree(d_lookup_);
         d_lookup_ = nullptr;
     }
+    if (d_slot_scales_) {
+        if (alloc_)
+            alloc_->free(d_slot_scales_);
+        else
+            cudaFree(d_slot_scales_);
+        d_slot_scales_ = nullptr;
+    }
+    nvfp4_slots_ = false;
     if (!prefetch_done_.empty()) {
         if (prefetch_h2ds_ > 0 || prefetch_skipped_cached_ > 0) {
             IMP_LOG_INFO("Expert LRU prefetch stats: %ld H2Ds issued, %ld skipped (already cached)",

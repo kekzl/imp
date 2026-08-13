@@ -81,6 +81,12 @@ struct ExpertLRUCache {
         int layer = -1;
         int proj = -1;   // ExpertProj
         int expert = -1;
+        // NVFP4 slots only: where this slot's micro-scale block starts. The
+        // dispatch derives the kernel's `micro_scales` base from the SAME
+        // layout, so a disagreement would silently point the kernel at the
+        // wrong bytes. Recorded here so a hit can assert the two agree
+        // instead of trusting them to (the #1384 / #1403 shape).
+        size_t ms_off = 0;
     };
 
     void* pool_ = nullptr;     // contiguous GPU allocation for all slots
@@ -147,14 +153,35 @@ struct ExpertLRUCache {
     int* d_lookup_ = nullptr;
     int n_layers_ = 0;
     int n_experts_ = 0;
+
+    // ---- NVFP4 slots ------------------------------------------------------
+    // An NVFP4 expert is two byte ranges (packed FP4 weights + FP8 E4M3
+    // micro-scales), so a slot holds both concatenated — see
+    // nvfp4_expert_offload.h for why that makes the existing fused kernels
+    // work unchanged.
+    //
+    // What does NOT come for free is the tensor scale: the kernels read
+    // `tensor_scales[idx]` with the SAME index they use for the weight, so a
+    // per-EXPERT array cannot be handed to a slot-indexed kernel. This is the
+    // per-SLOT mirror they read instead, rewritten whenever a slot's occupant
+    // changes.
+    //
+    // Non-null marks the cache as serving NVFP4 experts. In that mode the
+    // plain get_or_load() is a programming error (it would fill a slot with
+    // weights and no scales, which decodes to garbage) and says so loudly.
+    float* d_slot_scales_ = nullptr;  // [n_slots_], device
+    bool nvfp4_slots_ = false;
     bool debug_parity_ = false;
     mutable int64_t parity_checks_ok_ = 0;  // exposed for tests; bumped by const check_parity()
 
     // Initialize: allocate the slot pool (partitioned per-layer) + the
     // device mirror + the host source-pointer table. Returns false if GPU
     // allocation fails (cache disabled).
+    // `nvfp4_slots` sizes the per-slot tensor-scale mirror and puts the cache
+    // in NVFP4 mode; `max_expert_raw` is then the full slot size (packed +
+    // micro-scales, aligned), not a single range.
     [[nodiscard]] bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc, int n_layers,
-                            int n_experts, bool debug_parity = false);
+                            int n_experts, bool debug_parity = false, bool nvfp4_slots = false);
 
     // Lookup or insert an expert. Returns GPU pointer to cached expert data.
     // If cache miss: copies from host, evicts LRU entry within the layer's
@@ -165,9 +192,38 @@ struct ExpertLRUCache {
     void* get_or_load(int layer, ExpertProj proj, ExpertCacheKey key,
                       const void* src_host, size_t expert_bytes, cudaStream_t stream);
 
+    // NVFP4 variant: stages one expert's packed weights AND its micro-scales
+    // into a single slot, and mirrors its tensor scale into d_slot_scales_ so
+    // a slot-indexed kernel reads the right one.
+    //
+    // `ms_off` is the slot-relative offset of the micro-scale block. The
+    // dispatch computes the kernel's `micro_scales` base from the same value;
+    // passing a different one on a later call for the same slot is a
+    // disagreement between the two, and is fatal rather than silent.
+    void* get_or_load_nvfp4(int layer, ExpertProj proj, ExpertCacheKey key, const void* src_packed,
+                            size_t packed_bytes, const void* src_ms, size_t ms_bytes, size_t ms_off,
+                            float tensor_scale, cudaStream_t stream);
+
+    // Device pointer to layer L's per-slot tensor-scale block, or nullptr
+    // outside NVFP4 mode. Indexed by the same layer-relative slot index the
+    // dispatch feeds the kernels as `expert_indices`.
+    float* layer_slot_scales(int layer) const {
+        if (!d_slot_scales_ || layer < 0 || layer >= n_layers_)
+            return nullptr;
+        return d_slot_scales_ + static_cast<size_t>(layer) * slots_per_layer_;
+    }
+
     // Check if (layer, expert) is cached (no insertion). Updates LRU recency
     // within the layer.
     void* find(int layer, ExpertCacheKey key);
+
+    // Shared LRU body behind both get_or_load variants: returns the slot that
+    // holds (layer, proj, key) — an existing one on a hit, a free or evicted
+    // one on a miss — with the bookkeeping (host pointer table, access ring,
+    // recency, device mirror) already done. `*hit` says whether the caller
+    // still has to copy anything in. Returns nullptr on a bad layer index.
+    Slot* acquire_slot_(int layer, int proj_idx, ExpertCacheKey key, const void* src_host,
+                        size_t stamp_bytes, cudaStream_t stream, bool* hit);
 
     void destroy();
 

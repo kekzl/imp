@@ -3,6 +3,7 @@
 #include "memory/weight_snapshot.h"
 #include "memory/weight_cache_file.h"
 #include "model/expert_placement.h"
+#include "exec/nvfp4_expert_offload.h"
 #include "model/gguf_loader.h"
 #include "memory/mem_account.h"
 #include "quant/dequant_gpu.h"
@@ -1830,25 +1831,26 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
     decide_expert_layer_placement_(layer_expert_bytes, total_expert_bytes, expert_reserve_bytes, n_layers,
                                    experts_upload_layer, ctx.is_nvfp4_prequant);
 
-    // Refuse a placement this build cannot serve, rather than answering from
-    // the experts that happen to be resident. See expert_placement.h for why
-    // the three existing guards all miss this, and for the measurements.
-    if (!expert_placement_is_serveable(ctx.is_nvfp4_prequant, layer_expert_bytes, experts_upload_layer)) {
+    // A host-resident NVFP4 placement is servable now — the expert cache
+    // stages those experts per layer and the fused kernels address its slot
+    // pool. What CANNOT be decided here is whether the cache will be big
+    // enough: it is sized in init_weights()' workspace pass, which runs after
+    // this. Re-deriving that sizing here would be a second copy of the
+    // arithmetic, and a copy that drifts is exactly the failure #1403 was.
+    //
+    // So this only reports; the refusal lives in
+    // GraphExecutor::verify_host_expert_placement(), which runs once both the
+    // promotion and the real cache exist.
+    if (expert_placement_needs_host_path(ctx.is_nvfp4_prequant, layer_expert_bytes,
+                                         experts_upload_layer)) {
         const int host_layers = expert_placement_host_layers(layer_expert_bytes, experts_upload_layer);
         size_t free_mem = 0, total_mem = 0;
         vram_budget_mem_get_info(&free_mem, &total_mem);
-        std::string msg = "NVFP4-prequant experts do not fit on the device: ";
-        msg += std::to_string(host_layers);
-        msg += " MoE layer(s) would be host-resident, and there is no host-offload path for this ";
-        msg += "weight format. Serving it would silently skip those experts' GEMMs and answer from ";
-        msg += "the rest (";
-        msg += std::to_string(total_expert_bytes / (1024 * 1024));
-        msg += " MiB of experts, ";
-        msg += std::to_string(free_mem / (1024 * 1024));
-        msg += " MiB free). Reduce runtime.max_seq_len, pick a smaller KV dtype ";
-        msg += "(kv_cache.dtype=nvfp4), or use a GGUF quantisation of this model, whose experts ";
-        msg += "do have a host path.";
-        throw std::runtime_error(msg);
+        IMP_LOG_INFO(
+            "NVFP4 experts: %d MoE layer(s) stay host-resident (%zu MiB of experts, %zu MiB free) — "
+            "they will be served from the expert cache. Decode on those layers is materially "
+            "slower than resident; the load is refused later if the cache cannot hold them.",
+            host_layers, total_expert_bytes / (1024 * 1024), free_mem / (1024 * 1024));
     }
 
     // Upload expert weights for each layer
@@ -2425,6 +2427,13 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 const int N = static_cast<int>(experts.size());
                 if (N == 0)
                     return;
+                // Experts that stayed on host keep their micro-scales there.
+                // The expert cache stages BOTH halves of an NVFP4 expert into
+                // one slot, so a scale already in VRAM would be the wrong
+                // address space for that copy — and VRAM spent on a layer that
+                // was moved out of VRAM precisely because it did not fit.
+                if (!experts[0].on_device)
+                    return;
                 std::vector<NvFP4PreQuantWeight*> grp(N, nullptr);
                 size_t e_ms = 0;
                 for (int e = 0; e < N; ++e) {
@@ -2519,7 +2528,23 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     is_samples.push_back(std::move(s));
                 }
             }
-            upload_scale(sc.weight_scale);
+            // Same rule as the slab path above, for the experts it declined
+            // (ragged shapes, or a projection it bailed out of): a scale whose
+            // weight is host-resident stays on host. Asking the weight itself
+            // rather than tracking a parallel flag is what keeps the two in
+            // agreement — the failure mode of #1384 and #1403 both.
+            bool weight_is_host_expert = false;
+            if (const auto ek = parse_expert_key(name); ek.valid && ek.layer < n_layers()) {
+                const auto& L = layers_[ek.layer];
+                const std::vector<Tensor>& vec = (ek.kind == NvFP4ExpertKey::Kind::Gate) ? L.expert_w_gate
+                                                 : (ek.kind == NvFP4ExpertKey::Kind::Up) ? L.expert_w_up
+                                                                                         : L.expert_w_down;
+                if (ek.expert < static_cast<int>(vec.size()))
+                    weight_is_host_expert = (vec[ek.expert].data != nullptr && !vec[ek.expert].on_device);
+            }
+            if (!weight_is_host_expert) {
+                upload_scale(sc.weight_scale);
+            }
             upload_scale(sc.weight_scale_2);
             // input_scale is loaded for diagnostics but never read by any
             // GEMM kernel (see executor_pre_dequant.cu Phase 0 comment + the

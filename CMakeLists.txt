@@ -368,6 +368,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe.cu
     src/exec/executor_forward_moe_cutlass.cu
     src/exec/executor_forward_moe_batch.cu
+    src/exec/executor_forward_moe_nvfp4_host.cu
     src/exec/executor_forward_moe_legacy.cu
     src/exec/expert_cache.cu
     src/exec/weight_handle.cu
@@ -650,6 +651,7 @@ if(IMP_BUILD_TESTS)
         # model/expert_placement.h takes the placement as data, so no GPU and no
         # checkpoint are needed to pin the refusal.
         tests/test_expert_placement.cpp
+        tests/test_nvfp4_expert_offload.cpp
         # Memory subsystem L1 (docs/internals/MEMORY.md). FakeBackend is the
         # substitution seam that keeps the whole allocator stack testable in the
         # CPU lane; it is test scaffolding, so it is compiled here rather than

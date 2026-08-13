@@ -1,0 +1,257 @@
+// Decode path for MoE layers whose NVFP4 experts live on host.
+//
+// The GGUF host-offload path (#1370) works by handing the fused decode kernels
+// the LRU cache's per-layer slot pool instead of the model's expert array: the
+// kernels read `base + idx * stride`, and the pool is exactly that shape, so
+// `idx` becomes a slot index and no kernel changes.
+//
+// NVFP4 experts did not have that path at all. A host-resident placement was
+// loaded and served WRONG — Phase 0 skipped promoting scales onto host weights,
+// the generic GEMM then recognised the scale-less packed weight and returned
+// without multiplying, and the model answered from whichever experts happened
+// to be resident, at exit code 0 (#1403 refused the placement rather than
+// serve it). This file is the path that refusal was standing in for.
+//
+// What is different from the GGUF case, and why it is only different by this
+// much: an NVFP4 expert is TWO byte ranges (packed FP4 weights + FP8 E4M3
+// micro-scales) rather than one. Both are addressed by the same slot index,
+// because the kernels take separate bases and separate strides for them — so a
+// slot holding `packed || micro_scales` resolves both at once. The layout
+// arithmetic is in nvfp4_expert_offload.h.
+//
+// The one piece that genuinely does not fall out is the per-tensor scale: the
+// kernels read `tensor_scales[idx]` with the SAME index as the weight, so the
+// checkpoint's per-EXPERT array cannot be handed to a slot-indexed kernel. The
+// cache keeps a per-SLOT mirror, written whenever a slot's occupant changes.
+
+#include "exec/executor.h"
+#include "exec/executor_forward_moe_internal.h"
+#include "exec/executor_helpers.h"
+#include "exec/executor_kernels.h"
+#include "exec/nvfp4_expert_offload.h"
+#include "compute/activation.h"
+#include "compute/moe_routing.h"
+#include "quant/nvfp4_gemm.h"
+#include "core/logging.h"
+
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace imp {
+
+// Refuse a placement nothing can serve — the gate #1403 installed, moved to
+// where the answer is actually known.
+//
+// At weight-upload time it was not: whether a host-resident NVFP4 layer can be
+// served depends on the expert cache, which is sized later (init_weights runs
+// before init_kv_cache). The old gate resolved that by refusing every
+// host-resident NVFP4 placement outright, which was correct while no path
+// existed. Now that one does, re-deriving the cache's sizing at placement time
+// would mean a second copy of that arithmetic — and a copy that drifts is
+// exactly the failure #1384 and #1403 both were.
+//
+// So the check runs here instead, after pre-dequant, against the real tensors
+// and the real cache. It uses the SAME predicates the dispatch uses, so a
+// placement that passes here is one run_moe_decode_fast will route to the slot
+// path rather than quietly fall through to a GEMM that cannot multiply it.
+void GraphExecutor::verify_host_expert_placement() const {
+    const auto& cfg = model_->config();
+    if (!cfg.is_nvfp4_prequant)
+        return;  // GGUF-class experts have a staging fallback that is slow, not wrong.
+
+    const int top_k = std::max(1, cfg.n_experts_active);
+    int host_layers = 0, unservable = 0, first_bad = -1;
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        const auto& L = model_->layer(i);
+        if (L.expert_w_up.empty() || !L.expert_w_up[0].data || L.expert_w_up[0].on_device)
+            continue;
+        ++host_layers;
+        const bool has_gate = (!L.expert_w_gate.empty() && L.expert_w_gate[0].data != nullptr);
+        const bool ok = nvfp4_host_experts_servable(L.expert_w_up) &&
+                        nvfp4_host_experts_servable(L.expert_w_down) &&
+                        (!has_gate || nvfp4_host_experts_servable(L.expert_w_gate)) &&
+                        nvfp4_host_pool_ready(expert_cache_, moe_, top_k);
+        if (!ok) {
+            ++unservable;
+            if (first_bad < 0)
+                first_bad = i;
+        }
+    }
+
+    if (unservable > 0) {
+        const int need = kExpertProjCount * top_k;
+        std::string msg = "NVFP4 experts are host-resident on ";
+        msg += std::to_string(unservable);
+        msg += " MoE layer(s) (first: layer ";
+        msg += std::to_string(first_bad);
+        msg += ") that the expert cache cannot serve. Serving them anyway would skip those "
+               "experts' GEMMs and answer from the rest, at exit code 0. The slot path needs at "
+               "least ";
+        msg += std::to_string(need);
+        msg += " slots per layer (3 projections x top_k) and has ";
+        msg += std::to_string(expert_cache_.slots_per_layer_);
+        msg += ". Raise moe.expert_cache_budget_pct, reduce runtime.max_seq_len, pick a smaller "
+               "KV dtype, or use a GGUF quantisation of this model.";
+        throw std::runtime_error(msg);
+    }
+
+    if (host_layers > 0) {
+        IMP_LOG_INFO("NVFP4 experts: %d MoE layer(s) host-resident, served from the expert cache "
+                     "(%d slots/layer, %.2f MiB per slot)",
+                     host_layers, expert_cache_.slots_per_layer_,
+                     expert_cache_.slot_size_ / (1024.0 * 1024.0));
+    }
+}
+
+namespace {
+
+// Point an NvFP4MoEQuantResult at one layer's slot pool. `ms_off` is where a
+// slot's micro-scale block starts; the cache filled the slot with the same
+// value, and disagreeing about it is fatal there rather than silent here.
+NvFP4MoEQuantResult pool_view(char* layer_pool, size_t slot_size, size_t ms_off, float* slot_scales,
+                              int slots_per_layer, int64_t N, int64_t K) {
+    NvFP4MoEQuantResult r;
+    r.packed_data = layer_pool;
+    r.micro_scales = layer_pool + ms_off;
+    r.tensor_scales = slot_scales;
+    r.n_experts = slots_per_layer;
+    r.N = N;
+    r.K = K;
+    r.expert_stride_packed = slot_size;
+    r.expert_stride_ms = slot_size;
+    r.borrowed = true;  // every pointer belongs to the cache
+    return r;
+}
+
+}  // namespace
+
+void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, int d, int eff,
+                                              int top_k, const MoeRoutingResult& routing,
+                                              const Tensor& no, Tensor& h, const Tensor& r,
+                                              bool moe_use_fp32_residual,
+                                              bool will_skip_residual_copy, bool& residual_fused,
+                                              bool non_gated_experts) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+
+    const int32_t* expert_indices = static_cast<const int32_t*>(routing.expert_indices.data);
+    const float* expert_weights = static_cast<const float*>(routing.expert_weights.data);
+
+    half* norm_ptr = static_cast<half*>(no.data);
+    half* gate_buf = static_cast<half*>(moe_.expert_gate.data);   // [top_k, eff]
+    half* up_buf = static_cast<half*>(moe_.expert_up.data);       // [top_k, eff]
+    half* act_buf = static_cast<half*>(moe_.expert_swiglu.data);  // [top_k, eff]
+    half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [top_k, d]
+
+    // Establishing residency needs the routing on the host, so this path pays
+    // one D2H + sync per layer — the same one the GGUF slot path pays, and the
+    // reason CUDA graphs stay disabled under host-resident experts.
+    moe_host_args_capture_guard(stream);
+    std::vector<int32_t> h_experts(top_k);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts.data(), expert_indices,
+                                       static_cast<size_t>(top_k) * sizeof(int32_t),
+                                       cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);
+
+    std::vector<int32_t> h_slots(static_cast<size_t>(kExpertProjCount) * top_k, -1);
+    size_t ms_off[kExpertProjCount] = {0, 0, 0};
+
+    auto stage = [&](const std::vector<Tensor>& experts, ExpertProj proj) -> bool {
+        const int proj_idx = std::to_underlying(proj);
+        if (experts.empty() || !experts[0].data)
+            return true;  // non-gated model has no gate projection
+        const auto layout = nvfp4_slot_layout(experts[0].shape[0], experts[0].shape[1] * 2);
+        ms_off[proj_idx] = layout.packed_off();
+        const int off = proj_idx * top_k;
+        for (int k = 0; k < top_k; ++k) {
+            const int e = h_experts[k];
+            if (e < 0 || e >= static_cast<int>(experts.size()))
+                return false;
+            const Tensor& w = experts[e];
+            // packed_ptr identifies the projection; expert 0's address is
+            // stable and unique per (layer, projection).
+            ExpertCacheKey ck{experts[0].data, e};
+            void* p = expert_cache_.get_or_load_nvfp4(layer, proj, ck, w.data, layout.packed_bytes,
+                                                      w.scales, layout.ms_bytes, layout.packed_off(),
+                                                      w.tensor_scale, stream);
+            if (!p)
+                return false;
+            const size_t flat =
+                static_cast<size_t>(static_cast<char*>(p) - static_cast<char*>(expert_cache_.pool_)) /
+                expert_cache_.slot_size_;
+            h_slots[off + k] = static_cast<int32_t>(flat) - layer * expert_cache_.slots_per_layer_;
+        }
+        return true;
+    };
+
+    if (!stage(ly.expert_w_gate, ExpertProj::Gate) || !stage(ly.expert_w_up, ExpertProj::Up) ||
+        !stage(ly.expert_w_down, ExpertProj::Down)) {
+        // Unreachable by construction: the dispatch predicate checked every
+        // precondition, and staging can only fail on an out-of-range expert
+        // id. Falling through would hand a HOST pointer to a kernel, so say so
+        // instead.
+        IMP_LOG_FATAL(
+            "MoE NVFP4 host decode: experts could not be staged into the LRU pool (layer %d, "
+            "top_k %d, slots/layer %d). The dispatch predicate and this path have diverged.",
+            layer, top_k, expert_cache_.slots_per_layer_);
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx, h_slots.data(),
+                                       h_slots.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                       stream));
+
+    char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
+                       static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *
+                           expert_cache_.slot_size_;
+    float* slot_scales = expert_cache_.layer_slot_scales(layer);
+    const size_t slot_size = expert_cache_.slot_size_;
+    const int slots_per_layer = expert_cache_.slots_per_layer_;
+
+    const int32_t* gate_idx = moe_.d_slot_idx;
+    const int32_t* up_idx = moe_.d_slot_idx + top_k;
+    const int32_t* down_idx = moe_.d_slot_idx + 2 * top_k;
+
+    const NvFP4MoEQuantResult up_view =
+        pool_view(layer_pool, slot_size, ms_off[std::to_underlying(ExpertProj::Up)], slot_scales,
+                  slots_per_layer, eff, d);
+    const NvFP4MoEQuantResult down_view =
+        pool_view(layer_pool, slot_size, ms_off[std::to_underlying(ExpertProj::Down)], slot_scales,
+                  slots_per_layer, d, eff);
+
+    if (!non_gated_experts) {
+        const NvFP4MoEQuantResult gate_view =
+            pool_view(layer_pool, slot_size, ms_off[std::to_underlying(ExpertProj::Gate)], slot_scales,
+                      slots_per_layer, eff, d);
+        // gate and up sit in DIFFERENT slots, so the one-index fused gate+up
+        // kernel cannot express both. Two decodes still collapse 2*top_k
+        // weight launches into 2 — the same trade the GGUF slot path makes.
+        gemv_nvfp4_moe_decode(gate_view, gate_idx, norm_ptr, gate_buf, eff, d, /*x_stride=*/0, top_k,
+                              stream);
+        gemv_nvfp4_moe_decode(up_view, up_idx, norm_ptr, up_buf, eff, d, /*x_stride=*/0, top_k, stream);
+        apply_expert_activation(gate_buf, up_buf, act_buf, /*non_gated=*/false, top_k, eff,
+                                compute_dtype_, cfg.ffn_activation, stream);
+        gemv_nvfp4_moe_decode(down_view, down_idx, act_buf, down_buf, d, eff, /*x_stride=*/eff, top_k,
+                              stream);
+    } else {
+        gemv_nvfp4_moe_decode(up_view, up_idx, norm_ptr, up_buf, eff, d, /*x_stride=*/0, top_k, stream);
+        int64_t act_shape[2] = {static_cast<int64_t>(top_k), static_cast<int64_t>(eff)};
+        Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
+        relu_sqr_inplace(up_t, stream);
+        gemv_nvfp4_moe_decode(down_view, down_idx, up_buf, down_buf, d, eff, /*x_stride=*/eff, top_k,
+                              stream);
+    }
+
+    const bool has_shared_expert = (ly.w_up_shared.data != nullptr);
+    const void* res_ptr = (has_shared_expert || moe_use_fp32_residual)
+                              ? nullptr
+                              : (will_skip_residual_copy ? h.data : r.data);
+    moe_weighted_sum_residual(down_buf, expert_weights, res_ptr, h.data, d, top_k, stream);
+    if (!has_shared_expert && !moe_use_fp32_residual)
+        residual_fused = true;
+}
+
+}  // namespace imp

@@ -356,6 +356,12 @@ bool Engine::init_kv_cache() {
     executor_->pre_dequant_weights(stream_, vram_budget);
     dequant_done_ = true;
 
+    // Both facts this needs exist only now: Phase 0 (inside pre_dequant) has
+    // labelled host-resident NVFP4 experts, and the expert cache was sized in
+    // init_weights(). Refusing here rather than at weight-upload time is the
+    // point — see verify_host_expert_placement().
+    executor_->verify_host_expert_placement();
+
     // KV now takes the MEASURED residual, not a predicted one. This can only
     // shrink the pool relative to the budget's projection, never grow it, so
     // it cannot overcommit; and it keeps the allocator's headroom free, which

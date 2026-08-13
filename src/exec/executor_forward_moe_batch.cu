@@ -6,6 +6,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "core/cuda_static_reset.h"
 #include "exec/executor_forward_moe_internal.h"
+#include "exec/nvfp4_expert_offload.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
@@ -948,6 +949,27 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     bool use_nvfp4_moe = (ly.nvfp4_moe_up_ptr != nullptr && ly.nvfp4_moe_down_ptr != nullptr);
     if (use_nvfp4_moe && !non_gated_experts)
         use_nvfp4_moe = (ly.nvfp4_moe_gate_ptr != nullptr);
+
+    // ---- Host-resident NVFP4 experts: address the LRU cache's slot pool ----
+    // Phase 3 builds nvfp4_moe_*_ptr only for device-resident experts, so a
+    // host-resident NVFP4 layer arrives here with none of them — which is how
+    // #1403's placement reached a generic GEMM as raw bytes and answered from
+    // the experts that happened to be resident.
+    //
+    // The fix is the #1370 trick with one addition. An NVFP4 expert is TWO
+    // ranges, so a slot holds `packed || micro_scales` and the kernels get
+    // both bases pointing into the same pool with the same stride. The one
+    // piece that does not fall out is the tensor scale, which the kernels
+    // index by the SAME id as the weight: it comes from the cache's per-slot
+    // mirror instead of the checkpoint's per-expert array. Details and the
+    // layout arithmetic are in nvfp4_expert_offload.h.
+    if (!use_nvfp4_moe && !model_->profile().is_gpt_oss &&
+        nvfp4_host_decode_ready(ly, expert_cache_, moe_, top_k)) {
+        run_moe_decode_nvfp4_host(layer, stream, d, eff, top_k, routing, no, h, r,
+                                  moe_use_fp32_residual, will_skip_residual_copy, residual_fused,
+                                  non_gated_experts);
+        return;
+    }
 
     if (use_nvfp4_moe) {
         if (model_->profile().is_gpt_oss) {

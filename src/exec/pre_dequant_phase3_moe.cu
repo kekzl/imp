@@ -463,6 +463,16 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             return false;
         if (packed.data && wcache_->nvfp4_moe.count(packed.data))
             return false;
+        // Host-resident experts are the expert cache's business, not this one.
+        // Both branches below build a DEVICE decode cache: the borrow branch
+        // points at resident bytes, and the fallback copies the experts into a
+        // contiguous device buffer with cudaMemcpyDeviceToDevice — which fails
+        // with "invalid argument" on a host source, leaving the buffer
+        // uninitialised and the layer decoding from garbage. It is also the
+        // opposite of what the placement asked for: it would pull back into
+        // VRAM exactly the experts that were moved out of it.
+        if (!experts[0].on_device)
+            return false;
         // ZERO-COPY decode cache (LEAD-2): NVFP4-prequant SafeTensors upload the
         // per-expert weights AND scales into contiguous VRAM (one buffer per
         // projection, sliced per expert). When that holds we point an

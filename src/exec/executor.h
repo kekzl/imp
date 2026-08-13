@@ -800,6 +800,25 @@ private:
                              const Tensor& no, Tensor& h, const Tensor& r,
                              bool moe_use_fp32_residual, bool moe_fused_norm_q8,
                              bool will_skip_residual_copy, bool& residual_fused);
+    // Decode step for a layer whose NVFP4 experts live on host: stages the
+    // routed experts into the LRU cache's slot pool and runs the ordinary
+    // fused NVFP4 GEMVs against it. Only called when the dispatch predicate in
+    // run_moe_decode_fast says every precondition holds — see
+    // nvfp4_expert_offload.h. Defined in executor_forward_moe_nvfp4_host.cu.
+    void run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, int d, int eff, int top_k,
+                                   const MoeRoutingResult& routing, const Tensor& no, Tensor& h,
+                                   const Tensor& r, bool moe_use_fp32_residual,
+                                   bool will_skip_residual_copy, bool& residual_fused,
+                                   bool non_gated_experts);
+
+public:
+    // Throws when a MoE layer's NVFP4 experts are host-resident and nothing
+    // can serve them from there. Call after pre_dequant_weights(): it needs
+    // Phase 0's promotion and the initialised expert cache, which is why it
+    // cannot live at weight-upload time. See the definition for the history.
+    void verify_host_expert_placement() const;
+
+private:
     // Compute MoE routing: gate logits (FP32 router fast-path for Gemma-4
     // already done by caller — signaled via `fp32_gate_logits_ready`) + topk
     // gating + per-expert weight scaling (Nemotron, Gemma-4). Caller passes

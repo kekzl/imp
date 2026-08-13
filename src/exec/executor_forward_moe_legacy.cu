@@ -4,6 +4,7 @@
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "exec/executor_forward_moe_internal.h"
+#include "exec/nvfp4_expert_offload.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
 #include "exec/executor_debug.h"
@@ -237,6 +238,74 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                         gemm_nvfp4(nw, a_t, c_t, stream);
                     }
                     return;
+                }
+            }
+
+            // Host-resident NVFP4 expert: stage it into the LRU cache's slot
+            // pool first, then run the ordinary NVFP4 GEMM against the slot.
+            //
+            // Without this the branch below hands `wh.payload.nvfp4.data` —
+            // a HOST pointer for these experts — straight to gemm_nvfp4, which
+            // dequantises it on the device: an illegal access, and the reason
+            // the M>1 fallback died on the 593 MiB expert matrix. #1370 never
+            // hit this because its GGUF experts reach dequant_expert's staging
+            // buffer instead; per-expert NVFP4 tensors do not.
+            //
+            // One expert at a time is exactly what this loop already does, so
+            // three slots suffice regardless of how many experts the prompt
+            // activates — the pool is not thrashed the way a batched path
+            // would thrash it.
+            //
+            // Note the condition is on the EXPERT tensor, not on the `qtype`
+            // parameter: that one comes from `ly.expert_*_packed`, which stays
+            // empty for host-resident NVFP4 layers (Phase 3 only stamps it for
+            // device-resident ones). Reading the parameter here would test a
+            // tensor this branch never touches — the same mismatch that made
+            // #1384 and #1403 miss what they were meant to catch.
+            if (static_cast<size_t>(eidx) < fallback.size() &&
+                fallback[eidx].qtype == QType::NVFP4) {
+                const Tensor& w = fallback[eidx];
+                if (w.data && !w.on_device && w.scales && w.ndim == 2 &&
+                    nvfp4_host_pool_ready_for_staging(expert_cache_)) {
+                    const auto layout = nvfp4_slot_layout(w.shape[0], w.shape[1] * 2);
+                    if (layout.slot_bytes() > 0 && layout.slot_bytes() <= expert_cache_.slot_size_) {
+                        ExpertCacheKey ck{fallback[0].data, eidx};
+                        void* slot = expert_cache_.get_or_load_nvfp4(
+                            layer, proj, ck, w.data, layout.packed_bytes, w.scales, layout.ms_bytes,
+                            layout.packed_off(), w.tensor_scale, stream);
+                        if (slot) {
+                            NvFP4QuantResult nw;
+                            nw.packed_data = slot;
+                            nw.micro_scales = static_cast<char*>(slot) + layout.packed_off();
+                            nw.tensor_scale = w.tensor_scale;
+                            nw.N = static_cast<int>(w.shape[0]);
+                            nw.K = static_cast<int>(w.shape[1] * 2);
+                            const int M = static_cast<int>(a.shape[0]);
+                            if (M == 1) {
+                                gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
+                                                static_cast<half*>(c.data), nw.N, nw.K, stream);
+                            } else {
+                                // M>1 goes through gemm_nvfp4 for the same
+                                // reason the resident path does: the per-row
+                                // gemv loop is wrong on multi-token expert
+                                // prefill (bisected 2026-04-27, see below).
+                                int64_t a_shape[2] = {static_cast<int64_t>(M),
+                                                      static_cast<int64_t>(nw.K)};
+                                int64_t c_shape[2] = {static_cast<int64_t>(M),
+                                                      static_cast<int64_t>(nw.N)};
+                                Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
+                                           QType::F16, 2, a_shape, true);
+                                Tensor c_t(c.data, QType::F16, 2, c_shape, true);
+                                gemm_nvfp4(nw, a_t, c_t, stream);
+                            }
+                            return;
+                        }
+                    }
+                    IMP_LOG_FATAL(
+                        "MoE legacy fallback: host-resident NVFP4 expert %d on layer %d cannot be "
+                        "staged (slot %zu B, pool slot %zu B). Continuing would hand a host "
+                        "pointer to a device kernel.",
+                        eidx, layer, layout.slot_bytes(), expert_cache_.slot_size_);
                 }
             }
 

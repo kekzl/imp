@@ -8,6 +8,7 @@
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "exec/gemm_scratch.h"  // prewarm_mmvq_scratch
+#include "exec/nvfp4_expert_offload.h"
 #include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -522,6 +523,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // device-resident (the common all-on-device load).
         size_t max_expert_raw = 0;
         bool any_host_packed_experts = false;
+        bool nvfp4_host_experts = false;
         {
             for (int li = 0; li < model_->n_layers(); li++) {
                 const auto& L = model_->layer(li);
@@ -537,6 +539,37 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 check(L.expert_up_packed, L.expert_up_packed.qtype);
                 check(L.expert_down_packed, L.expert_down_packed.qtype);
                 check(L.expert_gate_packed, L.expert_gate_packed.qtype);
+            }
+            // NVFP4-prequant checkpoints have no 3-D packed tensor at this
+            // point — their experts are per-expert 2-D tensors and Phase 3
+            // stamps the packed slot later, well after this runs. So size the
+            // pool off those instead, and off the FULL slot (packed weights +
+            // micro-scales), which is what an NVFP4 slot has to hold.
+            //
+            // The qtype is still INT8 here: Phase 0's promotion to NVFP4 runs
+            // in pre_dequant_weights(), which is init_kv_cache() — after this.
+            // is_nvfp4_prequant comes from config.json and is known already.
+            if (model_->config().is_nvfp4_prequant) {
+                for (int li = 0; li < model_->n_layers(); li++) {
+                    const auto& L = model_->layer(li);
+                    auto check_nv = [&](const std::vector<Tensor>& experts) {
+                        if (experts.empty() || !experts[0].data || experts[0].ndim != 2)
+                            return;
+                        // Per-expert 2-D NVFP4 weights are stored [N, K/2].
+                        const auto layout =
+                            nvfp4_slot_layout(experts[0].shape[0], experts[0].shape[1] * 2);
+                        if (layout.slot_bytes() == 0)
+                            return;
+                        max_expert_raw = std::max(max_expert_raw, layout.slot_bytes());
+                        if (!experts[0].on_device) {
+                            any_host_packed_experts = true;
+                            nvfp4_host_experts = true;
+                        }
+                    };
+                    check_nv(L.expert_w_gate);
+                    check_nv(L.expert_w_up);
+                    check_nv(L.expert_w_down);
+                }
             }
             if (max_expert_raw > 0 && any_host_packed_experts) {
                 moe_.raw_staging_buf = vram_alloc(vram_alloc_, max_expert_raw, "moe_staging");
@@ -572,6 +605,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                         break;
                     }
                 }
+                // NVFP4-prequant experts are per-expert 2-D at this point, so
+                // the loop above cannot see them.
+                has_host_experts = has_host_experts || nvfp4_host_experts;
             }
             if (has_host_experts && !runtime_config().moe.no_expert_cache) {
                 // Budget: proportional to free VRAM (15%) instead of flat cap.
@@ -587,7 +623,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 const auto& mcfg = model_->config();
                 bool debug_parity = runtime_config().moe.expert_cache_debug_parity;
                 if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers,
-                                       mcfg.n_experts, debug_parity)) {
+                                       mcfg.n_experts, debug_parity, nvfp4_host_experts)) {
                     IMP_LOG_INFO("Expert LRU cache: %d slots (%.2f MiB / %.2f MiB budget)",
                                  expert_cache_.n_slots_,
                                  expert_cache_.n_slots_ * max_expert_raw / (1024.0 * 1024.0),
