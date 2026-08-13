@@ -12,7 +12,7 @@
 # binary, which the repo forbids for *pinning* a baseline. It is defensible for
 # a *delta*: both arms come from the same tree with one line different, and the
 # arms alternate so drift cancels. The question is only whether the delta clears
-# the gate's 3 % decode threshold.
+# the gate's 8 % decode threshold.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 MID=${1:-M29}

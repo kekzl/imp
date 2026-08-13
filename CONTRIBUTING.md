@@ -46,7 +46,7 @@ make verify            # Full pre-merge gate (~5min)
 
 ## Benchmark
 
-The gate uses `tests/perf_baseline.json` (3% decode / 5% prefill regression
+The gate uses `tests/perf_baseline.json` (8% decode / 8% prefill regression
 thresholds, plus a 10% peak-VRAM ceiling over the pinned
 `metrics.memory_mb.own_peak_mb`). After a change that intentionally moves perf
 *or* peak VRAM, refresh it:

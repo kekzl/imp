@@ -158,8 +158,8 @@ cat > "$OUTPUT" << EOF
     }
   },
   "thresholds": {
-    "decode_regression_pct": 3,
-    "prefill_regression_pct": 5,
+    "decode_regression_pct": 8,
+    "prefill_regression_pct": 8,
     "vram_increase_pct": 10
   }
 }

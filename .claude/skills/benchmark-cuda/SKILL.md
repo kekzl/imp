@@ -34,7 +34,7 @@ The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`,
 | Single model quick check | `make test-perf` | Qwen3-8B Q8_0 only |
 | Per-config sweep MBU/MFU/TTFT/TBT | `bench/bench.py` | CSV output, optional llama.cpp compare |
 | Refresh perf baseline | `make gen-perf-baseline [MODEL=/models/…]` | cold-median: 5 trials × 15 s cooldown; writes `tests/perf_baseline.json`, including the `own_peak_mb` VRAM pin (extra `--mem-report` run) |
-| Regression gate | `make verify-fast` | 3% decode / 5% prefill / 10% peak VRAM (`own_peak`) |
+| Regression gate | `make verify-fast` | 8% decode / 8% prefill / 10% peak VRAM (`own_peak`) |
 | VRAM attribution for one run | `imp-cli --mem-report` | lifecycle checkpoints, per-pool notes, named charges (context / library reserve / engine arena), `own_peak` vs any `--vram-budget`, residual; the gate parses `own_peak=` from it |
 | North-star gate (Qwen3-14B Q6_K) | `make verify-north-star` | vs `tests/perf_baseline_north_star.json` |
 | Single kernel — wall-clock A/B | `cudaEvent` in launcher | see Step 1 |

@@ -12,7 +12,7 @@ External state:  Running imp-server with real model + GPU.
 
 The baseline file is the canonical verify.sh schema (legacy single-model):
     {"metrics": {"decode_tps": {"tg128": ...}, "prefill_tps": {"pp512": ...}},
-     "thresholds": {"decode_regression_pct": 3, ...}, "schema_version": ...}
+     "thresholds": {"decode_regression_pct": 8, ...}, "schema_version": ...}
 This suite gates decode throughput against metrics.decode_tps.tg128 and reads
 its threshold from thresholds.decode_regression_pct so it shares ONE source of
 truth with scripts/verify.sh (the audit found the old ["throughput"]/["ttft"]

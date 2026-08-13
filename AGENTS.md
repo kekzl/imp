@@ -9,7 +9,7 @@ global rules below; each role then narrows scope and lists explicit **MAY NOT** 
 - **English only in the repo.** All commits, PRs, code comments, docs and `.md` files are English.
 - **Single architecture.** Target is exactly `sm_120a` (RTX 5090 / GB202) with a `compute_120f` PTX fallback.
   Never add speculative multi-arch paths or datacenter-Blackwell (`sm_100`, tcgen05/TMEM/wgmma/TMA-WS) designs.
-- **Performance is gated, single-session only.** `tests/perf_baseline.json` is canonical (3% decode / 5%
+- **Performance is gated, single-session only.** `tests/perf_baseline.json` is canonical (8% decode / 8%
   prefill, plus 10% peak VRAM over the pinned `metrics.memory_mb.own_peak_mb`). Compiler/cuBLAS autotuning
   makes cross-session numbers unreliable — **only compare benchmark
   results captured within one run.** Decode `tg128` is the headline signal; refresh the baseline only via
@@ -91,7 +91,7 @@ compile-time isolation:
 - **Scope:** `scripts/bench_gate.sh`, `scripts/gen_perf_baseline.sh`, the `scripts/verify.sh` gates,
   `tools/imp-bench/`, `tests/perf_baseline*.json`.
 - **Allowed tools:** bash (benchmark), edit (baselines + bench scripts).
-- **MUST:** warm the clocks, run ≥3 trials single-session, enforce the 3%/5%/10% gate, sample
+- **MUST:** warm the clocks, run ≥3 trials single-session, enforce the 8%/8%/10% gate, sample
   `nvidia-smi` clocks during the run to rule out depressed host state.
 - **MAY NOT:** compare across sessions/days as if equal; refresh a baseline silently (must be stated in the PR).
 

@@ -64,11 +64,21 @@ rather than reporting it as a result.
 
 ## The gate
 
-- Canonical baseline: **`tests/perf_baseline.json`** — thresholds **3 % decode /
-  5 % prefill** (`scripts/bench_gate.sh`, used by `make verify*` and the GPU CI job)
+- Canonical baseline: **`tests/perf_baseline.json`** — thresholds **8 % decode /
+  8 % prefill** (`scripts/bench_gate.sh`, used by `make verify*` and the GPU CI job)
   and **10 % peak VRAM** (`scripts/verify.sh`, see below). One file, two gates.
-- A decode delta worse than −3 % **fails**; a prefill delta worse than −5 % warns
+- A decode delta worse than −8 % **fails**; a prefill delta worse than −8 % warns
   (cuBLAS variance).
+- **Why 8 % and not 3 %.** The threshold has to sit above this host's own
+  movement, or it reports the box instead of the diff. Within one session the
+  gate is tight — three independent processes agree to 0.16 % — but *between*
+  sessions the same tree reads 287.63 one day and 276.92 the next (−3.58 %) at
+  healthy clocks, and six quiet runs spanned 278.59…289.77. Ordinary desktop use
+  (a stream, a browser) costs a few percent more, and a depressed-host day costs
+  8-15 %. The old 3 % sat below all of that, so it failed on docs-only changes.
+  What the gate still catches: the split-K mutation M29 measured **−36 %**, a
+  4.5x margin. A red gate has never been a regression on its own anyway — the
+  proof is a paired A/B against `main`, alternating the arms.
 - **Peak VRAM is gated too** (`scripts/verify.sh`, both `verify` and `verify-fast`):
   a `--mem-report` run vs the pinned `metrics.memory_mb.own_peak_mb` against
   `thresholds.vram_increase_pct`. It gates `own_peak` — this process's allocations

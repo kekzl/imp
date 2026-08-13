@@ -15,7 +15,7 @@ reliable A/B signal; prefill (pp) varies up to 2.6× across container restarts
 (cuBLAS autotuning) and is therefore not tabulated for comparisons.
 
 The CI-gated canonical baseline lives in
-[`tests/perf_baseline.json`](../tests/perf_baseline.json) (3% decode / 5%
+[`tests/perf_baseline.json`](../tests/perf_baseline.json) (8% decode / 8%
 prefill regression gate, plus a 10% peak-VRAM ceiling over the pinned
 `metrics.memory_mb.own_peak_mb` — see [`BENCHMARKING.md`](BENCHMARKING.md));
 refresh it via `scripts/gen_perf_baseline.sh`.

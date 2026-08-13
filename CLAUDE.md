@@ -64,8 +64,8 @@ make verify-fast           # ~90 s pre-push gate    make verify   # ~5 min full
   or on GitHub.)
 - **Always branch off `main` and `gh pr create --base main`.** Never stack PRs
   (squash-merge + stacking caused recovery-PR cascades). Prefer fewer, batched PRs.
-- **Performance is gated.** `tests/perf_baseline.json` is canonical (3% decode /
-  5% prefill). Refresh via `scripts/gen_perf_baseline.sh` only when a change
+- **Performance is gated.** `tests/perf_baseline.json` is canonical (8% decode /
+  8% prefill). Refresh via `scripts/gen_perf_baseline.sh` only when a change
   intentionally moves perf, and say so in the PR.
 - Runtime config is `RuntimeConfig` in `src/runtime/config.h` (`imp.conf` +
   `--config` + `--set`). The env vars seeded are `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`, and the three
