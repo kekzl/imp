@@ -45,15 +45,14 @@ These have a code path and no gate. They may work; nothing proves it.
   and is unit-tested against a sink-aware reference; 4 bits per value on a
   64-wide head is simply not enough. It falls back to FP16 rather than pretending.
 - **Host-offloaded NVFP4 MoE experts are slow, and nothing gates them.** They run
-  correctly (Qwen3-30B-A3B-NVFP4, all 48 MoE layers on host: 23.0 tok/s against
+  correctly (Qwen3-30B-A3B-NVFP4, all 48 MoE layers on host: 23.3 tok/s against
   384.0 resident), but the price is steep and the only checks that exercise the
   path are manual. The CPU lane covers the slot arithmetic, not the kernels.
-  Two known costs: prefill goes through the serial per-expert fallback, and
-  prefill evicts the decode working set from the expert cache (74.6 % hit rate
-  measured, against 88.7 % on the equivalent GGUF path). A placement the cache
-  cannot hold at all is still refused at load rather than served wrong (#1403).
+  The remaining cost is that prefill goes through the serial per-expert
+  fallback, one expert per GEMM. A placement the expert cache cannot hold at all
+  is still refused at load rather than served wrong (#1403).
 
-  [PROV: commit=67d2c44 date=2026-08-13 hw=RTX5090 model=Qwen3-30B-A3B-NVFP4-Modelopt
+  [PROV: commit=8a7bd8c date=2026-08-13 hw=RTX5090 model=Qwen3-30B-A3B-NVFP4-Modelopt
          quant=NVFP4 cuda=13.3 path=nvfp4-moe-host-offload
          cmd=`imp-cli --max-tokens 220 --temperature 0 --set moe.force_host_experts=48`
          n=1 note=single greedy run per arm; resident arm is the same command

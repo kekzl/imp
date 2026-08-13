@@ -251,10 +251,16 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             // hit this because its GGUF experts reach dequant_expert's staging
             // buffer instead; per-expert NVFP4 tensors do not.
             //
-            // One expert at a time is exactly what this loop already does, so
-            // three slots suffice regardless of how many experts the prompt
-            // activates — the pool is not thrashed the way a batched path
-            // would thrash it.
+            // WHERE it is staged follows the same working-set rule as the GGUF
+            // path above: through the LRU pool when this dispatch fits it,
+            // through the single staging buffer when it does not. The bytes
+            // moved are identical either way — what differs is whether the
+            // copies evict anything. A prefill activating every expert asks for
+            // 3*n_active cells against slots_per_layer, so using the cache
+            // there retains nothing AND throws out the entries decode is about
+            // to want. Correctness does not depend on the choice: each expert
+            // is consumed by a kernel launched immediately after it is staged,
+            // and both destinations are written on this stream.
             //
             // Note the condition is on the EXPERT tensor, not on the `qtype`
             // parameter: that one comes from `ly.expert_*_packed`, which stays
@@ -265,47 +271,63 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             if (static_cast<size_t>(eidx) < fallback.size() &&
                 fallback[eidx].qtype == QType::NVFP4) {
                 const Tensor& w = fallback[eidx];
-                if (w.data && !w.on_device && w.scales && w.ndim == 2 &&
-                    nvfp4_host_pool_ready_for_staging(expert_cache_)) {
+                if (w.data && !w.on_device && w.scales && w.ndim == 2) {
                     const auto layout = nvfp4_slot_layout(w.shape[0], w.shape[1] * 2);
-                    if (layout.slot_bytes() > 0 && layout.slot_bytes() <= expert_cache_.slot_size_) {
-                        ExpertCacheKey ck{fallback[0].data, eidx};
-                        void* slot = expert_cache_.get_or_load_nvfp4(
-                            layer, proj, ck, w.data, layout.packed_bytes, w.scales, layout.ms_bytes,
-                            layout.packed_off(), w.tensor_scale, stream);
-                        if (slot) {
-                            NvFP4QuantResult nw;
-                            nw.packed_data = slot;
-                            nw.micro_scales = static_cast<char*>(slot) + layout.packed_off();
-                            nw.tensor_scale = w.tensor_scale;
-                            nw.N = static_cast<int>(w.shape[0]);
-                            nw.K = static_cast<int>(w.shape[1] * 2);
-                            const int M = static_cast<int>(a.shape[0]);
-                            if (M == 1) {
-                                gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
-                                                static_cast<half*>(c.data), nw.N, nw.K, stream);
-                            } else {
-                                // M>1 goes through gemm_nvfp4 for the same
-                                // reason the resident path does: the per-row
-                                // gemv loop is wrong on multi-token expert
-                                // prefill (bisected 2026-04-27, see below).
-                                int64_t a_shape[2] = {static_cast<int64_t>(M),
-                                                      static_cast<int64_t>(nw.K)};
-                                int64_t c_shape[2] = {static_cast<int64_t>(M),
-                                                      static_cast<int64_t>(nw.N)};
-                                Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
-                                           QType::F16, 2, a_shape, true);
-                                Tensor c_t(c.data, QType::F16, 2, c_shape, true);
-                                gemm_nvfp4(nw, a_t, c_t, stream);
-                            }
-                            return;
+                    void* staged = nullptr;
+                    if (layout.slot_bytes() > 0) {
+                        if (use_expert_cache && nvfp4_host_pool_ready_for_staging(expert_cache_) &&
+                            layout.slot_bytes() <= expert_cache_.slot_size_) {
+                            ExpertCacheKey ck{fallback[0].data, eidx};
+                            staged = expert_cache_.get_or_load_nvfp4(
+                                layer, proj, ck, w.data, layout.packed_bytes, w.scales,
+                                layout.ms_bytes, layout.packed_off(), w.tensor_scale, stream);
+                        } else if (moe_.raw_staging_buf &&
+                                   moe_.raw_staging_size >= layout.slot_bytes()) {
+                            // Same slot layout, one buffer: packed at 0, the
+                            // micro-scales behind it, so the NvFP4QuantResult
+                            // below is built the same way for both routes.
+                            char* st = static_cast<char*>(moe_.raw_staging_buf);
+                            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(st, w.data, layout.packed_bytes,
+                                                               cudaMemcpyHostToDevice, stream));
+                            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(st + layout.packed_off(), w.scales,
+                                                               layout.ms_bytes,
+                                                               cudaMemcpyHostToDevice, stream));
+                            staged = st;
                         }
+                    }
+                    if (staged) {
+                        NvFP4QuantResult nw;
+                        nw.packed_data = staged;
+                        nw.micro_scales = static_cast<char*>(staged) + layout.packed_off();
+                        nw.tensor_scale = w.tensor_scale;
+                        nw.N = static_cast<int>(w.shape[0]);
+                        nw.K = static_cast<int>(w.shape[1] * 2);
+                        const int M = static_cast<int>(a.shape[0]);
+                        if (M == 1) {
+                            gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
+                                            static_cast<half*>(c.data), nw.N, nw.K, stream);
+                        } else {
+                            // M>1 goes through gemm_nvfp4 for the same reason
+                            // the resident path does: the per-row gemv loop is
+                            // wrong on multi-token expert prefill (bisected
+                            // 2026-04-27, see below).
+                            int64_t a_shape[2] = {static_cast<int64_t>(M),
+                                                  static_cast<int64_t>(nw.K)};
+                            int64_t c_shape[2] = {static_cast<int64_t>(M),
+                                                  static_cast<int64_t>(nw.N)};
+                            Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
+                                       QType::F16, 2, a_shape, true);
+                            Tensor c_t(c.data, QType::F16, 2, c_shape, true);
+                            gemm_nvfp4(nw, a_t, c_t, stream);
+                        }
+                        return;
                     }
                     IMP_LOG_FATAL(
                         "MoE legacy fallback: host-resident NVFP4 expert %d on layer %d cannot be "
-                        "staged (slot %zu B, pool slot %zu B). Continuing would hand a host "
-                        "pointer to a device kernel.",
-                        eidx, layer, layout.slot_bytes(), expert_cache_.slot_size_);
+                        "staged by either route (needs %zu B; cache slot %zu B, staging buffer "
+                        "%zu B). Continuing would hand a host pointer to a device kernel.",
+                        eidx, layer, layout.slot_bytes(), expert_cache_.slot_size_,
+                        moe_.raw_staging_size);
                 }
             }
 

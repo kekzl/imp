@@ -322,6 +322,19 @@ Note the middle row got *slower*, which is the point: those eight layers were fa
 
 Two costs remain, both measured rather than assumed. Prefill runs the serial per-expert fallback, and it evicts the decode working set — 74.6 % hit rate against the 88.7 % the GGUF path reaches, which is the same thrashing #1365's working-set gate fixed there and which nothing yet fixes here. Neither is a correctness issue and both are ordinary follow-on work.
 
+**The second of those is now fixed, and the measurement is worth more than the fix.** #1365's rule already existed in `run_moe_legacy_fallback_` as `use_expert_cache` — a dispatch touching more than `slots_per_layer` cells bypasses the cache for the single staging buffer, same H2D bytes, no eviction. The NVFP4 staging path simply did not read it. Honouring it, on Qwen3-30B-A3B-NVFP4 with all 48 MoE layers host-resident, `--bench-pp 512 --bench-reps 3`, three runs per arm (medians):
+
+| | cache misses | pp512 | tg256 |
+|---|---|---|---|
+| gate off | 106 108 | 285.57 | 54.77 |
+| **gate on** | **30 451** | **285.15** | **57.31** |
+
+**Misses drop 3.5x and throughput barely moves.** That is the informative part. It says the prefill transfers were never the cost — they move the same bytes either way, which is why `pp512` is flat to 0.15 % — and that what the eviction destroyed was only the *decode* cache's contents, worth +4.6 % on `tg256`. That figure sits inside this path's own spread (the arms overlap: 50.8-59.7 against 57.3-60.3), so treat the miss count as the result and the throughput as directionally consistent with it, not as a measured win.
+
+**GGUF's +5.6 % on pp512 does not reproduce here, and the reason is structural rather than a failure to reproduce it.** There the bypass replaces a dequant-into-scratch with a straight copy; here both routes are a copy into a slot and the GEMM reads NVFP4 either way. Same rule, different arithmetic underneath, so only the decode half of the benefit transfers.
+
+Two caveats on the numbers: the arms were not alternated (each switch is a full rebuild), and the first run of any arm is cold — 35.06 tok/s against 57-60 warm on identical code, the same warm/cold gap this entry records for the GGUF path.
+
 *Where the path stands after all of it, re-profiled 2026-08-11 on the shipped build.* The entry opened by calling this path issue-bound; after #1370 and #1376 **it is not any more, and that retires the framing rather than confirming it.** Same config (256 cold decode tokens, all experts host-resident), tg phase 7.06 s:
 
 | term | per token | share |

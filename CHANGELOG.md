@@ -20,6 +20,11 @@ there instead of retelling it.
 
 ### Fixed
 
+- **MoE prefill no longer evicts the decode working set from the expert cache**
+  on the NVFP4 host path: it now honours the same working-set rule the GGUF path
+  has had since #1365. Cache misses drop 3.5x (106k to 30k over a pp512+tg256
+  run on Qwen3-30B-A3B-NVFP4 with every MoE layer host-resident); throughput
+  moves within noise. ([`docs/roadmap.md`](docs/roadmap.md))
 - **An NVFP4 MoE checkpoint whose experts do not fit is refused at load**
   instead of skipping their GEMMs and answering from the rest at exit code 0.
   The refusal now fires only when the expert cache cannot hold a layer's working
