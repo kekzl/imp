@@ -34,6 +34,10 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`ghcr.io/kekzl/imp:latest` pointed at v0.22.0**, three releases behind, because
+  that release was published after v0.25.0 and the image workflow moved `latest`
+  (and `0`) on every publish regardless of version. The moving tags now only
+  advance when the release really is the newest.
 - **MoE prefill no longer evicts the decode working set from the expert cache**
   on the NVFP4 host path: it now honours the same working-set rule the GGUF path
   has had since #1365. Cache misses drop 3.5x (106k to 30k over a pp512+tg256

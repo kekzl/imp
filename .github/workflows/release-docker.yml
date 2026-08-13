@@ -32,6 +32,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Is this release the newest version, or an older one published late?
+      #
+      # The moving tags (`latest`, `{{major}}`) must only ever move FORWARD.
+      # They did not: v0.22.0 was created on 2026-08-05 but published on
+      # 2026-08-13, five hours after v0.25.0 — and since this workflow fires on
+      # `release: published` and set `latest` for every non-prerelease, the
+      # older image took both `latest` and `0`. Anyone pulling
+      # ghcr.io/kekzl/imp:latest got a three-release-old build, with nothing to
+      # indicate it. GitHub's own "Latest" badge kept pointing at v0.25.0,
+      # because it sorts by version rather than publish time.
+      #
+      # Compare against every published tag with sort -V rather than the API's
+      # /releases/latest, which sorts by created_at and would have called this
+      # backfill "latest" too.
+      - name: Is this the newest release
+        id: newest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          this="${{ github.event.release.tag_name }}"
+          if [ -z "$this" ]; then echo "newest=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          highest=$(gh api --paginate /repos/${{ github.repository }}/releases \
+                      --jq '.[] | select(.draft==false and .prerelease==false) | .tag_name' \
+                    | sort -V | tail -1)
+          echo "this=$this highest=$highest"
+          if [ "$this" = "$highest" ]; then
+            echo "newest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "newest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$this is not the newest release ($highest) — keeping the moving tags where they are."
+          fi
+
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -40,8 +73,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=semver,pattern={{major}},enable=${{ steps.newest.outputs.newest == 'true' }}
+            type=raw,value=latest,enable=${{ steps.newest.outputs.newest == 'true' && !github.event.release.prerelease }}
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push
