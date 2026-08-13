@@ -355,6 +355,12 @@ Decode does not move because its cache hits 96-98 % and barely transfers; prefil
 
 **Two method notes, both of which cost a wrong conclusion first.** A per-expert pinned buffer was the obvious implementation and is the wrong one: nsys measured **36 877 `cudaHostAlloc` calls costing 24.7 s** plus 6.4 s of `cudaFreeHost`, to save 0.5 s of transfer. One slab per (layer, projection) is 144 allocations for the same result. And **three paired rounds read decode as −33 % and that was noise** — this path's decode spread is wider than the effect (the off arm alone spanned 34.7 to 66.1 tok/s), which is exactly the "only paired, alternating rounds decide anything here" rule already recorded above, needing six pairs rather than three.
 
+*Where the offload prefill stands after that, and what the next lever is not.* Re-profiled with pinning on, the two halves are now about even: **784 ms of H2D against 670 ms of kernel time**, and the largest single kernel is `dequantize_nvfp4_kernel` at **51.9 % of kernel time** (17 085 instances, 20.4 µs each). That is the cost of the M>1 route in `gemm_nvfp4`: dequantise the staged expert to FP16 in VRAM, then cuBLAS. The resident path never pays it, because CUTLASS grouped reads NVFP4 directly.
+
+**The obvious lever off that profile was tested and is refuted.** `gemm_nvfp4` sends M<=16 through the batched NVFP4 GEMV, which skips the dequant; at pp512 an expert sees ~32 tokens and therefore misses it. Raising `kSmallMBatchedGemv` 16 → 48 measured **316.09 against 317.6 tok/s median** — no change, well inside this path's spread. The reason is in the threshold's own arithmetic: the GEMV re-reads the NVFP4 weight once per MR=4 tile, so at M=32 it moves ~2.0x FP16-equivalent bytes against the dequant route's ~2.25x. The two are a wash there, which is where the 16 was placed to begin with.
+
+So the dequant is not waste a threshold can recover; it is the price of having no grouped NVFP4 GEMM on this path. Closing it means feeding CUTLASS grouped from the slot pool in chunks, which is a project rather than a tuning change, and it is the honest next step for whoever picks this up.
+
 *Where the path stands after all of it, re-profiled 2026-08-11 on the shipped build.* The entry opened by calling this path issue-bound; after #1370 and #1376 **it is not any more, and that retires the framing rather than confirming it.** Same config (256 cold decode tokens, all experts host-resident), tg phase 7.06 s:
 
 | term | per token | share |
