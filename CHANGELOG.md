@@ -13,162 +13,76 @@ there instead of retelling it.
 
 ## [0.25.0] - 2026-08-13
 
+The Nemotron-H family decodes ~3x faster, Qwen3.6-35B sees images, and native-FP8
+checkpoints load. 40 PRs since 0.24.0; the reasoning behind each entry is in the
+linked PR.
+
 ### Added
 
-- **Nemotron-3.5's MTP head loads and drafts — and measurably should not be
-  used.** Its 270 `mtp.*` tensors were logged as unrecognised: the loader only
-  knew the Qwen3.6 shape, and this head is a miniature Nemotron (attention in
-  `layers.0`, MoE in `layers.1`, `mixer` naming, per-expert 2-D non-gated
-  squared-ReLU experts, DeepSeek-style router bias, NoPE attention, no
-  `attn_output_gate`). Wired up it drafts at **43.9 % top-1 accept**, but costs
-  **-41 % decode at k=1** (364 → 216 tok/s): the draft path still runs outside
-  CUDA graphs while the main decode no longer does (#1389), so a draft step now
-  prices like a whole decode step. imp's economics gate unbinds it after 8
-  verifies; `--mtp-spec-decode` is opt-in and the default uploads nothing.
-  The draft MoE is device-side as of this change (`gemv_f16_moe_decode`, a new
-  FP16 indexed MoE GEMV — the quantized siblings all existed, the FP16 one did
-  not): +14…+23 % on the speculative path, verdict unchanged at −32 % vs no
-  speculation. The remaining cost is the verify chunk — see
-  [`docs/roadmap.md`](docs/roadmap.md).
-- **Native-FP8 weights decode from their own bytes: +7.5% on Nemotron-3.5-Lightning.**
-  Loading them (previous entry) gave prefill an FP16 companion because sm_120 has
-  no FP8 prefill GEMM — but decode was reading that copy too, 2 B/elem where the
-  checkpoint ships 1, on the bandwidth-bound path. Phase 4 already had the rule
-  that keeps an FP8 cache entry out of the primary tier while setting
-  `decode_tier = FP8`; it just did not recognise a native-FP8 source. Measured
-  median **+7.5%** decode over 27 order-balanced pairs (t=3.33), matching the
-  +6.9% predicted from bytes/bandwidth. No extra VRAM, and lossless — these are
-  the published weights, not a requantization.
-
+- **Qwen3.6-35B-A3B sees images** — no new encoder and nothing to download: the
+  checkpoint has always shipped a complete Qwen3-VL tower (333 `model.visual.*`,
+  851.8 MiB), and two gates dropped it. Text-only checkpoints are unaffected.
+  (#1379, #1384)
 - **Native FP8 weights load — `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` runs**
-  (~137 tok/s decode, 45/45 on `degen_suite.py`). Its Modelopt `MIXED_PRECISION`
-  export puts the 46 Mamba in/out projections in FP8 and 5935 MoE expert tensors
-  in NVFP4. sm_120 has no FP8 prefill GEMM, so those weights previously reached
-  cuBLAS raw and aborted (`status 15, dtB=28`). They now get an FP16 companion at
-  load: Phase 0 records the per-tensor scale instead of mis-promoting them to
-  NVFP4, Phase 1 expands them via the existing `dequantize_fp8_e4m3_to_fp16`.
-  Costs 1698 MiB of FP16 cache here; init lands at 24.4 of 32.6 GB.
-
-- **Modelopt `quant_algo: MIXED_PRECISION` is parsed** — a per-tensor
-  `quantized_layers` table instead of one global algorithm. Nemotron-3.5-Lightning
-  uses it to put the 46 Mamba in/out projections on FP8 and 5935 MoE expert
-  tensors on NVFP4. Accepted only when the table actually names NVFP4, because
-  the return value sets `is_nvfp4_prequant`, which drives the MoE expert cache
-  and the VRAM budget. **This does not yet make that checkpoint load** — native
-  FP8 *weights* have no dequant path (`gemm: status 15, dtB=28`); see
-  [`docs/roadmap.md`](docs/roadmap.md).
-
-- **Qwen3.6-35B-A3B sees images.** The checkpoint already shipped a complete
-  Qwen3-VL tower (333 `model.visual.*` tensors, 851.8 MiB); two gates dropped it.
-  `vision_config.model_type` is `qwen3_5_moe`, which failed a literal string
-  compare (#1379), and the llm-compressor loader skipped `model.visual.*`
-  unconditionally — which also made the shard-drop discard the whole
-  `model_visual.safetensors`. The skip is now conditional on config.json
-  declaring a tower this build supports, so text-only checkpoints translate
-  exactly as before. No new encoder: it is the Qwen3-VL tower under a different
-  `model_type`. Validated on two fixtures with distinct correct descriptions.
-
+  (~137 tok/s decode, 45/45 on `degen_suite.py`). Modelopt `MIXED_PRECISION` puts
+  46 Mamba projections in FP8 and 5935 MoE tensors in NVFP4; sm_120 has no FP8
+  prefill GEMM, so the FP8 tensors get an FP16 companion at load (1698 MiB).
+  (#1385, #1386)
 - **`moe.expert_cache_budget_pct`** — the share of free VRAM the MoE expert LRU
-  cache may claim, previously hardcoded at 15. On the host-offload path this is
-  the dominant lever, because the pool depth decides how many tokens of routing
-  history the cache holds: Qwen3-30B-A3B-Q4_K_M with all experts host-resident,
-  256 cold decode tokens, 5 % → 50 % moves decode 10.51 → 51.86 tok/s (hit rate
-  36.6 % → 96.2 %). **Default unchanged at 15** — on a model that genuinely does
-  not fit, the same VRAM is what the KV pool and weight caches want. Sweep and
-  the floor below which the cache is bypassed entirely: [`docs/roadmap.md`](docs/roadmap.md).
+  cache may claim, previously hardcoded at 15. **Default unchanged at 15**; at 50
+  a fully host-resident Qwen3-30B-A3B-Q4_K_M decodes 10.51 → 51.86 tok/s (hit
+  rate 36.6 % → 96.2 %). (#1374)
+- **Nemotron-3.5's MTP head loads and drafts — and measurably should not be
+  used.** 43.9 % top-1 accept, still −32 % decode, because the draft step runs
+  outside CUDA graphs while the main decode no longer does. `--mtp-spec-decode`
+  stays opt-in and off by default; the bottleneck is the verify chunk, not the
+  draft. (#1390, #1391)
 
 ### Changed
 
+- **The entire Nemotron-H family decodes ~3x faster** — CUDA graphs were demoted
+  for pure-SSM layers by a `not yet` nobody had retested; nothing in the Mamba2
+  scan is capture-hostile. tg256, spec off: Nemotron-3-Nano 148 → **386**,
+  Nemotron-Labs-3-Elastic 70 → **381**, Nemotron-3.5-Lightning 126 → **362**
+  tok/s (vLLM 0.27.1 reads 351 on the same card and checkpoint).
+  `docs/supported-models.md` and `AUDIT_ARCH` had both blamed the architecture;
+  corrected. (#1389)
+- **MoE host-offload decode ~2.1x: the fused decode kernels reach host-resident
+  experts.** Feeding them slot indices instead of expert ids needs no new kernel
+  and no staging copy. Qwen3-30B-A3B-Q4_K_M, all 48 MoE layers on host: 22.9 →
+  48.3 tok/s, CUDA launches −69 %. (#1370)
+- **MoE host-offload decode ~2x again: the expert cache stopped maintaining a
+  device mirror nothing reads.** `cudaMemcpyAsync` −59 %, decode ~20 → ~41 tok/s,
+  output byte-identical. The mirror is now built only under
+  `moe.expert_cache_debug_parity`, its sole reader. (#1376)
+- **Native-FP8 weights decode from their own bytes: +7.5 % median** on
+  Nemotron-3.5-Lightning (27 order-balanced pairs, t=3.33; +6.9 % predicted from
+  bytes and bandwidth). Decode had been reading the FP16 prefill companion — 2
+  B/elem where the checkpoint ships 1, on the bandwidth-bound path. No extra
+  VRAM, lossless. (#1388)
+- **The MoE expert LRU cache is skipped for a dispatch it cannot hold** — prefill
+  asked for 384 slots against the 73 a Qwen3-30B-A3B gets and retained nothing.
+  Median +5.6 % pp512 at no decode cost, decode hit rate 88.7 % → 95.7 %, output
+  byte-identical. (#1365)
 - **Dependencies: CUTLASS v4.6.2 → 4.7.0, googletest v1.17.0 → v1.18.0,
-  cpp-httplib v0.50.1 → v0.53.0** (nlohmann/json already current). CUTLASS is
-  the primary GEMM path on sm_120, so it was A/B'd rather than assumed:
-  decode is neutral to within 0.05% on Qwen3-14B-NVFP4 (171.5 vs 171.6) and
-  Qwen3.6-35B-A3B-NVFP4 (319.1 vs 318.9), prefill within the known cuBLAS
-  restart noise. Note for the next bump: NVIDIA dropped the `v` prefix — the
-  tag is `4.7.0`, and `v4.7.0` does not exist.
-
-- **MoE host-offload decode is ~2.1x faster: the fused decode kernels now reach
-  host-resident experts.** They address an expert as `base + idx * stride`, and
-  the LRU cache's per-layer slot pool is already exactly that shape — feeding
-  them slot indices instead of expert ids makes the whole family reachable with
-  no new kernel and no staging copy. Qwen3-30B-A3B-Q4_K_M with all 48 MoE layers
-  on host: decode 22.9 -> 48.3 tok/s (median), CUDA launches 197809 -> 61585
-  (-69%, against 52024 for the same model fully resident). Validated on two model
-  families; the perplexity figure first cited here measured prefill, which the
-  change does not touch — see [`docs/roadmap.md`](docs/roadmap.md) for what the
-  decode evidence actually is.
-- **MoE host-offload: the expert LRU cache is skipped for a dispatch it cannot
-  hold.** One dispatch touches three cells per *active* expert, so prefill asks
-  for 384 against the 73 slots a Qwen3-30B-A3B gets and the cache retains
-  nothing — measured 24.3 % hit rate against a 19 % structural ceiling. Gating
-  on working-set fit is worth a median +5.6 % pp512 (5/5 paired rounds) at no
-  decode cost, and lifts decode's own hit rate 88.7 % → 95.7 %. Output is
-  byte-identical. Measurement and the rest of the offload picture:
-  [`docs/roadmap.md`](docs/roadmap.md); harness
-  `tools/analysis/expert_cache_offload_sweep.sh`.
-- **A Qwen3.6 checkpoint's vision tower is now recognised instead of dismissed.**
-  Its `vision_config.model_type` is `qwen3_5_moe`, which failed a literal string
-  compare even though the tower layout is Qwen3-VL's — 333 `model.visual.*`
-  tensors, the same nine geometry fields. **This does not yet enable vision on
-  Qwen3.6**: the weights are still dropped a layer lower, and the log now names
-  the missing tensor and count rather than shrugging. Second gate scoped in
-  [`docs/roadmap.md`](docs/roadmap.md).
+  cpp-httplib v0.50.1 → v0.53.0.** CUTLASS is the primary GEMM path on sm_120, so
+  it was A/B'd rather than assumed: decode neutral to within 0.05 % on two NVFP4
+  models. Note for the next bump — NVIDIA dropped the `v` prefix, the tag is
+  `4.7.0`. (#1392)
 
 ### Fixed
 
-- **`check-release.sh` aborted silently right after a release cut.** Its
-  changelog-hygiene step greps `[Unreleased]` for duplicate `###` headings, and
-  an empty `[Unreleased]` — exactly what cutting a release leaves behind — makes
-  grep exit 1, which under the script's `set -euo pipefail` killed the run with
-  no FAIL line and before `make verify-fast` had a chance to execute. v0.25.0
-  was cut with the check dying at that point. The grep is now `|| true`.
-
-- **The entire Nemotron-H family decodes ~3x faster: CUDA graphs were demoted
-  for pure-SSM layers on an assumption that does not hold.** `has_pure_ssm`
-  forced `use_cuda_graphs=false` with the comment "pure SSM (Nemotron-H) is not
-  yet [graph-compatible]". Nothing in the Mamba2 scan is capture-hostile — its
-  device work is stream-async and the recurrent state lives in one pool
-  allocated once, so replay writes it in place exactly as an eager step does.
-  Measured (tg256, spec off): **Nemotron-3-Nano 148 → 386**, **Nemotron-Elastic
-  70 → 381**, **Nemotron-3.5-Lightning 126 → 362 tok/s**. For scale: vLLM 0.27.1
-  reads 351 tok/s on the same card and checkpoint, so this closes a 2.8x deficit
-  and passes it. Verified with 45/45 `degen_suite`, a clean 700-token
-  generation, multi-turn, and four concurrent requests keeping their states
-  apart. `docs/supported-models.md` blamed the architecture ("arch-limited") and
-  `AUDIT_ARCH` called it "eager decode by design" — both were describing this
-  demotion; both corrected.
-
-
-
-- **The "not one expert tensor was recognised" guard no longer fires on every
-  up/down-only MoE.** It asked only about `expert_w_gate`, which the whole
-  Nemotron-H family never has — its experts are `(up_proj, down_proj)`. The
-  error went unnoticed because the caller discards the bool: Nemotron-3-Nano
-  logged it and then loaded and generated correctly at ~112 tok/s. A guard that
-  cries wolf on a working model, and whose verdict nobody reads, is worse than
-  no guard. Now checks all three projections; 5 tests, both directions pinned.
-- **`imp-quantize` refuses `--keep-attn-gate` together with `--calib` instead of
-  writing a silently wrong checkpoint.** A fused Q+gate `q_proj` is copied
-  through without the group's column scale, but the calibration planner has no
-  idea that exclusion exists — it builds group A from `{q,k,v}` unconditionally
-  and folds that group's `1/s` into `input_layernorm`. The result is an input
-  divided by `s` whose columns were never multiplied by it: a checkpoint that
-  loads and generates and is wrong. Latent rather than live (every arch with a
-  fused attention gate currently fails `--calib`'s architecture check), so this
-  is armed for whoever widens that check. Same call as #1188 made for stacked
-  experts: refuse rather than mangle.
-
-- **MoE host-offload decode ~2x faster again: the expert cache stopped
-  maintaining a device mirror nothing reads.** `d_lookup_` was built for
-  dispatch kernels to resolve slots from; the change above instead derives the
-  slot from `get_or_load`'s returned pointer, leaving the mirror write-only —
-  two extra 4-byte `cudaMemcpyAsync` per cache miss with no consumer. Now built
-  and maintained only under `moe.expert_cache_debug_parity`, its sole reader.
-  Qwen3-30B-A3B-Q4_K_M, all experts host-resident, 256 cold decode tokens:
-  `cudaMemcpyAsync` 519638 -> 212454 (-59%), decode ~20 -> ~41 tok/s. Cache hit
-  rate is identical to three digits (74.1%) and generated output is
-  byte-identical, as a write-only structure implies.
-
+- **`check-release.sh` aborted silently right after a release cut.** An empty
+  `[Unreleased]` — exactly what cutting a release leaves behind — made its
+  changelog-hygiene `grep` exit 1, and `set -euo pipefail` killed the run with no
+  FAIL line, before `make verify-fast` ever executed. (#1394)
+- **A load guard cried wolf on every working up/down-only MoE.** It asked only
+  about `expert_w_gate`, which no Nemotron-H has, and went unnoticed because the
+  caller discards the bool. Now checks all three projections. (#1385)
+- **`imp-quantize` refuses `--keep-attn-gate` together with `--calib`** instead of
+  writing a checkpoint that loads, generates, and is silently wrong: the fused
+  Q+gate `q_proj` skips the group's column scale that the calibration planner
+  folds into `input_layernorm` regardless. (#1382)
 
 ## [0.24.0] - 2026-08-10
 
