@@ -338,7 +338,8 @@ roofline-regress:
 #   Stage 1 — pre-commit (GPU): runs the full GPU suite (make test-gpu) when
 #             staged sources change. CI has no GPU runner, so GPU correctness is
 #             gated here, locally, before the commit lands.
-#   pre-push: keeps the verify-fast perf+smoke regression gate.
+#   pre-push: verify-fast. Correctness half always; the perf gate only when the
+#             diff touches a path that can move a number (see scripts/pre-push.hook).
 #   Stage 2 — CI (CPU): ctest -L unit, in .github/workflows/ci.yml (no hook).
 install-hooks:
 	@cp scripts/pre-commit.hook .git/hooks/pre-commit
@@ -347,7 +348,7 @@ install-hooks:
 	@chmod +x .git/hooks/pre-push
 	@echo "hooks installed:"
 	@echo "  pre-commit → Stage 1 'make test-gpu' (full GPU suite) on staged src/tests changes"
-	@echo "  pre-push   → 'make verify-fast' (perf + smoke regression) on source changes"
+	@echo "  pre-push   → 'make verify-fast' on source changes (perf gate only for measured paths)"
 	@echo "  CI (Stage 2) runs 'ctest -L unit' — the CPU lane — automatically"
 
 # clang-format settings live in .clang-format. Host has no clang-format

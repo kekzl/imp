@@ -69,6 +69,14 @@ rather than reporting it as a result.
   and **10 % peak VRAM** (`scripts/verify.sh`, see below). One file, two gates.
 - A decode delta worse than −8 % **fails**; a prefill delta worse than −8 % warns
   (cuBLAS variance).
+- **When it runs.** The pre-push hook runs the perf gate only when the diff can
+  move it: `src/{compute,exec,quant,runtime,model}/`, any `.cu`/`.cuh`, the build
+  definition, or a baseline file. A push outside those paths keeps the
+  correctness half (tests, peak VRAM, graphs ON/OFF, degeneration smoke) and
+  skips the three benched processes, which is half the wall clock (36 s → 18 s).
+  `scripts/check-release.sh` always runs everything, so a release is still gated
+  on the full set. Of the 40 commits between v0.24.0 and v0.25.0, 13 touch a
+  measured path and 27 do not.
 - **Why 8 % and not 3 %.** The threshold has to sit above this host's own
   movement, or it reports the box instead of the diff. Within one session the
   gate is tight — three independent processes agree to 0.16 % — but *between*

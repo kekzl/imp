@@ -1,7 +1,27 @@
 #!/bin/bash
 # pre-push hook: gate pushes on scripts/verify.sh fast.
-# Skips verification when no source files (src/, include/, tools/, tests/, CMakeLists, *.cmake) changed.
-# Override with: git push --no-verify   (use sparingly — see CLAUDE.md verification rules)
+#
+# Two tiers, because the two halves of verify-fast answer different questions:
+#
+#   correctness (gtests, degeneration smoke, graphs ON/OFF sanity)
+#       runs whenever a source file changed. CI has no GPU runner, so this local
+#       run is the only thing in the project that ever puts a CUDA kernel in
+#       front of a correctness check.
+#
+#   throughput (the perf gate: 3 benched processes, ~half the wall clock)
+#       runs only when the diff can actually move a number: the kernel and
+#       dispatch trees, any .cu/.cuh, the build definition, or the baseline
+#       itself. Everything else pushes with IMP_VERIFY_SKIP_PERF=1, because on
+#       this host a decode reading drifts several percent between sessions and a
+#       gate that fires on a server-handler edit reports the box, not the change.
+#
+# The peak-VRAM gate stays on in both tiers: own_peak_mb is byte-identical
+# across repeat runs, so it cannot produce the false positive this split exists
+# to remove, and it costs almost nothing (measured 36 s full, 18 s without the
+# perf gate).
+#
+# The release gate (scripts/check-release.sh) always runs everything.
+# Override with: git push --no-verify   (use sparingly — see CLAUDE.md)
 set -uo pipefail
 
 REMOTE="$1"
@@ -9,8 +29,12 @@ URL="$2"
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+SOURCE_RE='^(src/|include/|tools/|tests/|scripts/|CMakeLists\.txt|cmake/|.*\.cmake$)'
+PERF_RE='^(src/(compute|exec|quant|runtime|model)/|.*\.(cu|cuh)$|cmake/|CMakeLists\.txt|tests/perf_baseline)'
+
 # stdin lines: <local_ref> <local_sha> <remote_ref> <remote_sha>
 NEEDS_VERIFY=0
+NEEDS_PERF=0
 while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ] && continue   # delete
     if [ "$REMOTE_SHA" = "0000000000000000000000000000000000000000" ]; then
@@ -20,13 +44,10 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     else
         BASE="$REMOTE_SHA"
     fi
-    CHANGED=$(git diff --name-only "$BASE" "$LOCAL_SHA" 2>/dev/null \
-              | grep -E '^(src/|include/|tools/|tests/|CMakeLists\.txt|cmake/|.*\.cmake$)' \
-              || true)
-    if [ -n "$CHANGED" ]; then
-        NEEDS_VERIFY=1
-        break
-    fi
+    FILES=$(git diff --name-only "$BASE" "$LOCAL_SHA" 2>/dev/null || true)
+    [ -z "$FILES" ] && continue
+    echo "$FILES" | grep -qE "$SOURCE_RE" && NEEDS_VERIFY=1
+    echo "$FILES" | grep -qE "$PERF_RE"   && NEEDS_PERF=1
 done
 
 if [ "$NEEDS_VERIFY" -eq 0 ]; then
@@ -34,5 +55,12 @@ if [ "$NEEDS_VERIFY" -eq 0 ]; then
     exit 0
 fi
 
-echo "pre-push: source changes detected → make verify-fast"
+if [ "$NEEDS_PERF" -eq 1 ]; then
+    echo "pre-push: source changes touch the measured paths → make verify-fast (with perf gate)"
+    exec make -s verify-fast
+fi
+
+echo "pre-push: source changes outside the measured paths → make verify-fast (no perf gate)"
+echo "          run the perf gate anyway with: make verify-fast"
+export IMP_VERIFY_SKIP_PERF=1
 exec make -s verify-fast
