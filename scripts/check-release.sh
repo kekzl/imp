@@ -298,7 +298,10 @@ section "make verify-fast"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
     echo "  (skipped via SKIP_VERIFY=1)"
 else
-    if make verify-fast >/tmp/imp_check_release_verify.log 2>&1; then
+    # A release runs every gate, whatever the shell exported: the pre-push hook
+    # sets IMP_VERIFY_SKIP_PERF=1 for diffs outside the measured paths.
+    if IMP_VERIFY_SKIP_PERF=0 IMP_VERIFY_SKIP_VRAM=0 IMP_VERIFY_SKIP_GRAPHS=0 \
+       make verify-fast >/tmp/imp_check_release_verify.log 2>&1; then
         pass "make verify-fast"
     else
         echo "  log: /tmp/imp_check_release_verify.log"

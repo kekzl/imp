@@ -27,7 +27,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 | Full GPU suite | `make test-gpu` | ~4–5 min (`test-attention` alone ~241 s) |
 | E2E model tests (real models) | `make test-e2e` | needs Qwen3-4B + Qwen3.5-4B + Gemma-4 GGUFs |
 | Vision goldens | `make test-vision` | `IMP_VISION_GOLDEN_DUMP=1` to regenerate |
-| Pre-push gate | `make verify-fast` | build + filtered tests + perf gate + peak-VRAM gate + graphs-ON/OFF gate + smoke (the VRAM gate adds its own short model load; skip with `IMP_VERIFY_SKIP_VRAM=1`) |
+| Pre-push gate | `make verify-fast` | build + filtered tests + perf gate + peak-VRAM gate + graphs-ON/OFF gate + smoke. **The hook drops the perf gate** (36 s → 18 s) unless the diff touches `src/{compute,exec,quant,runtime,model}/`, a `.cu`/`.cuh`, the build definition or a baseline. Everything else keeps the correctness half, and `check-release.sh` always runs all of it. Manual skips: `IMP_VERIFY_SKIP_PERF` / `_VRAM` / `_GRAPHS=1` |
 | Full pre-merge gate | `make verify` | ~5 min |
 | Chunked-prefill gate | `make verify-chunked` | vs `perf_baseline_chunked.json`, 5%/8% |
 | North-star gate | `make verify-north-star` | Qwen3-14B Q6_K vs its own baseline |

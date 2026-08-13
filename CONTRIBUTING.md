@@ -42,7 +42,7 @@ make verify-fast       # Build + filtered tests + perf gate + peak-VRAM gate + s
 make verify            # Full pre-merge gate (~5min)
 ```
 
-`make install-hooks` installs **two** hooks: pre-commit runs the full GPU suite (`make test-gpu`) when staged changes touch buildable sources, and pre-push runs `verify-fast` whenever `src/`, `include/`, `tools/`, or `tests/` change. The pre-commit one is heavy by design — skip a single commit with `git commit --no-verify`.
+`make install-hooks` installs **two** hooks: pre-commit runs the full GPU suite (`make test-gpu`) when staged changes touch buildable sources, and pre-push runs `verify-fast` whenever `src/`, `include/`, `tools/`, `tests/` or `scripts/` change — with the perf gate only when the diff touches a path that can move it (`src/{compute,exec,quant,runtime,model}/`, any `.cu`/`.cuh`, the build definition, or a baseline). A release always runs everything. The pre-commit one is heavy by design — skip a single commit with `git commit --no-verify`.
 
 ## Benchmark
 
