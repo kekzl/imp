@@ -1,5 +1,5 @@
 // Tier allocators: arena (T1/T2), block pool (T3), scratch stack (T4).
-// docs/MEMORY_ARCHITECTURE.md A2/A3.3/A3.4/A6, invariants V3-V6.
+// docs/internals/MEMORY.md A2/A3.3/A3.4/A6, invariants V3-V6.
 //
 // CPU-only: every allocator runs over FakeBackend, so the whole stack is
 // exercised in the lane CI actually runs (`ctest -L unit`).

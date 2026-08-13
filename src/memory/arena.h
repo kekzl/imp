@@ -1,7 +1,7 @@
 #pragma once
 
 // T1 (model-resident) and T2 (engine-persistent) of the lifetime taxonomy
-// (docs/MEMORY_ARCHITECTURE.md §A2/§A3.3).
+// (docs/internals/MEMORY.md §A2/§A3.3).
 //
 // A bump arena over ONE Region. Allocations are handed out by advancing an
 // offset and are never individually freed — the whole arena is released at

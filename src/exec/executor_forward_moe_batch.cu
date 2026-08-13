@@ -836,7 +836,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         if (moe_.expert_hist == nullptr) {
             int n_layers = cfg.n_layers;
             size_t bytes = static_cast<size_t>(n_layers) * ne * sizeof(unsigned int);
-            // vram_alloc, not cudaMalloc: I1 (docs/MEMORY_ARCHITECTURE.md) keeps
+            // vram_alloc, not cudaMalloc: I1 (docs/internals/MEMORY.md) keeps
             // direct CUDA allocation out of everything but src/memory/, against
             // a list that only shrinks. A diagnostic is no reason to grow it.
             moe_.expert_hist = static_cast<unsigned int*>(vram_alloc(vram_alloc_, bytes, "moe_expert_hist"));

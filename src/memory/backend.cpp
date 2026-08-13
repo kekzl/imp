@@ -103,7 +103,7 @@ void note_serving_allocation(RegionTag tag, size_t bytes, const void* site) {
     g_steady_allocs[i].fetch_add(1, std::memory_order_relaxed);
     if (!g_steady_logged[i].exchange(true, std::memory_order_relaxed)) {
         IMP_LOG_WARN("I2 violation: %.2f MiB for '%s' while serving (site %p) — this must be "
-                     "drawn from a pre-planned pool (docs/MEMORY_ARCHITECTURE.md A3.2)",
+                     "drawn from a pre-planned pool (docs/internals/MEMORY.md A3.2)",
                      bytes / (1024.0 * 1024.0), region_tag_name(tag), site);
     }
 #ifndef NDEBUG

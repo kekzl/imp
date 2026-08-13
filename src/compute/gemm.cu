@@ -83,7 +83,7 @@ static cublasLtHandle_t get_cublaslt_handle() {
 // arena via gemm_init(), used by all GEMM calls.  cuBLASLt takes the workspace
 // as an argument, so ONE slice sized at the plan's maximum serves every call:
 // per-handle would multiply it by handle count for no benefit
-// (docs/MEMORY_ARCHITECTURE.md A5.3).
+// (docs/internals/MEMORY.md A5.3).
 // ---------------------------------------------------------------------------
 static void* s_workspace = nullptr;
 static size_t s_workspace_size = 0;

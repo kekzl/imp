@@ -2,7 +2,7 @@
 
 // Exact, pre-upload demand for the engine-persistent (T2) tenants whose size
 // is a pure function of the model shape and the engine config
-// (docs/MEMORY_ARCHITECTURE.md B5 point 1, A7 step 4b/6).
+// (docs/internals/MEMORY.md B5 point 1, A7 step 4b/6).
 //
 // Why this exists: the T2 arena acquires its Region when it is OPENED, so
 // sizing it correctly is what reserves those bytes against everything that

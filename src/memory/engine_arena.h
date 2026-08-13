@@ -1,7 +1,7 @@
 #pragma once
 
 // The process-global engine-persistent (T2) arena
-// (docs/MEMORY_ARCHITECTURE.md §A2/§A3.3).
+// (docs/internals/MEMORY.md §A2/§A3.3).
 //
 // T2 holds what lives for the process: executor workspaces, the cuBLAS/CUTLASS
 // scratch, graph buffers, per-kernel scratch that is sized once at init. None

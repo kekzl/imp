@@ -1,5 +1,5 @@
 // PinnedBuffer — the owner for T5's engine-persistent half
-// (docs/MEMORY_ARCHITECTURE.md §A2, memory/host_pinned.h).
+// (docs/internals/MEMORY.md §A2, memory/host_pinned.h).
 //
 // CPU lane on purpose, and it is the whole reason HostPinnedAllocator is an
 // interface: the 26 call sites this type exists for are pinned-host buffers in

@@ -1,6 +1,6 @@
 #pragma once
 
-// A7 step 2b (docs/MEMORY_ARCHITECTURE.md): run plan_memory() alongside
+// A7 step 2b (docs/internals/MEMORY.md): run plan_memory() alongside
 // compute_vram_budget(), log both, and attribute the difference — WITHOUT
 // applying anything.
 //

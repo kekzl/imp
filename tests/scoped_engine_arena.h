@@ -4,7 +4,7 @@
 // directly.
 //
 // Production opens the arena in Engine::init, before the first tenant runs
-// (docs/MEMORY_ARCHITECTURE.md A3.3). A GPU test that calls into a T2 tenant
+// (docs/internals/MEMORY.md A3.3). A GPU test that calls into a T2 tenant
 // without an Engine — the CUTLASS grouped GEMM and the IMMA prefill scratches
 // are the cases that needed this — would otherwise find no arena, take nothing,
 // and fail for a reason that has nothing to do with what it is testing.

@@ -1,6 +1,6 @@
 // tools/analysis/vmm_wsl2_probe.cu
 // WSL2/WDDM viability spike for the CUDA virtual-memory-management APIs
-// (docs/MEMORY_ARCHITECTURE.md A3.1 — the hard gate on A7 step 7, the growable
+// (docs/internals/MEMORY.md A3.1 — the hard gate on A7 step 7, the growable
 // VMM backend for the KV block pool).
 //
 // No imp dependencies. Build + run inside a CUDA container:
@@ -189,7 +189,7 @@ struct VmmPool {
 // ---------------------------------------------------------------------------
 
 int main() {
-    printf("=== imp VMM WSL2/WDDM spike (docs/MEMORY_ARCHITECTURE.md A3.1) ===\n\n");
+    printf("=== imp VMM WSL2/WDDM spike (docs/internals/MEMORY.md A3.1) ===\n\n");
 
     CU_TRY(cuInit(0));
     CUDA_TRY(cudaSetDevice(0));

@@ -1,7 +1,7 @@
 #pragma once
 
 // T2 slot pool for the conditional graph loop
-// (docs/MEMORY_ARCHITECTURE.md §A2/§A3.4, A7 step 5.3).
+// (docs/internals/MEMORY.md §A2/§A3.4, A7 step 5.3).
 //
 // CudaGraphConditionalRunner::setup() allocated 13 device buffers and 4 pinned
 // host buffers, and cleanup() freed them again — once per burst, which the

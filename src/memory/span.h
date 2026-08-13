@@ -1,6 +1,6 @@
 #pragma once
 
-// L3 of the memory architecture (docs/MEMORY_ARCHITECTURE.md §A3.4): the typed
+// L3 of the memory architecture (docs/internals/MEMORY.md §A3.4): the typed
 // views that make I3 — "stable addresses for graph-captured memory" — a
 // property of the type system instead of a comment the next refactor ignores.
 //

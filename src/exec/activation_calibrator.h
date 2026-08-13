@@ -32,7 +32,7 @@ class ActivationCalibrator {
 public:
     // `alloc` may be null in tests; then the collector allocates nothing and
     // stays empty rather than reaching for cudaMalloc behind the allocator's
-    // back (docs/MEMORY_ARCHITECTURE.md A3 — every device allocation routes
+    // back (docs/internals/MEMORY.md A3 — every device allocation routes
     // through src/memory/).
     explicit ActivationCalibrator(VRAMAllocator* alloc) : alloc_(alloc) {}
     ~ActivationCalibrator();

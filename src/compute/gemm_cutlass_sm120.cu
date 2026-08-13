@@ -798,7 +798,7 @@ static bool gemm_nvfp4_cutlass_sm120_impl(const void* a_data, const void* a_sf, 
     // each one asks gemm_nvfp4_cutlass_sm120_workspace() for the same (or a
     // larger) shape and passes the answer. Refusing lets the dispatch fall back
     // to the dequant path with correct output; allocating here could not
-    // (docs/MEMORY_ARCHITECTURE.md A5.3).
+    // (docs/internals/MEMORY.md A5.3).
     size_t needed = GemmT::get_workspace_size(args);
     if (needed > workspace_size) {
         IMP_LOG_WARN(

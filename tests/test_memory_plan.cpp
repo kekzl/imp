@@ -1,4 +1,4 @@
-// The planner (docs/MEMORY_ARCHITECTURE.md A4), invariants V7 (determinism)
+// The planner (docs/internals/MEMORY.md A4), invariants V7 (determinism)
 // and V8 (sufficiency).
 //
 // CPU-only by construction: plan_memory() never queries the device, takes no

@@ -680,7 +680,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     }
     // Engine-persistent (T2) arena — opened before the first tenant
-    // (docs/MEMORY_ARCHITECTURE.md A3.3). The arena acquires its Region HERE,
+    // (docs/internals/MEMORY.md A3.3). The arena acquires its Region HERE,
     // so its capacity is what reserves those bytes against everything that
     // allocates later — notably the pre-dequant cache build, which expands
     // into whatever free VRAM it finds (AUDIT B23). Size it from the exact
@@ -809,7 +809,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     MemAccount::instance().checkpoint("05_post_warmup");
 
     // I2: from here on, asking the driver for memory is a defect
-    // (docs/MEMORY_ARCHITECTURE.md A3.2). The guard was built in step 0 and
+    // (docs/internals/MEMORY.md A3.2). The guard was built in step 0 and
     // then never connected — set_alloc_phase() existed only in tests, so
     // steady_state_allocations() was structurally zero and acceptance
     // criterion 3 was vacuous (AUDIT B8). Debug builds abort on a

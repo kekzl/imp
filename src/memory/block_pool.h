@@ -1,7 +1,7 @@
 #pragma once
 
 // T3 (pooled fixed-block) of the lifetime taxonomy
-// (docs/MEMORY_ARCHITECTURE.md §A2/§A3.4/§A5.1).
+// (docs/internals/MEMORY.md §A2/§A3.4/§A5.1).
 //
 // One contiguous Region carved into fixed-size blocks, handed out through a
 // free list. Fixed size is the whole point: a pool of identical blocks cannot
@@ -103,7 +103,7 @@ public:
     // sizes differ per layer (Gemma-4 dual geometry) and per group (SWA layers
     // hold only the trailing window). A uniform stride cannot express that,
     // and the addressing was never the part that needed fixing: the ownership
-    // was. See docs/MEMORY_ARCHITECTURE.md B2/D10.
+    // was. See docs/internals/MEMORY.md B2/D10.
     [[nodiscard]] MemError open_slots(int num_blocks);
 
     // Release the region. Asserts (debug) that no refs are outstanding — a

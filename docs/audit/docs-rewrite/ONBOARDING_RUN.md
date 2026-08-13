@@ -38,7 +38,7 @@ Ran the README block verbatim, changing only the host port (8099) to avoid the
 user's own service on 8080, and the model path to a checkpoint that exists here:
 
 ```
-docker run -d --gpus all -v /home/kekz/models:/models \
+docker run -d --gpus all -v ./models:/models \
   -v imp-onboarding-cache:/home/imp/.cache/imp \
   -p 8099:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3-8B-Q8_0.gguf
 ```
