@@ -95,9 +95,16 @@ namespace {
 // which measured ~48 kernel launches per layer against this path's ~3
 // (docs/roadmap.md).
 static bool can_decode_fast(int n, const Tensor& expert_up_packed, QType up_qtype, void* dequant_buf,
-                            QType compute_dtype, bool host_pool_ok) {
-    return (n == 1 && expert_up_packed.data != nullptr && dequant_buf != nullptr &&
-            compute_dtype == QType::F16 && (expert_up_packed.on_device || host_pool_ok) &&
+                            QType compute_dtype, bool host_pool_ok, bool nvfp4_host_ok) {
+    if (n != 1 || compute_dtype != QType::F16)
+        return false;
+    // Host-resident NVFP4 experts have no packed 3-D tensor to test — the slot
+    // path addresses the per-expert tensors directly. Its own predicate has
+    // already checked everything this one would.
+    if (nvfp4_host_ok)
+        return true;
+    return (expert_up_packed.data != nullptr && dequant_buf != nullptr &&
+            (expert_up_packed.on_device || host_pool_ok) &&
             (up_qtype == QType::Q6_K || up_qtype == QType::Q8_0 || up_qtype == QType::Q4_0 ||
              up_qtype == QType::Q4_K || up_qtype == QType::Q5_K || up_qtype == QType::Q2_K ||
              up_qtype == QType::Q3_K || up_qtype == QType::Q5_1 || up_qtype == QType::NVFP4));
@@ -189,7 +196,9 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
         can_decode_fast(ctx.n, ly.expert_up_packed, ly.expert_up_packed.qtype, moe_.dequant_buf,
                         compute_dtype_,
                         host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_,
-                                               model_->config().n_experts_active)) &&
+                                               model_->config().n_experts_active),
+                        nvfp4_host_decode_ready(ly, expert_cache_, moe_,
+                                                model_->config().n_experts_active)) &&
         ly.w_up_shared.data == nullptr;  // must not have shared expert for full residual fusion
 
     if (!ctx.will_skip_residual_copy) {
@@ -316,7 +325,9 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     ctx.will_decode_fast = can_decode_fast(ctx.n, ly.expert_up_packed, ctx.up_qtype, moe_.dequant_buf,
                                            compute_dtype_,
                                            host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_,
-                                                                  cfg.n_experts_active));
+                                                                  cfg.n_experts_active),
+                                           nvfp4_host_decode_ready(ly, expert_cache_, moe_,
+                                                                   cfg.n_experts_active));
     // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
     // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
     // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.

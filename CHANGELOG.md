@@ -11,11 +11,20 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **NVFP4 MoE experts can now live on host**, so a checkpoint whose experts
+  exceed VRAM runs instead of being refused. Qwen3-30B-A3B-NVFP4 with all 48 MoE
+  layers off-GPU answers correctly at 23.0 tok/s, against 384.0 fully resident.
+  ([`docs/roadmap.md`](docs/roadmap.md))
+
 ### Fixed
 
 - **An NVFP4 MoE checkpoint whose experts do not fit is refused at load**
   instead of skipping their GEMMs and answering from the rest at exit code 0.
-  GGUF experts keep their host path. ([`docs/roadmap.md`](docs/roadmap.md))
+  The refusal now fires only when the expert cache cannot hold a layer's working
+  set; otherwise the host path above serves it. GGUF experts are unaffected.
+  ([`docs/roadmap.md`](docs/roadmap.md))
 
 ## [0.25.0] - 2026-08-13
 

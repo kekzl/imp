@@ -13,6 +13,7 @@
 #include "exec/executor.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
+#include "exec/nvfp4_expert_offload.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/logging.h"
 #include "quant/nvfp4_quant.h"
@@ -91,7 +92,20 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
             return false;  // not an NVFP4 promotion — nothing else to do here
         }
 
-        if (!w.on_device || !sc.weight_scale.on_device) {
+        // Promotion itself is host bookkeeping — it labels the weight NVFP4 and
+        // records where its micro-scales and tensor scale live. What it must
+        // never do is mix address spaces: `w.scales` is read with the same
+        // pointer discipline as `w.data`, so a device weight carrying a host
+        // scale (or the reverse) would hand one of them to the wrong consumer.
+        //
+        // Both-on-host is a legitimate combination for MoE experts, which the
+        // expert cache stages into VRAM per (layer, projection) at decode time.
+        // Skipping them is what made #1403's placement unservable: the weight
+        // stayed QType::INT8 and reached the generic GEMM as raw bytes. Dense
+        // weights have no host path, so they keep the device requirement.
+        const bool both_device = (w.on_device && sc.weight_scale.on_device);
+        const bool both_host = (!w.on_device && !sc.weight_scale.on_device);
+        if (!both_device && !(both_host && is_expert_key(key))) {
             IMP_LOG_DEBUG("NVFP4 prequant: skipping %s (data_dev=%d, scale_dev=%d)", key, w.on_device,
                           sc.weight_scale.on_device);
             return false;
@@ -458,6 +472,15 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
         // instead (phase 2b). Always register.
         auto register_prequant = [&](const Tensor& w) {
             if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
+                return;
+            // These caches feed device kernels: every pointer registered here
+            // is dereferenced on the GPU. A host-resident weight put in one is
+            // an illegal access, not a slow path — which is exactly what
+            // happened once Phase 0 started promoting host-resident experts
+            // (they reached the CUTLASS grouped prefill as host pointers).
+            // Host-resident MoE experts are served by the expert cache
+            // instead; see exec/nvfp4_expert_offload.h.
+            if (!w.on_device)
                 return;
             if (wcache_->nvfp4.count(w.data))
                 return;

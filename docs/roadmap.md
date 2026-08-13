@@ -306,6 +306,22 @@ What did **not** materialise is the rest of the 19x. Establishing residency need
 
 So the entry above stands, with one correction: the symptom is not only "repeated-token garbage + IMA". At a *partial* offload the model stays fluent and is simply wrong, which is the harder failure to notice. Building the path itself is still open, and the shape is the same one #1370 used: a cache slot would hold one expert's packed bytes and its micro-scales concatenated, so `gemv_nvfp4_moe_*` can be fed slot indices with `expert_stride_packed = expert_stride_ms = slot_size_`, needing no kernel change. The one piece that does not fall out for free is `tensor_scales`, which those kernels index with the same id as the weight, so it needs a per-slot mirror rather than the per-expert array that exists today.
 
+**Built 2026-08-13, and the decode half was exactly that. The estimate still missed roughly half the work, in a way worth recording.** Measured on Qwen3-30B-A3B-NVFP4-Modelopt, greedy, same prompt as the refusal above:
+
+| arm | before (#1403) | after |
+|---|---|---|
+| experts resident | 361.97 tok/s, coherent | **384.03**, coherent |
+| 8 of 48 layers on host | 88.77 tok/s, **wrong answer** | **44.54**, correct |
+| all 48 layers on host | repeats `ftp` forever | **23.03**, correct |
+
+Note the middle row got *slower*, which is the point: those eight layers were fast because they were skipping their GEMMs. Both host arms now emit the same answer as the resident one, and the 8-layer arm stops at the identical token count (119). GGUF offload is unchanged (39.77 tok/s at full offload, 65.7 % hit rate), and `make verify-fast` is flat (decode −1.05 %, prefill +0.95 %, peak VRAM +0.01 %).
+
+**What the estimate missed: the prefill.** #1370 could ignore `n > 1` — its own entry says "prefill unchanged, n>1 still takes the legacy path" — because GGUF experts reach `dequant_expert`'s staging buffer there. Per-expert NVFP4 tensors do not: the M>1 fallback handed the 593 MiB expert matrix to `gemm_nvfp4`, which dequantises on the device, so the first working decode still died on an IMA. The fix is small once located (stage one expert per `expert_gemm` call through the same slot pool, three slots regardless of how many experts the prompt activates), but it is a second path, not a detail of the first.
+
+**And the promotion had a blast radius nobody costed.** Letting Phase 0 label host-resident experts NVFP4 makes them visible to every consumer that keys off `qtype == NVFP4` and then does device work. Four had to learn the difference, each found by a separate crash or wrong answer: Phase 0b registered them for the CUTLASS grouped prefill (host pointer into a kernel); Phase 3 tried to copy them into a contiguous device buffer with `cudaMemcpyDeviceToDevice` (fails on a host source, leaving the buffer uninitialised — and it would have pulled back into VRAM exactly what was moved out); the micro-scales were still uploaded to VRAM, so the promotion's own both-on-host guard never fired; and `can_decode_fast` keys off `expert_up_packed`, which is only stamped for device-resident experts, so the decode sat in the serial legacy path at 35 tok/s while the new one went unused. **The generalisable rule: `qtype` says how to decode bytes, never where they live. A predicate that reads one and means the other is the #1384 / #1403 shape, and it appeared four more times here.**
+
+Two costs remain, both measured rather than assumed. Prefill runs the serial per-expert fallback, and it evicts the decode working set — 74.6 % hit rate against the 88.7 % the GGUF path reaches, which is the same thrashing #1365's working-set gate fixed there and which nothing yet fixes here. Neither is a correctness issue and both are ordinary follow-on work.
+
 *Where the path stands after all of it, re-profiled 2026-08-11 on the shipped build.* The entry opened by calling this path issue-bound; after #1370 and #1376 **it is not any more, and that retires the framing rather than confirming it.** Same config (256 cold decode tokens, all experts host-resident), tg phase 7.06 s:
 
 | term | per token | share |

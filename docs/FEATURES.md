@@ -98,6 +98,6 @@ Source: `src/core/qtype.h`.
 | speculative decoding: n-gram, suffix, MTP | ✅ | economics differ per model, see limitations |
 | Gated DeltaNet / Mamba2 hybrids | ✅ | |
 | MoE host offload for GGUF experts | ✅ | see the figure in [`PERF.md`](PERF.md#moe-host-offload) |
-| MoE host offload for NVFP4 experts | ⚪ | refused at load rather than served wrong (#1403) |
+| MoE host offload for NVFP4 experts | 🟡 | served from the expert cache; no automatic gate, see [`LIMITATIONS.md`](LIMITATIONS.md) |
 | multi-GPU, tensor parallelism | ⚪ | |
 | non-Blackwell GPUs, CPU inference | ⚪ | |

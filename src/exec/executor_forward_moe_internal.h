@@ -6,6 +6,8 @@
 #include "quant/dequant_gpu.h"
 #include "exec/expert_cache.h"
 #include "exec/moe_workspace.h"
+#include "exec/nvfp4_expert_offload.h"
+#include "model/model_config.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -81,6 +83,49 @@ inline bool host_expert_pool_ready(const Tensor& up_packed, const ExpertLRUCache
     return (!up_packed.on_device && cache.n_slots_ > 0 && cache.pool_ != nullptr && cache.slot_size_ > 0 &&
             moe.d_slot_idx != nullptr && moe.d_slot_idx_count >= kExpertProjCount * top_k &&
             cache.slots_per_layer_ >= kExpertProjCount * top_k);
+}
+
+// The weaker form the LEGACY (prefill) path needs. It stages one expert at a
+// time and consumes the result before touching the next, so it needs neither
+// the slot-index buffer nor `3 * top_k` slots — stream ordering already keeps
+// a refill behind the kernel that read the previous occupant. What it does
+// need is a pool that carries NVFP4 slots at all.
+inline bool nvfp4_host_pool_ready_for_staging(const ExpertLRUCache& cache) {
+    return (cache.nvfp4_slots_ && cache.d_slot_scales_ != nullptr && cache.pool_ != nullptr &&
+            cache.slot_size_ > 0 && cache.slots_per_layer_ >= kExpertProjCount);
+}
+
+// Same question for NVFP4 experts. Two extra requirements over the GGUF case:
+// the pool must have been initialised with NVFP4 slots (they are wider — one
+// slot holds packed weights AND micro-scales), and the per-slot tensor-scale
+// mirror must exist, because the fused kernels index it with the slot number.
+inline bool nvfp4_host_pool_ready(const ExpertLRUCache& cache, const MoEWorkspace& moe, int top_k) {
+    return (cache.nvfp4_slots_ && cache.d_slot_scales_ != nullptr && cache.n_slots_ > 0 &&
+            cache.pool_ != nullptr && cache.slot_size_ > 0 && moe.d_slot_idx != nullptr &&
+            moe.d_slot_idx_count >= kExpertProjCount * top_k &&
+            cache.slots_per_layer_ >= kExpertProjCount * top_k);
+}
+
+// Does this layer's n==1 decode go to the host-resident NVFP4 slot path?
+//
+// ONE definition, three readers: `can_decode_fast` (may I take the decode fast
+// path at all), the residual-fusion pre-check, and run_moe_decode_fast's own
+// branch. They must agree exactly — if the first says yes and the last
+// declines, the layer falls through to a path that cannot serve it.
+//
+// This deliberately does NOT look at `expert_up_packed`: that tensor is only
+// stamped for device-resident experts, so a host-resident NVFP4 layer arrives
+// with it empty. Reading it there is what kept this decode in the serial
+// legacy path at 35 tok/s while the slot path sat unused.
+inline bool nvfp4_host_decode_ready(const TransformerLayer& ly, const ExpertLRUCache& cache,
+                                    const MoEWorkspace& moe, int top_k) {
+    if (!nvfp4_host_pool_ready(cache, moe, top_k))
+        return false;
+    const bool non_gated = (ly.expert_gate_packed.data == nullptr &&
+                            (ly.expert_w_gate.empty() || ly.expert_w_gate[0].data == nullptr));
+    return nvfp4_host_experts_servable(ly.expert_w_up) &&
+           nvfp4_host_experts_servable(ly.expert_w_down) &&
+           (non_gated || nvfp4_host_experts_servable(ly.expert_w_gate));
 }
 
 }  // namespace imp
