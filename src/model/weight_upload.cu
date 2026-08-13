@@ -2,6 +2,7 @@
 #include "memory/vram_query.h"
 #include "memory/weight_snapshot.h"
 #include "memory/weight_cache_file.h"
+#include "model/expert_placement.h"
 #include "model/gguf_loader.h"
 #include "memory/mem_account.h"
 #include "quant/dequant_gpu.h"
@@ -17,6 +18,7 @@
 
 #ifdef __linux__
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #endif
@@ -1748,9 +1750,8 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
     size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
     if (is_nvfp4_prequant && budget < total_expert_bytes) {
         IMP_LOG_WARN(
-            "NVFP4-prequant experts (%.2f GiB) exceed on-device budget (%.2f GiB free) — "
-            "some experts will be host-resident, which is UNSUPPORTED for NVFP4 and will "
-            "produce garbage. Reduce context (runtime.max_seq_len) or KV dtype (--kv-nvfp4).",
+            "NVFP4-prequant experts (%.2f GiB) exceed the on-device budget (%.2f GiB free). "
+            "There is no host path for this weight format, so the load is about to be refused.",
             total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
     }
 
@@ -1828,6 +1829,27 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
     std::vector<bool> experts_upload_layer(n_layers, false);
     decide_expert_layer_placement_(layer_expert_bytes, total_expert_bytes, expert_reserve_bytes, n_layers,
                                    experts_upload_layer, ctx.is_nvfp4_prequant);
+
+    // Refuse a placement this build cannot serve, rather than answering from
+    // the experts that happen to be resident. See expert_placement.h for why
+    // the three existing guards all miss this, and for the measurements.
+    if (!expert_placement_is_serveable(ctx.is_nvfp4_prequant, layer_expert_bytes, experts_upload_layer)) {
+        const int host_layers = expert_placement_host_layers(layer_expert_bytes, experts_upload_layer);
+        size_t free_mem = 0, total_mem = 0;
+        vram_budget_mem_get_info(&free_mem, &total_mem);
+        std::string msg = "NVFP4-prequant experts do not fit on the device: ";
+        msg += std::to_string(host_layers);
+        msg += " MoE layer(s) would be host-resident, and there is no host-offload path for this ";
+        msg += "weight format. Serving it would silently skip those experts' GEMMs and answer from ";
+        msg += "the rest (";
+        msg += std::to_string(total_expert_bytes / (1024 * 1024));
+        msg += " MiB of experts, ";
+        msg += std::to_string(free_mem / (1024 * 1024));
+        msg += " MiB free). Reduce runtime.max_seq_len, pick a smaller KV dtype ";
+        msg += "(kv_cache.dtype=nvfp4), or use a GGUF quantisation of this model, whose experts ";
+        msg += "do have a host path.";
+        throw std::runtime_error(msg);
+    }
 
     // Upload expert weights for each layer
     for (int i = 0; i < n_layers; ++i) {
