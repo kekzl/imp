@@ -1,9 +1,9 @@
----
+<!--
 layer: L3
 audience: agents
 verified: 2026-08-13
 commit: f7831dba
----
+-->
 
 # Claim verification (phase 2, validator)
 

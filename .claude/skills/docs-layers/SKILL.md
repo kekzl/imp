@@ -34,16 +34,24 @@ paragraph into the wrong layer is the most common defect here, and it is what
 **Smell test:** if a paragraph in L0 or L1 uses `mma.sync`, `TMA`, `splitk` or
 "NVFP4 block scaling" without explaining it, it belongs in L2.
 
-## Frontmatter, on every in-scope file
+## Metadata header, on every in-scope file
 
-```yaml
----
+**An HTML comment, never YAML frontmatter.** GitHub renders YAML front matter as
+a visible table at the top of the page, so the first thing a visitor saw on the
+README was `layer / audience / verified / commit` instead of what imp is. The
+header is for the linter; the reader must not meet it.
+
+```markdown
+<!--
 layer: L1            # L0 | L1 | L2 | L3
 audience: operators  # newcomers | operators | kernel-devs | agents
 verified: 2026-08-13 # last content verification
 commit: <sha8>       # what it was verified against
----
+-->
 ```
+
+Do **not** convert `.claude/skills/*/SKILL.md` or `.github/ISSUE_TEMPLATE/*.md`:
+their YAML frontmatter is functional, parsed by the skill loader and by GitHub.
 
 ## Single source of truth
 

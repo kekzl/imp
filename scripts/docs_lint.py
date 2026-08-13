@@ -100,7 +100,13 @@ PROV_RE = re.compile(r"\[PROV:")
 PROV_HEADER_ALLOWLIST = {"docs/BENCHMARKS.md", "docs/GOAL.md", "docs/MODELS.md"}
 PROV_HEADER_RE = re.compile(r"commit|re-measured|measured", re.I)
 
-FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+# The metadata header is an HTML COMMENT, not YAML frontmatter, and that is
+# deliberate: GitHub renders YAML front matter as a visible table at the top of
+# the page, so the README - the one file that exists for first contact - opened
+# with `layer / audience / verified / commit` instead of with what imp is.
+# Machine-readable and invisible beats machine-readable and in the reader's way.
+# The legacy `---` form is still accepted so a file is never silently unchecked.
+FRONTMATTER_RE = re.compile(r"\A(?:<!--\n(.*?)\n-->|---\n(.*?)\n---)\n", re.S)
 VALID_LAYERS = {"L0", "L1", "L2", "L3"}
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)#\s]+)(?:#[^)]*)?\)")
@@ -142,7 +148,7 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
     if not m:
         errors.append(f"{rel}: missing frontmatter (needs layer/audience/verified/commit)")
     else:
-        fm = m.group(1)
+        fm = m.group(1) or m.group(2)
         lm = re.search(r"^layer:\s*(\S+)", fm, re.M)
         if not lm:
             errors.append(f"{rel}: frontmatter has no `layer:`")
