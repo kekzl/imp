@@ -335,6 +335,26 @@ Two costs remain, both measured rather than assumed. Prefill runs the serial per
 
 Two caveats on the numbers: the arms were not alternated (each switch is a full rebuild), and the first run of any arm is cold — 35.06 tok/s against 57-60 warm on identical code, the same warm/cold gap this entry records for the GGUF path.
 
+*What the remaining serial prefill actually costs, profiled 2026-08-13.* Host-offloaded prefill is **61x** slower than resident on this model (pp512 17508 vs 285 tok/s), against only 6.9x on decode — so prefill, not decode, is where this path loses most. nsys says why, and it is not the GEMMs: `cudaMemcpyAsync` is **53.7 %** of API time at 90 759 calls, and the host sits in those calls for **4.13 s** while the GPU spends **795 ms** actually transferring. The gap is the driver staging an mmap source synchronously, because WSL2 cannot page-lock a mapping in place.
+
+Isolated at one expert's size (768 KiB weights + 96 KiB micro-scales), medians over 300 reps:
+
+| source | host time in the call | GPU time | rate |
+|---|---|---|---|
+| pageable mmap, 2 calls (what it did) | 76.2 µs | 92.3 µs | 9.6 GB/s |
+| pinned, 1 call | 2.8 µs | 27.3 µs | 32.4 GB/s |
+
+**`moe.pin_host_experts` (default off) copies those experts into pinned host memory at load**, which is what the GGUF packed path already does at `weight_upload.cu` Path A1 — the per-expert NVFP4 tensors simply never reached it, the same "one path got the treatment, the other did not" shape as the rest of this entry. Six alternating paired rounds, all 48 MoE layers host-resident:
+
+| | pp512 | tg256 | model load |
+|---|---|---|---|
+| off | 276.6 | no effect | 5.1 s |
+| **on** | **317.6 (+14.8 %, 6/6 pairs)** | 3 up / 3 down | 22.6 s |
+
+Decode does not move because its cache hits 96-98 % and barely transfers; prefill touches every expert. It stays **off by default** because 4.4x model-load time is too visible a cost to impose silently, and break-even is around 32k prompt tokens.
+
+**Two method notes, both of which cost a wrong conclusion first.** A per-expert pinned buffer was the obvious implementation and is the wrong one: nsys measured **36 877 `cudaHostAlloc` calls costing 24.7 s** plus 6.4 s of `cudaFreeHost`, to save 0.5 s of transfer. One slab per (layer, projection) is 144 allocations for the same result. And **three paired rounds read decode as −33 % and that was noise** — this path's decode spread is wider than the effect (the off arm alone spanned 34.7 to 66.1 tok/s), which is exactly the "only paired, alternating rounds decide anything here" rule already recorded above, needing six pairs rather than three.
+
 *Where the path stands after all of it, re-profiled 2026-08-11 on the shipped build.* The entry opened by calling this path issue-bound; after #1370 and #1376 **it is not any more, and that retires the framing rather than confirming it.** Same config (256 cold decode tokens, all experts host-resident), tg phase 7.06 s:
 
 | term | per token | share |

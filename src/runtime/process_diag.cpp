@@ -50,6 +50,7 @@ struct ProcessDiag {
     int moe_mr_nr = 8;
     int moe_expert_overhead_pct = 10;
     int moe_force_host_experts = 0;
+    bool moe_pin_host_experts = false;
 
     // GDN
     std::string gdn_layout_override;
@@ -117,6 +118,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.moe_mr_nr = cfg.moe.mr_nr;
     d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
     d.moe_force_host_experts = cfg.moe.force_host_experts;
+    d.moe_pin_host_experts = cfg.moe.pin_host_experts;
     d.gdn_layout_override = cfg.gdn.layout_override;
 }
 
@@ -166,6 +168,7 @@ bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
 int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }
 int process_diag_moe_force_host_experts() { return slot().moe_force_host_experts; }
+bool process_diag_moe_pin_host_experts() { return slot().moe_pin_host_experts; }
 const std::string& process_diag_gdn_layout_override() { return slot().gdn_layout_override; }
 
 }  // namespace imp
