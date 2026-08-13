@@ -74,26 +74,25 @@ Single source of truth for the version is **`CMakeLists.txt`** `project(imp … 
 4. Merge that PR (squash) as usual, then tag the merged commit on `main`: `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`. Tags are `vX.Y.Z` (e.g. `v0.18.0`). `scripts/check-release.sh` gates release-touching PRs in CI.
 5. **Publish a GitHub Release on that tag — the tag alone is not the release.** Every version back to v0.20.x has one, and it is what a reader actually sees: `gh release create vX.Y.Z --title "vX.Y.Z — <what changed, in words>" --notes-file <file> --verify-tag`. Format below. `check-release.sh` prints only `PASS make verify-fast` and swallows the gate figures, so run `make verify-fast` separately if you need to quote them.
 
-### Write both for a stranger
+### Write both for a stranger — without introducing the project
 
-The CHANGELOG and the release page are the only two artifacts read by people who have never opened this repo. They arrive from a model-name search or a link, with no context. **The reasoning lives in the PR; these two say what changed and what it measures.**
+The CHANGELOG and the release page are read by people who did not follow the PRs. **The reasoning lives in the PR; these two say what changed and what it measures.** Write them so a stranger can follow — but *don't explain imp to them*: they are looking at the repo, the README is one click away.
+
+- **No boilerplate header, no install block, no "what imp is" paragraph, and no standalone "all numbers were measured under X" banner.** That was tried in v0.25.0 and pulled back out. Start with `## Highlights`. Measurement conditions ride along with the numbers instead: `| model, tg256, spec off |` in the table header, `Qwen3-8B-Q8_0 on one RTX 5090` in the Gate line.
 
 - **Entries are one to three lines** (the rule is in `CHANGELOG.md`'s own preamble, and v0.25.0 broke it: 159 lines for 13 entries, ~15 lines each). What changed for the reader, the number that makes it checkable, then `(#NNNN)`. The hypotheses, the ruled-out causes and the war story stay in the PR body and `docs/`.
 - **No unexplained internal vocabulary.** `has_pure_ssm`, "Phase 4", "the shard-drop", "primary tier", "order-balanced pairs" mean nothing outside the repo. Name a symbol only when the reader could grep for it.
 - **Every number needs its referent**: which model, which quant, and the units. "decode 287.63" is meaningless; "Qwen3-8B-Q8, decode 287.63 tok/s vs 287.19 baseline" is checkable.
+- **Lead with what a reader can now do that they could not before** — a checkpoint that runs at all, a modality that works — and only then with how much faster the existing paths got. v0.25.0 first led with the graph fix because that was the most interesting thing to *write*; the actual news was `Nemotron-3.5-Lightning-30B-A3B-NVFP4`, which did not run in v0.24.0 and decodes at 362 tok/s here.
 - **Titles name the change, not the anecdote.** `v0.25.0 — a "not yet" nobody retested: the Nemotron family was 3x slower than its own kernels` is a riddle to everyone but the author; `Nemotron-H decodes 3x faster; Qwen3.6-35B sees images` is the same release.
 - Publish negative results too — a lever that measured worse is a finding. Keep it to the verdict and the number.
 
-Release body skeleton (the four things a stranger needs first are what imp *is*, the hardware, how to get it, and the measurement conditions):
+Release body skeleton — three headings and a footer, nothing before them:
 
 ```markdown
-<one-line what-is-imp + the sm_120a/RTX 5090 constraint + link to README>
-Install: docker pull ghcr.io/kekzl/imp:vX.Y.Z
-All numbers below: single RTX 5090, batch 1, single stream, speculation off.
-
 ## Highlights          <- 3-5 bullets, headline number inline, (#NNNN) for detail
 ## Also in here        <- one line each: deps, refusals, guards
-## Gate                <- verify-fast on the tagged tree, model named
+## Gate                <- verify-fast on the tagged tree, model + quant + card named
 No breaking changes. / Breaking: <what a user must change>
 Full detail: CHANGELOG · N PRs since vX.Y.(Z-1).
 ```
