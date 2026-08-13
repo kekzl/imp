@@ -1,85 +1,72 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # docs
 
-Nineteen more markdown files sit next to this one and GitHub lists them
-alphabetically, which tells you nothing about which is the map and which is a
-snapshot of one afternoon. This is the index.
+Documentation is layered by **who is reading**, and every file declares its layer
+in frontmatter. `scripts/docs_lint.py` gates the contract in CI.
 
-**If you are here to understand the engine, read [`architecture.md`](architecture.md)
-first.** It is the canonical narrative; everything else is either a companion to
-it, a contract, or a record.
+| layer | reader | where |
+|---|---|---|
+| **L0** | first contact, knows LLMs, not CUDA | [`../README.md`](../README.md) |
+| **L1** | operators: deploy, configure, diagnose | `docs/*.md`, this directory |
+| **L2** | kernel work: PTX, MMA, occupancy, roofline | [`internals/`](internals/) |
+| **L3** | AI agents working on the tree | `CLAUDE.md`, per directory |
 
-## The canonical four
+A document links downward; it does not repeat. If an L1 page starts explaining
+`mma.sync`, it is in the wrong layer.
 
-`CLAUDE.md` routes agents to these, and they are the ones kept current.
+## Start here (L1)
+
+| doc | what it answers |
+|---|---|
+| [`QUICKSTART.md`](QUICKSTART.md) | from nothing to an answered completion |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | config, auth, reverse proxy, health, capacity |
+| [`API.md`](API.md) | which endpoints and fields actually work, with status |
+| [`MODELS.md`](MODELS.md) | which checkpoints and quants load, and what each needs |
+| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | symptom → cause → fix |
+
+## The four single sources of truth
+
+Nothing else in the tree states these. Everything else links here.
+
+| doc | owns |
+|---|---|
+| [`PERF.md`](PERF.md) | every number, and the methodology that makes one admissible |
+| [`FEATURES.md`](FEATURES.md) | what exists, with ✅ / 🟡 / ⚪ status |
+| [`LIMITATIONS.md`](LIMITATIONS.md) | what does not exist, or exists untested |
+| [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md) | what is absent *on purpose*, with the measurement |
+
+## Contracts
+
+- [`determinism.md`](determinism.md) — what reproducibility guarantees, and the two batch-invariance properties that hold instead of the one that does not
+- [`GOAL.md`](GOAL.md) — the mission and the release bars
+- [`quantization.md`](quantization.md) — formats, the NVFP4 path, and the AWQ findings including the refuted ones
+- [`usage.md`](usage.md) — full CLI, `imp.conf` and C API reference
+
+## Internals (L2)
 
 | doc | what it is |
 |---|---|
-| [`architecture.md`](architecture.md) | the narrative — how a request becomes tokens |
-| [`sm120.md`](sm120.md) | the hardware imp targets, and what consumer Blackwell does *not* have |
-| [`MEMORY_ARCHITECTURE.md`](MEMORY_ARCHITECTURE.md) | the memory subsystem: tiers, allocators, invariants I1–I7. Read before anything about VRAM, ownership or lifetime |
-| [`BENCHMARKING.md`](BENCHMARKING.md) | the measurement contract — what counts as a number here, and what does not |
+| [`internals/ARCHITECTURE.md`](internals/ARCHITECTURE.md) | the narrative, and **the** statement of what `sm_120a` has and lacks |
+| [`internals/SM120.md`](internals/SM120.md) | hardware notes, MMA shapes, measured ceilings |
+| [`internals/KERNELS.md`](internals/KERNELS.md) | kernel catalogue and design reference |
+| [`internals/ATTENTION_DISPATCH.md`](internals/ATTENTION_DISPATCH.md) | which attention kernel runs for each phase × dtype × layer |
+| [`internals/MEMORY.md`](internals/MEMORY.md) | tiers, allocators, invariants I1-I7. Read before anything about VRAM |
+| [`internals/QUANT_PIPELINE.md`](internals/QUANT_PIPELINE.md) | the two layers handling quantized weights |
+| [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) | the measurement contract |
+| [`internals/PROFILING.md`](internals/PROFILING.md) | nsys and ncu on this host |
 
-## Companions to the architecture
+## Records, not documentation
 
-Narrower than `architecture.md`, same standing.
+These are append-only and are deliberately **not** linted or refreshed: a record
+is a statement about one dated afternoon.
 
-- [`attention-dispatch.md`](attention-dispatch.md) — which attention kernel runs for each (phase × dtype × layer)
-- [`quant-pipeline.md`](quant-pipeline.md) — the two parallel layers handling quantized weights, and the boundary between them
-- [`quantization.md`](quantization.md) — formats, the NVFP4 path, and the AWQ calibration findings (including the ones that were refuted)
-- [`sm120_optimal_kernel.md`](sm120_optimal_kernel.md) — design reference for the hot-path attention kernel
-- [`vision_gemma4v_spec.md`](vision_gemma4v_spec.md) — the gemma4v encoder spec
-
-## Contracts and promises
-
-What imp guarantees, and where the edges are.
-
-- [`GOAL.md`](GOAL.md) — the mission and the release bars, including the non-goals
-- [`determinism.md`](determinism.md) — reproducibility guarantees, the documented limits, and the two batch-invariance properties that hold instead of the one that does not
-- [`supported-models.md`](supported-models.md) — architectures that load, and what each needs
-- [`usage.md`](usage.md) — running the CLI and the server
-
-## Numbers
-
-- [`BENCHMARKS.md`](BENCHMARKS.md) — published competitive numbers, tied to a release tag
-- [`performance.md`](performance.md) — methodology behind them
-- [`vram_audit.md`](vram_audit.md) — append-only per-component VRAM accounting
-- [`nsys_profiling.md`](nsys_profiling.md) — how to profile with Nsight Systems on this box
-
-## Where the work goes
-
-- [`roadmap.md`](roadmap.md) — current focus and the open gaps. **"What is still open?" is answered here**, not in the audit ledger
-- [`MISSION_JOURNAL.md`](MISSION_JOURNAL.md) — the investigation record: what was tried, what it cost, what it disproved
-- [`plans/`](plans/) — design documents for work large enough to need one before code
-
-## Audit and test ledgers
-
-[`audit/`](audit/) holds two different kinds of file, and mixing them up wastes time.
-
-**Living ledgers** — consult these:
-
-- [`audit/SETTLED.md`](audit/SETTLED.md) — read *before* forming audit hypotheses. Every finding with a terminal state
-- [`audit/ARCHMAP.md`](audit/ARCHMAP.md) — structure derived from source, not from prose
-- [`audit/AUDIT_FILESIZE.md`](audit/AUDIT_FILESIZE.md) — per-file rationale for the size gate
-- [`audit/TEST_INVENTORY.md`](audit/TEST_INVENTORY.md), [`audit/ESCAPE_ANALYSIS.md`](audit/ESCAPE_ANALYSIS.md), [`audit/MUTATION_BASELINE.md`](audit/MUTATION_BASELINE.md), [`audit/TEST_HARDENING_LOG.md`](audit/TEST_HARDENING_LOG.md) — what the suite covers, what escaped it, and how well it kills mutants
-
-Plus [`audit/PERF_LOG.md`](audit/PERF_LOG.md) (append-only) and
-[`audit/AUDIT_ARCH_2026_07_29.md`](audit/AUDIT_ARCH_2026_07_29.md) with its
-evidence directory — the latter stays here because `check-release.sh`
-cross-checks it against `SETTLED.md`, and the gate fails if either moves.
-
-**Dated campaign reports live in [`archive/`](archive/)**, not here: roofline
-sweeps, structural-debt audits, the prefill-gap investigation, perplexity parity
-and the rest. They are history rather than current state, and their numbers are
-still cited from code — see [`archive/README.md`](archive/README.md).
-
-[`audit/decisions/`](audit/decisions/) holds ADRs — a decision outliving its
-context is the point of one.
-
-[`archive/`](archive/) is where a document goes when its subject was shelved and
-the reasoning is still worth having.
-
-## A note on deleting things here
-
-A refuted experiment is not clutter — this repo spends real GPU time
-re-discovering things it already disproved. The bar for removing a doc is that
-its conclusion is carried somewhere maintained, not that its subject is over.
+- [`roadmap.md`](roadmap.md) — the gap list, with how each gap was measured or refuted
+- [`MISSION_JOURNAL.md`](MISSION_JOURNAL.md), [`vram_audit.md`](vram_audit.md)
+- [`BENCHMARKS.md`](BENCHMARKS.md) — per-model competitive figures, each row carrying its own date, commit and command
+- [`archive/`](archive/), [`audit/`](audit/), [`plans/`](plans/)

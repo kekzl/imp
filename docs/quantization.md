@@ -1,8 +1,15 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # Quantization
 
 imp supports both GGUF quantization (loaded directly from llama.cpp-compatible files) and SafeTensors NVFP4 prequant (produced by external calibration tools). This page explains what each format is, where it is used inside the engine, and what the trade-offs are.
 
-For per-model picks see [`supported-models.md`](supported-models.md). For benchmark numbers see [`performance.md`](performance.md).
+For per-model picks see [`supported-models.md`](MODELS.md). For benchmark numbers see [`performance.md`](performance.md).
 
 ## Formats and where they show up
 

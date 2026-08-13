@@ -1,3 +1,10 @@
+---
+layer: L1
+audience: operators
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # Contributing to imp
 
 Thanks for taking a look. imp is a single-author / single-target experiment, so contribution overhead is intentionally low — but a few things will save us both time.
@@ -89,7 +96,7 @@ Other rules:
 - File names are `snake_case`. Known intentional exception: the `smallM` fragment (`gemm_grouped_nvfp4_smallM.{h,cu}`) — it mirrors the user-facing config key `moe.nvfp4_smallM`, which can't change without breaking configs.
 - Errors return codes (`ImpError` / `bool`); CUDA errors are checked and logged, not thrown.
 - Don't add third-party dependencies without a very strong reason — the only runtime deps are the CUDA toolkit, CUTLASS (vendored via FetchContent), and `stb_image` for vision.
-- **Serving allocates nothing** — the measured steady state is `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`. Acquire memory through `src/memory/backend.h` and the tier allocators (`arena`, `block_pool`, `scratch_stack`, `graph_slots`) rather than raw `cudaMalloc`/`cudaFree`, and resolve capacity at init instead of at first use. The blocking `Alloc sites` CI job (`tools/check_alloc_sites.py` against `tools/alloc_allowlist.txt`) rejects new direct allocation sites. See [`docs/MEMORY_ARCHITECTURE.md`](docs/MEMORY_ARCHITECTURE.md).
+- **Serving allocates nothing** — the measured steady state is `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`. Acquire memory through `src/memory/backend.h` and the tier allocators (`arena`, `block_pool`, `scratch_stack`, `graph_slots`) rather than raw `cudaMalloc`/`cudaFree`, and resolve capacity at init instead of at first use. The blocking `Alloc sites` CI job (`tools/check_alloc_sites.py` against `tools/alloc_allowlist.txt`) rejects new direct allocation sites. See [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md).
 - Don't `__noinline__` GPU inner-loop functions; spills go to local memory and tank performance.
 
 ## Commit messages

@@ -1,3 +1,10 @@
+---
+layer: L2
+audience: kernel-devs
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # tools/roofline — reproducible roofline & coverage pipeline
 
 Measures roofline proximity (%-roofline, AI, achieved FLOPS/BW) and kernel

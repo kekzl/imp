@@ -1,3 +1,10 @@
+---
+layer: L2
+audience: kernel-devs
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # Gemma-4 vision (gemma4v) encoder — implementation spec
 
 Reverse-engineered from llama.cpp master (`tools/mtmd/models/gemma4v.cpp`, `clip.cpp`,

@@ -1,3 +1,10 @@
+---
+layer: L2
+audience: kernel-devs
+verified: 2026-08-13
+commit: 81ffa573
+---
+
 # KV-cache NIAH harness
 
 Runs a 4-config × 2-context × 5-depth × 3-seed Needle-in-a-Haystack
