@@ -87,6 +87,18 @@ Reasoning models separate their chain of thought into `reasoning_content`
 (Anthropic: `thinking`) rather than emitting it as the answer. This holds on the
 streaming path too, which is where it was once wrong.
 
+**On `/v1/messages` that means `content[0]` is often not the text.** A reasoning
+model returns a `thinking` block first and the answer second, so a client reading
+`content[0].text` gets an empty string and concludes the model said nothing.
+Select by `type`:
+
+```python
+text = "".join(b["text"] for b in resp["content"] if b["type"] == "text")
+```
+
+Verified on Qwen3-8B-Q8_0: `content` = `[{type: thinking, ...}, {type: text,
+text: "The capital of France is Paris."}]`.
+
 ## Prompt caching
 
 ✅ on by default for the server. Prefix blocks are reused across requests that
