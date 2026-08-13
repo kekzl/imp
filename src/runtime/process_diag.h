@@ -96,6 +96,9 @@ int process_diag_moe_mr_nr();  // rows-per-block for NVFP4 MoE decode (4/8/16/32
 // + force-host-experts). No per-Engine context at that point.
 int process_diag_moe_expert_overhead_pct();
 int process_diag_moe_force_host_experts();
+// Copy host-resident NVFP4 experts into pinned host memory at load (a trade:
+// +14.7 % prefill for 4.6x model-load time — see dispatch_policy.h).
+bool process_diag_moe_pin_host_experts();
 
 // GDN: layout override read at model-load time by hf_config_loader (no
 // per-Engine context at that point in the loader pipeline).

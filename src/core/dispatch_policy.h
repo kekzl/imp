@@ -245,6 +245,27 @@ struct MoE {
     // the ~45% next-token reuse but not the ~80%-within-8 band. Exposed so that
     // trade is measurable rather than hardcoded; 15 is the long-standing value.
     int expert_cache_budget_pct = 15;
+    // Copy host-resident NVFP4 experts into pinned host memory at load, so the
+    // per-expert H2D transfers become real DMAs instead of driver-staged
+    // copies. On WSL2 an mmap cannot be page-locked in place, which is why this
+    // is a copy rather than a registration (the GGUF packed path does the same
+    // thing at weight_upload.cu's Path A1).
+    //
+    // It is a TRADE, not a win, which is why it is off by default. Measured on
+    // Qwen3-30B-A3B-NVFP4 with all 48 MoE layers host-resident, SIX alternating
+    // paired rounds (the switch exists partly so the arms can alternate without
+    // a rebuild):
+    //   prefill pp512  276.6 -> 317.6 tok/s   +14.8 %, 6/6 pairs positive
+    //   decode  tg256  no effect              3 pairs up, 3 down
+    //   model load     5.1 s -> 22.6 s        4.4x, for ~14 GiB of pinned copies
+    // Decode is unaffected because its cache hits 96-98 % and barely transfers;
+    // prefill touches every expert and is what the transfers cost.
+    //
+    // Three paired rounds read decode as -33 % and that was noise: this path's
+    // own decode spread is wider than the effect (the off arm alone measured
+    // 34.7 to 66.1 tok/s across six runs). Do not re-derive this from fewer
+    // than six pairs.
+    bool pin_host_experts = false;
     // Phase 2 (MoE host-offload Graphs design): assert device-side mirror
     // == host-side LRU state after every cache mutation. Off by default;
     // turn on via `moe.expert_cache_debug_parity = true` in imp.conf for

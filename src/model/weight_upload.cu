@@ -2209,6 +2209,65 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             convert_host_bf16(L.expert_w_gate);
             convert_host_bf16(L.expert_w_up);
             convert_host_bf16(L.expert_w_down);
+
+            // Host-resident NVFP4 experts: copy the mmap'd bytes into pinned
+            // host memory, for exactly the reason Path A1 does it for the
+            // packed GGUF tensor — on WSL2 an mmap cannot be page-locked in
+            // place, so a cudaMemcpyAsync from it is staged synchronously
+            // inside the driver.
+            //
+            // Measured on this box at one expert's size (768 KiB weights +
+            // 96 KiB micro-scales): 76.2 us of HOST time inside the copy calls
+            // from mmap against 2.8 us from pinned, and the DMA itself runs at
+            // 9.6 vs 32.4 GB/s. The offload prefill issues ~89k such transfers,
+            // which nsys measured as 4.13 s of host time against 795 ms of
+            // actual GPU transfer.
+            //
+            // These stay pageable until here because the per-expert path never
+            // ran Path A1's pinning: the BF16 converter above is the only thing
+            // in this branch that produced pinned experts, and it declines
+            // anything that is not BF16.
+            // ONE buffer per projection, not one per expert. Pinning is a
+            // syscall-heavy operation: a first cut took a buffer per expert and
+            // nsys measured 36 877 cudaHostAlloc calls costing 24.7 s, plus
+            // 6.4 s of cudaFreeHost at teardown, to save 0.5 s of transfer
+            // time. Per projection it is 144 allocations for the same result,
+            // and the experts land contiguously as a side benefit.
+            auto pin_host_nvfp4_experts = [&](std::vector<Tensor>& expert_vec) {
+                if (!ctx.is_nvfp4_prequant || expert_vec.empty())
+                    return;
+                if (!process_diag_moe_pin_host_experts())
+                    return;  // off by default — see moe.pin_host_experts
+                size_t total = 0;
+                for (const Tensor& w : expert_vec) {
+                    if (!w.data || w.on_device || w.qtype == QType::BF16)
+                        return;  // mixed placement: leave the whole projection alone
+                    total += w.nbytes();
+                }
+                if (total == 0)
+                    return;
+                PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total);
+                if (pin.empty()) {
+                    // Correct but slow: the experts stay on the mmap and every
+                    // transfer pays the staging cost above.
+                    IMP_LOG_WARN(
+                        "Host NVFP4 experts: pinned alloc failed (%.2f MiB) — staying on mmap, "
+                        "H2D will be ~3x slower",
+                        total / (1024.0 * 1024.0));
+                    return;
+                }
+                char* dst = static_cast<char*>(pin.data());
+                for (Tensor& w : expert_vec) {
+                    const size_t bytes = w.nbytes();
+                    std::memcpy(dst, w.data, bytes);
+                    w.data = dst;
+                    dst += bytes;
+                }
+                ctx.host_pinned_allocs.push_back(std::move(pin));
+            };
+            pin_host_nvfp4_experts(L.expert_w_gate);
+            pin_host_nvfp4_experts(L.expert_w_up);
+            pin_host_nvfp4_experts(L.expert_w_down);
         }
     }
 
@@ -2432,8 +2491,44 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 // one slot, so a scale already in VRAM would be the wrong
                 // address space for that copy — and VRAM spent on a layer that
                 // was moved out of VRAM precisely because it did not fit.
-                if (!experts[0].on_device)
+                //
+                // They do get pinned, in ONE slab for the whole projection, for
+                // the same reason and with the same per-allocation discipline
+                // as the weights: the scale is the second of the two transfers
+                // every staged expert pays.
+                if (!experts[0].on_device) {
+                    if (!process_diag_moe_pin_host_experts())
+                        return;  // stays on host, unpinned
+                    size_t total = 0;
+                    std::vector<Tensor*> host_scales;
+                    host_scales.reserve(N);
+                    for (int e = 0; e < N; ++e) {
+                        std::string k = "L" + std::to_string(layer) + "." + kind + "." +
+                                        std::to_string(e);
+                        auto it = nvfp4_scratch_.find(k);
+                        if (it == nvfp4_scratch_.end())
+                            return;
+                        Tensor& ws = it->second.weight_scale;
+                        if (!ws.data || ws.on_device || ws.numel() == 0)
+                            return;
+                        total += ws.nbytes();
+                        host_scales.push_back(&ws);
+                    }
+                    if (total == 0)
+                        return;
+                    PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total);
+                    if (pin.empty())
+                        return;  // stays on mmap: slower, still correct
+                    char* dst = static_cast<char*>(pin.data());
+                    for (Tensor* ws : host_scales) {
+                        const size_t b = ws->nbytes();
+                        std::memcpy(dst, ws->data, b);
+                        ws->data = dst;
+                        dst += b;
+                    }
+                    host_pinned_allocs_.push_back(std::move(pin));
                     return;
+                }
                 std::vector<NvFP4PreQuantWeight*> grp(N, nullptr);
                 size_t e_ms = 0;
                 for (int e = 0; e < N; ++e) {
@@ -2542,6 +2637,9 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 if (ek.expert < static_cast<int>(vec.size()))
                     weight_is_host_expert = (vec[ek.expert].data != nullptr && !vec[ek.expert].on_device);
             }
+            // A host expert's scale stays on host. The slab pass above already
+            // pinned it per projection; if that pass declined (ragged shapes,
+            // missing entry) it stays on the mmap, which is slower but correct.
             if (!weight_is_host_expert) {
                 upload_scale(sc.weight_scale);
             }
