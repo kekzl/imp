@@ -48,7 +48,15 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
         return false;
     }
 
-    size_t total = static_cast<size_t>(n_slots_) * slot_size_;
+    // The per-slot NVFP4 scale mirror rides at the END of the pool rather than
+    // in an allocation of its own. Same lifetime, one acquisition instead of
+    // two — and this file is on the I1 allowlist (tools/alloc_allowlist.txt),
+    // which only ever shrinks, so a second cudaMalloc/cudaFree pair here would
+    // be a regression of that invariant for no benefit.
+    const size_t slot_bytes_total = static_cast<size_t>(n_slots_) * slot_size_;
+    const size_t scale_bytes =
+        nvfp4_slots_ ? static_cast<size_t>(n_slots_) * sizeof(float) : 0;
+    size_t total = slot_bytes_total + scale_bytes;
     if (alloc_) {
         pool_ = alloc_->allocate(total, "expert_cache");
     } else {
@@ -140,27 +148,9 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     // dispatch cannot produce that ordering, but a zero is a recognisable
     // wrong answer where garbage is not.
     if (nvfp4_slots_) {
-        const size_t bytes = static_cast<size_t>(n_slots_) * sizeof(float);
-        d_slot_scales_ = static_cast<float*>(
-            alloc_ ? alloc_->allocate(bytes, "expert_cache_slot_scales") : nullptr);
-        if (!alloc_) {
-            if (cudaMalloc(reinterpret_cast<void**>(&d_slot_scales_), bytes) != cudaSuccess)
-                d_slot_scales_ = nullptr;
-        }
-        if (!d_slot_scales_) {
-            IMP_LOG_WARN("Expert LRU cache: per-slot NVFP4 scale mirror alloc failed (%zu bytes) — "
-                         "cache disabled, experts fall back to the staging path.",
-                         bytes);
-            if (alloc_)
-                alloc_->free(pool_);
-            else
-                cudaFree(pool_);
-            pool_ = nullptr;
-            n_slots_ = 0;
-            slots_per_layer_ = 0;
-            return false;
-        }
-        IMP_CUDA_CHECK_LOG(cudaMemset(d_slot_scales_, 0, bytes));
+        d_slot_scales_ =
+            reinterpret_cast<float*>(static_cast<char*>(pool_) + slot_bytes_total);
+        IMP_CUDA_CHECK_LOG(cudaMemset(d_slot_scales_, 0, scale_bytes));
     }
 
     // Host-side tables — used in production regardless of the mirror above.
@@ -614,13 +604,8 @@ void ExpertLRUCache::destroy() {
         cudaFree(d_lookup_);
         d_lookup_ = nullptr;
     }
-    if (d_slot_scales_) {
-        if (alloc_)
-            alloc_->free(d_slot_scales_);
-        else
-            cudaFree(d_slot_scales_);
-        d_slot_scales_ = nullptr;
-    }
+    // d_slot_scales_ points into pool_, freed above — nothing of its own.
+    d_slot_scales_ = nullptr;
     nvfp4_slots_ = false;
     if (!prefetch_done_.empty()) {
         if (prefetch_h2ds_ > 0 || prefetch_skipped_cached_ > 0) {
