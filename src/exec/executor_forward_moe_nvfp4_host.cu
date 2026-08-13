@@ -107,6 +107,93 @@ void GraphExecutor::verify_host_expert_placement() const {
     }
 }
 
+// Stage one host-resident NVFP4 layer's experts into the device buffer.
+//
+// The per-expert route issues two H2D per expert per projection, ~768 KiB and
+// ~96 KiB — sizes that do not reach PCIe bandwidth. nsys measured 90 759 such
+// transfers moving 38 GB for one profiling run, with the host inside those
+// calls far longer than the GPU spent transferring. A whole projection at once
+// is the same bytes as ONE transfer of ~110 MiB.
+//
+// That collapse is only possible because the sources are already contiguous:
+// `moe.pin_host_experts` lays a projection's experts into one pinned slab back
+// to back, and a plain mmap usually does the same. Contiguity is CHECKED here
+// rather than assumed — a checkpoint that interleaves its tensors would
+// otherwise have its experts silently read from the wrong addresses.
+bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
+                                       StagedProj out[kExpertProjCount]) {
+    for (int i = 0; i < kExpertProjCount; ++i)
+        out[i] = StagedProj{};
+    if (!moe_.layer_stage_buf || moe_.layer_stage_proj_bytes == 0)
+        return false;
+
+    const auto& ly = model_->layer(layer);
+    const std::vector<Tensor>* projs[kExpertProjCount] = {&ly.expert_w_gate, &ly.expert_w_up,
+                                                          &ly.expert_w_down};
+    bool any = false;
+    for (int p = 0; p < kExpertProjCount; ++p) {
+        const std::vector<Tensor>& experts = *projs[p];
+        if (!nvfp4_host_experts_servable(experts))
+            continue;  // non-gated model, or a projection this path cannot take
+        const int ne = static_cast<int>(experts.size());
+        if (ne > moe_.layer_stage_experts)
+            continue;  // buffer was sized for fewer experts
+
+        const auto layout = nvfp4_slot_layout(experts[0].shape[0], experts[0].shape[1] * 2);
+        const size_t pb = layout.packed_bytes, mb = layout.ms_bytes;
+        if (static_cast<size_t>(ne) * (pb + mb) > moe_.layer_stage_proj_bytes)
+            continue;
+
+        char* base = static_cast<char*>(moe_.layer_stage_buf) +
+                     static_cast<size_t>(p) * moe_.layer_stage_proj_bytes;
+        char* packed_dst = base;
+        char* ms_dst = base + static_cast<size_t>(ne) * pb;
+
+        // Are the host experts laid out back to back? If so this is two
+        // memcpys for the whole projection instead of 2*ne.
+        bool packed_contig = true, ms_contig = true;
+        for (int e = 1; e < ne; ++e) {
+            const char* w0 = static_cast<const char*>(experts[0].data);
+            const char* s0 = static_cast<const char*>(experts[0].scales);
+            if (static_cast<const char*>(experts[e].data) != w0 + static_cast<size_t>(e) * pb)
+                packed_contig = false;
+            if (static_cast<const char*>(experts[e].scales) != s0 + static_cast<size_t>(e) * mb)
+                ms_contig = false;
+            if (!packed_contig && !ms_contig)
+                break;
+        }
+
+        if (packed_contig) {
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(packed_dst, experts[0].data,
+                                               static_cast<size_t>(ne) * pb,
+                                               cudaMemcpyHostToDevice, stream));
+        } else {
+            for (int e = 0; e < ne; ++e)
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(packed_dst + static_cast<size_t>(e) * pb,
+                                                   experts[e].data, pb, cudaMemcpyHostToDevice,
+                                                   stream));
+        }
+        if (ms_contig) {
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ms_dst, experts[0].scales,
+                                               static_cast<size_t>(ne) * mb,
+                                               cudaMemcpyHostToDevice, stream));
+        } else {
+            for (int e = 0; e < ne; ++e)
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ms_dst + static_cast<size_t>(e) * mb,
+                                                   experts[e].scales, mb, cudaMemcpyHostToDevice,
+                                                   stream));
+        }
+
+        out[p].packed = packed_dst;
+        out[p].ms = ms_dst;
+        out[p].packed_stride = pb;
+        out[p].ms_stride = mb;
+        out[p].n_experts = ne;
+        any = true;
+    }
+    return any;
+}
+
 namespace {
 
 // Point an NvFP4MoEQuantResult at one layer's slot pool. `ms_off` is where a

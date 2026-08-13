@@ -18,11 +18,12 @@ there instead of retelling it.
   layers off-GPU answers correctly at 23.0 tok/s, against 384.0 fully resident.
   ([`docs/roadmap.md`](docs/roadmap.md))
 
-- **`moe.pin_host_experts`** (default off) copies host-resident NVFP4 experts
-  into pinned host memory at load, which speeds up prefill on that path by
-  **14.8 %** (pp512 276.6 to 317.6 tok/s on Qwen3-30B-A3B-NVFP4 with every MoE
-  layer host-resident, six paired rounds). Decode is unaffected. Off by default
-  because it costs 4.4x model-load time. ([`docs/roadmap.md`](docs/roadmap.md))
+- **`moe.pin_host_experts`** (default off) makes prefill **2.9x** faster on the
+  NVFP4 host-offload path: pp512 goes from 276.6 to 790.8 tok/s on
+  Qwen3-30B-A3B-NVFP4 with every MoE layer host-resident. It pins the experts at
+  load and stages a whole layer per transfer instead of two per expert; the two
+  only work together. Decode is unaffected. Off by default because it costs
+  4.4x model-load time. ([`docs/roadmap.md`](docs/roadmap.md))
 
 ### Fixed
 

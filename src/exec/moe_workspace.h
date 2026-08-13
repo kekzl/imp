@@ -133,6 +133,24 @@ struct MoEWorkspace {
     void* raw_staging_buf = nullptr;
     size_t raw_staging_size = 0;
 
+    // Whole-layer staging for host-resident NVFP4 experts during PREFILL.
+    //
+    // The per-expert route issues two H2D per expert per projection — 18 432
+    // transfers of ~768 KiB + ~96 KiB for one pass over this model — and small
+    // transfers do not reach PCIe bandwidth. Staging a whole projection at once
+    // moves the same bytes as ONE transfer, because the pinned slabs from
+    // `moe.pin_host_experts` already lay a projection's experts back to back
+    // (and the mmap usually does too, which is checked at runtime).
+    //
+    // Sized for one layer only and reused across layers: the forward is
+    // sequential, so layer L+1 overwrites layer L after its kernels have run
+    // on the same stream. Null when the experts are device-resident, when the
+    // model is not NVFP4-prequant, or when one layer does not fit the budget.
+    void* layer_stage_buf = nullptr;      // [kExpertProjCount][n_experts * expert_bytes]
+    size_t layer_stage_proj_bytes = 0;    // per-projection span within the buffer
+    size_t layer_stage_size = 0;          // total allocation
+    int layer_stage_experts = 0;          // n_experts the buffer was sized for
+
     // Slot indices for the host-offload decode path: [3 * top_k] int32, one
     // block per projection (gate, up, down). The fused MoE decode kernels
     // address an expert as `base + idx * stride`; with host-resident experts
