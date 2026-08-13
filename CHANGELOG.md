@@ -19,15 +19,16 @@ linked PR.
 
 ### Added
 
+- **Native FP8 weights load — `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` runs**,
+  the first checkpoint here that ships them (45/45 on `degen_suite.py`; **362
+  tok/s** decode with the graph fix below, against vLLM 0.27.1's 351 on the same
+  file). Modelopt `MIXED_PRECISION` puts 46 Mamba projections in FP8 and 5935 MoE
+  tensors in NVFP4; sm_120 has no FP8 prefill GEMM, so the FP8 tensors get an
+  FP16 companion at load (1698 MiB). (#1385, #1386)
 - **Qwen3.6-35B-A3B sees images** — no new encoder and nothing to download: the
   checkpoint has always shipped a complete Qwen3-VL tower (333 `model.visual.*`,
   851.8 MiB), and two gates dropped it. Text-only checkpoints are unaffected.
   (#1379, #1384)
-- **Native FP8 weights load — `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` runs**
-  (~137 tok/s decode, 45/45 on `degen_suite.py`). Modelopt `MIXED_PRECISION` puts
-  46 Mamba projections in FP8 and 5935 MoE tensors in NVFP4; sm_120 has no FP8
-  prefill GEMM, so the FP8 tensors get an FP16 companion at load (1698 MiB).
-  (#1385, #1386)
 - **`moe.expert_cache_budget_pct`** — the share of free VRAM the MoE expert LRU
   cache may claim, previously hardcoded at 15. **Default unchanged at 15**; at 50
   a fully host-resident Qwen3-30B-A3B-Q4_K_M decodes 10.51 → 51.86 tok/s (hit

@@ -83,6 +83,7 @@ The CHANGELOG and the release page are read by people who did not follow the PRs
 - **Entries are one to three lines** (the rule is in `CHANGELOG.md`'s own preamble, and v0.25.0 broke it: 159 lines for 13 entries, ~15 lines each). What changed for the reader, the number that makes it checkable, then `(#NNNN)`. The hypotheses, the ruled-out causes and the war story stay in the PR body and `docs/`.
 - **No unexplained internal vocabulary.** `has_pure_ssm`, "Phase 4", "the shard-drop", "primary tier", "order-balanced pairs" mean nothing outside the repo. Name a symbol only when the reader could grep for it.
 - **Every number needs its referent**: which model, which quant, and the units. "decode 287.63" is meaningless; "Qwen3-8B-Q8, decode 287.63 tok/s vs 287.19 baseline" is checkable.
+- **Lead with what a reader can now do that they could not before** — a checkpoint that runs at all, a modality that works — and only then with how much faster the existing paths got. v0.25.0 first led with the graph fix because that was the most interesting thing to *write*; the actual news was `Nemotron-3.5-Lightning-30B-A3B-NVFP4`, which did not run in v0.24.0 and decodes at 362 tok/s here.
 - **Titles name the change, not the anecdote.** `v0.25.0 — a "not yet" nobody retested: the Nemotron family was 3x slower than its own kernels` is a riddle to everyone but the author; `Nemotron-H decodes 3x faster; Qwen3.6-35B sees images` is the same release.
 - Publish negative results too — a lever that measured worse is a finding. Keep it to the verdict and the number.
 
