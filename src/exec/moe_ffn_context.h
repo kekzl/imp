@@ -3,6 +3,8 @@
 #include "core/tensor.h"
 #include "core/qtype.h"          // QType
 #include "compute/moe_routing.h"  // MoeRoutingResult
+#include "exec/expert_cache.h"           // kExpertProjCount
+#include "exec/nvfp4_expert_offload.h"  // StagedProj
 #include <cstddef>
 
 namespace imp {
@@ -53,6 +55,13 @@ struct MoeFfnContext {
     // back to true. Default true so paths that never check it always see a
     // populated buffer.
     bool moe_gather_done = true;
+
+    // Host-resident NVFP4 experts staged into the device buffer for THIS
+    // layer. Filled by whichever prefill path reaches the layer first and
+    // reused by the later ones, so a layer is transferred once even when the
+    // CUTLASS attempt falls through to the legacy fallback.
+    StagedProj staged[kExpertProjCount]{};
+    bool staged_done = false;
 };
 
 }  // namespace imp

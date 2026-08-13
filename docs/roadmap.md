@@ -382,6 +382,19 @@ That also re-prices `moe.pin_host_experts` itself, and it is now a much better t
 
 **One correction to the scoping above, found by running it rather than reading it: the smallM branch is unreachable, so it is not the cheap option.** Resident prefill logs `CUTLASS 3.x device-args full path`, which is selected at `executor_forward_moe_cutlass.cu:159` — *before* the smallM branch at :405 is ever consulted. So "smallM already accepts the native layout" is true and irrelevant: nothing reaches it on this model. Closing the dequant means the device-args path, which needs SfAtom scale factors and `wcache_->cutlass_nvfp4` entries built per staged layer. The converter exists (`convert_nvfp4_moe_scales_to_sfatom`) and the staged buffer is the right shape to feed it; the work is the per-layer weight-entry bookkeeping, not the conversion.
 
+**Built 2026-08-13 behind `moe.staged_cutlass_prefill` (default off), and it is the largest single step on this path — with a decode question attached that is the reason it is opt-in.** Converting a staged layer's scales to SfAtom and building the per-expert pointer arrays lets a host-resident layer enter the same CUTLASS grouped prefill a resident one uses. Six alternating paired rounds, all 48 MoE layers host-resident, `moe.pin_host_experts` on in both arms:
+
+| | pp512 | tg256 |
+|---|---|---|
+| off (staged + dequant to cuBLAS) | 663.2 | 59.4 |
+| **on (staged + CUTLASS grouped)** | **1563.9 (+136 %, 6/6)** | **37.7 (-36 %, 6/6)** |
+
+The prefill arm is remarkably tight (1558-1568 across six runs, under 1 % spread), which is what a path that stopped waiting on transfers and dequants looks like. Cumulatively this path's prefill has gone **285 to 1564 tok/s** across this campaign, and the gap to resident from 61x to **11x**.
+
+**The decode figure is real and NOT understood, which is why this is opt-in rather than default.** All six pairs are negative, so it is not the spread this entry keeps warning about. But it reverses with context: with `--bench-pp 8` instead of 512, the same two arms measure **25.5 to 30.6 tok/s, i.e. the staged path is FASTER**. This code only runs at `n > 1` and cannot touch the decode kernels, so what differs is the state decode inherits: the expert cache's hit rate is 91 % against 92.9-98.4 % after a long prefill, and 84.8 % against 80.6 % after a short one. A 2.4x prefill win does not get to impose an unexplained decode cost by default; explaining it is the next task here, ahead of further GEMM work.
+
+Not a regression risk elsewhere: the resident NVFP4 path measures unchanged (pp512 17612 against 17508, tg 380 against 395), the default arm still takes the legacy fallback, and `verify-fast` is green.
+
 *Where the path stands after all of it, re-profiled 2026-08-11 on the shipped build.* The entry opened by calling this path issue-bound; after #1370 and #1376 **it is not any more, and that retires the framing rather than confirming it.** Same config (256 cold decode tokens, all experts host-resident), tg phase 7.06 s:
 
 | term | per token | share |

@@ -30,6 +30,7 @@
 #include "exec/executor_kernels.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "compute/activation.h"
+#include "compute/gemm_cutlass_sm120.h"
 #include "compute/moe_routing.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
@@ -190,8 +191,97 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
         out[p].ms_stride = mb;
         out[p].n_experts = ne;
         any = true;
+
+        // CUTLASS device-args view: the grouped GEMM reads SfAtom-ordered
+        // scale factors and per-expert pointer arrays, neither of which the
+        // staged bytes carry. Building them here is what lets a host-resident
+        // layer take the same prefill path as a resident one instead of the
+        // per-expert dequant fallback.
+        if (!moe_.layer_stage_sf || moe_.layer_stage_sf_proj_bytes == 0)
+            continue;
+        const int64_t N = experts[0].shape[0];
+        const int64_t K = experts[0].shape[1] * 2;
+        const size_t sf_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+        if (static_cast<size_t>(ne) * sf_expert > moe_.layer_stage_sf_proj_bytes)
+            continue;
+        char* sf_base = static_cast<char*>(moe_.layer_stage_sf) +
+                        static_cast<size_t>(p) * moe_.layer_stage_sf_proj_bytes;
+        convert_nvfp4_moe_scales_to_sfatom(ms_dst, sf_base, ne, static_cast<int>(N),
+                                           static_cast<int>(K), stream);
+
+        std::vector<const void*> hb(ne), hsfb(ne);
+        std::vector<float> halpha(ne);
+        for (int e = 0; e < ne; ++e) {
+            hb[e] = packed_dst + static_cast<size_t>(e) * pb;
+            hsfb[e] = sf_base + static_cast<size_t>(e) * sf_expert;
+            halpha[e] = experts[e].tensor_scale;
+        }
+        const size_t off = static_cast<size_t>(p) * moe_.layer_stage_experts;
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_b_ptrs + off, hb.data(),
+                                           static_cast<size_t>(ne) * sizeof(const void*),
+                                           cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_sfb_ptrs + off, hsfb.data(),
+                                           static_cast<size_t>(ne) * sizeof(const void*),
+                                           cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_alpha + off, halpha.data(),
+                                           static_cast<size_t>(ne) * sizeof(float),
+                                           cudaMemcpyHostToDevice, stream));
+        // The pointer arrays are filled from stack vectors, so this call is
+        // not graph-capturable — which is fine, graphs are already off under
+        // host-resident experts.
+        out[p].cutlass_ready = true;
     }
     return any;
+}
+
+// Stage a host-resident layer for prefill and report whether the staged copy
+// can carry the CUTLASS path.
+//
+// Staged once per MoE call and carried on ctx, so a fallback to the legacy
+// path does not transfer the same bytes again. The weights then live in the
+// staging buffer rather than the registry, which is why the CUTLASS entry
+// predicate (`covers_ids`) cannot see them: those handles exist only for
+// device-resident experts.
+bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
+    if (!ctx.staged_done && ctx.n > 1 && moe_.layer_stage_buf)
+        ctx.staged_done = stage_nvfp4_layer_(layer, stream, ctx.staged);
+    if (!runtime_config().moe.staged_cutlass_prefill || !ctx.staged_done)
+        return false;
+    const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
+    return ready(ExpertProj::Up) && ready(ExpertProj::Down) &&
+           (ctx.non_gated_experts || ready(ExpertProj::Gate));
+}
+
+// Present a staged layer to the CUTLASS grouped prefill as if it were
+// device-resident. The staging pass already wrote the per-expert pointer and
+// alpha arrays; this only slices them per projection.
+//
+// Opt-in (moe.staged_cutlass_prefill): the prefill win is large and the decode
+// effect that comes with it is real but unexplained — see dispatch_policy.h.
+bool GraphExecutor::build_staged_device_args_(
+    const MoeFfnContext& ctx, bool non_gated,
+    MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const {
+    if (!runtime_config().moe.staged_cutlass_prefill || !ctx.staged_done ||
+        !moe_.layer_stage_b_ptrs || moe_.layer_stage_experts <= 0)
+        return false;
+    const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
+    if (!ready(ExpertProj::Up) || !ready(ExpertProj::Down) ||
+        (!non_gated && !ready(ExpertProj::Gate)))
+        return false;
+
+    const size_t stride = static_cast<size_t>(moe_.layer_stage_experts);
+    const auto at = [&](ExpertProj p) { return static_cast<size_t>(std::to_underlying(p)) * stride; };
+    out.d_gate_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Gate);
+    out.d_gate_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Gate);
+    out.d_gate_alpha = moe_.layer_stage_alpha + at(ExpertProj::Gate);
+    out.d_up_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Up);
+    out.d_up_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Up);
+    out.d_up_alpha = moe_.layer_stage_alpha + at(ExpertProj::Up);
+    out.d_down_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Down);
+    out.d_down_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Down);
+    out.d_down_alpha = moe_.layer_stage_alpha + at(ExpertProj::Down);
+    out.ready = true;
+    return true;
 }
 
 namespace {

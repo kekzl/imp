@@ -272,6 +272,24 @@ struct MoE {
     // 34.7 to 66.1 tok/s across six runs). Do not re-derive this from fewer
     // than six pairs.
     bool pin_host_experts = false;
+    // Dispatch a STAGED host-resident layer through the CUTLASS grouped NVFP4
+    // prefill instead of the per-expert dequant fallback. Requires
+    // pin_host_experts (which is what makes staging possible at all).
+    //
+    // Measured on Qwen3-30B-A3B-NVFP4, all 48 MoE layers host-resident, six
+    // alternating paired rounds:
+    //   prefill pp512  663.2 -> 1563.9 tok/s   +136 %, 6/6 pairs, spread <1 %
+    //   decode  tg256   59.4 ->   37.7 tok/s   -36 %,  6/6 pairs
+    //
+    // Opt-in because that decode figure is real but NOT understood, and it
+    // reverses with context: at pp8 instead of pp512 the same arms measure
+    // 25.5 -> 30.6 tok/s, i.e. the staged path is FASTER. This code only runs
+    // at n > 1, so it cannot slow the decode kernels directly; what differs is
+    // the expert cache's state when decode inherits it (hit rate 91 % vs
+    // 92.9-98.4 % after a long prefill, 84.8 % vs 80.6 % after a short one).
+    // Until that is explained, a 2.4x prefill win does not get to impose an
+    // unexplained decode cost by default.
+    bool staged_cutlass_prefill = false;
     // Phase 2 (MoE host-offload Graphs design): assert device-side mirror
     // == host-side LRU state after every cache mutation. Off by default;
     // turn on via `moe.expert_cache_debug_parity = true` in imp.conf for

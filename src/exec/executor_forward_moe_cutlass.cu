@@ -104,12 +104,18 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
     // walked. A tier the chain never reaches keeps its `false` — see the KNOWN
     // LIMIT above. Same short-circuit order as the six early returns this
     // conjunction replaces, so the cheap checks still gate the expensive ones.
+    // Host-resident NVFP4 experts: stage the layer and report whether the
+    // staged copy can carry this path (see the definition; it is why
+    // `covers_ids` cannot see these weights).
+    const bool staged_covers = stage_layer_for_prefill_(layer, stream, ctx);
+
     MoePrefillWorkspace obs{};
     static const bool force_off = runtime_config().moe.no_cutlass3x;
-    obs.grouped_available = !force_off && cutlass_grouped_3x_nvfp4_available() && moe_.cutlass3x_packed &&
-                            moe_.cutlass3x_sf && covers_ids(ly.expert_up_ids) &&
-                            covers_ids(ly.expert_down_ids) &&
-                            (ctx.non_gated_experts || covers_ids(ly.expert_gate_ids));
+    const bool ids_cover = covers_ids(ly.expert_up_ids) && covers_ids(ly.expert_down_ids) &&
+                           (ctx.non_gated_experts || covers_ids(ly.expert_gate_ids));
+    obs.grouped_available = !force_off && cutlass_grouped_3x_nvfp4_available() &&
+                            moe_.cutlass3x_packed && moe_.cutlass3x_sf &&
+                            (staged_covers || ids_cover);
     if (!obs.grouped_available) {
         verify_against_moe_routing_model(cfg.arch, runtime_config(), obs, MoePrefillPath::LEGACY);
         return false;
@@ -130,6 +136,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
 // h_offsets, no D2H+sync — prerequisite for graph capture of
 // the MoE prefill path. Falls back to the legacy path on any
 // dispatch failure or unpopulated workspace.
+//
 bool device_args_done = false;
 {
     // Default ON since 2026-05-14: 4-model A/B showed +11–39%
@@ -229,10 +236,13 @@ bool device_args_done = false;
         const bool da_cache_ready =
             layer < static_cast<int>(moe_.per_layer_da_cache.size()) &&
             moe_.per_layer_da_cache[layer].ready;
-        const auto& da_cache =
-            da_cache_ready
-                ? moe_.per_layer_da_cache[layer]
-                : MoEWorkspace::PerLayerNvfp4DeviceArgsCache{};
+
+        // Host-resident experts: the staged copy stands in for the resident
+        // one, so from here this layer is dispatched like any other. See
+        // build_staged_device_args_().
+        MoEWorkspace::PerLayerNvfp4DeviceArgsCache da_cache{};
+        if (!build_staged_device_args_(ctx, non_gated_experts, da_cache) && da_cache_ready)
+            da_cache = moe_.per_layer_da_cache[layer];
 
         auto dispatch_device =
             [&](const std::vector<TensorID>& weight_ids,

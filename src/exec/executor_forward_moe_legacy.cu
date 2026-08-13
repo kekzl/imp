@@ -118,8 +118,12 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         // path was losing to. Decode is excluded deliberately: it wants
         // top_k experts, and staging all of them to get 8 would be strictly
         // more traffic than the slot cache it already uses.
-        StagedProj staged[kExpertProjCount];
-        const bool layer_staged = (n > 1) && stage_nvfp4_layer_(layer, stream, staged);
+        // The CUTLASS attempt ahead of us may already have staged this layer;
+        // reuse it rather than transferring the same bytes twice.
+        if (!ctx.staged_done && n > 1)
+            ctx.staged_done = stage_nvfp4_layer_(layer, stream, ctx.staged);
+        const StagedProj* staged = ctx.staged;
+        const bool layer_staged = ctx.staged_done;
 
         // Helper: dequant one expert's weight from packed tensor into dequant scratch slot 0.
         // Returns a Tensor view into the scratch buffer with shape [rows, cols], FP16.
