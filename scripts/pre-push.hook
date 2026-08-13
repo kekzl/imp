@@ -46,6 +46,11 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     fi
     FILES=$(git diff --name-only "$BASE" "$LOCAL_SHA" 2>/dev/null || true)
     [ -z "$FILES" ] && continue
+    # Documentation cannot move a number or break a kernel, wherever it lives.
+    # Without this, src/compute/CLAUDE.md matches PERF_RE and a docs-only push
+    # pays the full perf gate — which then reports the host, not the change.
+    FILES=$(echo "$FILES" | grep -vE '\.md$' || true)
+    [ -z "$FILES" ] && continue
     echo "$FILES" | grep -qE "$SOURCE_RE" && NEEDS_VERIFY=1
     echo "$FILES" | grep -qE "$PERF_RE"   && NEEDS_PERF=1
 done
