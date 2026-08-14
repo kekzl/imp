@@ -1087,6 +1087,24 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 logits_out = executor_->get_logits_view(/*n=*/1);
             }
         } else {
+            // `runtime.prefill_graph` defaults to true, but seven conditions
+            // gate the capture and none of them logged anything, so a model
+            // that never captures looked exactly like one that does. Report
+            // the failing condition once per process: measured on
+            // Qwen3-8B-Q8_0 and Qwen3-Coder-30B-A3B-NVFP4, neither ever
+            // captured a prefill chunk, and finding out which gate closed
+            // took a source read plus three A/Bs.
+            static bool logged_no_prefill_capture = false;
+            if (prefill_graph_enabled && !logged_no_prefill_capture) {
+                logged_no_prefill_capture = true;
+                IMP_LOG_INFO(
+                    "prefill graph: not capturing (runtime.prefill_graph=true) — "
+                    "pf_pool=%d cuda_graphs=%d kv_append_f16=%d offset0=%d "
+                    "not_snapshot_end=%d nvfp4_dequant_capturable=%d moe_capturable=%d",
+                    (int)pf_pool_used, (int)config_.use_cuda_graphs, (int)kv_append_capturable,
+                    (int)(offset == 0), (int)!ends_at_snapshot, (int)!executor_->nvfp4_dequant_uncapturable(),
+                    (int)!executor_->moe_prefill_uncapturable());
+            }
             executor_->forward_logits(state, logits_out, pf_stream);
         }
 

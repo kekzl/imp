@@ -29,6 +29,7 @@ bool process_diag_debug_forward();
 bool process_diag_debug_template();
 bool process_diag_graph_diag();
 bool process_diag_nvfp4_force_dequant();
+bool process_diag_prefill_graph_ignore_dequant_cap();
 bool process_diag_log_gemm_algo();
 bool process_diag_audit_nvfp4_scales();
 const char* process_diag_dump_hidden_dir();   // nullptr when unset; "1"/"all" → "/tmp"

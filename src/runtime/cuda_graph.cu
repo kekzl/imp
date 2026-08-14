@@ -447,12 +447,30 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
         step_count_++;
         // During graph capture the kernels are recorded but NOT executed.
         // Replay immediately so this step produces actual results.
-        if (!graph_.replay(stream)) {
+        // Short-circuit order matters: the injected failure must PREVENT the
+        // replay, not follow a successful one. Launching the graph and then
+        // resetting it destroys the graphExec while the async replay is still
+        // in flight.
+        const bool inject_fail = fail_next_replay_for_test_;
+        fail_next_replay_for_test_ = false;
+        const bool replay_ok = !inject_fail && graph_.replay(stream);
+        if (!replay_ok) {
             IMP_LOG_ERROR(
                 "CudaGraphRunner: first replay after capture failed — falling back "
                 "to per-step decode (up to 15x slower).");
             graph_.reset();
-            return false;
+            // The capture recorded the launches WITHOUT executing them (see the
+            // comment above), so this step has produced nothing yet. Every other
+            // failure path in this function re-runs decode_fn_ for exactly that
+            // reason; this one used to return false instead, and four of the five
+            // execute() call sites ignore the return value. engine_scheduler.cpp
+            // then finds logits_out.data == nullptr and falls back to
+            // get_logits_view(), i.e. the PREVIOUS step's logits — greedy repeats
+            // the token. capture_failed_ marks it eager for good: a first-replay
+            // failure is structural, so retrying would skip a forward every step.
+            capture_failed_ = true;
+            decode_fn_(stream);
+            return true;
         }
         replay_count_++;
         return true;

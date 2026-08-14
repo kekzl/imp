@@ -34,7 +34,23 @@ there instead of retelling it.
 
 ### Fixed
 
-- **`ghcr.io/kekzl/imp:latest` pointed at v0.22.0**, three releases behind, because
+- **A failed first graph replay skipped that step's forward pass entirely**, so the
+  sampler read the previous step's logits and greedy decoding repeated a token for
+  as long as the failure lasted. The step now runs eagerly, as every other capture
+  failure path in the same function already did.
+
+- **Prefill graph capture now says why it did not happen.** `runtime.prefill_graph`
+  has defaulted to on since 2026-05-17, but seven conditions gate the capture and
+  none of them logged anything, so a model that never captures looked exactly like
+  one that does. Measured: on Qwen3-8B-Q8_0 and Qwen3-Coder-30B-A3B-NVFP4 the LM
+  head (vocab x d_model x 2 B = 1187 and 594 MiB) exceeds the 512 MiB dequant
+  workspace cap, and FP8 KV closes a second gate.
+
+### Changed
+
+- **`diagnostics.prefill_graph_ignore_dequant_cap`** (default off) lets a probe run
+  keep prefill capture enabled when only the dequant-workspace cap blocks it, so
+  the guarded path's reachability can be measured from one binary.
   that release was published after v0.25.0 and the image workflow moved `latest`
   (and `0`) on every publish regardless of version. The moving tags now only
   advance when the release really is the newest.

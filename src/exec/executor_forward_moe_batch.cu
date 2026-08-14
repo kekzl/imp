@@ -753,7 +753,18 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
 
     // Fused gate GEMV + topk only profitable when n_experts ≤ warps (8).
     // Higher expert counts (e.g. 128 in Qwen3-Coder) prefer separate
-    // gemv_gate_fp32 (128 parallel blocks).
+    // gemv_gate_fp32, which puts one warp on each expert row: 128 parallel
+    // WARPS in 16 blocks of 8 (not 128 blocks — kGemvThreads is 256).
+    //
+    // 16 blocks looks like under-occupancy (16 of this card's 170 SMs, 0.02
+    // waves/SM, 205 GB/s = 11.4% of peak) and it is not worth "fixing" by
+    // narrowing the block: measured 2026-08-14, 32 threads/block gives 128
+    // blocks and 128/170 SMs, and the kernel gets SLOWER (4320 -> 4480 ns at
+    // base clock, occupancy 16.3% -> 2.1%) for 0.9993x paired e2e on two 128-
+    // expert models. The work is pinned at 128 warps by one-warp-per-row, so
+    // redistributing them only removes each SM's ability to hide DRAM latency
+    // across warps. Making this kernel faster needs K split across several
+    // warps per row — an algorithm change, not a launch-config change.
     constexpr int kMaxFusedExperts = 8;
     const std::string& dl = runtime_config().diagnostics.dump_logits_dir;
     bool dump_logits = !dl.empty() && (layer == 29 || dl == "all");

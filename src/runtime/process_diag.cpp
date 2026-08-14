@@ -12,6 +12,7 @@ struct ProcessDiag {
     bool debug_template = false;
     bool graph_diag = false;
     bool nvfp4_force_dequant = false;
+    bool prefill_graph_ignore_dequant_cap = false;
     bool log_gemm_algo = false;
     bool audit_nvfp4_scales = false;
     std::string dump_hidden_dir;
@@ -84,6 +85,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.debug_template = cfg.diagnostics.debug_template;
     d.graph_diag = cfg.diagnostics.graph_diag;
     d.nvfp4_force_dequant = cfg.diagnostics.nvfp4_force_dequant;
+    d.prefill_graph_ignore_dequant_cap = cfg.diagnostics.prefill_graph_ignore_dequant_cap;
     d.log_gemm_algo = cfg.diagnostics.log_gemm_algo;
     d.audit_nvfp4_scales = cfg.diagnostics.audit_nvfp4_scales;
     d.dump_hidden_dir = cfg.diagnostics.dump_hidden_dir;
@@ -126,6 +128,7 @@ bool process_diag_debug_forward() { return slot().debug_forward; }
 bool process_diag_debug_template() { return slot().debug_template; }
 bool process_diag_graph_diag() { return slot().graph_diag; }
 bool process_diag_nvfp4_force_dequant() { return slot().nvfp4_force_dequant; }
+bool process_diag_prefill_graph_ignore_dequant_cap() { return slot().prefill_graph_ignore_dequant_cap; }
 bool process_diag_log_gemm_algo() { return slot().log_gemm_algo; }
 bool process_diag_audit_nvfp4_scales() { return slot().audit_nvfp4_scales; }
 const char* process_diag_dump_hidden_dir() {

@@ -138,6 +138,14 @@ public:
             step_count_ = warmup_steps_;
     }
 
+    // Test-only: make the next post-capture replay report failure, so the
+    // first-replay-failure path can be exercised. A genuine cudaGraphLaunch
+    // failure right after a successful cudaGraphInstantiate cannot be provoked
+    // from outside without relying on undefined behaviour, and that path used to
+    // skip the forward pass entirely (see cuda_graph.cu). Never set in
+    // production code.
+    void set_fail_next_replay_for_test() { fail_next_replay_for_test_ = true; }
+
 private:
     DecodeFn decode_fn_;
     CudaGraphCapture graph_;
@@ -147,6 +155,7 @@ private:
     int replay_count_ = 0;
     int capture_count_ = 0;
     bool capture_failed_ = false;  // Set when capture fails; prevents infinite retry
+    bool fail_next_replay_for_test_ = false;  // see set_fail_next_replay_for_test()
 
     // Track batch config to detect changes
     int last_batch_size_ = -1;
