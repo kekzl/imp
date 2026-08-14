@@ -69,3 +69,46 @@ TEST(CaptureAbort, ThrowDuringCaptureLeavesStreamUsable) {
     cudaFree(d);
     cudaStreamDestroy(stream);
 }
+
+// A capture records launches without executing them, so the replay that follows
+// it IS that step's execution. When that first replay fails, the step has run
+// nothing — and the path used to `return false` without re-running decode_fn_.
+// Four of the five execute() call sites ignore the return value; the batched
+// decode one (engine_scheduler.cpp) then sees logits_out.data == nullptr and
+// falls back to get_logits_view(), which still holds the PREVIOUS step's logits,
+// so greedy decoding repeats the token instead of failing.
+TEST(CaptureAbort, FirstReplayFailureStillExecutesTheStep) {
+    SKIP_IF_NO_CUDA();
+    cudaStream_t stream;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+    int* d = nullptr;
+    ASSERT_EQ(cudaMalloc(&d, sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d, 0, sizeof(int)), cudaSuccess);
+
+    CudaGraphRunner runner;
+    runner.set_warmup_steps(0);  // capture on the first execute
+    int calls = 0;
+    runner.set_decode_fn([&](cudaStream_t s) {
+        calls++;
+        touch_kernel<<<1, 1, 0, s>>>(d);
+    });
+
+    runner.set_fail_next_replay_for_test();
+    EXPECT_TRUE(runner.execute(stream)) << "a step whose work ran eagerly is not a failure";
+    EXPECT_EQ(calls, 2) << "capture pass + eager re-run after the failed first replay";
+
+    // The work must have actually reached the device, not just been recorded.
+    int h = 0;
+    EXPECT_EQ(cudaMemcpyAsync(&h, d, sizeof(int), cudaMemcpyDeviceToHost, stream), cudaSuccess);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    EXPECT_EQ(h, 42) << "the failed replay left the step unexecuted";
+
+    // A first-replay failure is structural: stay eager instead of re-capturing
+    // (and skipping a forward) on every later step.
+    EXPECT_TRUE(runner.execute(stream));
+    EXPECT_EQ(calls, 3);
+    EXPECT_EQ(runner.capture_count(), 1) << "must not retry capture after a failed first replay";
+
+    cudaFree(d);
+    cudaStreamDestroy(stream);
+}

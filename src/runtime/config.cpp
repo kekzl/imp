@@ -290,6 +290,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("diagnostics.graph_dump_dir", cfg.diagnostics.graph_dump_dir);
     B("diagnostics.nvfp4_force_dequant", cfg.diagnostics.nvfp4_force_dequant);
     B("diagnostics.no_nvfp4_decode_cache", cfg.diagnostics.no_nvfp4_decode_cache);
+    B("diagnostics.prefill_graph_ignore_dequant_cap", cfg.diagnostics.prefill_graph_ignore_dequant_cap);
     B("diagnostics.spec_capture_probe", cfg.diagnostics.spec_capture_probe);
     B("diagnostics.log_gemm_algo", cfg.diagnostics.log_gemm_algo);
     B("diagnostics.mtp_pattern_log", cfg.diagnostics.mtp_pattern_log);

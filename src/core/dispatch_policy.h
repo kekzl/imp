@@ -828,6 +828,17 @@ struct Diagnostics {
     // semantics. Distinct from nvfp4_force_dequant, which dequantizes
     // the already-NVFP4-quantized cache and so keeps NVFP4 values.
     bool no_nvfp4_decode_cache = false;
+    // Do not let the NVFP4 dequant-workspace cap disable prefill-graph
+    // capture (`executor_workspace_buffers.cu`, kCap = 512 MiB). Probe
+    // tool: the cap is compared against the largest dequant target,
+    // which for every model with a big vocabulary is the LM head
+    // (vocab x d_model x 2 B — 593 MiB on Qwen3-Coder-30B, 1187 MiB on
+    // Qwen3-8B), so prefill capture is off for every model above ~1B.
+    // Whether the M>1 NVFP4 dequant fallback can actually be reached
+    // under prefill capture is the open question; with this set, the
+    // existing fail-loud in gemm_nvfp4 answers it — capture succeeds if
+    // the path never fires, and fails cleanly if it does.
+    bool prefill_graph_ignore_dequant_cap = false;
     // #847 graph-captured-verify feasibility probe: stream-capture every
     // spec verify chunk forward, instantiate + launch the graph (falls
     // back to the eager forward on any failure). Logs per-attempt

@@ -22,6 +22,7 @@
 #include "memory/vram_allocator.h"
 #include "memory/engine_arena.h"
 #include "exec/workspace_sizes.h"
+#include "runtime/process_diag.h"  // process_diag_prefill_graph_ignore_dequant_cap
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -1270,13 +1271,16 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     // non-captured streams; hitting one of them under capture now throws
     // (gemm_nvfp4) and the capture fails cleanly.
     if (max_bytes > kCap) {
+        const bool ignore_cap = imp::process_diag_prefill_graph_ignore_dequant_cap();
         IMP_LOG_WARN(
             "gemm_nvfp4 dequant workspace: largest NVFP4 weight is %.2f MiB > %.0f MiB cap "
-            "(covered: %.2f MiB) — prefill graph capture disabled (a captured M>1 fallback "
+            "(covered: %.2f MiB) — prefill graph capture %s (a captured M>1 fallback "
             "on the oversized weight fails loud).",
             max_bytes / (1024.0 * 1024.0), kCap / (1024.0 * 1024.0),
-            covered_bytes / (1024.0 * 1024.0));
-        nvfp4_dequant_uncapturable_ = true;  // scheduler will skip prefill-graph capture
+            covered_bytes / (1024.0 * 1024.0),
+            ignore_cap ? "KEPT ENABLED by diagnostics.prefill_graph_ignore_dequant_cap" : "disabled");
+        if (!ignore_cap)
+            nvfp4_dequant_uncapturable_ = true;  // scheduler will skip prefill-graph capture
     }
     if (covered_bytes == 0)
         return !nvfp4_dequant_uncapturable_;
