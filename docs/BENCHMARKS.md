@@ -21,6 +21,13 @@ artificially LOW). `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Decode (tg) is the
 reliable A/B signal; prefill (pp) varies up to 2.6× across container restarts
 (cuBLAS autotuning) and is therefore not tabulated for comparisons.
 
+> **Correction, 2026-08-14** (this file is a record, so the method note above is
+> left as written): the 2.6× was a carried-forward citation. cuBLAS algo
+> re-timing measures 3.50 % over nine process starts, and the spread is a
+> property of the *model*, not of cuBLAS: 0.6-1.2 % on Qwen3-8B Q8_0 against
+> 37.6 % on a fully resident NVFP4 MoE model. Current figures and provenance:
+> [`PERF.md`](PERF.md).
+
 The CI-gated canonical baseline lives in
 [`tests/perf_baseline.json`](../tests/perf_baseline.json) (8% decode / 8%
 prefill regression gate, plus a 10% peak-VRAM ceiling over the pinned

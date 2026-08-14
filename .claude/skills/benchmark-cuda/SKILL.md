@@ -9,7 +9,7 @@ Pair with `sm120-cuda-expert` for optimization decisions.
 
 ## STOP — what is a real signal on this box
 
-1. **Decode is the only reliable A/B signal.** Prefill (`pp512`) varies up to **2.6× across container restarts** (cuBLAS algo re-selection). Never gate on prefill alone. For prefill-*kernel* A/Bs ≤5%, end-to-end pp cannot resolve the delta at all — compare **nsys per-kernel time sums** instead. Metric keys: the gate uses **`tg128`**, ad-hoc runs usually print `tg256` — compare like with like.
+1. **Decode is the only reliable A/B signal.** Prefill (`pp512`) spread across process starts is a property of the MODEL, not of cuBLAS: measured on one quiet host, 3 fresh processes per arm, **0.6-1.2 % on Qwen3-8B Q8_0** (the cuBLAS-FP16 prefill model) against **37.6 % on a fully resident NVFP4 MoE model**. cuBLAS algo re-selection on its own measures 3.50 % over nine starts. (The "2.6×" this line used to quote was a carried-forward citation, retracted 2026-08-03.) Never gate on prefill alone; resolve it with a paired, alternating A/B, not with more reps. For prefill-*kernel* A/Bs ≤5%, end-to-end pp cannot resolve the delta at all — compare **nsys per-kernel time sums** instead. Metric keys: the gate uses **`tg128`**, ad-hoc runs usually print `tg256` — compare like with like.
 2. **The GPU is water-cooled and never throttles** (idles ~30 °C). Do NOT add temperature cooldowns. The 15 s cooldown in `gen_perf_baseline.sh` resets **cuBLAS algo state**, not temperature.
 3. **Idle downclock is the dominant cold-start artifact.** Clocks need ~1 s to ramp, so the first second reads LOW — once producing a spurious −42% that re-measured +20% clean. Precede timed reps with a discarded warmup >1 s; imp's built-in `Warmup...` is too short.
 4. **Decode can read 8–15% low for a whole day** (host/driver state on this WSL2 box, issue #526). Sample clocks DURING the bench: healthy load ≈ **2850 MHz SM / 13801 MHz mem / ~500 W**. Lower mem clock or power = depressed host → don't trust cross-day deltas or refresh baselines that day.
@@ -139,7 +139,8 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 
 ## Red flags — STOP and re-run
 
-- Reporting `pp512` delta without a decode delta → 2.6× restart variance, you're seeing noise
+- Reporting `pp512` delta without a decode delta → on a MoE model that spread is ~38 % across process starts, you're seeing noise
+- Reading `nvidia-smi` as "the GPU is free" on WSL2 → load from the **Windows side** is invisible here: `--query-compute-apps` stays blank and `docker ps` shows nothing, while `memory.used` and `utilization.gpu` do report it. Guard on those two, not on the process list (observed 2026-08-14: 12.9 GiB held at 96 % util, no container, no visible process)
 - Trusting a cold single-shot number → first ~1 s runs at idle clocks (NOT heat — this box never throttles)
 - Cross-day decode delta without sampling clocks during the bench → host drift is 8–15%
 - Refreshing the baseline on a depressed-host day → bakes a low bar in

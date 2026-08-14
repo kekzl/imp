@@ -15,8 +15,13 @@ is the auditable summary.)
 
 - **Decode `tg128` (tokens/s)** is the headline and the A/B signal. It is stable
   within a session.
-- **Prefill `pp512`** is reported but **not** used for A/B: cuBLAS prefill varies
-  up to **2.6× across container restarts**. Treat prefill regressions as warnings.
+- **Prefill `pp512`** is reported but **not** used for A/B on its own: it varies
+  far more than decode across process starts, and by model. Measured on one quiet
+  host, three fresh processes per arm: **0.6-1.2 %** on the cuBLAS-FP16 prefill
+  model (Qwen3-8B Q8_0), **37.6 %** on a fully resident NVFP4 MoE model
+  (Qwen3-Coder-30B-A3B). cuBLAS algo re-timing, long blamed for this, measured
+  **3.50 %** on its own over nine process starts. Treat prefill regressions as
+  warnings, and resolve them with a paired, alternating A/B rather than more reps.
 
 ## How to measure (every run)
 

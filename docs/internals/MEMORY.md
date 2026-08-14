@@ -246,10 +246,12 @@ must attribute it explicitly rather than dumping it into a residual (A5.3).
   on-disk persisted cache), not a fork. Design accordingly (A5.1).
 - **No persistent GEMM autotuning state.** `src/compute/gemm.cu` contains no
   file I/O of any kind; the cuBLASLt algo cache is a process-local map rebuilt
-  every start. The known **2.6× prefill variance across container restarts is
-  therefore not explained by persisted autotune state** — there is none. It is
-  per-process heuristic selection plus host/driver state. Not a memory-design
-  input; recorded here so the question is closed.
+  every start. The **prefill variance across process starts is therefore not
+  explained by persisted autotune state** — there is none. It is per-process
+  heuristic selection plus host/driver state, and the algo-selection share of it
+  measured only 3.50 % (the 2.6x once quoted here was a carried-forward citation;
+  see `docs/PERF.md`). Not a memory-design input; recorded here so the question
+  is closed.
 
 ### A1.7 Per-site inventory by subsystem
 
@@ -881,10 +883,11 @@ model. The grouped path keeps a growth path, which is safe for a reason the
 `cudaMalloc` version was not: **a bump-arena take is pointer arithmetic, not a
 CUDA call, so it is legal under stream capture.**
 
-**On the 2.6× prefill variance:** the dispatch asks whether persistent autotuning
+**On the prefill variance:** the dispatch asks whether persistent autotuning
 state explains it. It does not — there is no persistence (A1.6, verified: zero
 file I/O in `gemm.cu`). Recording it here closes the question; it is not a design
-input.
+input. (The dispatch quoted 2.6x; that figure has since been retracted — see
+`docs/PERF.md`.)
 
 **The measurement window, not the charge, is what varies (B79).** The reserve reads 0 / 2 / 4182 / 7460 MiB across configs because `report_library_reserve()` anchors immediately before the warmup forward, and which library claims before that point depends on the model's execution path — the NVFP4 cache build runs CUTLASS two phases earlier. On 30B-A3B-NVFP4 the unmeasured remainder is the 2239 MiB residual, confirmed by the invariance A1.5 defines the charge by (identical at batch 1 and 8, +27.7 MiB across a 4x context). The fix is an earlier anchor; it changes what the plan charges on every model, so it is its own pass.
 

@@ -48,6 +48,13 @@ there instead of retelling it.
 
 ### Changed
 
+- **The "2.6x prefill variance" figure is retracted across the docs.** It was a
+  citation carried forward; cuBLAS algo re-timing measures 3.50 % over nine
+  process starts, and the spread is a property of the model rather than of
+  cuBLAS: 0.6-1.2 % on Qwen3-8B Q8_0 against 37.6 % on a fully resident NVFP4 MoE
+  model. `docs/PERF.md` now owns the figures; `BENCHMARKS.md` keeps its method
+  note as written (it is a record) with a dated correction beneath it.
+
 - **`diagnostics.prefill_graph_ignore_dequant_cap`** (default off) lets a probe run
   keep prefill capture enabled when only the dequant-workspace cap blocks it, so
   the guarded path's reachability can be measured from one binary.

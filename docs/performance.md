@@ -16,7 +16,7 @@ commit: 81ffa573
 | imp config | NVFP4 decode cache + FP16 prefill (FP8 auto-disabled on sm_120), CUDA Graphs on |
 | llama.cpp | `b8445+`, flash attention on, full offload (`-ngl 99`) |
 | Sampling | Greedy (temp = 0) |
-| Repetitions | 3 (decode); prefill varies up to ±2.6× across container restarts (cuBLAS algo selection) |
+| Repetitions | 3 (decode); prefill spread depends on the model, see [`PERF.md`](PERF.md) |
 | Reported | Mean; decode (`tg256`) is the reliable A/B signal |
 
 Refresh the baseline with `scripts/gen_perf_baseline.sh` after any intentional perf
@@ -27,8 +27,8 @@ change — or any intentional memory change: the same file pins peak VRAM
 **Last refreshed**: decode numbers are owned by the SHA-anchored
 [`BENCHMARKS.md`](BENCHMARKS.md) (see Decode Throughput below — no table is
 duplicated here). Prefill + KV-cache tables below are
-**historical** (2026-05-27 era, CUDA 13.2.1) — prefill varies up to 2.6×
-across container restarts and is not maintained as a comparison table.
+**historical** (2026-05-27 era, CUDA 13.2.1) — prefill moves enough across
+process starts that it is not maintained as a comparison table.
 llama.cpp / vLLM comparison from cross-engine bench 2026-05-24.
 
 **Bench-mode caveat**: `--bench --max-tokens 128` sizes the engine to the bench
@@ -84,7 +84,7 @@ Default is **FP16**. FP8 has perf parity with FP16 on Qwen3 and Qwen3.5/3.6 GDN 
 
 ## Notes
 
-- **Prefill variance**: cuBLAS autotuning can cause up to 2.6x variance in prefill numbers between container restarts. Decode is stable — compare decode only for reliable A/B testing.
+- **Prefill variance**: prefill moves far more than decode across process starts, and it is the MoE path that moves, not cuBLAS autotuning as long assumed. Figures and provenance: [`PERF.md`](PERF.md). Compare decode for A/B testing, or pair and alternate the arms.
 - **Gemma-4**: CUDA Graphs enabled. Decode is 1.21x llama.cpp on Q4_K_M. Q4_K_M can degenerate on complex code-gen prompts — use Q5_K_M or Q8_0 when output quality matters.
 - **GDN models**: Use FP16 prefill weights for numerical stability, reducing prefill throughput ~8% vs FP8.
 - **MXFP4 Prefill**: `--mxfp4-prefill` uses CUTLASS block-scaled GEMM; currently ~10% slower than FP8 cuBLASLt due to activation quantization overhead.

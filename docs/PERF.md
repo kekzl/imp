@@ -28,10 +28,19 @@ healthy clocks; six quiet runs spanned 278.59-289.77. Three processes *within*
 one session agree to 0.16 %. That is why the regression gate sits at 8 % and not
 at 3 %: below 8 % it was reporting the host, not the change.
 
-**Prefill varies more than decode**, because cuBLAS algo selection is re-timed
-per process. Under host-resident MoE experts the same arm varies about 15 %
-between two runs. A single prefill number is not a measurement; a paired,
-alternating A/B is.
+**Prefill varies more than decode, and it is the MoE path that varies, not
+cuBLAS.** Measured across fresh processes on one quiet host: the cuBLAS-FP16
+prefill model spreads **0.6-1.2 %**, while a fully resident NVFP4 MoE model
+spreads **37.6 %** in the same session. Under host-resident MoE experts the same
+arm varies about 15 % between two runs. cuBLAS algo selection is re-timed per
+process and was long blamed for this; its own contribution measured **3.50 %**
+over nine process starts (`docs/audit/AUDIT_ARCH_2026_07_29.md`, answer 5), which
+is inside the gate's own threshold. A single prefill number is not a measurement;
+a paired, alternating A/B is.
+
+[PROV: commit=43e8b663 date=2026-08-14 hw=RTX5090 model=Qwen3-8B-Q8_0+Qwen3-Coder-30B-A3B-NVFP4
+       quant=Q8_0+NVFP4 cuda=13.3 path=gguf-dp4a+cutlass-nvfp4
+       cmd=`imp-cli --bench --bench-pp 512|4096 --bench-reps 5` n=3 processes per arm]
 
 **A red gate is not a regression until it reproduces.** Under container load the
 same build reads 4-8 % low.

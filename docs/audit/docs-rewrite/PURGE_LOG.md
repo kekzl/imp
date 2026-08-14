@@ -35,12 +35,23 @@ that lost things.
 | `docs/roadmap.md`'s 32 unprovenanced figures | it is a dated research record whose numbers *are* the narrative of what was measured or refuted. Excluded from the linter; the reader-facing distillation is `LIMITATIONS.md` / `DESIGN_DECISIONS.md` / `PERF.md`, which are linted |
 | every file in `docs/archive/` and `docs/audit/` | records, not documentation |
 
+## 2026-08-14 — the 2.6x prefill variance
+
+| removed | why |
+|---|---|
+| "prefill varies up to 2.6x across container restarts (cuBLAS autotuning)" in `performance.md` (x3), `internals/BENCHMARKING.md`, `internals/MEMORY.md` (x2) | retracted 2026-08-03 in `docs/audit/AUDIT_ARCH_2026_07_29.md` answer 5: nine process starts of one binary spread **3.50 %**, not 2.6x. The figure was a citation carried forward. Replaced by the measured per-model split in `PERF.md`: **0.6-1.2 %** on the cuBLAS-FP16 model, **37.6 %** on a resident NVFP4 MoE model — so the attribution to cuBLAS was wrong as well as the magnitude. `BENCHMARKS.md` is a record and was left as written, with a dated correction appended below its method note. |
+
 ## Found, not fixed here
 
-Both are code changes, listed so they are not lost:
+Code changes, listed so they are not lost:
 
 - `src/core/qtype.h:15` carries a German comment ("Wire-stable 0..31 (kompatibel
   mit GGUF block-quant Wire-Format)"), violating §2.4.
 - `src/runtime/engine_init_resolver.cpp:565` says "prefill is never
-  graph-captured". `runtime.prefill_graph` defaults to `true` (`config.h:103`).
-  The comment contradicts the default it sits beside.
+  graph-captured". `runtime.prefill_graph` defaults to `true` (`config.h:103`),
+  so this was filed as a contradiction. **It is not: measured 2026-08-14, no real
+  model ever captures a prefill chunk.** Three gates close it independently (the
+  512 MiB NVFP4 dequant cap vs the LM head, `kv_append_capturable` requiring F16
+  KV, and the last chunk always running eager), and `can_capture` logged nothing
+  when it was false. The comment is accidentally right about the outcome and
+  wrong about the reason. Diagnostic added in #1417; the default is still `true`.
