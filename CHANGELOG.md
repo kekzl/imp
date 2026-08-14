@@ -57,6 +57,14 @@ there instead of retelling it.
 
 ### Changed
 
+- **Split-K attention merge is 21.9 % faster** (`paged_attention_reduce_kernel`,
+  12 992 -> 10 144 ns at base clock). The per-split `(m, l)` pairs are staged into
+  shared memory with one parallel load instead of being walked serially by a
+  single thread, and each split weight is computed once instead of once per
+  thread. Worth **+1.39 %** decode at 8k context on Qwen3-Coder-30B-A3B (10 of 10
+  paired runs, sign test p = 0.002); nothing at short context, where the kernel is
+  small. Output is bit-identical, covered by a new test.
+
 - **The "2.6x prefill variance" figure is retracted across the docs.** It was a
   citation carried forward; cuBLAS algo re-timing measures 3.50 % over nine
   process starts, and the spread is a property of the model rather than of
