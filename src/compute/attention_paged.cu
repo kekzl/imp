@@ -1076,10 +1076,37 @@ __global__ void paged_attention_reduce_kernel(
     __shared__ float s_global_max;
     __shared__ float s_global_l;
 
+    // The per-split (m, l) pair sits `partial_stride` floats apart (520 B at
+    // head_dim=128), so reading them one at a time from a single thread costs
+    // one un-overlapped memory latency each while the rest of the block waits
+    // at the __syncthreads() below. That serial walk is this kernel's cost:
+    // measured at ctx 8k on Qwen3-Coder-30B-A3B (num_splits=85, so 170 serial
+    // reads) it is 13.0 us per launch at 110 GB/s, 6.1 % of peak, occupancy
+    // 8.3 %, and 8.2 % of the whole decode step across 48 layers.
+    //
+    // Stage them with a parallel load first, then reduce in the SAME serial
+    // order, so the result is bit-identical and only the latency is parallel.
+    // Splits are NOT capped at 32 here: paged_attention_splitk_fp8_tile_gqa_splits
+    // returns ceil(2*n_sms / (batch*n_kv_heads)), which is 85 at 4 KV heads and
+    // rises as KV heads drop, bounded only by the split-K scratch. The loop and
+    // the generous bound cover that; anything larger keeps the original path.
+    constexpr int kMaxStagedSplits = 256;
+    __shared__ float s_m[kMaxStagedSplits];
+    __shared__ float s_l[kMaxStagedSplits];
+    __shared__ float s_w[kMaxStagedSplits];  // expf(m - gmax), Step 3 reuses it
+    const bool staged = (num_splits <= kMaxStagedSplits);
+    if (staged) {
+        for (int s = tid; s < num_splits; s += blockDim.x) {
+            s_m[s] = base[s * partial_stride];
+            s_l[s] = base[s * partial_stride + 1];
+        }
+        __syncthreads();
+    }
+
     if (tid == 0) {
         float gmax = -FLT_MAX;
         for (int s = 0; s < num_splits; s++) {
-            float m = base[s * partial_stride];
+            float m = staged ? s_m[s] : base[s * partial_stride];
             gmax = fmaxf(gmax, m);
         }
         // gpt-oss learned sink (#547): virtual extra softmax column — joins
@@ -1091,8 +1118,8 @@ __global__ void paged_attention_reduce_kernel(
         // Step 2: Compute global denominator
         float gl = 0.0f;
         for (int s = 0; s < num_splits; s++) {
-            float m = base[s * partial_stride];
-            float l = base[s * partial_stride + 1];
+            float m = staged ? s_m[s] : base[s * partial_stride];
+            float l = staged ? s_l[s] : base[s * partial_stride + 1];
             gl += expf(m - gmax) * l;
         }
         if (attn_sinks)
@@ -1105,12 +1132,21 @@ __global__ void paged_attention_reduce_kernel(
     float gl = s_global_l;
     float inv_gl = (gl > 0.0f) ? (1.0f / gl) : 0.0f;
 
+    // The split weight depends only on s, but the loop below ran expf() for it
+    // once per (thread, split): 10880 calls per block at head_dim=128 and
+    // num_splits=85, for 85 distinct values. Compute each once. Same expf on the
+    // same input, so the weights are bit-identical.
+    if (staged) {
+        for (int s = tid; s < num_splits; s += blockDim.x)
+            s_w[s] = expf(s_m[s] - gmax);  // expf, not __expf: must stay bit-identical
+        __syncthreads();
+    }
+
     // Step 3: Each thread handles a subset of head_dim elements
     for (int d = tid; d < head_dim; d += blockDim.x) {
         float o_val = 0.0f;
         for (int s = 0; s < num_splits; s++) {
-            float m = base[s * partial_stride];
-            float weight = expf(m - gmax);
+            float weight = staged ? s_w[s] : expf(base[s * partial_stride] - gmax);
             float o_s = base[s * partial_stride + 2 + d];
             o_val += weight * o_s;
         }
