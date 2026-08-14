@@ -75,7 +75,7 @@ These bugs were diagnosed at high cost. The current kernels assume the fix is in
 | `__launch_bounds__` cost on regular paths: -4.5% to -20% | Repeated benchmarks 2026-04 to 2026-05 |
 | `mxf4nvf4.block_scale` raw MMA: 2.60× over f8f6f4 | `mxf4nvf4_mma_bench` 2026-04-25 |
 | CUDA Graph decode on prequant NVFP4 MoE: +193% to +234% | Qwen3-Coder, Qwen3.6, Gemma-4 NVFP4 — verified 2026-05-07 |
-| pp512 cuBLAS-autotune variance: up to 2.6× across container restarts | Use `tg256` for A/B; ≤5% prefill-kernel deltas need nsys per-kernel sums, not end-to-end pp (PR #648) — see `benchmark-cuda` skill |
+| pp512 spread across process starts: **model-dependent**, 0.6-1.2 % on Qwen3-8B Q8_0 vs **37.6 %** on a resident NVFP4 MoE model (cuBLAS algo re-timing itself: 3.50 %; the old "2.6× cuBLAS" figure was retracted 2026-08-03) | Use `tg256` for A/B; ≤5% prefill-kernel deltas need nsys per-kernel sums, not end-to-end pp (PR #648) — see `benchmark-cuda` skill |
 | FP4 `mma.sync` measured peak ≈ 2,019 TOPS (~½ datasheet); f32-accumulate = ¼ rate | TC-rate calibration 2026-06-07 (#595/#596) |
 
 ---
