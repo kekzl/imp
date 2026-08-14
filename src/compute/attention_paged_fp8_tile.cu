@@ -535,6 +535,16 @@ int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int 
     const int sms = kpar_n_sms();
     const int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
     const int bh_kv = batch_size * n_kv_heads;
+    // Target 2 blocks per SM. This factor is a measured optimum in BOTH
+    // directions, not a guess: capping split-K lower regressed 21-35 %
+    // (2026-07-13), and raising it costs decode monotonically -- at ctx 8k on
+    // Qwen3-Coder-30B-A3B, 2/3/4 waves give 340/512/680 blocks and
+    // 317.25/308.15/302.32 tok/s, losing in 5 of 5 rounds (2026-08-14, measured
+    // after the split-K reduce got 21.9 % faster, so the reduce is not the cost).
+    // The kernel is not bandwidth-bound at M=1 despite sitting at 31 % of peak:
+    // its long-scoreboard stall is 1.64 against the lm_head GEMV's 18.4 at 93 %,
+    // so more blocks buy per-split overhead, not overlap. See the
+    // sm120-cuda-expert known-issues entry before retrying either direction.
     int s = (2 * sms + bh_kv - 1) / bh_kv;
     s = min(s, num_ctx_blocks);
     void* sk_ptr = nullptr;
