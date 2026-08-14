@@ -8,6 +8,6 @@
 # Used by: CMakeLists.txt FetchContent_Declare GIT_TAG entries.
 
 set(IMP_DEP_GOOGLETEST_TAG    v1.18.0  CACHE STRING "googletest git tag")
-set(IMP_DEP_CUTLASS_TAG       4.7.0    CACHE STRING "NVIDIA/cutlass git tag")
+set(IMP_DEP_CUTLASS_TAG       v4.7.0   CACHE STRING "NVIDIA/cutlass git tag")
 set(IMP_DEP_HTTPLIB_TAG       v0.53.0  CACHE STRING "cpp-httplib git tag")
 set(IMP_DEP_NLOHMANN_JSON_TAG v3.12.0  CACHE STRING "nlohmann/json git tag")

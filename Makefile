@@ -14,7 +14,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -31,7 +31,19 @@ check-gpu:
 	fi; \
 	echo "GPU is free (utilization: $${GPU_UTIL:-0}%)"
 
-build:
+# Dependency-pin gate. Local builds run the OFFLINE half (Dockerfile ARG
+# defaults vs cmake/imp-deps.cmake): it is instant and cannot fail because the
+# network is down, which matters since the pre-commit hook reaches `build`
+# through `test-gpu`. CI's Lint job runs it with --online, which additionally
+# resolves every tag upstream -- that is the check that would have caught the
+# CUTLASS `4.7.0` vs `v4.7.0` break before a cold cache did.
+check-deps:
+	@bash scripts/check_dep_pins.sh
+
+check-deps-online:
+	@bash scripts/check_dep_pins.sh --online
+
+build: check-deps
 	docker build $(BUILD_ARGS) $(DEP_ARGS) -t $(DOCKER_IMG) .
 
 # ---------------------------------------------------------------------------
