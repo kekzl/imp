@@ -34,6 +34,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Builds from a cold Docker cache were broken.** The CUTLASS pin read `4.7.0`
+  while every tag in that repository carries a `v` prefix, so
+  `git clone --branch 4.7.0` failed; cached builds kept working, which is why CI
+  stayed green. Three of the four Dockerfile `ARG` defaults had also drifted
+  behind the pins they mirror (GoogleTest, cpp-httplib, CUTLASS), so building
+  with plain `docker build` used different dependencies than the gate.
+  `scripts/check_dep_pins.sh` now enforces both: `make build` runs the offline
+  drift half, CI's Lint job additionally resolves every tag upstream.
+
 - **A failed first graph replay skipped that step's forward pass entirely**, so the
   sampler read the previous step's logits and greedy decoding repeated a token for
   as long as the failure lasted. The step now runs eagerly, as every other capture
