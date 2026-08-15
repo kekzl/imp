@@ -129,8 +129,14 @@ The exclusion is deliberate and reasoned ("quantizing them costs quality for no
 bandwidth win on the decode hot path") and that reasoning is about *speed*. When
 the question is whether the model fits at all, the trade is a different one and
 should be available as an opt-in with a measured price tag. Needs a PPL
-comparison per option before it ships, and `--dry-run` should show what each
-choice buys now that it reports size.
+comparison per option before it ships.
+
+**Landed 2026-08-15:** the reporting half, which is what makes the trade
+visible. `--dry-run` now breaks down the bytes that did NOT shrink, by reason,
+largest first. On Qwen3.8-27B that reads 5.60 GiB, **30 % of the output**: 2 425
+MiB embedding, 2 425 MiB lm_head, 875 MiB vision tower. The compression ratio
+never says this, and "why is it still this big" has a different fix from "did
+quantization work". The opt-in itself still waits on the measurement.
 
 ### 3. Confirm `--calib-groups BD` above 14B (smallest work, named open question)
 
