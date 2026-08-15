@@ -292,6 +292,30 @@ bool write_quant_config(const Options& opt, const std::vector<std::string>& excl
 // records for this WSL2/WDDM box.
 constexpr size_t kContextBytes = 1680ull * 1024 * 1024;
 
+// Where the bytes that did not shrink went, largest first.
+//
+// The compression ratio answers "did it work" and not "why is it still this
+// big", and those have different fixes. Every line here is a role deliberately
+// left in source precision, so the table doubles as the list of what could be
+// traded if a checkpoint misses the card: on a modern vocabulary the embedding
+// pair is a quarter of the output, which no ratio reveals.
+void report_copied_breakdown(const std::map<std::string, size_t>& by_reason, size_t bytes_out) {
+    if (by_reason.empty() || bytes_out == 0)
+        return;
+    std::vector<std::pair<std::string, size_t>> rows(by_reason.begin(), by_reason.end());
+    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    size_t total = 0;
+    for (const auto& [_, b] : rows)
+        total += b;
+    printf("\nkept at source precision: %.2f GiB, %.0f%% of the output", total / 1073741824.0,
+           100.0 * double(total) / double(bytes_out));
+    const double mib = 1024.0 * 1024.0;
+    for (size_t i = 0; i < rows.size() && i < 5; i++)
+        printf("\n      %8.0f MiB  %s", double(rows[i].second) / mib, rows[i].first.c_str());
+    if (rows.size() > 5)
+        printf("\n      %8s   (%zu smaller reasons)", "", rows.size() - 5);
+}
+
 // Report the checkpoint against the card it is meant to run on. Deliberately
 // states the ON-DISK size against the budget rather than predicting VRAM:
 // what the engine actually resides is the weights PLUS a scale-factor cache and
@@ -581,6 +605,11 @@ int main(int argc, char** argv) {
 
     size_t n_quantized = 0, n_copied = 0, n_moe_skipped = 0;
     size_t bytes_in = 0, bytes_out = 0;
+    // Where the bytes that did NOT shrink went. A checkpoint that misses the
+    // card by a gigabyte is a question about this table, not about the ratio:
+    // on a modern vocabulary the embedding pair alone is a quarter of the
+    // output, and the ratio never says so.
+    std::map<std::string, size_t> copied_bytes_by_reason;
     std::vector<std::string> excluded_modules;
     std::vector<std::pair<std::string, std::string>> tensor_to_shard;
 
@@ -623,6 +652,7 @@ int main(int argc, char** argv) {
                 if (gated_fp8 || !quantize::should_quantize(as_bf16, opt.quantize_lm_head, why_fp8)) {
                     out.push_back({t.name, t.dtype, t.shape, t.data, t.nbytes});
                     bytes_out += t.nbytes;
+                    copied_bytes_by_reason[gated_fp8 ? "fused Q+gate projection" : why_fp8] += t.nbytes;
                     n_copied++;
                     continue;
                 }
@@ -691,6 +721,7 @@ int main(int argc, char** argv) {
                 }
                 out.push_back({t.name, t.dtype, t.shape, data, t.nbytes});
                 bytes_out += t.nbytes;
+                copied_bytes_by_reason[why] += t.nbytes;
                 n_copied++;
                 continue;
             }
@@ -796,6 +827,7 @@ int main(int argc, char** argv) {
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
     printf("\nsize: %.2f GiB -> %.2f GiB (%.2fx)%s", bytes_in / 1073741824.0, bytes_out / 1073741824.0,
            bytes_out ? double(bytes_in) / double(bytes_out) : 0.0, opt.dry_run ? " (forecast)" : "");
+    report_copied_breakdown(copied_bytes_by_reason, bytes_out);
     report_card_fit(bytes_out);
     printf("\n");
     return 0;

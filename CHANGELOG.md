@@ -13,6 +13,14 @@ there instead of retelling it.
 
 ### Added
 
+- **`imp-quantize` reports which bytes did not shrink, and why.** The ratio
+  answers "did it work", not "why is it still this big", and those have
+  different fixes. On Qwen3.8-27B the breakdown reads 5.60 GiB kept at source
+  precision, 30% of the output: 2425 MiB embedding, 2425 MiB lm_head, 875 MiB
+  vision tower. Every line is a role deliberately left in source precision, so
+  it doubles as the list of what could be traded when a checkpoint misses the
+  card.
+
 - **`imp-quantize` reads block-scaled FP8 checkpoints as a source.** Releases
   published only in FP8 (DeepSeek-V3, Qwen3.8's FP8 line) were refused tensor by
   tensor, because the accepted set was BF16/F16. Both conventions store the same
