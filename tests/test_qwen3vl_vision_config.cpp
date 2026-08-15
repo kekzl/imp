@@ -140,6 +140,8 @@ TEST(Qwen3VLVisionConfig, TowerAllowlist) {
     EXPECT_TRUE(vision_tower_supported("qwen3_vl"));
     // Qwen3.6 ships the same tower layout under its text model_type.
     EXPECT_TRUE(vision_tower_supported("qwen3_5_moe"));
+    // Qwen3.8 is the dense sibling and carries that same tower.
+    EXPECT_TRUE(vision_tower_supported("qwen3_5"));
 
     // Everything else keeps hitting the loud text-only path. Recognising a
     // tower on a resemblance is what this list exists to prevent.

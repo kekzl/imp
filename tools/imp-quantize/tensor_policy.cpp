@@ -53,6 +53,15 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
         why_not = "lm_head (use --lm-head to include)";
         return false;
     }
+    // The vision tower. Its upload path takes F16/BF16/F32 and rejects anything
+    // else outright (qwen3vl_vision_upload.cpp), so an NVFP4 tower is a tower no
+    // loader can read back: the tensors are 2-D and K-aligned, so every shape
+    // check waves them through. Multimodal checkpoints carry it under
+    // `model.visual.*`; a text-only one has no such tensor and is unaffected.
+    if (contains(t.name, "visual.") || contains(t.name, "vision_tower.")) {
+        why_not = "vision tower (upload path takes source precision only)";
+        return false;
+    }
     // Two weight roles that are 2-D and K-aligned — so every shape check waves
     // them through — but that must NOT be quantized. Both were found by
     // bisection on DeepSeek-V2-Lite (MLA + 64-expert MoE), where quantizing

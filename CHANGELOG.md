@@ -13,6 +13,18 @@ there instead of retelling it.
 
 ### Added
 
+- **Qwen3.8-27B runs, text and vision.** Its vision tower is the one imp already
+  had, declared under a third `vision_config.model_type` (`qwen3_5`), so enabling
+  it was one allowlist entry: 333 tensors, 878.8 MiB. Decode `tg256` 89.85 tok/s,
+  prefill `pp512` 7524 tok/s, teacher-forced PPL 4.62 on `ppl_corpus_45k.txt`.
+  No published NVFP4 export runs on `sm_120` (they carry FP8 attention, which the
+  card has no GEMM for): quantize the BF16 release with `imp-quantize`.
+  ([`docs/MODELS.md`](docs/MODELS.md))
+
+- **`imp-quantize` no longer quantizes a vision tower.** `model.visual.*` and
+  `vision_tower.*` are copied at source precision, because the tower upload path
+  accepts F16/BF16/F32 only, so an NVFP4 tower could not be read back.
+
 - **NVFP4 MoE experts can now live on host**, so a checkpoint whose experts
   exceed VRAM runs instead of being refused. Qwen3-30B-A3B-NVFP4 with all 48 MoE
   layers off-GPU answers correctly at 23.0 tok/s, against 384.0 fully resident.

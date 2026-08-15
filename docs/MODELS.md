@@ -52,6 +52,7 @@ GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but elimi
 | [Qwen3.5-27B](https://huggingface.co/unsloth/Qwen3.5-27B-GGUF) | Q4_K_M | 16 GB | — | GGUF |
 | [Qwable-3.6-27B](https://huggingface.co/Mia-AiLab/Qwable-3.6-27b) | Q4_K_M | 16 GB | ~18 | GGUF, validated dense-GDN 27B (Qwen3.6-27B fine-tune, 64 layers: 16 attn + 48 GDN). ~29 GB resident (Q4_K + NVFP4 decode cache + GDN state) → relies on the auto KV clamp to serve. Heavy trace-reasoner: give it generous `max_tokens`. |
 | [Qwen3.6-27B-Text-NVFP4-MTP](https://huggingface.co/sakamakismile/Qwen3.6-27B-Text-NVFP4-MTP) | NVFP4 | 17 GB | — | SafeTensors (Modelopt), dense-GDN 27B. **Checkpoint quantizes the GDN `linear_attn` projections to NVFP4** — `ssm_in`/`ssm_out`/`gdn_gate` run native NVFP4, `gdn_alpha`/`gdn_beta` (FP16_ONLY) are dequanted to FP16 at load (#812). |
+| [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) | NVFP4 | 17 GB | 90 | SafeTensors, dense-GDN 27B (64 layers: 16 attn + 48 GDN) and multimodal. The text config is field-identical to Qwen3.6-27B above. **No published NVFP4 export runs on this card**: they are mixed-precision with FP8 attention and `sm_120` has no FP8 GEMM. Quantize the BF16 release yourself (`imp-quantize`, 51.8 → 18.6 GiB). Teacher-forced PPL 4.62 on `ppl_corpus_45k.txt` against 7.55 for Qwen3.6-27B on the same corpus |
 | Qwen3.5-27B | MXFP4 | — | — | Loads OOM on 32 GB — see [roadmap](roadmap.md) |
 
 ## Mixture-of-Experts
@@ -81,6 +82,7 @@ checkpoint, so there is no second file and no second flag.
 |---|---|---|---|
 | [Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct) | BF16 | SafeTensors | Tower ships with the checkpoint — no `--mmproj`. Dynamic resolution (a 1795x2397 photo becomes 972 image tokens), DeepStack taps into the LM's first layers, three-axis M-RoPE |
 | [Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4) | NVFP4 | SafeTensors (llm-compressor) | Same tower under a different `vision_config.model_type` (`qwen3_5_moe`), 27 blocks, no DeepStack. Text weights NVFP4, tower BF16 (851.8 MiB) — the mixed precision is the checkpoint's, not a conversion. Tight: init lands at ~31.1 of 32.6 GB. The `mmangkad` Modelopt export in the text table above is a different upload and was not tested for vision |
+| [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) | NVFP4 | SafeTensors | The same tower a third time, under `vision_config.model_type` `qwen3_5`: 27 blocks, no DeepStack, the same 333 `model.visual.*` tensors and the same `image_token_id`. Only `out_hidden_size` differs (5120), which is the LM width. Tower stays BF16 (878.8 MiB): `imp-quantize` keeps `model.visual.*` at source precision, because the upload path takes F16/BF16/F32 only |
 | [Gemma-3-12B-it](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF) | Q8_0 | GGUF | text + vision, `tg256` 129 |
 | [Gemma-3-27B-it](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | Q4_K_M | GGUF | largest Gemma-3 |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | GGUF | text + vision via the gemma4v encoder (separate BF16 mmproj), `tg128` 273 — see [`vision_gemma4v_spec.md`](vision_gemma4v_spec.md) |
@@ -88,9 +90,10 @@ checkpoint, so there is no second file and no second flag.
 Several images in one request are supported on this tower — repeat `--image`, or
 send several `image_url` parts — and they are read in prompt order.
 
-`Qwen3VLForConditionalGeneration`, `Qwen3VLMoeForConditionalGeneration` and
-`Qwen3_5MoeForConditionalGeneration` are all registered; the dense 4B and the
-Qwen3.6-35B MoE are validated end to end here. A VL checkpoint also loads
+`Qwen3VLForConditionalGeneration`, `Qwen3VLMoeForConditionalGeneration`,
+`Qwen3_5MoeForConditionalGeneration` and `Qwen3_5ForConditionalGeneration` are all
+registered; the dense 4B, the Qwen3.6-35B MoE and the dense Qwen3.8-27B are
+validated end to end here. A VL checkpoint also loads
 text-only — the tower is simply never run if no image is passed.
 
 What decides is `vision_config.model_type`, matched against an allowlist
