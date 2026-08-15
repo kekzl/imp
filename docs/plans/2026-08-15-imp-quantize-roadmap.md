@@ -109,14 +109,41 @@ checkpoint whose scales contradict its weights. An E4M3 tensor with no grid is
 reported by name instead of falling into the generic dtype exclusion, because
 that case is a scalar-scale export needing different handling.
 
-Not done: the write path has only been exercised on a synthetic fixture, since
-quantizing needs a GPU. Two things still to settle by measurement, not
-assumption: whether FP8 to NVFP4
-re-quantization is worth doing at all against just running the FP8 checkpoint
-(sm_120 has no FP8 GEMM, so the runtime already expands FP8 to an FP16
-companion, `roadmap.md` line 474, which costs VRAM the NVFP4 path would not),
-and how much quality a double quantization costs versus the BF16 route when both
-are available for the same model.
+**Measured end to end 2026-08-15 on `Qwen/Qwen3.8-27B-FP8`** (28.75 GiB, 407
+block-scaled tensors), against the BF16 release of the same model. Both open
+questions are answered, and both went further than expected.
+
+*Is the re-quantization worth doing at all?* It is not optional, it is the only
+way to run this model here. Loading the FP8 checkpoint directly fails: the
+weights land at **26 952 MiB** and the upload aborts at layer 60 with "Weight
+upload failed. Try a smaller quantization." Via NVFP4 the same model serves at
+16 466 MiB of weights.
+
+*What does the double quantization cost?* **0.24 %.** Teacher-forced perplexity
+over `ppl_corpus_45k.txt`, `deterministic_gemm=true`:
+
+| route | source | PPL |
+|---|---|---|
+| BF16 to NVFP4 | 51.75 GiB | **4.6151** |
+| FP8 to NVFP4 | 28.75 GiB | **4.6262** |
+
+The two checkpoints agree on more than the score: same 504 quantized and 695
+copied tensors, same 19 024 MiB on disk, same 16 466.3 MiB of resident weights,
+same byte-for-byte breakdown of what stayed at source precision. Output is
+coherent (Rayleigh-scattering answer, thinking channel intact), decode 85.0
+tok/s.
+
+So an FP8-only release is not a second-class source: where no BF16 exists, this
+path costs a quarter of a percent, and where the model would not fit at all, it
+is what makes it run.
+
+**One trap worth recording**, because it cost the first run: `imp:test` was five
+hours old and predated the FP8 merge, so it copied the E4M3 tensors through
+instead of widening them. Nothing failed. The only signal was the output size,
+29 GiB where the forecast said 18.58, which is exactly what the `--dry-run`
+forecast is for. A stale image producing a checkpoint that loads and runs while
+silently missing the win it claims is the same failure class the stacked-expert
+refusal exists to prevent.
 
 ### 2. Optional embedding and lm_head quantization (largest size lever)
 
@@ -138,7 +165,18 @@ MiB embedding, 2 425 MiB lm_head, 875 MiB vision tower. The compression ratio
 never says this, and "why is it still this big" has a different fix from "did
 quantization work". The opt-in itself still waits on the measurement.
 
-### 3. Confirm `--calib-groups BD` above 14B (smallest work, named open question)
+### 3. Confirm `--calib-groups BD` above 14B (blocked on a model, not on work)
+
+**2026-08-15: this cannot be measured on Qwen3.8.** `--calib` refuses
+`model_type qwen3_5` outright, because AWQ folds its scales into the RMSNorm and
+that fold is only valid for a plain multiplicative norm (qwen2/qwen3/llama/
+mistral); this family carries the unit-offset norm. The refusal is correct and
+should stay. Measuring the open question therefore needs a BF16 SafeTensors
+model above 14B with a plain RMSNorm, and none is staged locally: the large BF16
+checkpoints here are Qwen3.8 (refused) and the DeepSeek-Lites (MLA). A download
+of 28 to 65 GiB is the entry price, which is why this did not happen alongside
+the FP8 work.
+
 
 The roadmap states the practical rule ("`BD` on wide-GQA models") and then says
 plainly that `n_rep` is 8 on most 70B-class checkpoints and **"whether `BD`

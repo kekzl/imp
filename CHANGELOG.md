@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Added
 
+- **FP8 sources verified end to end: an FP8-only release now runs where it could
+  not before.** `Qwen/Qwen3.8-27B-FP8` does not load directly (weights 26 952
+  MiB, upload aborts at layer 60); quantized to NVFP4 it serves at 16 466 MiB.
+  The double quantization costs **0.24%** perplexity against the BF16 route of
+  the same model (4.6262 vs 4.6151 on `ppl_corpus_45k.txt`), and both routes
+  produce the same 19 024 MiB checkpoint from the same 504 tensors.
+
 - **`imp-quantize` reports which bytes did not shrink, and why.** The ratio
   answers "did it work", not "why is it still this big", and those have
   different fixes. On Qwen3.8-27B the breakdown reads 5.60 GiB kept at source
