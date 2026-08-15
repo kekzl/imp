@@ -420,6 +420,41 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
     return tensor_scale;
 }
 
+void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, NvFP4QuantResult& result,
+                                       cudaStream_t stream) {
+    IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4_with_scale: input must be on device");
+    IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4_with_scale: input must be FP16");
+    IMP_CHECK(input.ndim == 2, "quantize_fp16_to_nvfp4_with_scale: input must be 2D [N, K]");
+    // Every value in the tensor is divided by this. A zero or non-finite scale
+    // would make the whole matrix zero or NaN in a checkpoint that still loads.
+    IMP_CHECK(std::isfinite(tensor_scale) && tensor_scale > 0.0f,
+              "quantize_fp16_to_nvfp4_with_scale: tensor_scale must be finite and positive, got %g",
+              tensor_scale);
+
+    const int64_t N = input.shape[0];
+    const int64_t K = input.shape[1];
+    IMP_CHECK(K % kMicroBlockSize == 0, "quantize_fp16_to_nvfp4_with_scale: K=%lld must be multiple of %d",
+              static_cast<long long>(K), kMicroBlockSize);
+
+    uint8_t* d_packed = nullptr;
+    uint8_t* d_micro_scales = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, N * (K / 2)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_micro_scales, N * (K / kMicroBlockSize)));
+
+    const int64_t total_micro_blocks = N * (K / kMicroBlockSize);
+    const int num_blocks = (int)((total_micro_blocks + kBlockSize - 1) / kBlockSize);
+    quantize_nvfp4_kernel<<<num_blocks, kBlockSize, 0, stream>>>(reinterpret_cast<const half*>(input.data),
+                                                                 d_packed, d_micro_scales, tensor_scale, N,
+                                                                 K);
+    IMP_CUDA_CHECK_LAUNCH();
+
+    result.packed_data = d_packed;
+    result.micro_scales = d_micro_scales;
+    result.tensor_scale = tensor_scale;
+    result.N = N;
+    result.K = K;
+}
+
 void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaStream_t stream) {
     IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4: input must be on device");
     IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4: input must be FP16, got qtype=%d",

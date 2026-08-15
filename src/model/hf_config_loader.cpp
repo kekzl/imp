@@ -1202,12 +1202,16 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
         return true;
     }
 
-    if (has_compressor) {
-        return imp::llm_compressor::parse_recipe_yaml(model_dir, cfg);
-    }
+    if (has_compressor && imp::llm_compressor::parse_recipe_yaml(model_dir, cfg))
+        return true;
 
-    // Neither file present.
-    return false;
+    // No recipe.yaml, or one this build cannot use: the checkpoint's own
+    // declaration is `quantization_config` in config.json, which is what
+    // HuggingFace and vLLM read. A compressed-tensors export published without
+    // the recipe used to fall through to "not quantized" here, and its scales
+    // are the RECIPROCAL of Modelopt's — so the weights loaded, generated, and
+    // were wrong by amax²/36.
+    return imp::llm_compressor::parse_compressed_tensors_config(model_dir, cfg);
 }
 
 // ---- load_mxfp4_config ----

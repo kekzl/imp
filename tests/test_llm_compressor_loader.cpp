@@ -536,3 +536,91 @@ TEST(ModeloptMixedPrecision, PlainNvfp4Unchanged) {
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+// ---- compressed-tensors declared in config.json --------------------------
+//
+// recipe.yaml is llm-compressor's record of the run, not the checkpoint's
+// declaration: plenty of published exports carry only the config.json block,
+// and imp used to read those as Modelopt — whose tensor scale is the
+// RECIPROCAL of this format's.
+
+TEST(LlmCompressorFormatDetect, DetectsCompressedTensorsFromConfigJson) {
+    std::string dir = tmpdir() + "/fmt_ctcfg_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir + "/config.json") << R"({
+  "model_type": "qwen3",
+  "quantization_config": {
+    "config_groups": {"group_0": {"input_activations": null, "targets": ["Linear"],
+      "weights": {"num_bits": 4, "type": "float", "group_size": 16, "strategy": "tensor_group",
+                  "symmetric": true}}},
+    "format": "nvfp4-pack-quantized",
+    "ignore": ["lm_head", "model.layers.0.mlp.gate"],
+    "quant_method": "compressed-tensors"
+  }
+})";
+    imp::HFConfigLoader::NvFP4Config cfg;
+    ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
+    EXPECT_EQ(cfg.group_size, 16);
+    ASSERT_EQ(cfg.exclude_modules.size(), 2u);
+    EXPECT_EQ(cfg.exclude_modules[0], "lm_head");
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST(LlmCompressorFormatDetect, RejectsCompressedTensorsSchemesThatAreNotNvfp4) {
+    // int4 pack-quantized is compressed-tensors too. Claiming it as NVFP4 would
+    // read integer weights through the FP4 decoder.
+    std::string dir = tmpdir() + "/fmt_ctint_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir + "/config.json") << R"({
+  "quantization_config": {
+    "config_groups": {"group_0": {"weights": {"num_bits": 4, "type": "int", "group_size": 128,
+                                              "strategy": "group", "symmetric": true}}},
+    "format": "pack-quantized",
+    "quant_method": "compressed-tensors"
+  }
+})";
+    imp::HFConfigLoader::NvFP4Config cfg;
+    EXPECT_FALSE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST(LlmCompressorFormatDetect, IgnoresAConfigJsonWithoutAQuantizationBlock) {
+    std::string dir = tmpdir() + "/fmt_plain_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir + "/config.json") << R"({"model_type": "qwen3", "quantization_config": null})";
+    imp::HFConfigLoader::NvFP4Config cfg;
+    EXPECT_FALSE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST(LlmCompressorFormatDetect, RecipeYamlStillWinsOverConfigJson) {
+    // Both present is the normal llm-compressor upload. The recipe path is the
+    // one with history behind it, so it stays first.
+    std::string dir = tmpdir() + "/fmt_ctboth_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir + "/recipe.yaml")
+        << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n"
+           "      ignore: [lm_head]\n      scheme: NVFP4\n";
+    std::ofstream(dir + "/config.json") << R"({
+  "quantization_config": {
+    "config_groups": {"group_0": {"weights": {"num_bits": 4, "type": "float", "group_size": 16,
+                                              "strategy": "tensor_group", "symmetric": true}}},
+    "format": "nvfp4-pack-quantized", "ignore": ["a", "b", "c"],
+    "quant_method": "compressed-tensors"
+  }
+})";
+    imp::HFConfigLoader::NvFP4Config cfg;
+    ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg));
+    EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
+    EXPECT_EQ(cfg.exclude_modules.size(), 1u) << "the recipe's ignore list, not config.json's";
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}

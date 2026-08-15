@@ -57,4 +57,19 @@ void log_summary(const TranslationCounters& counters);
 // missing file, parse error, or unsupported scheme.
 bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg);
 
+// The same, from `quantization_config` in config.json.
+//
+// recipe.yaml is llm-compressor's own record of the RUN; the checkpoint's
+// declaration lives in config.json, which is what HuggingFace and vLLM read and
+// the only one a re-upload is guaranteed to carry. Detecting the format from
+// the recipe alone means a compressed-tensors checkpoint published without it
+// is read as Modelopt — and the two store the tensor scale as reciprocals of
+// each other, so every weight comes out scaled by amax²/36 with nothing
+// failing. Measured on a checkpoint imp-quantize itself wrote: perplexity
+// 31.05 against 1.2e47.
+//
+// Returns false when the config declares a scheme this build does not serve as
+// NVFP4 (int4 pack-quantized, W8A8, …), same soft-fail contract as above.
+bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg);
+
 }  // namespace imp::llm_compressor

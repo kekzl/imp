@@ -471,6 +471,7 @@ if(IMP_BUILD_TOOLS)
     add_executable(imp-quantize
         tools/imp-quantize/main.cpp
         tools/imp-quantize/tensor_policy.cpp
+        tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/fp8_source.cpp
         tools/imp-quantize/awq_plan.cpp
         tools/imp-quantize/awq.cu
@@ -703,6 +704,11 @@ if(IMP_BUILD_TESTS)
         # produces plausible numbers.
         tools/imp-quantize/fp8_source.cpp
         tests/test_quantize_fp8_source.cpp
+        # The output-format rules. Every one of them is silent when wrong: a
+        # reciprocal written the wrong way round, a fused group that does not
+        # share a scale, a config.json with two quantization_config keys.
+        tools/imp-quantize/checkpoint_out.cpp
+        tests/test_quantize_checkpoint_out.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse the server's
