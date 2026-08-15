@@ -41,6 +41,33 @@ mkdir -p models
 
 Which checkpoints load, and what each needs: [`MODELS.md`](MODELS.md).
 
+### Staging a model from HuggingFace
+
+`scripts/stage-model.sh` fetches a repo into a local directory, and converts it
+if it is not NVFP4 yet.
+
+```bash
+# ready-made NVFP4: download only
+scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4 ~/models/Qwen3.8-27B-NVFP4
+
+# BF16 or FP8 source: download, then convert (~25 min for a 27B)
+scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/Qwen3.8-27B-NVFP4
+```
+
+It exists because the obvious ways to fetch a repo are unavailable here by
+design: `git clone` needs git-lfs, and `huggingface-cli` needs Python, neither of
+which the clean-host policy installs. This needs only `curl`, `jq` and Docker.
+imp itself never fetches (`src/model/hf_hub.h`), so something has to.
+
+For a source that does need converting it forecasts the output size and whether
+it fits the card **before** spending the 25 minutes. Prefer an FP8 source where
+one exists: for Qwen3.8-27B it is 28.8 GiB against 51.8 GiB for BF16, and costs
+0.24 % perplexity (4.6262 against 4.6151 on `ppl_corpus_45k.txt`).
+
+Some models ship only as BF16 or FP8, which on this card is a wall rather than
+an inconvenience: FP8 has no GEMM on `sm_120`, and a 27B in either format does
+not fit. Converting is what makes them run at all.
+
 ## 2. Start the server
 
 ```bash
