@@ -13,6 +13,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`json_schema` requests no longer come back with empty `content` on reasoning
+  models.** Structured output disables thinking for `json_mode`, tools, regex and
+  grammar; `json_schema` was missing from that list, so the constrainer's gate
+  held its mask open for a reasoning block. On a model whose `</think>` is a
+  multi-token BPE sequence (Qwen3.8-27B) the block never closed in the text the
+  splitter reads, and the answer stayed in `reasoning_content`. Measured on
+  Qwen3.8-27B: **0 of 8 valid at temperature 0, now 8 of 8**, and the quality
+  suite goes 42/45 to **45/45**. Qwen3.6-27B, whose `</think>` is one token, was
+  unaffected and stays at 45/45.
+
 - **`imp-quantize` no longer destroys the MTP draft head.** Its loader takes
   `mtp.*.weight` by name and knows nothing about the `weight_scale` companions,
   so a quantized head arrived as packed nibbles read as BF16. Nothing errored:

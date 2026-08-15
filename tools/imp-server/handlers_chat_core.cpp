@@ -299,9 +299,20 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // it — the constrainer's gate would hold the mask open while the model
     // spends the budget thinking, and the caller gets prose instead of the
     // format.
-    const bool thinking_default = ctx.snap.is_think_model && template_think_evidence &&
-                                  !ctx.params.json_mode && !ctx.params.has_tools &&
-                                  ctx.params.regex_pattern.empty() && ctx.params.grammar.empty();
+    //
+    // `json_schema` belongs in that list and was missing from it, which is the
+    // whole of #1431: a schema request kept thinking on, the gate held the mask
+    // open for the reasoning, and on a model whose `</think>` is a multi-token
+    // BPE sequence (Qwen3.8: `think_start_id` is -1) the block never closed in
+    // the text the splitter reads. The answer was written inside the reasoning
+    // channel and `content` came back EMPTY. Measured before the fix: 0 of 8 at
+    // temperature 0, against 10 of 10 on Qwen3.6-27B, whose `</think>` IS a
+    // single token.
+    const bool thinking_default =
+        ctx.snap.is_think_model && template_think_evidence &&
+        !imp::server::structured_output_excludes_thinking(
+            ctx.params.json_mode, ctx.params.has_tools, !ctx.params.json_schema_str.empty(),
+            !ctx.params.regex_pattern.empty(), !ctx.params.grammar.empty());
     const bool want_thinking = ctx.params.enable_thinking_set ? ctx.params.enable_thinking_requested
                                                               : thinking_default;
     // think_budget is the fraction of max_tokens reserved for reasoning;
@@ -313,8 +324,19 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     const bool budget_disables_thinking = ctx.params.think_budget <= 0.0f;
     ctx.snap.enable_thinking = ctx.snap.is_think_model && ctx.snap.think_start_id >= 0 && want_thinking &&
                                !budget_disables_thinking;
-    ctx.snap.suppress_thinking = ctx.snap.is_think_model && !ctx.snap.enable_thinking &&
-                                 budget_disables_thinking;
+    // Suppressing means STAMPING `enable_thinking=false` into the Jinja context,
+    // which is the only thing that makes a template render its pre-closed
+    // `<think></think>` block. Leaving it unstamped lets the template fall back
+    // to its own default, and Qwen3.8's default is an OPEN `<think>`: the server
+    // then believes thinking is off while the prompt says it is on, and the
+    // reconcile step correctly flips the splitter to REASONING for a block that
+    // never closes.
+    //
+    // So it is not enough that thinking was disabled: it has to be disabled
+    // where the template can see it. Any reason to not want thinking now
+    // suppresses, rather than only a zero budget.
+    ctx.snap.suppress_thinking = imp::server::should_stamp_thinking_off(
+        ctx.snap.is_think_model, ctx.snap.enable_thinking, budget_disables_thinking, want_thinking);
 
     // If thinking IS enabled, remove the provisional <think> stop token.
     if (ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
