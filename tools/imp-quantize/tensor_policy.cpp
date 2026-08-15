@@ -11,6 +11,8 @@ bool ends_with(const std::string& s, const std::string& suf) {
 
 bool contains(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
 
+bool starts_with(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
+
 bool is_float_dtype(const std::string& dtype) { return dtype == "BF16" || dtype == "F16"; }
 
 }  // namespace
@@ -60,6 +62,21 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
     // `model.visual.*`; a text-only one has no such tensor and is unaffected.
     if (contains(t.name, "visual.") || contains(t.name, "vision_tower.")) {
         why_not = "vision tower (upload path takes source precision only)";
+        return false;
+    }
+    // The MTP draft head, for the same reason and with a worse failure mode.
+    // Its loader takes `mtp.*.weight` by name (safetensors_loader.cpp) and knows
+    // nothing about the `weight_scale` / `weight_scale_2` companions, so a
+    // quantized head arrives as packed nibbles with no scales: half the expected
+    // width, read as BF16. Nothing errors. The head loads, drafts, and every
+    // draft is rejected.
+    //
+    // Measured on Qwen3.8-27B: quantizing it took draft acceptance from 81% (the
+    // published Qwen3.6-27B checkpoint, whose head is BF16) to 0 of 24, which
+    // costs speed and never correctness, so there is no louder symptom than the
+    // accept rate. It is 0.22 GiB, and excluding it is the whole fix.
+    if (starts_with(t.name, "mtp.")) {
+        why_not = "MTP draft head (its loader reads the weight by name, without scales)";
         return false;
     }
     // Two weight roles that are 2-D and K-aligned — so every shape check waves
