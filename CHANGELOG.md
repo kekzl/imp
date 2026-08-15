@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-15
+
 ### Fixed
 
 - **`json_schema` requests no longer come back with empty `content` on reasoning
