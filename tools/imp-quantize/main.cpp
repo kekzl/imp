@@ -67,6 +67,7 @@
 #include "tensor_policy.h"
 
 #include "core/tensor.h"
+#include "memory/plan.h"
 #include "model/safetensors_raw.h"
 #include "model/safetensors_writer.h"
 #include "quant/awq_transform.h"
@@ -137,7 +138,8 @@ void usage() {
         "                half carries #1273's divergence, but excluding it measured\n"
         "                ~1.5%% WORSE on perplexity, not better, and costs 1-4% of\n"
         "                the checkpoint. Kept for models with a higher gate share.\n"
-        "  --dry-run     report what would be quantized, write nothing\n");
+        "  --dry-run     report what would be quantized and how large the result\n"
+        "                will be, against what the card has left. Writes nothing.\n");
 }
 
 bool ends_with(const std::string& s, const std::string& suf) {
@@ -280,6 +282,44 @@ bool write_quant_config(const Options& opt, const std::vector<std::string>& excl
         f << (i ? ", " : "") << '"' << excluded[i] << '"';
     f << "]\n  }\n}\n";
     return static_cast<bool>(f);
+}
+
+// What is gone from the card before imp allocates a single weight. Both are
+// measurements on this target, not headroom guesses: the library reserve is
+// kMeasuredLibraryReserveBytes (src/memory/plan.h, re-measure after a CUDA or
+// driver bump), and the CUDA primary context is the figure the same header
+// records for this WSL2/WDDM box.
+constexpr size_t kContextBytes = 1680ull * 1024 * 1024;
+
+// Report the checkpoint against the card it is meant to run on. Deliberately
+// states the ON-DISK size against the budget rather than predicting VRAM:
+// what the engine actually resides is the weights PLUS a scale-factor cache and
+// MINUS whatever the loader skips (a vision tower is uploaded separately, an MTP
+// sidecar may not be loaded at all). Measured on Qwen3.8-27B: 18.60 GiB on disk
+// arrived as 16.08 GiB of weights plus a 1.49 GiB CUTLASS scale cache. So the
+// disk figure is the right order and the wrong decimal, and this prints the
+// budget the reader needs rather than a number that looks exact and is not.
+void report_card_fit(size_t bytes_out) {
+    size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess || total_b == 0)
+        return;  // no device visible: the size line above still stands on its own
+    const double mib = 1024.0 * 1024.0;
+    const size_t overhead = kContextBytes + kMeasuredLibraryReserveBytes;
+    if (total_b <= overhead)
+        return;
+    const double budget = double(total_b - overhead) / mib;
+    const double ckpt = double(bytes_out) / mib;
+    printf("\ncard: %.0f MiB total, less %.0f context and %.0f library reserve leaves %.0f MiB",
+           double(total_b) / mib, kContextBytes / mib, kMeasuredLibraryReserveBytes / mib, budget);
+    if (ckpt >= budget)
+        printf("\n      this checkpoint is %.0f MiB on disk and does NOT fit: %.0f MiB short before"
+               "\n      any KV cache or workspace",
+               ckpt, ckpt - budget);
+    else
+        printf("\n      this checkpoint is %.0f MiB on disk, leaving %.0f MiB for the KV cache and"
+               "\n      workspaces. On-disk size is not the resident figure: a scale-factor cache is"
+               "\n      built on top, and a vision tower or MTP sidecar may load separately or not at all",
+               ckpt, budget - ckpt);
 }
 
 }  // namespace
@@ -563,6 +603,7 @@ int main(int argc, char** argv) {
             const int64_t N = t.shape[0], K = t.shape[1];
             if (opt.dry_run) {
                 printf("  QUANT %-58s [%lld,%lld]\n", t.name.c_str(), (long long)N, (long long)K);
+                bytes_out += quantize::nvfp4_output_bytes(N, K);
                 n_quantized++;
                 continue;
             }
@@ -581,7 +622,18 @@ int main(int argc, char** argv) {
             out.push_back({t.name, "U8", {N, K / 2}, q.packed.data(), q.packed.size()});
             out.push_back({base + ".weight_scale", "F8_E4M3", {N, K / 16}, q.micro.data(), q.micro.size()});
             out.push_back({base + ".weight_scale_2", "F32", {1}, &scale_store.back(), sizeof(float)});
-            bytes_out += q.packed.size() + q.micro.size() + sizeof(float);
+            const size_t written = q.packed.size() + q.micro.size() + sizeof(float);
+            // The forecast --dry-run printed is this same arithmetic. If the two
+            // ever disagree the forecast has quietly become a guess, so say so
+            // here rather than let a wrong size be published as a measurement.
+            if (written != quantize::nvfp4_output_bytes(N, K)) {
+                fprintf(stderr,
+                        "  %s: quantized to %zu bytes but the size forecast says %zu. The NVFP4\n"
+                        "output layout changed without nvfp4_output_bytes() following it\n",
+                        t.name.c_str(), written, quantize::nvfp4_output_bytes(N, K));
+                return 1;
+            }
+            bytes_out += written;
             n_quantized++;
         }
 
@@ -647,9 +699,9 @@ int main(int argc, char** argv) {
                    : "");
     if (n_moe_skipped)
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
-    if (!opt.dry_run)
-        printf("\nsize: %.2f GiB -> %.2f GiB (%.2fx)", bytes_in / 1073741824.0, bytes_out / 1073741824.0,
-               bytes_in ? double(bytes_in) / double(bytes_out) : 0.0);
+    printf("\nsize: %.2f GiB -> %.2f GiB (%.2fx)%s", bytes_in / 1073741824.0, bytes_out / 1073741824.0,
+           bytes_out ? double(bytes_in) / double(bytes_out) : 0.0, opt.dry_run ? " (forecast)" : "");
+    report_card_fit(bytes_out);
     printf("\n");
     return 0;
 }

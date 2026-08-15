@@ -189,5 +189,28 @@ TEST(FusedGateQProj, DoesNotGuessWhenTheLayerHasNoOProj) {
     EXPECT_TRUE(find_fused_gate_q_projections(ts).empty()) << "no reference — must not guess";
 }
 
+// The --dry-run size forecast is this arithmetic, and the writing path asserts
+// its real buffers against it. Pinning the three components separately means a
+// layout change breaks the test that explains the layout, not just a total.
+TEST(Nvfp4OutputBytes, CountsPackedNibblesMicroScalesAndTensorScale) {
+    // A real Qwen3.8 projection: [17408, 5120].
+    const int64_t N = 17408, K = 5120;
+    const size_t packed = size_t(N) * K / 2;   // two 4-bit values per byte
+    const size_t micro = size_t(N) * K / 16;   // one FP8 scale per 16 values
+    EXPECT_EQ(nvfp4_output_bytes(N, K), packed + micro + sizeof(float));
+
+    // The point of quantizing: 2 bytes per value become 0.5 + 0.0625.
+    const double ratio = double(size_t(N) * K * 2) / double(nvfp4_output_bytes(N, K));
+    EXPECT_NEAR(ratio, 32.0 / 9.0, 0.01) << "BF16 against packed+micro is 2 / (0.5 + 0.0625)";
+}
+
+TEST(Nvfp4OutputBytes, RefusesToInventBytesForAnEmptyMatrix) {
+    // Guards the forecast against a degenerate shape adding a phantom 4 bytes
+    // per tensor, which on a 1000-tensor checkpoint is a visible drift.
+    EXPECT_EQ(nvfp4_output_bytes(0, 5120), 0u);
+    EXPECT_EQ(nvfp4_output_bytes(17408, 0), 0u);
+    EXPECT_EQ(nvfp4_output_bytes(-1, 5120), 0u);
+}
+
 }  // namespace
 }  // namespace imp::quantize

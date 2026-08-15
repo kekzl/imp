@@ -21,6 +21,15 @@ namespace imp::quantize {
 // copies the tensor through untouched.
 bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why_not);
 
+// Bytes an [N, K] matrix occupies once quantized: the packed nibbles [N, K/2],
+// the FP8 micro-scales [N, K/16], and one F32 tensor scale.
+//
+// Exists so the --dry-run forecast and the real write agree by construction
+// rather than by two people keeping two expressions in step. The writing path
+// checks its actual buffers against this and fails loudly on a mismatch, so a
+// layout change cannot silently turn the forecast into a guess.
+size_t nvfp4_output_bytes(int64_t N, int64_t K);
+
 // MoE experts stored as one 3-D [n_experts, N, K] stack rather than a 2-D
 // tensor per expert.
 //
