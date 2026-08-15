@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Added
 
+- **`imp-quantize --dry-run` now forecasts the output size and whether it fits.**
+  It prints the same `size: A -> B` line the real run does, plus the card's
+  budget once the CUDA context and library reserve are subtracted. Verified on
+  Qwen3.8-27B: the forecast reads `51.75 GiB -> 18.58 GiB (2.79x)`, the figure
+  the write then produced, in seconds instead of 25 minutes. The writing path
+  now fails loudly if its actual buffers ever disagree with that arithmetic.
+
 - **Qwen3.8-27B runs, text and vision.** Its vision tower is the one imp already
   had, declared under a third `vision_config.model_type` (`qwen3_5`), so enabling
   it was one allowlist entry: 333 tensors, 878.8 MiB. Decode `tg256` 89.85 tok/s,

@@ -96,6 +96,15 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
     return true;
 }
 
+size_t nvfp4_output_bytes(int64_t N, int64_t K) {
+    if (N <= 0 || K <= 0)
+        return 0;
+    const size_t n = static_cast<size_t>(N), k = static_cast<size_t>(K);
+    return n * k / 2       // packed FP4 nibbles, two per byte
+           + n * k / 16    // one FP8 E4M3 micro-scale per 16 values
+           + sizeof(float);  // the per-tensor F32 scale
+}
+
 std::vector<const RawTensor*> find_fused_gate_q_projections(const std::vector<RawTensor>& tensors) {
     static const std::string kQ = ".q_proj.weight";
     static const std::string kO = ".o_proj.weight";
