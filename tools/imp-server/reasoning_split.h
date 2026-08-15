@@ -46,6 +46,34 @@ namespace imp::server {
 // explicit caller `enable_thinking` request is left untouched (a closed-block
 // template cannot honor an explicit `true` anyway, and we do not silently flip
 // an explicit choice — that is the caller's to make).
+// Does this request ask for STRUCTURED output, i.e. a constraint covering the
+// whole reply? Such a reply has no room for a reasoning preamble: the
+// constrainer's gate would hold the mask open while the model spends its budget
+// thinking, and the caller gets prose instead of the format.
+//
+// A predicate rather than an inline conjunction because the list has already
+// been wrong by omission: `json_schema` was missing from it (#1431), which on a
+// model whose `</think>` is a multi-token BPE sequence returned EMPTY content,
+// the answer having stayed in the reasoning channel. Every entry here is a
+// constraint over the entire response; adding one is adding it to this list.
+inline bool structured_output_excludes_thinking(bool json_mode, bool has_tools, bool has_json_schema,
+                                                bool has_regex, bool has_grammar) {
+    return json_mode || has_tools || has_json_schema || has_regex || has_grammar;
+}
+
+// Should the render STAMP `enable_thinking=false` into the template context?
+//
+// The distinction that matters: not stamping is not the same as stamping false.
+// Unstamped, a template falls back to its own default, and some default to an
+// OPEN `<think>` (Qwen3.8). The server then believes thinking is off while the
+// prompt says it is on, and the splitter is correctly reconciled to REASONING
+// for a block that will never close. So any reason to not want thinking has to
+// reach the template, not just the server's own flags.
+inline bool should_stamp_thinking_off(bool is_think_model, bool enable_thinking, bool budget_disabled,
+                                      bool want_thinking) {
+    return is_think_model && !enable_thinking && (budget_disabled || !want_thinking);
+}
+
 inline bool reconcile_thinking_with_prompt_tail(bool current, bool explicit_set,
                                                 bool tail_has_think, bool tail_has_close) {
     if (tail_has_think && !tail_has_close)
