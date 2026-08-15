@@ -219,28 +219,60 @@ bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, Qua
 }
 
 bool copy_aux_files(const Options& opt, std::string& err) {
-    // Everything the runtime needs beside the weights. config.json is copied
+    // Everything the checkpoint needs beside the weights. config.json is copied
     // verbatim: the quantization is declared in hf_quant_config.json, which is
     // where hf_config_loader looks for it.
+    //
+    // The named list is what imp itself reads. It is deliberately NOT the whole
+    // requirement: a quantized checkpoint should stay loadable by whatever the
+    // source was loadable by, and an allowlist of imp's own needs quietly breaks
+    // that. Measured: the output of this tool would not load in vLLM at all,
+    // because `preprocessor_config.json` was missing, a file imp never reads.
     static const char* kNames[] = {"config.json",
                                    "generation_config.json",
                                    "tokenizer.json",
                                    "tokenizer_config.json",
                                    "special_tokens_map.json",
+                                   "added_tokens.json",
                                    "vocab.json",
                                    "merges.txt",
                                    "tokenizer.model",
-                                   "chat_template.jinja"};
+                                   "chat_template.jinja",
+                                   "chat_template.json"};
+    std::set<std::string> copied;
     std::error_code ec;
+    auto copy_one = [&](const fs::path& src, const std::string& name) {
+        fs::copy_file(src, fs::path(opt.out_dir) / name, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            err = "failed to copy " + name + ": " + ec.message();
+            return false;
+        }
+        copied.insert(name);
+        return true;
+    };
     for (const char* n : kNames) {
         const fs::path src = fs::path(opt.in_dir) / n;
         if (!fs::exists(src))
             continue;
-        fs::copy_file(src, fs::path(opt.out_dir) / n, fs::copy_options::overwrite_existing, ec);
-        if (ec) {
-            err = std::string("failed to copy ") + n + ": " + ec.message();
+        if (!copy_one(src, n))
             return false;
-        }
+    }
+
+    // Then every remaining `*_config.json`, by pattern rather than by name, so a
+    // preprocessor, video preprocessor or processor config travels without this
+    // list having to learn each one. Two are excluded on purpose: the shard
+    // index and hf_quant_config.json describe THIS write and are produced below,
+    // so copying the source's would contradict what was just written.
+    for (const auto& e : fs::directory_iterator(opt.in_dir, ec)) {
+        if (!e.is_regular_file())
+            continue;
+        const std::string name = e.path().filename().string();
+        if (copied.count(name) || !ends_with(name, "_config.json"))
+            continue;
+        if (name == "hf_quant_config.json")
+            continue;
+        if (!copy_one(e.path(), name))
+            return false;
     }
     return true;
 }
