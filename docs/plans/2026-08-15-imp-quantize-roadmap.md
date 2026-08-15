@@ -78,25 +78,40 @@ download:
 | Mixtral-8x7B-Instruct | BF16 | 2-D per expert | yes |
 | Qwen3-235B-A22B | BF16 | 2-D per expert | yes (too large to fit resident) |
 | Qwen3.8-27B | BF16 | dense | yes |
-| **DeepSeek-V3** | **F8_E4M3 + F32** | 2-D per expert | **no: dtype refused** |
+| **DeepSeek-V3** | **F8_E4M3 + F32** | 2-D per expert | read path landed 2026-08-15, write untested |
 | **Qwen3.8-2.4T-A95B** | BF16 | **3-D stack `[512, 4096, 8192]`** | **no: stack refused** |
 
-### 1. Read FP8 and F32 sources (largest reach)
+### 1. Read FP8 and F32 sources (largest reach): READ PATH LANDED 2026-08-15
 
-`is_float_dtype` accepts BF16 and F16, so a checkpoint published only in FP8 is
-rejected tensor by tensor as "already quantized or unsupported". DeepSeek-V3 is
-the clearest case: its weights are `F8_E4M3` with `F32` scale tensors alongside.
-FP8 is now a common *primary* release format for large models, so this is not an
-edge case, it is a whole class of releases the tool cannot open.
+**Status:** the decode and the wiring are in, host-side and covered by the CPU
+lane; what is untested is the write, because that needs a GPU and a staged FP8
+checkpoint. Both released conventions turned out to be the same layout, which
+made this smaller than the section below assumed: an E4M3 weight beside a
+`weight_scale_inv` grid of 128x128 tiles, differing only in the scale dtype
+(DeepSeek-V3 F32, Qwen3.8-27B-FP8 BF16). The block edge is derived from the two
+shapes rather than assumed. Remaining: run it end to end on a real FP8
+checkpoint, and answer the two measurement questions below.
 
-This is cheaper than it looks because the decode already exists in-tree:
-`dequantize_fp8_e4m3_to_fp16` (`src/quant/fp8_quant.cu:491`) has a raw-pointer
-API, and the quantizer already stages every tensor through the GPU. The work is
-in `raw_to_fp16`: recognise the FP8 dtype, find that tensor's scale (the
-companion `weight_scale_inv`-style F32 tensor, whose naming is per-exporter),
-and apply it while widening.
 
-Two things to settle by measurement, not assumption: whether FP8 to NVFP4
+The problem it solved: `is_float_dtype` accepted BF16 and F16, so a checkpoint
+published only in FP8 was rejected tensor by tensor as "already quantized or
+unsupported". FP8 is now a common *primary* release format for large models, so
+that was not an edge case but a whole class of releases the tool could not open.
+
+What was built: `fp8_source.{h,cpp}`, a host-only translation unit so the CPU
+lane can check the parts that fail silently when wrong. The E4M3 bit layout and
+the block stride both produce plausible magnitudes when misread, which is why
+they are pinned by test rather than by inspecting a converted checkpoint, and
+both are mutation-validated. `main.cpp` pairs each E4M3 weight with its grid
+across shards before the write loop, and **consumes** the grid: once the weight
+is NVFP4 the old scales describe nothing, and copying them through would leave a
+checkpoint whose scales contradict its weights. An E4M3 tensor with no grid is
+reported by name instead of falling into the generic dtype exclusion, because
+that case is a scalar-scale export needing different handling.
+
+Not done: the write path has only been exercised on a synthetic fixture, since
+quantizing needs a GPU. Two things still to settle by measurement, not
+assumption: whether FP8 to NVFP4
 re-quantization is worth doing at all against just running the FP8 checkpoint
 (sm_120 has no FP8 GEMM, so the runtime already expands FP8 to an FP16
 companion, `roadmap.md` line 474, which costs VRAM the NVFP4 path would not),

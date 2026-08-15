@@ -13,6 +13,14 @@ there instead of retelling it.
 
 ### Added
 
+- **`imp-quantize` reads block-scaled FP8 checkpoints as a source.** Releases
+  published only in FP8 (DeepSeek-V3, Qwen3.8's FP8 line) were refused tensor by
+  tensor, because the accepted set was BF16/F16. Both conventions store the same
+  layout: an E4M3 weight beside a `weight_scale_inv` grid of 128x128 tiles,
+  differing only in the scale dtype. The tile size is derived from the two
+  shapes, so a grid no single block explains is refused rather than read with a
+  wrong stride. The write path is not yet exercised on a real FP8 checkpoint.
+
 - **`imp-quantize --dry-run` now forecasts the output size and whether it fits.**
   It prints the same `size: A -> B` line the real run does, plus the card's
   budget once the CUDA context and library reserve are subtracted. Verified on

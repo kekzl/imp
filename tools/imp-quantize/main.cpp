@@ -64,6 +64,7 @@
 // performance work where the weights only need to be the right shape.
 
 #include "awq.h"
+#include "fp8_source.h"
 #include "tensor_policy.h"
 
 #include "core/tensor.h"
@@ -539,6 +540,45 @@ int main(int argc, char** argv) {
         }
     }
 
+    // FP8 sources. A checkpoint published only in FP8 (DeepSeek-V3, Qwen3.8's
+    // FP8 line) stores an E4M3 weight beside a `weight_scale_inv` block grid.
+    // Pairing them up front, across shards, because the two are not guaranteed
+    // to share a file and should_quantize sees one tensor at a time.
+    //
+    // The scale tensors are then CONSUMED: once the weight is NVFP4 they
+    // describe nothing, and copying them through would leave a checkpoint whose
+    // scales contradict its weights.
+    std::map<std::string, const RawTensor*> fp8_scale_of;
+    std::set<std::string> fp8_scale_names;
+    {
+        std::map<std::string, const RawTensor*> by_name;
+        for (const auto& src : opened)
+            for (const auto& t : src->tensors())
+                by_name[t.name] = &t;
+        static const std::string kW = ".weight";
+        for (const auto& [name, t] : by_name) {
+            if (!quantize::is_fp8_e4m3_dtype(t->dtype) || !ends_with(name, kW))
+                continue;
+            const auto it = by_name.find(name.substr(0, name.size() - kW.size()) + ".weight_scale_inv");
+            if (it == by_name.end()) {
+                // Without its grid the tensor is unreadable, and the generic
+                // dtype exclusion below would report it as merely "unsupported".
+                // Say which scale is missing: a scalar-scale FP8 export
+                // (Modelopt style) lands here and needs different handling.
+                fprintf(stderr,
+                        "note: %s is E4M3 but has no .weight_scale_inv beside it, so it is copied\n"
+                        "      through unquantized. Block-scaled FP8 is what this reads.\n",
+                        name.c_str());
+                continue;
+            }
+            fp8_scale_of[name] = it->second;
+            fp8_scale_names.insert(it->first);
+        }
+        if (!fp8_scale_of.empty())
+            printf("FP8 source: %zu block-scaled E4M3 tensor(s) will be widened before quantizing\n",
+                   fp8_scale_of.size());
+    }
+
     size_t n_quantized = 0, n_copied = 0, n_moe_skipped = 0;
     size_t bytes_in = 0, bytes_out = 0;
     std::vector<std::string> excluded_modules;
@@ -561,6 +601,61 @@ int main(int argc, char** argv) {
 
         for (const auto& t : src.tensors()) {
             bytes_in += t.nbytes;
+            // A consumed FP8 scale grid: its weight is about to become NVFP4
+            // with scales of its own, so this tensor must not reach the output.
+            if (fp8_scale_names.count(t.name)) {
+                if (opt.dry_run)
+                    printf("  DROP  %-58s FP8 block scale, consumed by its weight\n", t.name.c_str());
+                continue;
+            }
+            const auto fp8_it = fp8_scale_of.find(t.name);
+            if (fp8_it != fp8_scale_of.end()) {
+                const int64_t N = t.shape.size() == 2 ? t.shape[0] : 0;
+                const int64_t K = t.shape.size() == 2 ? t.shape[1] : 0;
+                // The same roles that must stay full precision in a BF16 source
+                // must stay full precision here; only the dtype gate differs, so
+                // ask the policy about the widened form rather than duplicating
+                // the rule. An FP8 tensor it refuses is copied through as-is.
+                RawTensor as_bf16 = t;
+                as_bf16.dtype = "BF16";
+                std::string why_fp8;
+                const bool gated_fp8 = gated_q_proj.count(t.name) != 0;
+                if (gated_fp8 || !quantize::should_quantize(as_bf16, opt.quantize_lm_head, why_fp8)) {
+                    out.push_back({t.name, t.dtype, t.shape, t.data, t.nbytes});
+                    bytes_out += t.nbytes;
+                    n_copied++;
+                    continue;
+                }
+                if (opt.dry_run) {
+                    printf("  QUANT %-58s [%lld,%lld] (from FP8)\n", t.name.c_str(), (long long)N,
+                           (long long)K);
+                    bytes_out += quantize::nvfp4_output_bytes(N, K);
+                    n_quantized++;
+                    continue;
+                }
+                std::vector<uint16_t> h;
+                std::string ferr;
+                if (!quantize::fp8_block_scaled_to_fp16(t, *fp8_it->second, h, ferr)) {
+                    fprintf(stderr, "  %s: %s\n", t.name.c_str(), ferr.c_str());
+                    return 1;
+                }
+                awq_apply_matrix(h, N, K, plan_vec(plan.row_div, t.name), plan_vec(plan.col_scale, t.name));
+                quant_store.emplace_back();
+                Quantized& q = quant_store.back();
+                if (!quantize_one(h, N, K, q, err)) {
+                    fprintf(stderr, "  %s: %s\n", t.name.c_str(), err.c_str());
+                    return 1;
+                }
+                scale_store.push_back(q.tensor_scale);
+                const std::string base = t.name.substr(0, t.name.size() - strlen(".weight"));
+                out.push_back({t.name, "U8", {N, K / 2}, q.packed.data(), q.packed.size()});
+                out.push_back(
+                    {base + ".weight_scale", "F8_E4M3", {N, K / 16}, q.micro.data(), q.micro.size()});
+                out.push_back({base + ".weight_scale_2", "F32", {1}, &scale_store.back(), sizeof(float)});
+                bytes_out += q.packed.size() + q.micro.size() + sizeof(float);
+                n_quantized++;
+                continue;
+            }
             std::string why;
             // Checked before should_quantize, which sees one tensor and cannot
             // know a q_proj is gated — that needs the layer's o_proj too.

@@ -471,6 +471,7 @@ if(IMP_BUILD_TOOLS)
     add_executable(imp-quantize
         tools/imp-quantize/main.cpp
         tools/imp-quantize/tensor_policy.cpp
+        tools/imp-quantize/fp8_source.cpp
         tools/imp-quantize/awq_plan.cpp
         tools/imp-quantize/awq.cu
     )
@@ -696,6 +697,12 @@ if(IMP_BUILD_TESTS)
         # checkpoint (#1159), so it is compiled into the CPU lane directly.
         tools/imp-quantize/tensor_policy.cpp
         tests/test_quantize_policy.cpp
+        # Reading FP8 as a quantization source. Host-only on purpose, so the
+        # bit-level decode is checked by the CPU lane rather than by looking at
+        # a converted checkpoint, where a wrong exponent bias or block stride
+        # produces plausible numbers.
+        tools/imp-quantize/fp8_source.cpp
+        tests/test_quantize_fp8_source.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse the server's
