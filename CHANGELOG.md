@@ -11,6 +11,17 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`imp-quantize` no longer destroys the MTP draft head.** Its loader takes
+  `mtp.*.weight` by name and knows nothing about the `weight_scale` companions,
+  so a quantized head arrived as packed nibbles read as BF16. Nothing errored:
+  the head loaded, drafted, and every draft was rejected. On Qwen3.8-27B that
+  read **0 of 24 drafts accepted against 81% for a checkpoint whose head is
+  BF16**, and turning speculation on cost 17% decode. Excluding the head (810
+  MiB) restores acceptance to 48% and makes `--mtp-spec-decode` neutral instead
+  of harmful.
+
 ### Added
 
 - **FP8 sources verified end to end: an FP8-only release now runs where it could

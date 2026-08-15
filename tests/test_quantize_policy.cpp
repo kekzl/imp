@@ -182,6 +182,19 @@ TEST(FusedGateQProj, FindsThemUnderTheNestedLanguageModelPrefix) {
     EXPECT_EQ(found[0]->name, "model.language_model.layers.31.self_attn.q_proj.weight");
 }
 
+// The MTP draft head. Its loader takes `mtp.*.weight` by name and never looks
+// for the scale companions, so quantizing it yields a head that loads, drafts,
+// and has every draft rejected. Measured: 81% acceptance to 0 of 24.
+TEST(ShouldQuantize, LeavesTheMtpDraftHeadAlone) {
+    EXPECT_FALSE(quantizes(tensor("mtp.fc.weight", {5120, 10240})));
+    EXPECT_FALSE(quantizes(tensor("mtp.layers.0.mlp.down_proj.weight", {5120, 17408})));
+    EXPECT_FALSE(quantizes(tensor("mtp.layers.0.self_attn.q_proj.weight", {12288, 5120})));
+
+    // Anchored at the start, so a main-model tensor whose name merely contains
+    // the letters is unaffected. Nothing should widen this by accident.
+    EXPECT_TRUE(quantizes(tensor("model.layers.0.mtp_like.weight", {5120, 5120})));
+}
+
 TEST(FusedGateQProj, DoesNotGuessWhenTheLayerHasNoOProj) {
     // Without the o_proj there is nothing to compare against, and a bare
     // "shape[0] is even" heuristic would flag every ordinary projection.
