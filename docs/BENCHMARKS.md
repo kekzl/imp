@@ -239,6 +239,51 @@ that head is 2.4 GiB of the 17.9 and is served from the NVFP4 decode cache, a
 trade measured at +10.4 % decode for +0.99 % perplexity
 ([`quantization.md`](quantization.md)).
 
+## imp vs vLLM on one checkpoint (2026-08-16)
+
+The first cross-engine comparison on Qwen3.8-27B, and the first where **both
+engines read the same file**: `imp-quantize --format vllm` writes
+compressed-tensors, so the same 19.2 GiB NVFP4 checkpoint is served by each.
+Earlier comparisons had to use different exports.
+
+Same host, same checkpoint, same client (`curl` against `/v1/chat/completions`),
+same request: one prompt, `temperature=0`, `max_tokens=128`, non-streaming.
+End-to-end tok/s = `completion_tokens / wall time`, first request discarded as
+warmup, three measured. CUDA graphs on in both.
+
+| engine | tok/s | runs |
+|---|---:|---|
+| imp | **81.58** | 80.53 / 81.58 / 82.11 |
+| vLLM 0.27.1 | 69.71 | 69.89 / 68.95 / 69.71 |
+
+imp is **17 % ahead** on single-stream decode. Three things that number needs:
+
+- **vLLM has no native FP4 kernel on `sm_120`** and falls back to Marlin, which
+  it says itself, and it additionally warns that this model's shapes need
+  thread-tile padding, "padded/sliced on every forward; performance may be
+  degraded". This is a consumer-Blackwell result, not a statement about vLLM on
+  the hardware it targets.
+- **Batch 1 is imp's design point and not vLLM's.** vLLM owns continuous
+  batching at high concurrency; that is not what this measures.
+- Each arm is one process with three requests, not three alternating processes.
+  The spread within each arm (2.0 % and 1.4 %) is well inside the 17 % gap, but
+  it is a weaker design than the perf gate's.
+
+**vLLM needs `--max-num-seqs` lowered on this model or it will not start with
+graphs.** Qwen3.8-27B is a GDN hybrid, so vLLM allocates one Mamba cache block
+per decode sequence; with 19 GiB of weights on a 32 GB card only 169 blocks fit
+against a default `max_num_seqs` of 256, and startup aborts with
+
+```
+ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (169).
+Each decode sequence requires one Mamba cache block, so CUDA graph capture
+cannot proceed.
+```
+
+`--max-num-seqs 64` was used here. Running with `--enforce-eager` instead hides
+the error and costs vLLM most of its decode speed (12.2 tok/s in an earlier,
+discarded run), so an eager-mode comparison is not a comparison.
+
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
 First tracked long-context table (the GOAL benchmarking discipline asks for
