@@ -47,22 +47,56 @@ jobs than imp is, and imp does not try to be.
 
 ## 60-second quickstart
 
-Everything runs in Docker. You do not need a CUDA toolkit on the host.
+Everything runs in Docker. You do not need a CUDA toolkit on the host. The
+worked example is **Qwen3.8-27B**: a 27B multimodal model, quantized to NVFP4 so
+it fits a single 5090 with room for a real context.
+
+**Get the weights** (19.2 GiB, download only, nothing to convert):
 
 ```bash
-mkdir -p models   # drop a GGUF or a SafeTensors directory in here
+scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4 ~/models/Qwen3.8-27B-NVFP4
+```
 
-docker run --gpus all -v ./models:/models -v imp-cache:/home/imp/.cache/imp \
-  -p 8080:8080 ghcr.io/kekzl/imp:latest --model /models/your-model.gguf
+**Serve it and ask.** This is the 60 seconds:
+
+```bash
+docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
+  -p 8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
 
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"your-model.gguf","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
+  -d '{"model":"Qwen3.8-27B-NVFP4","messages":[{"role":"user","content":"Why is the sky blue?"}],"max_tokens":64}'
 ```
 
-Expected: a JSON completion object whose `choices[0].message.content` holds the
-reply. The model id is the file or directory basename, `GET /v1/models` lists it,
-and the field is required.
+Expected: a JSON completion object whose `choices[0].message.content` explains
+Rayleigh scattering. The model id is the file or directory basename,
+`GET /v1/models` lists it, and the field is required. A GGUF file works the same
+way: swap the path.
+
+The weights take 17.9 GiB on the card and answer at **~85 tok/s**, leaving
+~7.7 GiB for the KV cache on a 32 GB 5090.
+
+[PROV: commit=8f2568c8 date=2026-08-16 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4
+       cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
+       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0`]
+
+### Bringing your own model
+
+That checkpoint was made with the in-tree quantizer, and the same command builds
+one from any BF16 or FP8 release. Qwen3.8-27B needs it: no published NVFP4 export
+of it runs here, because they keep attention in FP8 and this card has no kernel
+for that.
+
+```bash
+scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4
+```
+
+28.8 GiB down, ~25 minutes of conversion, 18.8 GiB out. The FP8 release is a
+third of the BF16 download and costs 0.24 % perplexity against converting the
+BF16 one. The script forecasts the output size and whether it fits the card
+*before* writing anything, so a model that would not fit costs seconds rather
+than half an hour. Details and the quality numbers:
+[`docs/quantization.md`](docs/quantization.md).
 
 The cache volume is optional and pays for itself on the second start: it holds
 the transformed weights (Qwen3-14B-NVFP4 init 7.9 s → 2.1 s).
