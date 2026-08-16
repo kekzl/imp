@@ -605,9 +605,8 @@ TEST(LlmCompressorFormatDetect, RecipeYamlStillWinsOverConfigJson) {
     // one with history behind it, so it stays first.
     std::string dir = tmpdir() + "/fmt_ctboth_" + std::to_string(::getpid());
     std::filesystem::create_directories(dir);
-    std::ofstream(dir + "/recipe.yaml")
-        << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n"
-           "      ignore: [lm_head]\n      scheme: NVFP4\n";
+    std::ofstream(dir + "/recipe.yaml") << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n"
+                                           "      ignore: [lm_head]\n      scheme: NVFP4\n";
     std::ofstream(dir + "/config.json") << R"({
   "quantization_config": {
     "config_groups": {"group_0": {"weights": {"num_bits": 4, "type": "float", "group_size": 16,
@@ -623,4 +622,66 @@ TEST(LlmCompressorFormatDetect, RecipeYamlStillWinsOverConfigJson) {
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
+}
+
+// ---- the drop predicate is a different question from the skip predicate ----
+//
+// translate_name() SKIPs `mtp.*` because those tensors do not belong in the
+// main tensor map — and load_shard() then diverts them into the MTP map. They
+// are skipped and still used. The shard-drop asked "is it skipped", so on a
+// sharded llm-compressor checkpoint the draft head was discarded before any
+// tensor was read, and the only symptom was spec-decode never engaging.
+
+TEST(LlmCompressorUnused, MtpIsSkippedButNotUnusedWhenWanted) {
+    const char* mtp[] = {"mtp.fc.weight", "model.mtp.layers.0.self_attn.q_proj.weight"};
+    for (const char* n : mtp) {
+        // Skipped by the translator either way: it does not go in the main map.
+        EXPECT_TRUE(name_is_skipped(n)) << n;
+        // But only unused when nobody is collecting the head.
+        EXPECT_TRUE(name_is_unused(n, /*keep_vision=*/false, /*keep_mtp=*/false)) << n;
+        EXPECT_FALSE(name_is_unused(n, /*keep_vision=*/false, /*keep_mtp=*/true)) << n;
+    }
+}
+
+TEST(LlmCompressorUnused, VisionKeepsItsExistingMeaning) {
+    const char* v = "model.visual.blocks.0.attn.qkv.weight";
+    EXPECT_TRUE(name_is_unused(v, /*keep_vision=*/false, /*keep_mtp=*/false));
+    EXPECT_FALSE(name_is_unused(v, /*keep_vision=*/true, /*keep_mtp=*/false));
+    // A tower is unaffected by the MTP flag and vice versa.
+    EXPECT_TRUE(name_is_unused(v, /*keep_vision=*/false, /*keep_mtp=*/true));
+}
+
+TEST(LlmCompressorUnused, OrdinaryWeightsAreNeverUnused) {
+    for (bool kv : {false, true})
+        for (bool km : {false, true}) {
+            EXPECT_FALSE(name_is_unused("model.layers.0.self_attn.q_proj.weight_packed", kv, km));
+            EXPECT_FALSE(name_is_unused("model.embed_tokens.weight", kv, km));
+            EXPECT_FALSE(name_is_unused("lm_head.weight_packed", kv, km));
+        }
+}
+
+// A tensor is dropped only if NOTHING would read it: the union of the main map
+// (translate_name EMITs) and the MTP map (load_shard diverts). Stated as one
+// property so the two predicates cannot drift apart again.
+TEST(LlmCompressorUnused, DropOnlyWhenNeitherConsumerTakesIt) {
+    const char* names[] = {
+        "model.visual.blocks.0.attn.qkv.weight",
+        "multi_modal_projector.linear_1.weight",
+        "mtp.fc.weight",
+        "model.mtp.layers.0.mlp.up_proj.weight",
+        "model.layers.0.self_attn.q_proj.weight_packed",
+        "model.embed_tokens.weight",
+    };
+    for (bool keep_vision : {false, true}) {
+        for (bool keep_mtp : {false, true}) {
+            for (const char* n : names) {
+                TranslationCounters c{};
+                const bool main_map_takes_it = translate_name(n, c, keep_vision).action ==
+                                               NameTranslation::EMIT;
+                const bool mtp_map_takes_it = keep_mtp && name_is_mtp(n);
+                EXPECT_EQ(name_is_unused(n, keep_vision, keep_mtp), !main_map_takes_it && !mtp_map_takes_it)
+                    << "name=" << n << " keep_vision=" << keep_vision << " keep_mtp=" << keep_mtp;
+            }
+        }
+    }
 }

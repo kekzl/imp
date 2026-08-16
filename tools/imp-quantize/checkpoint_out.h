@@ -137,6 +137,17 @@ std::string compressed_tensors_quant_config(const std::vector<std::string>& igno
 bool patch_config_json(const std::string& src, const std::string& quant_config_obj, std::string& out,
                        std::string& err);
 
+// A combination that produces a checkpoint the target engine cannot load, or
+// nullptr when there is nothing to say. Reported before the conversion runs.
+//
+// Today there is one: `--lm-head` with compressed-tensors output. vLLM's
+// `ParallelLMHead` takes no scales ("There is no module or parameter named
+// lm_head.weight_global_scale ... available: {'lm_head.weight'}"), so the
+// checkpoint fails to load there — loudly, but only after the conversion. It is
+// the right choice for an imp-only checkpoint, where it is measurably free, so
+// this warns rather than refuses.
+const char* portability_warning(OutputFormat fmt, bool quantize_lm_head);
+
 // -- the files themselves --------------------------------------------------
 
 // Whether this source can carry the declaration the chosen format needs.

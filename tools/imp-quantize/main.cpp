@@ -101,7 +101,7 @@ namespace {
 
 struct Options {
     std::string in_dir, out_dir;
-    std::string calib_file;         // --calib: activation statistics for AWQ scaling
+    std::string calib_file;  // --calib: activation statistics for AWQ scaling
     // --calib-groups: which AWQ scale groups run, for attributing a bad result.
     std::string calib_groups = awq::kAwqAllGroups;
     bool quantize_lm_head = false;  // imp has its own lm_head NVFP4 policy (#982)
@@ -209,10 +209,9 @@ bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, flo
     Tensor in(d_in, QType::F16, 2, shape, /*on_device=*/true);
 
     NvFP4QuantResult q;
-    const float scale = forced_scale > 0.0f
-                            ? forced_scale
-                            : quantize::export_tensor_scale(
-                                  quantize::fp16_absmax(h_fp16.data(), h_fp16.size()));
+    const float scale = forced_scale > 0.0f ? forced_scale
+                                            : quantize::export_tensor_scale(
+                                                  quantize::fp16_absmax(h_fp16.data(), h_fp16.size()));
     quantize_fp16_to_nvfp4_with_scale(in, scale, q);
     if (cudaDeviceSynchronize() != cudaSuccess) {
         cudaFree(d_in);
@@ -309,14 +308,16 @@ void report_card_fit(size_t bytes_out) {
     printf("\ncard: %.0f MiB total, less %.0f context and %.0f library reserve leaves %.0f MiB",
            double(total_b) / mib, kContextBytes / mib, kMeasuredLibraryReserveBytes / mib, budget);
     if (ckpt >= budget)
-        printf("\n      this checkpoint is %.0f MiB on disk and does NOT fit: %.0f MiB short before"
-               "\n      any KV cache or workspace",
-               ckpt, ckpt - budget);
+        printf(
+            "\n      this checkpoint is %.0f MiB on disk and does NOT fit: %.0f MiB short before"
+            "\n      any KV cache or workspace",
+            ckpt, ckpt - budget);
     else
-        printf("\n      this checkpoint is %.0f MiB on disk, leaving %.0f MiB for the KV cache and"
-               "\n      workspaces. On-disk size is not the resident figure: a scale-factor cache is"
-               "\n      built on top, and a vision tower or MTP sidecar may load separately or not at all",
-               ckpt, budget - ckpt);
+        printf(
+            "\n      this checkpoint is %.0f MiB on disk, leaving %.0f MiB for the KV cache and"
+            "\n      workspaces. On-disk size is not the resident figure: a scale-factor cache is"
+            "\n      built on top, and a vision tower or MTP sidecar may load separately or not at all",
+            ckpt, budget - ckpt);
 }
 
 }  // namespace
@@ -342,8 +343,7 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "imp-quantize: unknown --format '%s' (modelopt | vllm)\n", f.c_str());
                 return 2;
             }
-        }
-        else if (a == "--calib-groups") {
+        } else if (a == "--calib-groups") {
             opt.calib_groups = next();
             for (char& c : opt.calib_groups)
                 c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -391,6 +391,10 @@ int main(int argc, char** argv) {
             fprintf(stderr, "%s\n", derr.c_str());
             return 1;
         }
+        // Same reason: a combination that will not load where the caller is
+        // aiming should be said now, not after the conversion.
+        if (const char* warn = quantize::portability_warning(opt.format, opt.quantize_lm_head))
+            fprintf(stderr, "note: %s\n\n", warn);
         fs::create_directories(opt.out_dir, ec);
         if (ec) {
             fprintf(stderr, "cannot create %s: %s\n", opt.out_dir.c_str(), ec.message().c_str());
@@ -841,18 +845,17 @@ int main(int argc, char** argv) {
         // Modelopt declares itself in a file of its own; compressed-tensors put
         // its declaration into the config.json copy_aux_files just patched, and
         // repeats it in recipe.yaml for readers that look only there.
-        const bool declared =
-            opt.format == quantize::OutputFormat::Modelopt
-                ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules, calibrated, err)
-                : quantize::write_recipe_yaml(opt.out_dir, excluded_modules, err);
+        const bool declared = opt.format == quantize::OutputFormat::Modelopt
+                                  ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules,
+                                                                          calibrated, err)
+                                  : quantize::write_recipe_yaml(opt.out_dir, excluded_modules, err);
         if (!declared) {
             fprintf(stderr, "%s\n", err.c_str());
             return 1;
         }
         // Single-shard checkpoints load off model.safetensors directly; sharded
         // ones need the index, and it must describe the tensors we wrote.
-        if (shards.size() > 1 &&
-            !quantize::write_shard_index(opt.out_dir, tensor_to_shard, bytes_out, err)) {
+        if (shards.size() > 1 && !quantize::write_shard_index(opt.out_dir, tensor_to_shard, bytes_out, err)) {
             fprintf(stderr, "%s\n", err.c_str());
             return 1;
         }
@@ -875,15 +878,16 @@ int main(int argc, char** argv) {
         // the harm is the ATTENTION groups on wide GQA, and mostly their
         // interaction (A x C +1.36). BD alone GAINS 0.13 there, so the warning
         // names the way out instead of just the hazard.
-        printf("\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest.%s"
-               "\n      Score this checkpoint with --perplexity against the uncalibrated one"
-               "\n      before using it; see docs/quantization.md.",
-               plan.groups_scaled, plan.groups_rtn,
-               opt.calib_groups == std::string(awq::kAwqAllGroups)
-                   ? "\n      NOTE: the full set is validated on Qwen3-0.6B/1.7B but measured HARMFUL"
-                     "\n      on Qwen3-14B (PPL 9.93 -> 12.3-12.6). The attention groups are the cause:"
-                     "\n      on wide-GQA models prefer --calib-groups BD (14B: 9.79, better than RTN)."
-                   : "");
+        printf(
+            "\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest.%s"
+            "\n      Score this checkpoint with --perplexity against the uncalibrated one"
+            "\n      before using it; see docs/quantization.md.",
+            plan.groups_scaled, plan.groups_rtn,
+            opt.calib_groups == std::string(awq::kAwqAllGroups)
+                ? "\n      NOTE: the full set is validated on Qwen3-0.6B/1.7B but measured HARMFUL"
+                  "\n      on Qwen3-14B (PPL 9.93 -> 12.3-12.6). The attention groups are the cause:"
+                  "\n      on wide-GQA models prefer --calib-groups BD (14B: 9.79, better than RTN)."
+                : "");
     if (n_moe_skipped)
         printf(", %zu MoE expert stacks left unquantized (not supported yet)", n_moe_skipped);
     printf("\nsize: %.2f GiB -> %.2f GiB (%.2fx)%s", bytes_in / 1073741824.0, bytes_out / 1073741824.0,

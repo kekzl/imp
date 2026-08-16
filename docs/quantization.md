@@ -90,6 +90,37 @@ The two differ in more than names, and each difference is silent when wrong:
   unquantized layer for each; a module missing from that list is one it looks for
   scales for that were never written.
 
+#### Making the checkpoint smaller: what each exclusion costs
+
+A third of the output is weights left at source precision, and `--dry-run`
+breaks it down by reason. Measured on Qwen3.8-27B (BF16 source 51.75 GiB):
+
+| what | size in the output | quantizing it costs | quantizing it is |
+|---|---:|---|---|
+| `lm_head` | 2 425 MiB | **nothing measurable in imp** | `--lm-head`, but see below |
+| `embed_tokens` | 2 425 MiB | +0.94 % perplexity | not possible: no NVFP4 lookup |
+| vision tower | 875 MiB | tower loads at source precision only | not possible |
+| MTP draft head | 810 MiB | draft acceptance 81 % → 0 (#1428) | refused |
+
+**`--lm-head` is free on imp and breaks vLLM.** imp converts a native LM head
+into an NVFP4 decode cache at load anyway (`gemm.nvfp4_lm_head`, auto → on for
+native sources), so quantizing it in the checkpoint changes nothing except what
+is on disk. Measured on Qwen3.8-27B: perplexity **4.6158 either way**, greedy
+output **byte-identical over four prompts**, weights **17 920 → 16 192 MiB**,
+checkpoint 19.15 → 17.44 GiB. But vLLM's `ParallelLMHead` takes no scales and
+stops at `no module or parameter named lm_head.weight_global_scale`, so the flag
+belongs with `--format modelopt`. The tool warns when the two are combined.
+
+**Embeddings stay at source precision, and the price is now known.** imp's
+embedding lookup handles F32/F16/BF16/Q8_0/Q6_K and not NVFP4, so a quantized
+table cannot be read back; vLLM leaves embeddings unquantized too. Rather than
+write the kernel first, the table was pushed through the exact round trip the
+quantizer would apply and written back at source precision, which measures the
+quality loss without needing a reader: Qwen3-0.6B perplexity **29.4204 →
+29.6982, +0.94 %**, for what would be ~10 % off a 27B checkpoint. So the trade
+is real but modest, and it costs the interoperability the compressed-tensors
+format was added for.
+
 #### Fused layers share one tensor scale
 
 Inference engines merge `q_proj`/`k_proj`/`v_proj` into one linear and
