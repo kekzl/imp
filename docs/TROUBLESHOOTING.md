@@ -103,6 +103,30 @@ Since v0.23.0 this should be impossible: a pattern imp cannot compile is a `400`
 If you get free text at HTTP 200 with a `response_format` set, that is a bug
 worth reporting, and it was the exact defect fixed in #1256.
 
+## `content` is empty and the answer sits in `reasoning_content`
+
+On a thinking model in a long conversation, raise `max_tokens` before assuming a
+defect. The model thinks first, and the budget is shared: once thinking fills it,
+the reply never starts and imp returns an empty `content` with
+`finish_reason: stop`, which reads like a failure and is an honest report of what
+was generated.
+
+Measured on Qwen3.8-27B, one session grown to ~8k tokens over 74 turns:
+
+| `max_tokens` | result |
+|---|---|
+| 260 | several turns with empty `content`, one reply that was a single non-Latin token |
+| 600 | **74 of 74 turns clean**, every recall correct |
+
+It is the model, not the engine: the same conversation on vLLM with the same
+checkpoint degenerates the same way, only visibly, because vLLM has no reasoning
+parser and streams the thinking into `content` instead. A fixed conversation
+replayed at identical depth (up to 5 005 prompt tokens) is answered correctly by
+both engines, so context length alone is not the trigger.
+
+Reproduce with `tools/analysis/multiturn_deep.py`, which drives one growing
+session and checks every reply for the degeneration shapes.
+
 ## Build or test problems
 
 - `build/` and `build-dev/` are root-owned by the container. Remove them with

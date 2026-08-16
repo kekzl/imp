@@ -52,6 +52,20 @@ python3 tools/analysis/degen_suite.py --skip-deterministic
 python3 tools/analysis/degen_suite.py --only think-leak,adherence --quick --json /tmp/degen.json
 ```
 
+**Long sessions need the deeper probe.** `degen_suite`'s multi-turn category is
+three turns; state that decays and thinking that eats the token budget only show
+up later:
+
+```bash
+python3 tools/analysis/multiturn_deep.py --url http://localhost:8080 \
+    --model <id> --filler 60 --max-tokens 600   # ~74 turns, recalls across all of them
+```
+
+It reports `finish_reason` and reasoning length on every failure, which is what
+separates a defect from a budget the thinking consumed. **Qwen3.8-27B at
+`--max-tokens 260` fails that way and is clean at 600**, in imp and in vLLM
+alike, so check the budget before filing an engine bug.
+
 Source: `tools/analysis/degen_suite.py`. Exit 0 = clean, 1 = failures
 (printed with evidence), 2 = server unreachable. Run this whenever output
 quality is in question — it catches what the C-API GTest battery cannot see.
