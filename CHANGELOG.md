@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A sharded compressed-tensors checkpoint no longer loses its MTP draft
+  head.** The shard-drop asked "is this name skipped by the translator", but
+  `mtp.*` is skipped *and* then diverted into the MTP map — so the shard
+  carrying the draft head was discarded before any tensor was read, and
+  spec-decode silently never engaged. On Qwen3.8-27B the head is back with a
+  **67-89 % draft accept rate** where it previously reported "model has no MTP
+  head loaded".
+
 ### Added
 
 - **`imp-quantize --format vllm` writes a checkpoint vLLM can serve.** The new
@@ -21,6 +31,16 @@ there instead of retelling it.
   [`quantization.md`](docs/quantization.md).
 
 ### Changed
+
+- **`imp-quantize` says up front when a flag combination will not load where you
+  are aiming.** `--lm-head` with `--format vllm` produces a checkpoint vLLM
+  refuses (its `ParallelLMHead` takes no scales). On imp the flag costs nothing
+  *extra* — the default already converts a native head to NVFP4 at load — but it
+  makes that trade irreversible, so the doc now states what the default itself
+  costs: Qwen3.8-27B perplexity **4.5707 → 4.6158 (+0.99 %) for +10.4 % decode**,
+  and the win survives concurrency (+25 % ITL at 4 requests, +8 % at 16). Also
+  refuses a source with no `config.json` before converting rather than after.
+  See [`quantization.md`](docs/quantization.md).
 
 - **Fused layers now share one tensor scale.** Engines merge q/k/v and gate/up
   into a single linear that carries one scale, so three independently calibrated

@@ -477,8 +477,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
             // unknown wire types when the tensor is actually emitted.
             if (tensor_data_offset + offset_end > file_size) {
                 n_dropped_offset_validation++;
-                warn_drop(tensor_name.c_str(),
-                          "offset_end past EOF (unknown wire dtype, lenient check)");
+                warn_drop(tensor_name.c_str(), "offset_end past EOF (unknown wire dtype, lenient check)");
                 continue;
             }
         } else {
@@ -487,8 +486,8 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
                 nelem *= shape[d];
             uint64_t expected_nbytes = static_cast<uint64_t>(nelem) * static_cast<uint64_t>(wire_bytes);
             std::string vt_err;
-            if (!safetensors_internal::validate_tensor_offsets(
-                    offset_start, offset_end, expected_nbytes, tensor_data_offset, file_size, &vt_err)) {
+            if (!safetensors_internal::validate_tensor_offsets(offset_start, offset_end, expected_nbytes,
+                                                               tensor_data_offset, file_size, &vt_err)) {
                 n_dropped_offset_validation++;
                 warn_drop(tensor_name.c_str(), vt_err.c_str());
                 continue;
@@ -509,10 +508,11 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     int n_total_dropped = n_dropped_no_dtype + n_dropped_no_shape + n_dropped_too_many_dims +
                           n_dropped_no_offsets + n_dropped_offset_validation;
     if (n_total_dropped > 0) {
-        IMP_LOG_WARN("SafeTensors %s: dropped %d malformed tensors (no_dtype=%d no_shape=%d "
-                     "too_many_dims=%d no_offsets=%d offset_validation=%d)",
-                     path.c_str(), n_total_dropped, n_dropped_no_dtype, n_dropped_no_shape,
-                     n_dropped_too_many_dims, n_dropped_no_offsets, n_dropped_offset_validation);
+        IMP_LOG_WARN(
+            "SafeTensors %s: dropped %d malformed tensors (no_dtype=%d no_shape=%d "
+            "too_many_dims=%d no_offsets=%d offset_validation=%d)",
+            path.c_str(), n_total_dropped, n_dropped_no_dtype, n_dropped_no_shape, n_dropped_too_many_dims,
+            n_dropped_no_offsets, n_dropped_offset_validation);
     }
 
     return true;
@@ -520,8 +520,16 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
 
 // ---- Sharded SafeTensors loading ----
 
+// mtp_out: same contract as load_shard's — non-null means an embedded MTP head
+// is wanted, so `mtp.*` tensors are collected instead of discarded, and a shard
+// made only of them is NOT dropped. Passing nullptr here (which this function
+// used to do implicitly, having no parameter at all) loses the draft head on
+// every sharded llm-compressor checkpoint, silently: translate_name SKIPs the
+// names, so they never reach the main map either, and the fallback that
+// harvests them from there finds nothing.
 static bool load_sharded(const std::string& model_dir, std::unordered_map<std::string, Tensor>& tensor_map,
-                         std::vector<ShardInfo>& shards, bool keep_vision) {
+                         std::vector<ShardInfo>& shards, bool keep_vision,
+                         std::unordered_map<std::string, Tensor>* mtp_out) {
     std::string index_path = model_dir + "/model.safetensors.index.json";
 
     // Read the index file
@@ -563,11 +571,13 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     // tower usually ships as its own shard (`model_visual.safetensors`), so the
     // drop decides the tower's fate before any tensor is looked at.
     std::set<std::string> shard_files;
+    const bool keep_mtp = mtp_out != nullptr;
     for (auto& [fname, tensors] : shard_tensors) {
         bool all_skip = !tensors.empty() &&
-                        std::all_of(tensors.begin(), tensors.end(), [keep_vision](const std::string& n) {
-                            return imp::llm_compressor::name_is_skipped(n, keep_vision);
-                        });
+                        std::all_of(tensors.begin(), tensors.end(),
+                                    [keep_vision, keep_mtp](const std::string& n) {
+                                        return imp::llm_compressor::name_is_unused(n, keep_vision, keep_mtp);
+                                    });
         if (all_skip) {
             IMP_LOG_INFO("Skipping shard %s (%zu tensors are MTP/vision-only and unused)", fname.c_str(),
                          tensors.size());
@@ -590,6 +600,9 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     std::vector<std::unordered_map<std::string, Tensor>> per_shard_maps(shard_list.size());
     std::vector<ShardInfo> per_shard_info(shard_list.size());
     std::vector<imp::llm_compressor::TranslationCounters> per_shard_counters(shard_list.size());
+    // Per-shard MTP collection, merged below: the head's tensors are not
+    // guaranteed to share one shard, and the maps are filled in parallel.
+    std::vector<std::unordered_map<std::string, Tensor>> per_shard_mtp(shard_list.size());
     std::atomic<bool> any_failure{false};
 
     std::atomic<size_t> shards_done{0};
@@ -597,13 +610,13 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     auto worker = [&](size_t i) {
         std::string shard_path = model_dir + "/" + shard_list[i];
         if (!load_shard(shard_path, per_shard_maps[i], per_shard_info[i], llm_compressor_format, keep_vision,
-                        per_shard_counters[i])) {
+                        per_shard_counters[i], keep_mtp ? &per_shard_mtp[i] : nullptr)) {
             IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
             any_failure.store(true);
         }
         const size_t done = shards_done.fetch_add(1) + 1;
-        IMP_LOG_INFO("  [%zu/%zu] mmap'd shard: %s (%zu tensors)", done, total_shards,
-                     shard_list[i].c_str(), per_shard_maps[i].size());
+        IMP_LOG_INFO("  [%zu/%zu] mmap'd shard: %s (%zu tensors)", done, total_shards, shard_list[i].c_str(),
+                     per_shard_maps[i].size());
     };
 
     {
@@ -622,6 +635,9 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     for (size_t i = 0; i < shard_list.size(); ++i) {
         for (auto& kv : per_shard_maps[i])
             tensor_map.emplace(kv.first, kv.second);
+        if (keep_mtp)
+            for (auto& kv : per_shard_mtp[i])
+                mtp_out->emplace(kv.first, kv.second);
         shards.push_back(per_shard_info[i]);
         const auto& c = per_shard_counters[i];
         tcounters.suffix_renames += c.suffix_renames;
@@ -693,7 +709,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         // Directory mode: try sharded first, then single
         std::string index_path = model_dir + "/model.safetensors.index.json";
         if (fs::exists(index_path)) {
-            loaded = load_sharded(model_dir, tensor_map, shards, keep_vision);
+            loaded = load_sharded(model_dir, tensor_map, shards, keep_vision, mtp_collect);
         }
         if (!loaded) {
             std::string st_path = model_dir + "/model.safetensors";
@@ -744,12 +760,13 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     auto dispatch_mtp = [](std::unordered_map<std::string, Tensor>& tm, const std::string& src,
                            size_t bytes) -> imp::MtpHead {
         imp::MtpHead head;
-        head.info.path       = src;
+        head.info.path = src;
         head.info.file_bytes = bytes;
-        head.info.n_tensors  = static_cast<int>(tm.size());
+        head.info.n_tensors = static_cast<int>(tm.size());
         auto take = [&](const char* key, Tensor& dst) -> bool {
             auto it = tm.find(key);
-            if (it == tm.end()) return false;
+            if (it == tm.end())
+                return false;
             dst = it->second;
             return true;
         };
@@ -820,9 +837,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
 
         bool ok = true;
         ok &= take("mtp.pre_fc_norm_embedding.weight", head.pre_fc_norm_embedding);
-        ok &= take("mtp.pre_fc_norm_hidden.weight",    head.pre_fc_norm_hidden);
-        ok &= take("mtp.fc.weight",                    head.fc);
-        ok &= take("mtp.layers.0.input_layernorm.weight",          head.input_layernorm);
+        ok &= take("mtp.pre_fc_norm_hidden.weight", head.pre_fc_norm_hidden);
+        ok &= take("mtp.fc.weight", head.fc);
+        ok &= take("mtp.layers.0.input_layernorm.weight", head.input_layernorm);
         ok &= take("mtp.layers.0.post_attention_layernorm.weight", head.post_attention_layernorm);
         ok &= take("mtp.layers.0.self_attn.q_proj.weight", head.q_proj);
         ok &= take("mtp.layers.0.self_attn.k_proj.weight", head.k_proj);
@@ -832,28 +849,29 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         ok &= take("mtp.layers.0.self_attn.k_norm.weight", head.k_norm);
         ok &= take("mtp.norm.weight", head.final_norm);
 
-        const bool moe =
-            take("mtp.layers.0.mlp.gate.weight", head.router) &&
-            take("mtp.layers.0.mlp.experts.gate_up_proj", head.experts_gate_up_packed) &&
-            take("mtp.layers.0.mlp.experts.down_proj", head.experts_down_packed) &&
-            take("mtp.layers.0.mlp.shared_expert.gate_proj.weight", head.shared_expert_gate_proj) &&
-            take("mtp.layers.0.mlp.shared_expert.up_proj.weight", head.shared_expert_up_proj) &&
-            take("mtp.layers.0.mlp.shared_expert.down_proj.weight", head.shared_expert_down_proj) &&
-            take("mtp.layers.0.mlp.shared_expert_gate.weight", head.shared_expert_gate);
-        const bool dense =
-            !moe &&
-            take("mtp.layers.0.mlp.gate_proj.weight", head.shared_expert_gate_proj) &&
-            take("mtp.layers.0.mlp.up_proj.weight", head.shared_expert_up_proj) &&
-            take("mtp.layers.0.mlp.down_proj.weight", head.shared_expert_down_proj);
+        const bool moe = take("mtp.layers.0.mlp.gate.weight", head.router) &&
+                         take("mtp.layers.0.mlp.experts.gate_up_proj", head.experts_gate_up_packed) &&
+                         take("mtp.layers.0.mlp.experts.down_proj", head.experts_down_packed) &&
+                         take("mtp.layers.0.mlp.shared_expert.gate_proj.weight",
+                              head.shared_expert_gate_proj) &&
+                         take("mtp.layers.0.mlp.shared_expert.up_proj.weight", head.shared_expert_up_proj) &&
+                         take("mtp.layers.0.mlp.shared_expert.down_proj.weight",
+                              head.shared_expert_down_proj) &&
+                         take("mtp.layers.0.mlp.shared_expert_gate.weight", head.shared_expert_gate);
+        const bool dense = !moe && take("mtp.layers.0.mlp.gate_proj.weight", head.shared_expert_gate_proj) &&
+                           take("mtp.layers.0.mlp.up_proj.weight", head.shared_expert_up_proj) &&
+                           take("mtp.layers.0.mlp.down_proj.weight", head.shared_expert_down_proj);
         ok &= (moe || dense);
 
         head.loaded = ok;
         if (ok) {
-            IMP_LOG_INFO("MTP head loaded: %s (%d tensors, %s MLP, BF16)", src.c_str(),
-                         head.info.n_tensors, moe ? "MoE" : "dense");
+            IMP_LOG_INFO("MTP head loaded: %s (%d tensors, %s MLP, BF16)", src.c_str(), head.info.n_tensors,
+                         moe ? "MoE" : "dense");
         } else {
-            IMP_LOG_WARN("MTP head detected at %s but some expected tensors were missing; "
-                         "spec-decode disabled for this model", src.c_str());
+            IMP_LOG_WARN(
+                "MTP head detected at %s but some expected tensors were missing; "
+                "spec-decode disabled for this model",
+                src.c_str());
         }
         return head;
     };
@@ -891,7 +909,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             }
             if (!embedded_mtp_map.empty()) {
                 size_t bytes = 0;
-                for (const auto& kv : embedded_mtp_map) bytes += kv.second.nbytes();
+                for (const auto& kv : embedded_mtp_map)
+                    bytes += kv.second.nbytes();
                 mtp_local = dispatch_mtp(embedded_mtp_map, path + " (embedded mtp.*)", bytes);
             }
         }
@@ -944,8 +963,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // prompt-blind output with preserved magnitudes). Force NeoX for the
     // SafeTensors path so HF-native Q/K rotate correctly. Arches that already
     // keep the default (rope_neox=true: QWEN3/GEMMA/...) are unaffected.
-    if (cfg.arch == ModelArch::LLAMA || cfg.arch == ModelArch::MISTRAL ||
-        cfg.arch == ModelArch::MIXTRAL || cfg.arch == ModelArch::LLAMA4) {
+    if (cfg.arch == ModelArch::LLAMA || cfg.arch == ModelArch::MISTRAL || cfg.arch == ModelArch::MIXTRAL ||
+        cfg.arch == ModelArch::LLAMA4) {
         cfg.rope_neox = true;
     }
 
@@ -1007,9 +1026,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         cfg.is_mxfp4_prequant = true;
         cfg.mxfp4_block_size = mxfp4_cfg.block_size;
         if (cfg.arch == ModelArch::GPT_OSS) {
-            IMP_LOG_INFO("MXFP4 SafeTensors (block_size=%d): gpt-oss experts will be "
-                         "transcoded MXFP4→NVFP4 at init (native decode).",
-                         cfg.mxfp4_block_size);
+            IMP_LOG_INFO(
+                "MXFP4 SafeTensors (block_size=%d): gpt-oss experts will be "
+                "transcoded MXFP4→NVFP4 at init (native decode).",
+                cfg.mxfp4_block_size);
         } else {
             IMP_LOG_WARN(
                 "MXFP4 SafeTensors detected (block_size=%d) — imp has no SafeTensors "
@@ -1032,8 +1052,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             "version=%s) — imp does not yet have an AWQ dequant kernel. "
             "Weights load as their wire dtype and inference will be "
             "incorrect. Use a GPTQ or NVFP4 export instead.",
-            awq_cfg.bits, awq_cfg.group_size,
-            awq_cfg.zero_point ? "true" : "false",
+            awq_cfg.bits, awq_cfg.group_size, awq_cfg.zero_point ? "true" : "false",
             awq_cfg.version.empty() ? "unspecified" : awq_cfg.version.c_str());
     }
 
@@ -1060,15 +1079,14 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // HFConfigLoader::load_config) against the actual lm_head.weight
     // presence. Mismatch is a real surprise — most models tie, so silent
     // tying when the author said `tie=false` would mask a missing lm_head.
-    const bool out_proj_missing =
-        (model->out_proj_.data == nullptr && model->tok_emb_.data != nullptr);
+    const bool out_proj_missing = (model->out_proj_.data == nullptr && model->tok_emb_.data != nullptr);
     if (cfg.tie_word_embeddings == 0 && out_proj_missing) {
         IMP_LOG_WARN(
             "config.json declares tie_word_embeddings=false but lm_head.weight "
             "is absent in the SafeTensors files; tying anyway as a fallback.");
     }
-    if (cfg.tie_word_embeddings == 1 && model->out_proj_.data != nullptr &&
-        model->tok_emb_.data != nullptr && model->out_proj_.data != model->tok_emb_.data) {
+    if (cfg.tie_word_embeddings == 1 && model->out_proj_.data != nullptr && model->tok_emb_.data != nullptr &&
+        model->out_proj_.data != model->tok_emb_.data) {
         IMP_LOG_INFO(
             "config.json declares tie_word_embeddings=true but lm_head.weight "
             "was loaded as a separate tensor; honoring the file (no tying).");
@@ -1251,18 +1269,20 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     if (cfg.attention_bias == 1) {
         int missing_q = 0, missing_k = 0, missing_v = 0;
         for (const auto& layer : model->layers_) {
-            if (layer.q_bias.data == nullptr) missing_q++;
-            if (layer.k_bias.data == nullptr) missing_k++;
-            if (layer.v_bias.data == nullptr) missing_v++;
+            if (layer.q_bias.data == nullptr)
+                missing_q++;
+            if (layer.k_bias.data == nullptr)
+                missing_k++;
+            if (layer.v_bias.data == nullptr)
+                missing_v++;
         }
         if (missing_q || missing_k || missing_v) {
             IMP_LOG_WARN(
                 "config.json says attention_bias=true but %d/%d Q-biases, "
                 "%d/%d K-biases, %d/%d V-biases are missing from the SafeTensors "
                 "export. Inference will proceed without those biases.",
-                missing_q, static_cast<int>(model->layers_.size()),
-                missing_k, static_cast<int>(model->layers_.size()),
-                missing_v, static_cast<int>(model->layers_.size()));
+                missing_q, static_cast<int>(model->layers_.size()), missing_k,
+                static_cast<int>(model->layers_.size()), missing_v, static_cast<int>(model->layers_.size()));
         }
     }
 
@@ -1309,8 +1329,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             layer.expert_gate_bias = Tensor(g, QType::BF16, 2, bshape, /*on_device=*/false);
             layer.expert_up_bias = Tensor(u, QType::BF16, 2, bshape, /*on_device=*/false);
         }
-        IMP_LOG_INFO("gpt-oss: expert gate_up biases de-interleaved for %zu layers",
-                     model->layers_.size());
+        IMP_LOG_INFO("gpt-oss: expert gate_up biases de-interleaved for %zu layers", model->layers_.size());
 
         // Residual-stream 2^-4 rescale (#547): gpt-oss's massive BF16
         // activations overflow the FP16 hidden state (hidden L2 jumps ~12x at
@@ -1350,8 +1369,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         };
         bool rescale_ok = true;
         for (auto& layer : model->layers_) {
-            rescale_ok = rescale_ok && scale_bf16_pow2(layer.wo, 4) &&
-                         scale_bf16_pow2(layer.o_bias, 4) && scale_bf16_pow2(layer.expert_down_bias, 4);
+            rescale_ok = rescale_ok && scale_bf16_pow2(layer.wo, 4) && scale_bf16_pow2(layer.o_bias, 4) &&
+                         scale_bf16_pow2(layer.expert_down_bias, 4);
         }
         if (!rescale_ok) {
             IMP_LOG_ERROR("gpt-oss: residual-stream rescale failed");

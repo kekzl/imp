@@ -327,3 +327,23 @@ TEST(QuantizeCheckpointOut, RefusesCompressedTensorsWithoutAConfigJson) {
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+// Measured 2026-08-16: vLLM refuses `lm_head.weight_global_scale` outright,
+// while imp reads a quantized head with byte-identical greedy output — because
+// its own default already quantizes a native head at load (which itself costs
+// +0.99 % perplexity for +10.4 % decode; see docs/quantization.md). So the
+// combination is defensible for an imp-only checkpoint and useless for a
+// portable one, and the caller has to hear that before the conversion, not
+// after it.
+TEST(QuantizeCheckpointOut, WarnsOnlyWhenLmHeadMeetsCompressedTensors) {
+    EXPECT_NE(portability_warning(OutputFormat::CompressedTensors, /*quantize_lm_head=*/true), nullptr);
+    EXPECT_EQ(portability_warning(OutputFormat::CompressedTensors, false), nullptr);
+    EXPECT_EQ(portability_warning(OutputFormat::Modelopt, true), nullptr);
+    EXPECT_EQ(portability_warning(OutputFormat::Modelopt, false), nullptr);
+
+    const std::string w = portability_warning(OutputFormat::CompressedTensors, true);
+    // Names the flag, the format and the symptom, so the reader can act on it.
+    EXPECT_NE(w.find("--lm-head"), std::string::npos);
+    EXPECT_NE(w.find("lm_head.weight_global_scale"), std::string::npos);
+    EXPECT_NE(w.find("modelopt"), std::string::npos);
+}

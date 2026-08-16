@@ -230,6 +230,18 @@ float export_tensor_scale(float absmax) {
     return absmax / kFp4E2M1Max;
 }
 
+const char* portability_warning(OutputFormat fmt, bool quantize_lm_head) {
+    if (fmt == OutputFormat::CompressedTensors && quantize_lm_head)
+        return "--lm-head with --format vllm: vLLM cannot load the result. Its ParallelLMHead\n"
+               "takes no scales, so loading stops at 'no module or parameter named\n"
+               "lm_head.weight_global_scale'. imp reads it fine and costs nothing EXTRA there,\n"
+               "because its default already quantizes a native head at load — but that also\n"
+               "makes the trade irreversible (gemm.nvfp4_lm_head=off can no longer buy the\n"
+               "0.99%% perplexity back). Use it with --format modelopt when the model would\n"
+               "otherwise not fit, or drop it for a checkpoint both engines read.";
+    return nullptr;
+}
+
 std::string fusion_group_key(const std::string& weight_name) {
     static const std::string kW = ".weight";
     if (!ends_with(weight_name, kW))

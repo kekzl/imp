@@ -96,10 +96,20 @@ bool name_is_vision(const std::string& in) {
            starts_with(in, "vision_tower.") || starts_with(in, "multi_modal_projector.");
 }
 
+bool name_is_mtp(const std::string& in) { return starts_with(in, "mtp.") || starts_with(in, "model.mtp."); }
+
 bool name_is_skipped(const std::string& in, bool keep_vision) {
     if (name_is_vision(in))
         return !keep_vision;
-    return starts_with(in, "mtp.") || starts_with(in, "model.mtp.");
+    return name_is_mtp(in);
+}
+
+bool name_is_unused(const std::string& in, bool keep_vision, bool keep_mtp) {
+    if (name_is_vision(in))
+        return !keep_vision;
+    if (name_is_mtp(in))
+        return !keep_mtp;  // skipped by translate_name, but diverted, not dropped
+    return false;
 }
 
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters, bool keep_vision) {

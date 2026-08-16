@@ -48,6 +48,24 @@ bool name_is_skipped(const std::string& in, bool keep_vision = false);
 // so the skip rule and the keep rule read from one list.
 bool name_is_vision(const std::string& in);
 
+// True if the name belongs to an embedded MTP draft head.
+bool name_is_mtp(const std::string& in);
+
+// True when NOTHING in this load will read the tensor, so a shard made only of
+// such names can be dropped unread.
+//
+// This is a DIFFERENT question from name_is_skipped(), and conflating the two
+// is what lost the MTP head on every sharded compressed-tensors checkpoint:
+// translate_name() SKIPs `mtp.*` because those tensors do not belong in the
+// main tensor map, but load_shard() then diverts them into the MTP map — they
+// are skipped and still used. A drop predicate that asks "is it skipped" throws
+// away the shard carrying the draft head before anyone looks at it, and the
+// only symptom is that spec-decode silently never engages.
+//
+// `keep_mtp` is the caller's `load_mtp_head`, i.e. whether an MTP map is being
+// collected at all; `keep_vision` mirrors it for the tower.
+bool name_is_unused(const std::string& in, bool keep_vision, bool keep_mtp);
+
 // Emit one INFO log summarizing what translate_name() did across a shard.
 // Call once at the end of the enumerate-tensors loop in load_shard().
 void log_summary(const TranslationCounters& counters);
