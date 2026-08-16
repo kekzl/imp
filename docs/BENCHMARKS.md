@@ -212,6 +212,33 @@ The lone surviving NVFP4-prefill gap is dense pp4096 at ~1.04×. Decode (tg256
 @ctx2048): 14B 159, 30B-A3B ~317. (The claim that once stood here — that
 Nemotron-3-Nano is arch-limited — was disproved on 2026-08-12; see note ¹ᶜ.)
 
+## Qwen3.8-27B, the quickstart model (2026-08-16)
+
+Measured because this is the model the [README](../README.md) and
+[`QUICKSTART.md`](QUICKSTART.md) now walk a first-time reader through, and a
+worked example should carry numbers somebody can check.
+
+2026-08-16, commit `52efa361`, CUDA 13.3, `CUBLAS_WORKSPACE_CONFIG=:4096:8`,
+median of 3 isolated processes × 10 reps, card verified free before each run.
+The checkpoint is `imp-quantize` output from the FP8 release
+(`Qwen/Qwen3.8-27B-FP8`, 28.75 GiB in, 18.80 GiB out), which is what
+`scripts/stage-model.sh` produces. Command:
+`imp-cli --model <dir> --bench --bench-pp <16|512> --bench-reps 10 --max-tokens 128`.
+
+| metric | tok/s | spread across processes |
+|---|---:|---|
+| decode tg128 | **87.36** | 87.34 / 87.36 / 87.39, 0.06 % |
+| prefill pp512 | **7 565.65** | 7 503 / 7 566 / 7 577, 0.98 % |
+
+Weights land at 17.9 GiB resident, leaving ~7.7 GiB for the KV cache on a 32 GB
+card. Decode here is far steadier than the 8 % gate threshold suggests: three
+processes agreed to 0.06 %, which is the quiet-host case the gate cannot assume.
+
+A dense-GDN 27B at 87 tok/s is bounded by weight bandwidth, not by the LM head:
+that head is 2.4 GiB of the 17.9 and is served from the NVFP4 decode cache, a
+trade measured at +10.4 % decode for +0.99 % perplexity
+([`quantization.md`](quantization.md)).
+
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
 First tracked long-context table (the GOAL benchmarking discipline asks for
