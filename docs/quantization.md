@@ -102,7 +102,7 @@ breaks it down by reason. Measured on Qwen3.8-27B (BF16 source 51.75 GiB):
 | vision tower | 875 MiB | tower loads at source precision only | not possible |
 | MTP draft head | 810 MiB | draft acceptance 81 % → 0 (#1428) | refused |
 
-**`--lm-head` costs nothing *extra*, because imp already pays it — and that is
+**`--lm-head` costs nothing *extra*, because imp already pays it, and that is
 the part worth understanding.** imp converts a native LM head into an NVFP4
 decode cache at load anyway (`gemm.nvfp4_lm_head`, auto → on for native
 sources), so quantizing it in the checkpoint changes nothing a run can see:
@@ -130,14 +130,14 @@ Qwen3.8-27B, 248 320-token vocabulary, so the largest head available here:
 
 Decode is the median of three alternating pairs (a fixed arm order overstates);
 every pair favoured `on`. So the #982 trade holds and is cheaper here than the
-+2.2 % recorded there — a bigger vocabulary moves both sides, and the quality
++2.2 % recorded there: a bigger vocabulary moves both sides, and the quality
 side moved less.
 
 **The obvious explanation for why other engines skip this is wrong.** The head is
 read whole once per token, so at batch 1 it is ~11 % of the step (2.43 GiB of
 17.9 GiB weights) and one expects the win to amortise away under concurrency.
 It does not: the advantage shrinks from +25 % to +8 % between 4 and 16 concurrent
-decodes but never inverts. What actually separates imp here is simpler — vLLM's
+decodes but never inverts. What actually separates imp here is simpler. vLLM's
 `ParallelLMHead` accepts no scales at all, and Modelopt / llm-compressor put
 `lm_head` in `ignore` by convention for W4A4 recipes. Absence of the feature, not
 a verdict on the trade.
