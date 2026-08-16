@@ -383,6 +383,14 @@ int main(int argc, char** argv) {
     std::sort(shards.begin(), shards.end());
 
     if (!opt.dry_run) {
+        // Before any work: a source that cannot carry the chosen format's
+        // declaration must cost a second, not a full conversion that then
+        // refuses to finish.
+        std::string derr;
+        if (!quantize::can_declare_quantization(opt.in_dir, opt.format, derr)) {
+            fprintf(stderr, "%s\n", derr.c_str());
+            return 1;
+        }
         fs::create_directories(opt.out_dir, ec);
         if (ec) {
             fprintf(stderr, "cannot create %s: %s\n", opt.out_dir.c_str(), ec.message().c_str());

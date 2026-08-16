@@ -369,6 +369,14 @@ bool patch_config_json(const std::string& src, const std::string& quant_config_o
 
 namespace fs = std::filesystem;
 
+bool can_declare_quantization(const std::string& in_dir, OutputFormat fmt, std::string& err) {
+    if (fmt != OutputFormat::CompressedTensors || fs::exists(fs::path(in_dir) / "config.json"))
+        return true;
+    err = "compressed-tensors output needs a config.json to declare the quantization in, and " + in_dir +
+          " has none";
+    return false;
+}
+
 bool copy_aux_files(const std::string& in_dir, const std::string& out_dir, OutputFormat fmt,
                     const std::vector<std::string>& excluded_modules, bool calibrated, std::string& err) {
     static const char* kNames[] = {"config.json",
@@ -393,15 +401,8 @@ bool copy_aux_files(const std::string& in_dir, const std::string& out_dir, Outpu
         copied.insert(name);
         return true;
     };
-    // In compressed-tensors mode config.json is the ONLY place the checkpoint
-    // says it is quantized. Without one there is nothing to patch, and the
-    // output would be a directory of packed nibbles that every reader takes for
-    // an unquantized model — the failure being that it loads.
-    if (fmt == OutputFormat::CompressedTensors && !fs::exists(fs::path(in_dir) / "config.json")) {
-        err = "compressed-tensors output needs a config.json to declare the quantization in, and " + in_dir +
-              " has none";
+    if (!can_declare_quantization(in_dir, fmt, err))
         return false;
-    }
 
     for (const char* n : kNames) {
         const fs::path src = fs::path(in_dir) / n;

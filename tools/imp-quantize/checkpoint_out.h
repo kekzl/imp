@@ -139,6 +139,18 @@ bool patch_config_json(const std::string& src, const std::string& quant_config_o
 
 // -- the files themselves --------------------------------------------------
 
+// Whether this source can carry the declaration the chosen format needs.
+//
+// In compressed-tensors mode config.json is the ONLY place the checkpoint says
+// it is quantized, and it is patched rather than written from nothing. Without
+// one the output is a directory of packed nibbles every reader takes for an
+// unquantized model — the failure being that it loads.
+//
+// Called BEFORE the first tensor is written, not at the copy step where the
+// file is actually needed: a source that cannot be declared should cost a
+// second, not the 25 minutes of a 27B conversion that then refuses to finish.
+bool can_declare_quantization(const std::string& in_dir, OutputFormat fmt, std::string& err);
+
 // Everything the checkpoint needs beside the weights.
 //
 // The named list is what imp itself reads. It is deliberately NOT the whole

@@ -306,3 +306,24 @@ TEST(QuantizeCheckpointOut, SurvivesEscapesAndRejectsNonObjects) {
     EXPECT_FALSE(patch_config_json("", "{}", out, err));
     EXPECT_FALSE(patch_config_json("{\"a\"", "{}", out, err));
 }
+
+// The refusal has to be reachable before the conversion, not at the copy step
+// where the file is finally needed — on a 27B source that is 25 minutes of work
+// thrown away, and the modelopt path must not be caught by it at all.
+TEST(QuantizeCheckpointOut, RefusesCompressedTensorsWithoutAConfigJson) {
+    const std::string dir =
+        (std::filesystem::temp_directory_path() / ("ckpt_noconf_" + std::to_string(::getpid()))).string();
+    std::filesystem::create_directories(dir);
+
+    std::string err;
+    EXPECT_FALSE(can_declare_quantization(dir, OutputFormat::CompressedTensors, err));
+    EXPECT_NE(err.find("config.json"), std::string::npos);
+    // Modelopt declares itself in a file it writes itself, so it is unaffected.
+    EXPECT_TRUE(can_declare_quantization(dir, OutputFormat::Modelopt, err));
+
+    std::ofstream(dir + "/config.json") << "{}";
+    EXPECT_TRUE(can_declare_quantization(dir, OutputFormat::CompressedTensors, err));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
