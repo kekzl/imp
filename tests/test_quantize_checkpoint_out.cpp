@@ -329,8 +329,10 @@ TEST(QuantizeCheckpointOut, RefusesCompressedTensorsWithoutAConfigJson) {
 }
 
 // Measured 2026-08-16: vLLM refuses `lm_head.weight_global_scale` outright,
-// while imp reads a quantized head with byte-identical greedy output. So the
-// combination is legitimate for an imp-only checkpoint and useless for a
+// while imp reads a quantized head with byte-identical greedy output — because
+// its own default already quantizes a native head at load (which itself costs
+// +0.99 % perplexity for +10.4 % decode; see docs/quantization.md). So the
+// combination is defensible for an imp-only checkpoint and useless for a
 // portable one, and the caller has to hear that before the conversion, not
 // after it.
 TEST(QuantizeCheckpointOut, WarnsOnlyWhenLmHeadMeetsCompressedTensors) {

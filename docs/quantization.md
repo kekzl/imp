@@ -97,19 +97,59 @@ breaks it down by reason. Measured on Qwen3.8-27B (BF16 source 51.75 GiB):
 
 | what | size in the output | quantizing it costs | quantizing it is |
 |---|---:|---|---|
-| `lm_head` | 2 425 MiB | **nothing measurable in imp** | `--lm-head`, but see below |
+| `lm_head` | 2 425 MiB | nothing **on top of what imp already pays** | `--lm-head`, but see below |
 | `embed_tokens` | 2 425 MiB | +0.94 % perplexity | not possible: no NVFP4 lookup |
 | vision tower | 875 MiB | tower loads at source precision only | not possible |
 | MTP draft head | 810 MiB | draft acceptance 81 % → 0 (#1428) | refused |
 
-**`--lm-head` is free on imp and breaks vLLM.** imp converts a native LM head
-into an NVFP4 decode cache at load anyway (`gemm.nvfp4_lm_head`, auto → on for
-native sources), so quantizing it in the checkpoint changes nothing except what
-is on disk. Measured on Qwen3.8-27B: perplexity **4.6158 either way**, greedy
-output **byte-identical over four prompts**, weights **17 920 → 16 192 MiB**,
-checkpoint 19.15 → 17.44 GiB. But vLLM's `ParallelLMHead` takes no scales and
-stops at `no module or parameter named lm_head.weight_global_scale`, so the flag
-belongs with `--format modelopt`. The tool warns when the two are combined.
+**`--lm-head` costs nothing *extra*, because imp already pays it — and that is
+the part worth understanding.** imp converts a native LM head into an NVFP4
+decode cache at load anyway (`gemm.nvfp4_lm_head`, auto → on for native
+sources), so quantizing it in the checkpoint changes nothing a run can see:
+Qwen3.8-27B reads perplexity **4.6158 either way**, greedy output
+**byte-identical over four prompts**, weights **17 920 → 16 192 MiB**,
+checkpoint 19.15 → 17.44 GiB.
+
+That comparison is NVFP4 against NVFP4, so it says nothing about the default
+itself. The honest question is what the default costs against a real BF16 head
+(`gemm.nvfp4_lm_head=off`), which is how every other engine runs it. Measured on
+Qwen3.8-27B, 248 320-token vocabulary, so the largest head available here:
+
+| `gemm.nvfp4_lm_head` | perplexity | decode, 128 tokens greedy | ITL @4 | ITL @16 |
+|---|---:|---:|---:|---:|
+| `off` (BF16 head) | **4.5707** | 78.56 tok/s | 53.1 ms | 206.2 ms |
+| `on` (default here) | 4.6158 (**+0.99 %**) | **86.70 tok/s (+10.4 %)** | **39.7 ms** | **190.1 ms** |
+
+```
+[PROV: commit=bca9e9e date=2026-08-16 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4
+       cuda=13.3 path=nvfp4-decode-cache n=3-alternating-pairs
+       cmd=`imp-cli --prompt … --max-tokens 128 --temperature 0 --set gemm.nvfp4_lm_head=off|on`;
+       ITL from `tools/agent_bench.py --concurrency 1,4,16`, one run per arm;
+       perplexity over ppl_corpus_45k.txt with runtime.deterministic_gemm=true]
+```
+
+Decode is the median of three alternating pairs (a fixed arm order overstates);
+every pair favoured `on`. So the #982 trade holds and is cheaper here than the
++2.2 % recorded there — a bigger vocabulary moves both sides, and the quality
+side moved less.
+
+**The obvious explanation for why other engines skip this is wrong.** The head is
+read whole once per token, so at batch 1 it is ~11 % of the step (2.43 GiB of
+17.9 GiB weights) and one expects the win to amortise away under concurrency.
+It does not: the advantage shrinks from +25 % to +8 % between 4 and 16 concurrent
+decodes but never inverts. What actually separates imp here is simpler — vLLM's
+`ParallelLMHead` accepts no scales at all, and Modelopt / llm-compressor put
+`lm_head` in `ignore` by convention for W4A4 recipes. Absence of the feature, not
+a verdict on the trade.
+
+**What `--lm-head` really costs is the option.** With a BF16 head in the
+checkpoint the trade stays reversible: `--set gemm.nvfp4_lm_head=off` buys the
+0.99 % back. Quantized in the checkpoint, it cannot. So use it when the model
+would otherwise not fit, not as a default.
+
+vLLM's `ParallelLMHead` takes no scales at all and stops at `no module or
+parameter named lm_head.weight_global_scale`, so the flag belongs with
+`--format modelopt`. The tool warns when the two are combined.
 
 **Embeddings stay at source precision, and the price is now known.** imp's
 embedding lookup handles F32/F16/BF16/Q8_0/Q6_K and not NVFP4, so a quantized

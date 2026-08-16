@@ -144,8 +144,8 @@ bool patch_config_json(const std::string& src, const std::string& quant_config_o
 // `ParallelLMHead` takes no scales ("There is no module or parameter named
 // lm_head.weight_global_scale ... available: {'lm_head.weight'}"), so the
 // checkpoint fails to load there — loudly, but only after the conversion. It is
-// the right choice for an imp-only checkpoint, where it is measurably free, so
-// this warns rather than refuses.
+// a defensible choice for an imp-only checkpoint, where it costs nothing on top
+// of what the runtime already spends, so this warns rather than refuses.
 const char* portability_warning(OutputFormat fmt, bool quantize_lm_head);
 
 // -- the files themselves --------------------------------------------------
