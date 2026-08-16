@@ -14,12 +14,15 @@
 // The quantization itself is not new code: src/quant/nvfp4_quant.h already has
 // the two-level (FP8 E4M3 micro-scale per 16 values + FP32 tensor scale) kernel
 // used to build the decode cache at load time. This tool applies it offline and
-// writes the result in the layout hf_config_loader already recognises:
+// writes the result in one of two layouts (--format, see checkpoint_out.h):
 //
-//   <prefix>.weight          U8       [N, K/2]   packed FP4 nibbles
-//   <prefix>.weight_scale    F8_E4M3  [N, K/16]  micro-scales
-//   <prefix>.weight_scale_2  F32      [1]        tensor scale
-//   + hf_quant_config.json   {"quantization": {"quant_algo": "NVFP4", ...}}
+//   modelopt (default)             compressed-tensors (--format vllm)
+//   <p>.weight         U8          <p>.weight_packed        U8
+//   <p>.weight_scale   F8_E4M3     <p>.weight_scale         F8_E4M3
+//   <p>.weight_scale_2 F32         <p>.weight_global_scale  F32 (1/scale)
+//   + hf_quant_config.json         + quantization_config in config.json
+//
+// Both are read by imp. Only the second is read by vLLM.
 //
 // Scope of this version: dense models AND MoE checkpoints that store experts
 // the HF-standard way — one 2-D tensor per expert
@@ -64,6 +67,7 @@
 // performance work where the weights only need to be the right shape.
 
 #include "awq.h"
+#include "checkpoint_out.h"
 #include "fp8_source.h"
 #include "tensor_policy.h"
 
@@ -108,15 +112,24 @@ struct Options {
     // the gate share is higher than the one checkpoint that could be measured.
     bool keep_attn_gate = false;
     bool dry_run = false;
+    quantize::OutputFormat format = quantize::OutputFormat::Modelopt;
 };
 
 void usage() {
     printf(
         "usage: imp-quantize --model <safetensors-dir> --out <dir> [--calib <file>]\n"
-        "                    [--lm-head] [--dry-run]\n"
+        "                    [--format modelopt|vllm] [--lm-head] [--dry-run]\n"
         "\n"
         "  --model DIR   source checkpoint (BF16/FP16 SafeTensors + config.json)\n"
         "  --out DIR     destination; created if missing\n"
+        "  --format F    output layout (default modelopt):\n"
+        "                  modelopt            .weight / .weight_scale_2, declared in\n"
+        "                                      hf_quant_config.json. imp reads it.\n"
+        "                  vllm                compressed-tensors nvfp4-pack-quantized:\n"
+        "                  (= compressed-tensors)  .weight_packed / .weight_global_scale,\n"
+        "                                      declared in config.json. imp AND vLLM read\n"
+        "                                      it, and fused layers (q/k/v, gate/up) share\n"
+        "                                      one tensor scale, which vLLM requires.\n"
         "  --calib FILE  activation calibration (AWQ scaling). Produce it with:\n"
         "                  imp-cli --model DIR --perplexity <corpus> --calibrate FILE\n"
         "                Without it the quantization is plain round-to-nearest,\n"
@@ -176,8 +189,10 @@ struct Quantized {
     float tensor_scale = 1.0f;
 };
 
-bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, Quantized& out,
-                  std::string& err) {
+// `forced_scale` > 0 quantizes against a scale decided elsewhere — the shared
+// scale of a fused group. At 0 the tensor's own absmax decides.
+bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, float forced_scale,
+                  Quantized& out, std::string& err) {
     void* d_in = nullptr;
     const size_t in_bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * 2;
     if (cudaMalloc(&d_in, in_bytes) != cudaSuccess) {
@@ -194,7 +209,11 @@ bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, Qua
     Tensor in(d_in, QType::F16, 2, shape, /*on_device=*/true);
 
     NvFP4QuantResult q;
-    quantize_fp16_to_nvfp4(in, q);
+    const float scale = forced_scale > 0.0f
+                            ? forced_scale
+                            : quantize::export_tensor_scale(
+                                  quantize::fp16_absmax(h_fp16.data(), h_fp16.size()));
+    quantize_fp16_to_nvfp4_with_scale(in, scale, q);
     if (cudaDeviceSynchronize() != cudaSuccess) {
         cudaFree(d_in);
         free_nvfp4_result(q);
@@ -218,103 +237,24 @@ bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, Qua
     return true;
 }
 
-bool copy_aux_files(const Options& opt, std::string& err) {
-    // Everything the checkpoint needs beside the weights. config.json is copied
-    // verbatim: the quantization is declared in hf_quant_config.json, which is
-    // where hf_config_loader looks for it.
-    //
-    // The named list is what imp itself reads. It is deliberately NOT the whole
-    // requirement: a quantized checkpoint should stay loadable by whatever the
-    // source was loadable by, and an allowlist of imp's own needs quietly breaks
-    // that. Measured: the output of this tool would not load in vLLM at all,
-    // because `preprocessor_config.json` was missing, a file imp never reads.
-    static const char* kNames[] = {"config.json",
-                                   "generation_config.json",
-                                   "tokenizer.json",
-                                   "tokenizer_config.json",
-                                   "special_tokens_map.json",
-                                   "added_tokens.json",
-                                   "vocab.json",
-                                   "merges.txt",
-                                   "tokenizer.model",
-                                   "chat_template.jinja",
-                                   "chat_template.json"};
-    std::set<std::string> copied;
-    std::error_code ec;
-    auto copy_one = [&](const fs::path& src, const std::string& name) {
-        fs::copy_file(src, fs::path(opt.out_dir) / name, fs::copy_options::overwrite_existing, ec);
-        if (ec) {
-            err = "failed to copy " + name + ": " + ec.message();
+// The FP16 form a tensor is quantized from: an FP8 source widened against its
+// block-scale grid, otherwise the raw BF16/F16 bits, then the AWQ transform.
+//
+// One function because two callers need it — the scale planner and the writer —
+// and a planner that measured a different tensor than the writer quantized
+// would produce scales that are wrong by exactly the transform.
+bool tensor_as_fp16(const RawTensor& t, const std::map<std::string, const RawTensor*>& fp8_scale_of,
+                    const awq::Plan& plan, std::vector<uint16_t>& out, std::string& err) {
+    const auto it = fp8_scale_of.find(t.name);
+    if (it != fp8_scale_of.end()) {
+        if (!quantize::fp8_block_scaled_to_fp16(t, *it->second, out, err))
             return false;
-        }
-        copied.insert(name);
-        return true;
-    };
-    for (const char* n : kNames) {
-        const fs::path src = fs::path(opt.in_dir) / n;
-        if (!fs::exists(src))
-            continue;
-        if (!copy_one(src, n))
-            return false;
+    } else {
+        out = awq::raw_to_fp16(t);
     }
-
-    // Then every remaining `*_config.json`, by pattern rather than by name, so a
-    // preprocessor, video preprocessor or processor config travels without this
-    // list having to learn each one. Two are excluded on purpose: the shard
-    // index and hf_quant_config.json describe THIS write and are produced below,
-    // so copying the source's would contradict what was just written.
-    for (const auto& e : fs::directory_iterator(opt.in_dir, ec)) {
-        if (!e.is_regular_file())
-            continue;
-        const std::string name = e.path().filename().string();
-        if (copied.count(name) || !ends_with(name, "_config.json"))
-            continue;
-        if (name == "hf_quant_config.json")
-            continue;
-        if (!copy_one(e.path(), name))
-            return false;
-    }
+    awq_apply_matrix(out, t.shape[0], t.shape[1], plan_vec(plan.row_div, t.name),
+                     plan_vec(plan.col_scale, t.name));
     return true;
-}
-
-// A sharded checkpoint is only loadable with an index, and the index cannot be
-// copied from the source: quantizing one weight turns it into three tensors, so
-// the name->shard map has to be rebuilt from what was actually written.
-bool write_shard_index(const Options& opt,
-                       const std::vector<std::pair<std::string, std::string>>& tensor_to_shard,
-                       size_t total_bytes, std::string& err) {
-    std::ofstream f(fs::path(opt.out_dir) / "model.safetensors.index.json");
-    if (!f) {
-        err = "cannot write model.safetensors.index.json";
-        return false;
-    }
-    f << "{\n  \"metadata\": { \"total_size\": " << total_bytes << " },\n  \"weight_map\": {\n";
-    for (size_t i = 0; i < tensor_to_shard.size(); i++)
-        f << "    \"" << tensor_to_shard[i].first << "\": \"" << tensor_to_shard[i].second << '"'
-          << (i + 1 < tensor_to_shard.size() ? ",\n" : "\n");
-    f << "  }\n}\n";
-    return static_cast<bool>(f);
-}
-
-bool write_quant_config(const Options& opt, const std::vector<std::string>& excluded, bool calibrated,
-                        std::string& err) {
-    std::ofstream f(fs::path(opt.out_dir) / "hf_quant_config.json");
-    if (!f) {
-        err = "cannot write hf_quant_config.json";
-        return false;
-    }
-    f << "{\n"
-      << "  \"producer\": { \"name\": \"imp-quantize\", \"version\": \"2\", \"calibration\": \""
-      << (calibrated ? "awq" : "none") << "\" },\n"
-      << "  \"quantization\": {\n"
-      << "    \"quant_algo\": \"NVFP4\",\n"
-      << "    \"kv_cache_quant_algo\": null,\n"
-      << "    \"group_size\": 16,\n"
-      << "    \"exclude_modules\": [";
-    for (size_t i = 0; i < excluded.size(); i++)
-        f << (i ? ", " : "") << '"' << excluded[i] << '"';
-    f << "]\n  }\n}\n";
-    return static_cast<bool>(f);
 }
 
 // What is gone from the card before imp allocates a single weight. Both are
@@ -396,6 +336,13 @@ int main(int argc, char** argv) {
             opt.keep_attn_gate = true;
         else if (a == "--calib")
             opt.calib_file = next();
+        else if (a == "--format") {
+            const std::string f = next();
+            if (!quantize::parse_output_format(f, opt.format)) {
+                fprintf(stderr, "imp-quantize: unknown --format '%s' (modelopt | vllm)\n", f.c_str());
+                return 2;
+            }
+        }
         else if (a == "--calib-groups") {
             opt.calib_groups = next();
             for (char& c : opt.calib_groups)
@@ -436,6 +383,14 @@ int main(int argc, char** argv) {
     std::sort(shards.begin(), shards.end());
 
     if (!opt.dry_run) {
+        // Before any work: a source that cannot carry the chosen format's
+        // declaration must cost a second, not a full conversion that then
+        // refuses to finish.
+        std::string derr;
+        if (!quantize::can_declare_quantization(opt.in_dir, opt.format, derr)) {
+            fprintf(stderr, "%s\n", derr.c_str());
+            return 1;
+        }
         fs::create_directories(opt.out_dir, ec);
         if (ec) {
             fprintf(stderr, "cannot create %s: %s\n", opt.out_dir.c_str(), ec.message().c_str());
@@ -635,6 +590,75 @@ int main(int argc, char** argv) {
                    fp8_scale_of.size());
     }
 
+    // Fused layers share one tensor scale (see checkpoint_out.h): an engine that
+    // merges q/k/v into a single linear keeps one scale for the merged weight,
+    // so three independently calibrated scales leave two matrices dequantized
+    // against the wrong one. The scale must be known before the first member is
+    // quantized and members are not guaranteed to share a shard, so it is
+    // decided here, in its own pass over the source.
+    std::map<std::string, float> forced_scale;
+    if (!opt.dry_run) {
+        std::map<std::string, std::vector<const RawTensor*>> groups;
+        for (const auto& src : opened) {
+            for (const auto& t : src->tensors()) {
+                if (fp8_scale_names.count(t.name) || gated_q_proj.count(t.name))
+                    continue;
+                // Ask the policy about the widened form, exactly as the writer
+                // does, so a tensor the writer copies through is not given a
+                // scale here — and, worse, does not drag a fused sibling's
+                // scale up with an absmax that was never quantized.
+                RawTensor probe = t;
+                if (fp8_scale_of.count(t.name))
+                    probe.dtype = "BF16";
+                std::string why;
+                if (!quantize::should_quantize(probe, opt.quantize_lm_head, why))
+                    continue;
+                const std::string key = quantize::fusion_group_key(t.name);
+                if (!key.empty())
+                    groups[key].push_back(&t);
+            }
+        }
+        size_t n_shared = 0, n_groups = 0;
+        for (auto& [key, members] : groups) {
+            if (members.size() < 2)
+                continue;  // a group of one shares with nobody
+            float amax = 0.0f;
+            for (const RawTensor* t : members) {
+                std::vector<uint16_t> h;
+                std::string err;
+                if (!tensor_as_fp16(*t, fp8_scale_of, plan, h, err)) {
+                    fprintf(stderr, "  %s: %s\n", t->name.c_str(), err.c_str());
+                    return 1;
+                }
+                amax = std::max(amax, quantize::fp16_absmax(h.data(), h.size()));
+            }
+            const float s = quantize::export_tensor_scale(amax);
+            for (const RawTensor* t : members)
+                forced_scale[t->name] = s;
+            n_shared += members.size();
+            n_groups++;
+        }
+        if (n_groups)
+            printf("fused layers: %zu tensors in %zu groups share a tensor scale\n", n_shared, n_groups);
+    }
+
+    auto forced_of = [&](const std::string& name) {
+        const auto it = forced_scale.find(name);
+        return it == forced_scale.end() ? 0.0f : it->second;
+    };
+    // The three tensors one quantized module becomes, named and scaled for the
+    // output format. `scale_store` owns the F32 until the shard is written, so
+    // it must not reallocate — the callers reserve it per shard.
+    auto emit_quantized = [&](std::vector<SafeTensorsOut>& out, std::vector<float>& scale_store,
+                              const std::string& weight_name, int64_t N, int64_t K, const Quantized& q) {
+        scale_store.push_back(quantize::global_scale_value(q.tensor_scale, opt.format));
+        const std::string base = weight_name.substr(0, weight_name.size() - strlen(".weight"));
+        const quantize::QuantTensorNames names = quantize::quant_tensor_names(base, opt.format);
+        out.push_back({names.packed, "U8", {N, K / 2}, q.packed.data(), q.packed.size()});
+        out.push_back({names.micro_scale, "F8_E4M3", {N, K / 16}, q.micro.data(), q.micro.size()});
+        out.push_back({names.global_scale, "F32", {1}, &scale_store.back(), sizeof(float)});
+    };
+
     size_t n_quantized = 0, n_copied = 0, n_moe_skipped = 0;
     size_t bytes_in = 0, bytes_out = 0;
     // Where the bytes that did NOT shrink went. A checkpoint that misses the
@@ -697,23 +721,17 @@ int main(int argc, char** argv) {
                 }
                 std::vector<uint16_t> h;
                 std::string ferr;
-                if (!quantize::fp8_block_scaled_to_fp16(t, *fp8_it->second, h, ferr)) {
+                if (!tensor_as_fp16(t, fp8_scale_of, plan, h, ferr)) {
                     fprintf(stderr, "  %s: %s\n", t.name.c_str(), ferr.c_str());
                     return 1;
                 }
-                awq_apply_matrix(h, N, K, plan_vec(plan.row_div, t.name), plan_vec(plan.col_scale, t.name));
                 quant_store.emplace_back();
                 Quantized& q = quant_store.back();
-                if (!quantize_one(h, N, K, q, err)) {
+                if (!quantize_one(h, N, K, forced_of(t.name), q, err)) {
                     fprintf(stderr, "  %s: %s\n", t.name.c_str(), err.c_str());
                     return 1;
                 }
-                scale_store.push_back(q.tensor_scale);
-                const std::string base = t.name.substr(0, t.name.size() - strlen(".weight"));
-                out.push_back({t.name, "U8", {N, K / 2}, q.packed.data(), q.packed.size()});
-                out.push_back(
-                    {base + ".weight_scale", "F8_E4M3", {N, K / 16}, q.micro.data(), q.micro.size()});
-                out.push_back({base + ".weight_scale_2", "F32", {1}, &scale_store.back(), sizeof(float)});
+                emit_quantized(out, scale_store, t.name, N, K, q);
                 bytes_out += q.packed.size() + q.micro.size() + sizeof(float);
                 n_quantized++;
                 continue;
@@ -766,20 +784,18 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            std::vector<uint16_t> h = awq::raw_to_fp16(t);
-            awq_apply_matrix(h, N, K, plan_vec(plan.row_div, t.name), plan_vec(plan.col_scale, t.name));
-            quant_store.emplace_back();
-            Quantized& q = quant_store.back();
-            if (!quantize_one(h, N, K, q, err)) {
+            std::vector<uint16_t> h;
+            if (!tensor_as_fp16(t, fp8_scale_of, plan, h, err)) {
                 fprintf(stderr, "  %s: %s\n", t.name.c_str(), err.c_str());
                 return 1;
             }
-            scale_store.push_back(q.tensor_scale);
-
-            const std::string base = t.name.substr(0, t.name.size() - strlen(".weight"));
-            out.push_back({t.name, "U8", {N, K / 2}, q.packed.data(), q.packed.size()});
-            out.push_back({base + ".weight_scale", "F8_E4M3", {N, K / 16}, q.micro.data(), q.micro.size()});
-            out.push_back({base + ".weight_scale_2", "F32", {1}, &scale_store.back(), sizeof(float)});
+            quant_store.emplace_back();
+            Quantized& q = quant_store.back();
+            if (!quantize_one(h, N, K, forced_of(t.name), q, err)) {
+                fprintf(stderr, "  %s: %s\n", t.name.c_str(), err.c_str());
+                return 1;
+            }
+            emit_quantized(out, scale_store, t.name, N, K, q);
             const size_t written = q.packed.size() + q.micro.size() + sizeof(float);
             // The forecast --dry-run printed is this same arithmetic. If the two
             // ever disagree the forecast has quietly become a guess, so say so
@@ -816,21 +832,34 @@ int main(int argc, char** argv) {
 
     if (!opt.dry_run) {
         std::string err;
-        if (!copy_aux_files(opt, err) ||
-            !write_quant_config(opt, excluded_modules, !opt.calib_file.empty(), err)) {
+        const bool calibrated = !opt.calib_file.empty();
+        if (!quantize::copy_aux_files(opt.in_dir, opt.out_dir, opt.format, excluded_modules, calibrated,
+                                      err)) {
+            fprintf(stderr, "%s\n", err.c_str());
+            return 1;
+        }
+        // Modelopt declares itself in a file of its own; compressed-tensors put
+        // its declaration into the config.json copy_aux_files just patched, and
+        // repeats it in recipe.yaml for readers that look only there.
+        const bool declared =
+            opt.format == quantize::OutputFormat::Modelopt
+                ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules, calibrated, err)
+                : quantize::write_recipe_yaml(opt.out_dir, excluded_modules, err);
+        if (!declared) {
             fprintf(stderr, "%s\n", err.c_str());
             return 1;
         }
         // Single-shard checkpoints load off model.safetensors directly; sharded
         // ones need the index, and it must describe the tensors we wrote.
-        if (shards.size() > 1 && !write_shard_index(opt, tensor_to_shard, bytes_out, err)) {
+        if (shards.size() > 1 &&
+            !quantize::write_shard_index(opt.out_dir, tensor_to_shard, bytes_out, err)) {
             fprintf(stderr, "%s\n", err.c_str());
             return 1;
         }
     }
 
-    printf("\n%s: %zu tensors quantized, %zu copied", opt.dry_run ? "dry run" : "done", n_quantized,
-           n_copied);
+    printf("\n%s: %zu tensors quantized, %zu copied, %s layout", opt.dry_run ? "dry run" : "done",
+           n_quantized, n_copied, quantize::format_name(opt.format));
     if (!opt.dry_run && opt.calib_file.empty())
         printf(
             "\n\nUNCALIBRATED OUTPUT: round-to-nearest, no activation calibration.\n"

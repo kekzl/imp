@@ -32,6 +32,21 @@ struct NvFP4QuantResult {
 // input: [N, K] FP16 on device. K must be multiple of 16.
 void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaStream_t stream = nullptr);
 
+// Same, with a CALLER-SUPPLIED tensor scale instead of one calibrated from this
+// tensor alone — an offline-export need the load-time path does not have.
+//
+// Fused layers must SHARE a scale: an engine that merges q/k/v into one linear
+// keeps a single tensor scale for the merged weight (vLLM keeps the max), so
+// three independently calibrated scales leave two of the three matrices
+// dequantized against the wrong one. Sharing is also the better quantization
+// here, not just the compatible one — measured 30.40 to 29.47 perplexity on
+// Qwen3-0.6B (tools/imp-quantize/checkpoint_out.h).
+//
+// A scale of 0 or a non-finite one is rejected: it would divide every value in
+// the tensor by it.
+void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, NvFP4QuantResult& result,
+                                       cudaStream_t stream = nullptr);
+
 // Calibrate optimal tensor scale and micro-scales.
 // Returns tensor_scale = global_absmax / 6.0 (FP4 E2M1 max = 6.0)
 // d_reusable_max: optional pre-allocated device buffer (1 float) to avoid per-call malloc

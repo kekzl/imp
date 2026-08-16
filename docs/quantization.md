@@ -61,11 +61,56 @@ imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 Drop `--calib` (and step 1) for plain round-to-nearest; `--dry-run` previews
 what would be quantized without touching the GPU.
 
-It writes the layout the loader already recognises — `<prefix>.weight` (U8,
-packed nibbles), `.weight_scale` (F8_E4M3 micro-scales), `.weight_scale_2`
-(F32 tensor scale), plus `hf_quant_config.json` — copies the tokenizer and
-config files, and rebuilds the shard index when the source is sharded.
-Embeddings, norms and (unless `--lm-head`) the LM head stay full precision.
+It copies the tokenizer and config files, rebuilds the shard index when the
+source is sharded, and leaves embeddings, norms and (unless `--lm-head`) the LM
+head at full precision.
+
+#### Which layout it writes (`--format`)
+
+| `--format` | tensors | declared in | read by |
+|---|---|---|---|
+| `modelopt` (default) | `.weight` (U8 packed) · `.weight_scale` (F8_E4M3) · `.weight_scale_2` (F32) | `hf_quant_config.json` | imp |
+| `vllm` (= `compressed-tensors`) | `.weight_packed` · `.weight_scale` · `.weight_global_scale` | `quantization_config` in `config.json`, repeated in `recipe.yaml` | imp **and** vLLM |
+
+```bash
+imp-quantize --model ./Qwen3.8-27B --out ./Qwen3.8-27B-nvfp4 --format vllm
+vllm serve ./Qwen3.8-27B-nvfp4      # loads as compressed-tensors NVFP4A16
+```
+
+The two differ in more than names, and each difference is silent when wrong:
+
+- **The tensor scale is stored inverted.** compressed-tensors stores a divisor
+  and readers compute `1 / weight_global_scale`; Modelopt stores the multiplier.
+  Writing one convention's number under the other's name leaves every weight
+  scaled by `absmax² / 36` — a checkpoint that loads, generates, and is wrong.
+- **`input_activations` stays null.** This tool quantizes weights only, and vLLM
+  reads that as NVFP4A16. Declaring activation quantization that was never
+  measured would make vLLM quantize activations at runtime against absent scales.
+- **Everything left at source precision is listed in `ignore`.** vLLM builds an
+  unquantized layer for each; a module missing from that list is one it looks for
+  scales for that were never written.
+
+#### Fused layers share one tensor scale
+
+Inference engines merge `q_proj`/`k_proj`/`v_proj` into one linear and
+`gate_proj`/`up_proj` into another (vLLM's `packed_modules_mapping`; imp's GDN
+path merges `in_proj_qkv`/`in_proj_z` and `in_proj_b`/`in_proj_a` the same way).
+A merged layer carries **one** tensor scale, so three independently calibrated
+scales leave two of the three matrices dequantized against the third's. vLLM
+warns and continues; the amax spread inside those groups reaches 3.7× on
+Qwen3-0.6B, so this is not a rounding difference.
+
+`imp-quantize` therefore decides the scale per fused group, in a pass over the
+source before anything is written (group members are not guaranteed to share a
+shard). This is also the better quantization, not merely the compatible one:
+Qwen3-0.6B over `ppl_corpus_45k.txt` with `deterministic_gemm`, round-to-nearest
+both arms, reads **29.42** against **30.40** for per-tensor scales.
+
+One thing that looks like an improvement and is not: scaling by
+`absmax / (6 × 448)` so the FP8 micro-scales fill their range — what published
+exports do — measured **31.05** on the same setup. imp writes `absmax / 6`.
+Readers multiply either convention back out, so the arm that measures better
+wins; do not "fix" it without re-measuring.
 
 #### Roles that stay full precision, and why
 

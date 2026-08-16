@@ -11,6 +11,32 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **`imp-quantize --format vllm` writes a checkpoint vLLM can serve.** The new
+  layout is compressed-tensors `nvfp4-pack-quantized` (`.weight_packed` /
+  `.weight_global_scale`, declared in `config.json`); `--format modelopt` stays
+  the default. Verified end to end: vLLM 0.27.1 loads the output as
+  compressed-tensors NVFP4A16 and generates. See
+  [`quantization.md`](docs/quantization.md).
+
+### Changed
+
+- **Fused layers now share one tensor scale.** Engines merge q/k/v and gate/up
+  into a single linear that carries one scale, so three independently calibrated
+  scales left two matrices dequantized against the third's — the amax spread
+  inside those groups reaches 3.7×. Also the better quantization: Qwen3-0.6B
+  perplexity **30.40 → 29.42** over `ppl_corpus_45k.txt`.
+
+### Fixed
+
+- **compressed-tensors checkpoints without a `recipe.yaml` are no longer read as
+  Modelopt.** imp detected the format from that file alone, but the checkpoint's
+  declaration is `quantization_config` in `config.json`, and the two formats
+  store the tensor scale as reciprocals of each other. Such a checkpoint loaded
+  and generated with every weight scaled by `absmax²/36`: perplexity **1.2e47**
+  against 31.05.
+
 ## [0.26.0] - 2026-08-15
 
 ### Fixed

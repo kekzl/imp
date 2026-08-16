@@ -1,6 +1,7 @@
 #include "model/llm_compressor_loader.h"
 
 #include "core/logging.h"
+#include "model/json_util.h"
 
 #include <fstream>
 #include <sstream>
@@ -332,6 +333,80 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
     cfg.format = imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
     IMP_LOG_INFO("NVFP4 model (llm-compressor): scheme=%s, group_size=%d, exclude=%zu modules",
                  scheme.c_str(), cfg.group_size, cfg.exclude_modules.size());
+    return true;
+}
+
+bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg) {
+    const std::string text = read_file(model_dir + "/config.json");
+    if (text.empty())
+        return false;
+    JsonParser parser(text.data(), text.size());
+    const JValue root = parser.parse();
+    if (!parser.ok() || root.type != JType::OBJECT)
+        return false;
+
+    const JValue* qc = jobj_find(root, "quantization_config");
+    if (!qc || qc->type != JType::OBJECT)
+        return false;
+    std::string method;
+    if (!jobj_get_string(*qc, "quant_method", method) || method != "compressed-tensors")
+        return false;
+
+    // The scheme lives in config_groups; a checkpoint may carry several, and
+    // NVFP4 is claimed only if one of them is NVFP4-shaped. The five fields
+    // tested here are the same ones vLLM's _is_nvfp4_format() reads, so a
+    // checkpoint the two engines disagree about cannot arise from this check.
+    int group_size = 0;
+    bool found_nvfp4 = false;
+    std::string other_scheme;
+    const JValue* groups = jobj_find(*qc, "config_groups");
+    if (groups && groups->type == JType::OBJECT) {
+        for (const auto& [_, group] : groups->obj) {
+            if (group.type != JType::OBJECT)
+                continue;
+            const JValue* w = jobj_find(group, "weights");
+            if (!w || w->type != JType::OBJECT)
+                continue;
+            int num_bits = 0, gs = 0;
+            std::string type, strategy;
+            jobj_get_int(*w, "num_bits", num_bits);
+            jobj_get_int(*w, "group_size", gs);
+            jobj_get_string(*w, "type", type);
+            jobj_get_string(*w, "strategy", strategy);
+            if (num_bits == 4 && type == "float" && gs == 16 && strategy == "tensor_group") {
+                found_nvfp4 = true;
+                group_size = gs;
+                break;
+            }
+            other_scheme = std::to_string(num_bits) + "-bit " + (type.empty() ? "?" : type) + " " +
+                           (strategy.empty() ? "?" : strategy);
+        }
+    }
+    if (!found_nvfp4) {
+        // Same soft fail as the recipe path: load with the wire dtype rather
+        // than block. Logged rather than silent, because a compressed-tensors
+        // checkpoint whose scheme this build cannot serve is the case that
+        // otherwise arrives as "some unquantized model".
+        std::string fmt;
+        jobj_get_string(*qc, "format", fmt);
+        IMP_LOG_WARN(
+            "config.json declares compressed-tensors (format=%s, weights=%s) but no NVFP4 group "
+            "(4-bit float, group_size 16, tensor_group). Falling back to the on-wire dtype.",
+            fmt.empty() ? "?" : fmt.c_str(), other_scheme.empty() ? "?" : other_scheme.c_str());
+        return false;
+    }
+
+    cfg.group_size = group_size;
+    cfg.exclude_modules.clear();
+    const JValue* ignore = jobj_find(*qc, "ignore");
+    if (ignore && ignore->type == JType::ARRAY) {
+        for (const JValue& v : ignore->arr)
+            if (v.type == JType::STRING)
+                cfg.exclude_modules.push_back(v.str_val);
+    }
+    cfg.format = imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
+    IMP_LOG_INFO("NVFP4 model (compressed-tensors, config.json): group_size=%d, exclude=%zu modules",
+                 cfg.group_size, cfg.exclude_modules.size());
     return true;
 }
 
