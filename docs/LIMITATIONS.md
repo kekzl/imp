@@ -116,6 +116,16 @@ These have a code path and no gate. They may work; nothing proves it.
   `server.recurrent_snapshot_mb=0` returns it to 1 of 12, twice, against 3 of 12
   three times at the 256 MiB default.
 
+  **Characterised with `speculative.ngram=false`.** Every divergent cell above
+  had speculation disabled; the same 12-then-12 structure with speculation at
+  its default was stable across 24 requests. That is a weak negative against a
+  3-in-12 effect, so it does not establish that the default is immune, only
+  that the effect has not been observed there. It matters because the flag does
+  not merely switch n-gram drafting: it also selects the burst bound of the
+  on-device decode loop (`speculative.miss_burst` against
+  `runtime.decode_burst`), so the two settings are different decode
+  configurations even on a sampled request that never drafts.
+
   This is a mode to select, not a defect: the tokens really do match, so the
   reused state is legitimate for that prefix, and disabling the store also
   disables hybrid prefix caching. It is the recurrent path paying the
