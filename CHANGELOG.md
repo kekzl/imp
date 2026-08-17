@@ -11,6 +11,14 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **The server now says when an answer was lost to thinking.** A reply with an
+  empty `content` beside a full `reasoning_content` is not a defect, it is a
+  token budget consumed before the answer started, and it reads exactly like a
+  broken engine. The log now names it, with the amount of thinking and the
+  finish reason. See [`TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+
 ## [0.27.0] - 2026-08-17
 
 ### Fixed

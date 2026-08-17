@@ -988,6 +988,21 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         if (!reasoning_content.empty()) {
             msg["reasoning_content"] = reasoning_content;
         }
+        // An empty answer beside a full reasoning channel is not a defect, and
+        // it reads exactly like one. The reply shares the token budget with the
+        // thinking, so once the thinking fills it the answer never starts, and
+        // the caller sees `content: ""` with `finish_reason: stop`. Measured on
+        // Qwen3.8-27B: a 74-turn session returns empty replies at max_tokens
+        // 260 and is 74/74 clean at 600 (docs/TROUBLESHOOTING.md). Say which of
+        // the two it was, rather than leave someone bisecting an engine that
+        // did what it was asked.
+        if (answer_lost_to_reasoning(!tool_calls.empty(), content, reasoning_content)) {
+            IMP_LOG_WARN(
+                "empty content: the answer never started because the token budget went "
+                "to reasoning (%zu chars of thinking, finish_reason=%s). Raise "
+                "max_tokens — a thinking model needs room to answer AFTER it thinks.",
+                reasoning_content.size(), finish);
+        }
         if (!tool_validation_error.empty()) {
             msg["tool_call_validation_error"] = tool_validation_error;
         }

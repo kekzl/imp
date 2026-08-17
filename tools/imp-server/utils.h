@@ -57,6 +57,21 @@ void send_json_error(httplib::Response& res, int status, const char* type, const
 // pre-routing handler so the security-critical compare is unit-testable.
 bool bearer_token_matches(const std::string& authorization, const std::string& api_key);
 
+// True when a reply came back with nothing to show and everything spent on
+// thinking: no tool calls, empty content, non-empty reasoning.
+//
+// Not a defect. The answer shares the token budget with the thinking, so on a
+// long conversation a small max_tokens can be consumed before the reply starts,
+// and the caller sees `content: ""` with `finish_reason: stop`, which reads
+// exactly like a broken engine. Measured on Qwen3.8-27B: a 74-turn session
+// returns empty replies at max_tokens 260 and is clean at 600
+// (docs/TROUBLESHOOTING.md).
+//
+// Split out because the state is real but not reliably reproducible on demand:
+// it depends on how long the model chooses to think. A rule that fires rarely
+// is exactly the one that has to be covered by a test rather than by a run.
+bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning);
+
 // Accepts EITHER the OpenAI-style `Authorization: Bearer <key>` header OR the
 // Anthropic-style `x-api-key: <key>` header (the official Anthropic SDK sends
 // the latter, so a Bearer-only check 401s real Anthropic clients on /v1/messages).
