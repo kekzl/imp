@@ -95,6 +95,35 @@ These have a code path and no gate. They may work; nothing proves it.
   `runtime.deterministic_gemm` the forward is not bit-reproducible, and at a
   temperature a last-bit difference in the logits moves the sampled token
   whenever the top candidates are close.
+- **On a recurrent model, a sampled request can differ depending on what the
+  server answered before it, and hybrid prefix caching is the carrier.** A GDN
+  model's recurrent state is cumulative, so reusing KV blocks alone cannot skip
+  prefill; imp therefore saves the recurrent state at block boundaries in a
+  `RecurrentSnapshotStore` and restores it on a prefix hit, in which case the
+  state slab is overwritten from the snapshot instead of being reset
+  (`src/runtime/engine_sampling_stop.cpp:297`). The lookup keys on the KV prefix
+  hash, so it only fires on genuinely identical tokens, but **every chat request
+  begins with the same chat-template header**, so the first block matches across
+  unrelated prompts. The restored state is then the one another prompt's prefill
+  produced under different chunk boundaries, which is not what recomputing would
+  give on a forward that is not bit-reproducible.
+
+  Measured on Qwen3.8-27B-NVFP4, temperature 0.8, fixed seed, sequential
+  requests, keyed on `reasoning_content` plus `content`: 12 identical requests
+  give one distinct answer in a fresh process, and one distinct answer even with
+  prefix caching on, but **three distinct answers when 12 requests of an
+  unrelated prompt precede them in the same process**. Setting
+  `server.recurrent_snapshot_mb=0` returns it to 1 of 12, twice, against 3 of 12
+  three times at the 256 MiB default.
+
+  This is a mode to select, not a defect: the tokens really do match, so the
+  reused state is legitimate for that prefix, and disabling the store also
+  disables hybrid prefix caching. It is the recurrent path paying the
+  reproducibility price prefix caching charges everywhere. Consequence for
+  callers: a harness that pins a seed to make two runs comparable does not get
+  that guarantee from the seed alone if both runs share a long-lived server with
+  other traffic between them. Pin `server.recurrent_snapshot_mb=0`, or use a
+  fresh process per arm.
 - **Speculative decoding does not reproduce the non-speculative greedy output on
   a GDN hybrid.** Its contract is that it changes speed and not tokens; here it
   changes tokens. Measured on Qwen3.8-27B-NVFP4 with
