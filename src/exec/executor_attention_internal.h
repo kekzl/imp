@@ -5,6 +5,7 @@
 // gate). Included only by executor_attention.cu and its dispatch fragments;
 // the static helpers below assume single-TU inclusion.
 
+#include "exec/attention_dispatch_rules.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_gemv_helpers.h"

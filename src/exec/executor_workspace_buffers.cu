@@ -4,6 +4,7 @@
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
+#include "exec/attention_dispatch_rules.h"
 #include "memory/vram_query.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
@@ -1650,8 +1651,12 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     if (uniform && !sinks && hd_u == 128 && att.fa2_fp16qk != "never")
         return desired;
     // The tiled FMHA dispatch serves chunks whose ctx_len crosses the
-    // threshold (and any chunk the S-matrix cannot hold) with no S-matrix.
-    if (uniform && !sinks && att.fmha_prefill_threshold > 0 &&
+    // threshold (and any chunk the S-matrix cannot hold) with no S-matrix --
+    // but only for head dims it actually covers. Without that check this
+    // returned `desired` unclamped on any model whose head_dim FMHA cannot
+    // serve (MLA is head_dim 192), and the cuBLAS fallback then aborted on its
+    // own S-matrix bound. See attention_dispatch_rules.h.
+    if (uniform && !sinks && fmha_serves_head_dim(hd_u) && att.fmha_prefill_threshold > 0 &&
         offset + desired >= att.fmha_prefill_threshold)
         return desired;
     // Heterogeneous per-layer shapes (Gemma-4 dual head_dim 256/512): every
@@ -1667,8 +1672,8 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
         for (int x : cfg.head_dim_per_layer) {
             if (x <= 0)
                 continue;  // non-attention layers (GDN/Mamba2 hybrids)
-            const bool fa2 = (x == 128 || (x == 256 && att.fa2_hd256)) && att.fa2_fp16qk != "never";
-            const bool fmha = x == 64 || x == 96 || x == 128 || x == 256 || x == 512;
+            const bool fa2 = fa2_serves_head_dim(x, att.fa2_hd256) && att.fa2_fp16qk != "never";
+            const bool fmha = fmha_serves_head_dim(x);
             if (!fa2 && !fmha) {
                 all_served = false;
                 break;

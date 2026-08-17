@@ -11,6 +11,18 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A model whose `head_dim` no fused kernel serves no longer aborts on a long
+  prompt.** The prefill dispatch knows the tiled FMHA covers head dims 64/96/
+  128/256/512; the chunk clamp did not ask, and returned the chunk unclamped
+  whenever the context crossed `attention.fmha_prefill_threshold`. On MLA
+  models (`head_dim` 192) nothing then bounded the chunk and the cuBLAS
+  fallback hit its own S-matrix limit, killing the process with
+  `engine should have prevented this`. Reproduced on DeepSeek-V2-Lite, a
+  perplexity run over 45k tokens: `std::abort()` before, 13.2787 after. Both
+  sides now read the rule from one header.
+
 ### Added
 
 - **The server now says when an answer was lost to thinking.** A reply with an

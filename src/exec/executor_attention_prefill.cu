@@ -47,8 +47,7 @@
             const bool shapes_uniform = !per_layer_shapes || attn_shapes_uniform();
             // hd=256 rides the stage-1 FA2 port (attention.fa2_hd256, default
             // on since #932): same fp16-qk kernel family, Bq=64/TWOSLOT instance.
-            const bool fa2_hd_ok =
-                hd == 128 || (hd == 256 && runtime_config().attention.fa2_hd256);
+            const bool fa2_hd_ok = fa2_serves_head_dim(hd, runtime_config().attention.fa2_hd256);
             // FA2 is chosen per-layer: heterogeneous Gemma-4 SWA layers (hd=256)
             // qualify even though the model is not uniform — the gather and the
             // attention are per-layer, so only THIS layer's head_dim matters.
@@ -60,8 +59,7 @@
             // this dispatch), per-layer — so Gemma-4 global layers (hd=512)
             // qualify too. Only learned sinks below the threshold still require
             // cuBLAS (folded into the WMMA FMHA above the threshold, #992).
-            const bool fmha_hd_ok =
-                (hd == 64 || hd == 96 || hd == 128 || hd == 256 || hd == 512);
+            const bool fmha_hd_ok = fmha_serves_head_dim(hd);
             const bool chunk_fmha_ok = fmha_hd_ok;
             // attn_scores_ is sized [nh, s_cap, s_cap] (square). Chunked cuBLAS stores
             // an [nh, n, ctx_len] FP16 matrix (or FP32 = 2× when use_fp32_s). The

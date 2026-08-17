@@ -709,6 +709,10 @@ if(IMP_BUILD_TESTS)
         # share a scale, a config.json with two quantization_config keys.
         tools/imp-quantize/checkpoint_out.cpp
         tests/test_quantize_checkpoint_out.cpp
+        # Attention-family capability rules: the prefill dispatch and the
+        # chunk clamp must answer 'can this head_dim skip the S-matrix' the
+        # same way, or nothing bounds the chunk and cuBLAS aborts.
+        tests/test_attention_dispatch_rules.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse the server's
