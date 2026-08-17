@@ -270,16 +270,18 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weig
 // Fused conv1d + SiLU + FP32 output for prefill.
 // Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one.
 // ---------------------------------------------------------------------------
-__global__ void ssm_conv1d_prefill_f32_silu_kernel(float* __restrict__ conv_state,
-                                                   const half* __restrict__ x_in,
-                                                   const half* __restrict__ weight,
-                                                   const half* __restrict__ bias,
-                                                   float* __restrict__ x_out_f32, int n_tokens, int channels,
-                                                   int kernel_size, const int* __restrict__ d_real_n) {
+__global__ void ssm_conv1d_prefill_f32_silu_kernel(
+    float* __restrict__ conv_state, const half* __restrict__ x_in, const half* __restrict__ weight,
+    const half* __restrict__ bias, float* __restrict__ x_out_f32, int n_tokens, int channels, int kernel_size,
+    const int* __restrict__ d_real_n, float* __restrict__ conv_snap, const int* __restrict__ d_snap_n,
+    const float* __restrict__ conv_prev) {
     int token = blockIdx.x;
     if (token >= n_tokens)
         return;
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
+    // Second commit row for the speculative verify (see the h_state snapshot in
+    // gdn.cu): the conv window as of snap_n rows. 0 disables it.
+    const int snap_n = (conv_snap && d_snap_n) ? min(n_tokens, __ldg(d_snap_n)) : 0;
 
     for (int ch = threadIdx.x; ch < channels; ch += blockDim.x) {
         float sum = 0.0f;
@@ -317,18 +319,36 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(float* __restrict__ conv_stat
                                         : state[src_t + kernel_size];
             }
         }
+        // Same window, taken at snap_n rows. Its leading values come from the
+        // state BEFORE this chunk, and they must be read from the caller's
+        // pre-chunk copy rather than from conv_state: the commit above writes
+        // conv_state from a different block, and nothing orders the two. Read
+        // the live buffer here and the snapshot silently picks up whichever
+        // block ran first — measured as a drop in draft acceptance from 2.26 to
+        // 2.03 emitted per verify, with no error anywhere.
+        if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
+            const float* src_state = conv_prev + ch * kernel_size;
+            float* snap = conv_snap + ch * kernel_size;
+            for (int k = 0; k < kernel_size; k++) {
+                int src_t = snap_n - kernel_size + k;
+                snap[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
+                                       : src_state[src_t + kernel_size];
+            }
+        }
     }
 }
 
 void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
                                  const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream,
-                                 const int* d_real_n) {
+                                 const int* d_real_n, void* conv_snap, const int* d_snap_n,
+                                 const void* conv_prev) {
     int n_tokens = static_cast<int>(x_in.shape[0]);
     int channels = static_cast<int>(x_in.shape[1]);
     ssm_conv1d_prefill_f32_silu_kernel<<<n_tokens, 256, 0, stream>>>(
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
-        x_out_f32, n_tokens, channels, conv_kernel, d_real_n);
+        x_out_f32, n_tokens, channels, conv_kernel, d_real_n, static_cast<float*>(conv_snap), d_snap_n,
+        static_cast<const float*>(conv_prev));
     IMP_CUDA_CHECK_LAUNCH();
 }
 

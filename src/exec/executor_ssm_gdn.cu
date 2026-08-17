@@ -339,8 +339,19 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 cudaMemcpyAsync(xBC_out.data, xBC_in.data,
                                 static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
                                 cudaMemcpyDeviceToDevice, stream));
+            // Speculative verify: also write the conv window as of d_snap_n
+            // rows into the snapshot slab, so a partial acceptance landing on
+            // that row can adopt the state instead of re-forwarding to it.
+            void* conv_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
+                                  ? state.ssm_state->conv_state_in(state.spec_snap_slab, ssm_idx)
+                                  : nullptr;
+            const void* conv_prev = (conv_snap && state.spec_prev_slab)
+                                        ? state.ssm_state->conv_state_in(state.spec_prev_slab, ssm_idx)
+                                        : nullptr;
             ssm_conv1d_prefill_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
-                                        conv_kernel, stream, state.d_chunk_len);
+                                        conv_kernel, stream, state.d_chunk_len,
+                                        conv_prev ? conv_snap : nullptr, conv_prev ? state.d_snap_n : nullptr,
+                                        conv_prev);
         } else {
             // Decode: FP32 fused conv+SiLU (matching llama.cpp precision).
             // Copy FP16 input to xBC_out first to avoid aliasing: conv_f32
@@ -414,6 +425,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
     void* h_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
                                                    : nullptr;
+    void* h_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
+                       ? state.ssm_state->h_state_in(state.spec_snap_slab, ssm_idx)
+                       : nullptr;
 
     // Gate projection — computed before scan, used after in RMSNormGated.
     // Fused-input path: the gate slice is already in gdn_fused_proj_buf_ from
@@ -504,15 +518,16 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                            static_cast<const float*>(ly.ssm_a.data),
                                            static_cast<const float*>(ly.ssm_dt_b.data),
                                            static_cast<float*>(h_st), y_fp32, n, n_heads, head_dim_ssm, ssize,
-                                           n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len);
+                                           n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len,
+                                           static_cast<float*>(h_snap), h_snap ? state.d_snap_n : nullptr);
             } else {
-                gdn_scan_fused_fp32out(conv_f32, conv_channels,
-                                       static_cast<const half*>(alpha_proj_out.data),
+                gdn_scan_fused_fp32out(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                                        static_cast<const half*>(beta_proj_out.data),
                                        static_cast<const float*>(ly.ssm_a.data),
                                        static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                        y_fp32, n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
-                                       state.d_chunk_len);
+                                       state.d_chunk_len, static_cast<float*>(h_snap),
+                                       h_snap ? state.d_snap_n : nullptr);
             }
             // FP32-in, FP32-out RMSNorm+Gate+SiLU: preserves precision for the
             // ssm_out matmul. The FP32→FP16 copy below is REQUIRED, not optional

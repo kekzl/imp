@@ -993,6 +993,8 @@ private:
     // advances state through rejected draft positions; on partial acceptance
     // the slab is restored and the accepted prefix re-forwarded).
     void* spec_state_scratch_ = nullptr;
+    void* spec_state_snap_ = nullptr;  // mid-chunk recurrent snapshot (row 0)
+    int* d_spec_snap_n_ = nullptr;     // device row count the snapshot is taken at
     size_t spec_state_scratch_bytes_ = 0;
     bool ensure_spec_state_scratch_();
     int recurrent_slot_for_(int req_id) const;

@@ -222,6 +222,18 @@ struct InferenceState {
     // updates (conv tail, scan final state) read it so the padding rows of a
     // captured verify chunk don't advance the committed state.
     const int* d_chunk_len = nullptr;
+    // Speculative verify: a second per-sequence recurrent slab to write the
+    // state as of row d_snap_n into, alongside the committed one at the real
+    // last row. A partial acceptance that lands on that row adopts it instead
+    // of restoring the pre-chunk state and re-forwarding to reach it — the
+    // re-forward is a full model pass, measured at 17.2 ms against a 28.5 ms
+    // verify on Qwen3.8-27B. nullptr disables it and nothing else changes.
+    void* spec_snap_slab = nullptr;
+    const int* d_snap_n = nullptr;
+    // The state as it was BEFORE this chunk. The conv snapshot's leading values
+    // come from there; reading them from the live buffer races the commit that
+    // another block writes into it.
+    void* spec_prev_slab = nullptr;
 };
 
 }  // namespace imp

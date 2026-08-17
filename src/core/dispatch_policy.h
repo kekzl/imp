@@ -746,10 +746,16 @@ struct Speculative {
     // MTP economics guard: after an 8-verify sample, average emitted
     // tokens per MTP-filled verify below this dooms MTP drafting for the
     // request (the verify chunk + chain cost can't amortize). 0 disables
-    // the guard (raw-economics measurement). Default from the #852
-    // break-even measurement; re-derive when chain/verify costs change —
-    // note a chain of k can emit at most k+1 per verify, so values >= k+1
-    // doom that k unconditionally.
+    // the guard (raw-economics measurement). Re-derive when chain/verify
+    // costs change — note a chain of k can emit at most k+1 per verify, so
+    // values >= k+1 doom that k unconditionally.
+    //
+    // 4.0 came from the #852 measurement, when the verify chunk ran eagerly
+    // and a partial acceptance re-forwarded the accepted prefix through the
+    // whole model. Both are gone: the verify is 26.5 ms against an 11.8 ms
+    // decode step on Qwen3.8-27B, so break-even is 2.25 emitted per verify,
+    // and that model emits 2.72. At 4.0 the guard disabled a configuration
+    // that measures +14.5 % against no MTP at all.
     float mtp_econ_min_emit = 4.0f;
     // Graph-captured verify chunk (#847): cache one CUDA graph per
     // draft-length bucket and replay it each verify step — the chunk
