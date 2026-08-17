@@ -1321,13 +1321,15 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         return;
     }
 
-    // n-gram (prompt-lookup) speculation: when a draft is available, the
-    // verify step replaces this decode step entirely (it allocates its own
-    // KV blocks and emits accepted tokens). Falls through to the normal
-    // path on a draft miss or when any gate fails.
-    if (decode_batch.size() == 1 && spec_ngram_enabled_(*decode_batch[0])) {
+    // Speculation: when a draft is available, the verify step replaces this
+    // decode step entirely (it allocates its own KV blocks and emits accepted
+    // tokens). Falls through to the normal path on a draft miss or when any
+    // gate fails. The draft may come from the n-gram/suffix matcher, the MTP
+    // head or token recycling, so the entry gate asks whether ANY drafter is
+    // enabled — gating this on the n-gram flag alone left MTP unreachable.
+    if (decode_batch.size() == 1 && spec_any_drafter_enabled_(*decode_batch[0])) {
         spec_maybe_rearm_(*decode_batch[0]);
-        if (spec_ngram_gates_ok_(*decode_batch[0])) {
+        if (spec_verify_gates_ok_(*decode_batch[0])) {
             if (step_spec_verify_(decode_batch[0], dec_stream))
                 return;
         } else if (decode_batch[0]->spec_ngram_given_up &&
@@ -1341,7 +1343,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             if (try_launch_async_graph_loop(sreq, sreq->output_tokens.back(), dec_stream, lim))
                 return;
         } else if (decode_batch[0]->think_budget > 0.0f && decode_batch[0]->in_think_block &&
-                   spec_ngram_gates_ok_(*decode_batch[0], /*ignore_think=*/true) &&
+                   spec_verify_gates_ok_(*decode_batch[0], /*ignore_think=*/true) &&
                    spec_burst_launch_ok_(*decode_batch[0]) &&
                    // Budget exhausted → the EAGER step must run: it forces
                    // the </think> token. Launching the loop here instead
@@ -1405,7 +1407,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             if (!spec_ngram_enabled_(*r))
                 continue;
             spec_maybe_rearm_(*r);
-            if (!spec_ngram_gates_ok_(*r))
+            if (!spec_verify_gates_ok_(*r))
                 continue;
             const int id = r->id;
             if (id > spec_rr_last_id_ && id < best_id) {

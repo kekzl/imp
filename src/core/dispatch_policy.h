@@ -570,7 +570,13 @@ struct Generation {
 };
 
 struct Speculative {
-    bool ngram = true;  // prompt-lookup speculation, default-on (batch-1, greedy, dense)
+    // Prompt-lookup speculation, default-on (batch-1, greedy, dense). This
+    // switches the HISTORY MATCHER only. It used to switch the whole verify
+    // step, which meant setting it false silently disabled MTP and token
+    // recycling too, with no diagnostic: mtp_k=2 drafted zero tokens. Entering
+    // the verify is now decided by spec_any_drafter (runtime/spec_gates.h),
+    // which asks all three sources.
+    bool ngram = true;
     // Context cap for DENSE chunk-verify drafting (#964). With the
     // verify_decode_attn route below (2026-07-12), dense n-gram WINS up
     // to at least 12k context on the captured-verify (server) path:
@@ -735,6 +741,9 @@ struct Speculative {
     // drafts fill verify steps where the suffix/ngram matcher has no
     // match (draft-poor prose — 78-94% depth-1 accept on Qwen3.6-35B-A3B,
     // PR #804). imp-cli equivalent: --mtp-spec-decode <k>.
+    // Independent of `ngram` above: with ngram=false and mtp_k=2 the head
+    // drafts and the matcher does not (measured 100 drafts over 50 verifies
+    // on Qwen3.8-27B, against 0 before the gate split).
     int mtp_k = 0;
     // Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head
     // decode cache when one exists (#847 lever 3). The chain re-reads the

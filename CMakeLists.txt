@@ -685,6 +685,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mrope_config.cpp
         tests/test_image_placeholders.cpp
         tests/test_ngram_draft.cpp
+        tests/test_spec_gates.cpp
         tests/test_suffix_draft.cpp
         tests/test_token_recycle_draft.cpp
         tests/test_routing_decision.cpp

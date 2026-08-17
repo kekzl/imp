@@ -375,7 +375,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         constraints_return_(std::move(req->constraints));
     // Server visibility: the engine outlives requests, so cumulative
     // speculation telemetry is logged per request end (no-op when idle).
-    if (spec_ngram_enabled_(*req))
+    if (spec_any_drafter_enabled_(*req))
         log_spec_stats_();
 }
 

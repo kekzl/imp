@@ -15,7 +15,7 @@
 // draft blocks were appended this step and are never content-hashed (prefix
 // hashing only covers prompt prefill blocks).
 //
-// Phase 1 scope (gated in spec_ngram_gates_ok_): batch-1, greedy sampling,
+// Phase 1 scope (gated in spec_verify_gates_ok_): batch-1, greedy sampling,
 // no penalties / logit_bias / DRY / mirostat, no logprobs, no json/schema
 // constraints, no think budget, chunked-prefill-capable archs only. The
 // verify loop runs eager — the async conditional graph loop stays off while
@@ -272,7 +272,7 @@ bool Engine::spec_burst_launch_ok_(const Request& req) const {
     return true;
 }
 
-bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
+bool Engine::spec_verify_gates_ok_(const Request& req, bool ignore_think) const {
     if (req.spec_ngram_given_up) return false;
     // Greedy sampling only: verify compares argmax tokens.
     const bool greedy = (req.temperature <= 0.0f || req.top_k == 1);
@@ -328,7 +328,7 @@ bool Engine::spec_ngram_gates_ok_(const Request& req, bool ignore_think) const {
     return true;
 }
 
-// Model-level gates, split out of spec_ngram_gates_ok_ so spec_ngram_enabled_
+// Model-level gates, split out of spec_verify_gates_ok_ so spec_ngram_enabled_
 // can ask the same question without the per-request checks. Nothing here
 // depends on a request, so a false answer means "this model never speculates,
 // whatever the flag says".
@@ -403,7 +403,16 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int k = std::max(1, scfg.k);
     int draft_start = -1;
     std::vector<int32_t> draft;
-    if (scfg.suffix) {
+    // The history matcher is the n-gram source, so it answers to the n-gram
+    // flag alone. The step itself is entered whenever ANY drafter is enabled
+    // (spec_any_drafter_enabled_), which is what lets MTP and token recycling
+    // reach the verify with `speculative.ngram=false` — but they must not drag
+    // the matcher in with them, or turning n-gram off would stop meaning
+    // anything.
+    const bool ngram_source_on = spec_ngram_enabled_(*req);
+    if (!ngram_source_on) {
+        // fall through to the MTP / recycling sources below
+    } else if (scfg.suffix) {
         // Suffix index: input ++ prediction indexed at first use, output
         // tokens appended incrementally (every emit path lands in
         // output_tokens, so loop-burst tokens are picked up here too).
