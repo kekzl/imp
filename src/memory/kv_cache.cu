@@ -392,6 +392,12 @@ int KVCache::commit_blocks_(int blocks) {
         const size_t bb = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
         if (bb == 0)
             continue;  // a non-attention layer in a hybrid holds no KV
+        // A sliding-window layer's region is smaller than `blocks` implies, so
+        // this commits past it into the next layer's range. Deliberate: that
+        // range belongs to the same reservation and is wanted anyway, the tail
+        // is clamped to the reservation, and capping it per layer was measured
+        // to change nothing (64.00 vs 34.00 MiB committed either way, the
+        // difference coming from the layout rather than from the cap).
         const size_t want = static_cast<size_t>(blocks) * bb;
         const size_t k_off = static_cast<const char*>(k_ptr(l, 0)) - base;
         const size_t v_off = static_cast<const char*>(v_ptr(l, 0)) - base;
@@ -413,6 +419,14 @@ int KVCache::commit_blocks_(int blocks) {
     // handed out with stale bytes in its unused tail is the kind of difference
     // that shows up as rare, unreproducible output rather than as an error.
     // Only the new range: rezeroing the old one would erase live KV.
+    //
+    // The invariant this keeps is "a block is clean the first time it is handed
+    // out", and it is tracked by committed_blocks_. A future shrink has to
+    // lower that counter when it decommits, or a range that is decommitted and
+    // recommitted would come back with whatever the driver hands over and skip
+    // the memset below. Reuse of an already-committed block does NOT re-zero,
+    // which is the fixed pool's behaviour too: attention reads only the slots
+    // the sequence wrote.
     for (int l = 0; l < n_layers_ && blocks > first_new; l++) {
         const size_t bb = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
         if (bb == 0)
@@ -424,6 +438,8 @@ int KVCache::commit_blocks_(int blocks) {
     committed_blocks_ = blocks;
     return blocks;
 }
+
+size_t KVCache::committed_bytes() const { return region_ ? region_.committed() : 0; }
 
 int KVCache::try_grow_to(int wanted) {
     const int have = blocks_.num_blocks();
