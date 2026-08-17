@@ -99,6 +99,31 @@ text = "".join(b["text"] for b in resp["content"] if b["type"] == "text")
 Verified on Qwen3-8B-Q8_0: `content` = `[{type: thinking, ...}, {type: text,
 text: "The capital of France is Paris."}]`.
 
+### Turning thinking off
+
+Two request fields do it, and **either one alone is enough**:
+
+| field | dialect | effect |
+|---|---|---|
+| `think_budget` | OpenAI | fraction of `max_tokens` reserved for reasoning. **0 disables thinking** |
+| `enable_thinking` | OpenAI | `false` disables thinking |
+| `thinking: {type: "disabled"}` | Anthropic | same, and zeroes the budget |
+
+Measured on Qwen3.8-27B with a JSON prompt at `max_tokens: 400`, counting
+`reasoning_content` characters: nothing set 160, `think_budget: 0` alone **0**,
+`enable_thinking: false` alone **0**. The server's toggle test sets both because
+it covers the combination, not because both are required.
+
+**Why you would.** The answer shares the token budget with the thinking, so a
+small `max_tokens` on a thinking model can be consumed before the reply starts,
+and you get an empty `content` with `finish_reason: stop`. Short structured
+calls (a JSON classifier at `max_tokens: 400`, say) are the usual case: disable
+thinking there rather than raising every budget. See
+[`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
+
+Structured output disables thinking on its own: `json_mode`, `json_schema`,
+`tools`, `regex` and `grammar` all suppress it without either field.
+
 ## Prompt caching
 
 ✅ on by default for the server. Prefix blocks are reused across requests that
