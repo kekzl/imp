@@ -53,6 +53,34 @@ bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, c
     return !has_tool_calls && content.empty() && !reasoning.empty();
 }
 
+const char* health_unservable_code(bool engine_faulted, bool kv_pool_floored) {
+    // Faulted first: a wedged engine is the louder fault, and a floored pool
+    // does not stop being true underneath it.
+    if (engine_faulted)
+        return "engine_faulted";
+    if (kv_pool_floored)
+        return "kv_pool_floored";
+    return "";
+}
+
+std::string health_unservable_reason(bool engine_faulted, bool kv_pool_floored, int kv_blocks,
+                                     int kv_block_size) {
+    if (engine_faulted)
+        return "the engine is faulted and this process cannot recover; restart it";
+    if (!kv_pool_floored)
+        return "";
+    // Name the pool and the arithmetic. The admission error a caller sees says
+    // "KV cache too small for prompt", which reads as a statement about the
+    // prompt: at this size no prompt worth sending fits.
+    const long long tokens = static_cast<long long>(kv_blocks) * kv_block_size;
+    return "the KV pool fell back to its rescue floor: " + std::to_string(kv_blocks) + " blocks of " +
+           std::to_string(kv_block_size) + " = " + std::to_string(tokens) +
+           " tokens of capacity, so every longer prompt is cancelled at admission. Nothing was "
+           "left to size the pool from at startup, usually another process still holding the "
+           "card. This lasts as long as the process: restart it on a free card. Retrying will "
+           "not help.";
+}
+
 bool bearer_token_matches(const std::string& authorization, const std::string& api_key) {
     const std::string expected = "Bearer " + api_key;
     // Accumulate the difference over the full expected length; do NOT early-out

@@ -318,6 +318,15 @@ public:
     };
     const SpecStats& spec_stats() const noexcept { return spec_stats_; }
     KVCache* kv_cache() const noexcept { return kv_cache_raw_; }
+    // True when the KV pool fell back to its rescue floor: nothing was left to
+    // size it from, so it holds a few hundred tokens rather than a context.
+    //
+    // Permanent for the process, because the pool is sized once at init. Every
+    // prompt past the floor is then cancelled at admission with a message about
+    // the prompt, while /health reports ok and /v1/models keeps advertising the
+    // full context — which is how an operator spends an afternoon looking at
+    // the wrong component. The server reads this to answer honestly instead.
+    bool kv_pool_floored() const noexcept { return kv_pool_floored_; }
     Model* model() const noexcept { return model_.get(); }
     // Effective context window actually allocated by the engine (after VRAM-aware
     // auto-sizing in init_compute_max_seq_len_). May be < the model's declared
@@ -374,6 +383,7 @@ private:
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<KVCacheManager> kv_manager_;
     KVCache* kv_cache_raw_ = nullptr;  // Non-owning pointer (owned by kv_manager_)
+    bool kv_pool_floored_ = false;     // the pool is the rescue floor, not a size
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;
     CudaStream stream_;

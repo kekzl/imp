@@ -845,10 +845,23 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         // to say nothing. 503 with the reason is the honest answer, and it is
         // the code a client is expected to back off / re-route on.
         if (std::strcmp(finish, "capacity") == 0) {
+            // On a pool that fell back to its rescue floor, "shorten the prompt"
+            // is advice that cannot be followed: the pool holds a few hundred
+            // tokens and the fault is the startup, not the request. Say which
+            // of the two situations this is, or the caller tunes the prompt
+            // against a server that will refuse every length worth sending.
+            bool floored = false;
+            if (state.ctx && state.ctx->engine)
+                floored = state.ctx->engine->kv_pool_floored();
             send_json_error(res, 503, "capacity_error",
-                            "Request does not fit the KV cache: the prompt needs more blocks than "
-                            "the pool can hold. Shorten the prompt, lower --max-seq-len, or give "
-                            "the server more VRAM (see the engine log for the exact block counts).");
+                            floored
+                                ? "The KV pool fell back to its rescue floor at startup, so it holds only "
+                                  "a few hundred tokens. This lasts as long as the process and retrying "
+                                  "will not help: restart the server on a free card. GET /health reports "
+                                  "code kv_pool_floored and the exact capacity."
+                                : "Request does not fit the KV cache: the prompt needs more blocks than "
+                                  "the pool can hold. Shorten the prompt, lower --max-seq-len, or give "
+                                  "the server more VRAM (see the engine log for the exact block counts).");
             return;
         }
 
