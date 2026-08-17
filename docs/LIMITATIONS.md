@@ -86,6 +86,15 @@ These have a code path and no gate. They may work; nothing proves it.
   A peer's conformance tier had been carrying this as an unexplained sporadic
   divergence. Not a defect on its own, but a golden-output test has to pin
   `speculative.ngram` and `speculative.mtp_k`, or it is testing the history too.
+
+  **Only on the greedy path.** Speculation requires `temperature: 0` or
+  `top_k: 1`, so a sampled request never drafts and none of this reaches it —
+  measured as `imp_spec_drafted_total` not moving at all on a
+  `temperature: 0.8` request with the drafter enabled. A sampled request that
+  diverges between identical runs is a different mechanism: without
+  `runtime.deterministic_gemm` the forward is not bit-reproducible, and at a
+  temperature a last-bit difference in the logits moves the sampled token
+  whenever the top candidates are close.
 - **Speculative decoding does not reproduce the non-speculative greedy output on
   a GDN hybrid.** Its contract is that it changes speed and not tokens; here it
   changes tokens. Measured on Qwen3.8-27B-NVFP4 with
