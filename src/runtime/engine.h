@@ -3,6 +3,7 @@
 #include "model/model.h"
 #include "model/chat_template.h"
 #include "runtime/scheduler.h"
+#include "runtime/spec_gates.h"
 #include "runtime/request.h"
 #include "runtime/batch.h"
 #include "runtime/green_ctx.h"
@@ -917,15 +918,39 @@ private:
         // says yes (engine_scheduler.cpp), so a model whose gates always fail
         // paid the chopping for drafts that could not happen — and the burst
         // boundaries, not the drafts, are what made greedy output depend on
-        // request history (#1299). The comment in spec_ngram_gates_ok_ already
+        // request history (#1299). The comment in spec_verify_gates_ok_ already
         // says GGUF-MoE "stays on the async conditional-graph loop"; this is
         // what makes that true.
-        if (!spec_ngram_model_capable_())
-            return false;
-        return req.spec_ngram_override >= 0 ? req.spec_ngram_override == 1
-                                            : runtime_config_.speculative.ngram;
+        return spec_ngram_source(spec_drafter_state_(req));
     }
-    // The model-level half of spec_ngram_gates_ok_: facts that cannot change
+    // Does ANY drafter exist for this request? The verify step is shared: the
+    // n-gram/suffix matcher, the trained MTP head and token recycling all feed
+    // the same chunk, and which one filled it is decided inside
+    // step_spec_verify_. So the decision to ENTER that step belongs to this
+    // predicate, not to any single source.
+    //
+    // Asking spec_ngram_enabled_ here instead is what made
+    // `speculative.ngram=false` silently disable MTP as well: mtp_k=2 drafted
+    // nothing at all, because the step that consumes its chain was never
+    // reached. One flag switched off a different feature, with no diagnostic.
+    // Keep the two questions apart: "is the n-gram source on" and "can anyone
+    // draft".
+    bool spec_any_drafter_enabled_(const Request& req) const {
+        return spec_any_drafter(spec_drafter_state_(req));
+    }
+    // The configuration half, split out so the rule itself lives in
+    // spec_gates.h as a pure function and CI can test its truth table without
+    // a GPU. The engine supplies the state; it does not own the rule.
+    SpecDrafterState spec_drafter_state_(const Request& req) const {
+        SpecDrafterState s;
+        s.model_capable = spec_ngram_model_capable_();
+        s.ngram_on = req.spec_ngram_override >= 0 ? req.spec_ngram_override == 1
+                                                  : runtime_config_.speculative.ngram;
+        s.mtp_on = mtp_spec_decode_enabled();
+        s.recycling_on = runtime_config_.speculative.token_recycling;
+        return s;
+    }
+    // The model-level half of spec_verify_gates_ok_: facts that cannot change
     // between requests or between steps — so it is computed once and cached.
     // spec_ngram_enabled_ sits on the per-step decode path; recomputing this
     // there (it reaches into supports_chunked_prefill_) would put avoidable
@@ -938,7 +963,7 @@ private:
     // determinism cases going from 0 failing back to 7.
     bool spec_ngram_model_capable_uncached_() const;
     bool spec_ngram_model_capable_flag_ = false;
-    bool spec_ngram_gates_ok_(const Request& req, bool ignore_think = false) const;
+    bool spec_verify_gates_ok_(const Request& req, bool ignore_think = false) const;
     bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;

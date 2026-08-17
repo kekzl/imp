@@ -309,7 +309,7 @@ struct RuntimeConfig {
     // decode. The verify loop runs eager (no async conditional graph loop);
     // burst_rearm + miss_burst keep draft-miss fragmentation ~free, so the old
     // tg128 -15% draft-poor downside no longer reproduces (-0.2%/-0.9% on
-    // dense Q8/NVFP4, 2026-06-16) — hence default-ON. spec_ngram_gates_ok_
+    // dense Q8/NVFP4, 2026-06-16) — hence default-ON. spec_verify_gates_ok_
     // confines engagement to batch-1 / greedy / no-penalty-window / no-json /
     // no-logprobs / non-recurrent requests (MoE additionally requires
     // native-NVFP4 experts, see `moe` below); everything else falls back
