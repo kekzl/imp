@@ -72,6 +72,33 @@ bool bearer_token_matches(const std::string& authorization, const std::string& a
 // is exactly the one that has to be covered by a test rather than by a run.
 bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning);
 
+// Why this server cannot serve, or "" when it can. Not the same question as
+// whether the last request failed.
+//
+// A transient OOM keeps /health at 200 on purpose: the server is alive, the
+// pressure passes, and an orchestrator restarting on it makes things worse. A
+// KV pool that fell back to its rescue floor is the opposite. The pool is sized
+// once at init, so the condition lasts as long as the process; every prompt
+// past a few hundred tokens is cancelled at admission with a message naming the
+// prompt; and /v1/models goes on advertising the full context. Restarting on a
+// card that has since been freed is the only fix, which is exactly what a 503
+// asks an orchestrator to do.
+//
+// Reported from production by a peer running imp behind an agent loop:
+// `docker compose restart` while the previous process still held the card came
+// up with 16 KV blocks against a planned 3066, /health saying ok throughout. It
+// cost two failures that looked like defects in another component.
+//
+// The string is the operator-facing detail; the machine-readable half is
+// health_unservable_code() below, because a client has to tell this apart from
+// a transient 503 to know not to retry it.
+std::string health_unservable_reason(bool engine_faulted, bool kv_pool_floored, int kv_blocks,
+                                     int kv_block_size);
+
+// The stable identifier for the same state, "" when the server can serve.
+// Values: "engine_faulted", "kv_pool_floored".
+const char* health_unservable_code(bool engine_faulted, bool kv_pool_floored);
+
 // Accepts EITHER the OpenAI-style `Authorization: Bearer <key>` header OR the
 // Anthropic-style `x-api-key: <key>` header (the official Anthropic SDK sends
 // the latter, so a Bearer-only check 401s real Anthropic clients on /v1/messages).

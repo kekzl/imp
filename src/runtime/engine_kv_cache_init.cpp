@@ -389,6 +389,9 @@ bool Engine::init_kv_cache() {
         // below only fires with an explicit --vram-budget, so without this the
         // default path learns about it from cancelled generations (#1251).
         if (sizing.floored) {
+            // Kept, not just logged: the server has to be able to answer for
+            // this after the log line has scrolled away.
+            kv_pool_floored_ = true;
             IMP_LOG_WARN(
                 "KV cache: only %.0f MiB was left after the weight caches, and the allocator "
                 "keeps %.0f MiB of it as headroom — nothing remained to size the pool from, so "

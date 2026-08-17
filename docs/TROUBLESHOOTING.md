@@ -82,6 +82,24 @@ Also check `kv_cache.swa_snapshot_mb`: a value **below one snapshot size**
 silently disables prefix caching, which is worse than setting it to zero. It
 warns since #1092.
 
+## After a restart, every prompt is cancelled
+
+Restarting the server while the previous process still holds the card gives you
+a process whose KV pool was sized against VRAM that had not been released yet.
+It comes up in seconds, loads the model, and then cancels every prompt past a
+few hundred tokens with "KV cache too small for prompt", which reads as a
+statement about the prompt.
+
+`GET /health` says so since v0.28.0: **503 with `code: "kv_pool_floored"`**, and
+`kv_capacity_tokens` in the body whether or not anything is wrong. On an older
+build the tell is `imp_kv_blocks_total` in `/metrics`, a number in the tens
+where a clean start reads thousands. Nothing in `/health` showed it, and
+`/v1/models` kept advertising the model's full context.
+
+The fix is a restart on a free card, not a retry: the pool is sized once, at
+startup. Wait for the old process to release the GPU before starting the new
+one.
+
 ## The server answers 503
 
 Either the model is suspended (`POST /admin/resume`), or the server was started

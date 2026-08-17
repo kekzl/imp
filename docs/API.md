@@ -162,3 +162,32 @@ An unmatched route answers with an envelope too.
 Internal engine errors are translated to `ImpError` at the C API boundary
 (`src/api/imp_api.cpp`); this is intentional and is why a load failure surfaces
 as a typed message rather than a crash.
+
+### `GET /health`, and which 503 is worth retrying
+
+`/health` answers 200 with `status: "ok"` whenever the process can serve. Load,
+queueing and a transient out-of-memory all stay 200 on purpose: the server is
+alive and an orchestrator restarting on them makes things worse.
+
+It answers **503 only for states that outlast the request that hit them**, and
+then carries a stable `code` so a client can tell those apart from a retryable
+one:
+
+| `code` | what it means | what a client should do |
+|---|---|---|
+| `kv_pool_floored` | the KV pool fell back to its rescue floor, so it holds a few hundred tokens instead of a context. Sized once at startup, usually because another process still held the card | do **not** retry, the process cannot recover. Restart it on a free card |
+| `engine_faulted` | the engine is wedged | restart |
+
+Whenever a model is loaded the body also carries the pool capacity, healthy or
+not, so a caller can check what it is about to send against what the server can
+hold without scraping `/metrics`:
+
+```json
+{"status": "unhealthy", "code": "kv_pool_floored",
+ "model_loaded": true, "queue_depth": 0, "suspended": false,
+ "kv_blocks_total": 16, "kv_block_size": 32, "kv_capacity_tokens": 512}
+```
+
+This exists because the quiet version of that state cost an operator an
+afternoon: `/health` said ok, `/v1/models` kept advertising 131 072 tokens, and
+every real prompt came back cancelled with a message about the prompt.

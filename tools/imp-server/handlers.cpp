@@ -51,6 +51,9 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
     bool loaded = false;
     int queue = -1;
     bool faulted = false;
+    bool kv_floored = false;
+    int kv_blocks = -1;
+    int kv_block_size = -1;
     std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
     if (lock.owns_lock()) {
         loaded = state.model_loaded();
@@ -58,18 +61,41 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
             queue = state.batching->queue_depth();
             faulted = state.batching->faulted();
         }
+        // Capacity, not occupancy (invariant I7): the number a caller needs
+        // before it sends a long prompt, and the one a harness needs to refuse
+        // to measure a clamped server. Reporting it here rather than only in
+        // /metrics keeps a liveness probe and a precondition check as one read.
+        if (state.ctx && state.ctx->engine) {
+            kv_floored = state.ctx->engine->kv_pool_floored();
+            if (const auto* kv = state.ctx->engine->kv_cache()) {
+                kv_blocks = kv->total_blocks();
+                kv_block_size = kv->block_size();
+            }
+        }
         lock.unlock();
     } else {
         loaded = state.model_status_snapshot().loaded;  // queue_depth stays -1 (unknown)
     }
-    json body = {{"status", faulted ? "unhealthy" : "ok"},
+    const std::string unservable = health_unservable_reason(faulted, kv_floored, kv_blocks, kv_block_size);
+    json body = {{"status", unservable.empty() ? "ok" : "unhealthy"},
                  {"model_loaded", loaded},
                  {"queue_depth", queue},
                  // Suspended is HEALTHY (deliberate operator state, HTTP 200):
                  // the model is parked in host RAM, POST /admin/resume serves again.
                  {"suspended", state.suspended.load()}};
-    if (faulted)
+    if (kv_blocks >= 0) {
+        body["kv_blocks_total"] = kv_blocks;
+        body["kv_block_size"] = kv_block_size;
+        body["kv_capacity_tokens"] = static_cast<long long>(kv_blocks) * kv_block_size;
+    }
+    if (!unservable.empty()) {
+        // A client has to tell a permanent 503 from a transient one, or it
+        // retries a condition retrying cannot fix and burns its budget doing
+        // it. The code is the stable half; the detail is for the operator.
+        body["code"] = health_unservable_code(faulted, kv_floored);
+        body["detail"] = unservable;
         res.status = 503;  // let orchestrators restart a wedged server (#874)
+    }
     res.set_content(dump_safe(body), "application/json");
 }
 

@@ -43,6 +43,17 @@ there instead of retelling it.
 
 ### Added
 
+- **`/health` reports the KV pool, and refuses to call a clamped server
+  healthy.** A server started while another process still held the card comes
+  up with a KV pool at its rescue floor: it loads, reports `ok`, keeps
+  advertising the model's full context, and cancels every prompt past a few
+  hundred tokens with a message about the prompt. `/health` now answers 503 with
+  `code: "kv_pool_floored"` for that state, and carries `kv_blocks_total`,
+  `kv_block_size` and `kv_capacity_tokens` whenever a model is loaded. The code
+  is stable so a client can tell a permanent 503 from a retryable one. Reported
+  from production, where the quiet version cost an afternoon of looking at the
+  wrong component. See [`API.md`](docs/API.md).
+
 - **The server now says when an answer was lost to thinking.** A reply with an
   empty `content` beside a full `reasoning_content` is not a defect, it is a
   token budget consumed before the answer started, and it reads exactly like a
