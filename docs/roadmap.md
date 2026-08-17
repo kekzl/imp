@@ -162,12 +162,39 @@ how predictable the continuation is:
 | ordinary prose, MTP k=2 | 87.9 | 58 % | 2.3 |
 | **repeat a text verbatim** | **876.5** | **98.3 %** | **36.6** |
 
+**DISPUTED (2026-08-18):** the reading below treats imp's speculation economics
+as a property of speculation. Comparable engines report an MTP k=2 win on this
+class of model and hardware, so the more likely reading is that imp pays a cost
+they do not. Pending a reference-engine measurement on this box, treat every
+"speculation does not pay" statement in this section as "imp's speculation does
+not pay", and the guard that disables it as a workaround rather than a verdict.
+
 Speculation is worth **ten times** on the workload it was built for, and nothing
 on the one it was not. Where it pays, acceptance is near-total and the
 partial-acceptance repair path never runs, so the verify work below is inert
 there; where that work helps, speculation does not pay in the first place.
-Acceptance is the lever: 11 % to 98 % is 10x, and the entire verify cost is a
-few percent. Spend on drafters, not on the repair path.
+~~Acceptance is the lever: 11 % to 98 % is 10x, and the entire verify cost is a
+few percent. Spend on drafters, not on the repair path.~~
+
+**Retracted 2026-08-18: that sentence does not survive k=1.** It was written
+from the k=2 row above, where a poor drafter and an expensive verify are
+confounded. Measured at k=1 on a mixed corpus, the MTP head already accepts
+**75.0 %** and emits 1.748 per verify, and it still loses: 84.7-85.8 tok/s
+against ~88 without speculation. From those numbers a verify costs 20.6 ms
+against an 11.36 ms decode step, and the two levers price out as:
+
+| close this gap | result |
+|---|---|
+| acceptance 75 % → 87 % (the published figure) | 90.8 tok/s, **+3.2 %** |
+| verify 20.6 ms → 13.6 ms (1.2x a decode step) | 128.2 tok/s, **+45.7 %** |
+
+So the verify price is worth an order of magnitude more than the acceptance
+gap at k=1, and the retracted sentence had it backwards. The two are not
+independent either: verify cost grows **5.23 ms per extra draft token**, which
+is 46 % of a full decode step, and that slope is what caps chain length, which
+caps emitted-per-verify, which caps what any acceptance number can be worth.
+Where the slope lives — the forward, or the recurrent state machinery around
+it — is unmeasured and is the open question.
 
 **Three levers remain in the verify, each worth 4-6 ms of a 28.5 ms verify.** MTP needs the
 verify below 26.7 ms to pay at 2.26 emitted per verify, so any one of them
