@@ -64,6 +64,18 @@ struct KVCache {
     // one driver mapping call per layer (measured 1.18 ms per 256 MiB) and
     // happens at most once per growth event, not per step.
     bool growable = false;
+    // Percent of the planned pool to COMMIT at startup when growable. 100 keeps
+    // today's behaviour: commit whatever the residual clamp allowed, and grow
+    // only if that was less than planned.
+    //
+    // Lower is the point of the whole mechanism. A successful cudaMalloc proves
+    // nothing about free VRAM on WSL2: measured on this box, a second server
+    // started against a card already holding 31.4 GiB took its full 10.2 GiB of
+    // KV anyway, which means it spilled into host memory and will decode at a
+    // fraction of the bandwidth with nothing reporting an error. Committing a
+    // fraction up front and growing into demand is the version of that decision
+    // that cannot silently overshoot.
+    int growable_initial_pct = 100;
     // SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on
     // every other layer, gemma-3 5:1 pattern) allocate only the trailing
     // window in a small dedicated block group instead of full-length KV

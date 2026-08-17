@@ -468,6 +468,21 @@ bool Engine::init_kv_cache() {
     // reading that is wrong most often — free VRAM while another process is
     // still letting go of the card — stops being final.
     const int kv_ceiling_blocks = runtime_config_.kv_cache.growable ? kv_blocks_planned : 0;
+    if (kv_ceiling_blocks > 0) {
+        // Commit a fraction on purpose, where the operator asked for it. The
+        // clamp above answers "what fits" from a reading that is wrong in both
+        // directions on this platform, and starting under it is the only way to
+        // be sure the pool is resident rather than spilled.
+        const int pct = std::clamp(runtime_config_.kv_cache.growable_initial_pct, 1, 100);
+        if (pct < 100) {
+            const int initial = std::max(16, max_blocks / 100 * pct);
+            if (initial < max_blocks) {
+                IMP_LOG_INFO("KV cache: committing %d%% of the pool up front (%d of %d blocks)", pct, initial,
+                             max_blocks);
+                max_blocks = initial;
+            }
+        }
+    }
     if (kv_ceiling_blocks > max_blocks) {
         IMP_LOG_INFO(
             "KV cache: growable, starting at %d blocks with a %d-block ceiling "
@@ -750,7 +765,14 @@ bool Engine::init_kv_cache() {
         // pool (max_blocks), not just max_seq_len/block_size. Size from
         // max_blocks so the H2D copy at the prefill metadata upload site
         // doesn't overflow on long-cumulative-KV requests.
-        size_t bt_bytes = static_cast<size_t>(max_blocks) * sizeof(int);
+        //
+        // And from the CEILING when the pool is growable, because "the entire
+        // pool" is then a moving number. Sizing this from the initial commit
+        // produced exactly the overflow the line above warns about: the pool
+        // grew to serve a 25 222-token prompt and the upload then failed with
+        // `prefill memcpy block_tables failed: invalid argument`. It is four
+        // bytes per block of a pool that may never exist, which is nothing.
+        size_t bt_bytes = static_cast<size_t>(std::max(max_blocks, kv_ceiling_blocks)) * sizeof(int);
         size_t swa_bt_bytes = swa_sizing_active_ ? bt_bytes : 0;
         size_t cl_bytes = sizeof(int);
         prefill_pool_size_ = tok_bytes + pos_bytes + bt_bytes + swa_bt_bytes + cl_bytes;

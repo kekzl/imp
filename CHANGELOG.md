@@ -24,7 +24,13 @@ there instead of retelling it.
   committed underneath it, 1.18 ms per 256 MiB commit. `/health` reports
   `kv_ceiling_blocks` beside the total, and a floored pool that can still grow
   no longer answers 503, because restarting a server that is healing is wrong.
-  See [`MEMORY.md`](docs/internals/MEMORY.md) A7 step 7.
+  `kv_cache.growable_initial_pct` starts the pool deliberately below what the
+  card appears to allow, which is the answer to the other half of the same
+  unreliable reading: a second server started against a card already holding
+  31.4 GiB took its full 10.2 GiB of KV anyway, i.e. spilled into host memory
+  with nothing reporting an error. End to end on Qwen3-14B-NVFP4: started at
+  810 of 8192 blocks, grew to 1582 to serve a 25 222-token prompt, answered
+  coherently. See [`MEMORY.md`](docs/internals/MEMORY.md) A7 step 7.
 
 ### Changed
 

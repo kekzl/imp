@@ -66,8 +66,17 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     // exception the growable pool is for, it is bounded by the
                     // ceiling reserved at init, and it is logged when it
                     // happens.
-                    if (blocks_needed > cap)
-                        cap = kv_manager_->kv_cache()->try_grow_to(blocks_needed);
+                    if (blocks_needed > cap) {
+                        // Grow for the whole request, not for its prompt.
+                        // context_len() counts what exists NOW, so growing to
+                        // exactly that produced a pool with zero decode
+                        // headroom and the request was cancelled anyway, one
+                        // block short, after paying for the growth. Measured on
+                        // a 25 222-token prompt: grew 810 -> 1577 blocks, then
+                        // refused.
+                        const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
+                        cap = kv_manager_->kv_cache()->try_grow_to(blocks_needed + decode_blocks);
+                    }
                     if (blocks_needed > cap) {
                         IMP_LOG_ERROR(
                             "Scheduler: request %d needs %d KV blocks but cache capacity is %d "
