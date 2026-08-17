@@ -11,6 +11,44 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **The KV pool can grow into what it asked for (`kv_cache.growable`, off by
+  default).** A server started while another process still holds the card sizes
+  its pool against VRAM that has not been released yet and lands on the rescue
+  floor, where it stays for its whole life: capacity is planned once. With this,
+  address space is reserved for the pre-clamp plan and physical memory is
+  committed for the clamped number, so the pool grows when a request needs more
+  than it has and the card can spare it. Measured on this box: base address
+  invariant across growth, a captured CUDA graph still correct after 1.5 GiB was
+  committed underneath it, 1.18 ms per 256 MiB commit. `/health` reports
+  `kv_ceiling_blocks` beside the total, and a floored pool that can still grow
+  no longer answers 503, because restarting a server that is healing is wrong.
+  `kv_cache.growable_initial_pct` starts the pool deliberately below what the
+  card appears to allow, which is the answer to the other half of the same
+  unreliable reading: a second server started against a card already holding
+  31.4 GiB took its full 10.2 GiB of KV anyway, i.e. spilled into host memory
+  with nothing reporting an error. End to end on Qwen3-14B-NVFP4: started at
+  810 of 8192 blocks, grew to 1582 to serve a 25 222-token prompt, answered
+  coherently. See [`MEMORY.md`](docs/internals/MEMORY.md) A7 step 7.
+
+- **`/health` reports the KV pool, and refuses to call a clamped server
+  healthy.** A server started while another process still held the card comes
+  up with a KV pool at its rescue floor: it loads, reports `ok`, keeps
+  advertising the model's full context, and cancels every prompt past a few
+  hundred tokens with a message about the prompt. `/health` now answers 503 with
+  `code: "kv_pool_floored"` for that state, and carries `kv_blocks_total`,
+  `kv_block_size` and `kv_capacity_tokens` whenever a model is loaded. The code
+  is stable so a client can tell a permanent 503 from a retryable one. Reported
+  from production, where the quiet version cost an afternoon of looking at the
+  wrong component. See [`API.md`](docs/API.md).
+
+- **The server now says when an answer was lost to thinking.** A reply with an
+  empty `content` beside a full `reasoning_content` is not a defect, it is a
+  token budget consumed before the answer started, and it reads exactly like a
+  broken engine. The log now names it, with the amount of thinking and the
+  finish reason. See [`TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+
 ### Changed
 
 - **Quantization quality improved on both measured sizes, calibrated and not.**
@@ -40,26 +78,6 @@ there instead of retelling it.
   `engine should have prevented this`. Reproduced on DeepSeek-V2-Lite, a
   perplexity run over 45k tokens: `std::abort()` before, 13.2787 after. Both
   sides now read the rule from one header.
-
-### Added
-
-- **`/health` reports the KV pool, and refuses to call a clamped server
-  healthy.** A server started while another process still held the card comes
-  up with a KV pool at its rescue floor: it loads, reports `ok`, keeps
-  advertising the model's full context, and cancels every prompt past a few
-  hundred tokens with a message about the prompt. `/health` now answers 503 with
-  `code: "kv_pool_floored"` for that state, and carries `kv_blocks_total`,
-  `kv_block_size` and `kv_capacity_tokens` whenever a model is loaded. The code
-  is stable so a client can tell a permanent 503 from a retryable one. Reported
-  from production, where the quiet version cost an afternoon of looking at the
-  wrong component. See [`API.md`](docs/API.md).
-
-- **The server now says when an answer was lost to thinking.** A reply with an
-  empty `content` beside a full `reasoning_content` is not a defect, it is a
-  token budget consumed before the answer started, and it reads exactly like a
-  broken engine. The log now names it, with the amount of thinking and the
-  finish reason. See [`TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
-
 ## [0.27.0] - 2026-08-17
 
 ### Fixed

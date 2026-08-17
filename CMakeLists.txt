@@ -122,6 +122,7 @@ set(IMP_CORE_SOURCES
 
 set(IMP_MEMORY_SOURCES
     src/memory/backend.cpp
+    src/memory/vmm_backend.cpp
     $<$<BOOL:${IMP_ALLOC_INTERPOSE}>:src/memory/alloc_interpose.cpp>
     src/memory/arena.cpp
     src/memory/engine_arena.cpp
@@ -845,6 +846,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
         tests/test_kv_block_copy.cu
+        tests/test_vmm_backend.cu
         tests/test_green_ctx.cu
         tests/test_capture_abort.cu
         tests/test_prefix_cache_equiv.cpp

@@ -54,6 +54,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
     bool kv_floored = false;
     int kv_blocks = -1;
     int kv_block_size = -1;
+    int kv_ceiling = -1;
     std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
     if (lock.owns_lock()) {
         loaded = state.model_loaded();
@@ -70,13 +71,20 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
             if (const auto* kv = state.ctx->engine->kv_cache()) {
                 kv_blocks = kv->total_blocks();
                 kv_block_size = kv->block_size();
+                kv_ceiling = kv->ceiling_blocks();
             }
         }
         lock.unlock();
     } else {
         loaded = state.model_status_snapshot().loaded;  // queue_depth stays -1 (unknown)
     }
-    const std::string unservable = health_unservable_reason(faulted, kv_floored, kv_blocks, kv_block_size);
+    // A growable pool that started small is not the same state as one stuck
+    // there: it heals when the card frees, so a client should wait rather than
+    // restart it, and an orchestrator must not be told to recycle a server that
+    // is recovering on its own.
+    const bool can_grow = kv_ceiling > kv_blocks;
+    const std::string unservable = health_unservable_reason(faulted, kv_floored && !can_grow, kv_blocks,
+                                                            kv_block_size);
     json body = {{"status", unservable.empty() ? "ok" : "unhealthy"},
                  {"model_loaded", loaded},
                  {"queue_depth", queue},
@@ -87,12 +95,15 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         body["kv_blocks_total"] = kv_blocks;
         body["kv_block_size"] = kv_block_size;
         body["kv_capacity_tokens"] = static_cast<long long>(kv_blocks) * kv_block_size;
+        // The ceiling a growable pool may still reach. Equal to the total for a
+        // fixed pool, so a caller can compare the two rather than test a flag.
+        body["kv_ceiling_blocks"] = kv_ceiling;
     }
     if (!unservable.empty()) {
         // A client has to tell a permanent 503 from a transient one, or it
         // retries a condition retrying cannot fix and burns its budget doing
         // it. The code is the stable half; the detail is for the operator.
-        body["code"] = health_unservable_code(faulted, kv_floored);
+        body["code"] = health_unservable_code(faulted, kv_floored && !can_grow);
         body["detail"] = unservable;
         res.status = 503;  // let orchestrators restart a wedged server (#874)
     }

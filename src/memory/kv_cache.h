@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
 #include <vector>
 
 namespace imp {
@@ -19,8 +20,22 @@ static constexpr int kNVFP4Group = 16;
 
 class KVCache {
 public:
+    // `ceiling_blocks` > `max_blocks` asks for a GROWABLE pool: address space
+    // is reserved for the ceiling, physical memory is committed for
+    // `max_blocks`, and try_grow_to() commits more later. Address space costs
+    // nothing, so the ceiling is what the configuration wants and `max_blocks`
+    // is only what fits right now.
+    //
+    // The point is a pool that is no longer sized once, at the moment when the
+    // free-VRAM reading is least trustworthy. A server started while another
+    // process still holds the card lands on the rescue floor and stays there
+    // for its whole life; a growable pool heals when the card frees.
+    //
+    // 0 (the default) keeps the fixed pool, as does a device or build without
+    // virtual memory management. Growth is then simply never available and
+    // every other behaviour is bit-identical.
     KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks,
-            int block_size = kKVBlockSize, VRAMAllocator* alloc = nullptr);
+            int block_size = kKVBlockSize, VRAMAllocator* alloc = nullptr, int ceiling_blocks = 0);
 
     // Per-layer-shape constructor (Gemma 4 dual attention geometry).
     // n_kv_heads_per_layer[l] and head_dim_per_layer[l] define layer l's
@@ -35,8 +50,21 @@ public:
     // interpret block_id in the layer's group space (per-layer offsets).
     KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
             const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
-            VRAMAllocator* alloc, const std::vector<char>& layer_is_swa = {}, int swa_max_blocks = 0);
+            VRAMAllocator* alloc, const std::vector<char>& layer_is_swa = {}, int swa_max_blocks = 0,
+            int ceiling_blocks = 0);
     ~KVCache();
+
+    // How many blocks this pool could grow to. Equals total_blocks() unless it
+    // was built growable and has not reached its ceiling.
+    int ceiling_blocks() const { return max_blocks_; }
+
+    // Commit memory for at least `wanted` blocks and make them allocatable.
+    // Returns the capacity afterwards, which is what the caller must believe:
+    // a partial growth is a real, servable capacity and not a failure.
+    //
+    // Costs one driver mapping call per layer region, measured at 1.18 ms per
+    // 256 MiB, so callers grow in coarse steps rather than per block.
+    int try_grow_to(int wanted);
 
     // Block allocation / deallocation
     int allocate_block();
@@ -130,6 +158,20 @@ private:
     // uniform stride cannot express (BlockPool::open_slots).
     BlockPool blocks_;
     void* pool_ = nullptr;  // single contiguous GPU allocation (K+V)
+    // Held only by a growable pool: the reservation whose committed prefix per
+    // layer region grows. Empty for the fixed path, which keeps using pool_
+    // from the allocator exactly as before.
+    Region region_;
+    bool growable_ = false;
+    int committed_blocks_ = 0;  // blocks whose memory is backed in every layer
+    // What may be handed out. Mirrored here rather than read from the block
+    // pool because admission asks per pending request per step, and the pool's
+    // accessor takes the lock that allocate/free contend for.
+    std::atomic<int> usable_blocks_{0};
+
+    int plan_growth_(int max_blocks, int ceiling_blocks);
+    bool reserve_pool_(size_t total_bytes, int fixed_blocks);
+    int commit_blocks_(int blocks);
 
     // Per-layer KV shapes and offsets (for Gemma 4 dual attention geometry).
     // If empty, all layers use the scalar n_kv_heads_/head_dim_/block_bytes_.

@@ -185,8 +185,16 @@ hold without scraping `/metrics`:
 ```json
 {"status": "unhealthy", "code": "kv_pool_floored",
  "model_loaded": true, "queue_depth": 0, "suspended": false,
- "kv_blocks_total": 16, "kv_block_size": 32, "kv_capacity_tokens": 512}
+ "kv_blocks_total": 16, "kv_block_size": 32, "kv_capacity_tokens": 512,
+ "kv_ceiling_blocks": 16}
 ```
+
+`kv_ceiling_blocks` is what the pool may still grow to. Equal to
+`kv_blocks_total` means a fixed pool at its final size; greater means it is
+growable and has not got there yet (`kv_cache.growable`). A pool that is small
+**and** can still grow is not reported as unhealthy at all: it heals as the card
+frees, and a client should wait for the total to climb rather than restart the
+server.
 
 This exists because the quiet version of that state cost an operator an
 afternoon: `/health` said ok, `/v1/models` kept advertising 131 072 tokens, and

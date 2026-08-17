@@ -1,4 +1,5 @@
 #include "memory/kv_cache.h"
+#include "memory/backend.h"
 #include "memory/vram_allocator.h"
 #include "memory/mem_account.h"
 #include "runtime/graph_diag.h"
@@ -26,7 +27,7 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks, int block_size,
-                 VRAMAllocator* alloc)
+                 VRAMAllocator* alloc, int ceiling_blocks)
     : n_layers_(n_layers),
       n_kv_heads_(n_kv_heads),
       head_dim_(head_dim),
@@ -37,25 +38,33 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
       block_bytes_((dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV)
                        ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
                        : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim * dtype_size(dtype))) {
-
-    // Allocate contiguous GPU pool — K+V (2x)
+    // Growable: every offset below is computed from max_blocks_, so the CEILING
+    // has to be the stride. What is initially usable is the block count the
+    // caller could afford, tracked by the id space rather than by the layout.
+    const int usable = plan_growth_(max_blocks, ceiling_blocks);
     size_t total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * block_bytes_;
-    if (alloc_) {
-        pool_ = alloc_->allocate(total, "kv_cache");
-    } else {
-        cudaError_t err = cudaMalloc(&pool_, total);
-        if (err != cudaSuccess)
-            pool_ = nullptr;
+    if (!reserve_pool_(total, usable)) {
+        // max_blocks_ is back to the fixed size, so the pool below is the one
+        // that was actually affordable.
+        total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * block_bytes_;
+        if (alloc_) {
+            pool_ = alloc_->allocate(total, "kv_cache");
+        } else {
+            cudaError_t err = cudaMalloc(&pool_, total);
+            if (err != cudaSuccess)
+                pool_ = nullptr;
+        }
+        if (!pool_) {
+            char msg[256];
+            std::snprintf(msg, sizeof(msg), "KVCache: cudaMalloc failed for %.2f MiB (out of memory)",
+                          static_cast<double>(total) / (1024.0 * 1024.0));
+            throw std::runtime_error(msg);
+        }
+        // Zero-initialize the pool so fresh blocks start clean
+        IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
+    } else if (commit_blocks_(usable) != usable) {
+        throw std::runtime_error("KVCache: growable pool could not commit its initial blocks");
     }
-    if (!pool_) {
-        char msg[256];
-        std::snprintf(msg, sizeof(msg), "KVCache: cudaMalloc failed for %.2f MiB (out of memory)",
-                      static_cast<double>(total) / (1024.0 * 1024.0));
-        throw std::runtime_error(msg);
-    }
-
-    // Zero-initialize the pool so fresh blocks start clean
-    IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
     // Attribution comes from VRAMAllocator::allocate() now, under the "kv_cache"
     // tag — noting it here as well double-counted the pool.
 
@@ -99,8 +108,9 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
 
     // Block ids + refcounts. Slots-only: this class keeps the memory (the
     // layout is layer-major and cannot be expressed as a uniform stride).
-    if (blocks_.open_slots(max_blocks_) != MemError::Ok)
+    if (blocks_.open_slots(usable) != MemError::Ok)
         throw std::runtime_error("KVCache: block id space init failed");
+    usable_blocks_.store(usable, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,9 +118,19 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
 // ---------------------------------------------------------------------------
 KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
                  const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
-                 VRAMAllocator* alloc, const std::vector<char>& layer_is_swa, int swa_max_blocks)
-    : n_layers_(n_layers), max_blocks_(max_blocks), block_size_(block_size), dtype_(dtype), alloc_(alloc),
-      layer_is_swa_(layer_is_swa), swa_max_blocks_(swa_max_blocks) {
+                 VRAMAllocator* alloc, const std::vector<char>& layer_is_swa, int swa_max_blocks,
+                 int ceiling_blocks)
+    : n_layers_(n_layers),
+      max_blocks_(max_blocks),
+      block_size_(block_size),
+      dtype_(dtype),
+      alloc_(alloc),
+      layer_is_swa_(layer_is_swa),
+      swa_max_blocks_(swa_max_blocks) {
+    // Before the offset loop below: it strides by layer_capacity(l), which is
+    // max_blocks_ for a full-attention layer, and the stride has to be the
+    // ceiling or growth would move every layer's data.
+    const int usable = plan_growth_(max_blocks, ceiling_blocks);
     bool packed_4bit = (dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV);
     size_t elem_size = packed_4bit ? 0  // 4-bit modes use /2 below
                                    : dtype_size(dtype);
@@ -128,11 +148,18 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
     };
 
     // Compute per-layer block bytes and offsets.
+    //
+    // In a lambda because it strides by layer_capacity(l), which reads
+    // max_blocks_ — the CEILING while a growable pool is intended. If the
+    // reservation is then declined, the stride has to go back to the affordable
+    // size and the whole layout with it, or the offsets would describe a pool
+    // that was never allocated.
     layer_block_bytes_.resize(n_layers_);
     layer_k_offset_.resize(n_layers_);
     layer_v_offset_.resize(n_layers_);
-    size_t running = 0;
     int max_nkv = 0, max_hd = 0;
+    auto compute_layout = [&]() -> size_t {
+    size_t running = 0;
     for (int l = 0; l < n_layers_; l++) {
         int nkv = (l < (int)n_kv_heads_per_layer.size()) ? n_kv_heads_per_layer[l] : 0;
         int hd = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
@@ -156,7 +183,9 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         layer_v_offset_[l] = running;
         running += layer_capacity(l) * bb;
     }
-    size_t total = running;
+    return running;
+    };
+    size_t total = compute_layout();
 
     // Populate scalar fallback fields with max values (for external queries)
     n_kv_heads_ = max_nkv;
@@ -165,20 +194,25 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
                                : (static_cast<size_t>(block_size_) * max_nkv * max_hd * elem_size);
 
     // Allocate single contiguous pool
-    if (alloc_) {
-        pool_ = alloc_->allocate(total, "kv_cache");
-    } else {
-        cudaError_t err = cudaMalloc(&pool_, total);
-        if (err != cudaSuccess)
-            pool_ = nullptr;
+    if (!reserve_pool_(total, usable)) {
+        total = compute_layout();  // max_blocks_ is back to the affordable size
+        if (alloc_) {
+            pool_ = alloc_->allocate(total, "kv_cache");
+        } else {
+            cudaError_t err = cudaMalloc(&pool_, total);
+            if (err != cudaSuccess)
+                pool_ = nullptr;
+        }
+        if (!pool_) {
+            char msg[256];
+            std::snprintf(msg, sizeof(msg), "KVCache(per-layer): cudaMalloc failed for %.2f MiB",
+                          static_cast<double>(total) / (1024.0 * 1024.0));
+            throw std::runtime_error(msg);
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
+    } else if (commit_blocks_(usable) != usable) {
+        throw std::runtime_error("KVCache(per-layer): growable pool could not commit its initial blocks");
     }
-    if (!pool_) {
-        char msg[256];
-        std::snprintf(msg, sizeof(msg), "KVCache(per-layer): cudaMalloc failed for %.2f MiB",
-                      static_cast<double>(total) / (1024.0 * 1024.0));
-        throw std::runtime_error(msg);
-    }
-    IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
 
     // INT8/INT4 per-layer scales not yet supported in per-layer mode.
     if (dtype == QType::INT8 || dtype == QType::INT4) {
@@ -241,8 +275,12 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         scale_block_bytes_ = static_cast<size_t>(block_size_) * max_nkv * (max_hd / kNVFP4Group);
     }
 
-    if (blocks_.open_slots(max_blocks_) != MemError::Ok)
+    // `usable`, never max_blocks_: on a growable pool max_blocks_ is the
+    // CEILING, and handing out an id whose memory is not committed yet faults
+    // on the first write into that block.
+    if (blocks_.open_slots(usable) != MemError::Ok)
         throw std::runtime_error("KVCache(per-layer): block id space init failed");
+    usable_blocks_.store(usable, std::memory_order_relaxed);
 
     // SWA group: separate id space, separate pool. Not a partition of the
     // global one — a ref must not be able to cross between them.
@@ -279,13 +317,135 @@ KVCache::~KVCache() {
             IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_));
         scale_pool_ = nullptr;
     }
-    if (pool_) {
+    if (region_) {
+        MemAccount::instance().note("kv_cache", -static_cast<std::ptrdiff_t>(region_.committed()));
+        region_.reset();  // unmaps and releases every committed chunk
+        pool_ = nullptr;
+    } else if (pool_) {
         if (alloc_)
             alloc_->free(pool_);
         else
             IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Growable pool
+// ---------------------------------------------------------------------------
+
+// Decide the layout stride. Returns how many blocks are usable to begin with.
+//
+// Growth is refused rather than faked when the device has no virtual memory
+// management: a pool that reports a ceiling it can never reach would make
+// admission wait for memory that is not coming.
+int KVCache::plan_growth_(int max_blocks, int ceiling_blocks) {
+    if (ceiling_blocks <= max_blocks || vmm_backend() == nullptr)
+        return max_blocks;
+    max_blocks_ = ceiling_blocks;  // the stride, and the ceiling
+    growable_ = true;
+    return max_blocks;
+}
+
+// Reserve address space for the ceiling. False means "not growable", and the
+// caller falls back to the fixed allocation it would have made anyway — a
+// reservation failure must not turn into a load failure, because the fixed
+// path can still serve.
+bool KVCache::reserve_pool_(size_t total_bytes, int fixed_blocks) {
+    if (!growable_)
+        return false;
+    Backend* be = vmm_backend();
+    if (be == nullptr)
+        return false;
+    auto res = be->acquire_growable(total_bytes, 0, 256, RegionTag::KvBlockPool);
+    if (!res) {
+        IMP_LOG_WARN(
+            "KV cache: could not reserve %.0f MiB of address space for a growable pool "
+            "(%s); falling back to a fixed pool of %d blocks",
+            total_bytes / (1024.0 * 1024.0), mem_error_name(res.error), fixed_blocks);
+        // Put the stride back before the caller sizes its fixed allocation from
+        // it. Leaving the ceiling in place would allocate the pool this machine
+        // has just said it could not even reserve address space for.
+        growable_ = false;
+        max_blocks_ = fixed_blocks;
+        return false;
+    }
+    region_ = std::move(res.region);
+    pool_ = region_.base();
+    return true;
+}
+
+// Commit the memory that blocks [0, blocks) occupy, in every layer's region.
+// Returns the number of blocks actually backed, which is what the caller must
+// believe: a growth that got halfway is half a pool, not a failure.
+//
+// One call per layer region, because the pool is laid out per layer and what
+// grows is every layer at once, not the end of one buffer.
+int KVCache::commit_blocks_(int blocks) {
+    if (!region_ || blocks <= 0)
+        return 0;
+    Backend* be = vmm_backend();
+    const char* base = static_cast<const char*>(pool_);
+    const size_t before = region_.committed();
+    const int first_new = committed_blocks_;  // what to zero, and only that
+    for (int l = 0; l < n_layers_; l++) {
+        const size_t bb = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
+        if (bb == 0)
+            continue;  // a non-attention layer in a hybrid holds no KV
+        const size_t want = static_cast<size_t>(blocks) * bb;
+        const size_t k_off = static_cast<const char*>(k_ptr(l, 0)) - base;
+        const size_t v_off = static_cast<const char*>(v_ptr(l, 0)) - base;
+        if (be->commit_range(region_, k_off, want) != MemError::Ok ||
+            be->commit_range(region_, v_off, want) != MemError::Ok) {
+            // Stop at the first layer that cannot be backed. Blocks are only
+            // usable when EVERY layer has memory for them, so the honest
+            // capacity is the one that was fully committed before this.
+            const size_t added = region_.committed() - before;
+            MemAccount::instance().note("kv_cache", static_cast<std::ptrdiff_t>(added));
+            return committed_blocks_;
+        }
+    }
+    const size_t added = region_.committed() - before;
+    if (added > 0)
+        MemAccount::instance().note("kv_cache", static_cast<std::ptrdiff_t>(added));
+    // Fresh blocks start clean, exactly as the fixed pool's one big memset
+    // guarantees. Driver-committed pages carry no such promise, and a block
+    // handed out with stale bytes in its unused tail is the kind of difference
+    // that shows up as rare, unreproducible output rather than as an error.
+    // Only the new range: rezeroing the old one would erase live KV.
+    for (int l = 0; l < n_layers_ && blocks > first_new; l++) {
+        const size_t bb = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
+        if (bb == 0)
+            continue;
+        const size_t bytes = static_cast<size_t>(blocks - first_new) * bb;
+        IMP_CUDA_CHECK_LOG(cudaMemset(k_ptr(l, first_new), 0, bytes));
+        IMP_CUDA_CHECK_LOG(cudaMemset(v_ptr(l, first_new), 0, bytes));
+    }
+    committed_blocks_ = blocks;
+    return blocks;
+}
+
+int KVCache::try_grow_to(int wanted) {
+    const int have = blocks_.num_blocks();
+    if (!growable_ || wanted <= have)
+        return have;
+    const int target = std::min(wanted, max_blocks_);
+    if (target <= have)
+        return have;
+    const int got = commit_blocks_(target);
+    if (got <= have)
+        return have;
+    if (blocks_.grow_slots(got) != MemError::Ok)
+        return have;
+    // Published only after the ids exist: a reader that saw the new capacity
+    // first would admit a request the pool cannot yet hand blocks for.
+    usable_blocks_.store(got, std::memory_order_release);
+    IMP_LOG_INFO(
+        "KV cache: grew %d -> %d blocks (%.0f tokens, %.0f MiB committed of a %d-block "
+        "ceiling)",
+        have, got, static_cast<double>(got) * block_size_, region_.committed() / (1024.0 * 1024.0),
+        max_blocks_);
+    return got;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +554,10 @@ void* KVCache::v_ptr(int layer, int block_id) {
 
 int KVCache::num_free_blocks() const { return blocks_.free_count(); }
 
-int KVCache::total_blocks() const { return max_blocks_; }
+// What may be handed out, which is the whole pool unless it is growable and
+// has not reached its ceiling yet. Admission reads this, so it must never
+// report memory that is reserved but not committed.
+int KVCache::total_blocks() const { return usable_blocks_.load(std::memory_order_relaxed); }
 
 // ---------------------------------------------------------------------------
 // Accessors

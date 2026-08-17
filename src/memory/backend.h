@@ -183,6 +183,22 @@ public:
     // Returns MemError::NotGrowable on backends that cannot (cudaMalloc).
     virtual MemError commit(Region& region, size_t new_committed) = 0;
 
+    // Commit (or release) one interior range of a growable region.
+    //
+    // A paged pool does not grow at its end. The KV pool lays its blocks out
+    // per layer, so adding blocks extends every layer's sub-range at once and
+    // the committed set is a set of interior prefixes, not one. commit() alone
+    // could only express that by committing everything up to the last layer,
+    // which is the whole reservation.
+    //
+    // `offset` and `bytes` are rounded OUT to the backend's granularity, so a
+    // caller must keep its sub-ranges granule-aligned if two of them must not
+    // share pages. The KV pool pads its per-layer strides for exactly that
+    // reason: padding costs address space, which is free, and never physical
+    // memory.
+    virtual MemError commit_range(Region& region, size_t offset, size_t bytes);
+    virtual MemError decommit_range(Region& region, size_t offset, size_t bytes);
+
     virtual BackendStats stats() const = 0;
 
     // Installed hard cap in bytes (--vram-budget); 0 = uncapped.
@@ -216,5 +232,13 @@ private:
 // See §A3.1 for why VMM is scoped to the KV pool and gated on a WSL2 spike
 // rather than being the default here.
 Backend& cuda_malloc_backend();
+
+// The growable backend (CUDA VMM), or nullptr where the device cannot do it.
+// A pointer rather than a reference because "this card has no virtual memory
+// management" is a real answer that callers have to be able to fall back from,
+// not a startup failure. See vmm_backend.cpp for what was measured on sm_120a
+// before it was trusted, in particular that a captured CUDA graph survives
+// growth and that decommit actually returns VRAM on WSL2.
+Backend* vmm_backend();
 
 }  // namespace imp

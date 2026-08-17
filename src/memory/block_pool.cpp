@@ -73,6 +73,24 @@ MemError BlockPool::open_slots(int num_blocks) {
     return MemError::Ok;
 }
 
+MemError BlockPool::grow_slots(int new_num_blocks) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!open_ || block_bytes_ != 0)
+        return MemError::InvalidArgument;  // slot-only pools; a backed pool owns memory
+    if (new_num_blocks <= num_blocks_)
+        return MemError::InvalidArgument;
+    // Append ids above the existing range. Nothing below moves, so every
+    // outstanding BlockRef, every block table and every prefix-cache entry
+    // keeps pointing at the same block: growth must be invisible to anything
+    // already holding a reference.
+    refcount_.resize(static_cast<size_t>(new_num_blocks), 0);
+    free_list_.reserve(free_list_.size() + static_cast<size_t>(new_num_blocks - num_blocks_));
+    for (int i = new_num_blocks - 1; i >= num_blocks_; --i)
+        free_list_.push_back(i);
+    num_blocks_ = new_num_blocks;
+    return MemError::Ok;
+}
+
 void BlockPool::close() {
     std::lock_guard<std::mutex> lock(mu_);
     if (!open_)

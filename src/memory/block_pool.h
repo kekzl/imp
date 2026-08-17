@@ -106,6 +106,12 @@ public:
     // was. See docs/internals/MEMORY.md B2/D10.
     [[nodiscard]] MemError open_slots(int num_blocks);
 
+    // Add ids above the current range, for a pool whose memory grew underneath
+    // it. Slot-only pools only: a backed pool owns its Region and would have to
+    // grow that too. Existing ids and refcounts are untouched, so growth is
+    // invisible to every outstanding BlockRef.
+    [[nodiscard]] MemError grow_slots(int new_num_blocks);
+
     // Release the region. Asserts (debug) that no refs are outstanding — a
     // non-zero count here is exactly the "block outlived its request" bug.
     void close();

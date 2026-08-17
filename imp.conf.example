@@ -120,6 +120,19 @@ allow_nondeterministic_fp8  = false
 fp8_auto_legacy             = false
 # BitDecoding TC path for NVFP4 paged-attention QK (experimental).
 bitdecoding_qk              = false
+
+# Growable KV pool: reserve address space for the pool this configuration asks
+# for, commit what the card can spare now, commit more as it frees. Fixes a
+# server started while another process still holds the card, which otherwise
+# lands on the KV rescue floor and stays there for its whole life. Needs CUDA
+# virtual memory management; without it the pool is fixed, as before.
+growable                    = false
+# Percent of the planned pool to commit at startup when growable. 100 keeps the
+# clamped size; lower starts deliberately small and grows into demand, which is
+# the only way to be sure the pool is resident: on WSL2 a successful allocation
+# proves nothing, and a pool that spilled into host memory decodes at a fraction
+# of the bandwidth with nothing reporting an error.
+growable_initial_pct        = 100
 # BitDecoding residual FP16 cache for the newest N tokens (0 = disabled;
 # typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
 bitdecoding_residual_tokens = 0

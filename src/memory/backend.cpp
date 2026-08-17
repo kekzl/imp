@@ -175,6 +175,10 @@ AcquireResult Backend::acquire(size_t bytes, size_t alignment, RegionTag tag) {
     return res;
 }
 
+MemError Backend::commit_range(Region&, size_t, size_t) { return MemError::NotGrowable; }
+
+MemError Backend::decommit_range(Region&, size_t, size_t) { return MemError::NotGrowable; }
+
 MemError Backend::do_acquire_growable(size_t, size_t, size_t, RegionTag, void**) {
     return MemError::NotGrowable;
 }
