@@ -132,6 +132,52 @@ The batch=1 *competitive campaigns* are closed as programs -- every lever they l
 - **FP8 SSM projection sidecar** (#949) -- per-row-scale FP8 for GDN in/out projections; Qwen3.6-35B NVFP4 decode +19% (tg ~320). Extended to GGUF hybrids' Q8_0-kept GDN projections (dequant→FP8 at init): 35B UD-Q4_K_M decode +21% (tg 272, ahead of llama.cpp) -- closed the last decode combo where llama.cpp led.
 - **Speculative decoding economics** (#852/#862-#866) -- hybrid-safe verify + MTP drafts; echo-heavy agent workloads up to +156% on 27B.
 
+### The MTP verify on a GDN hybrid, decomposed (2026-08-17)
+
+Prompted by a report that an RTX 5060 Ti gets +85% from MTP-2 on Qwen3.8-27B
+while imp measured a loss on a 5090. The comparison is not the one it looks
+like: his 47.4 tok/s is *with* MTP and his baseline is 25.7, while imp's ~84 is
+*without*. Both engines sit near their memory roofline (84% and 93%); the 4x
+bandwidth is the difference. What is real is that the same absolute draft
+overhead amortises against his 39 ms step and not against our 11.8 ms one -- a
+faster card makes an inefficient drafter relatively more expensive.
+
+Measured per verify, Qwen3.8-27B-NVFP4, k=2, guard off, over 300 verifies:
+
+| phase | before #1455 | after | note |
+|---|---:|---:|---|
+| chunk forward (captured, 3 rows) | 17.8 ms | 17.8 ms | against an 11.8 ms decode step |
+| replay of the accepted prefix | 25.1 ms | 17.2 ms | fires in ~37-48% of verifies |
+| argmax + D2H + rollback | 16.4 ms | 10.7 ms | includes the replay |
+| decode | 64.3 tok/s | 84.4 tok/s | 83.7 without MTP |
+
+**Three levers remain, each worth 4-6 ms of a 28.5 ms verify.** MTP needs the
+verify below 26.7 ms to pay at 2.26 emitted per verify, so any one of them
+would flip it from break-even to a win:
+
+1. **Kill the remaining replay.** On `matched == 0` the state needed is the one
+   after row 0, which the GDN scan already holds in registers -- it commits at a
+   device-specified row (`d_real_n`) for padding. Writing a second snapshot at
+   row 0 costs one extra 151 MiB slab and removes the forward entirely for
+   ~37% of verifies. The commit point in `gdn_scan_fused_kernel` is six lines.
+2. **The 4.3 ms of argmax + D2H + rollback** is a host round-trip per verify.
+   Deciding acceptance on device would remove it, at the cost of a
+   conditional-graph redesign of the accept path.
+3. **The chunk forward at 17.8 ms for 3 rows** against 11.8 ms for one. A
+   bandwidth-bound decode reads its weights once either way, so 6 ms scales with
+   something else; unprofiled.
+
+Two findings that are not speed:
+
+- **Speculation does not reproduce the non-speculative greedy output on this
+  model.** Two of three prompts diverge, first at character 79 of 1026, with
+  `deterministic_gemm` on both arms and a stable control. Predates #1455. See
+  [`LIMITATIONS.md`](LIMITATIONS.md).
+- **The economics guard is right and its constant is too coarse.** 4.0 emitted
+  per verify was derived when the verify ran eagerly; the measured break-even is
+  now 2.42. It should be derived from `verify_wall_ms / decode_step_ms` rather
+  than pinned, which is what the comment beside it already asks for.
+
 **Candidate, not committed: CPU-resident cold experts (no measurement yet).**
 
 A MoE with a small active set touches only a fraction of its weights per token; the rest occupies VRAM without ever being read on that step. The idea is not to *stream* those experts over PCIe — at ~55 GB/s effective that is far too slow once 20B+ is active per token — but to compute the cold ones **on the CPU with AVX-512** while the hot ones stay resident on the GPU. ktransformers demonstrates the shape carries in practice. On this box (9800X3D, DDR5-6000) it is the difference between comfortably running a 30B-A3B and reaching the 80B-120B class — [`GOAL.md`](GOAL.md) now names that as the ambition for MoE — which no amount of kernel work on the GPU side can buy.
