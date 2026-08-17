@@ -58,6 +58,11 @@ public:
     // was built growable and has not reached its ceiling.
     int ceiling_blocks() const { return max_blocks_; }
 
+    // Physical memory currently committed by a growable pool, 0 for a fixed
+    // one. What the pool actually costs right now, as opposed to the address
+    // space it reserved.
+    size_t committed_bytes() const;
+
     // Commit memory for at least `wanted` blocks and make them allocatable.
     // Returns the capacity afterwards, which is what the caller must believe:
     // a partial growth is a real, servable capacity and not a failure.

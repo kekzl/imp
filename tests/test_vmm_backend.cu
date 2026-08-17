@@ -253,3 +253,37 @@ TEST_F(VmmBackendTest, PerLayerPoolAlsoStartsAtWhatIsCommitted) {
 }
 
 }  // namespace
+
+namespace {
+
+// A pool whose layers are half sliding-window costs less to grow, because a
+// windowed layer's region holds only its window. Measured rather than assumed:
+// capping the per-layer commit at that window changes nothing (the same 34 MiB
+// either way), so this asserts the layout property that is real and not a guard
+// that is not.
+TEST_F(VmmBackendTest, WindowedLayersMakeAGrownPoolCheaper) {
+    const std::vector<int> nkv(4, 8), hd(4, 128);
+    auto grown_bytes = [&](const std::vector<char>& is_swa, int swa_blocks) {
+        KVCache kv(/*n_layers=*/4, nkv, hd, QType::F16, /*max_blocks=*/32, /*block_size=*/16,
+                   /*alloc=*/nullptr, is_swa, swa_blocks, /*ceiling=*/256);
+        EXPECT_EQ(kv.try_grow_to(200), 200);
+        return kv.committed_bytes();
+    };
+    const size_t all_full = grown_bytes({}, 0);
+    const size_t half_windowed = grown_bytes({1, 0, 1, 0}, 24);
+    ASSERT_GT(all_full, 0u);
+    EXPECT_LT(half_windowed, all_full);
+
+    // Blocks in both kinds of layer are backed after the growth.
+    const std::vector<char> is_swa = {1, 0, 1, 0};
+    KVCache kv(/*n_layers=*/4, nkv, hd, QType::F16, /*max_blocks=*/32, /*block_size=*/16,
+               /*alloc=*/nullptr, is_swa, /*swa_max_blocks=*/24, /*ceiling=*/256);
+    ASSERT_EQ(kv.try_grow_to(200), 200);
+    write_pattern(kv.k_ptr(1, 199), kv.block_bytes(), 0x5E);
+    write_pattern(kv.k_ptr(0, 23), kv.block_bytes(), 0x2D);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+    EXPECT_EQ(count_mismatches(kv.k_ptr(1, 199), kv.block_bytes(), 0x5E), 0u);
+    EXPECT_EQ(count_mismatches(kv.k_ptr(0, 23), kv.block_bytes(), 0x2D), 0u);
+}
+
+}  // namespace
