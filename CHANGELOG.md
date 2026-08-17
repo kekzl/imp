@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-08-17
+
 ### Fixed
 
 - **A sharded compressed-tensors checkpoint no longer loses its MTP draft
