@@ -118,6 +118,11 @@ Measured on Qwen3.8-27B, one session grown to ~8k tokens over 74 turns:
 | 260 | several turns with empty `content`, one reply that was a single non-Latin token |
 | 600 | **74 of 74 turns clean**, every recall correct |
 
+Not one model's quirk either: Qwen3.6-35B-A3B runs the same 54-turn probe with
+53 turns clean at `max_tokens` 600, and its one failure is the same shape, a
+`wrapup` turn cut off mid-sentence at `finish_reason: length` with 2 395
+characters of thinking behind it.
+
 It is the model, not the engine: the same conversation on vLLM with the same
 checkpoint degenerates the same way, only visibly, because vLLM has no reasoning
 parser and streams the thinking into `content` instead. A fixed conversation
