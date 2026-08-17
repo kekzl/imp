@@ -221,10 +221,18 @@ would flip it from break-even to a win:
    | `gemv_nvfp4_kpar_mb_fp16` | 8919 ms (26.0 %) | 17045 ms (44.1 %) |
    | per launch | 38.7 us | 38.6 us |
 
-   The per-launch cost is identical, so the chunk is not slower at three rows
-   and its bytes do not move at a worse rate. There are 92 % more launches. The
-   whole 12.8 % that MTP costs is that one kernel, which is the batched
-   spec-verify GEMM, and everything else stays within baseline growth.
+   The per-launch cost is identical, so the chunk is not slower at three rows.
+   ~~There are 92 % more launches [per emitted token].~~
+
+   **WITHDRAWN 2026-08-18 by its author.** The per-token normalisation behind
+   that claim divided by 16384 tokens, taken from the benchmark's
+   `tg 8192 tokens avg 0.00 ms ( 0.00 tok/s) [2 reps]` line. That line is the
+   REQUEST, and its `0.00 ms` says the phase produced no timing. At the measured
+   ~256 launches per forward, 230400 launches is about 1100 forwards, so the
+   arms emitted on the order of a thousand tokens, not 16384. The absolute
+   kernel times stand; every per-token figure derived from them does not, and
+   neither does the direction of the comparison. Superseded by the four-arm
+   table below, which counts tokens from the API responses.
 
    **The accounting error underneath all three items: a verify replaces a decode
    step only when the draft is accepted.** On rejection it is additional. So the
@@ -233,6 +241,75 @@ would flip it from break-even to a win:
    is why the repair path is not where the money is, and why the chain-length
    saturation in [`LIMITATIONS.md`](LIMITATIONS.md) is a consequence rather than
    a separate result.
+
+### The four-arm table (2026-08-18)
+
+Four server arms, `speculative.ngram=false` so the MTP head is the only drafter,
+`server.prefix_cache=false`, same three prompts, nsys per arm, **tokens counted
+from the API responses**:
+
+| arm | rows in chunk | tokens | verifies | kernel ms/token | emitted/verify | cost/verify |
+|---|---:|---:|---:|---:|---:|---:|
+| k=0 (no speculation) | 1 | 723 | 0 | 11.39 | n/a | 11.39 ms |
+| k=1 | 2 | 729 | 424 | 11.33 | 1.715 | 19.43 ms |
+| k=2 | 3 | 721 | 334 | 11.35 | 2.153 | 24.44 ms |
+| k=3 | 4 | 768 | 291 | 11.98 | 2.629 | 31.50 ms |
+
+Two facts, neither depending on a fit:
+
+- **Speculation buys no GPU time.** Kernel time per emitted token is flat across
+  k=0..2 and worse at k=3, while emitted-per-verify climbs 1.72 → 2.63. Each
+  verify costs in proportion to what it emits.
+- **Cost per verify is linear in chunk rows**: `5.36 ms + 6.53 ms x rows`, fitted
+  on four points against two parameters, residuals -0.50 / +1.01 / -0.52 / +0.01.
+  **An extra row costs 6.53 ms, 57 % of a full decode step**, where on a
+  bandwidth-bound batch-1 decode it should be near-free.
+
+At k=1 the accepted-prefix repair is structurally unreachable (it is gated on
+`0 < matched < K`), so that row is free of repair effects: a 2-row verify costs
+19.43 ms against an 11.39 ms decode, i.e. **the second row alone costs 8.04 ms**.
+
+```
+[PROV: commit=196a3384 date=2026-08-18 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=3 prompts x 256 greedy tokens per
+       arm cmd=`--set speculative.ngram=false --set speculative.mtp_k=0|1|2|3
+       --set speculative.mtp_econ_min_emit=0 --set server.prefix_cache=false`,
+       nsys -t cuda --cuda-graph-trace=node; kernel time = cuda_gpu_kern_sum
+       total, tokens from usage.completion_tokens, verifies from /metrics]
+```
+
+### Externally measured, and it closes the drafter question
+
+**vLLM 0.27.1 reaches 59.7 % MTP acceptance (418/700) on this box, this card and
+this checkpoint family** (`method: qwen3_next_mtp, num_speculative_tokens: 2`,
+resolved architecture `Qwen3_5MTP`), against imp's 58.0-64.1 % at k=2. Parity.
+Another engine gets the same acceptance from the same head, so the drafter is not
+imp's problem and the published 87 % figure describes a regime nobody has pinned.
+
+### Buried, so they are not re-run
+
+- Six drafter-accuracy hypotheses: draft lm_head precision, quantised head
+  weights, a missing `gamma = 1 + W` offset, the hidden-state convention, a RoPE
+  defect, an uninitialised MTP KV cache. All measured, all dead; detail in
+  [`LIMITATIONS.md`](LIMITATIONS.md).
+- **MoE draft head**: this checkpoint's MTP head has no experts and no router,
+  only `mlp.gate_proj/up_proj/down_proj`. The per-expert host loop cannot run.
+- **An unfused verify chunk**: per-launch cost is flat at 32.5 us across 2 and 3
+  rows, so the batched GEMV amortises its weight read as designed.
+- **The repair forward as the main cost**: unreachable at k=1, and consistent
+  with ~21 % of verifies at k=2.
+- **The async conditional-graph loop**, which MTP switches off: worth 1.0 %
+  measured (87.28 against 86.44 tok/s), not the 27-45 % assumed. The condition at
+  `engine_scheduler.cpp` that trades it for telemetry coverage is still wrong on
+  its own terms, but it is a 1 % wrong.
+
+### Withdrawn by their author
+
+- "0.72 forwards per emitted token, so speculation moves fewer bytes": the launch
+  count fell and the GPU time did not, so counting launches never measured cost.
+- The launch-count framing generally, including the 22.3 % CUTLASS share quoted
+  from a broken CSV parse (nsys kernel names contain commas inside template
+  arguments; the field must be read with a real CSV reader).
 
 Two findings that are not speed:
 
