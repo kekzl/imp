@@ -11,6 +11,21 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **The KV pool can grow into what it asked for (`kv_cache.growable`, off by
+  default).** A server started while another process still holds the card sizes
+  its pool against VRAM that has not been released yet and lands on the rescue
+  floor, where it stays for its whole life: capacity is planned once. With this,
+  address space is reserved for the pre-clamp plan and physical memory is
+  committed for the clamped number, so the pool grows when a request needs more
+  than it has and the card can spare it. Measured on this box: base address
+  invariant across growth, a captured CUDA graph still correct after 1.5 GiB was
+  committed underneath it, 1.18 ms per 256 MiB commit. `/health` reports
+  `kv_ceiling_blocks` beside the total, and a floored pool that can still grow
+  no longer answers 503, because restarting a server that is healing is wrong.
+  See [`MEMORY.md`](docs/internals/MEMORY.md) A7 step 7.
+
 ### Changed
 
 - **Quantization quality improved on both measured sizes, calibrated and not.**

@@ -53,6 +53,21 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     // prompt looped here indefinitely). Cancel up front so
                     // the caller gets a clear error instead of a 30s timeout.
                     int cap = kv_manager_->kv_cache()->total_blocks();
+                    // A growable pool is allowed to answer this with memory
+                    // rather than with a refusal. Only here, where the pool
+                    // cannot hold the request AT ALL: that is the condition a
+                    // clamped startup produces and the one no amount of
+                    // waiting fixes. Ordinary contention between requests that
+                    // each fit is left to queue, so growth never competes with
+                    // the weight caches for VRAM on a merely busy server.
+                    //
+                    // This does ask the driver for memory during serving,
+                    // which invariant I2 otherwise forbids. It is the
+                    // exception the growable pool is for, it is bounded by the
+                    // ceiling reserved at init, and it is logged when it
+                    // happens.
+                    if (blocks_needed > cap)
+                        cap = kv_manager_->kv_cache()->try_grow_to(blocks_needed);
                     if (blocks_needed > cap) {
                         IMP_LOG_ERROR(
                             "Scheduler: request %d needs %d KV blocks but cache capacity is %d "

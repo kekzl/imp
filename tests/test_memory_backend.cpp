@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "memory/backend.h"
+#include "memory/block_pool.h"
 #include "memory/fake_backend.h"
 
 #include <cstring>
@@ -312,4 +313,49 @@ TEST_F(PhaseFixture, TagNamesAndErrorNamesAreTotal) {
     EXPECT_STREQ(mem_error_name(MemError::Ok), "ok");
     EXPECT_STREQ(mem_error_name(MemError::BudgetExceeded), "budget_exceeded");
     EXPECT_STREQ(mem_error_name(MemError::NotGrowable), "not_growable");
+}
+
+// ── Slot growth: the id space grows without disturbing what is already out ──
+//
+// A KV block has several concurrent referents (the owning sequence's block
+// table, the prefix cache, the pin set). Growth that renumbered anything would
+// corrupt all of them at once and look like a model defect.
+TEST_F(PhaseFixture, SlotGrowthAppendsIdsAndLeavesLiveOnesAlone) {
+    BlockPool pool;
+    ASSERT_EQ(pool.open_slots(4), MemError::Ok);
+    BlockRef a = pool.acquire();
+    BlockRef b = pool.acquire();
+    ASSERT_TRUE(a);
+    ASSERT_TRUE(b);
+    const int a_id = a.id(), b_id = b.id();
+    EXPECT_EQ(pool.num_blocks(), 4);
+    EXPECT_EQ(pool.free_count(), 2);
+
+    ASSERT_EQ(pool.grow_slots(10), MemError::Ok);
+    EXPECT_EQ(pool.num_blocks(), 10);
+    EXPECT_EQ(pool.free_count(), 8) << "growth adds free blocks, it does not free live ones";
+    EXPECT_EQ(a.id(), a_id) << "an outstanding reference must keep its block";
+    EXPECT_EQ(b.id(), b_id);
+
+    // The new ids have to be reachable, or the pool grew on paper only.
+    std::vector<BlockRef> rest;
+    for (int i = 0; i < 8; i++) {
+        rest.push_back(pool.acquire());
+        ASSERT_TRUE(rest.back()) << "acquire " << i << " after growth";
+    }
+    EXPECT_FALSE(pool.acquire()) << "and the new capacity is still a capacity";
+}
+
+TEST_F(PhaseFixture, SlotGrowthRefusesToShrinkOrToTouchABackedPool) {
+    BlockPool pool;
+    ASSERT_EQ(pool.open_slots(8), MemError::Ok);
+    EXPECT_EQ(pool.grow_slots(8), MemError::InvalidArgument) << "not growth";
+    EXPECT_EQ(pool.grow_slots(4), MemError::InvalidArgument) << "shrinking ids would renumber";
+
+    // A pool that owns memory would have to grow the Region too; refusing is
+    // the honest answer rather than handing out ids with nothing behind them.
+    FakeBackend be;
+    BlockPool backed;
+    ASSERT_EQ(backed.open(be, 256, 4, RegionTag::KvBlockPool), MemError::Ok);
+    EXPECT_EQ(backed.grow_slots(8), MemError::InvalidArgument);
 }

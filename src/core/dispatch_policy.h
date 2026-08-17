@@ -49,6 +49,21 @@ struct KVCache {
     int bitdecoding_residual_tokens = 0;
     // BitDecoding TC path for NVFP4 paged attention QK.
     bool bitdecoding_qk = false;
+    // Growable KV pool: reserve address space for the pool the configuration
+    // asked for, commit physical memory for what the card can spare right now,
+    // and commit more as it frees up.
+    //
+    // What it fixes is a pool sized once, at the moment the free-VRAM reading
+    // is least trustworthy. A server started while another process still holds
+    // the card lands on the rescue floor and stays there for its whole life,
+    // cancelling every prompt past a few hundred tokens while reporting a
+    // successful load. With this, that server heals instead.
+    //
+    // Needs CUDA virtual memory management on the device; where that is absent
+    // the pool is fixed and everything behaves exactly as before. Growth costs
+    // one driver mapping call per layer (measured 1.18 ms per 256 MiB) and
+    // happens at most once per growth event, not per step.
+    bool growable = false;
     // SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on
     // every other layer, gemma-3 5:1 pattern) allocate only the trailing
     // window in a small dedicated block group instead of full-length KV
