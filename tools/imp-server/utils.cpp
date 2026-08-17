@@ -49,6 +49,10 @@ void send_json_error(httplib::Response& res, int status, const char* type, const
     res.set_content(dump_safe(err), "application/json");
 }
 
+bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning) {
+    return !has_tool_calls && content.empty() && !reasoning.empty();
+}
+
 bool bearer_token_matches(const std::string& authorization, const std::string& api_key) {
     const std::string expected = "Bearer " + api_key;
     // Accumulate the difference over the full expected length; do NOT early-out

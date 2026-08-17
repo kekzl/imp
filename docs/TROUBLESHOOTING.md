@@ -124,6 +124,10 @@ parser and streams the thinking into `content` instead. A fixed conversation
 replayed at identical depth (up to 5 005 prompt tokens) is answered correctly by
 both engines, so context length alone is not the trigger.
 
+The server says so when it happens: the log carries `empty content: the answer
+never started because the token budget went to reasoning`, with the amount of
+thinking and the finish reason.
+
 Reproduce with `tools/analysis/multiturn_deep.py`, which drives one growing
 session and checks every reply for the degeneration shapes.
 
