@@ -113,6 +113,21 @@ bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why
     return true;
 }
 
+Fp8SourceAction fp8_source_action(const RawTensor& weight, bool gated, bool quantize_lm_head,
+                                  std::string& why_not) {
+    if (gated) {
+        why_not = "fused Q+gate projection (--keep-attn-gate)";
+        return Fp8SourceAction::WidenToFullPrecision;
+    }
+    // Ask about the widened form. The dtype gate in should_quantize would
+    // otherwise refuse every FP8 tensor as "already quantized" before it ever
+    // looked at the role, and the roles are the whole point of this call.
+    RawTensor widened = weight;
+    widened.dtype = "BF16";
+    return should_quantize(widened, quantize_lm_head, why_not) ? Fp8SourceAction::Quantize
+                                                               : Fp8SourceAction::WidenToFullPrecision;
+}
+
 size_t nvfp4_output_bytes(int64_t N, int64_t K) {
     if (N <= 0 || K <= 0)
         return 0;

@@ -611,15 +611,16 @@ int main(int argc, char** argv) {
             for (const auto& t : src->tensors()) {
                 if (fp8_scale_names.count(t.name) || gated_q_proj.count(t.name))
                     continue;
-                // Ask the policy about the widened form, exactly as the writer
-                // does, so a tensor the writer copies through is not given a
-                // scale here — and, worse, does not drag a fused sibling's
-                // scale up with an absmax that was never quantized.
-                RawTensor probe = t;
-                if (fp8_scale_of.count(t.name))
-                    probe.dtype = "BF16";
+                // Ask the policy exactly as the writer does, so a tensor the
+                // writer keeps at full precision is not given a scale here -
+                // and, worse, does not drag a fused sibling's scale up with an
+                // absmax that was never quantized.
                 std::string why;
-                if (!quantize::should_quantize(probe, opt.quantize_lm_head, why))
+                const bool refused = fp8_scale_of.count(t.name)
+                                         ? quantize::fp8_source_action(t, false, opt.quantize_lm_head, why) !=
+                                               quantize::Fp8SourceAction::Quantize
+                                         : !quantize::should_quantize(t, opt.quantize_lm_head, why);
+                if (refused)
                     continue;
                 const std::string key = quantize::fusion_group_key(t.name);
                 if (!key.empty())
@@ -687,9 +688,13 @@ int main(int argc, char** argv) {
         std::vector<Quantized> quant_store;
         std::vector<float> scale_store;
         std::vector<std::vector<unsigned char>> folded_store;
+        // FP8 weights this tool refuses: widened here, so the buffer must outlive
+        // the descriptor that points at it.
+        std::vector<std::vector<uint16_t>> widened_store;
         quant_store.reserve(src.tensors().size());
         scale_store.reserve(src.tensors().size());
         folded_store.reserve(src.tensors().size());
+        widened_store.reserve(src.tensors().size());
         std::vector<SafeTensorsOut> out;
 
         for (const auto& t : src.tensors()) {
@@ -709,15 +714,30 @@ int main(int argc, char** argv) {
                 // must stay full precision here; only the dtype gate differs, so
                 // ask the policy about the widened form rather than duplicating
                 // the rule. An FP8 tensor it refuses is copied through as-is.
-                RawTensor as_bf16 = t;
-                as_bf16.dtype = "BF16";
                 std::string why_fp8;
-                const bool gated_fp8 = gated_q_proj.count(t.name) != 0;
-                if (gated_fp8 || !quantize::should_quantize(as_bf16, opt.quantize_lm_head, why_fp8)) {
-                    out.push_back({t.name, t.dtype, t.shape, t.data, t.nbytes});
-                    bytes_out += t.nbytes;
-                    copied_bytes_by_reason[gated_fp8 ? "fused Q+gate projection" : why_fp8] += t.nbytes;
+                if (quantize::fp8_source_action(t, gated_q_proj.count(t.name) != 0, opt.quantize_lm_head,
+                                                why_fp8) != quantize::Fp8SourceAction::Quantize) {
+                    // Its block grid was dropped above, so the E4M3 bytes cannot
+                    // travel as they are. Widen and write full precision.
+                    const size_t widened_bytes = static_cast<size_t>(t.numel()) * sizeof(uint16_t);
+                    copied_bytes_by_reason[why_fp8] += widened_bytes;
+                    bytes_out += widened_bytes;
                     n_copied++;
+                    if (ends_with(t.name, ".weight") && t.shape.size() >= 2)
+                        excluded_modules.push_back(t.name.substr(0, t.name.size() - strlen(".weight")));
+                    if (opt.dry_run) {
+                        printf("  COPY  %-58s widened from FP8: %s\n", t.name.c_str(), why_fp8.c_str());
+                        continue;
+                    }
+                    std::vector<uint16_t> h;
+                    std::string werr;
+                    if (!tensor_as_fp16(t, fp8_scale_of, plan, h, werr)) {
+                        fprintf(stderr, "  %s: %s\n", t.name.c_str(), werr.c_str());
+                        return 1;
+                    }
+                    widened_store.push_back(std::move(h));
+                    const std::vector<uint16_t>& w = widened_store.back();
+                    out.push_back({t.name, "F16", t.shape, w.data(), w.size() * sizeof(uint16_t)});
                     continue;
                 }
                 if (opt.dry_run) {

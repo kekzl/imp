@@ -217,6 +217,56 @@ TEST(Nvfp4OutputBytes, CountsPackedNibblesMicroScalesAndTensorScale) {
     EXPECT_NEAR(ratio, 32.0 / 9.0, 0.01) << "BF16 against packed+micro is 2 / (0.5 + 0.0625)";
 }
 
+// An FP8 source pairs each E4M3 weight with a block-scale grid, and the grid is
+// consumed whatever happens to the weight. So "leave this one alone" cannot mean
+// "copy its bytes": E4M3 without its scales is still valid E4M3 that means
+// something else, and nothing downstream can tell. Every refusal here must be a
+// widen.
+TEST(Fp8SourceAction, RefusedWeightsAreWidenedRatherThanCopiedRaw) {
+    std::string why;
+    const RawTensor lm_head = tensor("lm_head.weight", {248320, 5120}, "F8_E4M3");
+    EXPECT_EQ(fp8_source_action(lm_head, false, false, why), Fp8SourceAction::WidenToFullPrecision);
+    EXPECT_NE(why.find("lm_head"), std::string::npos) << "the byte report prints this reason";
+
+    // The #1159 roles, in the dtype the family that needs them ships in:
+    // DeepSeek-V3 stores its MLA latent projections as block-scaled E4M3.
+    EXPECT_EQ(fp8_source_action(tensor("model.layers.0.self_attn.kv_a_proj_with_mqa.weight", {576, 2048},
+                                       "F8_E4M3"),
+                                false, false, why),
+              Fp8SourceAction::WidenToFullPrecision);
+    EXPECT_EQ(fp8_source_action(tensor("model.layers.0.mlp.gate.weight", {64, 2048}, "F8_E4M3"), false, false,
+                                why),
+              Fp8SourceAction::WidenToFullPrecision);
+}
+
+// The caller knows this and the policy cannot: a q_proj carrying a fused output
+// gate needs its layer's o_proj to be recognised.
+TEST(Fp8SourceAction, TakesTheGatedFlagFromTheCaller) {
+    std::string why;
+    const RawTensor q = tensor("model.layers.0.self_attn.q_proj.weight", {8192, 2048}, "F8_E4M3");
+    EXPECT_EQ(fp8_source_action(q, false, false, why), Fp8SourceAction::Quantize);
+    EXPECT_EQ(fp8_source_action(q, true, false, why), Fp8SourceAction::WidenToFullPrecision);
+    EXPECT_NE(why.find("gate"), std::string::npos);
+}
+
+// The dtype gate in should_quantize refuses every FP8 tensor as "already
+// quantized". Asking it directly, rather than about the widened form, would
+// widen the entire checkpoint and quantize nothing.
+TEST(Fp8SourceAction, AsksAboutTheWidenedFormNotTheStoredDtype) {
+    std::string why;
+    const RawTensor proj = tensor("model.layers.0.mlp.down_proj.weight", {5120, 17408}, "F8_E4M3");
+    EXPECT_EQ(fp8_source_action(proj, false, false, why), Fp8SourceAction::Quantize);
+    EXPECT_FALSE(quantizes(proj)) << "the stored dtype alone says no, which is why this call exists";
+}
+
+// `--lm-head` has to reach the FP8 path too, or the flag silently does nothing
+// on an FP8 source while working on a BF16 one.
+TEST(Fp8SourceAction, HonoursTheLmHeadFlag) {
+    std::string why;
+    const RawTensor lm_head = tensor("lm_head.weight", {248320, 5120}, "F8_E4M3");
+    EXPECT_EQ(fp8_source_action(lm_head, false, true, why), Fp8SourceAction::Quantize);
+}
+
 TEST(Nvfp4OutputBytes, RefusesToInventBytesForAnEmptyMatrix) {
     // Guards the forecast against a degenerate shape adding a phantom 4 bytes
     // per tensor, which on a 1000-tensor checkpoint is a visible drift.
