@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-17
+
 ### Added
 
 - **The KV pool can grow into what it asked for (`kv_cache.growable`, off by
@@ -44,6 +46,16 @@ there instead of retelling it.
   is stable so a client can tell a permanent 503 from a retryable one. Reported
   from production, where the quiet version cost an afternoon of looking at the
   wrong component. See [`API.md`](docs/API.md).
+
+- **Speculative decoding stops paying for an eager forward it does not need.**
+  On a hybrid, a partially accepted draft re-forwards the accepted prefix to
+  rebuild the recurrent state, and that re-forward ran outside the CUDA graph:
+  25.1 ms for one or two rows against 17.8 ms for the graph-captured three-row
+  chunk it was repairing. It replays the captured graph now. On Qwen3.8-27B
+  that is 64.3 to **84.4 tok/s** on the MTP path, which takes MTP from costing
+  22 % to costing nothing against 83.7 tok/s without it. A tree-ceiling research
+  probe that scanned the whole vocabulary once per drafted token (713 us, 12 %
+  of GPU time) is now `diagnostics.mtp_tree_probe`, default off.
 
 - **The server now says when an answer was lost to thinking.** A reply with an
   empty `content` beside a full `reasoning_content` is not a defect, it is a
