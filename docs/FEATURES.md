@@ -92,6 +92,7 @@ Source: `src/core/qtype.h`.
 | TMA bulk-tensor loads | ✅ | `gemm_grouped_nvfp4_smallM.cu:65`, emits UTMALDG |
 | FlashAttention-2 style prefill, hd=128 and hd=256 | ✅ | default since #930 |
 | Paged KV cache | ✅ | default block `n=16`; the geometry is per-configuration |
+| Growable KV pool | ✅ opt-in | `kv_cache.growable`: reserves address space for the planned pool, commits what the card can spare, grows on demand. Needs CUDA virtual memory management |
 | CUDA graphs, decode | ✅ | gate asserts ≥1.3x, measured 2.28x |
 | CUDA graphs, prefill | ✅ | default on; disabled per-model when one NVFP4 weight exceeds the dequant-workspace cap |
 | continuous batching, concurrent decode | ✅ | |
