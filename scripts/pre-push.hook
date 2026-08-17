@@ -60,6 +60,15 @@ if [ "$NEEDS_VERIFY" -eq 0 ]; then
     exit 0
 fi
 
+# Both tiers below run kernels, so neither can judge anything on a busy card.
+# Checked after the "no source changes" exit above: a docs-only push must not
+# wait for a card it never touches.
+# Guarded: an installed hook outlives the branch it came from, and a checkout
+# that predates this script must still run the gate rather than die on it.
+if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
+    "$ROOT/scripts/require_free_gpu.sh" "pre-push" || exit 1
+fi
+
 if [ "$NEEDS_PERF" -eq 1 ]; then
     echo "pre-push: source changes touch the measured paths → make verify-fast (with perf gate)"
     exec make -s verify-fast

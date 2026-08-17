@@ -32,5 +32,14 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
     exit 0
 fi
 
+# A co-tenant on the card makes this stage judge the host instead of the commit,
+# and it takes a Docker build plus the full suite to say so. One rule, read by
+# this hook and by pre-push, because both end in a CUDA run.
+# Guarded: an installed hook outlives the branch it came from, and a checkout
+# that predates this script must still run the gate rather than die on it.
+if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
+    "$ROOT/scripts/require_free_gpu.sh" "pre-commit (Stage 1 / GPU)" || exit 1
+fi
+
 echo "pre-commit (Stage 1 / GPU): staged source changes → make test-gpu"
 exec make -s test-gpu
