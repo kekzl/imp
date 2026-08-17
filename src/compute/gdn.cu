@@ -37,7 +37,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
     float* __restrict__ h_state,         // [n_heads, SS, HD] FP32
     YOut* __restrict__ y_out,            // [n_tokens, n_heads * HD] FP16 or FP32
     int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout,
-    const int* __restrict__ d_real_n) {  // device chunk length (padded verify chunk) or nullptr
+    const int* __restrict__ d_real_n,    // device chunk length (padded verify chunk) or nullptr
+    float* __restrict__ h_snap,          // second state output, or nullptr
+    const int* __restrict__ d_snap_n) {  // row count h_snap is taken at
     const int h = blockIdx.x;
     if (h >= n_heads)
         return;
@@ -47,6 +49,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
     // register snapshot at the real last row — H_reg keeps evolving through
     // the pads only to define their (discarded) y values.
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
+    // Second commit row for the speculative verify: the state as of snap_n
+    // rows, written alongside the one at real_n. 0 disables it.
+    const int snap_n = (h_snap && d_snap_n) ? min(n_tokens, __ldg(d_snap_n)) : 0;
 
     // Head-to-K-group mapping. GGUF stores heads in tiled layout where head h's
     // group is `h % n_groups`. HF SafeTensors (Qwen3.5/3.6) stores heads in
@@ -181,6 +186,12 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
 #pragma unroll
             for (int s = 0; s < SS; s++)
                 H_col[s * HD] = H_reg[s];
+        }
+        if (t + 1 == snap_n) {
+            float* S_col = h_snap + static_cast<size_t>(h) * SS * HD + d;
+#pragma unroll
+            for (int s = 0; s < SS; s++)
+                S_col[s * HD] = H_reg[s];
         }
 
         // Sync before next token — the next iteration overwrites s_k/s_q in
@@ -326,12 +337,14 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
     if (head_dim_ssm == 128 && state_size == 128) {
         gdn_scan_fused_kernel<128, 128, half>
             <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
-                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
+                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
+                                             nullptr, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         gdn_scan_fused_kernel<64, 64, half>
             <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
-                                            n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
+                                            n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
+                                            nullptr, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Fallback: per-token loop (for unsupported HD/SS sizes). The host
@@ -359,17 +372,20 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
 void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int grouped_layout, const int* d_real_n) {
+                            cudaStream_t stream, int grouped_layout, const int* d_real_n, float* h_snap,
+                            const int* d_snap_n) {
     size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
     if (head_dim_ssm == 128 && state_size == 128) {
         gdn_scan_fused_kernel<128, 128, float>
             <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
-                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
+                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
+                                             h_snap, d_snap_n);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         gdn_scan_fused_kernel<64, 64, float>
             <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
-                                            n_heads, n_groups, conv_channels, grouped_layout, d_real_n);
+                                            n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
+                                            h_snap, d_snap_n);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         if (d_real_n != nullptr)

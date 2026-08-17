@@ -49,7 +49,8 @@ void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const 
                                 const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
                                 int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                                 cudaStream_t stream, int chunk_size = 64, int grouped_layout = 0,
-                                const int* d_real_n = nullptr);
+                                const int* d_real_n = nullptr, float* h_snap = nullptr,
+                                const int* d_snap_n = nullptr);
 
 // Phase 2a — WY-representation parallel delta-rule scan prototype.
 // Numerically equivalent to the sequential delta rule but factors the
@@ -119,7 +120,8 @@ void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in,
 void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int grouped_layout = 0, const int* d_real_n = nullptr);
+                            cudaStream_t stream, int grouped_layout = 0, const int* d_real_n = nullptr,
+                            float* h_snap = nullptr, const int* d_snap_n = nullptr);
 
 // ---------------------------------------------------------------------------
 // Reference multi-token GDN scan.

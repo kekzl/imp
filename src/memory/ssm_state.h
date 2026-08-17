@@ -40,6 +40,17 @@ public:
     }
     size_t per_seq_bytes() const { return per_seq_bytes_; }
 
+    // The same per-layer layout applied to an arbitrary slab of per_seq_bytes()
+    // — a snapshot scratch rather than a live sequence. The speculative verify
+    // writes a second, mid-chunk state into one of these so a partial
+    // acceptance can adopt it instead of re-forwarding to reach it.
+    void* conv_state_in(void* slab, int ssm_layer_idx) const {
+        return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_;
+    }
+    void* h_state_in(void* slab, int ssm_layer_idx) const {
+        return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_ + conv_bytes_;
+    }
+
     int max_sequences() const { return max_sequences_; }
     int n_ssm_layers() const { return n_ssm_layers_; }
     QType h_dtype() const { return h_dtype_; }

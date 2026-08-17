@@ -60,7 +60,8 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     // (pageable-source async copies stage through a driver buffer on WSL2).
     // The captured graphs bake the sub-pointers; the block is allocated once
     // per capacity, so they stay stable. Same trick for argmax+topm D2H.
-    const size_t stage_ints = 3ull * chunk_cap + 3;
+    // [tokens | positions | row_ctx_lens | ctx_len, past_len, chunk_len, snap_n]
+    const size_t stage_ints = 3ull * chunk_cap + 4;
     const size_t out_ints = static_cast<size_t>(chunk_cap) * (1 + kRowwiseTopMMax);
     // T5b for the pinned twins (memory/host_pinned.h). Wrapped in a lambda so the
     // && chain still SHORT-CIRCUITS: acquiring them up front would allocate host
@@ -97,6 +98,7 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     d_spec_context_len_ = d_spec_stage_ + 3ull * chunk_cap;
     d_spec_past_len_ = d_spec_context_len_ + 1;
     d_spec_chunk_len_ = d_spec_context_len_ + 2;
+    d_spec_snap_n_ = d_spec_context_len_ + 3;
     d_spec_topm_ = d_spec_argmax_ + chunk_cap;
     h_spec_topm_ = h_spec_argmax_.as<int32_t>() + chunk_cap;
     spec_chunk_cap_ = chunk_cap;
@@ -138,6 +140,19 @@ bool Engine::ensure_spec_state_scratch_() {
         return false;
     }
     spec_state_scratch_bytes_ = bytes;
+    // A second slab for the mid-chunk snapshot. The chunk writes the state as
+    // of its first row here alongside the committed one at the last row, so a
+    // draft that was rejected outright adopts it instead of restoring the
+    // pre-chunk state and re-forwarding a full model pass to reach it — that
+    // re-forward measures 17.2 ms against a 28.5 ms verify. Optional: without
+    // it the replay path stands, so an allocation failure is a warning.
+    if (spec_state_snap_ == nullptr && cudaMalloc(&spec_state_snap_, bytes) != cudaSuccess) {
+        IMP_LOG_WARN(
+            "spec-hybrid: snapshot slab alloc failed (%zu bytes) — partial acceptances "
+            "will re-forward instead of adopting the snapshot",
+            bytes);
+        spec_state_snap_ = nullptr;
+    }
     return true;
 }
 
@@ -151,6 +166,10 @@ int Engine::recurrent_slot_for_(int req_id) const {
 }
 
 void Engine::free_spec_buffers_() {
+    if (spec_state_snap_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(spec_state_snap_));
+        spec_state_snap_ = nullptr;
+    }
     // Captured verify graphs bake these buffer pointers — drop them first.
     free_spec_graphs_();
     if (spec_state_scratch_) {
@@ -816,6 +835,18 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             return false;
         }
         fill_recurrent_state(*req, state, /*reset=*/false, stream);
+        // Snapshot the state as of the chunk's FIRST row: that row is the last
+        // real token, so it is the state a fully rejected draft needs.
+        if (spec_state_snap_ != nullptr && d_spec_snap_n_ != nullptr) {
+            const int snap_rows = 1;
+            if (check(cudaMemcpyAsync(d_spec_snap_n_, &snap_rows, sizeof(int), cudaMemcpyHostToDevice,
+                                      stream),
+                      "snapshot row H2D")) {
+                state.spec_snap_slab = spec_state_snap_;
+                state.d_snap_n = d_spec_snap_n_;
+                state.spec_prev_slab = spec_state_scratch_;  // the pre-chunk copy
+            }
+        }
     }
 
     Tensor logits_out;
@@ -1023,7 +1054,15 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // exactly the forwarded tokens); finished requests skip (the slot is
     // released and nothing reads the state again). The replay rewrites the
     // kept KV rows with identical values.
-    if (hybrid && matched < K && req->status != RequestStatus::FINISHED) {
+    if (hybrid && matched == 0 && state.spec_snap_slab != nullptr && req->status != RequestStatus::FINISHED) {
+        // Nothing was accepted, so the committed state must be the one after
+        // the chunk's first row — which the scan just wrote into the snapshot
+        // slab. Adopt it: a 151 MiB device copy instead of a full model
+        // forward. Everything below is the general path for a partial
+        // acceptance that landed further along.
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), state.spec_snap_slab,
+                                           ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
+    } else if (hybrid && matched < K && req->status != RequestStatus::FINISHED) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
                                            ssm_state_->per_seq_bytes(),
                                            cudaMemcpyDeviceToDevice, stream));
