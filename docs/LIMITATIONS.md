@@ -75,6 +75,17 @@ These have a code path and no gate. They may work; nothing proves it.
   `repeat_last_n: 0`: the verify replicates them for the unbounded window.
   Other engines have neither rule, because rejection sampling makes a verify
   distribution-preserving at any temperature and none of them force `</think>`.
+- **The same request can produce different output on its second pass through
+  one process.** Two things speculation keeps across requests carry it: the
+  n-gram drafter's corpus, and the MTP head's own KV cache, which resumes over
+  the longest common prefix of the previous history. Draft acceptance therefore
+  depends on what the process has served before, and accepted drafts change
+  which tokens are emitted. Observed here as three prompts run twice in one
+  server, where the first differed on the second pass while two fresh processes
+  running the same three prompts in the same order were byte-identical.
+  A peer's conformance tier had been carrying this as an unexplained sporadic
+  divergence. Not a defect on its own, but a golden-output test has to pin
+  `speculative.ngram` and `speculative.mtp_k`, or it is testing the history too.
 - **Speculative decoding does not reproduce the non-speculative greedy output on
   a GDN hybrid.** Its contract is that it changes speed and not tokens; here it
   changes tokens. Measured on Qwen3.8-27B-NVFP4 with
