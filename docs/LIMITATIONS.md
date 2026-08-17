@@ -107,22 +107,41 @@ These have a code path and no gate. They may work; nothing proves it.
   single-token path, and the two do not agree bit for bit. Predates the
   2026-08-17 verify work: the same two prompts diverge with the older eager
   replay.
-- **MTP loses on a GDN hybrid, and the guard is right to disable it.** Measured
-  on Qwen3.8-27B-NVFP4, greedy, 256 tokens, thinking off, economics guard
-  disabled so it runs throughout: 65.5 tok/s at `mtp_k=2` against **83.7
-  without MTP**, at 62.8 % draft acceptance and 2.26 emitted per verify. A
-  verify costs ~34.6 ms against an 11.8 ms decode step, because a partially
-  accepted draft restores the recurrent state slab and re-forwards the accepted
-  prefix — at that acceptance rate, most verifies. `mtp_k=4` is worse (55.4).
-  Enabling MTP at all costs ~17 % even when the drafter never fires.
+- **MTP loses on a GDN hybrid at every chain length, and the guard is right to
+  disable it.** Measured on Qwen3.8-27B-NVFP4, greedy, 256 tokens, thinking off,
+  economics guard disabled so it runs throughout, two alternating rounds with a
+  fresh process per arm:
+
+  | `mtp_k` | tok/s (round 1 / 2) | emitted per verify | draft acceptance |
+  |---|---|---|---|
+  | 0 | 89.2 / 87.2 | | |
+  | 2 | 83.3 / 80.1 | 2.22 / 2.25 | 58.8 / 54.3 % |
+  | 4 | 64.0 / 61.9 | 2.56 / 2.46 | 36.7 / 34.5 % |
+  | 6 | 53.8 / 52.9 | 2.55 / 2.44 | 24.6 / 23.9 % |
+
+  A longer chain does not buy its way out. Emitted-per-verify saturates near
+  2.5 from `mtp_k=4` on while the verify chunk grows linearly in k, so the
+  fourth and later draft tokens are paid for on every verify and almost never
+  accepted: acceptance falls from 58.8 % to 23.9 % across the sweep. Break-even
+  needs the verify below 2.25 emitted tokens times the decode step, and no
+  chain length on prose reaches it. This is the chain-length form of the same
+  result recorded in `docs/roadmap.md`: acceptance is the lever, chain length
+  is not.
 
 ```
-[PROV: commit=a82dec8f date=2026-08-17 hw=RTX5090 model=Qwen3.8-27B-NVFP4
-       quant=NVFP4 cuda=13.3 path=imp-server n=3 runs of 256 greedy tokens
-       cmd=`--set speculative.mtp_k=0|2|4 --set speculative.mtp_econ_min_emit=0
+[PROV: commit=3cf2af24 date=2026-08-17 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=3 runs of 256 greedy tokens per
+       arm, 2 alternating rounds
+       cmd=`--set speculative.mtp_k=0|2|4|6 --set speculative.mtp_econ_min_emit=0
        --set runtime.max_seq_len=8192`, request `temperature 0, think_budget 0`;
        rates and acceptance from /metrics deltas, card idle at ~0.9 GiB]
 ```
+
+  An earlier measurement on the pre-snapshot build (commit `a82dec8f`, before
+  the mid-chunk recurrent snapshot of #1459) put `mtp_k=2` at 65.5 tok/s and
+  found that enabling MTP cost ~17 % even when the drafter never fired. The
+  snapshot work lifted `mtp_k=2` to the numbers above; the ~17 % figure has not
+  been re-measured since.
 - **`imp-cli --prompt` prints only about 10 tokens.** Byte-level comparisons have
   to go through the server's JSON.
 - **Prefill graph capture is disabled per model** when one NVFP4 weight exceeds
