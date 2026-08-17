@@ -22,6 +22,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Converting an FP8 checkpoint no longer writes weights whose scales were
+  thrown away.** `imp-quantize` pairs each E4M3 weight with its block-scale grid
+  and consumes the grid, but a weight the tool keeps at full precision was then
+  copied through as raw E4M3 bytes, which are still valid E4M3 and simply mean
+  something else. On Qwen3.8-27B-FP8 that is the whole MTP draft head, the one
+  part whose corruption costs only draft acceptance and so has no loud symptom.
+  Such weights are widened to full precision now and declared unquantized;
+  the forecast for that checkpoint goes from 18.80 to 19.15 GiB.
+
 - **A model whose `head_dim` no fused kernel serves no longer aborts on a long
   prompt.** The prefill dispatch knows the tiled FMHA covers head dims 64/96/
   128/256/512; the chunk clamp did not ask, and returned the chunk unclamped

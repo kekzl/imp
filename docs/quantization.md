@@ -46,8 +46,9 @@ Calibrated per-tensor scales using AWQ or SmoothQuant. Two upstream tools produc
 > published Modelopt export. Use it to get a model onto the NVFP4 path for
 > evaluation or performance work — not to produce a checkpoint you ship.
 
-`imp-quantize` turns a dense BF16/FP16 SafeTensors checkpoint into an NVFP4 one
-without leaving the repo, for models nobody has published an export for:
+`imp-quantize` turns a dense BF16/FP16 or block-scaled FP8 SafeTensors
+checkpoint into an NVFP4 one without leaving the repo, for models nobody has
+published an export for:
 
 ```bash
 # 1. one calibration pass over a corpus — writes per-channel activation stats
@@ -64,6 +65,15 @@ what would be quantized without touching the GPU.
 It copies the tokenizer and config files, rebuilds the shard index when the
 source is sharded, and leaves embeddings, norms and (unless `--lm-head`) the LM
 head at full precision.
+
+A **block-scaled FP8 source** works too, which is what makes the FP8-only
+release lines reachable (DeepSeek-V3, Qwen3.8's FP8 line): each E4M3 weight is
+paired with its `weight_scale_inv` grid and widened before quantizing. The pair
+is read as one unit, so a weight this tool keeps at full precision is widened as
+well rather than copied: the grid is consumed either way, and raw E4M3 without
+its scales is still valid E4M3 that simply means something else. On
+Qwen3.8-27B-FP8 that is the MTP draft head, whose corruption costs draft
+acceptance and nothing louder, and honesty there costs 350 MiB of output.
 
 #### Which layout it writes (`--format`)
 

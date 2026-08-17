@@ -21,6 +21,27 @@ namespace imp::quantize {
 // copies the tensor through untouched.
 bool should_quantize(const RawTensor& t, bool quantize_lm_head, std::string& why_not);
 
+// What happens to an FP8 weight that was paired with a block-scale grid.
+//
+// The pair is one unit. The grid is consumed either way, because a grid that
+// outlives the weight it described says nothing true, so a weight this tool
+// refuses to quantize cannot travel in its source dtype either: raw E4M3 bytes
+// without their scales are still valid E4M3 and simply mean something else,
+// which no loader can detect. It is widened to full precision instead, and the
+// caller declares the module unquantized.
+//
+// This exists because the question was being asked in two places that could
+// disagree. The pairing pass consumed every grid it could match, while the
+// writer asked `should_quantize` and, on a refusal, copied the weight through
+// untouched. On a DeepSeek-V3-style FP8 checkpoint that is every MLA latent
+// projection in the model.
+//
+// `gated` is the caller's knowledge that this q_proj carries a fused output
+// gate; `should_quantize` sees one tensor and cannot know that.
+enum class Fp8SourceAction { Quantize, WidenToFullPrecision };
+Fp8SourceAction fp8_source_action(const RawTensor& weight, bool gated, bool quantize_lm_head,
+                                  std::string& why_not);
+
 // Bytes an [N, K] matrix occupies once quantized: the packed nibbles [N, K/2],
 // the FP8 micro-scales [N, K/16], and one F32 tensor scale.
 //
