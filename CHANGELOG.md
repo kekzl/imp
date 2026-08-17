@@ -30,7 +30,9 @@ there instead of retelling it.
   31.4 GiB took its full 10.2 GiB of KV anyway, i.e. spilled into host memory
   with nothing reporting an error. End to end on Qwen3-14B-NVFP4: started at
   810 of 8192 blocks, grew to 1582 to serve a 25 222-token prompt, answered
-  coherently. See [`MEMORY.md`](docs/internals/MEMORY.md) A7 step 7.
+  coherently, and decode measured 358.6 against 352.4 tok/s for a fixed pool,
+  i.e. no cost inside the host's own variance. See
+  [`MEMORY.md`](docs/internals/MEMORY.md) A7 step 7.
 
 - **`/health` reports the KV pool, and refuses to call a clamped server
   healthy.** A server started while another process still held the card comes

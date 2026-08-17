@@ -1511,6 +1511,23 @@ void Engine::step_decode(cudaStream_t dec_stream) {
 
         if (blocks_needed > blocks_have) {
             int new_block = kv_manager_->append_block(req->id);
+            if (new_block < 0 && kv_cache_raw_ != nullptr) {
+                // A growable pool gets one chance to answer with memory before
+                // the sequence is cancelled. Admission alone is not enough: a
+                // generation that was admitted can still outgrow the pool
+                // block by block, and without this a pool that started small
+                // cancelled every long generation mid-decode — measured, a
+                // synthetic 8192-token run produced ZERO tokens where a fixed
+                // pool produced 354 tok/s.
+                //
+                // Grown in coarse steps rather than one block at a time: the
+                // cost is per driver mapping call, not per byte.
+                const int have = kv_cache_raw_->total_blocks();
+                if (kv_cache_raw_->ceiling_blocks() > have) {
+                    kv_cache_raw_->try_grow_to(have + std::max(64, have / 4));
+                    new_block = kv_manager_->append_block(req->id);
+                }
+            }
             if (new_block < 0) {
                 // KV exhausted: append_block already reclaimed cached blocks, so
                 // the free pool AND all reclaimable cached blocks are empty. The
