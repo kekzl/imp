@@ -329,8 +329,14 @@ calibration over 36 058 tokens of general prose. Full chain reproducible with
 
 | Model | BF16 | NVFP4 RTN | NVFP4 `--calib` | AWQ gain | gap to BF16 |
 |---|---:|---:|---:|---:|---|
-| Qwen3-0.6B | 24.06 | 30.10 | **28.48** | −5.4% | +25.1% → **+18.3%** |
-| Qwen3-1.7B (2 shards) | 17.22 | 20.43 | **19.21** | −6.0% | +18.6% → **+11.5%** |
+| Qwen3-0.6B | 24.08 | 29.42 | **27.60** | −6.2% | +22.2% → **+14.6%** |
+| Qwen3-1.7B (2 shards) | 17.22 | 20.39 | **18.71** | −8.2% | +18.4% → **+8.7%** |
+
+Re-measured 2026-08-17, after fused layers started sharing a tensor scale. Both
+arms moved: the same table read 30.10 / 28.48 and 20.43 / 19.21 before that
+change, so sharing the scale helps the calibrated path as much as the
+round-to-nearest one, and `--calib` still recovers roughly a third to a half of
+the remaining gap to BF16 on these two sizes.
 
 `degen_suite.py` reads 45/45 on every checkpoint in that table (the AWQ ones
 re-run three and two times respectively). `--calib` closes about a quarter of

@@ -46,8 +46,12 @@
 // Measured over tools/analysis/ppl_corpus_45k.txt (13 537 tokens), calibrated
 // on general prose that is NOT the scoring corpus:
 //
-//   Qwen3-0.6B  BF16 24.06 -> RTN 30.10 (+25%) -> AWQ 28.48 (+18%)
-//   Qwen3-1.7B  BF16 17.22 -> RTN 20.43 (+19%) -> AWQ 19.21 (+12%)
+//   Qwen3-0.6B  BF16 24.08 -> RTN 29.42 (+22%) -> AWQ 27.60 (+15%)
+//   Qwen3-1.7B  BF16 17.22 -> RTN 20.39 (+18%) -> AWQ 18.71 (+9%)
+//
+// Both arms improved when fused layers started sharing a tensor scale
+// (2026-08-17). The figures this file carried before that change were
+// 30.10 / 28.48 and 20.43 / 19.21.
 //
 // Use a corpus of that size to judge this. The same model over the 199-token
 // ppl_corpus.txt reads wildly different numbers and inverts the size trend —
