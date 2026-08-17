@@ -181,9 +181,31 @@ would flip it from break-even to a win:
 2. **The 4.3 ms of argmax + D2H + rollback** is a host round-trip per verify.
    Deciding acceptance on device would remove it, at the cost of a
    conditional-graph redesign of the accept path.
-3. **The chunk forward at 17.8 ms for 3 rows** against 11.8 ms for one. A
-   bandwidth-bound decode reads its weights once either way, so 6 ms scales with
-   something else; unprofiled.
+3. ~~**The chunk forward at 17.8 ms for 3 rows** against 11.8 ms for one.~~
+   **Profiled 2026-08-17, and it dissolves the premise of this list.** Two nsys
+   runs on Qwen3.8-27B-NVFP4, `speculative.hybrid=true` forced in both (an
+   `imp-cli --bench` default pins it off, which silently disables speculation
+   outright on a GDN model), k=0 against k=2, both arms verified quiet and the
+   k=2 arm asserted to show drafting in its own log before being read:
+
+   | | k=0 (n-gram only) | k=2 (n-gram + MTP) |
+   |---|---:|---:|
+   | total GPU kernel time | 34.27 s | 38.67 s |
+   | `gemv_nvfp4_kpar_mb_fp16` | 8919 ms (26.0 %) | 17045 ms (44.1 %) |
+   | per launch | 38.7 us | 38.6 us |
+
+   The per-launch cost is identical, so the chunk is not slower at three rows
+   and its bytes do not move at a worse rate. There are 92 % more launches. The
+   whole 12.8 % that MTP costs is that one kernel, which is the batched
+   spec-verify GEMM, and everything else stays within baseline growth.
+
+   **The accounting error underneath all three items: a verify replaces a decode
+   step only when the draft is accepted.** On rejection it is additional. So the
+   cost of speculation is not "the verify price minus what it saves", it is a
+   full weight sweep per verify whether or not that verify emits anything. That
+   is why the repair path is not where the money is, and why the chain-length
+   saturation in [`LIMITATIONS.md`](LIMITATIONS.md) is a consequence rather than
+   a separate result.
 
 Two findings that are not speed:
 
