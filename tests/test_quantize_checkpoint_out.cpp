@@ -347,3 +347,96 @@ TEST(QuantizeCheckpointOut, WarnsOnlyWhenLmHeadMeetsCompressedTensors) {
     EXPECT_NE(w.find("lm_head.weight_global_scale"), std::string::npos);
     EXPECT_NE(w.find("modelopt"), std::string::npos);
 }
+
+// ---- the files the checkpoint cannot load without ------------------------
+//
+// A sharded checkpoint is unreadable without an index, and the index cannot be
+// copied from the source: quantizing one weight turns it into three tensors.
+// A wrong one fails at load with the misleading "No .gguf file found in
+// directory", so the writer is worth pinning.
+
+namespace {
+struct TempDir {
+    std::string path;
+    TempDir() {
+        path = (std::filesystem::temp_directory_path() /
+                ("ckpt_w_" + std::to_string(::getpid()) + "_" + std::to_string(counter()++)))
+                   .string();
+        std::filesystem::create_directories(path);
+    }
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+    static int& counter() {
+        static int n = 0;
+        return n;
+    }
+    std::string read(const std::string& name) const {
+        std::ifstream f(path + "/" + name);
+        return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+    }
+};
+}  // namespace
+
+TEST(QuantizeCheckpointOut, ShardIndexMapsEveryTensorAndTotalsTheBytes) {
+    TempDir d;
+    std::string err;
+    ASSERT_TRUE(write_shard_index(d.path,
+                                  {{"model.layers.0.q.weight_packed", "model-00001-of-00002.safetensors"},
+                                   {"model.layers.0.q.weight_scale", "model-00001-of-00002.safetensors"},
+                                   {"lm_head.weight", "model-00002-of-00002.safetensors"}},
+                                  4242, err))
+        << err;
+    const std::string s = d.read("model.safetensors.index.json");
+    EXPECT_NE(s.find("\"total_size\": 4242"), std::string::npos);
+    EXPECT_NE(s.find("\"model.layers.0.q.weight_packed\": \"model-00001-of-00002.safetensors\""),
+              std::string::npos);
+    EXPECT_NE(s.find("\"lm_head.weight\": \"model-00002-of-00002.safetensors\""), std::string::npos);
+    // Valid JSON: no trailing comma after the last entry.
+    EXPECT_EQ(s.find(",\n  }"), std::string::npos);
+    EXPECT_EQ(s.find(",\n}"), std::string::npos);
+}
+
+TEST(QuantizeCheckpointOut, CompressedTensorsCopyPatchesTheConfigItCopies) {
+    TempDir src, dst;
+    std::ofstream(src.path + "/config.json") << R"({"model_type": "qwen3", "vocab_size": 151936})";
+    std::ofstream(src.path + "/tokenizer.json") << R"({"version": "1.0"})";
+    // A file imp never reads but other loaders do: it must travel, or the
+    // output stops loading elsewhere for a reason nobody can see here.
+    std::ofstream(src.path + "/preprocessor_config.json") << R"({"image_mean": [0.5]})";
+
+    std::string err;
+    ASSERT_TRUE(copy_aux_files(src.path, dst.path, OutputFormat::CompressedTensors, {"lm_head"},
+                               /*calibrated=*/false, err))
+        << err;
+    const std::string cfg = dst.read("config.json");
+    EXPECT_NE(cfg.find("\"quant_method\": \"compressed-tensors\""), std::string::npos);
+    EXPECT_NE(cfg.find("\"vocab_size\": 151936"), std::string::npos) << "source fields must survive";
+    EXPECT_NE(cfg.find("\"lm_head\""), std::string::npos) << "the ignore list must be written";
+    EXPECT_FALSE(dst.read("tokenizer.json").empty());
+    EXPECT_FALSE(dst.read("preprocessor_config.json").empty()) << "*_config.json travels by pattern";
+}
+
+TEST(QuantizeCheckpointOut, ModeloptCopyLeavesTheConfigAlone) {
+    TempDir src, dst;
+    const std::string original = R"({"model_type": "qwen3", "quantization_config": null})";
+    std::ofstream(src.path + "/config.json") << original;
+
+    std::string err;
+    ASSERT_TRUE(copy_aux_files(src.path, dst.path, OutputFormat::Modelopt, {"lm_head"}, false, err)) << err;
+    // Modelopt declares itself in hf_quant_config.json; touching config.json
+    // here would put two disagreeing declarations in one checkpoint.
+    EXPECT_EQ(dst.read("config.json"), original);
+}
+
+TEST(QuantizeCheckpointOut, RecipeSaysTheSameSchemeTheConfigDoes) {
+    TempDir d;
+    std::string err;
+    ASSERT_TRUE(write_recipe_yaml(d.path, {"lm_head", "re:.*router"}, err)) << err;
+    const std::string y = d.read("recipe.yaml");
+    EXPECT_NE(y.find("scheme: NVFP4"), std::string::npos);
+    EXPECT_NE(y.find("targets: [Linear]"), std::string::npos);
+    // Quoted: a bare re:... entry parses as a YAML mapping key, not a string.
+    EXPECT_NE(y.find("'re:.*router'"), std::string::npos);
+}
