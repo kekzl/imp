@@ -11,6 +11,15 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- **Quantization quality improved on both measured sizes, calibrated and not.**
+  Sharing a tensor scale across fused layers helps the AWQ path as much as
+  round-to-nearest: Qwen3-0.6B perplexity 30.10 → **29.42** uncalibrated and
+  28.48 → **27.60** with `--calib`, Qwen3-1.7B 20.43 → **20.39** and 19.21 →
+  **18.71**, against BF16 references of 24.08 and 17.22. `--calib` with
+  `--format vllm` is measured for the first time here.
+
 ### Fixed
 
 - **A model whose `head_dim` no fused kernel serves no longer aborts on a long
