@@ -296,6 +296,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.spec_capture_probe", cfg.diagnostics.spec_capture_probe);
     B("diagnostics.log_gemm_algo", cfg.diagnostics.log_gemm_algo);
     B("diagnostics.mtp_pattern_log", cfg.diagnostics.mtp_pattern_log);
+    B("diagnostics.mtp_tree_probe", cfg.diagnostics.mtp_tree_probe);
     B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
     B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);

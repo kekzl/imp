@@ -14,6 +14,8 @@ Categories (select with --only / --skip):
   special-tokens   raw template/control markers in content
   adherence        prompt-blindness + gross hallucination (exact-answer tasks)
   long-context     needle echo at ~2-3k tokens (catches RoPE/echo bugs)
+  kv-growth        same greedy answer before and after the KV pool grows
+                   (skips unless kv_cache.growable left room to grow)
   multi-turn       state carry across turns, turn-2 garble
   stream           stream/non-stream consistency, SSE termination
 
@@ -556,6 +558,66 @@ class Suite:
                     needle in r["content"],
                     f"content={r['content'][:140]!r}")
 
+    # -- KV pool growth ------------------------------------------------------
+    def cat_kv_growth(self):
+        """The same greedy prompt before and after the KV pool grows.
+
+        A growable pool (kv_cache.growable) commits memory while the server is
+        serving. Nothing about that is visible to a client except through the
+        answers, and a pool that grew badly does not error: it returns text
+        that is subtly wrong, which every downstream instrument scores as the
+        MODEL being wrong. Byte-identity of a greedy answer across a growth
+        event is the only check at this layer.
+
+        Skips unless the pool can actually still grow, which /health reports as
+        kv_ceiling_blocks > kv_blocks_total.
+        """
+        try:
+            with urllib.request.urlopen(self.srv.url + "/health", timeout=30) as h:
+                health = json.loads(h.read())
+        except Exception as e:                      # noqa: BLE001
+            self.skip("kv-growth", "same answer across a growth event", f"/health: {e}")
+            return
+        blocks = health.get("kv_blocks_total", -1)
+        ceiling = health.get("kv_ceiling_blocks", -1)
+        if blocks < 0 or ceiling <= blocks:
+            self.skip("kv-growth", "same answer across a growth event",
+                      f"pool is fixed ({blocks} blocks, ceiling {ceiling})")
+            return
+
+        probe = "List the first eight prime numbers, separated by commas, nothing else."
+        n = 1000 if self.is_reasoning else 60
+        before = self.srv.chat([{"role": "user", "content": probe}], max_tokens=n)["content"]
+
+        # Outgrow the pool: one token per ~4 characters, so ask for more
+        # characters than the pool currently holds tokens.
+        unit = ("The paged attention mechanism stores keys and values in fixed-size "
+                "blocks so that sequences of different lengths share one pool. ")
+        # 1.5x the pool, not 1.0x: at parity the prompt lands inside the pool
+        # and nothing grows, and the check then passes without ever having
+        # established the state it is about to assert over.
+        need_chars = int(blocks * health.get("kv_block_size", 16) * 4.5 * 1.5)
+        big = unit * (need_chars // len(unit) + 1) + "\n\nAnswer in one word: fine?"
+        try:
+            self.srv.chat([{"role": "user", "content": big}], max_tokens=16)
+        except urllib.error.HTTPError as e:
+            self.skip("kv-growth", "same answer across a growth event",
+                      f"server rejected the growth prompt: {e}")
+            return
+
+        with urllib.request.urlopen(self.srv.url + "/health", timeout=30) as h:
+            grown = json.loads(h.read()).get("kv_blocks_total", blocks)
+        if grown <= blocks:
+            # Refuse to report a verdict on a growth that did not happen. A pass
+            # here would be a statement about two ordinary requests.
+            self.skip("kv-growth", "same answer across a growth event",
+                      f"pool did not grow ({blocks} -> {grown} blocks); prompt was too small")
+            return
+        after = self.srv.chat([{"role": "user", "content": probe}], max_tokens=n)["content"]
+        self.record("kv-growth", f"greedy answer identical across growth ({blocks} -> {grown} blocks)",
+                    after == before and bool(before.strip()),
+                    f"before={before[:60]!r} after={after[:60]!r}")
+
     # -- multi-turn state ----------------------------------------------------
     def cat_multi_turn(self):
         n = 1000 if self.is_reasoning else 100
@@ -865,6 +927,7 @@ CATEGORIES = {
     "special-tokens": Suite.cat_special_tokens,
     "adherence": Suite.cat_adherence,
     "long-context": Suite.cat_long_context,
+    "kv-growth": Suite.cat_kv_growth,
     "multi-turn": Suite.cat_multi_turn,
     "stream": Suite.cat_stream,
     "constrained": Suite.cat_constrained,

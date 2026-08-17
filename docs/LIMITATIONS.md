@@ -66,6 +66,43 @@ These have a code path and no gate. They may work; nothing proves it.
   head drafts well (43.9 % top-1 accept) and still costs 32 % of decode, because
   the draft path runs outside CUDA graphs while the main decode does not. It is
   opt-in and self-disables after 8 verifies.
+- **Speculation is off for most real requests, by two rules that are easy to
+  miss.** It requires greedy sampling (`temperature: 0` or `top_k: 1`), so any
+  request with a temperature gets none; and a think budget disables it inside
+  the think block, which on a reasoning model is most of the answer. The server
+  sets `think_budget` to 0.5 by default, so on such a model speculation never
+  runs out of the box. Penalties are **not** a blocker at the default
+  `repeat_last_n: 0`: the verify replicates them for the unbounded window.
+  Other engines have neither rule, because rejection sampling makes a verify
+  distribution-preserving at any temperature and none of them force `</think>`.
+- **Speculative decoding does not reproduce the non-speculative greedy output on
+  a GDN hybrid.** Its contract is that it changes speed and not tokens; here it
+  changes tokens. Measured on Qwen3.8-27B-NVFP4 with
+  `runtime.deterministic_gemm=true` on both arms and a stable control (two
+  no-MTP processes, byte-identical): with `mtp_k=2`, two of three prompts
+  diverge from the no-MTP answer, the first at character 79 of 1026 — an early
+  token flip, not a rounding tail. Both answers are coherent and correct, but
+  they are different generations. The verify advances the recurrent state
+  through the chunk kernels while plain decode advances it through the
+  single-token path, and the two do not agree bit for bit. Predates the
+  2026-08-17 verify work: the same two prompts diverge with the older eager
+  replay.
+- **MTP loses on a GDN hybrid, and the guard is right to disable it.** Measured
+  on Qwen3.8-27B-NVFP4, greedy, 256 tokens, thinking off, economics guard
+  disabled so it runs throughout: 65.5 tok/s at `mtp_k=2` against **83.7
+  without MTP**, at 62.8 % draft acceptance and 2.26 emitted per verify. A
+  verify costs ~34.6 ms against an 11.8 ms decode step, because a partially
+  accepted draft restores the recurrent state slab and re-forwards the accepted
+  prefix — at that acceptance rate, most verifies. `mtp_k=4` is worse (55.4).
+  Enabling MTP at all costs ~17 % even when the drafter never fires.
+
+```
+[PROV: commit=a82dec8f date=2026-08-17 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=3 runs of 256 greedy tokens
+       cmd=`--set speculative.mtp_k=0|2|4 --set speculative.mtp_econ_min_emit=0
+       --set runtime.max_seq_len=8192`, request `temperature 0, think_budget 0`;
+       rates and acceptance from /metrics deltas, card idle at ~0.9 GiB]
+```
 - **`imp-cli --prompt` prints only about 10 tokens.** Byte-level comparisons have
   to go through the server's JSON.
 - **Prefill graph capture is disabled per model** when one NVFP4 weight exceeds

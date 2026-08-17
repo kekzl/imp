@@ -1030,15 +1030,35 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         const int replay_ctx = p0 + 1 + matched;
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_spec_context_len_, &replay_ctx, sizeof(int),
                                            cudaMemcpyHostToDevice, stream));
-        state.n_tokens = matched + 1;
         state.max_context_len = replay_ctx;
-        // The replay is an unpadded eager forward of the accepted prefix —
-        // run it on the plain host-length chunk path, not the capture path.
-        state.ctx_capacity = 0;
-        state.d_past_len = nullptr;
-        state.d_chunk_len = nullptr;
         Tensor replay_logits;
-        executor_->forward_logits(state, replay_logits, stream);
+        bool replayed = false;
+        if (capture_on && !spec_capture_doomed_) {
+            // Reuse the captured chunk graph rather than forwarding eagerly.
+            // The graph reads its chunk length from device memory and the GDN
+            // scan commits h_state at that row, so the same recording serves a
+            // shorter prefix: keep the padded row count, tell the device the
+            // real one. Eager here cost 25.1 ms for one or two rows against
+            // 17.8 ms for the captured three-row chunk, measured over 300
+            // verifies on Qwen3.8-27B — the difference is launch pacing, not
+            // work.
+            const int real_rows = matched + 1;
+            if (check(cudaMemcpyAsync(d_spec_chunk_len_, &real_rows, sizeof(int), cudaMemcpyHostToDevice,
+                                      stream),
+                      "replay chunk len H2D")) {
+                state.n_tokens = chunk_pad;
+                replayed = spec_captured_forward_(state, replay_logits, stream);
+            }
+        }
+        if (!replayed) {
+            state.n_tokens = matched + 1;
+            // Fallback: an unpadded eager forward of the accepted prefix on the
+            // plain host-length chunk path.
+            state.ctx_capacity = 0;
+            state.d_past_len = nullptr;
+            state.d_chunk_len = nullptr;
+            executor_->forward_logits(state, replay_logits, stream);
+        }
     }
 
     spec_stats_.verify_steps++;

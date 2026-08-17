@@ -876,6 +876,19 @@ struct Diagnostics {
     bool log_gemm_algo = false;
     // MTP pattern logging (predicted, actual, match per step).
     bool mtp_pattern_log = false;
+    // Stage 0 tree-ceiling probe: ask the MTP head for its top-4 candidates on
+    // every chain step and tally, per depth, whether the true next token was
+    // within top-w. imp-cli prints the table at the end of a run.
+    //
+    // Off by default because it is not free, and it was not free in the serving
+    // path either: measured on Qwen3.8-27B, the top-4 kernel is a single
+    // <<<1,256>>> block scanning a 248 320-entry vocabulary once per width,
+    // 713 us per drafted token — twice the cost of the lm_head GEMV that
+    // produced the logits, and 12 % of all GPU time in an MTP run. Asking for
+    // it also forces a per-draft cudaStreamSynchronize, which is the very
+    // thing the device-side chain exists to avoid. Nothing in serving reads
+    // the result.
+    bool mtp_tree_probe = false;
     // MTP: pass main model's post-RMSNorm hidden to draft head (vLLM
     // variant).
     bool mtp_prenorm_h = false;
