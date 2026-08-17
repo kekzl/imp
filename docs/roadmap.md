@@ -151,7 +151,25 @@ Measured per verify, Qwen3.8-27B-NVFP4, k=2, guard off, over 300 verifies:
 | argmax + D2H + rollback | 16.4 ms | 10.7 ms | includes the replay |
 | decode | 64.3 tok/s | 84.4 tok/s | 83.7 without MTP |
 
-**Three levers remain, each worth 4-6 ms of a 28.5 ms verify.** MTP needs the
+**The verify price is the wrong lever, and one measurement settles it.** The
+same server, same model, speculation at its default settings, differing only in
+how predictable the continuation is:
+
+| workload | tok/s | draft acceptance | emitted per verify |
+|---|---:|---:|---:|
+| ordinary prose, no speculation | 89.1 | — | — |
+| ordinary prose, n-gram default | 89.4 | 11.2 % | — |
+| ordinary prose, MTP k=2 | 87.9 | 58 % | 2.3 |
+| **repeat a text verbatim** | **876.5** | **98.3 %** | **36.6** |
+
+Speculation is worth **ten times** on the workload it was built for, and nothing
+on the one it was not. Where it pays, acceptance is near-total and the
+partial-acceptance repair path never runs, so the verify work below is inert
+there; where that work helps, speculation does not pay in the first place.
+Acceptance is the lever: 11 % to 98 % is 10x, and the entire verify cost is a
+few percent. Spend on drafters, not on the repair path.
+
+**Three levers remain in the verify, each worth 4-6 ms of a 28.5 ms verify.** MTP needs the
 verify below 26.7 ms to pay at 2.26 emitted per verify, so any one of them
 would flip it from break-even to a win:
 
