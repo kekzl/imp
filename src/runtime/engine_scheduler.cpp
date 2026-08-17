@@ -2174,23 +2174,76 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             const void* chain_h_prev = h_for_mtp;
             std::vector<int32_t> chain_preds;
             chain_preds.reserve(K);
-            for (int k = 0; k < K; ++k) {
-                int prediction = -1;
-                int topk[Engine::kMtpMeasureW] = {-1, -1, -1, -1};
-                if (!mtp_draft_one(chain_prev_tok, chain_h_prev, hidden_dim, vocab_size,
-                                    &prediction, topk, Engine::kMtpMeasureW)) {
-                    break;
+            // The top-w probe is opt-in: it costs a single-block scan of the
+            // whole vocabulary per width plus a host sync, per drafted token,
+            // and only imp-cli's tree-ceiling table reads it.
+            const bool want_probe = runtime_config_.diagnostics.mtp_tree_probe;
+            // Device-side chain, the same one mtp_feed_pairs_ uses: each step's
+            // argmax lands in ws->d_chain_tokens[k] and feeds step k+1's
+            // embedding lookup on device, so ONE drain replaces K host
+            // round-trips. Without it every drafted token ends in a
+            // cudaStreamSynchronize and the GPU idles while the host issues the
+            // next step — measured on Qwen3.8-27B, ~6 ms of the 6.85 ms per
+            // drafted token was that dead time rather than kernel work.
+            //
+            // The probe needs its top-w on the host per step, so it keeps the
+            // round-trip path; it is a measurement mode, not a serving one.
+            const bool device_chain = !want_probe && ws->d_chain_tokens != nullptr && ws->n_experts == 0 &&
+                                      K <= imp::kMtpMaxChainK;
+            if (device_chain) {
+                int launched = 0;
+                for (int k = 0; k < K; ++k) {
+                    const bool first = (k == 0);
+                    if (!mtp_draft_one(first ? chain_prev_tok : -1, first ? chain_h_prev : ws->d_h_final,
+                                       hidden_dim, vocab_size, nullptr, nullptr, 0,
+                                       first ? nullptr : ws->d_chain_tokens + k - 1,
+                                       ws->d_chain_tokens + k)) {
+                        break;
+                    }
+                    launched++;
                 }
-                MtpChainEntry entry{prediction, k, cur_pos + 1 + k, {}};
-                for (int w = 0; w < Engine::kMtpMeasureW; ++w) entry.topk[w] = topk[w];
-                mtp_pending_chain_.push_back(entry);
-                chain_preds.push_back(prediction);
-                // For k=0 only, also feed pending_prediction_ (legacy 1-step
-                // accuracy counter remains in sync with chain_accept_[0]).
-                if (k == 0) mtp_pending_prediction_ = prediction;
-                // Chain: next iter uses this prediction + the MTP's own h_final.
-                chain_prev_tok = prediction;
-                chain_h_prev   = ws->d_h_final;
+                int32_t h_chain[imp::kMtpMaxChainK];
+                if (launched > 0 && cudaMemcpyAsync(h_chain, ws->d_chain_tokens,
+                                                    static_cast<size_t>(launched) * sizeof(int32_t),
+                                                    cudaMemcpyDeviceToHost, decode_stream()) == cudaSuccess) {
+                    cudaStreamSynchronize(decode_stream());
+                    for (int k = 0; k < launched; ++k) {
+                        const int prediction = h_chain[k];
+                        if (prediction < 0 || prediction >= vocab_size)
+                            break;  // NaN-logits guard — keep the valid prefix
+                        // topk stays unset: -1 is the "not a candidate"
+                        // sentinel the width tally compares against, and a
+                        // zero-filled array would count token id 0 as a hit.
+                        MtpChainEntry entry{prediction, k, cur_pos + 1 + k, {}};
+                        for (int w = 0; w < Engine::kMtpMeasureW; ++w)
+                            entry.topk[w] = -1;
+                        mtp_pending_chain_.push_back(entry);
+                        chain_preds.push_back(prediction);
+                        if (k == 0)
+                            mtp_pending_prediction_ = prediction;
+                    }
+                }
+            } else {
+                for (int k = 0; k < K; ++k) {
+                    int prediction = -1;
+                    int topk[Engine::kMtpMeasureW] = {-1, -1, -1, -1};
+                    if (!mtp_draft_one(chain_prev_tok, chain_h_prev, hidden_dim, vocab_size, &prediction,
+                                       want_probe ? topk : nullptr, want_probe ? Engine::kMtpMeasureW : 0)) {
+                        break;
+                    }
+                    MtpChainEntry entry{prediction, k, cur_pos + 1 + k, {}};
+                    for (int w = 0; w < Engine::kMtpMeasureW; ++w)
+                        entry.topk[w] = topk[w];
+                    mtp_pending_chain_.push_back(entry);
+                    chain_preds.push_back(prediction);
+                    // For k=0 only, also feed pending_prediction_ (legacy 1-step
+                    // accuracy counter remains in sync with chain_accept_[0]).
+                    if (k == 0)
+                        mtp_pending_prediction_ = prediction;
+                    // Chain: next iter uses this prediction + the MTP's own h_final.
+                    chain_prev_tok = prediction;
+                    chain_h_prev = ws->d_h_final;
+                }
             }
             // Roll back the speculative cache writes from K-1 chained steps.
             // The first chained step (k=0) IS the real "next step" prediction
