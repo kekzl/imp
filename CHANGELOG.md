@@ -11,6 +11,14 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`scripts/verify.sh` no longer reports OK when no model-backed gate ran.**
+  `models/` is a gitignored symlink farm that exists only in the main checkout,
+  so in a fresh worktree the perf, peak-VRAM, graphs and smoke gates all skipped
+  and the pre-push gate still exited 0. A missing model directory now fails with
+  the path and the fix; a single absent checkpoint still only skips.
+
 ## [0.28.0] - 2026-08-17
 
 ### Added
