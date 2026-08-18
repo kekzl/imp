@@ -35,6 +35,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -173,6 +174,87 @@ TEST_F(BatchedSmallM, MatchesDequantisedReference) {
                     << "m=" << m << " row=" << r << " n=" << n;
             }
     }
+}
+
+
+// DISABLED by default: a measurement, not an assertion. Run it with
+//   ./build-dev/test-quant --gtest_also_run_disabled_tests \\
+//       --gtest_filter='*MarginalRowCost*'
+//
+// TWO METHOD REQUIREMENTS ARE BAKED IN HERE BECAUSE GETTING EITHER WRONG
+// PRODUCED CONFIDENT NONSENSE (2026-08-18):
+//
+//  1. Warm up past the clock ramp. With a 20-iteration warmup the SAME
+//     unchanged code path measured 20.59, 15.54 and 8.82 us across three runs,
+//     purely because it was always timed first. Burn a full second.
+//  2. Compare implementations PAIRED AND ALTERNATING INSIDE ONE PROCESS. Across
+//     two builds the same unchanged path read 11.30 and 13.88 us, so any
+//     difference under ~25 % is drift, and a 2-5 us delta on a 10 us kernel is
+//     not resolvable that way.
+//
+// An N-tiled variant of this kernel (one activation read shared across several
+// output rows) was built and measured this way: +0.55, +0.23 and -0.20 us at
+// MR = 2, 3, 4. A wash, so it was not kept. The per-verify marginal row cost of
+// 4.22 ms is real and comes from server measurements, but its cause is NOT the
+// activation re-read, and it remains unattributed.
+TEST_F(BatchedSmallM, DISABLED_MarginalRowCost) {
+    std::mt19937 rng(5);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    std::vector<half> x(static_cast<size_t>(4) * kK);
+    for (auto& h : x) h = __float2half(dist(rng));
+
+    // A real GDN projection shape: at the fixture's N=512 only 512 blocks reach
+    // a 170-SM card and the kernel is latency-bound, which is not the regime a
+    // verify chunk runs in.
+    constexpr int kBenchN = 5120;
+    imp::NvFP4QuantResult bw{};
+    {
+        std::vector<half> hw(static_cast<size_t>(kBenchN) * kK);
+        std::normal_distribution<float> wd(0.0f, 0.05f);
+        for (auto& h : hw) h = __float2half(wd(rng));
+        void* d_bw = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_bw, hw.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_bw, hw.data(), hw.size() * sizeof(half), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        int64_t sh[2] = {kBenchN, kK};
+        imp::Tensor wt(d_bw, imp::QType::F16, 2, sh, true);
+        imp::quantize_fp16_to_nvfp4(wt, bw, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cudaFree(d_bw);
+    }
+
+    half *d_x = nullptr, *d_y = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(4) * kBenchN * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_x, x.data(), x.size() * sizeof(half), cudaMemcpyHostToDevice), cudaSuccess);
+
+    cudaEvent_t a, b;
+    cudaEventCreate(&a); cudaEventCreate(&b);
+    for (int i = 0; i < 80000; ++i)  // > 1 s, see requirement 1 above
+        imp::gemm_nvfp4_batched(bw, d_x, d_y, kBenchN, kK, 2, nullptr);
+    cudaDeviceSynchronize();
+
+    printf("\n  N=%d K=%d  (weight ~%.2f MB)\n", kBenchN, kK, kBenchN * kK * 0.5 / 1e6);
+    float prev = 0.0f;
+    for (int m = 1; m <= 4; ++m) {
+        float best = 1e9f;
+        for (int rep = 0; rep < 5; ++rep) {
+            constexpr int kIter = 300;
+            cudaEventRecord(a);
+            for (int i = 0; i < kIter; ++i)
+                imp::gemm_nvfp4_batched(bw, d_x, d_y, kBenchN, kK, m, nullptr);
+            cudaEventRecord(b);
+            cudaEventSynchronize(b);
+            float ms = 0.0f; cudaEventElapsedTime(&ms, a, b);
+            best = std::min(best, ms * 1000.0f / kIter);
+        }
+        printf("  MR=%d  %8.2f us  marginal %+7.2f us  %.0f GB/s of weight\n",
+               m, best, m == 1 ? 0.0f : best - prev, (kBenchN * kK * 0.5) / (best * 1e3));
+        prev = best;
+    }
+    cudaEventDestroy(a); cudaEventDestroy(b);
+    cudaFree(d_x); cudaFree(d_y);
+    imp::free_nvfp4_result(bw);
 }
 
 }  // namespace
