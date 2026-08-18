@@ -162,12 +162,19 @@ how predictable the continuation is:
 | ordinary prose, MTP k=2 | 87.9 | 58 % | 2.3 |
 | **repeat a text verbatim** | **876.5** | **98.3 %** | **36.6** |
 
-**DISPUTED (2026-08-18):** the reading below treats imp's speculation economics
-as a property of speculation. Comparable engines report an MTP k=2 win on this
-class of model and hardware, so the more likely reading is that imp pays a cost
-they do not. Pending a reference-engine measurement on this box, treat every
-"speculation does not pay" statement in this section as "imp's speculation does
-not pay", and the guard that disables it as a workaround rather than a verdict.
+**RESOLVED (2026-08-18), and the section below is a record of the broken build.**
+The dispute is settled by fixing the engine: two launch defects, a grid over
+tokens and a `GemmContext` built without `cur_spec_verify_`, kept every GDN
+projection off the small-M batched GEMV. Fixed in `ea547a53`. MTP k=2 now runs
+**104.06 tok/s against 86.21 without speculation**, from 75.26 against 84.47,
+and kernel time per emitted token falls 11.35 to 8.93 ms. Every "speculation
+does not pay" statement below described imp, not speculation, and no longer
+describes imp either. Detail and the remaining levers:
+[`LIMITATIONS.md`](LIMITATIONS.md).
+
+Not a cross-engine claim: vLLM was measured here for MTP **acceptance** only
+(59.7 % against imp's 58-64 %, which is what cleared the drafter), and no
+trustworthy throughput comparison between the two engines exists.
 
 Speculation is worth **ten times** on the workload it was built for, and nothing
 on the one it was not. Where it pays, acceptance is near-total and the

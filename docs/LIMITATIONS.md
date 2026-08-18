@@ -209,23 +209,68 @@ These have a code path and no gate. They may work; nothing proves it.
        request `temperature 0, think_budget 0`; acceptance from /metrics
        deltas (imp_spec_accepted_total / imp_spec_drafted_total), card idle]
 ```
-- **DISPUTED (2026-08-18): the entry below states a conclusion about the
-  technique that its evidence does not support.** Comparable engines report an
-  MTP k=2 *win* on comparable hardware for this class of model. If that holds,
-  then "MTP loses on a GDN hybrid" is wrong as written and the true statement is
-  "imp's MTP path loses", which makes the economics guard a workaround for a
-  defect rather than a correct refusal. The measurements below stand as
-  measurements; the heading and the last sentence do not. The deciding evidence
-  is a reference engine measured on this box, which is not yet done. Until then
-  do not cite this entry as a property of MTP or of GDN hybrids.
+- **RESOLVED (2026-08-18). MTP does not lose on a GDN hybrid. imp's MTP path
+  lost, and it no longer does.** The entry below stated a conclusion about the
+  technique that its evidence never supported, and the dispute is settled by
+  fixing the engine rather than by argument. Two defects, both in how work was
+  launched rather than what it computed (`ea547a53`):
 
-  The suspect cost, from the same tables: verify time grows **5.23 ms per extra
-  draft token** (46 % of a full decode step) on a fit through widths 2/3/5/7,
-  with a **15.4 ms intercept** against an 11.36 ms plain decode. On a batch-1
-  memory-bound forward an extra row should be nearly free, because the weights
-  are already streaming.
-- **MTP loses on a GDN hybrid at every chain length, and the guard is right to
-  disable it.** Measured on Qwen3.8-27B-NVFP4, greedy, 256 tokens, thinking off,
+  1. `ssm_conv1d_prefill_f32_silu_kernel` had a grid over tokens, so a two-row
+     verify chunk ran on two blocks of a 170-SM card while each block walked
+     every channel serially.
+  2. `executor_ssm_gdn.cu` built its `GemmContext` without `cur_spec_verify_`,
+     which FFN and attention both pass. The `M<=4` batched-GEMV branch from
+     #998/#1055 was therefore unreachable for **every GDN projection**, i.e. for
+     48 of 64 layers on this model.
+
+  | | before | after |
+  |---|---:|---:|
+  | no speculation | 84.47 tok/s | 86.21 tok/s |
+  | MTP k=2 | 75.26 tok/s | **104.06 tok/s** |
+  | kernel time per emitted token, k=2 | 11.35 ms | **8.93 ms** |
+  | CUTLASS launches per verify | 296.3 | 8.9 |
+
+  Speculation went from 10.9 % slower than not speculating to 20.7 % faster.
+  The kernel figure reproduces across two independent runs on different corpora
+  (8.93 and 8.93; the no-speculation arm reads 11.21 and 11.29).
+
+```
+[PROV: commit=ea547a53 date=2026-08-18 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=3 prompts x 256 greedy tokens,
+       2 alternating rounds, fresh process per arm, nsys per arm
+       cmd=`--set speculative.ngram=false --set speculative.mtp_k=0|2
+       --set speculative.mtp_econ_min_emit=0 --set server.prefix_cache=false`;
+       wall from usage.completion_tokens over request wall time, kernel from
+       cuda_gpu_kern_sum, both from the SAME arm]
+```
+
+  **This is not a cross-engine comparison and must not be read as one.** vLLM
+  0.27.1 was measured on this box only for MTP *acceptance*, where it reads
+  59.7 % against imp's 58-64 %: parity, which is what retired the drafter as a
+  suspect. Its throughput was not measured in a form worth trusting, so no
+  claim about imp against vLLM speed exists in either direction.
+
+  **What it cost to learn this**: six hypotheses about drafter accuracy, all
+  dead, and a published 87 % acceptance target chased for days that turned out
+  to describe an unpinned regime. Acceptance was never the problem. Detail in
+  the entry above.
+
+  **Not finished.** A marginal chunk row still costs 4.22 ms, 38 % of a full
+  decode step (down from 8.09 ms, 71 %), on a batch-1 memory-bound decode where
+  the weights are already streaming and it should be near-free. Remaining
+  levers, measured, in size order:
+
+  1. the per-row FMA work in `gemv_nvfp4_kpar_mb_fp16`, which scales by
+     construction; an HMMA tile kernel is the honest answer if it is the floor.
+  2. the capture-bucket floor of 3: a two-row chunk is padded to three and pays
+     ~17 % of its GEMV time for a row that does not exist.
+  3. the argmax + D2H + rollback host round-trip, which grows the non-kernel gap
+     from 0.31 to 0.68 ms/token and eats 16 % of the kernel win. Smallest of the
+     three, and the one with a named fix already in `roadmap.md`.
+
+- ~~**MTP loses on a GDN hybrid at every chain length, and the guard is right to
+  disable it.**~~ Superseded by the entry above; the measurements stand as a
+  record of the broken build. Measured on Qwen3.8-27B-NVFP4, greedy, 256 tokens, thinking off,
   economics guard disabled so it runs throughout, two alternating rounds with a
   fresh process per arm:
 
