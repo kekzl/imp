@@ -283,7 +283,17 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     // gdn.cu): the conv window as of snap_n rows. 0 disables it.
     const int snap_n = (conv_snap && d_snap_n) ? min(n_tokens, __ldg(d_snap_n)) : 0;
 
-    for (int ch = threadIdx.x; ch < channels; ch += blockDim.x) {
+    // Channels are split across blockIdx.y as well as threads. With the grid
+    // keyed on tokens alone, a speculative verify chunk launched 2-4 blocks
+    // total and left 166 of 170 SMs idle while each block walked every channel:
+    // measured 2.10 ms for a 2-row chunk against 0.10 ms for the single-token
+    // decode kernel, a 21x ratio on two rows. Tokens are independent here (each
+    // reads its own window from x_in, and conv_state only for the leading
+    // positions), and the two state commits below are per channel, so widening
+    // the grid changes no result. Prefill keeps the same mapping, with more
+    // blocks.
+    for (int ch = blockIdx.y * blockDim.x + threadIdx.x; ch < channels;
+         ch += gridDim.y * blockDim.x) {
         float sum = 0.0f;
         for (int k = 0; k < kernel_size; k++) {
             int src_t = token - (kernel_size - 1) + k;
@@ -344,7 +354,12 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
                                  const void* conv_prev) {
     int n_tokens = static_cast<int>(x_in.shape[0]);
     int channels = static_cast<int>(x_in.shape[1]);
-    ssm_conv1d_prefill_f32_silu_kernel<<<n_tokens, 256, 0, stream>>>(
+    // Grid over (tokens, channel tiles). A 2-row verify chunk used to occupy
+    // two SMs; the y extent gives it the whole card, the same way the
+    // single-token decode launcher already does.
+    constexpr int kThreads = 256;
+    dim3 grid(n_tokens, (channels + kThreads - 1) / kThreads);
+    ssm_conv1d_prefill_f32_silu_kernel<<<grid, kThreads, 0, stream>>>(
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         x_out_f32, n_tokens, channels, conv_kernel, d_real_n, static_cast<float*>(conv_snap), d_snap_n,

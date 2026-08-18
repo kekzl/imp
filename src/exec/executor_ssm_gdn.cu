@@ -64,8 +64,17 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
 
     // GemmContext for all weight GEMM dispatches in this function.
+    //
+    // cur_spec_verify_ is load-bearing here and was missing until 2026-08-18:
+    // without it ctx.spec_verify_small_m stays false, the M<=4 batched-GEMV
+    // branch (#998/#1055) is unreachable, and every GDN projection in a
+    // speculative verify chunk takes the CUTLASS prefill path instead. FFN and
+    // attention already threaded it; this path did not, and on a GDN hybrid it
+    // is 48 of 64 layers, so the small-M verify optimisation never reached the
+    // layers that dominate the architecture. Measured at 148 CUTLASS launches
+    // and 4.26 ms per verify.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq);
+                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
@@ -278,7 +287,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     int head_dim_ssm = (n_heads > 0) ? inner / n_heads : 0;
 
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq);
+                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
