@@ -444,7 +444,7 @@ jobs:
           SKIP_VERIFY: "1"
         run: bash scripts/check-release.sh
 
-  # I1 gate (docs/MEMORY_ARCHITECTURE.md): exactly one module talks to the CUDA
+  # I1 gate (docs/internals/MEMORY.md): exactly one module talks to the CUDA
   # driver about memory. Runs against tools/alloc_allowlist.txt, which shrinks
   # monotonically — the gate fails both on a new direct allocation site and on a
   # stale allowlist entry, so the list cannot silently stop being accurate.

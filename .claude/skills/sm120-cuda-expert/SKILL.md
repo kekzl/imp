@@ -144,7 +144,7 @@ phases, hardware FP4 saturation. It does NOT unlock `tcgen05.*` / TMEM /
 - **Dead ends, version-dependent retries, load-bearing fixes** →
   `references/known-issues.md` — read this BEFORE proposing a lever; most
   obvious ideas on the mature paths have been measured and refuted.
-- **Repo docs**: `docs/sm120.md` (kernel notes), `docs/performance.md`
+- **Repo docs**: `docs/internals/SM120.md` (hardware), `docs/internals/KERNELS.md` (kernel notes), `docs/PERF.md`
   (baselines + methodology), `docs/audit/` (roofline reports).
 - **Hot-path source**: `src/compute/` (attention, gemm, NVFP4), `src/quant/`
   (dequant), `tools/imp-bench/`

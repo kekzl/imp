@@ -408,7 +408,7 @@ sanitize:
 	done
 
 # Apply clang-format in place across src/, include/, tools/, tests/.
-# I1 gate (docs/MEMORY_ARCHITECTURE.md): no direct CUDA memory API outside
+# I1 gate (docs/internals/MEMORY.md): no direct CUDA memory API outside
 # src/memory/, against a monotonically shrinking allowlist. Host-only, no Docker.
 check-alloc-sites:
 	@python3 tools/check_alloc_sites.py

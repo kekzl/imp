@@ -1,6 +1,6 @@
 ---
 name: docs-sync
-description: Use when keeping imp's docs and config examples coherent after a change — updating architecture.md / README / docs/GOAL.md / supported-models.md / imp.conf.example / CHANGELOG / MISSION_JOURNAL, or "is this doc stale", "document this change", "the example config is out of date", "the README says X but the code does Y". Do NOT use for structural code audits (codebase-audit), measuring perf or refreshing the perf baseline (benchmark-cuda), or the agent's private memory (MEMORY.md).
+description: Use when keeping imp's docs and config examples coherent after a change — updating docs/internals/ARCHITECTURE.md / README / docs/GOAL.md / docs/MODELS.md / imp.conf.example / CHANGELOG / MISSION_JOURNAL, or "is this doc stale", "document this change", "the example config is out of date", "the README says X but the code does Y". Do NOT use for structural code audits (codebase-audit), measuring perf or refreshing the perf baseline (benchmark-cuda), or the agent's private memory (MEMORY.md).
 ---
 
 # Docs sync — imp
@@ -34,13 +34,13 @@ description: Use when keeping imp's docs and config examples coherent after a ch
 
 | Doc | Owns | Touch it when |
 |---|---|---|
-| `docs/architecture.md` | Canonical narrative (the source of truth) | a refactor changes the high-level structure / data flow |
-| `docs/MEMORY_ARCHITECTURE.md` · `AUDIT.md` | Memory subsystem: lifetime tiers, allocators, invariants I1–I7, acceptance criteria · the running findings log (incl. REFUTED results) | ownership, lifetime, capacity or VRAM behaviour changes. `architecture.md` defers to it for anything memory-shaped, so don't re-narrate it there |
+| `docs/internals/ARCHITECTURE.md` | Canonical narrative (the source of truth) | a refactor changes the high-level structure / data flow |
+| `docs/internals/MEMORY.md` · `docs/audit/AUDIT_ARCH_2026_07_29.md` | Memory subsystem: lifetime tiers, allocators, invariants I1–I7, acceptance criteria · the running findings log (incl. REFUTED results) | ownership, lifetime, capacity or VRAM behaviour changes. `ARCHITECTURE.md` defers to it for anything memory-shaped, so don't re-narrate it there |
 | `README.md` | User-facing pitch + quickstart + headline numbers | supported models, build steps, or headline perf change |
 | `docs/GOAL.md` | North-star target (Qwen3-14B Q6_K @ctx2048 → 175 tok/s) + hardware scope | the goal or hardware scope changes |
 | `docs/BENCHMARKS.md` | Reproducible perf table (SHA-anchored) | you measured a number worth publishing |
 | `tests/perf_baseline*.json` | The perf **and peak-VRAM** gate (canonical) | a change intentionally moves perf or peak VRAM — refresh via `scripts/gen_perf_baseline.sh` (it re-pins `own_peak_mb` too) |
-| `docs/supported-models.md` | Supported architectures/models | a new arch/model lands or a quant is dropped |
+| `docs/MODELS.md` | Supported architectures/models | a new arch/model lands or a quant is dropped |
 | `docs/MISSION_JOURNAL.md` · `docs/scoreboard.tsv` | Mission log · competitive scoreboard | a competitive/strategic result changes |
 | `CHANGELOG.md` | Notable changes | user-visible behavior changes |
 | `docs/audit/` | Audit reports (see codebase-audit) | an audit/cleanup pass |
@@ -52,8 +52,8 @@ description: Use when keeping imp's docs and config examples coherent after a ch
   Re-bench properly first (REQUIRED SUB-SKILL: benchmark-cuda — clock ramp + host
   drift make cold single shots lie).
 - **Config flag added/removed** → `imp.conf.example` + the `config.h`/`config.cpp` pair.
-- **New arch / model / quant** → `docs/supported-models.md` + README if headline.
-- **Structural refactor** → `docs/architecture.md` if the narrative no longer matches.
+- **New arch / model / quant** → `docs/MODELS.md` + README if headline.
+- **Structural refactor** → `docs/internals/ARCHITECTURE.md` if the narrative no longer matches.
 
 ## Common mistakes
 
