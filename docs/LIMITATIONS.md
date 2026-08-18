@@ -146,6 +146,84 @@ These have a code path and no gate. They may work; nothing proves it.
   single-token path, and the two do not agree bit for bit. Predates the
   2026-08-17 verify work: the same two prompts diverge with the older eager
   replay.
+- **The MTP head accepts 75.0 % of its first draft, and six explanations for
+  the gap to published figures are dead.** Measured on Qwen3.8-27B-NVFP4 over a
+  10-prompt mixed corpus (exposition, code, arithmetic, enumeration), n-gram
+  disabled so the head is the only drafter, `mtp_k=1` so acceptance *is*
+  first-position acceptance, two rounds with a fresh process each:
+  **74.8 % and 75.2 %** (σ 1.2, >1200 drafts per cell), 84.7 and 85.8 tok/s
+  against ~88 without speculation. At `mtp_k=2` the aggregate is 58.0-64.1 %.
+
+```
+[PROV: commit=37cd1543 date=2026-08-17 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=10 prompts x 256 greedy tokens
+       per arm, 2 rounds, fresh process per arm, alternating
+       cmd=`--set speculative.ngram=false --set speculative.mtp_k=1|2
+       --set speculative.mtp_econ_min_emit=0 --set server.prefix_cache=false`,
+       request `temperature 0, think_budget 0`; acceptance from /metrics
+       deltas (imp_spec_accepted_total / imp_spec_drafted_total), card idle]
+```
+
+  Ruled out as causes of the gap, each by measurement, so they do not need
+  running again:
+
+  1. **Draft lm_head precision.** `speculative.mtp_nvfp4_head` true vs false:
+     55.9/55.5 % against 51.6/56.6 %, fully overlapping. The NVFP4 head is ~8 %
+     faster and costs no acceptance, so the default is right.
+  2. **Quantised head weights.** The MTP tensors carry no scale companions in
+     the checkpoint: they are BF16.
+  3. **A missing `gamma = 1 + W` offset.** All seven MTP norms upload through
+     the offset-applying path (`up_norm` in `weight_upload.cu`).
+  4. **The hidden-state convention.** `diagnostics.mtp_prenorm_h` moves nothing
+     (62.8 % against 62.8 %), which follows from `pre_fc_norm_hidden`
+     normalising its input anyway.
+  5. **A RoPE defect.** Disabling rotation looked like a +7.6-point win on one
+     prompt set and reverses across prompt lengths: 72.7/55.6 at 112 tokens,
+     66.5/68.3 at 607, 77.7/67.9 at 2767 (on/off). Rotation is fine.
+  6. **An uninitialised MTP KV cache.** Zeroing it left the per-process spread
+     intact (12.6 points before, 10.1 after) and moved first-position
+     acceptance 73.2 → 75.0, which two samples per condition cannot separate
+     from noise.
+
+  **Two measurement errors of ours are in that list and are the reusable part.**
+  (a) Findings 5 and 6 both survived a first pass because a run was *repeated*
+  rather than *varied*: greedy decoding makes a run deterministic, so two
+  identical runs agreeing to the tenth of a point is a statement about
+  determinism, not about the effect. Vary the workload, not the repetition.
+  (b) The per-process spread in (6) was read as a defect signal when the
+  processes had generated **different text** — imp's forward is not
+  reproducible across processes, and acceptance depends on what was generated.
+  Spread across processes is only a defect signal once the output is identical.
+
+  **The 87 % reference is not yet comparable.** It is a published figure for
+  this architecture class from another engine, and the chain depth, batch size
+  and acceptance definition (per-token or per-chain) behind it are unpinned.
+  Pin the regime before treating the 12-point gap as a target.
+
+```
+[PROV: commit=37cd1543 date=2026-08-17 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=10 prompts x 256 greedy tokens
+       per arm, 2 rounds, fresh process per arm, alternating
+       cmd=`--set speculative.ngram=false --set speculative.mtp_k=1|2
+       --set speculative.mtp_econ_min_emit=0 --set server.prefix_cache=false`,
+       request `temperature 0, think_budget 0`; acceptance from /metrics
+       deltas (imp_spec_accepted_total / imp_spec_drafted_total), card idle]
+```
+- **DISPUTED (2026-08-18): the entry below states a conclusion about the
+  technique that its evidence does not support.** Comparable engines report an
+  MTP k=2 *win* on comparable hardware for this class of model. If that holds,
+  then "MTP loses on a GDN hybrid" is wrong as written and the true statement is
+  "imp's MTP path loses", which makes the economics guard a workaround for a
+  defect rather than a correct refusal. The measurements below stand as
+  measurements; the heading and the last sentence do not. The deciding evidence
+  is a reference engine measured on this box, which is not yet done. Until then
+  do not cite this entry as a property of MTP or of GDN hybrids.
+
+  The suspect cost, from the same tables: verify time grows **5.23 ms per extra
+  draft token** (46 % of a full decode step) on a fit through widths 2/3/5/7,
+  with a **15.4 ms intercept** against an 11.36 ms plain decode. On a batch-1
+  memory-bound forward an extra row should be nearly free, because the weights
+  are already streaming.
 - **MTP loses on a GDN hybrid at every chain length, and the guard is right to
   disable it.** Measured on Qwen3.8-27B-NVFP4, greedy, 256 tokens, thinking off,
   economics guard disabled so it runs throughout, two alternating rounds with a
