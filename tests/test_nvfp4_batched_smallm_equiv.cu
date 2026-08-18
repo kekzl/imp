@@ -11,6 +11,14 @@
 // change that reroutes 48 of 64 layers onto a different kernel family therefore
 // had no gate at all until this file.
 //
+// GPU-ONLY, AND CI NEVER RUNS IT. The `Test` job is skipped on the runners
+// (no GPU), so this file's protection is local-only: it ran once through a
+// pre-commit hook and nothing upstream will run it again. If you touch the
+// small-M verify dispatch, run it yourself before pushing:
+//
+//   docker run --rm --gpus all -v $PWD:/src -w /src imp:toolchain \
+//       ./build-dev/test-quant --gtest_filter='*BatchedSmallM*'
+//
 // Two invariants, both deterministic and both at the shapes a GDN hybrid
 // actually uses:
 //   1. row m of a batched M-row call equals the single-row call for that row,

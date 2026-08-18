@@ -146,12 +146,18 @@ bool Engine::ensure_spec_state_scratch_() {
     // pre-chunk state and re-forwarding a full model pass to reach it — that
     // re-forward measures 17.2 ms against a 28.5 ms verify. Optional: without
     // it the replay path stands, so an allocation failure is a warning.
-    if (spec_state_snap_ == nullptr && cudaMalloc(&spec_state_snap_, bytes) != cudaSuccess) {
-        IMP_LOG_WARN(
-            "spec-hybrid: snapshot slab alloc failed (%zu bytes) — partial acceptances "
-            "will re-forward instead of adopting the snapshot",
-            bytes);
-        spec_state_snap_ = nullptr;
+    // Through the VRAM allocator rather than cudaMalloc: invariant I1 keeps
+    // direct driver calls inside src/memory/, and the allowlist this file sits
+    // on only ever shrinks. #1459 added a raw pair here and pushed the file
+    // from its budgeted 13 sites to 15, which failed the blocking Alloc-sites
+    // gate on main from that commit onward.
+    if (spec_state_snap_ == nullptr) {
+        spec_state_snap_ = vram_alloc_.allocate(bytes, "spec_state_snapshot");
+        if (spec_state_snap_ == nullptr)
+            IMP_LOG_WARN(
+                "spec-hybrid: snapshot slab alloc failed (%zu bytes) — partial acceptances "
+                "will re-forward instead of adopting the snapshot",
+                bytes);
     }
     return true;
 }
@@ -167,7 +173,7 @@ int Engine::recurrent_slot_for_(int req_id) const {
 
 void Engine::free_spec_buffers_() {
     if (spec_state_snap_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(spec_state_snap_));
+        vram_alloc_.free(spec_state_snap_);
         spec_state_snap_ = nullptr;
     }
     // Captured verify graphs bake these buffer pointers — drop them first.
