@@ -759,13 +759,49 @@ struct Speculative {
     // costs change — note a chain of k can emit at most k+1 per verify, so
     // values >= k+1 doom that k unconditionally.
     //
-    // 4.0 came from the #852 measurement, when the verify chunk ran eagerly
-    // and a partial acceptance re-forwarded the accepted prefix through the
-    // whole model. Both are gone: the verify is 26.5 ms against an 11.8 ms
-    // decode step on Qwen3.8-27B, so break-even is 2.25 emitted per verify,
-    // and that model emits 2.72. At 4.0 the guard disabled a configuration
-    // that measures +14.5 % against no MTP at all.
-    float mtp_econ_min_emit = 4.0f;
+    // NEGATIVE (the default) selects a k-aware threshold, 0 disables the
+    // guard, and a positive value is taken as an absolute floor.
+    //
+    // It used to be an absolute 4.0, which doomed MTP at every chain length
+    // this engine can run: a chain of k emits at most k+1 per verify, so 4.0
+    // is unreachable for k=1 (max 2.0), k=2 (max 3.0) and k=3 (max 4.0). The
+    // guard therefore unbound MTP after its 8-verify sample by arithmetic,
+    // whatever the speed, and the 21 % that mtp_k=2 now delivers could not be
+    // received by anyone who did not also override this key. 4.0 came from
+    // #852, when the verify ran eagerly and a partial acceptance re-forwarded
+    // the accepted prefix through the whole model; both are long gone.
+    //
+    // An absolute value cannot be right for every k, because break-even is
+    // chunk_cost(k+1 rows) / decode_cost and that ratio grows with the chain.
+    // Measured on Qwen3.8-27B-NVFP4 after the 2026-08-18 launch fixes, cost
+    // per verify against an 11.21 ms decode step:
+    //
+    //   k=1  15.59 ms -> break-even 1.39, emits 1.721
+    //   k=2  19.65 ms -> break-even 1.75, emits 2.195
+    //   k=3  27.27 ms -> break-even 2.43, emits 2.629
+    //
+    // `1 + 0.5 k` gives 1.5 / 2.0 / 2.5: above each measured break-even, so a
+    // configuration that genuinely loses is still caught, below each measured
+    // emission, and strictly under k+1 for every k, so it can never doom a
+    // chain by arithmetic again. Re-derive it the same way if verify or decode
+    // costs move; the three numbers above are the whole input.
+    //
+    // THE THREE THRESHOLDS ARE NOT EQUALLY SOUND. Margins against break-even
+    // and against measured emission:
+    //
+    //   k=1   +7.9 % above break-even,  12.8 % below emission
+    //   k=2  +14.3 %                     8.9 %
+    //   k=3   +2.9 %                     4.9 %
+    //
+    // Two runs of the identical k=2 configuration differed by 13 % in tok/s and
+    // by 3.7x in verify count, because generations diverge between processes
+    // and different text offers different draft opportunities. Both k=3 margins
+    // are inside that spread, so at k=3 this guard is advisory: on an unlucky
+    // corpus it can unbind a chain that is paying, and on a lucky one it can
+    // miss one that is not. k=1 and k=2 have real headroom. Widening the
+    // coefficient would buy k=3 a margin at the cost of making the guard worse
+    // everywhere else, which is why it is documented rather than fixed.
+    float mtp_econ_min_emit = -1.0f;
     // Graph-captured verify chunk (#847): cache one CUDA graph per
     // draft-length bucket and replay it each verify step — the chunk
     // metadata and KV lengths are read from device buffers, so the graph
