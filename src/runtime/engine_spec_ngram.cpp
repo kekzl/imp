@@ -1154,7 +1154,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // Break-even avg emitted/verify is configurable (0 disables): the
         // right value depends on the chain lm_head cost (NVFP4 vs FP16) and
         // the verify-chunk cost, both of which have moved since #852.
-        const float min_emit = runtime_config_.speculative.mtp_econ_min_emit;
+        // Negative selects the k-aware default; see dispatch_policy.h for the
+        // measurement it comes from and for why an absolute value doomed every
+        // chain length this engine runs.
+        const float cfg_min = runtime_config_.speculative.mtp_econ_min_emit;
+        const float min_emit =
+            cfg_min < 0.0f ? 1.0f + 0.5f * static_cast<float>(mtp_spec_decode_k()) : cfg_min;
         if (min_emit > 0.0f && mtp_econ_verifies_ >= kMtpEconSample &&
             static_cast<float>(mtp_econ_emitted_) <
                 static_cast<float>(mtp_econ_verifies_) * min_emit)
