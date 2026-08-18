@@ -202,7 +202,7 @@ Per token:
 
 ## Subsystems referenced across phases
 
-- **Memory** — has its own design document: [`docs/MEMORY_ARCHITECTURE.md`](MEMORY.md)
+- **Memory** — has its own design document: [`docs/internals/MEMORY.md`](MEMORY.md)
   is canonical for anything about ownership, lifetime or capacity, and
   [`AUDIT.md`](../../AUDIT.md) records what was measured on the way (including the
   negative results). The short version: five lifetime tiers (T1 model-resident,

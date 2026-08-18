@@ -19,7 +19,7 @@ For small edits (parameter tweak, kernel-signature change, fusing two existing k
 > `ptx_survey_all.sh` at `compute_120a` under 13.2 vs 13.3 = **0 of 247 instructions
 > flipped** (none unlocked, none regressed). The "retry on CUDA 13.3+" rows below were
 > re-probed and stay ❌. sm_120's ISA surface is silicon-fixed; toolkit bumps don't add
-> tcgen05/wgmma/TMA. Baselines: `docs/ptx-status-2026-05-29-cuda13{2,3}-sm120a.md`.
+> tcgen05/wgmma/TMA. Baselines: the two `docs/ptx-status-*-sm120a.md` snapshots were consolidated away in #805 — regenerate with `tools/analysis/ptx_survey_all.sh` rather than looking for them.
 > 13.3's value is tooling (CUDA Tile C++, CompileIQ) + cuBLAS perf, not instructions.
 
 | Dead end | Blocked by | Retry on |
@@ -39,7 +39,7 @@ For small edits (parameter tweak, kernel-signature change, fusing two existing k
 
 - **Build target `sm_120a`** (was historically blocked by a `ptxas` C7600 bug on `120f` that needed the `f` workaround). As of CUDA 13.2.1 the `a` arch suffix is the correct target — superset of `120f`, adds `mma.sync.kind::mxf4nvf4.block_scale` and TMA-WS-Grouped-GEMM. Switched 2026-05-04 (commit `6568652`).
 
-- **CUDA Graphs + prequant-NVFP4 MoE.** Earlier "non-Gemma-4 MoE blocks graph capture" claim was stale. The MoE decode fast-path (`executor_forward_moe.cu:524`) is fully device-side, no D2H sync — graph-safe. Verified 2026-05-07 across Qwen3-Coder, Qwen3.6, Gemma-4 NVFP4 (all +193%–234% decode vs `--no-cuda-graphs`). GGUF MoE prefill paths still use D2H sync, but prefill isn't graph-captured anyway. Hybrid Mamba2 (Nemotron-H) does NOT benefit yet — SSM layers don't fast-path.
+- **CUDA Graphs + prequant-NVFP4 MoE.** Earlier "non-Gemma-4 MoE blocks graph capture" claim was stale. The MoE decode fast-path (`executor_forward_moe.cu`, the `n=1, device-resident packed experts` branch) is fully device-side, no D2H sync — graph-safe. Verified 2026-05-07 across Qwen3-Coder, Qwen3.6, Gemma-4 NVFP4 (all +193%–234% decode vs `--no-cuda-graphs`). GGUF MoE prefill paths still use D2H sync, but prefill isn't graph-captured anyway. Hybrid Mamba2 (Nemotron-H) does NOT benefit yet — SSM layers don't fast-path.
 
 - **Lever 1 SSM dispatch (commit `5b2c5db`).** Registered `ssm_in`/`ssm_out` in the `cutlass_nvfp4_cache` so GDN/SSM weights hit the fast NVFP4 GEMM path. Showed +95–376% decode on Qwen3.5/3.6 GDN families on 2026-05-04 — but the gain came from CUDA Graph capture *enabled by* the faster GEMM, not the GEMM speedup itself. **Always re-bench graphs ON after a hot-path kernel change.**
 
@@ -83,7 +83,7 @@ These bugs were diagnosed at high cost. The current kernels assume the fix is in
 ## Negative results (don't repeat)
 
 - **Generic `compute_120` PTX fallback.** Lacks FP8 MMA + block-scale. Always pin `compute_120a/sm_120a`.
-- **FP8×FP8 cuBLAS prefill on sm_120.** Disabled by default since 2026-05-28: cuBLAS FP8 returns `NOT_SUPPORTED` at non-aligned M on consumer Blackwell (`engine_init_resolver.cpp:156`, config `attention.fp8_prefill`). Prefill levers are the FA2 family instead.
+- **FP8×FP8 cuBLAS prefill on sm_120.** Disabled by default since 2026-05-28: cuBLAS FP8 returns `NOT_SUPPORTED` at non-aligned M on consumer Blackwell (`engine_init_resolver.cpp`, config `attention.fp8_prefill`). Prefill levers are the FA2 family instead.
 - **NVFP4 on GDN in/out projections.** REGRESSES −9 to −20% on wide GDN shapes — FP16 wins there; the byte-aligned `gemm.fp8_ssm_proj` sidecar is the shipped answer (native +19% #949, GGUF-Q8_0 +21% #962). The old `gemm.nvfp4_ssm_proj` GGUF opt-in was removed 2026-07-11 (bit-rotted to 71 tok/s, superseded); `gemm.nvfp4_attn_proj` remains a measured opt-in exception.
 - **Occupancy raise / KPAR→MR reroute on the NVFP4 decode GEMV path.** Refuted by the 2026-05-30 nsys+ncu roofline sweep — decode plateau is a 4-bit-dequant co-limit (L1TEX 91%), not occupancy.
 - **Batch-1 MoE decode GEMV beyond 30% roofline.** Structural (#600/PR #642): shallow grids (1.5–2 waves) + tiny K (1.5–4 loads/lane); occupancy is already HIGHER than dense. `moe.mr_nr` is saturated — NR=4 +0.9%, NR≥16 regresses. Don't re-pursue.

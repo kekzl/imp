@@ -5,7 +5,7 @@ description: Use when working on imp's quantization formats, loaders, or dequant
 
 # Quantization Formats & Pipelines — imp
 
-**Sources of truth: `docs/quantization.md` (formats, choosing a quant) and `docs/quant-pipeline.md` (files, GEMM-dispatch registry, boundary rules).** This skill carries only the agent-facing gotchas — read those docs for the full picture.
+**Sources of truth: `docs/quantization.md` (formats, choosing a quant) and `docs/internals/QUANT_PIPELINE.md` (files, GEMM-dispatch registry, boundary rules).** This skill carries only the agent-facing gotchas — read those docs for the full picture.
 
 ## The two worlds
 
@@ -47,7 +47,7 @@ Per-expert NVFP4 tensors are copied into one contiguous `[ne, N, K_packed]` buff
 - **FP8 prefill is disabled on sm_120** (cuBLAS `NOT_SUPPORTED` at non-aligned M) — don't build on it.
 - **MXFP4 GGUF status (2026-07-09)**: Qwen3.5-4B MXFP4 **works** (server garbage fixed in PRs #935/#937); Qwen3.5-27B MXFP4 stays blocked (loads OOM on 32 GB, no GGUF source).
 - **MXFP4-on-GDN-hybrids decode falls back MXFP4→FP16 — that fallback MUST be VRAM-budgeted** (PR #935): unbudgeted it silently failed to allocate and produced token-0 `!` garbage. The planner now reserves it at init and fails loud; don't remove the reserve.
-- **MoE expert leak fingerprint** (PR #925): host-resident experts left unpromoted (raw INT8/FP4 handed to cuBLAS → `status 15` / garbage). For any MoE-expert weight bug, check `src/exec/weight_upload.cu` promotion logic FIRST.
+- **MoE expert leak fingerprint** (PR #925): host-resident experts left unpromoted (raw INT8/FP4 handed to cuBLAS → `status 15` / garbage). For any MoE-expert weight bug, check `src/model/weight_upload.cu` promotion logic FIRST.
 - **VRAM ordering** (PR #926, corrected by #1106): mandatory NVFP4 caches are reserved BEFORE workspaces/KV (`cudaMemGetInfo` lies after async frees — a balloon reservation holds the floor). Don't reorder allocations "for simplicity". **The reservation alone was not enough**: it was sized from an *estimate* of cache demand that ran ~1.6 GiB low, the caches took the difference back out of the reserve, and gpt-oss-20b-mxfp4 at server defaults ended at exactly 0 MiB free — where WSL2/WDDM spills into host memory and decode collapses (55 → 331–359 tok/s once fixed; that is #1103). The shipped rule is the *build* order: the weight caches, whose demand is bounded by the model, are built first, and the KV pool — the elastic tier — takes the **measured** residual rather than a predicted one (`src/runtime/engine_kv_cache_init.cpp`). Corollary: a successful allocation at 0 MiB free proves nothing, since WDDM oversubscribes into host memory and still returns `cudaSuccess`; bandwidth is the discriminator (~1530 GB/s resident vs ~237 GB/s spilled).
 - **Dequant correctness is golden-locked**: GGUF dequant is bit-exact vs spec; f16-class cross-path tolerance is strict 1e-2 (measured ~4e-4). If your change moves these, it's a bug, not noise.
 - Quantizing new checkpoints normally happens OUTSIDE imp (NVIDIA ModelOpt / llm-compressor). Bad community quants exist — a degenerate model can be the file, not the engine (verify with llama.cpp control where possible).

@@ -1,7 +1,7 @@
 # Memory Subsystem Audit
 
 Running findings log for the memory-architecture work. Design lives in
-[`docs/MEMORY_ARCHITECTURE.md`](docs/MEMORY_ARCHITECTURE.md). **Negative results
+[`docs/internals/MEMORY.md`](docs/internals/MEMORY.md). **Negative results
 are recorded here too** — a suspected problem that turns out to be clean is worth
 exactly as much as one that is real, and stops the next pass re-chasing it.
 

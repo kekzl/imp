@@ -5,12 +5,26 @@ description: Use when a question is about *structure* rather than text — who c
 
 # code-graph — ask the index, don't grep the tree
 
-imp has a pre-built symbol and call graph in `.codegraph/` (CodeGraph v1.5.0, ~800 ms to
-rebuild, auto-syncs on save). It answers reverse and scope-resolving questions that a text
-search structurally cannot: **which function** launches a kernel, who reaches a symbol
-transitively, what a header change touches.
+imp has a pre-built symbol and call graph in `.codegraph/` (CodeGraph v1.5.0). It answers
+reverse and scope-resolving questions that a text search structurally cannot: **which
+function** launches a kernel, who reaches a symbol transitively, what a header change
+touches.
 
 ## Hard rules
+
+0. **Sync before you trust it — it does not sync itself.** This file used to claim the
+   index auto-syncs on save. Measured 2026-08-19: the DB was **16 days and 236 commits
+   behind**, and it answered *nothing at all* for every symbol added in that window
+   (`kv_pool_floored`, shipped in v0.28.0, returned an empty result). That is trap 1 one
+   level up: absence is silent, and an empty answer reads like "does not exist" rather
+   than "not indexed". `codegraph sync` cost **2.8 s** for 279 changed files, so there is
+   no reason to skip it:
+
+   ```bash
+   codegraph status                 # Files/Nodes/Edges — sanity, not freshness
+   codegraph sync                   # 2.8 s after a 16-day gap; keeps CUDA launch edges
+   codegraph query <a symbol you just touched>   # the only freshness check that means anything
+   ```
 
 1. **Reverse question → graph first.** "Who calls / who launches / what would break" costs ~30
    tokens through the graph and 500-2500 through `rg` + reading the file to find the enclosing

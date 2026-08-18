@@ -33,7 +33,7 @@ asm volatile(
 
 References in repo:
 - `tests/bench/attention_mxf4nvf4_probe.cu` — canned-input probe
-- `src/compute/attention_fmha_mxf4nvf4_sm120.h` — FMHA upgrade target
+- `src/compute/attention_fmha_mxfp4_sm120.h` — FMHA upgrade target
 
 ---
 
