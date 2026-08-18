@@ -255,6 +255,33 @@ These have a code path and no gate. They may work; nothing proves it.
   to describe an unpinned regime. Acceptance was never the problem. Detail in
   the entry above.
 
+  **MTP stays off by default, and that is a decision rather than an omission.**
+  `speculative.mtp_k` remains 0. Enable it with `--set speculative.mtp_k=2`.
+  What you get and what you pay, all measured on Qwen3.8-27B-NVFP4 after the
+  launch fixes:
+
+  - **+15.2 % decode** on the shipped economics guard, two rounds: 109.48 and
+    96.81 tok/s at k=2 against 89.54 and 89.50 without speculation. The two
+    rounds differ by 13 % and ran 342 against 93 verifies on identical
+    settings, so read this as a range of roughly +8 % to +22 %, not a number.
+    The cause of that 3.7x swing in draft opportunity is not understood.
+
+```
+[PROV: commit=6c2c9445 date=2026-08-18 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=3 prompts x 256 greedy tokens,
+       2 alternating rounds, fresh process per arm
+       cmd=`--set speculative.ngram=false --set speculative.mtp_k=0|2
+       --set server.prefix_cache=false`, NO mtp_econ_min_emit override so the
+       shipped guard applies; tok/s from usage.completion_tokens over request
+       wall time, verify counts from /metrics]
+```
+
+  - **~1.6 GiB of VRAM** for the draft head, paid whether or not it drafts.
+  - **Output stops being reproducible across processes.** A golden-output test
+    has to pin `speculative.mtp_k` or it is testing the drafter's luck; see the
+    history-dependence entry above.
+  - Measured on one checkpoint. Other MTP-carrying models are untested.
+
   **Not finished.** A marginal chunk row still costs 4.22 ms, 38 % of a full
   decode step (down from 8.09 ms, 71 %), on a batch-1 memory-bound decode where
   the weights are already streaming and it should be near-free. Remaining
