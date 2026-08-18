@@ -737,7 +737,11 @@ struct Speculative {
     bool hybrid = true;
     // MTP-head chain-draft length for the verify loop (models shipping a
     // trained MTP head, e.g. Qwen3.6 model_mtp.safetensors). 0 = off.
-    // When >0 the server loads the head (~1.6 GiB VRAM) and enables MTP;
+    // When >0 the server loads the head and enables MTP. Its VRAM cost is
+    // per checkpoint, not a constant: Qwen3.8-27B's dense-MLP head measures
+    // 0.79 GiB (15 tensors, BF16 to FP16 on upload), where the ~1.6 GiB this
+    // line used to quote came from a MoE head. Read the load line rather
+    // than this comment;
     // drafts fill verify steps where the suffix/ngram matcher has no
     // match (draft-poor prose — 78-94% depth-1 accept on Qwen3.6-35B-A3B,
     // PR #804). imp-cli equivalent: --mtp-spec-decode <k>.

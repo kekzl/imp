@@ -11,6 +11,12 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **A checkpoint that ships an MTP head now says so when nothing is using it.**
+  One log line naming `speculative.mtp_k`, the measured gain (+15 % decode on
+  Qwen3.8-27B-NVFP4) and its two prices. The default stays 0.
+
 ### Fixed
 
 - **`scripts/verify.sh` no longer reports OK when no model-backed gate ran.**

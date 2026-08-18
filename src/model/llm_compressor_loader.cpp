@@ -2,6 +2,7 @@
 
 #include "core/logging.h"
 #include "model/json_util.h"
+#include "model/mtp_head.h"
 
 #include <fstream>
 #include <sstream>
@@ -96,7 +97,10 @@ bool name_is_vision(const std::string& in) {
            starts_with(in, "vision_tower.") || starts_with(in, "multi_modal_projector.");
 }
 
-bool name_is_mtp(const std::string& in) { return starts_with(in, "mtp.") || starts_with(in, "model.mtp."); }
+// One rule for the whole loader: this decides the shard drop, load_shard()
+// decides the divert, and probe_mtp_head() decides what the operator is told.
+// #1384 was three sites answering one question and one of them disagreeing.
+bool name_is_mtp(const std::string& in) { return imp::name_is_mtp_tensor(in); }
 
 bool name_is_skipped(const std::string& in, bool keep_vision) {
     if (name_is_vision(in))
