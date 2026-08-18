@@ -141,7 +141,7 @@ These have a code path and no gate. They may work; nothing proves it.
   `speculative.ngram=false` and `server.prefix_cache=false` on both arms, three
   prompts at 256 greedy tokens each, against a stable control (two
   no-speculation processes byte-identical, and that control has held across
-  eight processes): with `mtp_k=2`, **all three prompts** diverge from the
+  eleven processes): with `mtp_k=2`, **all three prompts** diverge from the
   no-speculation answer, first at bytes 79 / 332 / 243 (0-indexed). That is an
   early token flip, not a rounding tail. Both answers are coherent; they are
   different generations. Predates the 2026-08-17 verify work: the same prompts
@@ -222,23 +222,38 @@ These have a code path and no gate. They may work; nothing proves it.
 ```
 
 - **A speculative arm is not byte-stable across processes at temperature 0,
-  with identical flags.** At `mtp_k=2`, one of nine processes on identical flags
-  produced a different prompt-3 answer (737 against 733 bytes, first difference
-  at byte 243) while its aggregate speculation counters were identical
-  (476/371/238). At `mtp_k=1` it is larger: two processes on identical flags
-  produced 471 against 1213 bytes on prompt 1, with 326 drafts / 278 accepts
-  against 420 / 345. The no-speculation arm is byte-stable across all eight of
-  its processes, so this is a property of the speculative path and not of the
-  host. It is not localized to one prompt or one chain length. Consequence for
-  callers: a harness that pins temperature 0 to make two runs comparable does
-  not get that from the seed alone while speculation is on. Use
+  with identical flags. Fresh processes are usually byte-identical and
+  sometimes not.** At `mtp_k=2`, eight of nine processes on identical flags
+  agree byte for byte on all three prompts, and the ninth differs on prompt 3
+  (737 against 733 bytes, first difference at byte 243) with its aggregate
+  speculation counters identical at 476/371/238. At `mtp_k=1` it is coarser:
+  two processes on identical flags produced 471 against 1213 bytes on prompt 1,
+  with 326 drafts / 278 accepts against 420 / 345. The no-speculation arm is
+  byte-stable across all eleven of its processes, prompt 1 the same 1282-byte
+  text every time, so this is a property of the speculative path and not of the
+  host. It is not localized to one prompt or one chain length.
+
+  **It also settles a contradiction between this file and the commit history.**
+  The second-pass entry above reports that "two fresh processes running the same
+  three prompts in the same order were byte-identical" and scopes its finding to
+  a second pass inside one process. That observation is true and it is not
+  general: it is the eight-of-nine case, and two processes cannot see the ninth.
+  The commit body of `ea547a53` (#1467) states the opposite in passing, as the
+  reason a test had to pin a kernel instead of comparing generations, that
+  speculative arms are not reproducible across processes. It carried no number
+  and no mechanism, so it was an assumption. It is measured now, and the two
+  statements are both about the same effect seen from different sample sizes.
+
+  Consequence for callers: a harness that pins temperature 0 to make two runs
+  comparable does not get that from the seed alone while speculation is on. Use
   `speculative.mtp_k=0` with `speculative.ngram=false` for an arm that has to
-  reproduce, or keep both arms inside one process.
+  reproduce. There is no setting that makes a speculative arm reproducible here,
+  because the history inside a process moves it as well, see the entry above.
 
 ```
 [PROV: commit=e3c48aa2 date=2026-08-18 hw=RTX5090 model=Qwen3.8-27B-NVFP4
        quant=NVFP4 cuda=13.3 path=imp-server n=3 prompts x 256 greedy tokens
-       per process, 9 processes at mtp_k=2, 2 at mtp_k=1, 8 at mtp_k=0
+       per process, 9 processes at mtp_k=2, 2 at mtp_k=1, 11 at mtp_k=0
        cmd=`--set server.prefix_cache=false --set runtime.deterministic_gemm=true
        --set speculative.ngram=false --set speculative.mtp_k=0|1|2
        --set speculative.mtp_econ_min_emit=0`, request `temperature 0,
