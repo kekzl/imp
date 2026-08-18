@@ -338,13 +338,15 @@ Added 2026-08-18, on the speculative greedy divergence:
 - **Correction to "Two of three prompts diverge"**, in the *Two findings that
   are not speed* list further down this file: all three prompts diverge, at
   bytes 79 / 332 / 243 with `mtp_k=2`. Two of three was the count on the first
-  pass only. The control is unchanged and now holds across eight
+  pass only. The control is unchanged and now holds across eleven
   no-speculation processes.
 - **Cross-process reproducibility of a speculative arm at temperature 0.** It
-  does not hold, and it is not a kernel hypothesis to chase here: 1 of 9
-  processes at `mtp_k=2` produced a different answer on identical flags, and the
-  two processes measured at `mtp_k=1` disagree with each other. Documented for
-  callers in [`LIMITATIONS.md`](LIMITATIONS.md).
+  does not hold, and it is not a kernel hypothesis to chase here: 8 of 9
+  processes at `mtp_k=2` agree byte for byte and the ninth does not, and the two
+  processes measured at `mtp_k=1` disagree with each other. That is also why two
+  fresh processes were seen agreeing in #1457 while #1467's commit body asserted
+  they do not: both were looking at the same effect with too few samples to see
+  it. Documented for callers in [`LIMITATIONS.md`](LIMITATIONS.md).
 
 ### Withdrawn by their author
 
