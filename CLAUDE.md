@@ -27,6 +27,7 @@ Match the task, invoke that skill first.
 | Open/merge a PR, cut a release | skill **shipping-prs** |
 | Who calls / launches X, blast radius, "is this still used" | skill **code-graph** — ask the index before grepping the tree |
 | Structure audit / dead code / god-files | skill **codebase-audit** — read [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) **before** forming hypotheses |
+| "Is this actually implemented?" — stub, ignored request field, dead kernel, test that asserts nothing | skill **find-stubs** — every rung ships its measured baseline |
 | Keep docs in sync after a change | skill **docs-sync** |
 | VRAM / ownership / lifetime / "where did the memory go" | read [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md) **first** |
 
