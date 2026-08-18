@@ -309,7 +309,14 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // (bucket 3 + the 4-row edge); larger chunks stay on CUTLASS (5+
         // weight sweeps at M=17 would be ~3.5x worse). Same weight + linear
         // micro-scales the M=1 decode GEMV reads (source_data/source_scales),
-        // so verify rows stay in the decode kernel family (argmax parity).
+        // but NOT the same kernel, and there is no argmax parity: decode takes
+        // gemv_nvfp4_kpar (32-lane warp_k_loop K-partition) for shapes
+        // 10240x5120 and 12288x5120 while the verify chunk takes
+        // gemm_nvfp4_batched here, and the FFN shapes 17408x5120 / 5120x17408
+        // never reach this file at decode at all, because the n==1-gated fused
+        // NVFP4 kernels in executor_ffn.cu serve them there. Measured on
+        // Qwen3.8-27B-NVFP4: a speculative arm does not reproduce the
+        // non-speculative greedy output, see docs/LIMITATIONS.md.
         if (ctx.spec_verify_small_m && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 &&
             h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.source_data != nullptr &&

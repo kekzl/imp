@@ -134,18 +134,118 @@ These have a code path and no gate. They may work; nothing proves it.
   that guarantee from the seed alone if both runs share a long-lived server with
   other traffic between them. Pin `server.recurrent_snapshot_mb=0`, or use a
   fresh process per arm.
-- **Speculative decoding does not reproduce the non-speculative greedy output on
-  a GDN hybrid.** Its contract is that it changes speed and not tokens; here it
-  changes tokens. Measured on Qwen3.8-27B-NVFP4 with
-  `runtime.deterministic_gemm=true` on both arms and a stable control (two
-  no-MTP processes, byte-identical): with `mtp_k=2`, two of three prompts
-  diverge from the no-MTP answer, the first at character 79 of 1026 — an early
-  token flip, not a rounding tail. Both answers are coherent and correct, but
-  they are different generations. The verify advances the recurrent state
-  through the chunk kernels while plain decode advances it through the
-  single-token path, and the two do not agree bit for bit. Predates the
-  2026-08-17 verify work: the same two prompts diverge with the older eager
-  replay.
+- **Speculative decoding does not reproduce the non-speculative greedy output
+  on a GDN hybrid, and it cannot by construction.** Its contract is that it
+  changes speed and not tokens; here it changes tokens. Measured on
+  Qwen3.8-27B-NVFP4 with `runtime.deterministic_gemm=true`,
+  `speculative.ngram=false` and `server.prefix_cache=false` on both arms, three
+  prompts at 256 greedy tokens each, against a stable control (two
+  no-speculation processes byte-identical, and that control has held across
+  eight processes): with `mtp_k=2`, **all three prompts** diverge from the
+  no-speculation answer, first at bytes 79 / 332 / 243 (0-indexed). That is an
+  early token flip, not a rounding tail. Both answers are coherent; they are
+  different generations. Predates the 2026-08-17 verify work: the same prompts
+  diverge with the older eager replay.
+
+  **The cause is structural, not a kernel defect.** In a speculative arm every
+  emitted token comes out of the multi-row verify chunk and none out of the
+  single-token decode step: the chunk is built at
+  `src/runtime/engine_spec_ngram.cpp:740,751` and the only emit site in that
+  file is `:988`. Proven by an image whose `n == 1` decode path was broken badly
+  enough to emit pure garbage, and whose speculative arm still produced output
+  byte-identical to the stock speculative arm. Decode and the verify chunk also
+  dispatch different kernels for the same weights, per shape: 10240x5120 and
+  12288x5120 take `gemv_nvfp4_kpar` with its 32-lane `warp_k_loop` partition at
+  decode and `gemm_nvfp4_batched` in the chunk, and the FFN shapes 17408x5120
+  and 5120x17408 never appear on the decode side at all, because the
+  `n == 1`-gated fused NVFP4 kernels serve them there
+  (`src/exec/executor_ffn.cu:98,140`). So "speculation reproduces
+  non-speculative decode" is not a property this design can deliver. It could
+  only hold by kernel coincidence, and it does not.
+
+  **The mechanism this entry used to state is withdrawn.** It read: the verify
+  advances the recurrent state through the chunk kernels while plain decode
+  advances it through the single-token path. `--set gdn.chunkwise_scan=false` is
+  byte-inert on both arms and the divergence survives at the same offsets, so
+  that is not it.
+
+  **Five decode-side hypotheses are dead, each killed by a switch or by a patch
+  that instrumentation proved live. Do not re-run them:**
+
+  1. **GDN chunkwise scan** (`--set gdn.chunkwise_scan=false`): byte-inert on
+     both arms.
+  2. **Fused QK-norm + RoPE** (`--set attention.no_qknorm_fused=true`):
+     byte-inert on both arms.
+  3. **The NVFP4 `use_multirow` K-partition split**
+     (`src/quant/nvfp4_gemv_dense.cu:387`, patched out): byte-inert on both
+     arms. The dispatch log confirms shapes 10240x5120 and 12288x5120 moved from
+     `multirow=1` to `multirow=0` at decode, so the instrument was live.
+  4. **The fused NVFP4 FFN at decode** (two-site patch at
+     `src/exec/executor_ffn.cu:98,140`): decode output byte-identical to stock
+     across 2281 greedy tokens. The log confirms both FFN shapes moved onto
+     `gemv_nvfp4_kpar`, and `gemv_nvfp4_gate_up_fused` never fired.
+  5. **The attention kernel family** (mirror flip at
+     `src/exec/executor_attention.cu:516`, putting the `n == 1` decode step on
+     the chunk's FA2 path): it moves prompts 2 and 3 on the decode side and
+     leaves prompt 1 byte-identical, and prompt 1 is exactly where the
+     speculative divergence sits, at byte 79. With `--set
+     speculative.capture=false` putting both paths on the same eager
+     `FA2_FP16QK` branch, the divergence is still at byte 79.
+
+  **All five are decode-side substitutions, and the direction matters.** This is
+  not "kernel identity is irrelevant". A chunk-side substitution does move the
+  generated text: `--set speculative.verify_nvfp4_gemm=false` moves the first
+  difference to bytes 58 / 130 / 150 on the three prompts, and it still never
+  reaches the non-speculative reference. The standing fact for the chunk side is
+  the weaker one, that no chunk-side kernel choice tried so far closes the gap.
+
+  **What makes the decode-side eliminations hard to argue with is that the
+  invariance is at text level, not at offset level.** Across every decode-side
+  substitution the non-speculative prompt-1 answer is one and the same 1282-byte
+  text in 11 processes (md5 `35e7d9a93d14fe18a604a58fb6456388`), and the
+  `mtp_k=2` prompt-1 answer is one and the same 470-byte text in 8 processes
+  (md5 `c8a63ca87dc1ad95bc185b8c4e97d7b8`). The two differ from byte 79 on.
+  Prompt 2 behaves the same way, so prompts 1 and 2 carry this record.
+  **Prompt 3 does not**: it reads 243 in five pairs and 253 in two, and the 253
+  cannot be separated from the cross-process instability in the entry below.
+  Prompt 3 is evidence that all three prompts diverge, nothing more.
+
+```
+[PROV: commit=e3c48aa2 date=2026-08-18 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=3 prompts x 256 greedy tokens
+       per arm, fresh process per arm, one arm per process
+       cmd=`--set server.prefix_cache=false --set runtime.deterministic_gemm=true
+       --set speculative.ngram=false --set speculative.mtp_k=0|2
+       --set speculative.mtp_econ_min_emit=0`, request `temperature 0,
+       think_budget 0`; divergence offsets from `cmp` over the saved answer
+       bytes, kernel identity from the dispatch log, card idle]
+```
+
+- **A speculative arm is not byte-stable across processes at temperature 0,
+  with identical flags.** At `mtp_k=2`, one of nine processes on identical flags
+  produced a different prompt-3 answer (737 against 733 bytes, first difference
+  at byte 243) while its aggregate speculation counters were identical
+  (476/371/238). At `mtp_k=1` it is larger: two processes on identical flags
+  produced 471 against 1213 bytes on prompt 1, with 326 drafts / 278 accepts
+  against 420 / 345. The no-speculation arm is byte-stable across all eight of
+  its processes, so this is a property of the speculative path and not of the
+  host. It is not localized to one prompt or one chain length. Consequence for
+  callers: a harness that pins temperature 0 to make two runs comparable does
+  not get that from the seed alone while speculation is on. Use
+  `speculative.mtp_k=0` with `speculative.ngram=false` for an arm that has to
+  reproduce, or keep both arms inside one process.
+
+```
+[PROV: commit=e3c48aa2 date=2026-08-18 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=3 prompts x 256 greedy tokens
+       per process, 9 processes at mtp_k=2, 2 at mtp_k=1, 8 at mtp_k=0
+       cmd=`--set server.prefix_cache=false --set runtime.deterministic_gemm=true
+       --set speculative.ngram=false --set speculative.mtp_k=0|1|2
+       --set speculative.mtp_econ_min_emit=0`, request `temperature 0,
+       think_budget 0`; answer bytes compared with `cmp`, drafts and accepts
+       from /metrics deltas, card idle]
+```
+
 - **The MTP head accepts 75.0 % of its first draft, and six explanations for
   the gap to published figures are dead.** Measured on Qwen3.8-27B-NVFP4 over a
   10-prompt mixed corpus (exposition, code, arithmetic, enumeration), n-gram
