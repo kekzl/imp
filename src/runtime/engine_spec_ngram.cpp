@@ -1158,8 +1158,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // measurement it comes from and for why an absolute value doomed every
         // chain length this engine runs.
         const float cfg_min = runtime_config_.speculative.mtp_econ_min_emit;
+        // 1 + f*k IS a draft-acceptance threshold, because a verify emits
+        // exactly 1 + accepted. f = 0.40 sits on the measured break-even
+        // acceptance (39.0 / 37.5 / 47.7 % at k = 1 / 2 / 3); see
+        // dispatch_policy.h for the derivation and for why permissive at k=3
+        // is the deliberate direction.
+        constexpr float kMtpEconAccept = 0.40f;
         const float min_emit =
-            cfg_min < 0.0f ? 1.0f + 0.5f * static_cast<float>(mtp_spec_decode_k()) : cfg_min;
+            cfg_min < 0.0f ? 1.0f + kMtpEconAccept * static_cast<float>(mtp_spec_decode_k()) : cfg_min;
         if (min_emit > 0.0f && mtp_econ_verifies_ >= kMtpEconSample &&
             static_cast<float>(mtp_econ_emitted_) <
                 static_cast<float>(mtp_econ_verifies_) * min_emit)
