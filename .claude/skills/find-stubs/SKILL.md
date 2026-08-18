@@ -14,16 +14,30 @@ sweeps over-flag by construction. Scope is `src include tools`, `--glob '!build*
 
 ## 1. Textual markers — 5 minutes
 
+**Start with the sharp pattern, not the broad one.** `stub`, `not implemented`
+and `unimplemented` are the tokens that pay here; this repo does not use
+TODO/FIXME (one hit each), and `placeholder` is a **domain term** — 25 of the 39
+broad hits are image placeholders in the vision prompt path, one is a stub.
+
 ```bash
-rg -n -i --glob '!build*' -e '\b(TODO|FIXME|XXX|HACK|WIP|STUB|PLACEHOLDER|NOT[_ ]?IMPLEMENTED|UNIMPLEMENTED)\b' src include tools   # 39
-rg -n -i --glob '!build*' -e 'for now|temporar|simplified|fallback for|approximation|assume[sd]? that' src include tools            # 68
-rg -n --glob '!build*' -e 'assert\(false\)|assert\(0\)|std::abort|__trap\(\)|#if\s+0\b' src include tools                           # 10
+rg -n -i --glob '!build*' -e '\b(STUB|NOT[_ ]?IMPLEMENTED|UNIMPLEMENTED)\b' src include tools           # 12, all productive
 ```
 
-This repo does not use TODO/FIXME (one hit each). The productive tokens are
-`placeholder` (25), `stub` (6), `not implemented` (6) — read all 39. `should be`
-(90 hits alone), `revisit` and `naive impl` (0) are left out of the second
-pattern deliberately.
+Twelve hits, zero noise, and they name every unfinished compute path in the
+tree. Read all twelve — the 2026-08-19 run found `gemm_grouped_dispatch` (four
+`... tier not implemented` branches) with **zero callers in src, tools or
+tests**, while its live sibling `gemv_dispatch` has three production call sites.
+
+Then the broad sweep, for what the sharp one cannot know it is missing:
+
+```bash
+rg -n -i --glob '!build*' -e '\b(TODO|FIXME|XXX|HACK|WIP|PLACEHOLDER)\b' src include tools              # 27, mostly image placeholders
+rg -n -i --glob '!build*' -e 'for now|temporar|simplified|fallback for|approximation|assume[sd]? that' src include tools   # 68
+rg -n --glob '!build*' -e 'assert\(false\)|assert\(0\)|std::abort|__trap\(\)|#if\s+0\b' src include tools                  # 10
+```
+
+`should be` (90 hits alone), `revisit` and `naive impl` (0) are left out of the
+weasel pattern deliberately.
 
 ## 2. Compiler as detector
 
