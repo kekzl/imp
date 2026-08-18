@@ -486,5 +486,13 @@ These have a code path and no gate. They may work; nothing proves it.
 - **Free VRAM only ever decreases within a process** on WSL2/WDDM, however
   cleanly CUDA released it. Anything sized from `cudaMemGetInfo` reads a moving
   floor.
+- **No `/health` field separates a server that started beside another process
+  from a healthy one.** It does not fail: it gets a smaller KV pool and reports
+  that pool as sitting at its own ceiling — 23 339 blocks on an idle card
+  against 17 406 beside a neighbour holding 23.4 GiB, both answering `ok`. The
+  plan and the install-time baseline both read `cudaMemGetInfo`, the same source
+  as the defect, so neither can point at it. The one signal is the weight-upload
+  delta against the checkpoint on disk, which warns at load; measurement and the
+  two refuted fields are in [`MEMORY.md`](internals/MEMORY.md) B8.
 - **`kv_cache.swa_snapshot_mb` set below one snapshot silently disables prefix
   caching** — worse than setting it to zero. It warns since #1092.
