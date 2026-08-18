@@ -55,6 +55,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
     int kv_blocks = -1;
     int kv_block_size = -1;
     int kv_ceiling = -1;
+    bool kv_growable = false;
     std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
     if (lock.owns_lock()) {
         loaded = state.model_loaded();
@@ -72,6 +73,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
                 kv_blocks = kv->total_blocks();
                 kv_block_size = kv->block_size();
                 kv_ceiling = kv->ceiling_blocks();
+                kv_growable = kv->growable();
             }
         }
         lock.unlock();
@@ -98,6 +100,11 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         // The ceiling a growable pool may still reach. Equal to the total for a
         // fixed pool, so a caller can compare the two rather than test a flag.
         body["kv_ceiling_blocks"] = kv_ceiling;
+        // A fixed pool reports ceiling == total, and so does a growable one
+        // already at its ceiling. Same pair, opposite advice: one heals as the
+        // card frees, the other never will. Say which, rather than leaving the
+        // caller to derive it from a pair that cannot express it.
+        body["kv_pool_growable"] = kv_growable;
     }
     if (!unservable.empty()) {
         // A client has to tell a permanent 503 from a transient one, or it

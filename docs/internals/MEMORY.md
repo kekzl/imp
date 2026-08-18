@@ -1049,7 +1049,7 @@ rounded up — three of the seven are still open, and one has not moved at all.
 | I1 | Single acquisition point | ✗ — 365 sites / 74 files outside `src/memory/` | **✗ — 499 calls / 74 files (2026-07-31), of which 224 are acquisitions and 275 releases.** The **pinned-host class is CLOSED: 26 → 0** (B58/B60) — every one moved to T5b's `PinnedBuffer`/`HostRegistration`, which is why the total fell 638 → 582 (each migration took its releases with it). What remains is device memory only. Progress since B48's 696/309 came from migrating whole clusters rather than sites (B52–B57); what stalled it before that was migrations keeping their original path as a fallback, which the gate cannot see (B34/B47) | ✓ — `Backend`, allowlist empty, CI gate |
 | I2 | No allocation on the hot path | ✗ — measured +190 MiB/config of steady-state allocation | **✓ — `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`**, 15 requests, dense. Was 414 → 238 → 0 | ✓ — `ScratchStack`, phase guard, counter == 0 |
 | I3 | Stable addresses for graph memory | ~ — true in practice, enforced by comments + a `workspace_generation` hook | **~ — `StableSpan` exists and is passkey-enforced**, so only allocators that can promise stability can mint one; kernel signatures still take raw pointers | ✓ — `StableSpan` in kernel signatures; no conversion from `DeviceSpan` |
-| I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ — `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). **The balloon is GONE (2026-07-30, B62)** — the mandatory-cache guarantee is a planned floor instead of a physical hold, which also freed 72x more KV on the config where the hold bound. **The KV block count is now the PLAN's** (B69) — `plan_memory()` decides it, the live pass is the fallback when the plan rejects, and the measured-residual clamp can still only shrink it. What still enters through `cudaMemGetInfo` is the *distributable* figure the plan is handed — **measured 2026-07-31 (B82) and it does not move**: five identical starts produce a byte-identical plan, and a co-tenant holding 31 949 MiB changes neither the plan nor decode throughput (293.4 vs 292.7 tok/s, i.e. no WDDM spill). Replacing it is the invariant's letter, not a fix for anything that fails | ✓ — `plan_memory()` never queries the device; fails at load with a report |
+| I4 | Capacity planned, not discovered | ✗ — live `cudaMemGetInfo`, a balloon, six stacked clamps | **~ — `plan_memory()` is pure and runs in shadow**; the live pass now charges the library reserve it always omitted (B37). **The balloon is GONE (2026-07-30, B62)** — the mandatory-cache guarantee is a planned floor instead of a physical hold, which also freed 72x more KV on the config where the hold bound. **The KV block count is now the PLAN's** (B69) — `plan_memory()` decides it, the live pass is the fallback when the plan rejects, and the measured-residual clamp can still only shrink it. What still enters through `cudaMemGetInfo` is the *distributable* figure the plan is handed — **measured 2026-07-31 (B82) and it does not move**: five identical starts produce a byte-identical plan, and a co-tenant holding 31 949 MiB changes neither the plan nor decode throughput (293.4 vs 292.7 tok/s, i.e. no WDDM spill). Replacing it is the invariant's letter, not a fix for anything that fails. **B82 holds only while the config cap binds before VRAM does** — with a VRAM-bound plan the same co-tenant takes 25 % of the KV pool (B8) | ✓ — `plan_memory()` never queries the device; fails at load with a report |
 | I5 | Unidirectional ownership | ✗ — `VRAMAllocator` is a tracker; raw `void*` cross module boundaries | **~ — KV blocks and the T2/T3 tiers own through move-only RAII** (`Region`, `BlockRef`, `GraphSlotLease`); raw `void*` still crosses boundaries in `exec/` and `compute/` | ✓ — `Owned<T, Tier>`, no cross-tier conversion, no raw device pointers above L1 |
 | I6 | OOM is typed and recoverable | ~ — `RequestStatus::CANCELLED`, plus a warning that fires *after* prefill | **✓ — both halves.** Plan-time: an unservable `--vram-budget` refuses at load with the block arithmetic. Admission-time: `IMP_ERROR_CAPACITY` → HTTP 503 `capacity_error`, distinct from a client cancel (B40) | ✓ — plan-time failure at load; admission-time 429/503 at runtime |
 | I7 | Capacity ≠ occupancy | ✗ — 20–39 % of device memory unattributed | **~ — per-tier reserved *and* live is served** on `/metrics`, plus KV blocks and budget-vs-own. Accounting reaches **98.3 %** once the library reserve is charged at its measured value rather than the 3900 MiB constant (B41/B42); with the constant it is 82.5 % on Qwen3-8B. MoE's **102.0 %** — a negative residual — proves the note double-booking (B32), so that config's gap is the counters, not the attribution | ✓ — per-tier reserved *and* live, library reserve named, ≥95 % accounted |
@@ -1437,6 +1437,67 @@ The I3 mechanism itself is asserted at compile time in
 `StableSpan`, `StableSpan` is not constructible from a raw pointer, and the
 widening direction stays implicit. A refactor that reopens the hole fails to
 compile rather than silently passing.
+
+### B8 — a co-tenant moves the plan, and no `/health` field can say so (2026-08-19)
+
+Same command, same model, same build; only the card differs:
+
+| card at startup | KV blocks | `kv_ceiling_blocks` | what `/health` says |
+|---|---:|---:|---|
+| idle | 23 339 | 23 339 | `ok`, pool at its ceiling |
+| 23.4 GiB in use by a neighbour | 17 406 | 17 406 | `ok`, pool at its ceiling |
+
+A client comparing the total against the ceiling reads "at capacity, healthy" in
+both — at a quarter of the pool. Nothing is faulted and nothing is floored: the
+second server loads, serves, and every number it then produces is a statement
+about a card it shared.
+
+**This bounds B82.** That measurement found a co-tenant holding 31 949 MiB
+changing neither the plan nor decode throughput, and it is correct *in its
+regime*: at `runtime.max_seq_len=8192` this model's plan asks
+`max_seq_len x max_batch / block_size` = 16 384 blocks, the config cap binds
+before VRAM does, and a neighbour is invisible to it. The table above is the
+same box with `max_seq_len=65536`, where the plan is VRAM-bound — and then the
+neighbour takes 25 % of it. "The plan does not move" holds only while something
+other than free VRAM is the binding constraint.
+
+**Two `/health` fields were built for this state and both were measured to
+fail.** Recorded so they are not rebuilt:
+
+1. **The pre-clamp plan beside the total** (`kv_blocks_planned`). The plan is
+   handed `effective_free_vram()`, so it shrinks with the neighbour like
+   everything else. Occupied arm: planned 17 673 against a total of 17 512, a
+   0.9 % gap that reads as a clean bill of health while the pool sits 25 % below
+   an idle-card start. The gap it does expose — the measured residual undercutting
+   the plan — is the ordinary case the `KvResidualSizing::clamped` comment already
+   calls normal.
+2. **Device-used at `vram_budget_install`** (`vram_used_at_install_bytes()`).
+   1679 MiB in **both** arms. Under WSL2/WDDM the driver reports the whole card
+   as free until a process allocates against it, so a snapshot taken before the
+   first allocation cannot see a neighbour at all. Every figure derived from that
+   baseline inherits the blindness, which is why `vram_own_used_bytes()` cannot
+   be made to answer this either.
+
+**What does see it is the process's own upload.** For the same 3263 MiB
+checkpoint, `free_before - free_after` across `upload_weights_gpu` measured
+3264 MiB on the idle card and 8446 MiB beside the neighbour. That is the first
+moment the card's real occupancy is observable at all, and until now the line
+printed the delta as `weights ~8446 MiB` — labelling a co-tenant as this model's
+weights. It now names the delta for what it is and warns when it exceeds the
+checkpoint on disk by more than a quarter (`engine_weight_upload.cpp`).
+One-sided on purpose: consuming *less* than the file is ordinary (host-resident
+experts, dropped sources), consuming a quarter more cannot be weights. Checked
+against a 9.9 GiB NVFP4 checkpoint directory on an idle card, which consumed
+10 080 MiB and stays silent.
+
+```
+[PROV: commit=f39441d0 date=2026-08-19 hw=RTX5090 model=Llama-3.2-3B-Instruct-Q8_0
+       quant=Q8_0 cuda=13.3 path=imp-server n=2 arms x 2 configs
+       cmd=`imp-server --model <m> --set runtime.max_seq_len=65536`, neighbour =
+       a second imp-server pinned to `--set kv_cache.max_blocks=14000`; blocks and
+       ceiling read from GET /health, upload delta from the server log]
+```
+
 
 ---
 

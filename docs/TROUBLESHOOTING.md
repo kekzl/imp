@@ -100,6 +100,31 @@ The fix is a restart on a free card, not a retry: the pool is sized once, at
 startup. Wait for the old process to release the GPU before starting the new
 one.
 
+## The server came up fine, but its numbers are wrong
+
+The quieter half of the same fault, and the one that costs you a false finding
+rather than a cancelled request. A server started beside another process does
+not fail: it gets a smaller KV pool, and `/health` still reports that pool as
+sitting at its own ceiling, because the ceiling was computed against the same
+occupied card. There is no field in `/health` that separates it from a healthy
+start — both read `ok`.
+
+The load log does say so, since v0.29.0:
+
+```
+WARN  Weight upload consumed 8446 MiB of device free VRAM for a 3263 MiB
+      checkpoint. The excess is not weights: another process is holding the card
+      (on WSL2 it is invisible until this upload), or the upload spilled to host
+      memory.
+```
+
+The weight upload is the first moment a neighbour is visible at all — under
+WSL2/WDDM the driver reports the whole card as free until a process allocates
+against it. Everything sized after that point (KV pool, decode caches) reads the
+same shrunken residual, and the load still reports success, so treat this
+warning as a refusal to measure: free the card and restart before recording any
+number from that process.
+
 ## The server answers 503
 
 Either the model is suspended (`POST /admin/resume`), or the server was started

@@ -13,11 +13,24 @@ there instead of retelling it.
 
 ### Added
 
+- **`/health` says whether the KV pool can still grow (`kv_pool_growable`).** A
+  fixed pool and a growable one already at its ceiling both report
+  `kv_ceiling_blocks == kv_blocks_total`, and the two want opposite reactions:
+  wait for the card to free, or stop waiting.
+
 - **A checkpoint that ships an MTP head now says so when nothing is using it.**
   One log line naming `speculative.mtp_k`, the measured gain (+15 % decode on
   Qwen3.8-27B-NVFP4) and its two prices. The default stays 0.
 
 ### Fixed
+
+- **The weight-upload log line called a neighbour on the card "weights".** The
+  same 3263 MiB checkpoint consumes 3264 MiB of device free VRAM on an idle card
+  and 8446 MiB beside a process holding 23.4 GiB. The line now names the delta
+  for what it is and warns when it exceeds the checkpoint on disk by a quarter —
+  the first moment a co-tenant is visible at all on WSL2, and the only signal
+  that separates a poisoned start from a healthy one. Why no `/health` field
+  can: [`MEMORY.md`](docs/internals/MEMORY.md) B8.
 
 - **`scripts/verify.sh` no longer reports OK when no model-backed gate ran.**
   `models/` is a gitignored symlink farm that exists only in the main checkout,

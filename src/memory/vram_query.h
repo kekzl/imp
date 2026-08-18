@@ -91,6 +91,26 @@ inline size_t vram_reserve_floor(size_t total_bytes, int pct = 10) {
     return share > floor_bytes ? share : floor_bytes;
 }
 
+// Whether a weight upload consumed more device free VRAM than the checkpoint on
+// disk can account for.
+//
+// The upload is the first moment a co-tenant on the card is observable at all:
+// under WSL2/WDDM the driver reports the whole card as free until a process
+// allocates against it, so both `vram_used_at_install_bytes()` and the plan's
+// free-VRAM read are blind to a neighbour, and the KV pool that follows is
+// sized from the same shrunken residual while the load reports success
+// (MEMORY.md B8). Consuming LESS than the file is ordinary — host-resident
+// experts, dropped sources — so this is one-sided by construction; a quarter
+// more than the file holds cannot be weights.
+//
+// `on_disk_bytes == 0` means "could not size the checkpoint", which reads as no
+// reference to check against rather than as a fault.
+inline bool upload_exceeds_checkpoint(size_t consumed_bytes, size_t on_disk_bytes) {
+    if (on_disk_bytes == 0)
+        return false;
+    return consumed_bytes > on_disk_bytes + on_disk_bytes / 4;
+}
+
 // Outcome of sizing the KV pool from the measured post-cache residual.
 struct KvResidualSizing {
     int blocks = 0;         // block count to use

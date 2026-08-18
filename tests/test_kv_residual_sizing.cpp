@@ -158,5 +158,38 @@ TEST(KvPoolVerdict, UnsetRequirementIsNotAFault) {
     EXPECT_EQ(kv_pool_verdict(s, 2048, 0), KvPoolVerdict::Sufficient);
 }
 
+// ── upload_exceeds_checkpoint ─────────────────────────────────────────────
+//
+// The measured pair this exists for (MEMORY.md B8): the same 3263 MiB
+// checkpoint consumed 3264 MiB of device free VRAM on an idle card and
+// 8446 MiB beside a process holding 23.4 GiB.
+
+TEST(UploadExceedsCheckpoint, TheMeasuredPair) {
+    EXPECT_FALSE(upload_exceeds_checkpoint(3264 * kMiB, 3263 * kMiB));
+    EXPECT_TRUE(upload_exceeds_checkpoint(8446 * kMiB, 3263 * kMiB));
+}
+
+TEST(UploadExceedsCheckpoint, ConsumingLessIsOrdinary) {
+    // Host-resident experts and dropped sources upload less than the file
+    // holds. One-sided on purpose: this direction must never warn, or the
+    // gpt-oss and MoE-offload paths warn on every healthy load.
+    EXPECT_FALSE(upload_exceeds_checkpoint(1 * kMiB, 10000 * kMiB));
+    EXPECT_FALSE(upload_exceeds_checkpoint(0, 10000 * kMiB));
+}
+
+TEST(UploadExceedsCheckpoint, TheQuarterIsInclusiveOfItsBoundary) {
+    // Exactly a quarter over is still silent — the threshold has to absorb the
+    // CUDA context and library growth that the upload phase also pays for.
+    EXPECT_FALSE(upload_exceeds_checkpoint(1250 * kMiB, 1000 * kMiB));
+    EXPECT_TRUE(upload_exceeds_checkpoint(1251 * kMiB, 1000 * kMiB));
+}
+
+TEST(UploadExceedsCheckpoint, UnknownCheckpointSizeIsNotAFault) {
+    // 0 = the checkpoint could not be sized (unreadable path, an unrecognised
+    // layout). There is no reference to compare against, and inventing one
+    // would warn on every load of it.
+    EXPECT_FALSE(upload_exceeds_checkpoint(99999 * kMiB, 0));
+}
+
 }  // namespace
 }  // namespace imp

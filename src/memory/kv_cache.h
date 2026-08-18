@@ -57,6 +57,11 @@ public:
     // How many blocks this pool could grow to. Equals total_blocks() unless it
     // was built growable and has not reached its ceiling.
     int ceiling_blocks() const { return max_blocks_; }
+    // Whether the ceiling can actually be reached. Without this, a client
+    // reading ceiling == total cannot tell a fixed pool from a growable one
+    // sitting at its ceiling, and those want opposite reactions: wait for the
+    // card to free, or stop waiting.
+    bool growable() const { return growable_; }
 
     // Physical memory currently committed by a growable pool, 0 for a fixed
     // one. What the pool actually costs right now, as opposed to the address

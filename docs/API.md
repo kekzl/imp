@@ -186,12 +186,15 @@ hold without scraping `/metrics`:
 {"status": "unhealthy", "code": "kv_pool_floored",
  "model_loaded": true, "queue_depth": 0, "suspended": false,
  "kv_blocks_total": 16, "kv_block_size": 32, "kv_capacity_tokens": 512,
- "kv_ceiling_blocks": 16}
+ "kv_ceiling_blocks": 16, "kv_pool_growable": false}
 ```
 
 `kv_ceiling_blocks` is what the pool may still grow to. Equal to
 `kv_blocks_total` means a fixed pool at its final size; greater means it is
-growable and has not got there yet (`kv_cache.growable`). A pool that is small
+growable and has not got there yet (`kv_cache.growable`). `kv_pool_growable`
+resolves the case where that pair cannot: a fixed pool and a growable one that
+has already reached its ceiling both report ceiling == total, and the two want
+opposite reactions — wait for the card to free, or stop waiting. A pool that is small
 **and** can still grow is not reported as unhealthy at all: it heals as the card
 frees, and a client should wait for the total to climb rather than restart the
 server.
