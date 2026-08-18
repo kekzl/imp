@@ -7,6 +7,11 @@
 #   3. Perf vs. tests/perf_baseline.json (decode regression > 3% = fail)
 #   4. Smoke prompts on real models (degeneration detector)
 #
+# Steps 3 and 4, plus the peak-VRAM and CUDA-graph gates, need real checkpoints
+# under $MODELS and skip individually when one of them is absent. A missing
+# models/ directory, or a run in which no model-backed gate measured anything at
+# all, fails the gate instead of reporting OK.
+#
 # Modes:
 #   verify.sh fast    Unit tests + perf baseline + 1 smoke prompt   (~90s)
 #   verify.sh full    Full ctest + perf baseline + 2 smoke prompts  (~5min)
@@ -56,6 +61,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_BIN=/usr/local/bin/imp-cli \
         -e IMP_VERIFY_TESTS=/usr/local/bin/imp-tests \
         -e IMP_VERIFY_SKIP_BUILD=1 \
+        -e IMP_VERIFY_MODELS="${IMP_VERIFY_MODELS:-models}" \
         -e IMP_VERIFY_SKIP_PERF="${IMP_VERIFY_SKIP_PERF:-0}" \
         -e IMP_VERIFY_SKIP_VRAM="${IMP_VERIFY_SKIP_VRAM:-0}" \
         -e IMP_VERIFY_SKIP_GRAPHS="${IMP_VERIFY_SKIP_GRAPHS:-0}" \
@@ -82,6 +88,13 @@ pass()    { echo "${GRN}PASS${RST} $*"; }
 fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 skip()    { echo "${YLW}SKIP${RST} $*"; }
 warn()    { echo "${YLW}WARN${RST} $*"; }
+
+# Model-backed gates that actually measured something. Every gate that loads a
+# checkpoint degrades to SKIP when the file is absent, so a run can reach the
+# summary having put nothing in front of the GPU. The summary refuses to report
+# OK while this is still zero.
+MODEL_GATES_RUN=0
+model_gate_ran() { MODEL_GATES_RUN=$((MODEL_GATES_RUN+1)); }
 
 # --- Host-drift guard (#526) -------------------------------------------------
 # This WSL2 box has day-level "depressed host" states where decode reads 8-15%
@@ -205,6 +218,36 @@ if [ "${IMP_VERIFY_SKIP_BUILD:-0}" != "1" ] && ! command -v cmake >/dev/null 2>&
     exit 0
 fi
 
+# ------------------------------------------------- 0. model directory preflight
+# Every gate below that touches the GPU resolves its checkpoint under $MODELS and
+# degrades to SKIP when the file is not there. With the directory missing outright
+# there is nothing left to measure: perf, peak VRAM, graphs and the smoke prompts
+# all skip, and the summary used to print OK anyway. That is how a fresh worktree
+# produced a green pre-push gate that tested nothing: models/ is a gitignored
+# symlink farm, so it exists in the main checkout and in no other worktree.
+# Placed after the Docker-only early exit above, which returns 0 before it and is
+# therefore unaffected.
+case "$MODELS" in
+    /*) MODELS_ABS="$MODELS";        MODELS_IS_RELATIVE=0 ;;
+    *)  MODELS_ABS="$ROOT/$MODELS";  MODELS_IS_RELATIVE=1 ;;
+esac
+if [ ! -d "$MODELS_ABS" ]; then
+    section "models"
+    fail "model directory not found: $MODELS_ABS"
+    if [ "${IMP_VERIFY_IN_DOCKER:-0}" = "1" ] && [ "$MODELS_IS_RELATIVE" = "1" ]; then
+        echo "  ($ROOT is where this container has the repo mounted, so the"
+        echo "   missing directory is '$MODELS/' in the checkout you ran this from)"
+    fi
+    echo "  perf, peak VRAM, graphs ON/OFF and the smoke prompts all read their"
+    echo "  checkpoints from there, so this run would have measured nothing."
+    echo "  Fix on the host, from the repo root, with either of:"
+    echo "    ln -s \"\$HOME/models\" models"
+    echo "    IMP_VERIFY_MODELS=\"\$HOME/models\" make verify-fast"
+    echo
+    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST}"
+    exit 1
+fi
+
 # -------------------------------------------------------------------- 1. build
 section "build"
 if [ "${IMP_VERIFY_SKIP_BUILD:-0}" = "1" ]; then
@@ -311,6 +354,7 @@ else
                 continue
             fi
             ANY_MEASURED=1
+            model_gate_ran
             ERR=$(mktemp)
             gpu_sample_start
             "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
@@ -356,6 +400,7 @@ else
         if [ ! -f "$MODEL_PATH" ]; then
             skip "baseline model $MODEL_PATH not present"
         else
+            model_gate_ran
             REPS=3
             ERR=$(mktemp)
             # --prefill-chunk-size 0 forces single-chunk prefill so the baseline
@@ -509,6 +554,7 @@ else
     elif [ -z "$BL_VRAM" ]; then
         :  # already reported above
     else
+        model_gate_ran
         ERR_V=$(mktemp)
         # BOTH streams: imp's INFO logs (which carry the VRAM audit table) go to
         # STDOUT, only the bench result lines go to stderr. Capturing stderr
@@ -562,6 +608,7 @@ else
         #                                less launch-overhead share = lower ratio.
         # 1.3 catches catastrophic graph failures (≈ 1.0x = full fallback to
         # per-step decode) without rejecting healthy big-model decodes.
+        model_gate_ran
         MIN_SPEEDUP_X="${IMP_VERIFY_MIN_GRAPH_SPEEDUP:-1.3}"
         ERR_NG=$(mktemp); ERR_G=$(mktemp)
         # Sample clocks/power across BOTH runs: a depressed host (#526 — SM
@@ -621,6 +668,7 @@ smoke_prompt() {
         skip "$label ($model not present)"
         return
     fi
+    model_gate_ran
     local ERR; ERR=$(mktemp)
     OUT=$("$BIN" --model "$MODELS/$model" --prompt "$prompt" \
           --max-tokens 64 --temperature 0 --chat-template none 2>"$ERR")
@@ -663,6 +711,17 @@ if [ "$MODE" = "full" ]; then
 fi
 
 # ------------------------------------------------------------------- summary
+# A run in which every model-backed gate skipped measured nothing on the GPU, so
+# it is not a pass. A single absent checkpoint still only skips: the north-star
+# model or any other optional one can be missing and the gate stays green, as
+# long as at least one model-backed gate ran.
+if [ "$MODEL_GATES_RUN" -eq 0 ]; then
+    fail "no model-backed gate ran: perf, peak VRAM, graphs and smoke all skipped"
+    echo "  Model directory in use: $MODELS_ABS"
+    echo "  None of the checkpoints those gates need are in it, so nothing was measured."
+    echo "  Point the gate at the model store: IMP_VERIFY_MODELS=\"\$HOME/models\""
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
     echo "${GRN}=== verify $MODE: OK ===${RST}"
