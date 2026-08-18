@@ -391,11 +391,25 @@ These have a code path and no gate. They may work; nothing proves it.
        wall time, verify counts from /metrics]
 ```
 
-  - **~1.6 GiB of VRAM** for the draft head, paid whether or not it drafts.
+  - **0.79 GiB of VRAM** for the draft head on this model, paid whether or not
+    it drafts (15 tensors, BF16 to FP16 on upload). The `~1.6 GiB` that
+    `dispatch_policy.h` quotes is not this checkpoint: its head is a dense
+    MLP, and a MoE head costs more.
   - **Output stops being reproducible across processes.** A golden-output test
     has to pin `speculative.mtp_k` or it is testing the drafter's luck; see the
     history-dependence entry above.
   - Measured on one checkpoint. Other MTP-carrying models are untested.
+
+  **The engine says this at load.** A checkpoint that ships an MTP head while
+  `speculative.mtp_k` is 0 gets one INFO line naming the flag, the measured
+  gain and the two prices. It is a name-only probe across all three
+  checkpoint layouts (sidecar file, shard index, single-file header), so it
+  reads no weight and costs nothing on a load that does not want the head. It
+  asks for the fusion projection that the loader's own dispatch keys on, not
+  for any `mtp.*` name, so a group of MTP tensors imp could not actually load
+  does not get advertised. Without it the option is invisible: the head is
+  only loaded when `mtp_k > 0`, so an engine that has not loaded it also cannot
+  mention it.
 
   **Not finished.** A marginal chunk row still costs 4.22 ms, 38 % of a full
   decode step (down from 8.09 ms, 71 %), on a batch-1 memory-bound decode where

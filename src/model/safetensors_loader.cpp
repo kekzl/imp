@@ -395,11 +395,10 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
             if (translated.action == imp::llm_compressor::NameTranslation::SKIP) {
                 // Embedded MTP head: keep the tensor, but route it to the
                 // separate MTP map under its raw mtp.* name.
-                if (mtp_out != nullptr) {
+                if (mtp_out != nullptr && name_is_mtp_tensor(tensor_name)) {
                     if (tensor_name.rfind("model.mtp.", 0) == 0)
-                        tensor_name = tensor_name.substr(6);  // strip "model."
-                    if (tensor_name.rfind("mtp.", 0) == 0)
-                        divert_to_mtp = true;
+                        tensor_name = tensor_name.substr(6);
+                    divert_to_mtp = true;
                 }
                 if (!divert_to_mtp)
                     continue;
@@ -658,6 +657,67 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
 
 // ---- Main SafeTensors loader ----
 
+// Name-only MTP presence check. Three checkpoint layouts carry a head, and a
+// reader that knows only one of them reports "no head" on the other two:
+//   1. sidecar   model_mtp.safetensors
+//   2. sharded   model.safetensors.index.json names it in weight_map
+//   3. single    model.safetensors names it in the header
+// All three answer via name_is_mtp_head_key(), the same tensor dispatch_mtp()
+// keys its shapes on, so a "yes" here means enabling would actually load. Only
+// names are read (the index text, or the 8-byte-prefixed header), never a
+// weight, so this costs nothing on a load that does not want the head.
+bool probe_mtp_head(const std::string& model_dir) {
+    namespace fs = std::filesystem;
+    if (model_dir.empty())
+        return false;
+
+    auto json_has_head = [](const char* data, size_t len) {
+        JsonParser parser(data, len);
+        JValue root = parser.parse();
+        if (!parser.ok() || root.type != JType::OBJECT)
+            return false;
+        // The index nests names under weight_map; a shard header lists them at
+        // the top level.
+        const JValue* map = jobj_find(root, "weight_map");
+        const JValue& obj = (map && map->type == JType::OBJECT) ? *map : root;
+        for (const auto& kv : obj.obj)
+            if (name_is_mtp_head_key(kv.first))
+                return true;
+        return false;
+    };
+
+    // Read a safetensors header without mapping the body.
+    auto header_has_head = [&](const std::string& file) {
+        std::error_code ec;
+        auto total = fs::file_size(file, ec);
+        if (ec || total < 8)
+            return false;
+        std::ifstream f(file, std::ios::binary);
+        if (!f.is_open())
+            return false;
+        uint64_t header_size = 0;
+        if (!f.read(reinterpret_cast<char*>(&header_size), sizeof(header_size)))
+            return false;
+        std::string vh_err;
+        if (!safetensors_internal::validate_header_size(total, header_size, &vh_err))
+            return false;
+        std::string header(static_cast<size_t>(header_size), '\0');
+        if (!f.read(header.data(), static_cast<std::streamsize>(header_size)))
+            return false;
+        return json_has_head(header.data(), header.size());
+    };
+
+    if (header_has_head(model_dir + "/model_mtp.safetensors"))
+        return true;
+
+    std::ifstream idx(model_dir + "/model.safetensors.index.json");
+    if (idx.is_open()) {
+        std::string text((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
+        return json_has_head(text.data(), text.size());
+    }
+    return header_has_head(model_dir + "/model.safetensors");
+}
+
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head) {
     namespace fs = std::filesystem;
 
@@ -775,11 +835,11 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         // says `self_attn`/`mlp`, and per-expert 2-D weights instead of one
         // packed 3-D stack. Detected on a name only this layout has, so the
         // Qwen path below is reached byte-for-byte as before.
-        if (tm.count("mtp.layers.0.eh_proj.weight")) {
+        if (tm.count(kMtpHeadKeyEhProj)) {
             bool nok = true;
             nok &= take("mtp.layers.0.enorm.weight", head.pre_fc_norm_embedding);
             nok &= take("mtp.layers.0.hnorm.weight", head.pre_fc_norm_hidden);
-            nok &= take("mtp.layers.0.eh_proj.weight", head.fc);
+            nok &= take(kMtpHeadKeyEhProj, head.fc);
             nok &= take("mtp.layers.0.norm.weight", head.input_layernorm);
             nok &= take("mtp.layers.0.mixer.q_proj.weight", head.q_proj);
             nok &= take("mtp.layers.0.mixer.k_proj.weight", head.k_proj);
@@ -838,7 +898,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         bool ok = true;
         ok &= take("mtp.pre_fc_norm_embedding.weight", head.pre_fc_norm_embedding);
         ok &= take("mtp.pre_fc_norm_hidden.weight", head.pre_fc_norm_hidden);
-        ok &= take("mtp.fc.weight", head.fc);
+        ok &= take(kMtpHeadKeyFc, head.fc);
         ok &= take("mtp.layers.0.input_layernorm.weight", head.input_layernorm);
         ok &= take("mtp.layers.0.post_attention_layernorm.weight", head.post_attention_layernorm);
         ok &= take("mtp.layers.0.self_attn.q_proj.weight", head.q_proj);
@@ -901,10 +961,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             // harvest from there.
             if (embedded_mtp_map.empty()) {
                 for (const auto& kv : tensor_map) {
-                    if (kv.first.rfind("mtp.", 0) == 0)
-                        embedded_mtp_map.emplace(kv.first, kv.second);
-                    else if (kv.first.rfind("model.mtp.", 0) == 0)
-                        embedded_mtp_map.emplace(kv.first.substr(6), kv.second);
+                    if (!name_is_mtp_tensor(kv.first))
+                        continue;
+                    const bool prefixed = kv.first.rfind("model.mtp.", 0) == 0;
+                    embedded_mtp_map.emplace(prefixed ? kv.first.substr(6) : kv.first, kv.second);
                 }
             }
             if (!embedded_mtp_map.empty()) {
@@ -914,6 +974,17 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                 mtp_local = dispatch_mtp(embedded_mtp_map, path + " (embedded mtp.*)", bytes);
             }
         }
+    } else if (probe_mtp_head(model_dir)) {
+        // The caller asked for no head and this checkpoint has one. Say so
+        // once, with the trade, because speculative.mtp_k defaults to 0 and an
+        // option nobody is told about is not a choice the operator gets to
+        // make. Costs a name scan, no weight bytes.
+        IMP_LOG_INFO(
+            "MTP head present in this checkpoint but not loaded (speculative.mtp_k=0). "
+            "Enable with --set speculative.mtp_k=2: measured +15 %% decode on "
+            "Qwen3.8-27B-NVFP4, range +8 to +22 %%, in exchange for the head's VRAM "
+            "(0.79 GiB there) and reproducible output across processes. "
+            "See docs/LIMITATIONS.md");
     }
 
     // Create model

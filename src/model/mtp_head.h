@@ -67,9 +67,43 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace imp {
+
+// Is this checkpoint tensor part of an MTP head? Checkpoints write the head
+// either as `mtp.*` or, with the outer prefix kept, as `model.mtp.*`.
+//
+// One rule, two callers: the divert decision in load_shard() and the presence
+// probe that tells the operator about a head it is NOT loading. Two places
+// asking the same question and answering differently is the defect class that
+// produced #1384 and #1443, so both go through here.
+inline bool name_is_mtp_tensor(std::string_view name) {
+    return name.rfind("mtp.", 0) == 0 || name.rfind("model.mtp.", 0) == 0;
+}
+
+// Does this name make an `mtp.*` group a head imp can actually dispatch? It is
+// the projection fusing the embedding with the hidden state, and dispatch_mtp()
+// keys its two checkpoint shapes on exactly these two spellings. A probe that
+// accepted any `mtp.*` name would advertise a head that enabling then rejects,
+// which is a worse failure than saying nothing.
+// The two spellings, as constants, because dispatch_mtp() branches on the same
+// strings. Sharing them is what keeps probe and dispatch from drifting apart:
+// a test could only notice the drift afterwards, a shared constant prevents it.
+inline constexpr const char* kMtpHeadKeyEhProj = "mtp.layers.0.eh_proj.weight";
+inline constexpr const char* kMtpHeadKeyFc = "mtp.fc.weight";
+
+inline bool name_is_mtp_head_key(std::string_view name) {
+    if (name.rfind("model.", 0) == 0)
+        name.remove_prefix(6);
+    return name == kMtpHeadKeyEhProj || name == kMtpHeadKeyFc;
+}
+
+// True when `model_dir` ships an MTP head, decided from tensor NAMES only: the
+// sidecar file, the shard index, or the single-file header. Reads no weight
+// byte, so it is cheap enough to run on a load that does not want the head.
+bool probe_mtp_head(const std::string& model_dir);
 
 // Phase 1.A leftover — kept as part of the new MtpHead struct for compatibility
 // with the existing Model::mtp_info_ field.
