@@ -18,9 +18,39 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <utility>
 
 namespace imp {
+
+namespace {
+// Bytes of model on disk, for the one comparison that can tell a weight upload
+// from a card someone else is on. A file is its own size; a checkpoint
+// directory is the sum of its weight shards (config/tokenizer JSON is noise at
+// this scale). 0 = could not tell, which reads as "no reference to check
+// against" everywhere below.
+size_t model_source_bytes(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (path.empty())
+        return 0;
+    if (fs::is_regular_file(path, ec))
+        return static_cast<size_t>(fs::file_size(path, ec));
+    if (!fs::is_directory(path, ec))
+        return 0;
+    size_t total = 0;
+    for (const auto& e : fs::directory_iterator(path, ec)) {
+        if (ec)
+            return 0;
+        if (!e.is_regular_file(ec))
+            continue;
+        const std::string ext = e.path().extension().string();
+        if (ext == ".safetensors" || ext == ".gguf" || ext == ".bin")
+            total += static_cast<size_t>(e.file_size(ec));
+    }
+    return ec ? 0 : total;
+}
+}  // namespace
 
 bool Engine::init_weights() {
     const auto& mcfg = model_->config();
@@ -225,9 +255,35 @@ bool Engine::init_weights() {
 
     size_t free_after = 0, total_after = 0;
     cudaMemGetInfo(&free_after, &total_after);
-    IMP_LOG_INFO("GPU memory after weight upload: %zu MiB free / %zu MiB total (weights ~%zu MiB)",
-                 free_after / (1024UL * 1024), total_after / (1024UL * 1024),
-                 (free_before - free_after) / (1024UL * 1024));
+    // A free-VRAM delta is not a weight size, and this line used to call it one.
+    // The two come apart exactly where it matters: on WSL2 the driver reports
+    // the whole card as free until a process allocates, so a server started
+    // beside a neighbour sees an empty card here and only learns otherwise
+    // THROUGH its own upload. Measured on this box, same 3263 MiB checkpoint:
+    // 3264 MiB consumed on an idle card, 8446 MiB beside a 23.4 GiB neighbour —
+    // and the second one was printed as "weights ~8446 MiB" (MEMORY.md B8).
+    const size_t upload_consumed = free_before - free_after;
+    const size_t on_disk = model_source_bytes(model_->source_path());
+    IMP_LOG_INFO(
+        "GPU memory after weight upload: %zu MiB free / %zu MiB total (upload consumed "
+        "%zu MiB of device free)",
+        free_after / (1024UL * 1024), total_after / (1024UL * 1024), upload_consumed / (1024UL * 1024));
+    // One-sided on purpose. Consuming LESS than the checkpoint is ordinary —
+    // host-resident experts, dropped sources — but consuming a quarter more
+    // than the file holds cannot be weights, and this is the first and only
+    // moment the card's real occupancy is observable. Everything sized after
+    // this point (KV pool, decode caches) reads the same shrunken residual and
+    // the load still reports success, so the operator has to hear it here.
+    if (upload_exceeds_checkpoint(upload_consumed, on_disk)) {
+        IMP_LOG_WARN(
+            "Weight upload consumed %zu MiB of device free VRAM for a %zu MiB checkpoint. The "
+            "excess is not weights: another process is holding the card (on WSL2 it is invisible "
+            "until this upload), or the upload spilled to host memory. This process will still "
+            "load and serve, and every number it produces — pool size, tokens/s — will be a "
+            "statement about the card it shared. Free the card and restart before measuring "
+            "anything here.",
+            upload_consumed / (1024UL * 1024), on_disk / (1024UL * 1024));
+    }
 
     // Check for host-resident expert weights.
     // gpt-oss is exempt: its MXFP4 experts are intentionally kept host-resident
