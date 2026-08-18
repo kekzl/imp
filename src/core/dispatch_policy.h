@@ -780,27 +780,28 @@ struct Speculative {
     //   k=2  19.65 ms -> break-even 1.75, emits 2.195
     //   k=3  27.27 ms -> break-even 2.43, emits 2.629
     //
-    // `1 + 0.5 k` gives 1.5 / 2.0 / 2.5: above each measured break-even, so a
-    // configuration that genuinely loses is still caught, below each measured
-    // emission, and strictly under k+1 for every k, so it can never doom a
-    // chain by arithmetic again. Re-derive it the same way if verify or decode
-    // costs move; the three numbers above are the whole input.
+    // IT IS AN ACCEPTANCE RULE, and writing it in emitted tokens hid that.
+    // A verify emits exactly 1 + accepted (the base token plus every accepted
+    // draft; confirmed in the data: 1.721 = 1 + 0.721, 2.195 = 1 + 1.195,
+    // 2.612 = 1 + 1.612). So `1 + f k` is precisely "unbind below f draft
+    // acceptance", and the break-evens above become 39.0 %, 37.5 % and 47.7 %,
+    // which vary far less across k than 1.39 / 1.75 / 2.43 do. Acceptance is
+    // the natural unit here; emitted tokens are not.
     //
-    // THE THREE THRESHOLDS ARE NOT EQUALLY SOUND. Margins against break-even
-    // and against measured emission:
+    // f = 0.40 gives 1.4 / 1.8 / 2.2 against break-evens of 1.39 / 1.75 / 2.43
+    // and measured emissions of 1.721 / 2.195 / 2.612. Essentially exact at
+    // k=1, 2.9 % strict at k=2, and 9.5 % PERMISSIVE at k=3, where a marginally
+    // losing chain now survives. That direction is deliberate: a permissive
+    // guard costs a few percent on a bad workload, a strict one costs the whole
+    // feature on a good one, and the 4.0 this replaced was the strict failure
+    // taken to its limit. An earlier attempt at f = 0.5 was 11 to 12.5
+    // percentage points stricter than break-even at k=1 and k=2 for the same
+    // reason it looked reasonable: nobody had converted it to acceptance.
     //
-    //   k=1   +7.9 % above break-even,  12.8 % below emission
-    //   k=2  +14.3 %                     8.9 %
-    //   k=3   +2.9 %                     4.9 %
-    //
-    // Two runs of the identical k=2 configuration differed by 13 % in tok/s and
-    // by 3.7x in verify count, because generations diverge between processes
-    // and different text offers different draft opportunities. Both k=3 margins
-    // are inside that spread, so at k=3 this guard is advisory: on an unlucky
-    // corpus it can unbind a chain that is paying, and on a lucky one it can
-    // miss one that is not. k=1 and k=2 have real headroom. Widening the
-    // coefficient would buy k=3 a margin at the cost of making the guard worse
-    // everywhere else, which is why it is documented rather than fixed.
+    // Separate from the hard floor three lines below in engine_spec_ngram.cpp:
+    // `accepted*100 < drafted*15` dooms ALL speculation for a request, n-gram
+    // included, and re-enables the async decode loop. This one only unbinds
+    // MTP. Same quantity, different scope, and they are not to be merged.
     float mtp_econ_min_emit = -1.0f;
     // Graph-captured verify chunk (#847): cache one CUDA graph per
     // draft-length bucket and replay it each verify step — the chunk
