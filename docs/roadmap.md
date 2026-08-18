@@ -310,6 +310,42 @@ imp's problem and the published 87 % figure describes a regime nobody has pinned
   `engine_scheduler.cpp` that trades it for telemetry coverage is still wrong on
   its own terms, but it is a 1 % wrong.
 
+Added 2026-08-18, on the speculative greedy divergence:
+
+- **The recurrent-state mechanism for it**, i.e. "the verify advances the
+  recurrent state through the chunk kernels while plain decode advances it
+  through the single-token path". Disproven: `--set gdn.chunkwise_scan=false` is
+  byte-inert on both arms and the divergence survives at the same offsets. That
+  sentence stood in [`LIMITATIONS.md`](LIMITATIONS.md) until this measurement
+  and is gone from it now.
+- **Five decode-side kernel hypotheses**: GDN chunkwise scan
+  (`gdn.chunkwise_scan=false`), fused QK-norm + RoPE
+  (`attention.no_qknorm_fused=true`), the NVFP4 `use_multirow` K-partition split
+  (patched out), the fused NVFP4 FFN at decode (two-site patch in
+  `executor_ffn.cu`), the attention kernel family (mirror flip plus
+  `speculative.capture=false`). Each instrument was proven live by its dispatch
+  log before the null result was believed; all five leave the speculative output
+  where it was. They cannot be the cause for a structural reason: in a
+  speculative arm every emitted token comes out of the multi-row verify chunk
+  and none out of the single-token decode step, so no decode-side kernel is on
+  the emitting path at all. Offsets and the per-hypothesis evidence in
+  [`LIMITATIONS.md`](LIMITATIONS.md).
+- **Chunk-side kernel choice as the fix.** Not dead, but not a lever either:
+  `--set speculative.verify_nvfp4_gemm=false` moves the first difference to
+  bytes 58 / 130 / 150 instead of 79 / 332 / 243 and still never reaches the
+  non-speculative reference. No chunk-side kernel choice tried so far closes the
+  gap.
+- **Correction to "Two of three prompts diverge"**, in the *Two findings that
+  are not speed* list further down this file: all three prompts diverge, at
+  bytes 79 / 332 / 243 with `mtp_k=2`. Two of three was the count on the first
+  pass only. The control is unchanged and now holds across eight
+  no-speculation processes.
+- **Cross-process reproducibility of a speculative arm at temperature 0.** It
+  does not hold, and it is not a kernel hypothesis to chase here: 1 of 9
+  processes at `mtp_k=2` produced a different answer on identical flags, and the
+  two processes measured at `mtp_k=1` disagree with each other. Documented for
+  callers in [`LIMITATIONS.md`](LIMITATIONS.md).
+
 ### Withdrawn by their author
 
 - "0.72 forwards per emitted token, so speculation moves fewer bytes": the launch
