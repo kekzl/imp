@@ -16,16 +16,17 @@ DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
 .PHONY: check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
-# Check that no other process is using the GPU (games, other inference, etc.)
+# Check that nothing else is using the GPU. Delegates to
+# scripts/require_free_gpu.sh, the same guard the git hooks use, because
+# OCCUPIED MEMORY is the tell and the process list is not: on WSL2 nvidia-smi
+# shows no process for a container holding the card, so `--query-compute-apps`
+# reports an idle GPU while a neighbour is measuring on it. This target used to
+# ask exactly that blind question, and a co-tenant run on 2026-08-20 produced
+# decode 30.39 tok/s against a 287.19 baseline with peak VRAM at 28259 MiB
+# (WDDM spill), which reads as a catastrophic regression and was the host.
 check-gpu:
-	@GPU_PROCS=$$(nvidia-smi --query-compute-apps=pid,name,used_gpu_memory --format=csv,noheader 2>/dev/null | grep -v "^$$"); \
-	if [ -n "$$GPU_PROCS" ]; then \
-		echo "ERROR: GPU is in use — benchmarks will be unreliable:"; \
-		echo "$$GPU_PROCS"; \
-		echo "Close other GPU processes first (games, other inference, etc.)"; \
-		exit 1; \
-	fi; \
-	GPU_UTIL=$$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1); \
+	@scripts/require_free_gpu.sh "check-gpu"
+	@GPU_UTIL=$$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1); \
 	if [ "$$GPU_UTIL" -gt 5 ] 2>/dev/null; then \
 		echo "WARNING: GPU utilization at $${GPU_UTIL}% — results may be noisy"; \
 	fi; \
@@ -286,18 +287,29 @@ test-agents-external: build check-gpu
 test-golden: build
 	@echo "Golden output tests require running server — use pytest tests/api/ instead"
 
-# verify: full pre-merge gate (host build, ~5 min). build + ctest + perf + smoke.
-verify:
+# All four verify targets take `build`, like test-e2e/test-server/bench do.
+# Without it they measured whatever `imp:test` happened to hold: this host has
+# no cmake, so scripts/verify.sh re-execs into the EXISTING image with
+# IMP_VERIFY_SKIP_BUILD=1 and its own log says `SKIP build`. The docker-build
+# branch at verify.sh:206 cannot cover it either, because inside the container
+# cmake is present. A perf gate that never compiles the change it is gating is
+# the third instance of the class already recorded in this repo (#1474, and the
+# json_schema case in check-release.sh's header). The layer cache makes the
+# prerequisite nearly free when nothing changed, which is the common case on a
+# pre-push run.
+
+# verify: full pre-merge gate (~5 min). ctest + perf + smoke.
+verify: build check-gpu
 	@scripts/verify.sh full
 
-# verify-fast: pre-push gate (host build, ~90s). build + filtered tests + 1 smoke.
+# verify-fast: pre-push gate (~90s). filtered tests + 1 smoke.
 # Perf gate uses --prefill-chunk-size 0 to stay apples-to-apples with tests/perf_baseline.json.
-verify-fast:
+verify-fast: build check-gpu
 	@scripts/verify.sh fast
 
 # verify-chunked: gates chunked-prefill path (chunk=512) against tests/perf_baseline_chunked.json.
 # Looser thresholds (5%/8%) cover the gather + rect-attn per-chunk overhead.
-verify-chunked:
+verify-chunked: build check-gpu
 	@IMP_VERIFY_BASELINE=tests/perf_baseline_chunked.json \
 	 IMP_VERIFY_CHUNK_SIZE=512 \
 	 scripts/verify.sh fast
@@ -308,7 +320,7 @@ verify-chunked:
 # 2026-05-23 under the cold-median methodology (PR #376) — see
 # memory/qwen3_14b_north_star_cold_median_2026_05_23.md for the raw samples
 # (σ = 0.16 tok/s on tg128 @ ctx=2048, well inside the 3% threshold).
-verify-north-star:
+verify-north-star: build check-gpu
 	@IMP_VERIFY_BASELINE=tests/perf_baseline_north_star.json \
 	 scripts/verify.sh fast
 
