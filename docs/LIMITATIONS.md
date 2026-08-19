@@ -141,6 +141,52 @@ These have a code path and no gate. They may work; nothing proves it.
   that guarantee from the seed alone if both runs share a long-lived server with
   other traffic between them. Pin `server.recurrent_snapshot_mb=0`, or use a
   fresh process per arm.
+- **MTP speculation truncates answers: 2 of 6 prompts end after ~40 tokens with
+  a re-statement of the question (measured 2026-08-19).** This is the same
+  divergence as the entry below, but it is not the harmless half of it — the
+  answer is not "different but coherent", it is unusable:
+
+  ```
+  # Paged KV Cache in LLM Inference
+  ## The Problem: Traditional KV Cache Wastes Memory
+  In a large language model (LLM) inference engine, and why block size matters.
+  ```
+
+  (164 bytes, `finish_reason: "stop"`. The last clause is the tail of the prompt.)
+
+  Qwen3.8-27B-NVFP4, `speculative.mtp_k=1`, `speculative.ngram=false`,
+  `server.prefix_cache=false`, six prompts, `max_tokens: 400`:
+
+  | arm | degenerate | lengths |
+  |---|---|---|
+  | `mtp_k=1` | **2 / 6** | 164 B, 286 B, and four of 1198-1793 B |
+  | `mtp_k=0` (control) | **0 / 6** | 1146-1784 B |
+
+  **It is deterministic, not noise.** With `runtime.deterministic_gemm=true`
+  four fresh processes produce the same truncated answer byte for byte
+  (**4 / 4**, identical sha). Without it — the default — three of four do
+  (**3 / 4**); the pin does not remove the state, it stabilises it, so the one
+  process in four that escapes is the accident, not the rule.
+
+  **The mechanism, from `diagnostics.spec_trace`:** the final verify reads
+  `p0=114 t0=12482 draft=[13] argmax=[13,248046]` — token 12482 is `" matters"`,
+  13 is `"."`, and **248046 is `<|im_end|>`**. The bonus token that a verify
+  emits after an accepted draft comes from the last chunk row, and that row
+  predicts end-of-turn where the single-token decode path keeps writing. So the
+  structural divergence below is not confined to *which* coherent answer you
+  get; it reaches the stop decision.
+
+  **Consequence: `speculative.mtp_k` stays 0 by default**, despite the +21.3 %
+  it measures on this model ([`roadmap.md`](roadmap.md)). A throughput win that
+  truncates a third of answers is not a win, and this defect is the blocker to
+  clear before that default can be revisited.
+
+  *Caveat this places on that +21.3 %:* the two arms do not generate the same
+  text, and the speculative arm sometimes stops early, so the comparison is
+  between workloads that differ. The token counts ran the other way (2100 at
+  k=1 against 1847 at k=0), so it is not simply "shorter answers decode
+  faster", but the number is not a like-for-like one either.
+
 - **Speculative decoding does not reproduce the non-speculative greedy output
   on a GDN hybrid, and it cannot by construction.** Its contract is that it
   changes speed and not tokens; here it changes tokens. Measured on

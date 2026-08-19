@@ -15,9 +15,10 @@ there instead of retelling it.
 
 - **MTP speculative decoding pays on Qwen3.8-27B-NVFP4: `speculative.mtp_k=1`
   measures +21.3 % decode** (104.31 against 86.03 tok/s). Only at k=1 — an extra
-  chunk row still costs half a decode step, so k=3 buys 2 %. The default stays 0;
-  measurement and the profile behind it in
-  [`roadmap.md`](docs/roadmap.md).
+  chunk row still costs half a decode step, so k=3 buys 2 %. **The default stays
+  0, and now for a measured reason:** at k=1, 2 of 6 prompts end after ~40 tokens
+  with a re-statement of the question (0 of 6 without speculation). Both in
+  [`LIMITATIONS.md`](docs/LIMITATIONS.md) and [`roadmap.md`](docs/roadmap.md).
 
 - **`/health` says whether the KV pool can still grow (`kv_pool_growable`).** A
   fixed pool and a growable one already at its ceiling both report
