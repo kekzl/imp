@@ -5,7 +5,6 @@
 
 #include <cublasLt.h>
 #include <cuda_runtime.h>
-#include <span>
 
 namespace imp {
 
@@ -16,10 +15,5 @@ void gemm_dispatch(cublasLtHandle_t lt, const WeightHandle& w, const Tensor& x, 
 
 // Decode GEMV (single-token path). Same semantics, batch=1.
 void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream_t stream);
-
-// MoE grouped GEMM. experts.size() == n_active_experts for this token.
-void gemm_grouped_dispatch(cublasLtHandle_t lt, std::span<const WeightHandle* const> experts,
-                           const Tensor& x_flat, Tensor& y_flat, const int* expert_counts, void* workspace,
-                           size_t workspace_bytes, cudaStream_t stream);
 
 }  // namespace imp

@@ -59,7 +59,7 @@ the real dispatch rather than predicted.
 
 Tried in order, first hit wins:
 
-1. **`fmha_sm120_mxfp4_prefill`** — opt-in (`attention_mxfp4_available()`), hd%32==0
+1. **`fmha_sm120_mxfp4_prefill`** — opt-in (`attention_mxfp4_available()`), hd%32==0, compared against an FP16 reference at hd 64/96/128 **and 256** (`tests/test_attention_fmha_mxfp4.cu`; the hd=256 case needs the FA2 reference, because tier 5 cannot serve hd=256 on sm_120 — see below)
 2. **`fmha_sm120_fa2_prefill`** — register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), **hd 128 and 256** (hd=256 via `attention.fa2_hd256`, default on since #932; Bq=64/TWOSLOT instance). f16-QK mode unless the fp8-QK pair is explicitly opted in (`fa2_fp16qk=never` AND `fp8_fmha=on`).
 3. **`fmha_sm120_fp8_prefill`** — strictly opt-in (`attention.fp8_fmha == "on"`), hd%32==0. Raw e4m3 Q/K conversion compounds per-layer score error on real activations (#511): teacher-forced PPL gemma-3-12b 16.6→549 / Qwen3-8B 40.5→4506 when it served prefill. Off by default.
 4. **`fmha_sm120_prefill`** — FP16 WMMA, hd%16==0. Fallback for the configs FA2 declines: hd=256 with `fa2_hd256=false`, FA2-declined chunk continuations (`q_offset > 0`), other head dims (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window).

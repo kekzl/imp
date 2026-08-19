@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention.h"
+#include "compute/attention_fmha_sm120.h"
 #include "compute/attention_tc.h"
 #include "core/tensor.h"
 #include "runtime/process_diag.h"
@@ -120,8 +121,21 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD, bool caus
         Tensor V(d_v, QType::F16, 4, kv_shape, true);
         Tensor O(d_o_ref, QType::F16, 4, qo_shape, true);
         ASSERT_GE(sm, 120) << "imp targets sm_120 only";
-        ASSERT_TRUE(flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
-                                              recipe.q_offset));
+        // `flash_attention_blackwell` cannot serve head_dim=256 on sm_120: Br=64
+        // needs ~176 KiB of shared memory against a 99 KiB opt-in limit, so it
+        // declines by design (attention_blackwell.cu). That, and not the MXFP4
+        // kernel, is why the HD=256 case sat DISABLED_ — the comparison had no
+        // reference, while the kernel under test ran fine (Bq=32 fits).
+        // Production has no such gap: the FA2 tier serves hd=256 and sits AHEAD
+        // of the Blackwell tier in attention_prefill_dispatch. So fall back to
+        // it, and keep Blackwell wherever it already ran, so every case that
+        // passed before still compares against exactly what it did before.
+        bool ref_ok = flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                                recipe.q_offset);
+        if (!ref_ok)
+            ref_ok = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                        recipe.q_offset);
+        ASSERT_TRUE(ref_ok) << "no FP16 reference tier accepted HD=" << HD;
     }
 
     cudaStreamSynchronize(stream);
@@ -159,10 +173,9 @@ TEST_F(FhmaMxFP4Test, BasicHD128) {
     run_compare_test(1, 128, 128, 4, 2, 128, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 
-TEST_F(FhmaMxFP4Test, DISABLED_BasicHD256) {
+TEST_F(FhmaMxFP4Test, BasicHD256) {
     if (!can_run())
         GTEST_SKIP() << "Requires sm_120+";
-    // HD=256 requires large shared memory; disabled pending smem optimization
     run_compare_test(1, 64, 64, 2, 2, 256, true, 0, 0.0f, 0.5f, 0.1f, stream_, sm_);
 }
 

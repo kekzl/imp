@@ -388,31 +388,26 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
                                             h_snap, d_snap_n);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        if (d_real_n != nullptr)
-            throw std::runtime_error("gdn_scan_fused_fp32out: padded verify chunk unsupported for HD=" +
-                                     std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
-        // No FP32 fallback: supported sizes are HD=SS=128 / 64 only.
-        // Fall back to FP16 path + post-hoc upcast (precision loss intact).
-        int inner = n_heads * head_dim_ssm;
-        int BC_size = n_groups * state_size;
-        size_t smem_old = 2 * state_size * sizeof(float) + 2 * sizeof(float);
-        std::vector<half> scratch_host(n_tokens * inner);
-        half* scratch_dev = nullptr;
-        cudaMallocAsync(&scratch_dev, n_tokens * inner * sizeof(half), stream);
-        for (int t = 0; t < n_tokens; t++) {
-            const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-            gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_old, stream>>>(
-                row + 2 * BC_size, row + BC_size, row, alpha + t * n_heads, beta + t * n_heads, A_log,
-                dt_bias, h_state, scratch_dev + t * inner, nullptr, n_heads, head_dim_ssm, state_size,
-                n_groups, grouped_layout);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-        // Convert FP16 scratch → FP32. Simple elementwise cast kernel not
-        // present; do it via cuda memcpy + cast on device via small kernel.
-        // Skip for now; assume 128/64 paths cover practical models.
-        IMP_LOG_WARN("gdn_scan_fused_fp32out: unsupported HD=%d SS=%d — fallback not implemented",
-                     head_dim_ssm, state_size);
-        cudaFreeAsync(scratch_dev, stream);
+        // Refuse, do not approximate. This branch used to run the FP16 decode
+        // kernel into a scratch buffer, log a WARN that the FP32 conversion was
+        // "not implemented", and free the scratch — leaving `y_fp32` exactly as
+        // the caller passed it in. The scan silently contributed nothing, the
+        // step still returned, and the only trace was one warning in a log
+        // nobody reads per token. The same failure shape as #654: an unchecked
+        // fallback that keeps serving.
+        //
+        // Every GDN checkpoint staged here is HD=SS=128 (Qwen3.5/3.6/3.8:
+        // linear_key_head_dim = linear_value_head_dim = 128), so nothing reaches
+        // this today — which is precisely why it could sit unfinished. A shape
+        // that does arrive now says so at the first token instead of producing
+        // an answer nobody can tell from a correct one. Mamba2 checkpoints with
+        // other shapes (Nemotron-3.5: mamba_head_dim 64, ssm_state_size 128) use
+        // the Mamba2 scan, not this one.
+        throw std::runtime_error("gdn_scan_fused_fp32out: no kernel for HD=" + std::to_string(head_dim_ssm) +
+                                 " SS=" + std::to_string(state_size) +
+                                 " (supported: 128/128 and 64/64). The FP16 decode fallback never wrote "
+                                 "its FP32 output, so serving this shape would return a scan that did "
+                                 "nothing.");
     }
 }
 
