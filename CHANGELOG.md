@@ -14,72 +14,60 @@ there instead of retelling it.
 ### Added
 
 - **MTP speculative decoding pays on Qwen3.8-27B-NVFP4: `speculative.mtp_k=1`
-  measures +21.3 % decode** (104.31 against 86.03 tok/s). Only at k=1 — an extra
-  chunk row still costs half a decode step, so k=3 buys 2 %. **The default stays
-  0, and now for a measured reason:** at k=1, 2 of 6 prompts end after ~40 tokens
-  with a re-statement of the question (0 of 6 without speculation), and the one
-  switch that fixes that (`speculative.verify_nvfp4_gemm=false`) turns the
-  +21.3 % into -11.2 %. Both in [`LIMITATIONS.md`](docs/LIMITATIONS.md) and
-  [`roadmap.md`](docs/roadmap.md).
+  measures +21.3 % decode** (104.31 against 86.03 tok/s). The default stays 0 for
+  a measured reason, see [`LIMITATIONS.md`](docs/LIMITATIONS.md).
+
+- **A fully rejected draft no longer re-forwards a row to recover the recurrent
+  state.** The scan writes a second copy on its way past instead: a whole model
+  forward skipped in 29 % of verifies on Qwen3.8-27B-NVFP4 at k=2 (#1459).
 
 - **`/health` says whether the KV pool can still grow (`kv_pool_growable`).** A
-  fixed pool and a growable one already at its ceiling both report
-  `kv_ceiling_blocks == kv_blocks_total`, and the two want opposite reactions:
-  wait for the card to free, or stop waiting.
+  fixed pool and a growable one at its ceiling used to look identical, and the
+  two want opposite reactions.
 
 - **A checkpoint that ships an MTP head now says so when nothing is using it.**
-  One log line naming `speculative.mtp_k`, the measured gain (+15 % decode on
-  Qwen3.8-27B-NVFP4) and its two prices. The default stays 0.
+  One log line naming `speculative.mtp_k`, the measured gain and its two prices.
+  The default stays 0.
 
 ### Fixed
 
-- **The MTP head is refused up front when it does not fit, instead of stranding
-  a partial upload.** It is 272 allocations on a per-expert checkpoint and the
-  allocator decided per allocation, so running out midway left the ones already
-  uploaded resident for the life of the process with spec-decode off anyway. The
-  load line now reports device free consumed (6291 MiB on Nemotron-3.5) next to
-  the 2.49 GiB on disk, which is what the restacking copy actually costs.
+- **`response_format: json_schema` returns valid JSON for a free string value
+  again.** A token carrying string content *and* the closing quote got neither
+  category, so the pre-filter dropped it before the FSM. Costs ~5.6 % decode.
 
-- **`response_format: regex` and `grammar` answer the request again instead of
+- **`response_format: regex` and `grammar` answer the request instead of
   `!!!!...` until `max_tokens`.** The allow list was uploaded at the width of the
-  logits row (151936 on Qwen3-8B) into a buffer sized from the tokenizer
-  (151669); the copy failed, the mask killed every token, and greedy argmax fell
-  to id 0. Broken since #1091/#1095, on any checkpoint with a padded `lm_head`.
+  logits row into a tokenizer-sized buffer. Broken since #1091/#1095.
 
-- **`PrefixCacheE2ETest` asserted bit-equality that the design cannot give.** A
-  cache hit chunks differently than a fresh prefill and flips a near-tie: gap
-  0.161 between the top two candidates, 0.172 shift between the paths.
+- **`speculative.ngram=false` no longer silently disables MTP and token
+  recycling too.** The entry gate to the shared verify step asked whether n-gram
+  drafting was on, so `mtp_k=2` drafted exactly zero tokens with it off (#1464).
 
-- **`scripts/check-release.sh` now fails when a server battery is red.** It
-  deferred only to `make verify-fast`, and `make test-server` is the one place
-  `handlers.cpp` and `batching_engine` run end to end. The `json_schema` defect
-  fixed above passed this gate every time. `SKIP_VERIFY=1` still exits 0 for the
-  CI job that has no GPU, but the summary no longer says "all gates passed" when
-  no model ran.
+- **The MTP head is refused up front when it does not fit.** 272 allocations
+  decided one at a time left a partial upload resident for the life of the
+  process. The load line now reports device free consumed, 6168 MiB on Nemotron-3.5.
 
-- **`response_format: json_schema` could not close a free string value, and
-  returned invalid JSON.** A token that carries string content *and* the closing
-  quote — `."`, `n"`, `!"`, the usual spelling on a BPE vocabulary — got neither
-  `CAT_STRING_CHAR` nor `CAT_QUOTE`, so the category pre-filter dropped it before
-  the FSM (which accepts it) was asked. Measured on Qwen3-8B-NVFP4: unmasked `."`
-  is top-1 at logprob 0.0, masked it is not in the top 5, and the model closed
-  with a typographic `”` instead — legal string content, so the value ran to
-  `max_tokens`. Costs ~5.6 % decode on a constrained request, which is the
-  pre-filter doing less work up front.
+- **The speculation economics guard no longer rules MTP out by arithmetic at
+  every chain length.** It was an acceptance rule stated as a cost rule, and it
+  fired before any measurement could contradict it (#1470, #1473).
+
+- **`scripts/check-release.sh` fails when a server battery is red.** `make
+  test-server` is the only place `handlers.cpp` and `batching_engine` run end to
+  end; the `json_schema` defect above passed the old gate every time.
+
+- **`scripts/verify.sh` no longer reports OK when no model-backed gate ran.** In
+  a fresh worktree the perf, peak-VRAM, graphs and smoke gates all skipped and
+  the gate still exited 0. A missing `models/` now fails with the path.
 
 - **The weight-upload log line called a neighbour on the card "weights".** The
-  same 3263 MiB checkpoint consumes 3264 MiB of device free VRAM on an idle card
-  and 8446 MiB beside a process holding 23.4 GiB. The line now names the delta
-  for what it is and warns when it exceeds the checkpoint on disk by a quarter —
-  the first moment a co-tenant is visible at all on WSL2, and the only signal
-  that separates a poisoned start from a healthy one. Why no `/health` field
-  can: [`MEMORY.md`](docs/internals/MEMORY.md) B8.
+  same 3263 MiB checkpoint consumes 3264 MiB of device free on an idle card and
+  8446 MiB beside a 23.4 GiB process. See [`MEMORY.md`](docs/internals/MEMORY.md) B8.
 
-- **`scripts/verify.sh` no longer reports OK when no model-backed gate ran.**
-  `models/` is a gitignored symlink farm that exists only in the main checkout,
-  so in a fresh worktree the perf, peak-VRAM, graphs and smoke gates all skipped
-  and the pre-push gate still exited 0. A missing model directory now fails with
-  the path and the fix; a single absent checkpoint still only skips.
+- **`PrefixCacheE2ETest` asserted bit-equality that the design cannot give.** A
+  cache hit chunks differently and flips a near-tie: gap 0.161 between the top
+  two candidates, 0.172 shift between the paths.
+
+- **The GDN layers reach their fast path during the verify chunk** (#1467).
 
 ## [0.28.0] - 2026-08-17
 
