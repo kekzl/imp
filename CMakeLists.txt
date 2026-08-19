@@ -855,6 +855,7 @@ if(IMP_BUILD_TESTS)
         tests/test_prefix_cache_equiv.cpp
         tests/test_recurrent_snapshot_store.cpp
         tests/test_vram_query.cpp
+        tests/test_mtp_upload_budget.cpp
     )
 
     imp_add_test_module(test-moe-gdn SOURCES

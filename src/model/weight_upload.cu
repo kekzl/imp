@@ -986,6 +986,7 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
 // producing zero output that locks the LM-head argmax to a deterministic
 // noise token. Pass the offset on norm tensors only.
 // ---------------------------------------------------------------------------
+
 static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     if (!head.loaded) return true;  // nothing to upload
 
@@ -1048,9 +1049,11 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     // draft has to copy routing D2H and loop on the host, which is exactly what
     // makes the draft path uncapturable.
     //
-    // The per-expert Tensors are then repointed INTO the slab and the originals
-    // freed, so this costs no steady-state VRAM — only a transient second copy
-    // of one expert-set while the slab is filled.
+    // The per-expert Tensors are then repointed INTO the slab. The originals are
+    // NOT freed: they stay in gpu_allocs until teardown, so both copies are
+    // resident for the life of the process. That is why mtp_upload_peak_bytes
+    // counts the slabs on top of the head, and why the load refuses a head it
+    // cannot afford as a whole.
     if (ok && !head.experts_up.empty() && head.experts_up[0].data != nullptr) {
         auto stack = [&](std::vector<Tensor>& parts, Tensor& out, const char* what) -> bool {
             const int64_t ne = static_cast<int64_t>(parts.size());
@@ -2699,12 +2702,37 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // — if the upload fails (no VRAM), we degrade by disabling MTP rather
     // than failing the entire model load.
     if (mtp_.has_value() && mtp_->loaded) {
+        // Refuse a head that does not fit BEFORE uploading any of it. See
+        // mtp_upload_peak_bytes: a per-allocation refusal partway through
+        // strands everything already uploaded for the life of the process.
+        size_t mtp_free = 0, mtp_total = 0;
+        const size_t mtp_need = mtp_upload_peak_bytes(*mtp_);
+        const bool have_reading = vram_budget_mem_get_info(&mtp_free, &mtp_total);
+        const size_t mtp_headroom = vram_allocator_headroom(mtp_total);
+        if (have_reading && mtp_free < mtp_need + mtp_headroom) {
+            IMP_LOG_WARN(
+                "MTP head: needs %zu MiB plus %zu MiB allocator headroom, %zu MiB free. "
+                "Skipping the head, spec-decode disabled.",
+                mtp_need / (1024 * 1024), mtp_headroom / (1024 * 1024), mtp_free / (1024 * 1024));
+            mtp_->loaded = false;
+        }
+    }
+    if (mtp_.has_value() && mtp_->loaded) {
         size_t allocs_before = gpu_allocations_.size();
+        size_t mtp_free_before = 0;
+        vram_budget_mem_get_info(&mtp_free_before, nullptr);
         if (upload_mtp_weights(*mtp_, ctx)) {
-            IMP_LOG_INFO("MTP head: uploaded to GPU (%zu allocations, %.2f GiB BF16→FP16)",
-                         gpu_allocations_.size() - allocs_before,
-                         static_cast<double>(mtp_->info.file_bytes) /
-                             (1024.0 * 1024.0 * 1024.0));
+            // Report what the device actually gave up, not the size on disk:
+            // the restacking copy makes the second number roughly 2.5x the
+            // first, and the file size read like the whole cost.
+            size_t mtp_free_after = 0;
+            vram_budget_mem_get_info(&mtp_free_after, nullptr);
+            const size_t mtp_used = mtp_free_before > mtp_free_after ? mtp_free_before - mtp_free_after : 0;
+            IMP_LOG_INFO(
+                "MTP head: uploaded to GPU (%zu allocations, %zu MiB of device free, "
+                "%.2f GiB on disk)",
+                gpu_allocations_.size() - allocs_before, mtp_used / (1024 * 1024),
+                static_cast<double>(mtp_->info.file_bytes) / (1024.0 * 1024.0 * 1024.0));
         } else {
             IMP_LOG_WARN("MTP head: GPU upload failed — spec-decode disabled");
             mtp_->loaded = false;
