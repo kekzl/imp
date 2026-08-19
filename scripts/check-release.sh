@@ -4,7 +4,25 @@
 # Runs the cheap checks that should always pass on a publishable
 # tree: doc links, secrets/path leaks, no accidentally tracked
 # binaries, then defers to `make verify-fast` for build + test
-# + perf + smoke.
+# + perf + smoke and to `make test-server` for the HTTP surface.
+#
+# Both model-backed stages are needed and neither substitutes for the other:
+# verify-fast measures kernels and throughput, test-server is the ONLY place
+# handlers.cpp and batching_engine run end to end (Makefile, test-server).
+# A defect that only shows over HTTP passes verify-fast untouched — one did:
+# `response_format: json_schema` returned invalid JSON for months and this gate
+# reported OK every time, because it never asked the server anything.
+#
+# SKIP_VERIFY=1 skips BOTH of them. The summary then refuses the words "all
+# gates passed" and says what it actually checked, because a run that put no
+# model in front of the GPU is a statement about the tree, not a release
+# verdict — the rule #1474 put into scripts/verify.sh, for the same reason.
+#
+# It still exits 0 in that mode, deliberately: the `Release hygiene` CI job
+# runs exactly this way (ci.yml, SKIP_VERIFY: "1") because the runner has no
+# GPU, and a job that can never be green teaches people to ignore it. The
+# distinction is carried by the summary line, which is what a human reads
+# before tagging — not by an exit code that would only break CI.
 #
 # Exit code 0 if everything passes; non-zero otherwise.
 
@@ -18,6 +36,10 @@ YLW=$(tput setaf 3 || echo)
 RST=$(tput sgr0 || echo)
 
 FAIL=0
+# Model-backed stages that actually put a checkpoint in front of the GPU.
+# SKIP_VERIFY=1 leaves this at zero, and the summary refuses to report success
+# while it is — see the header.
+MODEL_STAGES_RUN=0
 section() { echo; echo "${YLW}== $* ==${RST}"; }
 pass()    { echo "${GRN}PASS${RST} $*"; }
 fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
@@ -297,6 +319,7 @@ if [ "${SKIP_VERIFY:-0}" = "1" ]; then
 else
     # A release runs every gate, whatever the shell exported: the pre-push hook
     # sets IMP_VERIFY_SKIP_PERF=1 for diffs outside the measured paths.
+    MODEL_STAGES_RUN=$((MODEL_STAGES_RUN+1))
     if IMP_VERIFY_SKIP_PERF=0 IMP_VERIFY_SKIP_VRAM=0 IMP_VERIFY_SKIP_GRAPHS=0 \
        make verify-fast >/tmp/imp_check_release_verify.log 2>&1; then
         pass "make verify-fast"
@@ -307,8 +330,37 @@ else
     fi
 fi
 
+# ----------------------------------------------- 7. defer to make test-server
+# The HTTP surface, which verify-fast never touches. Its batteries are the only
+# thing in this repository that drives handlers.cpp and batching_engine against
+# a live model, so a release that skips it ships whatever the wire protocol has
+# broken since the last manual run.
+section "make test-server"
+if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+    echo "  (skipped via SKIP_VERIFY=1)"
+else
+    MODEL_STAGES_RUN=$((MODEL_STAGES_RUN+1))
+    if make test-server >/tmp/imp_check_release_server.log 2>&1; then
+        pass "make test-server"
+    else
+        echo "  log: /tmp/imp_check_release_server.log"
+        # The per-battery verdicts are what names the culprit; the tail alone is
+        # usually the make error and says nothing.
+        grep -E '^   -> |^test-server:' /tmp/imp_check_release_server.log | sed 's/^/  /' || true
+        fail "make test-server"
+    fi
+fi
+
 # --------------------------------------------------------------------- end
 echo
+if [ "$FAIL" -eq 0 ] && [ "$MODEL_STAGES_RUN" -eq 0 ]; then
+    # Exit 0 on purpose — see the header. The wording is the gate here: nobody
+    # should be able to read this line as a release verdict.
+    echo "${YLW}check-release: cheap checks passed — NOT a release verdict${RST}"
+    echo "         SKIP_VERIFY=1 skipped verify-fast and test-server, so no model ran."
+    echo "         Re-run without it before tagging."
+    exit 0
+fi
 if [ "$FAIL" -eq 0 ]; then
     echo "${GRN}check-release: all gates passed${RST}"
     exit 0

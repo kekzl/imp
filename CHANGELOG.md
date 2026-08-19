@@ -33,6 +33,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`scripts/check-release.sh` now fails when a server battery is red.** It
+  deferred only to `make verify-fast`, and `make test-server` is the one place
+  `handlers.cpp` and `batching_engine` run end to end. The `json_schema` defect
+  fixed above passed this gate every time. `SKIP_VERIFY=1` still exits 0 for the
+  CI job that has no GPU, but the summary no longer says "all gates passed" when
+  no model ran.
+
 - **`response_format: json_schema` could not close a free string value, and
   returned invalid JSON.** A token that carries string content *and* the closing
   quote — `."`, `n"`, `!"`, the usual spelling on a BPE vocabulary — got neither
