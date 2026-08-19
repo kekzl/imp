@@ -7,7 +7,11 @@ SHELL := bash
 .SHELLFLAGS := -o pipefail -c
 
 DOCKER_IMG ?= imp:test
-DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
+# Mount $(HOME)/models, not $(PWD)/models: the repo's models/ holds ABSOLUTE
+# symlinks into $(HOME)/models, which dangle inside the container. Every path
+# under $(PWD)/models therefore misses, and a missing model is a skip, so the
+# whole model suite went silently green. test-vision already mounts $(HOME).
+DOCKER_RUN = docker run --rm --gpus all -v $(HOME)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # Dependency pins live once in cmake/imp-deps.cmake; inject them into the Docker
 # build so the tags are not duplicated (bump that file only). Extraction is in a
@@ -143,18 +147,22 @@ test-all: build
 # one place — tests/.env.test, which nothing sources — so DetEvalE2ETest skipped
 # on every invocation the repo knew how to launch, from #542 until #1299 found
 # it red (escape class E3). Setting it here is what makes that suite runnable.
-# Override with `make test-e2e MOE_MODEL=/models/<other>`; a path that is not
-# there skips rather than fails.
+# Override with `make test-e2e MOE_MODEL=/models/<other>`. A path that is not
+# there FAILS rather than skips: this line always sets the variable, so a name
+# that is not in the container is a misconfiguration, not a missing
+# prerequisite. Unset is still a skip - that, not a wrong path, is what kept the
+# suite dead until #1299.
 # NOTE: the *DetEvalE2ETest* form is required — it is a TEST_P suite, so
 # `DetEvalE2ETest.*` matches nothing and gtest calls that PASSED.
 # guard_det_suite_filter (CMakeLists.txt, unit lane) holds both to that.
 MOE_MODEL ?= /models/gpt-oss-20b-mxfp4.gguf
 test-e2e: build
-	docker run --rm --gpus all -v $(PWD)/models:/models \
+	docker run --rm --gpus all -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
-		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-Q8_0.gguf \
-		-e IMP_TEST_MODEL_GEMMA4=/models/gemma-4-26B-A4B-it-Q4_K_M.gguf \
+		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
+		-e IMP_TEST_MODEL_GEMMA4=/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf \
 		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
+		-e IMP_TEST_MODEL_MODELOPT_CODER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
 		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:*DetEvalE2ETest*"
 
 # Vision GPU golden (R9 / #583): SigLIP + gemma4v encoder + projector tail.
@@ -186,14 +194,18 @@ bench: build check-gpu
 	@echo "--- Qwen3-8B Q8_0 ---"
 	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@echo ""
-	@echo "--- Qwen3.5-4B GDN Q8_0 ---"
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3.5-4B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
-	@echo ""
-	@echo "--- Qwen3.5-9B GDN Q8_0 ---"
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3.5-9B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
-	@echo ""
-	@echo "--- Qwen3-4B MXFP4 ---"
-	$(DOCKER_RUN) imp-cli --model /models/qwen3-4b-instruct-2507-mxfp4.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@# GDN coverage moved from Qwen3.5-4B-Q8_0 to the mxfp4 checkpoint: the Q8_0
+	@# one is not on this host, and it is the mxfp4 that the E2E battery already
+	@# drives (IMP_TEST_MODEL_GDN). The label follows the file, because a
+	@# different quant is a different measurement. Consequence, stated rather
+	@# than hidden: the Qwen3.5-4B/9B Q8_0 rows in docs/performance.md were
+	@# measured on checkpoints this target can no longer reproduce.
+	@echo "--- Qwen3.5-4B GDN MXFP4 ---"
+	$(DOCKER_RUN) imp-cli --model /models/Qwen3.5-4B-mxfp4.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@# Dropped: Qwen3.5-9B GDN Q8_0 (no 9B checkpoint of any quant on this host)
+	@# and Qwen3-4B MXFP4 (qwen3-4b-instruct-2507-mxfp4.gguf is not here either).
+	@# Both were dead paths, and each recipe line aborts the target, so `make
+	@# bench` died at the first of them and never reached the MXFP4 line at all.
 
 # Single model benchmark (quick check)
 test-perf: build check-gpu
@@ -402,7 +414,7 @@ sanitize:
 	docker build --target builder $(BUILD_ARGS) -t imp:sanitize .
 	@for b in test-attention test-quant test-kv; do \
 		echo "== compute-sanitizer memcheck: $$b =="; \
-		docker run --rm --gpus all -v $(PWD)/models:/models imp:sanitize \
+		docker run --rm --gpus all -v $(HOME)/models:/models imp:sanitize \
 			/usr/local/cuda/bin/compute-sanitizer --tool memcheck --error-exitcode 1 \
 			/src/build/$$b || exit 1; \
 	done

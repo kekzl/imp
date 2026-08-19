@@ -1,4 +1,6 @@
 #include "imp/imp.h"
+#include "test_models.h"
+
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <cstdlib>
@@ -17,8 +19,15 @@ bool dir_exists(const std::string& p) {
 class LlmCompressorE2E : public ::testing::Test {
 protected:
     static constexpr const char* kGemma4Dir = "/models/Gemma-4-26B-A4B-it-NVFP4";
-    static constexpr const char* kMistralDir = "/models/Mistral-Small-3.2-24B-Instruct-2506-NVFP4";
-    static constexpr const char* kModeloptCoderDir = "/models/Qwen3-Coder-30B-A3B-FP4";
+    // Overridable, because a hardcoded default that does not exist on the host
+    // reads as "this export is untested" when it means "the path is wrong".
+    static std::string mistral_dir() {
+        return imp_test::env_path_or(imp_test::kEnvModelMistral,
+                                     "/models/Mistral-Small-3.2-24B-Instruct-2506-NVFP4");
+    }
+    static std::string modelopt_coder_dir() {
+        return imp_test::env_path_or(imp_test::kEnvModelModeloptCoder, "/models/Qwen3-Coder-30B-A3B-FP4");
+    }
 };
 
 TEST_F(LlmCompressorE2E, Gemma4_LoadsWithoutIMA) {
@@ -99,12 +108,14 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsAndGeneratesCoherent) {
 //      `config_groups: group_0: weights: {num_bits: 4, type: float}` schema as
 //      NVFP4, and handles the multi-line bracket-array `ignore: [...]` form.
 TEST_F(LlmCompressorE2E, MistralSmall_LoadsAndGeneratesCoherent) {
-    if (!dir_exists(kMistralDir)) {
-        GTEST_SKIP() << "Model not present at " << kMistralDir;
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelMistral));
+    const std::string mistral = mistral_dir();
+    if (!dir_exists(mistral.c_str())) {
+        GTEST_SKIP() << "Model not present at " << mistral;
     }
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(kMistralDir, IMP_FORMAT_SAFETENSORS, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(mistral.c_str(), IMP_FORMAT_SAFETENSORS, &model), IMP_SUCCESS);
     ImpConfig cfg = imp_config_default();
     cfg.max_seq_len = 512;
     cfg.max_batch_size = 1;
@@ -130,12 +141,14 @@ TEST_F(LlmCompressorE2E, MistralSmall_LoadsAndGeneratesCoherent) {
 // after the Phase 1 dispatch reshuffle in load_nvfp4_config(). Loads
 // Qwen3-Coder-30B-A3B-FP4 and verifies generation completes coherently.
 TEST_F(LlmCompressorE2E, Modelopt_QwenCoder30B_StillWorks) {
-    if (!dir_exists(kModeloptCoderDir)) {
-        GTEST_SKIP() << "Model not present at " << kModeloptCoderDir;
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelModeloptCoder));
+    const std::string coder = modelopt_coder_dir();
+    if (!dir_exists(coder.c_str())) {
+        GTEST_SKIP() << "Model not present at " << coder;
     }
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(kModeloptCoderDir, IMP_FORMAT_SAFETENSORS, &model), IMP_SUCCESS)
+    ASSERT_EQ(imp_model_load(coder.c_str(), IMP_FORMAT_SAFETENSORS, &model), IMP_SUCCESS)
         << "Modelopt path regressed";
     ASSERT_NE(model, nullptr);
 

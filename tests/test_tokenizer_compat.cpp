@@ -98,6 +98,8 @@ protected:
         if (!model_env || !golden_env) {
             GTEST_SKIP() << "Set IMP_TEST_MODEL and IMP_TEST_GOLDEN env vars to run";
         }
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(model_env, imp_test::kEnvModel));
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(golden_env, imp_test::kEnvGolden));
 
         model_path_ = model_env;
         golden_path_ = golden_env;

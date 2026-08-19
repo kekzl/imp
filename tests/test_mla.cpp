@@ -49,6 +49,7 @@ TEST(MLAConfig, YarnMscaleAttentionScaleNonMLA) {
 TEST(MLAConfig, YarnMscaleAttentionScale) {
     std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
                                             "/models/DeepSeek-V2-Lite");
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
     if (!std::filesystem::exists(dir)) {
         GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
                      << dir << " to run MLA mscale tests";
@@ -72,6 +73,7 @@ TEST(MLAConfig, YarnMscaleAttentionScale) {
 TEST(MLAConfig, ParsesDeepSeekV2LiteFields) {
     std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
                                             "/models/DeepSeek-V2-Lite");
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
     if (!std::filesystem::exists(dir)) {
         GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
                      << dir << " to run MLA config tests";
@@ -115,6 +117,7 @@ TEST(MLAConfig, ParsesDeepSeekV2LiteFields) {
 TEST(MLAConfig, YarnRopeMscaleIsUnityForV2Lite) {
     std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
                                             "/models/DeepSeek-V2-Lite");
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
     if (!std::filesystem::exists(dir)) {
         GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
                      << dir << " to run MLA rope-mscale tests";
@@ -147,6 +150,7 @@ TEST(MLAConfig, IsMlaReturnsFalseForNonMLA) {
 TEST(MLAConfig, ProfileSelectsMLAVariant) {
     std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
                                             "/models/DeepSeek-V2-Lite");
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
     if (!std::filesystem::exists(dir)) {
         GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
                      << dir << " to run MLA profile tests";

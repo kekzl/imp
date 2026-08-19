@@ -36,6 +36,7 @@ protected:
         path_ = primary_model();
         if (!path_)
             GTEST_SKIP() << "Set IMP_TEST_MODEL to run";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModel));
 
         ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
@@ -173,6 +174,7 @@ protected:
         path_ = gdn_model();
         if (!path_)
             GTEST_SKIP() << "Set IMP_TEST_MODEL_GDN to run";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModelGdn));
 
         ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
@@ -292,6 +294,7 @@ protected:
         path_ = gemma4_model();
         if (!path_)
             GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModelGemma4));
 
         ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
@@ -431,6 +434,7 @@ protected:
         path_ = gemma4_model();
         if (!path_)
             GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModelGemma4));
 
         ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
@@ -521,6 +525,7 @@ TEST(DecodeGraphCtxGrowthTest, LongPromptAfterShortRequestStaysAlive) {
     const char* path = primary_model();
     if (!path)
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
     ImpContext ctx = nullptr;
