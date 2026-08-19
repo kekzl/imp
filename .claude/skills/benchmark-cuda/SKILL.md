@@ -137,6 +137,42 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 - **`docs/BENCHMARKS.md`** is SHA-anchored (method, date, commit, command, tok/s). Update it — and the README numbers — in the same commit as the perf change. `scripts/check-release.sh` gates release-touching PRs.
 - `bash scripts/scoreboard.sh` tallies hero-model status vs llama.cpp.
 
+## A published verdict expires when its path is fixed
+
+**Three times in two days a documented verdict priced a build that no longer
+existed**, and each time the fix was younger than the verdict by weeks, not
+months:
+
+| verdict, as written | re-measured | what sat between |
+|---|---|---|
+| "MTP loses: 84.7-85.8 vs ~88 tok/s" | **+21.3 %** at k=1 (#1481) | `ea547a53`, 3 weeks |
+| "`token_recycling` still net-negative, −7 %" | **−0.27 %**, neutral (#1483) | the same commit |
+| "the marginal row cost is unattributed" | register pressure, both fixes refuted (#1482) | — |
+
+The pattern is not "old numbers drift". It is that **a fix to the measured path
+retires every verdict that ran through it**, immediately and completely, while
+the document keeps reading like a current finding. `token_recycling` and MTP
+share one line of code — `greedy_argmax_all` on the verify chunk — so one commit
+invalidated both, and nothing in either entry pointed at the other.
+
+So, when you read a verdict before acting on it:
+
+1. `git log --oneline <PROV commit>..HEAD -- <the files the measured path lives in>`.
+   Not the whole tree: on this repo *every* provenance block has perf-path
+   commits behind it (all 20, checked 2026-08-19), so "commits happened" ranks
+   nothing. The question is whether one of them touched **this** path.
+2. Prefer re-running the harness over reasoning about the delta. The re-runs
+   above cost minutes each because the harnesses are in `tools/analysis/`
+   (`mtp_k_sweep.sh`, `token_recycling_ab.sh`) — ship one with every verdict.
+3. Check the **level**, not only the delta: `token_recycling` re-measured at
+   156 tok/s where the original read 99.37, because an unrelated fix (#1102)
+   sits between. An absolute number weeks old is not a baseline.
+
+An automated staleness gate was tried and is not worth building: keyed on
+perf-path commits it fires on 100 % of blocks, which is the failure mode skill
+`find-stubs` exists to warn about — a check without a baseline reads normal as a
+finding.
+
 ## Red flags — STOP and re-run
 
 - Reporting `pp512` delta without a decode delta → on a MoE model that spread is ~38 % across process starts, you're seeing noise
