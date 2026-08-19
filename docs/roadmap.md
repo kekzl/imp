@@ -789,6 +789,50 @@ Closed competitive records (kept for the record, not active work):
     | 2 | 166 | -54 % |
     | 3 | 129 | -65 % |
 
+    **Re-measured 2026-08-19, and the cost is now ~2 %, for a reason the table
+    above cannot show.** `ea547a53` (2026-08-18) touched `ssm.cu` and
+    `executor_ssm_gdn.cu`, which this Mamba2 hybrid runs through, so the numbers
+    above price a build six days older than that fix:
+
+    | k | tok/s (r1, r2) | mean | vs k=0 | drafted | accepted | verifies |
+    |---|---|---:|---:|---:|---:|---:|
+    | 0 | 366.11, 363.45 | 364.78 | — | — | — | — |
+    | 1 | 357.45, 357.63 | 357.54 | **-2.0 %** | 24 | 2 (8 %) | 24 |
+    | 2 | 353.59, 349.88 | 351.74 | -3.6 % | 48-80 | 1-7 (2-9 %) | 24-40 |
+
+    **But the mechanism changed, not the drafter.** Speculation is not cheap
+    here — it *stops*: with 0 of the first 8 drafts accepted, the acceptance-poor
+    floor unbinds all speculation for the request after 8 verifies
+    (`spec-ngram: req 2 gave up (acceptance-poor: verifies=8 accepted=0/8)`), so
+    24 verifies over 2100 tokens is the whole of it. The -2 % is what 8 wasted
+    verifies per request cost, not what MTP costs. **The guard is doing exactly
+    its job**, and the honest reading of this entry is now "the head does not
+    draft usefully on this model", not "speculation is expensive on this model".
+
+    **Two things that do not add up, recorded rather than guessed at:**
+
+    - This entry documents **43.9 % top-1 accept at depth 1**; the serving path
+      measures **0-9 %**. Those may not be the same quantity — the 43.9 % came
+      from `--mtp-spec-decode` through `mtp_accuracy_bench.sh`, which scores the
+      draft offline, while this counts what the verify chunk accepts. Nobody has
+      shown they agree, and the gap is too large to assume they do.
+    - The load emits **270 `WeightMap: unrecognised weight name: mtp.*`
+      warnings** for this checkpoint and **zero** for Qwen3.8-27B-NVFP4, whose
+      head accepts 76 %. Both are Model Optimizer exports; the `divert_to_mtp`
+      branch in `safetensors_loader.cpp` is gated on `llm_compressor_format`, so
+      a Modelopt checkpoint's `mtp.*` tensors reach the generic mapper instead.
+      The head still uploads (272 allocations, 2.49 GiB) so the warnings look
+      cosmetic — but a warning that fires 270 times on a working load is noise
+      that would hide a real one, and the 0 % acceptance sits right next to it.
+
+    ```
+    [PROV: commit=02872bdf date=2026-08-19 hw=RTX5090
+           model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 quant=NVFP4 cuda=13.3
+           path=imp-server n=3 prompts x 2 alternating rounds
+           cmd=`tools/analysis/mtp_k_sweep.sh` with MTP_MODEL set, counters from
+           /metrics, give-up line from the server log]
+    ```
+
     **The reason is now unambiguous, and it changed with #1389.** Measured before that fix, when the main decode was graph-demoted at 126 tok/s, MTP cost only -1.3 % at k=1 — draft and decode were both eager, so a draft step was priced like a decode step. With graphs restored the main decode is ~2.75 ms/token while the draft still runs eager (`mtp_forward.cu`: "drafts run outside graph capture for now", three `cudaStreamSynchronize` per draft token). A draft step now costs roughly a *whole* decode step despite the head being a fraction of the model, so every speculative token is a bad trade.
 
     **The draft MoE is now device-side (`gemv_f16_moe_decode`, added for this)** — no D2H of the routing, no host loop, one fewer sync per draft token. It bought +14…+23 % *on the speculative path* (k=1 216→247, k=2 166→194, k=3 129→159) and did **not** change the verdict: k=1 is still −32 % against no speculation. That matches the bound computed before building it — with a *free* draft the ceiling is +10.7 % at best and negative if the verify chunk really costs 2× a decode step. **The remaining cost is the verify chunk, not the draft.** Capturing the draft path is now unblocked (that was the point of the kernel) but is not worth doing for its own sake. Until then the built-in tree probe caps the other direction — a top-4 tree reaches E[accept] 1.08 vs 0.52, nowhere near the break-even. `speculative.mtp_econ_min_emit` detects the loss after 8 verifies and unbinds, so the default costs nothing and `--mtp-spec-decode` is opt-in. For context, NVIDIA's own DSpark drafter measured **-42 % in vLLM** on this card (351 -> 202), and the model card recommends no speculation at all for H100-class bandwidth.
