@@ -33,6 +33,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`response_format: json_schema` could not close a free string value, and
+  returned invalid JSON.** A token that carries string content *and* the closing
+  quote — `."`, `n"`, `!"`, the usual spelling on a BPE vocabulary — got neither
+  `CAT_STRING_CHAR` nor `CAT_QUOTE`, so the category pre-filter dropped it before
+  the FSM (which accepts it) was asked. Measured on Qwen3-8B-NVFP4: unmasked `."`
+  is top-1 at logprob 0.0, masked it is not in the top 5, and the model closed
+  with a typographic `”` instead — legal string content, so the value ran to
+  `max_tokens`. Costs ~5.6 % decode on a constrained request, which is the
+  pre-filter doing less work up front.
+
 - **The weight-upload log line called a neighbour on the card "weights".** The
   same 3263 MiB checkpoint consumes 3264 MiB of device free VRAM on an idle card
   and 8446 MiB beside a process holding 23.4 GiB. The line now names the delta

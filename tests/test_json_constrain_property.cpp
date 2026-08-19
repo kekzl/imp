@@ -556,6 +556,38 @@ TEST(TokenCategory, NonAsciiCountsAsStringContent) {
     EXPECT_FALSE(classify_token("ab\nc") & CAT_STRING_CHAR) << "embedded newline accepted";
 }
 
+// ---------------------------------------------------------------------------
+// #1199 follow-up: a free string value could not be CLOSED. The end of a string
+// is spelled by a BPE vocabulary far more often as `."`, `n"`, `!"` than as a
+// bare `"`. Those tokens got neither CAT_STRING_CHAR (is_str clears on any
+// quote) nor CAT_QUOTE (it keyed on `first == '"'`), so their category was
+// 0x0000 and the STRING_VALUE pre-filter — CAT_STRING_CHAR | CAT_QUOTE —
+// dropped them before token_legal, which accepts them, was consulted.
+//
+// Measured on Qwen3-8B-NVFP4 at the position after `...rascheln`: unmasked, `."`
+// is top-1 at logprob 0.0 and `.”` sits 13.4 nats behind it; masked, `."` is not
+// in the top 5 at all and `.”` wins. The model then wrote a typographic quote —
+// legal string content — and the value ran to max_tokens as invalid JSON.
+// ---------------------------------------------------------------------------
+TEST(TokenCategory, StringEndingTokensCarryQuote) {
+    const uint16_t string_phase = CAT_STRING_CHAR | CAT_QUOTE;  // schema STRING_VALUE
+    // The forms a vocabulary actually uses to end a string.
+    for (const char* t : {".\"", "n\"", "!\"", "ln\"", ".\")", "\"}", "\"", "e\","}) {
+        EXPECT_TRUE(classify_token(t) & string_phase)
+            << "token " << t << " cannot pass the STRING_VALUE category pre-filter, "
+            << "so a free string can never be closed with it";
+    }
+    // The quote is what earns CAT_QUOTE, wherever it sits in the token.
+    EXPECT_TRUE(classify_token(".\"") & CAT_QUOTE) << "trailing quote not recognised";
+    EXPECT_TRUE(classify_token("\"}") & CAT_QUOTE) << "leading quote not recognised";
+    EXPECT_TRUE(classify_token("a\"b") & CAT_QUOTE) << "embedded quote not recognised";
+    // And a token with no quote must NOT gain it — the pre-filter still has to
+    // separate string content from string end.
+    EXPECT_FALSE(classify_token(".\u201d") & CAT_QUOTE) << "typographic quote counted as a real one";
+    EXPECT_FALSE(classify_token("rascheln") & CAT_QUOTE) << "plain word counted as a quote";
+    EXPECT_TRUE(classify_token(".\u201d") & CAT_STRING_CHAR) << "typographic quote must stay string content";
+}
+
 TEST(JsonConstrainFsm, AcceptsUmlautsInsideStrings) {
     JsonConstrainer fsm;
     fsm.advance_text("{\"k\":\"Die ");

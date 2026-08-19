@@ -109,7 +109,18 @@ static inline uint16_t classify_token(const std::string& text) {
             cat |= CAT_COLON;
         if (first == ',')
             cat |= CAT_COMMA;
-        if (first == '"')
+        // CAT_QUOTE follows the PRESENCE of a quote, not its position. A BPE
+        // vocabulary spells the end of a string far more often as `."`, `n"`,
+        // `!"` than as a bare `"`, and those tokens are the only way out of a
+        // free string value. Keying on `first == '"'` gave them neither
+        // CAT_QUOTE (they do not start with one) nor CAT_STRING_CHAR (is_str
+        // clears on any quote, four lines up), so cat came out 0x0000 and the
+        // category pre-filter dropped them before token_legal — which accepts
+        // them — was ever asked. Same shape as #1197 one class over: the mask
+        // decided something the FSM was supposed to decide, and the model
+        // closed the string with a typographic `”` instead, which IS legal
+        // string content, so the value never ended (#1199).
+        if (text.find('"') != std::string::npos)
             cat |= CAT_QUOTE;
 
         if (is_ws)
