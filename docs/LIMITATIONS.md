@@ -176,10 +176,28 @@ These have a code path and no gate. They may work; nothing proves it.
   structural divergence below is not confined to *which* coherent answer you
   get; it reaches the stop decision.
 
+  **A switch fixes it, and it costs the entire win.**
+  `speculative.verify_nvfp4_gemm=false` routes the verify chunk off the batched
+  NVFP4 GEMV: truncation drops to **0 of 6** on the same prompts, both offenders
+  included, with acceptance unchanged (72-80 %). Throughput goes with it:
+
+  | arm | tok/s (r1, r2) | vs k=0 |
+  |---|---|---:|
+  | k=0 | 88.97, 88.93 | — |
+  | k=1, `verify_nvfp4_gemm=false` | 80.50, 77.43 | **-11.2 %** |
+  | k=1, default (truncates) | see roadmap | +21.3 % |
+
+  So **the +21.3 % comes from precisely the kernel that causes the truncation.**
+  Both accumulate in `float` — the difference is summation order, not precision,
+  and it is enough to flip the stop decision on a third of prompts. No setting
+  of this pair is both fast and correct.
+
   **Consequence: `speculative.mtp_k` stays 0 by default**, despite the +21.3 %
   it measures on this model ([`roadmap.md`](roadmap.md)). A throughput win that
-  truncates a third of answers is not a win, and this defect is the blocker to
-  clear before that default can be revisited.
+  truncates a third of answers is not a win, and the cheap escape does not
+  exist: MTP is either fast and wrong, or correct and slower than no speculation
+  at all. Closing this needs the chunk path to agree with decode numerically,
+  which is a kernel change, not a flag.
 
   *Caveat this places on that +21.3 %:* the two arms do not generate the same
   text, and the speculative arm sometimes stops early, so the comparison is

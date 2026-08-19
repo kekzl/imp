@@ -34,7 +34,7 @@ start_arm(){ # k
       --set speculative.ngram=false \
       --set speculative.mtp_k=$1 \
       --set speculative.mtp_econ_min_emit=0 \
-      --set server.prefix_cache=false >/dev/null
+      --set server.prefix_cache=false ${EXTRA:-} >/dev/null
   for _ in $(seq 1 200); do
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
     docker ps --format '{{.Names}}' | grep -q '^mtpsweep$' || { echo "DIED k=$1"; docker logs mtpsweep 2>&1|tail -20; return 1; }
