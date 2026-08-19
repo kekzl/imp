@@ -38,11 +38,38 @@ bool model_available() {
     return fs::exists(std::string(kQwen36ModelDir) + "/model_mtp.safetensors");
 }
 
+// This checkpoint takes ~23.7 GiB of a 32 GiB card, so whether it fits depends
+// on what ran before it in the same process — and running it without the room
+// does not fail cleanly. Measured: the upload OOMs part-way, and from that point
+// NO free works, async or synchronous. 62537 of 62537 cudaFreeAsync calls return
+// "out of memory" with the error state cleared before each one, and a
+// synchronous cudaFree fallback succeeds 0 times out of those 62537. The memory
+// comes back at process exit and not before, so every later test in the binary
+// runs on a full card — 33 of them, in the run that surfaced this.
+//
+// So the guard has to sit BEFORE the load. A checkpoint that cannot fit is a
+// skip with the numbers in it, not a failure: the test says nothing about the
+// code in that state.
+constexpr size_t kNeededMiB = 25000;  // 23.7 GiB upload + headroom for the MTP head
+
+size_t device_free_mib() {
+    size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess)
+        return 0;
+    return free_b >> 20;
+}
+
 }  // namespace
 
 TEST(MtpForwardTest, DraftStepProducesValidToken) {
     if (!model_available()) {
         GTEST_SKIP() << "Qwen3.6-NVFP4 with MTP not present at " << kQwen36ModelDir;
+    }
+    const size_t free_mib = device_free_mib();
+    if (free_mib < kNeededMiB) {
+        GTEST_SKIP() << "needs ~" << kNeededMiB << " MiB free, card has " << free_mib
+                     << " MiB — an OOM here leaves the CUDA context unable to free "
+                        "anything, which fails every later test in this binary";
     }
 
     // Load model + upload weights with MTP enabled.
