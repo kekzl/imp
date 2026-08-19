@@ -13,6 +13,12 @@ there instead of retelling it.
 
 ### Added
 
+- **MTP speculative decoding pays on Qwen3.8-27B-NVFP4: `speculative.mtp_k=1`
+  measures +21.3 % decode** (104.31 against 86.03 tok/s). Only at k=1 — an extra
+  chunk row still costs half a decode step, so k=3 buys 2 %. The default stays 0;
+  measurement and the profile behind it in
+  [`roadmap.md`](docs/roadmap.md).
+
 - **`/health` says whether the KV pool can still grow (`kv_pool_growable`).** A
   fixed pool and a growable one already at its ceiling both report
   `kv_ceiling_blocks == kv_blocks_total`, and the two want opposite reactions:
