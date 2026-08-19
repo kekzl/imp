@@ -33,7 +33,7 @@ A ranked audit of what still separates imp from "best agentic engine on a 5090".
 | 2 | Vision beyond Gemma | **largely closed** — Qwen3-VL runs end to end (#1163-#1180): dynamic resolution, DeepStack, three-axis M-RoPE, images over `/v1/chat/completions` and `imp-cli --image`, several images per request. Qwen3.6-35B-A3B-NVFP4 joined on the same tower (#1379 + this PR). What remains: no video, and no VL family with a genuinely different tower |
 | 3 | One server, one model | **closed** — `server.model_swap` (#1080) |
 | 4 | Constrained decoding is JSON-only | **closed** — `response_format: regex` / `guided_regex` (#1091) and GBNF grammars (#1095) ship; `/v1/rerank` remains a separate item |
-| 5 | No speculation tree / trained draft head | open — **re-measured 2026-07-27: still net-negative** (−7% on reasoning). The larger lever it was measured against (#1100, the context-capacity decode tax) is fixed in #1102 |
+| 5 | No speculation **tree** | **half closed, and the other half is no longer negative** (2026-08-19). A trained draft head is not missing: the MTP head pays **+21.3 %** at `speculative.mtp_k=1` since `ea547a53` (see the re-measurement below). No EAGLE/Medusa/multi-candidate **tree** exists, and that part stands. The −7 % that used to close this row was `token_recycling`, re-measured on the current build at **−0.27 %** — neutral, not a loss |
 | 6 | Context VRAM-capped, no host spill | **shelved on measurement, not size** (2026-08-01) — the "silent context loss" half closed 2026-07-31. The remaining half, a tier below VRAM, has **no reproducible trigger on this box** and would land on a 6.5x bandwidth cliff; see below |
 | 7 | Agentic quality unmeasured vs competitors | **closed** — measured across three model families, published in [`BENCHMARKS.md`](BENCHMARKS.md); vLLM/SGLang deliberately out of scope |
 | 8 | No GBNF/EBNF grammar surface | **closed** — GBNF via `response_format: grammar`, llama.cpp's `grammar`, vLLM's `guided_grammar` (#1095) |
@@ -76,9 +76,36 @@ Shipped alongside, not from this list: the live web UI at `GET /` (#1078) and th
 
 4. **Regex-constrained decoding — shipped (GBNF followed as item 8; rerank remains).** `response_format: {"type":"regex"}` (and vLLM's `guided_regex`) constrain the whole reply to a pattern, so a diff header, an ID format, an enum or a small DSL is enforceable without prompting and hoping. Built on the `RegexNfa` already in the tree for JSON-Schema `pattern` — a second engine was written and discarded after measuring identical behaviour. What this needed was the decode-time wrapper: `RegexConstrainer` with the JSON constrainers' `apply_mask` contract, a per-state-set mask cache, EOS gated on an accepting state, and — the part that actually took the time — closing every path that bypasses the mask (the spec-ngram and graph-loop routers, two further `apply_mask` call sites, thinking-default suppression, and pooled-manager state that leaked between requests). The full grammar surface followed as item 8; `/v1/rerank` remains open as item 9.
 
-5. **Speculation has no tree and no trained draft head.** No EAGLE / Medusa / multi-candidate path exists in the tree. Prompt-lookup n-gram only drafts spans that already appear in the context, so it contributes nothing on free-form reasoning output, and the verify-in-loop experiment was removed after a nine-class sweep found no prompt class where it won (see `CHANGELOG.md`, Unreleased).
+5. **Speculation has no tree.** No EAGLE / Medusa / multi-candidate path exists in the tree. **"And no trained draft head" is retired (2026-08-19):** the MTP head is one, and it pays +21.3 % at `speculative.mtp_k=1` — see "Re-measured on the fixed build" below. Prompt-lookup n-gram only drafts spans that already appear in the context, so it contributes nothing on free-form reasoning output, and the verify-in-loop experiment was removed after a nine-class sweep found no prompt class where it won (see `CHANGELOG.md`, Unreleased).
 
-    **Re-measured 2026-07-27 on the current build** (the re-evaluation trigger in [`plans/2026-07-22-token-recycling-spec-tree.md`](plans/2026-07-22-token-recycling-spec-tree.md) was "only if the verify ratio drops below ~1.3×"). It has not. Qwen3-14B-Q6_K, three fresh reasoning prompts, best of 3 each, warm clocks, server path — `speculative.token_recycling` **off 99.37 tok/s vs on 92.46 tok/s (−7%)**, accept 1.65–1.79 tok/verify at ~40 ms/verify against a ~10 ms decode step. A verify step costs ~4 decode steps and returns 1.7 tokens; break-even would need an accept near 4, which no published tree result reaches. Route (b) (true tree mask) stays unwarranted on these numbers.
+    **Re-measured 2026-08-19: the −7 % is gone, and `token_recycling` is now
+    neutral.** Same model and prompt class as the 2026-07-27 run below,
+    alternating arms, fresh process per arm:
+
+    | `speculative.token_recycling` | tok/s (r1, r2) | mean | drafted | accepted | verifies |
+    |---|---|---:|---:|---:|---:|
+    | off | 155.95, 155.07 | 155.51 | 48 | 4 (8.3 %) | 3 |
+    | on | 154.76, 155.41 | 155.08 | 77 | 9 (11.7 %) | 27 |
+
+    **−0.27 %, against −7.0 % three weeks earlier.** The cause is the same one
+    that flipped MTP: `ea547a53` made the verify chunk cheaper, and this path
+    runs through the same `greedy_argmax_all` on the same chunk. It is *neutral*,
+    not a win — on this prompt class it drafts 77 spans and gets 9 of them, so
+    there is almost nothing to win. What changed is that being wrong stopped
+    costing anything.
+
+    Note the level, not only the delta: **156 tok/s where that measurement read
+    99.37**, because #1102 (below) sits between the two.
+
+    ```
+    [PROV: commit=d374df1b date=2026-08-19 hw=RTX5090 model=Qwen3-14B-Q6_K
+           quant=Q6_K cuda=13.3 path=imp-server n=3 reasoning prompts x 2
+           alternating rounds cmd=`imp-server --think-budget 0 --set
+           speculative.token_recycling=true|false --set server.prefix_cache=false`,
+           tokens from usage.completion_tokens, counters from /metrics]
+    ```
+
+    **Re-measured 2026-07-27 on the build of that day** (the re-evaluation trigger in [`plans/2026-07-22-token-recycling-spec-tree.md`](plans/2026-07-22-token-recycling-spec-tree.md) was "only if the verify ratio drops below ~1.3×"). It has not. Qwen3-14B-Q6_K, three fresh reasoning prompts, best of 3 each, warm clocks, server path — `speculative.token_recycling` **off 99.37 tok/s vs on 92.46 tok/s (−7%)**, accept 1.65–1.79 tok/verify at ~40 ms/verify against a ~10 ms decode step. A verify step costs ~4 decode steps and returns 1.7 tokens; break-even would need an accept near 4, which no published tree result reaches. Route (b) (true tree mask) stays unwarranted on these numbers.
 
     **And it was not the largest batch=1 lever — that one has since been fixed.** The same measurement session found that decode throughput was set by the CONFIGURED context capacity rather than the live sequence length: the same 280-token request ran at 160 tok/s with `runtime.max_seq_len=1024` and 99 tok/s at the server's default, with the captured decode body growing 44 → 137 kernels (issue #1100, repro `tools/analysis/ctx_capacity_decode_sweep.sh`). The cause was not the capacity itself but the pre-dequant VRAM budget: the NVFP4 decode cache's reservation was subtracted from the shared budget that the cache itself spends from, so every byte the (already-allocated) KV pool took came out of the cache a second time. At full context that left 100 of 280 weight tensors without an NVFP4 overlay, decoding from Q6_K source instead. Fixed in #1102 — the sweep is now flat at 162–163 tok/s across every capacity from 1024 to 40960, a 42-kernel body throughout. Speculation is once again the open batch=1 question, and on the numbers above it is still not worth building.
 
