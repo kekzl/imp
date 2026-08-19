@@ -63,9 +63,13 @@ These have a code path and no gate. They may work; nothing proves it.
   two bit-equal; pin batch composition if you need that.
 - **MoE routing uses atomics**, so identical seeds can diverge.
 - **Speculative decoding is not universally profitable.** On Nemotron-3.5 the MTP
-  head drafts well (43.9 % top-1 accept) and still costs 32 % of decode, because
-  the draft path runs outside CUDA graphs while the main decode does not. It is
-  opt-in and self-disables after 8 verifies. On Qwen3.8-27B-NVFP4 it does pay
+  head accepts **0-9 %** of its drafts on the serving path, so the acceptance-poor
+  floor unbinds speculation after 8 verifies and the whole feature costs **~2 %**
+  of decode (re-measured 2026-08-19; the −41 % this entry used to quote predates
+  `ea547a53`). The guard is what makes that cheap — without it the drafts keep
+  being paid for. The head's documented 43.9 % top-1 accept was measured offline
+  by a different harness and has never been reconciled with the 0-9 %; see
+  [`roadmap.md`](roadmap.md). On Qwen3.8-27B-NVFP4 it does pay
   since `ea547a53` — `speculative.mtp_k=1` measured +21.3 % — but **only at k=1**:
   an extra chunk row still costs half a decode step, so k=3 buys 2 %. Numbers and
   the profile that localises that cost: [`roadmap.md`](roadmap.md).
