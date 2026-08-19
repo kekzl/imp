@@ -11,6 +11,8 @@ description: Use when opening, merging, or releasing a PR for imp — branching 
 2. **English only in the repo.** PR title + body, commits, code comments, docs, `.md` files — all English. (Chat to the user stays German; this rule is only for what lands on GitHub.)
 3. **`main` merges are SQUASH** (each PR → one commit `… (#NNN)`). Write the PR title to be the final squash-commit subject.
 4. **The required GitHub check is named exactly `Build`** (branch ruleset id `14716423`, "Require CI"). If a CI job is renamed without updating the ruleset, every PR hangs at `mergeStateStatus=BLOCKED`. CI has **no GPU runner** — `Build` only compiles + runs CPU/mock tests. GPU correctness/perf is **your job locally** (`make verify-fast` before push).
+
+   **`Build` being the only required check cuts both ways: every other job can go red and the PR still merges.** Auto-merge squashes the moment `Build` is green, so `Alloc sites`, `File size`, `Docs`, `Lint` and the contract jobs are advisory *in practice* however blocking their own steps are. That put a red `Alloc sites` on `main` twice (2026-08-17, 2026-08-19). **Check `gh pr checks <n>` after the merge too, not only before** — the merge is not evidence the run was clean.
 5. **Perf- or VRAM-moving change → refresh the baseline IN THE SAME PR and say so.** Regen `tests/perf_baseline.json` via `scripts/gen_perf_baseline.sh` (see `benchmark-cuda`), and state the intended delta in the PR body. The gate is 8% decode / 8% prefill / 10% peak VRAM — the same file pins `metrics.memory_mb.own_peak_mb`, so a change that intentionally raises memory fails `verify-fast` until it is re-pinned.
 
 ## The auto-merge race (this lost commit `a5403bd5` in #718 — read it)
