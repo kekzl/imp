@@ -565,5 +565,16 @@ These have a code path and no gate. They may work; nothing proves it.
   as the defect, so neither can point at it. The one signal is the weight-upload
   delta against the checkpoint on disk, which warns at load; measurement and the
   two refuted fields are in [`MEMORY.md`](internals/MEMORY.md) B8.
+- **A prefix-cache hit is not token-identical to a fresh prefill.** The hit skips
+  the cached prefix, so it computes over a different chunk split and accumulates
+  in a different order. Measured on Qwen3-4B-Q8_0 through the C API, at the first
+  position where the two differ: fresh picks token 55486 (logit 38.242889) over
+  279 (38.081467), a gap of 0.161; the cached run returns the same two in the
+  other order (38.253368 against 38.188511). The shift the two paths put on one
+  token is 0.172, larger than the gap between the candidates, so a near-tie
+  flips. Answers stay coherent and agree for many tokens before they part, but
+  greedy plus prefix caching is not bit-reproducible. `tests/test_prefix_cache_e2e.cpp`
+  asserts a common prefix rather than equality for that reason.
+
 - **`kv_cache.swa_snapshot_mb` set below one snapshot silently disables prefix
   caching** — worse than setting it to zero. It warns since #1092.
