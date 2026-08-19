@@ -65,7 +65,10 @@ These have a code path and no gate. They may work; nothing proves it.
 - **Speculative decoding is not universally profitable.** On Nemotron-3.5 the MTP
   head drafts well (43.9 % top-1 accept) and still costs 32 % of decode, because
   the draft path runs outside CUDA graphs while the main decode does not. It is
-  opt-in and self-disables after 8 verifies.
+  opt-in and self-disables after 8 verifies. On Qwen3.8-27B-NVFP4 it does pay
+  since `ea547a53` — `speculative.mtp_k=1` measured +21.3 % — but **only at k=1**:
+  an extra chunk row still costs half a decode step, so k=3 buys 2 %. Numbers and
+  the profile that localises that cost: [`roadmap.md`](roadmap.md).
 - **Speculation is off for most real requests, by two rules that are easy to
   miss.** It requires greedy sampling (`temperature: 0` or `top_k: 1`), so any
   request with a temperature gets none; and a think budget disables it inside

@@ -203,6 +203,75 @@ caps emitted-per-verify, which caps what any acceptance number can be worth.
 Where the slope lives — the forward, or the recurrent state machinery around
 it — is unmeasured and is the open question.
 
+### Re-measured on the fixed build (2026-08-19), and the answer is the forward
+
+**Everything above this heading describes the build before `ea547a53`, and the
+verdict has flipped.** That fix landed *after* the k=1 numbers were taken, so the
+table above prices a verify that no longer exists. Re-run on the current build,
+`speculative.ngram=false` so the MTP head is the only drafter, guard off, prefix
+cache off, `--think-budget 0` (the 0.5 default disables speculation inside a
+think block, and this is a reasoning model), three prompts, two rounds with the
+arm order reversed in the second:
+
+| k | chunk rows | tok/s (r1, r2) | mean | vs k=0 | acceptance | emitted/verify | ms/verify |
+|---|---:|---|---:|---:|---:|---:|---:|
+| 0 | 1 | 86.04, 86.02 | 86.03 | — | — | — | — |
+| **1** | 2 | 104.44, 104.19 | **104.31** | **+21.3 %** | 76.0 % | 1.76 | 16.89 |
+| 2 | 3 | 103.86, 97.78 | 100.82 | +17.2 % | 59.9 % | 2.20 | 21.82 |
+| 3 | 4 | 88.08, 87.34 | 87.71 | +2.0 % | 49.9 % | 2.50 | 28.52 |
+
+**MTP pays now.** The k=0 arm reproduces to 0.02 % across rounds, so the +21 %
+is far outside the measurement's own noise.
+
+Three things follow, and the first two say what did *not* cause it:
+
+- **Acceptance did not move.** 76.0 % here against the 75.0 % measured before the
+  fix. The drafter is the same drafter; the external-parity finding below still
+  stands.
+- **The slope survives.** Fitting cost per verify against chunk rows gives
+  `4.96 ms + 5.82 ms x rows`, against `5.36 + 6.53` before — an extra row still
+  costs **50 %** of an 11.62 ms decode step (was 57 %). So chain length is still
+  not a lever: k=3 buys 2 %.
+- **What changed is the verify price at two rows**, 20.6 → 16.89 ms. The
+  retracted paragraph's own model predicted this: it priced 20.6 → 13.6 ms at
+  +45.7 %, and we got half that distance for +21.3 %. The model was right; only
+  its input number was stale.
+
+**The open question is answered: the slope lives in the forward, not in the
+recurrent state machinery.** nsys on k=1 against k=3 (same prompts, same binary,
+`--cuda-graph-trace=node` — without it graph-replayed kernels are not attributed
+at all):
+
+| kernel | share of the k=3 − k=1 growth | per launch k=1 → k=3 |
+|---|---:|---|
+| `gemv_nvfp4_kpar_mb_fp16` (the batched verify GEMM) | **65.1 %** | 26.95 → 32.87 us, **+22.0 %** |
+| `gemv_fp16` | 11.5 % | 64.02 → 66.23 us, +3.4 % |
+| `gemv_nvfp4_multirow_fp32` | 8.4 % | 440.10 → 442.90 us, +0.6 % |
+| `gdn_scan_fused` (the recurrent state) | **2.3 %** | 8.72 → 10.03 us, +15.0 % |
+
+The GDN scan — the candidate the question named — carries 2.3 % of the growth.
+Two thirds sit in the batched NVFP4 GEMV, and **it is not purely a count**: the
+same kernel costs 22 % more *per launch* at four rows than at two. A batched GEMV
+exists to amortise one weight read across M rows; this one amortises well
+(doubling the rows costs 22 %, not 100 %) but not freely, and that residual is
+the slope.
+
+Reported per launch on purpose: greedy decoding is deterministic *within* a
+process but not across them, and the same prompt returned 700 tokens in one run
+and 92 in another. Any per-token normalisation across two profiled processes
+would be reporting that, not the kernel.
+
+```
+[PROV: commit=3c3e9ac9 date=2026-08-19 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=imp-server n=3 prompts x 2 alternating rounds
+       cmd=`imp-server --think-budget 0 --set speculative.ngram=false
+       --set speculative.mtp_k=0|1|2|3 --set speculative.mtp_econ_min_emit=0
+       --set server.prefix_cache=false`; throughput on the `make build` image,
+       tokens from usage.completion_tokens, verifies from /metrics. nsys arms on
+       the dev build (nsys ships only in imp:toolchain) — sound because both arms
+       are the same binary and the claim is relative, not an absolute rate]
+```
+
 **Three levers remain in the verify, each worth 4-6 ms of a 28.5 ms verify.** MTP needs the
 verify below 26.7 ms to pay at 2.26 emitted per verify, so any one of them
 would flip it from break-even to a win:
