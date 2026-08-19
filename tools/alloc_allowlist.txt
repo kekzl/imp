@@ -12,7 +12,6 @@ src/compute/attention_fmha_sm120.cu  # 2
 src/compute/attention_mxfp4_prefill.cu  # 8
 src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5
-src/compute/gdn.cu  # 2
 src/compute/gemm.cu  # 4
 src/compute/gemm_batched.cu  # 7
 src/compute/gemm_cutlass_mxfp4_sm120.cu  # 11
