@@ -33,6 +33,10 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`PrefixCacheE2ETest` asserted bit-equality that the design cannot give.** A
+  cache hit chunks differently than a fresh prefill and flips a near-tie: gap
+  0.161 between the top two candidates, 0.172 shift between the paths.
+
 - **`scripts/check-release.sh` now fails when a server battery is red.** It
   deferred only to `make verify-fast`, and `make test-server` is the one place
   `handlers.cpp` and `batching_engine` run end to end. The `json_schema` defect

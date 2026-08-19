@@ -134,8 +134,41 @@ TEST_F(PrefixCacheE2ETest, ControlNoCacheBackToBackIsDeterministic) {
 // 1. Fresh-prefill vs prefix-cache-HIT must be token-identical.
 //    Same context, prefix caching ON, NO reset between calls: call 1 prefills
 //    fresh and caches its prefix on finish; call 2 hits the cached prefix.
-//    Greedy ⇒ the two outputs must be byte-identical. A mismatch is exactly the
-//    silent-determinism failure that keeps the feature off-by-default.
+//
+//    The two are NOT byte-identical, and asserting that they are was wrong. A
+//    hit skips the cached prefix, so it computes over a different chunk split
+//    than the fresh prefill: measured on this test, "PrefixCache: seq 3 reused
+//    3/4 blocks (48 tokens skippable)". Different split, different accumulation
+//    order, and in FP16 that moves a logit.
+//
+//    Measured at the position where the two first differ, both paths dumping
+//    their raw top-2 (throwaway probe in build_logprob_info, 2026-08-19):
+//
+//      fresh : top1=55486(38.242889)  top2=279(38.081467)   gap 0.161422
+//      cached: top1=  279(38.253368)  top2=55486(38.188511) gap 0.064857
+//
+//    Same two tokens, order flipped. The gap between them is 0.42 % of the
+//    logit, and the shift the two paths produce on the same token is 0.172,
+//    i.e. LARGER than the gap. That is a tie decided by rounding, not a wrong
+//    KV block: a wrong block does not return the same two candidates within
+//    0.4 % of each other.
+//
+//    So the assertion is a common prefix, not equality. The bar comes from a
+//    distribution, not a single run: ten consecutive runs of both tests gave a
+//    common prefix of 103 characters every time, out of 161 and 153. The
+//    divergence point is not itself a coin flip, it is a fixed position where a
+//    fixed near-tie falls the other way, so 103 is a floor and not a sample
+//    mean. kMinCommonChars sits at 64, about 62 % of that.
+//
+//    Counted in CHARACTERS, deliberately: a token-based bar would need a
+//    chars-per-token factor, which is wrong for non-ASCII output and would make
+//    the bar depend on the language of the answer. Bytes are what both strings
+//    are made of.
+//
+//    What the bar has to keep catching is #536: there the hit diverged within
+//    the first tokens and continued differently, i.e. a common prefix near
+//    zero. Rounding diverges at 103. Any bar between those two separates them,
+//    and 64 is far from both.
 TEST_F(PrefixCacheE2ETest, FreshVsPrefixHitTokenEqual) {
     MakeContext(/*prefix_cache=*/true);
 
@@ -143,11 +176,16 @@ TEST_F(PrefixCacheE2ETest, FreshVsPrefixHitTokenEqual) {
     std::string second = gen(kPrompt, kGen);  // hits the cached prefix
 
     ASSERT_FALSE(first.empty()) << "model produced no output";
-    EXPECT_EQ(first, second)
-        << "PREFIX-CACHE HIT DIVERGED FROM FRESH PREFILL (greedy):\n  fresh: " << first
-        << "\n  hit:   " << second
-        << "\nThis is the determinism failure risk #7 names — the cached KV does "
-           "not reproduce the fresh forward pass.";
+    size_t common = 0;
+    while (common < first.size() && common < second.size() && first[common] == second[common])
+        common++;
+    const size_t kMinCommonChars = 64;  // measured floor 103 over ten runs
+    EXPECT_GE(common, kMinCommonChars)
+        << "PREFIX-CACHE HIT DIVERGED FROM FRESH PREFILL TOO EARLY (greedy):\n  fresh: " << first
+        << "\n  hit:   " << second << "\n  common prefix: " << common << " chars, want >= " << kMinCommonChars
+        << "\nLate divergence is the rounding this test tolerates (see the block "
+           "comment). Diverging this early is the failure risk #7 names: the "
+           "cached KV is not the KV a fresh forward would have produced.";
 }
 
 // 2. Cross-context equivalence: prefix-cache-ON output == prefix-cache-OFF
@@ -176,9 +214,19 @@ TEST_F(PrefixCacheE2ETest, PrefixCacheMatchesNoCacheBaseline) {
     std::string cached = gen(kPrompt, kGen);  // prefix-cache hit
 
     ASSERT_FALSE(baseline.empty());
-    EXPECT_EQ(baseline, cached)
-        << "prefix-cache output diverged from the no-cache baseline (greedy):\n"
-        << "  no-cache: " << baseline << "\n  cached:   " << cached;
+    // Same reasoning as test 1, and the comment above already had it for
+    // hybrids: a cache hit skips the cached prefix, so it chunks differently
+    // than the no-cache run and accumulates in a different order. That holds
+    // for a dense model too, it was simply never drawn. Common prefix, with
+    // the bar set the same way.
+    size_t common = 0;
+    while (common < baseline.size() && common < cached.size() && baseline[common] == cached[common])
+        common++;
+    const size_t kMinCommonChars = 64;  // same floor as test 1
+    EXPECT_GE(common, kMinCommonChars)
+        << "prefix-cache output left the no-cache baseline too early (greedy):\n"
+        << "  no-cache: " << baseline << "\n  cached:   " << cached << "\n  common prefix: " << common
+        << " chars, want >= " << kMinCommonChars;
 }
 
 // 3. Shared prefix, different suffix: a cache hit on the common prefix must not
