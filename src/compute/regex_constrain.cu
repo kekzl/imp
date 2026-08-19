@@ -170,7 +170,7 @@ bool RegexConstrainer::language_non_empty() const {
     return false;
 }
 
-bool RegexConstrainer::init(const std::string& pattern, Tokenizer* tokenizer, int vocab_size) {
+bool RegexConstrainer::init(const std::string& pattern, Tokenizer* tokenizer) {
     if (!tokenizer)
         return false;
     if (!init_pattern_only(pattern))
@@ -182,7 +182,7 @@ bool RegexConstrainer::init(const std::string& pattern, Tokenizer* tokenizer, in
         token_texts_[i] = tokenizer->decode_token(static_cast<int32_t>(i));
     eos_ids_ = tokenizer->eos_ids();
 
-    if (!dev_.alloc_token_allow("RegexConstrainer", vocab_size)) {
+    if (!dev_.alloc_token_allow("RegexConstrainer", vocab_size_)) {
         initialized_ = false;
         return false;
     }
@@ -289,13 +289,17 @@ void RegexConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t 
         return;
 
     const std::vector<uint8_t>& allow = allow_for_current_state(vocab_size);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev_.token_allow(), allow.data(), static_cast<size_t>(vocab_size),
+    // The allow list covers the tokenizer's vocabulary; the logits row can be
+    // wider than that on a checkpoint with a padded lm_head. Upload only what
+    // the buffer holds. The kernel masks everything at or above n_classified
+    // without reading the list, so the padding ids need no entry.
+    const int n_classified = std::min(vocab_size, vocab_size_);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev_.token_allow(), allow.data(), static_cast<size_t>(n_classified),
                                        cudaMemcpyHostToDevice, stream));
 
     const int threads = 256;
     const int blocks = (vocab_size + threads - 1) / threads;
-    regex_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, dev_.token_allow(), vocab_size,
-                                                      std::min(vocab_size, vocab_size_));
+    regex_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, dev_.token_allow(), vocab_size, n_classified);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

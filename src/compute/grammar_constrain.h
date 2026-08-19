@@ -37,7 +37,7 @@ public:
     // Compiles `gbnf` and classifies the tokenizer vocabulary. Returns false on
     // a grammar that does not compile — the caller then declines constrained
     // decoding rather than enforcing something nobody wrote.
-    [[nodiscard]] bool init(const std::string& gbnf, Tokenizer* tokenizer, int vocab_size);
+    [[nodiscard]] bool init(const std::string& gbnf, Tokenizer* tokenizer);
 
     // Grammar-only init for unit tests: no tokenizer, no device buffers. Only
     // update_text/is_done/would_accept work afterwards.
