@@ -331,6 +331,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
 
     int assigned = 0;
     int skipped = 0;
+    int mtp_sidecar = 0;  // read by the MTP loader, not a miss here
 
     const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
     const bool is_gemma4_moe = is_gemma4 && (model.config_.n_experts > 0);
@@ -513,6 +514,18 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // -----------------------------------------------------------------
         // Layer weights: model.layers.{i}.<rest>
         // -----------------------------------------------------------------
+        // The MTP head is a sidecar with its own loader and its own naming
+        // (`mtp.layers.N.*`). It is not a weight of the main model, so it is
+        // not a finding here. Reported as unrecognised it produced 270 WARN
+        // lines on Nemotron-3.5-Lightning for a head that loaded correctly,
+        // which is worse than silence: "unrecognised weight name" is the string
+        // you grep for after a first load to catch a checkpoint whose tensors
+        // this map does not read, and 270 false ones make it useless.
+        if (!parts.empty() && parts[0] == "mtp") {
+            IMP_LOG_DEBUG("  MTP head tensor, read by the MTP loader: %s", name.c_str());
+            ++mtp_sidecar;
+            continue;
+        }
         if (parts.size() < 4 || parts[0] != "model" || parts[1] != "layers") {
             IMP_LOG_WARN("WeightMap: unrecognised weight name: %s", name.c_str());
             ++skipped;
@@ -1317,10 +1330,17 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         }
     }
 
-    IMP_LOG_INFO(
-        "WeightMap (%s): assigned %d tensors, skipped %d, "
-        "layers=%d, experts=%d",
-        model_arch_name(arch_), assigned, skipped, model.config_.n_layers, model.config_.n_experts);
+    if (mtp_sidecar > 0)
+        IMP_LOG_INFO(
+            "WeightMap (%s): assigned %d tensors, skipped %d, %d MTP sidecar (own loader), "
+            "layers=%d, experts=%d",
+            model_arch_name(arch_), assigned, skipped, mtp_sidecar, model.config_.n_layers,
+            model.config_.n_experts);
+    else
+        IMP_LOG_INFO(
+            "WeightMap (%s): assigned %d tensors, skipped %d, "
+            "layers=%d, experts=%d",
+            model_arch_name(arch_), assigned, skipped, model.config_.n_layers, model.config_.n_experts);
 
     // Vision tower, when the config loader recognised one. Its weights ride in
     // the same shard map as the LM's — that is why Model owns it — but they are

@@ -41,6 +41,14 @@ These have a code path and no gate. They may work; nothing proves it.
 
 ## Known-bad and known-limited behaviour
 
+- **Calibrated KV-cache scales shipped in a checkpoint are not read.** Six local
+  checkpoints carry `*.self_attn.{k_proj.k_scale,v_proj.v_scale}` (96 tensors on
+  Qwen3-Coder-30B-A3B-FP4, 12 on NVIDIA-Nemotron-3.5-Lightning-30B, which has 6
+  attention layers of 52); no consumer for them exists in the tree, and the FP8
+  KV path derives its own. Whether adopting them changes output quality is
+  unmeasured. They were invisible until #1497, counted among 270 false
+  "unrecognised weight name" warnings for the MTP sidecar.
+
 - **INT4 KV cache produces empty output on gpt-oss.** Its sink term is correct
   and is unit-tested against a sink-aware reference; 4 bits per value on a
   64-wide head is simply not enough. It falls back to FP16 rather than pretending.
