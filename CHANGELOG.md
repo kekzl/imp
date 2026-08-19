@@ -17,8 +17,10 @@ there instead of retelling it.
   measures +21.3 % decode** (104.31 against 86.03 tok/s). Only at k=1 — an extra
   chunk row still costs half a decode step, so k=3 buys 2 %. **The default stays
   0, and now for a measured reason:** at k=1, 2 of 6 prompts end after ~40 tokens
-  with a re-statement of the question (0 of 6 without speculation). Both in
-  [`LIMITATIONS.md`](docs/LIMITATIONS.md) and [`roadmap.md`](docs/roadmap.md).
+  with a re-statement of the question (0 of 6 without speculation), and the one
+  switch that fixes that (`speculative.verify_nvfp4_gemm=false`) turns the
+  +21.3 % into -11.2 %. Both in [`LIMITATIONS.md`](docs/LIMITATIONS.md) and
+  [`roadmap.md`](docs/roadmap.md).
 
 - **`/health` says whether the KV pool can still grow (`kv_pool_growable`).** A
   fixed pool and a growable one already at its ceiling both report
