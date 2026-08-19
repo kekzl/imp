@@ -250,6 +250,21 @@ arm order reversed in the second:
 **MTP pays now.** The k=0 arm reproduces to 0.02 % across rounds, so the +21 %
 is far outside the measurement's own noise.
 
+**It is still not shippable as a default, and the blocker is correctness, not
+speed (2026-08-19).** At `mtp_k=1`, 2 of 6 prompts end after ~40 tokens with a
+re-statement of the question, deterministically (4 of 4 fresh processes
+byte-identical under `deterministic_gemm`), against 0 of 6 for the same prompts
+without speculation. Detail, trace and the exact output in
+[`LIMITATIONS.md`](LIMITATIONS.md). That also puts a caveat on the +21.3 %: the
+arms do not generate the same text.
+
+**Two measurement notes this cost, both worth carrying.** The sweep above sets
+`speculative.ngram=false` to isolate the MTP head — a correct control that also
+*hid* this defect, because the arm that first showed it was the one run at
+defaults. And the degenerate answer is what `deterministic_gemm` pins: the pin
+does not remove the state, it stabilises it, so a run that looks reproducible
+can be reproducibly wrong.
+
 Three things follow, and the first two say what did *not* cause it:
 
 - **Acceptance did not move.** 76.0 % here against the 75.0 % measured before the
