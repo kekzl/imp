@@ -192,28 +192,44 @@ struct MtpHead {
 // second copy of both sets is resident at the peak, and stays resident. See
 // the note on experts_up_stacked.
 //
+// The first slab additionally costs twice its size, because it is the first
+// large request the async pool serves and the pool rounds up when it grows.
+// Probed on Nemotron-3.5, device free after each phase:
+//
+//   start                     12137 MiB
+//   after 270 tensor uploads   9577      2560 used, against 2550 on disk
+//   after slab up              7153      2424 used, for a 1218 MiB slab
+//   after slab down            5937      1216 used, the slab exactly
+//
+// So the term is one extra slab, not a margin: this returns 6204 MiB for that
+// head against 6200 measured. The allocator headroom the caller adds on top is
+// left to cover allocator waste, which is what it is for. Relying on it to
+// cover this would have held only on a large card: it is 5 % of the total, so
+// 1630 MiB on 32 GB but 819 MiB on 16 GB, and only 409 MiB for a process
+// running under an 8 GB --vram-budget.
+//
 // Measured over three runs per arm, comparing device free consumed by the load
 // with speculative.mtp_k at 0 and 1:
 //
 //   Qwen3.6-35B-A3B-NVFP4   packed, 19 tensors    1608 MiB on disk, 1495 used
 //   Nemotron-3.5-Lightning  per-expert, 270       2550 MiB on disk, 6317 used
 //
-// This function returns 1608 and 4987 for those two. The packed number is a
-// slight over-estimate and the per-expert one falls 1330 MiB short of the
-// measurement, which the allocator headroom the caller adds on top covers; the
-// shortfall is async-pool behaviour, not a term that can be derived from the
-// shapes.
+// This returns 1608 for the packed head, a slight over-estimate, and 6204 for
+// the per-expert one.
 inline size_t mtp_upload_peak_bytes(const MtpHead& head) {
     constexpr size_t kFp16Bytes = 2;  // device dtype, independent of CUDA headers
     size_t bytes = head.info.file_bytes;
+    size_t largest_slab = 0;
     for (const std::vector<Tensor>* parts : {&head.experts_up, &head.experts_down}) {
         if (parts->empty() || parts->front().data == nullptr)
             continue;
         const Tensor& t = parts->front();
-        bytes += static_cast<size_t>(t.shape[0]) * static_cast<size_t>(t.shape[1]) * kFp16Bytes *
-                 parts->size();
+        const size_t slab = static_cast<size_t>(t.shape[0]) * static_cast<size_t>(t.shape[1]) * kFp16Bytes *
+                            parts->size();
+        bytes += slab;
+        largest_slab = slab > largest_slab ? slab : largest_slab;
     }
-    return bytes;
+    return bytes + largest_slab;
 }
 
 }  // namespace imp

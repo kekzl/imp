@@ -31,7 +31,7 @@ TEST(MtpUploadBudgetTest, PackedLayoutCostsTheFileSize) {
     EXPECT_EQ(mtp_upload_peak_bytes(head), head.info.file_bytes);
 }
 
-TEST(MtpUploadBudgetTest, PerExpertLayoutAddsBothSlabs) {
+TEST(MtpUploadBudgetTest, PerExpertLayoutAddsBothSlabsAndPoolGrowth) {
     // Nemotron-3.5-Lightning-30B: 128 experts, hidden 2688, d_ff_e 1856.
     constexpr int64_t kExperts = 128, kHidden = 2688, kDffE = 1856;
     MtpHead head;
@@ -41,17 +41,22 @@ TEST(MtpUploadBudgetTest, PerExpertLayoutAddsBothSlabs) {
         head.experts_down.push_back(fake_expert(kHidden, kDffE));
     }
 
+    // Both slabs, plus one more for the pool growth the first large request
+    // triggers. Probed phase by phase on this checkpoint: 2424 MiB went for the
+    // first 1218 MiB slab and 1216 MiB for the second.
     const size_t slab = static_cast<size_t>(kExperts) * kDffE * kHidden * 2;
-    EXPECT_EQ(mtp_upload_peak_bytes(head), head.info.file_bytes + 2 * slab);
+    EXPECT_EQ(mtp_upload_peak_bytes(head), head.info.file_bytes + 3 * slab);
 
-    // The point of the function: on this checkpoint the head costs far more
-    // than its file size. The estimate is 4986 MiB against 2550 MiB on disk,
-    // and the load was measured consuming 6317 MiB of device free. The
-    // estimate is deliberately the smaller of the two, because the caller adds
-    // the allocator headroom (1630 MiB on a 32 GiB card) on top of it.
-    EXPECT_GT(mtp_upload_peak_bytes(head), head.info.file_bytes * 19 / 10)
-        << "a per-expert head that estimates near its file size would be waved "
-           "through and then strand its allocations partway";
+    // Which lands within 4 MiB of the 6200 MiB the load was measured taking.
+    const size_t measured = 6200ull * 1024 * 1024;
+    const size_t est = mtp_upload_peak_bytes(head);
+    const size_t off = est > measured ? est - measured : measured - est;
+    EXPECT_LT(off, 16ull * 1024 * 1024)
+        << "estimate " << est / (1024 * 1024) << " MiB against 6200 MiB measured";
+
+    // And it must not be reachable by the file size alone, or a per-expert head
+    // gets waved through and strands its allocations partway.
+    EXPECT_GT(est, 2 * head.info.file_bytes);
 }
 
 TEST(MtpUploadBudgetTest, UnuploadedExpertsAreNotCounted) {
