@@ -35,10 +35,6 @@ there instead of retelling it.
   again.** A token carrying string content *and* the closing quote got neither
   category, so the pre-filter dropped it before the FSM. Costs ~5.6 % decode.
 
-- **A checkpoint's MTP tensors are no longer reported as unrecognised weights.**
-  They have their own loader; 270 false WARN lines on Nemotron-3.5 were hiding
-  12 real ones (`k_scale`/`v_scale`, which imp does not read).
-
 - **`response_format: regex` and `grammar` answer the request instead of
   `!!!!...` until `max_tokens`.** The allow list was uploaded at the width of the
   logits row into a tokenizer-sized buffer. Broken since #1091/#1095.
