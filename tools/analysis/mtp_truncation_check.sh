@@ -15,7 +15,7 @@ IMG=${IMP_IMAGE:-imp:test}; MODEL=${MTP_MODEL:-/models/Qwen3.8-27B-NVFP4}; PORT=
 cleanup(){ docker rm -f prproc >/dev/null 2>&1; }
 trap cleanup EXIT
 docker rm -f prproc >/dev/null 2>&1
-docker run -d --name prproc --gpus all -p $PORT:8080 -v /home/kekz/models:/models "$IMG" \
+docker run -d --name prproc --gpus all -p $PORT:8080 -v "${MODELS_DIR:-$HOME/models}":/models "$IMG" \
   imp-server --host 0.0.0.0 --port 8080 --model "$MODEL" --think-budget 0 \
     --set speculative.mtp_k=$K --set speculative.ngram=false --set server.prefix_cache=false \
     --set runtime.deterministic_gemm=true >/dev/null
