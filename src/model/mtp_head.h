@@ -157,8 +157,13 @@ struct MtpHead {
     // index them from a device-side expert id (gemv_f16_moe_decode) instead of
     // the host reading routing back and issuing one GEMM per chosen expert.
     // That host round trip is what kept the draft out of CUDA graph capture.
-    // Same storage, not a second copy: the per-expert Tensors above are views
-    // into these slabs once packing has run.
+    // The per-expert Tensors above become views into these slabs once packing
+    // has run. The slabs are a second copy in VRAM, not a re-pointing: the
+    // original per-expert allocations stay tracked and are only released at
+    // teardown, so the head costs file_bytes plus both slabs for the life of
+    // the process. Measured on Nemotron-3.5: 6317 MiB of device free for a head
+    // that is 2550 MiB on disk. Uploading straight into the slabs would remove
+    // the second copy and is not done yet.
     Tensor experts_up_stacked;    // [n_experts, d_ff_e, hidden] FP16
     Tensor experts_down_stacked;  // [n_experts, hidden, d_ff_e] FP16
     // DeepSeek-style additive score bias on the router logits. Null when absent.
@@ -178,5 +183,37 @@ struct MtpHead {
     // Status flag set true when ALL of the above tensors are populated.
     bool loaded = false;
 };
+
+// Device VRAM the head's upload needs at its peak, in bytes.
+//
+// The head is BF16 on disk and FP16 on device, so file_bytes is its resident
+// size. A per-expert layout additionally restacks both expert sets into one
+// contiguous slab each while the per-expert allocations are still live, so a
+// second copy of both sets is resident at the peak, and stays resident. See
+// the note on experts_up_stacked.
+//
+// Measured over three runs per arm, comparing device free consumed by the load
+// with speculative.mtp_k at 0 and 1:
+//
+//   Qwen3.6-35B-A3B-NVFP4   packed, 19 tensors    1608 MiB on disk, 1495 used
+//   Nemotron-3.5-Lightning  per-expert, 270       2550 MiB on disk, 6317 used
+//
+// This function returns 1608 and 4987 for those two. The packed number is a
+// slight over-estimate and the per-expert one falls 1330 MiB short of the
+// measurement, which the allocator headroom the caller adds on top covers; the
+// shortfall is async-pool behaviour, not a term that can be derived from the
+// shapes.
+inline size_t mtp_upload_peak_bytes(const MtpHead& head) {
+    constexpr size_t kFp16Bytes = 2;  // device dtype, independent of CUDA headers
+    size_t bytes = head.info.file_bytes;
+    for (const std::vector<Tensor>* parts : {&head.experts_up, &head.experts_down}) {
+        if (parts->empty() || parts->front().data == nullptr)
+            continue;
+        const Tensor& t = parts->front();
+        bytes += static_cast<size_t>(t.shape[0]) * static_cast<size_t>(t.shape[1]) * kFp16Bytes *
+                 parts->size();
+    }
+    return bytes;
+}
 
 }  // namespace imp

@@ -33,6 +33,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The MTP head is refused up front when it does not fit, instead of stranding
+  a partial upload.** It is 272 allocations on a per-expert checkpoint and the
+  allocator decided per allocation, so running out midway left the ones already
+  uploaded resident for the life of the process with spec-decode off anyway. The
+  load line now reports device free consumed (6291 MiB on Nemotron-3.5) next to
+  the 2.49 GiB on disk, which is what the restacking copy actually costs.
+
 - **`response_format: regex` and `grammar` answer the request again instead of
   `!!!!...` until `max_tokens`.** The allow list was uploaded at the width of the
   logits row (151936 on Qwen3-8B) into a buffer sized from the tokenizer
