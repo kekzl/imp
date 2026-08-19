@@ -257,6 +257,33 @@ already proven live before you trust the negative — for the sweep above, `code
 write_kv_cache_fp8_fused_kernel` and `… write_kv_cache_nvfp4_kernel` both correctly returned
 `write_kv_cache`, which is what made the two empty answers meaningful.
 
+## D2 — The constrainer's category pre-filter has now been wrong twice
+
+`classify_token` in `src/compute/constrain_common.h` assigns a category, and
+`schema_constrain.cu` / `json_constrain.cu` drop a token whose category misses
+the phase mask **before** `token_legal` is consulted. It exists for cost: the
+simulation deep-copies the frame stack per candidate over the whole vocabulary.
+
+Twice now it has answered a question the FSM was there to answer, and both times
+the symptom was output the FSM would have allowed:
+
+- **#1197 / #1200** — every byte of a multi-byte UTF-8 sequence read as negative
+  through signed `char`, so tokens carrying an umlaut lost `CAT_STRING_CHAR` and
+  were masked out. Constrained output came back transliterated: "Die Bären
+  hören" as "Die Baren horen".
+- **#1489** — `CAT_QUOTE` keyed on `first == '"'`, so a token that carries string
+  content *and* the closing quote (`."`, `n"`, `!"` — the usual spelling on a BPE
+  vocabulary) got category `0x0000` and was dropped. A free string value could
+  then only be closed by a token that *starts* with a quote, which is the
+  exception, so the model closed with a typographic `”` and the value ran to
+  `max_tokens` as invalid JSON.
+
+**The rule, if you touch it again:** the pre-filter may only reject what
+`token_legal` would also reject. When in doubt, let the token through and pay
+the simulation. Both defects above cost correctness to save cycles, and both
+were invisible to the property batteries because those generate documents, not
+the *tokens* a real vocabulary spells them with. A third class is not unlikely.
+
 ## D — Load-bearing; a "cleanup" here is a regression
 
 | # | Thing | Why it must survive |
