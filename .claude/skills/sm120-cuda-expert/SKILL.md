@@ -58,6 +58,15 @@ real headroom.
    at `(256,1)`). On a path already at its measured ceiling, occupancy work is
    refuted — check the roofline baseline before spending time there.
 
+   **The min-blocks argument is the dangerous half.** `__launch_bounds__(T)`
+   caps threads; `__launch_bounds__(T, N)` also orders ptxas to fit N blocks per
+   SM, and it obeys by *spilling to local memory* — which is DRAM. Measured
+   2026-08-19 on the batched spec-verify GEMV: pinning `(128, 12)` bought the
+   nominal 12 blocks/SM by spilling 40 bytes at MR=4 and cost **14.5 → 26.8 µs**,
+   far outside the −20% this table quotes. Read `--ptxas-options=-v` for `spill
+   stores`/`spill loads` on **every** template instance before and after — an
+   instance that spills has already lost more than any occupancy it gained.
+
 3. **Quantization type determines kernel strategy.** Q8_0 (simple dequant) →
    bandwidth-bound → row-parallel + smem-cached activations. Q6_K (complex
    dequant) → compute-influenced → K-parallel + warp-level division. NVFP4
@@ -130,6 +139,7 @@ phases, hardware FP4 saturation. It does NOT unlock `tcgen05.*` / TMEM /
 | Forgetting the graphs-ON re-bench after a kernel speedup | Compute speedup alone doesn't show in tok/s. |
 | Assuming H100 SMEM (228 KB) | 99 KB opt-in here. Query the device property. |
 | `__launch_bounds__` on regular paths | −4.5% to −20%. Only the two documented exceptions. |
+| `__launch_bounds__(T, min_blocks)` to force occupancy | ptxas obeys by spilling to DRAM: measured −46% to −64% on one kernel. Check `spill stores` per template instance. |
 | `reinterpret_cast` on Q8_0 blocks | 34-byte blocks are not 4-aligned — `memcpy()`. |
 | `__noinline__` on device helpers | Spills to local memory (DRAM). Use `__forceinline__`. |
 | Missing `__syncthreads()` after `cp.async wait` | Race on SMEM reads. |
