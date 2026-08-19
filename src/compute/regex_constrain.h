@@ -40,7 +40,7 @@ public:
     // Compiles `pattern` and classifies the tokenizer vocabulary. Returns false
     // on an unsupported/malformed pattern — the caller then declines
     // constrained decoding rather than enforcing a wrong grammar.
-    [[nodiscard]] bool init(const std::string& pattern, Tokenizer* tokenizer, int vocab_size);
+    [[nodiscard]] bool init(const std::string& pattern, Tokenizer* tokenizer);
 
     // Pattern-only init for unit tests: no tokenizer, no device buffers. Only
     // update_text/is_done/would_accept work afterwards.

@@ -33,6 +33,12 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`response_format: regex` and `grammar` answer the request again instead of
+  `!!!!...` until `max_tokens`.** The allow list was uploaded at the width of the
+  logits row (151936 on Qwen3-8B) into a buffer sized from the tokenizer
+  (151669); the copy failed, the mask killed every token, and greedy argmax fell
+  to id 0. Broken since #1091/#1095, on any checkpoint with a padded `lm_head`.
+
 - **`PrefixCacheE2ETest` asserted bit-equality that the design cannot give.** A
   cache hit chunks differently than a fresh prefill and flips a near-tie: gap
   0.161 between the top two candidates, 0.172 shift between the paths.

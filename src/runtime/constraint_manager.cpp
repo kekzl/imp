@@ -313,7 +313,7 @@ bool ConstraintManager::prepare_regex(const std::string& pattern, Tokenizer* tok
     // vocab_size here is the LOGITS width; the constrainer clamps its own
     // classification to the tokenizer vocab (SafeTensors models pad lm_head
     // past it — indexing to the logits width read out of bounds once).
-    if (!regex_constrainer_->init(pattern, tokenizer, tokenizer->vocab_size())) {
+    if (!regex_constrainer_->init(pattern, tokenizer)) {
         IMP_LOG_WARN("ConstraintManager: regex '%s' rejected — not enforcing it", pattern.c_str());
         return false;
     }
@@ -344,7 +344,7 @@ bool ConstraintManager::prepare_grammar(const std::string& gbnf, Tokenizer* toke
         // vocab_size here is the LOGITS width; the constrainer clamps its own
         // classification to the tokenizer vocab (SafeTensors models pad lm_head
         // past it — indexing to the logits width read out of bounds once).
-        if (!grammar_constrainer_->init(gbnf, tokenizer, tokenizer->vocab_size())) {
+        if (!grammar_constrainer_->init(gbnf, tokenizer)) {
             IMP_LOG_WARN("ConstraintManager: GBNF grammar rejected (%s) — not enforcing it",
                          grammar_constrainer_->error().c_str());
             cached_grammar_string_.clear();
