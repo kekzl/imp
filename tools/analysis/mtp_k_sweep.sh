@@ -29,7 +29,7 @@ trap cleanup EXIT
 start_arm(){ # k
   docker rm -f mtpsweep >/dev/null 2>&1
   docker run -d --name mtpsweep --gpus all -p $PORT:8080 \
-    -v /home/kekz/models:/models "$IMG" \
+    -v "${MODELS_DIR:-$HOME/models}":/models "$IMG" \
     imp-server --host 0.0.0.0 --port 8080 --model "$MODEL" --think-budget 0 \
       --set speculative.ngram=false \
       --set speculative.mtp_k=$1 \
