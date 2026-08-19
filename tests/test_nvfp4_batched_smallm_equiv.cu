@@ -195,8 +195,25 @@ TEST_F(BatchedSmallM, MatchesDequantisedReference) {
 // An N-tiled variant of this kernel (one activation read shared across several
 // output rows) was built and measured this way: +0.55, +0.23 and -0.20 us at
 // MR = 2, 3, 4. A wash, so it was not kept. The per-verify marginal row cost of
-// 4.22 ms is real and comes from server measurements, but its cause is NOT the
-// activation re-read, and it remains unattributed.
+// 4.22 ms is real and comes from server measurements, and its cause is NOT the
+// activation re-read.
+//
+// ATTRIBUTED 2026-08-19: register pressure, and the shipped launch bounds are
+// already the best point on that curve. ptxas gives 40 registers at MR=1/2
+// (12 blocks/SM) against 48-53 at MR=3/4 (9-10 blocks/SM), and the weight
+// bandwidth this benchmark prints tracks it exactly: 1444-1508 GB/s at MR=1/2,
+// then 1045 and 885. Both ways of "fixing" it were measured and are worse —
+// dropping __launch_bounds__ clears MR=3's 4-byte spill and buys nothing
+// (12.60 / 12.55 us against 12.72, inside this harness's own drift), and
+// pinning (kKparThreads, 12) forces 40 registers by spilling 40 bytes at MR=4
+// and takes it from 14.5 to 26.8 us. Detail in the sm120-cuda-expert skill's
+// known-issues. Do not re-derive.
+//
+// Third requirement this harness earned on that run: it cannot resolve a 12 %
+// effect. Three consecutive runs of the SAME binary read 11.92 / 8.92 / 8.69 us
+// at MR=1 — a 37 % spread, because the first MR=1 measurement is always the one
+// paying the clock ramp. Compare the LATER rows within one run, never a single
+// row across runs.
 TEST_F(BatchedSmallM, DISABLED_MarginalRowCost) {
     std::mt19937 rng(5);
     std::normal_distribution<float> dist(0.0f, 1.0f);
