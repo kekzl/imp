@@ -134,7 +134,14 @@ while IFS= read -r ref; do
     [ -z "$ref" ] && continue
     case " $BARE_ALLOW " in *" $ref "*) continue ;; esac
     BARECHECKED=$((BARECHECKED+1))
-    if ! printf '%s\n' "$TRACKED_BASENAMES" | grep -qxF "$ref"; then
+    # Herestring, NOT `printf ... | grep -q`. grep -q exits at the first match and
+    # closes the pipe; printf then dies of EPIPE, and under `set -o pipefail` that
+    # makes the pipeline non-zero even though grep FOUND the name. `! pipeline` is
+    # then true and an existing file is reported dead. It is a race, so it fires
+    # only when the match comes early enough for grep to leave before the last
+    # write: `AGENTS.md` once locally, `GOAL.md` in CI, both near the front of the
+    # sorted list. Three clean local runs are not evidence against it.
+    if ! grep -qxF "$ref" <<< "$TRACKED_BASENAMES"; then
         echo "  dead pointer: $ref (no tracked file has this name)"
         DOCBROKEN=$((DOCBROKEN+1))
     fi
@@ -257,9 +264,9 @@ else
         FINDINGN=$((FINDINGN+1))
         # Resolved marks win over the open mark: F-3 is "✅ RESOLVED … the
         # residual is ⛔ WON'T FIX", which carries both and is resolved.
-        if echo "$line" | grep -q '✅\|⛔'; then
+        if grep -q '✅\|⛔' <<< "$line"; then
             :
-        elif echo "$line" | grep -q '⚠️'; then
+        elif grep -q '⚠️' <<< "$line"; then
             OPEN_IN_REPORT="$OPEN_IN_REPORT $id"
         else
             STATUSLESS="$STATUSLESS $id"
