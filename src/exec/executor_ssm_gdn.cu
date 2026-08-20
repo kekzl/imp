@@ -137,8 +137,21 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
     if (conv_st) {
         if (state.is_prefill) {
+            // Speculative verify: also write the conv window as of d_snap_n
+            // rows into the snapshot slab, so a fully rejected draft can adopt
+            // the state after the chunk's first row instead of re-forwarding.
+            // Same wiring the GDN path has had since #847 — without it the slab
+            // stays uninitialised and engine_spec_ngram.cpp's matched == 0 fast
+            // path commits garbage.
+            void* conv_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
+                                  ? state.ssm_state->conv_state_in(state.spec_snap_slab, ssm_idx)
+                                  : nullptr;
+            const void* conv_prev = (conv_snap && state.spec_prev_slab)
+                                        ? state.ssm_state->conv_state_in(state.spec_prev_slab, ssm_idx)
+                                        : nullptr;
             ssm_conv1d_prefill(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b, xBC_out, conv_kernel,
-                               stream, state.d_chunk_len);
+                               stream, state.d_chunk_len, conv_prev ? conv_snap : nullptr,
+                               conv_prev ? state.d_snap_n : nullptr, conv_prev);
         } else {
             ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b, xBC_out, conv_kernel,
                               stream);
@@ -156,6 +169,9 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
     void* h_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
                                                    : nullptr;
+    void* h_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
+                       ? state.ssm_state->h_state_in(state.spec_snap_slab, ssm_idx)
+                       : nullptr;
 
     if (h_st) {
         // xBC_out layout: [n, conv_channels] where each row = [x(inner) | B(BC_size) | C(BC_size)]
@@ -241,7 +257,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
             ssm_scan_prefill(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_all,
                              static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize,
-                             n_groups, h_dtype, stream, state.d_chunk_len);
+                             n_groups, h_dtype, stream, state.d_chunk_len, h_snap,
+                             h_snap ? state.d_snap_n : nullptr);
         }
     }
 

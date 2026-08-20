@@ -32,9 +32,17 @@ void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weigh
 //             padded for a captured verify graph (#847). Rows past it still
 //             produce conv outputs (causally invisible padding), but the
 //             conv_state tail is written from the real last rows only.
+// conv_snap/d_snap_n/conv_prev: second commit of the conv window, taken at
+//             d_snap_n rows instead of the real last row — the state a fully
+//             rejected speculative chunk falls back to. conv_prev is the
+//             pre-chunk conv_state copy, needed because a snapshot row shorter
+//             than kernel_size takes its leading values from before the chunk
+//             and the live buffer has already moved on. Same contract as
+//             ssm_conv1d_prefill_f32_silu below.
 void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
                         Tensor& x_out, int conv_kernel, cudaStream_t stream,
-                        const int* d_real_n = nullptr);
+                        const int* d_real_n = nullptr, void* conv_snap = nullptr,
+                        const int* d_snap_n = nullptr, const void* conv_prev = nullptr);
 
 // Fused conv1d + SiLU + FP32 output for prefill (GDN layers).
 // Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one launch.
@@ -68,11 +76,17 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Te
 // d_real_n: optional device int — real chunk length when the chunk is padded
 //           for a captured verify graph (#847). y is written for all rows,
 //           but h_state stops advancing after the real last row.
+// h_snap/d_snap_n: second state output, written as of d_snap_n rows alongside
+//           the committed one at d_real_n. Same storage dtype and layout as
+//           h_state. Mirrors the GDN scan's snapshot (gdn.cu) — the speculative
+//           verify needs the state after the chunk's first row when the whole
+//           draft is rejected.
 void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
                       const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y,
                       const void* z, int n_tokens, int n_heads, int head_dim_ssm, int state_size,
                       int n_groups, QType h_dtype = QType::F32, cudaStream_t stream = nullptr,
-                      const int* d_real_n = nullptr);
+                      const int* d_real_n = nullptr, void* h_snap = nullptr,
+                      const int* d_snap_n = nullptr);
 
 // Group RMSNorm: normalize each of n_groups groups independently.
 // x:      [n_tokens, dim] compute_dtype (dim = n_groups * group_size)

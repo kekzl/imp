@@ -206,11 +206,17 @@ __global__ void ssm_conv1d_prefill_kernel(
     const half* __restrict__ bias,    // [channels] or nullptr
     half* __restrict__ x_out,         // [n_tokens, channels]
     int n_tokens, int channels, int kernel_size,
-    const int* __restrict__ d_real_n) {  // device chunk length (padded verify chunk) or nullptr
+    const int* __restrict__ d_real_n,   // device chunk length (padded verify chunk) or nullptr
+    float* __restrict__ conv_snap,      // second conv-state commit, or nullptr
+    const int* __restrict__ d_snap_n,   // row count conv_snap is taken at
+    const float* __restrict__ conv_prev) {  // pre-chunk conv_state copy
     int token = blockIdx.x;
     if (token >= n_tokens)
         return;
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
+    // Second commit row for the speculative verify (see the h_state snapshot in
+    // gdn.cu): the conv window as of snap_n rows. 0 disables it.
+    const int snap_n = (conv_snap && d_snap_n) ? min(n_tokens, __ldg(d_snap_n)) : 0;
 
     for (int ch = threadIdx.x; ch < channels; ch += blockDim.x) {
         float sum = 0.0f;
@@ -251,18 +257,33 @@ __global__ void ssm_conv1d_prefill_kernel(
                                         : state[src_t + kernel_size];
             }
         }
+        // Same window, taken at snap_n rows. Its leading values come from the
+        // PRE-chunk state (conv_prev), not the live one: the real-row commit
+        // above may already have run on another block. snap_n == real_n needs
+        // no second copy — the two commits coincide.
+        if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
+            float* snap = conv_snap + ch * kernel_size;
+            const float* prev = conv_prev + ch * kernel_size;
+            for (int k = 0; k < kernel_size; k++) {
+                int src_t = snap_n - kernel_size + k;
+                snap[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
+                                       : prev[src_t + kernel_size];
+            }
+        }
     }
 }
 
 void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
-                        Tensor& x_out, int conv_kernel, cudaStream_t stream, const int* d_real_n) {
+                        Tensor& x_out, int conv_kernel, cudaStream_t stream, const int* d_real_n,
+                        void* conv_snap, const int* d_snap_n, const void* conv_prev) {
     int n_tokens = static_cast<int>(x_in.shape[0]);
     int channels = static_cast<int>(x_in.shape[1]);
 
     ssm_conv1d_prefill_kernel<<<n_tokens, 256, 0, stream>>>(
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
-        static_cast<half*>(x_out.data), n_tokens, channels, conv_kernel, d_real_n);
+        static_cast<half*>(x_out.data), n_tokens, channels, conv_kernel, d_real_n,
+        static_cast<float*>(conv_snap), d_snap_n, static_cast<const float*>(conv_prev));
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -407,7 +428,9 @@ __global__ void ssm_scan_kernel(
     half* __restrict__ y,               // [n_tokens, inner_size]
     const half* __restrict__ z,         // [n_tokens, inner_size] (gate, only if FUSE_GATE)
     int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups, int s_tiles,
-    const int* __restrict__ d_real_n) {  // device chunk length (padded verify chunk) or nullptr
+    const int* __restrict__ d_real_n,   // device chunk length (padded verify chunk) or nullptr
+    void* __restrict__ h_snap,          // second state output, or nullptr
+    const int* __restrict__ d_snap_n) {  // row count h_snap is taken at
     int h = blockIdx.x;
     if (h >= n_heads)
         return;
@@ -415,6 +438,9 @@ __global__ void ssm_scan_kernel(
     // are causally invisible downstream), but h_state stops advancing after
     // the real last row so the committed recurrent state ignores the pads.
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
+    // Second commit row for the speculative verify (see the h_state snapshot in
+    // gdn.cu): the state as of snap_n rows. 0 disables it.
+    const int snap_n = (h_snap && d_snap_n) ? min(n_tokens, __ldg(d_snap_n)) : 0;
 
     int heads_per_group = n_heads / n_groups;
     int g = h / heads_per_group;
@@ -471,6 +497,13 @@ __global__ void ssm_scan_kernel(
                     static_cast<float*>(h_state)[idx] = h_new;
                 }
             }
+            if (t == snap_n - 1) {
+                if constexpr (H_FP16) {
+                    static_cast<half*>(h_snap)[idx] = __float2half(h_new);
+                } else {
+                    static_cast<float*>(h_snap)[idx] = h_new;
+                }
+            }
             y_partial += h_new * c_s;
         }
 
@@ -514,7 +547,8 @@ __global__ void ssm_scan_kernel(
 static void ssm_scan_launch(const half* x, const half* B, const half* C, const half* dt, const float* A_log,
                             const float* D, const float* dt_bias, void* h_state, half* y, const half* z,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            QType h_dtype, cudaStream_t stream, const int* d_real_n = nullptr) {
+                            QType h_dtype, cudaStream_t stream, const int* d_real_n = nullptr,
+                            void* h_snap = nullptr, const int* d_snap_n = nullptr) {
     // Pick s_tiles to maximize thread count per block (power of 2, up to 1024 threads)
     int hd = std::max(head_dim_ssm, 1);
     int max_s_tiles = std::min(state_size, 1024 / hd);
@@ -533,7 +567,7 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C, const h
         ssm_scan_kernel<H_FP16_V, FUSE_V>                                                                   \
             <<<n_heads, threads, smem_bytes, stream>>>(x, B, C, dt, A_log, D, dt_bias, h_state, y, z,       \
                                                        n_tokens, n_heads, head_dim_ssm, state_size,         \
-                                                       n_groups, s_tiles, d_real_n);                        \
+                                                       n_groups, s_tiles, d_real_n, h_snap, d_snap_n);      \
         IMP_CUDA_CHECK_LAUNCH();                                                                            \
     } while (0)
 
@@ -566,13 +600,14 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Te
 void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
                       const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y,
                       const void* z, int n_tokens, int n_heads, int head_dim_ssm, int state_size,
-                      int n_groups, QType h_dtype, cudaStream_t stream, const int* d_real_n) {
+                      int n_groups, QType h_dtype, cudaStream_t stream, const int* d_real_n, void* h_snap,
+                      const int* d_snap_n) {
     ssm_scan_launch(static_cast<const half*>(x.data), static_cast<const half*>(B.data),
                     static_cast<const half*>(C.data), static_cast<const half*>(dt.data),
                     static_cast<const float*>(A_log.data), static_cast<const float*>(D.data),
                     static_cast<const float*>(dt_bias.data), h_state, static_cast<half*>(y.data),
                     static_cast<const half*>(z), n_tokens, n_heads, head_dim_ssm, state_size, n_groups,
-                    h_dtype, stream, d_real_n);
+                    h_dtype, stream, d_real_n, h_snap, d_snap_n);
 }
 
 // ---------------------------------------------------------------------------
