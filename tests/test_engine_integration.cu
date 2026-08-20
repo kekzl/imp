@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "compute/gemm.h"
 #include "test_model_builder.h"
 
@@ -49,6 +50,56 @@ TEST(EngineIntegrationTest, InitSucceeds) {
     EXPECT_NE(engine.kv_cache(), nullptr);
     EXPECT_NE(engine.scheduler(), nullptr);
     EXPECT_NE(engine.model(), nullptr);
+
+    tm.cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// runtime.cuda_graphs = "never" on a model WITHOUT experts.
+//
+// The check used to sit inside the MoE branch of weight upload, so a dense
+// model read the value and never acted on it. Asserting on the reason rather
+// than on use_cuda_graphs is deliberate: other inputs also turn graphs off, and
+// only the reason tells "honoured" apart from "off anyway".
+// ---------------------------------------------------------------------------
+TEST(EngineIntegrationTest, ConfigNeverIsHonouredWithoutExperts) {
+    SKIP_IF_NO_CUDA();
+
+    auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
+    gemm_init();
+
+    RuntimeConfig rc;
+    rc.runtime.cuda_graphs = "never";
+    set_pending_runtime_config(rc);
+
+    EngineConfig cfg = test_engine_config();
+    cfg.use_cuda_graphs = true;  // eligible going in, so the demotion is visible
+
+    Engine engine;
+    ASSERT_TRUE(engine.init(tm.model, cfg));
+    EXPECT_EQ(engine.graph_demotion_reason(), GraphDemotionReason::ConfigNever);
+
+    tm.cleanup();
+}
+
+// The control for the test above: same model, default value. Asserting NE
+// rather than None keeps it honest, since a synthetic model may be demoted for
+// an unrelated reason on some hosts.
+TEST(EngineIntegrationTest, ConfigAutoDoesNotClaimTheNeverReason) {
+    SKIP_IF_NO_CUDA();
+
+    auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
+    gemm_init();
+
+    RuntimeConfig rc;  // runtime.cuda_graphs defaults to "auto"
+    set_pending_runtime_config(rc);
+
+    EngineConfig cfg = test_engine_config();
+    cfg.use_cuda_graphs = true;
+
+    Engine engine;
+    ASSERT_TRUE(engine.init(tm.model, cfg));
+    EXPECT_NE(engine.graph_demotion_reason(), GraphDemotionReason::ConfigNever);
 
     tm.cleanup();
 }

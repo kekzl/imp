@@ -345,6 +345,12 @@ public:
     // mutates it in place for arch-specific defaults; GraphExecutor reads a
     // non-owning pointer set via set_runtime_config().
     const RuntimeConfig& runtime_config() const noexcept { return runtime_config_; }
+
+    // Why CUDA graphs are off, or None if they are on. Readable so a test can
+    // assert the *reason* rather than the resolved bool: several inputs can
+    // turn graphs off, and "off for the reason asked for" is the property that
+    // distinguishes an honoured setting from a coincidence.
+    GraphDemotionReason graph_demotion_reason() const noexcept { return graph_demotion_; }
     RuntimeConfig& mutable_runtime_config() noexcept { return runtime_config_; }
 
 private:

@@ -40,7 +40,11 @@ struct RuntimeConfig {
         // path runs the exact same kernels as before with zero overhead.
         // Legacy env: IMP_DETERMINISTIC=1.
         bool deterministic = false;
-        std::string cuda_graphs = "auto";  // "auto" | "always" | "never"
+        // "auto" | "always" | "never". "always" is a synonym for "auto" today:
+        // it does not override the safety demotions (host-resident experts,
+        // streaming KV, failed pinned buffer), because a captured decode on
+        // those paths replays stale pointers rather than running faster.
+        std::string cuda_graphs = "auto";
         // Engine warmup (two tiny BOS requests at init, ~2-4 s on a 30B).
         // Default ON since the greedy request-order-independence fix: warmup
         // pre-arms the decode graph pool (mark_process_warm), so the FIRST
