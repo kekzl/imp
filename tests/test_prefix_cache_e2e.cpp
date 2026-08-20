@@ -43,6 +43,7 @@ protected:
         const char* path = model_path();
         if (!path)
             GTEST_SKIP() << "Set IMP_TEST_MODEL to run prefix-cache E2E equivalence";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
         path_ = path;
         fmt_ = is_safetensors_dir(path_) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
         ASSERT_EQ(imp_model_load(path, fmt_, &model_), IMP_SUCCESS);

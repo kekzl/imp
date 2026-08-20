@@ -101,6 +101,7 @@ TEST(EndToEndModelTest, LoadModel) {
     const std::string path = test_model_path();
     if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
     ImpError err = imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model);
@@ -118,6 +119,7 @@ TEST(EndToEndModelTest, Tokenize) {
     const std::string path = test_model_path();
     if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
@@ -140,6 +142,7 @@ TEST(EndToEndModelTest, CreateContextAndGenerate) {
     const std::string path = test_model_path();
     if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
@@ -174,6 +177,7 @@ TEST(EndToEndModelTest, PrefillDecodeStep) {
     const std::string path = test_model_path();
     if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
@@ -221,6 +225,7 @@ TEST(EndToEndModelTest, LongContext8k) {
     const std::string path = test_model_path();
     if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
@@ -258,6 +263,7 @@ TEST(EndToEndModelTest, LongContext16k_NVFP4KV) {
     const std::string path = test_model_path();
     if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
@@ -554,6 +560,7 @@ TEST(EndToEndModelTest, MultiDecodeOutputIsolation) {
     const std::string path = test_model_path();
     if (path.empty())
         GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);

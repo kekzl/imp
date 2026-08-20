@@ -31,6 +31,14 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`make test-e2e` runs the model battery instead of skipping all of it.** The
+  `models/` it mounted holds absolute symlinks that dangle in the container, so
+  every path missed: 25 tests over 6 suites now run where none ran before.
+
+- **A model env var that names a path that is not there fails instead of
+  skipping.** Unset still skips, that is a missing prerequisite; set-but-absent
+  is a misconfiguration (`imp_test::require_readable`, 23 call sites).
+
 - **A `see FOO.md` in code now has to resolve, whatever the prefix.** The gate
   only checked `docs/`-prefixed paths, so 25 pointers to the deleted
   `TEST_AUDIT.md` survived it; 15 dead names over 25 sites are resolved.

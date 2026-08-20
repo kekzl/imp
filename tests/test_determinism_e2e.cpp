@@ -13,13 +13,17 @@
 //   manually, 2× identical on Qwen3.6-35B).
 //
 // KNOWN LIMIT (the DISABLED_ tests below are the gate): across FRESH
-// CONTEXTS in ONE process, output on the GDN-hybrid is only *usually*
-// identical — observed flaky for both greedy decode and perplexity on
-// Qwen3.6-35B (same binary alternated green/red run-to-run; PPL deltas up
-// to a few percent, i.e. state-sized, not rounding-sized). The varying
-// input is per-context engine state (VRAM layout, CUDA-graph capture, slot
-// assignment); not yet pinned down. Eval workloads don't hit this (server =
-// one context; CLI = one process). Historical note: SAME-context perplexity
+// CONTEXTS in ONE process, output is only *usually* identical, for both
+// greedy decode and perplexity. PPL deltas run to a few percent, i.e.
+// state-sized, not rounding-sized. The varying input is per-context engine
+// state (VRAM layout, CUDA-graph capture, slot assignment); not yet pinned
+// down. Eval workloads don't hit this (server = one context; CLI = one
+// process).
+//
+// WHICH model carries it: docs/determinism.md §4, measured 2026-08-10, is
+// the source. Do not re-derive it here. This comment used to say GDN-hybrid,
+// which that measurement refutes: the MoE row fails 2/2 across fresh
+// contexts while the dense row passes. Historical note: SAME-context perplexity
 // drift had a separate root cause — imp_perplexity nulled active_request
 // before imp_context_reset, leaking the KV sequence + SSM/GDN slot per call
 // (fixed in imp_api.cpp alongside this test).
@@ -41,8 +45,6 @@
 #include "imp/imp.h"
 #include "test_models.h"
 
-#include <sys/stat.h>
-
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -51,11 +53,6 @@ namespace {
 
 bool is_safetensors_dir(const std::string& p) {
     return p.size() < 5 || p.substr(p.size() - 5) != ".gguf";
-}
-
-bool path_exists(const char* p) {
-    struct stat st;
-    return p != nullptr && ::stat(p, &st) == 0;
 }
 
 // One row per model env var. A row whose variable is unset, or set to a path
@@ -77,8 +74,7 @@ protected:
         const char* path = std::getenv(GetParam().env);
         if (path == nullptr)
             GTEST_SKIP() << "Set " << GetParam().env << " to run deterministic-mode E2E";
-        if (!path_exists(path))
-            GTEST_SKIP() << GetParam().env << " points at " << path << ", which does not exist";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, GetParam().env));
         // Must be set BEFORE imp_context_create: engine init pulls the
         // env-seeded RuntimeConfig via take_pending_runtime_config().
         setenv("IMP_DETERMINISTIC", "1", 1);
@@ -220,7 +216,8 @@ TEST_P(DetEvalE2ETest, PerplexityBitIdenticalSameContext) {
 }
 
 // 4. KNOWN LIMIT companion (see header): cross-context perplexity in one
-//    process — flaky on the GDN-hybrid like the greedy variant.
+//    process is flaky, like the greedy variant. For which model, see
+//    docs/determinism.md §4, not this comment.
 TEST_P(DetEvalE2ETest, DISABLED_PerplexityBitIdenticalAcrossFreshContexts) {
     std::vector<int32_t> tokens;
     for (int i = 0; i < 256; ++i)

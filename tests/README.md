@@ -19,6 +19,12 @@ How to build, run, and extend the tests. The engine targets **one chip**
 **skip-with-reason** when a required device feature, model, or golden is absent —
 they never fail for a missing prerequisite.
 
+A prerequisite is *absent* when its env var is **unset**. A var that is **set**
+to a path that is not there is a different thing: a misconfiguration, and it
+fails loudly (`imp_test::require_readable`). Treating the two alike is what let
+`make test-e2e` mount a directory of dangling symlinks and report green having
+loaded no model at all.
+
 ## Running
 
 The host has no CUDA toolkit by design — everything builds inside Docker
