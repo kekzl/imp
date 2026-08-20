@@ -2,8 +2,9 @@
 
 // GemmKernel registry — R5 first-domino cross-axis refactor (slice 1).
 //
-// Replaces the 21-parameter `gemm_dispatch_impl` god-dispatcher (review
-// phase3_maint.md §2 #1) with a single small args struct and a (Strategy
+// Replaces the 21-parameter `gemm_dispatch_impl` god-dispatcher (phase-3
+// maintainability review §2 #1, archived in #604) with a single small args
+// struct and a (Strategy
 // -> function pointer) registry. Adding a new qtype/quantization tier
 // becomes a single-file change: register an entry; nothing else moves.
 //
@@ -16,7 +17,7 @@
 // Future slices migrate FP8, NVFP4, CUTLASS_NVFP4, MXFP4 tiers one at a
 // time; once every dispatch site is covered the legacy path can be
 // deleted (the cross-axis maintainability + extensibility win from
-// review phase5_synthesis.md §5).
+// phase-5 review §5, archived in #604).
 
 #include "core/storage_tier.h"
 #include "core/tensor.h"

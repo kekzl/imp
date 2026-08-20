@@ -204,7 +204,7 @@ TEST(MoEExecutorTest, Deterministic) {
 }
 
 // ============================================================================
-// Test 4b: MoE run-to-run LOGIT drift is bounded (TEST_AUDIT.md §7 Tier-1).
+// Test 4b: MoE run-to-run LOGIT drift is bounded (TEST_AUDIT (retired) §7 Tier-1).
 //
 // The existing Deterministic test asserts the sampled TOKEN is identical across
 // two forwards — but token equality hides logit drift below the argmax margin.

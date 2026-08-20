@@ -1,5 +1,5 @@
 // =============================================================================
-// TEST_AUDIT.md Re-Audit 2026-06-06 — P1.2 / R1.2 (issue #576).
+// TEST_AUDIT (retired) Re-Audit 2026-06-06 — P1.2 / R1.2 (issue #576).
 // CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM (src/compute/gemm_cutlass_grouped_3x.cu)
 // — the #574 pp512-10x MoE prefill path — vs an INDEPENDENT fp64 CPU reference.
 //

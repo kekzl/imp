@@ -4,7 +4,7 @@
 #
 # Usage: ./tests/test_engine_chat.sh [build_dir]
 #
-# MANUAL tool — not wired into ctest/CI/verify.sh (TEST_AUDIT.md §7).
+# MANUAL tool — not wired into ctest/CI/verify.sh (TEST_AUDIT (retired) §7).
 # Run by hand before releases or after engine/KV/graph changes.
 
 set -eo pipefail

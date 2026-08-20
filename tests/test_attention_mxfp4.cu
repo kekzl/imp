@@ -240,7 +240,7 @@ TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
     EXPECT_LT(mean_err, 0.1f) << "Mean absolute error too large";
     EXPECT_LT(max_err, 0.5f) << "Max absolute error too large";
 
-    // ---- INDEPENDENT fp64 oracle + BIAS guard (TEST_AUDIT.md §7 Tier-0) ----
+    // ---- INDEPENDENT fp64 oracle + BIAS guard (TEST_AUDIT (retired) §7 Tier-0) ----
     // The abs-error check above is imp-FP4 vs imp-FP16 — a systematically
     // shifted mxfp4 dequant (wrong scale exponent / off-by-one block) that
     // stays within 0.5 abs passes it. Compute the attention from the ORIGINAL

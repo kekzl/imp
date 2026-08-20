@@ -710,8 +710,8 @@ smoke_prompt "Qwen3-4B Q8_0 (dense)" \
     "Paris"
 
 if [ "$MODE" = "full" ]; then
-    smoke_prompt "Qwen3.5-4B Q8_0 (GDN)" \
-        "Qwen3.5-4B-Q8_0.gguf" \
+    smoke_prompt "Qwen3.5-4B MXFP4 (GDN)" \
+        "Qwen3.5-4B-mxfp4.gguf" \
         "The capital of France is" \
         "Paris"
 fi

@@ -1,4 +1,4 @@
-// E2E greedy locks — frozen full-stack token sequences (TEST_AUDIT risk #3).
+// E2E greedy locks — frozen full-stack token sequences (TEST_AUDIT (retired) risk #3).
 // Consumed by tests/test_e2e_greedy_lock.cpp. See that file's header for the
 // lock lifecycle (generate with IMP_LOCK_PRINT=1 → verify EXTERNALLY →
 // commit). Every entry documents its verification in the comment above it:

@@ -1,4 +1,4 @@
-// Attention cross-path agreement — TEST_AUDIT.md risk #1.
+// Attention cross-path agreement — TEST_AUDIT (retired) risk #1.
 //
 // The engine has SIX prefill-attention implementations that MUST agree:
 // cuBLAS materialized, WMMA FMHA (fmha_sm120), fp8 FMHA, FA2 (e4m3 QK),
@@ -418,7 +418,7 @@ TEST_F(AttentionCrossPathTest, SaturatingSoftcap_FP32S_GQA) {
                /*mild=*/false, nullptr, nullptr, 0);
 }
 
-// ---- seqlen edge cases (TEST_AUDIT.md §7 Tier-0): the crosspath matrix
+// ---- seqlen edge cases (TEST_AUDIT (retired) §7 Tier-0): the crosspath matrix
 // previously bottomed out at Sq=24. These cover the degenerate single-/two-token
 // prefill (empty-row / minimal-causal softmax) and the 512-tile boundary +1.
 // No committed golden (n_spots=0): the in-test fp64 reference IS ground truth,
@@ -449,7 +449,7 @@ TEST_F(AttentionCrossPathTest, TileBoundaryPlusOne_Sq513) {
                nullptr, 0);
 }
 
-// ---- head-dim edges (TEST_AUDIT.md §7 Tier-1): the parity matrix above is
+// ---- head-dim edges (TEST_AUDIT (retired) §7 Tier-1): the parity matrix above is
 // HD=128-only. These add cross-path agreement at HD≠128. Whatever production
 // path runs at a given HD is held to its class tolerance vs the fp64 ref (the
 // "must-not-decline" guard is HD==128-only, so a path that legitimately has no

@@ -4,12 +4,17 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
+# The list is aspirational: 6 of these are not on this host right now and the
+# loop below reports them as SKIP with a count, so a thin run is visible in
+# the summary rather than silent. Two entries were not merely absent but
+# dead names (Qwen3.5-4B-Q8_0, Qwen3.5-9B-Q8_0); those are resolved.
+# This script hangs off no CI job and no make target, and it sets no exit
+# code - read the SUMMARY line, do not trust $?.
 MODELS=(
   Llama-3.2-3B-Instruct-Q8_0.gguf
   Qwen3-4B-Instruct-2507-Q8_0.gguf
-  Qwen3.5-4B-Q8_0.gguf
+  Qwen3.5-4B-mxfp4.gguf
   Qwen3-8B-Q8_0.gguf
-  Qwen3.5-9B-Q8_0.gguf
   gemma-3-12b-it-Q8_0.gguf
   Devstral-Small-2507-Q4_K_M.gguf
   DeepSeek-R1-Distill-Qwen-14B-Q6_K.gguf

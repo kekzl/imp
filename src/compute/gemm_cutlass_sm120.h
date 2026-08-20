@@ -101,7 +101,7 @@ void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
 // Reads gate + up directly from HBM, computes the activation in registers, and
 // writes only the packed FP4 + SFA — saving one full HBM round-trip of the
 // swiglu intermediate per MoE layer prefill call (~188 MiB on Qwen3-Coder
-// NVFP4 at expanded=32k, eff=2880; ~+5-10% pp512 per review/phase5_synthesis
+// NVFP4 at expanded=32k, eff=2880; ~+5-10% pp512 per the phase-5 review
 // §2.2 M1).
 //
 //   gate        : [expanded, K] FP16, OR nullptr when non_gated_experts=true

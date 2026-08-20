@@ -1,4 +1,4 @@
-// GGUF loader fault-injection tests — TEST_AUDIT.md Phase 2, risk #10.
+// GGUF loader fault-injection tests — TEST_AUDIT (retired) Phase 2, risk #10.
 //
 // Charter (risk #10): "header fault injection → clean error". The contract
 // under test is NOT that a malformed file loads correctly — it is that the

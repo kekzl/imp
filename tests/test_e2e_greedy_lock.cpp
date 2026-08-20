@@ -1,4 +1,4 @@
-// E2E greedy regression locks — TEST_AUDIT.md risk #3 (Phase 2.4).
+// E2E greedy regression locks — TEST_AUDIT (retired) risk #3 (Phase 2.4).
 //
 // The single highest-leverage test class in the audit: a fixed prompt run
 // greedy (temp=0, top_k=1) through the FULL stack (tokenize → prefill →
@@ -59,6 +59,7 @@ protected:
         const char* path = model_path();
         if (!path)
             GTEST_SKIP() << "Set IMP_TEST_MODEL to run greedy locks";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
         path_ = path;
 
         ImpModelFormat fmt = is_safetensors_dir(path_) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;

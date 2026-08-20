@@ -21,9 +21,7 @@ TEST(TensorKindCoverage, NoUnknownKindsInSmallQwen) {
     if (!kTestModelPath) {
         GTEST_SKIP() << "Set IMP_TEST_GGUF=/path/to/model.gguf to run this test";
     }
-    if (!std::filesystem::exists(kTestModelPath)) {
-        GTEST_SKIP() << "Model not found: " << kTestModelPath;
-    }
+    ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(kTestModelPath, imp_test::kEnvGguf));
 
     auto model = load_gguf(kTestModelPath);
     ASSERT_NE(model, nullptr) << "Failed to load model: " << kTestModelPath;

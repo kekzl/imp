@@ -1,5 +1,5 @@
 // =============================================================================
-// Unit tests for tools/imp-server/tool_call.cpp — TEST_AUDIT.md §7 Tier-2.
+// Unit tests for tools/imp-server/tool_call.cpp — TEST_AUDIT (retired) §7 Tier-2.
 //
 // WHY THIS EXISTS: tool_call.cpp (parse_tool_calls_{chatml,llama3,gemma},
 // validate_tool_call) had ZERO unit tests — tool_call.h was included by no test.

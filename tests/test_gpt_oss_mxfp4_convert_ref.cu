@@ -1,5 +1,5 @@
 // =============================================================================
-// TEST_AUDIT.md Re-Audit 2026-06-06 — P1.1 / R1.1 (issue #576).
+// TEST_AUDIT (retired) Re-Audit 2026-06-06 — P1.1 / R1.1 (issue #576).
 // gpt-oss MXFP4 -> NVFP4 expert converter (src/quant/gpt_oss_mxfp4_convert.cu)
 // vs a format-spec-derived, INDEPENDENT fp64 reference.
 //

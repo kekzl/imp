@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""MANUAL tool — not wired into ctest/CI/verify.sh (TEST_AUDIT.md §7).
+"""MANUAL tool — not wired into ctest/CI/verify.sh (TEST_AUDIT (retired) §7).
 Needs a running imp-server on :8080 with an instruction-following model that
 also serves /v1/embeddings (default Qwen3-8B-NVFP4-cortecs).
 
-Regression battery for the imp "0 completion tokens" bug (DEBUG-0tokens.md,
-fixed in PR #710 / v0.11.1). Under interleaved embeddings + chat the embeddings
+Regression battery for the imp "0 completion tokens" bug, fixed in PR #710 / v0.11.1. Under interleaved embeddings + chat the embeddings
 handler used to stop() the batching engine, cancelling every in-flight
 generation — chats came back empty (`finish_reason:"cancelled"`, the lone
 reasoning token logged as "0 completion tokens"). The empty rate looked

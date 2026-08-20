@@ -7,10 +7,23 @@ commit: 81ffa573
 
 # imp test suite
 
+> Comments across this tree cite `TEST_AUDIT (retired) §N` or `risk #N`. That
+> document existed twice, as `docs/TEST_AUDIT.md` and `tests/TEST_AUDIT.md`, and
+> both copies were deleted (#805, #946). What the section and risk numbers meant
+> is recorded in [`../docs/archive/README.md`](../docs/archive/README.md). The
+> citations are kept because they are why those tests exist; they are not a
+> pointer to a file you can open.
+
 How to build, run, and extend the tests. The engine targets **one chip**
 (NVIDIA Blackwell `sm_120a`, RTX 5090), so the GPU tests assume that device and
 **skip-with-reason** when a required device feature, model, or golden is absent —
 they never fail for a missing prerequisite.
+
+A prerequisite is *absent* when its env var is **unset**. A var that is **set**
+to a path that is not there is a different thing: a misconfiguration, and it
+fails loudly (`imp_test::require_readable`). Treating the two alike is what let
+`make test-e2e` mount a directory of dangling symlinks and report green having
+loaded no model at all.
 
 ## Running
 
