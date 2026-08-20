@@ -70,13 +70,18 @@ These have a code path and no gate. They may work; nothing proves it.
   two bit-equal; pin batch composition if you need that.
 - **MoE routing uses atomics**, so identical seeds can diverge.
 - **Speculative decoding is not universally profitable.** On Nemotron-3.5 the MTP
-  head accepts **0-9 %** of its drafts on the serving path, so the acceptance-poor
-  floor unbinds speculation after 8 verifies and the whole feature costs **~2 %**
-  of decode (re-measured 2026-08-19; the −41 % this entry used to quote predates
-  `ea547a53`). The guard is what makes that cheap — without it the drafts keep
-  being paid for. The head's documented 43.9 % top-1 accept was measured offline
-  by a different harness and has never been reconciled with the 0-9 %; see
-  [`roadmap.md`](roadmap.md). On Qwen3.8-27B-NVFP4 it does pay
+  head accepts **39 %** of its drafts on the serving path, which agrees with the
+  **41 %** the offline harness scores on the same three prompts — the two numbers
+  are the same quantity and they now match. The **0-9 %** this entry used to quote
+  was a defect, not a property of the head: on a Mamba2 hybrid a fully rejected
+  verify committed an unwritten recurrent snapshot, so the model's own predictions
+  became garbage and nothing could be accepted afterwards (fixed 2026-08-20;
+  `executor_ssm_gdn.cu` now wires both halves of the slab, as the GDN path already
+  did). **It still does not pay here**, for the honest reason: a verify chunk emits
+  only ~1.41 tokens and costs more than that, so k=1 loses roughly half the decode
+  rate with the economics guard disabled, and the shipped guard's verdict now sits
+  on the break-even and flips between runs. Leave `speculative.mtp_k` at 0 on this
+  model; the measured table is in [`roadmap.md`](roadmap.md). On Qwen3.8-27B-NVFP4 it does pay
   since `ea547a53` — `speculative.mtp_k=1` measured +21.3 % — but **only at k=1**:
   an extra chunk row still costs half a decode step, so k=3 buys 2 %. Numbers and
   the profile that localises that cost: [`roadmap.md`](roadmap.md).

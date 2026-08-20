@@ -31,6 +31,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Speculative decoding no longer corrupts Mamba2 hybrids.** A fully rejected
+  draft chunk adopts the recurrent snapshot the chunk forward writes as of its
+  first row (#1459); the GDN path wrote that slab, the Mamba2 path never did, so
+  it committed uninitialised VRAM instead — 0 of 26 378 240 bytes written,
+  measured device-side. Output degenerated from the first fully rejected verify
+  and MTP acceptance on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 read 0 %
+  where the head actually drafts at 39 %. Affects any drafter, not just MTP.
+  Details and the before/after table: [`roadmap.md`](docs/roadmap.md).
+
 - **`runtime.cuda_graphs=never` now works on dense models.** The check sat inside
   the MoE branch of weight upload, so on any model without experts the value was
   read and never acted on while the dispatch line still printed `graphs=1`.
