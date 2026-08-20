@@ -80,7 +80,7 @@ Source: `src/core/qtype.h`.
 | per-request speculative toggle | ✅ | |
 | auth (`--api-key`), `--metrics-require-auth` | ✅ | |
 | embedded web UI at `GET /` | ✅ | |
-| logprobs | 🟡 | in the parameter surface, no dedicated gate |
+| logprobs | ✅ | `tests/test_server_logprobs.py`: at temperature 0 the emitted token IS `top_logprobs[0]` and shares its logprob |
 | C library API, CLI | ✅ | |
 
 ## Engine

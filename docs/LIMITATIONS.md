@@ -37,7 +37,6 @@ These have a code path and no gate. They may work; nothing proves it.
 
 - **Llama-4** architecture: loads, no dedicated gate.
 - **FP8 E5M2**: the type exists, nothing exercises it.
-- **logprobs**: present in the parameter surface, no dedicated test.
 
 ## Known-bad and known-limited behaviour
 
@@ -81,13 +80,23 @@ These have a code path and no gate. They may work; nothing proves it.
   since `ea547a53` — `speculative.mtp_k=1` measured +21.3 % — but **only at k=1**:
   an extra chunk row still costs half a decode step, so k=3 buys 2 %. Numbers and
   the profile that localises that cost: [`roadmap.md`](roadmap.md).
-- **Speculation is off for most real requests, by two rules that are easy to
+- **Speculation is off for most real requests, by rules that are easy to
   miss.** It requires greedy sampling (`temperature: 0` or `top_k: 1`), so any
   request with a temperature gets none; and a think budget disables it inside
   the think block, which on a reasoning model is most of the answer. The server
   sets `think_budget` to 0.5 by default, so on such a model speculation never
   runs out of the box. Penalties are **not** a blocker at the default
   `repeat_last_n: 0`: the verify replicates them for the unbounded window.
+
+  **Six further request features disable it outright**, in one condition
+  (`src/runtime/engine_spec_ngram.cpp:295-297`): `logprobs`, `json_mode`,
+  `json_schema`, `regex_pattern`, `grammar` and `tool_constraint_tools`. The
+  verify chunk replicates no FSM masks, so a constrained request stays eager.
+  In practice that means **every tool call and every structured output runs
+  without speculation** — the agentic workload this engine targets, and the
+  constrained-decoding surface it ships. A `logprobs` request is eager too,
+  which also makes logprobs unusable as an instrument for observing what
+  speculation does.
   Other engines have neither rule, because rejection sampling makes a verify
   distribution-preserving at any temperature and none of them force `</think>`.
 - **The same request can produce different output on its second pass through
