@@ -285,6 +285,39 @@ bool Engine::init_weights() {
             upload_consumed / (1024UL * 1024), on_disk / (1024UL * 1024));
     }
 
+    // The one config value that means "no graphs", applied before anything that
+    // could skip it. This check used to sit inside the MoE block below, so it
+    // was only evaluated for models with experts and not gpt-oss: on every
+    // dense model runtime.cuda_graphs="never" was read, stored, and then never
+    // looked at. Silently: the resolved-dispatch line still printed graphs=1,
+    // which reads as a decision rather than an ignored request. Measured
+    // 2026-08-20 on Qwen3.8-27B-NVFP4 (GDN, dense FFN, n_experts=0): with
+    // "never" set, graphs=1 and a capture happened.
+    //
+    // That made the escape hatch inoperative for exactly the models it was
+    // written for: engine_kv_cache_init.cpp calls it "the way out" for the
+    // Mamba2/SSM demotion it removed, and SSM/GDN models have no experts.
+    //
+    // It runs first so an explicit "never" is also the reason that gets
+    // recorded when another demotion would apply too; demote_graphs_ keeps the
+    // first reason, and the one the user asked for is the informative one.
+    //
+    // The same key silently accepted anything (AUDIT.md G1: `=off` parsed fine,
+    // changed nothing, and produced a byte-identical A/B that read as a clean
+    // refutation). An unknown value now warns instead of resolving to "auto"
+    // without a word.
+    {
+        const std::string& g = runtime_config_.runtime.cuda_graphs;
+        if (g == "never") {
+            demote_graphs_(GraphDemotionReason::ConfigNever);
+        } else if (g != "auto" && g != "always") {
+            IMP_LOG_WARN(
+                "runtime.cuda_graphs: unknown value '%s' (expected auto|always|never) - keeping "
+                "graphs enabled. Nothing was disabled by this setting.",
+                g.c_str());
+        }
+    }
+
     // Check for host-resident expert weights.
     // gpt-oss is exempt: its MXFP4 experts are intentionally kept host-resident
     // through upload (weight_upload's carve-out) and converted to on-device
@@ -338,8 +371,6 @@ bool Engine::init_weights() {
                 // does not deliver captured decode (see the branch above).
             }
         }
-        if (runtime_config_.runtime.cuda_graphs == "never")
-            demote_graphs_(GraphDemotionReason::ConfigNever);
         // MoE decode fast path is fully device-side (no D2H memcpy) — graph-safe.
         // Only MoE prefill paths use D2H sync for expert_offsets, but prefill is
         // never captured in CUDA graphs.

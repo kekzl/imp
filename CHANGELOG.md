@@ -31,6 +31,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`runtime.cuda_graphs=never` now works on dense models.** The check sat inside
+  the MoE branch of weight upload, so on any model without experts the value was
+  read and never acted on while the dispatch line still printed `graphs=1`.
+  Measured on Qwen3.8-27B-NVFP4: `never` goes from 2 graph captures to 0.
+  Closes `AUDIT.md` G1.
+
+- **An unknown `runtime.cuda_graphs` value warns instead of being ignored.**
+  `=off` used to parse fine and change nothing, which is how it produced a
+  byte-identical A/B that read as a refutation.
+
 - **The perf gate now compiles the change it is gating.** The four `verify*`
   targets had no `build` prerequisite, so on a host without cmake they measured
   whatever `imp:test` already held, and said `SKIP build` while doing it.
