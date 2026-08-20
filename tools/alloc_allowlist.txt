@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 68 files, 471 sites
+# remaining: 66 files, 466 sites
 
 src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_sm120.cu  # 2
@@ -23,7 +23,7 @@ src/compute/mmq_q4k_imma_tile.cu  # 6
 src/compute/mmq_q8_imma.cu  # 3
 src/compute/mmq_q8_imma_scratch.cu  # 4
 src/compute/moe_routing.cu  # 12
-src/compute/mtp_forward.cu  # 12
+src/compute/mtp_forward.cu  # 11
 src/compute/quantize_fp16_nvfp4_moe_native.cu  # 6
 src/compute/sampling.cu  # 1
 src/compute/sampling_penalties.cu  # 2
@@ -44,7 +44,6 @@ src/exec/executor_perplexity.cu  # 8
 src/exec/executor_ssm_gdn.cu  # 2
 src/exec/executor_workspace.cu  # 7
 src/exec/executor_workspace_buffers.cu  # 15
-src/exec/executor_workspace_config.cu  # 2
 src/exec/expert_cache.cu  # 4
 src/exec/gemm_scratch.cu  # 1
 src/exec/moe_workspace.cu  # 2

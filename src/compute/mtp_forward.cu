@@ -441,6 +441,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens), kMtpMaxChainK * sizeof(int32_t));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_argmax), sizeof(int));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_tok), sizeof(int32_t));
 
     ws.hidden_dim   = hidden_dim;
     ws.n_experts    = n_experts;
@@ -525,6 +526,10 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     if (ws.d_topk) { cudaFree(ws.d_topk); ws.d_topk = nullptr; }
     if (ws.d_chain_tokens) { cudaFree(ws.d_chain_tokens); ws.d_chain_tokens = nullptr; }
     if (ws.d_argmax) { cudaFree(ws.d_argmax); ws.d_argmax = nullptr; }
+    if (ws.d_tok) {
+        cudaFree(ws.d_tok);
+        ws.d_tok = nullptr;
+    }
     frfn(ws.d_post_norm);
     frfn(ws.d_expert_gate_up);
     frfn(ws.d_expert_act);
@@ -602,21 +607,20 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
         imp::embedding_lookup(main_tok_emb, d_prev_token, /*n_tokens=*/1, out_view,
                               main_tok_emb.qtype, stream);
     } else {
-        // Upload prev_token_id to a tiny device buffer so embedding_lookup
-        // can dispatch with the correct signature. (The graph-friendly
-        // _from_device overload also exists if needed.)
-        int32_t  h_tok = static_cast<int32_t>(prev_token_id);
-        int32_t* d_tok = nullptr;
-        if (cudaMalloc(&d_tok, sizeof(int32_t)) != cudaSuccess) {
-            IMP_LOG_ERROR("mtp_draft_step: token-id scratch alloc failed");
+        // Upload prev_token_id to the workspace's persistent token-id slot so
+        // embedding_lookup can dispatch with the correct signature. (The
+        // graph-friendly _from_device overload also exists if needed.)
+        // Persistent rather than per-step: see the ws.d_tok comment in the
+        // header. Allocated once by mtp_workspace_allocate.
+        if (ws.d_tok == nullptr) {
+            IMP_LOG_ERROR("mtp_draft_step: token-id scratch not allocated");
             return false;
         }
-        cudaMemcpyAsync(d_tok, &h_tok, sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+        int32_t h_tok = static_cast<int32_t>(prev_token_id);
+        cudaMemcpyAsync(ws.d_tok, &h_tok, sizeof(int32_t), cudaMemcpyHostToDevice, stream);
         int64_t out_shape[2] = {1, hidden_dim};
         Tensor  out_view(ws.d_fc_in, QType::F16, 2, out_shape, /*on_device=*/true);
-        imp::embedding_lookup(main_tok_emb, d_tok, /*n_tokens=*/1, out_view, main_tok_emb.qtype,
-                              stream);
-        cudaFreeAsync(d_tok, stream);
+        imp::embedding_lookup(main_tok_emb, ws.d_tok, /*n_tokens=*/1, out_view, main_tok_emb.qtype, stream);
     }
 
     // Step 2: emb_norm = RMSNorm(emb, pre_fc_norm_embedding)

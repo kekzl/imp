@@ -136,9 +136,14 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
 }
 
 bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
+    // The grow branch below routes through vram_alloc/vram_free (the owner's
+    // allocator), which is not stream-ordered, so nothing here needs `stream`.
+    // The parameter stays: eight call sites pass it and a stream-ordered
+    // variant is the shape this would take if the branch ever goes live.
+    (void)stream;
     // Resize targets the PREFILL shared arena. While the decode workspace is
     // active (slot 1), shared_workspace_ aliases the fixed-size decode buffer
-    // — growing through that alias cudaFreeAsync's the decode buffer and
+    // — growing through that alias frees the decode buffer and
     // leaves decode_shared_workspace_ dangling; the next use_workspace(1)
     // re-installs the freed pointer and decode kernels write into freed
     // memory (#948: server wedged with an illegal memory access whenever a
@@ -164,16 +169,26 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
 
     if (new_shared > shared_workspace_size_) {
         // Only reallocate when growing — reuse existing buffer if large enough.
-        // This avoids expensive cudaMallocAsync/cudaFreeAsync on every batch size change.
+        //
+        // Through the SAME allocator that owns the buffer. allocate_shared_workspace()
+        // takes it from vram_alloc() (cudaMalloc, or VRAMAllocator when one is
+        // installed) and free_workspace() returns it with vram_free(); this branch
+        // used to cudaFreeAsync that pointer and replace it with a cudaMallocAsync
+        // one, which is the same invalid pair AUDIT B10 recorded in mtp_forward.cu,
+        // plus a buffer whose owner could then no longer account for it. AUDIT's
+        // step-4b/step-5 resolution shows the branch is unreachable today
+        // (new_shared > shared_workspace_size_ cannot hold: allocate_shared_workspace
+        // sizes at max_tokens_, this clamps to it, and every phase term is monotone
+        // in T). Fixed rather than deleted precisely because that reachability
+        // argument is a property of the surrounding code, not of this branch.
         if (shared_workspace_) {
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(shared_workspace_, stream));
+            vram_free(vram_alloc_, shared_workspace_);
+            shared_workspace_ = nullptr;
         }
         generation_++;  // arena moves — captured verify graphs must invalidate
-        cudaError_t err = cudaMallocAsync(&shared_workspace_, new_shared, stream);
-        if (err != cudaSuccess) {
-            IMP_LOG_ERROR("Failed to resize shared workspace to %zu bytes: %s", new_shared,
-                          cudaGetErrorString(err));
-            shared_workspace_ = nullptr;
+        shared_workspace_ = vram_alloc(vram_alloc_, new_shared, "shared_workspace");
+        if (!shared_workspace_) {
+            IMP_LOG_ERROR("Failed to resize shared workspace to %zu bytes", new_shared);
             shared_workspace_size_ = 0;
             return false;
         }

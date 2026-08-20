@@ -1,0 +1,18 @@
+# Justified allocate/free API mismatches, for tools/check_alloc_pairs.py
+#
+# A pointer must go home to the allocator it came from:
+#   cudaMalloc / cudaMallocManaged      <->  cudaFree
+#   cudaMallocAsync                     <->  cudaFreeAsync
+#   cudaMallocHost / cudaHostAlloc      <->  cudaFreeHost
+#
+# An entry belongs here only when the mismatch is apparent rather than real — a
+# pointer that genuinely comes from either API depending on a branch, whose free
+# branch matches. It is NOT a place to park a known-wrong pair: fix those.
+#
+# Format: `path:name  # reason` for an in-file pair, `member:name  # reason` for a
+# member variable paired across translation units. The reason is mandatory (an empty
+# one is rejected) and a stale entry fails the gate too, so the list cannot rot in
+# either direction.
+#
+# Empty on purpose since 2026-08-21: the four mismatches this gate was written to
+# find were fixed rather than listed.

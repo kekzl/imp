@@ -11,6 +11,24 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Four device pointers were freed through an allocator that had not produced
+  them**, which is invalid CUDA and silent. `mtp_forward.cu` allocated a 4-byte
+  token id with `cudaMalloc` and freed it with `cudaFreeAsync` once per MTP draft
+  step (it is now a persistent workspace slot, so the allocation is gone as well);
+  `chunk_eager_k_`/`_v_` were 128 MiB of `cudaMallocAsync` released with `cudaFree`
+  at executor teardown, which returns success without returning the block to the
+  async pool; the shared-workspace grow branch swapped a `vram_alloc()` buffer for
+  a `cudaMallocAsync` one. See `AUDIT.md` B10.
+
+### Added
+
+- **`make check-alloc-pairs` fails when a pointer is freed by the wrong
+  allocator**, in CI as well. Two passes: within a file, and across files for
+  member variables, because the 128 MiB pair above allocates and frees in
+  different translation units and no per-file check can see it.
+
 ## [0.29.0] - 2026-08-21
 
 ### Added
