@@ -679,7 +679,13 @@ smoke_prompt() {
     WORDS=$(grep -oP "\[tok=[0-9]+ '\K[^']*" "$ERR" | tr '\n' ' ')
     rm -f "$ERR"
 
-    if echo " $WORDS " | grep -qiE ' (nan|inf|-inf|-nan) '; then
+    # Herestrings, not `echo ... | grep -q`: grep -q leaves at the first match and
+    # closes the pipe, echo dies of EPIPE, and `set -o pipefail` (:40) turns that
+    # into a non-zero pipeline even though grep MATCHED. Here that would swallow a
+    # NaN report; three lines down, where the test is negated, it fails a smoke
+    # run whose output was correct. $OUT carries the whole cli log, so it is well
+    # past the point where the producer writes in one block.
+    if grep -qiE ' (nan|inf|-inf|-nan) ' <<< " $WORDS "; then
         fail "$label — NaN/Inf token in output"
         echo "  words: $WORDS"
         return
@@ -690,7 +696,7 @@ smoke_prompt() {
         return
     fi
     # Generated text appears interleaved with logs on stdout — substring match works
-    if ! echo "$OUT$WORDS" | grep -q "$expect"; then
+    if ! grep -q "$expect" <<< "$OUT$WORDS"; then
         fail "$label — expected '$expect' in output"
         echo "  words: $WORDS"
         return
