@@ -33,7 +33,8 @@ for r in $(seq 1 $ROUNDS); do
   ARMS="false true"; [ $((r % 2)) -eq 0 ] && ARMS="true false"
   for a in $ARMS; do
     start "$a" || continue
-    docker logs recyc 2>&1 | grep -q "Weight upload consumed" && { echo "# POISONED" >&2; continue; }
+    # Herestring: pipefail would turn a MATCH into a miss, see mtp_k_sweep.sh.
+    grep -q "Weight upload consumed" <<< "$(docker logs recyc 2>&1)" && { echo "# POISONED" >&2; continue; }
     tot=0; ms=0
     for p in "${PROMPTS[@]}"; do
       t0=$(date +%s%N)

@@ -43,7 +43,9 @@ start_arm(){ # k
 }
 
 # Refuse to measure on a card someone else is on — the load says so since #1476.
-poisoned(){ docker logs mtpsweep 2>&1 | grep -q "Weight upload consumed"; }
+# Herestring: grep -q closes the pipe at the first match, docker logs dies of
+# EPIPE, and pipefail turns a MATCH into a non-zero pipeline, i.e. "not poisoned".
+poisoned(){ grep -q "Weight upload consumed" <<< "$(docker logs mtpsweep 2>&1)"; }
 
 metrics(){ curl -s "http://127.0.0.1:$PORT/metrics" | awk '/^imp_spec_(drafted|accepted|verify_steps)_total/{print $1"="$2}' | tr '\n' ' '; }
 

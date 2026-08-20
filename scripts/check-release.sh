@@ -3,8 +3,9 @@
 #
 # Runs the cheap checks that should always pass on a publishable
 # tree: doc links, secrets/path leaks, no accidentally tracked
-# binaries, then defers to `make verify-fast` for build + test
-# + perf + smoke and to `make test-server` for the HTTP surface.
+# binaries, then defers to `make verify-fast` for tests + perf + smoke
+# and to `make test-server` for the HTTP surface. Both rebuild the image first
+# (their `build` prerequisite), so both measure the tree in front of you.
 #
 # Both model-backed stages are needed and neither substitutes for the other:
 # verify-fast measures kernels and throughput, test-server is the ONLY place

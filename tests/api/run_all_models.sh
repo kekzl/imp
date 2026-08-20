@@ -94,7 +94,8 @@ for MODEL in "${MODELS[@]}"; do
     # Check if container crashed
     if ! docker compose ps imp-server 2>/dev/null | grep -q "Up"; then
       LOGS=$(docker compose logs imp-server --tail 3 2>/dev/null)
-      if echo "$LOGS" | grep -qi "out of memory\|cudaMalloc failed"; then
+      # Herestring: see the note on the result parse below.
+      if grep -qi "out of memory\|cudaMalloc failed" <<< "$LOGS"; then
         echo "SKIP: OOM during model load"
         SKIP=$((SKIP + 1))
         RESULTS+="SKIP  $MODEL (OOM)\n"
@@ -130,11 +131,15 @@ for MODEL in "${MODELS[@]}"; do
   )
 
   # Parse result
-  if echo "$OUTPUT" | grep -q "passed"; then
+  # Herestrings, not `echo "$OUTPUT" | grep -q`. grep -q leaves at the first
+  # match and closes the pipe; echo dies of EPIPE and `set -o pipefail` (:4)
+  # makes the pipeline non-zero although grep MATCHED. $OUTPUT is a full pytest
+  # run, so a passing model would be recorded as ERROR.
+  if grep -q "passed" <<< "$OUTPUT"; then
     PASSED=$(echo "$OUTPUT" | grep -oP '\d+ passed' | head -1)
     FAILED=$(echo "$OUTPUT" | grep -oP '\d+ failed' | head -1)
     FAILNAMES=$(echo "$OUTPUT" | grep "FAILED " | sed 's/FAILED /  /')
-    if echo "$OUTPUT" | grep -q "failed"; then
+    if grep -q "failed" <<< "$OUTPUT"; then
       echo "FAIL: $PASSED, $FAILED"
       [ -n "$FAILNAMES" ] && echo "$FAILNAMES"
       FAIL=$((FAIL + 1))

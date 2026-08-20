@@ -31,6 +31,14 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The perf gate now compiles the change it is gating.** The four `verify*`
+  targets had no `build` prerequisite, so on a host without cmake they measured
+  whatever `imp:test` already held, and said `SKIP build` while doing it.
+
+- **`check-gpu` refuses on occupied VRAM, not on an empty process list.** On
+  WSL2 that list stays empty while a container holds the card: a co-tenant run
+  reported 30.39 tok/s against a 287.19 baseline, all of it host.
+
 - **`make test-e2e` runs the model battery instead of skipping all of it.** The
   `models/` it mounted holds absolute symlinks that dangle in the container, so
   every path missed: 25 tests over 6 suites now run where none ran before.

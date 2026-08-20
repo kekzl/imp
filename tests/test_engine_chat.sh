@@ -29,9 +29,13 @@ fail() { FAIL=$((FAIL+1)); echo -e "  ${RED}FAIL${NC}  $1 — $2"; }
 skip() { SKIP=$((SKIP+1)); echo -e "  ${YELLOW}SKIP${NC}  $1 — $2"; }
 
 has_model() { [ -e "$1" ]; }
-has_crash() { echo "$OUT" | grep -qi "segmentation fault\|SIGSEGV\|core dumped\|SIGABRT\|Aborted"; }
-has_text()  { echo "$OUT" | grep -qi "$1"; }
-has_exact() { echo "$OUT" | grep -q "$1"; }
+# Herestrings, not `echo "$OUT" | grep -q`: grep -q leaves at the first match and
+# closes the pipe, echo dies of EPIPE, and `set -o pipefail` makes the pipeline
+# non-zero although grep MATCHED. $OUT is a whole engine run, far past a single
+# write. Here that reads as "no crash" on a run that DID crash.
+has_crash() { grep -qi "segmentation fault\|SIGSEGV\|core dumped\|SIGABRT\|Aborted" <<< "$OUT"; }
+has_text()  { grep -qi "$1" <<< "$OUT"; }
+has_exact() { grep -q "$1" <<< "$OUT"; }
 
 run_single() {
     local model="$1" prompt="$2" timeout_s="${3:-60}" extra="${4:-}"
