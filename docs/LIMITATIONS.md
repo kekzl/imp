@@ -85,6 +85,31 @@ These have a code path and no gate. They may work; nothing proves it.
   since `ea547a53` — `speculative.mtp_k=1` measured +21.3 % — but **only at k=1**:
   an extra chunk row still costs half a decode step, so k=3 buys 2 %. Numbers and
   the profile that localises that cost: [`roadmap.md`](roadmap.md).
+- **MTP is released for one model class, and the class that is left out has a
+  measured defect, not a missing feature.** `speculative.mtp_k` stays **0
+  everywhere** — nothing below is on by default; the table says what a user opts
+  into and what they get.
+
+  | class | example | cached verify graph vs an eager forward of the same state | MTP |
+  |---|---|---|---|
+  | dense GDN hybrid | Qwen3.8-27B-NVFP4 | 1 of 1033 replays disagree (0.10 %) | **released**, `mtp_k=1` measured **+21.3 %** decode |
+  | MoE + GDN hybrid | Qwen3.6-35B-A3B-NVFP4 | 2 of 1013 (0.20 %) | released, unmeasured for throughput |
+  | MoE + Mamba2 hybrid (`nemotron_h`) | NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 | **176 of 1318 (13.4 %)** | **not released** |
+
+  The defect that keeps the third row out: a cached verify-chunk graph replayed
+  against a state it was not captured for does not reproduce what an eager
+  forward of that state computes — logit deltas to 23.8, and roughly one
+  generation in eight carries a visibly duplicated word. It is not the drafter
+  and it is not the attention route; removing the MoE pass (`moe.skip`) drops the
+  rate from 11.2 % to 0.8 %, so the MoE pass carries it — but MoE alone is not
+  enough, since the second row is MoE and clean. The value the graph bakes stale
+  is not yet identified. `tests/test_spec_capture_fidelity.cpp` gates the first
+  two rows and fails on the third.
+
+  The first two rows are not bit-exact either: capture picks its cuBLASLt
+  algorithm once, so ~0.1-0.2 % of replays differ from eager on a healthy model.
+  That is the floor the gate's 2 % threshold sits above.
+
 - **Speculation is off for most real requests, by rules that are easy to
   miss.** It requires greedy sampling (`temperature: 0` or `top_k: 1`), so any
   request with a temperature gets none; and a think budget disables it inside

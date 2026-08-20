@@ -926,6 +926,13 @@ struct Diagnostics {
     // spec verify chunk forward, instantiate + launch the graph (falls
     // back to the eager forward on any failure). Logs per-attempt
     // outcomes — a capturability census, not a perf path.
+    // Capture-fidelity check (diagnostics). When on, every replay of a cached
+    // verify-chunk graph is compared against an eager forward of the same state:
+    // half A eager, restore the recurrent slab from the pre-chunk copy, half B
+    // the cached graph, then diff the row-0 logits. Costs a full extra forward
+    // plus two vocab-sized D2H per verify step, so it is a gate/diagnostic mode,
+    // never a serving one. Off it is one bool test per verify step.
+    bool spec_capture_fidelity = false;
     bool spec_capture_probe = false;
     // Log shape + per-candidate algoId/tileId + chosen algo for every
     // benchmark_and_select_algo call.
