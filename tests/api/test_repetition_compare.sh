@@ -73,7 +73,10 @@ ENDJSON
 
     # Check for repetition (same 3+ char pattern repeated 5+ times)
     local has_repetition="NO"
-    if echo "$content" | grep -qP '(.{3,})\1{4,}'; then
+    # Herestring: grep -q closes the pipe at the first match, echo dies of EPIPE,
+    # and pipefail turns a MATCH into a miss. $content is a whole completion, so
+    # here that would report NO repetition on exactly the output that has it.
+    if grep -qP '(.{3,})\1{4,}' <<< "$content"; then
         has_repetition="YES"
     fi
 

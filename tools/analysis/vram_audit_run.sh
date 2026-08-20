@@ -48,7 +48,10 @@ for _ in $(seq 1 120); do
     echo "  ready."
     break
   fi
-  if ! docker ps -q -f name="$NAME" | grep -q .; then
+  # Herestring for the same reason as the other sites in this sweep: one short
+  # line here, so it cannot fire, but that is a property of the line, not of the
+  # construction.
+  if ! grep -q . <<< "$(docker ps -q -f name="$NAME")"; then
     echo "!! server container exited early; logs:"; docker logs "$NAME" | tail -40; exit 1
   fi
   sleep 2
