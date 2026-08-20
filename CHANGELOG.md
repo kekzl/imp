@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-08-21
+
 ### Added
 
 - **MTP speculative decoding pays on Qwen3.8-27B-NVFP4: `speculative.mtp_k=1`
@@ -29,19 +31,24 @@ there instead of retelling it.
   One log line naming `speculative.mtp_k`, the measured gain and its two prices.
   The default stays 0.
 
+- **`diagnostics.spec_capture_fidelity` checks a cached speculative verify graph
+  against an eager forward of the same state.** Off by default (one bool test per
+  verify step). `make test-spec-fidelity` runs it as a gate, and
+  `scripts/check-release.sh` now has it as a third model-backed stage.
+
 ### Fixed
 
 - **`diagnostics.no_nvfp4_decode_cache` no longer changes prefill.** The knob is
   a decode-side bisection tool, but its early return also skipped the CUTLASS
   NVFP4 *prefill* conversion, so all 5935 cached tensors lost their prefill
-  payload and the dense FFN dropped from W4A4 to W4A16 — 9.165 against 9.051
+  payload and the dense FFN dropped from W4A4 to W4A16: 9.165 against 9.051
   perplexity on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4. Default behaviour
   is unchanged; only the knob was over-broad.
 
 - **Speculative decoding no longer corrupts Mamba2 hybrids.** A fully rejected
   draft chunk adopts the recurrent snapshot the chunk forward writes as of its
   first row (#1459); the GDN path wrote that slab, the Mamba2 path never did, so
-  it committed uninitialised VRAM instead — 0 of 26 378 240 bytes written,
+  it committed uninitialised VRAM instead: 0 of 26 378 240 bytes written,
   measured device-side. Output degenerated from the first fully rejected verify
   and MTP acceptance on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 read 0 %
   where the head actually drafts at 39 %. Affects any drafter, not just MTP.
@@ -114,6 +121,12 @@ there instead of retelling it.
   two candidates, 0.172 shift between the paths.
 
 - **The GDN layers reach their fast path during the verify chunk** (#1467).
+
+- **`scripts/mtp_accuracy_bench.sh` no longer measures nothing quietly.** It
+  printed `WARN: no mtp line` whenever the economics guard unbound the head, and
+  averaged a partial result over four classes regardless. It now names which of
+  five causes fired, exits 1 with nothing measured, and defaults to the released
+  checkpoint: 82.7 % offline top-1 on Qwen3.8-27B-NVFP4.
 
 ## [0.28.0] - 2026-08-17
 
