@@ -96,6 +96,16 @@ These have a code path and no gate. They may work; nothing proves it.
   | MoE + GDN hybrid | Qwen3.6-35B-A3B-NVFP4 | 2 of 1013 (0.20 %) | released, unmeasured for throughput |
   | MoE + Mamba2 hybrid (`nemotron_h`) | NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 | **176 of 1318 (13.4 %)** | **not released** |
 
+  The released row carries two accept rates and they are not the same
+  measurement. **82.7 %** is the head's offline top-1 accept, teacher-forced over
+  four prompt classes with the verify loop pinned off
+  (`scripts/mtp_accuracy_bench.sh`: 89.0 / 75.6 / 81.9 / 84.3 % on factual /
+  verbose-think / code / instruction, 127 scored positions each). **67.0 %** is
+  what the verify chunk actually accepted on the serving path over 30 prompts
+  (4299 of 6415 drafts, `/metrics`). The offline number asks whether the head
+  would have been right; the serving number asks how often the chunk took it.
+  The gap is the cost of drafting into a chunk rather than one step at a time.
+
   The defect that keeps the third row out: a cached verify-chunk graph replayed
   against a state it was not captured for does not reproduce what an eager
   forward of that state computes — logit deltas to 23.8, and roughly one
