@@ -256,9 +256,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
             Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
 
             ssm_scan_prefill(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_all,
-                             static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize,
-                             n_groups, h_dtype, stream, state.d_chunk_len, h_snap,
-                             h_snap ? state.d_snap_n : nullptr);
+                             static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
+                             h_dtype, stream, state.d_chunk_len, h_snap, h_snap ? state.d_snap_n : nullptr);
         }
     }
 

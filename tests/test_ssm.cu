@@ -654,13 +654,18 @@ TEST(SSMScanTest, PrefillSnapshotIsStateAtSnapRow) {
     constexpr int n_chunk = 4;  // t0 + 3 draft rows
     constexpr int n_snap = 1;   // fully rejected: commit after the first row
 
-    std::vector<float> h_x(n_chunk * inner), h_B(n_chunk * bc), h_C(n_chunk * bc),
-        h_dt(n_chunk * n_heads), h_z(n_chunk * inner);
-    for (size_t i = 0; i < h_x.size(); i++) h_x[i] = std::sin(0.37f * i);
-    for (size_t i = 0; i < h_B.size(); i++) h_B[i] = std::cos(0.21f * i);
-    for (size_t i = 0; i < h_C.size(); i++) h_C[i] = std::sin(0.11f * i + 1.0f);
-    for (size_t i = 0; i < h_dt.size(); i++) h_dt[i] = 0.1f + 0.05f * (i % 7);
-    for (size_t i = 0; i < h_z.size(); i++) h_z[i] = std::cos(0.53f * i);
+    std::vector<float> h_x(n_chunk * inner), h_B(n_chunk * bc), h_C(n_chunk * bc), h_dt(n_chunk * n_heads),
+        h_z(n_chunk * inner);
+    for (size_t i = 0; i < h_x.size(); i++)
+        h_x[i] = std::sin(0.37f * i);
+    for (size_t i = 0; i < h_B.size(); i++)
+        h_B[i] = std::cos(0.21f * i);
+    for (size_t i = 0; i < h_C.size(); i++)
+        h_C[i] = std::sin(0.11f * i + 1.0f);
+    for (size_t i = 0; i < h_dt.size(); i++)
+        h_dt[i] = 0.1f + 0.05f * (i % 7);
+    for (size_t i = 0; i < h_z.size(); i++)
+        h_z[i] = std::cos(0.53f * i);
     std::vector<float> h_A(n_heads, -0.5f), h_D(n_heads, 0.3f), h_dtb(n_heads, 0.2f);
 
     auto make_f32_gpu = [](const float* host, size_t n) {
@@ -681,7 +686,8 @@ TEST(SSMScanTest, PrefillSnapshotIsStateAtSnapRow) {
     // A non-zero starting state: a snapshot that is silently left at zero must
     // not be able to match the reference.
     std::vector<float> h_init(h_elems);
-    for (size_t i = 0; i < h_elems; i++) h_init[i] = 0.05f * std::sin(0.9f * i);
+    for (size_t i = 0; i < h_elems; i++)
+        h_init[i] = 0.05f * std::sin(0.9f * i);
 
     // Run n_tokens rows; return the committed h_state and (optionally) the snapshot.
     auto run = [&](int n_tokens, const int* d_snap_n, std::vector<float>& h_out,
@@ -757,13 +763,17 @@ TEST(SSMConv1dTest, PrefillSnapshotIsConvStateAtSnapRow) {
     constexpr int n_snap = 1;  // fully rejected draft: commit after row 0
 
     std::vector<float> h_x(n_chunk * channels), h_w(channels * kernel_size), h_b(channels);
-    for (size_t i = 0; i < h_x.size(); i++) h_x[i] = std::sin(0.41f * i);
-    for (size_t i = 0; i < h_w.size(); i++) h_w[i] = 0.1f + 0.03f * (i % 5);
-    for (size_t i = 0; i < h_b.size(); i++) h_b[i] = 0.01f * i;
+    for (size_t i = 0; i < h_x.size(); i++)
+        h_x[i] = std::sin(0.41f * i);
+    for (size_t i = 0; i < h_w.size(); i++)
+        h_w[i] = 0.1f + 0.03f * (i % 5);
+    for (size_t i = 0; i < h_b.size(); i++)
+        h_b[i] = 0.01f * i;
     // A non-zero pre-chunk conv window: with n_snap < kernel_size the snapshot
     // has to pull its leading values from here.
     std::vector<float> h_state_init(channels * kernel_size);
-    for (size_t i = 0; i < h_state_init.size(); i++) h_state_init[i] = 0.2f * std::cos(0.7f * i);
+    for (size_t i = 0; i < h_state_init.size(); i++)
+        h_state_init[i] = 0.2f * std::cos(0.7f * i);
 
     Tensor d_w = make_fp16_gpu(h_w.data(), {channels, kernel_size});
     Tensor d_b = make_fp16_gpu(h_b.data(), {channels});

@@ -40,9 +40,9 @@ void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weigh
 //             and the live buffer has already moved on. Same contract as
 //             ssm_conv1d_prefill_f32_silu below.
 void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
-                        Tensor& x_out, int conv_kernel, cudaStream_t stream,
-                        const int* d_real_n = nullptr, void* conv_snap = nullptr,
-                        const int* d_snap_n = nullptr, const void* conv_prev = nullptr);
+                        Tensor& x_out, int conv_kernel, cudaStream_t stream, const int* d_real_n = nullptr,
+                        void* conv_snap = nullptr, const int* d_snap_n = nullptr,
+                        const void* conv_prev = nullptr);
 
 // Fused conv1d + SiLU + FP32 output for prefill (GDN layers).
 // Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one launch.
@@ -85,8 +85,7 @@ void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const T
                       const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y,
                       const void* z, int n_tokens, int n_heads, int head_dim_ssm, int state_size,
                       int n_groups, QType h_dtype = QType::F32, cudaStream_t stream = nullptr,
-                      const int* d_real_n = nullptr, void* h_snap = nullptr,
-                      const int* d_snap_n = nullptr);
+                      const int* d_real_n = nullptr, void* h_snap = nullptr, const int* d_snap_n = nullptr);
 
 // Group RMSNorm: normalize each of n_groups groups independently.
 // x:      [n_tokens, dim] compute_dtype (dim = n_groups * group_size)

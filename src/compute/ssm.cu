@@ -206,9 +206,9 @@ __global__ void ssm_conv1d_prefill_kernel(
     const half* __restrict__ bias,    // [channels] or nullptr
     half* __restrict__ x_out,         // [n_tokens, channels]
     int n_tokens, int channels, int kernel_size,
-    const int* __restrict__ d_real_n,   // device chunk length (padded verify chunk) or nullptr
-    float* __restrict__ conv_snap,      // second conv-state commit, or nullptr
-    const int* __restrict__ d_snap_n,   // row count conv_snap is taken at
+    const int* __restrict__ d_real_n,       // device chunk length (padded verify chunk) or nullptr
+    float* __restrict__ conv_snap,          // second conv-state commit, or nullptr
+    const int* __restrict__ d_snap_n,       // row count conv_snap is taken at
     const float* __restrict__ conv_prev) {  // pre-chunk conv_state copy
     int token = blockIdx.x;
     if (token >= n_tokens)
@@ -428,8 +428,8 @@ __global__ void ssm_scan_kernel(
     half* __restrict__ y,               // [n_tokens, inner_size]
     const half* __restrict__ z,         // [n_tokens, inner_size] (gate, only if FUSE_GATE)
     int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups, int s_tiles,
-    const int* __restrict__ d_real_n,   // device chunk length (padded verify chunk) or nullptr
-    void* __restrict__ h_snap,          // second state output, or nullptr
+    const int* __restrict__ d_real_n,    // device chunk length (padded verify chunk) or nullptr
+    void* __restrict__ h_snap,           // second state output, or nullptr
     const int* __restrict__ d_snap_n) {  // row count h_snap is taken at
     int h = blockIdx.x;
     if (h >= n_heads)
@@ -562,13 +562,13 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C, const h
     bool fp16 = (h_dtype == QType::F16);
     bool fused = (z != nullptr);
 
-#define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V)                                                                   \
-    do {                                                                                                    \
-        ssm_scan_kernel<H_FP16_V, FUSE_V>                                                                   \
-            <<<n_heads, threads, smem_bytes, stream>>>(x, B, C, dt, A_log, D, dt_bias, h_state, y, z,       \
-                                                       n_tokens, n_heads, head_dim_ssm, state_size,         \
-                                                       n_groups, s_tiles, d_real_n, h_snap, d_snap_n);      \
-        IMP_CUDA_CHECK_LAUNCH();                                                                            \
+#define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V)                                                              \
+    do {                                                                                               \
+        ssm_scan_kernel<H_FP16_V, FUSE_V>                                                              \
+            <<<n_heads, threads, smem_bytes, stream>>>(x, B, C, dt, A_log, D, dt_bias, h_state, y, z,  \
+                                                       n_tokens, n_heads, head_dim_ssm, state_size,    \
+                                                       n_groups, s_tiles, d_real_n, h_snap, d_snap_n); \
+        IMP_CUDA_CHECK_LAUNCH();                                                                       \
     } while (0)
 
     if (fp16) {
