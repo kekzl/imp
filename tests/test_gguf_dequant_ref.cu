@@ -1,5 +1,5 @@
 // =============================================================================
-// TEST_AUDIT.md Phase 2.6 — Risk #8
+// TEST_AUDIT (retired) Phase 2.6 — Risk #8
 // GGUF Q4_K / Q6_K / Q8_0 dequant + MMVQ/dp4a-GEMV vs a format-derived,
 // INDEPENDENT fp64 reference.
 //

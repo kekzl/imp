@@ -46,7 +46,7 @@ private:
 // the given HTTP status. Dumps via dump_safe so an invalid-UTF-8 byte echoed
 // into the message (e.g. a parse-error what() on byte-truncated input) can
 // never make the dump throw — that throw used to escape the handler and turn a
-// 400-class bad-input case into a bare 500 (DEBUG-500-on-bad-input.md).
+// 400-class bad-input case into a bare 500.
 void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message);
 
 // Constant-time Bearer-token check. Returns true iff `authorization` equals

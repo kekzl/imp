@@ -191,7 +191,7 @@ bool device_args_done = false;
                 moe_.cutlass3x_sf, moe_.d_sfa_offsets, ne, stream);
             // Zero the *active* prefix of the SFA staging buffer.
             // Padded rows of the SfAtom layout must be 0 for clean
-            // CUTLASS reads; QW5 (review/phase5_synthesis.md §2.1)
+            // CUTLASS reads; QW5 (phase-5 review §2.1, archived in #604)
             // replaces the full cudaMemsetAsync with a bounded
             // device kernel that reads d_sfa_offsets[ne] as the
             // byte count, capping at cutlass3x_sf_size.
@@ -210,7 +210,7 @@ bool device_args_done = false;
         // Replaces apply_expert_activation(gate, up -> swiglu_buf) +
         // quantize_device(swiglu_buf, eff). Reads gate/up directly,
         // computes SwiGLU/GeGLU/ReLU² in registers, writes only the
-        // packed FP4 + SFA. M1 from review/phase5_synthesis.md §2.2.
+        // packed FP4 + SFA. M1 from the phase-5 review §2.2 (archived in #604).
         //
         // For non_gated experts (RELU_SQR): gate is nullptr, kernel
         // reads `up` only. `expert_up_base` is left bit-identical

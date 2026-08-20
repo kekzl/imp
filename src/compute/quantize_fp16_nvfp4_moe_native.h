@@ -25,7 +25,7 @@ namespace imp {
 //   where kb = k_block = k/16
 //
 // This layout is read directly by gemm_grouped_nvfp4_smallM (cache_moe_native_nvfp4 /
-// nvfp4_moe_ms_native buffers). See bench/sm120_smallM_audit.md.
+// nvfp4_moe_ms_native buffers). The bench/ small-M audit it cited is gone.
 void quantize_fp16_to_nvfp4_moe_native(
     const __half* src_fp16,              // [expanded, K]
     void* const* d_packed_ptrs,          // [n_experts] per-expert packed FP4

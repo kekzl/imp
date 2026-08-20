@@ -11,7 +11,8 @@ namespace imp {
 // Uses WMMA HMMA fragments (mma.sync.m16n8k16.f16, mma.sync.m16n8k32.e4m3) —
 // NOT wgmma: wgmma.mma_async / TMEM / tcgen05 are Hopper-and-later (sm_90+/
 // SM100+) and unavailable on Consumer Blackwell (sm_120a). FA4 is therefore
-// permanently incompatible with this target. See review/phase2_perf.md §3.
+// permanently incompatible with this target. See the phase-2 perf review §3
+// (archived in #604).
 //
 // Supports: FP16, causal masking, softcap, sliding window, GQA.
 // Head dims: 64, 96, 128, 256. Falls back for unsupported configs.

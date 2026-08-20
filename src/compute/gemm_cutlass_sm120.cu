@@ -583,7 +583,8 @@ void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
 }
 
 // ---------------------------------------------------------------------------
-// Fused activation + NVFP4 CUTLASS quantize — M1 from review/phase5_synthesis §2.2.
+// Fused activation + NVFP4 CUTLASS quantize — M1 from the phase-5 review §2.2
+// (archived in #604).
 // Reads gate + up from HBM, computes SwiGLU/GeGLU/ReLU² in registers, and writes
 // only the packed FP4 + SFA. Replaces the apply_expert_activation + quantize_..._moe
 // pair in the device-args MoE prefill path; saves one full HBM round-trip of the

@@ -31,6 +31,10 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A `see FOO.md` in code now has to resolve, whatever the prefix.** The gate
+  only checked `docs/`-prefixed paths, so 25 pointers to the deleted
+  `TEST_AUDIT.md` survived it; 15 dead names over 25 sites are resolved.
+
 - **`response_format: json_schema` returns valid JSON for a free string value
   again.** A token carrying string content *and* the closing quote got neither
   category, so the pre-filter dropped it before the FSM. Costs ~5.6 % decode.

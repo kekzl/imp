@@ -33,7 +33,7 @@ Per-expert NVFP4 tensors are copied into one contiguous `[ne, N, K_packed]` buff
 
 ## KV cache dtypes
 
-`kv_cache.dtype = fp16 | fp8 | int8 | int4 | nvfp4` (CLI: `--kv-fp8` etc.). FP8 KV has a nondeterminism opt-in (`allow_nondeterministic_fp8`). Quant-KV accuracy envelopes are frozen in tests (TEST_AUDIT).
+`kv_cache.dtype = fp16 | fp8 | int8 | int4 | nvfp4` (CLI: `--kv-fp8` etc.). FP8 KV has a nondeterminism opt-in (`allow_nondeterministic_fp8`). Quant-KV accuracy envelopes are frozen in tests (TEST_AUDIT, retired).
 
 ## Judging quantization quality (the measurement is easy to get wrong)
 

@@ -1,5 +1,5 @@
 // NVFP4 quantize pipeline vs independent reference on adversarial weights —
-// TEST_AUDIT.md risk #2.
+// TEST_AUDIT (retired) risk #2.
 //
 // Until now the NVFP4 quantizer (the product's core decode path) had only
 // round-trip-via-own-code tests on benign Gaussian data (test_nvfp4_quant.cu

@@ -525,7 +525,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 failed_layers.push_back(li);
             }
         }
-        // QW8 from review/phase5_synthesis.md §2.1: hard-fail (not log-INFO)
+        // QW8 from the phase-5 review §2.1 (archived in #604): hard-fail (not log-INFO)
         // when the NVFP4 da_cache populates <100% of MoE-eligible layers.
         // Partial coverage means the per-layer fallback fires for the missing
         // layers and decode silently regresses ~5× on Qwen3-Coder / Gemma-4
