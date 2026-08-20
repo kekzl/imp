@@ -2,7 +2,7 @@
 # MANUAL tool — not wired into ctest/CI/verify.sh (like test_server_concurrent.sh).
 # Needs a running imp-server on :8080 with a model that supports /v1/embeddings.
 #
-# Regression for the "0 completion tokens" wedge (DEBUG-0tokens.md): the
+# Regression for the "0 completion tokens" wedge (PR #710): the
 # /v1/embeddings handler used to stop() the batching engine for exclusive
 # C-API access, which CANCELLED every in-flight generation. Under interleaved
 # embed+chat load each chat then returned an empty `finish_reason:"cancelled"`

@@ -333,8 +333,8 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
 // =========================================================================
 // Test 3b: Chunk-boundary handoff equivalence
 // -------------------------------------------------------------------------
-// Phase 1a of the chunkwise SSD scan refactor (docs/plans/gdn_chunkwise_
-// scan_design_2026_05_23.md). Establishes the precondition for Phase 1b:
+// Phase 1a of the chunkwise SSD scan refactor (design plan retired with
+// docs/plans/). Establishes the precondition for Phase 1b:
 // splitting a sequential GDN scan at any token boundary, saving the H state
 // at the split, and resuming with that saved state must produce bit-
 // equivalent output to a single monolithic scan.
@@ -511,8 +511,8 @@ TEST(GDNScanTest, ChunkBoundaryHandoff) {
 // =========================================================================
 // Test 3c: Chunkwise SSD prototype matches sequential fused scan
 // -------------------------------------------------------------------------
-// Phase 1b.1 of the chunkwise SSD scan refactor (docs/plans/gdn_chunkwise_
-// scan_design_2026_05_23.md). Exercises the chunked-shared-memory kernel
+// Phase 1b.1 of the chunkwise SSD scan refactor (design plan retired with
+// docs/plans/). Exercises the chunked-shared-memory kernel
 // path inside gdn_scan_chunkwise_f32 (chunk_size=64), which is structurally
 // distinct from the existing per-token sequential kernel.
 //

@@ -1,4 +1,4 @@
-// Tokenizer robustness / round-trip tests — TEST_AUDIT.md Phase 2, risk #10.
+// Tokenizer robustness / round-trip tests — TEST_AUDIT (retired) Phase 2, risk #10.
 //
 // The #510 class (NUL string terminators leaking into SSE deltas) lived in the
 // special-token / byte rendering paths. These tests pin the contract that

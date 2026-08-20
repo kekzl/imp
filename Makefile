@@ -113,7 +113,7 @@ test-unit: build
 
 # GPU tests: everything including CUDA kernels. ~4-5 min without models —
 # 7 of 8 binaries finish in <11s, but test-attention alone is ~241s (the
-# paged-/crosspath-oracle sweeps, TEST_AUDIT.md §8). The old "<30s" note was
+# paged-/crosspath-oracle sweeps, TEST_AUDIT (retired) §8). The old "<30s" note was
 # stale.
 test-gpu: build
 	$(DOCKER_RUN) imp-tests
@@ -382,7 +382,7 @@ CLANG_FORMAT_RUN = docker run --rm -v $(PWD):/work -w /work $(CLANG_FORMAT_IMG) 
 CLANG_FORMAT_FILES = $$(find src include tools tests -name '*.cpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh')
 
 # compute-sanitizer (memcheck) over the GPU-numeric test binaries
-# (TEST_AUDIT.md §4.4). Runs inside the BUILDER stage (the runtime image has
+# (TEST_AUDIT (retired) §4.4). Runs inside the BUILDER stage (the runtime image has
 # no CUDA toolkit, hence no compute-sanitizer; the builder keeps build/).
 #
 # DOES NOT WORK ON WSL2: the WDDM driver model exposes no debugger interface,

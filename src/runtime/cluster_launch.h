@@ -5,7 +5,7 @@
 // established for DSMEM K-broadcast across Q-heads (sm_90+; works on
 // sm_120a / Consumer Blackwell with the same calling convention).
 //
-// M5 Slice 1 from review/phase5_synthesis.md §2.2:
+// M5 Slice 1 from the phase-5 review §2.2 (archived in #604):
 //   - The existing decode-path GQA cluster launcher at
 //     src/compute/attention_paged.cu:1456-1474 is the working reference.
 //   - Slice 1 extracts that boilerplate into a reusable

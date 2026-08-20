@@ -1,5 +1,5 @@
 // =============================================================================
-// Unit tests for the server API-key (Bearer) auth check — TEST_AUDIT.md §7.
+// Unit tests for the server API-key (Bearer) auth check — TEST_AUDIT (retired) §7.
 //
 // WHY: the Bearer auth in main.cpp's pre-routing handler had NO test (mock_server
 // has no auth). An auth-bypass regression or a re-introduced early-out timing

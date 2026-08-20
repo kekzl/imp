@@ -1,4 +1,4 @@
-// Central model-env registry for the test suite (TEST_AUDIT.md R6 / #581).
+// Central model-env registry for the test suite (TEST_AUDIT (retired) R6 / #581).
 //
 // Model-dependent tests are gated on a small set of IMP_TEST_MODEL* env vars.
 // Before this header that gating was copy-pasted across ~25 files: each file
