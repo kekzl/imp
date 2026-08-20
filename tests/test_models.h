@@ -1,4 +1,4 @@
-// Central model-env registry for the test suite (TEST_AUDIT.md R6 / #581).
+// Central model-env registry for the test suite (TEST_AUDIT (retired) R6 / #581).
 //
 // Model-dependent tests are gated on a small set of IMP_TEST_MODEL* env vars.
 // Before this header that gating was copy-pasted across ~25 files: each file
@@ -24,11 +24,12 @@
 //   const std::string path = imp_test::env_path_or(imp_test::kEnvModel,
 //                                                   "/models/Qwen3-8B-Q8_0.gguf");
 //
-// The hardcoded /models/... fallbacks are NOT a defect (TEST_AUDIT.md §8): they
-// match the Makefile container mount `-v $(PWD)/models:/models` and skip
-// cleanly when the file is absent. They are passed by the caller so the
-// model<->test mapping stays visible at the call site; this header only owns
-// the env-var names and the getenv mechanics.
+// The hardcoded /models/... fallbacks are NOT a defect (TEST_AUDIT §8; that
+// document is retired, see docs/archive/README.md): they match the Makefile
+// container mount `-v $(PWD)/models:/models` and skip cleanly when the file is
+// absent. They are passed by the caller so the model<->test mapping stays
+// visible at the call site; this header only owns the env-var names and the
+// getenv mechanics.
 
 #ifndef IMP_TESTS_TEST_MODELS_H
 #define IMP_TESTS_TEST_MODELS_H

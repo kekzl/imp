@@ -580,7 +580,7 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
         s_norm_fp32_d = d;
     }
 
-    // M2 from review/phase5_synthesis.md §2.2: batch the per-token expert-
+    // M2 from the phase-5 review §2.2 (archived in #604): batch the per-token expert-
     // index D2H + sync into a single prefetch at function entry. Reduces
     // 2 * n syncs (one per token, three GEMVs each) down to ONE sync per
     // layer call. Restores the prefill graph-capture story up to (but not

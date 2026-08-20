@@ -12,8 +12,7 @@
 // a *second* <think> via a single-token-id compare — which never fires for
 // Qwen3.6, whose <think>/</think> ship as multi-BPE added_tokens (special=False;
 // see src/runtime/request.h:84-90). The result was reasoning leaking into
-// `content` on the streaming path only
-// (BUGREPORT-qwen36-reasoning-leaks-into-content.md).
+// `content` on the streaming path only.
 //
 // This unit closes that gap: in the CONTENT phase it detects a re-opened
 // <think> by TEXT scan (mirroring the SCAN/REASONING phases), holds a small

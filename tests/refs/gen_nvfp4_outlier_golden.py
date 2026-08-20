@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate fp64 spot-check goldens for tests/test_nvfp4_outlier_ref.cu.
 
-TEST_AUDIT.md risk #2: the NVFP4 quantize pipeline (the product's core decode
+TEST_AUDIT (retired) risk #2: the NVFP4 quantize pipeline (the product's core decode
 path) had only round-trip-via-own-code tests on benign Gaussian data. The
 Gemma mode-2 collapse (#514/#516) — a single outlier weight inflates the
 per-tensor scale until normal micro-blocks underflow the 1/512 FP8-E4M3 floor

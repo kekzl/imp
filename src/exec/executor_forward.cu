@@ -645,7 +645,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     const bool lm_has_fp8 = (wcache_.fp8.count(model_->output_proj().data) != 0);
     const bool lm_is_nvfp4 = !lm_has_fp8 && ((lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary);
 
-    // L2 streaming hint for the LM head projection (QW3 from review/phase5_synthesis.md §2.1):
+    // L2 streaming hint for the LM head projection (QW3 from the phase-5 review §2.1, archived in #604):
     // output_proj is huge (vocab_size × d_model — ~780 MiB for Qwen3-8B Q8_0) and
     // touched exactly once per forward, so it pollutes L2 if cached normally. The
     // streaming policy marks the read as evict-on-touch so the cache stays available

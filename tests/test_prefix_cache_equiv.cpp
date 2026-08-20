@@ -1,4 +1,4 @@
-// Prefix-cache equivalence — TEST_AUDIT.md risk #7 (Phase 2.6).
+// Prefix-cache equivalence — TEST_AUDIT (retired) risk #7 (Phase 2.6).
 //
 // "Prefix cache ships off-by-default BECAUSE its determinism is unvalidated —
 //  the test IS the enabler."

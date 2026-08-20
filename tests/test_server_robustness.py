@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""MANUAL tool — not wired into ctest/CI/verify.sh (TEST_AUDIT.md §7).
+"""MANUAL tool — not wired into ctest/CI/verify.sh (TEST_AUDIT (retired) §7).
 Needs a running imp-server on :8080 (default model Qwen3-8B-NVFP4-cortecs).
 
-Robustness battery for the HTTP surface (DEBUG-500-on-bad-input.md). imp must
+Robustness battery for the HTTP surface. imp must
 NEVER answer client-supplied bad input with a 5xx or a bare/opaque body: bad
 input is a 4xx with an OpenAI-style `{"error":{"message":..,"type":..}}`
 envelope. The original bug: invalid UTF-8 in the body made json::parse throw

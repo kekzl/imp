@@ -1,4 +1,4 @@
-// Paged decode attention quant variants vs fp64 reference — TEST_AUDIT.md
+// Paged decode attention quant variants vs fp64 reference — TEST_AUDIT (retired)
 // risk #6 (the decode twin of risk #1 / the cross-path test).
 //
 // The decode hot path has SIX paged-attention implementations, one per KV

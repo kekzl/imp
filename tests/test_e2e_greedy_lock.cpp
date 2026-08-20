@@ -1,4 +1,4 @@
-// E2E greedy regression locks — TEST_AUDIT.md risk #3 (Phase 2.4).
+// E2E greedy regression locks — TEST_AUDIT (retired) risk #3 (Phase 2.4).
 //
 // The single highest-leverage test class in the audit: a fixed prompt run
 // greedy (temp=0, top_k=1) through the FULL stack (tokenize → prefill →

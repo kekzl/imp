@@ -348,7 +348,7 @@ bool Engine::init_kv_cache() {
     //   Nemotron-3-Nano         127.2 -> 381.7 tok/s
     // with 45/45 degen_suite, a clean 700-token generation, multi-turn, and
     // four concurrent requests keeping their states apart. `AUDIT_ARCH` called
-    // this "eager decode by design" and supported-models.md called the model
+    // this "eager decode by design" and docs/MODELS.md called the model
     // "arch-limited" — both were describing this demotion, not the
     // architecture. `runtime.cuda_graphs=never` remains the way out.
 

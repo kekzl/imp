@@ -194,7 +194,7 @@
                 use_bitdecoding_tc = false;
             }
             if (use_bitdecoding_tc) {
-                // QW6 from review/phase5_synthesis.md §2.1: gate the entire
+                // QW6 from the phase-5 review §2.1 (archived in #604): gate the entire
                 // residual-arg marshalling (8+ trailing args) behind a single
                 // null-check. Default path (residual_on=false) uses the
                 // function's default arguments — no explicit nullptr/0 marshalling

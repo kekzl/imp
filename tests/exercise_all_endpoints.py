@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MANUAL tool — not wired into ctest/CI (TEST_AUDIT.md §7). Needs a running
+"""MANUAL tool — not wired into ctest/CI (TEST_AUDIT (retired) §7). Needs a running
 imp-server on :8080 with a tool-capable model (default Qwen3-8B-NVFP4-cortecs).
 
 Drives every imp-server endpoint and mode once — OpenAI chat/completions/

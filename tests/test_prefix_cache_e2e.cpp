@@ -1,4 +1,4 @@
-// Prefix-cache E2E equivalence — TEST_AUDIT.md risk #7 (Phase 2.6).
+// Prefix-cache E2E equivalence — TEST_AUDIT (retired) risk #7 (Phase 2.6).
 //
 // The unit tests (tests/test_prefix_cache_equiv.cpp) prove the KVCacheManager
 // hands back the same physical block with intact KV bytes. This file closes
@@ -128,7 +128,7 @@ TEST_F(PrefixCacheE2ETest, ControlNoCacheBackToBackIsDeterministic) {
 // ran on the PREVIOUS request's table, writing the new token's KV into the
 // wrong physical block while the async graph read garbage at the self-token
 // position. Fixed by content-comparing the table (batch.cpp). These tests
-// are the feature's ship gate (TEST_AUDIT risk #7: "the test IS the
+// are the feature's ship gate (TEST_AUDIT (retired) risk #7: "the test IS the
 // enabler") — they must stay green for prefix caching to be enabled.
 // =============================================================================
 // 1. Fresh-prefill vs prefix-cache-HIT must be token-identical.
