@@ -176,6 +176,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("attention.mla_absorb", cfg.attention.mla_absorb);
     B("attention.no_qknorm_fused", cfg.attention.no_qknorm_fused);
     B("diagnostics.spec_trace", cfg.diagnostics.spec_trace);
+    B("diagnostics.spec_capture_fidelity", cfg.diagnostics.spec_capture_fidelity);
     B("diagnostics.jump_trace", cfg.diagnostics.jump_trace);
     S("diagnostics.ppl_dump", cfg.diagnostics.ppl_dump);
     B("attention.splitk_pipe", cfg.attention.splitk_pipe);

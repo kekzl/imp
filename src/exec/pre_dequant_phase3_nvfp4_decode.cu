@@ -311,10 +311,22 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     size_t& remaining_budget, cudaStream_t stream) {
     if (wcache_->nvfp4_decode_mode <= 0)
         return;
-    if (runtime_config().diagnostics.no_nvfp4_decode_cache) {
-        IMP_LOG_INFO("NVFP4 decode cache DISABLED (diagnostics.no_nvfp4_decode_cache) — "
-                     "decode runs on source-precision paths");
-        return;
+    // diagnostics.no_nvfp4_decode_cache skips the steps that BUILD decode-cache
+    // entries. It must not skip the CUTLASS/MXFP4 conversions further down:
+    // those only re-lay-out weights phase 0 already registered, they populate
+    // wcache_->cutlass_nvfp4, and infer_tier_from_wcache (pre_dequant_internal.h)
+    // reads that map to set prefill_tier. Returning here took the whole
+    // 5935-tensor CUTLASS *prefill* cache with it, so a decode-only knob moved
+    // the dense FFN prefill from W4A4 (gemm_kernel_cutlass_nvfp4.cu quantizes
+    // the activation) to W4A16 (the gemm_nvfp4 safety net in
+    // executor_gemm_dispatch.cu) and changed a teacher-forced perplexity by
+    // -1.25 %.
+    const bool skip_decode_cache = runtime_config().diagnostics.no_nvfp4_decode_cache;
+    if (skip_decode_cache) {
+        IMP_LOG_INFO(
+            "NVFP4 decode cache DISABLED (diagnostics.no_nvfp4_decode_cache) — "
+            "decode runs on source-precision paths; the CUTLASS/MXFP4 prefill "
+            "conversions still run");
     }
 
     Nvfp4DecodeContext dctx;
@@ -356,31 +368,35 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     using NvFP4Entry = Nvfp4DecodeContext::Entry;
     std::vector<NvFP4Entry>& nvfp4_entries = dctx.entries;
 
-    if (wcache_->nvfp4_decode_mode == 2 && !nvfp4_entries.empty()) {
-        nvfp4_decode_quantize_mode2_(stream, dctx);
-    } else if (!nvfp4_entries.empty()) {
-        nvfp4_decode_quantize_mode1_(remaining_budget, stream, dctx);
-    }
+    if (!skip_decode_cache) {
+        if (wcache_->nvfp4_decode_mode == 2 && !nvfp4_entries.empty()) {
+            nvfp4_decode_quantize_mode2_(stream, dctx);
+        } else if (!nvfp4_entries.empty()) {
+            nvfp4_decode_quantize_mode1_(remaining_budget, stream, dctx);
+        }
 
-    if (wcache_->nvfp4_decode_mode == 2 && !wcache_->fp16.empty()) {
-        nvfp4_decode_free_fp16_and_migrate_fp8_(remaining_budget, stream, dctx);
-    }
+        if (wcache_->nvfp4_decode_mode == 2 && !wcache_->fp16.empty()) {
+            nvfp4_decode_free_fp16_and_migrate_fp8_(remaining_budget, stream, dctx);
+        }
 
-    if (budget.nvfp4_second_pass && !nvfp4_entries.empty()) {
-        nvfp4_decode_second_pass_(budget, stream, dctx);
+        if (budget.nvfp4_second_pass && !nvfp4_entries.empty()) {
+            nvfp4_decode_second_pass_(budget, stream, dctx);
+        }
     }
 
     // Native-NVFP4 models store the LM head in FP16/BF16 — quantize it to an
     // NVFP4 decode-cache entry so decode uses the fast GEMV instead of a cuBLAS
     // FP16 GEMV over vocab×d_model (~0.78 ms/token, ~19% of decode on Qwen3-8B).
     // Run after dense quantize so the entry is committed before CUTLASS convert.
-    nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
+    if (!skip_decode_cache)
+        nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
 
     // Native-NVFP4 hybrids store some attention projections BF16 (recipe
     // exclusion). Opt-in (gemm.nvfp4_attn_proj) quantizes the q/k/v/o into the
     // same NVFP4 decode cache. Run after the LM head, before CUTLASS convert so
     // these entries get the same block-scaled treatment.
-    nvfp4_decode_cache_fp16_projections_(cfg, stream);
+    if (!skip_decode_cache)
+        nvfp4_decode_cache_fp16_projections_(cfg, stream);
 
     if (!wcache_->nvfp4.empty() && cutlass_sm120_nvfp4_available()) {
         nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
@@ -394,7 +410,8 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
 
     if (model_->profile().is_gpt_oss)
         gpt_oss_convert_moe_experts_(cfg, dctx);
-    nvfp4_decode_cache_moe_experts_(cfg, budget, remaining_budget, stream, dctx);
+    if (!skip_decode_cache)
+        nvfp4_decode_cache_moe_experts_(cfg, budget, remaining_budget, stream, dctx);
 }
 
 // Mode 2 ("only") incremental NVFP4 quantize. Process FP16-cached entries

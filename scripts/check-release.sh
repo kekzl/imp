@@ -3,18 +3,25 @@
 #
 # Runs the cheap checks that should always pass on a publishable
 # tree: doc links, secrets/path leaks, no accidentally tracked
-# binaries, then defers to `make verify-fast` for tests + perf + smoke
-# and to `make test-server` for the HTTP surface. Both rebuild the image first
-# (their `build` prerequisite), so both measure the tree in front of you.
+# binaries, then defers to `make verify-fast` for tests + perf + smoke,
+# to `make test-server` for the HTTP surface, and to `make test-spec-fidelity`
+# for the captured speculative verify chunk. All three rebuild the image first
+# (their `build` prerequisite), so all three measure the tree in front of you.
 #
-# Both model-backed stages are needed and neither substitutes for the other:
+# The three model-backed stages are needed and none substitutes for another:
 # verify-fast measures kernels and throughput, test-server is the ONLY place
 # handlers.cpp and batching_engine run end to end (Makefile, test-server).
 # A defect that only shows over HTTP passes verify-fast untouched — one did:
 # `response_format: json_schema` returned invalid JSON for months and this gate
 # reported OK every time, because it never asked the server anything.
+# test-spec-fidelity is the third such blind spot: it asserts a cached verify-
+# chunk graph still reproduces an eager forward of the same state, which nothing
+# else runs — the case skips inside every batched lane on a 32 GiB card because
+# the checkpoint plus a second forward does not fit behind another model
+# (measured: 15769 MiB free, needs ~26000), so without its own stage here it is
+# a gate nobody runs.
 #
-# SKIP_VERIFY=1 skips BOTH of them. The summary then refuses the words "all
+# SKIP_VERIFY=1 skips ALL THREE. The summary then refuses the words "all
 # gates passed" and says what it actually checked, because a run that put no
 # model in front of the GPU is a statement about the tree, not a release
 # verdict — the rule #1474 put into scripts/verify.sh, for the same reason.
@@ -417,13 +424,42 @@ else
     fi
 fi
 
+# ------------------------------------------ 8. defer to make test-spec-fidelity
+# The captured speculative verify chunk, which neither stage above touches.
+# It runs in its own container on purpose (Makefile, test-spec-fidelity): the
+# checkpoint plus the comparison's extra forward do not fit behind another
+# model, so in a batched lane the case skips and the lane still reports green.
+section "make test-spec-fidelity"
+if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+    echo "  (skipped via SKIP_VERIFY=1)"
+else
+    MODEL_STAGES_RUN=$((MODEL_STAGES_RUN+1))
+    if make test-spec-fidelity >/tmp/imp_check_release_specfid.log 2>&1; then
+        # A skip here is not a pass: the case gates itself on free VRAM, and a
+        # busy card would turn this stage into a green line that checked nothing.
+        if grep -q '\[  SKIPPED \]' /tmp/imp_check_release_specfid.log; then
+            echo "  log: /tmp/imp_check_release_specfid.log"
+            grep -A1 'Skipped' /tmp/imp_check_release_specfid.log | sed 's/^/  /' | head -4 || true
+            fail "make test-spec-fidelity (skipped — the card was not free enough to run it)"
+        else
+            pass "make test-spec-fidelity"
+        fi
+    else
+        echo "  log: /tmp/imp_check_release_specfid.log"
+        grep -E 'cached-graph replays|too few to judge' /tmp/imp_check_release_specfid.log |
+            sed 's/^/  /' || true
+        fail "make test-spec-fidelity"
+    fi
+fi
+
 # --------------------------------------------------------------------- end
 echo
 if [ "$FAIL" -eq 0 ] && [ "$MODEL_STAGES_RUN" -eq 0 ]; then
     # Exit 0 on purpose — see the header. The wording is the gate here: nobody
     # should be able to read this line as a release verdict.
     echo "${YLW}check-release: cheap checks passed — NOT a release verdict${RST}"
-    echo "         SKIP_VERIFY=1 skipped verify-fast and test-server, so no model ran."
+    echo "         SKIP_VERIFY=1 skipped verify-fast, test-server and test-spec-fidelity,"
+    echo "         so no model ran."
     echo "         Re-run without it before tagging."
     exit 0
 fi

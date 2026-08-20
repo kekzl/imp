@@ -884,6 +884,8 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_llm_compressor.cpp
         tests/test_chunked_prefill.cu
         tests/test_mtp_forward.cpp
+        tests/test_nvfp4_prefill_cache_knob.cpp
+        tests/test_spec_capture_fidelity.cpp
         tests/test_encoder_embed.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp

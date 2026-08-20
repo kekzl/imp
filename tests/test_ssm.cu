@@ -631,5 +631,207 @@ TEST(SSMScanTest, PrefillPaddedChunkDeviceLength) {
     cudaFree(d_dtb);
 }
 
+// ===========================================================================
+// Speculative-verify snapshots (#847 contract, Mamba2 side).
+//
+// A fully rejected draft chunk commits the state as of the chunk's FIRST row.
+// engine_spec_ngram.cpp adopts spec_snap_slab wholesale for that case, so both
+// halves of the slab — conv window and h_state — have to be written by the
+// chunk forward. The GDN path has done this since #847; these two lock the
+// Mamba2 path to the same contract. Both poison the snapshot buffer first, so
+// "never written" fails instead of passing on a zeroed buffer.
+// ===========================================================================
+
+TEST(SSMScanTest, PrefillSnapshotIsStateAtSnapRow) {
+    SKIP_IF_NO_CUDA();
+
+    constexpr int n_heads = 2;
+    constexpr int head_dim = 4;
+    constexpr int state_size = 8;
+    constexpr int n_groups = 1;
+    constexpr int inner = n_heads * head_dim;
+    constexpr int bc = n_groups * state_size;
+    constexpr int n_chunk = 4;  // t0 + 3 draft rows
+    constexpr int n_snap = 1;   // fully rejected: commit after the first row
+
+    std::vector<float> h_x(n_chunk * inner), h_B(n_chunk * bc), h_C(n_chunk * bc), h_dt(n_chunk * n_heads),
+        h_z(n_chunk * inner);
+    for (size_t i = 0; i < h_x.size(); i++)
+        h_x[i] = std::sin(0.37f * i);
+    for (size_t i = 0; i < h_B.size(); i++)
+        h_B[i] = std::cos(0.21f * i);
+    for (size_t i = 0; i < h_C.size(); i++)
+        h_C[i] = std::sin(0.11f * i + 1.0f);
+    for (size_t i = 0; i < h_dt.size(); i++)
+        h_dt[i] = 0.1f + 0.05f * (i % 7);
+    for (size_t i = 0; i < h_z.size(); i++)
+        h_z[i] = std::cos(0.53f * i);
+    std::vector<float> h_A(n_heads, -0.5f), h_D(n_heads, 0.3f), h_dtb(n_heads, 0.2f);
+
+    auto make_f32_gpu = [](const float* host, size_t n) {
+        float* d;
+        cudaMalloc(&d, n * sizeof(float));
+        cudaMemcpy(d, host, n * sizeof(float), cudaMemcpyHostToDevice);
+        return d;
+    };
+    float* d_A = make_f32_gpu(h_A.data(), n_heads);
+    float* d_D = make_f32_gpu(h_D.data(), n_heads);
+    float* d_dtb = make_f32_gpu(h_dtb.data(), n_heads);
+    int64_t head_shape[1] = {n_heads};
+    Tensor t_A(d_A, QType::F32, 1, head_shape, true);
+    Tensor t_D(d_D, QType::F32, 1, head_shape, true);
+    Tensor t_dtb(d_dtb, QType::F32, 1, head_shape, true);
+
+    const size_t h_elems = static_cast<size_t>(n_heads) * state_size * head_dim;
+    // A non-zero starting state: a snapshot that is silently left at zero must
+    // not be able to match the reference.
+    std::vector<float> h_init(h_elems);
+    for (size_t i = 0; i < h_elems; i++)
+        h_init[i] = 0.05f * std::sin(0.9f * i);
+
+    // Run n_tokens rows; return the committed h_state and (optionally) the snapshot.
+    auto run = [&](int n_tokens, const int* d_snap_n, std::vector<float>& h_out,
+                   std::vector<float>& snap_out) {
+        Tensor d_x = make_fp16_gpu(h_x.data(), {n_tokens, inner});
+        Tensor d_B = make_fp16_gpu(h_B.data(), {n_tokens, bc});
+        Tensor d_C = make_fp16_gpu(h_C.data(), {n_tokens, bc});
+        Tensor d_dt = make_fp16_gpu(h_dt.data(), {n_tokens, n_heads});
+        Tensor d_z = make_fp16_gpu(h_z.data(), {n_tokens, inner});
+        Tensor d_y = alloc_fp16_gpu({n_tokens, inner});
+        float *d_h, *d_snap = nullptr;
+        cudaMalloc(&d_h, h_elems * sizeof(float));
+        cudaMemcpy(d_h, h_init.data(), h_elems * sizeof(float), cudaMemcpyHostToDevice);
+        if (d_snap_n) {
+            cudaMalloc(&d_snap, h_elems * sizeof(float));
+            std::vector<float> poison(h_elems, 12345.0f);
+            cudaMemcpy(d_snap, poison.data(), h_elems * sizeof(float), cudaMemcpyHostToDevice);
+        }
+        ssm_scan_prefill(d_x, d_B, d_C, d_dt, t_A, t_D, t_dtb, d_h, d_y, d_z.data, n_tokens, n_heads,
+                         head_dim, state_size, n_groups, QType::F32, nullptr, nullptr, d_snap, d_snap_n);
+        cudaDeviceSynchronize();
+        h_out.resize(h_elems);
+        cudaMemcpy(h_out.data(), d_h, h_elems * sizeof(float), cudaMemcpyDeviceToHost);
+        if (d_snap) {
+            snap_out.resize(h_elems);
+            cudaMemcpy(snap_out.data(), d_snap, h_elems * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaFree(d_snap);
+        }
+        cudaFree(d_h);
+        free_tensor(d_x);
+        free_tensor(d_B);
+        free_tensor(d_C);
+        free_tensor(d_dt);
+        free_tensor(d_z);
+        free_tensor(d_y);
+    };
+
+    // Reference: the state after n_snap rows is what a scan of exactly n_snap
+    // rows commits.
+    std::vector<float> h_ref, unused;
+    run(n_snap, nullptr, h_ref, unused);
+
+    int* d_snap_n;
+    cudaMalloc(&d_snap_n, sizeof(int));
+    int snap_n = n_snap;
+    cudaMemcpy(d_snap_n, &snap_n, sizeof(int), cudaMemcpyHostToDevice);
+    std::vector<float> h_chunk, h_snap;
+    run(n_chunk, d_snap_n, h_chunk, h_snap);
+    cudaFree(d_snap_n);
+
+    ASSERT_EQ(h_snap.size(), h_elems);
+    for (size_t i = 0; i < h_elems; i++)
+        EXPECT_NEAR(h_ref[i], h_snap[i], 1e-5f) << "snapshot mismatch at i=" << i;
+    // The full-chunk commit must still be the state after all n_chunk rows —
+    // the snapshot is a second output, not a replacement.
+    bool differs = false;
+    for (size_t i = 0; i < h_elems && !differs; i++)
+        differs = std::fabs(h_chunk[i] - h_snap[i]) > 1e-4f;
+    EXPECT_TRUE(differs) << "chunk commit and row-" << n_snap
+                         << " snapshot are identical — the test proves nothing";
+
+    cudaFree(d_A);
+    cudaFree(d_D);
+    cudaFree(d_dtb);
+}
+
+TEST(SSMConv1dTest, PrefillSnapshotIsConvStateAtSnapRow) {
+    SKIP_IF_NO_CUDA();
+
+    constexpr int channels = 8;
+    constexpr int kernel_size = 4;
+    constexpr int n_chunk = 4;
+    constexpr int n_snap = 1;  // fully rejected draft: commit after row 0
+
+    std::vector<float> h_x(n_chunk * channels), h_w(channels * kernel_size), h_b(channels);
+    for (size_t i = 0; i < h_x.size(); i++)
+        h_x[i] = std::sin(0.41f * i);
+    for (size_t i = 0; i < h_w.size(); i++)
+        h_w[i] = 0.1f + 0.03f * (i % 5);
+    for (size_t i = 0; i < h_b.size(); i++)
+        h_b[i] = 0.01f * i;
+    // A non-zero pre-chunk conv window: with n_snap < kernel_size the snapshot
+    // has to pull its leading values from here.
+    std::vector<float> h_state_init(channels * kernel_size);
+    for (size_t i = 0; i < h_state_init.size(); i++)
+        h_state_init[i] = 0.2f * std::cos(0.7f * i);
+
+    Tensor d_w = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_b = make_fp16_gpu(h_b.data(), {channels});
+    const size_t st_elems = static_cast<size_t>(channels) * kernel_size;
+
+    auto run = [&](int n_tokens, const int* d_snap_n, std::vector<float>& st_out,
+                   std::vector<float>& snap_out) {
+        Tensor d_x = make_fp16_gpu(h_x.data(), {n_tokens, channels});
+        Tensor d_out = alloc_fp16_gpu({n_tokens, channels});
+        float *d_st, *d_prev = nullptr, *d_snap = nullptr;
+        cudaMalloc(&d_st, st_elems * sizeof(float));
+        cudaMemcpy(d_st, h_state_init.data(), st_elems * sizeof(float), cudaMemcpyHostToDevice);
+        if (d_snap_n) {
+            cudaMalloc(&d_prev, st_elems * sizeof(float));
+            cudaMemcpy(d_prev, h_state_init.data(), st_elems * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMalloc(&d_snap, st_elems * sizeof(float));
+            std::vector<float> poison(st_elems, 12345.0f);
+            cudaMemcpy(d_snap, poison.data(), st_elems * sizeof(float), cudaMemcpyHostToDevice);
+        }
+        ssm_conv1d_prefill(d_st, d_x, d_w, d_b, d_out, kernel_size, nullptr, nullptr, d_snap, d_snap_n,
+                           d_prev);
+        cudaDeviceSynchronize();
+        st_out.resize(st_elems);
+        cudaMemcpy(st_out.data(), d_st, st_elems * sizeof(float), cudaMemcpyDeviceToHost);
+        if (d_snap) {
+            snap_out.resize(st_elems);
+            cudaMemcpy(snap_out.data(), d_snap, st_elems * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaFree(d_snap);
+            cudaFree(d_prev);
+        }
+        cudaFree(d_st);
+        free_tensor(d_x);
+        free_tensor(d_out);
+    };
+
+    std::vector<float> st_ref, unused;
+    run(n_snap, nullptr, st_ref, unused);
+
+    int* d_snap_n;
+    cudaMalloc(&d_snap_n, sizeof(int));
+    int snap_n = n_snap;
+    cudaMemcpy(d_snap_n, &snap_n, sizeof(int), cudaMemcpyHostToDevice);
+    std::vector<float> st_chunk, st_snap;
+    run(n_chunk, d_snap_n, st_chunk, st_snap);
+    cudaFree(d_snap_n);
+
+    ASSERT_EQ(st_snap.size(), st_elems);
+    for (size_t i = 0; i < st_elems; i++)
+        EXPECT_NEAR(st_ref[i], st_snap[i], 1e-5f) << "conv snapshot mismatch at i=" << i;
+    bool differs = false;
+    for (size_t i = 0; i < st_elems && !differs; i++)
+        differs = std::fabs(st_chunk[i] - st_snap[i]) > 1e-4f;
+    EXPECT_TRUE(differs) << "chunk commit and row-" << n_snap
+                         << " conv snapshot are identical — the test proves nothing";
+
+    free_tensor(d_w);
+    free_tensor(d_b);
+}
+
 }  // namespace
 }  // namespace imp

@@ -31,6 +31,22 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`diagnostics.no_nvfp4_decode_cache` no longer changes prefill.** The knob is
+  a decode-side bisection tool, but its early return also skipped the CUTLASS
+  NVFP4 *prefill* conversion, so all 5935 cached tensors lost their prefill
+  payload and the dense FFN dropped from W4A4 to W4A16 — 9.165 against 9.051
+  perplexity on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4. Default behaviour
+  is unchanged; only the knob was over-broad.
+
+- **Speculative decoding no longer corrupts Mamba2 hybrids.** A fully rejected
+  draft chunk adopts the recurrent snapshot the chunk forward writes as of its
+  first row (#1459); the GDN path wrote that slab, the Mamba2 path never did, so
+  it committed uninitialised VRAM instead — 0 of 26 378 240 bytes written,
+  measured device-side. Output degenerated from the first fully rejected verify
+  and MTP acceptance on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 read 0 %
+  where the head actually drafts at 39 %. Affects any drafter, not just MTP.
+  Details and the before/after table: [`roadmap.md`](docs/roadmap.md).
+
 - **`runtime.cuda_graphs=never` now works on dense models.** The check sat inside
   the MoE branch of weight upload, so on any model without experts the value was
   read and never acted on while the dispatch line still printed `graphs=1`.

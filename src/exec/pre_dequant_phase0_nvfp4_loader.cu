@@ -538,16 +538,35 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
                          ct_count);
         }
         {
-            int n_ssm = 0;
+            // Report what this loop actually registered, not what the recurrent
+            // projections are assumed to be. The old line counted every
+            // ssm_in/ssm_out that exists and claimed all of them were in the
+            // NVFP4 decode cache with no FP16 source. On a mixed-precision
+            // Modelopt hybrid both halves are false: the projections are FP8 in
+            // the checkpoint, so register_prequant above never sees them; phase 1
+            // gives them an FP16 prefill companion; and phase 3 then excludes
+            // them from the NVFP4 cache outright ("GDN/SSM: excluding %d
+            // recurrent projections", pre_dequant_phase3_nvfp4_decode.cu). The
+            // handles measured on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+            // carry primary=FP16, prefill=FP16, no NVFP4 entry.
+            int n_ssm = 0, n_ssm_cached = 0;
             for (int i = 0; i < cfg.n_layers; i++) {
                 const auto& L = mut_model->layer(i);
-                if (L.ssm_in.data) n_ssm++;
-                if (L.ssm_out.data) n_ssm++;
+                if (L.ssm_in.data) {
+                    n_ssm++;
+                    n_ssm_cached += wcache_->nvfp4.count(L.ssm_in.data) ? 1 : 0;
+                }
+                if (L.ssm_out.data) {
+                    n_ssm++;
+                    n_ssm_cached += wcache_->nvfp4.count(L.ssm_out.data) ? 1 : 0;
+                }
             }
             if (n_ssm > 0)
-                IMP_LOG_INFO("GDN/SSM (native NVFP4): %d recurrent projections IN NVFP4 decode cache "
-                             "(no FP16 source exists; fast gemv_nvfp4_kpar at decode)",
-                             n_ssm);
+                IMP_LOG_INFO(
+                    "GDN/SSM: %d of %d recurrent projections registered in the NVFP4 "
+                    "decode cache here; the rest keep their source precision and take "
+                    "whatever prefill/decode tier phase 4 assigns",
+                    n_ssm_cached, n_ssm);
         }
     }
 }

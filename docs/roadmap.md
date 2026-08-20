@@ -824,7 +824,8 @@ Closed competitive records (kept for the record, not active work):
     its job**, and the honest reading of this entry is now "the head does not
     draft usefully on this model", not "speculation is expensive on this model".
 
-    **Two things that do not add up, recorded rather than guessed at:**
+    **Two things that did not add up, recorded rather than guessed at.** The
+    first is resolved below (2026-08-20); the second closed as #1497.
 
     - This entry documents **43.9 % top-1 accept at depth 1**; the serving path
       measures **0-9 %**. Those may not be the same quantity — the 43.9 % came
@@ -846,6 +847,62 @@ Closed competitive records (kept for the record, not active work):
            path=imp-server n=3 prompts x 2 alternating rounds
            cmd=`tools/analysis/mtp_k_sweep.sh` with MTP_MODEL set, counters from
            /metrics, give-up line from the server log]
+    ```
+
+    **Resolved 2026-08-20: the 0-9 % was a defect, and the two numbers are the
+    same quantity.** A fully rejected verify chunk takes the cheap path in
+    `engine_spec_ngram.cpp:1072-1079` — it adopts `spec_snap_slab`, the recurrent
+    state the chunk forward wrote as of its first row, instead of restoring the
+    pre-chunk slab and re-forwarding. `run_gdn` has written that slab since #847.
+    `run_ssm` never did: `ssm_scan_prefill` had no snapshot parameter at all and
+    the `ssm_conv1d_prefill` call passed none, so on a Mamba2 hybrid the slab was
+    never written, and `vram_alloc_` does not zero it. Every fully rejected verify
+    therefore committed uninitialised VRAM as the recurrent state. Measured
+    device-side with the slab poison-filled at allocation: **0 of 26 378 240 bytes
+    written by the chunk forward without the wiring, 26 302 836 (99.71 %) with
+    it.** The 0.29 % gap is the bytes that legitimately land on the poison value.
+
+    What that cost, on the same commit and checkpoint:
+
+    | | offline top-1 accept | serving accept | Nemotron k=1 decode |
+    |---|---:|---:|---:|
+    | before | 851/2097 = **40.6 %** | 0/24 = **0.0 %** | 354.80, 356.54 tok/s |
+    | after | 861/2097 = **41.1 %** | 590/1507, 587/1510 = **39.2 / 38.9 %** | 177.17, 175.12 tok/s |
+
+    The offline counter (`engine_scheduler.cpp:2069-2071`) scores, per eager
+    decode step, whether the head's depth-1 draft equals the token the main model
+    then emits. The serving counter (`engine_spec_ngram.cpp:1119-1120`, exported
+    at `metrics_memory.cpp:85,88`) counts, per verify chunk, how many of the K
+    drafts equal the verify forward's argmax at their row. At k=1 those are the
+    same question, and they now answer it the same way. Before the fix they could
+    not: the first fully rejected verify destroyed the state, the emitted stream
+    degenerated (`Here's` then 300 x `0`), and nothing could match afterwards —
+    which is also why the acceptance-poor floor fired after exactly 8 verifies and
+    made the feature look like it cost only 2 %.
+
+    **The economics verdict does not change, only its reason.** With the guard
+    disabled, k=1 now runs speculation for the whole generation and costs **-51 %**
+    (176 vs 363 tok/s); with the shipped guard it lands at 258-341 tok/s, because
+    1.41 emitted per verify sits on the 1 + 0.40k break-even and the verdict flips
+    between runs. The drafter was never the problem; the verify chunk is.
+
+    **Not MTP-specific.** The same branch runs for any drafter. With
+    `speculative.mtp_k=0` and n-gram/suffix drafting on this model, the pre-fix
+    build derails into unrelated prose after the first fully rejected verify
+    (`Here's a thinking process:\n\n1.  **0.5\n- 1.0,The, 2015). The first step in
+    the process of creating a new product ...`, 1/79 accepted) where the fixed
+    build stays on task (13/120 accepted).
+
+    ```
+    [PROV: commit=8a7f2763 date=2026-08-20 hw=RTX5090
+           model=NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 quant=NVFP4 cuda=13.3
+           path=spec-verify/mtp-draft
+           cmd=`imp-server --think-budget 0 --set speculative.ngram=false --set
+                speculative.mtp_k=1 --set speculative.mtp_econ_min_emit=0 --set
+                server.prefix_cache=false`, 3 prompts x 700 max_tokens; offline arm
+                `imp-cli --mtp-spec-decode 1 --set speculative.hybrid=false` on the
+                same 3 prompts
+           n=2 per arm, arms alternated, fresh process per arm]
     ```
 
     **The reason is now unambiguous, and it changed with #1389.** Measured before that fix, when the main decode was graph-demoted at 126 tok/s, MTP cost only -1.3 % at k=1 — draft and decode were both eager, so a draft step was priced like a decode step. With graphs restored the main decode is ~2.75 ms/token while the draft still runs eager (`mtp_forward.cu`: "drafts run outside graph capture for now", three `cudaStreamSynchronize` per draft token). A draft step now costs roughly a *whole* decode step despite the head being a fraction of the model, so every speculative token is a bad trade.

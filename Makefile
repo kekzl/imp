@@ -82,7 +82,7 @@ DEV_CMAKE_ARGS = -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON -DIMP_BUILD_TOO
                  -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
                  -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json
 
-.PHONY: dev dev-image dev-test dev-clean
+.PHONY: dev dev-image dev-test dev-clean test-spec-fidelity
 
 # Toolchain-only image (compiler + pinned deps, no source). Always re-runs
 # rather than guarding on `docker image inspect`: fully cached this costs ~1 s,
@@ -164,7 +164,22 @@ test-e2e: build
 		-e IMP_TEST_MODEL_GEMMA4=/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf \
 		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
 		-e IMP_TEST_MODEL_MODELOPT_CODER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
-		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:*DetEvalE2ETest*"
+		-e IMP_TEST_MODEL_SSM=/models/Nemotron-3-Nano-30B-A3B-NVFP4 \
+		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:SpecCaptureFidelityTest.*:*DetEvalE2ETest*"
+
+# Speculative capture fidelity (gate 3). Its own container because the check
+# runs a second full forward per verify step against a 20 GiB checkpoint: after
+# the model battery has loaded anything, a 32 GiB card has ~15.7 GiB free and the
+# case skips on its VRAM precondition, the same way MtpForwardTest does. ~70 s.
+#   IMP_TEST_MODEL_SPEC_FIDELITY=<dir>  point it at another checkpoint; a
+#   nemotron_h one is expected to FAIL (13.4 % of replays disagree, see
+#   docs/LIMITATIONS.md).
+test-spec-fidelity: build
+	docker run --rm --gpus all -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL_SPEC_FIDELITY=$(SPEC_FIDELITY_MODEL) \
+		$(DOCKER_IMG) test-e2e --gtest_filter="SpecCaptureFidelityTest.CachedGraphMatchesEagerForward"
+
+SPEC_FIDELITY_MODEL ?= /models/Qwen3.8-27B-NVFP4
 
 # Vision GPU golden (R9 / #583): SigLIP + gemma4v encoder + projector tail.
 # Mounts $(HOME)/models (symlink targets resolve) + the committed fixture.

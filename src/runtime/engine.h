@@ -299,6 +299,18 @@ public:
     }
     void mtp_accuracy_reset() noexcept;  // also resets MTP KV cache pos
 
+    // Capture-fidelity tallies (diagnostics.spec_capture_fidelity). checked is
+    // the number of cached-graph replays compared against an eager forward of
+    // the same state; differing counts those whose row-0 argmax disagreed.
+    struct SpecCaptureFidelity {
+        long long checked = 0;
+        long long differing = 0;
+        double max_delta = 0.0;
+    };
+    SpecCaptureFidelity spec_capture_fidelity() const noexcept {
+        return {spec_fidelity_checked_, spec_fidelity_differing_, spec_fidelity_max_delta_};
+    }
+
     // Accessors for C API
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }
     KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
@@ -1025,6 +1037,10 @@ private:
     // the slab is restored and the accepted prefix re-forwarded).
     void* spec_state_scratch_ = nullptr;
     void* spec_state_snap_ = nullptr;  // mid-chunk recurrent snapshot (row 0)
+    // diagnostics.spec_capture_fidelity tallies (see the flag in dispatch_policy.h).
+    long long spec_fidelity_checked_ = 0;
+    long long spec_fidelity_differing_ = 0;
+    double spec_fidelity_max_delta_ = 0.0;
     int* d_spec_snap_n_ = nullptr;     // device row count the snapshot is taken at
     size_t spec_state_scratch_bytes_ = 0;
     bool ensure_spec_state_scratch_();

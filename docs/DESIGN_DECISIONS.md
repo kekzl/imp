@@ -86,8 +86,11 @@ performance check.
 
 **Why:** the economics are per-model and were measured both ways. Prompt-lookup
 n-gram is default-on for batch-1 greedy dense because its drafts are free. The
-MTP head on Nemotron-3.5 accepts 43.9 % at depth 1 and still costs 32 % of
-decode, because a draft step runs eager while the main decode runs in a graph.
+MTP head on Nemotron-3.5 accepts 41 % at depth 1 offline and 39 % on the serving
+path, and still costs 51 % of decode: the drafts are good, the verify chunk is
+what does not pay (~1.41 tokens emitted per chunk). Until 2026-08-20 the serving
+figure read 0-9 %, which was an unwritten recurrent snapshot rather than the
+head — the arithmetic below did not depend on it, and does not change.
 NVIDIA's own DSpark drafter measures -42 % in vLLM on the same card. A verify
 step there costs about four decode steps and returns 1.7 tokens.
 

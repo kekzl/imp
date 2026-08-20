@@ -45,6 +45,9 @@
 #include "exec/executor.h"
 #include "runtime/engine.h"
 
+#include <cmath>
+#include <vector>
+
 #include <cuda_runtime.h>
 #include <algorithm>
 
@@ -189,6 +192,58 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
     const int rec_slot = state.ssm_state ? state.ssm_seq_id : -1;
     auto& slot = spec_graphs_[{state.n_tokens, state.ctx_capacity, rec_slot}];
     if (slot.exec) {
+        // diagnostics.spec_capture_fidelity: a cached graph must compute the same
+        // thing an eager forward of the same state computes. Run eager, restore
+        // the recurrent slab from the pre-chunk copy (a non-hybrid needs no
+        // restore — re-running the chunk rewrites the same KV rows with the same
+        // inputs), replay the cached graph, diff the row-0 logits. Generation
+        // continues from the graph, so a run under this flag still produces what
+        // production would. Measured 2026-08-20: 0/400 differing on
+        // Qwen3.8-27B-NVFP4 and Qwen3.6-35B-A3B-NVFP4, 45/400 on
+        // NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4.
+        if (runtime_config_.diagnostics.spec_capture_fidelity && model_) {
+            const bool hybrid_restore = state.ssm_state != nullptr && spec_state_scratch_ != nullptr &&
+                                        rec_slot >= 0;
+            const size_t vocab = static_cast<size_t>(model_->config_.vocab_size);
+            std::vector<float> eager(vocab), graph(vocab);
+            executor_->forward_logits(state, logits_out, stream);
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpy(eager.data(), logits_out.data, vocab * sizeof(float), cudaMemcpyDeviceToHost));
+            if (hybrid_restore) {
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
+                                                   ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice,
+                                                   stream));
+            }
+            if (cudaGraphLaunch(slot.exec, stream) == cudaSuccess) {
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+                IMP_CUDA_CHECK_LOG(
+                    cudaMemcpy(graph.data(), logits_out.data, vocab * sizeof(float), cudaMemcpyDeviceToHost));
+                size_t ie = 0, ig = 0;
+                double mx = 0.0;
+                for (size_t i = 0; i < vocab; i++) {
+                    const double d = std::fabs(static_cast<double>(eager[i]) - static_cast<double>(graph[i]));
+                    if (d > mx)
+                        mx = d;
+                    if (eager[i] > eager[ie])
+                        ie = i;
+                    if (graph[i] > graph[ig])
+                        ig = i;
+                }
+                spec_fidelity_checked_++;
+                if (mx > spec_fidelity_max_delta_)
+                    spec_fidelity_max_delta_ = mx;
+                if (ie != ig) {
+                    spec_fidelity_differing_++;
+                    IMP_LOG_WARN(
+                        "[spec-capture] cached graph disagrees with an eager forward of the "
+                        "same state: argmax %zu vs %zu, max|dlogit|=%.4f (checked=%lld "
+                        "differing=%lld)",
+                        ig, ie, mx, spec_fidelity_checked_, spec_fidelity_differing_);
+                }
+                return true;
+            }
+        }
         cudaError_t err = cudaGraphLaunch(slot.exec, stream);
         if (err == cudaSuccess)
             return true;
