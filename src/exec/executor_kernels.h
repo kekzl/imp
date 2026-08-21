@@ -34,9 +34,6 @@ __global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const h
                                                                          const half* __restrict__ b,
                                                                          half* __restrict__ out, int64_t n);
 
-__global__ __launch_bounds__(256) void fp32_accum_add_fp16_kernel(float* __restrict__ accum,
-                                                                  const half* __restrict__ branch, int64_t n);
-
 __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float* __restrict__ in,
                                                                     half* __restrict__ out, int rows,
                                                                     int cols);

@@ -36,6 +36,12 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A kernel whose only caller was its own test.** `fp32_accum_add_fp16_kernel` had
+  a declaration, a definition and a green test, and no production launch site. Every
+  existing dead-code check read it as covered: the decl-only sweeps filter on two
+  mentions, the header-inline gate filters on header definitions, and a caller query
+  finds the test. Removed with its test.
+
 - **Ten sites logged at FATAL and then carried on.** `IMP_LOG_FATAL` only writes a
   log line; `IMP_CHECK` is the only thing that aborts. One reported
   `WeightRegistry::handle: id out of range` and indexed out of range on the next

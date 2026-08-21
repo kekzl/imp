@@ -71,16 +71,6 @@ __global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const h
     }
 }
 
-// FP32 accumulator += FP16 branch: accum[i] += __half2float(branch[i])
-__global__ __launch_bounds__(256) void fp32_accum_add_fp16_kernel(float* __restrict__ accum,
-                                                                  const half* __restrict__ branch,
-                                                                  int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        accum[idx] += __half2float(branch[idx]);
-    }
-}
-
 // Convert FP32 → FP16 with per-row dynamic scaling.
 // Each row is independently scaled so max_abs maps to ≤65000, preserving
 // the ratio between elements.  Since subsequent operations (RMSNorm) are
