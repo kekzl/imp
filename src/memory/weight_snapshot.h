@@ -140,12 +140,6 @@ public:
     // resume — proves warm and cold uploads mix byte-safely.
     bool drop_key(const std::string& key) { return blobs_.erase(key) > 0; }
 
-    // Builder API for the on-disk warm cache (memory/weight_cache_file.cpp):
-    // assembles a snapshot from deserialized records instead of a live capture.
-    void builder_set_identity(int arch_id, int n_layers) {
-        arch_id_ = arch_id;
-        n_layers_ = n_layers;
-    }
     // Zero-copy variant: blob bytes are VIEWS into an mmap the snapshot takes
     // ownership of via builder_set_mmap (munmapped in the destructor).
     void builder_add_views(WeightUploadRecord rec, std::vector<const uint8_t*> views) {

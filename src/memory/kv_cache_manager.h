@@ -144,7 +144,6 @@ public:
 
     // Cap on unique pin_prefix-pinned blocks. 0 = unlimited (default).
     void set_pin_budget_blocks(int blocks) { pin_budget_blocks_ = blocks; }
-    int pin_budget_blocks() const { return pin_budget_blocks_; }
 
     // Cached (unreferenced) blocks that are actually reclaimable, i.e.
     // excluding pinned blocks. O(1).
@@ -278,9 +277,6 @@ public:
 
     bool residual_enabled() const { return residual_pool_ != nullptr; }
     int residual_n_tokens() const { return residual_n_tokens_; }
-    int residual_max_seqs() const { return residual_max_seqs_; }
-    int residual_n_kv_heads() const { return residual_n_kv_heads_; }
-    int residual_head_dim() const { return residual_head_dim_; }
 
     // Per-(seq, layer) K/V pointer into the residual pool. Returns nullptr if
     // residual is not enabled, seq_id has no allocated slot, or layer is out

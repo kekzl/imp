@@ -179,7 +179,6 @@ public:
     // Returns adapter id >= 1, or 0 on failure. id 0 = base model.
     int lora_load(const std::string& path);
     bool lora_set(int id);  // 0 deactivates
-    int lora_active() const { return active_lora_; }
 
     // Reset batch pool upload cache (call on context_reset to prevent
     // stale block table pointers when KV blocks are reused)

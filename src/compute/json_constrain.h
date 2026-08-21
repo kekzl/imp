@@ -90,9 +90,6 @@ public:
     // Check if initialized
     bool is_initialized() const { return initialized_; }
 
-    // Get max tokens to finish (force-close open structures near limit)
-    int closing_tokens_needed() const { return static_cast<int>(state_stack_.size()); }
-
     // Strict-simulate `text` from the current state without mutating it —
     // true iff every char is a legal grammar continuation. Public for the
     // FSM unit tests; apply_mask uses it for whole-token validation.

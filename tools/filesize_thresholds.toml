@@ -46,40 +46,49 @@ header_ext = [".cuh", ".hpp", ".h"]
 # Directory roots scanned by the audit + the gate.
 roots = ["src", "tools", "tests"]
 
-# Allowlist: files that EXCEED their hard-review threshold today and are accepted
-# into the baseline so CI is green WITHOUT splitting anything in this change.
-# Every entry MUST carry a non-empty reason (the gate rejects an empty value).
-# Classification letter: (a) bundles multiple independent concepts → split candidate;
-# (b) explicit template instantiations/specializations inline; (c) legitimately
-# monolithic (one cohesive unit / one test target). "split candidate" marks the
-# (a) entries that should eventually be broken up — they are allowlisted, not blessed.
 [allow]
-"src/compute/attention_fmha_sm120.cu" = "(c) 1436 code LOC — single FA2 attention family (base/fp8/fa2 variants) sharing one smem layout"
-"src/compute/attention_paged.cu" = "(c) 1134 code LOC — one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster — shared block/KV layout"
-"src/compute/attention_paged_nvfp4_tc.cu" = "(c) 845 code LOC — NVFP4 tensor-core paged-attn family (decode/splitk/reduce) — shared TC path"
-"src/compute/attention_fmha_mxfp4_sm120.cu" = "(c) 810 code LOC — single MXFP4 FA2 attention kernel family"
-"src/compute/gemm.cu" = "(c) 613 code LOC — one module: generic cuBLAS GEMM wrapper + algo-reselect/fallback chain + packed-weight leak guards (pushed over 600 by the #925 defense-in-depth guards)"
-"src/compute/gemm_dp4a.cu" = "(c) 601 code LOC — one dp4a q8_1 family: activation/rmsnorm quantize kernels + the per-qtype GEMV launcher set (pushed to 601 by the 2026-07-17 post-launch error checks)"
-"src/compute/gemm_grouped_nvfp4_smallM.cu" = "(c) 718 code LOC — one small-M grouped-GEMM family (software-ref + prod + smoke variants)"
-"src/compute/schema_constrain.cu" = "(c) 1146 code LOC — schema-constrained decode token-mask compute (host-side): the shared frame-stack simulator now carries TWO body grammars (JSON schema + Qwen-Coder XML tool calls) around one sim_advance source of truth; split candidate if a third grammar lands"
-"src/compute/mtp_forward.cu" = "(c) 651 code LOC — MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature"
-"src/exec/executor_workspace_buffers.cu" = "(c) 906 code LOC — one concern: executor scratch/workspace sizing+allocation (host-only)"
-"src/exec/executor_forward_moe_batch.cu" = "(c) 872 code LOC — one path: batched-MoE forward dispatch (host-only)"
-"src/exec/executor_forward.cu" = "(c) 712 code LOC — executor forward orchestration (one dense forward path + 2 scale helpers)"
-"src/model/jinja.cpp" = "(c) 2295 code LOC — one cohesive Jinja2 engine: Value + Lexer + Parser + Evaluator"
-"src/model/tokenizer.cpp" = "(c) 1800 code LOC — one tokenizer: BPE/SPM/WordPiece encode + merge + cache (JSON parsing now via shared model/json_util)"
-"src/model/weight_upload.cu" = "(c) 1658 code LOC — one upload pipeline: pinned staging + checked malloc + tensor load orchestration"
-"src/compute/json_schema.cpp" = "(c) 1158 code LOC — one module: JSON-schema parser + RegexNfa compiler/executor for constrained decode"
-"src/model/safetensors_loader.cpp" = "(c) 1147 code LOC — one loader: header validation + tensor assign + arch inference"
-"src/runtime/engine_scheduler.cpp" = "(c) 1074 code LOC — one scheduler: prefill/decode scheduling + chunked exec + perplexity capture"
-"src/model/weight_map.cpp" = "(c) 966 code LOC — one mapping module: weight-name parse + layer-index + arch inference"
-"src/model/hf_config_loader.cpp" = "(tu) 810 code LOC — central HF config→ModelConfig parser; one accreting block per arch (MLA/YaRN/MoE/SWA/rope); splitting scatters the single parse flow"
-"src/model/gguf_loader.cpp" = "(a->c) 812 code LOC — the (a) split already happened: gguf_parse.cpp + gguf_tensor_assign.cpp came out of it and left 788 (AUDIT_FILESIZE.md). The residue is one linear load flow (mmap, header, metadata -> ModelConfig, shard stitch, tensor wiring) like the allowlisted safetensors_loader.cpp, and the file is in maintenance mode per its own header. Crossed 800 with the #1324 declared-layers consistency check."
-"src/runtime/cuda_graph.cu" = "(c) 863 code LOC — one module: graph capture/mode-resolve + PDL edges + barrier insert + replay"
-"src/memory/kv_cache_manager.cpp" = "(c) 852 code LOC — one manager: block alloc + residual pool + prefix cache + eviction"
-"tests/test_quant_integration.cu" = "(c) 1442 code LOC — 24 tests, all exercising the quant_gemm/dequant unit — one test target"
-"tests/test_gemm_kernel_registry.cu" = "(c) 1214 code LOC — 40 tests of the gemm_kernel_registry dispatch contract — one test target"
-"tests/test_paged_attention.cu" = "(c) 982 code LOC — 14 tests of the paged-attention kernel — one test target"
-"tests/test_kv_cache.cpp" = "(c) 951 code LOC — 56 tests across KV allocator/cache/manager — one test target"
-"tests/test_gdn.cu" = "(c) 942 code LOC — 11 tests of the GDN state-recurrent module — one test target"
-"src/compute/gemv_dp4a_traits.cuh" = "(b) 1295 code LOC — trait-based template library: 8 DequantTraits<> specializations + 6 template GEMV kernels, consolidating ~33 hand-written kernels (header — wide include blast radius)"
+# Allowlist: files that EXCEED their hard-review threshold today and are accepted
+# into the baseline. An entry is a CEILING, not an exemption: `code_loc` is the
+# measured code LOC at the time of pinning and the gate fails when the file drifts
+# from it in either direction. Re-pin with `python3 tools/check_filesize.py --update`
+# and say in the PR body which way it moved.
+#
+# Why the ceiling exists: before 2026-08-21 an [allow] entry removed the file from
+# the gate entirely, so the 29 allowlisted files were the only ones in the tree with
+# no size limit at all - exactly the files where recompile blast radius is worst.
+# Sixteen had grown past the code-LOC figure their own reason cited, `engine_scheduler.cpp`
+# by 83 % (1074 -> 1962), with every CI run green throughout.
+#
+# `reason` is mandatory (an empty one is rejected) and no longer carries the LOC
+# figure, because that is the part that went stale. Classification letter:
+# (a) bundles independent concepts -> split candidate; (b) explicit template
+# instantiations inline; (c) legitimately monolithic (one cohesive unit / test target).
+"src/compute/attention_fmha_mxfp4_sm120.cu" = { code_loc = 1520, reason = "(c) single MXFP4 FA2 attention kernel family" }
+"src/compute/attention_fmha_sm120.cu" = { code_loc = 1480, reason = "(c) single FA2 attention family (base/fp8/fa2 variants) sharing one smem layout" }
+"src/compute/attention_paged.cu" = { code_loc = 1196, reason = "(c) one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster - shared block/KV layout" }
+"src/compute/attention_paged_nvfp4_tc.cu" = { code_loc = 848, reason = "(c) NVFP4 tensor-core paged-attn family (decode/splitk/reduce) - shared TC path" }
+"src/compute/gemm.cu" = { code_loc = 727, reason = "(c) one module: generic cuBLAS GEMM wrapper + algo-reselect/fallback chain + packed-weight leak guards (pushed over 600 by the #925 defense-in-depth guards)" }
+"src/compute/gemm_dp4a.cu" = { code_loc = 601, reason = "(c) one dp4a q8_1 family: activation/rmsnorm quantize kernels + the per-qtype GEMV launcher set (pushed to 601 by the 2026-07-17 post-launch error checks)" }
+"src/compute/gemm_grouped_nvfp4_smallM.cu" = { code_loc = 693, reason = "(c) one small-M grouped-GEMM family (software-ref + prod + smoke variants)" }
+"src/compute/gemv_dp4a_traits.cuh" = { code_loc = 1320, reason = "(b) trait-based template library: 8 DequantTraits<> specializations + 6 template GEMV kernels, consolidating ~33 hand-written kernels (header - wide include blast radius)" }
+"src/compute/json_schema.cpp" = { code_loc = 1034, reason = "(c) one module: JSON-schema parser + RegexNfa compiler/executor for constrained decode" }
+"src/compute/mtp_forward.cu" = { code_loc = 855, reason = "(c) MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature" }
+"src/compute/schema_constrain.cu" = { code_loc = 1181, reason = "(c) schema-constrained decode token-mask compute (host-side): the shared frame-stack simulator now carries TWO body grammars (JSON schema + Qwen-Coder XML tool calls) around one sim_advance source of truth; split candidate if a third grammar lands" }
+"src/exec/executor_forward.cu" = { code_loc = 732, reason = "(c) executor forward orchestration (one dense forward path + 2 scale helpers)" }
+"src/exec/executor_forward_moe_batch.cu" = { code_loc = 1061, reason = "(c) one path: batched-MoE forward dispatch (host-only)" }
+"src/exec/executor_workspace_buffers.cu" = { code_loc = 1348, reason = "(c) one concern: executor scratch/workspace sizing+allocation (host-only)" }
+"src/memory/kv_cache_manager.cpp" = { code_loc = 1200, reason = "(c) one manager: block alloc + residual pool + prefix cache + eviction" }
+"src/model/gguf_loader.cpp" = { code_loc = 812, reason = "(a->c) the (a) split already happened: gguf_parse.cpp + gguf_tensor_assign.cpp came out of it and left 788 (AUDIT_FILESIZE.md). The residue is one linear load flow (mmap, header, metadata -> ModelConfig, shard stitch, tensor wiring) like the allowlisted safetensors_loader.cpp, and the file is in maintenance mode per its own header. Crossed 800 with the #1324 declared-layers consistency check." }
+"src/model/hf_config_loader.cpp" = { code_loc = 943, reason = "(tu) central HF config→ModelConfig parser; one accreting block per arch (MLA/YaRN/MoE/SWA/rope); splitting scatters the single parse flow" }
+"src/model/jinja.cpp" = { code_loc = 2294, reason = "(c) one cohesive Jinja2 engine: Value + Lexer + Parser + Evaluator" }
+"src/model/safetensors_loader.cpp" = { code_loc = 1088, reason = "(c) one loader: header validation + tensor assign + arch inference" }
+"src/model/tokenizer.cpp" = { code_loc = 1801, reason = "(c) one tokenizer: BPE/SPM/WordPiece encode + merge + cache (JSON parsing now via shared model/json_util)" }
+"src/model/weight_map.cpp" = { code_loc = 1068, reason = "(c) one mapping module: weight-name parse + layer-index + arch inference" }
+"src/model/weight_upload.cu" = { code_loc = 1999, reason = "(c) one upload pipeline: pinned staging + checked malloc + tensor load orchestration" }
+"src/runtime/cuda_graph.cu" = { code_loc = 1046, reason = "(c) one module: graph capture/mode-resolve + PDL edges + barrier insert + replay" }
+"src/runtime/engine_scheduler.cpp" = { code_loc = 1962, reason = "(c) one scheduler: prefill/decode scheduling + chunked exec + perplexity capture" }
+"tests/test_gdn.cu" = { code_loc = 1026, reason = "(c) 12 tests of the GDN state-recurrent module - one test target" }
+"tests/test_gemm_kernel_registry.cu" = { code_loc = 1259, reason = "(c) 41 tests of the gemm_kernel_registry dispatch contract - one test target" }
+"tests/test_kv_cache.cpp" = { code_loc = 1159, reason = "(c) 59 tests across KV allocator/cache/manager - one test target" }
+"tests/test_paged_attention.cu" = { code_loc = 1202, reason = "(c) 26 tests of the paged-attention kernel - one test target" }
+"tests/test_quant_integration.cu" = { code_loc = 1470, reason = "(c) 25 tests, all exercising the quant_gemm/dequant unit - one test target" }
