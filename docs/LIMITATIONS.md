@@ -443,12 +443,59 @@ These have a code path and no gate. They may work; nothing proves it.
   [PROV: commit=2a049185 date=2026-08-21 hw=RTX5090 model=Qwen3.8-27B-NVFP4
    cmd=`--set speculative.mtp_k={0,1} --set speculative.ngram=false --set server.prefix_cache=false --set runtime.deterministic_gemm=true --think-budget 0`
    note=six prompts, max_tokens 600, temperature 0, top_k 1; dump-step counts from `diagnostics.dump_hidden_dir`]
-  **Consequence: `speculative.mtp_k` stays 0 by default**, despite the +21.3 %
-  it measures on this model ([`roadmap.md`](roadmap.md)). A throughput win that
-  truncates a third of answers is not a win, and the cheap escape does not
-  exist: MTP is either fast and wrong, or correct and slower than no speculation
-  at all. Closing this needs the chunk path to agree with decode numerically,
-  which is a kernel change, not a flag.
+  **2026-08-21, fourth pass: a stop-decision guard was built, measured and
+  removed. The ordinary decode path agrees that the turn is over.** The one
+  approach the three earlier passes had not tried was to stop trusting the chunk
+  row's stop decision at all: when a verify chunk row's argmax is a stop token,
+  drop that row and hand the position to the ordinary single-row decode path
+  instead. This does not ask what a non-speculative run would have done, since
+  that trajectory no longer exists; it asks whether the non-chunk path, from
+  this same state, also ends the turn.
+
+  It does. One build, six prompts, two fresh processes per arm:
+
+  | arm | degenerate | guard fires |
+  |---|---|---|
+  | guard on, parity off | 2 / 6, 2 / 6 | 8 in 898 verify steps (0.89 %) |
+  | guard on, parity on | 1 / 6, 1 / 6 | 4 in 1126 verify steps (0.36 %) |
+
+  Identical to the same arms without it. The decisive line is in the per-request
+  counters rather than the totals: on the truncating prompt the guard fired
+  **twice in that request's 24 verify steps**, so the position really was handed
+  to the decode path, and the answer still ended at exactly 164 bytes. The
+  confident stop is a property of the state, not of the projection that reads it.
+
+  Cost, paired alternating arms, two rounds: k=0 88.36 / 88.51, parity 106.74 /
+  105.65, parity + guard 105.50 / 104.34. The guard is **+18.6 % over k=0** and
+  1.2 % below parity alone, so it was affordable. It was removed anyway, on the
+  same standard that removed sites 3 and 4 above: it does not change the count.
+
+  Its fire rate also disagrees with the 0.22 % predicted from the EOS-proposal
+  trace in the second pass, by a factor of 1.6 to 4. The trace counted proposals
+  it could see; the guard counts every chunk row whose argmax is a stop token
+  outside a think block. The larger number is the real one.
+
+  **This closes the line.** Four independent approaches have now been measured
+  against this truncation: per-kernel parity at four sites, routing the chunk off
+  the overlay, a fused multi-row SwiGLU, and this guard. None reaches 0 / 6, and
+  the third pass above explains why none of them could: the truncation is one
+  outcome of a divergence that has already happened on every prompt by byte 271.
+
+  [PROV: commit=fa21f28e date=2026-08-21 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+   cmd=`tools/analysis/mtp_truncation_check.sh 1` with `MTP_EXTRA_SET` per arm; guard built locally, not in the tree
+   note=six prompts, max_tokens 400, temperature 0, top_k 1; throughput from three 400-token requests per arm, arms alternated]
+  **Consequence: `speculative.mtp_k` stays 0 by default**, despite the +18.6 to
+  +21.3 % it measures on this model ([`roadmap.md`](roadmap.md)). A throughput
+  win that truncates one answer in six is not a win.
+
+  The sentence this paragraph used to end on - *"closing this needs the chunk
+  path to agree with decode numerically, which is a kernel change, not a flag"* -
+  is **refuted**. Three of the four kernels now agree and the count did not fall;
+  the fourth pass handed the stop decision to the decode path itself and the
+  count did not fall either. Numerical agreement is not what stands between MTP
+  and a shippable default. What stands there is that speculation puts this model
+  on a different trajectory from byte 48 onward on every prompt, and one
+  trajectory in six ends early.
 
   *Caveat this places on that +21.3 %:* the two arms do not generate the same
   text, and the speculative arm sometimes stops early, so the comparison is
