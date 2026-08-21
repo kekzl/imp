@@ -285,6 +285,50 @@ These have a code path and no gate. They may work; nothing proves it.
   batched path (it re-reads the 5120x17408 weight per row) **and it did not
   change the count** - it was removed rather than shipped.
 
+  **2026-08-21, second pass: closing the remaining sites does NOT reduce the
+  count, and that refutes the framing this entry rests on.** Sites 3 and 4 were
+  both built and both proven live (a one-shot log line each, `n=3`), on one
+  build, six prompts, two fresh processes per arm:
+
+  | arm | degenerate | which prompts |
+  |---|---|---|
+  | parity off | 2 / 6 | 1, 4 |
+  | site 1 (K-reduction width) | 1 / 6 | 1 |
+  | sites 1 + 4 (QK-norm/RoPE fusion) | 1 / 6 | 1 |
+  | sites 1 + 3 + 4 (+ SwiGLU fusion) | **2 / 6** | 1, **3** |
+
+  Stable within an arm across fresh processes, different prompts between arms.
+  So the divergences are not accumulating toward agreement: each perturbation
+  reshuffles which prompts fall over. That is the signature of a **marginal stop
+  decision** - the bonus token off the last chunk row is near-tied between
+  continuing and `<|im_end|>` at those positions, and any numerical change moves
+  a different subset across the line.
+
+  Consequence for this entry: "closing this needs the chunk path to agree with
+  decode numerically" is not established. Three of the four sites now agree and
+  the count did not fall. Sites 3 and 4 are **not shipped** - they add kernels
+  and complexity for no measured benefit, and site 3 makes it worse. Only site 1
+  ships, and it ships because it is free and faster, not because 1 / 6 is a
+  proven improvement over 2 / 6 on six prompts.
+
+  One caveat that survives and points somewhere: routing the chunk off the
+  overlay entirely (`verify_nvfp4_gemm=false`) reaches 0 / 6 including prompt 1,
+  which no parity arm does. So something about the overlay path is not captured
+  by per-kernel agreement with decode. The engine's `n == 1` path is
+  pervasively fused - QKV, gate/up, o, down, QK-norm+RoPE each have their own
+  `n == 1` branch - so a verify chunk is a different execution graph rather than
+  the same graph at a different width. Reaching real parity is that
+  architecture, not four kernels.
+
+  **Correction to the cost figure below.** The -27.7 % measured for a fused
+  multi-row SwiGLU was a property of the implementation, not of the fix: the
+  first version called the single-row helper once per activation row, i.e. MR
+  full sweeps of the 5120x17408 down weight, and its own comment claimed the
+  weight "cannot be hoisted without changing the accumulation". That is wrong -
+  micro-block outer, rows inner gives each row the same fma sequence. The
+  rewritten version hoists correctly. It still is not shipped, for the reason
+  above: it does not help.
+
   Also corrected: `verify_nvfp4_gemm=false` does NOT make the verify chunk
   agree with decode. It routes the chunk to CUTLASS, a third kernel. It
   reaching 0 / 6 is a property of these six prompts, not of an established
