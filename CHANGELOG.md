@@ -13,6 +13,15 @@ there instead of retelling it.
 
 ### Added
 
+- **Invariant I2 has a gate: `make check-alloc-interpose`.** "Nothing allocates device
+  memory while serving" was stated, counted, and unobservable: the counter only sees what
+  routes through `Backend`, and the `--wrap` interposer that would see the rest compiled in
+  no make target and no CI job. The gate builds it, drives 20 requests at batch 4 with
+  NVFP4 residual KV and an MTP chain, and pins the count. First run: **46 allocations while
+  serving**. 27 were the MTP workspace allocated after the phase flip and are now labelled
+  as the context-setup step they are; the remaining 19 are named by site in
+  [`DEBT_LEDGER`](docs/audit/DEBT_LEDGER_2026_08_21.md) and the pin only ever goes down.
+
 - **`diagnostics.spec_trace` reports the top-2 logit gap per verify chunk row.**
   The trace said which token a row picked and never by how much, which is the
   question that decides whether a disagreement with the decode path is a coin flip

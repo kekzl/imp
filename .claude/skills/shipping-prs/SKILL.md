@@ -53,7 +53,7 @@ git log -1 --stat origin/main                  # confirm your final commit is in
 
 **Don't branch a new topic off `main` while a previous PR's auto-merge is still in flight** — it squashes onto `main` any moment and your new branch misses it (conflict/rework later). Wait for the merge, `git pull --ff-only`, then branch.
 
-### `mergeStateStatus=BLOCKED` — triage before assuming
+### A PR that will not merge: triage before assuming
 
 Don't guess. Dump the real state first:
 
@@ -65,6 +65,22 @@ gh pr view <PR> --json mergeStateStatus,statusCheckRollup,reviewDecision
 - `reviewDecision` not `APPROVED`, or an unresolved review thread → needs review action.
 - Branch out-of-date with `main` → `git pull --no-rebase origin main` (or update via the PR), push.
 - A *different* required status (not `Build`) still pending → wait for it.
+- **`gh pr checks` reports NOTHING at all** → that is not "pending", it is a symptom, and
+  `mergeStateStatus` is the field that answers it. `DIRTY` means the PR conflicts with
+  `main`, and GitHub computes `pull_request` workflows against a merge ref it cannot build
+  when there are conflicts: no CI run, no Auto-merge run, no arming. A conflicted PR
+  therefore looks identical to a queue backlog in every view, and nothing says so.
+  Resolve the conflict (rebase onto `origin/main`; force-push is gated here, so push a
+  fresh branch and reopen) and the checks fire.
+
+  **`UNKNOWN` is not a state.** It means GitHub has not computed mergeability yet and to
+  ask again. Reading it as evidence and building a mechanism on top of it is how #1516 got
+  diagnosed as "GitHub dropped the event" for an hour. Query it twice before believing it.
+
+  The cause is usually upstream of all this: **a PR opened from a base that no longer
+  exists.** #1516 was branched while #1515 was in flight, #1515 merged and touched the same
+  `[Unreleased]` block, and the PR was born conflicted 29 minutes later. That is the rule
+  two sections up, and eleven PRs that followed it merged themselves the same night.
 
 ## Cutting a tagged release (only when explicitly releasing)
 
