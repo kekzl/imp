@@ -734,6 +734,23 @@ chunk width; that factor of 3.4 has no mechanism. A host round trip per verify (
 D2H + rollback, priced in `roadmap.md`) is a candidate for part of the 38.1 ms and does not
 appear in a kernel profile at all, but it is untested and does not explain a quant gap.
 
+**Named candidate for the quant gap, with the control that settles it**, so whoever picks
+this up starts from a test rather than from zero. The launch count is a property of the
+graph and both quants run the same graph at the same chunk width, so the gap must be either
+per-launch cost or a different launch count. The second branch has a concrete mechanism: a
+*partial* NVFP4 overlay would route some of the verify's launches to a different kernel
+family on one quant and not the other, so the two would not be running the same set of
+kernels at all.
+
+  Control: diff the kernel NAME SETS of two `--cuda-graph-trace=node` profiles, one per
+  quant, on the same prompt with speculation on. If both verify paths show the same kernel
+  families and only the per-instance times differ, the gap is per-launch cost. If the Q6_K
+  profile carries a family the NVFP4 one does not, the overlay is partial and that family
+  is the answer.
+
+Not run: the 8.4x question was bounded at one card window and that window was spent on the
+differential profile above.
+
 ### Three hypotheses tested and refuted, so nobody re-runs them
 
 1. **"The verify dequantises the Q6_K source per chunk."** `dequant_q6k_v2_kernel` does run,
