@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-21
+commit: b2a162c0
 -->
 
 # Benchmarks
@@ -76,12 +76,46 @@ digest** in [`scripts/bench_competitive.sh`](../scripts/bench_competitive.sh),
 not by tag: `:full-cuda` moves, and the two sweeps below were each compared
 against a build that nothing in the repo recorded.
 
-Two imp columns, because one number cannot mean both things. imp's `--bench`
-prompt is self-repetitive, so where the n-gram drafter engages it accepts
-essentially every draft (measured here: 504 of 504 on Qwen3-8B) and
-`llama-bench` has no equivalent. The spec-off column is the same command with
-`--set speculative.ngram=false`. The 2026-07-12 sweep tabulated the defaults
-column only.
+Two imp columns, because one number cannot mean both things. Where the n-gram
+drafter engages, a dense `--bench` run accepts essentially every draft (measured
+here: 504 of 504 on Qwen3-8B) and `llama-bench` has no equivalent. The spec-off
+column is the same command with `--set speculative.ngram=false`. The 2026-07-12
+sweep tabulated the defaults column only.
+
+**Where that acceptance comes from, since this file said the wrong thing about
+it until 2026-08-21.** Not from the prompt, and this follows from the source
+rather than from a measurement:
+
+- `imp-cli --bench` builds the prompt as `tokens[i] = i % vocab_size`
+  (`tools/imp-cli/main.cpp:401`). At `--bench-pp 512` against a ~151k vocab the
+  counter never wraps, so the prompt is 0..511 strictly increasing.
+- Every 6-gram in a strictly increasing sequence of distinct ids is unique.
+- The drafter is prompt-lookup over `input + prediction + output` with
+  `speculative.min_match = 6` (`src/core/dispatch_policy.h:714`).
+
+So the prompt contributes **zero** matches by construction, and any draft that
+exists came from the **generation**. Under `ignore_eos` a synthetic counting
+prompt sends some checkpoints into a periodic continuation that prompt-lookup
+then predicts exactly, and which checkpoints those are is not a property of the
+model. Same prompt, same build, same day:
+
+| checkpoint | drafted | accepted |
+|---|---:|---:|
+| Qwen3-8B Q8_0 | 504 | 504 (100 %) |
+| Qwen3-14B **NVFP4** | 504 | 504 (100 %) |
+| Qwen3-14B **Q6_K** | 96 | 6 (6.2 %) |
+
+The two 14B rows are the same model at two quantisations. The quantisation
+changes the greedy continuation, one of them loops and the other does not, and
+the drafter follows. The Q6_K arm is also bistable across fresh processes: three
+runs gave `drafted=0`, then 96, then 96. So a decode A/B that leaves speculation
+on is not merely measuring the verify path, it is measuring whether this
+checkpoint happened to loop.
+
+It is also why the spec-off column is not optional. At batch 1 decode is
+dominated by weight reads, so a degenerate continuation does not move tok/s on
+its own. It moves it only through speculation, and that is the 504-of-504
+effect.
 
 | Model (shared quant) | imp default | imp spec-off | llama.cpp | imp lead | lead 07-12 |
 |---|---:|---:|---:|---:|---:|

@@ -59,6 +59,16 @@ there instead of retelling it.
 
 ### Changed
 
+- **The `--bench` prompt is not self-repetitive, and six files said it was.**
+  `imp-cli --bench` builds it as `tokens[i] = i % vocab_size`, so at
+  `--bench-pp 512` it is 512 distinct ids and every 6-gram is unique; with
+  `speculative.min_match = 6` the prompt cannot supply one draft. The ~99.9 %
+  acceptance is real but comes from the **generation** looping under
+  `ignore_eos`, and it turns on the *quantisation*: Qwen3-14B NVFP4 accepts 504
+  of 504 where the same model at Q6_K accepts 6 of 96. Corrected in `GOAL.md`, `BENCHMARKS.md` and the
+  `benchmark-cuda` and `server-api` skills. The operational guidance is
+  unchanged: pass `--set speculative.ngram=false` to both arms of a decode A/B.
+
 - **A stop-decision guard for MTP was built, measured and removed, and it closes
   the line.** Handing a verify chunk's stop token to the ordinary decode path
   instead of trusting the chunk row leaves the truncation count unchanged (2/6
