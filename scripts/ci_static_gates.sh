@@ -37,7 +37,11 @@
 # deterministic: no apt, no network, no build directory, seconds in total.
 set -uo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
+# Repo root from this script's own location, not from git. The GitHub Actions
+# container runs as a different user than owns the checkout, so `git rev-parse`
+# there dies with "detected dubious ownership in repository at /__w/imp/imp" and
+# takes the whole required check with it. This needs no git and no safe.directory.
+cd "$(dirname "$(readlink -f "$0")")/.."
 FAIL=0
 run() {  # run <label> <cmd...>
     local label="$1"; shift
