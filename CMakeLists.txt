@@ -183,6 +183,7 @@ set(IMP_QUANT_SOURCES
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
     src/quant/nvfp4_gemv_dense.cu
+    src/quant/nvfp4_gemv_batched.cu
     src/quant/nvfp4_gemv_fused.cu
     src/quant/nvfp4_gemv_moe.cu
     src/quant/mxfp4_gemm.cu

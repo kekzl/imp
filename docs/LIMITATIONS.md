@@ -249,6 +249,47 @@ These have a code path and no gate. They may work; nothing proves it.
   and it is enough to flip the stop decision on a third of prompts. No setting
   of this pair is both fast and correct.
 
+  **Re-measured and part-diagnosed 2026-08-21.** The count reproduces exactly
+  on the current build (2 / 6, the 164-byte answer byte-for-byte), so the
+  finding had not expired. What has changed is the explanation, and it was
+  narrower than "summation order" in one place and wider in another.
+
+  The verify chunk and the M=1 decode step take DIFFERENT kernels at four
+  independent sites, all gated on the same `n == 1` condition:
+
+  | site | how they differ | status |
+  |---|---|---|
+  | q/k/v, gate/up projections | K reduced in 32 partial sums (decode, `gemv_nvfp4_multirow_kernel<8>`, one warp per output row) against 128 (verify, `gemv_nvfp4_kpar_mb_fp16_kernel`, one block per output row) | **fixed**, `speculative.verify_row_parity` |
+  | down projection GEMM | nothing: `n_mb = 1088 > 512` so both take the 128-wide path. Measured, not assumed | already equal |
+  | SwiGLU into down | decode keeps `silu(gate)*up` in float registers, verify rounds it to FP16 in a separate kernel first | open |
+  | RoPE + KV write, QK-norm | `can_fuse_rope_kv` and the fused QK-norm are both `n == 1` only (`executor_attention.cu:390,405`) | open |
+
+  The inner loops are otherwise instruction-for-instruction identical - same
+  `cvt.rn.f16x2.e2m1x2` dequant, same 16 fma pairs, same scale. So the first
+  row of that table is a pure grouping difference, and closing it costs
+  nothing: `gemv_nvfp4_multirow_mb_kernel` keeps the 32-lane warp partition AND
+  still reads each weight micro-block once for all rows.
+
+  | arm | tok/s (r1, r2) | vs k=0 | degenerate |
+  |---|---|---|---:|
+  | k=0 | 88.56, 88.47 | | 0 / 6 |
+  | k=1, default | 104.46, 104.02 | +17.8 % | 2 / 6 |
+  | k=1, `verify_row_parity=true` | 105.52, 105.07 | **+19.0 %** | **1 / 6** |
+
+  So the sentence this entry used to end on - *"MTP is either fast and wrong,
+  or correct and slower than no speculation at all"* - is **wrong as stated**.
+  One of the two divergences is closable at no cost, and the parity arm is the
+  fastest of the three. What is true is narrower: the remaining truncation
+  needs the other two sites, and the SwiGLU one is expensive. A fused
+  multi-row down projection was built and measured at **-27.7 %** against the
+  batched path (it re-reads the 5120x17408 weight per row) **and it did not
+  change the count** - it was removed rather than shipped.
+
+  Also corrected: `verify_nvfp4_gemm=false` does NOT make the verify chunk
+  agree with decode. It routes the chunk to CUTLASS, a third kernel. It
+  reaching 0 / 6 is a property of these six prompts, not of an established
+  mechanism.
+
   **Consequence: `speculative.mtp_k` stays 0 by default**, despite the +21.3 %
   it measures on this model ([`roadmap.md`](roadmap.md)). A throughput win that
   truncates a third of answers is not a win, and the cheap escape does not
