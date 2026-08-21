@@ -124,25 +124,46 @@ def strip_comments(text: str) -> str:
             if c == "*" and nxt == "/":
                 state = None; out.append("  "); i += 2; continue
             out.append(c if c == "\n" else " "); i += 1; continue
-        # inside a string/char literal
-        out.append(c)
+        # Inside a string/char literal: blank the CONTENT but keep the quotes and
+        # the line count. `IMP_LOG_ERROR("cudaMalloc(%zu bytes) failed")` is a
+        # message, and counting it as a call site inflates the census with two
+        # entries that can never be attributed to a pointer.
         if c == "\\":
-            if i + 1 < n:
-                out.append(text[i + 1]); i += 2; continue
-        elif (state == "str" and c == '"') or (state == "chr" and c == "'"):
+            out.append("  ")
+            if i + 1 < n and text[i + 1] == "\n":
+                out[-1] = " \n"
+            i += 2; continue
+        if (state == "str" and c == '"') or (state == "chr" and c == "'"):
             state = None
+            out.append(c)
+        else:
+            out.append(c if c == "\n" else " ")
         i += 1
     return "".join(out)
 
 
 def normalise(expr: str) -> str:
-    """`(void**)&this->buf_[i]` -> `buf_`. Returns "" for anything not a plain name."""
+    """`(void**)&this->buf_[i]` -> `buf_`. Returns "" for anything not a plain name.
+
+    Peel casts, parentheses and address-of/deref in a LOOP rather than once each.
+    A single ordered pass looks equivalent and is not: the dominant form in this
+    tree is `reinterpret_cast<void**>(&ws.d_mtp_position)`, where removing the
+    cast leaves `(&...)`, so a `lstrip("&")` that runs before the parens are
+    stripped does nothing and the pointer drops out of the census silently. Five
+    of them did, which is the same shape of blind spot this gate exists to close.
+    """
     e = expr.strip()
-    e = CAST_RE.sub("", e)
-    e = CSTYLE_RE.sub("", e)
-    e = e.strip().lstrip("&").strip()
+    for _ in range(8):  # bounded: each pass strips at least one layer or stops
+        before = e
+        e = CAST_RE.sub("", e)
+        e = CSTYLE_RE.sub("", e)
+        e = e.strip()
+        if e.startswith("(") and e.endswith(")"):
+            e = e[1:-1].strip()
+        e = e.lstrip("&*").strip()
+        if e == before:
+            break
     e = re.sub(r"\[[^\]]*\]", "", e)          # drop subscripts
-    e = re.sub(r"^\(+|\)+$", "", e).strip()
     e = re.sub(r"^this\s*->\s*", "", e)
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\s*(?:\.|->)\s*[A-Za-z_][A-Za-z0-9_]*)*", e):
         return ""
