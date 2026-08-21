@@ -65,10 +65,15 @@ jobs:
       # Minimal git up front so checkout below pulls real history and the
       # docs-only detection can diff against the PR/push base. (The rest of the
       # build tooling installs later, gated on the detection result.)
-      - name: Install git
+      #
+      # python3 comes with it because the static gates below are python and this
+      # container has neither: `nvidia/cuda:13.3.1-devel-ubuntu26.04` ships no
+      # python3 and no git. Without this the gate step fails "python3: not
+      # found" on every PR, which is a false red on the one required check.
+      - name: Install git and python3
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git
+          apt-get install -y --no-install-recommends git python3
 
       - uses: actions/checkout@v7
         with:
@@ -96,6 +101,28 @@ jobs:
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           printf 'non-docs changes: code=%s\nchanged files:\n%s\n' "$code" "${files:-<none>}"
+
+      # The blocking static gates, FIRST, before the compile. Ruleset 14716423
+      # requires exactly one context (`Build`), so a gate that runs only as its
+      # own job is advisory: #1523 merged with `File size` FAILED and #1524
+      # merged over the same red gate forty minutes later (DEBT_LEDGER (j)).
+      # Running them here is what makes red stop a merge. They are seconds, they
+      # need no apt and no network, and putting them ahead of the build means a
+      # drifted allowlist fails in ~15 s rather than after a three-minute
+      # compile. The named jobs below still run the same script with a filter,
+      # so `which gate failed` keeps a check name and there is one list, not two.
+      # Runs on docs-only PRs too: the docs and release-hygiene gates are exactly
+      # the ones a docs-only change can break.
+      # git refuses this checkout on ownership inside the container: the
+      # Actions runner owns /__w/imp/imp and the job's user does not. Without
+      # this, any gate that shells out to git dies - check-release.sh:55 got an
+      # empty `git rev-parse` and cd'd to nothing, which failed the required
+      # check for a reason that had nothing to do with the tree.
+      - name: Trust the checkout (container UID differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Static gates (blocking, before the build)
+        run: bash scripts/ci_static_gates.sh
 
       - name: Install build deps
         if: steps.changes.outputs.code == 'true'
@@ -405,25 +432,12 @@ jobs:
           python-version: "3.12"
       - name: File-size smells (advisory, non-blocking)
         run: python3 tools/check_filesize.py --warn-only
-      - name: File-size hard-review gate + allowlist ceilings (blocking)
-        run: python3 tools/check_filesize.py
-      # The size of the hole `No GPU runner in CI` leaves. Reads SOURCES, not a
-      # build directory: a gate that counts by reading build-dev/ inherits that
-      # directory's provenance, and on 2026-08-21 a stray uncommitted file had
-      # been compiled into test-quant and moved the count by 3.
-      - name: Tests that run in no CI lane (blocking)
-        run: python3 tools/check_test_lanes.py --report
-      # Functions defined inline in a header and mentioned nowhere else. The
-      # 2026-08-03 decl-only sweep could not see this class: it filtered on
-      # decl+def, i.e. two occurrences, and a header-inline definition is one.
-      - name: Header-inline definitions with no caller (blocking)
-        run: python3 tools/check_dead_inline_accessors.py
-      # IMP_LOG_FATAL only logs; IMP_CHECK is the only thing that aborts. Ten
-      # of twelve sites logged at FATAL and then carried on, three of them
-      # after a comment saying that carrying on hands a host pointer to a
-      # device kernel.
-      - name: FATAL logs that do not stop (blocking)
-        run: python3 tools/check_log_fatal.py --list
+      # The blocking checks live in scripts/ci_static_gates.sh, which the `Build`
+      # job also runs so a red gate fails the one required context. This job
+      # keeps them a named check: "which gate failed" is worth a check name, and
+      # the filter means there is one list rather than two that drift.
+      - name: File-size gates (blocking)
+        run: bash scripts/ci_static_gates.sh filesize
 
   # Documentation layer contract (docs/audit/docs-rewrite/). Seven checks, all
   # of which map to a defect this repo actually shipped: a datacenter-Blackwell
@@ -438,33 +452,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Generated perf blocks match tests/perf_baseline.json
-        run: python3 scripts/sync_docs.py --check
-      - name: Doc lint (layers, provenance, links, budgets)
-        run: python3 scripts/docs_lint.py
+      - name: Doc gates (blocking)
+        run: bash scripts/ci_static_gates.sh docs
 
-  # Publishable-tree hygiene: the cheap half of scripts/check-release.sh (doc
-  # links, maintainer paths, credential-shaped strings, tracked binaries,
-  # LICENSE). SKIP_VERIFY=1 drops the `make verify-fast` step — that one needs a
-  # GPU and the built image, so it stays local. Own ubuntu job, no toolchain,
-  # seconds. The script existed since the first release but was wired into
-  # nothing, so it only ran when someone remembered it: v0.20.0 found two
-  # maintainer paths that had been on main for days. A gate nobody runs is not
-  # a gate.
   hygiene:
     name: Release hygiene
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: check-release.sh (without the GPU gate)
-        env:
-          SKIP_VERIFY: "1"
-        run: bash scripts/check-release.sh
+      - name: Release hygiene gate (blocking)
+        run: bash scripts/ci_static_gates.sh hygiene
 
-  # I1 gate (docs/internals/MEMORY.md): exactly one module talks to the CUDA
-  # driver about memory. Runs against tools/alloc_allowlist.txt, which shrinks
-  # monotonically — the gate fails both on a new direct allocation site and on a
-  # stale allowlist entry, so the list cannot silently stop being accurate.
   alloc-sites:
     name: Alloc sites
     runs-on: ubuntu-24.04
@@ -473,22 +471,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Remaining direct allocation sites (progress)
-        run: python3 tools/check_alloc_sites.py --stats
-      - name: I1 allowlist gate (blocking)
-        run: python3 tools/check_alloc_sites.py
-      # A pointer freed through the allocator that did not produce it is invalid
-      # CUDA and silent: right pointer width, no driver complaint, program keeps
-      # running. AUDIT B10 recorded one such pair in July and it was still there
-      # in August, two lines further down. Blocking.
-      - name: Allocate/free API pairing gate (blocking)
-        run: python3 tools/check_alloc_pairs.py
+      - name: Alloc-site gates (blocking)
+        run: bash scripts/ci_static_gates.sh alloc
 
-  # Post-launch error checks after every CUDA kernel launch. Blocking: an
-  # unguarded launch turns a launch-time failure (bad config, smem over the
-  # opt-in, missing kernel image) into silently wrong output instead of an
-  # error. The convention was ~99% adopted and 0% enforced until the 2026-08-02
-  # audit found the whole Qwen3-VL tower at 9 launches / 0 checks.
   launchguards:
     name: Launch guards
     runs-on: ubuntu-24.04
@@ -497,8 +482,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Post-launch check gate (blocking)
-        run: python3 tools/check_launch_guards.py
+      - name: Launch-guard gate (blocking)
+        run: bash scripts/ci_static_gates.sh launchguards
 
   test:
     name: Test
