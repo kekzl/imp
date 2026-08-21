@@ -21,6 +21,65 @@ The engine is past the raw-speed land-grab; current work is making it boringly r
 - **Model-support debt burn-down** -- last hard crash (gemma-3-12b GGUF decode IMA) fixed in #959; remaining blockers under "Known limitations".
 - **MLA family expansion** -- DeepSeek-V2-Lite is validated (#802/#803 latent-KV decode, opt-in); DeepSeek-V3 / GLM / Kimi / Ling reuse the same path once weights are staged locally.
 
+## What a 2026 engine has to do (assessed 2026-08-21)
+
+The bar a local inference engine is measured against now, scored against imp. It
+is the frame for the gap list below, not a schedule. Written against the field as
+it stood in mid-2026; anything that appeared elsewhere after that is not in here.
+Every "met" row below was checked against the tree on 2026-08-21, not recalled.
+
+### Met
+
+| Expectation | Where |
+|---|---|
+| Three API dialects natively, not via a shim | OpenAI chat/completions, Anthropic `/v1/messages`, OpenAI Responses; one shared SSE driver |
+| Tool calling, gated by real harnesses | aider, Claude Code and the OpenAI Agents SDK drive imp in `make test-agents-external` |
+| Constrained decoding past JSON | JSON Schema, regex, GBNF; an uncompilable constraint is a 400, not a free-text answer |
+| Prompt caching with explicit breakpoints | prefix cache on by default, `cache_control` per breakpoint, content-salted so a different image is a different key |
+| Embeddings and reranking in the same server | `/v1/embeddings`, `/v1/rerank`, validated against llama.cpp on the same GGUF |
+| logprobs that agree with what was emitted | at temperature 0 the emitted token IS `top_logprobs[0]` (`tests/test_server_logprobs.py`) |
+| Per-request adapter selection | `lora` body field, empty means the base model |
+| Latency observability, not just counters | `imp_ttft_seconds`, `imp_inter_token_seconds`, `imp_request_duration_seconds` histograms, plus `imp_queue_depth` and `imp_tokens_cached_total` |
+| Auth, rate limiting, backpressure | `--api-key`, per-key rate limit, `max_concurrent`, 429 |
+| Continuous batching over a paged KV cache | default block n=16, geometry per configuration |
+| Chunked prefill and graph-captured decode | CUDA graphs on both paths; gate asserts decode >= 1.3x, measures 2.28x |
+| Speculative decoding that pays | n-gram, suffix index and a trained MTP head (+21.3 % at `mtp_k=1`) |
+| Quantized KV, including 4-bit | FP8 E4M3, INT8, INT4, NVFP4, and an NVFP4 attention-decode kernel |
+| Graceful behaviour when the KV pool fills | StreamingLLM sink plus sliding window; growable pool commits as the card frees up |
+| Weight formats a user actually has | GGUF K-quants and IQ, safetensors, NVFP4, MXFP4, native FP8 |
+| Model classes, not one family | dense, MoE, MLA, Mamba2/GDN hybrids, vision-language, encoder-only |
+| Operating it without a restart | model swap that drains in-flight work, `/admin/suspend` and `/admin/resume`, on-disk warm weight cache |
+| Reproducibility as a product property | `runtime.deterministic` covers MoE routing atomics, sampling races and GEMM; see [`determinism.md`](determinism.md) |
+
+### Open
+
+Ranked by what an agent workload notices first.
+
+1. **Scheduling is arrival order.** No priority, no preemption, no fair share:
+   nothing in the scheduler reads a per-request priority, so one long generation
+   holds the batch slot while short requests queue behind it. This is the
+   expectation on this list that imp misses hardest, because the mission is
+   parallel agent traffic and `max_concurrent` only bounds the queue, it does not
+   order it.
+2. **No speculation tree.** Gap 5 below. n-gram, suffix and MTP are all
+   single-chain; no EAGLE, Medusa or multi-candidate verify.
+3. **No audio, and a checkpoint that has it loses it quietly.** Gemma-4 ships
+   `model.embed_audio.*`; `weight_map.cpp:369` counts those tensors as skipped,
+   so an omni checkpoint loads as a text plus vision model. Omni models are the
+   direction the model side moved in 2026 and imp is text plus images.
+4. **No video.** Gap 2 below; the Qwen3-VL tower does images only.
+5. **No KV tier below VRAM.** Gap 6 below, shelved on measurement rather than on
+   size: the spill lands on a 6.5x bandwidth cliff on this box.
+6. **No multi-GPU and no tensor parallelism.** Deliberate, and the one item here
+   that is a scope decision rather than a gap: [`LIMITATIONS.md`](LIMITATIONS.md)
+   states it first for a reason.
+7. **The quantizer refuses 3-D stacked experts.** Gap 1(f) below: refusing is
+   correct, supporting them needs a per-model layout descriptor plus per-expert
+   bias support in the loader and the MoE forward.
+8. **No distributed tracing.** `/metrics` answers the single-process questions;
+   there is no trace id carried through a request, which is what an agent
+   framework needs to attribute its own latency.
+
 ## Open gaps to the mission (assessed 2026-07-26)
 
 A ranked audit of what still separates imp from "best agentic engine on a 5090". This is a gap list, not a schedule -- nothing here is committed. The raw-speed half of [`GOAL.md`](GOAL.md) is met (batch=1 decode leads llama.cpp by +13-48% on every hero in the 2026-07-12 re-sweep, MoE prefill leads vLLM single-seq, cross-engine PPL parity measured). Every item below sits on the *agentic* half of the mission.
