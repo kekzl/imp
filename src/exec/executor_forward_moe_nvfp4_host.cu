@@ -6,7 +6,7 @@
 // `idx` becomes a slot index and no kernel changes.
 //
 // NVFP4 experts did not have that path at all. A host-resident placement was
-// loaded and served WRONG — Phase 0 skipped promoting scales onto host weights,
+// loaded and served WRONG - Phase 0 skipped promoting scales onto host weights,
 // the generic GEMM then recognised the scale-less packed weight and returned
 // without multiplying, and the model answered from whichever experts happened
 // to be resident, at exit code 0 (#1403 refused the placement rather than
@@ -15,7 +15,7 @@
 // What is different from the GGUF case, and why it is only different by this
 // much: an NVFP4 expert is TWO byte ranges (packed FP4 weights + FP8 E4M3
 // micro-scales) rather than one. Both are addressed by the same slot index,
-// because the kernels take separate bases and separate strides for them — so a
+// because the kernels take separate bases and separate strides for them - so a
 // slot holding `packed || micro_scales` resolves both at once. The layout
 // arithmetic is in nvfp4_expert_offload.h.
 //
@@ -44,7 +44,7 @@
 
 namespace imp {
 
-// Refuse a placement nothing can serve — the gate #1403 installed, moved to
+// Refuse a placement nothing can serve - the gate #1403 installed, moved to
 // where the answer is actually known.
 //
 // At weight-upload time it was not: whether a host-resident NVFP4 layer can be
@@ -52,7 +52,7 @@ namespace imp {
 // before init_kv_cache). The old gate resolved that by refusing every
 // host-resident NVFP4 placement outright, which was correct while no path
 // existed. Now that one does, re-deriving the cache's sizing at placement time
-// would mean a second copy of that arithmetic — and a copy that drifts is
+// would mean a second copy of that arithmetic - and a copy that drifts is
 // exactly the failure #1384 and #1403 both were.
 //
 // So the check runs here instead, after pre-dequant, against the real tensors
@@ -111,7 +111,7 @@ void GraphExecutor::verify_host_expert_placement() const {
 // Stage one host-resident NVFP4 layer's experts into the device buffer.
 //
 // The per-expert route issues two H2D per expert per projection, ~768 KiB and
-// ~96 KiB — sizes that do not reach PCIe bandwidth. nsys measured 90 759 such
+// ~96 KiB - sizes that do not reach PCIe bandwidth. nsys measured 90 759 such
 // transfers moving 38 GB for one profiling run, with the host inside those
 // calls far longer than the GPU spent transferring. A whole projection at once
 // is the same bytes as ONE transfer of ~110 MiB.
@@ -119,7 +119,7 @@ void GraphExecutor::verify_host_expert_placement() const {
 // That collapse is only possible because the sources are already contiguous:
 // `moe.pin_host_experts` lays a projection's experts into one pinned slab back
 // to back, and a plain mmap usually does the same. Contiguity is CHECKED here
-// rather than assumed — a checkpoint that interleaves its tensors would
+// rather than assumed - a checkpoint that interleaves its tensors would
 // otherwise have its experts silently read from the wrong addresses.
 bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
                                        StagedProj out[kExpertProjCount]) {
@@ -227,7 +227,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
                                            static_cast<size_t>(ne) * sizeof(float),
                                            cudaMemcpyHostToDevice, stream));
         // The pointer arrays are filled from stack vectors, so this call is
-        // not graph-capturable — which is fine, graphs are already off under
+        // not graph-capturable - which is fine, graphs are already off under
         // host-resident experts.
         out[p].cutlass_ready = true;
     }
@@ -257,7 +257,7 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
 // alpha arrays; this only slices them per projection.
 //
 // Opt-in (moe.staged_cutlass_prefill): the prefill win is large and the decode
-// effect that comes with it is real but unexplained — see dispatch_policy.h.
+// effect that comes with it is real but unexplained - see dispatch_policy.h.
 bool GraphExecutor::build_staged_device_args_(
     const MoeFfnContext& ctx, bool non_gated,
     MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const {
@@ -325,7 +325,7 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [top_k, d]
 
     // Establishing residency needs the routing on the host, so this path pays
-    // one D2H + sync per layer — the same one the GGUF slot path pays, and the
+    // one D2H + sync per layer - the same one the GGUF slot path pays, and the
     // reason CUDA graphs stay disabled under host-resident experts.
     moe_host_args_capture_guard(stream);
     std::vector<int32_t> h_experts(top_k);
@@ -371,10 +371,14 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
         // precondition, and staging can only fail on an out-of-range expert
         // id. Falling through would hand a HOST pointer to a kernel, so say so
         // instead.
-        IMP_LOG_FATAL(
-            "MoE NVFP4 host decode: experts could not be staged into the LRU pool (layer %d, "
-            "top_k %d, slots/layer %d). The dispatch predicate and this path have diverged.",
-            layer, top_k, expert_cache_.slots_per_layer_);
+        // IMP_CHECK, not IMP_LOG_FATAL. The comment above says continuing hands a
+        // HOST pointer to a device kernel, and IMP_LOG_FATAL only LOGS
+        // (logging.h:58) - so it said so and then did it. Abort rather than
+        // throw: this is state corruption, not a request that can be failed.
+        IMP_CHECK(false,
+                  "MoE NVFP4 host decode: experts could not be staged into the LRU pool (layer %d, "
+                  "top_k %d, slots/layer %d). The dispatch predicate and this path have diverged.",
+                  layer, top_k, expert_cache_.slots_per_layer_);
     }
 
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx, h_slots.data(),
@@ -405,7 +409,7 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
                       slots_per_layer, eff, d);
         // gate and up sit in DIFFERENT slots, so the one-index fused gate+up
         // kernel cannot express both. Two decodes still collapse 2*top_k
-        // weight launches into 2 — the same trade the GGUF slot path makes.
+        // weight launches into 2 - the same trade the GGUF slot path makes.
         gemv_nvfp4_moe_decode(gate_view, gate_idx, norm_ptr, gate_buf, eff, d, /*x_stride=*/0, top_k,
                               stream);
         gemv_nvfp4_moe_decode(up_view, up_idx, norm_ptr, up_buf, eff, d, /*x_stride=*/0, top_k, stream);

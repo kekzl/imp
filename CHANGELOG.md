@@ -36,6 +36,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Ten sites logged at FATAL and then carried on.** `IMP_LOG_FATAL` only writes a
+  log line; `IMP_CHECK` is the only thing that aborts. One reported
+  `WeightRegistry::handle: id out of range` and indexed out of range on the next
+  line; two returned from a dispatch leaving the output tensor unwritten; three MoE
+  staging sites said in their own comments that continuing hands a host pointer to a
+  device kernel, and then did. Also: the expert-cache parity checker returned `false`
+  into callers that discarded it, so the debug facility detected a host/device
+  divergence and continued. `make check-log-fatal` keeps the count at zero.
+
 - **`[calibration] out_path` now writes a file.** The key was parsed, documented in
   `config.h` and offered in `imp.conf.example`, and read by nothing: setting it
   produced no calibration file and no warning, because `imp_calibration_write()`

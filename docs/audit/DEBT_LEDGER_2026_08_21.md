@@ -183,6 +183,43 @@ Same shape as item 3: a counter reads clean because the traffic never reaches it
 `vram_alloc` to decline) shows `--mem-report` charging `shared_workspace` the same bytes
 it charges on the non-fallback path.
 
+**NEW, CLOSED - `IMP_LOG_FATAL` does not stop anything, and ten of twelve sites
+assumed it did.**
+
+```
+$ sed -n '58p' src/core/logging.h
+#define IMP_LOG_FATAL(...) ::imp::log_message(::imp::LogLevel::FATAL, __FILE__, __LINE__, __VA_ARGS__)
+$ python3 tools/check_log_fatal.py     # on the pre-fix tree
+log-fatal: 12 IMP_LOG_FATAL site(s), 1 abort, 0 throw, 11 continue (1 allowlisted)
+```
+
+`IMP_CHECK` (`logging.h:68-74`) is the only thing in the tree that reaches
+`std::abort()`, and its own comment says so. So the macro's name promised what
+only its sibling delivered. Census and verdicts:
+
+| site | after the log | verdict |
+|---|---|---|
+| `pre_dequant_phase4_tensor_registry.cu:550` | `std::abort()` | correct |
+| `weight_handle.h:26` | `return self.handles_[id]` | **out-of-bounds read after reporting the id is out of range** |
+| `weight_dispatch.cu:281`, `:392` | `return` | output tensor left holding whatever it held; `:392` is the `default:` |
+| `expert_cache.cu` x4 | falls through / returns the slot | fills a slot it just said does not fit; returns a pointer it just called unusable |
+| 3 MoE staging sites | falls through | each says in its own comment that continuing hands a HOST pointer to a device kernel |
+| `expert_cache.cu` parity check | `return false` | correct in itself, **and both callers discarded the verdict** |
+
+The last row is the one worth keeping: `check_parity()` returning `false` is the
+right contract for a function that reports agreement, but `get_or_load()` called
+it as a bare statement. So the debug facility detected the host/device
+divergence, logged it, returned false into nothing, and carried on - while
+`expert_cache.h:273` documented the behaviour as "aborts on mismatch". Found
+while correcting that comment, not by the census.
+
+Two throw (dispatch failures the API boundary turns into `ImpError`), eight
+abort via `IMP_CHECK` (state corruption or a documented abort contract), one was
+already correct, one is allowlisted with the reason. `tools/check_log_fatal.py`
+keeps it at zero, keyed on the message rather than the line number - the first
+version keyed on lines and rotted immediately when four comment lines moved a
+site by six.
+
 ### (b) Stubs, ignored request fields, dead kernels, tests that assert nothing
 
 ```

@@ -77,8 +77,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         // Use the LRU cache only when this dispatch's working set fits the
         // layer's slot pool. One dispatch touches kExpertProjCount cells per
         // ACTIVE expert; the pool holds slots_per_layer. Above that the cache
-        // retains nothing across the dispatch — every access misses and
-        // evicts — so it does strictly more work than the single-slot staging
+        // retains nothing across the dispatch - every access misses and
+        // evicts - so it does strictly more work than the single-slot staging
         // buffer for the same H2D bytes.
         //
         // Decode stays on the cache (top_k experts -> 3*top_k cells, well
@@ -103,7 +103,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         // performance heuristic.
         //
         // Tested 2026-08-11 whether the full-fit rule is too strict at the
-        // margin — a pool at 79% of the working set ought to keep most of the
+        // margin - a pool at 79% of the working set ought to keep most of the
         // reuse. It does not: measured hit rate is 0.0-0.4% at 14 and 19 slots
         // against a 24-cell set, and using the cache there is SLOWER than
         // bypassing it (5.6-6.3 vs 6.8-6.9 tok/s). Below full fit the cache
@@ -160,7 +160,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
 
             const char* src;
             if (!packed.on_device) {
-                // Expert weights offloaded to host — try LRU cache first, then staging
+                // Expert weights offloaded to host - try LRU cache first, then staging
                 // buffer.
                 const char* host_ptr = static_cast<const char*>(packed.data) + offset;
                 if (use_expert_cache) {
@@ -193,7 +193,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
 
         // Helper: try fused quantized GEMV for count=1 decode (dequant+dot in one kernel),
         // else fall back to dequant_expert + cuBLAS gemm.
-        // For host-resident experts: H2D to staging buffer, then fused GEMV on staging —
+        // For host-resident experts: H2D to staging buffer, then fused GEMV on staging -
         // eliminates separate dequant_gpu + cuBLAS gemm overhead.
         auto expert_gemm = [&](const Tensor& a, Tensor& c, const Tensor& packed, QType qtype,
                                const std::vector<Tensor>& fallback,
@@ -258,8 +258,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             // Host-resident NVFP4 expert: stage it into the LRU cache's slot
             // pool first, then run the ordinary NVFP4 GEMM against the slot.
             //
-            // Without this the branch below hands `wh.payload.nvfp4.data` —
-            // a HOST pointer for these experts — straight to gemm_nvfp4, which
+            // Without this the branch below hands `wh.payload.nvfp4.data` -
+            // a HOST pointer for these experts - straight to gemm_nvfp4, which
             // dequantises it on the device: an illegal access, and the reason
             // the M>1 fallback died on the 593 MiB expert matrix. #1370 never
             // hit this because its GGUF experts reach dequant_expert's staging
@@ -268,7 +268,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             // WHERE it is staged follows the same working-set rule as the GGUF
             // path above: through the LRU pool when this dispatch fits it,
             // through the single staging buffer when it does not. The bytes
-            // moved are identical either way — what differs is whether the
+            // moved are identical either way - what differs is whether the
             // copies evict anything. A prefill activating every expert asks for
             // 3*n_active cells against slots_per_layer, so using the cache
             // there retains nothing AND throws out the entries decode is about
@@ -280,7 +280,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             // parameter: that one comes from `ly.expert_*_packed`, which stays
             // empty for host-resident NVFP4 layers (Phase 3 only stamps it for
             // device-resident ones). Reading the parameter here would test a
-            // tensor this branch never touches — the same mismatch that made
+            // tensor this branch never touches - the same mismatch that made
             // #1384 and #1403 miss what they were meant to catch.
             if (static_cast<size_t>(eidx) < fallback.size() &&
                 fallback[eidx].qtype == QType::NVFP4) {
@@ -289,7 +289,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     const auto layout = nvfp4_slot_layout(w.shape[0], w.shape[1] * 2);
 
                     // Whole-layer staging already put this expert on the
-                    // device — read it there and skip the per-expert copies
+                    // device - read it there and skip the per-expert copies
                     // entirely.
                     const StagedProj& sp = staged[std::to_underlying(proj)];
                     if (layer_staged && sp.covers(eidx)) {
@@ -367,12 +367,16 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                         }
                         return;
                     }
-                    IMP_LOG_FATAL(
-                        "MoE legacy fallback: host-resident NVFP4 expert %d on layer %d cannot be "
-                        "staged by either route (needs %zu B; cache slot %zu B, staging buffer "
-                        "%zu B). Continuing would hand a host pointer to a device kernel.",
-                        eidx, layer, layout.slot_bytes(), expert_cache_.slot_size_,
-                        moe_.raw_staging_size);
+                    // IMP_CHECK, not IMP_LOG_FATAL. The comment above says continuing hands a
+                    // HOST pointer to a device kernel, and IMP_LOG_FATAL only LOGS
+                    // (logging.h:58) - so it said so and then did it. Abort rather than
+                    // throw: this is state corruption, not a request that can be failed.
+                    IMP_CHECK(false,
+                              "MoE legacy fallback: host-resident NVFP4 expert %d on layer %d cannot be "
+                              "staged by either route (needs %zu B; cache slot %zu B, staging buffer "
+                              "%zu B). Continuing would hand a host pointer to a device kernel.",
+                              eidx, layer, layout.slot_bytes(), expert_cache_.slot_size_,
+                              moe_.raw_staging_size);
                 }
             }
 
@@ -388,7 +392,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                 nw.packed_data = wh.payload.nvfp4.data;
                 nw.micro_scales = wh.payload.nvfp4.block_scales;
                 // tensor_scale: payload.nvfp4.tensor_scale is a HOST float pointer
-                // (borrowed from wcache_.nvfp4 map entry — stable address). Read directly.
+                // (borrowed from wcache_.nvfp4 map entry - stable address). Read directly.
                 nw.tensor_scale = (wh.payload.nvfp4.tensor_scale != nullptr)
                                       ? *wh.payload.nvfp4.tensor_scale
                                       : 1.0f;
@@ -409,8 +413,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     // loop produces wrong output on Gemma-4 NVFP4 experts even though
                     // it works for Mistral dense decode at the same kernel/dimensions
                     // (see commit message + memory/llm_compressor_phase2_item2…). The
-                    // dense-path mirror — gemm_nvfp4 (NVFP4 → FP16 dequant + cuBLAS
-                    // gemm) — is correct on Gemma-4 and is what Mistral dense prefill
+                    // dense-path mirror - gemm_nvfp4 (NVFP4 → FP16 dequant + cuBLAS
+                    // gemm) - is correct on Gemma-4 and is what Mistral dense prefill
                     // already uses, so route the multi-token expert prefill through
                     // it. Bisected via IMP_EXPERT_NVFP4_DEQUANT_MR=1 on 2026-04-27:
                     // M=1 on gemv_kpar + M>1 on gemm_nvfp4 → "The capital of France
@@ -472,7 +476,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                 // (executor_pre_dequant.cu Phase 0). The legacy fallback below
                 // expects an FP16 weight; calling cuBLAS gemm with qtype=NVFP4
                 // would crash with "unsupported dtype 71". Route through the
-                // native NVFP4 path — same logic as the WeightHandle-driven
+                // native NVFP4 path - same logic as the WeightHandle-driven
                 // has_nvfp4_id branch above.
                 if (b.qtype == QType::NVFP4 && b.scales != nullptr) {
                     NvFP4QuantResult nw;
@@ -539,7 +543,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             size_t expert_raw_sz = static_cast<size_t>(rows) * qtype_row_bytes(qtype, cols);
 
             if (!moe_.batch_dequant_buf || expert_fp16_sz == 0) {
-                // No buffer — serial fallback
+                // No buffer - serial fallback
                 for (int e = 0; e < ne; ++e) {
                     int start = h_offsets[e];
                     int count = h_offsets[e + 1] - start;
@@ -572,7 +576,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             for (int e = 0; e < ne; ++e)
                 b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
 
-            // Use cublasGemmGroupedBatchedEx — single call for all experts.
+            // Use cublasGemmGroupedBatchedEx - single call for all experts.
             // We already have h_offsets from D2H sync, so no need for
             // gemm_moe_device_grouped (which does its own D2H sync + 128
             // individual cublasLtMatmul calls).
@@ -593,7 +597,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                                   dequant_gpu_supported(ly.expert_up_packed.qtype));
 
         if (has_precached_up) {
-            // Pre-cached FP16 path — all expert packs in fp16_packed_*_cache
+            // Pre-cached FP16 path - all expert packs in fp16_packed_*_cache
             // ===== PRE-CACHED FP16 BATCHED GEMM PATH =====
             std::vector<const void*> gate_w_ptrs(ne, nullptr);
             std::vector<const void*> up_w_ptrs(ne, nullptr);
