@@ -9,6 +9,9 @@
 #include "core/logging.h"
 #include "runtime/process_diag.h"
 
+#include <cstdio>
+#include <stdexcept>
+
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <vector>
@@ -340,15 +343,26 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
         //
         // For now: log an error and return (stub behavior for Phase 2).
         case StorageTier::CUTLASS_NVFP4: {
-            // CUTLASS_NVFP4 is a prefill tier (M>1).  Decode falls through
-            // to NVFP4 GEMV in the consumer (executor_kernels.cu line 1951).
-            // gemv_dispatch is only called for decode (M=1); in phase-2 the
-            // consumer still uses the wcache_ NVFP4 entry directly.
-            // Stub: log error and do nothing so tests can verify routing.
-            IMP_LOG_ERROR(
-                "gemv_dispatch CUTLASS_NVFP4: not directly callable for decode "
-                "(no FP8 micro_scales in payload); consumer should use NVFP4 tier");
-            return;
+            // Unreachable today and it must stay an error rather than a silent
+            // return. CUTLASS_NVFP4 is a prefill tier (M>1); decode reaches the
+            // NVFP4 GEMV through the consumer, and `decode_tier` is only ever
+            // assigned `tier`, FP8 or NVFP4 (pre_dequant_phase4_tensor_registry.cu
+            // :90,96,98,100), so no caller can route here.
+            //
+            // Until 2026-08-21 this branch logged and returned WITHOUT WRITING
+            // `y`, i.e. it left the output holding whatever the workspace held
+            // before, behind one ERROR line. That is the shape #654 removed from
+            // attention_prefill_dispatch, and SETTLED.md S-22 records why: "no
+            // tier accepted" is an error, not a degraded answer. An unreachable
+            // branch is exactly where a silent-wrong-output path survives, because
+            // nothing exercises it to prove otherwise.
+            char msg[192];
+            snprintf(msg, sizeof(msg),
+                     "gemv_dispatch: CUTLASS_NVFP4 is not directly callable for decode "
+                     "(no FP8 micro_scales in the payload); the consumer must use the "
+                     "NVFP4 tier. shape=[%lld,%lld]",
+                     static_cast<long long>(w.shape[0]), static_cast<long long>(w.shape[1]));
+            throw std::runtime_error(msg);
         }
 
         // ---- MXFP4 -------------------------------------------------------

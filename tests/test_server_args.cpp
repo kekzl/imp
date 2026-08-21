@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 #include "args.h"
+#include "common/args_common.h"
 
 #include <string>
 #include <vector>
@@ -71,4 +72,29 @@ TEST(ServerArgs, UnrelatedFlagsLeaveLimitsAtDefault) {
     EXPECT_EQ(a.port, 9099);
     EXPECT_EQ(a.max_concurrent, 64);
     EXPECT_EQ(a.max_input_tokens, 0);
+}
+
+// ---------------------------------------------------------------------------
+// resolve_calibration_out - `[calibration] out_path` was parsed, documented in
+// config.h and offered in imp.conf.example, and read by nothing: setting it
+// produced no file and no warning, because imp_calibration_write() takes the
+// path as an argument and imp-cli passed --calibrate straight through.
+// Debt ledger item 7.
+// ---------------------------------------------------------------------------
+
+TEST(CalibrationOutPath, TheFlagWins) {
+    EXPECT_EQ(resolve_calibration_out("/from/flag.json", "/from/conf.json"), "/from/flag.json");
+}
+
+TEST(CalibrationOutPath, TheConfigKeyIsUsedWhenTheFlagCarriesNoPath) {
+    // This is the case that silently did nothing before.
+    EXPECT_EQ(resolve_calibration_out("", "/from/conf.json"), "/from/conf.json");
+}
+
+TEST(CalibrationOutPath, NeitherMeansNoCalibrationRun) { EXPECT_EQ(resolve_calibration_out("", ""), ""); }
+
+TEST(CalibrationOutPath, AnEmptyConfigKeyDoesNotClobberTheFlag) {
+    // imp.conf.example ships `out_path = ""`, so the default value of the key
+    // is the empty string on every run that does not set it.
+    EXPECT_EQ(resolve_calibration_out("/from/flag.json", ""), "/from/flag.json");
 }

@@ -64,3 +64,9 @@ bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i) {
     }
     return true;
 }
+
+std::string resolve_calibration_out(const std::string& flag_value, const std::string& config_value) {
+    if (!flag_value.empty())
+        return flag_value;
+    return config_value;
+}

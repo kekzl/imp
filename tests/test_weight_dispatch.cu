@@ -10,6 +10,8 @@
 #include "quant/mxfp4_gemm.h"
 
 #include <gtest/gtest.h>
+#include <cstdint>
+#include <stdexcept>
 #include <cuda_runtime.h>
 #include <cublasLt.h>
 #include <cuda_fp16.h>
@@ -665,12 +667,19 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     cudaFree(d_y_disp);
 }
 
-// gemv_dispatch CUTLASS_NVFP4 (M=1): CUTLASS_NVFP4 is a prefill-only tier.
-// The consumer decode path uses the NVFP4 tier directly; the CUTLASS_NVFP4
-// gemv_dispatch stub logs an error and returns without crashing.
-TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvIsStub) {
-    // This tests that calling gemv_dispatch on a CUTLASS_NVFP4 handle does
-    // not crash (logs an error but returns cleanly).
+// gemv_dispatch CUTLASS_NVFP4 (M=1): CUTLASS_NVFP4 is a prefill-only tier and
+// the consumer decode path uses the NVFP4 tier directly, so reaching this case
+// is a routing bug in the caller.
+//
+// This test used to assert the opposite. It was named `CUTLASS_NVFP4_GemvIsStub`
+// and asserted EXPECT_NO_THROW with the comment "output buffer is unchanged
+// (stub returns early)" - i.e. it pinned a branch that answered with whatever
+// the output buffer already held, behind one ERROR line, and it pinned it as
+// the expected behaviour. That is the shape #654 removed from
+// attention_prefill_dispatch: "no tier accepted" is an error, not a degraded
+// answer (SETTLED.md S-22). The routing check the test was written for is kept;
+// what changed is what counts as correct routing behaviour.
+TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvRefusesInsteadOfAnsweringWithStaleMemory) {
     const int M = 8, K = 32;
 
     void* dummy_data;
@@ -699,9 +708,18 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvIsStub) {
     Tensor x_t(d_x, QType::F16, 2, xshape, true);
     Tensor y_t(d_y, QType::F16, 2, yshape, true);
 
-    // Must not crash; output buffer is unchanged (stub returns early)
-    EXPECT_NO_THROW(gemv_dispatch(h, x_t, y_t, stream_));
+    // A sentinel the old behaviour would have left in place and called an answer.
+    EXPECT_EQ(cudaMemset(d_y, 0xAB, M * sizeof(half)), cudaSuccess);
+
+    EXPECT_THROW(gemv_dispatch(h, x_t, y_t, stream_), std::runtime_error);
     EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+
+    // And it refuses without touching the output, so a caller that ignores the
+    // exception still cannot mistake the buffer for a result.
+    std::vector<uint16_t> host(M);
+    EXPECT_EQ(cudaMemcpy(host.data(), d_y, M * sizeof(half), cudaMemcpyDeviceToHost), cudaSuccess);
+    for (int i = 0; i < M; ++i)
+        EXPECT_EQ(host[i], 0xABAB) << "output was written by a path that refused";
 
     cudaFree(dummy_data);
     cudaFree(dummy_sf);
