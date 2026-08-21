@@ -13,6 +13,17 @@ there instead of retelling it.
 
 ### Added
 
+- **`VramOwned<T>`: an owning handle for a `VRAMAllocator` allocation.** The
+  allocator says of itself, in its own destructor, that it is "a tracker, not an
+  owner", so ownership lived with the caller as a raw pointer plus a free somewhere
+  else. That spelling is where this week's allocation defects were: four pointers
+  freed through an allocator that had not produced them, and 128 MiB released with
+  the wrong API. The handle carries the allocator that produced it and releases
+  through that one; move-only, and no `release()`, because a raw-pointer escape
+  would make the class writable again. Two callers converted, and the direct-site
+  allowlist shrinks 466 to 464. (`AUDIT.md` R7 records that earlier audits referred
+  to this type before it existed.)
+
 - **The release blocker is now enforced where it is defined.** `GOAL.md` makes a
   hero regressing against a competitor a release blocker, over seven heroes, of
   which gates observed two: Gemma-4 sat 5.3 % down for six weeks and no gate
