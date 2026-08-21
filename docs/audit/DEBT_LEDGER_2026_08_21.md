@@ -634,3 +634,58 @@ matches the class name anywhere in the line rather than depending on that.
 
 The gate also refuses to judge before it can prove it reached the path it claims to
 exercise: it fails if `residual buffer enabled` is absent from the log.
+
+---
+
+## (h) The release blocker is defined over seven heroes and observed on two
+
+`GOAL.md` says: *"If a hero model regresses against any competitor on the primary
+metric, that is a release blocker."* The hero set has seven entries. Two of them are
+pinned by a gate:
+
+```
+tests/perf_baseline.json             -> Qwen3-8B-Q8_0.gguf
+tests/perf_baseline_north_star.json  -> Qwen3-14B-Q6_K.gguf
+tests/perf_baseline_chunked.json     -> no model pinned
+```
+
+Qwen3-Coder-30B-A3B, Qwen3.6-35B-A3B, **Gemma-4-26B-A4B**, Nemotron-H and gpt-oss-20b are
+measured by nothing. The only instrument that has ever looked at them is the competitive
+sweep, which before 2026-08-21 had last run on 2026-07-12.
+
+This is a coverage gap, not a calibration one, and the distinction decides where the fix
+goes. The 8 % threshold never entered into it: no gate ran on the model, so no threshold
+was applied. Recording it as "5.3 % slipped under 8 %" would send the next reader to argue
+about a number that was never consulted.
+
+`make bench-competitive` (#1518) is the instrument that closes it, wired into
+`scripts/check-release.sh` rather than `verify-fast`, because the blocker is defined at
+release scope and a per-PR cost is not warranted for it.
+
+### Two open shapes recorded here rather than chased
+
+**An unexplained +5 tok/s on Gemma-4 between window index 237 and 476.** The scan that
+located the `63df2d30` trade also mapped the rest of the window, and it is flat to the
+resolution of the instrument for 178 commits and then recovers:
+
+| window index | commit | Gemma-4 tg128 |
+|---|---|---|
+| 0 | `7811658a` | 258.96 |
+| 59 | `c5936db7` | 241.04 |
+| 119 | `5c9f6c07` | 241.37 |
+| 178 | `5408eb5c` | 240.41 |
+| 237 | `9f0322c8` | 240.21 |
+| 476 | `6e503cca` | 245.24 |
+
+Indices 59 through 237 span 1.16 tok/s, 0.48 %, against a within-arm spread of 0.05 to
+0.4 % on this model. Something after index 237 gives back ~5 tok/s and nothing records
+what. Not chased: the question it belonged to ("why is Gemma-4 slow") dissolved when the
+drop turned out to be a priced trade.
+
+**The `is_dense=false` arm has now been checked on a second model and was right there.**
+`pre_dequant_internal.h` records that this arm "silently voided that flag on quantized
+hybrids and cost the hero -5% decode", repaired for GDN hybrids only. Gemma-4 falls through
+the same arm and is neither dense nor GDN, so it looked like a second instance of the same
+defect. It is not: the trade is genuinely losing for it (+7.4 % decode against +9.0 % PPL).
+The generalisation still stands for the members of that category nobody has measured, but
+it now has one instance where the categorical call was correct.

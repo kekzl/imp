@@ -59,6 +59,13 @@ there instead of retelling it.
 
 ### Changed
 
+- **Gemma-4's 5.3 % decode drop since July is a priced trade, not a regression.**
+  Bisected to `63df2d30` (#982's `gemm.nvfp4_lm_head` auto rule), then named inside
+  that two-change commit by flag rather than by splitting it: `on` buys **+7.4 %
+  decode for +9.0 % PPL** on Gemma-4-26B-A4B UD-Q4_K_M. Losing by the rule's own
+  standard, so the categorical MoE arm made the right call for a model that was
+  never in its calibration set. Priced in `GOAL.md`'s trades list.
+
 - **The `--bench` prompt is not self-repetitive, and six files said it was.**
   `imp-cli --bench` builds it as `tokens[i] = i % vocab_size`, so at
   `--bench-pp 512` it is 512 distinct ids and every 6-gram is unique; with
