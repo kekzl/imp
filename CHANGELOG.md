@@ -19,6 +19,14 @@ there instead of retelling it.
   or a real difference of opinion. Off by default; the logit buffer is only
   allocated when the flag is on.
 
+- **`make bench-competitive` re-runs the llama.cpp comparison with the competitor
+  image pinned by digest.** The previous sweep was six weeks and 548 upstream
+  builds old and compared against a build the repo did not record. Re-measured
+  against b10524: imp leads on all four heroes (+148 %, +44 %, +29 %, +16 %) and
+  llama.cpp is flat to slightly slower than b9976 on every shared model. It also
+  reports imp with and without n-gram speculation, which is what caught that the
+  drafter never engages on Qwen3-14B Q6_K. ([`BENCHMARKS.md`](docs/BENCHMARKS.md))
+
 - **`speculative.verify_row_parity` makes the verify chunk reduce K the way the
   decode step does.** The two paths grouped the same products into 32 partial sums
   (decode) and 128 (verify); the rounding difference reached the stop decision and

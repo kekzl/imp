@@ -18,7 +18,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -233,6 +233,10 @@ test-perf: build check-gpu
 # coding agent actually feels (see docs/GOAL.md "Agentic surface"). Override the
 # model with MODEL=<name-under-$HOME/models>.
 AGENTIC_MODEL ?= Qwen3-8B-Q8_0.gguf
+bench-competitive: build check-gpu
+	@echo "Competitive decode sweep vs llama.cpp (image pinned by digest in the script)"
+	bash scripts/bench_competitive.sh
+
 bench-agentic: build check-gpu
 	@echo "=== imp agentic bench (RTX 5090) — model=$(AGENTIC_MODEL) ==="
 	@docker rm -f imp-agentic-bench >/dev/null 2>&1 || true
