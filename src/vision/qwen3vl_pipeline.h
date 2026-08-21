@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <span>
 
 namespace imp {
 
@@ -76,7 +77,7 @@ public:
     // CPU only — decode, resize, patchify. Safe to call off the batch worker
     // (an HTTP handler thread), and it is what tells the caller how many image
     // tokens the prompt has to reserve, BEFORE any GPU work happens.
-    bool preprocess(const uint8_t* data, size_t len, QwenPatches& out) const;
+    bool preprocess(std::span<const uint8_t> data, QwenPatches& out) const;
     // Image tokens a patchified image becomes.
     int merged_tokens_of(const QwenPatches& p) const;
     // Bytes one request's embedding buffer needs (same for each DeepStack tap).

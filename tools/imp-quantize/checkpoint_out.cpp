@@ -1,10 +1,10 @@
 #include "checkpoint_out.h"
 
+#include "core/fp_bits.h"
 #include "model/json_util.h"
 
 #include <array>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -176,40 +176,6 @@ float global_scale_value(float tensor_scale, OutputFormat fmt) {
     return tensor_scale == 0.0f ? 0.0f : 1.0f / tensor_scale;
 }
 
-namespace {
-
-// FP16 bits -> float. Written out rather than taken from cuda_fp16.h so this
-// translation unit stays host-only and the CPU test lane can reach it.
-float fp16_bits_to_float(uint16_t bits) {
-    const uint32_t sign = static_cast<uint32_t>(bits & 0x8000u) << 16;
-    const uint32_t exp = (bits >> 10) & 0x1Fu;
-    const uint32_t mant = bits & 0x3FFu;
-    uint32_t out;
-    if (exp == 0) {
-        if (mant == 0) {
-            out = sign;  // +/- 0
-        } else {
-            // Subnormal: renormalize into a float32 exponent.
-            uint32_t e = 0, m = mant;
-            while ((m & 0x400u) == 0) {
-                m <<= 1;
-                e++;
-            }
-            m &= 0x3FFu;
-            out = sign | ((127 - 15 - e + 1) << 23) | (m << 13);
-        }
-    } else if (exp == 0x1F) {
-        out = sign | 0x7F800000u | (mant << 13);  // Inf / NaN
-    } else {
-        out = sign | ((exp + 127 - 15) << 23) | (mant << 13);
-    }
-    float f;
-    std::memcpy(&f, &out, sizeof(f));
-    return f;
-}
-
-}  // namespace
-
 float fp16_absmax(const uint16_t* data, size_t n) {
     uint16_t best = 0;
     for (size_t i = 0; i < n; i++) {
@@ -219,7 +185,7 @@ float fp16_absmax(const uint16_t* data, size_t n) {
         if (mag > best)
             best = mag;
     }
-    return fp16_bits_to_float(best);
+    return half_to_float(best);
 }
 
 float export_tensor_scale(float absmax) {
@@ -310,14 +276,13 @@ std::string compressed_tensors_quant_config(const std::vector<std::string>& igno
     return s;
 }
 
-bool patch_config_json(const std::string& src, const std::string& quant_config_obj, std::string& out,
-                       std::string& err) {
+std::expected<std::string, std::string> patch_config_json(const std::string& src,
+                                                          const std::string& quant_config_obj) {
     static const std::string kKey = "quantization_config";
     size_t i = 0;
     skip_ws(src, i);
     if (i >= src.size() || src[i] != '{') {
-        err = "config.json does not start with a JSON object";
-        return false;
+        return std::unexpected("config.json does not start with a JSON object");
     }
     const size_t obj_open = i;
     i++;
@@ -327,10 +292,8 @@ bool patch_config_json(const std::string& src, const std::string& quant_config_o
     // the same word appearing in a string value — is not mistaken for this one.
     while (true) {
         skip_ws(src, i);
-        if (i >= src.size()) {
-            err = "config.json ends inside its top-level object";
-            return false;
-        }
+        if (i >= src.size())
+            return std::unexpected("config.json ends inside its top-level object");
         if (src[i] == '}') {
             // No such key: insert one right after the opening brace. The comma
             // is omitted for an otherwise empty object, which would otherwise
@@ -340,30 +303,22 @@ bool patch_config_json(const std::string& src, const std::string& quant_config_o
                 skip_ws(src, j);
                 return j == i;
             }();
-            out = src.substr(0, obj_open + 1) + "\n  \"" + kKey + "\": " + quant_config_obj +
-                  (empty ? "\n" : ",\n") + src.substr(obj_open + 1);
-            return true;
+            return src.substr(0, obj_open + 1) + "\n  \"" + kKey + "\": " + quant_config_obj +
+                   (empty ? "\n" : ",\n") + src.substr(obj_open + 1);
         }
         std::string key;
-        if (!read_string(src, i, key)) {
-            err = "malformed key in config.json";
-            return false;
-        }
+        if (!read_string(src, i, key))
+            return std::unexpected("malformed key in config.json");
         skip_ws(src, i);
-        if (i >= src.size() || src[i] != ':') {
-            err = "expected ':' after key '" + key + "' in config.json";
-            return false;
-        }
+        if (i >= src.size() || src[i] != ':')
+            return std::unexpected("expected ':' after key '" + key + "' in config.json");
         i++;
         skip_ws(src, i);
         const size_t value_start = i;
-        if (!skip_value(src, i)) {
-            err = "malformed value for key '" + key + "' in config.json";
-            return false;
-        }
+        if (!skip_value(src, i))
+            return std::unexpected("malformed value for key '" + key + "' in config.json");
         if (key == kKey) {
-            out = src.substr(0, value_start) + quant_config_obj + src.substr(i);
-            return true;
+            return src.substr(0, value_start) + quant_config_obj + src.substr(i);
         }
         skip_ws(src, i);
         if (i < src.size() && src[i] == ',') {
@@ -372,8 +327,7 @@ bool patch_config_json(const std::string& src, const std::string& quant_config_o
         }
         if (i < src.size() && src[i] == '}')
             continue;  // handled at the top of the loop
-        err = "expected ',' or '}' in config.json";
-        return false;
+        return std::unexpected("expected ',' or '}' in config.json");
     }
 }
 
@@ -381,16 +335,18 @@ bool patch_config_json(const std::string& src, const std::string& quant_config_o
 
 namespace fs = std::filesystem;
 
-bool can_declare_quantization(const std::string& in_dir, OutputFormat fmt, std::string& err) {
+std::expected<void, std::string> can_declare_quantization(const std::string& in_dir, OutputFormat fmt) {
     if (fmt != OutputFormat::CompressedTensors || fs::exists(fs::path(in_dir) / "config.json"))
-        return true;
-    err = "compressed-tensors output needs a config.json to declare the quantization in, and " + in_dir +
-          " has none";
-    return false;
+        return {};
+    return std::unexpected(
+        "compressed-tensors output needs a config.json to declare the quantization in, and " + in_dir +
+        " has none");
 }
 
-bool copy_aux_files(const std::string& in_dir, const std::string& out_dir, OutputFormat fmt,
-                    const std::vector<std::string>& excluded_modules, bool calibrated, std::string& err) {
+std::expected<void, std::string> copy_aux_files(const std::string& in_dir, const std::string& out_dir,
+                                                OutputFormat fmt,
+                                                const std::vector<std::string>& excluded_modules,
+                                                bool calibrated) {
     static const char* kNames[] = {"config.json",
                                    "generation_config.json",
                                    "tokenizer.json",
@@ -404,17 +360,15 @@ bool copy_aux_files(const std::string& in_dir, const std::string& out_dir, Outpu
                                    "chat_template.json"};
     std::set<std::string> copied;
     std::error_code ec;
-    auto copy_one = [&](const fs::path& src, const std::string& name) {
+    auto copy_one = [&](const fs::path& src, const std::string& name) -> std::expected<void, std::string> {
         fs::copy_file(src, fs::path(out_dir) / name, fs::copy_options::overwrite_existing, ec);
-        if (ec) {
-            err = "failed to copy " + name + ": " + ec.message();
-            return false;
-        }
+        if (ec)
+            return std::unexpected("failed to copy " + name + ": " + ec.message());
         copied.insert(name);
-        return true;
+        return {};
     };
-    if (!can_declare_quantization(in_dir, fmt, err))
-        return false;
+    if (auto declarable = can_declare_quantization(in_dir, fmt); !declarable)
+        return declarable;
 
     for (const char* n : kNames) {
         const fs::path src = fs::path(in_dir) / n;
@@ -422,25 +376,21 @@ bool copy_aux_files(const std::string& in_dir, const std::string& out_dir, Outpu
             continue;
         if (fmt == OutputFormat::CompressedTensors && std::string(n) == "config.json") {
             const std::string text = read_file(src.string());
-            if (text.empty()) {
-                err = "cannot read " + src.string();
-                return false;
-            }
-            std::string patched;
-            if (!patch_config_json(text, compressed_tensors_quant_config(excluded_modules, calibrated),
-                                   patched, err))
-                return false;
+            if (text.empty())
+                return std::unexpected("cannot read " + src.string());
+            const auto patched = patch_config_json(text, compressed_tensors_quant_config(excluded_modules,
+                                                                                         calibrated));
+            if (!patched)
+                return std::unexpected(patched.error());
             std::ofstream f(fs::path(out_dir) / "config.json");
-            f << patched;
-            if (!f) {
-                err = "cannot write config.json";
-                return false;
-            }
+            f << *patched;
+            if (!f)
+                return std::unexpected("cannot write config.json");
             copied.insert("config.json");
             continue;
         }
-        if (!copy_one(src, n))
-            return false;
+        if (auto copied_one = copy_one(src, n); !copied_one)
+            return copied_one;
     }
 
     // Then every remaining `*_config.json`, by pattern rather than by name, so a
@@ -456,19 +406,18 @@ bool copy_aux_files(const std::string& in_dir, const std::string& out_dir, Outpu
             continue;
         if (name == "hf_quant_config.json")
             continue;
-        if (!copy_one(e.path(), name))
-            return false;
+        if (auto copied_one = copy_one(e.path(), name); !copied_one)
+            return copied_one;
     }
-    return true;
+    return {};
 }
 
-bool write_modelopt_quant_config(const std::string& out_dir, const std::vector<std::string>& excluded,
-                                 bool calibrated, std::string& err) {
+std::expected<void, std::string> write_modelopt_quant_config(const std::string& out_dir,
+                                                             const std::vector<std::string>& excluded,
+                                                             bool calibrated) {
     std::ofstream f(fs::path(out_dir) / "hf_quant_config.json");
-    if (!f) {
-        err = "cannot write hf_quant_config.json";
-        return false;
-    }
+    if (!f)
+        return std::unexpected("cannot write hf_quant_config.json");
     f << "{\n"
       << "  \"producer\": { \"name\": \"imp-quantize\", \"version\": \"2\", \"calibration\": \""
       << (calibrated ? "awq" : "none") << "\" },\n"
@@ -480,16 +429,18 @@ bool write_modelopt_quant_config(const std::string& out_dir, const std::vector<s
     for (size_t i = 0; i < excluded.size(); i++)
         f << (i ? ", " : "") << '"' << json_escape(excluded[i]) << '"';
     f << "]\n  }\n}\n";
-    return static_cast<bool>(f);
+    // A stream that failed HERE used to return false with `err` never set, so
+    // the caller printed an empty line and exited 1.
+    if (!f)
+        return std::unexpected("write failed for hf_quant_config.json");
+    return {};
 }
 
-bool write_recipe_yaml(const std::string& out_dir, const std::vector<std::string>& excluded,
-                       std::string& err) {
+std::expected<void, std::string> write_recipe_yaml(const std::string& out_dir,
+                                                   const std::vector<std::string>& excluded) {
     std::ofstream f(fs::path(out_dir) / "recipe.yaml");
-    if (!f) {
-        err = "cannot write recipe.yaml";
-        return false;
-    }
+    if (!f)
+        return std::unexpected("cannot write recipe.yaml");
     f << "default_stage:\n"
       << "  default_modifiers:\n"
       << "    QuantizationModifier:\n"
@@ -501,23 +452,25 @@ bool write_recipe_yaml(const std::string& out_dir, const std::vector<std::string
         f << (i ? ", " : "") << '\'' << excluded[i] << '\'';
     f << "]\n"
       << "      scheme: NVFP4\n";
-    return static_cast<bool>(f);
+    if (!f)
+        return std::unexpected("write failed for recipe.yaml");
+    return {};
 }
 
-bool write_shard_index(const std::string& out_dir,
-                       const std::vector<std::pair<std::string, std::string>>& tensor_to_shard,
-                       size_t total_bytes, std::string& err) {
+std::expected<void, std::string> write_shard_index(
+    const std::string& out_dir, const std::vector<std::pair<std::string, std::string>>& tensor_to_shard,
+    size_t total_bytes) {
     std::ofstream f(fs::path(out_dir) / "model.safetensors.index.json");
-    if (!f) {
-        err = "cannot write model.safetensors.index.json";
-        return false;
-    }
+    if (!f)
+        return std::unexpected("cannot write model.safetensors.index.json");
     f << "{\n  \"metadata\": { \"total_size\": " << total_bytes << " },\n  \"weight_map\": {\n";
     for (size_t i = 0; i < tensor_to_shard.size(); i++)
         f << "    \"" << json_escape(tensor_to_shard[i].first) << "\": \"" << tensor_to_shard[i].second << '"'
           << (i + 1 < tensor_to_shard.size() ? ",\n" : "\n");
     f << "  }\n}\n";
-    return static_cast<bool>(f);
+    if (!f)
+        return std::unexpected("write failed for model.safetensors.index.json");
+    return {};
 }
 
 }  // namespace imp::quantize

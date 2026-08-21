@@ -565,10 +565,11 @@ int main(int argc, char** argv) {
                     msgs.back().content = blocks + msgs.back().content;
                     tokens = chat_tpl.apply(*tok, msgs);
                     const int32_t pad_id = tok->find_token("<|image_pad|>");
-                    std::string exp_err;
-                    if (pad_id < 0 || !imp::expand_image_placeholders(tokens, pad_id, counts, exp_err)) {
-                        fprintf(stderr, "Error placing image tokens: %s\n",
-                                pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err.c_str());
+                    const auto expanded = pad_id < 0
+                                              ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
+                                              : imp::expand_image_placeholders(tokens, pad_id, counts);
+                    if (!expanded) {
+                        fprintf(stderr, "Error placing image tokens: %s\n", expanded.error().c_str());
                         history.pop_back();
                         continue;
                     }
@@ -778,10 +779,11 @@ int main(int argc, char** argv) {
                 std::vector<imp::ChatMessage> msgs = {{"user", blocks + args.prompt}};
                 tokens = chat_tpl.apply(*tok, msgs);
                 const int32_t pad_id = tok->find_token("<|image_pad|>");
-                std::string exp_err;
-                if (pad_id < 0 || !imp::expand_image_placeholders(tokens, pad_id, counts, exp_err)) {
-                    fprintf(stderr, "Error placing image tokens: %s\n",
-                            pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err.c_str());
+                const auto expanded = pad_id < 0
+                                          ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
+                                          : imp::expand_image_placeholders(tokens, pad_id, counts);
+                if (!expanded) {
+                    fprintf(stderr, "Error placing image tokens: %s\n", expanded.error().c_str());
                     imp_context_free(ctx);
                     imp_model_free(model);
                     return 1;

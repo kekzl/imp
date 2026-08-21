@@ -1,6 +1,7 @@
 #include "lora/lora_adapter.h"
 #include "core/logging.h"
 #include "model/json_util.h"
+#include "core/fp_bits.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -71,19 +72,16 @@ void* upload_f16(const uint8_t* src, size_t nbytes, const std::string& dtype, in
             return nullptr;
         const uint16_t* bf = reinterpret_cast<const uint16_t*>(src);
         for (int64_t i = 0; i < numel; i++) {
-            uint32_t bits = static_cast<uint32_t>(bf[i]) << 16;
-            float f;
-            std::memcpy(&f, &bits, 4);
-            __half hf = __float2half(f);
-            std::memcpy(&h[i], &hf, 2);
+            const __half_raw hf(__float2half(bf16_to_float(bf[i])));
+            h[i] = hf.x;
         }
     } else if (dtype == "F32") {
         if (nbytes != static_cast<size_t>(numel) * 4)
             return nullptr;
         const float* f = reinterpret_cast<const float*>(src);
         for (int64_t i = 0; i < numel; i++) {
-            __half hf = __float2half(f[i]);
-            std::memcpy(&h[i], &hf, 2);
+            const __half_raw hf(__float2half(f[i]));
+            h[i] = hf.x;
         }
     } else {
         return nullptr;
@@ -126,7 +124,7 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
     if (!cfg_path.empty() && fs::exists(cfg_path)) {
         std::ifstream f(cfg_path);
         std::string js((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        JsonParser p(js.data(), js.size());
+        JsonParser p(js);
         JValue root = p.parse();
         if (p.ok() && root.type == JType::OBJECT) {
             for (auto& [k, v] : root.obj) {
@@ -160,7 +158,7 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
     std::vector<uint8_t> data(fsize - 8 - hdr_len);
     f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
 
-    JsonParser p(hdr.data(), hdr.size());
+    JsonParser p(hdr);
     JValue root = p.parse();
     if (!p.ok() || root.type != JType::OBJECT) {
         IMP_LOG_ERROR("LoRA: safetensors header JSON parse failed");

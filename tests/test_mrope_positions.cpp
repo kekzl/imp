@@ -29,8 +29,12 @@ struct Built {
 Built build(const std::vector<uint8_t>& mask, const std::vector<MRopeImageGrid>& grids, int start = 0) {
     Built b;
     b.n = mask.size();
-    std::string err;
-    EXPECT_TRUE(qwen_build_mrope_positions(mask, grids, start, b.pos, b.next, err)) << err;
+    const auto r = qwen_build_mrope_positions(mask, grids, start);
+    EXPECT_TRUE(r) << r.error();
+    if (r) {
+        b.pos = r->pos;
+        b.next = r->next_pos;
+    }
     return b;
 }
 
@@ -116,53 +120,49 @@ TEST(MRopePositions, ASingleImageWithNoTextAround) {
 // A run length that does not match the grid means the placeholder expansion and
 // the preprocessor disagree. Every position after it would be shifted.
 TEST(MRopePositions, RefusesARunThatDoesNotMatchItsGrid) {
-    std::vector<int32_t> out;
-    int next = 0;
-    std::string err;
-    EXPECT_FALSE(qwen_build_mrope_positions({0, 1, 1, 1, 0}, {{2, 2}}, 0, out, next, err));
-    EXPECT_NE(err.find("4 tokens"), std::string::npos) << err;
-    EXPECT_NE(err.find("reserves 3"), std::string::npos) << err;
+    const auto r = qwen_build_mrope_positions({0, 1, 1, 1, 0}, {{2, 2}}, 0);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_NE(r.error().find("4 tokens"), std::string::npos) << r.error();
+    EXPECT_NE(r.error().find("reserves 3"), std::string::npos) << r.error();
 }
 
 TEST(MRopePositions, RefusesAGridCountMismatch) {
-    std::vector<int32_t> out;
-    int next = 0;
-    std::string err;
     // Two runs, one grid.
-    EXPECT_FALSE(qwen_build_mrope_positions({1, 0, 1}, {{1, 1}}, 0, out, next, err));
-    EXPECT_NE(err.find("more image runs"), std::string::npos) << err;
+    {
+        const auto r = qwen_build_mrope_positions({1, 0, 1}, {{1, 1}}, 0);
+        ASSERT_FALSE(r.has_value());
+        EXPECT_NE(r.error().find("more image runs"), std::string::npos) << r.error();
+    }
     // One run, two grids.
-    err.clear();
-    EXPECT_FALSE(qwen_build_mrope_positions({1, 0}, {{1, 1}, {1, 1}}, 0, out, next, err));
-    EXPECT_NE(err.find("grids were supplied"), std::string::npos) << err;
+    {
+        const auto r = qwen_build_mrope_positions({1, 0}, {{1, 1}, {1, 1}}, 0);
+        ASSERT_FALSE(r.has_value());
+        EXPECT_NE(r.error().find("grids were supplied"), std::string::npos) << r.error();
+    }
 }
 
 TEST(MRopePositions, RefusesAnEmptyGrid) {
-    std::vector<int32_t> out;
-    int next = 0;
-    std::string err;
-    EXPECT_FALSE(qwen_build_mrope_positions({1}, {{0, 3}}, 0, out, next, err));
-    EXPECT_NE(err.find("empty grid"), std::string::npos) << err;
+    {
+        const auto r = qwen_build_mrope_positions({1}, {{0, 3}}, 0);
+        ASSERT_FALSE(r.has_value());
+        EXPECT_NE(r.error().find("empty grid"), std::string::npos) << r.error();
+    }
 }
 
 TEST(MRopePositions, EmptySequenceIsFine) {
-    std::vector<int32_t> out;
-    int next = -1;
-    std::string err;
-    EXPECT_TRUE(qwen_build_mrope_positions({}, {}, 5, out, next, err)) << err;
-    EXPECT_TRUE(out.empty());
-    EXPECT_EQ(next, 5);
+    const auto r = qwen_build_mrope_positions({}, {}, 5);
+    ASSERT_TRUE(r) << r.error();
+    EXPECT_TRUE(r->pos.empty());
+    EXPECT_EQ(r->next_pos, 5);
 }
 
 // Two adjacent images with no text between them are one contiguous run of image
 // tokens, and must NOT be read as a single image.
 TEST(MRopePositions, AdjacentImagesWithoutSeparatorAreRefused) {
-    std::vector<int32_t> out;
-    int next = 0;
-    std::string err;
     // 4 contiguous image tokens, declared as two 1x2 images.
-    EXPECT_FALSE(qwen_build_mrope_positions({1, 1, 1, 1}, {{1, 2}, {1, 2}}, 0, out, next, err));
-    EXPECT_FALSE(err.empty()) << "a merged run must not silently become one image";
+    const auto r = qwen_build_mrope_positions({1, 1, 1, 1}, {{1, 2}, {1, 2}}, 0);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_FALSE(r.error().empty()) << "a merged run must not silently become one image";
 }
 
 }  // namespace

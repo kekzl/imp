@@ -150,11 +150,11 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
     return ok;
 }
 
-bool VisionPipeline::preprocess(const uint8_t* data, size_t len, ImageData& out) const {
+bool VisionPipeline::preprocess(std::span<const uint8_t> data, ImageData& out) const {
     if (!model_)
         return false;
-    return load_and_preprocess_image_from_memory(data, len, model_->config.image_size,
-                                                  model_->config.image_mean, model_->config.image_std, out);
+    return load_and_preprocess_image_from_memory(data, model_->config.image_size, model_->config.image_mean,
+                                                 model_->config.image_std, out);
 }
 
 bool VisionPipeline::encode_to(const ImageData& img, half* out, cudaStream_t stream) {
@@ -189,15 +189,15 @@ bool VisionPipeline::set_image(const std::string& path, cudaStream_t stream) {
     return encode_image(img.pixels.data(), n_pixels, stream);
 }
 
-bool VisionPipeline::set_image_from_memory(const uint8_t* data, size_t len, cudaStream_t stream) {
+bool VisionPipeline::set_image_from_memory(std::span<const uint8_t> data, cudaStream_t stream) {
     if (!encoder_) {
         IMP_LOG_ERROR("set_image_from_memory: no vision model loaded");
         return false;
     }
 
     ImageData img;
-    if (!load_and_preprocess_image_from_memory(data, len, model_->config.image_size,
-                                               model_->config.image_mean, model_->config.image_std, img)) {
+    if (!load_and_preprocess_image_from_memory(data, model_->config.image_size, model_->config.image_mean,
+                                               model_->config.image_std, img)) {
         return false;
     }
 

@@ -357,7 +357,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     }
 
     const char* json_data = reinterpret_cast<const char*>(data + 8);
-    JsonParser parser(json_data, static_cast<size_t>(header_size));
+    JsonParser parser(std::string_view(json_data, static_cast<size_t>(header_size)));
     JValue root = parser.parse();
     if (!parser.ok() || root.type != JType::OBJECT) {
         munmap(mmap_base, file_size);
@@ -540,7 +540,7 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     std::string index_json((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     ifs.close();
 
-    JsonParser parser(index_json.data(), index_json.size());
+    JsonParser parser(index_json);
     JValue root = parser.parse();
     if (!parser.ok() || root.type != JType::OBJECT) {
         IMP_LOG_ERROR("Failed to parse index JSON: %s", index_path.c_str());
@@ -672,7 +672,7 @@ bool probe_mtp_head(const std::string& model_dir) {
         return false;
 
     auto json_has_head = [](const char* data, size_t len) {
-        JsonParser parser(data, len);
+        JsonParser parser(std::string_view(data, len));
         JValue root = parser.parse();
         if (!parser.ok() || root.type != JType::OBJECT)
             return false;

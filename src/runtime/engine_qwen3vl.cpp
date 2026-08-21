@@ -176,14 +176,14 @@ bool Engine::set_image(const std::string& path) {
         }
         const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
                                          std::istreambuf_iterator<char>());
-        return set_image_from_memory(bytes.data(), bytes.size());
+        return set_image_from_memory(bytes);
     }
     return vision_.set_image(path, stream_);
 }
 
-bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
+bool Engine::set_image_from_memory(std::span<const uint8_t> data) {
     clear_image();
-    return add_image_from_memory(data, len);
+    return add_image_from_memory(data);
 }
 
 bool Engine::add_image(const std::string& path) {
@@ -195,23 +195,23 @@ bool Engine::add_image(const std::string& path) {
         return false;
     }
     const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    return add_image_from_memory(bytes.data(), bytes.size());
+    return add_image_from_memory(bytes);
 }
 
-bool Engine::add_image_from_memory(const uint8_t* data, size_t len) {
+bool Engine::add_image_from_memory(std::span<const uint8_t> data) {
     if (qwen_vision_.is_ready()) {
         auto patches = std::make_shared<QwenPatches>();
-        if (!qwen_vision_.preprocess(data, len, *patches))
+        if (!qwen_vision_.preprocess(data, *patches))
             return false;
         qwen_pending_patches_.push_back(std::move(patches));
-        pending_image_hash_ = combine_image_hash(pending_image_hash_, image_content_hash(data, len));
+        pending_image_hash_ = combine_image_hash(pending_image_hash_, image_content_hash(data));
         return true;
     }
     // The mmproj path stores its image inside VisionPipeline, but the hash has
     // to reach the request either way — see the note at the prefill guard. It
     // holds exactly one image, so adding replaces.
-    pending_image_hash_ = image_content_hash(data, len);
-    return vision_.set_image_from_memory(data, len, stream_);
+    pending_image_hash_ = image_content_hash(data);
+    return vision_.set_image_from_memory(data, stream_);
 }
 
 void Engine::clear_image() {
@@ -220,8 +220,8 @@ void Engine::clear_image() {
     vision_.clear_image();
 }
 
-bool Engine::preprocess_image_qwen(const uint8_t* data, size_t len, QwenPatches& out) const {
-    return qwen_vision_.is_ready() && qwen_vision_.preprocess(data, len, out);
+bool Engine::preprocess_image_qwen(std::span<const uint8_t> data, QwenPatches& out) const {
+    return qwen_vision_.is_ready() && qwen_vision_.preprocess(data, out);
 }
 
 int Engine::image_tokens_of(const QwenPatches& patches) const {
@@ -337,8 +337,6 @@ bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& s
         return false;
     }
 
-    std::string err;
-    int next_pos = 0;
     // One grid per image, in prompt order. `qwen_build_mrope_positions` walks
     // the runs of image tokens and takes the next grid at each one, so a second
     // picture continues the (t, h, w) sequence rather than restarting it.
@@ -346,14 +344,16 @@ bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& s
     grids.reserve(shapes.size());
     for (const auto& s : shapes)
         grids.push_back({s.grid_rows, s.grid_cols});
-    if (!qwen_build_mrope_positions(is_image, grids, 0, req.mrope_positions, next_pos, err)) {
-        IMP_LOG_ERROR("Qwen3-VL: %s", err.c_str());
+    const auto mrope = qwen_build_mrope_positions(is_image, grids, 0);
+    if (!mrope) {
+        IMP_LOG_ERROR("Qwen3-VL: %s", mrope.error().c_str());
         return false;
     }
+    req.mrope_positions = std::move(mrope->pos);
     // Negative whenever the prompt held an image — it occupied more tokens than
     // it cost positions — and it is what keeps generation continuing where the
     // prompt left off instead of jumping past a gap.
-    req.mrope_pos_delta = next_pos - static_cast<int>(req.input_tokens.size());
+    req.mrope_pos_delta = mrope->next_pos - static_cast<int>(req.input_tokens.size());
     // Its own device copy: decode replays dereference this pointer, and a
     // shared one would let a concurrent request's prefill change it mid-run.
     auto delta_buf = std::make_shared<Buffer>(Buffer::device(sizeof(int)));

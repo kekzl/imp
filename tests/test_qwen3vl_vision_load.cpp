@@ -105,9 +105,9 @@ TEST(Qwen3VLVisionLoad, LoadsTheRealCheckpoint) {
     ASSERT_EQ(tensors.size(), 315u);
 
     VisionModel v = fresh_tower();
-    Qwen3VLVisionLoadStats st;
-    std::string err;
-    ASSERT_TRUE(load_qwen3vl_vision_tensors(tensors, v, st, err)) << err;
+    const auto loaded = load_qwen3vl_vision_tensors(tensors, v);
+    ASSERT_TRUE(loaded) << loaded.error().what;
+    const Qwen3VLVisionLoadStats& st = *loaded;
 
     EXPECT_EQ(st.assigned, 315);
     EXPECT_EQ(st.unknown, 0);
@@ -132,9 +132,10 @@ TEST(Qwen3VLVisionLoad, RefusesWhenASlotStaysNull) {
     tensors.erase("model.visual.blocks.13.attn.proj.bias");
 
     VisionModel v = fresh_tower();
-    Qwen3VLVisionLoadStats st;
-    std::string err;
-    EXPECT_FALSE(load_qwen3vl_vision_tensors(tensors, v, st, err));
+    const auto loaded = load_qwen3vl_vision_tensors(tensors, v);
+    ASSERT_FALSE(loaded.has_value());
+    const std::string& err = loaded.error().what;
+    const Qwen3VLVisionLoadStats& st = loaded.error().stats;
     EXPECT_EQ(st.missing, 1);
     EXPECT_NE(err.find("blocks.13.attn.proj.bias"), std::string::npos) << err;
 }
@@ -146,9 +147,9 @@ TEST(Qwen3VLVisionLoad, RefusesSwappedMergerNormWidths) {
     tensors["model.visual.merger.norm.weight"] = tensor({4096});
 
     VisionModel v = fresh_tower();
-    Qwen3VLVisionLoadStats st;
-    std::string err;
-    EXPECT_FALSE(load_qwen3vl_vision_tensors(tensors, v, st, err));
+    const auto loaded = load_qwen3vl_vision_tensors(tensors, v);
+    ASSERT_FALSE(loaded.has_value());
+    const std::string& err = loaded.error().what;
     EXPECT_NE(err.find("merger.norm.weight"), std::string::npos) << err;
     EXPECT_NE(err.find("1024"), std::string::npos) << "the message must name the expected width: " << err;
 }
@@ -169,10 +170,10 @@ TEST(Qwen3VLVisionLoad, RefusesAShapeTheConfigContradicts) {
         auto tensors = real_checkpoint();
         tensors[c.name] = tensor(c.shape);
         VisionModel v = fresh_tower();
-        Qwen3VLVisionLoadStats st;
-        std::string err;
-        EXPECT_FALSE(load_qwen3vl_vision_tensors(tensors, v, st, err)) << c.name;
-        EXPECT_NE(err.find("shape"), std::string::npos) << c.name << ": " << err;
+        const auto loaded = load_qwen3vl_vision_tensors(tensors, v);
+        ASSERT_FALSE(loaded.has_value()) << c.name;
+        EXPECT_NE(loaded.error().what.find("shape"), std::string::npos)
+            << c.name << ": " << loaded.error().what;
     }
 }
 
@@ -185,9 +186,9 @@ TEST(Qwen3VLVisionLoad, IgnoresEverythingOutsideTheVisualPrefix) {
     tensors["visual.blocks.0.norm1.weight"] = tensor({1024});  // prefix-like, not the prefix
 
     VisionModel v = fresh_tower();
-    Qwen3VLVisionLoadStats st;
-    std::string err;
-    ASSERT_TRUE(load_qwen3vl_vision_tensors(tensors, v, st, err)) << err;
+    const auto loaded = load_qwen3vl_vision_tensors(tensors, v);
+    ASSERT_TRUE(loaded) << loaded.error().what;
+    const Qwen3VLVisionLoadStats& st = *loaded;
     EXPECT_EQ(st.assigned, 315);
     EXPECT_EQ(st.unknown, 0);
 }
@@ -200,9 +201,9 @@ TEST(Qwen3VLVisionLoad, CountsUnknownVisualTensorsWithoutFailing) {
     tensors["model.visual.some_future_head.weight"] = tensor({8, 8});
 
     VisionModel v = fresh_tower();
-    Qwen3VLVisionLoadStats st;
-    std::string err;
-    EXPECT_TRUE(load_qwen3vl_vision_tensors(tensors, v, st, err)) << err;
+    const auto loaded = load_qwen3vl_vision_tensors(tensors, v);
+    EXPECT_TRUE(loaded) << loaded.error().what;
+    const Qwen3VLVisionLoadStats& st = *loaded;
     EXPECT_EQ(st.unknown, 1);
     EXPECT_EQ(st.assigned, 315);
 }
@@ -211,9 +212,10 @@ TEST(Qwen3VLVisionLoad, CountsUnknownVisualTensorsWithoutFailing) {
 // this first would resize to zero and route every block into nothing.
 TEST(Qwen3VLVisionLoad, RefusesAnUnparsedConfig) {
     VisionModel v;  // is_qwen3vl still false
-    Qwen3VLVisionLoadStats st;
-    std::string err;
-    EXPECT_FALSE(load_qwen3vl_vision_tensors(real_checkpoint(), v, st, err));
+    const auto loaded = load_qwen3vl_vision_tensors(real_checkpoint(), v);
+    ASSERT_FALSE(loaded.has_value());
+    const std::string& err = loaded.error().what;
+    const Qwen3VLVisionLoadStats& st = loaded.error().stats;
     EXPECT_NE(err.find("not parsed"), std::string::npos) << err;
     EXPECT_EQ(st.assigned, 0);
 }
@@ -235,9 +237,9 @@ TEST(Qwen3VLVisionLoad, RefusesADeepstackMergerWithNoConfiguredSlot) {
         tensors[std::string("model.visual.deepstack_merger_list.3.") + tail] = tensor(shape);
 
     VisionModel v = fresh_tower();
-    Qwen3VLVisionLoadStats st;
-    std::string err;
-    EXPECT_FALSE(load_qwen3vl_vision_tensors(tensors, v, st, err));
+    const auto loaded = load_qwen3vl_vision_tensors(tensors, v);
+    ASSERT_FALSE(loaded.has_value());
+    const std::string& err = loaded.error().what;
     EXPECT_NE(err.find("no slot"), std::string::npos) << err;
 }
 
@@ -248,9 +250,9 @@ TEST(Qwen3VLVisionLoad, RefusesABlockIndexPastTheConfiguredDepth) {
     tensors["model.visual.blocks.24.norm1.weight"] = tensor({1024});
 
     VisionModel v = fresh_tower();
-    Qwen3VLVisionLoadStats st;
-    std::string err;
-    EXPECT_FALSE(load_qwen3vl_vision_tensors(tensors, v, st, err));
+    const auto loaded = load_qwen3vl_vision_tensors(tensors, v);
+    ASSERT_FALSE(loaded.has_value());
+    const std::string& err = loaded.error().what;
     EXPECT_NE(err.find("exceeds depth"), std::string::npos) << err;
 }
 

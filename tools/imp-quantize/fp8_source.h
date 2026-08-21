@@ -24,6 +24,7 @@
 
 #include <cstdint>
 #include <string>
+#include <expected>
 #include <vector>
 
 namespace imp::quantize {
@@ -43,9 +44,9 @@ float e4m3_to_float(uint8_t bits);
 int derive_block_edge(int64_t n, int64_t k, int64_t scale_rows, int64_t scale_cols);
 
 // Widen an FP8 weight to FP16 by multiplying each value with its block scale.
-// `out` is resized to N*K. Returns false with `err` set on any shape or dtype
-// mismatch; a partially converted buffer is never handed back.
-bool fp8_block_scaled_to_fp16(const RawTensor& weight, const RawTensor& scale_inv,
-                              std::vector<uint16_t>& out, std::string& err);
+// Returns N*K FP16 values, or the error text on any shape or dtype mismatch.
+// A partially converted buffer is not a value this can return.
+[[nodiscard]] std::expected<std::vector<uint16_t>, std::string> fp8_block_scaled_to_fp16(
+    const RawTensor& weight, const RawTensor& scale_inv);
 
 }  // namespace imp::quantize

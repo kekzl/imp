@@ -3,6 +3,7 @@
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <algorithm>
+#include <ranges>
 #include <cstring>
 
 namespace imp {
@@ -103,32 +104,32 @@ void BatchBuilder::reset() {
     batch_.seq_offsets.push_back(0);
 }
 
-void BatchBuilder::add_prefill_sequence(const int32_t* tokens, int n_tokens, const int* block_table,
-                                        int n_blocks, int start_pos, const int* swa_block_table,
-                                        int n_swa_blocks) {
-    for (int i = 0; i < n_tokens; ++i) {
-        batch_.token_ids.push_back(tokens[i]);
-        batch_.positions.push_back(start_pos + i);
+void BatchBuilder::add_prefill_sequence(std::span<const int32_t> tokens, std::span<const int> block_table,
+                                        int start_pos, std::span<const int> swa_block_table) {
+    const int n_tokens = static_cast<int>(tokens.size());
+    for (const auto [i, tok] : std::views::enumerate(tokens)) {
+        batch_.token_ids.push_back(tok);
+        batch_.positions.push_back(start_pos + static_cast<int>(i));
     }
 
     batch_.context_lens.push_back(start_pos + n_tokens);
-    raw_block_tables_.push_back({block_table, n_blocks});
-    raw_swa_block_tables_.push_back({swa_block_table, n_swa_blocks});
-    any_swa_tables_ |= (swa_block_table != nullptr);
+    raw_block_tables_.push_back(block_table);
+    raw_swa_block_tables_.push_back(swa_block_table);
+    any_swa_tables_ |= !swa_block_table.empty();
 
     batch_.total_tokens += n_tokens;
     batch_.n_sequences++;
     batch_.seq_offsets.push_back(batch_.total_tokens);
 }
 
-void BatchBuilder::add_decode_sequence(int32_t token, int position, const int* block_table, int n_blocks,
-                                       int context_len, const int* swa_block_table, int n_swa_blocks) {
+void BatchBuilder::add_decode_sequence(int32_t token, int position, std::span<const int> block_table,
+                                       int context_len, std::span<const int> swa_block_table) {
     batch_.token_ids.push_back(token);
     batch_.positions.push_back(position);
     batch_.context_lens.push_back(context_len);
-    raw_block_tables_.push_back({block_table, n_blocks});
-    raw_swa_block_tables_.push_back({swa_block_table, n_swa_blocks});
-    any_swa_tables_ |= (swa_block_table != nullptr);
+    raw_block_tables_.push_back(block_table);
+    raw_swa_block_tables_.push_back(swa_block_table);
+    any_swa_tables_ |= !swa_block_table.empty();
 
     batch_.total_tokens += 1;
     batch_.n_sequences++;
@@ -138,9 +139,8 @@ void BatchBuilder::add_decode_sequence(int32_t token, int position, const int* b
 Batch BatchBuilder::build() {
     // Compute max_blocks_per_seq and build padded block_tables
     int max_blocks = 0;
-    for (auto& [ptr, n] : raw_block_tables_) {
-        max_blocks = std::max(max_blocks, n);
-    }
+    for (const auto& table : raw_block_tables_)
+        max_blocks = std::max(max_blocks, static_cast<int>(table.size()));
     batch_.max_blocks_per_seq = max_blocks;
     batch_.actual_blocks_per_seq = max_blocks;
 
@@ -149,10 +149,9 @@ Batch BatchBuilder::build() {
     batch_.block_tables.resize(static_cast<unsigned long>(batch_.n_sequences) * max_blocks, 0);
 
     for (int s = 0; s < batch_.n_sequences; s++) {
-        auto& [ptr, n] = raw_block_tables_[s];
-        for (int b = 0; b < n; b++) {
-            batch_.block_tables[s * max_blocks + b] = ptr[b];
-        }
+        const auto& table = raw_block_tables_[static_cast<size_t>(s)];
+        for (const auto [b, block] : std::views::enumerate(table))
+            batch_.block_tables[s * max_blocks + static_cast<int>(b)] = block;
     }
 
     // Parallel SWA tables (same shape/stride). Padded with -1 — a padded slot
@@ -160,12 +159,10 @@ Batch BatchBuilder::build() {
     if (any_swa_tables_) {
         batch_.block_tables_swa.assign(static_cast<unsigned long>(batch_.n_sequences) * max_blocks, -1);
         for (int s = 0; s < batch_.n_sequences; s++) {
-            auto& [ptr, n] = raw_swa_block_tables_[s];
-            if (!ptr)
-                continue;
-            for (int b = 0; b < n && b < max_blocks; b++) {
-                batch_.block_tables_swa[s * max_blocks + b] = ptr[b];
-            }
+            const auto full = raw_swa_block_tables_[static_cast<size_t>(s)];
+            const auto table = full.first(std::min(full.size(), static_cast<size_t>(max_blocks)));
+            for (const auto [b, block] : std::views::enumerate(table))
+                batch_.block_tables_swa[s * max_blocks + static_cast<int>(b)] = block;
         }
     }
 

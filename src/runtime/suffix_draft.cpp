@@ -30,10 +30,11 @@ uint64_t SuffixDraftIndex::gram_hash_at_(int end) const {
     return h;
 }
 
-void SuffixDraftIndex::append(const int32_t* toks, int n) {
-    if (toks == nullptr || n <= 0)
+void SuffixDraftIndex::append(std::span<const int32_t> toks) {
+    if (toks.empty())
         return;
-    hist_.insert(hist_.end(), toks, toks + n);
+    const int n = static_cast<int>(toks.size());
+    hist_.insert(hist_.end(), toks.begin(), toks.end());
     const int total = static_cast<int>(hist_.size());
     // A gram window [end - min_match, end) is new iff it covers at least one
     // appended token, i.e. end > total - n (windows straddling the boundary
@@ -46,9 +47,7 @@ void SuffixDraftIndex::append(const int32_t* toks, int n) {
     }
 }
 
-std::vector<int32_t> SuffixDraftIndex::draft(int k, int k_max, int* draft_start) const {
-    if (draft_start)
-        *draft_start = -1;
+NgramDraft SuffixDraftIndex::draft(int k, int k_max) const {
     const int n = static_cast<int>(hist_.size());
     if (k <= 0 || n < min_match_ + 1)
         return {};
@@ -131,9 +130,7 @@ std::vector<int32_t> SuffixDraftIndex::draft(int k, int k_max, int* draft_start)
     }
     if (out.empty())
         return {};
-    if (draft_start)
-        *draft_start = rep_end;
-    return out;
+    return {std::move(out), rep_end};
 }
 
 }  // namespace imp

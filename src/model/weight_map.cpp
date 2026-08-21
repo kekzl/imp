@@ -1346,19 +1346,19 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     // the same shard map as the LM's — that is why Model owns it — but they are
     // routed by their own mapper, not by the LM matchers above.
     if (model.vision_tower) {
-        Qwen3VLVisionLoadStats vstats;
-        std::string verr;
-        if (load_qwen3vl_vision_tensors(tensors, *model.vision_tower, vstats, verr)) {
+        const auto loaded = load_qwen3vl_vision_tensors(tensors, *model.vision_tower);
+        if (loaded) {
             IMP_LOG_INFO("Vision tower: %d tensors assigned (%zu blocks, %zu deepstack mergers)",
-                         vstats.assigned, model.vision_tower->layers.size(),
+                         loaded->assigned, model.vision_tower->layers.size(),
                          model.vision_tower->deepstack_mergers.size());
         } else {
-            // Drop it rather than hand the encoder a tower with null slots —
+            // Drop it rather than hand the encoder a tower with null slots:
             // that would surface as a garbage embedding many layers later.
+            const auto& e = loaded.error();
             IMP_LOG_WARN(
-                "Vision tower incomplete (%s; %d assigned, %d unknown, %d missing) — "
+                "Vision tower incomplete (%s; %d assigned, %d unknown, %d missing), "
                 "continuing text-only",
-                verr.c_str(), vstats.assigned, vstats.unknown, vstats.missing);
+                e.what.c_str(), e.stats.assigned, e.stats.unknown, e.stats.missing);
             model.vision_tower.reset();
         }
     }

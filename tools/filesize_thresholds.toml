@@ -84,7 +84,7 @@ roots = ["src", "tools", "tests"]
 "src/model/safetensors_loader.cpp" = { code_loc = 1088, reason = "(c) one loader: header validation + tensor assign + arch inference" }
 "src/model/tokenizer.cpp" = { code_loc = 1801, reason = "(c) one tokenizer: BPE/SPM/WordPiece encode + merge + cache (JSON parsing now via shared model/json_util)" }
 "src/model/weight_map.cpp" = { code_loc = 1068, reason = "(c) one mapping module: weight-name parse + layer-index + arch inference" }
-"src/model/weight_upload.cu" = { code_loc = 1999, reason = "(c) one upload pipeline: pinned staging + checked malloc + tensor load orchestration" }
+"src/model/weight_upload.cu" = { code_loc = 1995, reason = "(c) one upload pipeline: pinned staging + checked malloc + tensor load orchestration" }
 "src/runtime/cuda_graph.cu" = { code_loc = 1046, reason = "(c) one module: graph capture/mode-resolve + PDL edges + barrier insert + replay" }
 "src/runtime/engine_scheduler.cpp" = { code_loc = 1968, reason = "(c) one scheduler: prefill/decode scheduling + chunked exec + perplexity capture" }
 "tests/test_gdn.cu" = { code_loc = 1026, reason = "(c) 12 tests of the GDN state-recurrent module - one test target" }

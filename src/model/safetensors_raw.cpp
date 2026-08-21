@@ -74,7 +74,8 @@ std::string RawSafeTensors::open(const std::string& path) {
         return path + ": " + err;
     }
 
-    JsonParser parser(reinterpret_cast<const char*>(bytes + 8), static_cast<size_t>(header_size));
+    JsonParser parser(
+        std::string_view(reinterpret_cast<const char*>(bytes + 8), static_cast<size_t>(header_size)));
     JValue root = parser.parse();
     if (!parser.ok() || root.type != JType::OBJECT) {
         close();

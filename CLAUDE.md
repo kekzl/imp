@@ -39,7 +39,7 @@ no perf numbers, only a link to `docs/PERF.md`.
 Docs are layered and gated by `scripts/docs_lint.py`: `README.md` L0,
 `docs/*.md` L1, `docs/internals/*.md` L2, the `CLAUDE.md` tree L3.
 
-Canonical references: `docs/internals/ARCHITECTURE.md` (narrative), `docs/internals/SM120.md` (hardware), `docs/internals/MEMORY.md` (memory subsystem: tiers, allocators, invariants I1-I7), `AGENTS.md` (subagent roles + guardrails), `docs/internals/BENCHMARKING.md` (measurement contract).
+Canonical references: `docs/internals/ARCHITECTURE.md` (narrative), `docs/internals/SM120.md` (hardware), `docs/internals/MEMORY.md` (memory subsystem: tiers, allocators, invariants I1-I7), `AGENTS.md` (subagent roles + guardrails), `docs/internals/BENCHMARKING.md` (measurement contract), `docs/internals/CPP23.md` (which C++23 the tree uses; device pointers are not `std::span`).
 
 ## Two facts about this box that mislead rather than fail
 

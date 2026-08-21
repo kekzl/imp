@@ -35,6 +35,7 @@
 #include <functional>
 #include <memory>
 #include <vector>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <list>
@@ -119,7 +120,7 @@ public:
     // of next tokens). Bench/eval only. For chunked prefill use the
     // Engine::begin/end_perplexity_capture flow, which accumulates via
     // perplexity_nll_partial after every chunk's forward.
-    double perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream = nullptr);
+    double perplexity_nll(std::span<const int32_t> tokens, cudaStream_t stream = nullptr);
 
     // Per-chunk NLL accumulation (chunked-prefill-aware imp_perplexity).
     // Applies the tier-aware LM head to hidden_[0..chunk_len-1] — the chunk

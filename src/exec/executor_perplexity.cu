@@ -488,7 +488,8 @@ void GraphExecutor::project_logits_all(int n_rows, float* d_out, cudaStream_t st
                             });
 }
 
-double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t stream) {
+double GraphExecutor::perplexity_nll(std::span<const int32_t> tokens, cudaStream_t stream) {
+    const int n = static_cast<int>(tokens.size());
     if (!initialized_ || n < 2) {
         IMP_LOG_ERROR("perplexity_nll: not initialized or n < 2 (n=%d)", n);
         return -1.0;
@@ -501,7 +502,7 @@ double GraphExecutor::perplexity_nll(const int32_t* tokens, int n, cudaStream_t 
     double* d_nll = nullptr;
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tokens, static_cast<size_t>(n) * sizeof(int32_t)));
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_nll, static_cast<size_t>(n) * sizeof(double)));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens, tokens, static_cast<size_t>(n) * sizeof(int32_t),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens, tokens.data(), static_cast<size_t>(n) * sizeof(int32_t),
                                        cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_nll, 0, static_cast<size_t>(n) * sizeof(double), stream));
 

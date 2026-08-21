@@ -1,5 +1,7 @@
 #include "quant/awq_transform.h"
 
+#include "core/fp_bits.h"
+
 #include <cuda_fp16.h>
 
 #include <cstring>
@@ -19,21 +21,6 @@ float fp16_at(const std::vector<uint16_t>& v, size_t i) {
 void fp16_set(std::vector<uint16_t>& v, size_t i, float f) {
     const __half_raw raw(__float2half(f));
     v[i] = raw.x;
-}
-
-float bf16_to_float(uint16_t raw) {
-    const uint32_t bits = static_cast<uint32_t>(raw) << 16;
-    float f;
-    std::memcpy(&f, &bits, sizeof(float));
-    return f;
-}
-
-uint16_t float_to_bf16(float f) {
-    uint32_t bits;
-    std::memcpy(&bits, &f, sizeof(float));
-    // Round-to-nearest-even on the truncated 16 low bits.
-    const uint32_t rounded = bits + 0x7fffu + ((bits >> 16) & 1u);
-    return static_cast<uint16_t>(rounded >> 16);
 }
 
 }  // namespace

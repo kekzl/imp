@@ -10,6 +10,7 @@
 #include "stream_pipeline.h"
 
 #include "api/imp_internal.h"
+#include "core/fp_bits.h"
 #include "vision/image_processor.h"
 #include "runtime/request.h"
 #include "model/hf_hub.h"
@@ -245,36 +246,6 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "imp_queue_depth " + std::to_string(queue) + "\n";
 
     res.set_content(out, "text/plain; version=0.0.4; charset=utf-8");
-}
-
-// Convert IEEE 754 FP16 (uint16_t) to FP32 on host
-static float fp16_to_fp32(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp = (h >> 10) & 0x1f;
-    uint32_t mant = h & 0x3ff;
-
-    uint32_t f;
-    if (exp == 0) {
-        if (mant == 0) {
-            f = sign << 31;
-        } else {
-            // Subnormal: normalize
-            exp = 1;
-            while (!(mant & 0x400)) {
-                mant <<= 1;
-                exp--;
-            }
-            mant &= 0x3ff;
-            f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
-        }
-    } else if (exp == 0x1f) {
-        f = (sign << 31) | 0x7f800000 | (mant << 13);
-    } else {
-        f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
-    }
-    float result;
-    std::memcpy(&result, &f, sizeof(float));
-    return result;
 }
 
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state) {
@@ -607,7 +578,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             if (sep >= 0 && framed.back() != sep)
                 framed.push_back(sep);
             std::vector<float> emb;
-            if (!engine->encoder_embed(framed.data(), static_cast<int>(framed.size()), emb)) {
+            if (!engine->encoder_embed(framed, emb)) {
                 nlohmann::json error = {
                     {"error",
                      {{"message", "encoder forward failed (input too long for the encoder "
@@ -684,7 +655,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         std::vector<float> embedding(d_model, 0.0f);
         for (int t = 0; t < n_tokens; ++t) {
             for (int d = 0; d < d_model; ++d) {
-                embedding[d] += fp16_to_fp32(h_hidden[t * d_model + d]);
+                embedding[d] += imp::half_to_float(h_hidden[t * d_model + d]);
             }
         }
         float inv_n = 1.0f / static_cast<float>(n_tokens);

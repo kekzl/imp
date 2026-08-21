@@ -814,7 +814,7 @@ bool Tokenizer::load(const std::string& path) {
         return false;
 
     // Parse JSON
-    JsonParser parser(file_data.c_str(), file_data.size());
+    JsonParser parser(file_data);
     JValue root = parser.parse();
     if (!parser.ok() || root.type != JType::OBJECT) {
         IMP_LOG_WARN("failed to parse tokenizer.json: %s", path.c_str());

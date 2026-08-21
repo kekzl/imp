@@ -794,7 +794,7 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
         // whenever the resolved prefill chunk size was smaller than the
         // corpus — which is the C-API DEFAULT: prefill_chunk_size=-1
         // resolves to 512 on dense archs.)
-        if (!ctx->engine->begin_perplexity_capture(tokens, n_tokens))
+        if (!ctx->engine->begin_perplexity_capture(std::span(tokens, static_cast<size_t>(n_tokens))))
             return IMP_ERROR_INTERNAL;
         ImpError e = imp_prefill(ctx, tokens, n_tokens);
         double ppl = -1.0;

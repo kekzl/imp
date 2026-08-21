@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <set>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -21,10 +22,9 @@ namespace imp {
 namespace {
 
 QwenVisionGrid build(int h, int w, int merge = 2, int side = 48) {
-    QwenVisionGrid g;
-    std::string err;
-    EXPECT_TRUE(qwen3vl_build_vision_grid(h, w, merge, side, g, err)) << err;
-    return g;
+    auto g = qwen3vl_build_vision_grid(h, w, merge, side);
+    EXPECT_TRUE(g) << g.error();
+    return g.value_or(QwenVisionGrid{});
 }
 
 // The patchifier emits tokens grouped by 2x2 merge block, so the merger can
@@ -149,24 +149,20 @@ TEST(Qwen3VLVisionGrid, TapsStayInsideTheTable) {
 }
 
 // A grid that is not a multiple of the merge size would drop the tail of the
-// last block — silently, since the token count still comes out of the loop.
+// last block, silently, since the token count still comes out of the loop.
 TEST(Qwen3VLVisionGrid, RefusesAGridThatIsNotAMultipleOfTheMergeSize) {
-    QwenVisionGrid g;
-    std::string err;
-    EXPECT_FALSE(qwen3vl_build_vision_grid(5, 4, 2, 48, g, err));
-    EXPECT_NE(err.find("multiple"), std::string::npos) << err;
-    EXPECT_FALSE(qwen3vl_build_vision_grid(4, 5, 2, 48, g, err));
-    EXPECT_NE(err.find("multiple"), std::string::npos) << err;
-    EXPECT_EQ(g.tokens, 0) << "a rejection must not leave a half-built grid";
+    for (auto [h, w] : {std::pair{5, 4}, std::pair{4, 5}}) {
+        const auto g = qwen3vl_build_vision_grid(h, w, 2, 48);
+        ASSERT_FALSE(g.has_value()) << h << "x" << w;
+        EXPECT_NE(g.error().find("multiple"), std::string::npos) << g.error();
+    }
 }
 
 TEST(Qwen3VLVisionGrid, RefusesNonPositiveDimensions) {
-    QwenVisionGrid g;
-    std::string err;
-    EXPECT_FALSE(qwen3vl_build_vision_grid(0, 4, 2, 48, g, err));
-    EXPECT_FALSE(qwen3vl_build_vision_grid(4, 0, 2, 48, g, err));
-    EXPECT_FALSE(qwen3vl_build_vision_grid(4, 4, 0, 48, g, err));
-    EXPECT_FALSE(qwen3vl_build_vision_grid(4, 4, 2, 0, g, err));
+    EXPECT_FALSE(qwen3vl_build_vision_grid(0, 4, 2, 48).has_value());
+    EXPECT_FALSE(qwen3vl_build_vision_grid(4, 0, 2, 48).has_value());
+    EXPECT_FALSE(qwen3vl_build_vision_grid(4, 4, 0, 48).has_value());
+    EXPECT_FALSE(qwen3vl_build_vision_grid(4, 4, 2, 0).has_value());
 }
 
 // merge == 1 is the degenerate case the same code has to keep handling: token

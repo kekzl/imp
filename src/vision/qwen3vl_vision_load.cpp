@@ -22,13 +22,11 @@ VisionMergerWeights* merger_for(VisionModel& m, int index) {
 // Assign into the slot, refusing to overwrite. A second tensor landing in the
 // same slot means the mapper and this router disagree, which would otherwise
 // show up as "the encoder uses whichever came last in hash order".
-bool put(Tensor& dst, const Tensor& src, const char* what, std::string& err) {
-    if (dst.data != nullptr) {
-        err = std::string("two tensors claim the same slot: ") + what;
-        return false;
-    }
+std::expected<void, std::string> put(Tensor& dst, const Tensor& src, const char* what) {
+    if (dst.data != nullptr)
+        return std::unexpected(std::string("two tensors claim the same slot: ") + what);
     dst = src;
-    return true;
+    return {};
 }
 
 // The shape every slot must have, derived from the config alone. `ndim == 0`
@@ -96,27 +94,29 @@ Expect expected_for(Slot s, int index, const VisionConfig& c) {
     }
 }
 
-bool shape_ok(const Tensor& t, const Expect& e, const char* what, std::string& err) {
+std::expected<void, std::string> shape_ok(const Tensor& t, const Expect& e, const char* what) {
     if (e.ndim == 0)
-        return true;
-    const bool ok = t.ndim == e.ndim && t.shape[0] == e.d0 && (e.ndim < 2 || t.shape[1] == e.d1);
-    if (ok)
-        return true;
-    err = std::string("vision tensor '") + what + "' has shape [" + std::to_string(t.shape[0]) +
-          (t.ndim > 1 ? ", " + std::to_string(t.shape[1]) : "") + "] (ndim " + std::to_string(t.ndim) +
-          "), config implies [" + std::to_string(e.d0) + (e.ndim > 1 ? ", " + std::to_string(e.d1) : "") +
-          "]";
-    return false;
+        return {};
+    if (t.ndim == e.ndim && t.shape[0] == e.d0 && (e.ndim < 2 || t.shape[1] == e.d1))
+        return {};
+    return std::unexpected(
+        std::string("vision tensor '") + what + "' has shape [" + std::to_string(t.shape[0]) +
+        (t.ndim > 1 ? ", " + std::to_string(t.shape[1]) : "") + "] (ndim " + std::to_string(t.ndim) +
+        "), config implies [" + std::to_string(e.d0) + (e.ndim > 1 ? ", " + std::to_string(e.d1) : "") + "]");
 }
 
 }  // namespace
 
-bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& tensors, VisionModel& out,
-                                 Qwen3VLVisionLoadStats& stats, std::string& err) {
+std::expected<Qwen3VLVisionLoadStats, Qwen3VLVisionLoadError> load_qwen3vl_vision_tensors(
+    const std::unordered_map<std::string, Tensor>& tensors, VisionModel& out) {
+    Qwen3VLVisionLoadStats stats;
+    std::string err;
+    auto refuse = [&] { return std::unexpected(Qwen3VLVisionLoadError{err, stats}); };
+
     const VisionConfig& cfg = out.config;
     if (!cfg.is_qwen3vl || cfg.num_layers <= 0) {
         err = "vision config was not parsed before loading tensors";
-        return false;
+        return refuse();
     }
     out.layers.resize(static_cast<size_t>(cfg.num_layers));
     out.deepstack_mergers.resize(cfg.deepstack_indexes.size());
@@ -137,19 +137,21 @@ bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& 
         // Checked before routing: a shape that contradicts the config means the
         // config and the checkpoint describe different models, and every later
         // consumer would read it as a stride.
-        if (!shape_ok(t, expected_for(ref.slot, ref.index, cfg), local.c_str(), err))
-            return false;
+        if (const auto shaped = shape_ok(t, expected_for(ref.slot, ref.index, cfg), local.c_str()); !shaped) {
+            err = shaped.error();
+            return refuse();
+        }
 
-        bool ok = true;
+        std::expected<void, std::string> placed;
         switch (ref.slot) {
             case Slot::PatchEmbedWeight:
-                ok = put(out.patch_embd_w, t, local.c_str(), err);
+                placed = put(out.patch_embd_w, t, local.c_str());
                 break;
             case Slot::PatchEmbedBias:
-                ok = put(out.patch_embd_b, t, local.c_str(), err);
+                placed = put(out.patch_embd_b, t, local.c_str());
                 break;
             case Slot::PosEmbed:
-                ok = put(out.position_embd, t, local.c_str(), err);
+                placed = put(out.position_embd, t, local.c_str());
                 break;
             case Slot::MergerNormWeight:
             case Slot::MergerNormBias:
@@ -161,7 +163,7 @@ bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& 
                 if (!m) {
                     err = "DeepStack merger index " + std::to_string(ref.index) +
                           " has no slot (config lists " + std::to_string(out.deepstack_mergers.size()) + ")";
-                    return false;
+                    return refuse();
                 }
                 Tensor* dst = nullptr;
                 switch (ref.slot) {
@@ -184,14 +186,14 @@ bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& 
                         dst = &m->fc2_b;
                         break;
                 }
-                ok = put(*dst, t, local.c_str(), err);
+                placed = put(*dst, t, local.c_str());
                 break;
             }
             default: {
                 if (ref.index < 0 || ref.index >= cfg.num_layers) {
                     err = "vision block index " + std::to_string(ref.index) + " exceeds depth " +
                           std::to_string(cfg.num_layers);
-                    return false;
+                    return refuse();
                 }
                 VisionLayerWeights& L = out.layers[static_cast<size_t>(ref.index)];
                 Tensor* dst = nullptr;
@@ -236,12 +238,14 @@ bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& 
                         dst = &L.ffn_down_b;
                         break;
                 }
-                ok = put(*dst, t, local.c_str(), err);
+                placed = put(*dst, t, local.c_str());
                 break;
             }
         }
-        if (!ok)
-            return false;
+        if (!placed) {
+            err = placed.error();
+            return refuse();
+        }
         stats.assigned++;
     }
 
@@ -255,7 +259,9 @@ bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& 
         }
     });
 
-    return stats.missing == 0;
+    if (stats.missing != 0)
+        return refuse();
+    return stats;
 }
 
 size_t qwen3vl_vision_tower_device_bytes(VisionModel& model) {
