@@ -505,6 +505,26 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
         h_nll += h_nll_pos[i];
     const int counted = last - first + 1;
     double ppl = std::exp(h_nll / static_cast<double>(counted));
+    // A run that produced no NLL at all reports PPL = exp(0) = 1.0000, which
+    // reads as a perfect score. That is the worst direction for a defect to
+    // fail in, and it happened: an aborted run ("perplexity failed:
+    // insufficient KV capacity") logged `mean_nll=0.0000 PPL=1.0000` on the
+    // next line, and anyone grepping for the PPL line reads the failure as a
+    // result. Exactly zero summed NLL over a non-empty span is impossible for a
+    // real forward (every position contributes a positive term), so it is the
+    // signature of a buffer nobody filled. Say that instead of printing a
+    // number. The CLI's own result line is already unreachable on failure
+    // (imp-cli/main.cpp), so this closes the log-reader's path, not a gate's.
+    if (counted > 0 && h_nll == 0.0) {
+        IMP_LOG_WARN("perplexity_nll: n=%d counted=%d but the summed NLL is exactly 0 - "
+                     "no forward filled this buffer. NOT a perplexity of 1.0; the run failed.",
+                     n, counted);
+        // false, not true-with-1.0: this function's contract is "did a
+        // perplexity happen", and the caller already turns false into a stderr
+        // line and exit 1. Returning true here handed a sentinel to anyone who
+        // asked for a number. *out_ppl is deliberately left untouched.
+        return false;
+    }
     IMP_LOG_INFO("perplexity_nll: n=%d first=%d last=%d counted=%d mean_nll=%.4f  PPL=%.4f", n,
                  first, last, counted, h_nll / counted, ppl);
     if (match_sum >= 0)

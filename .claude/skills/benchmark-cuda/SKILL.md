@@ -131,6 +131,22 @@ Kernel: <name>, config: <block=X, grid=Y, smem=Z>
 
 ## Publishing numbers (keep docs from going stale)
 
+- **A harness that runs longer than an edit window must run from a frozen copy, and its
+  hash belongs in the PROV block.** Bash reads a script incrementally from the file, so an
+  edit landing mid-run is executed by the process that started on the old text, and the
+  output carries nothing that says which version produced it. This happened on 2026-08-21
+  to `bench_competitive.sh` and cost a full re-run. `scripts/bench_competitive.sh` now
+  re-execs itself from a `mktemp` copy and prints `harness: <path> md5=<hash>`; put that
+  hash beside the commit: `[PROV: commit=... harness_md5=af3f719c...]`. "Which tree" and
+  "which script" are different questions and a commit only answers the first.
+- **Before a one-off query's output goes into a document or a pass line, run it against a
+  case whose answer you already know.** The gates in this repo are unit-tested; the ad-hoc
+  `grep`/`awk` used to *check* the gates are written once and trusted immediately, and that
+  is now the least-tested layer. Two instances in one hour on 2026-08-21, both patterns
+  that matched more than they claimed: `grep -c 'hero$'` also matches `nonhero` and
+  reported 6 heroes where there are 5; `grep -E "^\| [0-9]+ \|"` over a ledger also matched
+  a second table and reported four open items where there were two.
+
 - **`tests/perf_baseline.json` is the canonical gate, read the current values there, never from this skill** (a number copied into a doc is a number that will be wrong). It pins two gates, not one: throughput (`metrics.prefill_tps` / `decode_tps`, 3%/5%) and **peak VRAM** (`metrics.memory_mb.own_peak_mb` against `thresholds.vram_increase_pct`, evaluated by `scripts/verify.sh`). The file carries its own `_note` explaining any pin that is not comparable to older ones. Refresh ONLY when a change *intentionally* moves perf **or peak VRAM**: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR. **The gate measures spec-OFF decode** (`--set speculative.ngram=false`): with speculation ON a dense bench run measures the batched spec-verify GEMMs (~99.9% accept, see STOP #6 for where that comes from), which are restart-volatile and ungateable at 3%.
 - **Refreshing on the wrong day bakes in the wrong bar, in both directions.** A baseline sampled on a peak day put its 3% threshold inside the normal range, so ordinary days failed spuriously. A baseline sampled while another process holds the GPU pins a floor that hides real regressions. Before refreshing: no other compute process, healthy clocks, and a second cold-median run that agrees.
 - **When a gate fails, rule out the cheap causes before bisecting**, in this order: (0) is this process still VRAM-resident — at ~0 MiB free, WSL2/WDDM oversubscribes into host memory and every allocation keeps succeeding while bandwidth falls off a cliff (~1530 GB/s resident vs ~237 GB/s spilled). That is #1103: 55 tok/s at server defaults on a model that benches far higher. `--mem-report` prints free VRAM at init; **a successful `cudaMalloc` is not evidence of room** (28 GiB succeeds with 22.6 GiB reported free) — measure bandwidth or read the free figure. (1) is anything else on the GPU — **read `nvidia-smi --query-gpu=memory.used`, not the process list**: `--query-compute-apps` returns an EMPTY table on WSL2 even while VRAM is held, and `docker ps` misses it too once the holder is gone. Measured 2026-08-11: 16.4 GiB held against a ~1.3-1.6 GiB WSLg baseline, no container running, `--query-compute-apps` blank — decode read −5.5% at healthy clocks (2895 MHz / 13801 MHz / 490 W) and a paired A/B found no code effect, so it looked exactly like a #526 depressed-host day. It was not: when the driver reclaimed the memory the same build measured −1.24% and passed. A `docker run` killed mid-flight (a `timeout` around a bench) can leave the commitment behind for tens of minutes. A forgotten server container reads ~−12%; (2) can the diff even reach the measured code (`git diff --stat main -- src/ include/ tools/imp-cli/` empty ⇒ a decode regression is impossible); (3) does a cold-median run reproduce the verify-fast number.
