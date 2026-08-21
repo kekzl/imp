@@ -80,6 +80,16 @@ there instead of retelling it.
 
 ### Changed
 
+- **The tree is C++23 where the build said it already was.** `bool f(...,
+  std::string& err)` is gone from `src/`, `tools/` and `include/` (36 sites, 15
+  of them header declarations), replaced by `std::expected`; host pointer+length
+  pairs became `std::span` (12 uses to 87). Device pointers deliberately stay
+  raw: a span over one is a silent host segfault at the first `s[0]`. What nvcc
+  13.3 accepts in **device** code was measured on the card rather than assumed,
+  and the audit's "nvcc constrains what is usable in `.cu`" is refuted:
+  [`CPP23.md`](docs/internals/CPP23.md).
+
+
 - **A red gate now blocks the merge.** Ruleset `Require CI` requires exactly one
   context, `Build`, so every other check was advisory and two PRs merged over a red
   `File size` in forty minutes. `scripts/ci_static_gates.sh` is one list run from two
@@ -152,6 +162,20 @@ there instead of retelling it.
   ([`LIMITATIONS.md`](docs/LIMITATIONS.md))
 
 ### Fixed
+
+- **imp-quantize read every subnormal value in an F16 `scale_inv` grid up to
+  1025x too large** (`0x0001` as 6.1e-05 where the value is 5.96e-08): the
+  hand-written widening pasted the subnormal mantissa under a normal exponent
+  instead of renormalising, and each such scale multiplies a whole weight block.
+  All 2046 subnormal patterns were affected. That dtype is documented as not
+  seen in a released checkpoint. Found by merging that conversion out of ten
+  files into `src/core/fp_bits.h` and checking the copies against each other
+  over all 2^16 half and all 2^32 float patterns first.
+
+- **`imp-quantize --help` was undefined behaviour.** `costs 1-4% of` inside a
+  printf format string makes `% o` a conversion specifier. GCC warned about it
+  and the warning was never read.
+
 
 - **The GPU guard asked one question and answered two with it.**
   `require_free_gpu.sh` refused on `memory.used > 2000 MiB` alone, which misses a
