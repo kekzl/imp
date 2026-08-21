@@ -142,6 +142,19 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The GPU guard asked one question and answered two with it.**
+  `require_free_gpu.sh` refused on `memory.used > 2000 MiB` alone, which misses a
+  tenant that is compute-heavy and VRAM-light (a full Unreal Engine render on this
+  box peaks at 2385 MiB and **71 %** utilisation, so ~700 MiB of its own) and
+  misfires on one that is not there at all: the card idles at **1675 MiB**, seen as
+  low as 1435, so 2000 left ~325 MiB of margin. It refused a commit during a
+  container teardown on 2026-08-21. It now samples five times and splits the two
+  questions: sustained utilisation for "is someone computing", minimum-across-samples
+  memory for "is there room", thresholds derived from this box rather than rounded,
+  and the samples printed on refusal so a flicker is distinguishable from a tenant.
+  An empty `docker ps` now says a Windows-side process would never appear there,
+  instead of printing nothing.
+
 - **`main`'s `File size` gate was red and a PR merged through it.** #1523 added 6
   code lines to `engine_scheduler.cpp` without re-pinning its allowlist ceiling, the
   check failed, and the merge went ahead because ruleset `14716423` requires exactly
