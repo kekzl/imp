@@ -56,7 +56,6 @@ public:
     float scale() const { return scale_; }
     int max_rank() const { return max_rank_; }
     const std::string& name() const { return name_; }
-    void set_name(const std::string& n) { name_ = n; }
 
 private:
     struct LayerSlots {

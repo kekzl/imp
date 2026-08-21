@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **Three gates that could not fail now can.** The file-size allowlist gave its 29
+  entries no size limit at all, so `engine_scheduler.cpp` grew 1074 to 1962 code LOC
+  (+83 %) with CI green throughout; each entry now pins a measured `code_loc` and
+  drift either way fails (`--update` re-pins). The number of GTest cases that run in
+  no CI lane is pinned at 968 macros and named as a macro count in its own failure
+  message. And 28 functions defined inline in a header with no caller anywhere were
+  removed, with a gate to keep the count at zero.
+
 ### Fixed
 
 - **Four device pointers were freed through an allocator that had not produced

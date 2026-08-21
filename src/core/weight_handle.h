@@ -74,8 +74,6 @@ struct WeightHandle {
         } mxfp4;
     } payload{};
 
-    bool is_populated() const { return primary_tier != StorageTier::Undefined; }
-
     // Phase 5 PR #1 Commit 5.1.4.a: can the original GGUF source bytes
     // (source_data, owned by Model::gpu_allocations_) be safely freed once
     // this handle is populated?

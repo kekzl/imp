@@ -50,7 +50,6 @@ public:
     CalibrationStats snapshot(const std::string& model_id) const;
 
     bool empty() const { return entries_.empty(); }
-    size_t skipped_non_fp16() const { return skipped_non_fp16_; }
 
 private:
     struct Entry {

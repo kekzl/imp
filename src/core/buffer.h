@@ -29,7 +29,6 @@ public:
     // Accessors
     void* ptr() const { return data_; }
     size_t size() const { return size_; }
-    bool is_device() const { return on_device_; }
     explicit operator bool() const { return data_ != nullptr; }
 
     template <typename T>

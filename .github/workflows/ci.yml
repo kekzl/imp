@@ -405,8 +405,19 @@ jobs:
           python-version: "3.12"
       - name: File-size smells (advisory, non-blocking)
         run: python3 tools/check_filesize.py --warn-only
-      - name: File-size hard-review gate (blocking)
+      - name: File-size hard-review gate + allowlist ceilings (blocking)
         run: python3 tools/check_filesize.py
+      # The size of the hole `No GPU runner in CI` leaves. Reads SOURCES, not a
+      # build directory: a gate that counts by reading build-dev/ inherits that
+      # directory's provenance, and on 2026-08-21 a stray uncommitted file had
+      # been compiled into test-quant and moved the count by 3.
+      - name: Tests that run in no CI lane (blocking)
+        run: python3 tools/check_test_lanes.py --report
+      # Functions defined inline in a header and mentioned nowhere else. The
+      # 2026-08-03 decl-only sweep could not see this class: it filtered on
+      # decl+def, i.e. two occurrences, and a header-inline definition is one.
+      - name: Header-inline definitions with no caller (blocking)
+        run: python3 tools/check_dead_inline_accessors.py
 
   # Documentation layer contract (docs/audit/docs-rewrite/). Seven checks, all
   # of which map to a defect this repo actually shipped: a datacenter-Blackwell

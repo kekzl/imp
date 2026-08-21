@@ -65,8 +65,6 @@ public:
     // True if any state in `states` is accepting.
     bool accepts(const std::vector<int>& states) const;
 
-    static bool empty_set_dead(const std::vector<int>& states) { return states.empty(); }
-
 private:
     std::vector<NfaState> states_;
     int start_ = -1;

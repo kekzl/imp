@@ -46,33 +46,6 @@ enum class QType : uint16_t {
     // (2026-05-17); the C-API aliases followed 2026-07-07.
 };
 
-// True for block-quantised disk formats (Q*_K, Q*_0, Q*_1, IQ4_*, MXFP4, NVFP4).
-// These types require a Sidecar scales tensor for reconstruction.
-constexpr bool is_block_quant(QType q) {
-    auto v = static_cast<uint16_t>(q);
-    return (v >= 2 && v <= 15) || q == QType::IQ4_NL || q == QType::IQ4_XS || q == QType::MXFP4 ||
-           q == QType::NVFP4;
-}
-
-// True for compute-side dtypes that map directly to a hardware FP/INT type.
-// These tensors store raw values; no Sidecar scales needed.
-constexpr bool is_compute_dtype(QType q) {
-    switch (q) {
-        case QType::F32:
-        case QType::F16:
-        case QType::BF16:
-        case QType::FP8_E4M3:
-        case QType::FP8_E5M2:
-        case QType::INT8:
-        case QType::INT4:
-        case QType::INT32:
-        case QType::FP4_E2M1:
-            return true;
-        default:
-            return false;
-    }
-}
-
 // Does this source qtype benefit from an NVFP4 decode-cache conversion?
 // (> 4.5 bits/elem, or no fast native decode kernel.) Single source of truth
 // for the pre-dequant phases AND the VRAM-budget heuristic — keep any policy

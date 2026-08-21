@@ -16,10 +16,24 @@ Usage:
   python3 tools/check_filesize.py                 # blocking hard gate
   python3 tools/check_filesize.py --warn-only     # advisory, never fails
   python3 tools/check_filesize.py --config X.toml  # alternate config (tests)
+  python3 tools/check_filesize.py --update         # re-pin [allow] code_loc values
+
+THE ALLOWLIST IS A CEILING, NOT AN EXEMPTION
+--------------------------------------------
+An entry in [allow] used to remove the file from the gate entirely, which meant
+the 29 allowlisted files were the only ones in the tree with no size limit at
+all — exactly the files where recompile blast radius is worst. Measured
+2026-08-21: sixteen of them had grown past the code-LOC figure their own reason
+cited, `engine_scheduler.cpp` by 83 % (1074 -> 1962), and every CI run was green
+throughout. So each entry now carries a measured `code_loc` and the gate fails
+when the file drifts from it in EITHER direction, the same two-way ratchet
+`tools/alloc_allowlist.txt` uses. Growing an allowlisted file is still allowed;
+growing it silently is not. `--update` re-pins, and the diff is the record.
   python3 tools/check_filesize.py --root src/compute  # restrict scan roots
 """
 import argparse
 import os
+import re
 import sys
 
 try:
@@ -138,16 +152,27 @@ def main():
     ap.add_argument("--config", default=DEFAULT_CONFIG)
     ap.add_argument("--warn-only", action="store_true", help="print smells but always exit 0")
     ap.add_argument("--root", action="append", help="override scan roots (repeatable)")
+    ap.add_argument("--update", action="store_true",
+                    help="re-pin every [allow] code_loc to the measured value")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     th = cfg["thresholds"]
     allow = cfg.get("allow", {})
 
-    # Validate allowlist: every entry needs a non-empty reason (anti-cheat).
-    bad = [p for p, reason in allow.items() if not str(reason).strip()]
+    # Validate allowlist: every entry is a table with a measured code_loc and a
+    # non-empty reason. The reason is the anti-cheat; the code_loc is the ceiling.
+    legacy = [p for p, v in allow.items() if not isinstance(v, dict)]
+    if legacy:
+        print("ERROR: allowlist entries are `{ code_loc = N, reason = \"...\" }` tables now,")
+        print("       not bare strings. Run --update after adding code_loc. Offenders:")
+        for p in legacy:
+            print(f"  {p}")
+        return 2
+    bad = [p for p, v in allow.items()
+           if not str(v.get("reason", "")).strip() or not isinstance(v.get("code_loc"), int)]
     if bad:
-        print("ERROR: allowlist entries without a reason:")
+        print("ERROR: allowlist entries missing a reason or an integer code_loc:")
         for p in bad:
             print(f"  {p}")
         return 2
@@ -194,6 +219,41 @@ def main():
               f"(safe to remove from [allow]):")
         for p in sorted(stale):
             print(f"  {p}")
+
+    # The ceiling half of the allowlist: a listed file must still measure what its
+    # entry says it measures. Drift in either direction fails, because a stale
+    # number is what let engine_scheduler.cpp grow 83 % with the gate green.
+    drift = []
+    measured = {r["path"]: r["code"] for r in rows}
+    for path, entry in sorted(allow.items()):
+        actual = measured.get(path)
+        if actual is None:
+            continue  # file gone; the stale-entry note above already covers it
+        if actual != entry["code_loc"]:
+            drift.append((path, entry["code_loc"], actual))
+
+    if args.update:
+        text = open(args.config, encoding="utf-8").read()
+        for path, _, actual in drift:
+            pat = re.compile(r'(^"' + re.escape(path) + r'"\s*=\s*\{\s*code_loc\s*=\s*)\d+',
+                             re.M)
+            text, n = pat.subn(lambda m: m.group(1) + str(actual), text)
+            if n != 1:
+                print(f"ERROR: --update could not re-pin {path} (matched {n} lines)")
+                return 2
+        open(args.config, "w", encoding="utf-8").write(text)
+        print(f"\nallowlist re-pinned: {len(drift)} entr(y/ies) updated")
+        return 0
+
+    if drift and not args.warn_only:
+        print(f"\nFAIL: {len(drift)} allowlisted file(s) drifted from their pinned code_loc.")
+        print(f"  {'pinned':>7} {'actual':>7} {'+/-':>6}  file")
+        for path, pinned, actual in drift:
+            print(f"  {pinned:>7} {actual:>7} {actual - pinned:>+6}  {path}")
+        print("\nAn allowlist entry is a ceiling, not an exemption. Re-pin with")
+        print("  python3 tools/check_filesize.py --update")
+        print("and say in the PR body which way it moved and why.")
+        return 1
 
     if hards and not args.warn_only:
         print("\nFAIL: hard-review threshold exceeded. Split the file, or — if it is "

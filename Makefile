@@ -18,7 +18,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: check-alloc-pairs alloc-pairs-list check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -464,6 +464,15 @@ check-alloc-pairs:
 # Every pair the checker resolved, matched or not. Never fails.
 alloc-pairs-list:
 	@python3 tools/check_alloc_pairs.py --list
+
+# How many GTest macros run in no CI lane (docs/DESIGN_DECISIONS.md "No GPU
+# runner in CI"). Source-derived, no build needed, no Docker.
+check-test-lanes:
+	@python3 tools/check_test_lanes.py --report
+
+# Functions defined inline in a header that nothing in the tree mentions.
+check-dead-inline:
+	@python3 tools/check_dead_inline_accessors.py --list
 
 format:
 	@$(CLANG_FORMAT_RUN) -i --style=file $(CLANG_FORMAT_FILES)

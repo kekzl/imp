@@ -61,8 +61,6 @@ public:
     half* embeddings() const noexcept { return d_embeddings_; }
     int num_image_tokens() const noexcept { return model_ ? model_->config.num_image_tokens : 0; }
     int32_t soft_token_id() const noexcept { return soft_token_id_; }
-    int32_t boi_id() const noexcept { return boi_id_; }
-    int32_t eoi_id() const noexcept { return eoi_id_; }
     const VisionModel* vision_model() const noexcept { return model_.get(); }
 
 private:

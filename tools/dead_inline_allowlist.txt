@@ -1,0 +1,13 @@
+# Justified header-inline definitions with no other mention in the tree,
+# for tools/check_dead_inline_accessors.py
+#
+# Format: `path:name  # reason`. The reason is mandatory (an empty one is rejected)
+# and a stale entry fails the gate too, so the list cannot rot in either direction.
+#
+# An entry belongs here only when the call really exists and the scan cannot see it:
+# a name produced by token pasting, or a definition kept deliberately for a consumer
+# outside this repository. It is NOT a place to park an accessor nobody calls -
+# delete those.
+#
+# Empty on purpose since 2026-08-21: all 25 the gate found on its first run were
+# deleted rather than listed.

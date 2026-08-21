@@ -184,7 +184,6 @@ public:
     bool sample_single_from_logits_async(const Tensor& logits, const InferenceState& state, int slot_idx,
                                          cudaStream_t stream = nullptr);
     const int32_t* collect_sampled_tokens(int n_slots, cudaStream_t stream = nullptr);
-    int sample_slots() const { return sample_slots_; }
 
     // Parity-buffered sampling for the pipelined batched decode (one step in
     // flight): the slot region, pinned gather buffer, and top-k row-args
@@ -197,7 +196,6 @@ public:
     // thread never waits on work enqueued after the gather.
     // All non-pipelined callers run at parity 0 (identical to the old layout).
     void set_sample_parity(int parity) { sample_parity_ = parity & 1; }
-    int sample_parity() const { return sample_parity_; }
     bool gather_sampled_tokens_async(int n_slots, cudaStream_t stream = nullptr);
     const int32_t* wait_gathered_tokens(int parity);
     // Device pointer of slot 0 of the given parity set (the chain-advance
@@ -387,7 +385,6 @@ public:
         streaming_n_sinks_ = (n_sinks > 0) ? n_sinks : 0;
         streaming_window_ = (window > 0) ? window : 0;
     }
-    int streaming_n_sinks() const { return streaming_n_sinks_; }
     int streaming_window() const { return streaming_window_; }
 
     // LoRA runtime delta (issue #522): activation-path low-rank deltas, no
@@ -396,10 +393,6 @@ public:
     // captured graph holds the adapter's kernel launches/pointers.
     void set_lora(const LoraAdapter* adapter);
     const LoraAdapter* lora() const { return lora_; }
-
-    // Access the hidden state buffer after forward_logits().
-    // Returns [max_tokens, d_model] FP16 on device. Use view_tokens() to get [n, d_model].
-    const Tensor& hidden_state() const { return hidden_; }
 
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }

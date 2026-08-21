@@ -173,7 +173,6 @@ public:
     uint64_t declines_too_small() const;
 
     size_t device_bytes() const { return device_bytes_; }
-    size_t host_bytes() const { return host_bytes_; }
 
 private:
     friend class GraphSlotLease;

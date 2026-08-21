@@ -304,7 +304,7 @@ def main():
         print("\nA pointer must go home to the allocator it came from: cudaMalloc<->cudaFree, "
               "cudaMallocAsync<->cudaFreeAsync, cudaMallocHost/cudaHostAlloc<->cudaFreeHost.")
         return 1
-    print("OK — every in-file allocate/free pair uses one allocator.")
+    print("OK - every in-file allocate/free pair uses one allocator.")
     return 0
 
 
