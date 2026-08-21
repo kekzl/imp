@@ -1023,7 +1023,7 @@ private:
     int32_t* d_spec_argmax_ = nullptr;  // head of the [argmax | topm] block
     // diagnostics.spec_trace only: the chunk's full logits, so the trace can
     // report the top-2 gap per row rather than just which token won.
-    float* d_spec_logits_ = nullptr;
+    VramOwned<float> d_spec_logits_;
     std::vector<float> h_spec_logits_;
     PinnedBuffer h_spec_argmax_;  // pinned, [argmax | topm] twin (T5b)
     // Token-Recycling top-M harvest (speculative.token_recycling): per-row
