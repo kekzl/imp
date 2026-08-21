@@ -697,3 +697,85 @@ the same arm and is neither dense nor GDN, so it looked like a second instance o
 defect. It is not: the trade is genuinely losing for it (+7.4 % decode against +9.0 % PPL).
 The generalisation still stands for the members of that category nobody has measured, but
 it now has one instance where the categorical call was correct.
+
+---
+
+## (i) Open, unattributed: the verify chunk costs 8.4x a decode step on Q6_K and 3.8x on NVFP4
+
+Measured 2026-08-21, same model at two quantisations, `--bench-pp 512 --bench-reps 5`:
+
+| checkpoint | ms/verify | decode step | ratio |
+|---|---:|---:|---:|
+| Qwen3-8B Q8_0 | 9.67 | 2.58 ms | 3.75x |
+| Qwen3-14B **NVFP4** | 15.26 | 4.03 ms | **3.79x** |
+| Qwen3-14B **Q6_K** | 51.97 | ~6.2 ms | **8.4x** |
+
+It matters because it is what makes n-gram speculation net-negative on short requests
+on the north-star checkpoint: one verify costs about 6 % of a 128-token request and
+returns 2.0 tokens at 6.2 % acceptance. On a 1024-token request the same checkpoint
+accepts 36.1 % at 6.78 tokens per verify and speculation **wins**.
+
+**Explained in shape:** a verify chunk is a different execution graph, not the same graph
+at another width. Decode runs pervasively fused `n == 1` kernels
+(`gemv_nvfp4_gate_up_fused_mr_kernel<8>`, `gemv_nvfp4_qkv_fused_kernel`); the chunk runs
+unfused batched GEMVs. `docs/LIMITATIONS.md` already says this in the MTP entry.
+
+**Quantified.** On a 1024-token request (18 verify steps, 54.68 ms each, 984 ms of wall
+inside verifies) the overlay's GEMV runs **14400 times, 800 per verify, 20 per layer**,
+against decode's **2.14 per layer** for the same projection family. A **9.4x launch count**,
+each launch cheaper (20.74 us against 68.1 us), netting roughly 2.9x the GEMV time per
+layer. That is the unfused graph, in numbers.
+
+**Not explained:** two things. The verify GEMV accounts for **30.3 %** of the verify wall
+(16.6 of 54.68 ms), so **38.1 ms per verify sits elsewhere** - attention, norms and host
+time are pooled with decode in the profile and were not separated. And the same
+architecture gives 3.79x on NVFP4 against 8.4x on Q6_K for the same model at the same
+chunk width; that factor of 3.4 has no mechanism. A host round trip per verify (argmax +
+D2H + rollback, priced in `roadmap.md`) is a candidate for part of the 38.1 ms and does not
+appear in a kernel profile at all, but it is untested and does not explain a quant gap.
+
+**Named candidate for the quant gap, with the control that settles it**, so whoever picks
+this up starts from a test rather than from zero. The launch count is a property of the
+graph and both quants run the same graph at the same chunk width, so the gap must be either
+per-launch cost or a different launch count. The second branch has a concrete mechanism: a
+*partial* NVFP4 overlay would route some of the verify's launches to a different kernel
+family on one quant and not the other, so the two would not be running the same set of
+kernels at all.
+
+  Control: diff the kernel NAME SETS of two `--cuda-graph-trace=node` profiles, one per
+  quant, on the same prompt with speculation on. If both verify paths show the same kernel
+  families and only the per-instance times differ, the gap is per-launch cost. If the Q6_K
+  profile carries a family the NVFP4 one does not, the overlay is partial and that family
+  is the answer.
+
+Not run: the 8.4x question was bounded at one card window and that window was spent on the
+differential profile above.
+
+### Three hypotheses tested and refuted, so nobody re-runs them
+
+1. **"The verify dequantises the Q6_K source per chunk."** `dequant_q6k_v2_kernel` does run,
+   2800 instances, but a control with `--set speculative.ngram=false` gives **the same 2800**.
+   It is entirely prefill. 2800 / 280 dequantable weights is exactly 10 full passes, which
+   matches the prefill count and not the 3 to 6 verify steps.
+2. **"#998's small-M overlay cannot fire here."** The differential profile shows
+   `gemv_nvfp4_kpar_mb_fp16_kernel` (the overlay's kernel) with 14400 instances in the
+   spec-on arm and **absent** from spec-off. The overlay fires.
+3. **"The verify kernel is slow."** It costs **20.7 us** per call against **68.1 us** for the
+   decode `gate_up`. Per call the verify path is faster, and on a 1024-token request every
+   shared kernel is cheaper with speculation on (top-7 total 12.29 s against 12.83 s).
+
+Method note, because it is why (1) survived three probes: three one-shot liveness probes in
+`executor_gemm_dispatch.cu` were **silent**, and that silence was the answer rather than a
+search problem. When the third probe finds nothing, the hypothesis is the suspect.
+
+### Adjacent, and also open with no measured cost
+
+Four `GemmContext` flags are consulted only in `executor_gemm_dispatch.cu` and never inside
+a `gemm_kernel_*.cu` registry strategy, which does not read `RuntimeConfig` either:
+`q4k_hmma_enabled`, `q4k_imma_prefill`, `q8_imma_enabled`, `spec_verify_small_m`.
+`GemmKernelArgs` threads four *other* flags across and a comment calls three of them a
+Phase 5 follow-up, so the list being short is already known to someone.
+
+This is recorded as a **true statement about the code with no measured cost**, not as a
+defect. The one member of it whose cost was thought to be measured turned out to be
+measuring prefill (see (1) above). A defect claim here needs a control that has not been run.
