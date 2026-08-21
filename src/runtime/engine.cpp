@@ -123,10 +123,6 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
         async_d_block_tables_swa_ = nullptr;
     }
-    if (d_banned_tokens_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_banned_tokens_));
-        d_banned_tokens_ = nullptr;
-    }
     if (swa_snap_slab_) {
         IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));
         swa_snap_slab_ = nullptr;

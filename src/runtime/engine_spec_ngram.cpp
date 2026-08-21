@@ -113,14 +113,15 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     // trace site: a first-use allocation would be a serving-phase allocation
     // (docs/internals/MEMORY.md A3.2, and my own check_alloc_pairs gate would
     // see it). Off by default, so the memory is only taken when asked for.
-    if (runtime_config_.diagnostics.spec_trace && d_spec_logits_ == nullptr) {
+    if (runtime_config_.diagnostics.spec_trace && !d_spec_logits_) {
         const size_t v = static_cast<size_t>(model_->config().vocab_size);
         const size_t bytes = static_cast<size_t>(chunk_cap) * v * sizeof(float);
-        // Through vram_alloc_, like spec_state_snap_ two functions down, rather
-        // than a direct cudaMalloc: invariant I1 keeps the direct-allocation
-        // allowlist shrinking, and a diagnostic is not a reason to grow it.
-        d_spec_logits_ = static_cast<float*>(vram_alloc_.allocate(bytes, "spec_trace_logits"));
-        if (d_spec_logits_ == nullptr) {
+        // VramOwned, not vram_alloc_.allocate() plus a matching free in
+        // free_spec_buffers_(): the handle carries the allocator that produced
+        // it and releases through that one, so the pair cannot be written wrong
+        // and cannot be forgotten. It was correct before; it is now structural.
+        d_spec_logits_ = VramOwned<float>(vram_alloc_, bytes / sizeof(float), "spec_trace_logits");
+        if (!d_spec_logits_) {
             IMP_LOG_WARN(
                 "spec_trace: could not allocate %.1f MiB for the logit dump - the trace "
                 "will report argmax only, without the top-2 gap",
@@ -198,11 +199,10 @@ int Engine::recurrent_slot_for_(int req_id) const {
 }
 
 void Engine::free_spec_buffers_() {
-    // The spec_trace logit dump, freed through the API that allocated it.
-    if (d_spec_logits_) {
-        vram_alloc_.free(d_spec_logits_);
-        d_spec_logits_ = nullptr;
-    }
+    // The spec_trace logit dump releases itself: VramOwned frees through the
+    // allocator it was built from. reset() rather than waiting for ~Engine,
+    // because this function's contract is that the buffers are gone after it.
+    d_spec_logits_.reset();
     h_spec_logits_.clear();
     h_spec_logits_.shrink_to_fit();
     if (spec_state_snap_) {
@@ -980,7 +980,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // Whole block in runtime/spec_trace.cpp: the speculation loop should
         // not carry its own diagnostics, and this one reads full logits.
         spec_trace_emit_verify(p0, t0, mc_on ? &mc[0] : &draft, mc_on ? static_cast<int>(mc.size()) : 0,
-                               h_spec_argmax_.as<int32_t>(), chunk_len, executor_.get(), d_spec_logits_,
+                               h_spec_argmax_.as<int32_t>(), chunk_len, executor_.get(), d_spec_logits_.get(),
                                h_spec_logits_, model_->config().vocab_size, stream);
     }
 

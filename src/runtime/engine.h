@@ -26,6 +26,7 @@
 #include <span>
 #include "memory/layer_offload.h"
 #include "memory/vram_allocator.h"
+#include "memory/vram_owned.h"
 #include "exec/executor.h"
 #include "core/cuda_raii.h"
 #include <memory>
@@ -642,7 +643,11 @@ private:
     // launch and freed it again (AUDIT B28: part of the per-burst allocation
     // traffic the --wrap interposer named). One engine-owned copy, uploaded
     // once, serves all three.
-    int32_t* d_banned_tokens_ = nullptr;
+    // VramOwned, not a raw pointer plus a cudaFree in engine.cpp: the pairing
+    // used to span two files and tools/check_alloc_pairs.py had to re-derive it
+    // from source text. The handle frees through the allocator that produced it,
+    // once, in its own destructor.
+    VramOwned<int32_t> d_banned_tokens_;
     // Upload d_banned_tokens_ if not already resident. Returns nullptr when
     // the list is empty or the upload failed; callers then simply mask nothing.
     const int32_t* banned_tokens_device_(cudaStream_t stream);
@@ -1018,7 +1023,7 @@ private:
     int32_t* d_spec_argmax_ = nullptr;  // head of the [argmax | topm] block
     // diagnostics.spec_trace only: the chunk's full logits, so the trace can
     // report the top-2 gap per row rather than just which token won.
-    float* d_spec_logits_ = nullptr;
+    VramOwned<float> d_spec_logits_;
     std::vector<float> h_spec_logits_;
     PinnedBuffer h_spec_argmax_;  // pinned, [argmax | topm] twin (T5b)
     // Token-Recycling top-M harvest (speculative.token_recycling): per-row
