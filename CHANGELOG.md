@@ -40,6 +40,17 @@ there instead of retelling it.
   member variables, because the 128 MiB pair above allocates and frees in
   different translation units and no per-file check can see it.
 
+### Changed
+
+- **The MTP truncation is documented as one outcome of ordinary speculative
+  divergence, not a defect with a location.** All six probe prompts diverge from
+  the non-speculative answer between byte 48 and byte 271, and the two that
+  diverge earliest after the truncating one produce full, clean answers, so the
+  divergence point carries no signal. The hidden-state diff that would localise it
+  is not obtainable: `diagnostics.dump_hidden_dir` is host-side and decode is
+  graph-replayed, giving 5 dump steps for both 40 and 200 generated tokens.
+  ([`LIMITATIONS.md`](docs/LIMITATIONS.md))
+
 ### Fixed
 
 - **A kernel whose only caller was its own test.** `fp32_accum_add_fp16_kernel` had
