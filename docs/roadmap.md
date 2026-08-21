@@ -972,6 +972,56 @@ Closed competitive records (kept for the record, not active work):
            --cuda-graph-trace=node is mandatory: without it nsys does not attribute
            graph-replayed kernels at all.]
     ```
+
+  - **And it does not carry across the dense/MoE boundary - it goes UP** (2026-08-21).
+    Measured rather than carried, because the reason to distrust carrying it is two
+    bullets above in this same entry: the split-count lever was +10.0 % on Qwen3-8B
+    (`n_kv_heads=8, g=4`) and **-7.30 %** on Qwen3-30B-A3B (`n_kv_heads=4, g=8`), and the
+    entry says in its own words that "one model is not a heuristic". So the share was
+    re-measured on that exact counter-example checkpoint, same method:
+
+    | model | KV heads / g | layers | ctx | paged attention | everything else | ceiling |
+    |---|---|---|---|---|---|---|
+    | Qwen3-8B-Q8_0 (dense) | 8 / 4 | 36 | 8k | 19.9 % | 80.1 % | 1.23x |
+    | Qwen3-8B-Q8_0 (dense) | 8 / 4 | 36 | 32k | 43.9 % | 56.1 % | 1.76x |
+    | Qwen3-30B-A3B-NVFP4 (MoE) | 4 / 8 | 48 | 8k | **29.1 %** | 70.9 % | 1.36x |
+    | Qwen3-30B-A3B-NVFP4 (MoE) | 4 / 8 | 48 | 32k | **50.6 %** | 49.4 % | ~1.96x |
+
+    Both mechanisms one could argue for in advance are present and they pull in opposite
+    directions, so the sign was not predictable without measuring. Absolute ms per 256
+    decode steps at 32k:
+
+    | | dense | MoE | |
+    |---|---|---|---|
+    | paged attention | 656.6 ms | 587.7 ms | **-10.5 %**, halved KV heads |
+    | everything else | 843.7 ms | 574.1 ms | **-32.0 %**, small active expert set |
+
+    Both halves get cheaper on the MoE. The non-attention half gets cheaper *faster*, so
+    attention's share rises even though its absolute cost falls: a 30B MoE with 8 of 128
+    experts active moves fewer weight bytes per token than a dense 8B does.
+
+    Same three checks as the dense rows. Non-attention flat across context (571.7 ms at 8k
+    against 574.1 at 32k, 0.4 % apart). Kernel sum 91-95 % of the wall-clock decode step.
+    Repeat pair at 32k reads 50.71 % against 50.59 %, a 0.12 pp spread. Instance counts are
+    12288 = 256 steps x 48 layers against 9216 = 256 x 36 on the dense model, which is the
+    check that the differential landed on the model it claims to.
+
+    The ceiling is a range rather than a figure because the wall-clock differential is the
+    noisy input: its `tg=8` arm is only 8 decode steps and reads 4.795 against 4.573 ms/step
+    across the two runs, where the kernel-side totals agree to 0.04 %. 1.92x to 2.01x.
+
+    ```
+    [PROV: commit=f0f13b23 date=2026-08-21 hw=RTX5090 model=Qwen3-30B-A3B-NVFP4-Modelopt
+           quant=NVFP4 (FP8 KV) cuda=13.3 path=imp-cli n=2 runs per context (tg=8 and
+           tg=136), 32k repeated once
+           cmd=`nsys profile --sample=none --cpuctxsw=none --backtrace=none -t cuda
+           --cuda-graph-trace=node -- imp-cli --bench --bench-pp 8192|32768
+           --bench-reps 1 --max-tokens 8|136 --max-seq-len 40960
+           --set speculative.ngram=false`; shares from
+           `nsys stats --report cuda_gpu_kern_sum` differenced between the two tg values;
+           card exclusive, no other compute process, clocks warm. Same differential method
+           and the same two summed kernels as the dense rows above.]
+    ```
 - **NVFP4 GEMV tuning** -- 6 approaches refuted; structurally bandwidth-bound. The "64-73% of HBM peak" this used to quote is a 2026-05 figure the kernel has since outgrown: [`sm120_optimal_kernel.md`](internals/KERNELS.md) measures the decode GEMV at the GDDR7 ceiling, ~1.5 GB/ms (~84% of datasheet, ~98% of the 1531 GB/s a resident buffer actually reaches). The refutation is unaffected — there is less headroom than the old number implied, not more.
 - **FMHA rewrites** -- cluster, TMA bulk and the long-context heuristic were each A/B-refuted, and that still stands. **The "cuBLAS wins" conclusion does not**: since #597/#930 the register-resident FA2 kernel is the DEFAULT prefill path for hd=128/256 (`attention.fmha_fa2` / `fa2_fp16qk` both `"on"`), and cuBLAS is the fallback for configs FA2 declines.
 - **MoE offload + CUDA Graphs** -- **no longer shelved; moved to "CPU-resident cold experts" above, where it is now an active, measured entry.** This line said "full kernel-driven slot resolution deferred (multi-week, marginal user impact)" and every part of that is now false: it shipped in a day (#1370), is worth 2.1x decode, and it is not kernel-driven at all — the device-side mirror it was designed around turned out to have no reader and was removed (#1376). The CUDA-graphs half is open and blocked for a stated reason (#1373).
