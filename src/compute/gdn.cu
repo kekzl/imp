@@ -248,40 +248,13 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// V-head reorder: tiled → grouped (undo GGUF converter reorder for ssm_out)
+// V-head reorder: tiled -> grouped (undo GGUF converter reorder for ssm_out)
+//
+// FP16 twin removed 2026-08-21: it and its kernel were declared, defined and
+// called nowhere. The only consumer of `gdn.vhead_reorder`
+// (executor_ssm_gdn.cu:421) gathers V out of the FP32 conv1d output, so it has
+// only ever called the _f32 variant below.
 // ---------------------------------------------------------------------------
-__global__ void vhead_tiled_to_grouped_kernel(const half* __restrict__ src, half* __restrict__ dst,
-                                              int n_tokens, int n_heads, int head_dim, int n_groups) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = n_tokens * n_heads * head_dim;
-    if (tid >= total)
-        return;
-
-    int d = tid % head_dim;
-    int h_tiled = (tid / head_dim) % n_heads;
-    int t = tid / (n_heads * head_dim);
-
-    int n_v_per_k = n_heads / n_groups;
-    int replica = h_tiled / n_groups;
-    int group = h_tiled % n_groups;
-    int h_grouped = group * n_v_per_k + replica;
-
-    dst[t * n_heads * head_dim + h_grouped * head_dim + d] =
-        src[t * n_heads * head_dim + h_tiled * head_dim + d];
-}
-
-void vhead_tiled_to_grouped(const half* src, half* dst, int n_tokens, int n_heads, int head_dim, int n_groups,
-                            cudaStream_t stream) {
-    if (n_heads == n_groups)
-        return;
-    int total = n_tokens * n_heads * head_dim;
-    int threads = 256;
-    int blocks = (total + threads - 1) / threads;
-    vhead_tiled_to_grouped_kernel<<<blocks, threads, 0, stream>>>(src, dst, n_tokens, n_heads, head_dim,
-                                                                  n_groups);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
 // FP32 variant for conv1d-SiLU output (= scan V input). Same math as FP16,
 // different element type. Used when the GGUF stored V in tiled layout and the
 // scan kernel reads V[h*HD+d] assuming grouped layout.

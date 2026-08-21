@@ -148,10 +148,6 @@ void gdn_scan_prefill_f32(const float* x, const float* B, const float* C, const 
                           int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                           cudaStream_t stream, int grouped_layout = 0);
 
-// V-head reorder: tiled → grouped (FP16 variant, for post-scan y_buf).
-void vhead_tiled_to_grouped(const half* src, half* dst, int n_tokens, int n_heads, int head_dim, int n_groups,
-                            cudaStream_t stream);
-
 // V-head reorder: tiled → grouped (FP32 variant, for conv1d-SiLU output).
 // Asymmetric heads (n_groups != n_heads): the GGUF converter may store V in
 // tiled order (h0_g0, h1_g1, ..., h15_g15, h0_g0_r1, ...) while the scan

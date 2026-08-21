@@ -29,6 +29,21 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`[calibration] out_path` now writes a file.** The key was parsed, documented in
+  `config.h` and offered in `imp.conf.example`, and read by nothing: setting it
+  produced no calibration file and no warning, because `imp_calibration_write()`
+  takes the path as an argument and `--calibrate` was the only way in. `--calibrate`
+  still wins when both are given.
+
+- **A decode dispatch branch that logged an error and returned without writing its
+  output** now throws. `gemv_dispatch`'s `CUTLASS_NVFP4` case left the output tensor
+  holding whatever the workspace held before, behind one ERROR line. Unreachable on
+  today's tier assignment, which is exactly where such a path survives unnoticed.
+
+- **A dead FP16 kernel removed from `gdn.cu`.** `vhead_tiled_to_grouped` and its
+  kernel were declared, defined and called nowhere; the one consumer of
+  `gdn.vhead_reorder` has only ever used the FP32 variant.
+
 - **Four device pointers were freed through an allocator that had not produced
   them**, which is invalid CUDA and silent. `mtp_forward.cu` allocated a 4-byte
   token id with `cudaMalloc` and freed it with `cudaFreeAsync` once per MTP draft

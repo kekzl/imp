@@ -69,3 +69,22 @@ struct CommonArgs {
 // must not be able to shadow a shared flag with a divergent local handler,
 // which is the failure this consolidation exists to prevent.
 bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i);
+
+// Where a calibration run writes its statistics.
+//
+// `imp_calibration_write()` takes the path as an argument, so imp-cli passed
+// `--calibrate <out>` straight through and NOTHING ever read
+// `[calibration] out_path`. The key was parsed (config.cpp), documented in
+// config.h ("Where imp_calibration_write() puts the file") and offered in
+// imp.conf.example - a promise to the operator that nothing kept: setting it
+// produced no file and no warning.
+//
+// Resolution order, flag first, because a flag is the more specific intent:
+//   1. `--calibrate <path>` if given
+//   2. `[calibration] out_path` from imp.conf
+//   3. empty, meaning no calibration run was asked for
+//
+// Pure and here rather than inline in main.cpp so it has a test: an unwired
+// knob is what this fixes, and wiring it untested would be the same defect one
+// step along.
+std::string resolve_calibration_out(const std::string& flag_value, const std::string& config_value);

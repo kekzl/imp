@@ -107,6 +107,11 @@ int main(int argc, char** argv) {
         if (!pc_set)
             runtime_cfg.server.prefix_cache = false;
     }
+    // `[calibration] out_path` is the fallback when --calibrate carries no path.
+    // The key was parsed and documented and read by nothing, so an operator who
+    // set it in imp.conf got no file and no warning (debt ledger item 7).
+    args.calibrate_out = resolve_calibration_out(args.calibrate_out, runtime_cfg.calibration.out_path);
+
     // --calibrate is only meaningful alongside a corpus pass: the statistics
     // are what a forward pass saw, and --perplexity is the pass that walks a
     // whole corpus without sampling.
