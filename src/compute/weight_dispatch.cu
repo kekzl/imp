@@ -277,9 +277,18 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
         }
 
         case StorageTier::FP32:
-        case StorageTier::Undefined:
-            IMP_LOG_FATAL("gemm_dispatch: handle in invalid tier %d", std::to_underlying(w.primary_tier));
-            return;
+        case StorageTier::Undefined: {
+            // Was IMP_LOG_FATAL + return, which logs and leaves the output
+            // holding whatever it held. IMP_LOG_FATAL does not abort - only
+            // IMP_CHECK does - so "FATAL" here bought a log line and nothing
+            // else. Throws for the same reason the CUTLASS_NVFP4 case below
+            // does (#1508): no tier accepted is an error, not a degraded
+            // answer (SETTLED.md S-22), and imp_api.cpp turns it into ImpError.
+            char msg[128];
+            snprintf(msg, sizeof(msg), "gemm_dispatch: handle in invalid tier %d",
+                     std::to_underlying(w.primary_tier));
+            throw std::runtime_error(msg);
+        }
     }
 }
 
@@ -388,9 +397,16 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
             return;
         }
 
-        default:
-            IMP_LOG_FATAL("gemv_dispatch: handle in invalid tier %d", std::to_underlying(w.primary_tier));
-            return;
+        default: {
+            // Same class as the branch above, and worse for a structural
+            // reason: this is the `default:`, i.e. the branch that catches a
+            // tier nobody anticipated. That is the case in which continuing
+            // with an unwritten output is least affordable.
+            char msg[128];
+            snprintf(msg, sizeof(msg), "gemv_dispatch: handle in invalid tier %d",
+                     std::to_underlying(w.primary_tier));
+            throw std::runtime_error(msg);
+        }
     }
 }
 

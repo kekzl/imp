@@ -904,3 +904,80 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
     cudaFree(d_y_direct);
     cudaFree(d_y_disp);
 }
+
+// ===========================================================================
+// The IMP_LOG_FATAL class
+//
+// IMP_LOG_FATAL only LOGS (logging.h:58); IMP_CHECK is the only thing that
+// reaches std::abort(). Of the 12 sites in the tree, ten logged at FATAL and
+// then carried on - three of them after a comment saying that carrying on
+// hands a host pointer to a device kernel. These two are the dispatch pair:
+// they returned leaving the output tensor holding whatever it held before.
+// tools/check_log_fatal.py keeps the count at zero.
+// ===========================================================================
+
+TEST_F(WeightDispatchTest, GemmDispatchRefusesAnInvalidTierInsteadOfReturningQuietly) {
+    const int M = 8, K = 32;
+    half *d_x = nullptr, *d_y = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_x, static_cast<size_t>(K) * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(M) * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_x, 0, static_cast<size_t>(K) * sizeof(half)), cudaSuccess);
+    // A sentinel the old behaviour would have left in place and called a result.
+    ASSERT_EQ(cudaMemset(d_y, 0xAB, static_cast<size_t>(M) * sizeof(half)), cudaSuccess);
+
+    WeightHandle h;
+    h.kind = TensorKind::WQ;
+    h.primary_tier = StorageTier::FP32;  // no GEMM path serves it
+    h.shape[0] = M;
+    h.shape[1] = K;
+
+    int64_t xshape[2] = {1, K}, yshape[2] = {M, 1};
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_t(d_y, QType::F16, 2, yshape, true);
+
+    EXPECT_THROW(gemm_dispatch(lt_, h, x_t, y_t, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_),
+                 std::runtime_error);
+    EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+
+    std::vector<uint16_t> host(M);
+    ASSERT_EQ(cudaMemcpy(host.data(), d_y, host.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    for (int i = 0; i < M; ++i)
+        EXPECT_EQ(host[i], 0xABAB) << "the refusing path wrote to the output";
+
+    cudaFree(d_x);
+    cudaFree(d_y);
+}
+
+TEST_F(WeightDispatchTest, GemvDispatchDefaultRefusesInsteadOfReturningQuietly) {
+    // The `default:` is the branch that catches a tier nobody anticipated,
+    // which is exactly where an unwritten output is least affordable.
+    const int M = 8, K = 32;
+    half *d_x = nullptr, *d_y = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_x, static_cast<size_t>(K) * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(M) * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_x, 0, static_cast<size_t>(K) * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_y, 0xAB, static_cast<size_t>(M) * sizeof(half)), cudaSuccess);
+
+    WeightHandle h;
+    h.kind = TensorKind::WQ;
+    h.primary_tier = StorageTier::FP32;
+    h.shape[0] = M;
+    h.shape[1] = K;
+
+    int64_t xshape[2] = {1, K}, yshape[2] = {M, 1};
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_t(d_y, QType::F16, 2, yshape, true);
+
+    EXPECT_THROW(gemv_dispatch(h, x_t, y_t, stream_), std::runtime_error);
+    EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+
+    std::vector<uint16_t> host(M);
+    ASSERT_EQ(cudaMemcpy(host.data(), d_y, host.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    for (int i = 0; i < M; ++i)
+        EXPECT_EQ(host[i], 0xABAB) << "the refusing path wrote to the output";
+
+    cudaFree(d_x);
+    cudaFree(d_y);
+}

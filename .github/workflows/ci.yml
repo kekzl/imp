@@ -418,6 +418,12 @@ jobs:
       # decl+def, i.e. two occurrences, and a header-inline definition is one.
       - name: Header-inline definitions with no caller (blocking)
         run: python3 tools/check_dead_inline_accessors.py
+      # IMP_LOG_FATAL only logs; IMP_CHECK is the only thing that aborts. Ten
+      # of twelve sites logged at FATAL and then carried on, three of them
+      # after a comment saying that carrying on hands a host pointer to a
+      # device kernel.
+      - name: FATAL logs that do not stop (blocking)
+        run: python3 tools/check_log_fatal.py --list
 
   # Documentation layer contract (docs/audit/docs-rewrite/). Seven checks, all
   # of which map to a defect this repo actually shipped: a datacenter-Blackwell

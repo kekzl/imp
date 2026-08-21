@@ -1,0 +1,11 @@
+# Sites that log at FATAL and then continue, where continuing is CORRECT.
+#
+# IMP_LOG_FATAL only logs (logging.h:58); IMP_CHECK is what aborts. So a site
+# that logs and continues is a defect unless the function's contract is to
+# report a verdict rather than to stop. Format: `path:line  # reason`. The
+# reason is mandatory and a stale entry fails the gate, so the list cannot rot
+# in either direction.
+#
+# Line numbers move. When one does, the gate reports the site as unjustified
+# rather than silently accepting it, which is the safe direction.
+src/exec/expert_cache.cu:ExpertLRUCache parity check failed at  # check_parity() RETURNS its verdict, which is correct for a function whose contract is to report agreement: tests call it directly and want the bool. What was NOT correct is that both production callers DISCARDED it - a debug facility that detects the host/device divergence and then continues is not a facility. They now wrap it in IMP_CHECK, so a mismatch aborts as expert_cache.h always claimed.

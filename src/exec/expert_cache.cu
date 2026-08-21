@@ -50,7 +50,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
 
     // The per-slot NVFP4 scale mirror rides at the END of the pool rather than
     // in an allocation of its own. Same lifetime, one acquisition instead of
-    // two — and this file is on the I1 allowlist (tools/alloc_allowlist.txt),
+    // two - and this file is on the I1 allowlist (tools/alloc_allowlist.txt),
     // which only ever shrinks, so a second cudaMalloc/cudaFree pair here would
     // be a regression of that invariant for no benefit.
     const size_t slot_bytes_total = static_cast<size_t>(n_slots_) * slot_size_;
@@ -82,7 +82,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
         plru.lookup.reserve(slots_per_layer_ * 2);
 
     // Phase 4: per-layer access history ring. Capacity = slots_per_layer ×
-    // kExpertProjCount × 2 — a heuristic giving ~2 tokens worth of memory
+    // kExpertProjCount × 2 - a heuristic giving ~2 tokens worth of memory
     // per layer (each token touches up to top_k experts × 3 projs).
     history_capacity_ = std::max(8, slots_per_layer_ * kExpertProjCount * 2);
     per_layer_history_.assign(n_layers_, PerLayerAccessRing{});
@@ -90,10 +90,10 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
         ring.entries.assign(history_capacity_, {-1, -1});
 
     // Prefetch stream + per-layer completion events. Skipped if cudaStream
-    // creation fails — prefetch APIs become no-ops in that case.
+    // creation fails - prefetch APIs become no-ops in that case.
     cudaError_t serr = cudaStreamCreateWithFlags(&prefetch_stream_, cudaStreamNonBlocking);
     if (serr != cudaSuccess) {
-        IMP_LOG_WARN("Expert LRU cache: prefetch_stream alloc failed (%s) — Phase 4 disabled",
+        IMP_LOG_WARN("Expert LRU cache: prefetch_stream alloc failed (%s) - Phase 4 disabled",
                      cudaGetErrorString(serr));
         prefetch_stream_ = nullptr;
     } else {
@@ -120,7 +120,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     // Only built under debug_parity_. NOTHING on the device reads it: the plan
     // was for dispatch kernels to resolve slots from it, but the host-offload
     // decode path (#1370) instead derives the slot from get_or_load's returned
-    // pointer, which leaves the mirror write-only in production — two extra
+    // pointer, which leaves the mirror write-only in production - two extra
     // 4-byte cudaMemcpyAsync per cache miss maintaining a structure with no
     // consumer. Its only reader is check_parity(), which is a debug facility.
     // If a kernel ever does read it, re-enable maintenance in get_or_load and
@@ -131,18 +131,18 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
         cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&d_lookup_), bytes);
         if (err != cudaSuccess || !d_lookup_) {
             IMP_LOG_WARN(
-                "Expert LRU cache: device-side mirror alloc failed (%zu bytes, err=%s) — "
+                "Expert LRU cache: device-side mirror alloc failed (%zu bytes, err=%s) - "
                 "disabling mirror, host-side LRU still functional.",
                 bytes, cudaGetErrorString(err));
             d_lookup_ = nullptr;
         } else {
-            // (int32_t)-1 = 0xFFFFFFFF — memset 0xFF gives -1 in every cell.
+            // (int32_t)-1 = 0xFFFFFFFF - memset 0xFF gives -1 in every cell.
             IMP_CUDA_CHECK_LOG(cudaMemset(d_lookup_, 0xFF, bytes));
         }
     }
 
     // Per-slot tensor-scale mirror. Unlike d_lookup_ above this one IS read on
-    // the device — the fused NVFP4 kernels index it with the slot number the
+    // the device - the fused NVFP4 kernels index it with the slot number the
     // dispatch feeds them as `expert_indices`. Zero-init so a slot that is
     // read before it is filled contributes 0 rather than a stale scale; the
     // dispatch cannot produce that ordering, but a zero is a recognisable
@@ -153,16 +153,16 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
         IMP_CUDA_CHECK_LOG(cudaMemset(d_slot_scales_, 0, scale_bytes));
     }
 
-    // Host-side tables — used in production regardless of the mirror above.
+    // Host-side tables - used in production regardless of the mirror above.
     if (n_experts_ > 0) {
         // Host source-pointer table: [layer][proj * n_experts + expert].
-        // Lazy-populated by get_or_load() — the value is stable for the
+        // Lazy-populated by get_or_load() - the value is stable for the
         // model's lifetime once stamped.
         host_expert_addrs_.assign(n_layers_,
                                   std::vector<const void*>(static_cast<size_t>(kExpertProjCount) *
                                                               n_experts_,
                                                           nullptr));
-        // Canonical packed_ptr per (layer, proj) — the prefetcher needs this to
+        // Canonical packed_ptr per (layer, proj) - the prefetcher needs this to
         // rebuild cache keys that match dispatch's get_or_load calls.
         host_packed_ptrs_.assign(static_cast<size_t>(n_layers_) * kExpertProjCount, nullptr);
         // Per-(layer, proj) expert byte size. Avoids overflowing pinned host
@@ -184,7 +184,7 @@ inline int flat_slot(int layer, int slot_in_layer, int slots_per_layer) {
 }
 
 // Write a single int32 cell to the device-side lookup mirror.
-// Async on the supplied stream — Phase 3 mirror is write-only from the
+// Async on the supplied stream - Phase 3 mirror is write-only from the
 // engine's perspective; ordering against subsequent kernels is whatever
 // the stream provides.
 inline void write_lookup_cell(int* d_lookup, int n_experts, int layer, int proj, int expert,
@@ -237,14 +237,14 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
         if (off < table.size())
             table[off] = src_host;
     }
-    // Stamp the canonical packed_ptr per (layer, proj) — Phase 4 needs it
+    // Stamp the canonical packed_ptr per (layer, proj) - Phase 4 needs it
     // to rebuild keys for prefetch_layer.
     if (!host_packed_ptrs_.empty()) {
         size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj_idx;
         if (pp_off < host_packed_ptrs_.size())
             host_packed_ptrs_[pp_off] = key.packed_ptr;
     }
-    // Stamp the per-(layer, proj) expert byte size — prefetch must use this
+    // Stamp the per-(layer, proj) expert byte size - prefetch must use this
     // (not slot_size_) to avoid reading past the pinned host region.
     if (!host_expert_bytes_.empty()) {
         size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj_idx;
@@ -262,13 +262,19 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
             ++ring.filled;
     }
 
-    // Check cache hit — find() handles per-layer LRU front-update. Hits
+    // Check cache hit - find() handles per-layer LRU front-update. Hits
     // don't change which slot holds (layer, proj, expert), so the device
     // mirror cell remains correct.
     void* cached = find(layer, key);
     if (cached) {
+        // IMP_CHECK, not a bare call: both call sites used to DISCARD the
+        // verdict, so the parity checker detected a host/device divergence,
+        // logged it at FATAL (which does not abort - logging.h:58) and
+        // returned false into nothing. A debug facility that finds the
+        // invariant break and then continues is not a facility. The header
+        // documented this as "aborts on mismatch"; now it does.
         if (debug_parity_)
-            check_parity(stream);
+            IMP_CHECK(check_parity(stream), "ExpertLRUCache: parity check failed (cache hit path)");
         *hit = true;
         auto it = plru.lookup.find(key);
         return &slots_[flat_slot(layer, it->second.first, slots_per_layer_)];
@@ -314,7 +320,7 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
         write_lookup_cell(d_lookup_, n_experts_, layer, proj_idx, key.expert_idx, slot_in_layer, stream);
 
     if (debug_parity_)
-        check_parity(stream);
+        IMP_CHECK(check_parity(stream), "ExpertLRUCache: parity check failed (slot fill path)");
 
     return &slot;
 }
@@ -327,11 +333,15 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
         // it from a single range would leave the scales as whatever the
         // previous occupant left behind, which decodes to fluent nonsense
         // rather than failing. Refuse where the two paths disagree.
-        IMP_LOG_FATAL(
-            "ExpertLRUCache::get_or_load called on an NVFP4 slot pool (layer %d) — "
-            "this pool's slots carry packed weights + micro-scales and must be filled "
-            "via get_or_load_nvfp4().",
-            layer);
+        // IMP_CHECK, not IMP_LOG_FATAL: the latter only LOGS (logging.h:58), so this
+        // reported the wrong-API call and then made it anyway. Abort rather than throw -
+        // expert_cache.h:273 documents this contract as aborting on mismatch, and a
+        // wrong-API call is a programming error, not a request that can be failed.
+        IMP_CHECK(false,
+                  "ExpertLRUCache::get_or_load called on an NVFP4 slot pool (layer %d) - "
+                  "this pool's slots carry packed weights + micro-scales and must be filled "
+                  "via get_or_load_nvfp4().",
+                  layer);
     }
     bool hit = false;
     Slot* slot = acquire_slot_(layer, std::to_underlying(proj), key, src_host, expert_bytes, stream, &hit);
@@ -348,16 +358,19 @@ void* ExpertLRUCache::get_or_load_nvfp4(int layer, ExpertProj proj, ExpertCacheK
                                         const void* src_ms, size_t ms_bytes, size_t ms_off,
                                         float tensor_scale, cudaStream_t stream) {
     if (!nvfp4_slots_ || !d_slot_scales_) {
-        IMP_LOG_FATAL(
-            "ExpertLRUCache::get_or_load_nvfp4 called on a pool that was not initialised for "
-            "NVFP4 slots (layer %d) — there is no per-slot scale mirror to write.",
-            layer);
+        // Same class: reported, then proceeded.
+        IMP_CHECK(false,
+                  "ExpertLRUCache::get_or_load_nvfp4 called on a pool that was not initialised for "
+                  "NVFP4 slots (layer %d) - there is no per-slot scale mirror to write.",
+                  layer);
     }
     if (ms_off + ms_bytes > slot_size_ || packed_bytes > ms_off) {
-        IMP_LOG_FATAL(
-            "ExpertLRUCache::get_or_load_nvfp4: layout does not fit the slot (layer %d, "
-            "packed %zu B, ms_off %zu, ms %zu B, slot %zu B).",
-            layer, packed_bytes, ms_off, ms_bytes, slot_size_);
+        // The sharpest of the four: it declared that the layout does not fit the slot
+        // and then filled the slot anyway.
+        IMP_CHECK(false,
+                  "ExpertLRUCache::get_or_load_nvfp4: layout does not fit the slot (layer %d, "
+                  "packed %zu B, ms_off %zu, ms %zu B, slot %zu B).",
+                  layer, packed_bytes, ms_off, ms_bytes, slot_size_);
     }
     bool hit = false;
     Slot* slot = acquire_slot_(layer, std::to_underlying(proj), key, src_packed, packed_bytes, stream,
@@ -368,13 +381,15 @@ void* ExpertLRUCache::get_or_load_nvfp4(int layer, ExpertProj proj, ExpertCacheK
     if (hit) {
         // The dispatch derives the kernel's micro_scales base from its own copy
         // of the layout. If that ever stops matching what this slot was filled
-        // with, the kernel reads scales from the wrong offset — coherent-looking
+        // with, the kernel reads scales from the wrong offset - coherent-looking
         // and wrong. Assert the agreement instead of assuming it.
         if (slot->ms_off != ms_off) {
-            IMP_LOG_FATAL(
-                "ExpertLRUCache: slot layout disagreement on layer %d expert %d — slot was "
-                "filled with ms_off %zu, dispatch now says %zu.",
-                layer, key.expert_idx, slot->ms_off, ms_off);
+            // Returned slot->gpu_ptr after declaring the slot's layout wrong, i.e. handed
+            // out a pointer it had just said was unusable.
+            IMP_CHECK(false,
+                      "ExpertLRUCache: slot layout disagreement on layer %d expert %d - slot was "
+                      "filled with ms_off %zu, dispatch now says %zu.",
+                      layer, key.expert_idx, slot->ms_off, ms_off);
         }
         return slot->gpu_ptr;
     }
@@ -386,7 +401,7 @@ void* ExpertLRUCache::get_or_load_nvfp4(int layer, ExpertProj proj, ExpertCacheK
         cudaMemcpyAsync(dst + ms_off, src_ms, ms_bytes, cudaMemcpyHostToDevice, stream));
     slot->ms_off = ms_off;
 
-    // The scale mirror is indexed by the layer-relative slot index — the same
+    // The scale mirror is indexed by the layer-relative slot index - the same
     // number the dispatch hands the kernels as `expert_indices`.
     const int slot_in_layer = static_cast<int>(
         (static_cast<char*>(slot->gpu_ptr) - static_cast<char*>(pool_)) / slot_size_) -
@@ -436,7 +451,7 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
         considered.push_back({proj, expert});
 
         // Rebuild the cache key from the canonical packed_ptr stamped by
-        // get_or_load — this guarantees prefetched entries are found by
+        // get_or_load - this guarantees prefetched entries are found by
         // subsequent dispatch lookups that use the same packed.data.
         size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj;
         if (pp_off >= host_packed_ptrs_.size())
@@ -487,7 +502,7 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
 
         const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
         Slot& slot = slots_[flat];
-        // Prefer the per-(layer, proj) byte size — using slot_size_ as the
+        // Prefer the per-(layer, proj) byte size - using slot_size_ as the
         // fallback overflows for smaller projections and produces a CUDA
         // "invalid argument" on pinned-but-narrower host regions.
         size_t copy_bytes = expert_bytes_fallback;
@@ -540,7 +555,7 @@ bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
     std::vector<int> host(cells, -1);
 
     // Re-derive the expected device-mirror state from the authoritative
-    // host-side slot table — this is what every "+1 every update" path
+    // host-side slot table - this is what every "+1 every update" path
     // should converge to. Cell value is layer-relative slot_idx.
     for (size_t flat = 0; flat < slots_.size(); ++flat) {
         const Slot& slot = slots_[flat];
@@ -577,7 +592,7 @@ bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
             int expert = rest % n_experts_;
             IMP_LOG_FATAL(
                 "ExpertLRUCache parity check failed at (layer=%d, proj=%d, expert=%d): "
-                "host=%d device=%d. The host-side LRU and device-side mirror have diverged — "
+                "host=%d device=%d. The host-side LRU and device-side mirror have diverged - "
                 "Phase 3 invariant broken.",
                 layer, proj, expert, host[i], dev[i]);
             return false;
@@ -604,7 +619,7 @@ void ExpertLRUCache::destroy() {
         cudaFree(d_lookup_);
         d_lookup_ = nullptr;
     }
-    // d_slot_scales_ points into pool_, freed above — nothing of its own.
+    // d_slot_scales_ points into pool_, freed above - nothing of its own.
     d_slot_scales_ = nullptr;
     nvfp4_slots_ = false;
     if (!prefetch_done_.empty()) {

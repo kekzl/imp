@@ -112,7 +112,7 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
     nvfp4_batch_dequant_gemm(*ly.nvfp4_moe_up_ptr, gathered_base, expert_up_base, ctx.d, ctx.eff);
 
     // gpt-oss (#547): per-expert biases on gate/up outputs BEFORE activation.
-    // Rows are expert-sorted (expanded layout) — expert via expert_offsets.
+    // Rows are expert-sorted (expanded layout) - expert via expert_offsets.
     const int32_t* d_offsets = static_cast<const int32_t*>(ctx.routing.expert_offsets.data);
     if (model_->profile().is_gpt_oss) {
         moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, d_offsets, ctx.ne,
@@ -321,7 +321,7 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
                             non_gated_experts, expanded, eff, compute_dtype_,
                             cfg.ffn_activation, stream);
 
-    // Step 5+6: Down projection — dp4a, re-quantize activations to Q8_1
+    // Step 5+6: Down projection - dp4a, re-quantize activations to Q8_1
     char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
     QType down_qtype = ly.expert_down_packed.qtype;
     size_t down_stride = expert_stride(ly.expert_down_packed, down_qtype);
@@ -450,8 +450,8 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     }
 
     // MoE IMMA prefill (gemm.moe_imma_prefill): Q8_0/Q4_K expert tensors run
-    // the grouped INT8 IMMA kernel — fused dequant, one launch over all
-    // experts — instead of materializing every expert to FP16 (the 63-65%-of-
+    // the grouped INT8 IMMA kernel - fused dequant, one launch over all
+    // experts - instead of materializing every expert to FP16 (the 63-65%-of-
     // window dequant tax, docs/archive/prefill_gap_2026_06_07.md §4.2). Other
     // qtypes (Q6_K down_proj) and FP32-out fall through to the legacy path.
     int max_rows_per_expert = 0;
@@ -585,7 +585,7 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
     // 2 * n syncs (one per token, three GEMVs each) down to ONE sync per
     // layer call. Restores the prefill graph-capture story up to (but not
     // including) the grouped-mmvq kernel work that would eliminate the
-    // remaining sync — see follow-up: replacing this function with a
+    // remaining sync - see follow-up: replacing this function with a
     // device-indexed grouped mmvq lets the whole layer capture cleanly.
     //
     // top_k is bounded by FFN active-expert count (max 32 per kernel
@@ -614,7 +614,7 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
 
         // Per-token expert IDs: read from the pre-fetched host array (no D2H,
         // no sync). Old form: stack `int32_t h_experts[32]` + per-token
-        // cudaMemcpyAsync + cudaStreamSynchronize — M2 batched both above.
+        // cudaMemcpyAsync + cudaStreamSynchronize - M2 batched both above.
         const int32_t* h_experts = h_all_experts.data() + static_cast<size_t>(t) * top_k;
 
         auto do_mmvq = [&](const uint8_t* w, half* out, QType qt, int rows, int cols) {
@@ -690,7 +690,7 @@ bool GraphExecutor::try_run_moe_gemma4_ggml_prefill(int layer, cudaStream_t stre
 }
 
 // Expert-activation histogram (diagnostics.moe_expert_hist). One increment per
-// (token, k) routing decision, bucketed by absolute layer index — non-MoE layers
+// (token, k) routing decision, bucketed by absolute layer index - non-MoE layers
 // of a hybrid simply stay zero. Kept off the hot path by the null check on
 // `hist`; when on, it is one atomicAdd per decision (n * top_k per layer per
 // forward), which is noise next to the expert GEMMs it precedes.
@@ -711,7 +711,7 @@ __global__ void moe_expert_hist_kernel(const int32_t* __restrict__ expert_indice
 
 // Per-token expert trace. One record per (token, layer): [layer, e0..e_{k-1}],
 // appended at an atomically claimed offset so records stay whole even though the
-// claim is concurrent. Capacity is checked before the claim is committed —
+// claim is concurrent. Capacity is checked before the claim is committed -
 // overrunning would corrupt the tail of a trace that is read as evidence.
 __global__ void moe_expert_trace_kernel(const int32_t* __restrict__ expert_indices, int* __restrict__ trace,
                                         unsigned int* __restrict__ cursor, unsigned long long capacity,
@@ -736,7 +736,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     const auto& ly = model_->layer(layer);
 
     auto run_topk = [&](const Tensor& logits_f32) {
-        // gpt-oss (#547): router bias is a true LINEAR bias on the logits —
+        // gpt-oss (#547): router bias is a true LINEAR bias on the logits -
         // added before softmax/top-k it shifts selection AND the renormalized
         // top-k weights (= HF's topk(logits+b) → softmax-over-selected).
         // Distinct from DeepSeek's selection-only score_bias (router_bias_ptr).
@@ -754,7 +754,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // Fused gate GEMV + topk only profitable when n_experts ≤ warps (8).
     // Higher expert counts (e.g. 128 in Qwen3-Coder) prefer separate
     // gemv_gate_fp32, which puts one warp on each expert row: 128 parallel
-    // WARPS in 16 blocks of 8 (not 128 blocks — kGemvThreads is 256).
+    // WARPS in 16 blocks of 8 (not 128 blocks - kGemvThreads is 256).
     //
     // 16 blocks looks like under-occupancy (16 of this card's 170 SMs, 0.02
     // waves/SM, 205 GB/s = 11.4% of peak) and it is not worth "fixing" by
@@ -764,7 +764,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // expert models. The work is pinned at 128 warps by one-warp-per-row, so
     // redistributing them only removes each SM's ability to hide DRAM latency
     // across warps. Making this kernel faster needs K split across several
-    // warps per row — an algorithm change, not a launch-config change.
+    // warps per row - an algorithm change, not a launch-config change.
     constexpr int kMaxFusedExperts = 8;
     const std::string& dl = runtime_config().diagnostics.dump_logits_dir;
     bool dump_logits = !dl.empty() && (layer == 29 || dl == "all");
@@ -843,7 +843,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // Expert-activation histogram. Hooked HERE, at the end of the routing
     // funnel, and not inside run_topk: the fused gate+top-k decode branch above
     // never calls run_topk, so a hook there would silently miss every
-    // single-token decode — which is the case this measurement is about.
+    // single-token decode - which is the case this measurement is about.
     if (!runtime_config().diagnostics.moe_expert_hist.empty()) {
         if (moe_.expert_hist == nullptr) {
             int n_layers = cfg.n_layers;
@@ -860,7 +860,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                 IMP_LOG_INFO("moe expert histogram: recording %d layers x %d experts -> %s", n_layers, ne,
                              runtime_config().diagnostics.moe_expert_hist.c_str());
             } else {
-                IMP_LOG_WARN("moe expert histogram: allocation failed — not recording");
+                IMP_LOG_WARN("moe expert histogram: allocation failed - not recording");
             }
         }
         // ne can differ per layer in principle; a mismatch would alias buckets,
@@ -879,7 +879,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // Per-token expert trace. Decode only: a prefill call routes n tokens at once
     // and would append n*top_k behind a single record header, which the reader
     // cannot split back apart. Prefill decisions are not what a cache is judged
-    // on anyway — the per-token stream is.
+    // on anyway - the per-token stream is.
     if (n == 1 && !runtime_config().diagnostics.moe_expert_trace.empty()) {
         if (moe_.expert_trace == nullptr) {
             // 8M ints ~= 32 MiB: 512 tokens x 48 layers x (1+8) is 221k, so this
@@ -899,7 +899,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                 vram_free(vram_alloc_, moe_.trace_cursor);
                 moe_.expert_trace = nullptr;
                 moe_.trace_cursor = nullptr;
-                IMP_LOG_WARN("moe expert trace: allocation failed — not recording");
+                IMP_LOG_WARN("moe expert trace: allocation failed - not recording");
             }
         }
         if (moe_.expert_trace != nullptr && top_k == moe_.trace_top_k) {
@@ -963,7 +963,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
 
     // ---- Host-resident NVFP4 experts: address the LRU cache's slot pool ----
     // Phase 3 builds nvfp4_moe_*_ptr only for device-resident experts, so a
-    // host-resident NVFP4 layer arrives here with none of them — which is how
+    // host-resident NVFP4 layer arrives here with none of them - which is how
     // #1403's placement reached a generic GEMM as raw bytes and answered from
     // the experts that happened to be resident.
     //
@@ -986,7 +986,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         if (model_->profile().is_gpt_oss) {
             // gpt-oss (#547): per-expert biases on gate/up/down outputs + the
             // clamped GLU. The fused swiglu-down GEMV computes plain SwiGLU
-            // inline — bypassed here in favor of explicit bias→GLU→down→bias.
+            // inline - bypassed here in favor of explicit bias→GLU→down→bias.
             gemv_nvfp4_moe_gate_up_fused(*ly.nvfp4_moe_gate_ptr, *ly.nvfp4_moe_up_ptr, expert_indices,
                                          norm_ptr, gate_buf, up_buf, eff, d, top_k, stream);
             moe_add_expert_bias_indexed(gate_buf, ly.expert_gate_bias.data, expert_indices, top_k, eff,
@@ -1003,7 +1003,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
             gemv_nvfp4_moe_gate_up_fused(*ly.nvfp4_moe_gate_ptr, *ly.nvfp4_moe_up_ptr, expert_indices,
                                          norm_ptr, gate_buf, up_buf, eff, d, top_k, stream);
             // Compute the gated activation (silu(gate)*up) ONCE per element into act_buf,
-            // then a plain bandwidth-bound down GEMV — instead of gemv_nvfp4_moe_swiglu_decode,
+            // then a plain bandwidth-bound down GEMV - instead of gemv_nvfp4_moe_swiglu_decode,
             // which recomputed the silu (exp/div, XU-bound) once per OUTPUT ROW (NR=8x
             // redundant). nsys: the fused swiglu-down kernel was 15.5% of decode wall-clock,
             // XU-bound at 85% occ / 27% peak BW; this matches the gpt-oss + mmvq paths above
@@ -1035,7 +1035,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     // The fused MoE decode kernels read an expert as `base + idx * stride`.
     // With experts on host the contiguous array is the cache's per-layer slot
     // pool (fixed stride slot_size_), so `idx` is a SLOT index rather than an
-    // expert id — no new kernel, no staging copy. Establishing residency needs
+    // expert id - no new kernel, no staging copy. Establishing residency needs
     // the routing on the host, hence one D2H per layer; that is what the
     // serial fallback this replaces already paid, and CUDA graphs are disabled
     // on this path anyway. Requires the whole working set to fit the layer's
@@ -1102,13 +1102,17 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
             // Unreachable by construction: host_expert_pool_ready() is the same
             // predicate the dispatch used to send us here, and staging can only
             // fail on an out-of-range expert id or layer. Say so loudly rather
-            // than fall through — the fall-through would hand a HOST pointer to
+            // than fall through - the fall-through would hand a HOST pointer to
             // a device kernel.
-            IMP_LOG_FATAL(
-                "MoE decode fast: host-resident experts could not be staged into the LRU pool "
-                "(layer %d, top_k %d, slots/layer %d). The dispatch predicate and this path "
-                "have diverged.",
-                layer, top_k, expert_cache_.slots_per_layer_);
+            // IMP_CHECK, not IMP_LOG_FATAL. The comment above says continuing hands a
+            // HOST pointer to a device kernel, and IMP_LOG_FATAL only LOGS
+            // (logging.h:58) - so it said so and then did it. Abort rather than
+            // throw: this is state corruption, not a request that can be failed.
+            IMP_CHECK(false,
+                      "MoE decode fast: host-resident experts could not be staged into the LRU pool "
+                      "(layer %d, top_k %d, slots/layer %d). The dispatch predicate and this path "
+                      "have diverged.",
+                      layer, top_k, expert_cache_.slots_per_layer_);
         }
     }
 
@@ -1163,7 +1167,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                                       /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
         }
     } else {
-        // FP16 dequant fallback — only Q6_K / Q8_0 wired.
+        // FP16 dequant fallback - only Q6_K / Q8_0 wired.
         size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
         if (!non_gated_experts) {
             size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);

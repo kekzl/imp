@@ -22,9 +22,15 @@ public:
     // C++23 deducing this: one overload serves const and non-const callers.
     template <typename Self>
     auto&& handle(this Self&& self, TensorID id) {
-        if (id < 0 || id >= static_cast<TensorID>(self.handles_.size())) {
-            IMP_LOG_FATAL("WeightRegistry::handle: id %d out of range [0, %zu)", id, self.handles_.size());
-        }
+        // IMP_CHECK, not IMP_LOG_FATAL: the latter only LOGS (logging.h:58),
+        // so this used to report "out of range" and then index out of range
+        // anyway. Abort rather than throw, for two reasons specific to this
+        // site: it is a precondition on an accessor called from inside
+        // CUDA-graph capture regions, where unwinding is not a recovery, and
+        // an out-of-range TensorID means the registry and its caller disagree
+        // about identity - there is nothing to return.
+        IMP_CHECK(id >= 0 && id < static_cast<TensorID>(self.handles_.size()),
+                  "WeightRegistry::handle: id %d out of range [0, %zu)", id, self.handles_.size());
         return self.handles_[id];
     }
     size_t size() const { return handles_.size(); }
