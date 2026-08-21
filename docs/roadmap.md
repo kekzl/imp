@@ -24,9 +24,18 @@ The engine is past the raw-speed land-grab; current work is making it boringly r
 ## What a 2026 engine has to do (assessed 2026-08-21)
 
 The bar a local inference engine is measured against now, scored against imp. It
-is the frame for the gap list below, not a schedule. Written against the field as
-it stood in mid-2026; anything that appeared elsewhere after that is not in here.
-Every "met" row below was checked against the tree on 2026-08-21, not recalled.
+is the frame for the gap list below, not a schedule. Every "met" row was checked
+against the tree on 2026-08-21, not recalled, and the open list was checked
+against what the other engines published for 2026: [vLLM Q3](https://github.com/vllm-project/vllm/issues/48168),
+[SGLang Q2](https://github.com/sgl-project/sglang/issues/22949), and the MLSys
+2026 [report](https://www.modular.com/blog/three-trends-from-mlsys-2026) that KV
+cache was the single most discussed topic there. llama.cpp, the nearest
+neighbour, publishes no 2026 roadmap.
+
+**Scoped to one GPU.** Disaggregated prefill/decode, KV cache distributed across
+instances, context parallelism and elastic expert parallelism are on both of
+those roadmaps and are not on this list: they are multi-node answers, and imp is
+one card by design.
 
 ### Met
 
@@ -50,6 +59,7 @@ Every "met" row below was checked against the tree on 2026-08-21, not recalled.
 | Model classes, not one family | dense, MoE, MLA, Mamba2/GDN hybrids, vision-language, encoder-only |
 | Operating it without a restart | model swap that drains in-flight work, `/admin/suspend` and `/admin/resume`, on-disk warm weight cache |
 | Reproducibility as a product property | `runtime.deterministic` covers MoE routing atomics, sampling races and GEMM; see [`determinism.md`](determinism.md) |
+| Cold start that is not a full reload | warm on-disk weight cache plus `/admin/suspend`/`resume`. vLLM still carries cold start as an open Q3 roadmap issue, so this is one imp answered first |
 
 ### Open
 
@@ -61,22 +71,37 @@ Ranked by what an agent workload notices first.
    expectation on this list that imp misses hardest, because the mission is
    parallel agent traffic and `max_concurrent` only bounds the queue, it does not
    order it.
-2. **No speculation tree.** Gap 5 below. n-gram, suffix and MTP are all
-   single-chain; no EAGLE, Medusa or multi-candidate verify.
-3. **No audio, and a checkpoint that has it loses it quietly.** Gemma-4 ships
+2. **Speculation does not adapt to the request.** The server exposes
+   `speculative` as a **bool**: on or off, one configuration for every prompt.
+   Both other engines are going the other way, vLLM targeting an acceptance
+   length above 5 with hybrid and linear drafting, SGLang building "adaptive spec
+   configurations for different requests and batch sizes". imp's chain saturates
+   near 2.5 accepted per verify and the depth is a global setting. The missing
+   **tree** (gap 5 below: no EAGLE, Medusa or multi-candidate verify) is one way
+   to raise that ceiling, but per-request adaptivity is the cheaper half and is
+   not there either.
+3. **Long context is served by a 2023-era answer.** imp's only sparsity is
+   StreamingLLM, sink tokens plus a sliding window
+   (`attention_paged_common.cuh:71`), which drops what falls out of the window.
+   The field moved to keeping the whole context and reading it sparsely: HiSparse
+   reports 5x throughput on long-context workloads by tiering, and native sparse
+   attention is on both roadmaps. For a 32 GB card serving agent sessions that
+   reach 100k tokens, this is the difference between forgetting the middle of a
+   session and paying for it, and imp only has the first.
+4. **No audio, and a checkpoint that has it loses it quietly.** Gemma-4 ships
    `model.embed_audio.*`; `weight_map.cpp:369` counts those tensors as skipped,
    so an omni checkpoint loads as a text plus vision model. Omni models are the
    direction the model side moved in 2026 and imp is text plus images.
-4. **No video.** Gap 2 below; the Qwen3-VL tower does images only.
-5. **No KV tier below VRAM.** Gap 6 below, shelved on measurement rather than on
+5. **No video.** Gap 2 below; the Qwen3-VL tower does images only.
+6. **No KV tier below VRAM.** Gap 6 below, shelved on measurement rather than on
    size: the spill lands on a 6.5x bandwidth cliff on this box.
-6. **No multi-GPU and no tensor parallelism.** Deliberate, and the one item here
+7. **No multi-GPU and no tensor parallelism.** Deliberate, and the one item here
    that is a scope decision rather than a gap: [`LIMITATIONS.md`](LIMITATIONS.md)
    states it first for a reason.
-7. **The quantizer refuses 3-D stacked experts.** Gap 1(f) below: refusing is
+8. **The quantizer refuses 3-D stacked experts.** Gap 1(f) below: refusing is
    correct, supporting them needs a per-model layout descriptor plus per-expert
    bias support in the loader and the MoE forward.
-8. **No distributed tracing.** `/metrics` answers the single-process questions;
+9. **No distributed tracing.** `/metrics` answers the single-process questions;
    there is no trace id carried through a request, which is what an agent
    framework needs to attribute its own latency.
 
