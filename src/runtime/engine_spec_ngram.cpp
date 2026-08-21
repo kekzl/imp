@@ -38,6 +38,7 @@
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
 #include "runtime/engine.h"
+#include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
 #include "runtime/suffix_draft.h"
@@ -103,6 +104,29 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     h_spec_topm_ = h_spec_argmax_.as<int32_t>() + chunk_cap;
     spec_chunk_cap_ = chunk_cap;
     spec_block_table_cap_ = max_blocks;
+
+    // diagnostics.spec_trace only: room for the chunk's full logits, so the
+    // trace can report the TOP-2 GAP per row and not just the argmax id.
+    // Allocated here with the other spec buffers rather than lazily at the
+    // trace site: a first-use allocation would be a serving-phase allocation
+    // (docs/internals/MEMORY.md A3.2, and my own check_alloc_pairs gate would
+    // see it). Off by default, so the memory is only taken when asked for.
+    if (runtime_config_.diagnostics.spec_trace && d_spec_logits_ == nullptr) {
+        const size_t v = static_cast<size_t>(model_->config().vocab_size);
+        const size_t bytes = static_cast<size_t>(chunk_cap) * v * sizeof(float);
+        // Through vram_alloc_, like spec_state_snap_ two functions down, rather
+        // than a direct cudaMalloc: invariant I1 keeps the direct-allocation
+        // allowlist shrinking, and a diagnostic is not a reason to grow it.
+        d_spec_logits_ = static_cast<float*>(vram_alloc_.allocate(bytes, "spec_trace_logits"));
+        if (d_spec_logits_ == nullptr) {
+            IMP_LOG_WARN(
+                "spec_trace: could not allocate %.1f MiB for the logit dump - the trace "
+                "will report argmax only, without the top-2 gap",
+                bytes / (1024.0 * 1024.0));
+        } else {
+            h_spec_logits_.assign(static_cast<size_t>(chunk_cap) * v, 0.0f);
+        }
+    }
     return true;
 }
 
@@ -172,6 +196,13 @@ int Engine::recurrent_slot_for_(int req_id) const {
 }
 
 void Engine::free_spec_buffers_() {
+    // The spec_trace logit dump, freed through the API that allocated it.
+    if (d_spec_logits_) {
+        vram_alloc_.free(d_spec_logits_);
+        d_spec_logits_ = nullptr;
+    }
+    h_spec_logits_.clear();
+    h_spec_logits_.shrink_to_fit();
     if (spec_state_snap_) {
         vram_alloc_.free(spec_state_snap_);
         spec_state_snap_ = nullptr;
@@ -944,16 +975,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
 
     if (runtime_config_.diagnostics.spec_trace) {
-        std::string s = "[verify] p0=" + std::to_string(p0) + " t0=" + std::to_string(t0) +
-                        (mc_on ? " mc_cands=" + std::to_string(mc.size()) : "") + " draft=[";
-        const auto& dref = mc_on ? mc[0] : draft;
-        for (size_t j = 0; j < dref.size(); ++j)
-            s += std::to_string(dref[j]) + (j + 1 < dref.size() ? "," : "");
-        s += "] argmax=[";
-        for (int j = 0; j < chunk_len; ++j)
-            s += std::to_string(h_spec_argmax_.as<int32_t>()[j]) + (j + 1 < chunk_len ? "," : "");
-        s += "]";
-        IMP_LOG_INFO("%s", s.c_str());
+        // Whole block in runtime/spec_trace.cpp: the speculation loop should
+        // not carry its own diagnostics, and this one reads full logits.
+        spec_trace_emit_verify(p0, t0, mc_on ? &mc[0] : &draft, mc_on ? static_cast<int>(mc.size()) : 0,
+                               h_spec_argmax_.as<int32_t>(), chunk_len, executor_.get(), d_spec_logits_,
+                               h_spec_logits_, model_->config().vocab_size, stream);
     }
 
     // Accept and emit through the same per-token bookkeeping as the eager

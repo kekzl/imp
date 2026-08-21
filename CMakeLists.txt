@@ -293,6 +293,7 @@ endif()
 set(IMP_RUNTIME_SOURCES
     src/runtime/config.cpp
     src/runtime/process_diag.cpp
+    src/runtime/spec_trace.cpp
     src/runtime/graph_eligibility.cpp
     src/runtime/green_ctx.cu
     src/runtime/scheduler.cpp

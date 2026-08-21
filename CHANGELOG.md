@@ -13,6 +13,12 @@ there instead of retelling it.
 
 ### Added
 
+- **`diagnostics.spec_trace` reports the top-2 logit gap per verify chunk row.**
+  The trace said which token a row picked and never by how much, which is the
+  question that decides whether a disagreement with the decode path is a coin flip
+  or a real difference of opinion. Off by default; the logit buffer is only
+  allocated when the flag is on.
+
 - **`speculative.verify_row_parity` makes the verify chunk reduce K the way the
   decode step does.** The two paths grouped the same products into 32 partial sums
   (decode) and 128 (verify); the rounding difference reached the stop decision and
