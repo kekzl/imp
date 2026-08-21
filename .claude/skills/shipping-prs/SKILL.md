@@ -37,6 +37,30 @@ gh pr merge --auto --squash                    # re-arm LAST
 git log -1 --stat origin/main                  # after merge: confirm your new commit is in the squash
 ```
 
+## The PR body
+
+A reader opens it to decide whether this can merge. Narrative does not carry
+that decision, and `CHANGELOG.md`'s own rule ("a changelog, not a journal")
+applies here for the same reason.
+
+**Every paragraph carries a number, a file path or a decision.** One that
+carries only reasoning belongs in `docs/`, and the PR links to it.
+
+```
+## <change>        one section per topic, bullets under it
+| | before | after |    a table wherever a count or a timing moved
+## Gate            the measured block, verbatim, nothing wrapped around it
+Not in here:       one line: what a reviewer would look for and not find
+```
+
+Cut on sight: the sentence that sets a finding up before stating it ("that was
+never measured, and it is false"), the retelling of how a bug was found, and any
+instruction on how to read the numbers. State the fact and its evidence
+("the audit's X is false:" + the measurement) and stop.
+
+Measured on #1531: 162 lines to 57, no fact lost. Same rule for commit messages,
+which become squash subjects.
+
 ## Ship sequence
 
 ```bash
