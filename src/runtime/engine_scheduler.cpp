@@ -2977,3 +2977,18 @@ void Engine::abandon_decode_pipeline() {
     bd_pipe_.n = 0;
 }
 }  // namespace imp
+
+// THROWAWAY: deliberate allowlist drift to prove the File size gate blocks a
+// merge. This branch is never merged; see the PR that opens it.
+namespace imp {
+namespace prove_the_gate_blocks {
+int a1() { return 1; }
+int a2() { return 2; }
+int a3() { return 3; }
+int a4() { return 4; }
+int a5() { return 5; }
+int a6() { return 6; }
+int a7() { return 7; }
+int a8() { return 8; }
+}  // namespace prove_the_gate_blocks
+}  // namespace imp
