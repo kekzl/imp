@@ -334,6 +334,65 @@ These have a code path and no gate. They may work; nothing proves it.
   reaching 0 / 6 is a property of these six prompts, not of an established
   mechanism.
 
+  **2026-08-21, third pass: the truncation is not localised at the truncating
+  position, and the requested hidden-state diff is not obtainable.** The
+  question this pass set out to answer was where the chunk row's hidden state
+  parts company with the decode step's at the position that truncates. Two
+  independent measurements say that question has no answer on this build, and a
+  third says it would not have been the right question anyway.
+
+  *The position does not exist in the non-speculative arm.* On prompt 1 the k=1
+  and k=0 answers share only their first 49 bytes of 165 and 2358. The
+  non-speculative path never visits the truncating position, so "the decode
+  step's hidden state at the same position" is not a thing that was computed.
+
+  *The instrument cannot see the decode loop.* `diagnostics.dump_hidden_dir` is
+  host-side, and decode is CUDA-graph replayed, so the dump only covers passes
+  that re-enter host code. Measured on one build, same prompt, two token
+  budgets:
+
+  | max_tokens | tokens generated | distinct dump steps |
+  |---|---|---|
+  | 40 | 40 | 5 |
+  | 200 | 200 | **5** |
+
+  Constant in the generation length. Everything past the capture passes is
+  invisible to it. Turning capture off makes every step visible but changes the
+  arm being measured: with `speculative.capture=false` the same six prompts gave
+  2 / 6 and then 1 / 6 across two fresh processes, where capture-on is stable at
+  2 / 6 both times. The instrument that could see the position destabilises the
+  phenomenon it would measure.
+
+  *And the divergence point carries no signal.* Same build, six prompts, k=1
+  against k=0, first differing byte:
+
+  | prompt | k=1 bytes | k=0 bytes | first divergence | |
+  |---|---|---|---|---|
+  | 1 | **165** | 2358 | 49 | truncated |
+  | 2 | 2293 | 2223 | 271 | ok |
+  | 3 | 2157 | 2583 | 103 | ok |
+  | 4 | 2572 | 2574 | 135 | ok |
+  | 5 | 2687 | 2666 | 48 | ok |
+  | 6 | 2634 | 2701 | 49 | ok |
+
+  All six diverge early, between byte 48 and byte 271, and the two that diverge
+  earliest after the truncating one (48 and 49) produce full, clean answers.
+  Early divergence is the norm here, not the symptom. Speculation not
+  reproducing greedy output is already documented above; what this adds is that
+  truncation is **one outcome among six of that ordinary divergence**, not a
+  separate upstream event with a location to find. That is why the four
+  per-kernel parity sites reshuffle which prompts fall over instead of reducing
+  the count: they perturb a trajectory that has already left the greedy path on
+  every prompt.
+
+  *Correction to a claim made during the second pass:* `dump_hidden_dir` was
+  said to destroy the phenomenon. It does not. A run with it set still truncates
+  at exactly 164 bytes with `finish_reason=stop`, and still captures graphs. The
+  accurate statement is the one above: it cannot see the steps that matter.
+
+  [PROV: commit=2a049185 date=2026-08-21 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+   cmd=`--set speculative.mtp_k={0,1} --set speculative.ngram=false --set server.prefix_cache=false --set runtime.deterministic_gemm=true --think-budget 0`
+   note=six prompts, max_tokens 600, temperature 0, top_k 1; dump-step counts from `diagnostics.dump_hidden_dir`]
   **Consequence: `speculative.mtp_k` stays 0 by default**, despite the +21.3 %
   it measures on this model ([`roadmap.md`](roadmap.md)). A throughput win that
   truncates a third of answers is not a win, and the cheap escape does not
