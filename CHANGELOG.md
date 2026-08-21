@@ -123,6 +123,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`main`'s `File size` gate was red and a PR merged through it.** #1523 added 6
+  code lines to `engine_scheduler.cpp` without re-pinning its allowlist ceiling, the
+  check failed, and the merge went ahead because ruleset `14716423` requires exactly
+  one context (`Build`). Re-pinned 1962 to 1968. The enumeration of which checks are
+  required and which are advisory, and what that means for the five gates shipped this
+  week, is [`DEBT_LEDGER`](docs/audit/DEBT_LEDGER_2026_08_21.md) section (j).
+
 - **A failed perplexity run reported `PPL=1.0000`.** "perplexity failed:
   insufficient KV capacity" and `mean_nll=0.0000 PPL=1.0000` on consecutive
   lines, so anyone reading the log takes the failure for a perfect score.

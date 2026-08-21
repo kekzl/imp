@@ -697,3 +697,65 @@ the same arm and is neither dense nor GDN, so it looked like a second instance o
 defect. It is not: the trade is genuinely losing for it (+7.4 % decode against +9.0 % PPL).
 The generalisation still stands for the members of that category nobody has measured, but
 it now has one instance where the categorical call was correct.
+
+---
+
+## (j) Every gate this campaign shipped is advisory, and one of them proved it
+
+`main` went red on 2026-08-21 and stayed red: #1523's `File size` check **FAILED and the PR
+merged anyway**.
+
+```
+$ gh pr checks 1523 --json name,state
+FAILURE  File size
+SUCCESS  Build
+SUCCESS  Alloc sites, Docs, Lint, Launch guards, clang-tidy,
+         Mock API contract, Real API contract, Release hygiene, enable-auto-merge
+SKIPPED  Test
+```
+
+Ruleset `14716423` ("Require CI", enforcement active) requires exactly **one** context:
+
+```
+$ gh api repos/kekzl/imp/rulesets/14716423 \
+    --jq '.rules[] | select(.type=="required_status_checks")
+          | .parameters.required_status_checks[].context'
+Build
+```
+
+| check | required | state on #1523 |
+|---|---|---|
+| **Build** | **yes** | SUCCESS |
+| **File size** | no | **FAILURE** |
+| Alloc sites | no | SUCCESS |
+| Docs | no | SUCCESS |
+| Lint | no | SUCCESS |
+| Launch guards | no | SUCCESS |
+| clang-tidy | no | SUCCESS |
+| Mock API contract | no | SUCCESS |
+| Real API contract | no | SUCCESS |
+| Release hygiene | no | SUCCESS |
+| Test | no | SKIPPED |
+| enable-auto-merge | no | SUCCESS |
+
+Eleven of twelve are advisory, and auto-merge squashes on mergeability plus the one required
+context. So `check_alloc_pairs.py` (#1505), `check_test_lanes.py` and
+`check_dead_inline_accessors.py` (#1506), `check_log_fatal.py` (#1511) and
+`check_alloc_interpose.sh` (#1520) are all correct, all red-tested, and **none of them can
+stop a merge.** A step that blocks its own job blocks nothing when the job is not required.
+
+This is the campaign's own defect shape one level up: the property that was verified is
+"does the gate go red", and the property that matters is "does red stop anything". Every one
+of these gates had the first tested and none had the second.
+
+**Deliberately not fixed here.** Adding required contexts changes what can merge for every
+future PR in this repo, which is the repo owner's decision. Until it is made, this entry is
+the honest statement of what these gates are: **documentation with a red light, not
+enforcement.** `.claude/skills/shipping-prs/SKILL.md` already records the same fact from the
+other direction ("every other job can go red and the PR still merges", with the two 2026-08
+`Alloc sites` incidents); what is new here is the enumeration and a case where it happened
+to a gate written the same day.
+
+Query note, because the obvious one is wrong: `gh api repos/kekzl/imp/branches/main/protection`
+returns **404 "Branch not protected"**. That is not the answer. Protection here is configured
+via **rulesets**, which the legacy protection endpoint does not see.
