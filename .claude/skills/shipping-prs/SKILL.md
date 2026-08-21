@@ -53,7 +53,7 @@ git log -1 --stat origin/main                  # confirm your final commit is in
 
 **Don't branch a new topic off `main` while a previous PR's auto-merge is still in flight** — it squashes onto `main` any moment and your new branch misses it (conflict/rework later). Wait for the merge, `git pull --ff-only`, then branch.
 
-### `mergeStateStatus=BLOCKED` — triage before assuming
+### A PR that will not merge: triage before assuming
 
 Don't guess. Dump the real state first:
 
@@ -65,6 +65,34 @@ gh pr view <PR> --json mergeStateStatus,statusCheckRollup,reviewDecision
 - `reviewDecision` not `APPROVED`, or an unresolved review thread → needs review action.
 - Branch out-of-date with `main` → `git pull --no-rebase origin main` (or update via the PR), push.
 - A *different* required status (not `Build`) still pending → wait for it.
+- **`gh pr checks` reports NOTHING at all** → that is not "pending", it is a symptom, and
+  `mergeStateStatus` is the field that answers it. `DIRTY` means the PR conflicts with
+  `main`, and GitHub computes `pull_request` workflows against a merge ref it cannot build
+  when there are conflicts: no CI run, no Auto-merge run, no arming. A conflicted PR
+  therefore looks identical to a queue backlog in every view, and nothing says so.
+  Resolve the conflict (rebase onto `origin/main`; force-push is gated here, so push a
+  fresh branch and reopen) and the checks fire.
+
+  **`UNKNOWN` is not a state.** It means GitHub has not computed mergeability yet and to
+  ask again. Reading it as evidence and building a mechanism on top of it is how #1516 got
+  diagnosed as "GitHub dropped the event" for an hour. Query it twice before believing it.
+
+  **This entry is detection. The prevention is one section up and it is the rule both of
+  these walked past:** do not branch a new topic while a previous PR is in flight. #1516 was
+  branched while #1515 was in flight and was born conflicted 29 minutes later; #1519 repeated
+  it against #1518 an hour after this entry was written. Detection at the wrong layer is
+  exactly what this repo's gates keep getting caught doing, and a triage note that fires
+  after the PR exists is the process version of it.
+
+  So make branching mechanical rather than remembered:
+
+  ```bash
+  git fetch origin && git switch -c <topic> origin/main   # not `git switch main && ...`
+  ```
+
+  `git switch main` uses whatever the local tree is sitting on, which is stale the moment
+  anything merges. Branching directly off the freshly fetched `origin/main` cannot be stale,
+  and it costs one command either way.
 
 ## Cutting a tagged release (only when explicitly releasing)
 
