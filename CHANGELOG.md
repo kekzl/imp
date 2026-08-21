@@ -69,6 +69,15 @@ there instead of retelling it.
 
 ### Changed
 
+- **A red gate now blocks the merge.** Ruleset `Require CI` requires exactly one
+  context, `Build`, so every other check was advisory and two PRs merged over a red
+  `File size` in forty minutes. `scripts/ci_static_gates.sh` is one list run from two
+  places: the first step of `Build`, where a failure makes the required context red,
+  and the named jobs with a filter, so which gate failed still has a check name. Ahead
+  of the compile, so a drifted allowlist fails in ~15 s rather than after three
+  minutes. `Lint`, `Mock API contract`, `clang-tidy` and `Real API contract` stay
+  advisory for stated reasons; repo settings are untouched.
+
 - **Why a verify chunk costs 8.4x a decode step on Q6_K is recorded as open, with
   three refuted explanations.** It is what makes n-gram speculation net-negative on
   short requests on the north-star checkpoint. The chunk being a different, unfused
