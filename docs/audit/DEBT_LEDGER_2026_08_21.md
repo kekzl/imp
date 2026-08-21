@@ -279,6 +279,45 @@ harness-delegating bodies (`run_case(...)`, `run_arch(...)`). 8 `DISABLED_`, all
 stated reason in the file; two of them (`test_determinism_e2e.cpp:177,221`) are deliberately
 the gate for a known limit.
 
+**find-stubs rung 4 ran, 2026-08-21. One finding, and the census is worth less
+than the cross-check.**
+
+```
+$ nm build-dev/imp-server | grep -oP '__device_stub__\S+' | sed 's/.*__device_stub__/_/; s/\.cold//' \
+    | c++filt | sed 's/(.*//; s/<.*//; s/.*:://' | grep '_kernel$' | sort -u
+285 kernels present
+$ <launched, from the four nsys runs of assignments 4 and 4b:
+   dense + MoE x 8k + 32k, prefill and decode>
+61 launched
+249 dark
+```
+
+**249 dark does not mean 249 dead**, and this is the limit of the method as the
+skill describes it: four workloads cover no vision, no constrained decoding, no
+MoE host offload, no KV dtype but FP8, and no speculation. Cross-checking each
+dark kernel against its mentions in `src/` collapses 249 to **7**, and reading
+those 7 collapses it to **1**:
+
+| | |
+|---|---|
+| 6 of 7 | live benchmark/probe kernels that exist only under `tests/bench/` and are launched by their own harnesses |
+| **1 of 7** | `fp32_accum_add_fp16_kernel` - declared in `executor_kernels.h`, defined in `executor_elementwise.cu`, and its **only caller is its own test** |
+
+That last one is the finding, and its shape matters more than its size: **every
+existing check reads it as covered.** The 2026-08-03 decl-only sweeps
+(`SETTLED.md` §C) filtered on decl+def with nothing else, and this has a third
+mention. `check_dead_inline_accessors.py` (#1506) filters on header-inline
+definitions, and this is a `.cu` definition. A code-graph caller query finds a
+caller. A kernel whose only caller is a test is invisible to all three, and it
+is the same class as the `add_fp16_bias_to_fp32_kernel` §C records as "never
+launched at all". Removed, with its test.
+
+The second half of rung 4 - a *live* kernel behind a condition that is never
+true, the `ssm_graph_ban` class - is **not** answered by this. That needs to
+know which condition gates each kernel, which a launch census cannot see, and
+the four workloads here would report such a kernel as merely dark. Stated so the
+next pass does not read this entry as having closed it.
+
 ### (c) Dead code - symbols with no caller
 
 The graph was 76 files stale; `codegraph sync` cost 1.7 s. **`ccg enrich` does not run

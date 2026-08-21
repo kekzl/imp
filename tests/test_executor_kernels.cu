@@ -261,38 +261,6 @@ TEST(ExecutorKernelsTest, FP16ToFP32Roundtrip) {
 }
 
 // =========================================================================
-// fp32_accum_add_fp16_kernel: accum[i] += half2float(branch[i])
-// =========================================================================
-
-TEST(ExecutorKernelsTest, FP32AccumAddFP16) {
-    const int N = 256;
-    std::vector<float> h_accum(N, 10.0f);
-    std::vector<float> h_branch(N);
-    for (int i = 0; i < N; i++)
-        h_branch[i] = static_cast<float>(i) * 0.1f;
-
-    Tensor accum = make_gpu_fp32(h_accum.data(), {N});
-    Tensor branch = make_gpu_fp16(h_branch.data(), {N});
-
-    int threads = 256;
-    int blocks = (N + threads - 1) / threads;
-    fp32_accum_add_fp16_kernel<<<blocks, threads, 0, nullptr>>>(static_cast<float*>(accum.data),
-                                                                static_cast<const half*>(branch.data), N);
-    cudaDeviceSynchronize();
-
-    auto result = read_fp32(accum);
-    for (int i = 0; i < N; i++) {
-        // branch values lose precision in FP16, so use FP16-rounded value
-        float branch_fp16 = __half2float(__float2half(h_branch[i]));
-        float expected = h_accum[i] + branch_fp16;
-        EXPECT_NEAR(result[i], expected, 1e-5f) << "Mismatch at index " << i;
-    }
-
-    free_tensor(accum);
-    free_tensor(branch);
-}
-
-// =========================================================================
 // Edge case: odd-length elementwise_add (tests the scalar tail path)
 // =========================================================================
 
