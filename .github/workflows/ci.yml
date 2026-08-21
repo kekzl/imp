@@ -113,6 +113,14 @@ jobs:
       # so `which gate failed` keeps a check name and there is one list, not two.
       # Runs on docs-only PRs too: the docs and release-hygiene gates are exactly
       # the ones a docs-only change can break.
+      # git refuses this checkout on ownership inside the container: the
+      # Actions runner owns /__w/imp/imp and the job's user does not. Without
+      # this, any gate that shells out to git dies - check-release.sh:55 got an
+      # empty `git rev-parse` and cd'd to nothing, which failed the required
+      # check for a reason that had nothing to do with the tree.
+      - name: Trust the checkout (container UID differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Static gates (blocking, before the build)
         run: bash scripts/ci_static_gates.sh
 
