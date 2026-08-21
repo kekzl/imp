@@ -42,6 +42,15 @@ there instead of retelling it.
 
 ### Changed
 
+- **A stop-decision guard for MTP was built, measured and removed, and it closes
+  the line.** Handing a verify chunk's stop token to the ordinary decode path
+  instead of trusting the chunk row leaves the truncation count unchanged (2/6
+  and 1/6, same as without it) while the guard demonstrably fires: twice within
+  the truncating prompt's own 24 verify steps. The confident stop is a property
+  of the state, not of the projection. This also refutes the entry's standing
+  claim that closing it needs numerical agreement between the chunk and decode
+  paths. ([`LIMITATIONS.md`](docs/LIMITATIONS.md))
+
 - **The MTP truncation is documented as one outcome of ordinary speculative
   divergence, not a defect with a location.** All six probe prompts diverge from
   the non-speculative answer between byte 48 and byte 271, and the two that

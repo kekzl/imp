@@ -42,3 +42,10 @@ Explain what makes an LLM inference engine memory-bound at batch size one, and h
 Summarise the difference between prefill and decode in transformer inference, and why they scale differently.
 What is speculative decoding, and under what conditions does it fail to pay off?
 PROMPTS
+
+# The engine's own counters, read BEFORE the trap removes the container: once it
+# is gone the log is gone, and an arm whose knob never engaged looks exactly
+# like an arm whose knob did nothing. Every MTP arm measured through this script
+# has needed that distinction at least once.
+echo "  --- engine counters (an arm with no line here proves nothing) ---"
+docker logs prproc 2>&1 | grep -E '\[spec-ngram\]' | sed 's/^/  /' || true
