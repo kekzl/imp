@@ -146,10 +146,35 @@ and on 35B, Gemma-4, 30B and gpt-oss they agree to **0.2 %**.
 
 ¹ The sweep produced 154.77 for this row, 5.3 % below its own spec-off column
 where the two must agree. Two isolated re-measurements gave 162.08 and 162.04,
-and the tabulated value is their median. Cause: the first imp run after a
-16 GiB competitor model unloads is not on a settled card. The settle between
-arms was raised from 5 s to 20 s afterwards, so this sweep's own numbers were
-taken at 5 s.
+and the tabulated value is their median.
+
+**The first explanation for that gap was wrong and is corrected here.** It was
+attributed to the card not being settled after a 16 GiB competitor model
+unloads, and the settle between arms was raised from 5 s to 20 s on that basis.
+A re-run at 20 s produced 155.23. Not the cause.
+
+**The arm is bimodal, not noisy.** Four isolated runs, same command, same build:
+
+| run | `drafted` | tok/s |
+|---|---:|---:|
+| 1 | 176 | 153.56 |
+| 2 | 176 | 153.88 |
+| 3 | **0** | **162.13** |
+| 4 | 176 | 154.65 |
+
+The n-gram drafter engages on some processes and not others, and where it
+engages on this checkpoint it accepts 6.2 % at ~50 ms per verify against a
+~6.2 ms decode step: roughly eight decode steps spent to return two tokens. So
+this checkpoint's default throughput has two values, 162 quiet and ~154 firing,
+and the tabulated 162.06 is the quiet mode.
+
+It is a cold-start effect rather than a property of the model. On a single
+1024-token request the same checkpoint accepts **104 of 288, 36.1 %, at 6.78
+tokens per verify**: prompt-lookup has nothing to match against until the
+generation is long enough, and a 128-token bench rep is entirely cold start. The
+economics guard meant to catch this (`engine_spec_ngram.cpp:1200`) cannot: it
+arms on `spec_verifies >= 8` **per request**, and a 128-token request produces
+about one verify.
 
 ² Basis changed since 07-12. That row compared imp on SafeTensors against
 llama.cpp on GGUF; the SafeTensors checkpoint is no longer on this host, so both

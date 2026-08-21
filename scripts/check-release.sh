@@ -8,7 +8,7 @@
 # for the captured speculative verify chunk. All three rebuild the image first
 # (their `build` prerequisite), so all three measure the tree in front of you.
 #
-# The three model-backed stages are needed and none substitutes for another:
+# The four model-backed stages are needed and none substitutes for another:
 # verify-fast measures kernels and throughput, test-server is the ONLY place
 # handlers.cpp and batching_engine run end to end (Makefile, test-server).
 # A defect that only shows over HTTP passes verify-fast untouched — one did:
@@ -21,7 +21,23 @@
 # (measured: 15769 MiB free, needs ~26000), so without its own stage here it is
 # a gate nobody runs.
 #
-# SKIP_VERIFY=1 skips ALL THREE. The summary then refuses the words "all
+# bench-competitive is the fourth, and it is the only one that asks a question
+# about a COMPETITOR. GOAL.md makes "a hero regresses against a competitor" a
+# release blocker, and until 2026-08-21 that blocker was defined over seven
+# heroes and observed on two: perf_baseline.json pins Qwen3-8B Q8_0 and
+# perf_baseline_north_star.json pins Qwen3-14B Q6_K, and nothing measured the
+# other five. Gemma-4 sat 5.3% down for six weeks and no gate could have said
+# so, because no gate looked (DEBT_LEDGER section (h)). The other three stages
+# cannot cover this: they compare the tree against ITSELF, and a lead is a
+# statement about someone else's build. It lives at release scope rather than in
+# verify-fast because that is the scope GOAL.md defines the blocker at, and
+# because it costs a full sweep.
+#
+# Budget accordingly: stage 9 runs six models through three arms each and adds
+# roughly 50 minutes to this script. SKIP_VERIFY=1 skips it with the other
+# three, so the `Release hygiene` CI job is unaffected.
+#
+# SKIP_VERIFY=1 skips ALL FOUR. The summary then refuses the words "all
 # gates passed" and says what it actually checked, because a run that put no
 # model in front of the GPU is a statement about the tree, not a release
 # verdict — the rule #1474 put into scripts/verify.sh, for the same reason.
@@ -452,13 +468,38 @@ else
     fi
 fi
 
+# --------------------------------------------- 9. defer to make bench-competitive
+# GOAL.md release bar 2: decode must lead llama.cpp by >= 5% on every hero. The
+# competitor image is pinned by digest in scripts/bench_competitive.sh, so this
+# cannot silently drift onto a newer build the way the 2026-07-12 sweep did.
+section "make bench-competitive (release bar 2)"
+if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+    echo "  (skipped via SKIP_VERIFY=1)"
+else
+    MODEL_STAGES_RUN=$((MODEL_STAGES_RUN+1))
+    if RELEASE_BAR=1 make bench-competitive >/tmp/imp_check_release_bench.log 2>&1; then
+        # Surface the scope, not just the verdict. A bare green line here would
+        # be read as "the seven-hero blocker is satisfied" by anyone who does
+        # not open the script, and two of the seven cannot be contested at all.
+        sed -n '/cannot contest/,/^$/p' /tmp/imp_check_release_bench.log | sed 's/^/  /' || true
+        grep -A2 '^RELEASE BAR:' /tmp/imp_check_release_bench.log | sed 's/^/  /' || true
+        pass "make bench-competitive (release bar 2)"
+    else
+        echo "  log: /tmp/imp_check_release_bench.log"
+        grep -E 'FAIL: release bar|not measured|absent from|bar ' /tmp/imp_check_release_bench.log |
+            sed 's/^/  /' || true
+        fail "make bench-competitive (release bar 2)"
+    fi
+fi
+
 # --------------------------------------------------------------------- end
 echo
 if [ "$FAIL" -eq 0 ] && [ "$MODEL_STAGES_RUN" -eq 0 ]; then
     # Exit 0 on purpose — see the header. The wording is the gate here: nobody
     # should be able to read this line as a release verdict.
     echo "${YLW}check-release: cheap checks passed — NOT a release verdict${RST}"
-    echo "         SKIP_VERIFY=1 skipped verify-fast, test-server and test-spec-fidelity,"
+    echo "         SKIP_VERIFY=1 skipped verify-fast, test-server, test-spec-fidelity"
+    echo "         and bench-competitive,"
     echo "         so no model ran."
     echo "         Re-run without it before tagging."
     exit 0

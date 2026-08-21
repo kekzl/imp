@@ -658,9 +658,17 @@ goes. The 8 % threshold never entered into it: no gate ran on the model, so no t
 was applied. Recording it as "5.3 % slipped under 8 %" would send the next reader to argue
 about a number that was never consulted.
 
-`make bench-competitive` (#1518) is the instrument that closes it, wired into
-`scripts/check-release.sh` rather than `verify-fast`, because the blocker is defined at
-release scope and a per-PR cost is not warranted for it.
+`make bench-competitive` (#1518) is the instrument that closes it, and it is wired into
+`scripts/check-release.sh` as stage 9 rather than into `verify-fast`, because the blocker is
+defined at release scope and a per-PR sweep is not warranted for it. `RELEASE_BAR=1` fails
+on any hero under a 5 % decode lead and names which and by how much.
+
+**Five of the seven heroes are measurable against llama.cpp; two are not, and the gate says
+so.** Qwen3-Coder-30B-A3B and Nemotron-H are NVFP4-only on this host and llama.cpp has no
+NVFP4 path on sm_120, so no shared-quant comparison exists. The script prints them with
+that reason on every run. That is deliberate: the failure this section records is five
+heroes being unmeasured *without anything saying so*, and a stage that quietly omitted the
+two it cannot reach would reproduce it at smaller scale.
 
 ### Two open shapes recorded here rather than chased
 

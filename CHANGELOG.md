@@ -13,6 +13,16 @@ there instead of retelling it.
 
 ### Added
 
+- **The release blocker is now enforced where it is defined.** `GOAL.md` makes a
+  hero regressing against a competitor a release blocker, over seven heroes, of
+  which gates observed two: Gemma-4 sat 5.3 % down for six weeks and no gate
+  could have said so because none looked. `scripts/check-release.sh` gains
+  `make bench-competitive` as a fourth model-backed stage, failing on any hero
+  under a 5 % decode lead and naming which and by how much. The two heroes this
+  host cannot contest (Qwen3-Coder-30B-A3B and Nemotron-H are NVFP4-only, and
+  llama.cpp has no NVFP4 path on sm_120) are **printed with the reason**, because
+  a hero nobody measured must not read like a hero that passed.
+
 - **Invariant I2 has a gate: `make check-alloc-interpose`.** "Nothing allocates device
   memory while serving" was stated, counted, and unobservable: the counter only sees what
   routes through `Backend`, and the `--wrap` interposer that would see the rest compiled in
@@ -59,6 +69,23 @@ there instead of retelling it.
 
 ### Changed
 
+- **The north-star model's default decode has two values, and which one you get
+  is a coin flip.** Qwen3-14B Q6_K measures 162 tok/s when the n-gram drafter
+  stays quiet and ~154 when it engages, over four otherwise identical isolated
+  runs. Where it engages it accepts 6.2 % at ~50 ms per verify against a ~6.2 ms
+  decode step. It is a cold start, not the model: on a 1024-token request the
+  same checkpoint accepts 36.1 % at 6.78 tokens per verify. The economics guard
+  meant to catch this cannot arm, because `spec_verifies >= 8` is per request and
+  a 128-token request produces about one verify.
+  ([`BENCHMARKS.md`](docs/BENCHMARKS.md))
+
+- **Every hero that reaches `gemm.nvfp4_lm_head`'s MoE arm is now priced.**
+  gpt-oss-20b MXFP4 was the only one besides Gemma-4 that hits `is_dense=false`
+  without being in the rule's calibration set: `on` buys **+10.2 % decode for
+  +18.2 % PPL** (413.02 to 455.24, 105.86 to 125.12), losing more clearly than
+  Gemma-4's +7.4 / +9.0. The categorical call is correct on both.
+  ([`GOAL.md`](docs/GOAL.md))
+
 - **Gemma-4's 5.3 % decode drop since July is a priced trade, not a regression.**
   Bisected to `63df2d30` (#982's `gemm.nvfp4_lm_head` auto rule), then named inside
   that two-change commit by flag rather than by splitting it: `on` buys **+7.4 %
@@ -95,6 +122,14 @@ there instead of retelling it.
   ([`LIMITATIONS.md`](docs/LIMITATIONS.md))
 
 ### Fixed
+
+- **A failed perplexity run reported `PPL=1.0000`.** "perplexity failed:
+  insufficient KV capacity" and `mean_nll=0.0000 PPL=1.0000` on consecutive
+  lines, so anyone reading the log takes the failure for a perfect score.
+  Exactly zero summed NLL over a non-empty span cannot come from a real forward,
+  so it now says the buffer was never filled instead of printing a number. The
+  CLI's own result line was already unreachable on failure and no published
+  figure came from such a run; this closes the log-reader's path.
 
 - **A kernel whose only caller was its own test.** `fp32_accum_add_fp16_kernel` had
   a declaration, a definition and a green test, and no production launch site. Every
