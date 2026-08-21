@@ -23,18 +23,17 @@ const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
     if (banned_token_ids_.empty())
         return nullptr;
     if (d_banned_tokens_)
-        return d_banned_tokens_;
-    const size_t bytes = banned_token_ids_.size() * sizeof(int32_t);
-    void* p = nullptr;
-    if (cudaMalloc(&p, bytes) != cudaSuccess) {
-        IMP_LOG_WARN("banned tokens: device upload failed (%zu B) — masking disabled", bytes);
+        return d_banned_tokens_.get();
+    VramOwned<int32_t> buf(vram_alloc_, banned_token_ids_.size(), "banned_tokens");
+    if (!buf) {
+        IMP_LOG_WARN("banned tokens: device upload failed (%zu B), masking disabled", buf.bytes());
         return nullptr;
     }
-    d_banned_tokens_ = static_cast<int32_t*>(p);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_banned_tokens_, banned_token_ids_.data(), bytes,
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(buf.get(), banned_token_ids_.data(), buf.bytes(),
                                        cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));  // once, at first use
-    return d_banned_tokens_;
+    d_banned_tokens_ = std::move(buf);
+    return d_banned_tokens_.get();
 }
 
 int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
