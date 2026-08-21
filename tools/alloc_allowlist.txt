@@ -70,6 +70,6 @@ src/runtime/engine_graph_decode.cpp  # 31
 src/runtime/engine_internal.h  # 4
 src/runtime/engine_kv_cache_init.cpp  # 3
 src/runtime/engine_scheduler.cpp  # 24
-src/runtime/engine_spec_ngram.cpp  # 13
+src/runtime/engine_spec_buffers.cpp  # 13
 src/runtime/engine_workspace_warmup.cpp  # 2
 src/vision/vision_pipeline.cpp  # 2

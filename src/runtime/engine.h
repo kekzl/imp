@@ -980,6 +980,17 @@ private:
     // determinism cases going from 0 failing back to 7.
     bool spec_ngram_model_capable_uncached_() const;
     bool spec_ngram_model_capable_flag_ = false;
+    // Prompt-lookup drafting is cold by construction: it matches a suffix of the
+    // generated text against earlier occurrences, so until the generation is long
+    // enough there is nothing to match and a verify it loses costs ~8 decode steps
+    // to return 2 tokens. Conditions on tokens generated SO FAR, which is known at
+    // the decision point, rather than on the request's eventual length, which is
+    // not. Inline here because engine_spec_ngram.cpp is at its hard-review ceiling
+    // and this is one comparison. Measured curve: speculative.min_history.
+    bool spec_history_too_short_(const Request& req) const {
+        const int n = runtime_config_.speculative.min_history;
+        return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
+    }
     bool spec_verify_gates_ok_(const Request& req, bool ignore_think = false) const;
     bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
