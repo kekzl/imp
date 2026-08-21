@@ -924,12 +924,54 @@ Closed competitive records (kept for the record, not active work):
 
 - **Draft-model speculative decoding** -- separate draft models don't amortize weight reads on a single bandwidth-bound GPU. What *did* ship instead: prompt-lookup n-gram speculation (default-on for batch-1 greedy dense, #668-#670) and MTP self-drafts with hybrid-safe verify (#852) -- the drafts are free, so the economics work.
 - **FFN contextual sparsity** -- warp-cooperative layout masks the skip. +0-1% measured.
-- **BitDecoding (TC KV decode) -- shelved, and the scope now stated** (#1268, 2026-08-07). The original entry read "decode is weight-bound, not attention-bound, 0% gain" with no context length attached, and that omission is what made it misleading: it was measured at `tg256`, which prefills 64 tokens. Paged attention is 4.3% of the decode window there and **31.1% at 8k, 45.1% at 32k** -- at long context it is the second-largest class, not noise. Still shelved, but for a different reason than "attention doesn't matter": the two levers built on the finding are dead, and the third reading it rested on did not survive measurement.
+- **BitDecoding (TC KV decode) -- shelved, and the scope now stated** (#1268, 2026-08-07). The original entry read "decode is weight-bound, not attention-bound, 0% gain" with no context length attached, and that omission is what made it misleading: it was measured at `tg256`, which prefills 64 tokens. Paged attention is 4.3% of the decode window there and **31.1% at 8k, 45.1% at 32k** -- at long context it is the second-largest class, not noise. **Re-measured 2026-08-21 on the current build, with the model named this time: 19.9% at 8k and 43.9% at 32k on Qwen3-8B-Q8_0.** The 32k figure holds (43.9 against 45.1); the 8k one does not (19.9 against 31.1), and because the original carried no model, no method and no PROV block, there is no way to tell whether that is build drift or a different checkpoint. The conclusion is unchanged either way: at 32k attention is the largest single class in the decode window. Still shelved, but for a different reason than "attention doesn't matter": the two levers built on the finding are dead, and the third reading it rested on did not survive measurement.
   - *Split-count boost* (#1270, reverted #1271): +10.0% at 32k on Qwen3-8B (`n_kv_heads=8, g=4`), **-7.30% at 32k on Qwen3-30B-A3B** (`n_kv_heads=4, g=8`). One model is not a heuristic; the condition separating the two was never established.
   - *KV block size 16 -> 32*: neutral everywhere (-0.48% .. +0.07%), with the 30B as a null control that came out null.
   - *"Latency/occupancy-bound at 192 GB/s"*: **retracted by measurement.** The same kernel reaches **629.6 GB/s at 32k -- 3.4x -- at unchanged 16-17% occupancy** (roofline runs `dca16b71_20260806_041710` and `120bc0d7_20260807_091356`). The low bandwidth at 8k is a kernel short of work, not one held back by occupancy; the occupancy figure itself is a deliberate smem-for-L2 trade the tile dispatch documents.
   - Amdahl, re-estimated where the class actually weighs most (32k): closing 629.6 -> 1127 GB/s (what the GEMV reaches at that length) is ~20% of the decode window -- against a kernel already at 35% of roofline, not the 3.8x gap the 8k figure suggested.
   - Re-open on a mechanism, not on the share: the share is real and will keep growing with context.
+  - **The share, re-measured with its complement, so the ceiling of any attention-side lever is
+    readable off the table instead of inferred from it** (2026-08-21):
+
+    | ctx | paged attention | everything else | decode step | ceiling if attention went to zero |
+    |---|---|---|---|---|
+    | 8k  | **19.9 %** | 80.1 % | 4.29 ms | 1.23x |
+    | 32k | **43.9 %** | 56.1 % | 5.94 ms | 1.76x |
+
+    Two kernels summed, and only these two have a per-decode-step instance count:
+    `paged_attention_splitk_fp8_tile_gqa_kernel<128>` and `paged_attention_reduce_kernel`,
+    both 9216 instances = 256 steps x 36 layers. The `fmha_sm120_fa2_kernel` family shows
+    `d_inst = 0` and is pure prefill, which is the method working rather than an omission.
+
+    Method, because it is reusable and the obvious approach does not work: imp emits no NVTX,
+    so prefill cannot be separated from decode by range, and at 32k the prefill dominates any
+    kernel sum. Classifying by kernel name fails on the GEMMs, which both phases share. So this
+    is a **differential** measurement: at `--bench-reps 1` the harness runs exactly three
+    prefills regardless of `--max-tokens`, and `2 x tg` decode steps. Two runs at the same
+    context with `tg = 8` and `tg = 136` therefore differ by exactly 256 decode steps over an
+    identical prefill, and the per-kernel difference divided by 256 is the per-step cost with
+    the prefill cancelled exactly, shared GEMMs and load-time dequant included.
+
+    Three checks that the method holds. The non-attention total is flat across context
+    (836.9 ms at 8k against 843.7 at 32k) which is what FFN and QKV GEMVs should do. The kernel
+    sum is 94.9 % of the wall-clock decode step at 8k and 98.3 % at 32k, so kernels are
+    essentially the whole window and "share of kernel time" is not hiding overlap. And a
+    repeat of the 32k pair lands at 44.02 % against 43.93 %, a 0.09 pp spread.
+
+    ```
+    [PROV: commit=5b884e44 date=2026-08-21 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
+           (NVFP4 decode cache, FP8 KV) cuda=13.3 path=imp-cli n=2 runs per context
+           (tg=8 and tg=136), 32k repeated once
+           cmd=`nsys profile --sample=none --cpuctxsw=none --backtrace=none -t cuda
+           --cuda-graph-trace=node -- imp-cli --bench --bench-pp 8192|32768
+           --bench-reps 1 --max-tokens 8|136 --max-seq-len 40960
+           --set speculative.ngram=false`; shares from
+           `nsys stats --report cuda_gpu_kern_sum`, differenced between the two tg
+           values; card exclusive, no other compute process, clocks WARM during the
+           timed runs (2692 MHz SM at sample, cold 397 MHz before the first run).
+           --cuda-graph-trace=node is mandatory: without it nsys does not attribute
+           graph-replayed kernels at all.]
+    ```
 - **NVFP4 GEMV tuning** -- 6 approaches refuted; structurally bandwidth-bound. The "64-73% of HBM peak" this used to quote is a 2026-05 figure the kernel has since outgrown: [`sm120_optimal_kernel.md`](internals/KERNELS.md) measures the decode GEMV at the GDDR7 ceiling, ~1.5 GB/ms (~84% of datasheet, ~98% of the 1531 GB/s a resident buffer actually reaches). The refutation is unaffected — there is less headroom than the old number implied, not more.
 - **FMHA rewrites** -- cluster, TMA bulk and the long-context heuristic were each A/B-refuted, and that still stands. **The "cuBLAS wins" conclusion does not**: since #597/#930 the register-resident FA2 kernel is the DEFAULT prefill path for hd=128/256 (`attention.fmha_fa2` / `fa2_fp16qk` both `"on"`), and cuBLAS is the fallback for configs FA2 declines.
 - **MoE offload + CUDA Graphs** -- **no longer shelved; moved to "CPU-resident cold experts" above, where it is now an active, measured entry.** This line said "full kernel-driven slot resolution deferred (multi-week, marginal user impact)" and every part of that is now false: it shipped in a day (#1370), is worth 2.1x decode, and it is not kernel-driven at all — the device-side mirror it was designed around turned out to have no reader and was removed (#1376). The CUDA-graphs half is open and blocked for a stated reason (#1373).
