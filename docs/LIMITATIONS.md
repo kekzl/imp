@@ -320,6 +320,56 @@ These have a code path and no gate. They may work; nothing proves it.
   the same graph at a different width. Reaching real parity is that
   architecture, not four kernels.
 
+  **2026-08-21, third pass: the stop decision is NOT a knife edge. Measured,
+  and it refutes the explanation the second pass offered.**
+
+  The second pass concluded from the reshuffling that the bonus token must be
+  near-tied between continuing and `<|im_end|>`. That was an explanation of a
+  pattern, not a measurement, and it is wrong. `diagnostics.spec_trace` now
+  reports the top-2 logit gap per chunk row; over 892 verify steps / 1784 chunk
+  rows on the six prompts:
+
+  | rows | n | p05 | median | p95 |
+  |---|---|---|---|---|
+  | all chunk rows | 1784 | 0.13 | **1.74** | 9.01 |
+  | bonus rows (the last row of each chunk) | 892 | 0.12 | 1.71 | 8.89 |
+  | rows whose argmax is `<|im_end|>` | 2 | | **1.79** | |
+
+  ```
+  top1=248046 (<|im_end|>)  top2=271  gap=1.9852
+  top1=248046 (<|im_end|>)  top2=271  gap=1.5986
+  ```
+
+  Both EOS decisions sit **above** the median gap of an ordinary position, and
+  **33.2 % of all rows (593 of 1784) are tighter than 1.0**. The verify chunk is
+  not hesitating when it ends the turn; it is about as confident as usual.
+
+  So the disagreement with the single-token path is **substantial, not
+  marginal**: at that position the chunk's last row believes the turn is over by
+  a normal margin while decode keeps writing. That moves the suspect off the
+  LM-head numerics - three of the four divergence sites are closed and it did
+  not help - and onto the hidden state feeding that row.
+
+  **The rate, which prices any fix: 2 of 892 verify steps propose EOS at all,
+  0.22 %.** A guard that re-runs just those positions through the ordinary
+  single-token decode path and takes that verdict would fire on roughly one
+  verify step in 450 and cost one decode step when it does.
+
+  ```
+  [PROV: commit=86479ce4 date=2026-08-21 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+         quant=NVFP4 cuda=13.3 path=imp-server n=1 process, 6 prompts,
+         max_tokens=400, 892 verify steps
+         cmd=`imp-server --think-budget 0 --set speculative.mtp_k=1
+         --set speculative.ngram=false --set server.prefix_cache=false
+         --set runtime.deterministic_gemm=true --set diagnostics.spec_trace=true`;
+         gaps from the `gap=[id1>id2:x]` field this pass added to the verify
+         trace, top-2 over the full vocab of each chunk row's logits. The arm
+         reproduced 2/6 degenerate, so the traced run is the failing one.
+         NOT measured: the same positions under no speculation - there is no
+         verify chunk at mtp_k=0 and therefore no trace, so the comparison here
+         is EOS rows against ordinary rows of the same run.]
+  ```
+
   **Correction to the cost figure below.** The -27.7 % measured for a fused
   multi-row SwiGLU was a property of the implementation, not of the fix: the
   first version called the single-row helper once per activation row, i.e. MR
