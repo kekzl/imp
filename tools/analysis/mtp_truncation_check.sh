@@ -7,18 +7,23 @@
 # Usage: bash tools/analysis/mtp_truncation_check.sh 1   # MTP on
 #        bash tools/analysis/mtp_truncation_check.sh 0   # control
 #
+# MTP_EXTRA_SET adds further `--set k=v` pairs, space separated, so an arm can
+# be varied without editing this file:
+#   MTP_EXTRA_SET='speculative.verify_row_parity=true' bash ... 1
+#
 # deterministic_gemm is pinned on purpose: it does not remove the degenerate
 # state, it stabilises it, which is what makes this a repeatable check.
 # Findings: docs/LIMITATIONS.md, "MTP speculation truncates answers".
 set -uo pipefail
 IMG=${IMP_IMAGE:-imp:test}; MODEL=${MTP_MODEL:-/models/Qwen3.8-27B-NVFP4}; PORT=8095; K=$1
+EXTRA=""; for kv in ${MTP_EXTRA_SET:-}; do EXTRA="$EXTRA --set $kv"; done
 cleanup(){ docker rm -f prproc >/dev/null 2>&1; }
 trap cleanup EXIT
 docker rm -f prproc >/dev/null 2>&1
 docker run -d --name prproc --gpus all -p $PORT:8080 -v "${MODELS_DIR:-$HOME/models}":/models "$IMG" \
   imp-server --host 0.0.0.0 --port 8080 --model "$MODEL" --think-budget 0 \
     --set speculative.mtp_k=$K --set speculative.ngram=false --set server.prefix_cache=false \
-    --set runtime.deterministic_gemm=true >/dev/null
+    --set runtime.deterministic_gemm=true $EXTRA >/dev/null
 for _ in $(seq 1 200); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
   docker ps --format '{{.Names}}'|grep -q '^prproc$' || break; sleep 3; done
 while IFS= read -r p; do

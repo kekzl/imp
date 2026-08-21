@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Added
 
+- **`speculative.verify_row_parity` makes the verify chunk reduce K the way the
+  decode step does.** The two paths grouped the same products into 32 partial sums
+  (decode) and 128 (verify); the rounding difference reached the stop decision and
+  truncated answers under `speculative.mtp_k=1`. Off by default. On Qwen3.8-27B-NVFP4
+  it halves the truncation rate (2/6 to 1/6) and measures faster, not slower:
+  105.30 tok/s against 104.24 with it off and 88.52 at `mtp_k=0`.
+
 - **Three gates that could not fail now can.** The file-size allowlist gave its 29
   entries no size limit at all, so `engine_scheduler.cpp` grew 1074 to 1962 code LOC
   (+83 %) with CI green throughout; each entry now pins a measured `code_loc` and

@@ -629,6 +629,15 @@ struct Speculative {
     // with the decode path (same weights). Real prefills are never
     // affected. Kill switch for A/B.
     bool verify_nvfp4_gemm = true;
+    // Make the speculative verify chunk's NVFP4 GEMV reduce K exactly the way
+    // the M=1 decode GEMV does, so the two paths agree bit for bit. Both
+    // compute the same products; decode groups them into 32 partial sums (one
+    // per warp lane) and the batched verify kernel into 128 (one per block
+    // thread). That rounding difference reached the STOP decision: at
+    // speculative.mtp_k=1 on Qwen3.8-27B-NVFP4 it truncated 2 of 6 answers
+    // after ~40 tokens (docs/LIMITATIONS.md). Off by default in the PR that
+    // introduced it, pending its own measurement.
+    bool verify_row_parity = false;
     // Speculation on MoE models with NATIVE-NVFP4 experts (the gate
     // additionally requires profile().moe_experts_nvfp4). Measured on
     // Qwen3-Coder-30B-FP4 (2026-07-02): code-edit +49-81% (93% accept,

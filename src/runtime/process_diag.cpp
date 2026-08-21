@@ -49,6 +49,7 @@ struct ProcessDiag {
 
     // MoE
     int moe_mr_nr = 8;
+    bool verify_row_parity = false;
     int moe_expert_overhead_pct = 10;
     int moe_force_host_experts = 0;
     bool moe_pin_host_experts = false;
@@ -118,6 +119,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.mxfp4_promote_budget = cfg.attention.mxfp4_promote_budget;
     d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
     d.moe_mr_nr = cfg.moe.mr_nr;
+    d.verify_row_parity = cfg.speculative.verify_row_parity;
     d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
     d.moe_force_host_experts = cfg.moe.force_host_experts;
     d.moe_pin_host_experts = cfg.moe.pin_host_experts;
@@ -169,6 +171,8 @@ float process_diag_mxfp4_promote_budget() { return slot().mxfp4_promote_budget; 
 void process_diag_set_mxfp4_promote_budget(float v) { slot().mxfp4_promote_budget = v; }
 bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
+bool process_diag_verify_row_parity() { return slot().verify_row_parity; }
+void process_diag_set_verify_row_parity(bool v) { slot().verify_row_parity = v; }
 int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }
 int process_diag_moe_force_host_experts() { return slot().moe_force_host_experts; }
 bool process_diag_moe_pin_host_experts() { return slot().moe_pin_host_experts; }

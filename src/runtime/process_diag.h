@@ -92,6 +92,8 @@ void process_diag_set_mxfp4_promote_budget(float v);
 bool process_diag_ffn_sparsity_probe();
 
 // MoE
+bool process_diag_verify_row_parity();  // verify chunk reduces K like the decode GEMV
+void process_diag_set_verify_row_parity(bool);
 int process_diag_moe_mr_nr();  // rows-per-block for NVFP4 MoE decode (4/8/16/32)
 // Read at model-load time by weight_upload (Pass 2 expert offload budget
 // + force-host-experts). No per-Engine context at that point.

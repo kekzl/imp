@@ -8,6 +8,7 @@
 // stay bit-identical.
 
 #include "quant/fp8_utils.cuh"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -28,6 +29,13 @@ static constexpr int kMRThreads = kMRWarps * 32;  // 256
 static constexpr int kMinBlocksPerSM = 6;
 
 // Cached SM count for dispatch decisions.
+// speculative.verify_row_parity. Kernel TUs do not include runtime/config.h;
+// process_diag is the seam. NOT cached in a function-local static like
+// nvfp4_n_sms(): this is read once per GEMM launch on the host, so the read
+// costs nothing, and caching it would make the knob impossible to toggle in a
+// test - which is how the first version of this was written.
+static bool nvfp4_verify_row_parity() { return imp::process_diag_verify_row_parity(); }
+
 static int nvfp4_n_sms() {
     static int n_sms = 0;
     if (__builtin_expect(n_sms == 0, 0)) {
