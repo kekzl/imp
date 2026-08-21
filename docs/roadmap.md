@@ -23,10 +23,14 @@ The engine is past the raw-speed land-grab; current work is making it boringly r
 
 ## What a 2026 engine has to do (assessed 2026-08-21)
 
-The bar a local inference engine is measured against now, scored against imp. It
-is the frame for the gap list below, not a schedule. Written against the field as
-it stood in mid-2026; anything that appeared elsewhere after that is not in here.
-Every "met" row below was checked against the tree on 2026-08-21, not recalled.
+The bar a local inference engine is measured against, scored against imp, for one
+GPU. It is the frame for the gap list below, not a schedule. Every "met" row was
+checked against the tree, not recalled; the open list was checked against
+[vLLM Q3 2026](https://github.com/vllm-project/vllm/issues/48168),
+[SGLang Q2 2026](https://github.com/sgl-project/sglang/issues/22949) and the
+[MLSys 2026 report](https://www.modular.com/blog/three-trends-from-mlsys-2026)
+that KV cache was the most discussed topic there. llama.cpp, the nearest
+neighbour, publishes no 2026 roadmap.
 
 ### Met
 
@@ -48,37 +52,47 @@ Every "met" row below was checked against the tree on 2026-08-21, not recalled.
 | Graceful behaviour when the KV pool fills | StreamingLLM sink plus sliding window; growable pool commits as the card frees up |
 | Weight formats a user actually has | GGUF K-quants and IQ, safetensors, NVFP4, MXFP4, native FP8 |
 | Model classes, not one family | dense, MoE, MLA, Mamba2/GDN hybrids, vision-language, encoder-only |
-| Operating it without a restart | model swap that drains in-flight work, `/admin/suspend` and `/admin/resume`, on-disk warm weight cache |
+| Operating it without a restart | model swap that drains in-flight work, `/admin/suspend` and `/admin/resume` |
+| Cold start that is not a full reload | warm on-disk weight cache; vLLM still carries cold start as an open Q3 roadmap issue |
 | Reproducibility as a product property | `runtime.deterministic` covers MoE routing atomics, sampling races and GEMM; see [`determinism.md`](determinism.md) |
 
 ### Open
 
 Ranked by what an agent workload notices first.
 
-1. **Scheduling is arrival order.** No priority, no preemption, no fair share:
-   nothing in the scheduler reads a per-request priority, so one long generation
-   holds the batch slot while short requests queue behind it. This is the
-   expectation on this list that imp misses hardest, because the mission is
-   parallel agent traffic and `max_concurrent` only bounds the queue, it does not
-   order it.
-2. **No speculation tree.** Gap 5 below. n-gram, suffix and MTP are all
-   single-chain; no EAGLE, Medusa or multi-candidate verify.
-3. **No audio, and a checkpoint that has it loses it quietly.** Gemma-4 ships
+1. **Scheduling is arrival order.** Nothing in the scheduler reads a per-request
+   priority, so one long generation holds its batch slot while short requests
+   queue behind it. `max_concurrent` bounds the queue, it does not order it. Both
+   other engines are refactoring their scheduler this quarter and SGLang names
+   session control for agentic workloads explicitly.
+2. **Long context is served by a 2023-era answer.** The only sparsity is
+   StreamingLLM, sink tokens plus a sliding window
+   (`attention_paged_common.cuh:71`), which drops what falls out of the window.
+   The field keeps the context and reads it sparsely; HiSparse reports 5x
+   throughput on long-context workloads. On a 32 GB card serving agent sessions
+   that reach 100k tokens, that is the difference between forgetting the middle
+   of a session and paying for it.
+3. **Speculation does not adapt to the request.** The server exposes
+   `speculative` as a bool: one configuration for every prompt, and the depth is
+   a global setting. The chain saturates near 2.5 accepted per verify. vLLM
+   targets an acceptance length above 5 with hybrid and linear drafting, SGLang
+   builds "adaptive spec configurations for different requests and batch sizes".
+   A speculation **tree** (gap 5 below: no EAGLE, Medusa or multi-candidate
+   verify) raises the same ceiling from the other side.
+4. **No audio, and a checkpoint that has it loses it quietly.** Gemma-4 ships
    `model.embed_audio.*`; `weight_map.cpp:369` counts those tensors as skipped,
-   so an omni checkpoint loads as a text plus vision model. Omni models are the
-   direction the model side moved in 2026 and imp is text plus images.
-4. **No video.** Gap 2 below; the Qwen3-VL tower does images only.
-5. **No KV tier below VRAM.** Gap 6 below, shelved on measurement rather than on
+   so an omni checkpoint loads as a text plus vision model.
+5. **No video.** Gap 2 below; the Qwen3-VL tower does images only.
+6. **No KV tier below VRAM.** Gap 6 below, shelved on measurement rather than on
    size: the spill lands on a 6.5x bandwidth cliff on this box.
-6. **No multi-GPU and no tensor parallelism.** Deliberate, and the one item here
-   that is a scope decision rather than a gap: [`LIMITATIONS.md`](LIMITATIONS.md)
-   states it first for a reason.
-7. **The quantizer refuses 3-D stacked experts.** Gap 1(f) below: refusing is
-   correct, supporting them needs a per-model layout descriptor plus per-expert
-   bias support in the loader and the MoE forward.
-8. **No distributed tracing.** `/metrics` answers the single-process questions;
-   there is no trace id carried through a request, which is what an agent
-   framework needs to attribute its own latency.
+7. **No multi-GPU and no tensor parallelism.** A scope decision rather than a
+   gap: [`LIMITATIONS.md`](LIMITATIONS.md) states it first for a reason.
+8. **The quantizer refuses 3-D stacked experts.** Gap 1(f) below: supporting them
+   needs a per-model layout descriptor plus per-expert bias support in the loader
+   and the MoE forward.
+9. **No distributed tracing.** `/metrics` answers the single-process questions;
+   no trace id is carried through a request, which is what an agent framework
+   needs to attribute its own latency.
 
 ## Open gaps to the mission (assessed 2026-07-26)
 
