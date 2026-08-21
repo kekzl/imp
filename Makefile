@@ -18,7 +18,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -103,6 +103,16 @@ dev: dev-image
 # (CI builds the image from a clean tree).
 dev-test: dev
 	$(DEV_RUN) ctest --test-dir $(DEV_DIR) -L unit --output-on-failure
+
+# Invariant I2 has a gate now. -DIMP_ALLOC_INTERPOSE=ON is a measurement build
+# (--wrap on the CUDA allocators), so it gets its own build dir and never
+# stands in for the shipping image - never benchmark it (AUDIT G16).
+INTERPOSE_DIR ?= build-interpose
+check-alloc-interpose: dev-image
+	$(DEV_RUN) bash -c 'cmake -B $(INTERPOSE_DIR) -G Ninja $(DEV_CMAKE_ARGS) \
+	  -DIMP_ALLOC_INTERPOSE=ON >/dev/null \
+	  && cmake --build $(INTERPOSE_DIR) --target imp-server -j$$(nproc)'
+	bash scripts/check_alloc_interpose.sh
 
 dev-clean:
 	docker run --rm -v $(PWD):/src -w /src $(DEV_IMG) rm -rf $(DEV_DIR)

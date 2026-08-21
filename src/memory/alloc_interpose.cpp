@@ -132,13 +132,25 @@ struct Reporter {
         const uint64_t ds = g_dev_sync.calls.load(), da = g_dev_async.calls.load(),
                        hp = g_host_pinned.calls.load();
         if ((ds | da | hp) == 0) {
-            IMP_LOG_DEBUG(
+            // The clean line is INFO for the same reason the violation is WARN:
+            // the gate asserts that one of the two appears at all. Absent both,
+            // the binary was built without -DIMP_ALLOC_INTERPOSE=ON and a grep
+            // for violations passes for the wrong reason.
+            IMP_LOG_INFO(
                 "[alloc-interpose] steady state clean: 0 cudaMalloc, "
                 "0 cudaMallocAsync, 0 pinned-host allocations while serving");
             return;
         }
-        IMP_LOG_DEBUG(
-            "[alloc-interpose] I2 VIOLATIONS while serving:"
+        // WARN, not DEBUG. A detected invariant violation that only appears
+        // when someone remembers to raise the log level is a finding nobody
+        // finds: this is the line `make check-alloc-interpose` fails on.
+        IMP_LOG_WARN(
+            // The newline after the banner is load-bearing: without it the
+            // first class is glued to the banner line, and any reader anchored
+            // at the start of a line silently skips it. That is how
+            // check_alloc_interpose.sh first reported 2 allocations when there
+            // were 19.
+            "[alloc-interpose] I2 VIOLATIONS while serving:\n"
             "    cudaMalloc       %8llu calls  %10.2f MiB\n"
             "    cudaMallocAsync  %8llu calls  %10.2f MiB\n"
             "    pinned host      %8llu calls  %10.2f MiB\n",

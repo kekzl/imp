@@ -22,6 +22,7 @@
 // unbinds drafting for the request; the suffix matcher keeps working.
 // =============================================================================
 
+#include "memory/backend.h"
 #include "compute/mtp_forward.h"
 #include "core/logging.h"
 #include "exec/executor.h"
@@ -341,6 +342,16 @@ bool Engine::enable_mtp_spec_decode(int k) {
         mtp_kv_max = kMtpKvCap;
 
     auto* ws = new imp::MtpDraftWorkspace();
+    // 44 cudaMalloc calls, 65.68 MiB, and the phase says Serving for all of
+    // them: `set_alloc_phase(Serving)` fires at the end of engine init
+    // (engine.cpp), while `imp_enable_mtp_spec_decode` is a context-setup step
+    // the API exposes AFTER context creation. The server calls it immediately
+    // after `imp_context_create`, before a single request, so this is init
+    // traffic sitting on the wrong side of the boundary rather than an
+    // invariant breach. Labelled, not exempted: the scope logs its reason at
+    // INFO, so an embedder that calls this mid-serving is visible rather than
+    // masked. Found by `make check-alloc-interpose`.
+    AllocPhaseScope mtp_alloc_phase(AllocPhase::Planning, "mtp workspace");
     if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
                                      mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max)) {
         delete ws;

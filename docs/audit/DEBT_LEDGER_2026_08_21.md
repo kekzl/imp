@@ -21,7 +21,7 @@ because a negative result is what stops the next sweep.
 |---|---|---|---|
 | 1 | Per-decode-step `cudaMallocAsync` whose address is baked into a replayed CUDA graph, with no invalidation | `src/runtime/engine_scheduler.cpp:1695` | Silently wrong KV residual metadata on `residual + batch>1` decode; survives only because the async pool's release threshold is pinned to `UINT64_MAX` |
 | 2 | ~~`cudaMalloc` freed through `cudaFreeAsync`~~ **CLOSED `556f3b8d` (#1505)** | `src/compute/mtp_forward.cu:610` / `:619` | Undefined behaviour per the CUDA API, once per MTP draft step, on every MoE model (the device-chain arm requires `n_experts == 0`) Fixed, and three further pairs this ledger did not have came out with it. |
-| 3 | Invariant I2 has no gate in any shipping build **(still OPEN: #1505's gate is static and does not reach it)** | `CMakeLists.txt:67` | The counter that is supposed to catch items 1 and 2 reads zero in every build anyone runs; 469 direct allocation sites sit outside `src/memory/` where it cannot see them |
+| 3 | ~~Invariant I2 has no gate in any shipping build~~ **CLOSED: `make check-alloc-interpose`, a two-way pin at 19 calls over 5 named sites** | `CMakeLists.txt:67` | The counter that is supposed to catch items 1 and 2 reads zero in every build anyone runs; 469 direct allocation sites sit outside `src/memory/` where it cannot see them First run found **46 device allocations while serving**. 27 were the MTP workspace sitting on the wrong side of the phase flip (fixed). The remaining 19 are enumerated in (g) and the pin only ever goes down. |
 | 4 | ~~829 of 2288 GTest macros run in no CI lane~~ **CLOSED, and corrected to 968** (`tools/check_test_lanes.py`) | `CMakeLists.txt:952-957` | The entire GPU correctness surface reaches `main` on the strength of one human running `make verify-fast`; the required check is `Build`, which runs `ctest -L unit` Pinned now, and it fails when it moves. 829 was an undercount, see (e). |
 | 5 | ~~The file-size allowlist has no ceiling, and 16 of its 29 reasons are numerically stale~~ **CLOSED: every entry carries a measured `code_loc`, drift either way fails** | `tools/filesize_thresholds.toml:60` | An allowlisted file is exempt forever: `engine_scheduler.cpp` went 1074 → **1962** code LOC (+83 %) with the gate green the whole way. The gate is blind exactly where recompile blast radius is worst Reasons re-derived and the LOC figure taken out of the prose, because that is the half that went stale. |
 | 6 | `vram.library_reserve_mb` default is a constant measured to be wrong in both directions | `src/memory/plan.h:100` | On a cold cache the plan charges 3900 MiB where the model needs 0 (Qwen3-4B IQ4_NL) or 7458 (Qwen3-8B Q8_0) - AUDIT B41. Either 3.9 GiB of KV pool set aside for nothing, or a 3.5 GiB under-charge |
@@ -600,3 +600,37 @@ from `grep`, `sed`, `python3 tools/check_filesize.py`, `python3 tools/check_allo
 `codegraph`, or reading the file. Nothing was built and nothing was run on the device, so no
 claim here is a measurement of behaviour - every OPEN item's "proof it is closed" is written
 as the experiment that would settle it, precisely because this pass could not run one.
+
+---
+
+## (g) The 19 serving-phase allocations the I2 gate found
+
+`make check-alloc-interpose` builds `-DIMP_ALLOC_INTERPOSE=ON`, drives 20 requests at
+batch 4 on a config with NVFP4 residual KV and an MTP chain, and reads the interposer's
+report. `scripts/check_alloc_interpose.sh` pins the count at **19** and fails in both
+directions, so this list is a work queue with a gate behind it rather than a note.
+
+| calls | bytes | site | what it would take |
+|---|---|---|---|
+| 15 | ~0 | `Engine::try_launch_async_graph_loop`, `src/runtime/engine_graph_decode.cpp:408-412`, `:434` | `d_bt` / `d_token` / `d_pos` / `d_ctx` / `d_banned` are allocated and torn down **per request**. Making `cpipe_` persistent needs it sized from the KV plan at init and the teardown path reworked with it. This is the real violation of the five, and it is the same family as item 1. |
+| 2 | 128 MiB | `GraphExecutor::run_attention` -> `chunk_eager_k_` / `_v_`, `src/exec/executor_attention_prefill.cu:176-177` | Grow-only gather scratch for the eager chunked prefill path, sized from the live context on first use. Pre-size it from `ctx_capacity` the way its sibling `chunk_capture_k_`/`_v_` already is. |
+| 1 | ~0 | `Engine::banned_tokens_device_`, `src/runtime/engine_graph_decode.cpp:29` | Lazy first-use upload of a list that is known at engine init. The cheapest of the five. |
+| 1 | 0.001 MiB | `imp::VRAMAllocator::allocate` | The engine arena growing after the phase flip. Whether that is a defect or a plan one slab short is its own question. |
+
+Two things the first run got wrong, both worth keeping because both are the campaign's
+recurring shape:
+
+**The violation report was `IMP_LOG_DEBUG`.** Someone who opted into the measurement build
+still saw nothing at default log level. It is `IMP_LOG_WARN` now, and the clean line is
+`IMP_LOG_INFO`, because the gate asserts that **one of the two appears at all**: absent
+both, the binary was built without the flag and a grep for violations passes for the wrong
+reason.
+
+**The gate itself first reported 2 allocations when there were 19.** The report's banner
+and its first class were on the same line (no `\n` after `while serving:`), and the parser
+anchored at the start of a line, so it skipped `cudaMalloc` entirely and summed only the
+async and pinned rows. Both halves are fixed: the format has its newline, and the parser
+matches the class name anywhere in the line rather than depending on that.
+
+The gate also refuses to judge before it can prove it reached the path it claims to
+exercise: it fails if `residual buffer enabled` is absent from the log.
