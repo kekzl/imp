@@ -196,8 +196,9 @@ TEST(QuantizeCheckpointOut, ReplacesAnExistingQuantizationConfig) {
   "quantization_config": null,
   "vocab_size": 151936
 })";
-    std::string out, err;
-    ASSERT_TRUE(patch_config_json(src, "{\"quant_method\": \"compressed-tensors\"}", out, err)) << err;
+    const auto patched = patch_config_json(src, "{\"quant_method\": \"compressed-tensors\"}");
+    ASSERT_TRUE(patched) << patched.error();
+    const std::string& out = *patched;
     EXPECT_EQ(out.find("quantization_config"), out.rfind("quantization_config"));
     EXPECT_NE(out.find("\"quant_method\": \"compressed-tensors\""), std::string::npos);
     EXPECT_EQ(out.find("null"), std::string::npos);
@@ -208,25 +209,29 @@ TEST(QuantizeCheckpointOut, ReplacesAnExistingQuantizationConfig) {
 
 TEST(QuantizeCheckpointOut, ReplacesAnObjectValuedQuantizationConfig) {
     const std::string src = R"({"a": 1, "quantization_config": {"nested": {"x": [1,2]}}, "b": 2})";
-    std::string out, err;
-    ASSERT_TRUE(patch_config_json(src, "{\"new\": true}", out, err)) << err;
+    const auto patched = patch_config_json(src, "{\"new\": true}");
+    ASSERT_TRUE(patched) << patched.error();
+    const std::string& out = *patched;
     EXPECT_EQ(out, R"({"a": 1, "quantization_config": {"new": true}, "b": 2})");
 }
 
 TEST(QuantizeCheckpointOut, InsertsWhenAbsent) {
     const std::string src = "{\n  \"model_type\": \"qwen3\"\n}\n";
-    std::string out, err;
-    ASSERT_TRUE(patch_config_json(src, "{\"q\": 1}", out, err)) << err;
+    const auto patched = patch_config_json(src, "{\"q\": 1}");
+    ASSERT_TRUE(patched) << patched.error();
+    const std::string& out = *patched;
     EXPECT_NE(out.find("\"quantization_config\": {\"q\": 1},"), std::string::npos);
     EXPECT_NE(out.find("\"model_type\": \"qwen3\""), std::string::npos);
 }
 
 TEST(QuantizeCheckpointOut, InsertsIntoAnEmptyObjectWithoutATrailingComma) {
-    std::string out, err;
-    ASSERT_TRUE(patch_config_json("{}", "{\"q\": 1}", out, err)) << err;
+    const auto patched = patch_config_json("{}", "{\"q\": 1}");
+    ASSERT_TRUE(patched) << patched.error();
+    const std::string& out = *patched;
     EXPECT_EQ(out.find(','), std::string::npos);
-    ASSERT_TRUE(patch_config_json("{  \n }", "{\"q\": 1}", out, err)) << err;
-    EXPECT_EQ(out.find(','), std::string::npos);
+    const auto ws_patched = patch_config_json("{  \n }", "{\"q\": 1}");
+    ASSERT_TRUE(ws_patched) << ws_patched.error();
+    EXPECT_EQ(ws_patched->find(','), std::string::npos);
 }
 
 TEST(QuantizeCheckpointOut, DoesNotMatchTheKeyInsideANestedObjectOrAString) {
@@ -235,8 +240,9 @@ TEST(QuantizeCheckpointOut, DoesNotMatchTheKeyInsideANestedObjectOrAString) {
     // of the top-level key would leave the real declaration absent.
     const std::string src =
         R"({"text_config": {"quantization_config": "inner"}, "note": "quantization_config", "z": 0})";
-    std::string out, err;
-    ASSERT_TRUE(patch_config_json(src, "{\"q\": 1}", out, err)) << err;
+    const auto patched = patch_config_json(src, "{\"q\": 1}");
+    ASSERT_TRUE(patched) << patched.error();
+    const std::string& out = *patched;
     EXPECT_NE(out.find("\"text_config\": {\"quantization_config\": \"inner\"}"), std::string::npos);
     EXPECT_NE(out.find("\"note\": \"quantization_config\""), std::string::npos);
     EXPECT_NE(out.find("\"quantization_config\": {\"q\": 1},"), std::string::npos);
@@ -263,12 +269,11 @@ TEST(QuantizeCheckpointOut, WhatTheWriterDeclaresIsWhatTheLoaderDetects) {
   "quantization_config": null,
   "vocab_size": 151936
 })";
-    std::string patched, err;
-    ASSERT_TRUE(patch_config_json(src,
-                                  compressed_tensors_quant_config({"lm_head", "model.embed_tokens"}, false),
-                                  patched, err))
-        << err;
-    std::ofstream(dir + "/config.json") << patched;
+    const auto patched = patch_config_json(src,
+                                           compressed_tensors_quant_config({"lm_head", "model.embed_tokens"},
+                                                                           false));
+    ASSERT_TRUE(patched) << patched.error();
+    std::ofstream(dir + "/config.json") << *patched;
 
     imp::HFConfigLoader::NvFP4Config cfg;
     ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg))
@@ -282,8 +287,8 @@ TEST(QuantizeCheckpointOut, WhatTheWriterDeclaresIsWhatTheLoaderDetects) {
     // The recipe.yaml written beside it must say the same thing, because a
     // reader that predates config.json detection consults only that file — and
     // reading this checkpoint as Modelopt inverts every scale in silence.
-    std::string yerr;
-    ASSERT_TRUE(write_recipe_yaml(dir, {"lm_head", "model.embed_tokens"}, yerr)) << yerr;
+    const auto recipe = write_recipe_yaml(dir, {"lm_head", "model.embed_tokens"});
+    ASSERT_TRUE(recipe) << recipe.error();
     std::filesystem::remove(dir + "/config.json");
     imp::HFConfigLoader::NvFP4Config from_recipe;
     ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, from_recipe));
@@ -298,13 +303,14 @@ TEST(QuantizeCheckpointOut, WhatTheWriterDeclaresIsWhatTheLoaderDetects) {
 TEST(QuantizeCheckpointOut, SurvivesEscapesAndRejectsNonObjects) {
     // A key whose string contains an escaped quote must not end the scan early.
     const std::string src = R"({"chat_template": "say \"hi\"", "quantization_config": 1})";
-    std::string out, err;
-    ASSERT_TRUE(patch_config_json(src, "{\"q\": 1}", out, err)) << err;
+    const auto patched = patch_config_json(src, "{\"q\": 1}");
+    ASSERT_TRUE(patched) << patched.error();
+    const std::string& out = *patched;
     EXPECT_NE(out.find("\"quantization_config\": {\"q\": 1}"), std::string::npos);
 
-    EXPECT_FALSE(patch_config_json("[1,2]", "{}", out, err));
-    EXPECT_FALSE(patch_config_json("", "{}", out, err));
-    EXPECT_FALSE(patch_config_json("{\"a\"", "{}", out, err));
+    EXPECT_FALSE(patch_config_json("[1,2]", "{}").has_value());
+    EXPECT_FALSE(patch_config_json("", "{}").has_value());
+    EXPECT_FALSE(patch_config_json("{\"a\"", "{}").has_value());
 }
 
 // The refusal has to be reachable before the conversion, not at the copy step
@@ -315,14 +321,14 @@ TEST(QuantizeCheckpointOut, RefusesCompressedTensorsWithoutAConfigJson) {
         (std::filesystem::temp_directory_path() / ("ckpt_noconf_" + std::to_string(::getpid()))).string();
     std::filesystem::create_directories(dir);
 
-    std::string err;
-    EXPECT_FALSE(can_declare_quantization(dir, OutputFormat::CompressedTensors, err));
-    EXPECT_NE(err.find("config.json"), std::string::npos);
+    const auto refused = can_declare_quantization(dir, OutputFormat::CompressedTensors);
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_NE(refused.error().find("config.json"), std::string::npos);
     // Modelopt declares itself in a file it writes itself, so it is unaffected.
-    EXPECT_TRUE(can_declare_quantization(dir, OutputFormat::Modelopt, err));
+    EXPECT_TRUE(can_declare_quantization(dir, OutputFormat::Modelopt).has_value());
 
     std::ofstream(dir + "/config.json") << "{}";
-    EXPECT_TRUE(can_declare_quantization(dir, OutputFormat::CompressedTensors, err));
+    EXPECT_TRUE(can_declare_quantization(dir, OutputFormat::CompressedTensors).has_value());
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -381,13 +387,13 @@ struct TempDir {
 
 TEST(QuantizeCheckpointOut, ShardIndexMapsEveryTensorAndTotalsTheBytes) {
     TempDir d;
-    std::string err;
-    ASSERT_TRUE(write_shard_index(d.path,
-                                  {{"model.layers.0.q.weight_packed", "model-00001-of-00002.safetensors"},
-                                   {"model.layers.0.q.weight_scale", "model-00001-of-00002.safetensors"},
-                                   {"lm_head.weight", "model-00002-of-00002.safetensors"}},
-                                  4242, err))
-        << err;
+    const auto indexed =
+        write_shard_index(d.path,
+                          {{"model.layers.0.q.weight_packed", "model-00001-of-00002.safetensors"},
+                           {"model.layers.0.q.weight_scale", "model-00001-of-00002.safetensors"},
+                           {"lm_head.weight", "model-00002-of-00002.safetensors"}},
+                          4242);
+    ASSERT_TRUE(indexed) << indexed.error();
     const std::string s = d.read("model.safetensors.index.json");
     EXPECT_NE(s.find("\"total_size\": 4242"), std::string::npos);
     EXPECT_NE(s.find("\"model.layers.0.q.weight_packed\": \"model-00001-of-00002.safetensors\""),
@@ -406,10 +412,9 @@ TEST(QuantizeCheckpointOut, CompressedTensorsCopyPatchesTheConfigItCopies) {
     // output stops loading elsewhere for a reason nobody can see here.
     std::ofstream(src.path + "/preprocessor_config.json") << R"({"image_mean": [0.5]})";
 
-    std::string err;
-    ASSERT_TRUE(copy_aux_files(src.path, dst.path, OutputFormat::CompressedTensors, {"lm_head"},
-                               /*calibrated=*/false, err))
-        << err;
+    const auto copied = copy_aux_files(src.path, dst.path, OutputFormat::CompressedTensors, {"lm_head"},
+                                       /*calibrated=*/false);
+    ASSERT_TRUE(copied) << copied.error();
     const std::string cfg = dst.read("config.json");
     EXPECT_NE(cfg.find("\"quant_method\": \"compressed-tensors\""), std::string::npos);
     EXPECT_NE(cfg.find("\"vocab_size\": 151936"), std::string::npos) << "source fields must survive";
@@ -423,8 +428,8 @@ TEST(QuantizeCheckpointOut, ModeloptCopyLeavesTheConfigAlone) {
     const std::string original = R"({"model_type": "qwen3", "quantization_config": null})";
     std::ofstream(src.path + "/config.json") << original;
 
-    std::string err;
-    ASSERT_TRUE(copy_aux_files(src.path, dst.path, OutputFormat::Modelopt, {"lm_head"}, false, err)) << err;
+    const auto copied = copy_aux_files(src.path, dst.path, OutputFormat::Modelopt, {"lm_head"}, false);
+    ASSERT_TRUE(copied) << copied.error();
     // Modelopt declares itself in hf_quant_config.json; touching config.json
     // here would put two disagreeing declarations in one checkpoint.
     EXPECT_EQ(dst.read("config.json"), original);
@@ -432,8 +437,8 @@ TEST(QuantizeCheckpointOut, ModeloptCopyLeavesTheConfigAlone) {
 
 TEST(QuantizeCheckpointOut, RecipeSaysTheSameSchemeTheConfigDoes) {
     TempDir d;
-    std::string err;
-    ASSERT_TRUE(write_recipe_yaml(d.path, {"lm_head", "re:.*router"}, err)) << err;
+    const auto recipe = write_recipe_yaml(d.path, {"lm_head", "re:.*router"});
+    ASSERT_TRUE(recipe) << recipe.error();
     const std::string y = d.read("recipe.yaml");
     EXPECT_NE(y.find("scheme: NVFP4"), std::string::npos);
     EXPECT_NE(y.find("targets: [Linear]"), std::string::npos);

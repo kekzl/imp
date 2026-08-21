@@ -354,7 +354,7 @@ bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfig
     const std::string text = read_file(model_dir + "/config.json");
     if (text.empty())
         return false;
-    JsonParser parser(text.data(), text.size());
+    JsonParser parser(text);
     const JValue root = parser.parse();
     if (!parser.ok() || root.type != JType::OBJECT)
         return false;

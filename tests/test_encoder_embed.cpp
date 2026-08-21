@@ -61,7 +61,7 @@ TEST(EncoderEmbedTest, NomicBertEmbedsMatchReferenceStructure) {
         framed.insert(framed.end(), t.begin(), t.end());
         framed.push_back(102);  // [SEP]
         std::vector<float> out;
-        EXPECT_TRUE(engine.encoder_embed(framed.data(), static_cast<int>(framed.size()), out));
+        EXPECT_TRUE(engine.encoder_embed(framed, out));
         return out;
     };
 

@@ -610,7 +610,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache.cpp
         tests/test_gguf_loader.cpp
         tests/test_gguf_fault_injection.cpp
-        tests/test_gguf_half.cpp
+        tests/test_fp_bits.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_hf_config_loader.cpp
         tests/test_safetensors_loader.cpp

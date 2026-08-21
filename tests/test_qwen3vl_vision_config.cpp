@@ -34,14 +34,14 @@ const char* kRealVisionConfig = R"({
 })";
 
 JValue parse(const std::string& text) {
-    JsonParser p(text.data(), text.size());
+    JsonParser p(text);
     return p.parse();
 }
 
 TEST(Qwen3VLVisionConfig, ParsesTheRealCheckpoint) {
-    VisionConfig c;
-    std::string err;
-    ASSERT_TRUE(parse_qwen3vl_vision_config(parse(kRealVisionConfig), c, err)) << err;
+    auto parsed = parse_qwen3vl_vision_config(parse(kRealVisionConfig));
+    ASSERT_TRUE(parsed) << parsed.error();
+    const VisionConfig& c = *parsed;
 
     EXPECT_TRUE(c.is_qwen3vl);
     EXPECT_EQ(c.num_layers, 24);
@@ -63,52 +63,52 @@ TEST(Qwen3VLVisionConfig, ParsesTheRealCheckpoint) {
 // the SigLIP defaults (896 / 4096 / 256) would be a lie the encoder could read
 // and size buffers from.
 TEST(Qwen3VLVisionConfig, ClearsTheFixedResolutionFields) {
-    VisionConfig c;  // starts with the SigLIP defaults
-    ASSERT_NE(c.image_size, 0);
-    ASSERT_NE(c.num_patches, 0);
-    std::string err;
-    ASSERT_TRUE(parse_qwen3vl_vision_config(parse(kRealVisionConfig), c, err)) << err;
-    EXPECT_EQ(c.image_size, 0);
-    EXPECT_EQ(c.num_patches, 0);
-    EXPECT_EQ(c.num_image_tokens, 0);
+    const VisionConfig defaults;  // the SigLIP defaults this must not inherit
+    ASSERT_NE(defaults.image_size, 0);
+    ASSERT_NE(defaults.num_patches, 0);
+    auto parsed = parse_qwen3vl_vision_config(parse(kRealVisionConfig));
+    ASSERT_TRUE(parsed) << parsed.error();
+    EXPECT_EQ(parsed->image_size, 0);
+    EXPECT_EQ(parsed->num_patches, 0);
+    EXPECT_EQ(parsed->num_image_tokens, 0);
 }
 
-TEST(Qwen3VLVisionConfig, RejectionLeavesTheOutputUntouched) {
-    VisionConfig before;
-    VisionConfig c = before;
-    std::string err;
+// A rejection can no longer hand back a half-filled geometry, because it hands
+// back no geometry at all: the signature carries the error instead of writing
+// through an out-parameter the caller might read before checking the bool.
+TEST(Qwen3VLVisionConfig, RejectionYieldsNoConfigAtAll) {
     // depth missing entirely.
     const char* bad = R"({"hidden_size": 1024, "num_heads": 16})";
-    EXPECT_FALSE(parse_qwen3vl_vision_config(parse(bad), c, err));
-    EXPECT_FALSE(err.empty()) << "a rejection must say what was wrong";
-    EXPECT_FALSE(c.is_qwen3vl) << "output must not be half-filled on rejection";
-    EXPECT_EQ(c.hidden_size, before.hidden_size);
-    EXPECT_EQ(c.num_layers, before.num_layers);
+    auto parsed = parse_qwen3vl_vision_config(parse(bad));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_FALSE(parsed.error().empty()) << "a rejection must say what was wrong";
+    EXPECT_NE(parsed.error().find("depth"), std::string::npos) << parsed.error();
 }
 
 TEST(Qwen3VLVisionConfig, RejectsInconsistentGeometry) {
-    std::string base = kRealVisionConfig;
-    VisionConfig c;
-    std::string err;
+    const std::string base = kRealVisionConfig;
+
+    auto rejected_with = [](const std::string& cfg, const char* needle) {
+        auto parsed = parse_qwen3vl_vision_config(parse(cfg));
+        ASSERT_FALSE(parsed.has_value());
+        EXPECT_NE(parsed.error().find(needle), std::string::npos) << parsed.error();
+    };
 
     // hidden_size not divisible by num_heads.
     auto bad_heads = base;
     bad_heads.replace(bad_heads.find("\"num_heads\": 16"), 15, "\"num_heads\": 15");
-    EXPECT_FALSE(parse_qwen3vl_vision_config(parse(bad_heads), c, err));
-    EXPECT_NE(err.find("divisible"), std::string::npos) << err;
+    rejected_with(bad_heads, "divisible");
 
     // num_position_embeddings not a perfect square.
     auto bad_pos = base;
     bad_pos.replace(bad_pos.find("\"num_position_embeddings\": 2304"), 31,
                     "\"num_position_embeddings\": 2305");
-    EXPECT_FALSE(parse_qwen3vl_vision_config(parse(bad_pos), c, err));
-    EXPECT_NE(err.find("perfect square"), std::string::npos) << err;
+    rejected_with(bad_pos, "perfect square");
 
     // A non-positive dimension.
     auto bad_depth = base;
     bad_depth.replace(bad_depth.find("\"depth\": 24"), 11, "\"depth\": 0 ");
-    EXPECT_FALSE(parse_qwen3vl_vision_config(parse(bad_depth), c, err));
-    EXPECT_NE(err.find("positive"), std::string::npos) << err;
+    rejected_with(bad_depth, "positive");
 }
 
 // A DeepStack tap pointing past the last block would index out of bounds at
@@ -116,21 +116,19 @@ TEST(Qwen3VLVisionConfig, RejectsInconsistentGeometry) {
 TEST(Qwen3VLVisionConfig, RejectsDeepstackIndexOutOfRange) {
     std::string bad = kRealVisionConfig;
     bad.replace(bad.find("[5, 11, 17]"), 11, "[5, 11, 24]");
-    VisionConfig c;
-    std::string err;
-    EXPECT_FALSE(parse_qwen3vl_vision_config(parse(bad), c, err));
-    EXPECT_NE(err.find("out of range"), std::string::npos) << err;
+    auto parsed = parse_qwen3vl_vision_config(parse(bad));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("out of range"), std::string::npos) << parsed.error();
 }
 
 // DeepStack is optional; a model without it must still parse.
 TEST(Qwen3VLVisionConfig, MissingDeepstackIsFine) {
     std::string no_ds = kRealVisionConfig;
     no_ds.replace(no_ds.find("\"deepstack_visual_indexes\": [5, 11, 17],"), 40, "");
-    VisionConfig c;
-    std::string err;
-    ASSERT_TRUE(parse_qwen3vl_vision_config(parse(no_ds), c, err)) << err;
-    EXPECT_TRUE(c.deepstack_indexes.empty());
-    EXPECT_EQ(c.num_layers, 24);
+    auto parsed = parse_qwen3vl_vision_config(parse(no_ds));
+    ASSERT_TRUE(parsed) << parsed.error();
+    EXPECT_TRUE(parsed->deepstack_indexes.empty());
+    EXPECT_EQ(parsed->num_layers, 24);
 }
 
 // The allowlist is read twice per load — once by the SafeTensors loader to

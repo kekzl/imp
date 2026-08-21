@@ -193,7 +193,7 @@ public:
     // Prefix-cache block reuse is bypassed while active so every position is
     // actually forwarded. end: fixed-order host reduction (bit-reproducible),
     // returns exp(mean NLL) in *out_ppl and always frees the buffers.
-    [[nodiscard]] bool begin_perplexity_capture(const int32_t* tokens, int n);
+    [[nodiscard]] bool begin_perplexity_capture(std::span<const int32_t> tokens);
     [[nodiscard]] bool end_perplexity_capture(double* out_ppl);
 
     // Image tokens the pending Qwen3-VL image expands to, 0 when none. The
@@ -205,16 +205,16 @@ public:
     std::vector<int> pending_image_token_counts() const;
     // Server path: CPU-only patchify (safe off the batch worker) and the token
     // count the prompt must reserve for it.
-    bool preprocess_image_qwen(const uint8_t* data, size_t len, QwenPatches& out) const;
+    bool preprocess_image_qwen(std::span<const uint8_t> data, QwenPatches& out) const;
     int image_tokens_of(const QwenPatches& patches) const;
     bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready(); }
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     // `set_` replaces whatever was pending; `add_` appends, which only the
     // Qwen3-VL tower supports (the mmproj tower holds exactly one image).
     [[nodiscard]] bool set_image(const std::string& path);
-    [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
+    [[nodiscard]] bool set_image_from_memory(std::span<const uint8_t> data);
     [[nodiscard]] bool add_image(const std::string& path);
-    [[nodiscard]] bool add_image_from_memory(const uint8_t* data, size_t len);
+    [[nodiscard]] bool add_image_from_memory(std::span<const uint8_t> data);
     void clear_image();
     bool has_vision() const noexcept { return vision_.is_available() || qwen_vision_.is_ready(); }
     bool has_vision_input() const noexcept { return vision_.has_input(); }
@@ -223,7 +223,7 @@ public:
     // the GPU encode for req->image into a per-request buffer (req->vision_emb) —
     // MUST be called from the batch worker (the encode is serialized + uses the
     // shared encoder workspace). Returns false if no vision model / no image.
-    [[nodiscard]] bool preprocess_image(const uint8_t* data, size_t len, ImageData& out);
+    [[nodiscard]] bool preprocess_image(std::span<const uint8_t> data, ImageData& out);
     [[nodiscard]] bool encode_image_for(Request& req);
 
     // Enable MTP-based speculative decoding. K = draft length (1-4 typical).
@@ -239,7 +239,7 @@ public:
     // should not invoke directly until Phase 4 wires this into the decode loop.
     // Encoder embedder (#836): pooled + L2-normalized embedding for `tokens`.
     // Only valid when the loaded model is encoder-only (profile().is_encoder).
-    bool encoder_embed(const int32_t* tokens, int n, std::vector<float>& out);
+    bool encoder_embed(std::span<const int32_t> tokens, std::vector<float>& out);
     bool is_encoder_model() const { return encoder_ws_storage_ != nullptr; }
 
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,

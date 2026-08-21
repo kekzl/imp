@@ -1,6 +1,7 @@
 #include "vision/qwen3vl_vision_config.h"
 
 #include <cmath>
+#include <optional>
 
 namespace imp {
 
@@ -17,12 +18,11 @@ const JValue* find(const JValue& v, const char* key) {
 
 // Missing and present-but-not-a-number are the same failure here: both mean the
 // geometry is not what this parser assumes.
-bool get_int(const JValue& v, const char* key, int& out) {
+std::optional<int> get_int(const JValue& v, const char* key) {
     const JValue* f = find(v, key);
     if (!f || f->type != JType::NUMBER)
-        return false;
-    out = static_cast<int>(f->as_int());
-    return true;
+        return std::nullopt;
+    return static_cast<int>(f->as_int());
 }
 
 }  // namespace
@@ -47,9 +47,7 @@ bool vision_tower_supported(const std::string& vision_model_type) {
            vision_model_type == "qwen3_5";
 }
 
-bool parse_qwen3vl_vision_config(const JValue& vision_cfg, VisionConfig& out, std::string& err) {
-    // Everything lands in a scratch config first: a partially-filled VisionConfig
-    // is worse than none, because the caller cannot tell which fields are real.
+std::expected<VisionConfig, std::string> parse_qwen3vl_vision_config(const JValue& vision_cfg) {
     VisionConfig c;
     int depth = 0, hidden = 0, heads = 0, inter = 0, patch = 0, merge = 0, temporal = 0;
     int out_hidden = 0, num_pos = 0;
@@ -70,28 +68,22 @@ bool parse_qwen3vl_vision_config(const JValue& vision_cfg, VisionConfig& out, st
         {"num_position_embeddings", &num_pos},
     };
     for (const auto& f : required) {
-        if (!get_int(vision_cfg, f.key, *f.dst)) {
-            err = std::string("vision_config: missing or non-numeric '") + f.key + "'";
-            return false;
-        }
-        if (*f.dst <= 0) {
-            err = std::string("vision_config: '") + f.key + "' must be positive";
-            return false;
-        }
+        const std::optional<int> v = get_int(vision_cfg, f.key);
+        if (!v)
+            return std::unexpected(std::string("vision_config: missing or non-numeric '") + f.key + "'");
+        if (*v <= 0)
+            return std::unexpected(std::string("vision_config: '") + f.key + "' must be positive");
+        *f.dst = *v;
     }
 
-    if (hidden % heads != 0) {
-        err = "vision_config: hidden_size is not divisible by num_heads";
-        return false;
-    }
+    if (hidden % heads != 0)
+        return std::unexpected("vision_config: hidden_size is not divisible by num_heads");
 
     // The learned position embedding is a SQUARE grid that gets resampled per
     // image. A non-square count means this parser has the wrong model.
     const int grid = static_cast<int>(std::lround(std::sqrt(static_cast<double>(num_pos))));
-    if (grid * grid != num_pos) {
-        err = "vision_config: num_position_embeddings is not a perfect square";
-        return false;
-    }
+    if (grid * grid != num_pos)
+        return std::unexpected("vision_config: num_position_embeddings is not a perfect square");
 
     c.is_qwen3vl = true;
     c.num_layers = depth;
@@ -113,21 +105,16 @@ bool parse_qwen3vl_vision_config(const JValue& vision_cfg, VisionConfig& out, st
     const JValue* ds = find(vision_cfg, "deepstack_visual_indexes");
     if (ds && ds->type == JType::ARRAY) {
         for (const auto& e : ds->arr) {
-            if (e.type != JType::NUMBER) {
-                err = "vision_config: deepstack_visual_indexes holds a non-number";
-                return false;
-            }
+            if (e.type != JType::NUMBER)
+                return std::unexpected("vision_config: deepstack_visual_indexes holds a non-number");
             const int idx = static_cast<int>(e.as_int());
-            if (idx < 0 || idx >= depth) {
-                err = "vision_config: deepstack index out of range for depth";
-                return false;
-            }
+            if (idx < 0 || idx >= depth)
+                return std::unexpected("vision_config: deepstack index out of range for depth");
             c.deepstack_indexes.push_back(idx);
         }
     }
 
-    out = c;
-    return true;
+    return c;
 }
 
 }  // namespace imp

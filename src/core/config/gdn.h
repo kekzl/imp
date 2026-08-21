@@ -22,8 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct GDN {
     bool fp32_scan = false;
@@ -54,5 +53,4 @@ struct GDN {
     // Override gated-DeltaNet weight layout.
     std::string layout_override;
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg

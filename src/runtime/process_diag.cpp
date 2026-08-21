@@ -72,9 +72,8 @@ void process_diag_install(const RuntimeConfig& cfg) {
     // level: the whole point of this key is that the level used to be
     // unsettable, and a typo that quietly resolves to INFO would restore that.
     {
-        LogLevel lvl;
-        if (log_level_from_string(cfg.diagnostics.log_level.c_str(), lvl)) {
-            log_set_level(lvl);
+        if (const auto lvl = log_level_from_string(cfg.diagnostics.log_level)) {
+            log_set_level(*lvl);
         } else {
             IMP_LOG_WARN(
                 "diagnostics.log_level: unknown value '%s' — keeping the current level "

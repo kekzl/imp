@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace imp {
@@ -25,8 +26,7 @@ TEST(BatchBuilderTest, SingleDecodeSequence) {
     builder.reset();
 
     int block_table[] = {0, 1, 2};
-    builder.add_decode_sequence(/*token=*/42, /*position=*/15, block_table, /*n_blocks=*/3,
-                                /*context_len=*/16);
+    builder.add_decode_sequence(/*token=*/42, /*position=*/15, block_table, /*context_len=*/16);
 
     Batch batch = builder.build();
 
@@ -63,15 +63,15 @@ TEST(BatchBuilderTest, MultipleDecodeSequences) {
 
     // Seq 0: 2 blocks, context 20
     int bt0[] = {5, 10};
-    builder.add_decode_sequence(100, 19, bt0, 2, 20);
+    builder.add_decode_sequence(100, 19, std::span(bt0, 2), 20);
 
     // Seq 1: 3 blocks, context 40
     int bt1[] = {7, 8, 9};
-    builder.add_decode_sequence(200, 39, bt1, 3, 40);
+    builder.add_decode_sequence(200, 39, std::span(bt1, 3), 40);
 
     // Seq 2: 1 block, context 5
     int bt2[] = {12};
-    builder.add_decode_sequence(300, 4, bt2, 1, 5);
+    builder.add_decode_sequence(300, 4, std::span(bt2, 1), 5);
 
     Batch batch = builder.build();
 
@@ -123,7 +123,7 @@ TEST(BatchBuilderTest, PrefillSequence) {
 
     int32_t tokens[] = {1, 2, 3, 4, 5};
     int bt[] = {0, 1};
-    builder.add_prefill_sequence(tokens, 5, bt, 2, /*start_pos=*/0);
+    builder.add_prefill_sequence(std::span(tokens, 5), std::span(bt, 2), /*start_pos=*/0);
 
     Batch batch = builder.build();
 
@@ -152,14 +152,14 @@ TEST(BatchBuilderTest, ResetClearsPreviousData) {
     builder.reset();
 
     int bt[] = {0};
-    builder.add_decode_sequence(10, 5, bt, 1, 6);
+    builder.add_decode_sequence(10, 5, std::span(bt, 1), 6);
     Batch b1 = builder.build();
     EXPECT_EQ(b1.n_sequences, 1);
 
     // Reset and build new batch
     builder.reset();
-    builder.add_decode_sequence(20, 10, bt, 1, 11);
-    builder.add_decode_sequence(30, 15, bt, 1, 16);
+    builder.add_decode_sequence(20, 10, std::span(bt, 1), 11);
+    builder.add_decode_sequence(30, 15, std::span(bt, 1), 16);
     Batch b2 = builder.build();
     EXPECT_EQ(b2.n_sequences, 2);
     EXPECT_EQ(b2.total_tokens, 2);
@@ -180,8 +180,8 @@ TEST(GPUBatchTest, UploadAndFree) {
 
     int bt0[] = {0, 1};
     int bt1[] = {2, 3, 4};
-    builder.add_decode_sequence(100, 10, bt0, 2, 11);
-    builder.add_decode_sequence(200, 20, bt1, 3, 21);
+    builder.add_decode_sequence(100, 10, std::span(bt0, 2), 11);
+    builder.add_decode_sequence(200, 20, std::span(bt1, 3), 21);
 
     Batch batch = builder.build();
     ASSERT_EQ(batch.n_sequences, 2);
@@ -246,7 +246,7 @@ TEST(GPUBatchTest, SingleSequenceNoSeqOffsets) {
     builder.reset();
 
     int bt[] = {0};
-    builder.add_decode_sequence(42, 7, bt, 1, 8);
+    builder.add_decode_sequence(42, 7, std::span(bt, 1), 8);
 
     Batch batch = builder.build();
     GPUBatch gpu_batch;
@@ -439,8 +439,7 @@ TEST(BatchBuilderTest, SixteenDecodeSequences) {
         int position = ctx_len - 1;
         int32_t token = 1000 + i;
 
-        builder.add_decode_sequence(token, position, block_tables[i].data(),
-                                    static_cast<int>(block_tables[i].size()), ctx_len);
+        builder.add_decode_sequence(token, position, block_tables[i], ctx_len);
     }
 
     Batch batch = builder.build();
@@ -474,7 +473,7 @@ TEST(GPUBatchTest, SixteenSequenceUpload) {
 
     for (int i = 0; i < 16; i++) {
         int bt[] = {i, i + 100};
-        builder.add_decode_sequence(/*token=*/i + 500, /*position=*/i * 10, bt, 2, (i + 1) * 10);
+        builder.add_decode_sequence(/*token=*/i + 500, /*position=*/i * 10, std::span(bt, 2), (i + 1) * 10);
     }
 
     Batch batch = builder.build();
@@ -614,7 +613,7 @@ TEST(BatchBuilderTest, PrefillWithStartPos) {
 
     int32_t tokens[] = {10, 20, 30};
     int bt[] = {0, 1};
-    builder.add_prefill_sequence(tokens, 3, bt, 2, /*start_pos=*/5);
+    builder.add_prefill_sequence(std::span(tokens, 3), std::span(bt, 2), /*start_pos=*/5);
 
     Batch batch = builder.build();
 
@@ -635,7 +634,7 @@ TEST(GPUBatchTest, DoubleFree) {
     builder.reset();
 
     int bt[] = {0};
-    builder.add_decode_sequence(1, 0, bt, 1, 1);
+    builder.add_decode_sequence(1, 0, std::span(bt, 1), 1);
 
     Batch batch = builder.build();
     GPUBatch gpu_batch;
@@ -743,8 +742,8 @@ TEST(GPUBatchTest, BatchedDecodeVaryingContextLens) {
         for (int b = 0; b < seqs[i].n_blocks; b++) {
             block_tables[i][b] = i * 100 + b;
         }
-        builder.add_decode_sequence(seqs[i].token, seqs[i].position, block_tables[i].data(), seqs[i].n_blocks,
-                                    seqs[i].ctx_len);
+        builder.add_decode_sequence(seqs[i].token, seqs[i].position,
+                                    std::span(block_tables[i]).first(seqs[i].n_blocks), seqs[i].ctx_len);
     }
 
     Batch batch = builder.build();
@@ -1140,7 +1139,7 @@ TEST(BatchBuilderTest, SingleToken) {
 
     int32_t tokens[] = {42};
     int bt[] = {0};
-    builder.add_prefill_sequence(tokens, 1, bt, 1, /*start_pos=*/0);
+    builder.add_prefill_sequence(std::span(tokens, 1), std::span(bt, 1), /*start_pos=*/0);
 
     Batch batch = builder.build();
 

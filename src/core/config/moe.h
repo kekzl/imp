@@ -22,8 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct MoE {
     int expert_overhead_pct = 10;
@@ -126,5 +125,4 @@ struct MoE {
     // values: 4, 8 (default), 16, 32. Other values fall back to 8.
     int mr_nr = 8;
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg

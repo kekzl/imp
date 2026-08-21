@@ -9,6 +9,7 @@
 #include "runtime/engine.h"
 
 #include "core/logging.h"
+#include <span>
 
 #include <exception>
 
@@ -67,7 +68,7 @@ ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t l
     if (ImpError e = check_vision_ready(ctx, "imp_set_image_from_memory"); e != IMP_SUCCESS)
         return e;
     try {
-        return ctx->engine->set_image_from_memory(data, len) ? IMP_SUCCESS : IMP_ERROR_INTERNAL;
+        return ctx->engine->set_image_from_memory(std::span(data, len)) ? IMP_SUCCESS : IMP_ERROR_INTERNAL;
     } catch (const std::exception& e) {
         IMP_LOG_ERROR("imp_set_image_from_memory: %s", e.what());
         return IMP_ERROR_INTERNAL;
@@ -104,7 +105,7 @@ ImpError imp_add_image_from_memory(ImpContext ctx, const uint8_t* data, size_t l
         return IMP_ERROR_UNSUPPORTED;
     }
     try {
-        return ctx->engine->add_image_from_memory(data, len) ? IMP_SUCCESS : IMP_ERROR_INTERNAL;
+        return ctx->engine->add_image_from_memory(std::span(data, len)) ? IMP_SUCCESS : IMP_ERROR_INTERNAL;
     } catch (const std::exception& e) {
         IMP_LOG_ERROR("imp_add_image_from_memory: %s", e.what());
         return IMP_ERROR_INTERNAL;

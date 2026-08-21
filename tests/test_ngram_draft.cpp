@@ -12,7 +12,7 @@ namespace {
 
 std::vector<int32_t> draft(const std::vector<int32_t>& hist, int k, int min_match = 3,
                            int max_match = 8) {
-    return ngram_draft(hist.data(), static_cast<int>(hist.size()), k, min_match, max_match);
+    return ngram_draft(hist, k, min_match, max_match).tokens;
 }
 
 TEST(NgramDraft, EmptyWhenNoRepeat) {
@@ -75,7 +75,10 @@ TEST(NgramDraft, OverlappingPeriodicPattern) {
 
 TEST(NgramDraft, DegenerateParamsRejected) {
     std::vector<int32_t> h = {1, 2, 3, 1, 2, 3};
-    EXPECT_TRUE(ngram_draft(nullptr, 6, 4, 3, 8).empty());
+    // The old signature took (pointer, length) and had to defend against a
+    // null pointer carrying a length of 6. A span cannot be in that state, so
+    // the empty case is the only one left to check.
+    EXPECT_TRUE(ngram_draft({}, 4, 3, 8).empty());
     EXPECT_TRUE(draft(h, 0).empty());
     EXPECT_TRUE(draft(h, 4, 0, 8).empty());
 }

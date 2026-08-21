@@ -169,14 +169,15 @@ void encoder_workspace_free(EncoderWorkspace& ws) {
     ws.max_tokens = 0;
 }
 
-bool encoder_embed(const Model& model, EncoderWorkspace& ws, const int32_t* tokens, int n,
-                   float* out_host, cudaStream_t stream) {
+bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int32_t> tokens, float* out_host,
+                   cudaStream_t stream) {
+    const int n = static_cast<int>(tokens.size());
     if (ws.max_tokens == 0 || n <= 0 || n > ws.max_tokens || !out_host)
         return false;
     const int d = ws.d_model;
     const int dff = ws.d_ff;
 
-    cudaMemcpyAsync(ws.d_tokens, tokens, n * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(ws.d_tokens, tokens.data(), n * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
 
     // Embedding + token-type row 0 + post-embedding LayerNorm.
     Tensor h = fp16_view(ws.d_h, n, d);

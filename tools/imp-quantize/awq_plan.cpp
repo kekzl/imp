@@ -29,6 +29,7 @@
 
 #include "awq.h"
 
+#include "core/fp_bits.h"
 #include "model/json_util.h"
 #include "quant/awq_transform.h"
 
@@ -155,17 +156,19 @@ std::vector<std::string> unlisted_consumers(const std::map<std::string, const Ra
 }
 
 // Runs one group: search, then record the column scales and the fold. Returns
-// false only on a hard error; a skipped group is reported through `plan`.
-bool run_group(const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats, int layer,
-               const char* kind, const std::vector<std::string>& members,
-               const std::vector<float>& act_override, Plan& plan, SearchResult& result, std::string& err) {
-    // Cleared up front: callers read `result.alpha` to decide whether to fold,
-    // and a skipped group must never leave the previous group's scale standing.
-    result = SearchResult{};
+// the error text only on a hard error; a skipped group is reported through
+// `plan` and comes back as a default SearchResult (alpha 0 = no fold), which is
+// what keeps the previous group's scale from standing. That used to depend on
+// the function remembering to clear its out-parameter first.
+std::expected<SearchResult, std::string> run_group(const std::map<std::string, const RawTensor*>& index,
+                                                   const CalibrationStats& stats, int layer, const char* kind,
+                                                   const std::vector<std::string>& members,
+                                                   const std::vector<float>& act_override, Plan& plan) {
+    SearchResult result;
     const CalibrationEntry* stat = stats.find(layer, kind);
     if (!stat && act_override.empty()) {
         plan.groups_skipped++;
-        return true;
+        return result;
     }
     const std::vector<float>& act = act_override.empty() ? stat->mean_abs : act_override;
 
@@ -180,14 +183,14 @@ bool run_group(const std::map<std::string, const RawTensor*>& index, const Calib
             plan.groups_skipped++;
             plan.notes.push_back("layer " + std::to_string(layer) + " " + kind + ": missing or " +
                                  "unquantizable member " + name);
-            return true;
+            return result;
         }
         if (K < 0)
             K = sh.K;
         else if (K != sh.K) {
             plan.groups_skipped++;
             plan.notes.push_back("layer " + std::to_string(layer) + " " + kind + ": members disagree on K");
-            return true;
+            return result;
         }
         storage.push_back(std::move(bits));
         mats.push_back({&storage.back(), sh.N});
@@ -196,23 +199,25 @@ bool run_group(const std::map<std::string, const RawTensor*>& index, const Calib
         plan.groups_skipped++;
         plan.notes.push_back("layer " + std::to_string(layer) + " " + kind +
                              ": K does not match the calibration vector");
-        return true;
+        return result;
     }
     // `mats` holds pointers into `storage`; reserve() above keeps them stable.
     for (size_t i = 0; i < members.size(); i++)
         mats[i].data = &storage[i];
 
-    if (!search_group_scale(mats, K, act, result, err))
-        return false;
+    auto searched = search_group_scale(mats, K, act);
+    if (!searched)
+        return std::unexpected(searched.error());
+    result = std::move(*searched);
 
     if (result.alpha == 0.0f) {
         plan.groups_rtn++;
-        return true;
+        return result;
     }
     plan.groups_scaled++;
     for (const auto& name : members)
         plan.col_scale[name] = result.s;
-    return true;
+    return result;
 }
 
 }  // namespace
@@ -226,54 +231,47 @@ std::vector<uint16_t> raw_to_fp16(const RawTensor& t) {
         return out;
     }
     for (int64_t i = 0; i < n; i++) {
-        uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
-        float f;
-        std::memcpy(&f, &bits, sizeof(float));
         // __half_raw, not memcpy over __half — the latter is a class with a
         // protected member and the compiler is right to complain.
-        const __half_raw h(__float2half(f));
+        const __half_raw h(__float2half(bf16_to_float(src[i])));
         out[static_cast<size_t>(i)] = h.x;
     }
     return out;
 }
 
-bool build_plan(const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,
-                const std::string& config_json_path, const std::string& groups, Plan& plan,
-                std::string& err) {
+std::expected<Plan, std::string> build_plan(const std::map<std::string, const RawTensor*>& index,
+                                            const CalibrationStats& stats,
+                                            const std::string& config_json_path, const std::string& groups) {
+    Plan plan;
     const bool want_a = groups.find('A') != std::string::npos;
     const bool want_b = groups.find('B') != std::string::npos;
     const bool want_c = groups.find('C') != std::string::npos;
     const bool want_d = groups.find('D') != std::string::npos;
-    if (!want_a && !want_b && !want_c && !want_d) {
-        err = "--calib-groups '" + groups + "' selects no group; use a subset of ABCD";
-        return false;
-    }
+    if (!want_a && !want_b && !want_c && !want_d)
+        return std::unexpected("--calib-groups '" + groups + "' selects no group; use a subset of ABCD");
     if (groups != kAwqAllGroups)
         plan.notes.push_back("group selector: " + groups + " (default " + kAwqAllGroups +
                              ") — this is a diagnostic subset, not a normal checkpoint");
 
     std::ifstream f(config_json_path, std::ios::binary);
     if (!f) {
-        err = "cannot read " + config_json_path + " (needed for the architecture check)";
-        return false;
+        return std::unexpected("cannot read " + config_json_path + " (needed for the architecture check)");
     }
     std::stringstream ss;
     ss << f.rdbuf();
     const std::string text = ss.str();
-    JsonParser parser(text.data(), text.size());
+    JsonParser parser(text);
     JValue cfg = parser.parse();
     if (!parser.ok() || cfg.type != JType::OBJECT) {
-        err = "cannot parse " + config_json_path;
-        return false;
+        return std::unexpected("cannot parse " + config_json_path);
     }
 
     const JValue* mt = obj_get(cfg, "model_type");
     const std::string model_type = (mt && mt->type == JType::STRING) ? mt->str_val : "";
     if (!arch_uses_plain_rmsnorm(model_type)) {
-        err = "--calib does not support model_type '" + model_type +
-              "': the norm fold is only valid for a plain multiplicative RMSNorm "
-              "(qwen2/qwen3/llama/mistral). Quantize without --calib instead.";
-        return false;
+        return std::unexpected("--calib does not support model_type '" + model_type +
+                               "': the norm fold is only valid for a plain multiplicative RMSNorm "
+                               "(qwen2/qwen3/llama/mistral). Quantize without --calib instead.");
     }
 
     const int64_t n_layers = obj_int(cfg, "num_hidden_layers", 0);
@@ -284,8 +282,7 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
     if (head_dim <= 0 && n_heads > 0)
         head_dim = hidden / n_heads;
     if (n_layers <= 0 || n_heads <= 0 || n_kv_heads <= 0 || head_dim <= 0) {
-        err = "config.json is missing the layer/head geometry --calib needs";
-        return false;
+        return std::unexpected("config.json is missing the layer/head geometry --calib needs");
     }
     const int64_t n_rep = n_heads / n_kv_heads;
 
@@ -295,7 +292,6 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
         const std::string o_name = base + "self_attn.o_proj.weight";
         const std::string up_name = base + "mlp.up_proj.weight";
         const std::string down_name = base + "mlp.down_proj.weight";
-        SearchResult res;
 
         // ---- Group C: o_proj, folded into v_proj's output rows ----
         // This one folds into the tensor the KV CACHE stores, and imp's default
@@ -324,8 +320,10 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
                 const int64_t h = i / head_dim, d = i % head_dim;
                 tied[static_cast<size_t>(i)] = per_v[static_cast<size_t>((h / n_rep) * head_dim + d)];
             }
-            if (!run_group(index, stats, static_cast<int>(L), "WO", {o_name}, tied, plan, res, err))
-                return false;
+            const auto ran = run_group(index, stats, static_cast<int>(L), "WO", {o_name}, tied, plan);
+            if (!ran)
+                return std::unexpected(ran.error());
+            const SearchResult& res = *ran;
             if (res.alpha != 0.0f && plan.col_scale.count(o_name)) {
                 std::vector<float> row_div(static_cast<size_t>(vsh.N), 1.0f);
                 for (int64_t i = 0; i < osh.K; i++) {
@@ -348,8 +346,10 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
         Shape2 dsh, ush;
         if (want_d && tensor_shape(index, down_name, dsh) && tensor_shape(index, up_name, ush) &&
             dsh.K == ush.N) {
-            if (!run_group(index, stats, static_cast<int>(L), "W_DOWN", {down_name}, {}, plan, res, err))
-                return false;
+            const auto ran = run_group(index, stats, static_cast<int>(L), "W_DOWN", {down_name}, {}, plan);
+            if (!ran)
+                return std::unexpected(ran.error());
+            const SearchResult& res = *ran;
             if (res.alpha != 0.0f && plan.col_scale.count(down_name)) {
                 plan.row_div[up_name] = plan.col_scale[down_name];
                 const std::string up_bias = base + "mlp.up_proj.bias";
@@ -394,8 +394,10 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
                                                                       {"o_proj.weight"});
             if (want_a && !members.empty() && !act.empty() && index.count(norm) &&
                 fold_is_safe(index, extra, blocker)) {
-                if (!run_group(index, stats, static_cast<int>(L), "WQ", members, act, plan, res, err))
-                    return false;
+                const auto ran = run_group(index, stats, static_cast<int>(L), "WQ", members, act, plan);
+                if (!ran)
+                    return std::unexpected(ran.error());
+                const SearchResult& res = *ran;
                 if (res.alpha != 0.0f)
                     plan.vec_div[norm] = res.s;
             } else if (!want_a) {
@@ -439,8 +441,10 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
                                                                       {"down_proj.weight"});
             if (want_b && !members.empty() && !act.empty() && index.count(norm) &&
                 fold_is_safe(index, extra, blocker)) {
-                if (!run_group(index, stats, static_cast<int>(L), "W_GATE", members, act, plan, res, err))
-                    return false;
+                const auto ran = run_group(index, stats, static_cast<int>(L), "W_GATE", members, act, plan);
+                if (!ran)
+                    return std::unexpected(ran.error());
+                const SearchResult& res = *ran;
                 if (res.alpha != 0.0f)
                     plan.vec_div[norm] = res.s;
             } else if (!want_b) {
@@ -468,7 +472,7 @@ bool build_plan(const std::map<std::string, const RawTensor*>& index, const Cali
         fflush(stdout);
     }
 
-    return true;
+    return plan;
 }
 
 }  // namespace imp::awq

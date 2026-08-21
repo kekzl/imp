@@ -205,22 +205,19 @@ TEST(LogLevel, FromStringMapsEveryWordCaseInsensitively) {
         {"warn", LogLevel::WARN},   {"error", LogLevel::ERROR}, {"FATAL", LogLevel::FATAL},
     };
     for (const auto& [word, expected] : cases) {
-        LogLevel got = LogLevel::FATAL;
-        ASSERT_TRUE(log_level_from_string(word, got)) << word;
-        EXPECT_EQ(got, expected) << word;
+        const auto got = log_level_from_string(word);
+        ASSERT_TRUE(got.has_value()) << word;
+        EXPECT_EQ(*got, expected) << word;
     }
 }
 
 // Rejection has to be explicit, not "falls back to INFO": a typo that silently
 // resolves to the default would restore exactly the state this key fixed.
-TEST(LogLevel, FromStringRejectsAnythingElseAndLeavesOutAlone) {
-    for (const char* bad : {"", "verbose", "dbg", "informational", "debug ", "0"}) {
-        LogLevel got = LogLevel::WARN;  // sentinel: must survive untouched
-        EXPECT_FALSE(log_level_from_string(bad, got)) << "'" << bad << "'";
-        EXPECT_EQ(got, LogLevel::WARN) << "'" << bad << "' modified out";
-    }
-    LogLevel got = LogLevel::WARN;
-    EXPECT_FALSE(log_level_from_string(nullptr, got));
+// "leaves out alone" is no longer a property that can fail: there is no out
+// parameter to leave alone, only a value that is absent.
+TEST(LogLevel, FromStringRejectsAnythingElse) {
+    for (const char* bad : {"", "verbose", "dbg", "informational", "debug ", "0"})
+        EXPECT_FALSE(log_level_from_string(bad).has_value()) << "'" << bad << "'";
 }
 
 TEST(ProcessDiag, InstallAppliesTheConfiguredLogLevel) {

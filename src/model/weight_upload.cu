@@ -783,9 +783,7 @@ static bool upload_weight(Tensor& weight, QType qtype, QType compute_dtype, cuda
         return true;
 
     char keybuf[96];
-    const char* key = (wname && (g_warm || g_upload_log))
-                          ? make_weight_key(keybuf, sizeof(keybuf), wname, wlayer)
-                          : nullptr;
+    const char* key = (wname && (g_warm || g_upload_log)) ? make_weight_key(keybuf, wname, wlayer) : nullptr;
     const QType src_qtype = weight.qtype;
     // True source byte count for the raw-from-source heuristic: the row-based
     // formula the raw upload branches use. Tensor::nbytes() rounds per-element
@@ -1899,9 +1897,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                     // Suspend-to-RAM warm hit: restore the raw expert bytes from
                     // the host snapshot instead of re-copying from mmap.
                     char keybuf[96];
-                    const char* key = (g_warm || g_upload_log)
-                                          ? make_weight_key(keybuf, sizeof(keybuf), name, i)
-                                          : nullptr;
+                    const char* key = (g_warm || g_upload_log) ? make_weight_key(keybuf, name, i) : nullptr;
                     if (key && g_warm &&
                         g_warm->try_restore(key, packed, ctx.stream, ctx.gpu_allocs, kWarmOps,
                                             g_upload_log)) {

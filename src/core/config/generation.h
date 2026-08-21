@@ -22,8 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct Generation {
     bool no_logit_softcap = false;
@@ -34,5 +33,4 @@ struct Generation {
     // Disable RoPE inside the MTP draft head (diagnostic).
     bool mtp_no_rope = false;
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg

@@ -383,13 +383,14 @@ void run_case(int grid_h, int grid_w) {
     // The test's own scratch stays on VRAMAllocator — only the tower moved.
     VRAMAllocator alloc;
     ASSERT_TRUE(alloc.init(0.10f));
-    size_t bytes = 0;
-    std::string err;
-    ASSERT_TRUE(qwen3vl_upload_vision_tower(tower.model, bytes, err)) << err;
-    EXPECT_GT(bytes, 0u);
+    const auto bytes = qwen3vl_upload_vision_tower(tower.model);
+    ASSERT_TRUE(bytes) << bytes.error();
+    EXPECT_GT(*bytes, 0u);
 
     QwenVisionGrid grid;
-    ASSERT_TRUE(qwen3vl_build_vision_grid(grid_h, grid_w, kMerge, kPosSide, grid, err)) << err;
+    const auto built = qwen3vl_build_vision_grid(grid_h, grid_w, kMerge, kPosSide);
+    ASSERT_TRUE(built) << built.error();
+    grid = *built;
     ASSERT_EQ(grid.tokens, kTokens);
 
     const std::vector<float> patches = randoms(rng, static_cast<size_t>(kTokens) * kFeatures, 1.0f);

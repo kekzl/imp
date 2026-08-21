@@ -6,6 +6,7 @@
 #include "runtime/token_recycle_draft.h"
 
 #include <gtest/gtest.h>
+#include <span>
 #include <vector>
 
 using imp::TokenRecycleTable;
@@ -75,7 +76,7 @@ TEST(TokenRecycle, SlotsEvictOldest) {
 TEST(TokenRecycle, TopKObservationSetsRankOrder) {
     TokenRecycleTable t(100, 4);
     const int32_t ids[3] = {5, 6, 7};  // model's top-3 for token 1, best first
-    t.observe_topk(1, ids, 3);
+    t.observe_topk(1, std::span(ids, 3));
     EXPECT_EQ(t.successor(1, 0), 5);
     EXPECT_EQ(t.successor(1, 1), 6);
     EXPECT_EQ(t.successor(1, 2), 7);
@@ -100,7 +101,7 @@ TEST(TokenRecycle, IgnoresOutOfRangeIds) {
     EXPECT_FALSE(t.has(1));
     EXPECT_TRUE(t.draft_linear(1, 4).empty());
     const int32_t ids[2] = {150, 3};  // out-of-range entry skipped, valid kept
-    t.observe_topk(1, ids, 2);
+    t.observe_topk(1, std::span(ids, 2));
     EXPECT_EQ(t.successor(1, 0), 3);
     EXPECT_EQ(t.successor(1, 1), -1);
 }
@@ -108,7 +109,7 @@ TEST(TokenRecycle, IgnoresOutOfRangeIds) {
 TEST(TokenRecycle, CandidatesBranchAtRoot) {
     TokenRecycleTable t(100, 4);
     const int32_t ids[3] = {5, 6, 7};  // top-3 successors of 1
-    t.observe_topk(1, ids, 3);
+    t.observe_topk(1, std::span(ids, 3));
     t.observe_pair(5, 50);  // chain continuations
     t.observe_pair(6, 60);
     // 3 candidates, depth 2: [5,50], [6,60], [7] (7 has no successor).

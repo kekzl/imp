@@ -421,8 +421,9 @@ int Engine::resolve_prefill_chunk_size_() const {
 // (imp_perplexity). See engine.h for the contract.
 // =====================================================================
 
-bool Engine::begin_perplexity_capture(const int32_t* tokens, int n) {
-    if (ppl_capture_.active || !tokens || n < 2 || !executor_) {
+bool Engine::begin_perplexity_capture(std::span<const int32_t> tokens) {
+    const int n = static_cast<int>(tokens.size());
+    if (ppl_capture_.active || n < 2 || !executor_) {
         return false;
     }
     if (cudaMalloc(&ppl_capture_.d_tokens, static_cast<size_t>(n) * sizeof(int32_t)) != cudaSuccess) {
@@ -435,7 +436,7 @@ bool Engine::begin_perplexity_capture(const int32_t* tokens, int n) {
         ppl_capture_.d_nll = nullptr;
         return false;
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpy(ppl_capture_.d_tokens, tokens,
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(ppl_capture_.d_tokens, tokens.data(),
                                   static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice));
     IMP_CUDA_CHECK_LOG(cudaMemset(ppl_capture_.d_nll, 0, static_cast<size_t>(n) * sizeof(double)));
     // Greedy-agreement probe rides along for free (fused into the NLL max
@@ -1801,10 +1802,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
 
         const auto& bt = kv_manager_->block_table(req->id);
         const auto& sbt = kv_manager_->swa_block_table(req->id);
-        decode_builder_.add_decode_sequence(last_token, position, bt.data(), static_cast<int>(bt.size()),
-                                            ctx_len,
-                                            swa_sizing_active_ && !sbt.empty() ? sbt.data() : nullptr,
-                                            static_cast<int>(sbt.size()));
+        decode_builder_.add_decode_sequence(last_token, position, bt, ctx_len,
+                                            swa_sizing_active_ ? std::span<const int>(sbt)
+                                                               : std::span<const int>{});
     }
 
     Batch batch = decode_builder_.build();

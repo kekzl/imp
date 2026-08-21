@@ -92,10 +92,9 @@ bool Qwen3VLPipeline::init(VisionModel& tower, int max_patches) {
     // Idempotent: a tower already on the device (a second pipeline over the same
     // model) is left alone rather than uploaded twice.
     if (!tower.patch_embd_w.on_device) {
-        size_t bytes = 0;
-        std::string err;
-        if (!qwen3vl_upload_vision_tower(tower, bytes, err)) {
-            IMP_LOG_ERROR("Qwen3-VL pipeline: %s", err.c_str());
+        const auto uploaded = qwen3vl_upload_vision_tower(tower);
+        if (!uploaded) {
+            IMP_LOG_ERROR("Qwen3-VL pipeline: %s", uploaded.error().c_str());
             free_buffers();
             return false;
         }
@@ -175,13 +174,13 @@ int Qwen3VLPipeline::deepstack_taps() const {
     return tower_ ? static_cast<int>(tower_->config.deepstack_indexes.size()) : 0;
 }
 
-bool Qwen3VLPipeline::preprocess(const uint8_t* data, size_t len, QwenPatches& out) const {
+bool Qwen3VLPipeline::preprocess(std::span<const uint8_t> data, QwenPatches& out) const {
     if (!tower_)
         return false;
     int w = 0, h = 0, ch = 0;
-    uint8_t* rgb = stbi_load_from_memory(data, static_cast<int>(len), &w, &h, &ch, 3);
+    uint8_t* rgb = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &ch, 3);
     if (!rgb) {
-        IMP_LOG_ERROR("Qwen3-VL pipeline: could not decode a %zu-byte image", len);
+        IMP_LOG_ERROR("Qwen3-VL pipeline: could not decode a %zu-byte image", data.size());
         return false;
     }
     const bool ok = qwen_patchify(rgb, w, h, patchify_config(), out);
@@ -240,13 +239,13 @@ bool Qwen3VLPipeline::encode_patches(const QwenPatches& patches, Qwen3VLImage& o
         return false;
     }
 
-    QwenVisionGrid grid;
-    std::string err;
-    if (!qwen3vl_build_vision_grid(patches.grid_h, patches.grid_w, c.merge_size, c.pos_embed_grid, grid,
-                                   err)) {
-        IMP_LOG_ERROR("Qwen3-VL pipeline: %s", err.c_str());
+    const auto built = qwen3vl_build_vision_grid(patches.grid_h, patches.grid_w, c.merge_size,
+                                                 c.pos_embed_grid);
+    if (!built) {
+        IMP_LOG_ERROR("Qwen3-VL pipeline: %s", built.error().c_str());
         return false;
     }
+    const QwenVisionGrid& grid = *built;
 
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_patches_, patches.data.data(), patches.data.size() * sizeof(half),
                                        cudaMemcpyHostToDevice, stream));

@@ -37,25 +37,17 @@ AxisTaps axis_taps(int index, int size, int side) {
 
 }  // namespace
 
-bool qwen3vl_build_vision_grid(int grid_h, int grid_w, int merge, int pos_side, QwenVisionGrid& out,
-                               std::string& err) {
-    if (grid_h <= 0 || grid_w <= 0) {
-        err = "vision grid must be positive";
-        return false;
-    }
-    if (merge <= 0) {
-        err = "spatial merge size must be positive";
-        return false;
-    }
-    if (grid_h % merge != 0 || grid_w % merge != 0) {
-        err = "vision grid " + std::to_string(grid_h) + "x" + std::to_string(grid_w) +
-              " is not a multiple of the spatial merge size " + std::to_string(merge);
-        return false;
-    }
-    if (pos_side <= 0) {
-        err = "position-embedding grid side must be positive";
-        return false;
-    }
+std::expected<QwenVisionGrid, std::string> qwen3vl_build_vision_grid(int grid_h, int grid_w, int merge,
+                                                                     int pos_side) {
+    if (grid_h <= 0 || grid_w <= 0)
+        return std::unexpected("vision grid must be positive");
+    if (merge <= 0)
+        return std::unexpected("spatial merge size must be positive");
+    if (grid_h % merge != 0 || grid_w % merge != 0)
+        return std::unexpected("vision grid " + std::to_string(grid_h) + "x" + std::to_string(grid_w) +
+                               " is not a multiple of the spatial merge size " + std::to_string(merge));
+    if (pos_side <= 0)
+        return std::unexpected("position-embedding grid side must be positive");
 
     const int tokens = grid_h * grid_w;
     QwenVisionGrid g;
@@ -90,8 +82,7 @@ bool qwen3vl_build_vision_grid(int grid_h, int grid_w, int merge, int pos_side, 
         }
     }
 
-    out = std::move(g);
-    return true;
+    return g;
 }
 
 }  // namespace imp

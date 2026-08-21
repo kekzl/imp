@@ -22,8 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct FFN {
     // SwiGLU/GeGLU sparsity probe (instrumentation-only — no skipping).
@@ -49,5 +48,4 @@ struct FFN {
     // fall through to the unmasked dispatch automatically.
     float sparsity_threshold = 0.0f;
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg

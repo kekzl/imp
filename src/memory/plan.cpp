@@ -1,7 +1,7 @@
 #include "memory/plan.h"
 
 #include <algorithm>
-#include <cstdio>
+#include <format>
 
 namespace imp {
 
@@ -17,9 +17,7 @@ void push(std::vector<PlanLine>& v, const char* name, RegionTag tag, size_t byte
 }
 
 std::string fmt_lever(const char* key, long long from, long long to) {
-    char buf[160];
-    std::snprintf(buf, sizeof(buf), "%s %lld -> %lld", key, from, to);
-    return std::string(buf);
+    return std::format("{} {} -> {}", key, from, to);
 }
 
 }  // namespace
@@ -50,31 +48,21 @@ std::vector<PlanLine> MemoryPlan::lines() const {
 }
 
 std::string PlanFailure::report() const {
-    std::string out;
-    char buf[256];
-
-    std::snprintf(buf, sizeof(buf), "Cannot fit this configuration in the %zu MiB budget.\n\n",
-                  mib(budget));
-    out += buf;
-    std::snprintf(buf, sizeof(buf), "  %-36s %10s\n", "requested", "MiB");
-    out += buf;
-    for (const auto& l : lines) {
-        std::snprintf(buf, sizeof(buf), "    %-34s %10.0f\n", l.name, l.bytes / kMiB);
-        out += buf;
-    }
-    std::snprintf(buf, sizeof(buf), "    %-34s %10s\n", "", "-----");
-    out += buf;
-    std::snprintf(buf, sizeof(buf), "    %-34s %10.0f   over by %.0f MiB\n\n", "total",
-                  requested / kMiB, over_by / kMiB);
-    out += buf;
+    // std::format, not snprintf into a fixed buffer: a plan line name long
+    // enough to overrun 256 bytes used to be silently truncated, and this
+    // report is what a user reads when the engine refuses to start.
+    std::string out = std::format("Cannot fit this configuration in the {} MiB budget.\n\n", mib(budget));
+    out += std::format("  {:<36} {:>10}\n", "requested", "MiB");
+    for (const auto& l : lines)
+        out += std::format("    {:<34} {:>10.0f}\n", l.name, l.bytes / kMiB);
+    out += std::format("    {:<34} {:>10}\n", "", "-----");
+    out += std::format("    {:<34} {:>10.0f}   over by {:.0f} MiB\n\n", "total", requested / kMiB,
+                       over_by / kMiB);
 
     if (!levers.empty()) {
         out += "  the largest levers\n";
-        for (const auto& lv : levers) {
-            std::snprintf(buf, sizeof(buf), "    %-38s frees %6.0f MiB\n", lv.change.c_str(),
-                          lv.frees / kMiB);
-            out += buf;
-        }
+        for (const auto& lv : levers)
+            out += std::format("    {:<38} frees {:>6.0f} MiB\n", lv.change, lv.frees / kMiB);
     }
     return out;
 }

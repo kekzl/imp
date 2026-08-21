@@ -22,8 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct GEMM {
     bool no_dp4a_gemv = false;
@@ -191,5 +190,4 @@ struct GEMM {
     // on CUTLASS.
     bool nvfp4_moe_decode = true;
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg

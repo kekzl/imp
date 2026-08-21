@@ -22,8 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct Diagnostics {
     // Process log level: "debug" | "info" | "warn" | "error" | "fatal".
@@ -139,5 +138,4 @@ struct Diagnostics {
     std::string vram_audit_dump;
     // [RETIRED] tq_skip_qjl removed in Phase 5 (TurboQuant retired 2026-05-17).
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg

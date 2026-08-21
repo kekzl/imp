@@ -11,6 +11,8 @@
 // working without duplicating template logic.
 
 #include <cstdint>
+#include <expected>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -19,14 +21,16 @@ namespace imp {
 // Replaces the k-th occurrence of `pad_id` with `counts[k]` copies of it.
 // Refuses when the number of placeholders and the number of images disagree:
 // that means the prompt and the encoder are describing different inputs, and
-// every position after the mismatch would be shifted.
-bool expand_image_placeholders(std::vector<int32_t>& tokens, int32_t pad_id, const std::vector<int>& counts,
-                               std::string& err);
+// every position after the mismatch would be shifted. `tokens` is untouched on
+// a refusal.
+[[nodiscard]] std::expected<void, std::string> expand_image_placeholders(std::vector<int32_t>& tokens,
+                                                                         int32_t pad_id,
+                                                                         const std::vector<int>& counts);
 
 // FNV-1a over an image's bytes. Used as the prefix cache's content salt, so a
 // hit needs the same tokens AND the same picture. Never returns 0 — that value
 // means "no image" to the cache, and an all-zero image must not claim it.
-size_t image_content_hash(const uint8_t* data, size_t len);
+size_t image_content_hash(std::span<const uint8_t> data);
 
 // Fold one more image's hash into a running salt for a request carrying
 // several. Order-sensitive on purpose: the same two pictures the other way

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include <span>
 #include <vector>
 #include <cstdint>
 #include <cuda_runtime.h>
@@ -121,23 +122,26 @@ public:
 
     void reset();
 
-    // Add a prefill sequence (multiple tokens). swa_block_table (optional)
-    // is the parallel SWA-group table — pass nullptr when SWA sizing is off.
-    void add_prefill_sequence(const int32_t* tokens, int n_tokens, const int* block_table, int n_blocks,
-                              int start_pos, const int* swa_block_table = nullptr,
-                              int n_swa_blocks = 0);
+    // Add a prefill sequence (multiple tokens). swa_block_table (optional) is
+    // the parallel SWA-group table; pass an empty span when SWA sizing is off.
+    //
+    // Spans, not (pointer, count): the tables are host arrays, and the pair
+    // form let the scheduler pass a null pointer together with a non-zero
+    // count when SWA sizing was inactive but the sequence had blocks. Harmless
+    // only because build() re-checked the pointer.
+    void add_prefill_sequence(std::span<const int32_t> tokens, std::span<const int> block_table,
+                              int start_pos, std::span<const int> swa_block_table = {});
 
     // Add a decode sequence (single token)
-    void add_decode_sequence(int32_t token, int position, const int* block_table, int n_blocks,
-                             int context_len, const int* swa_block_table = nullptr,
-                             int n_swa_blocks = 0);
+    void add_decode_sequence(int32_t token, int position, std::span<const int> block_table, int context_len,
+                             std::span<const int> swa_block_table = {});
 
     Batch build();
 
 private:
     Batch batch_;
-    std::vector<std::pair<const int*, int>> raw_block_tables_;  // (ptr, n_blocks)
-    std::vector<std::pair<const int*, int>> raw_swa_block_tables_;
+    std::vector<std::span<const int>> raw_block_tables_;
+    std::vector<std::span<const int>> raw_swa_block_tables_;
     bool any_swa_tables_ = false;
 };
 

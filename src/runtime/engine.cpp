@@ -197,17 +197,15 @@ Engine::~Engine() {
 // in engine_spec_mtp.cpp — chunked-prefill capable, DeepSeek-aligned pairing,
 // feed-only forwards without the lm_head GEMV.)
 
-
-bool Engine::encoder_embed(const int32_t* tokens, int n, std::vector<float>& out) {
+bool Engine::encoder_embed(std::span<const int32_t> tokens, std::vector<float>& out) {
     if (encoder_ws_storage_ == nullptr || !model_) {
         IMP_LOG_ERROR("encoder_embed: no encoder workspace (not an encoder model?)");
         return false;
     }
     auto* ews = static_cast<imp::EncoderWorkspace*>(encoder_ws_storage_);
     out.resize(model_->config_.d_model);
-    return imp::encoder_embed(*model_, *ews, tokens, n, out.data(), stream_);
+    return imp::encoder_embed(*model_, *ews, tokens, out.data(), stream_);
 }
-
 
 // =====================================================================
 // Helper methods
@@ -502,13 +500,9 @@ void Engine::constraints_return_(std::shared_ptr<ConstraintManager> cm) {
 // Vision delegation
 // =====================================================================
 
-
-
-
-bool Engine::preprocess_image(const uint8_t* data, size_t len, ImageData& out) {
-    return vision_.preprocess(data, len, out);
+bool Engine::preprocess_image(std::span<const uint8_t> data, ImageData& out) {
+    return vision_.preprocess(data, out);
 }
-
 
 // =====================================================================
 // Initialization — decomposed into sub-phases

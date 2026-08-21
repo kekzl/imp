@@ -7,7 +7,7 @@
 
 namespace imp {
 
-JsonParser::JsonParser(const char* data, size_t len) : data_(data), len_(len), pos_(0) {}
+JsonParser::JsonParser(std::string_view data) : data_(data.data()), len_(data.size()), pos_(0) {}
 
 char JsonParser::peek() const {
     if (pos_ >= len_)
@@ -330,7 +330,7 @@ bool parse_json_file(const std::string& path, JValue& out) {
     if (data.empty())
         return false;
 
-    JsonParser parser(data.c_str(), data.size());
+    JsonParser parser(data);
     out = parser.parse();
     if (!parser.ok() || out.type != JType::OBJECT) {
         IMP_LOG_WARN("failed to parse JSON: %s", path.c_str());

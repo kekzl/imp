@@ -1,6 +1,7 @@
 #include "runtime/token_recycle_draft.h"
 
 #include <algorithm>
+#include <ranges>
 
 namespace imp {
 
@@ -46,8 +47,8 @@ void TokenRecycleTable::observe_pair(int32_t prev, int32_t next) {
                         : uint8_t{0};
 }
 
-void TokenRecycleTable::observe_topk(int32_t token, const int32_t* ids, int n) {
-    if (!valid_(token) || !ids || n <= 0)
+void TokenRecycleTable::observe_topk(int32_t token, std::span<const int32_t> ids) {
+    if (!valid_(token) || ids.empty())
         return;
     // Streak follows the model's rank-0 candidate: re-observed -> confirm,
     // brand-new -> reset. Lower ranks only refresh the slot pool.
@@ -61,9 +62,9 @@ void TokenRecycleTable::observe_topk(int32_t token, const int32_t* ids, int n) {
             }
     }
     // Promote in reverse rank order so ids[0] ends up in slot 0.
-    for (int i = n - 1; i >= 0; --i)
-        if (valid_(ids[i]))
-            promote_(token, ids[i]);
+    for (const int32_t id : std::views::reverse(ids))
+        if (valid_(id))
+            promote_(token, id);
     streak_[token] = front_existed
                          ? static_cast<uint8_t>(std::min(255, streak_[token] + 1))
                          : uint8_t{0};

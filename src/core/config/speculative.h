@@ -22,8 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct Speculative {
     // Prompt-lookup speculation, default-on (batch-1, greedy, dense). This
@@ -290,5 +289,4 @@ struct Speculative {
     // exceeds this run eager. Clamped to the model's max_seq_len.
     int capture_ctx_cap = 32768;
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg

@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,7 +31,9 @@ struct JValue {
 
 class JsonParser {
 public:
-    JsonParser(const char* data, size_t len);
+    // A view, not (pointer, length): every caller already had both halves of
+    // one object and had to spell the pair out.
+    explicit JsonParser(std::string_view data);
 
     JValue parse();
     bool ok() const { return !error_; }

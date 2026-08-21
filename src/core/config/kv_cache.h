@@ -24,8 +24,7 @@
 
 #include "core/config/swa_sizing_mode.h"
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct KVCache {
     // "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for models whose
@@ -112,5 +111,4 @@ struct KVCache {
         return SwaSizingMode::Off;
     }
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg

@@ -245,15 +245,14 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.vision_content_hash = 0;
         for (const auto& bytes : ctx.params.images)
             ctx.snap.vision_content_hash = imp::combine_image_hash(ctx.snap.vision_content_hash,
-                                                                   imp::image_content_hash(bytes.data(),
-                                                                                           bytes.size()));
+                                                                   imp::image_content_hash(bytes));
         if (state.ctx->engine->has_qwen_vision()) {
             // Dynamic resolution: patchify now (CPU only) so the token counts
             // are known before the prompt is tokenized — each placeholder has
             // to be expanded to exactly its own picture's count.
             for (const auto& bytes : ctx.params.images) {
                 auto patches = std::make_shared<imp::QwenPatches>();
-                if (!state.ctx->engine->preprocess_image_qwen(bytes.data(), bytes.size(), *patches))
+                if (!state.ctx->engine->preprocess_image_qwen(bytes, *patches))
                     return fail("Failed to process image");
                 const int tokens = state.ctx->engine->image_tokens_of(*patches);
                 if (tokens <= 0)
@@ -268,8 +267,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             return fail("this model accepts one image per request");
         } else {
             auto img = std::make_shared<imp::ImageData>();
-            if (!state.ctx->engine->preprocess_image(ctx.params.images[0].data(), ctx.params.images[0].size(),
-                                                     *img))
+            if (!state.ctx->engine->preprocess_image(ctx.params.images[0], *img))
                 return fail("Failed to process image");
             ctx.snap.vision_image = std::move(img);
         }
@@ -383,13 +381,12 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
                                                   force_thinking);
         const int32_t pad_id = ctx.snap.tok->find_token("<|image_pad|>");
-        std::string exp_err;
-        if (pad_id < 0 ||
-            !imp::expand_image_placeholders(ctx.snap.tokens, pad_id, ctx.snap.qwen_image_tokens, exp_err)) {
+        const auto expanded = pad_id < 0 ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
+                                         : imp::expand_image_placeholders(ctx.snap.tokens, pad_id,
+                                                                          ctx.snap.qwen_image_tokens);
+        if (!expanded) {
             res.status = 400;
-            json error = {{"error",
-                           {{"message", pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err},
-                            {"type", "invalid_request_error"}}}};
+            json error = {{"error", {{"message", expanded.error()}, {"type", "invalid_request_error"}}}};
             res.set_content(dump_safe(error), "application/json");
             return false;
         }

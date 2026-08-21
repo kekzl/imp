@@ -17,6 +17,7 @@
 // function exactly, which pins taps and weights independently of each other.
 
 #include <cstdint>
+#include <expected>
 #include <string>
 #include <vector>
 
@@ -36,11 +37,12 @@ struct QwenVisionGrid {
 
 inline constexpr int kQwenVisionPosTaps = 4;
 
-// `grid_h`/`grid_w` count patches and must both be multiples of `merge` —
+// `grid_h`/`grid_w` count patches and must both be multiples of `merge`:
 // smart_resize guarantees that, and a grid that is not would silently drop the
 // tail of the last merge block. `pos_side` is the side of the learned table.
-// Returns false with `err` set rather than producing a half-filled grid.
-bool qwen3vl_build_vision_grid(int grid_h, int grid_w, int merge, int pos_side, QwenVisionGrid& out,
-                               std::string& err);
+// Returns the error text instead of a grid, so a half-filled grid is not a
+// value that exists.
+[[nodiscard]] std::expected<QwenVisionGrid, std::string> qwen3vl_build_vision_grid(int grid_h, int grid_w,
+                                                                                   int merge, int pos_side);
 
 }  // namespace imp

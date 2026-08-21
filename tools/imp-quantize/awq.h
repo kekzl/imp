@@ -30,6 +30,7 @@
 #include "quant/calibration_stats.h"
 
 #include <cstdint>
+#include <expected>
 #include <map>
 #include <string>
 #include <vector>
@@ -84,8 +85,9 @@ constexpr const char* kAwqAllGroups = "ABCD";
 // config.json. `groups` selects which of A/B/C/D run. Returns false with `err`
 // set when the architecture is not one whose pre-norm layout this transform is
 // valid for.
-bool build_plan(const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,
-                const std::string& config_json_path, const std::string& groups, Plan& plan, std::string& err);
+[[nodiscard]] std::expected<Plan, std::string> build_plan(
+    const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,
+    const std::string& config_json_path, const std::string& groups);
 
 // One matrix of a scale group, host-side FP16 bits, row-major [N, K].
 struct GroupMatrix {
@@ -102,8 +104,8 @@ struct SearchResult {
 
 // Searches alpha over [0, 1] and returns the winning scale vector.
 // All matrices must share the inner dimension K. `act_mean` is [K].
-// Returns false and fills `err` on GPU failure or bad shapes.
-bool search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K, const std::vector<float>& act_mean,
-                        SearchResult& out, std::string& err);
+// Returns the error text on GPU failure or bad shapes.
+[[nodiscard]] std::expected<SearchResult, std::string> search_group_scale(
+    const std::vector<GroupMatrix>& mats, int64_t K, const std::vector<float>& act_mean);
 
 }  // namespace imp::awq

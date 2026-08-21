@@ -16,6 +16,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <span>
 
 namespace imp {
 
@@ -23,7 +24,7 @@ namespace imp {
 
 class BinaryReader {
 public:
-    BinaryReader(const uint8_t* data, size_t size) : data_(data), size_(size), pos_(0) {}
+    explicit BinaryReader(std::span<const uint8_t> data) : data_(data.data()), size_(data.size()), pos_(0) {}
 
     size_t pos() const { return pos_; }
     size_t remaining() const { return size_ - pos_; }

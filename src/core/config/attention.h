@@ -22,8 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace imp {
-namespace cfg {
+namespace imp::cfg {
 
 struct Attention {
     std::string fp8_prefill = "auto";
@@ -167,5 +166,4 @@ struct Attention {
     // model's max_tokens×heads needs (capped here); +128 MiB vs 256 at most.
     int attn_scores_mib = 384;
 };
-}  // namespace cfg
-}  // namespace imp
+}  // namespace imp::cfg
