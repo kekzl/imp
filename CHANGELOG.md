@@ -21,6 +21,12 @@ there instead of retelling it.
   message. And 28 functions defined inline in a header with no caller anywhere were
   removed, with a gate to keep the count at zero.
 
+
+- **`make check-alloc-pairs` fails when a pointer is freed by the wrong
+  allocator**, in CI as well. Two passes: within a file, and across files for
+  member variables, because the 128 MiB pair above allocates and frees in
+  different translation units and no per-file check can see it.
+
 ### Fixed
 
 - **Four device pointers were freed through an allocator that had not produced
@@ -31,13 +37,6 @@ there instead of retelling it.
   at executor teardown, which returns success without returning the block to the
   async pool; the shared-workspace grow branch swapped a `vram_alloc()` buffer for
   a `cudaMallocAsync` one. See `AUDIT.md` B10.
-
-### Added
-
-- **`make check-alloc-pairs` fails when a pointer is freed by the wrong
-  allocator**, in CI as well. Two passes: within a file, and across files for
-  member variables, because the 128 MiB pair above allocates and frees in
-  different translation units and no per-file check can see it.
 
 ## [0.29.0] - 2026-08-21
 
