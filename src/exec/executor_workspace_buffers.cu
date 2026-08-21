@@ -1580,14 +1580,22 @@ void GraphExecutor::free_buffers() {
     chunk_capture_k_ = nullptr;
     chunk_capture_v_ = nullptr;
     chunk_capture_ctx_ = 0;
+    // cudaFreeAsync, not cudaFree: the grow path in executor_attention_prefill.cu
+    // allocates these with cudaMallocAsync, and this teardown is the only place
+    // that used the sync API on them. Freeing a stream-ordered allocation
+    // synchronously returns success without returning the block to the async
+    // mempool (#834), so the 128 MiB looked reclaimed and was not. Null stream
+    // plus a sync below, matching ~Model.
     if (chunk_eager_k_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(chunk_eager_k_));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(chunk_eager_k_, nullptr));
         chunk_eager_k_ = nullptr;
     }
     if (chunk_eager_v_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(chunk_eager_v_));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(chunk_eager_v_, nullptr));
         chunk_eager_v_ = nullptr;
     }
+    if (chunk_eager_bytes_ > 0)
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));  // retire the frees for the pool
     chunk_eager_bytes_ = 0;
     ws_.free_buffers();  // shared + persistent workspace (Workspace-owned)
     vfree(fp32_accum_buf_);

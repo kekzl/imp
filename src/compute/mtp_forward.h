@@ -66,6 +66,13 @@ struct MtpDraftWorkspace {
     // [1] int — persistent argmax scratch for the host-path draft step
     // (replaces a per-draft cudaMallocAsync/cudaFreeAsync pair).
     int*  d_argmax = nullptr;
+    // [1] int32 — persistent token-id scratch for the host-chain draft step,
+    // the input twin of d_argmax above. The host path used to cudaMalloc four
+    // bytes per draft step and free them with cudaFreeAsync (AUDIT B10): the
+    // wrong allocator for that pointer, and a serving-phase allocation on the
+    // one MTP arm every MoE model takes (the device-chain arm needs
+    // n_experts == 0). Persistent here, so it is neither.
+    int32_t* d_tok = nullptr;
 
     // ---- Phase 2.2 MoE scratch ----
     // [hidden_dim] FP16 — post_attention_layernorm(fc_out)

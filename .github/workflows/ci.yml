@@ -460,6 +460,12 @@ jobs:
         run: python3 tools/check_alloc_sites.py --stats
       - name: I1 allowlist gate (blocking)
         run: python3 tools/check_alloc_sites.py
+      # A pointer freed through the allocator that did not produce it is invalid
+      # CUDA and silent: right pointer width, no driver complaint, program keeps
+      # running. AUDIT B10 recorded one such pair in July and it was still there
+      # in August, two lines further down. Blocking.
+      - name: Allocate/free API pairing gate (blocking)
+        run: python3 tools/check_alloc_pairs.py
 
   # Post-launch error checks after every CUDA kernel launch. Blocking: an
   # unguarded launch turns a launch-time failure (bad config, smem over the
