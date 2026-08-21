@@ -69,6 +69,16 @@ there instead of retelling it.
 
 ### Changed
 
+- **Why a verify chunk costs 8.4x a decode step on Q6_K is recorded as open, with
+  three refuted explanations.** It is what makes n-gram speculation net-negative on
+  short requests on the north-star checkpoint. The chunk being a different, unfused
+  execution graph explains the shape; the 3.79x on NVFP4 against 8.4x on Q6_K for the
+  same model has no mechanism. Refuted and not to be re-run: the per-chunk source
+  dequant (a `ngram=false` control gives the identical 2800 launches, so it is all
+  prefill), #998's overlay not firing (its kernel is in the spec-on trace and absent
+  from spec-off), and a slow verify kernel (20.7 us per call against 68.1 us for
+  decode `gate_up`). ([`DEBT_LEDGER`](docs/audit/DEBT_LEDGER_2026_08_21.md))
+
 - **The north-star model's default decode has two values, and which one you get
   is a coin flip.** Qwen3-14B Q6_K measures 162 tok/s when the n-gram drafter
   stays quiet and ~154 when it engages, over four otherwise identical isolated
