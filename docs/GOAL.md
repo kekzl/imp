@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-08-21
-commit: b2a162c0
+commit: d49dfd6d
 -->
 
 # imp — Goal Definition
@@ -167,7 +167,7 @@ A release is shippable when, on RTX 5090:
    - `gemm.nvfp4_lm_head_gdn` default-ON (#483): +2.2% PPL for +11.4% decode on GDN hybrids.
    - `gemm.fp8_ssm_proj` on **GGUF** hybrids default-ON (#962): +1.8% PPL (201-token corpus) for +21% decode on Qwen3.6-35B UD-Q4_K_M — E4M3 stacked on the Q8_0 lattice; the native-NVFP4 branch of the same flag is PPL-flat (#949) and is not a trade.
 
-   - `gemm.nvfp4_lm_head` default **"auto"** (#982, resolved 2026-07-13): the LM-head NVFP4 decode cache follows the measured net rule — ON for native BF16/F16 heads (+8-16% decode, +2.2% PPL, the long-standing accepted trade) and for small dense GGUF heads (d_model ≤ 4096: 4B +6.6% decode/+3.8% PPL, 8B +5.8%/+2.6% — decode win exceeds PPL cost); OFF for larger or MoE GGUF heads where the 2026-07-12 sweep measured the reverse (14B +1.9%/+2.1%, 30B-A3B +3.7%/+5.0%). Cost: north-star (14B Q6_K) −~1.9% decode, accepted for default PPL parity; `"on"`/`"off"` override.
+   - `gemm.nvfp4_lm_head` default **"auto"** (#982, resolved 2026-07-13): the LM-head NVFP4 decode cache follows the measured net rule: ON for native BF16/F16 heads (+8-16% decode, +2.2% PPL, the long-standing accepted trade) and for small dense GGUF heads (d_model ≤ 4096: 4B +6.6% decode/+3.8% PPL, 8B +5.8%/+2.6%, decode win exceeds PPL cost); OFF for larger or MoE GGUF heads where the 2026-07-12 sweep measured the reverse (14B +1.9%/+2.1%, 30B-A3B +3.7%/+5.0%). Cost: north-star (14B Q6_K) −~1.9% decode, accepted for default PPL parity; `"on"`/`"off"` override. **Gemma-4-26B-A4B UD-Q4_K_M, priced 2026-08-21 and it is the largest decode cost this rule carries:** the MoE arm turns the head off categorically (`is_dense=false` short-circuits before `d_model` is read), and that model was not in the calibration set. Measured on one build, alternating arms: `on` buys **+7.4% decode** (245.31 → 263.44 tok/s) for **+9.0% PPL** (251.23 → 273.90, 6465-token corpus). Losing by this rule's own standard, and by a wider margin than the 30B-A3B case it was calibrated on, so the categorical call was correct for a model it had never seen. The decode half is what a competitive sweep sees: Gemma-4 measured 258.96 tok/s before `63df2d30` and 245.24 after, and that −5.3% is this trade, not a regression.
    - `gemm.fp8_attn_proj` default "auto" = full q/k/v/o FP8 decode sidecar on **gpt-oss** (#984, 2026-07-13): +12.1% decode (349.7→392.1 tok/s). Not a teacher-forced-PPL trade by construction — the sidecar is decode-only (M=1 GEMV) and an nsys-verified `--perplexity` run executes zero FP8 kernels; decode-path quality gated via greedy-identity at 100 tokens and coherent 512-token generations across prompts. Opt-out `"off"`, conservative `"qo"` middle mode.
 
    First systematic cross-engine measurement 2026-07-12 (`docs/archive/ppl_parity_2026_07_12.md`): with the LM-head opt-out imp is at parity (−0.8%…+0.2%) with llama.cpp on every comparable GGUF hero.
