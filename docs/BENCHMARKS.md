@@ -69,6 +69,66 @@ Q4_K** hybrid path by extending that sidecar to the Q8_0-kept GDN projections
 (35B Q4_K decode 224 → 272 tok/s, 2026-07-11) — both now ahead of llama.cpp's
 ~229. GGUF remains the legacy path — NVFP4 SafeTensors is the priority.
 
+### Competitive re-sweep 2026-08-21 (llama.cpp build 10524 `9ee9fc04c`)
+
+Reproduce with `make bench-competitive`. The competitor image is pinned **by
+digest** in [`scripts/bench_competitive.sh`](../scripts/bench_competitive.sh),
+not by tag: `:full-cuda` moves, and the two sweeps below were each compared
+against a build that nothing in the repo recorded.
+
+Two imp columns, because one number cannot mean both things. imp's `--bench`
+prompt is self-repetitive, so where the n-gram drafter engages it accepts
+essentially every draft (measured here: 504 of 504 on Qwen3-8B) and
+`llama-bench` has no equivalent. The spec-off column is the same command with
+`--set speculative.ngram=false`. The 2026-07-12 sweep tabulated the defaults
+column only.
+
+| Model (shared quant) | imp default | imp spec-off | llama.cpp | imp lead | lead 07-12 |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-8B Q8_0 | 396.76 | 284.60 | 159.74 | **+148 %** | +48 % |
+| Qwen3-14B Q6_K | 162.06¹ | 163.38 | 112.83 | **+44 %** | +42 % |
+| Qwen3.6-35B-A3B UD-Q4_K_M (hybrid) | 283.99 | 284.48 | 220.53 | **+29 %** | +18 % |
+| Gemma-4-26B-A4B UD-Q4_K_M (MoE) | 244.16 | 244.24 | 210.34 | **+16 %** | +21 % |
+| Qwen3-30B-A3B Q4_K_M (MoE, non-hero) | 314.62 | 314.64 | 303.28 | +3.7 % | +1.7 % |
+| gpt-oss-20b MXFP4² | 412.41 | 412.09 | 330.09 | **+25 %** | +13-19 % |
+
+**Release bar 2 holds on all four heroes, in both columns.** The narrowest
+margin is Gemma-4 at +16 %.
+
+**llama.cpp did not erode the lead.** b10524 measures flat to slightly slower
+than b9976 on every shared model here (8B 160.5 → 159.74, 14B 115.3 → 112.83,
+35B 226.5 → 220.53, Gemma-4 216.0 → 210.34, 30B 319.2 → 303.28). The six weeks
+of batch-1 decode work between the two builds does not show up at these shapes.
+
+**One imp-side regression, and it is Gemma-4:** 261.3 → 244.16, -6.6 %, against
+llama.cpp's -2.6 % on the same model. That is what took the lead from +21 % to
++16 %. Not investigated here; this sweep measures, it does not fix.
+
+**The n-gram drafter never engages on Qwen3-14B Q6_K:** `verify_steps=0
+miss_steps=72 drafted=0` over a full bench run. Both imp columns therefore
+measure the same path on that model, which is what makes the pair a
+repeatability control: where speculation is inert the two columns must agree,
+and on 35B, Gemma-4, 30B and gpt-oss they agree to **0.2 %**.
+
+¹ The sweep produced 154.77 for this row, 5.3 % below its own spec-off column
+where the two must agree. Two isolated re-measurements gave 162.08 and 162.04,
+and the tabulated value is their median. Cause: the first imp run after a
+16 GiB competitor model unloads is not on a settled card. The settle between
+arms was raised from 5 s to 20 s afterwards, so this sweep's own numbers were
+taken at 5 s.
+
+² Basis changed since 07-12. That row compared imp on SafeTensors against
+llama.cpp on GGUF; the SafeTensors checkpoint is no longer on this host, so both
+engines here read the same `gpt-oss-20b-mxfp4.gguf`. The row is more
+apples-to-apples than the one it replaces, not less, but it is not the same
+measurement.
+
+[PROV: commit=fa21f28e date=2026-08-21 hw=RTX5090 tree=imp-campaign (fresh `make build`)
+ image=ghcr.io/ggml-org/llama.cpp@sha256:c49f4d485fb08d3002fcbd6b43be8b18758b4a2f021243b42968f64a37b57e1d
+ cmd=`bash scripts/bench_competitive.sh` -> imp `imp-cli --model <m> --bench --bench-pp 512 --bench-reps 10 --max-tokens 128 --temperature 0`,
+     llama `llama-bench -m <m> -p 512 -n 128 -r 5 -ngl 99`
+ note=one process per (engine, model); GPU verified idle (1502 MiB WSLg baseline, no containers) before the run]
+
 ### Competitive re-sweep 2026-07-12 (llama.cpp build 9976 `e3546c794`)
 
 Same-day, same host state, both engines pp512/tg128: imp
