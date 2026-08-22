@@ -710,10 +710,21 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // *9/8 for 256-byte alignment padding across the arena's takes (integer
         // identical to t + t/8, just one expression instead of two).
         const size_t cap = std::max(kEngineArenaDefaultBytes, (d.total() + vision_bytes + batch_pool_bytes) * 9 / 8);
-        IMP_LOG_INFO("engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> %.1f MiB reserved",
-                     d.describe().c_str(), vision_bytes / (1024.0 * 1024.0),
-                     batch_pool_bytes / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
-        (void)engine_arena_open(cuda_malloc_backend(), cap);
+        // #1629: the INFO line printed "-> N MiB reserved" BEFORE the open and
+        // regardless of its outcome, and the outcome was discarded. Both made
+        // a failed open indistinguishable from a successful one in the log.
+        const MemError arena_err = engine_arena_open(cuda_malloc_backend(), cap);
+        if (arena_err == MemError::Ok) {
+            IMP_LOG_INFO("engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> %.1f MiB reserved",
+                         d.describe().c_str(), vision_bytes / (1024.0 * 1024.0),
+                         batch_pool_bytes / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
+        } else {
+            IMP_LOG_WARN(
+                "engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> open of "
+                "%.1f MiB FAILED; tenants fall back to their own allocations",
+                d.describe().c_str(), vision_bytes / (1024.0 * 1024.0), batch_pool_bytes / (1024.0 * 1024.0),
+                cap / (1024.0 * 1024.0));
+        }
         // Name the two charges that are already known, HERE rather than after
         // warmup. Both are facts by now — the context was measured above, the
         // arena just took its region — and naming them early is what lets

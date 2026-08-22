@@ -180,6 +180,23 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A second `ImpContext` in one process was accepted and then broke both**
+  (#1629). `imp.h` told callers to create one context per thread; the engine
+  arena and the graph-slot pool are process-global, the second
+  `engine_arena_open()` returned `InvalidArgument` into a discarded value, and
+  the first `imp_context_free()` released both out from under the other. A
+  second LIVE context is refused now; sequential create/free/create is
+  unaffected. The arena's INFO line also printed "N MiB reserved" before the
+  open and regardless of its result.
+
+- **Green-context reconfiguration destroyed both streams with work in flight**
+  (#1656): `reconfigure()` runs from `step_schedule()` when the prefill/decode
+  mix changes, `cudaStreamDestroy` does not wait, and the replacement streams
+  carry no ordering against the old work. They are drained first now. Not
+  reachable on sm_120 - see the new `LIMITATIONS.md` entry on why green
+  contexts fall back to ordinary streams here.
+
+
 - **`/v1/messages` and `/v1/responses` built and dumped a JSON object for every
   emitted token** (#1657), which is what the shared writer's own header forbids
   on the hot path and what `/v1/chat/completions` stopped doing when it got
