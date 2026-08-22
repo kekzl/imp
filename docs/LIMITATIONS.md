@@ -52,6 +52,16 @@ them invisible here - the legend's whole point.
 
 ## Known-bad and known-limited behaviour
 
+- **`server.green_contexts=true` does not give you green contexts on this
+  chip.** `cudaDevResourceGenerateDesc` fails for the decode partition
+  (`one or more resources passed in are not valid resource types for the
+  operation`), the manager falls back to ordinary priority streams with
+  distinct memSyncDomains, and `has_green_contexts()` is false from then on.
+  Measured 2026-08-22 on the RTX 5090 at 170 SMs, both at the 80/20 split and
+  at the 99/1 retry. Consequence worth knowing: the dynamic SM reconfiguration
+  in `step_schedule()` is gated on that flag, so it never runs here - the
+  reconfigure race #1656 describes is real code but unreachable on sm_120.
+
 - **Remote `image_url` fetching is off by default, and when on it is still
   vulnerable to DNS rebinding.** `--allow-remote-images` classifies the
   destination before connecting, but the check and the connection are two

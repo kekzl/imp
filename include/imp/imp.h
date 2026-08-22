@@ -17,8 +17,14 @@ extern "C" {
  * - ImpModel handles are read-only after creation and safe to share
  *   across threads.
  * - ImpContext handles are NOT thread-safe. Each context must be used
- *   from a single thread at a time. Create one context per thread for
- *   concurrent inference.
+ *   from a single thread at a time.
+ * - ONE context per PROCESS. The engine arena and the graph-slot pool are
+ *   process-global; a second live context shares them and the first
+ *   imp_context_free() releases them under the other one. A second
+ *   imp_context_create() is refused with IMP_ERROR_INVALID_ARG rather than
+ *   returning a handle that breaks later (#1629). Sequential
+ *   create/free/create IS supported. For concurrent inference use the
+ *   batching the engine already does, or a second process.
  * - imp_model_load() and imp_model_free() are NOT thread-safe with
  *   respect to the same model handle.
  * - Global state (CUDA device, cuBLAS handles) is initialized once

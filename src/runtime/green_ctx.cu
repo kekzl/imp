@@ -232,6 +232,17 @@ bool GreenContextManager::reconfigure(float new_prefill_sm_ratio) {
 }
 
 void GreenContextManager::destroy() {
+    // #1656: reconfigure() calls this from inside step_schedule() whenever the
+    // prefill/decode mix changes, i.e. with work in flight. cudaStreamDestroy
+    // does not wait, the green context the work runs in is destroyed right
+    // after, and the replacement streams carry no ordering against any of it.
+    // Draining first costs the reconfigure its latency once; not draining
+    // leaves the outcome to timing.
+    if (prefill_stream_)
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(prefill_stream_));
+    if (decode_stream_)
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(decode_stream_));
+
     if (prefill_stream_) {
         cudaStreamDestroy(prefill_stream_);
         prefill_stream_ = nullptr;
