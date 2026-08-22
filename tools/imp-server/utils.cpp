@@ -4,6 +4,25 @@
 #include <algorithm>
 #include <cstdio>
 
+// Make a client-supplied string safe to put back into a response body.
+//
+// Two independent problems, one helper. Ill-formed UTF-8 reaches `dump()` and
+// throws; control bytes and unbounded length reach whatever reads the response
+// (a log viewer, a terminal, a dashboard). Printable ASCII only, everything
+// else one '.', truncated with a marker so a reader can tell (#1618).
+std::string sanitize_for_echo(std::string_view in, size_t max_len) {
+    std::string out;
+    const size_t n = std::min(in.size(), max_len);
+    out.reserve(n + 3);
+    for (size_t i = 0; i < n; i++) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+        out.push_back((c >= 0x20 && c < 0x7f) ? static_cast<char>(c) : '.');
+    }
+    if (in.size() > max_len)
+        out += "...";
+    return out;
+}
+
 std::string dump_safe(const json& j) {
     // error_handler_t::replace: emit U+FFFD for ill-formed UTF-8 instead of
     // throwing json::type_error.316. Identical output for valid UTF-8.

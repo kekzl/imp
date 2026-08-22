@@ -495,6 +495,97 @@ void compute_logprobs_cpu(const float* logits, int vocab_size, int32_t sampled_t
     }
 }
 
+// ---------------------------------------------------------------------------
+// logit_bias (#1617)
+// ---------------------------------------------------------------------------
+
+static int32_t* s_bias_tokens_buf = nullptr;
+static float* s_bias_values_buf = nullptr;
+static size_t s_bias_buf_cap = 0;
+
+__global__ void apply_logit_bias_kernel(float* __restrict__ logits, const int32_t* __restrict__ tokens,
+                                        const float* __restrict__ biases, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // atomicAdd, not `logits[t] += b`: two entries can name the same token
+        // ("1" and "01" both parse to 1) and the host loop accumulated both.
+        atomicAdd(&logits[tokens[idx]], biases[idx]);
+    }
+}
+
+void sampling_preallocate_logit_bias(int max_entries) {
+    if (max_entries <= 0)
+        return;
+    size_t cap = static_cast<size_t>(max_entries);
+    if (cap <= s_bias_buf_cap)
+        return;
+
+    s_bias_tokens_buf = nullptr;
+    s_bias_values_buf = nullptr;
+    s_bias_buf_cap = 0;
+
+    auto tokens = engine_arena().take_bytes(cap * sizeof(int32_t));
+    auto values = engine_arena().take_bytes(cap * sizeof(float));
+    if (tokens.empty() || values.empty()) {
+        IMP_LOG_WARN(
+            "sampling_preallocate_logit_bias: %zu slots unavailable from the T2 arena — "
+            "logit_bias falls back to per-entry copies",
+            cap);
+        return;
+    }
+    s_bias_tokens_buf = reinterpret_cast<int32_t*>(tokens.data());
+    s_bias_values_buf = reinterpret_cast<float*>(values.data());
+    s_bias_buf_cap = cap;
+    IMP_LOG_DEBUG("sampling_preallocate_logit_bias: pre-allocated %zu slots", cap);
+}
+
+void apply_logit_bias(float* d_logits, int vocab_size, const std::pair<int32_t, float>* host_pairs, int n,
+                      cudaStream_t stream) {
+    if (n <= 0 || host_pairs == nullptr || d_logits == nullptr)
+        return;
+
+    // Compact to in-range entries first: the kernel indexes logits directly,
+    // so an out-of-range id would be an out-of-bounds write, and the loop this
+    // replaces skipped those.
+    static thread_local std::vector<int32_t> h_tokens;
+    static thread_local std::vector<float> h_values;
+    h_tokens.clear();
+    h_values.clear();
+    for (int i = 0; i < n; i++) {
+        const int32_t tid = host_pairs[i].first;
+        if (tid >= 0 && tid < vocab_size) {
+            h_tokens.push_back(tid);
+            h_values.push_back(host_pairs[i].second);
+        }
+    }
+    const int m = static_cast<int>(h_tokens.size());
+    if (m == 0)
+        return;
+
+    if (s_bias_tokens_buf == nullptr || static_cast<size_t>(m) > s_bias_buf_cap) {
+        // No arena slots: the old path, so the bias is still applied. Bounded
+        // by --max-logit-bias on the server side.
+        for (int i = 0; i < m; i++) {
+            float logit;
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpy(&logit, d_logits + h_tokens[i], sizeof(float), cudaMemcpyDeviceToHost));
+            logit += h_values[i];
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_logits + h_tokens[i], &logit, sizeof(float),
+                                               cudaMemcpyHostToDevice, stream));
+        }
+        return;
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_bias_tokens_buf, h_tokens.data(), m * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_bias_values_buf, h_values.data(), m * sizeof(float),
+                                       cudaMemcpyHostToDevice, stream));
+    const int grid = (m + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    apply_logit_bias_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_logits, s_bias_tokens_buf, s_bias_values_buf,
+                                                             m);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
     if (max_seq_len <= 0)
         return;

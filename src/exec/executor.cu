@@ -147,20 +147,8 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
     }
 
     // Apply logit bias
-    if (state.n_logit_bias > 0 && state.logit_bias != nullptr) {
-        for (int i = 0; i < state.n_logit_bias; i++) {
-            int32_t tid = state.logit_bias[i].first;
-            float bias = state.logit_bias[i].second;
-            if (tid >= 0 && tid < vocab_size) {
-                float logit;
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpy(&logit, logits_ptr + tid, sizeof(float), cudaMemcpyDeviceToHost));
-                logit += bias;
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpyAsync(logits_ptr + tid, &logit, sizeof(float), cudaMemcpyHostToDevice, stream));
-            }
-        }
-    }
+    if (state.n_logit_bias > 0 && state.logit_bias != nullptr)
+        apply_logit_bias(logits_ptr, vocab_size, state.logit_bias, state.n_logit_bias, stream);
 
     // Force token: set all logits except force_token to -inf.
     // Used by think-budget to force </think> via logit manipulation
@@ -252,19 +240,8 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
             apply_dry_penalty(lp, vocab, st.host_penalty_tokens, st.n_penalty_tokens, st.dry_multiplier,
                               st.dry_base, st.dry_allowed_length, st.dry_penalty_last_n, stream);
         }
-        if (st.n_logit_bias > 0 && st.logit_bias != nullptr) {
-            for (int i = 0; i < st.n_logit_bias; i++) {
-                int32_t tid = st.logit_bias[i].first;
-                float bias = st.logit_bias[i].second;
-                if (tid >= 0 && tid < vocab) {
-                    float logit;
-                    IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost));
-                    logit += bias;
-                    IMP_CUDA_CHECK_LOG(
-                        cudaMemcpyAsync(lp + tid, &logit, sizeof(float), cudaMemcpyHostToDevice, stream));
-                }
-            }
-        }
+        if (st.n_logit_bias > 0 && st.logit_bias != nullptr)
+            apply_logit_bias(lp, vocab, st.logit_bias, st.n_logit_bias, stream);
         apply_constraint_mask(st, lp, vocab, stream);
         // Ban special tokens (chat template delimiters etc.). MUST happen
         // before sampling — without this, greedy can pick a banned token
@@ -450,19 +427,8 @@ void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceStat
         }
     }
     // Apply logit bias
-    if (state.n_logit_bias > 0 && state.logit_bias != nullptr) {
-        for (int i = 0; i < state.n_logit_bias; i++) {
-            int32_t tid = state.logit_bias[i].first;
-            float bias = state.logit_bias[i].second;
-            if (tid >= 0 && tid < vocab) {
-                float logit;
-                IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost));
-                logit += bias;
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpyAsync(lp + tid, &logit, sizeof(float), cudaMemcpyHostToDevice, stream));
-            }
-        }
-    }
+    if (state.n_logit_bias > 0 && state.logit_bias != nullptr)
+        apply_logit_bias(lp, vocab, state.logit_bias, state.n_logit_bias, stream);
     // Force token (think-budget)
     if (state.force_token >= 0 && state.force_token < vocab) {
         force_single_token(lp, vocab, state.force_token, stream);

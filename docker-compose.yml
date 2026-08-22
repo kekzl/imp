@@ -12,7 +12,11 @@ services:
               count: 1
               capabilities: [gpu]
     ports:
-      - "${IMP_PORT:-8080}:${IMP_PORT:-8080}"
+      # Bound to loopback by default (#1619). `"8080:8080"` publishes on every
+      # interface, and this image has no authentication unless IMP_API_KEY is
+      # set, so the shipped default was an open inference API on the LAN.
+      # To expose it deliberately: IMP_BIND=0.0.0.0 plus IMP_API_KEY.
+      - "${IMP_BIND:-127.0.0.1}:${IMP_PORT:-8080}:${IMP_PORT:-8080}"
     volumes:
       - ${IMP_MODELS_DIR:-./models}:/models
       # Survives `up --force-recreate` and image updates. Holds the
@@ -24,6 +28,9 @@ services:
     environment:
       - IMP_MODEL=${IMP_MODEL:-}
       - IMP_HOST=0.0.0.0
+      # Empty = no authentication. Required if IMP_BIND is widened.
+      - IMP_API_KEY=${IMP_API_KEY:-}
+      - IMP_TRUSTED_PROXY=${IMP_TRUSTED_PROXY:-}
       - IMP_PORT=${IMP_PORT:-8080}
       - IMP_MAX_TOKENS=${IMP_MAX_TOKENS:-}
       - IMP_CHAT_TEMPLATE=${IMP_CHAT_TEMPLATE:-auto}

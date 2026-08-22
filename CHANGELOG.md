@@ -180,6 +180,26 @@ there instead of retelling it.
 
 ### Fixed
 
+- **One request could cost the server an unbounded amount of work, and two of
+  the limits keyed on what the client wrote** (#1614, #1615, #1616, #1617,
+  #1618, #1619, #1622). The per-IP rate limit preferred `X-Forwarded-For`
+  whenever present, so varying one header both bypassed the limit and added a
+  permanent tracker entry; the header is now believed only from a peer named by
+  `--trusted-proxy`, and buckets that go quiet are evicted. Rate limiting
+  covered seven exact paths, so `/tokenize`, `/v1/messages/count_tokens` and
+  `/admin/*` were reachable at any rate; it now covers everything except
+  `/health` and `/metrics`. `n`, rerank `documents`, embeddings `input` and
+  `logit_bias` each multiplied one request's work with no ceiling and are
+  capped by `--max-n` (8), `--max-batch-items` (512) and `--max-logit-bias`
+  (1024). `logit_bias` also cost one **blocking** device-to-host copy per entry
+  per decode step in three copied loops; it is one upload and one kernel now.
+  The 404 envelope echoed the raw request path through `json::dump()`, which
+  throws on ill-formed UTF-8, turning a 404 into a 500 with an empty body. And
+  the shipped compose file published on every interface with no way to switch
+  authentication on: the host binding is `127.0.0.1` by default and
+  `IMP_API_KEY` reaches `--api-key`. Read, write and keep-alive limits are
+  configured rather than inherited from whatever cpp-httplib defaults to.
+
 - **A checkpoint could size imp's allocations, its parser stack, and the path it
   opens** (#1611, #1612, #1613). A layer index parsed out of a tensor name went
   straight into `resize`, and `sizeof(TransformerLayer)` is 9680 bytes, so

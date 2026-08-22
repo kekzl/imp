@@ -19,7 +19,7 @@ services:
   imp:
     image: ghcr.io/kekzl/imp:latest
     command: ["--model", "/models/your-model.gguf", "--api-key", "${IMP_API_KEY}"]
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]   # widen only together with --api-key
     volumes:
       - ./models:/models
       - imp-cache:/home/imp/.cache/imp
@@ -67,7 +67,32 @@ The settings that most often need changing in a deployment:
 ```bash
 --api-key "$IMP_API_KEY"      # bearer auth on the inference endpoints
 --metrics-require-auth        # fold /metrics behind the same key
+--trusted-proxy 10.0.0.5      # believe X-Forwarded-For from these peers only
 ```
+
+**There is no default credential and no default refusal.** Without `--api-key`
+every endpoint is open to whoever can reach the port, which is why the shipped
+compose file publishes on `127.0.0.1` and why widening it is a two-part change:
+`IMP_BIND` and `IMP_API_KEY` together (#1619).
+
+**`--trusted-proxy` is what makes rate limiting work behind a proxy.** Without
+it `X-Forwarded-For` is ignored and every request from the proxy shares one
+bucket; with it, the header is believed from those peers and the limit is
+per-client again. It is not believed from anyone else, because a client that
+can write the header can otherwise vary it per request and bypass the limit
+entirely (#1614).
+
+Per-request work is capped independently of the rate limit, because one request
+can ask for many units of it:
+
+| flag | default | bounds |
+|---|---|---|
+| `--max-n` | 8 | `n` completions per chat request |
+| `--max-batch-items` | 512 | rerank `documents`, embeddings `input` |
+| `--max-logit-bias` | 1024 | `logit_bias` entries |
+| `--http-read-timeout` | 60 s | socket read |
+| `--http-write-timeout` | 600 s | socket write, must outlast a stream |
+| `--http-keep-alive-max` | 100 | requests per connection |
 
 **CORS is wide open by design** (`Access-Control-Allow-Origin: *` plus an
 `OPTIONS` catch-all), because the built-in web UI and browser clients call the
