@@ -72,6 +72,11 @@ if(IMP_ALLOC_INTERPOSE)
     message(STATUS "Allocation interposition ENABLED (measurement build)")
 endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+# libFuzzer binaries, one per target in fuzz/ (#1620). Needs clang: g++ has no
+# -fsanitize=fuzzer. The same targets run without clang in the CPU lane via
+# tests/test_fuzz_corpus.cpp, which is what CI executes; this option is for the
+# long runs. See fuzz/README.md.
+option(IMP_FUZZERS "Build libFuzzer binaries from fuzz/ (clang only)" OFF)
 
 if(IMP_SANITIZERS)
     set(SANITIZER_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer -g")
@@ -603,6 +608,12 @@ if(IMP_BUILD_TESTS)
         # also require a GPU at configure-time (the binaries enumerate CUDA tests).
     endfunction()
 
+    set_source_files_properties(
+        fuzz/fuzz_json_schema.cpp fuzz/fuzz_regex.cpp fuzz/fuzz_gbnf.cpp
+        fuzz/fuzz_safetensors.cpp fuzz/fuzz_tokenizer_json.cpp
+        PROPERTIES COMPILE_DEFINITIONS "IMP_FUZZ_NO_ENTRY")
+    set(IMP_FUZZ_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fuzz)
+
     imp_add_test_module(test-core SOURCES
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
@@ -645,6 +656,18 @@ if(IMP_BUILD_TESTS)
         # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
         # CPU-only by construction — see the file header.
         tests/test_gbnf_grammar.cpp
+        # Fuzz targets driven over a committed corpus + a deterministic mutator
+        # (#1620), the same entry points libFuzzer drives. Unconditional so the
+        # sanitizer build (-DIMP_BUILD_SERVER=OFF) runs them too - which is the
+        # half that matters, since an out-of-bounds read is invisible without
+        # ASan. IMP_FUZZ_NO_ENTRY drops the LLVMFuzzerTestOneInput definitions
+        # so six of them do not collide in one binary.
+        fuzz/fuzz_json_schema.cpp
+        fuzz/fuzz_regex.cpp
+        fuzz/fuzz_gbnf.cpp
+        fuzz/fuzz_safetensors.cpp
+        fuzz/fuzz_tokenizer_json.cpp
+        tests/test_fuzz_corpus.cpp
         # Pre-dequant VRAM budget split (#1100). CPU-only: pure arithmetic in
         # runtime/vram_budget.h, and it belongs in the lane CI actually runs.
         tests/test_pre_dequant_budget.cpp
@@ -761,11 +784,20 @@ if(IMP_BUILD_TESTS)
             # binaries.
             tests/test_json_constrain_property.cpp
             tests/test_schema_constrain_property.cpp
+            # Only this target needs the server sources: tool_call.h pulls in
+            # nlohmann. The other five are unconditional below, so `make asan`
+            # (-DIMP_BUILD_SERVER=OFF) still runs them - the first version put
+            # all six here and the sanitizer binary silently contained none.
+            fuzz/fuzz_tool_stream.cpp
             tests/test_base64.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
                                                      ${CMAKE_CURRENT_SOURCE_DIR}/tools)
         target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
+        set_source_files_properties(fuzz/fuzz_tool_stream.cpp
+            PROPERTIES COMPILE_DEFINITIONS "IMP_FUZZ_NO_ENTRY")
+        target_compile_definitions(test-core PRIVATE IMP_FUZZ_HAVE_TOOL_STREAM)
     endif()
+    target_include_directories(test-core PRIVATE ${IMP_FUZZ_INCLUDE_DIR})
     # test_stream_pipeline.cpp includes the self-contained pure header
     # tools/imp-server/stream_pipeline.h (no httplib/json deps).
     target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
@@ -1042,4 +1074,39 @@ endif()
 
 if(IMP_BUILD_SERVER)
     install(TARGETS imp-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# ---- libFuzzer binaries (#1620) ----
+#
+# One binary per target, standard LLVMFuzzerTestOneInput entry points, so these
+# are also the shape OSS-Fuzz wants. clang only. The CPU lane runs the same
+# target functions through tests/test_fuzz_corpus.cpp with g++, which is what
+# gates a pull request; this is for the long runs. fuzz/README.md has the
+# commands.
+if(IMP_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "IMP_FUZZERS=ON needs clang (-fsanitize=fuzzer); "
+                            "got ${CMAKE_CXX_COMPILER_ID}. See fuzz/README.md.")
+    endif()
+    # fuzz_tool_stream needs nlohmann through tool_call.h, so it is only built
+    # when the server sources are configured in.
+    set(IMP_FUZZ_TARGETS json_schema regex gbnf safetensors tokenizer_json)
+    if(IMP_BUILD_SERVER)
+        list(APPEND IMP_FUZZ_TARGETS tool_stream)
+    endif()
+    foreach(t ${IMP_FUZZ_TARGETS})
+        add_executable(fuzz_${t} fuzz/fuzz_${t}.cpp)
+        target_include_directories(fuzz_${t} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+        target_compile_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined
+                                                 -fno-omit-frame-pointer -g)
+        target_link_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined)
+        target_link_libraries(fuzz_${t} PRIVATE imp)
+        if(IMP_BUILD_SERVER)
+            target_link_libraries(fuzz_${t} PRIVATE nlohmann_json::nlohmann_json)
+        endif()
+    endforeach()
 endif()

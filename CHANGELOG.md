@@ -13,6 +13,23 @@ there instead of retelling it.
 
 ### Added
 
+- **Fuzz targets for the six parsers that take untrusted bytes** (#1620), in
+  `fuzz/`: JSON Schema, regex, GBNF, the tool-call stream filter, the
+  SafeTensors loader and `tokenizer.json`. Standard `LLVMFuzzerTestOneInput`
+  entry points for libFuzzer (`-DIMP_FUZZERS=ON`, clang), and the same functions
+  driven over a committed corpus plus a deterministic mutator in the CPU lane,
+  0.7 s, on every PR. The corpus is the inputs that actually broke something.
+  `docs/audit/SETTLED.md` S-28 and `AUDIT_ARCH_2026_07_29.md` both claimed these
+  surfaces were "fuzzed, in CI" while no fuzz target existed; both are corrected.
+
+- **A `Sanitizers` CI job** (#1621). No lane ran any sanitizer in any category
+  before: ASan/UBSan existed behind a manual `make asan`, and the only job that
+  mentions compute-sanitizer is gated on a GPU runner that does not exist. It
+  builds test-core and test-text with ASan+UBSan and runs them, including the
+  fuzz corpus. Measured worth: against four reverted parser fixes the corpus
+  catches 3 of 5 targets without ASan and 4 of 5 with it - an out-of-bounds read
+  is invisible otherwise.
+
 - **`VramOwned<T>`: an owning handle for a `VRAMAllocator` allocation.** The
   allocator says of itself, in its own destructor, that it is "a tracker, not an
   owner", so ownership lived with the caller as a raw pointer plus a free somewhere

@@ -485,6 +485,103 @@ jobs:
       - name: Launch-guard gate (blocking)
         run: bash scripts/ci_static_gates.sh launchguards
 
+  # ASan + UBSan over the CPU test binaries, including the fuzz corpus (#1621).
+  #
+  # Before this job no CI lane ran any sanitizer in any category: ASAN/UBSAN
+  # existed behind a manual `make asan`, the one job that mentions
+  # compute-sanitizer is gated on a GPU runner the owner decided against, and
+  # its memcheck step is `continue-on-error` anyway.
+  #
+  # It is what makes the fuzz corpus worth running. Measured against the four
+  # reverted parser fixes, per target:
+  #
+  #             without ASan      with ASan
+  #   schema    green             stack-overflow
+  #   regex     hang              hang
+  #   gbnf      SEGV              stack-overflow
+  #   tokenizer hang              heap-use-after-free
+  #
+  # An out-of-bounds read is invisible without it: the process reads a
+  # neighbouring allocation and carries on.
+  #
+  # PR runs are gated on the parser/loader paths so the CUDA build is not paid
+  # on every PR; nightly and workflow_dispatch always run it. Advisory in
+  # practice like every job except `Build` (ruleset 14716423 requires that one
+  # context) - so read it after a merge, not only before.
+  sanitizers:
+    name: Sanitizers
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+    steps:
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git python3 cmake ninja-build ca-certificates
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Does this run need the sanitizer build?
+        id: scope
+        run: |
+          run=true
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "push" ]; then
+            base="${{ github.event.pull_request.base.sha || github.event.before }}"
+            if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              files="$(git diff --name-only "$base" HEAD)"
+              # Fail-open: an unreadable diff runs the job.
+              # grep -q exits at the first match and pipefail turns the
+              # producer EPIPE into a non-zero pipeline (#1499): here-string.
+              if ! grep -qE '^(fuzz/|tests/test_fuzz_corpus|src/compute/json_schema|src/compute/gbnf|src/model/(safetensors_loader|tokenizer|json_util)|tools/imp-server/tool_stream_filter|CMakeLists.txt|\.github/workflows/ci\.yml)' <<< "$files"; then
+                run=false
+              fi
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "sanitizer build: run=$run"
+
+      - name: Fetch pinned deps
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          . cmake/imp-deps.cmake 2>/dev/null || true
+          GT=$(grep -oP 'IMP_DEP_GOOGLETEST_TAG \K\S+' cmake/imp-deps.cmake | head -1)
+          git clone --depth=1 --branch "$GT" https://github.com/google/googletest.git /deps/googletest
+
+      # No tools, no bench, no server: the same configuration `make asan` uses,
+      # which is also why the five unconditional fuzz targets must not live in
+      # the IMP_BUILD_SERVER block - the first version of them did, and the
+      # sanitizer binary silently contained none of them (0 tests, "PASSED").
+      - name: Build test-core + test-text with ASan/UBSan
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cmake -B build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DIMP_SANITIZERS=ON \
+            -DIMP_BUILD_TOOLS=OFF -DIMP_BUILD_BENCH=OFF -DIMP_BUILD_SERVER=OFF \
+            -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest
+          cmake --build build-asan --target test-core test-text -j"$(nproc)"
+
+      # A binary that contains none of the tests reports "PASSED 0 tests" and
+      # exits 0. That is how the first version of this job would have gone green
+      # without running anything.
+      - name: Assert the fuzz corpus is in the binary
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          n=$(./build-asan/test-core --gtest_list_tests 2>/dev/null | grep -c '^FuzzCorpus' || true)
+          test "$n" = "1" || { echo "FuzzCorpus missing from the sanitizer binary"; exit 1; }
+
+      - name: Run
+        if: steps.scope.outputs.run == 'true'
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          LSAN_OPTIONS: suppressions=tools/sanitizers/lsan.supp
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1:suppressions=tools/sanitizers/ubsan.supp
+        run: |
+          ./build-asan/test-core
+          ./build-asan/test-text
+
   test:
     name: Test
     needs: build

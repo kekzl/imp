@@ -296,7 +296,7 @@ the *tokens* a real vocabulary spells them with. A third class is not unlikely.
 | S-25 | `src/runtime/engine_init_resolver.cpp` | ~25 log lines stating each resolved policy **and its reason**. An operator can read what the engine decided and why |
 | S-26 | `tools/filesize_thresholds.toml` `[allow]` with reason strings | Manages file size instead of silencing it; the gate rejects an empty reason |
 | S-27 | `tools/alloc_allowlist.txt` as a two-way ratchet | Fails on a new allocating file *and* on a listed file that stopped allocating, so the list cannot go stale in either direction |
-| S-28 | Property batteries in the CPU lane | `tests/test_json_constrain_property.cpp`, `tests/test_schema_constrain_property.cpp`, `tests/test_tokenizer_robustness.cpp`, `tests/test_gguf_fault_injection.cpp` — fuzzed in CI, no GPU |
+| S-28 | Property batteries in the CPU lane | `tests/test_json_constrain_property.cpp`, `tests/test_schema_constrain_property.cpp`, `tests/test_tokenizer_robustness.cpp`, `tests/test_gguf_fault_injection.cpp` — property + fault-injection, in CI, no GPU. **"fuzzed" was wrong and is corrected (#1620):** two of the four mutate nothing, and the other two assert their generated input VALID before use. Real fuzz targets are `fuzz/`, driven in the CPU lane by `tests/test_fuzz_corpus.cpp` and under ASan by the `Sanitizers` job since 2026-08-22. |
 
 ## E — Findings that were themselves wrong (do not re-derive them)
 
