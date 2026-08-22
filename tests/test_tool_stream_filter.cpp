@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 #include "tool_call.h"
 #include "tool_stream_filter.h"
+#include "stream_pipeline.h"
 #include "model/chat_template.h"
 
 #include <random>
@@ -40,6 +41,7 @@ struct Collected {
     int n_arg_deltas = 0;               // CALL_ARGS_DELTA count
     std::string open_deltas;            // deltas of the currently-open call
     std::vector<std::string> delta_concats;  // per streamed call: concat(deltas)
+    std::vector<std::string> all_deltas;     // every CALL_ARGS_DELTA, in order
 };
 
 Collected feed_chunks(ChatTemplateFamily fam, const std::string& input,
@@ -67,6 +69,7 @@ Collected feed_chunks(ChatTemplateFamily fam, const std::string& input,
                 case Kind::CALL_ARGS_DELTA:
                     out.n_arg_deltas++;
                     out.open_deltas += seg.text;
+                    out.all_deltas.push_back(seg.text);
                     break;
                 case Kind::CALL_END:
                     out.delta_concats.push_back(out.open_deltas);
@@ -430,4 +433,88 @@ TEST(ParseGemmaToolCallBody, RejectsMalformed) {
     ASSERT_TRUE(parse_gemma_tool_call_body("call:f{broken", tc));
     EXPECT_EQ(tc.name, "f");
     EXPECT_EQ(tc.arguments, "{}");
+}
+
+// ---- #1554: an argument delta never ends mid-codepoint ----
+//
+// The emit loop pulls `limit` back by close_tag_.size() - 1 BYTES so a
+// partially arrived close tag cannot leak into the arguments. That cut lands
+// inside a multi-byte character whenever one sits at the boundary, and each
+// half is JSON-encoded into its own SSE delta, where dump_safe turns it into
+// U+FFFD. Measured on Qwen3-8B-Q8_0 with a forced tool_choice: ten replacement
+// characters in one argument string, and the non-streaming control clean.
+//
+// The first attempt at this issue hardened the BUFFERED 48-byte chunker
+// instead. That path is real but is not the one a shipped model takes here, so
+// the defect survived the fix. These tests drive the streaming path.
+
+// Every emitted delta must be valid UTF-8 on its own, because each one is
+// JSON-encoded separately.
+static bool all_deltas_are_whole_utf8(const Collected& c) {
+    for (const auto& d : c.all_deltas) {
+        if (imp::stream::utf8_complete_len(d) != d.size())
+            return false;
+    }
+    return true;
+}
+
+TEST(ToolStreamFilterUtf8, ArgumentDeltasNeverEndMidCodepoint) {
+    // Umlauts spread through the value so at least one lands on the hold
+    // boundary for some chunk size.
+    const std::string body =
+        "<tool_call>{\"name\": \"note\", \"arguments\": {\"text\": "
+        "\"ÄÖÜäöüß ÄÖÜäöüß ÄÖÜäöüß ÄÖÜäöüß\"}}</tool_call>";
+    const std::string want_args = "{\"text\": \"ÄÖÜäöüß ÄÖÜäöüß ÄÖÜäöüß ÄÖÜäöüß\"}";
+
+    // Byte-at-a-time is the worst case: every multi-byte character arrives
+    // split across feeds.
+    {
+        auto c = feed_chunks(ChatTemplateFamily::CHATML, body, {1});
+        ASSERT_EQ(c.delta_concats.size(), 1u);
+        EXPECT_EQ(c.delta_concats[0], want_args);
+        EXPECT_TRUE(all_deltas_are_whole_utf8(c)) << "a delta ended mid-character";
+    }
+    // And a spread of chunk sizes, including ones that straddle the 2-byte
+    // characters at every offset.
+    for (size_t n : {2u, 3u, 4u, 5u, 7u, 11u, 16u, 48u}) {
+        auto c = feed_chunks(ChatTemplateFamily::CHATML, body, {n});
+        ASSERT_EQ(c.delta_concats.size(), 1u) << "chunk=" << n;
+        EXPECT_EQ(c.delta_concats[0], want_args) << "chunk=" << n;
+        EXPECT_TRUE(all_deltas_are_whole_utf8(c)) << "chunk=" << n;
+    }
+}
+
+TEST(ToolStreamFilterUtf8, HoldingBackTheTailDoesNotLoseIt) {
+    // The tail held back for the next feed has to come out eventually. A
+    // three-byte character as the very last thing before the close tag is the
+    // case where "hold it back" and "there is no next feed" meet.
+    const std::string body = "<tool_call>{\"name\": \"note\", \"arguments\": {\"t\": \"中\"}}</tool_call>";
+    for (size_t n : {1u, 2u, 3u, 5u, 9u}) {
+        auto c = feed_chunks(ChatTemplateFamily::CHATML, body, {n});
+        ASSERT_EQ(c.delta_concats.size(), 1u) << "chunk=" << n;
+        EXPECT_EQ(c.delta_concats[0], "{\"t\": \"中\"}") << "chunk=" << n;
+        EXPECT_TRUE(all_deltas_are_whole_utf8(c)) << "chunk=" << n;
+    }
+}
+
+TEST(ToolStreamFilterUtf8, FourByteCharactersSurviveToo) {
+    const std::string body =
+        "<tool_call>{\"name\": \"note\", \"arguments\": {\"t\": \"a😀b😀c\"}}</tool_call>";
+    for (size_t n : {1u, 2u, 3u, 4u, 6u, 13u}) {
+        auto c = feed_chunks(ChatTemplateFamily::CHATML, body, {n});
+        ASSERT_EQ(c.delta_concats.size(), 1u) << "chunk=" << n;
+        EXPECT_EQ(c.delta_concats[0], "{\"t\": \"a😀b😀c\"}") << "chunk=" << n;
+        EXPECT_TRUE(all_deltas_are_whole_utf8(c)) << "chunk=" << n;
+    }
+}
+
+TEST(ToolStreamFilterUtf8, AsciiArgumentsAreUnchanged) {
+    // Negative control: holding a partial codepoint back must not change the
+    // delta sequence for input that has none.
+    const std::string body =
+        "<tool_call>{\"name\": \"note\", \"arguments\": {\"t\": \"plain ascii\"}}</tool_call>";
+    auto c = feed_chunks(ChatTemplateFamily::CHATML, body, {1});
+    ASSERT_EQ(c.delta_concats.size(), 1u);
+    EXPECT_EQ(c.delta_concats[0], "{\"t\": \"plain ascii\"}");
+    EXPECT_GT(c.n_arg_deltas, 1) << "the value should still stream incrementally";
 }
