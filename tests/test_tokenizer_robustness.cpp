@@ -20,7 +20,10 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace imp {
@@ -320,6 +323,114 @@ TEST(TokenizerRobustness, SpmByteFallbackNoCrashOnArbitraryBytes) {
     ASSERT_FALSE(ids.empty());
     std::string back = tok.decode(ids);
     EXPECT_EQ(back, s) << "SPM byte fallback must reconstruct raw bytes";
+}
+
+// ---- #1606: tokenizer.json ids are bounded on the load path ----
+//
+// Ids arrive as JSON doubles, are narrowed to int, and index vocab_/scores_/
+// token_types_/added_token_ids_ directly. `max_id` only ever grew from 0, so a
+// negative id never widened the vector and the write landed at size_t(-1) - a
+// heap write during load, before any inference. The decode side of the same
+// file has always range-checked; the load side did not.
+
+static std::string write_temp_tokenizer_json(const std::string& body) {
+    char tmpl[] = "/tmp/imp_test_tok_XXXXXX";
+    int fd = ::mkstemp(tmpl);
+    if (fd < 0)
+        return "";
+    std::string path = tmpl;
+    ::close(fd);
+    std::string final_path = path + ".json";
+    ::rename(path.c_str(), final_path.c_str());
+    std::ofstream out(final_path, std::ios::binary);
+    if (!out)
+        return "";
+    out << body;
+    out.close();
+    return final_path;
+}
+
+TEST(TokenizerJsonHostileIds, NegativeVocabIdIsDroppedNotWritten) {
+    // "a" claims id -1. Before the bound check this was vocab_.data()[-1] = "a".
+    const std::string body = R"({"model":{"type":"BPE","vocab":{"a":-1,"b":0,"c":1},"merges":[]}})";
+    std::string path = write_temp_tokenizer_json(body);
+    ASSERT_FALSE(path.empty());
+
+    testing::internal::CaptureStderr();
+    Tokenizer tok;
+    bool ok = tok.load(path);
+    std::string captured = testing::internal::GetCapturedStderr();
+    std::remove(path.c_str());
+
+    EXPECT_TRUE(ok);
+    // The drop has to be reported. Without the bound check the entry is not
+    // dropped at all - it is written at vocab_.data()[-1] and this line is
+    // absent, which is what makes this assertion the detector outside ASan.
+    // find_token("a") cannot tell the two apart: the corrupt path stores -1 in
+    // token_to_id_, which reads back exactly like "not found".
+    EXPECT_NE(captured.find("out-of-range id"), std::string::npos) << captured;
+    // Only b(0) and c(1) survive; the vector is sized for those two.
+    EXPECT_EQ(tok.vocab_size(), 2);
+    EXPECT_EQ(tok.find_token("a"), -1) << "an out-of-range id must not enter token_to_id_";
+    EXPECT_EQ(tok.find_token("b"), 0);
+    EXPECT_EQ(tok.find_token("c"), 1);
+}
+
+TEST(TokenizerJsonHostileIds, HugeVocabIdDoesNotSizeTheVocabulary) {
+    // max_id + 1 in `int` wraps to INT_MIN at INT_MAX; one id below that asks
+    // for a 2.1-billion-element vector<string>. Neither may happen.
+    const std::string body = R"({"model":{"type":"BPE","vocab":{"a":0,"huge":2147483647},"merges":[]}})";
+    std::string path = write_temp_tokenizer_json(body);
+    ASSERT_FALSE(path.empty());
+
+    Tokenizer tok;
+    bool ok = tok.load(path);
+    std::remove(path.c_str());
+
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(tok.vocab_size(), 1) << "the out-of-range id must not size the vocabulary";
+    EXPECT_EQ(tok.find_token("huge"), -1);
+}
+
+TEST(TokenizerJsonHostileIds, NegativeAddedTokenIdIsDropped) {
+    // The added_tokens path has its own copy of the same narrowing, and its
+    // "ensure vectors are large enough" guard is a >= test that a negative id
+    // passes without resizing. added_token_ids_[id] = true is a vector<bool>
+    // proxy write at a negative bit index.
+    const std::string body = R"({"model":{"type":"BPE","vocab":{"a":0},"merges":[]},)"
+                             R"("added_tokens":[{"id":-5,"content":"<bad>","special":1},)"
+                             R"({"id":1,"content":"<good>","special":1}]})";
+    std::string path = write_temp_tokenizer_json(body);
+    ASSERT_FALSE(path.empty());
+
+    testing::internal::CaptureStderr();
+    Tokenizer tok;
+    bool ok = tok.load(path);
+    std::string captured = testing::internal::GetCapturedStderr();
+    std::remove(path.c_str());
+
+    EXPECT_TRUE(ok);
+    EXPECT_NE(captured.find("out-of-range id -5"), std::string::npos) << captured;
+    EXPECT_EQ(tok.find_token("<bad>"), -1);
+    EXPECT_EQ(tok.find_token("<good>"), 1);
+    EXPECT_TRUE(tok.is_added_token(1));
+}
+
+TEST(TokenizerJsonHostileIds, WellFormedVocabStillLoads) {
+    // Negative control: bounding the ids must not change a normal load.
+    const std::string body = R"({"model":{"type":"BPE","vocab":{"a":0,"b":1,"c":2},"merges":[]},)"
+                             R"("added_tokens":[{"id":3,"content":"<eos>","special":1}]})";
+    std::string path = write_temp_tokenizer_json(body);
+    ASSERT_FALSE(path.empty());
+
+    Tokenizer tok;
+    bool ok = tok.load(path);
+    std::remove(path.c_str());
+
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(tok.vocab_size(), 4);
+    EXPECT_EQ(tok.find_token("<eos>"), 3);
+    EXPECT_TRUE(tok.is_added_token(3));
 }
 
 }  // namespace

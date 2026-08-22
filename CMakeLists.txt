@@ -641,11 +641,6 @@ if(IMP_BUILD_TESTS)
         # Pre-cudaDeviceReset hook registry (#1207): self-registration replaced a
         # hand-maintained call list, so the new failure mode is an EMPTY registry.
         tests/test_cuda_static_reset.cpp
-        # Generative FSM battery for the schema-less json_object grammar. Lives
-        # in the CPU lane on purpose: the FSM is CUDA-free without init(), and
-        # every past grammar bug escaped CI because its tests need a GPU.
-        tests/test_json_constrain_property.cpp
-        tests/test_schema_constrain_property.cpp
         # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
         # CPU-only by construction — see the file header.
         tests/test_gbnf_grammar.cpp
@@ -748,6 +743,18 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/constraint_validation.cpp
             tests/test_constraint_validation.cpp
             tests/test_server_args.cpp
+            # Generative FSM battery for the schema-less json_object grammar.
+            # Lives in the CPU lane on purpose: the FSM is CUDA-free without
+            # init(), and every past grammar bug escaped CI because its tests
+            # need a GPU. It sits in THIS block rather than the unconditional
+            # list because both files use nlohmann as their oracle, and
+            # nlohmann is only fetched under IMP_BUILD_SERVER (:503). Listed
+            # unconditionally, test-core does not compile in any
+            # -DIMP_BUILD_SERVER=OFF configuration - which is what `make asan`
+            # configures, so the sanitizer target could not build its own
+            # binaries.
+            tests/test_json_constrain_property.cpp
+            tests/test_schema_constrain_property.cpp
             tests/test_base64.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
                                                      ${CMAKE_CURRENT_SOURCE_DIR}/tools)

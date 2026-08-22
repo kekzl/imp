@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -21,6 +22,7 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <algorithm>
 #include <thread>
 #include <mutex>
@@ -86,65 +88,85 @@ bool validate_tensor_offsets(uint64_t offset_start, uint64_t offset_end, uint64_
 
 }  // namespace safetensors_internal
 
-// ---- SafeTensors wire dtype string -> bytes-per-element ----
+// ---- SafeTensors wire dtype: one table for the width AND the QType ----
 //
-// Used by validate_tensor_offsets to compute expected_nbytes from shape ×
-// dtype width. Returns 0 for unknown dtype strings (validation is then
-// skipped for that tensor — the existing safetensors_dtype() WARN covers
-// the unknown-type case).
-static size_t safetensors_wire_dtype_bytes(const std::string& s) {
-    if (s == "F64")
-        return 8;
-    if (s == "F32" || s == "I32" || s == "U32")
-        return 4;
-    if (s == "F16" || s == "BF16" || s == "I16" || s == "U16")
-        return 2;
-    if (s == "F8_E4M3" || s == "F8_E5M2" || s == "I8" || s == "U8" || s == "BOOL")
-        return 1;
-    if (s == "I64" || s == "U64")
-        return 8;
-    return 0;
-}
+// #1604: the width a tensor is validated with and the width its consumer reads
+// it with have to be the same number. They were two private tables, and for
+// I16 they disagreed - 2 bytes on disk against 4 for the QType::INT32 it was
+// mapped to - so a tensor that passed every check was then read 2x past its
+// own window.
+//
+// A dtype whose on-disk width has no equal-width engine type is refused, not
+// re-typed. A "closest proxy" of a different width converts nothing: it
+// reinterprets the bytes at the wrong stride, so element i is read from byte
+// i*4 of a 2-byte-per-element array. Such a tensor was never servable, only
+// silently mapped, and src/model/CLAUDE.md is explicit that a checkpoint this
+// build cannot serve is refused at load rather than served wrong.
+struct SafeTensorsDtype {
+    std::string_view name;
+    size_t wire_bytes;  // bytes per element on disk
+    QType qtype;        // engine type; only meaningful when servable
+    bool servable;
+    const char* once_note;  // logged once, the first time this dtype appears
+};
 
-// ---- SafeTensors dtype string to QType ----
+static constexpr SafeTensorsDtype kSafeTensorsDtypes[] = {
+    {"F32", 4, QType::F32, true, nullptr},
+    {"F16", 2, QType::F16, true, nullptr},
+    {"BF16", 2, QType::BF16, true, nullptr},
+    {"F8_E4M3", 1, QType::FP8_E4M3, true, nullptr},
+    // Lossy but equal-width, so the stride is right and only the exponent
+    // interpretation is approximate.
+    {"F8_E5M2", 1, QType::FP8_E4M3, true,
+     "SafeTensors F8_E5M2 tensors found; mapping to FP8_E4M3 as a lossy proxy "
+     "(no native E5M2 path). Activation-style tensors may lose precision. (Logged once.)"},
+    {"I8", 1, QType::INT8, true, nullptr},
+    {"U8", 1, QType::INT8, true, nullptr},
+    {"BOOL", 1, QType::INT8, true, nullptr},
+    {"I32", 4, QType::INT32, true, nullptr},
+    {"U32", 4, QType::INT32, true, nullptr},
+    // Not servable: the engine has no 8-byte type and no 16-bit integer type,
+    // so no equal-width mapping exists. These used to be F64/I64 -> INT32
+    // (8 -> 4, wrong stride, garbage values) and I16/U16 -> INT32 or the F32
+    // default (2 -> 4, a 100% over-read running off the end of the mapping for
+    // the last tensor in a shard).
+    {"F64", 8, QType::F32, false, nullptr},
+    {"I64", 8, QType::INT32, false, nullptr},
+    {"U64", 8, QType::INT32, false, nullptr},
+    {"I16", 2, QType::INT32, false, nullptr},
+    {"U16", 2, QType::INT32, false, nullptr},
+};
 
-static QType safetensors_dtype(const std::string& s) {
-    if (s == "F32")
-        return QType::F32;
-    if (s == "F16")
-        return QType::F16;
-    if (s == "BF16")
-        return QType::BF16;
-    if (s == "F64")
-        return QType::F32;  // closest proxy
-    if (s == "I8")
-        return QType::INT8;
-    if (s == "U8")
-        return QType::INT8;  // treat unsigned byte as INT8
-    if (s == "I16")
-        return QType::INT32;  // closest proxy
-    if (s == "I32")
-        return QType::INT32;
-    if (s == "I64")
-        return QType::INT32;  // closest proxy
-    if (s == "BOOL")
-        return QType::INT8;
-    if (s == "F8_E4M3")
-        return QType::FP8_E4M3;
-    if (s == "F8_E5M2") {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            IMP_LOG_WARN(
-                "SafeTensors F8_E5M2 tensors found; mapping to FP8_E4M3 as a "
-                "lossy proxy (no native E5M2 path). Activation-style tensors "
-                "may lose precision. (Logged once.)");
-        }
-        return QType::FP8_E4M3;
+const SafeTensorsDtype* safetensors_dtype_entry(const std::string& s) {
+    for (const auto& e : kSafeTensorsDtypes) {
+        if (e.name == s)
+            return &e;
     }
-    IMP_LOG_WARN("Unknown SafeTensors dtype '%s', defaulting to FP32", s.c_str());
-    return QType::F32;
+    return nullptr;
 }
+
+// Shard loading is multi-threaded, so the once-per-dtype note needs a lock;
+// the previous plain `static bool warned` raced (harmlessly, but it raced).
+static void log_dtype_note_once(const SafeTensorsDtype& dt) {
+    if (!dt.once_note)
+        return;
+    static std::mutex note_mutex;
+    static std::set<std::string> noted;
+    std::lock_guard<std::mutex> lock(note_mutex);
+    if (noted.insert(std::string(dt.name)).second)
+        IMP_LOG_WARN("%s", dt.once_note);
+}
+
+namespace safetensors_internal {
+
+size_t dtype_table_size() { return sizeof(kSafeTensorsDtypes) / sizeof(kSafeTensorsDtypes[0]); }
+
+DtypeTableRow dtype_table_row(size_t i) {
+    const auto& e = kSafeTensorsDtypes[i];
+    return DtypeTableRow{std::string(e.name), e.wire_bytes, e.qtype, e.servable};
+}
+
+}  // namespace safetensors_internal
 
 // ---- Architecture detection from weight names ----
 
@@ -375,6 +397,8 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     int n_dropped_too_many_dims = 0;
     int n_dropped_no_offsets = 0;
     int n_dropped_offset_validation = 0;
+    int n_dropped_dtype_unsupported = 0;
+    int n_dropped_bad_shape = 0;
     auto warn_drop = [&](const char* tensor_name, const char* reason) {
         IMP_LOG_WARN("SafeTensors %s: dropping tensor '%s' — %s", path.c_str(), tensor_name, reason);
     };
@@ -413,7 +437,20 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
             warn_drop(tensor_name.c_str(), "missing or non-string 'dtype' field");
             continue;
         }
-        QType dtype = safetensors_dtype(dtype_val->str_val);
+        // #1603/#1604: the dtype decides both the QType and the width the
+        // offsets are validated with, so an unknown or unservable one is a
+        // drop here and never reaches a lenient validation branch below.
+        const SafeTensorsDtype* dt = safetensors_dtype_entry(dtype_val->str_val);
+        if (!dt || !dt->servable) {
+            n_dropped_dtype_unsupported++;
+            std::string reason = dt ? ("dtype '" + dtype_val->str_val +
+                                       "' has no equal-width engine type, refusing to re-type it")
+                                    : ("unknown SafeTensors dtype '" + dtype_val->str_val + "'");
+            warn_drop(tensor_name.c_str(), reason.c_str());
+            continue;
+        }
+        log_dtype_note_once(*dt);
+        QType dtype = dt->qtype;
 
         const JValue* shape_val = jobj_find(tensor_meta, "shape");
         if (!shape_val || shape_val->type != JType::ARRAY) {
@@ -424,6 +461,36 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
 
         int ndim = static_cast<int>(shape_val->arr.size());
         int64_t shape[kMaxDims] = {};
+
+        // #1605: every dim arrives as a JSON double narrowed to int64, so the
+        // sign and the running product have to be checked BEFORE any
+        // multiplication - a wrapped product yields a small expected_nbytes
+        // that then passes the offset check. gguf_tensor_byte_size()
+        // (src/model/gguf_parse.cpp) has had exactly this guard since it was
+        // written; this is the same computation without it.
+        uint64_t nelem = 1;
+        bool bad_shape = false;
+        for (int d = 0; d < ndim; d++) {
+            int64_t dim = shape_val->arr[d].as_int();
+            if (dim < 0) {
+                bad_shape = true;
+                break;
+            }
+            uint64_t udim = static_cast<uint64_t>(dim);
+            if (udim != 0 && nelem > UINT64_MAX / udim) {
+                bad_shape = true;
+                break;
+            }
+            nelem *= udim;
+        }
+        // Tensor::numel() redoes this product in int64_t, so a value above
+        // INT64_MAX would be signed overflow there even though it fits here.
+        if (bad_shape || nelem > static_cast<uint64_t>(INT64_MAX)) {
+            n_dropped_bad_shape++;
+            warn_drop(tensor_name.c_str(), "negative or overflowing shape dimension");
+            continue;
+        }
+
         if (ndim > kMaxDims) {
             // Was: drop with a WARN. That loses a weight and only says so in a
             // log line — Qwen3-VL's patch embed is [1024, 3, 2, 16, 16] and
@@ -442,11 +509,26 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
             // structure here — but it was being DROPPED before, so nothing can
             // regress, and the INFO line makes the reinterpretation visible
             // rather than silent.
-            int64_t tail = 1;
-            for (int d = 1; d < ndim; d++)
-                tail *= shape_val->arr[d].as_int();
+            // Dims are non-negative here, but shape[0] == 0 makes the total
+            // product 0 while the tail alone can still overflow, so the tail
+            // gets its own saturating guard.
+            uint64_t tail = 1;
+            bool tail_overflow = false;
+            for (int d = 1; d < ndim; d++) {
+                uint64_t udim = static_cast<uint64_t>(shape_val->arr[d].as_int());
+                if (udim != 0 && tail > static_cast<uint64_t>(INT64_MAX) / udim) {
+                    tail_overflow = true;
+                    break;
+                }
+                tail *= udim;
+            }
+            if (tail_overflow) {
+                n_dropped_bad_shape++;
+                warn_drop(tensor_name.c_str(), "trailing shape dims overflow when flattened");
+                continue;
+            }
             shape[0] = shape_val->arr[0].as_int();
-            shape[1] = tail;
+            shape[1] = static_cast<int64_t>(tail);
             IMP_LOG_WARN("SafeTensors %s: tensor '%s' has %d dims; flattening trailing dims to [%lld, %lld]",
                          path.c_str(), tensor_name.c_str(), ndim, static_cast<long long>(shape[0]),
                          static_cast<long long>(shape[1]));
@@ -468,29 +550,27 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         uint64_t offset_end = static_cast<uint64_t>(offsets_val->arr[1].as_int());
 
         // Per-tensor offset/size validation (F4): reject swap, OOB end, and
-        // shape-vs-byte-count mismatch. expected_nbytes = nelem × wire_dtype_bytes.
-        size_t wire_bytes = safetensors_wire_dtype_bytes(dtype_val->str_val);
-        if (wire_bytes == 0) {
-            // Unknown wire dtype — skip strict validation but keep the soft
-            // OOB check below. safetensors_dtype()'s WARN already fires for
-            // unknown wire types when the tensor is actually emitted.
-            if (tensor_data_offset + offset_end > file_size) {
-                n_dropped_offset_validation++;
-                warn_drop(tensor_name.c_str(), "offset_end past EOF (unknown wire dtype, lenient check)");
-                continue;
-            }
-        } else {
-            int64_t nelem = 1;
-            for (int d = 0; d < ndim; d++)
-                nelem *= shape[d];
-            uint64_t expected_nbytes = static_cast<uint64_t>(nelem) * static_cast<uint64_t>(wire_bytes);
-            std::string vt_err;
-            if (!safetensors_internal::validate_tensor_offsets(offset_start, offset_end, expected_nbytes,
-                                                               tensor_data_offset, file_size, &vt_err)) {
-                n_dropped_offset_validation++;
-                warn_drop(tensor_name.c_str(), vt_err.c_str());
-                continue;
-            }
+        // shape-vs-byte-count mismatch. expected_nbytes = nelem * wire_bytes.
+        //
+        // #1603: there is no lenient branch any more. The old one ran for every
+        // unknown dtype and never looked at offset_start at all - the only
+        // checker of offset_start is validate_tensor_offsets - so the raw
+        // pointer below was `mmap_base + tensor_data_offset + <unbounded>`. Its
+        // one check also added two file-controlled uint64s, which wraps for
+        // offset_end >= 2^64 - tensor_data_offset; validate_header_size at the
+        // top of this file rejects exactly that pattern and says why.
+        if (nelem != 0 && dt->wire_bytes > UINT64_MAX / nelem) {
+            n_dropped_bad_shape++;
+            warn_drop(tensor_name.c_str(), "shape times dtype width overflows");
+            continue;
+        }
+        uint64_t expected_nbytes = nelem * static_cast<uint64_t>(dt->wire_bytes);
+        std::string vt_err;
+        if (!safetensors_internal::validate_tensor_offsets(offset_start, offset_end, expected_nbytes,
+                                                           tensor_data_offset, file_size, &vt_err)) {
+            n_dropped_offset_validation++;
+            warn_drop(tensor_name.c_str(), vt_err.c_str());
+            continue;
         }
 
         void* tensor_ptr = tensor_data_base + offset_start;
@@ -505,13 +585,15 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     }
 
     int n_total_dropped = n_dropped_no_dtype + n_dropped_no_shape + n_dropped_too_many_dims +
-                          n_dropped_no_offsets + n_dropped_offset_validation;
+                          n_dropped_no_offsets + n_dropped_offset_validation + n_dropped_dtype_unsupported +
+                          n_dropped_bad_shape;
     if (n_total_dropped > 0) {
         IMP_LOG_WARN(
             "SafeTensors %s: dropped %d malformed tensors (no_dtype=%d no_shape=%d "
-            "too_many_dims=%d no_offsets=%d offset_validation=%d)",
+            "too_many_dims=%d no_offsets=%d offset_validation=%d dtype_unsupported=%d bad_shape=%d)",
             path.c_str(), n_total_dropped, n_dropped_no_dtype, n_dropped_no_shape, n_dropped_too_many_dims,
-            n_dropped_no_offsets, n_dropped_offset_validation);
+            n_dropped_no_offsets, n_dropped_offset_validation, n_dropped_dtype_unsupported,
+            n_dropped_bad_shape);
     }
 
     return true;

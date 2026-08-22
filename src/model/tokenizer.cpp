@@ -835,28 +835,49 @@ bool Tokenizer::load(const std::string& path) {
     // Extract vocabulary from model.vocab
     const JValue* vocab = jobj_find(*model, "vocab");
     if (vocab && vocab->type == JType::OBJECT) {
-        // Find max id to size the vocab vector
-        int max_id = 0;
+        // Find max id to size the vocab vector.
+        //
+        // #1606: an id arrives as a JSON double and is narrowed to int, so it
+        // can be negative or absurd. max_id only ever grew, so a negative id
+        // never widened the vector and `vocab_[id]` below indexed at size_t(-1)
+        // - a heap write before any inference runs, on any checkpoint
+        // directory the operator points at. The decode side of this same file
+        // has always range-checked (decode_spm_token); the load side did not.
+        // The upper bound matters too: max_id + 1 in `int` wraps to INT_MIN at
+        // INT_MAX, and an id of 2^31-1 alone asks for a 2.1-billion-element
+        // vector<string>.
+        int64_t max_id = -1;
+        size_t n_dropped_id = 0;
         for (const auto& [token, val] : vocab->obj) {
             if (val.type == JType::NUMBER) {
-                int id = static_cast<int>(val.num_val);
+                int64_t id = static_cast<int64_t>(val.num_val);
+                if (id < 0 || id > kMaxTokenId) {
+                    n_dropped_id++;
+                    continue;
+                }
                 if (id > max_id)
                     max_id = id;
             }
         }
-        vocab_.resize(max_id + 1);
-        scores_.resize(max_id + 1, 0.0f);
+        vocab_.resize(static_cast<size_t>(max_id + 1));
+        scores_.resize(static_cast<size_t>(max_id + 1), 0.0f);
 
         token_to_id_.clear();
         token_to_id_.reserve(vocab->obj.size());
         for (const auto& [token, val] : vocab->obj) {
             if (val.type != JType::NUMBER)
                 continue;
-            int id = static_cast<int>(val.num_val);
-            vocab_[id] = token;
-            token_to_id_[token] = id;
+            int64_t id = static_cast<int64_t>(val.num_val);
+            if (id < 0 || id > max_id)
+                continue;
+            vocab_[static_cast<size_t>(id)] = token;
+            token_to_id_[token] = static_cast<int>(id);
         }
 
+        if (n_dropped_id > 0) {
+            IMP_LOG_WARN("tokenizer.json: dropped %zu vocab entries with an out-of-range id (< 0 or > %lld)",
+                         n_dropped_id, static_cast<long long>(kMaxTokenId));
+        }
         IMP_LOG_INFO("tokenizer.json: loaded %zu vocab entries (type=%s)", vocab->obj.size(),
                      model_type.c_str());
     }
@@ -896,7 +917,18 @@ bool Tokenizer::load(const std::string& path) {
                 continue;
             if (id_v->type != JType::NUMBER || content_v->type != JType::STRING)
                 continue;
-            int id = static_cast<int>(id_v->num_val);
+            // #1606: same unchecked narrowing as the vocab loop above. The
+            // "ensure vectors are large enough" guard below is a `>=` test,
+            // which a negative id passes without resizing, so it lands as a
+            // write at a negative index - including a vector<bool> proxy write
+            // into added_token_ids_.
+            int64_t id64 = static_cast<int64_t>(id_v->num_val);
+            if (id64 < 0 || id64 > kMaxTokenId) {
+                IMP_LOG_WARN("tokenizer.json: added_token with out-of-range id %lld dropped",
+                             static_cast<long long>(id64));
+                continue;
+            }
+            int id = static_cast<int>(id64);
             const std::string& content = content_v->str_val;
             bool is_special = special_v && special_v->type == JType::NUMBER && special_v->num_val != 0.0;
             // HF semantics: an added token with `normalized=false` is matched
