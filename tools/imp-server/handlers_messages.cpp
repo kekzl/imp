@@ -34,6 +34,8 @@ namespace {
 // Anthropic SSE event writer. Emits "event: <name>\ndata: <json>\n\n".
 struct AnthropicSSE {
     httplib::DataSink& sink;
+    std::string hot_buf;  // reused by emit_delta, never by emit
+
     bool emit(const char* event_name, const json& payload) const {
         std::string buf = "event: ";
         buf += event_name;
@@ -42,7 +44,34 @@ struct AnthropicSSE {
         buf += "\n\n";
         return sink.write(buf.data(), buf.size());
     }
+
+    // #1657: the per-token path. emit() above builds a nested json object and
+    // dump()s it for EVERY token, which is exactly what the shared writer's own
+    // header forbids on the hot path (utils.h:167-168) and what
+    // /v1/chat/completions has avoided since it got SSEChunkWriter. The frame
+    // around a delta is constant for the whole block, so it is built once at
+    // block start and the token only gets escaped between the two halves.
+    bool emit_delta(const std::string& prefix, const std::string& suffix, const std::string& text) {
+        hot_buf.clear();
+        hot_buf += prefix;
+        json_escape_into(hot_buf, text.data(), text.size());
+        hot_buf += suffix;
+        return sink.write(hot_buf.data(), hot_buf.size());
+    }
 };
+
+// The constant half of a content_block_delta frame, built once per block.
+// `field` is "text" for a text_delta and "thinking" for a thinking_delta.
+inline std::string anth_delta_prefix(int block_index, const char* type, const char* field) {
+    std::string p = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":";
+    p += std::to_string(block_index);
+    p += ",\"delta\":{\"type\":\"";
+    p += type;
+    p += "\",\"";
+    p += field;
+    p += "\":\"";
+    return p;
+}
 
 // Tracks which content block (if any) is currently open in the stream so we
 // can close it before opening one of a different kind. Anthropic requires a
@@ -105,6 +134,9 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
 
     int block_index = -1;
     AnthBlock open_block = AnthBlock::NONE;
+    // Rebuilt whenever a block opens; constant for every token inside it.
+    std::string text_delta_prefix, thinking_delta_prefix;
+    static const std::string kDeltaSuffix = "\"}}\n\n";
 
     auto stop_block = [&]() -> bool {
         if (open_block == AnthBlock::NONE)
@@ -121,6 +153,7 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return false;
         ++block_index;
         open_block = AnthBlock::TEXT;
+        text_delta_prefix = anth_delta_prefix(block_index, "text_delta", "text");
         return out.emit("content_block_start",
                         json{{"type", "content_block_start"},
                              {"index", block_index},
@@ -133,6 +166,7 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return false;
         ++block_index;
         open_block = AnthBlock::THINKING;
+        thinking_delta_prefix = anth_delta_prefix(block_index, "thinking_delta", "thinking");
         return out.emit("content_block_start",
                         json{{"type", "content_block_start"},
                              {"index", block_index},
@@ -143,20 +177,14 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return true;
         if (!start_text_block())
             return false;
-        return out.emit("content_block_delta",
-                        json{{"type", "content_block_delta"},
-                             {"index", block_index},
-                             {"delta", {{"type", "text_delta"}, {"text", text}}}});
+        return out.emit_delta(text_delta_prefix, kDeltaSuffix, text);
     };
     auto emit_thinking = [&](const std::string& text) -> bool {
         if (text.empty())
             return true;
         if (!start_thinking_block())
             return false;
-        return out.emit("content_block_delta",
-                        json{{"type", "content_block_delta"},
-                             {"index", block_index},
-                             {"delta", {{"type", "thinking_delta"}, {"thinking", text}}}});
+        return out.emit_delta(thinking_delta_prefix, kDeltaSuffix, text);
     };
     // Open a tool_use block (content_block_start). Arguments follow as
     // input_json_delta events — incrementally for streamed (JSON-layout)
