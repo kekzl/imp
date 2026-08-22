@@ -93,6 +93,10 @@ struct Request {
     // enables what the model and the operator config allow; it cannot conjure
     // an MTP head the checkpoint does not carry.
     int spec_override = -1;
+    // Scheduler round this request was enqueued in. Only the scheduler writes
+    // it; it exists so admission can tell "short" from "short AND recent"
+    // (#1634).
+    uint64_t enqueued_round = 0;
     // OpenAI Predicted Outputs: client-supplied predicted completion tokens.
     // Never forwarded through the model — they only extend the n-gram draft
     // search corpus (input + prediction + output), so a response that tracks

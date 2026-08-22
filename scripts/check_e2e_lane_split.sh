@@ -47,6 +47,7 @@ RequestTest.DefaultState
 RequestTest.StatusTransitions
 SchedulerTest.ACancelledQueueSchedulesNothing
 SchedulerTest.AddRemoveRapidly
+SchedulerTest.AgingStopsALongPromptFromStarving
 SchedulerTest.AllRequestsTooLargeForMemory
 SchedulerTest.BasicPrefillThenDecode
 SchedulerTest.DoesNotPromoteARequestCancelledWhileQueued
@@ -64,6 +65,7 @@ SchedulerTest.MemoryAwareScheduling
 SchedulerTest.MemoryAwareSkipsLargeAdmitsSmall
 SchedulerTest.NewPrefillWhileDecoding
 SchedulerTest.PrefillPriorityOverDecode
+SchedulerTest.ShortestFirstStillHoldsAmongPeers
 SchedulerTest.RemovesFinishedRequests
 SchedulerTest.ShortestInputFirst
 StubModelTest.LoadStubModel

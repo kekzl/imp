@@ -180,6 +180,20 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Admission could starve a long prompt, and two knobs named `max_batch_size`
+  parked admitted rows** (#1634, #1637). The pending queue is re-sorted
+  shortest-first on every arrival, which is deliberate against head-of-line
+  blocking and unbounded on its own: under sustained short traffic a long
+  prompt is overtaken every round forever. Aging bounds it - a request waiting
+  `Scheduler::kAgingRounds` rounds sorts ahead of everything younger, ties by
+  length - so the property survives and the starvation does not.
+  `docs/roadmap.md` said "scheduling is arrival order", which it never was;
+  corrected in place with the date. Separately, `EngineConfig::max_batch_size`
+  caps admission while `runtime.max_batch_size` truncates the decode batch, and
+  when the second was smaller the rows admitted beyond it were prefilled, held
+  their KV and never decoded until a head row finished. Admission is clamped to
+  the smaller of the two and logs that it did.
+
 - **The `compute_120f` PTX fallback is assembled in CI** (#1650). It ships as
   `code=compute_120f`, the PTX-only form, so `ptxas` never ran over it and the
   first thing that would was the driver's JIT on a GB203 - a card nobody in

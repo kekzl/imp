@@ -661,5 +661,57 @@ TEST(SchedulerTest, MaxBatchSize) {
     EXPECT_EQ(total_admitted, 20);
 }
 
+// A long prompt must not be passed over forever (#1634).
+//
+// Shortest-first is the policy and stays. What it lacked was a bound: the
+// queue is re-sorted on every arrival, so under sustained short traffic a long
+// prompt is overtaken every round, with nothing that ever makes it its turn.
+TEST(SchedulerTest, AgingStopsALongPromptFromStarving) {
+    Scheduler sched(1);  // one slot, so every round admits exactly one
+
+    auto long_req = std::make_shared<Request>();
+    long_req->input_tokens.assign(500, 1);
+    sched.add_request(long_req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    bool long_admitted = false;
+
+    // A short request arrives before every scheduling round, which is the
+    // traffic pattern that starves the long one.
+    for (int round = 0; round < Scheduler::kAgingRounds + 4 && !long_admitted; round++) {
+        auto shorty = std::make_shared<Request>();
+        shorty->input_tokens.assign(3, 1);
+        sched.add_request(shorty);
+
+        sched.schedule(prefill, decode);
+        for (auto& r : prefill) {
+            if (r == long_req)
+                long_admitted = true;
+            r->status = RequestStatus::FINISHED;  // free the slot for the next round
+        }
+    }
+
+    EXPECT_TRUE(long_admitted) << "the long prompt was never admitted within "
+                               << (Scheduler::kAgingRounds + 4) << " rounds";
+}
+
+// The property aging must not cost: among requests of the same age, the
+// shorter one still goes first.
+TEST(SchedulerTest, ShortestFirstStillHoldsAmongPeers) {
+    Scheduler sched(1);
+
+    auto long_req = std::make_shared<Request>();
+    long_req->input_tokens.assign(500, 1);
+    auto short_req = std::make_shared<Request>();
+    short_req->input_tokens.assign(3, 1);
+    sched.add_request(long_req);
+    sched.add_request(short_req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0], short_req) << "same age, so length decides";
+}
+
 }  // namespace
 }  // namespace imp

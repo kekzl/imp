@@ -10,6 +10,7 @@ namespace imp {
 Scheduler::Scheduler(int max_batch_size) : max_batch_size_(max_batch_size) {}
 
 void Scheduler::add_request(std::shared_ptr<Request> req) {
+    req->enqueued_round = round_;
     pending_.push_back(std::move(req));
     pending_dirty_ = true;
 }
@@ -32,10 +33,33 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     std::erase_if(active_, is_done);
     std::erase_if(pending_, is_done);
 
-    // 2. Sort pending by ascending input token count (shortest-first)
-    //    to reduce head-of-line blocking in continuous batching.
-    if (pending_dirty_) {
-        std::ranges::sort(pending_, [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
+    // 2. Sort pending shortest-first, with aging.
+    //
+    // Shortest-first reduces head-of-line blocking, which is why it is here.
+    // On its own it also starves: the queue is re-sorted on every arrival, so
+    // a long prompt is passed over by every shorter one that shows up while
+    // the batch is full, for as long as that lasts. Under sustained short
+    // traffic "for as long as that lasts" has no bound (#1634).
+    //
+    // Aging puts a bound on it without giving up the property: a request that
+    // has been waiting kAgingRounds scheduling rounds sorts ahead of every
+    // request that has not, and ties fall back to length. So the ordering is
+    // shortest-first among peers, and arrival order across the aging boundary.
+    //
+    // The sort has to run whenever the round advances, not only when the queue
+    // changed - the aging bucket of a request changes with time, not with
+    // arrivals, and `pending_dirty_` cannot see time passing.
+    ++round_;
+    const uint64_t now = round_;
+    if (pending_dirty_ || !pending_.empty()) {
+        std::ranges::sort(pending_, [now](const std::shared_ptr<Request>& a,
+                                          const std::shared_ptr<Request>& b) {
+            const bool a_aged = now - a->enqueued_round >= static_cast<uint64_t>(kAgingRounds);
+            const bool b_aged = now - b->enqueued_round >= static_cast<uint64_t>(kAgingRounds);
+            if (a_aged != b_aged)
+                return a_aged;  // waited long enough beats short
+            if (a_aged)
+                return a->enqueued_round < b->enqueued_round;  // among the aged, oldest first
             return a->input_tokens.size() < b->input_tokens.size();
         });
         pending_dirty_ = false;

@@ -782,7 +782,27 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     } else {
         IMP_LOG_INFO("grouped-3x NVFP4 prewarm skipped: model has no experts");
     }
-    scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
+    // Two different values are called max_batch_size, and they bound the same
+    // pipeline at two different points (#1637): EngineConfig::max_batch_size
+    // caps ADMISSION here, and runtime.max_batch_size truncates the DECODE
+    // batch in engine_scheduler.cpp. When the decode cap is the smaller of the
+    // two, the rows admitted beyond it are prefilled, hold their KV, and never
+    // decode until a head row finishes - work paid for and parked.
+    //
+    // Admission is clamped to whichever is smaller, and says so. The names stay
+    // as they are: one is the C-API's EngineConfig field and the other is a
+    // documented imp.conf key, so renaming either breaks a published surface.
+    int admit_cap = config_.max_batch_size;
+    const int decode_cap = runtime_config_.runtime.max_batch_size;
+    if (decode_cap > 0 && admit_cap > decode_cap) {
+        IMP_LOG_INFO(
+            "admission capped at %d to match runtime.max_batch_size (EngineConfig::max_batch_size "
+            "is %d). Admitting more than the decode batch can serve parks the extra rows on their "
+            "KV until a head row finishes.",
+            decode_cap, admit_cap);
+        admit_cap = decode_cap;
+    }
+    scheduler_ = std::make_unique<Scheduler>(admit_cap);
     (void)stream_.create(cudaStreamNonBlocking);
     MemAccount::instance().checkpoint("01_prewarm_gemm");
 

@@ -60,11 +60,22 @@ neighbour, publishes no 2026 roadmap.
 
 Ranked by what an agent workload notices first.
 
-1. **Scheduling is arrival order.** Nothing in the scheduler reads a per-request
-   priority, so one long generation holds its batch slot while short requests
-   queue behind it. `max_concurrent` bounds the queue, it does not order it. Both
-   other engines are refactoring their scheduler this quarter and SGLang names
-   session control for agentic workloads explicitly.
+1. **Scheduling has no per-request priority.** Nothing in the scheduler reads
+   one, so a caller cannot say which request matters. `max_concurrent` bounds
+   the queue, it does not order it. Both other engines are refactoring their
+   scheduler this quarter and SGLang names session control for agentic
+   workloads explicitly.
+
+   *Corrected 2026-08-22 (#1634):* this entry said "scheduling is arrival
+   order". It was not, and had not been: `scheduler.cpp` re-sorts the pending
+   queue shortest-first on every arrival. That is a deliberate choice against
+   head-of-line blocking, but on its own it starves - a long prompt is passed
+   over by every shorter one that arrives while the batch is full, with no
+   bound under sustained short traffic. Aging now bounds it
+   (`Scheduler::kAgingRounds`): a request waiting that many rounds sorts ahead
+   of everything younger, ties by length. Shortest-first among peers, arrival
+   order across the boundary. The missing piece above - a priority a caller can
+   set - is still missing.
 2. **Long context is served by a 2023-era answer.** The only sparsity is
    StreamingLLM, sink tokens plus a sliding window
    (`attention_paged_common.cuh:71`), which drops what falls out of the window.
