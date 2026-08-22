@@ -8,6 +8,13 @@
 
 namespace imp {
 
+// Largest token id a tokenizer.json may declare (#1606). Ids come out of the
+// file as JSON doubles and index vocab_/scores_/token_types_ directly, so they
+// need both a lower and an upper bound: below zero is an out-of-bounds write,
+// and near INT_MAX the `max_id + 1` sizing wraps. 4M is roughly 16x the largest
+// vocabulary any shipped checkpoint uses (Gemma, ~256k).
+constexpr int64_t kMaxTokenId = 4 * 1024 * 1024;
+
 class Tokenizer {
 public:
     Tokenizer() = default;

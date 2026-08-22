@@ -58,6 +58,22 @@ bool validate_tensor_offsets(uint64_t offset_start, uint64_t offset_end,
                              uint64_t expected_nbytes, uint64_t tensor_data_offset,
                              uint64_t file_size, std::string* err);
 
+// One row of the SafeTensors wire-dtype table (#1604). `wire_bytes` is the
+// on-disk element width and `qtype` is what the tensor is mapped to; for a
+// servable row those two widths MUST agree, otherwise the loader validates a
+// tensor with one width and its consumer reads it with another. Exposed so a
+// test can assert that equality over the whole table and fail when a new
+// proxy mapping is added.
+struct DtypeTableRow {
+    std::string name;
+    size_t wire_bytes;
+    QType qtype;
+    bool servable;
+};
+
+size_t dtype_table_size();
+DtypeTableRow dtype_table_row(size_t i);
+
 }  // namespace safetensors_internal
 
 }  // namespace imp

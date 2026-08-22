@@ -163,6 +163,21 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Four out-of-bounds accesses in the model-file parsers, all reachable from a
+  checkpoint directory before any inference runs** (#1603, #1604, #1605, #1606).
+  A SafeTensors tensor was validated with one element width and read with
+  another (I16: 2 on disk, 4 in the QType it was mapped to), an unknown dtype
+  skipped the only validator that looks at `offset_start`, the shape product had
+  no overflow or sign guard, and a negative `tokenizer.json` id indexed
+  `vocab_` at `size_t(-1)`. A dtype with no equal-width engine type is now
+  refused instead of re-typed, and token ids are bounded at both ends.
+
+- **`make asan` could not build its own binaries** (#1659). Two test files that
+  use nlohmann sat in the unconditional `test-core` list while nlohmann is only
+  fetched under `IMP_BUILD_SERVER`, which the sanitizer target turns off, so
+  test-core did not compile in any `-DIMP_BUILD_SERVER=OFF` configuration.
+  Now clean: test-core 734, test-text 200, no ASan or UBSan report.
+
 - **imp-quantize read every subnormal value in an F16 `scale_inv` grid up to
   1025x too large** (`0x0001` as 6.1e-05 where the value is 5.96e-08): the
   hand-written widening pasted the subnormal mantissa under a normal exponent
