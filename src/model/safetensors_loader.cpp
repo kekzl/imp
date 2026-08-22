@@ -1,4 +1,5 @@
 #include "model/safetensors_loader.h"
+#include "model/model_limits.h"
 #include "model/model_arch.h"
 #include "model/weight_map.h"
 #include "model/hf_config_loader.h"
@@ -216,10 +217,16 @@ static int extract_layer_index(const std::string& name) {
     if (name.compare(0, plen, prefix) != 0)
         return -1;
 
+    // `idx * 10 + digit` on an unchecked digit run is signed overflow, i.e.
+    // undefined, and the result sizes `model->layers_` through
+    // `infer_n_layers` when config.json is absent. Stop at the limit instead:
+    // a name past it is not a layer this build can serve either way.
     int idx = 0;
     size_t i = plen;
     while (i < name.size() && name[i] >= '0' && name[i] <= '9') {
         idx = idx * 10 + (name[i] - '0');
+        if (idx > kMaxModelLayers)
+            return -1;
         i++;
     }
     if (i == plen)
@@ -599,6 +606,26 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     return true;
 }
 
+// A shard name out of `model.safetensors.index.json` is file content, not an
+// operator-supplied path, and it is about to be concatenated onto the model
+// directory and handed to open()/mmap(). A name with a separator in it escapes
+// that directory: "../../../../etc/hostname" resolves, and so does an absolute
+// path, because `model_dir + "/" + "/etc/shadow"` is just "//etc/shadow".
+//
+// Every real checkpoint names a plain file next to the index, so the rule is
+// the strict one: a bare filename, nothing else. The GGUF split path is not
+// exposed to this because it derives shard names from the operator's own path
+// (gguf_loader.cpp:196) rather than from the file.
+bool safetensors_shard_name_is_safe(const std::string& name) {
+    if (name.empty())
+        return false;
+    if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos)
+        return false;
+    if (name == "." || name == "..")
+        return false;
+    return true;
+}
+
 // ---- Sharded SafeTensors loading ----
 
 // mtp_out: same contract as load_shard's — non-null means an embedded MTP head
@@ -641,6 +668,11 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     std::map<std::string, std::vector<std::string>> shard_tensors;
     for (const auto& kv : weight_map->obj) {
         if (kv.second.type == JType::STRING) {
+            if (!safetensors_shard_name_is_safe(kv.second.str_val)) {
+                IMP_LOG_ERROR("Shard name escapes the model directory: '%s' (tensor '%s' in %s)",
+                              kv.second.str_val.c_str(), kv.first.c_str(), index_path.c_str());
+                return false;
+            }
             shard_tensors[kv.second.str_val].push_back(kv.first);
         }
     }
@@ -1135,6 +1167,17 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     }
 
     // 5. Allocate layers and expert vectors
+    //
+    // Every number below came out of the file (config.json, or inferred from
+    // tensor names when it is absent), so it is checked before it sizes
+    // anything: `num_hidden_layers` alone reaches 18.9 TiB at INT_MAX.
+    {
+        std::string dim_err;
+        if (!validate_declared_dimensions(cfg, &dim_err)) {
+            IMP_LOG_ERROR("SafeTensors: %s", dim_err.c_str());
+            return nullptr;
+        }
+    }
     model->layers_.resize(cfg.n_layers);
     if (cfg.n_experts > 0) {
         for (auto& layer : model->layers_) {

@@ -21,6 +21,12 @@ namespace imp {
 // the head is wasted VRAM otherwise (server + normal CLI never use it).
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head = false);
 
+// True when a `model.safetensors.index.json` shard name is a bare filename
+// next to the index. The names are file content, so a separator in one escapes
+// the model directory into an arbitrary open()/mmap() (#1612). Exposed for the
+// test; the loader calls it before it opens anything.
+bool safetensors_shard_name_is_safe(const std::string& name);
+
 // ---- Test-visible validation helpers ----
 //
 // These mirror the production validation rules in load_shard()

@@ -91,6 +91,11 @@ JValue JsonParser::parse() {
 }
 
 JValue JsonParser::parse_value() {
+    DepthGuard guard(*this);
+    if (depth_ > kMaxDepth) {
+        error_ = true;
+        return {};
+    }
     skip_ws();
     if (error_)
         return {};
