@@ -180,6 +180,21 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`docs_lint.py` promised checks it did not run** (#1683). The header claimed
+  all seven checks fail the build while staleness only warned, and the
+  frontmatter error named four fields while one was validated: `audience:` and
+  `commit:` were read by no line. Both are checked now, and a document edited
+  since the commit it claims to be verified against is reported - 41 of them
+  are. That check counts edits to the file, not commits to the repo: a
+  threshold on repo commits was the first attempt and did not fire on the case
+  that motivated it.
+
+- **The engine told server operators to use a flag that kills the server**
+  (#1681). `engine_kv_cache_init.cpp:432,459` say "lower --max-seq-len"; both
+  messages are shared by imp-cli and imp-server, and `imp-server --max-seq-len N`
+  exits 1. They name `--set runtime.max_seq_len=N` now.
+
+
 - **A nested `tools[].function.parameters` crashed the whole server** (#1607).
   Every parser on the request path is recursive and none bounded depth,
   nlohmann included and it runs first: measured here, 50 000 nested arrays parse

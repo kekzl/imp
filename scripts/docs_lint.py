@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Documentation linter. Fails the build on the seven checks below.
+"""Documentation linter. Six checks fail the build; staleness only warns.
+
+That split was undocumented until #1683, which found the header claiming all
+seven were blocking while check 7 appended to `warnings` and the exit code read
+`errors` alone. Staleness stays a warning on purpose - a date does not tell you
+whether the content moved - but it says so now, and the commit marker it sits
+next to is checked and reported (see check 3).
 
 The point of each check is that it catches a class of defect this repo has
 actually shipped before, not that it enforces a style:
@@ -115,6 +121,35 @@ README_MAX_LINES = 400
 CLAUDE_ROOT_MAX_TOKENS = 2000
 CLAUDE_DIR_MAX_TOKENS = 800
 STALE_DAYS = 180
+# A `commit:` marker is reported when THE FILE ITSELF changed after it, not at
+# some commit count. The count was the first attempt and it was arbitrary: 200
+# did not fire on the case that motivated the check (40 files pinned at
+# 81ffa573 with main 133 commits ahead), and any number that did fire would
+# have been picked to fit that one case. "Was this file edited since it was
+# last verified" needs no threshold and is the question the field claims to
+# answer (#1683).
+_COMMIT_DEPTH_CACHE: dict = {}
+
+
+def _edits_since(sha: str, path: str):
+    """Commits touching `path` after `sha`. None if `sha` is not in history."""
+    key = (sha, path)
+    if key in _COMMIT_DEPTH_CACHE:
+        return _COMMIT_DEPTH_CACHE[key]
+    import subprocess
+    val = None
+    try:
+        if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+                          capture_output=True, timeout=10).returncode == 0:
+            out = subprocess.run(["git", "rev-list", "--count", f"{sha}..HEAD", "--", path],
+                                 capture_output=True, text=True, timeout=10)
+            if out.returncode == 0 and out.stdout.strip():
+                val = int(out.stdout.strip())
+    except Exception:
+        val = None
+    _COMMIT_DEPTH_CACHE[key] = val
+    return val
+
 
 BASELINE = ROOT / "tests" / "perf_baseline.json"
 
@@ -149,6 +184,22 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
         errors.append(f"{rel}: missing frontmatter (needs layer/audience/verified/commit)")
     else:
         fm = m.group(1) or m.group(2)
+        # The error message above promises four fields and this validated one
+        # until #1683: `audience:` and `commit:` were read by no line in the
+        # file, so 40 documents carried `commit: 81ffa573` unnoticed while main
+        # moved 133 commits past it.
+        for field in ("audience", "commit"):
+            if not re.search(rf"^{field}:\s*\S+", fm, re.M):
+                errors.append(f"{rel}: frontmatter has no `{field}:`")
+        cm = re.search(r"^commit:\s*([0-9a-f]{7,40})", fm, re.M)
+        if cm:
+            edits = _edits_since(cm.group(1), rel)
+            if edits is None:
+                warnings.append(f"{rel}: commit {cm.group(1)} is not in this history")
+            elif edits > 0:
+                warnings.append(
+                    f"{rel}: edited {edits}x since the commit it says it was verified "
+                    f"against ({cm.group(1)})")
         lm = re.search(r"^layer:\s*(\S+)", fm, re.M)
         if not lm:
             errors.append(f"{rel}: frontmatter has no `layer:`")
