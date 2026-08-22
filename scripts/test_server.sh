@@ -49,6 +49,16 @@ fi
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# Stage 3a: does the server start with NO capacity flags at all? Every battery
+# below runs against a server booted with four of them, so the configuration a
+# first-time reader runs was the one nothing covered (#1631). Its own script,
+# because it needs its own container with different arguments.
+echo "== default-start gate (#1631) =="
+if ! bash scripts/test_server_default_start.sh; then
+    echo "test-server: FAIL - imp-server does not start on shipped defaults"
+    exit 1
+fi
+
 echo "== launch imp-server ($MODEL) =="
 docker rm -f "$CTR" >/dev/null 2>&1 || true
 docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models -p "$PORT":"$PORT" "$IMG" \
