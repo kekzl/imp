@@ -585,8 +585,16 @@ jobs:
       - name: Assert the fuzz corpus is in the binary
         if: steps.scope.outputs.run == 'true'
         run: |
-          n=$(./build-asan/test-core --gtest_list_tests 2>/dev/null | grep -c '^FuzzCorpus' || true)
-          test "$n" = "1" || { echo "FuzzCorpus missing from the sanitizer binary"; exit 1; }
+          # `2>/dev/null` here hid WHY on the first red run: an ASan binary that
+          # cannot start prints to stderr and lists nothing, which reads
+          # identical to a binary built without the tests. Keep stderr.
+          ./build-asan/test-core --gtest_list_tests > /tmp/tests.txt
+          if ! grep -q '^FuzzCorpus' /tmp/tests.txt; then
+            echo "FuzzCorpus missing from the sanitizer binary."
+            echo "suites it does have:"
+            grep -E '^[A-Za-z]' /tmp/tests.txt | head -40
+            exit 1
+          fi
 
       - name: Run
         if: steps.scope.outputs.run == 'true'
