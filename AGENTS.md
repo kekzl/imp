@@ -15,7 +15,8 @@ global rules below; each role then narrows scope and lists explicit **MAY NOT** 
 
 - **English only in the repo.** All commits, PRs, code comments, docs and `.md` files are English.
 - **Single architecture.** Target is exactly `sm_120a` (RTX 5090 / GB202) with a `compute_120f` PTX fallback.
-  Never add speculative multi-arch paths or datacenter-Blackwell (`sm_100`, tcgen05/TMEM/wgmma/TMA-WS) designs.
+  Never add speculative multi-arch paths or datacenter-Blackwell (`sm_100`, tcgen05/TMEM/wgmma) designs.
+  TMA warp-specialised block-scaled GEMM is NOT in that list: it ships on sm_120a (#1543).
 - **Performance is gated, single-session only.** `tests/perf_baseline.json` is canonical (8% decode / 8%
   prefill, plus 10% peak VRAM over the pinned `metrics.memory_mb.own_peak_mb`). Compiler/cuBLAS autotuning
   makes cross-session numbers unreliable — **only compare benchmark

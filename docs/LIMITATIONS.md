@@ -37,6 +37,18 @@ These have a code path and no gate. They may work; nothing proves it.
 
 - **Llama-4** architecture: loads, no dedicated gate.
 - **FP8 E5M2**: the type exists, nothing exercises it.
+- **Phi-4**: an alias onto the LLaMA path, no checkpoint of its own in a gate.
+- **Qwen3.6-35B-A3B vision**: shares the Qwen3-VL tower; `make test-vision`
+  runs gemma-3-4b-vl and Qwen3-VL-4B-Instruct, never a 35B-A3B checkpoint.
+- **Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K**: dequant paths with no gate reading a
+  checkpoint in those formats. Q4_0, Q8_0, Q4_K, Q5_K and Q6_K do have one.
+- **`/v1/rerank` against llama.cpp**: the cross-check is opt-in behind
+  `COMPARE_URL=`, so the default `make test-rerank` does not run it.
+- **`/admin/suspend`, `/admin/resume`** and **`server.model_swap`**: implemented,
+  no gate exercises either.
+
+All seven were green in `FEATURES.md` without a gate until #1680, which makes
+them invisible here - the legend's whole point.
 
 ## Known-bad and known-limited behaviour
 

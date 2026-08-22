@@ -100,9 +100,10 @@ The cost of an oversized file here is **recompile blast radius**, not line count
 
 ## Hardware reality (sm_120 ≠ datacenter Blackwell)
 
-- **No `tcgen05` / TMEM / wgmma / TMA-WS grouped GEMM.** The FP4 path is
-  `mma.sync` `mxf4nvf4` with FA2-style block-scaling. Ignore B200/`sm_100`
-  (FlashAttention-4-style) kernel designs unless porting.
+- **No `tcgen05` / TMEM / wgmma.** The FP4 path is `mma.sync` `mxf4nvf4` with
+  FA2-style block-scaling. Ignore B200/`sm_100` designs unless porting.
+  **TMA-WS block-scaled GEMM ships** on sm_120a (#1543); only the
+  `compute_120f` PTX fallback loses it.
 - **No FP4 cuBLASLt kernels on sm_120** → CUTLASS is the primary GEMM path; FP8
   prefill is unavailable. Dependency pins are single-sourced in
   `cmake/imp-deps.cmake` — bump only that file.
