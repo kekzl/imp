@@ -180,6 +180,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`/v1/messages` and `/v1/responses` built and dumped a JSON object for every
+  emitted token** (#1657), which is what the shared writer's own header forbids
+  on the hot path and what `/v1/chat/completions` stopped doing when it got
+  `SSEChunkWriter`. Both now build the constant part of the frame once per block
+  and only escape the token between the halves. Measured in isolation: 0.568 us
+  per delta against 0.006, a factor of 87. Wire output is byte-compatible -
+  same event count, same key sets, same reassembled text including non-ASCII,
+  checked against a recording from the pre-fix binary.
+
+
 - **`--set` accepted any value for 157 of the 185 bound keys** (#1627). The key
   half was rejected, the value half was not: `parse_bool`/`parse_int`/
   `parse_float` returned the current value for input they could not read, with
