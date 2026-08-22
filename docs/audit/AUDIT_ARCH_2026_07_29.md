@@ -1949,7 +1949,11 @@ and 11 came back REFUTED.
 
 13. **Property-based test batteries in the CPU lane.** `test_json_constrain_property.cpp`,
     `test_schema_constrain_property.cpp`, `test_tokenizer_robustness.cpp`,
-    `test_gguf_fault_injection.cpp` — the FSM and parser surfaces are fuzzed, in CI, with no GPU.
+    `test_gguf_fault_injection.cpp` — the FSM and parser surfaces have property and
+    fault-injection coverage in CI, with no GPU.
+    **Correction (2026-08-22, #1620): "fuzzed" was wrong** when this was written. No fuzz
+    target existed; two of the four files mutate nothing and the other two assert their
+    generated input valid before use. `fuzz/` and the `Sanitizers` job now make the claim true.
 
 14. **The `[allow]` mechanism in `tools/filesize_thresholds.toml`.** Every oversized file carries a
     *reason string* and a classification letter, the gate rejects an empty reason, and the header
