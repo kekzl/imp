@@ -928,6 +928,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_models.cpp
         tests/test_e2e_greedy_lock.cpp
         tests/test_continuous_batching.cpp
+        tests/test_scheduler.cpp
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp
         tests/test_weight_registry_preservation.cpp
