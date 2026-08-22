@@ -83,7 +83,7 @@ not fit. Converting is what makes them run at all.
 docker run --gpus all \
   -v ~/models:/models \
   -v imp-cache:/home/imp/.cache/imp \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
 ```
 

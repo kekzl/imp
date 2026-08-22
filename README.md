@@ -65,7 +65,7 @@ scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4 ~/models/Qwen3.8-27B-NVFP4
 
 ```bash
 docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
-  -p 8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
+  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
 
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -220,7 +220,7 @@ Tracks `main` rather than the latest release.
 ```bash
 git clone https://github.com/kekzl/imp.git && cd imp
 docker compose build imp-server
-docker run --gpus all -v ./models:/models -p 8080:8080 \
+docker run --gpus all -v ./models:/models -p 127.0.0.1:8080:8080 \
   imp:latest --model /models/your-model.gguf
 ```
 

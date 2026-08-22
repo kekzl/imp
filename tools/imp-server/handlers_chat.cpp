@@ -173,6 +173,14 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     // Parse logit_bias: map of token_id (string) -> bias (float)
     std::vector<std::pair<int32_t, float>> logit_bias;
     if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
+        // Same bound as the chat path (#1617); /v1/completions parses its own.
+        if (state.max_logit_bias > 0 && static_cast<int>(body["logit_bias"].size()) > state.max_logit_bias) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "\"logit_bias\" has " + std::to_string(body["logit_bias"].size()) +
+                                " entries, above the server limit of " +
+                                std::to_string(state.max_logit_bias) + " (--max-logit-bias)");
+            return;
+        }
         for (auto& [key, val] : body["logit_bias"].items()) {
             try {
                 int32_t token_id = std::stoi(key);

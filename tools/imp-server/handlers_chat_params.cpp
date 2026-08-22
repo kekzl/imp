@@ -46,9 +46,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // state.request_logger.enabled and the call is not an inner shim.
     ctx.t_log_start = std::chrono::system_clock::now();
     ctx.log_endpoint = req.path;
-    ctx.log_client_ip = req.get_header_value("X-Forwarded-For");
-    if (ctx.log_client_ip.empty())
-        ctx.log_client_ip = req.remote_addr;
+    // Same key the rate limiter uses: an untrusted X-Forwarded-For in the
+    // request log is a forged identity in the audit trail (#1614).
+    ctx.log_client_ip = state.rate_limit_key(req.remote_addr, req.get_header_value("X-Forwarded-For"));
     ctx.log_raw_body = req.body;
     ctx.log_skip = g_in_anthropic_shim;
 
@@ -112,6 +112,16 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.params.n_completions = body.value("n", 1);
     if (ctx.params.n_completions < 1)
         ctx.params.n_completions = 1;
+    // Each n is a full independent generation, run sequentially, and the whole
+    // request still counts as ONE against --rate-limit and --max-concurrent.
+    // The neighbouring max_tokens is clamped to the context window; this was
+    // not clamped at all (#1616).
+    if (state.max_n > 0 && ctx.params.n_completions > state.max_n) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "\"n\" is " + std::to_string(ctx.params.n_completions) +
+                            ", above the server limit of " + std::to_string(state.max_n) + " (--max-n)");
+        return false;
+    }
 
     // Streaming with n > 1 is not supported
     if (ctx.params.stream && ctx.params.n_completions > 1) {
@@ -224,6 +234,17 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
 
     // Parse logit_bias: map of token_id (string) -> bias (float)
     if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
+        // Every entry costs a blocking device-to-host copy per decode step, so
+        // the map size multiplies the cost of every token, not of the request
+        // (#1617). Refuse rather than truncate: a silently dropped bias changes
+        // the output without saying so.
+        if (state.max_logit_bias > 0 && static_cast<int>(body["logit_bias"].size()) > state.max_logit_bias) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "\"logit_bias\" has " + std::to_string(body["logit_bias"].size()) +
+                                " entries, above the server limit of " +
+                                std::to_string(state.max_logit_bias) + " (--max-logit-bias)");
+            return false;
+        }
         for (auto& [key, val] : body["logit_bias"].items()) {
             try {
                 int32_t token_id = std::stoi(key);

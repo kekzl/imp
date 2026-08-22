@@ -337,9 +337,10 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     // Capture original Anthropic request data for opt-in JSONL logging.
     const auto t_log_start = std::chrono::system_clock::now();
     const std::string log_endpoint = req.path;
-    std::string log_client_ip = req.get_header_value("X-Forwarded-For");
-    if (log_client_ip.empty())
-        log_client_ip = req.remote_addr;
+    // Same key the rate limiter uses: an untrusted X-Forwarded-For in the
+    // request log is a forged identity in the audit trail (#1614).
+    std::string log_client_ip = state.rate_limit_key(req.remote_addr,
+                                                     req.get_header_value("X-Forwarded-For"));
     const std::string log_raw_body = req.body;
 
     // #1607: bound the nesting before any recursive parser sees it.

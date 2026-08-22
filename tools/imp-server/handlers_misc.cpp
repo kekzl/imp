@@ -273,6 +273,17 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         if (body["input"].is_string()) {
             inputs.push_back(body["input"].get<std::string>());
         } else if (body["input"].is_array()) {
+            // One request, one rate-limit unit, N forward passes (#1616).
+            if (state.max_batch_items > 0 && static_cast<int>(body["input"].size()) > state.max_batch_items) {
+                res.status = 400;
+                json err = {{"error",
+                             {{"message", "\"input\" has " + std::to_string(body["input"].size()) +
+                                              " entries, above the server limit of " +
+                                              std::to_string(state.max_batch_items) + " (--max-batch-items)"},
+                              {"type", "invalid_request_error"}}}};
+                res.set_content(dump_safe(err), "application/json");
+                return;
+            }
             for (const auto& item : body["input"]) {
                 if (item.is_string()) {
                     inputs.push_back(item.get<std::string>());

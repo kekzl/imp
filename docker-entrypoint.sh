@@ -32,11 +32,30 @@ if [ -n "$IMP_MODEL" ]; then
     args+=(--model "$IMP_MODEL")
 fi
 
-# Host — default 0.0.0.0 inside container
+# Host — default 0.0.0.0 inside container.
+#
+# This one stays 0.0.0.0: the container's own loopback is not reachable through
+# a published port, so binding it here would break every mapping rather than
+# secure anything. What decides exposure is the HOST side of the port
+# publication, and docker-compose.yml binds that to 127.0.0.1 by default
+# (#1619).
 if [ -n "$IMP_HOST" ]; then
     args+=(--host "$IMP_HOST")
 elif [ "$CMD" = "imp-server" ]; then
     args+=(--host "0.0.0.0")
+fi
+
+# API key. The entrypoint translated fourteen env vars and not this one, so a
+# compose deployment had no way to turn authentication on at all (#1619).
+if [ -n "$IMP_API_KEY" ]; then
+    args+=(--api-key "$IMP_API_KEY")
+fi
+
+# Trusted proxies for X-Forwarded-For (#1614). Behind a reverse proxy this is
+# what makes per-client rate limiting work; without it the limit keys on the
+# proxy's address, which is one bucket for everyone.
+if [ -n "$IMP_TRUSTED_PROXY" ]; then
+    args+=(--trusted-proxy "$IMP_TRUSTED_PROXY")
 fi
 
 # Port
