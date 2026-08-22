@@ -180,6 +180,35 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A paged decode launcher answered an unserved `head_dim` by leaving the
+  output unwritten** (#1674). Seventeen sites logged an error and returned, so
+  `O` kept the previous layer's `attn_out_` and the answer was silently wrong -
+  the failure mode `SETTLED` S-22 exists to forbid, while the prefill chain
+  throws for the same class of miss. They throw now, and
+  `paged_attention_serves_head_dim()` refuses the dtype at init with a fallback
+  to FP16 KV, the way the sink guard beside it already did. NVFP4 serves no
+  head_dim 96; nothing said so anywhere.
+
+- **Sink models lost the FMHA chunk carve-out** (#1675). `max_safe_prefill_chunk`
+  still treated learned sinks as cuBLAS-only and skipped all three no-clamp
+  returns for them, although #992 made the FP16 WMMA FMHA tier sink-capable and
+  the dispatch routes sinks straight there. gpt-oss-20b prefill on a quiet card,
+  median of 3 runs each: **24289 -> 35579 tok/s at pp4096 (+46.5 %)**, chunk
+  sizes 432/832/1072/1760 -> a flat 2048. Decode unchanged (157.9 -> 157.4, both
+  arms spread ~3 %).
+
+- **`attention.fa2_fp16qk="never"` was not an off switch above the threshold**
+  (#1676). It is documented as restoring the materialized path and did so only
+  below `fmha_prefill_threshold`; above it the FMHA chain re-entered the same
+  FA2 kernel with `fp16_qk=true`. The explicit fp8-QK opt-in (`never` together
+  with `fp8_fmha=on`) still takes FA2, which is what that pair is for.
+
+- **`ATTENTION_DISPATCH.md`'s decode table named one kernel per dtype** (#1677)
+  where each launcher fans out over up to five, and its FP16 row named a symbol
+  that does not exist in the tree. Rewritten as launcher plus the kernels it can
+  pick, with the head_dim coverage that #1674 made explicit.
+
+
 - **A second `ImpContext` in one process was accepted and then broke both**
   (#1629). `imp.h` told callers to create one context per thread; the engine
   arena and the graph-slot pool are process-global, the second

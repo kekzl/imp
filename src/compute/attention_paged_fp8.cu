@@ -689,8 +689,7 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                     LAUNCH_SPLITK_FP8_PIPE(512);
                     break;  // Gemma 4 global
                 default:
-                    IMP_LOG_ERROR("paged_attention_splitk_fp8_pipeline: unsupported head_dim %d", head_dim);
-                    return;
+                    paged_attention_unsupported_head_dim("paged_attention_splitk_fp8_pipeline", head_dim);
             }
 #undef LAUNCH_SPLITK_FP8_PIPE
         } else {
@@ -721,8 +720,7 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                     LAUNCH_SPLITK_FP8(512);
                     break;  // Gemma 4 global
                 default:
-                    IMP_LOG_ERROR("paged_attention_splitk_fp8: unsupported head_dim %d", head_dim);
-                    return;
+                    paged_attention_unsupported_head_dim("paged_attention_splitk_fp8", head_dim);
             }
 #undef LAUNCH_SPLITK_FP8
         }
@@ -763,8 +761,7 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                 LAUNCH_FP8_FALLBACK(512);
                 break;  // Gemma 4 global attention
             default:
-                IMP_LOG_ERROR("paged_attention_decode_fp8: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_decode_fp8", head_dim);
         }
 #undef LAUNCH_FP8_FALLBACK
     }
