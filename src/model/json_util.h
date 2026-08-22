@@ -43,6 +43,23 @@ private:
     size_t len_;
     size_t pos_;
     bool error_ = false;
+    int depth_ = 0;
+
+    // Recursion is bounded because the input is not: a SafeTensors header may
+    // declare up to 128 MiB, and every '[' is one `parse_value` frame at ~240
+    // bytes of stack. Measured on an 8 MiB stack, this parser survives 30 000
+    // levels and takes SIGSEGV somewhere before 40 000, so a 128 MiB header of
+    // '[' crashes the loader before a weight is read. 512 is far past any real
+    // config.json or tokenizer.json; the deepest in this tree is 7.
+    static constexpr int kMaxDepth = 512;
+
+    // RAII depth counter: `parse_value` has eight returns and the count has to
+    // be right on all of them.
+    struct DepthGuard {
+        JsonParser& p;
+        explicit DepthGuard(JsonParser& parser) : p(parser) { ++p.depth_; }
+        ~DepthGuard() { --p.depth_; }
+    };
 
     char peek() const;
     char advance();

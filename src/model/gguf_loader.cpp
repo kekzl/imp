@@ -16,6 +16,7 @@
 // ============================================================================
 
 #include "model/gguf_loader.h"
+#include "model/model_limits.h"
 #include "model/gguf_loader_internal.h"
 #include "core/fp_bits.h"
 #include "model/loader_assign.h"
@@ -617,6 +618,16 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
 
     // 7. Allocate layers and assign weights
+    //
+    // `block_count` and the expert count are GGUF metadata, so they are the
+    // file's claim about itself and are checked before they size anything.
+    {
+        std::string dim_err;
+        if (!validate_declared_dimensions(cfg, &dim_err)) {
+            IMP_LOG_ERROR("GGUF: %s", dim_err.c_str());
+            return nullptr;
+        }
+    }
     model->layers_.resize(cfg.n_layers);
 
     if (cfg.n_experts > 0) {

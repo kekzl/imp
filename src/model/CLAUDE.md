@@ -23,6 +23,11 @@ and the upload/placement decisions that follow.
   the check meant to catch the problem.
 - **Tensor names are translated in one place.** Two translation paths disagreeing
   is how a vision tower gets discarded whole.
+- **A checkpoint is untrusted input, including the numbers it states about
+  itself.** Anything out of a file that reaches a `resize`, a recursion or an
+  `open()` needs a bound: `model_limits.h` holds the caps and the rule for which
+  treatment applies (a declared count is refused, an index parsed out of a name
+  is dropped). One tensor name reached 18.9 TiB before #1611.
 
 ## Entry points
 

@@ -180,6 +180,22 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A checkpoint could size imp's allocations, its parser stack, and the path it
+  opens** (#1611, #1612, #1613). A layer index parsed out of a tensor name went
+  straight into `resize`, and `sizeof(TransformerLayer)` is 9680 bytes, so
+  `model.layers.2147483000.…` asks for 18.9 TiB; `num_hidden_layers` in
+  `config.json` and `block_count` in GGUF reach the same `resize` without a
+  tensor name at all. Declared counts are now refused above 1024 layers / 4096
+  experts, an index out of a name is dropped with a counted warning, and
+  `std::atoi` is gone: it returned 0 for `"4294967296"`, so that name silently
+  overwrote layer 0. Shard filenames from `model.safetensors.index.json` are
+  concatenated onto the model directory and were opened and mmapped as given,
+  `../` included; they must now be bare filenames. Both recursive-descent
+  parsers are depth-capped: measured, `JsonParser` takes SIGSEGV before 40 000
+  nesting levels on an 8 MiB stack while a SafeTensors header may declare
+  128 MiB, and the Jinja template parser, whose input is the `chat_template`
+  inside the model file, does the same.
+
 - **A paged decode launcher answered an unserved `head_dim` by leaving the
   output unwritten** (#1674). Seventeen sites logged an error and returned, so
   `O` kept the previous layer's `attn_out_` and the answer was silently wrong -

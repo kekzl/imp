@@ -765,6 +765,8 @@ public:
     bool parse(std::vector<std::unique_ptr<Node>>& out) {
         while (!at_end()) {
             auto node = parse_node();
+            if (too_deep_)
+                break;
             if (!node) {
                 // Skip problematic token and continue
                 if (!at_end())
@@ -773,10 +775,46 @@ public:
             }
             out.push_back(std::move(node));
         }
+        if (too_deep_) {
+            // Half-built nodes can hold null sub-expressions, and the
+            // evaluator dereferences those without checking. The caller
+            // discards a failed parse, so leave nothing behind for it.
+            out.clear();
+            return false;
+        }
         return true;
     }
 
 private:
+    // The template comes out of the model file (`chat_template` in
+    // tokenizer_config.json), so its nesting is not the operator's either.
+    // `parse_primary` recurses back into `parse_expr` on '(' and statement
+    // bodies recurse through `parse_node`, both with no bound, so a template
+    // of 100 000 '(' overflows the stack during load. 256 is far past any
+    // real chat template; the deepest in this tree is 6.
+    //
+    // Note what this does NOT fix: an unknown tag is still dropped silently,
+    // so `parse()` still cannot fail for the reason a template author would
+    // expect. That is #1565 and it needs its own error channel.
+    static constexpr int kMaxParseDepth = 256;
+    int depth_ = 0;
+    bool too_deep_ = false;
+
+    struct DepthGuard {
+        Parser& p;
+        bool ok;
+        explicit DepthGuard(Parser& parser) : p(parser), ok(parser.depth_ < kMaxParseDepth) {
+            if (ok)
+                ++p.depth_;
+            else
+                p.too_deep_ = true;
+        }
+        ~DepthGuard() {
+            if (ok)
+                --p.depth_;
+        }
+    };
+
     const Token& peek() const { return pos_ < tokens_.size() ? tokens_[pos_] : tokens_.back(); }
 
     const Token& advance() {
@@ -816,6 +854,9 @@ private:
     }
 
     std::unique_ptr<Node> parse_node() {
+        DepthGuard guard(*this);
+        if (!guard.ok)
+            return nullptr;
         if (check(TokenType::TEXT)) {
             auto text = peek().value;
             advance();
@@ -1071,6 +1112,9 @@ private:
     // ---- Expression parsing with precedence climbing ----
 
     std::unique_ptr<Expr> parse_expr() {
+        DepthGuard guard(*this);
+        if (!guard.ok)
+            return nullptr;
         auto expr = parse_ternary();
         return expr;
     }

@@ -2,6 +2,7 @@
 #include "vision/qwen3vl_vision_load.h"
 #include "model/tensor_kind_matcher.h"
 #include "core/logging.h"
+#include "model/model_limits.h"
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -28,26 +29,35 @@ static std::vector<std::string> split(const std::string& s, char delim) {
     return tokens;
 }
 
-// Try to parse a non-negative integer from a string. Returns -1 on failure.
-static int parse_int(const std::string& s) {
-    if (s.empty())
-        return -1;
-    for (char c : s) {
-        if (c < '0' || c > '9')
-            return -1;
-    }
-    return std::atoi(s.c_str());
-}
+// Try to parse a non-negative integer from a string. Returns -1 on failure,
+// which now includes a value too large for an int (`model_limits.h`).
+static int parse_int(const std::string& s) { return parse_index(s); }
 
 // Ensure model.layers_ has at least (idx + 1) elements.
-static void ensure_layer(Model& model, int idx) {
+//
+// The index came out of a tensor name, so it is bounded before it is used:
+// `resize(idx + 1)` on an unchecked index is a single allocation the file
+// picks the size of. The caller has already rejected the name when this
+// returns false.
+static bool ensure_layer(Model& model, int idx) {
+    if (idx >= kMaxModelLayers) {
+        IMP_LOG_WARN("WeightMap: layer index %d exceeds the %d-layer limit, tensor dropped", idx,
+                     kMaxModelLayers);
+        return false;
+    }
     if (idx >= static_cast<int>(model.layers_.size())) {
         model.layers_.resize(idx + 1);
     }
+    return true;
 }
 
 // Ensure expert vectors within a layer have at least (idx + 1) elements.
-static void ensure_expert(TransformerLayer& layer, int idx) {
+static bool ensure_expert(TransformerLayer& layer, int idx) {
+    if (idx >= kMaxModelExperts) {
+        IMP_LOG_WARN("WeightMap: expert index %d exceeds the %d-expert limit, tensor dropped", idx,
+                     kMaxModelExperts);
+        return false;
+    }
     int needed = idx + 1;
     if (static_cast<int>(layer.expert_w_gate.size()) < needed)
         layer.expert_w_gate.resize(needed);
@@ -55,6 +65,7 @@ static void ensure_expert(TransformerLayer& layer, int idx) {
         layer.expert_w_up.resize(needed);
     if (static_cast<int>(layer.expert_w_down.size()) < needed)
         layer.expert_w_down.resize(needed);
+    return true;
 }
 
 // Helper: write one of weight_scale / weight_scale_2 / input_scale into
@@ -538,7 +549,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             ++skipped;
             continue;
         }
-        ensure_layer(model, layer_idx);
+        if (!ensure_layer(model, layer_idx)) {
+            ++skipped;
+            continue;
+        }
         TransformerLayer& layer = model.layers_[layer_idx];
 
         bool matched = false;
@@ -846,8 +860,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 matched = true;
             } else if (parts.size() >= 8 && parts[4] == "experts" && parts[7] == "weight") {
                 int expert_idx = parse_int(parts[5]);
-                if (expert_idx >= 0) {
-                    ensure_expert(layer, expert_idx);
+                if (expert_idx >= 0 && ensure_expert(layer, expert_idx)) {
                     const std::string& wname = parts[6];
                     if (wname == "w1") {
                         layer.expert_w_gate[expert_idx] = t;
@@ -889,8 +902,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             // MoE experts: mlp.experts.{e}.{gate_proj,up_proj,down_proj}.weight
             else if (parts.size() >= 8 && parts[4] == "experts" && parts[7] == "weight") {
                 int expert_idx = parse_int(parts[5]);
-                if (expert_idx >= 0) {
-                    ensure_expert(layer, expert_idx);
+                if (expert_idx >= 0 && ensure_expert(layer, expert_idx)) {
                     const std::string& proj = parts[6];
                     if (proj == "gate_proj") {
                         layer.expert_w_gate[expert_idx] = t;
@@ -909,8 +921,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                      (parts[7] == "weight_scale" || parts[7] == "weight_scale_2" ||
                       parts[7] == "input_scale")) {
                 int expert_idx = parse_int(parts[5]);
-                if (expert_idx >= 0) {
-                    ensure_expert(layer, expert_idx);
+                if (expert_idx >= 0 && ensure_expert(layer, expert_idx)) {
                     const std::string& proj = parts[6];
                     const std::string& kind = parts[7];
                     const char* slot = nullptr;
@@ -981,11 +992,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // -----------------------------------------------------------------
         if (!matched && parts[3] == "experts" && parts.size() >= 7) {
             int expert_idx = parse_int(parts[4]);
-            if (expert_idx >= 0) {
+            if (expert_idx >= 0 && ensure_expert(layer, expert_idx)) {
                 const std::string& proj = parts[5];
                 const std::string& field = parts[6];
                 if (field == "weight") {
-                    ensure_expert(layer, expert_idx);
                     if (proj == "gate_proj") {
                         layer.expert_w_gate[expert_idx] = t;
                         matched = true;
@@ -997,7 +1007,6 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                         matched = true;
                     }
                 } else if (field == "weight_scale" || field == "weight_scale_2" || field == "input_scale") {
-                    ensure_expert(layer, expert_idx);
                     const char* slot = nullptr;
                     if (proj == "gate_proj")
                         slot = "expert_w_gate";
