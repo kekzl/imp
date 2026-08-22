@@ -46,24 +46,33 @@ void Engine::init_apply_debug_raw_overrides_() {
     if (!debug_raw_)
         return;
     IMP_LOG_INFO(
-        "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic "
-        "cuBLAS)");
+        "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV and the MoE expert "
+        "cache off; deterministic cuBLAS, GDN reference scan)");
     // Weight storage: keep FP16 (skip the lossy cache paths)
     config_.use_fp8_prefill = 0;
     config_.use_nvfp4_decode = 0;
     config_.dual_path_quant = false;
+    // #1628: four of these were `setenv()` on IMP_* variables that NOTHING in
+    // the tree reads, so warmup, deterministic cuBLAS and the MoE expert cache
+    // all stayed at their normal settings while the log line above and
+    // imp.conf.example:97 said otherwise. `grep -rn 'getenv("IMP_NO_WARMUP"'`
+    // and the other three: zero hits each. They are config assignments now.
+    //
     // CUDA graphs off (graph capture can mask state bugs)
     config_.use_cuda_graphs = 0;
-    setenv("IMP_NO_CUDA_GRAPH", "1", 0);
     // No warmup (warmup can leak state into first request)
-    setenv("IMP_NO_WARMUP", "1", 0);
+    runtime_config_.runtime.warmup = false;
     // Deterministic cuBLAS (bit-exact across runs, no algo jitter)
-    setenv("IMP_DETERMINISTIC_GEMM", "1", 0);
+    runtime_config_.runtime.deterministic_gemm = true;
+    // CUBLAS_WORKSPACE_CONFIG is read by cuBLAS itself, not by imp, so this one
+    // stays an environment variable.
     setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
     // MoE: no expert LRU cache (state-carrying)
-    setenv("IMP_NO_EXPERT_CACHE", "1", 0);
-    // GDN: use reference unfused scan (no register-state reordering)
-    setenv("IMP_GDN_REF", "1", 0);
+    runtime_config_.moe.no_expert_cache = true;
+    // GDN: reference unfused scan (no register-state reordering). The env var
+    // this used to set is dead, but the switch it stood for exists as a config
+    // key (`gdn.ref_kernel`, read at executor_ssm_gdn.cu:526).
+    runtime_config_.gdn.ref_kernel = true;
     // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
     // IMP_NO_MMVQ — those trigger incompatible kernel paths that produce IMAs on
     // some combinations. The RAW flag is about disabling *caches and approximations*,

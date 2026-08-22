@@ -639,7 +639,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     moe_.d_slot_idx_count = moe_.d_slot_idx ? idx_count : 0;
                 }
             } else if (has_host_experts) {
-                IMP_LOG_INFO("Expert LRU cache disabled via IMP_NO_EXPERT_CACHE (staging fallback)");
+                IMP_LOG_INFO("Expert LRU cache disabled via moe.no_expert_cache (staging fallback)");
             }
 
             // Whole-layer staging buffer for the NVFP4 host prefill. Sized for

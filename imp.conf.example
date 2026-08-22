@@ -94,7 +94,9 @@ max_seq_len          = 0
 vram_budget_mb       = 0
 # Disable Programmatic Dependent Launch (PDL). Diagnostic; small perf impact.
 no_pdl               = false
-# Naked FP16 path with FP8/NVFP4/graphs/warmup all forced off.
+# Naked FP16 path: FP8/NVFP4/graphs/warmup/FP8-KV and the MoE expert cache off,
+# deterministic cuBLAS and the GDN reference scan on. Four of those went through
+# dead env vars until #1628 and did nothing at all.
 debug_raw            = false
 # Disable SigLIP vision encoder CUDA-graph capture (debug).
 no_vision_graph      = false

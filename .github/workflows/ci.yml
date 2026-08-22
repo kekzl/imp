@@ -275,6 +275,14 @@ jobs:
             imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
             imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
             imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
+      # #1626: without this the job's first `git` call dies with exit 128
+      # ("dubious ownership" — the container UID is not the checkout's owner),
+      # the file list comes back empty, the step prints "nothing to lint" and
+      # `continue-on-error` reports green. It had never linted a file. The Build
+      # job has carried this line since check-release.sh hit the same wall.
+      - name: Trust the checkout (container UID differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: clang-tidy (changed .cpp only, advisory)
         continue-on-error: true  # advisory — flip to a hard gate once baseline-clean
         run: |
@@ -283,8 +291,16 @@ jobs:
           if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
             base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
           fi
-          mapfile -t changed < <(git diff --name-only "$base" HEAD | grep -E '^(src|tools)/.*\.cpp$' || true)
+          # `|| true` on the pipeline made "git failed" and "no .cpp changed"
+          # the same outcome (#1626). Fail the diff loudly, keep the empty list
+          # quiet - only one of those two is normal.
+          if ! diff_out="$(git diff --name-only "$base" HEAD)"; then
+            echo "::error::git diff failed against base $base — the lint list would be empty"
+            exit 1
+          fi
+          mapfile -t changed < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools)/.*\.cpp$' || true)
           if [ ${#changed[@]} -eq 0 ]; then echo "no src/tools .cpp changed — nothing to lint"; exit 0; fi
+          echo "linting ${#changed[@]} file(s): ${changed[*]}"
           # compile_commands.json comes from the cached build/. If the cache missed
           # (cold key), reconfigure — _deps in the restored build/ keeps it cheap;
           # a fully cold _deps fetch is the rare worst case.

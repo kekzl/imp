@@ -180,6 +180,34 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`--set` accepted any value for 157 of the 185 bound keys** (#1627). The key
+  half was rejected, the value half was not: `parse_bool`/`parse_int`/
+  `parse_float` returned the current value for input they could not read, with
+  no warning, so `--set server.prefix_cache=disabled` kept the default and said
+  nothing. `stoi` also stopped at the first non-digit, making `16k` parse as 16.
+  Both are a rejection now, in `--set` and in `imp.conf`.
+
+- **`speculative.batch_rr` could not be set** (#1638). A default-on scheduling
+  switch read on the decode path (`engine_scheduler.cpp:1422,2882`) whose own
+  comment calls it a kill switch for A/B, bound to no config key.
+
+- **`runtime.debug_raw` did four of its seven effects through dead env vars**
+  (#1628). `IMP_NO_WARMUP`, `IMP_DETERMINISTIC_GEMM`, `IMP_NO_EXPERT_CACHE` and
+  `IMP_GDN_REF` are read by nothing in the tree, so warmup, deterministic
+  cuBLAS, the MoE expert cache and the GDN scan all stayed at their normal
+  settings while the log line and `imp.conf.example:97` said otherwise. All
+  four are config assignments now; the switch each stood for existed.
+
+- **The `clang-tidy` CI job had never linted a file** (#1626). Its first `git`
+  call died with exit 128 (`dubious ownership` - the container UID is not the
+  checkout's owner), the file list came back empty, and `continue-on-error`
+  reported green. It trusts the checkout now, and a failing `git diff` is an
+  error rather than an empty list.
+
+- **`make gen-perf-baseline` had no GPU guard** (#1623) while every other bench
+  target does - the one target that re-pins what the perf gate compares against.
+
+
 - **Twelve stale or self-contradicting documentation claims** (#1543, #1594,
   #1651, #1668-#1673, #1680-#1682, #1684). The load-bearing ones: `CLAUDE.md` and
   `AGENTS.md` told every agent that sm_120a has no TMA-WS grouped GEMM, which
