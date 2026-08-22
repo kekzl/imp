@@ -211,8 +211,13 @@ there instead of retelling it.
   `code=compute_120f`, the PTX-only form, so `ptxas` never ran over it and the
   first thing that would was the driver's JIT on a GB203 - a card nobody in
   this project owns. `scripts/check_ptx_fallback.sh` extracts every PTX image
-  from the built binary and assembles it; 155 images, no GPU needed, since
-  ptxas is a compiler. Measured today: all 155 assemble for `sm_120`.
+  from a built artefact and assembles it; no GPU needed, since ptxas is a
+  compiler. Measured on `libimp.a`: all 155 images assemble for `sm_120`. It
+  runs as the separate `PTX fallback` job, which builds the `imp` library with
+  the fallback on, because the required `Build` job configures
+  `IMP_DISABLE_120F_FALLBACK=ON` and its binary carries no PTX at all. The
+  second gencode costs +53.1% device-compile time over the three heaviest TUs
+  (47278 ms against 30886 ms), which is why `Build` keeps its opt-out.
 
 - **`"speculative": false` left two of three drafters running, and three
   server decisions had no counter** (#1639, #1640, #1641). The documented

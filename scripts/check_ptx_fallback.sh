@@ -11,7 +11,8 @@
 # no GPU: ptxas is a compiler.
 #
 # Usage: check_ptx_fallback.sh <binary> [arch]
-# Exit 0 = every PTX image assembles. 1 = one did not, or there were none.
+# Exit 0 = every PTX image assembles, or the build opted out of the fallback.
+# Exit 1 = one did not assemble, or a build that kept the fallback carries none.
 
 set -uo pipefail
 
@@ -34,14 +35,27 @@ BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# Whether there is a fallback to check is a property of the build, not a thing
+# to infer from the image count. IMP_DISABLE_120F_FALLBACK=ON emits sm_120a
+# SASS only, so zero PTX images is that build doing what it was told; reading
+# it out of the CMakeCache next to the binary is what tells that apart from a
+# build that lost the fallback. Guessing instead is how this guard first
+# shipped, and it turned CI's deliberate opt-out into a red required check.
+CACHE="$(dirname "$BIN")/CMakeCache.txt"
+if [ -f "$CACHE" ] && grep -q '^IMP_DISABLE_120F_FALLBACK:BOOL=ON$' "$CACHE"; then
+    echo "check_ptx_fallback: SKIP - $CACHE sets IMP_DISABLE_120F_FALLBACK=ON"
+    echo "  That build is sm_120a SASS only, by request. No PTX image exists to assemble."
+    exit 0
+fi
+
 n_listed=$(cuobjdump -all -lptx "$BIN" 2>/dev/null | grep -c 'PTX file' || true)
 if [ "$n_listed" -eq 0 ]; then
-    # Not "nothing to check": the fallback is on by default, so zero images
-    # means the build stopped emitting it and every non-5090 Blackwell lost its
-    # only path. IMP_DISABLE_120F_FALLBACK=ON is the deliberate way to opt out,
-    # and that build should not be running this check.
-    echo "check_ptx_fallback: FAIL — $BIN carries no PTX image at all." >&2
-    echo "  The compute_120f fallback is on by default (CMakeLists.txt)." >&2
+    # Not "nothing to check": the fallback is on by default and this build did
+    # not opt out, so zero images means it stopped emitting the fallback and
+    # every non-5090 Blackwell lost its only path.
+    echo "check_ptx_fallback: FAIL - $BIN carries no PTX image at all." >&2
+    echo "  The compute_120f fallback is on by default (CMakeLists.txt) and" >&2
+    echo "  ${CACHE} does not set IMP_DISABLE_120F_FALLBACK=ON." >&2
     echo "  A binary without it runs on sm_120a only." >&2
     exit 1
 fi
@@ -49,7 +63,7 @@ fi
 ( cd "$WORK" && cuobjdump -all -xptx all "$BIN" >/dev/null 2>&1 )
 mapfile -t files < <(find "$WORK" -name '*.ptx' | sort)
 if [ "${#files[@]}" -eq 0 ]; then
-    echo "check_ptx_fallback: FAIL — $n_listed PTX image(s) listed, none extracted" >&2
+    echo "check_ptx_fallback: FAIL - $n_listed PTX image(s) listed, none extracted" >&2
     exit 1
 fi
 
@@ -63,7 +77,7 @@ for f in "${files[@]}"; do
 done
 
 if [ "$failed" -gt 0 ]; then
-    echo "check_ptx_fallback: FAIL — $failed of ${#files[@]} PTX image(s) do not assemble for $ARCH" >&2
+    echo "check_ptx_fallback: FAIL - $failed of ${#files[@]} PTX image(s) do not assemble for $ARCH" >&2
     exit 1
 fi
 

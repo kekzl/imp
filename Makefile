@@ -476,14 +476,16 @@ check-alloc-sites:
 alloc-sites-stats:
 	@python3 tools/check_alloc_sites.py --stats
 
-# Allocate/free API pairing: cudaMalloc<->cudaFree, cudaMallocAsync<->cudaFreeAsync,
-# cudaMallocHost/cudaHostAlloc<->cudaFreeHost. Host-only, no Docker.
-# Assemble the compute_120f PTX fallback out of a built binary (#1650). Needs
-# ptxas, not a GPU. Runs in CI's Build job; this target is for reproducing it.
+# Assemble the compute_120f PTX fallback out of a built artefact (#1650). Needs
+# ptxas, not a GPU. Runs in CI's `PTX fallback` job; this target reproduces it.
+# The default target is build-dev, which keeps the fallback on; a build
+# configured with IMP_DISABLE_120F_FALLBACK=ON is skipped, not failed.
 check-ptx-fallback:
 	@docker run --rm -v $(PWD):/src -w /src $(DEV_IMG) \
-		bash scripts/check_ptx_fallback.sh $(or $(PTX_BIN),build-dev/imp-cli)
+		bash scripts/check_ptx_fallback.sh $(or $(PTX_BIN),build-dev/libimp.a)
 
+# Allocate/free API pairing: cudaMalloc<->cudaFree, cudaMallocAsync<->cudaFreeAsync,
+# cudaMallocHost/cudaHostAlloc<->cudaFreeHost. Host-only, no Docker.
 check-alloc-pairs:
 	@python3 tools/check_alloc_pairs.py
 
