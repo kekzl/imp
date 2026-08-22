@@ -3,6 +3,8 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include "runtime/request.h"
+
 #include <string>
 #include <string_view>
 #include <utility>
@@ -154,6 +156,28 @@ bool api_key_matches(const std::string& authorization, const std::string& x_api_
 
 json safe_token_json(const std::string& text);
 json token_bytes_json(const std::string& text);
+
+// The two logprobs SHAPES, which are not the same object.
+//
+// Chat (`/v1/chat/completions`):
+//   {"content": [{"token","logprob","bytes","top_logprobs":[{...}]}]}
+// Completions (`/v1/completions`), a different shape entirely:
+//   {"tokens":[], "token_logprobs":[], "top_logprobs":[{tok: lp}], "text_offset":[]}
+//
+// /v1/completions returned the Chat object on a `text_completion` response
+// until #1589, so an OpenAI SDK reading `.logprobs.tokens` found nothing and
+// one reading `.logprobs.content` got a field its own type does not declare.
+//
+// `text` is the completion string the offsets index into; the offsets are byte
+// offsets from its start, which is what the OpenAI field means for ASCII and
+// the only defensible reading for anything else.
+json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit);
+json completions_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
+                               const std::string& text);
+
+// One token in the Completions shape, for a streamed chunk. Streaming emits one
+// chunk per token: a chunk carrying two tokens has nowhere to put two offsets.
+json completions_logprobs_json_one(const imp::TokenLogprobInfo& lp, size_t text_offset);
 size_t utf8_complete_len(const std::string& s);
 
 // Trim a trailing incomplete UTF-8 sequence from a finished string (#1310).
@@ -207,7 +231,8 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
                       const char* finish_reason, const json& logprobs = nullptr);
 
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
-                                 const std::string& text, const char* finish_reason);
+                                 const std::string& text, const char* finish_reason,
+                                 const json& logprobs = nullptr);
 
 // Pre-formatted SSE chunk writer. Builds envelope templates once per request;
 // hot-path write_content/write_reasoning only JSON-escape the token text and

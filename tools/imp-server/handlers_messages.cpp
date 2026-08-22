@@ -216,7 +216,7 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     StreamDialect dialect;
     dialect.emit_text = emit_text;
     dialect.emit_reasoning = emit_thinking;
-    dialect.emit_content_token = emit_text;
+    dialect.emit_content_token = [&](const std::string& t, int) { return emit_text(t); };
     dialect.keepalive = [&]() -> bool { return out.emit("ping", json{{"type", "ping"}}); };
     dialect.on_call_begin = [&](const ParsedToolCall& tc) -> bool {
         // Streamed call: open the tool_use block now; the argument bytes

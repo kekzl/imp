@@ -77,13 +77,13 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             return true;
         return sse_writer.write_reasoning(text, sink);
     };
-    dialect.emit_content_token = [&](const std::string& text) -> bool {
+    dialect.emit_content_token = [&](const std::string& text, int token_index) -> bool {
         if (req_logprobs && active_req) {
             // Logprobs path: fall back to sse_chunk (rare)
             json content_delta = {{"content", text}};
             json lp_chunk = nullptr;
-            size_t lp_idx = static_cast<size_t>(out.n_output_tokens) - 1;
-            if (lp_idx < active_req->output_logprobs.size()) {
+            size_t lp_idx = static_cast<size_t>(token_index);
+            if (token_index >= 0 && lp_idx < active_req->output_logprobs.size()) {
                 const auto& lp = active_req->output_logprobs[lp_idx];
                 json top_arr = json::array();
                 for (const auto& t : lp.top) {

@@ -276,6 +276,79 @@ json token_bytes_json(const std::string& text) {
     return arr;
 }
 
+json completions_logprobs_json_one(const imp::TokenLogprobInfo& lp, size_t text_offset) {
+    json top_obj = json::object();
+    for (const auto& t : lp.top) {
+        const json key = safe_token_json(t.text);
+        if (key.is_string())
+            top_obj[key.get<std::string>()] = t.logprob;
+    }
+    return json{{"tokens", json::array({safe_token_json(lp.text)})},
+                {"token_logprobs", json::array({lp.logprob})},
+                {"top_logprobs", json::array({top_obj})},
+                {"text_offset", json::array({static_cast<int>(text_offset)})}};
+}
+
+json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit) {
+    json content = json::array();
+    for (size_t i = 0; i < lps.size() && i < limit; i++) {
+        const auto& lp = lps[i];
+        json top_arr = json::array();
+        for (const auto& t : lp.top) {
+            top_arr.push_back({{"token", safe_token_json(t.text)},
+                               {"logprob", t.logprob},
+                               {"bytes", token_bytes_json(t.text)}});
+        }
+        content.push_back({{"token", safe_token_json(lp.text)},
+                           {"logprob", lp.logprob},
+                           {"bytes", token_bytes_json(lp.text)},
+                           {"top_logprobs", top_arr}});
+    }
+    return json{{"content", content}};
+}
+
+json completions_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
+                               const std::string& text) {
+    json tokens = json::array();
+    json token_logprobs = json::array();
+    json top_logprobs = json::array();
+    json text_offset = json::array();
+
+    // The offset walk: each token's offset is where its text begins in the
+    // completion. Tracked by advancing through `text` rather than by summing
+    // token lengths, because the decoded token text and the assembled string
+    // can disagree (a stop sequence trims the tail, and a detokenizer may drop
+    // a leading space). When they do, the offsets stop advancing rather than
+    // running past the end of the string.
+    size_t cursor = 0;
+    for (size_t i = 0; i < lps.size() && i < limit; i++) {
+        const auto& lp = lps[i];
+        tokens.push_back(safe_token_json(lp.text));
+        token_logprobs.push_back(lp.logprob);
+        text_offset.push_back(static_cast<int>(cursor));
+
+        // top_logprobs here is an OBJECT per position (token -> logprob), not
+        // the array of objects the Chat shape uses.
+        json top_obj = json::object();
+        for (const auto& t : lp.top) {
+            const json key = safe_token_json(t.text);
+            if (key.is_string())
+                top_obj[key.get<std::string>()] = t.logprob;
+        }
+        top_logprobs.push_back(top_obj);
+
+        if (!lp.text.empty() && cursor + lp.text.size() <= text.size() &&
+            text.compare(cursor, lp.text.size(), lp.text) == 0) {
+            cursor += lp.text.size();
+        }
+    }
+
+    return json{{"tokens", tokens},
+                {"token_logprobs", token_logprobs},
+                {"top_logprobs", top_logprobs},
+                {"text_offset", text_offset}};
+}
+
 size_t utf8_complete_len(const std::string& s) {
     // Single source of truth lives in stream_pipeline.h (pure, unit-tested).
     return imp::stream::utf8_complete_len(s);
@@ -666,9 +739,10 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
 }
 
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
-                                 const std::string& text, const char* finish_reason) {
+                                 const std::string& text, const char* finish_reason, const json& logprobs) {
     json choice = {{"index", 0},
                    {"text", text},
+                   {"logprobs", logprobs},
                    {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}};
     json obj = {{"id", id},
                 {"object", "text_completion"},

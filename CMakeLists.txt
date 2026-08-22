@@ -759,6 +759,7 @@ if(IMP_BUILD_TESTS)
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
             tests/test_sse_stream_utils.cpp
+            tests/test_logprobs_shapes.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp

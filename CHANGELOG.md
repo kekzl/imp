@@ -180,6 +180,22 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Streamed logprobs were absent whenever a `stop` sequence was set, and
+  `/v1/completions` returned the wrong shape** (#1588, #1589, #1601). The
+  streaming driver attached per-token logprobs only on the branch taken when a
+  request carried no `stop`; with any stop present every chunk went out through
+  the logprob-free writer. Measured against a real server, Qwen3-4B-Q8_0,
+  `stop` set: 0 of 8 chunks carried logprobs before, 5 of 10 after.
+  `/v1/completions` returned the **Chat** object (`{"content":[...]}`) on a
+  `text_completion` response, so an SDK reading `.logprobs.tokens` found
+  nothing; it returns `{tokens, token_logprobs, top_logprobs, text_offset}` now,
+  and streams one chunk per token with its own offset (verified: every streamed
+  offset equals the length of the text reassembled so far). Both shapes come
+  from `utils.cpp` so they cannot drift apart again, and the token attribution
+  behind them is a pure component in `stream_pipeline.h` with 14 CPU-lane tests
+  covering it plus `safe_token_json` / `token_bytes_json`, which had no test in
+  any lane.
+
 - **Four tools that described themselves wrongly** (#1585, #1586, #1587,
   #1663). The pre-push gate's gtest filter carried `AttentionTest.*`, a suite
   renamed away before the pattern was added on 2026-04-27: gtest reports

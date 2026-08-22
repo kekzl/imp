@@ -926,24 +926,11 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         }
 
         // Build logprobs object if requested
+        // Chat shape here; /v1/completions builds the other one (#1589). Both
+        // come out of utils.cpp now, so the two cannot drift apart again.
         json logprobs_obj = nullptr;
         if (ctx.params.req_logprobs && active_req) {
-            const auto& lp_data = active_req->output_logprobs;
-            json content_logprobs = json::array();
-            for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
-                const auto& lp = lp_data[idx];
-                json top_arr = json::array();
-                for (const auto& t : lp.top) {
-                    top_arr.push_back({{"token", safe_token_json(t.text)},
-                                       {"logprob", t.logprob},
-                                       {"bytes", token_bytes_json(t.text)}});
-                }
-                content_logprobs.push_back({{"token", safe_token_json(lp.text)},
-                                            {"logprob", lp.logprob},
-                                            {"bytes", token_bytes_json(lp.text)},
-                                            {"top_logprobs", top_arr}});
-            }
-            logprobs_obj = {{"content", content_logprobs}};
+            logprobs_obj = chat_logprobs_json(active_req->output_logprobs, output_ids.size());
         }
 
         // Parse tool calls from model output. Run even on finish=length:

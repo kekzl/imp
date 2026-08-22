@@ -46,6 +46,11 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     std::string pending_text;
     bool text_stop_matched = false;
 
+    // Which token produced which bytes of the two holdback buffers (#1588).
+    // See stream_pipeline.h for why the live counter cannot answer that.
+    imp::stream::TokenSpans pending_spans;
+    imp::stream::TokenSpans utf8_spans;
+
     // Streaming tool-call demux (tool_stream_filter.h) — pure state machine.
     // Detects ChatML/Llama3/Gemma-4 open markers, holds back potential-tag
     // text, parses completed bodies (JSON, Qwen3.6 XML fallback, Gemma
@@ -114,14 +119,23 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         return d.emit_text(chunk);
     };
 
-    // Flush confirmed holdback text up to a byte position.
+    // Flush confirmed holdback text up to a byte position, one emission per
+    // token so the dialect can attach that token's logprob (#1588).
+    //
+    // A flush boundary is not a token boundary: `up_to` comes from the stop
+    // matcher, so it can land mid-token. The complete tokens go out with their
+    // own index; the remainder goes out as one chunk with -1, which is the
+    // honest answer rather than the nearest index.
     auto flush_text = [&](size_t up_to) -> bool {
         up_to = std::min(up_to, pending_text.size());  // never read past the buffer
         if (up_to == 0)
             return true;
-        bool ok = d.emit_text(pending_text.substr(0, up_to));
+        for (const auto& e : pending_spans.flush(up_to)) {
+            if (!d.emit_content_token(pending_text.substr(e.offset, e.length), e.token_index))
+                return false;
+        }
         pending_text.erase(0, up_to);
-        return ok;
+        return true;
     };
 
     // Flush held content buffers before emitting a tool call (or directly
@@ -424,18 +438,21 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         if (stop_sequences.empty()) {
             // No stop sequences: stream directly (with UTF-8 buffering).
             utf8_buf += piece;
+            utf8_spans.append(piece.size(), out.n_output_tokens - 1);
             size_t complete = utf8_complete_len(utf8_buf);
             if (complete > 0) {
-                std::string chunk = utf8_buf.substr(0, complete);
+                for (const auto& e : utf8_spans.flush(complete)) {
+                    if (!d.emit_content_token(utf8_buf.substr(e.offset, e.length), e.token_index))
+                        return false;
+                }
                 utf8_buf.erase(0, complete);
-                if (!d.emit_content_token(chunk))
-                    return false;
             }
         } else {
             // Buffer text and check for stop matches via the pure holdback
             // pipeline (stream_pipeline.h). It returns the safe-to-emit prefix
             // and whether a complete stop sequence is present.
             pending_text += piece;
+            pending_spans.append(piece.size(), out.n_output_tokens - 1);
             auto hd = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
             if (!flush_text(hd.flush_len))
                 return false;
@@ -463,8 +480,18 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         auto rs = think_split.finish();
         if (!rs.reasoning.empty())
             d.emit_reasoning(rs.reasoning);
-        if (!rs.content.empty())
+        if (!rs.content.empty()) {
+            // No span recorded on purpose. The splitter reorders bytes between
+            // its reasoning and content sinks, so which token produced which
+            // byte of its held tail is not recoverable from here. Those bytes
+            // go out with token_index -1 and therefore no logprob, which is
+            // the honest answer; guessing the last index would attach a real
+            // number to the wrong token. Measured consequence: a completion
+            // short enough that the splitter never releases anything during
+            // the loop (max_tokens=5 on a think model) streams one chunk with
+            // no logprobs.
             utf8_buf += rs.content;
+        }
     }
 
     // The model exhausted max_tokens while still reasoning and never produced
@@ -492,10 +519,12 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
 
     // Flush any remaining buffers (skip after a text-level stop match or when
     // tool calls were emitted).
-    if (!utf8_buf.empty() && !text_stop_matched && !out.tool_calls_emitted)
-        d.emit_text(utf8_buf);
+    if (!utf8_buf.empty() && !text_stop_matched && !out.tool_calls_emitted) {
+        for (const auto& e : utf8_spans.flush(utf8_buf.size()))
+            d.emit_content_token(utf8_buf.substr(e.offset, e.length), e.token_index);
+    }
     if (!pending_text.empty() && !text_stop_matched && !out.tool_calls_emitted)
-        d.emit_text(pending_text);
+        flush_text(pending_text.size());
 
     if (!finish)
         finish = out.tool_calls_emitted ? "tool_calls" : "length";
