@@ -576,8 +576,7 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
                     LAUNCH_SPLITK_INT4_PIPE(256);
                     break;
                 default:
-                    IMP_LOG_ERROR("paged_attention_splitk_int4_pipeline: unsupported head_dim %d", head_dim);
-                    return;
+                    paged_attention_unsupported_head_dim("paged_attention_splitk_int4_pipeline", head_dim);
             }
 #undef LAUNCH_SPLITK_INT4_PIPE
         } else {
@@ -605,8 +604,7 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
                     LAUNCH_SPLITK_INT4(256);
                     break;
                 default:
-                    IMP_LOG_ERROR("paged_attention_splitk_int4: unsupported head_dim %d", head_dim);
-                    return;
+                    paged_attention_unsupported_head_dim("paged_attention_splitk_int4", head_dim);
             }
 #undef LAUNCH_SPLITK_INT4
         }
@@ -641,8 +639,7 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
                 LAUNCH_INT4(256);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_int4: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_decode_int4", head_dim);
         }
 #undef LAUNCH_INT4
     }

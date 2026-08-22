@@ -52,7 +52,11 @@ struct Attention {
     // f32 accumulate), so the short-seq e4m3 quality cliff (#511/#512)
     // does not apply. O(n) memory: no S-matrix alloc. Declined configs
     // (hd!=128, dual-head-dim Gemma-4) fall back to cuBLAS, never to the
-    // fp8 FMHA family. "never" restores the materialized cuBLAS path.
+    // fp8 FMHA family. "never" restores the materialized path, at every
+    // sequence length: it declined the FA2 kernel below fmha_prefill_threshold
+    // and re-entered it above until #1676. The one exception is the explicit
+    // fp8-QK opt-in, "never" together with fp8_fmha="on", which is a different
+    // kernel mode and is what that pair is for.
     std::string fa2_fp16qk = "on";
     // f16-accumulate QK^T in the FP16-QK FA2 kernel (#597). GeForce sm_120
     // runs f16-src/f32-acc HMMA at 1/4 rate (#606); accumulating the score

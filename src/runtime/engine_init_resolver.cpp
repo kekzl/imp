@@ -6,6 +6,8 @@
 // roadmap. Methods remain Engine::* with declarations in engine.h.
 
 #include "runtime/engine.h"
+
+#include <set>
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
@@ -261,6 +263,31 @@ void Engine::init_resolve_kv_dtype_policy_() {
             "rather than serving a wrong softmax denominator.",
             qtype_name(config_.kv_cache_dtype));
         config_.kv_cache_dtype = QType::F16;
+    }
+
+    // #1674: the guard above asks whether the dtype can serve SINKS. Whether it
+    // has a decode kernel for this model's head_dim was asked nowhere, and the
+    // launchers answered a miss with a log line and a return - leaving O
+    // unwritten, which is a wrong answer at exit code 0. Same fallback shape as
+    // the sink arm, over every distinct head_dim the model uses.
+    if (config_.kv_cache_dtype != QType::F16) {
+        std::set<int> dims;
+        if (mcfg.head_dim > 0)
+            dims.insert(mcfg.head_dim);
+        for (int d : mcfg.head_dim_per_layer)
+            if (d > 0)
+                dims.insert(d);
+        for (int d : dims) {
+            if (!paged_attention_serves_head_dim(config_.kv_cache_dtype, d)) {
+                IMP_LOG_WARN(
+                    "KV cache dtype: %s requested, but its paged decode kernels have no template "
+                    "for head_dim %d (#1674) — falling back to FP16 KV rather than leaving the "
+                    "attention output unwritten.",
+                    qtype_name(config_.kv_cache_dtype), d);
+                config_.kv_cache_dtype = QType::F16;
+                break;
+            }
+        }
     }
 
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16 &&

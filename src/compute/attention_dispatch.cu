@@ -122,9 +122,16 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // (same numerical class as cuBLAS) unless the user explicitly opts into the
     // e4m3 fp8-QK mode (fa2_fp16qk=never AND fp8_fmha=on) — raw-converted fp8
     // scores compound per layer into garbage on real activations (#511).
-    if (rcfg.attention.fmha_fa2 == "on") {
-        const bool fa2_fp8_optin =
-            rcfg.attention.fa2_fp16qk == "never" && rcfg.attention.fp8_fmha == "on";
+    // #1676: `fa2_fp16qk="never"` is documented as restoring the materialized
+    // cuBLAS path, and executor_attention_internal.h honours it - but only
+    // BELOW fmha_prefill_threshold. Above it, control reached here and
+    // re-entered the same FA2 kernel with fp16_qk=true, i.e. exactly the mode
+    // the switch turns off. The one case where "never" still means FA2 is the
+    // explicit fp8-QK opt-in below, which is a different kernel mode and is
+    // what the two-flag combination exists for.
+    const bool fa2_fp8_optin = rcfg.attention.fa2_fp16qk == "never" && rcfg.attention.fp8_fmha == "on";
+    const bool fa2_opted_out = rcfg.attention.fa2_fp16qk == "never" && !fa2_fp8_optin;
+    if (rcfg.attention.fmha_fa2 == "on" && !fa2_opted_out) {
         if ((sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
                                                      stream, q_offset,
                                                      /*fp16_qk=*/!fa2_fp8_optin))) {

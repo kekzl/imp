@@ -516,8 +516,7 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
                 LAUNCH_SPLITK_INT8(256);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_splitk_int8: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_splitk_int8", head_dim);
         }
 #undef LAUNCH_SPLITK_INT8
 
@@ -551,8 +550,7 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
                 LAUNCH_INT8_FALLBACK(256);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_int8: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_decode_int8", head_dim);
         }
 #undef LAUNCH_INT8_FALLBACK
     }

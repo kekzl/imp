@@ -407,8 +407,8 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                 LAUNCH_SPLITK_NVFP4(512);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_nvfp4 splitk: unsupported head_dim %d", head_dim);
-                return;
+                // #1674: logged and returned, leaving O unwritten.
+                paged_attention_unsupported_head_dim("paged_attention_decode_nvfp4 splitk", head_dim);
         }
 #undef LAUNCH_SPLITK_NVFP4
 
@@ -440,8 +440,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                 LAUNCH_NVFP4(512);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_nvfp4: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_decode_nvfp4", head_dim);
         }
 #undef LAUNCH_NVFP4
     }
@@ -505,8 +504,8 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                 LAUNCH_SPLITK_MXFP4KV(512);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_mxfp4_kv splitk: unsupported head_dim %d", head_dim);
-                return;
+                // #1674: logged and returned, leaving O unwritten.
+                paged_attention_unsupported_head_dim("paged_attention_decode_mxfp4_kv splitk", head_dim);
         }
 #undef LAUNCH_SPLITK_MXFP4KV
 
@@ -538,8 +537,7 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                 LAUNCH_MXFP4KV(512);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_mxfp4_kv: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_decode_mxfp4_kv", head_dim);
         }
 #undef LAUNCH_MXFP4KV
     }

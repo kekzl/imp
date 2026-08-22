@@ -76,14 +76,26 @@ Per-arch default `prefill_chunk_size = 2048` (512 until 2026-06-11; larger chunk
 
 The decode dispatch (further down in `executor_attention.cu`) is a single `switch` on the KV cache dtype:
 
-| `cache_dtype` | Kernel | Notes |
+The switch selects a **launcher**, not a kernel. Each launcher then picks among
+its own variants by batch, GQA ratio and split-K decision, so the entry below is
+one row per dtype and up to four kernels per row (#1677 — this table named one
+kernel per dtype, and the FP16 row named a symbol that does not exist).
+
+| `cache_dtype` | Launcher (`src/compute/`) | Kernels it can pick |
 |---|---|---|
-| FP16 | `paged_attention_decode_fp16` | Default. WMMA 16×16 tiles. |
-| FP8 (E4M3) | `paged_attention_decode_fp8` | Per-token activation quant; bit-identical to FP16 within ~0.5% perplexity. |
-| INT8 | `paged_attention_decode_int8` | Per-head INT8 scale; rarely chosen. |
-| INT4 | `paged_attention_decode_int4` | Symmetric 4-bit + per-head FP16 scale. Long-context quality regression vs FP16. |
-| NVFP4 | `paged_attention_decode_nvfp4` or `_nvfp4_tc` | TC variant for SM120 mma.sync; falls back to non-TC for unsupported shapes. |
-| MXFP4 KV | `paged_attention_decode_mxfp4_kv` | MXFP4-quantized K/V with UE8M0 block-scale (Phase 3 of TurboQuant/MXFP4-KV slice; see `mxfp4_kv_slice3_findings_2026_05_17`). |
+| FP16 | `paged_attention_decode` (`attention_paged.cu:1422`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel`, `_cluster_kernel` |
+| FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; the tile variants live in `attention_paged_fp8_tile.cu` |
+| INT8 | `paged_attention_decode_int8` | `_decode_int8_kernel`, `_splitk_int8_kernel` |
+| INT4 | `paged_attention_decode_int4` | `_decode_int4_kernel`, `_splitk_int4_kernel`, `_splitk_int4_pipeline_kernel` |
+| NVFP4 | `paged_attention_decode_nvfp4` / `_nvfp4_tc` | `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel`; TC: `_decode_nvfp4_tc_kernel`, `_splitk_nvfp4_tc_kernel`, `_residual_reduce_kernel` |
+| MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:465`) | shares the NVFP4 kernels with UE8M0 scales |
+
+**Not every head_dim is served.** Each launcher templates a fixed set, and a
+miss now throws instead of leaving `O` unwritten (#1674); `paged_attention_serves_head_dim()`
+in `attention_paged.h` is the table, and the resolver falls back to FP16 KV
+before init when a model's head_dim is not in it. FP16 and FP8 serve
+64/96/128/256/512, INT8 and INT4 serve 64/96/128/256, NVFP4 serves
+64/128/256/512 — **no 96**.
 
 ### BitDecoding residual cache
 

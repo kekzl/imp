@@ -1,4 +1,7 @@
 #include "compute/attention_paged.h"
+
+#include <stdexcept>
+#include <string>
 #include "compute/attention_paged_common.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
@@ -1185,6 +1188,34 @@ bool paged_attention_applies_sinks(QType kv_dtype) {
            kv_dtype == QType::INT4 || kv_dtype == QType::NVFP4 || kv_dtype == QType::MXFP4_KV;
 }
 
+void paged_attention_unsupported_head_dim(const char* fn, int head_dim) {
+    throw std::runtime_error(std::string(fn) + ": unsupported head_dim " + std::to_string(head_dim) +
+                             " (no decode template; paged_attention_serves_head_dim() should have "
+                             "refused this dtype at init, #1674)");
+}
+
+bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim) {
+    // Read off the `case` labels of each dtype's decode launchers, 2026-08-22:
+    //   attention_paged.cu        64 96 128 256 512   (F16)
+    //   attention_paged_fp8.cu    64 96 128 256 512
+    //   attention_paged_int8.cu   64 96 128 256
+    //   attention_paged_int4.cu   64 96 128 256
+    //   attention_paged_nvfp4*.cu 64    128 256 512   (no 96)
+    switch (kv_dtype) {
+        case QType::F16:
+        case QType::FP8_E4M3:
+            return head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 256 || head_dim == 512;
+        case QType::INT8:
+        case QType::INT4:
+            return head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 256;
+        case QType::NVFP4:
+            return head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512;
+        default:
+            // Not checked here; do not refuse it.
+            return true;
+    }
+}
+
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
                                    int num_splits, cudaStream_t stream, const half* attn_sinks) {
     dim3 grid(batch_size, n_heads);
@@ -1517,8 +1548,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                     LAUNCH_SPLITK_PIPE(512);
                     break;
                 default:
-                    IMP_LOG_ERROR("paged_attention_splitk_pipeline: unsupported head_dim %d", head_dim);
-                    return;
+                    paged_attention_unsupported_head_dim("paged_attention_splitk_pipeline", head_dim);
             }
 #undef LAUNCH_SPLITK_PIPE
         } else {
@@ -1548,8 +1578,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                     LAUNCH_SPLITK(512);
                     break;
                 default:
-                    IMP_LOG_ERROR("paged_attention_splitk: unsupported head_dim %d", head_dim);
-                    return;
+                    paged_attention_unsupported_head_dim("paged_attention_splitk", head_dim);
             }
 #undef LAUNCH_SPLITK
         }
