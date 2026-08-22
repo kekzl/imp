@@ -17,7 +17,10 @@
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include "rate_limit.h"
+
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -166,12 +169,19 @@ struct ServerState {
     // Server limits
     int max_concurrent = 64;
     int request_timeout = 300;
-    int rate_limit = 0;        // requests per minute per IP (0=unlimited)
     int max_input_tokens = 0;  // reject prompts longer than this many tokens (0=disabled)
+    int max_n = 8;             // cap on `n` completions (0=unlimited)
+    int max_batch_items = 512;  // cap on rerank documents / embeddings input (0=unlimited)
+    int max_logit_bias = 1024;  // cap on logit_bias entries (0=unlimited)
 
-    // Rate limiter state: IP → list of request timestamps
-    std::mutex rate_mutex;
-    std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> rate_tracker;
+    // Rate limiting lives in its own unit so the CPU lane can test it
+    // (#1614); ServerState cannot be constructed there.
+    RateLimiter rate_limiter;
+
+    std::string rate_limit_key(const std::string& remote_addr, const std::string& xff) const {
+        return rate_limiter.key(remote_addr, xff);
+    }
+    bool check_rate_limit(const std::string& ip) { return rate_limiter.allow(ip); }
 
     // Per-request JSONL logger (opt-in via --log-requests).
     RequestLogger request_logger;
@@ -201,22 +211,6 @@ struct ServerState {
         return {obs_loaded, obs_model_name};
     }
 
-    // Check rate limit for an IP. Returns true if allowed.
-    bool check_rate_limit(const std::string& ip) {
-        if (rate_limit <= 0)
-            return true;
-        std::lock_guard<std::mutex> lock(rate_mutex);
-        auto now = std::chrono::steady_clock::now();
-        auto cutoff = now - std::chrono::seconds(60);
-        auto& stamps = rate_tracker[ip];
-        // Remove old entries
-        stamps.erase(std::remove_if(stamps.begin(), stamps.end(), [&](auto& t) { return t < cutoff; }),
-                     stamps.end());
-        if (static_cast<int>(stamps.size()) >= rate_limit)
-            return false;
-        stamps.push_back(now);
-        return true;
-    }
 };
 
 // Graceful shutdown

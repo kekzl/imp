@@ -156,6 +156,26 @@ void compute_logprobs_cpu(const float* logits, int vocab_size, int32_t sampled_t
 // max_seq_len: maximum sequence length (context + generation tokens).
 void sampling_preallocate_dry(int max_seq_len, cudaStream_t stream = nullptr);
 
+// logit_bias: add a per-token bias to the logits before sampling.
+//
+// host_pairs is a HOST array of (token_id, bias). Out-of-range ids are
+// skipped, matching what the per-entry loop this replaces did. Entries are
+// applied with atomicAdd because two JSON keys can name the same token ("1"
+// and "01"), and the loop accumulated both.
+//
+// Why it is a kernel: the old code read each logit back with a BLOCKING
+// cudaMemcpy D2H, added on the host, and wrote it back - one full device
+// synchronisation per entry per decode step, on three separate copies of the
+// same loop (#1617).
+void apply_logit_bias(float* d_logits, int vocab_size, const std::pair<int32_t, float>* host_pairs, int n,
+                      cudaStream_t stream = nullptr);
+
+// Engine-lifetime slots for apply_logit_bias, from the T2 arena. When this has
+// not run, or the arena had no room, apply_logit_bias falls back to the old
+// per-entry copies rather than dropping the bias: a silently unapplied bias
+// changes the output without saying so.
+void sampling_preallocate_logit_bias(int max_entries);
+
 // Free persistent CUB sort scratch (call at engine shutdown).
 void sampling_cleanup();
 

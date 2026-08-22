@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <cstddef>
@@ -18,6 +19,10 @@ using json = nlohmann::json;
 // well-formed UTF-8 the output is byte-identical to dump(). Use this for ANY
 // response/SSE/error body that can carry client- or model-supplied text.
 std::string dump_safe(const json& j);
+
+// Printable-ASCII, length-capped copy of a client-supplied string, for the
+// cases where one is echoed back into a response (#1618).
+std::string sanitize_for_echo(std::string_view in, size_t max_len);
 
 // Rejoins UTF-8 characters that a tokenizer split across two tokens.
 //

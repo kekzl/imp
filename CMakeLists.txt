@@ -538,6 +538,7 @@ if(IMP_BUILD_SERVER)
     tools/common/args_common.cpp
     tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
+        tools/imp-server/rate_limit.cpp
         tools/imp-server/tool_call.cpp
         tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/anthropic.cpp
@@ -762,6 +763,8 @@ if(IMP_BUILD_TESTS)
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
+            tools/imp-server/rate_limit.cpp
+            tests/test_server_request_limits.cpp
             # Admission-time rejection of unenforceable constraints (#1256). The
             # alias coverage is the part that rots: a new spelling in the
             # parameter parser without a line here is a validation bypass.

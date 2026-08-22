@@ -102,6 +102,14 @@ void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerSt
                         "\"documents\" (non-empty array of strings) is required");
         return;
     }
+    // One request, one rate-limit unit, N scoring passes (#1616).
+    if (state.max_batch_items > 0 && static_cast<int>(docs_field->size()) > state.max_batch_items) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "\"documents\" has " + std::to_string(docs_field->size()) +
+                            " entries, above the server limit of " + std::to_string(state.max_batch_items) +
+                            " (--max-batch-items)");
+        return;
+    }
     std::vector<std::string> documents;
     for (const auto& d : *docs_field) {
         if (d.is_string()) {
