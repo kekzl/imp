@@ -163,6 +163,18 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`imp-server` did not start at shipped defaults on the repo's own
+  perf-baseline model** (#1631). `imp-server --model Qwen3-8B-Q8_0.gguf` on an
+  idle 32 GB card ended in 537 CUDA out-of-memory lines and exit 1: the planner
+  cross-checks its NVFP4 heuristic against the storage planner's projection but
+  only acted on a 2x divergence, and this model diverges 1.35x (6100 vs 4511
+  MiB), so the KV pool took the difference and the first cuBLASLt call had
+  nothing left. Any divergence now raises the reserve. The pool is smaller
+  (11390 to 7079 blocks, 105136 tokens of capacity) and the server answers in
+  3 s. `scripts/test_server_default_start.sh` gates it, wired into
+  `make test-server`, because every other server battery boots with capacity
+  flags and the default configuration was covered by none of them.
+
 - **`json_schema`: two shapes desynced the parser and truncated the rest of the
   schema** (#1564). `additionalProperties` as a schema object and a non-string
   `enum` member each hit a parse helper that returns a default without consuming

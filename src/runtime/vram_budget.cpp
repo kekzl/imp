@@ -399,10 +399,23 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // into cutlass_sf_estimate so both the strategy math and the
             // backstop see it.
             //
-            // Gated on a 2x divergence so heuristic-covered models (Q6_K/Q8
-            // dense — the tuned bench configs) keep their KV pools unchanged.
+            // Gated on ANY divergence, not on a 2x one (#1631). The 2x gate was
+            // there so "heuristic-covered models (Q6_K/Q8 dense - the tuned
+            // bench configs) keep their KV pools unchanged", and the model it
+            // was protecting is the one that stopped starting: Qwen3-8B-Q8_0
+            // at shipped defaults projects 6100 MiB against a 4511 MiB
+            // heuristic, 1.35x, so the reserve stayed at the heuristic, the KV
+            // pool took the difference, and the first cuBLASLt call OOMed with
+            // 537 error lines and exit 1. A pool that is 38% smaller is worth
+            // more than a server that does not start.
+            //
+            // Raising the reserve to the projection alone is NOT enough - that
+            // was measured too: it plans 9977 KV blocks and still OOMs, while
+            // the arm that works plans 7079. The margin the floor adds is
+            // load-bearing, and the 500 MiB between those two arms is why this
+            // is a floor rather than a tighter estimate.
             size_t heuristic = nvfp4_estimate + cutlass_sf_estimate;
-            if (plan.projected_vram_bytes > 2 * heuristic) {
+            if (plan.projected_vram_bytes > heuristic) {
                 size_t want =
                     plan.projected_vram_bytes + vram_reserve_floor(total_vram, reserve_floor_pct);
                 // Never squeeze the pool below one full max_seq_len sequence

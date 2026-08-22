@@ -40,6 +40,22 @@ These have a code path and no gate. They may work; nothing proves it.
 
 ## Known-bad and known-limited behaviour
 
+- **The VRAM planner's weight-cache reserve is an estimate with a floor, not a
+  measurement, and there is no retry if it is wrong.** A start that overcommits
+  still ends in `imp_context_create` aborting rather than degrading to a smaller
+  KV pool. #1631 fixed the case that made `imp-server` unstartable at defaults
+  on `Qwen3-8B-Q8_0` by raising the reserve to the planner's own projection plus
+  the reserve floor, and the margin matters: the projection alone plans 9977 KV
+  blocks and still OOMs, while the arm that works plans 7079. That is a 500 MiB
+  edge, so a model whose demand sits inside it can still fail to start. The
+  robust form is a retry at a smaller pool; it is not implemented.
+
+- **The measured library reserve is only remembered if the cache path outlives
+  the process.** `vram.library_reserve_cache` defaults inside the container, so
+  a `docker run --rm` server re-measures every start and plans with the 3900 MiB
+  constant, which is wrong in both directions (measured: 0 MiB on Qwen3-4B
+  IQ4_NL, 7460 MiB on Qwen3-8B-Q8_0). Mount that path to keep it.
+
 - **JSON Schema: assertion keywords imp cannot enforce are a `400`, not a
   weaker grammar.** `minimum`, `maximum`, `exclusiveMinimum`,
   `exclusiveMaximum`, `multipleOf`, `allOf`, `not`, `uniqueItems`,
