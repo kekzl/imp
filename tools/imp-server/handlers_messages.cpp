@@ -219,10 +219,15 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return false;
         const std::string& args = tc.arguments;
         constexpr size_t kChunk = 48;
-        for (size_t off = 0; off < args.size(); off += kChunk) {
-            size_t n = std::min(kChunk, args.size() - off);
+        // #1554: the slice is at most kChunk bytes AND ends on a codepoint
+        // boundary. A fixed byte slice cut multi-byte characters in half and
+        // each half became U+FFFD in dump_safe, so a tool argument with a
+        // German city name or an emoji reached the client corrupted.
+        for (size_t off = 0; off < args.size();) {
+            const size_t n = utf8_chunk_len(args, off, kChunk);
             if (!emit_tool_args_delta(args.substr(off, n)))
                 return false;
+            off += n;
         }
         return stop_block();
     };
@@ -308,6 +313,10 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     if (log_client_ip.empty())
         log_client_ip = req.remote_addr;
     const std::string log_raw_body = req.body;
+
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
 
     json anth_body;
     try {

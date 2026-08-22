@@ -2509,7 +2509,13 @@ private:
         return Value();
     }
 
-    static std::string value_to_json(const Value& val) {
+    // #1607: the tojson filter walks the value tree recursively, and that tree
+    // comes from a request-supplied schema. Depth is bounded at the HTTP
+    // boundary; this is the second line, for a tree built any other way.
+    static std::string value_to_json(const Value& val, int depth = 0) {
+        constexpr int kMaxJsonDepth = 128;
+        if (depth >= kMaxJsonDepth)
+            return "null";
         if (val.is_none())
             return "null";
         if (val.is_bool())
@@ -2564,7 +2570,7 @@ private:
             for (size_t i = 0; i < arr.size(); i++) {
                 if (i > 0)
                     r += ", ";
-                r += value_to_json(arr[i]);
+                r += value_to_json(arr[i], depth + 1);
             }
             r += "]";
             return r;
@@ -2575,7 +2581,7 @@ private:
             for (auto& [k, v] : *val.as_object()) {
                 if (!first)
                     r += ", ";
-                r += "\"" + k + "\": " + value_to_json(v);
+                r += "\"" + k + "\": " + value_to_json(v, depth + 1);
                 first = false;
             }
             r += "}";

@@ -156,14 +156,17 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
             sink.write(sse.data(), sse.size());
         }
-        for (size_t aoff = 0; aoff < full_args.size(); aoff += kArgChunk) {
-            size_t an = std::min(kArgChunk, full_args.size() - aoff);
+        // #1554: codepoint-aligned slices, same reason as the Anthropic
+        // dialect. The /v1/responses dialect never chunked and was immune.
+        for (size_t aoff = 0; aoff < full_args.size();) {
+            const size_t an = utf8_chunk_len(full_args, aoff, kArgChunk);
             json args_delta = {
                 {"tool_calls",
                  json::array({{{"index", idx},
                                {"function", {{"arguments", full_args.substr(aoff, an)}}}}})}};
             sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
             sink.write(sse.data(), sse.size());
+            aoff += an;
         }
         return true;
     };
