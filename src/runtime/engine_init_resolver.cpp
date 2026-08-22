@@ -58,8 +58,12 @@ void Engine::init_apply_debug_raw_overrides_() {
     // imp.conf.example:97 said otherwise. `grep -rn 'getenv("IMP_NO_WARMUP"'`
     // and the other three: zero hits each. They are config assignments now.
     //
-    // CUDA graphs off (graph capture can mask state bugs)
-    config_.use_cuda_graphs = 0;
+    // CUDA graphs off (graph capture can mask state bugs). Through
+    // demote_graphs_, not by writing the field: setting use_cuda_graphs
+    // directly left graph_demotion_ at None, so the resolved-dispatch summary
+    // printed `graphs=0(none)` - "graphs are off, reason: graphs still
+    // enabled" (#1658).
+    demote_graphs_(GraphDemotionReason::DebugRaw);
     // No warmup (warmup can leak state into first request)
     runtime_config_.runtime.warmup = false;
     // Deterministic cuBLAS (bit-exact across runs, no algo jitter)

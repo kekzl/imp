@@ -327,3 +327,16 @@ TEST(ConfigBinding, SpeculativeBatchRrIsBound) {
         << "read at engine_scheduler.cpp:1422 and :2882, bound to no key until #1638";
     EXPECT_FALSE(cfg.speculative.batch_rr);
 }
+
+// #1645: the knob that sets the prefill TTFT/ITL trade had no imp.conf key,
+// while the knob that merely caps it did.
+TEST(ConfigBinding, PrefillChunkSizeIsBound) {
+    imp::RuntimeConfig cfg;
+    EXPECT_EQ(cfg.runtime.prefill_chunk_size, -1) << "default is the per-arch resolver";
+    EXPECT_TRUE(cfg.apply_overrides({"runtime.prefill_chunk_size=512"}).empty());
+    EXPECT_EQ(cfg.runtime.prefill_chunk_size, 512);
+    EXPECT_TRUE(cfg.apply_overrides({"runtime.prefill_chunk_size=0"}).empty());
+    EXPECT_EQ(cfg.runtime.prefill_chunk_size, 0);
+    // And it is still a number, not anything (#1627).
+    EXPECT_EQ(cfg.apply_overrides({"runtime.prefill_chunk_size=large"}).size(), 1u);
+}

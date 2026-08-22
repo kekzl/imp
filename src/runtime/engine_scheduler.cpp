@@ -391,8 +391,13 @@ bool Engine::supports_chunked_prefill_() const {
 
 int Engine::resolve_prefill_chunk_size_() const {
     int explicit_val = config_.prefill_chunk_size;
+    // #1645: the EngineConfig field is set by the CLI flag and the per-request
+    // override; imp.conf reaches it through runtime.prefill_chunk_size, which
+    // yields to an explicit CLI value.
+    if (explicit_val < 0 && runtime_config_.runtime.prefill_chunk_size >= 0)
+        explicit_val = runtime_config_.runtime.prefill_chunk_size;
     if (explicit_val < 0) {
-        // Default 2048 (was 512 until 2026-06-11). Chunked prefill re-reads
+        // Default 2048 since 2026-06-11. Chunked prefill re-reads
         // every weight once per chunk, so the memory-bound GEMMs pay the
         // weight traffic per chunk: at pp4096, 512-token chunks cost
         // NVFP4-MoE −43% prefill vs 2048 (14.8k -> 26.2k tok/s) and dense

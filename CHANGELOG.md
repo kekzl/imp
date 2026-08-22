@@ -204,6 +204,17 @@ there instead of retelling it.
   reported green. It trusts the checkout now, and a failing `git diff` is an
   error rather than an empty list.
 
+- **`prefill_chunk_size` had no `imp.conf` key** (#1645) while the knob that
+  merely caps it did. It sets the TTFT/ITL trade for every prefill and was
+  reachable only from the CLI and a per-request override. `runtime.prefill_chunk_size`
+  now, CLI wins over the file. Two comments documenting the retired default 512
+  are corrected to 2048.
+
+- **`runtime.debug_raw` printed `graphs=0(none)`** (#1658): "graphs are off,
+  reason: graphs still enabled". It wrote `use_cuda_graphs = 0` directly instead
+  of going through `demote_graphs_`, so the reason stayed `None`. It has its own
+  reason now.
+
 - **`make gen-perf-baseline` had no GPU guard** (#1623) while every other bench
   target does - the one target that re-pins what the perf gate compares against.
 

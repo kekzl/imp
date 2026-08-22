@@ -130,6 +130,11 @@ struct RuntimeConfig {
         // 65 ms at +85%. 1024 is the default compromise; set 512 for
         // latency-critical multi-tenant serving, 0 to disable (full chunk).
         // The full chunk returns as soon as nobody is decoding.
+        // -1 = per-arch default (2048 where chunked prefill is supported, 0
+        // otherwise). #1645: only the CLI flag and a per-request override could
+        // reach this, while the knob that merely CAPS it - the line below - had
+        // a key. A CLI value wins over the file.
+        int prefill_chunk_size = -1;
         int prefill_chunk_decode_cap = 1024;
         // Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are
         // single-sequence, so concurrent sessions time-slice the decode.
