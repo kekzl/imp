@@ -65,6 +65,19 @@ public:
     // True if any state in `states` is accepting.
     bool accepts(const std::vector<int>& states) const;
 
+    // Bounds on what one pattern may cost. A pattern is request-supplied text
+    // on an unauthenticated endpoint, and both limits below were unbounded
+    // (#1608, #1609).
+    //
+    // kMaxRepeat mirrors the GBNF parser's own bound (gbnf_parser.cpp:18):
+    // `{n,m}` is built by cloning the atom n times, so n IS an allocation
+    // count. kMaxStates bounds the nested form, which multiplies rather than
+    // adds - `(((a{100}){100}){100}){100}` is 28 bytes and asks for ~10^8
+    // states, each carrying a 256-entry char class.
+    static constexpr long kMaxRepeat = 1024;
+    static constexpr size_t kMaxStates = 100000;
+    static constexpr int kMaxDepth = 64;
+
 private:
     std::vector<NfaState> states_;
     int start_ = -1;
@@ -75,6 +88,7 @@ private:
     const std::string* src_ = nullptr;
     size_t pos_ = 0;
     bool error_ = false;
+    int depth_ = 0;
 
     int new_state();
     void add_epsilon(int from, int to);

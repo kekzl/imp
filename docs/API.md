@@ -67,7 +67,14 @@ post-validation.
 **A constraint imp cannot compile is a `400`, not an unconstrained answer.** That
 changed in v0.23.0 and it is a breaking difference from servers that log the
 rejection and answer anyway. Left recursion, undefined rules and a missing
-`root` are rejected at compile time.
+`root` are rejected at compile time, and since #1567 so are the JSON-Schema
+assertion keywords imp does not enforce. Which ones, and the three shapes that
+are accepted with a weaker guarantee than asked for, are listed in
+[`LIMITATIONS.md`](LIMITATIONS.md#known-bad-and-known-limited-behaviour).
+
+Schema, regex and grammar inputs are bounded: nesting past 64 levels, a `{n,m}`
+repeat above 1024, or a pattern needing more than 100k NFA states is a `400`
+rather than a stack overflow or an allocation storm (#1608, #1609).
 
 Constrained replies parse even when they hit `max_tokens`: the closer-narrowing
 and the no-closer-after-comma rules used to cancel each other out and release the

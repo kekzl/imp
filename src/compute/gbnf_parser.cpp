@@ -16,6 +16,11 @@ constexpr uint32_t kMaxCodepoint = 0x10FFFF;
 // A repetition bound larger than this is a grammar bomb, not an intent: {0,100000}
 // would materialise 100k synthetic rules before decoding a single token.
 constexpr int kMaxRepeat = 1024;
+// Nesting depth of `( ... )` groups. Same reasoning as kMaxRepeat, one level
+// up: the parser is recursive descent over a request-supplied string, so
+// `root ::= ((((...` costs one stack frame per byte (#1609). No real grammar
+// nests anywhere near this.
+constexpr int kMaxGroupDepth = 64;
 
 bool is_word_char(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
@@ -26,6 +31,7 @@ bool is_word_char(char c) {
 struct Parser {
     const std::string& src;
     std::vector<GbnfRule>& rules;
+    int depth = 0;
     std::map<std::string, int32_t> ids;
     std::set<std::string> defined;
     size_t pos = 0;
@@ -387,6 +393,14 @@ struct Parser {
 };
 
 bool Parser::parse_alternates(std::vector<GbnfAlt>& out, bool nested) {
+    if (depth >= kMaxGroupDepth)
+        return fail("group nesting deeper than " + std::to_string(kMaxGroupDepth));
+    depth++;
+    struct Pop {
+        int& d;
+        ~Pop() { d--; }
+    } pop{depth};
+
     GbnfAlt first;
     if (!parse_sequence(first, nested))
         return false;

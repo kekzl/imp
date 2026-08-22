@@ -40,6 +40,36 @@ These have a code path and no gate. They may work; nothing proves it.
 
 ## Known-bad and known-limited behaviour
 
+- **JSON Schema: assertion keywords imp cannot enforce are a `400`, not a
+  weaker grammar.** `minimum`, `maximum`, `exclusiveMinimum`,
+  `exclusiveMaximum`, `multipleOf`, `allOf`, `not`, `uniqueItems`,
+  `patternProperties`, `propertyNames`, `prefixItems`, `contains`,
+  `minContains`, `maxContains`, `minProperties`, `maxProperties`,
+  `dependentRequired`, `dependentSchemas`, `if`/`then`/`else` are rejected at
+  admission (#1567). They used to be accepted and dropped, so a request that
+  bounded its output was answered by an unbounded grammar at HTTP 200. Pure
+  annotations (`format`, `title`, `description`, `examples`, `default`,
+  `$schema`) are still ignored, which is what Draft 2020-12 says they do.
+  `const` is enforced, as a one-member enum.
+
+- **JSON Schema: `enum` and `const` members must be strings.** The FSM emits an
+  enum as quoted string content (`schema_constrain.cu:790`), so `{"enum":[1,2]}`
+  has no representation and is a `400`. Before #1564 it constrained the model to
+  the empty string instead.
+
+- **JSON Schema: `additionalProperties` as a schema object is not enforced, it
+  reads as `true`.** The boolean form is enforced. The object form (Pydantic
+  emits it for `Dict[str, T]`) is parsed and its constraint on extra keys is
+  dropped, which is weaker than asked for but not wrong. Before #1564 it
+  truncated the schema at that key: everything after it, `properties` included,
+  was silently discarded and the request downgraded to `json_object`.
+
+- **A `pattern` the regex engine cannot compile is not enforced, and the request
+  still returns 200.** `compile_patterns()` warns and leaves the node
+  unconstrained (`json_schema.cpp:558`), unlike a top-level `regex` constraint,
+  which is refused at admission. Same class as the keyword case above, on the
+  path that has no admission screen in front of it.
+
 - **Calibrated KV-cache scales shipped in a checkpoint are not read.** Six local
   checkpoints carry `*.self_attn.{k_proj.k_scale,v_proj.v_scale}` (96 tensors on
   Qwen3-Coder-30B-A3B-FP4, 12 on NVIDIA-Nemotron-3.5-Lightning-30B, which has 6
