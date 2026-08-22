@@ -672,7 +672,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
             // freed a LIVE sequence (no recompute path) → silent corruption.
             // Reject-newest: cancel this request, leave in-flight ones intact.
             if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                kv_manager_->free_sequence(req->id);
+                cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 return false;
             }
@@ -738,7 +738,7 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, pf_stream));
             if (d_context_lens)
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, pf_stream));
-            kv_manager_->free_sequence(req->id);
+            cancel_sequence_(req);
             return false;
         }
     }
@@ -912,7 +912,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             if (!ok) {
                 IMP_LOG_WARN("SwaSnapshot: restore failed for req %d at %d tokens — cancelling",
                              req->id, offset);
-                kv_manager_->free_sequence(req->id);
+                cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 return;
             }
@@ -924,7 +924,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
         kv_manager_->swa_trim(req->id, offset);
         if (!kv_manager_->swa_prepare(req->id, offset, ctx_len)) {
-            kv_manager_->free_sequence(req->id);
+            cancel_sequence_(req);
             req->status = RequestStatus::CANCELLED;
             return;
         }
@@ -1148,7 +1148,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             embed_accumulate_chunk_(*req, chunk_len, pf_stream);
 
         if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
+                                 pf_stream);
         }
 
         // MTP: feed this chunk's (token, hidden) pairs while the executor's
@@ -1172,7 +1173,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         Tensor score_logits;
         executor_->forward_logits(state, score_logits, pf_stream);
         if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
+                                 pf_stream);
         }
         score_capture_(*req, score_logits, pf_stream);
         finish_request(req);
@@ -1184,7 +1186,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         Tensor logits_unused;
         executor_->forward_logits(state, logits_unused, pf_stream);
         if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
+                                 pf_stream);
         }
         embed_accumulate_chunk_(*req, chunk_len, pf_stream);
         const size_t total = req->input_tokens.size();
@@ -1239,7 +1242,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             cudaEventRecord(prefill_done_, pf_stream);
 
             if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
+                                     d_context_lens, pf_stream);
             }
 
             cudaEventSynchronize(prefill_done_);
@@ -1250,13 +1254,15 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             next_token = sampled[0];
 
             if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
+                                     d_context_lens, pf_stream);
             }
         } else {
             next_token = executor_->forward(state, pf_stream);
 
             if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
+                                     d_context_lens, pf_stream);
             }
         }
 
@@ -1576,7 +1582,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     "pool was VRAM-clamped below the requested context; free VRAM, lower "
                     "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
                     req->id, blocks_needed, pool_blocks);
-                kv_manager_->free_sequence(req->id);
+                cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 continue;
             }
@@ -1591,7 +1597,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     "SWA KV sizing failed at decode: seq %d could not prepare its window at "
                     "ctx_len=%d — cancelling this sequence (see kv_cache.swa_sizing).",
                     req->id, ctx_len);
-                kv_manager_->free_sequence(req->id);
+                cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 continue;
             }

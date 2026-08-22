@@ -418,6 +418,59 @@ TEST(SchedulerTest, HandlesCancel) {
     EXPECT_EQ(sched.active_count(), 1);
 }
 
+// A request cancelled while it is still QUEUED must not be promoted (#1633).
+//
+// HandlesCancel above covers the other half: cancelled while already active.
+// That one passed throughout, because `active_` was filtered and `pending_`
+// was not - so the server's own disconnect path, which cancels before the
+// request is ever scheduled, ran a full generation for a client that was gone.
+TEST(SchedulerTest, DoesNotPromoteARequestCancelledWhileQueued) {
+    Scheduler sched(4);
+
+    auto queued = std::make_shared<Request>();
+    queued->input_tokens = {1, 2, 3};
+    auto live = std::make_shared<Request>();
+    live->input_tokens = {4, 5, 6};
+
+    sched.add_request(queued);
+    sched.add_request(live);
+
+    // The client disconnects before the first schedule() call.
+    queued->status = RequestStatus::CANCELLED;
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0], live);
+    EXPECT_EQ(sched.active_count(), 1);
+    // And the promotion must not have overwritten the status, which is what
+    // hid this downstream: PREFILLING says "a client is waiting".
+    EXPECT_EQ(queued->status, RequestStatus::CANCELLED);
+    EXPECT_FALSE(sched.has_pending());
+}
+
+// The whole queue cancelled is not a batch of work.
+TEST(SchedulerTest, ACancelledQueueSchedulesNothing) {
+    Scheduler sched(8);
+    std::vector<std::shared_ptr<Request>> reqs;
+    for (int i = 0; i < 5; i++) {
+        auto r = std::make_shared<Request>();
+        r->input_tokens = {i};
+        r->status = RequestStatus::CANCELLED;
+        reqs.push_back(r);
+        sched.add_request(r);
+    }
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    EXPECT_TRUE(prefill.empty());
+    EXPECT_TRUE(decode.empty());
+    EXPECT_EQ(sched.active_count(), 0);
+    EXPECT_FALSE(sched.has_pending());
+}
+
 // ============================================================================
 // BatchBuilder with large batch (16 sequences)
 // ============================================================================

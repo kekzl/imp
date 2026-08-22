@@ -19,10 +19,18 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     prefill_batch.clear();
     decode_batch.clear();
 
-    // 1. Remove finished/cancelled requests from active_
-    std::erase_if(active_, [](const std::shared_ptr<Request>& r) {
+    // 1. Remove finished/cancelled requests from active_ AND from pending_.
+    //
+    // pending_ was not filtered (#1633). A request cancelled while queued -
+    // which is what the server does when the client disconnects - was promoted
+    // anyway a few lines below, and the promotion overwrote CANCELLED with
+    // PREFILLING, so nothing downstream could tell either. It then ran a full
+    // generation, holding KV and a batch slot, for a client that was gone.
+    const auto is_done = [](const std::shared_ptr<Request>& r) {
         return r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED;
-    });
+    };
+    std::erase_if(active_, is_done);
+    std::erase_if(pending_, is_done);
 
     // 2. Sort pending by ascending input token count (shortest-first)
     //    to reduce head-of-line blocking in continuous batching.

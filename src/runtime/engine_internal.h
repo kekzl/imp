@@ -21,11 +21,18 @@
 namespace imp::engine_internal {
 
 // Free prefill metadata buffers when not using the pre-allocated pool.
-inline void free_prefill_buffers(int32_t* d_token_ids, int* d_positions, int* d_block_tables, int* d_context_lens,
-                                 cudaStream_t stream) {
+//
+// `d_block_tables_swa` is part of the set and had no parameter here, so on a
+// sliding-window model the fallback path allocated one per chunk and freed it
+// only when an allocation failed: every SUCCESSFUL chunk leaked it (#1644).
+// nullptr is fine, cudaFreeAsync ignores it, which is what the non-SWA callers
+// pass.
+inline void free_prefill_buffers(int32_t* d_token_ids, int* d_positions, int* d_block_tables,
+                                 int* d_block_tables_swa, int* d_context_lens, cudaStream_t stream) {
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_token_ids, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_positions, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, stream));
 }
 

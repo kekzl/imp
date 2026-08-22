@@ -373,6 +373,29 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         log_spec_stats_();
 }
 
+void Engine::cancel_sequence_(const std::shared_ptr<Request>& req) {
+    // The abnormal end of a request, as opposed to finish_request's graceful
+    // one. Both must release the same per-request resources.
+    //
+    // Six sites in the scheduler used to call free_sequence() alone (#1632).
+    // KV came back; the recurrent-state slot did not, and it is a fixed-size
+    // pool: once it is empty every later sequence falls back to the legacy
+    // `id % cap` aliasing, so two live sequences share one SSM state. On a
+    // dense model there is no slot and the release is a no-op, which is why
+    // this went unnoticed.
+    //
+    // Not shared with finish_request: prefix pinning (a cancelled request's
+    // prefix is not worth pinning) and the speculation telemetry (there was no
+    // completed generation to report).
+    kv_manager_->free_sequence(req->id);
+    release_recurrent_slot_(req->id);
+    req->recurrent_restore.reset();
+    req->swa_restore.reset();
+    spec_suffix_idx_.erase(req->id);
+    if (req->constraints)
+        constraints_return_(std::move(req->constraints));
+}
+
 void Engine::score_capture_(Request& req, const Tensor& logits, cudaStream_t stream) {
     if (req.score_token_ids.empty() || logits.data == nullptr)
         return;
