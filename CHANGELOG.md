@@ -174,13 +174,15 @@ there instead of retelling it.
   that before the body is read, where `req.body` is empty, and a 10 000-level
   body still returned 200 from there.
 
-- **Streamed tool arguments were sliced every 48 bytes, so non-ASCII arrived as
-  U+FFFD** (#1554). A multi-byte character straddling a slice boundary was cut
-  in half and each half JSON-encoded separately, which `dump_safe` replaces.
-  Any tool argument with an umlaut, an accent or an emoji reached the client
-  corrupted, silently. Slices now end on codepoint boundaries on both affected
-  dialects (`/v1/messages` and `/v1/chat/completions`; `/v1/responses` never
-  chunked and was unaffected).
+- **Streamed tool arguments arrived as U+FFFD wherever a multi-byte character
+  crossed a delta boundary** (#1554). `StreamToolCallFilter` holds back
+  `close_tag_.size() - 1` **bytes** so a partially arrived close tag cannot leak
+  into the arguments, and that cut lands mid-character; each half is
+  JSON-encoded into its own SSE delta, where `dump_safe` substitutes. Measured
+  on Qwen3-8B-Q8_0 with a forced `tool_choice`: 10 replacement characters in one
+  argument, 0 after the fix, with the non-streaming control clean throughout.
+  The buffered 48-byte chunker was hardened at the same time, but it is not the
+  path a shipped model takes here.
 
 - **`image_url` was an SSRF primitive: any host, any port, redirects followed,
   no size cap, no read timeout** (#1610). An unauthenticated request body chose
