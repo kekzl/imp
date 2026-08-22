@@ -222,6 +222,13 @@ jobs:
       # compile_commands.json + _deps, lints only the PR's changed .cpp, and never
       # blocks merge.
 
+      # #1650: the compute_120f fallback ships as PTX only, so ptxas never ran
+      # over it and the first thing that would is the driver JIT on a GB203 -
+      # a card nobody here owns. Assembling it needs no GPU, only the compiler
+      # that is already in this container.
+      - name: Assemble the compute_120f PTX fallback
+        run: bash scripts/check_ptx_fallback.sh build/imp-cli
+
       - name: Upload build artifacts
         if: steps.changes.outputs.code == 'true'
         uses: actions/upload-artifact@v7

@@ -180,6 +180,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The `compute_120f` PTX fallback is assembled in CI** (#1650). It ships as
+  `code=compute_120f`, the PTX-only form, so `ptxas` never ran over it and the
+  first thing that would was the driver's JIT on a GB203 - a card nobody in
+  this project owns. `scripts/check_ptx_fallback.sh` extracts every PTX image
+  from the built binary and assembles it; 155 images, no GPU needed, since
+  ptxas is a compiler. Measured today: all 155 assemble for `sm_120`.
+
 - **`"speculative": false` left two of three drafters running, and three
   server decisions had no counter** (#1639, #1640, #1641). The documented
   per-request switch fed only the n-gram matcher: the MTP head and token

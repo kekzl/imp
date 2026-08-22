@@ -18,7 +18,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -478,6 +478,12 @@ alloc-sites-stats:
 
 # Allocate/free API pairing: cudaMalloc<->cudaFree, cudaMallocAsync<->cudaFreeAsync,
 # cudaMallocHost/cudaHostAlloc<->cudaFreeHost. Host-only, no Docker.
+# Assemble the compute_120f PTX fallback out of a built binary (#1650). Needs
+# ptxas, not a GPU. Runs in CI's Build job; this target is for reproducing it.
+check-ptx-fallback:
+	@docker run --rm -v $(PWD):/src -w /src $(DEV_IMG) \
+		bash scripts/check_ptx_fallback.sh $(or $(PTX_BIN),build-dev/imp-cli)
+
 check-alloc-pairs:
 	@python3 tools/check_alloc_pairs.py
 
