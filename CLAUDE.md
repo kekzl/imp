@@ -62,7 +62,7 @@ The host has **no CUDA toolkit** by design — build inside Docker. `build/` and
 ```
 make dev / make dev-test   # incremental (2-14 s) + the real CI lane — iterate here
 make build                 # full image (~3.5 min) — the gate, benchmarks, pre-push
-make verify-fast           # ~90 s pre-push gate    make verify   # ~5 min full
+make verify-fast           # pre-push gate: build + 37 s script (#1587)   make verify   # full
 ```
 
 `make build` for anything you *measure* or push; `make dev` for everything else. `make test-unit` is a different binary from the CI lane — green there is not green in CI. Details, target list and CI job names: skill **building-and-testing**.

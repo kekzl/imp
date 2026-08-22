@@ -70,6 +70,7 @@
 // Useful today for: getting a model onto the NVFP4 path at all, and for
 // performance work where the weights only need to be the right shape.
 
+#include "common/exit_codes.h"
 #include "awq.h"
 #include "checkpoint_out.h"
 #include "fp8_source.h"
@@ -342,7 +343,7 @@ int main(int argc, char** argv) {
             const std::string f = next();
             if (!quantize::parse_output_format(f, opt.format)) {
                 fprintf(stderr, "imp-quantize: unknown --format '%s' (modelopt | vllm)\n", f.c_str());
-                return 2;
+                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
             }
         } else if (a == "--calib-groups") {
             opt.calib_groups = next();
@@ -354,7 +355,7 @@ int main(int argc, char** argv) {
             if (opt.calib_groups.find_first_not_of(awq::kAwqAllGroups) != std::string::npos) {
                 fprintf(stderr, "imp-quantize: --calib-groups '%s' has a letter outside %s\n",
                         opt.calib_groups.c_str(), awq::kAwqAllGroups);
-                return 2;
+                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
             }
         } else if (a == "--dry-run")
             opt.dry_run = true;
@@ -364,12 +365,12 @@ int main(int argc, char** argv) {
         } else {
             fprintf(stderr, "unknown argument: %s\n", a.c_str());
             usage();
-            return 2;
+            return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
         }
     }
     if (opt.in_dir.empty() || (opt.out_dir.empty() && !opt.dry_run)) {
         usage();
-        return 2;
+        return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
     }
 
     std::vector<fs::path> shards;

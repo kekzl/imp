@@ -1,4 +1,5 @@
 #include "api/imp_internal.h"
+#include "common/exit_codes.h"
 #include "args.h"
 #include "model/chat_template.h"
 #include "model/image_placeholders.h"
@@ -168,8 +169,12 @@ int main(int argc, char** argv) {
     if (format == IMP_FORMAT_GGUF) {
         resolved_model = imp::resolve_model_gguf(args.model_path, args.revision);
         if (resolved_model.empty()) {
+            // The most common failure of all, and the one a caller most wants
+            // to distinguish: a path that is not there. It never reached
+            // imp_model_load_ex, so it needs its own code rather than the
+            // generic 1 (#1585).
             fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
-            return 1;
+            return imp::tools::exit_code_for(IMP_ERROR_FILE_NOT_FOUND);
         }
         if (resolved_model != args.model_path) {
             printf("Resolved model: %s -> %s\n", args.model_path.c_str(), resolved_model.c_str());
@@ -188,7 +193,7 @@ int main(int argc, char** argv) {
                                      /*load_mtp_head=*/args.mtp_spec_decode_k > 0, &model);
     if (err != IMP_SUCCESS) {
         fprintf(stderr, "Error loading model: %s\n", imp_error_string(err));
-        return 1;
+        return imp::tools::exit_code_for(err);
     }
 
     ImpConfig config = imp_config_default();
@@ -333,7 +338,7 @@ int main(int argc, char** argv) {
     if (err != IMP_SUCCESS) {
         fprintf(stderr, "Error creating context: %s\n", imp_error_string(err));
         imp_model_free(model);
-        return 1;
+        return imp::tools::exit_code_for(err);
     }
 
     auto t_init_end = std::chrono::high_resolution_clock::now();
@@ -741,7 +746,7 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "Error loading image '%s': %s\n", p, imp_error_string(err));
                     imp_context_free(ctx);
                     imp_model_free(model);
-                    return 1;
+                    return imp::tools::exit_code_for(err);
                 }
                 fprintf(stderr, "Image loaded: %s\n", p);
             }
@@ -820,7 +825,7 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "Prefill error: %s\n", imp_error_string(err));
                 imp_context_free(ctx);
                 imp_model_free(model);
-                return 1;
+                return imp::tools::exit_code_for(err);
             }
 
             // Compute max stop length for buffering

@@ -35,6 +35,7 @@ import datetime as dt
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -152,6 +153,36 @@ def _edits_since(sha: str, path: str):
 
 
 BASELINE = ROOT / "tests" / "perf_baseline.json"
+
+
+def _ignored_paths(candidates: list[str]) -> set[str]:
+    """The subset of `candidates` that .gitignore excludes (#1663).
+
+    Without this the linter walks whatever happens to be in the tree. A local
+    scratch directory - `_audit/` during the 2026-08 audit - produced 160
+    errors on every run, and the working answer became `| grep -v '^FAIL
+    _audit/'`. A gate whose output has to be filtered by hand is one command
+    away from not being read at all.
+
+    `git check-ignore` rather than `git ls-files`: a doc that is written but
+    not yet added is still in scope, and would otherwise pass locally and fail
+    in CI. Falls back to "nothing is ignored" when git is unavailable, which is
+    the old behaviour.
+    """
+    if not candidates:
+        return set()
+    try:
+        r = subprocess.run(
+            ["git", "check-ignore", "--stdin"],
+            input="\n".join(candidates),
+            capture_output=True, text=True, cwd=ROOT, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    # exit 0 = some paths ignored, 1 = none, 128 = not a git repo
+    if r.returncode not in (0, 1):
+        return set()
+    return {line.strip() for line in r.stdout.splitlines() if line.strip()}
 
 
 def in_scope(rel: str) -> bool:
@@ -301,9 +332,11 @@ def check_budgets(errors: list) -> None:
         if t > CLAUDE_ROOT_MAX_TOKENS:
             errors.append(f"CLAUDE.md: ~{t} tokens > {CLAUDE_ROOT_MAX_TOKENS}")
 
-    for p in ROOT.rglob("CLAUDE.md"):
-        rel = p.relative_to(ROOT).as_posix()
-        if rel == "CLAUDE.md" or rel.startswith(EXCLUDED_PREFIXES):
+    claude_files = [p.relative_to(ROOT).as_posix() for p in ROOT.rglob("CLAUDE.md")]
+    ignored = _ignored_paths(claude_files)
+    for rel in claude_files:
+        p = ROOT / rel
+        if rel == "CLAUDE.md" or rel in ignored or rel.startswith(EXCLUDED_PREFIXES):
             continue
         t = approx_tokens(p.read_text(encoding="utf-8"))
         if t > CLAUDE_DIR_MAX_TOKENS:
@@ -314,11 +347,12 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    for path in sorted(ROOT.rglob("*.md")):
-        rel = path.relative_to(ROOT).as_posix()
-        if not in_scope(rel):
+    candidates = [p.relative_to(ROOT).as_posix() for p in sorted(ROOT.rglob("*.md"))]
+    ignored = _ignored_paths(candidates)
+    for rel in candidates:
+        if rel in ignored or not in_scope(rel):
             continue
-        check_file(path, rel, errors, warnings)
+        check_file(ROOT / rel, rel, errors, warnings)
 
     check_generated_blocks(errors)
     check_budgets(errors)

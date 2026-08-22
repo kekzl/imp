@@ -279,7 +279,14 @@ else
         # CI cannot run it, and DecodeLogitsInvariantToBatchComposition (#1314)
         # is the only assert in the tree that a sequence's logits do not depend
         # on its batch neighbours — the class #1044/#1045 came from.
-        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:AttentionTest.*:VramBudget*:ForwardPassTest.*"
+        #
+        # `*Attention*` was `AttentionTest.*` from 2026-04-27 until #1586. That
+        # suite had already been renamed, so the pattern matched nothing and
+        # gtest reported success for it: the gate ran ZERO attention tests for
+        # four months, in the subsystem with the most kernel churn in the tree.
+        # check_verify_filter.sh now fails when any pattern here matches
+        # nothing.
+        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:*Attention*:VramBudget*:ForwardPassTest.*"
         if "$TESTS_BIN" --gtest_filter="$FILTER" >/tmp/imp_verify_tests.log 2>&1; then
             pass "fast gtest filter"
         else
