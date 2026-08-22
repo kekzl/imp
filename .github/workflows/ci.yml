@@ -553,8 +553,16 @@ jobs:
       - name: Fetch pinned deps
         if: steps.scope.outputs.run == 'true'
         run: |
-          . cmake/imp-deps.cmake 2>/dev/null || true
-          GT=$(grep -oP 'IMP_DEP_GOOGLETEST_TAG \K\S+' cmake/imp-deps.cmake | head -1)
+          # Two separate traps, both hit on the way here. The pin line is
+          #   set(IMP_DEP_GOOGLETEST_TAG    v1.18.0  CACHE STRING "...")
+          # with RUN-LENGTH whitespace, so a pattern with one space matches
+          # nothing, grep exits 1 and `-e` kills the step with no message at
+          # all. And `grep | head -1` under `-o pipefail` is #1499: head closes
+          # the pipe, grep dies of EPIPE, the pipeline is non-zero even on a
+          # hit. `\s+` fixes the first, `-m1` instead of a pipe the second.
+          GT="$(grep -m1 -oP 'IMP_DEP_GOOGLETEST_TAG\s+\K[^ )]+' cmake/imp-deps.cmake)"
+          test -n "$GT" || { echo "googletest pin not found in cmake/imp-deps.cmake"; exit 1; }
+          echo "googletest pin: $GT"
           git clone --depth=1 --branch "$GT" https://github.com/google/googletest.git /deps/googletest
 
       # No tools, no bench, no server: the same configuration `make asan` uses,
