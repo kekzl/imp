@@ -47,6 +47,13 @@ max_batch_size       = 0
 # paths are unaffected. 0 = legacy unbounded behavior. Ignored when
 # deterministic = true (the unbounded loop stays for bit-reproducible evals).
 decode_burst         = 128
+# Prefill chunk size. -1 = per-arch default (2048 where chunked prefill is
+# supported, 0 otherwise), 0 = no chunking. Sets the TTFT/ITL trade for every
+# prefill: chunked prefill re-reads every weight once per chunk, so 512-token
+# chunks cost NVFP4-MoE -43 % prefill at pp4096 against 2048. A --prefill-chunk
+# CLI value wins over this. Had no key at all until #1645, while the cap below
+# did.
+prefill_chunk_size   = -1
 # Cap the prefill chunk while other sequences are decoding: prefill and decode
 # share one stream, so every chunk forward inserts its full latency between two
 # decode steps of the active sessions. 1024 is the measured compromise (decoder
@@ -94,7 +101,9 @@ max_seq_len          = 0
 vram_budget_mb       = 0
 # Disable Programmatic Dependent Launch (PDL). Diagnostic; small perf impact.
 no_pdl               = false
-# Naked FP16 path with FP8/NVFP4/graphs/warmup all forced off.
+# Naked FP16 path: FP8/NVFP4/graphs/warmup/FP8-KV and the MoE expert cache off,
+# deterministic cuBLAS and the GDN reference scan on. Four of those went through
+# dead env vars until #1628 and did nothing at all.
 debug_raw            = false
 # Disable SigLIP vision encoder CUDA-graph capture (debug).
 no_vision_graph      = false

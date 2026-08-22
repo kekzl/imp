@@ -128,7 +128,9 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
 // Deliberately unfused: state lives in global memory, per-token loop serial,
 // L2-norm of Q/K applied in-kernel but via shared-memory reductions (no
 // register-cached state). Same delta-rule math as `gdn_scan_fused_f32` but
-// trivially inspectable for validation. Enable via `IMP_GDN_REF=1`.
+// trivially inspectable for validation. Selected by `gdn.ref_kernel` (and by
+// `runtime.debug_raw`, which sets it). The `IMP_GDN_REF=1` this comment named
+// until #1628 is read by nothing.
 // ---------------------------------------------------------------------------
 void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,

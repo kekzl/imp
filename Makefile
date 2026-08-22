@@ -375,7 +375,11 @@ verify-north-star: build check-gpu
 # `-u` matches the host UID so the write succeeds.
 MODEL ?= /models/Qwen3-8B-Q8_0.gguf
 MODELS_DIR ?= $(HOME)/models
-gen-perf-baseline: build
+# #1623: every other bench target takes check-gpu; this one - the one that
+# re-pins what the gate compares against - did not. A baseline measured next to
+# a co-tenant becomes the number every later run is judged by, and nothing
+# downstream can tell.
+gen-perf-baseline: check-gpu build
 	@docker run --rm --gpus all \
 		-v $(MODELS_DIR):/models \
 		-v $(PWD):/src -w /src \
