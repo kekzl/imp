@@ -1,6 +1,7 @@
 #include "utils.h"
 #include "stream_pipeline.h"
 
+#include <algorithm>
 #include <cstdio>
 
 std::string dump_safe(const json& j) {
@@ -25,6 +26,93 @@ void drop_incomplete_utf8_tail(std::string& s) {
     const size_t complete = imp::stream::utf8_complete_len(s);
     if (complete < s.size() && s.size() - complete <= 3)
         s.resize(complete);
+}
+
+bool reject_body_too_deep(const httplib::Request& req, httplib::Response& res) {
+    // Every parser downstream is recursive and none bounds depth, nlohmann
+    // included and it runs first: measured on this tree, 50 000 nested arrays
+    // parse and dump() fine, 100 000 segfault the process. That is ~100 KB
+    // against a 100 MiB body cap, from an unauthenticated request, and one
+    // process means the SIGSEGV takes every in-flight stream with it.
+    constexpr int kMaxBodyNesting = 100;
+    if (req.body.empty() || json_nesting_depth(req.body, kMaxBodyNesting) <= kMaxBodyNesting)
+        return false;
+
+    res.status = 400;
+    const char* msg = "request body nests deeper than 100 levels";
+    json err;
+    if (req.path.rfind("/v1/messages", 0) == 0) {
+        err = {{"type", "error"}, {"error", {{"type", "invalid_request_error"}, {"message", msg}}}};
+    } else {
+        err = {{"error", {{"message", msg}, {"type", "invalid_request_error"}}}};
+    }
+    res.set_content(err.dump(), "application/json");
+    return true;
+}
+
+int json_nesting_depth(const std::string& body, int stop_at) {
+    int depth = 0, max_depth = 0;
+    bool in_string = false, escaped = false;
+    for (char c : body) {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (c) {
+            case '"':
+                in_string = true;
+                break;
+            case '{':
+            case '[':
+                depth++;
+                if (depth > max_depth) {
+                    max_depth = depth;
+                    if (max_depth > stop_at)
+                        return max_depth;  // proven hostile, stop reading
+                }
+                break;
+            case '}':
+            case ']':
+                if (depth > 0)
+                    depth--;
+                break;
+            default:
+                break;
+        }
+    }
+    return max_depth;
+}
+
+size_t utf8_chunk_len(const std::string& s, size_t off, size_t max) {
+    if (off >= s.size())
+        return 0;
+    const size_t remaining = s.size() - off;
+    if (remaining <= max)
+        return remaining;  // the tail fits; whatever it is, it is not a split
+    const size_t complete = imp::stream::utf8_complete_len(s.substr(off, max));
+    if (complete > 0)
+        return complete;
+    // complete == 0 means no whole character fits in `max`. Emitting `max`
+    // bytes here would be the very split this function exists to prevent, so
+    // the cap yields: one character, whole, even if it is longer than `max`.
+    // A chunk size is a hint about frame size; a half character is wrong at any
+    // size. Falls back to one byte only for input that is ill-formed at `off`,
+    // where there is no character to keep intact and stalling is worse.
+    const unsigned char lead = static_cast<unsigned char>(s[off]);
+    size_t char_len = 1;
+    if ((lead & 0xE0) == 0xC0)
+        char_len = 2;
+    else if ((lead & 0xF0) == 0xE0)
+        char_len = 3;
+    else if ((lead & 0xF8) == 0xF0)
+        char_len = 4;
+    return std::min(char_len, remaining);
 }
 
 std::string Utf8Stitch::feed(const std::string& piece) {

@@ -76,6 +76,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 }
 
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     // Parse request body
     json body;
     try {
@@ -682,6 +685,10 @@ void handle_count_tokens(const httplib::Request& req, httplib::Response& res, Se
         json err = {{"type", "error"}, {"error", {{"type", type}, {"message", message}}}};
         res.set_content(dump_safe(err), "application/json");
     };
+
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
 
     json anth_body;
     try {

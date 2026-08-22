@@ -583,6 +583,12 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
     };
 
     std::function<jinja::Value()> parse_value;
+    // #1607: this parser recurses once per nesting level over a string that
+    // came from a request body. The HTTP boundary caps the body at 100 levels,
+    // which is what actually bounds this today - the cap here is so a second
+    // caller, from a source that has no such boundary, cannot reintroduce it.
+    int depth = 0;
+    constexpr int kMaxDepth = 128;
 
     auto parse_string = [&]() -> std::string {
         if (pos >= json_str.size() || json_str[pos] != '"')
@@ -681,6 +687,14 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
     };
 
     parse_value = [&]() -> jinja::Value {
+        if (depth >= kMaxDepth)
+            return jinja::Value();
+        depth++;
+        struct Pop {
+            int& d;
+            ~Pop() { d--; }
+        } pop{depth};
+
         skip_ws();
         if (pos >= json_str.size())
             return jinja::Value();

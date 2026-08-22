@@ -163,6 +163,25 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A nested `tools[].function.parameters` crashed the whole server** (#1607).
+  Every parser on the request path is recursive and none bounded depth,
+  nlohmann included and it runs first: measured here, 50 000 nested arrays parse
+  and `dump()` fine and 100 000 segfault the process, i.e. ~100 KB of body
+  against a 100 MiB cap, unauthenticated, taking every in-flight stream with it.
+  Bodies deeper than 100 levels are now a `400` at all nine request-parse sites,
+  and `json_string_to_value` and the `tojson` walker have their own caps behind
+  that. The check does **not** live in the pre-routing handler: httplib calls
+  that before the body is read, where `req.body` is empty, and a 10 000-level
+  body still returned 200 from there.
+
+- **Streamed tool arguments were sliced every 48 bytes, so non-ASCII arrived as
+  U+FFFD** (#1554). A multi-byte character straddling a slice boundary was cut
+  in half and each half JSON-encoded separately, which `dump_safe` replaces.
+  Any tool argument with an umlaut, an accent or an emoji reached the client
+  corrupted, silently. Slices now end on codepoint boundaries on both affected
+  dialects (`/v1/messages` and `/v1/chat/completions`; `/v1/responses` never
+  chunked and was unaffected).
+
 - **`image_url` was an SSRF primitive: any host, any port, redirects followed,
   no size cap, no read timeout** (#1610). An unauthenticated request body chose
   where the server connected, which on a container host means loopback, the

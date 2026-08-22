@@ -311,6 +311,10 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         log_client_ip = req.remote_addr;
     const std::string log_raw_body = req.body;
 
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
+
     json body;
     try {
         body = json::parse(req.body);

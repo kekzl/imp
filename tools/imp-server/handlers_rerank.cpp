@@ -74,6 +74,9 @@ bool single_token(ServerState& state, const char* text, int32_t& out) {
 }  // namespace
 
 void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     json body;
     try {
         body = json::parse(req.body);

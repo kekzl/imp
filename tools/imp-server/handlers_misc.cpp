@@ -27,6 +27,9 @@
 #include <cuda_runtime.h>
 
 void handle_tokenize(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     json body;
     try {
         body = json::parse(req.body);
@@ -80,6 +83,9 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
 }
 
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     json body;
     try {
         body = json::parse(req.body);
@@ -249,6 +255,9 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
 }
 
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     // Parse request body
     json body;
     try {

@@ -42,6 +42,47 @@ private:
     std::string carry_;
 };
 
+// Nesting depth of a JSON document, counted WITHOUT parsing it (#1607).
+//
+// The parsers on this surface are all recursive and none of them bounds depth,
+// nlohmann included: measured on this tree, 50 000 nested arrays parse and
+// dump() fine and 100 000 segfault, i.e. ~100 KB of body against a 100 MiB body
+// cap. The parse is where the stack dies, so the check has to happen before it,
+// on the raw bytes.
+//
+// Scans left to right, skipping string contents so a brace inside a string does
+// not count, and stops as soon as `stop_at` is exceeded - so a hostile body
+// costs only as many bytes as it takes to prove it hostile. Returns the depth
+// reached, capped at `stop_at + 1`.
+int json_nesting_depth(const std::string& body, int stop_at);
+
+// Reject a request body that nests deeper than the cap, with the dialect's own
+// error envelope (#1607). Returns true when the request was answered and the
+// caller must stop.
+//
+// NOT in the pre-routing handler, where the other cross-cutting checks live:
+// httplib calls that handler from Server::routing() BEFORE the body has been
+// read, so `req.body` is empty there. Measured, after writing it there first -
+// a 10 000-level body still returned 200.
+bool reject_body_too_deep(const httplib::Request& req, httplib::Response& res);
+
+// Length of a chunk starting at `off` that is at most `max` bytes AND ends on a
+// UTF-8 codepoint boundary (#1554).
+//
+// Tool arguments were sliced every 48 bytes and each slice JSON-encoded on its
+// own, so a multi-byte character straddling a boundary was cut in half and
+// dump_safe turned each half into U+FFFD. The per-token content path has
+// stitched for exactly this reason since #1310; the tool-argument path did not.
+//
+// Requires `off` to be on a boundary, which holds inductively when every chunk
+// comes from this function. Always returns at least 1 when bytes remain, so a
+// pathological input cannot stall the loop.
+//
+// `max` yields to a character: when no whole character fits, the single
+// character is returned even if it is longer than `max`. A chunk size is a hint
+// about frame size, and half a character is wrong at any size.
+size_t utf8_chunk_len(const std::string& s, size_t off, size_t max);
+
 // Send an OpenAI-style error envelope {"error":{"message":..,"type":..}} with
 // the given HTTP status. Dumps via dump_safe so an invalid-UTF-8 byte echoed
 // into the message (e.g. a parse-error what() on byte-truncated input) can

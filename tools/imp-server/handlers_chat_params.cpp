@@ -52,6 +52,10 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.log_raw_body = req.body;
     ctx.log_skip = g_in_anthropic_shim;
 
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return false;
+
     // Parse request body
     json body;
     try {
