@@ -47,7 +47,7 @@ streaming driver, so a fix in streaming lands in all of them at once.
 | `stop` | ✅ | |
 | `stream` | ✅ | per token, all three dialects |
 | `n` | ✅ | documented and tested as `[1,4]` |
-| `logprobs` | 🟡 | in the parameter surface, no dedicated gate. Listed in [`LIMITATIONS.md`](LIMITATIONS.md) |
+| `logprobs` | ✅ non-streaming, ⚪ streaming | `tests/test_server_logprobs.py` in `make test-server`. **Streaming emits none at all** (#1588). This row said 🟡 "no dedicated gate, listed in LIMITATIONS.md" until #1594: the gate exists and it was not listed there |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
 | `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape |
 | `"lora": "name"` | ✅ | PEFT adapter hot-swap, works with every quant path |

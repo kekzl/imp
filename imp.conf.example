@@ -556,7 +556,7 @@ ngram                = true
 # costs ~2.1x a decode step at 2k ctx and ~5.2x at 16k (FA2 tile over the
 # pow2 ctx tier), so dense speculation (~2 tok/verify) is net-negative past
 # ~2k. Per-step gate; MoE-NVFP4 and GDN-hybrid drafts are exempt. 0 = no cap.
-draft_ctx_cap        = 2048
+draft_ctx_cap        = 0        # embedded default is 0, not 2048 (#1672)
 # Speculation on MoE models with native-NVFP4 experts (Qwen3-Coder-30B-FP4:
 # code-edit +49-81%, draft-poor floor -3-7%). GGUF-MoE never engages (its
 # batched verify re-dequants every activated expert per step, measured -22%)
@@ -627,7 +627,7 @@ mtp_nvfp4_head       = true
 # MTP economics guard: after an 8-verify sample, avg emitted tokens per
 # MTP-filled verify below this dooms MTP drafting for the request. 0 disables
 # the guard. Note: a chain of k emits at most k+1 per verify.
-mtp_econ_min_emit    = 4.0
+mtp_econ_min_emit    = -1.0     # embedded default is -1.0, not 4.0 (#1672)
 # Graph-captured verify (#847): cache one CUDA graph per draft-length bucket
 # and replay it each verify step (all growing lengths are read from device
 # buffers), removing the eager launch-pacing tax. Engages only where the
