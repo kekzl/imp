@@ -429,10 +429,12 @@ bool Engine::init_kv_cache() {
                 "KV cache: the pool ends up at %d blocks (%.0f MiB, %.0f tokens) but the "
                 "requested max_seq_len=%d needs %d blocks (%.0f MiB). Every full-length request "
                 "will be cancelled at admission even though this load reports success. Lower "
-                "--max-seq-len, lower the weight-cache demand (moe.reserve_mib, --kv-fp8), or "
+                "runtime.max_seq_len (imp-cli: --max-seq-len; imp-server: --set "
+                "runtime.max_seq_len=N, the flag is CLI-only and exits 1 there, #1681), lower "
+                "the weight-cache demand (moe.reserve_mib, --kv-fp8), or "
                 "free at least %.0f MiB for the KV pool.",
-                sizing.blocks, have_mib, static_cast<double>(sizing.blocks) * kv_bs,
-                config_.max_seq_len, need_blocks, need_mib, need_mib - have_mib);
+                sizing.blocks, have_mib, static_cast<double>(sizing.blocks) * kv_bs, config_.max_seq_len,
+                need_blocks, need_mib, need_mib - have_mib);
         }
     }
 
@@ -456,9 +458,10 @@ bool Engine::init_kv_cache() {
                 "--vram-budget %zu MiB is too small for this model: the KV pool ends up at %d "
                 "blocks (%.0f MiB) but one max_seq_len=%d sequence needs %d blocks (%.0f MiB). "
                 "Every request would be cancelled at admission. Raise --vram-budget by at least "
-                "%.0f MiB, or lower --max-seq-len.",
-                vram_budget_bytes() >> 20, max_blocks, have_mib, config_.max_seq_len,
-                blocks_per_seq, need_mib, need_mib - have_mib);
+                "%.0f MiB, or lower runtime.max_seq_len (imp-server: --set "
+                "runtime.max_seq_len=N; --max-seq-len is imp-cli only, #1681).",
+                vram_budget_bytes() >> 20, max_blocks, have_mib, config_.max_seq_len, blocks_per_seq,
+                need_mib, need_mib - have_mib);
             return false;
         }
     }

@@ -186,8 +186,7 @@ there instead of retelling it.
   the shipped cubin contains; `SM120.md`'s decode roofline was off by 1023x and
   the "~28:1 memory:compute ratio" was derived from that quotient (it is
   ~28,000:1); `MODELS.md` told operators to bound KV with `--max-seq-len`, which
-  exits 1 on `imp-server` (the two engine log lines that give the same advice
-  still do, #1681 stays open for them); the quickstart's first command needs an image nothing
+  exits 1 on `imp-server` (the two engine log lines that gave the same advice are fixed below, #1681); the quickstart's first command needs an image nothing
   in the quickstart builds; seven `FEATURES.md` rows were green without a gate.
   Two numbers were **withdrawn rather than corrected**: the MoE host-offload LRU
   row had four values for one measurement and the checkpoint is not on this host
@@ -201,6 +200,19 @@ there instead of retelling it.
   `a | b | c || fallback`, and sed exits 0 on empty input so the fallback never
   ran. Verified in the build container: 13.3 instead of empty.
 
+- **`docs_lint.py` promised checks it did not run** (#1683). The header claimed
+  all seven checks fail the build while staleness only warned, and the
+  frontmatter error named four fields while one was validated: `audience:` and
+  `commit:` were read by no line. Both are checked now, and a document edited
+  since the commit it claims to be verified against is reported - 41 of them
+  are. That check counts edits to the file, not commits to the repo: a
+  threshold on repo commits was the first attempt and did not fire on the case
+  that motivated it.
+
+- **The engine told server operators to use a flag that kills the server**
+  (#1681). `engine_kv_cache_init.cpp:432,459` say "lower --max-seq-len"; both
+  messages are shared by imp-cli and imp-server, and `imp-server --max-seq-len N`
+  exits 1. They name `--set runtime.max_seq_len=N` now.
 
 
 - **A nested `tools[].function.parameters` crashed the whole server** (#1607).
