@@ -513,11 +513,19 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+    # This image ships no bash, so GitHub picks `sh -e {0}` and any bashism is a
+    # syntax error at step start. The first version used a here-string and the
+    # job died in 1m15s before building anything - with `Build` the only
+    # required check, that merged. Declared explicitly, and bash installed below.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Install toolchain
+        shell: sh
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git python3 cmake ninja-build ca-certificates
+          apt-get install -y --no-install-recommends bash git python3 cmake ninja-build ca-certificates
 
       - uses: actions/checkout@v7
         with:
