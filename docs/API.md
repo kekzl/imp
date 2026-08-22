@@ -147,13 +147,23 @@ never replayed.
 
 ## Images
 
-✅ on `/v1/chat/completions`, as `image_url` content parts, data-URI or fetched
-over HTTP. Several images in one request are encoded in prompt order.
+✅ on `/v1/chat/completions`, as `image_url` content parts. Several images in one
+request are encoded in prompt order.
+
+**A data URI works out of the box; an `http(s)` URL does not.** Fetching one
+makes the server open a connection to a host the caller names, and the caller is
+unauthenticated by default, so it is behind `--allow-remote-images` (#1610).
+With the flag on, the destination is resolved and refused if it is loopback,
+link-local (including the cloud metadata address), RFC1918, CGNAT or ULA;
+redirects are not followed, the body is capped at 32 MiB and the read has a
+10 s timeout. See [`LIMITATIONS.md`](LIMITATIONS.md) for the residual.
 
 Two refusals worth knowing, both deliberate:
 
 - An `image_url` that cannot be read is a `400`, not a skipped picture. Dropping
-  one would slide every later image onto the wrong placeholder.
+  one would slide every later image onto the wrong placeholder. The message is
+  the same whatever went wrong, and does not echo the URL, so the endpoint
+  cannot be used to tell an open port from a closed one.
 - A model whose vision tower imp cannot read loads **text-only** and says so; a
   request that sends it an image gets `400 vision_unavailable` rather than a
   confident description of a picture the model never received.

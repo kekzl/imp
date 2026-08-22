@@ -40,6 +40,14 @@ These have a code path and no gate. They may work; nothing proves it.
 
 ## Known-bad and known-limited behaviour
 
+- **Remote `image_url` fetching is off by default, and when on it is still
+  vulnerable to DNS rebinding.** `--allow-remote-images` classifies the
+  destination before connecting, but the check and the connection are two
+  separate resolutions, so a name whose records change in between still reaches
+  a private address. Closing that needs a connect-time callback, which httplib
+  does not expose. The off-by-default is what carries this; treat the flag as
+  "the network this server sits on is trusted".
+
 - **The VRAM planner's weight-cache reserve is an estimate with a floor, not a
   measurement, and there is no retry if it is wrong.** A start that overcommits
   still ends in `imp_context_create` aborting rather than degrading to a smaller

@@ -11,6 +11,7 @@
 #include "tool_call.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
+#include "image_fetch.h"
 #include "reasoning_split.h"
 
 #include "api/imp_internal.h"
@@ -363,40 +364,41 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                             image_bytes = base64_decode(url.substr(comma + 1));
                         }
                     } else if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
-                        // Remote URL: fetch image via HTTP
-                        // Parse URL into host + path
-                        bool is_https = (url.rfind("https://", 0) == 0);
-                        std::string rest = url.substr(is_https ? 8 : 7);
-                        auto slash = rest.find('/');
-                        std::string host = (slash != std::string::npos) ? rest.substr(0, slash) : rest;
-                        std::string path_str = (slash != std::string::npos) ? rest.substr(slash) : "/";
-                        if (is_https) {
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-                            httplib::SSLClient cli(host);
-                            cli.set_follow_location(true);
-                            cli.set_connection_timeout(10);
-                            auto img_res = cli.Get(path_str);
-                            if (img_res && img_res->status == 200) {
-                                image_bytes.assign(img_res->body.begin(), img_res->body.end());
-                            }
-#else
-                            ctx.params.image_error = "https image_url needs an imp built with OpenSSL";
-#endif
+                        // #1610: this used to build an httplib client straight
+                        // from the request's host, follow redirects, and buffer
+                        // whatever came back. That is an SSRF primitive on an
+                        // endpoint that is unauthenticated by default: the
+                        // caller picks the host and port and the server has
+                        // reach the caller does not. Off by default now, and
+                        // bounded when on. See image_fetch.h.
+                        auto fetched = imp_server::fetch_remote_image(url,
+                                                                      state.default_args.allow_remote_images);
+                        if (fetched.ok) {
+                            image_bytes = std::move(fetched.bytes);
                         } else {
-                            httplib::Client cli(host);
-                            cli.set_follow_location(true);
-                            cli.set_connection_timeout(10);
-                            auto img_res = cli.Get(path_str);
-                            if (img_res && img_res->status == 200) {
-                                image_bytes.assign(img_res->body.begin(), img_res->body.end());
-                            }
+                            IMP_LOG_WARN("image_url not fetched: %s", fetched.detail.c_str());
                         }
                     }
                     // A scheme we do not fetch (file://, plain paths) leaves the
                     // slot empty, same as a failed request. Both are refused
                     // below rather than silently dropping a picture.
-                    if (image_bytes.empty() && ctx.params.image_error.empty())
-                        ctx.params.image_error = "could not read image_url: " + url.substr(0, 64);
+                    //
+                    // One string for every cause, and it does NOT echo the URL.
+                    // Distinguishable errors turned this into a port scanner of
+                    // the server's own network: "connection refused" and "200
+                    // with unparseable bytes" read differently from outside.
+                    //
+                    // The two variants below differ by SERVER CONFIGURATION,
+                    // never by what the URL named, so neither tells a caller
+                    // anything about the destination.
+                    if (image_bytes.empty() && ctx.params.image_error.empty()) {
+                        const bool remote = url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+                        ctx.params.image_error =
+                            (remote && !state.default_args.allow_remote_images)
+                                ? "could not read image_url: remote URLs are disabled on this "
+                                  "server; send a data: URI, or start it with --allow-remote-images"
+                                : "could not read image_url";
+                    }
                 }
             }
             ctx.params.chat_msgs.push_back({role, text_parts});

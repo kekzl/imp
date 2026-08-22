@@ -42,6 +42,8 @@ void print_server_usage(const char* prog) {
             "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
             "  --api-key <key>       Require Bearer token authentication\n"
             "  --metrics-require-auth  Also gate /metrics behind --api-key\n"
+            "  --allow-remote-images Fetch http(s) image_url from request bodies (default: off).\n"
+            "                        Off, the server never connects anywhere a caller names.\n"
             "  --reasoning-format <f> deepseek (default) or none\n"
             "  --mem-report          Print the full VRAM attribution table at init\n"
             "  --vram-budget <mb>    Hard per-process VRAM cap in MiB — size everything as if\n"
@@ -89,6 +91,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.api_key = argv[++i];
         } else if (std::strcmp(arg, "--metrics-require-auth") == 0) {
             args.metrics_require_auth = true;
+        } else if (std::strcmp(arg, "--allow-remote-images") == 0) {
+            args.allow_remote_images = true;
         } else if (std::strcmp(arg, "--reasoning-format") == 0 && i + 1 < argc) {
             args.reasoning_format = argv[++i];
         } else if (std::strcmp(arg, "--think-budget") == 0 && i + 1 < argc) {
