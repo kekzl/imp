@@ -28,11 +28,18 @@ struct StreamDialect {
     // User-visible content / reasoning deltas.
     std::function<bool(const std::string&)> emit_text;
     std::function<bool(const std::string&)> emit_reasoning;
-    // Content from the no-stop-sequence hot path, called once per decoded
-    // token: the chat dialect attaches per-token logprobs here (the index is
-    // StreamLoopResult::n_output_tokens - 1, updated live by the driver); the
-    // other dialects alias this to emit_text.
-    std::function<bool(const std::string&)> emit_content_token;
+    // Content carrying a token index, so the chat dialect can attach the
+    // right per-token logprob. The other dialects alias this to emit_text and
+    // ignore the index.
+    //
+    // The index is passed rather than read off StreamLoopResult::n_output_tokens
+    // because the two emission paths disagree about "now": without stop
+    // sequences the driver emits as it decodes, so the live counter is right,
+    // but with them it holds bytes back until a stop match is ruled out, and by
+    // the time those bytes go out the counter has moved on. That is why the
+    // stop path used to bypass this sink entirely and ship no logprobs at all
+    // (#1588). -1 means the driver cannot attribute the bytes to one token.
+    std::function<bool(const std::string&, int token_index)> emit_content_token;
     // Idle keepalive, sent when no token arrived for ~10s. A false return is
     // treated as a client disconnect (request cancelled).
     std::function<bool()> keepalive;

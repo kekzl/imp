@@ -52,7 +52,7 @@ struct ChatRequestParams {
     // 0 = force off, 1 = force on. From the imp extension body field
     // "speculative" (bool). Lets code-gen calls opt into speculation while
     // short tool-arg generations skip it on the same server.
-    int spec_ngram_override = -1;
+    int spec_override = -1;
     // OpenAI Predicted Outputs: concatenated text of the "prediction" body
     // field ({"type":"content","content": string | [{"type":"text","text"}]}).
     // Tokenized later in the snapshot stage (needs the tokenizer) and fed to

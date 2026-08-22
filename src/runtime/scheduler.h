@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime/request.h"
+#include <cstdint>
 #include <vector>
 #include <deque>
 #include <functional>
@@ -16,6 +17,10 @@ public:
     ~Scheduler() = default;
 
     void add_request(std::shared_ptr<Request> req);
+
+    // Rounds a request may be passed over before it sorts ahead of shorter
+    // ones. See the sort in schedule() for why this exists (#1634).
+    static constexpr int kAgingRounds = 32;
 
     // Schedule next batch: returns requests for prefill and decode
     void schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
@@ -39,6 +44,7 @@ public:
 private:
     int max_batch_size_;
     bool pending_dirty_ = false;
+    uint64_t round_ = 0;  // schedule() invocations, the clock the aging uses
     std::deque<std::shared_ptr<Request>> pending_;
     std::vector<std::shared_ptr<Request>> active_;
     KVCacheManager* kv_manager_ = nullptr;  // optional, for memory-aware scheduling

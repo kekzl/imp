@@ -46,6 +46,20 @@ These have a code path and no gate. They may work; nothing proves it.
   `COMPARE_URL=`, so the default `make test-rerank` does not run it.
 - **`/admin/suspend`, `/admin/resume`** and **`server.model_swap`**: implemented,
   no gate exercises either.
+- **The generation half of the HTTP contract**: SSE frame structure, usage
+  accounting, `finish_reason` and tool-call streaming. CI's `Real API contract
+  (model-less)` job deselects every test that produces a token, because
+  generation needs a GPU and there is no GPU runner (#1600). They run in
+  `make test-server` on a machine with a card, and in no CI job. The job prints
+  the collected-here vs collected-total counts so the gap is visible in its own
+  log rather than inferred from a job name.
+- **The per-token cost of the server streaming path**: the perf gate benches
+  `imp-cli`, which never enters the SSE writer, the tool-argument filter or the
+  per-chunk JSON serialisation (#1685). A change to `tools/imp-server/` cannot
+  regress the pinned numbers because the pinned numbers do not measure it.
+  Adding `tools/` to the pre-push path filter would not help: it would run a
+  benchmark of a different binary. Closing this needs a server-side benchmark
+  harness, which does not exist.
 
 All seven were green in `FEATURES.md` without a gate until #1680, which makes
 them invisible here - the legend's whole point.

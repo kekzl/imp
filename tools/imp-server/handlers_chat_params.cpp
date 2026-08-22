@@ -182,6 +182,12 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.regex_pattern = rf["regex"].get<std::string>();
             else if (rf.contains("pattern") && rf["pattern"].is_string())
                 ctx.params.regex_pattern = rf["pattern"].get<std::string>();
+            else {
+                send_json_error(res, 400, "invalid_request_error",
+                                "\"response_format\" is type \"regex\" but carries no string "
+                                "\"regex\" (or \"pattern\")");
+                return false;
+            }
         } else if (fmt_type == "grammar") {
             // {"type":"grammar","grammar":"root ::= ..."} — a GBNF grammar the
             // whole reply must derive. "gbnf" is accepted as a spelling too,
@@ -191,10 +197,28 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.grammar = rf["grammar"].get<std::string>();
             else if (rf.contains("gbnf") && rf["gbnf"].is_string())
                 ctx.params.grammar = rf["gbnf"].get<std::string>();
+            else {
+                send_json_error(res, 400, "invalid_request_error",
+                                "\"response_format\" is type \"grammar\" but carries no string "
+                                "\"grammar\" (or \"gbnf\")");
+                return false;
+            }
         } else if (fmt_type == "json_object") {
             ctx.params.json_mode = true;
         } else if (fmt_type == "json_schema") {
             ctx.params.json_mode = true;
+            const auto& rf = body["response_format"];
+            if (!rf.contains("json_schema") || !rf["json_schema"].is_object()) {
+                send_json_error(res, 400, "invalid_request_error",
+                                "\"response_format\" is type \"json_schema\" but carries no object "
+                                "\"json_schema\"");
+                return false;
+            }
+            if (!rf["json_schema"].contains("schema") || !rf["json_schema"]["schema"].is_object()) {
+                send_json_error(res, 400, "invalid_request_error",
+                                "\"response_format.json_schema\" carries no object \"schema\"");
+                return false;
+            }
             if (body["response_format"].contains("json_schema") &&
                 body["response_format"]["json_schema"].is_object()) {
                 auto& js = body["response_format"]["json_schema"];
@@ -214,6 +238,15 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     }
                 }
             }
+        } else if (fmt_type != "text") {
+            // The whole point of response_format is that the answer is
+            // constrained. A type this build does not know is not a weaker
+            // request, it is a different one, and answering it as free text
+            // with 200 tells the caller their constraint held (#1591).
+            send_json_error(res, 400, "invalid_request_error",
+                            "unknown \"response_format.type\": \"" + sanitize_for_echo(fmt_type, 64) +
+                                "\" (known: text, json_object, json_schema, regex, grammar)");
+            return false;
         }
     }
 
@@ -270,7 +303,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // Per-request speculative-decode override (imp extension). Absent → leave
     // tri-state at -1 (server default). Present bool → force on/off.
     if (body.contains("speculative") && body["speculative"].is_boolean())
-        ctx.params.spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
+        ctx.params.spec_override = body["speculative"].get<bool>() ? 1 : 0;
 
     // OpenAI Predicted Outputs: {"prediction": {"type": "content", "content":
     // string | [{"type":"text","text":...}...]}}. The text is a draft hint —

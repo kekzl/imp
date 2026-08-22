@@ -590,25 +590,19 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // Server-side input-token limit (--max-input-tokens). Reject before
     // prefill so an oversized prompt never reaches the engine.
     if (state.max_input_tokens > 0 && ctx.snap.n_prompt_tokens > state.max_input_tokens) {
-        res.status = 400;
-        json error = {
-            {"error",
-             {{"message", "Prompt exceeds max input tokens (" + std::to_string(ctx.snap.n_prompt_tokens) +
-                              " > " + std::to_string(state.max_input_tokens) + ")"},
-              {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "Prompt exceeds max input tokens (" + std::to_string(ctx.snap.n_prompt_tokens) +
+                            " > " + std::to_string(state.max_input_tokens) + ")",
+                        "messages", "context_length_exceeded");
         return false;
     }
 
     // Validate prompt length against context window
     if (ctx.snap.n_prompt_tokens >= ctx.snap.max_seq_len) {
-        res.status = 400;
-        json error = {
-            {"error",
-             {{"message", "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
-                              " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)"},
-              {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
+                            " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)",
+                        "messages", "context_length_exceeded");
         return false;
     }
 
@@ -663,7 +657,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
     req->pin_kv_prefix = ctx.params.cache_prompt;
     req->pin_kv_prefix_tokens = ctx.snap.pin_prefix_tokens;
-    req->spec_ngram_override = ctx.params.spec_ngram_override;
+    req->spec_override = ctx.params.spec_override;
     req->prediction_tokens = ctx.snap.prediction_tokens;
     req->min_p = ctx.params.min_p;
     req->typical_p = ctx.params.typical_p;
@@ -858,7 +852,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                                   "code kv_pool_floored and the exact capacity."
                                 : "Request does not fit the KV cache: the prompt needs more blocks than "
                                   "the pool can hold. Shorten the prompt, lower --max-seq-len, or give "
-                                  "the server more VRAM (see the engine log for the exact block counts).");
+                                  "the server more VRAM (see the engine log for the exact block counts).",
+                            /*param=*/nullptr, floored ? "kv_pool_floored" : "context_length_exceeded");
             return;
         }
 
@@ -926,24 +921,11 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         }
 
         // Build logprobs object if requested
+        // Chat shape here; /v1/completions builds the other one (#1589). Both
+        // come out of utils.cpp now, so the two cannot drift apart again.
         json logprobs_obj = nullptr;
         if (ctx.params.req_logprobs && active_req) {
-            const auto& lp_data = active_req->output_logprobs;
-            json content_logprobs = json::array();
-            for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
-                const auto& lp = lp_data[idx];
-                json top_arr = json::array();
-                for (const auto& t : lp.top) {
-                    top_arr.push_back({{"token", safe_token_json(t.text)},
-                                       {"logprob", t.logprob},
-                                       {"bytes", token_bytes_json(t.text)}});
-                }
-                content_logprobs.push_back({{"token", safe_token_json(lp.text)},
-                                            {"logprob", lp.logprob},
-                                            {"bytes", token_bytes_json(lp.text)},
-                                            {"top_logprobs", top_arr}});
-            }
-            logprobs_obj = {{"content", content_logprobs}};
+            logprobs_obj = chat_logprobs_json(active_req->output_logprobs, output_ids.size());
         }
 
         // Parse tool calls from model output. Run even on finish=length:
@@ -1017,7 +999,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             msg["tool_call_validation_error"] = tool_validation_error;
         }
 
-        json choice = {{"index", ci}, {"message", msg}, {"finish_reason", finish}};
+        json choice = {{"index", ci}, {"message", msg}, {"finish_reason", openai_finish_reason(finish)}};
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
         }
@@ -1058,9 +1040,13 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                                               {"rejected_prediction_tokens", imp_req->pred_rejected}};
     }
 
-    json response = {{"id", comp_id},      {"object", "chat.completion"},
-                     {"created", created}, {"model", ctx.snap.model_name},
-                     {"choices", choices}, {"usage", usage}};
+    json response = {{"id", comp_id},
+                     {"object", "chat.completion"},
+                     {"created", created},
+                     {"model", ctx.snap.model_name},
+                     {"system_fingerprint", system_fingerprint(ctx.snap.model_name)},
+                     {"choices", choices},
+                     {"usage", usage}};
 
     // Pull the final finish_reason from choice 0 for log correlation;
     // multi-completion requests still record only the aggregate.

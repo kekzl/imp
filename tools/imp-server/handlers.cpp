@@ -228,6 +228,73 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     res.set_content(dump_safe(body), "application/json");
 }
 
+// GET /v1/models/{id} — `client.models.retrieve(...)` (#1599).
+//
+// The route did not exist, so the SDK call fell through to the unmatched-route
+// handler and 404'd even for the model the server is currently serving. There
+// is no path-parameter route anywhere else in this server, which is why it was
+// missed: the list endpoint looked like complete coverage.
+void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, ServerState& state,
+                           const std::string& model_id) {
+    bool loaded = false;
+    std::string model_name;
+    int max_seq_len = 0;
+    {
+        std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+        if (lock.owns_lock()) {
+            loaded = state.model_loaded();
+            model_name = state.model_name;
+            max_seq_len = state.max_seq_len;
+        } else {
+            ServerState::ObsStatus snap = state.model_status_snapshot();
+            loaded = snap.loaded;
+            model_name = snap.model_name;
+            max_seq_len = state.max_seq_len;
+        }
+    }
+
+    if (loaded && model_id == model_name) {
+        json model = {{"id", model_name},
+                      {"object", "model"},
+                      {"created", unix_timestamp()},
+                      {"owned_by", "imp"},
+                      {"loaded", true}};
+        if (max_seq_len > 0) {
+            model["max_model_len"] = max_seq_len;
+            model["meta"] = {{"n_ctx_train", max_seq_len}};
+        }
+        res.set_content(dump_safe(model), "application/json");
+        return;
+    }
+
+    // A model on disk that this server would swap in. Same answer the list
+    // endpoint gives for it, so the two cannot disagree.
+    if (state.runtime_config.server.model_swap) {
+        for (const auto& [fname, fpath] : scan_model_files(state.models_dir)) {
+            (void)fpath;
+            if (fname != model_id)
+                continue;
+            json model = {{"id", fname},
+                          {"object", "model"},
+                          {"created", unix_timestamp()},
+                          {"owned_by", "imp"},
+                          {"loaded", false}};
+            res.set_content(dump_safe(model), "application/json");
+            return;
+        }
+    }
+
+    // OpenAI answers a missing model with 404 and a typed envelope naming the
+    // parameter, not the generic unmatched-route body.
+    res.status = 404;
+    json err = {{"error",
+                 {{"message", "The model '" + sanitize_for_echo(model_id, 128) + "' does not exist"},
+                  {"type", "invalid_request_error"},
+                  {"param", "model"},
+                  {"code", "model_not_found"}}}};
+    res.set_content(dump_safe(err), "application/json");
+}
+
 // Snapshot {loaded, model_name, max_seq_len} for the context-length probes
 // below, using the same bounded-lock / fall-back-to-snapshot discipline as the
 // other observability endpoints (#889).

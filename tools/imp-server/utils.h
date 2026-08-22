@@ -3,6 +3,8 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include "runtime/request.h"
+
 #include <string>
 #include <string_view>
 #include <utility>
@@ -93,7 +95,16 @@ size_t utf8_chunk_len(const std::string& s, size_t off, size_t max);
 // into the message (e.g. a parse-error what() on byte-truncated input) can
 // never make the dump throw — that throw used to escape the handler and turn a
 // 400-class bad-input case into a bare 500.
-void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message);
+// The shared error envelope.
+//
+// `param` and `code` are optional and default to absent, which is what every
+// existing caller gets. They are what makes an error machine-readable: OpenAI
+// clients branch on `error.code`, and without it a context-window refusal, a
+// bad argument and an auth failure differ only in an English sentence (#1595).
+// Pass them wherever the answer is "this specific field, for this specific
+// reason".
+void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message,
+                     const char* param = nullptr, const char* code = nullptr);
 
 // Constant-time Bearer-token check. Returns true iff `authorization` equals
 // "Bearer " + api_key, compared without early-out so response timing cannot leak
@@ -152,8 +163,53 @@ const char* health_unservable_code(bool engine_faulted, bool kv_pool_floored);
 bool api_key_matches(const std::string& authorization, const std::string& x_api_key,
                      const std::string& api_key);
 
+// Map an engine finish reason onto the OpenAI `finish_reason` enum.
+//
+// The engine has two reasons OpenAI does not: "cancelled" (the request was
+// aborted) and "capacity" (the KV pool cannot hold it). Both used to ship
+// verbatim on a 200, so a client switching on the enum fell through its
+// default branch and treated a failed generation as a normal one (#1590).
+//
+// Both map to "length": the generation stopped before the model chose to stop,
+// which is exactly what "length" means to a client, and it is the value that
+// makes them retry or shorten rather than accept the text. The non-streaming
+// chat path answers "capacity" with 503 before it gets here; this is the
+// backstop for the paths that do not.
+const char* openai_finish_reason(const char* engine_finish);
+
+// `system_fingerprint`: what a client compares across calls to notice that the
+// backend changed under it. Emitted nowhere before #1602, so a model swap, a
+// quantisation change or a server upgrade was invisible in the response.
+//
+// The value is the engine version plus the loaded model, hashed: the two things
+// that change what the same request returns. Stable for the life of a
+// configuration, different across any change to either.
+std::string system_fingerprint(const std::string& model_name);
+
 json safe_token_json(const std::string& text);
 json token_bytes_json(const std::string& text);
+
+// The two logprobs SHAPES, which are not the same object.
+//
+// Chat (`/v1/chat/completions`):
+//   {"content": [{"token","logprob","bytes","top_logprobs":[{...}]}]}
+// Completions (`/v1/completions`), a different shape entirely:
+//   {"tokens":[], "token_logprobs":[], "top_logprobs":[{tok: lp}], "text_offset":[]}
+//
+// /v1/completions returned the Chat object on a `text_completion` response
+// until #1589, so an OpenAI SDK reading `.logprobs.tokens` found nothing and
+// one reading `.logprobs.content` got a field its own type does not declare.
+//
+// `text` is the completion string the offsets index into; the offsets are byte
+// offsets from its start, which is what the OpenAI field means for ASCII and
+// the only defensible reading for anything else.
+json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit);
+json completions_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
+                               const std::string& text);
+
+// One token in the Completions shape, for a streamed chunk. Streaming emits one
+// chunk per token: a chunk carrying two tokens has nowhere to put two offsets.
+json completions_logprobs_json_one(const imp::TokenLogprobInfo& lp, size_t text_offset);
 size_t utf8_complete_len(const std::string& s);
 
 // Trim a trailing incomplete UTF-8 sequence from a finished string (#1310).
@@ -207,7 +263,8 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
                       const char* finish_reason, const json& logprobs = nullptr);
 
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
-                                 const std::string& text, const char* finish_reason);
+                                 const std::string& text, const char* finish_reason,
+                                 const json& logprobs = nullptr);
 
 // Pre-formatted SSE chunk writer. Builds envelope templates once per request;
 // hot-path write_content/write_reasoning only JSON-escape the token text and
@@ -227,9 +284,19 @@ struct SSEChunkWriter {
         json_escape_into(esc_id, id.data(), id.size());
         json_escape_into(esc_model, model.data(), model.size());
 
+        // system_fingerprint is part of the envelope, so it has to be in BOTH
+        // builders or they drift; ContentFrameMatchesJsonBuiltChunk is the
+        // guard that caught exactly that when only sse_chunk() gained it
+        // (#1602). It is constant for the request, so it belongs in the
+        // pre-built prefix rather than the hot path.
+        std::string esc_fp;
+        const std::string fp = system_fingerprint(model);
+        json_escape_into(esc_fp, fp.data(), fp.size());
+
         std::string envelope_prefix = "data: {\"id\":\"" + esc_id +
                                       "\",\"object\":\"chat.completion.chunk\",\"created\":" +
                                       std::to_string(created) + ",\"model\":\"" + esc_model +
+                                      "\",\"system_fingerprint\":\"" + esc_fp +
                                       "\",\"choices\":[{\"index\":0,\"delta\":{\"";
 
         std::string envelope_suffix = "\"},\"finish_reason\":null}]}\n\n";

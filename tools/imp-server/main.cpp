@@ -296,6 +296,12 @@ int main(int argc, char** argv) {
         handle_models(req, res, state);
     });
 
+    // The only path-parameter route in this server (#1599). A model id can
+    // contain a slash (a HuggingFace repo id), so the pattern is greedy.
+    svr.Get(R"(/v1/models/(.+))", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_model_retrieve(req, res, state, req.matches[1].str());
+    });
+
     // Context-window auto-detection probes for OpenAI-compatible clients:
     // /props is the llama.cpp shape, /info the TGI shape (/v1/models also
     // carries vLLM's max_model_len). A client written for any of the three can

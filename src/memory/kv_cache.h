@@ -62,6 +62,10 @@ public:
     // sitting at its ceiling, and those want opposite reactions: wait for the
     // card to free, or stop waiting.
     bool growable() const { return growable_; }
+    // How many times try_grow_to() actually committed more memory. Exposed for
+    // /metrics: a pool that keeps growing under load is the signal an operator
+    // wants before the pool stops being able to (#1641).
+    uint64_t growths() const { return growths_.load(std::memory_order_relaxed); }
 
     // Physical memory currently committed by a growable pool, 0 for a fixed
     // one. What the pool actually costs right now, as opposed to the address
@@ -173,6 +177,7 @@ private:
     // from the allocator exactly as before.
     Region region_;
     bool growable_ = false;
+    std::atomic<uint64_t> growths_{0};
     int committed_blocks_ = 0;  // blocks whose memory is backed in every layer
     // What may be handed out. Mirrored here rather than read from the block
     // pool because admission asks per pending request per step, and the pool's
@@ -186,6 +191,14 @@ private:
     // Per-layer KV shapes and offsets (for Gemma 4 dual attention geometry).
     // If empty, all layers use the scalar n_kv_heads_/head_dim_/block_bytes_.
     std::vector<size_t> layer_block_bytes_;  // block_size * nkv[l] * hd[l] * dtype_size
+    // Blocks layer l's own region holds. A sliding-window layer's region is
+    // swa_max_blocks_, not max_blocks_, and anything that strides or writes
+    // per layer has to respect that or it lands in the next layer's range.
+    size_t layer_capacity_(int l) const {
+        return (swa_max_blocks_ > 0 && l < static_cast<int>(layer_is_swa_.size()) && layer_is_swa_[l])
+                   ? static_cast<size_t>(swa_max_blocks_)
+                   : static_cast<size_t>(max_blocks_);
+    }
     std::vector<size_t> layer_k_offset_;     // byte offset of layer l's K region in pool
     std::vector<size_t> layer_v_offset_;     // byte offset of layer l's V region in pool
 

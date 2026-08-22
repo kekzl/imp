@@ -1,7 +1,9 @@
 #include "utils.h"
+#include "imp/imp.h"
 #include "stream_pipeline.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 
 // Make a client-supplied string safe to put back into a response body.
@@ -150,8 +152,17 @@ std::string Utf8Stitch::feed(const std::string& piece) {
     return buf;
 }
 
-void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message) {
-    json err = {{"error", {{"message", message}, {"type", type}}}};
+void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message,
+                     const char* param, const char* code) {
+    json e = {{"message", message}, {"type", type}};
+    // Emitted only when supplied: OpenAI's own envelope carries them as null
+    // rather than absent, but a client that checks `"code" in err` should not
+    // see a key that says nothing.
+    if (param)
+        e["param"] = param;
+    if (code)
+        e["code"] = code;
+    json err = {{"error", std::move(e)}};
     res.status = status;
     res.set_content(dump_safe(err), "application/json");
 }
@@ -224,6 +235,28 @@ bool api_key_matches(const std::string& authorization, const std::string& x_api_
     return false;
 }
 
+std::string system_fingerprint(const std::string& model_name) {
+    // FNV-1a over version + model. Not a security hash; it exists so a client
+    // can tell "same backend" from "different backend" in one comparison.
+    const std::string material = std::string(imp_version()) + "\x1f" + model_name;
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : material) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "fp_%016llx", static_cast<unsigned long long>(h));
+    return buf;
+}
+
+const char* openai_finish_reason(const char* engine_finish) {
+    if (engine_finish == nullptr)
+        return "stop";
+    if (std::strcmp(engine_finish, "cancelled") == 0 || std::strcmp(engine_finish, "capacity") == 0)
+        return "length";
+    return engine_finish;
+}
+
 json safe_token_json(const std::string& text) {
     std::string safe;
     safe.reserve(text.size());
@@ -274,6 +307,79 @@ json token_bytes_json(const std::string& text) {
     for (unsigned char c : text)
         arr.push_back(static_cast<int>(c));
     return arr;
+}
+
+json completions_logprobs_json_one(const imp::TokenLogprobInfo& lp, size_t text_offset) {
+    json top_obj = json::object();
+    for (const auto& t : lp.top) {
+        const json key = safe_token_json(t.text);
+        if (key.is_string())
+            top_obj[key.get<std::string>()] = t.logprob;
+    }
+    return json{{"tokens", json::array({safe_token_json(lp.text)})},
+                {"token_logprobs", json::array({lp.logprob})},
+                {"top_logprobs", json::array({top_obj})},
+                {"text_offset", json::array({static_cast<int>(text_offset)})}};
+}
+
+json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit) {
+    json content = json::array();
+    for (size_t i = 0; i < lps.size() && i < limit; i++) {
+        const auto& lp = lps[i];
+        json top_arr = json::array();
+        for (const auto& t : lp.top) {
+            top_arr.push_back({{"token", safe_token_json(t.text)},
+                               {"logprob", t.logprob},
+                               {"bytes", token_bytes_json(t.text)}});
+        }
+        content.push_back({{"token", safe_token_json(lp.text)},
+                           {"logprob", lp.logprob},
+                           {"bytes", token_bytes_json(lp.text)},
+                           {"top_logprobs", top_arr}});
+    }
+    return json{{"content", content}};
+}
+
+json completions_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
+                               const std::string& text) {
+    json tokens = json::array();
+    json token_logprobs = json::array();
+    json top_logprobs = json::array();
+    json text_offset = json::array();
+
+    // The offset walk: each token's offset is where its text begins in the
+    // completion. Tracked by advancing through `text` rather than by summing
+    // token lengths, because the decoded token text and the assembled string
+    // can disagree (a stop sequence trims the tail, and a detokenizer may drop
+    // a leading space). When they do, the offsets stop advancing rather than
+    // running past the end of the string.
+    size_t cursor = 0;
+    for (size_t i = 0; i < lps.size() && i < limit; i++) {
+        const auto& lp = lps[i];
+        tokens.push_back(safe_token_json(lp.text));
+        token_logprobs.push_back(lp.logprob);
+        text_offset.push_back(static_cast<int>(cursor));
+
+        // top_logprobs here is an OBJECT per position (token -> logprob), not
+        // the array of objects the Chat shape uses.
+        json top_obj = json::object();
+        for (const auto& t : lp.top) {
+            const json key = safe_token_json(t.text);
+            if (key.is_string())
+                top_obj[key.get<std::string>()] = t.logprob;
+        }
+        top_logprobs.push_back(top_obj);
+
+        if (!lp.text.empty() && cursor + lp.text.size() <= text.size() &&
+            text.compare(cursor, lp.text.size(), lp.text) == 0) {
+            cursor += lp.text.size();
+        }
+    }
+
+    return json{{"tokens", tokens},
+                {"token_logprobs", token_logprobs},
+                {"top_logprobs", top_logprobs},
+                {"text_offset", text_offset}};
 }
 
 size_t utf8_complete_len(const std::string& s) {
@@ -661,19 +767,22 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
                 {"object", "chat.completion.chunk"},
                 {"created", created},
                 {"model", model},
+                {"system_fingerprint", system_fingerprint(model)},
                 {"choices", json::array({choice})}};
     return "data: " + dump_safe(obj) + "\n\n";
 }
 
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
-                                 const std::string& text, const char* finish_reason) {
+                                 const std::string& text, const char* finish_reason, const json& logprobs) {
     json choice = {{"index", 0},
                    {"text", text},
+                   {"logprobs", logprobs},
                    {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}};
     json obj = {{"id", id},
                 {"object", "text_completion"},
                 {"created", created},
                 {"model", model},
+                {"system_fingerprint", system_fingerprint(model)},
                 {"choices", json::array({choice})}};
     return "data: " + dump_safe(obj) + "\n\n";
 }

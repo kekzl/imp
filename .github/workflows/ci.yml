@@ -190,9 +190,12 @@ jobs:
           # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. IMP_DISABLE_120F_FALLBACK=ON
           # builds the sm_120a SASS only (no compute_120f PTX fallback) — CI just
           # verifies the build compiles + CPU tests; runtime tests need a self-hosted
-          # RTX 5090 runner. This halves device-compile time and stops every .cu
+          # RTX 5090 runner. Measured over the three heaviest TUs on the dev
+          # toolchain, the second gencode costs +53.1% device-compile time
+          # (47278 ms with it, 30886 ms without), and it stops every .cu
           # diagnostic from being emitted twice (once per gencode). The shipped
-          # fatbin (release-docker) keeps the 120f PTX fallback for 5080/5070 SKUs.
+          # fatbin (release-docker) keeps the 120f PTX fallback for 5080/5070
+          # SKUs; the `PTX fallback` job below is what assembles it (#1650).
           # IMP_BUILD_BENCH=OFF skips ~30-60s of mxf4nvf4 microbench TUs that
           # are bench-only — production server builds don't link them.
 
@@ -355,7 +358,7 @@ jobs:
   # Runs in the same CUDA image the Build job compiled in: the binary is linked
   # against that libstdc++, so a plain ubuntu-24.04 runner cannot load it.
   real-api:
-    name: Real API contract
+    name: Real API contract (model-less)
     needs: build
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -383,6 +386,22 @@ jobs:
           # conftest.py starts it model-less and shuts it down at session end.
           IMP_SERVER_BIN="$PWD/build/imp-server" \
             python3 -m pytest tests/api -m nomodel --tb=short -q
+
+      # What this job does NOT cover, printed rather than implied (#1600).
+      # Generation needs a GPU and CI has no GPU runner, so every test that
+      # produces a token is deselected here. The job name says "model-less" for
+      # the same reason: "Real API contract" green next to a streaming defect
+      # reads as coverage.
+      - name: State the uncovered half
+        run: |
+          total=$(python3 -m pytest tests/api --collect-only -q 2>/dev/null | tail -1)
+          covered=$(python3 -m pytest tests/api -m nomodel --collect-only -q 2>/dev/null | tail -1)
+          echo "collected here:  $covered"
+          echo "collected total: $total"
+          echo ""
+          echo "The difference is the generation contract: SSE frame structure, usage"
+          echo "accounting, finish_reason, tool-call streaming. It runs in 'make test-server'"
+          echo "on a machine with a GPU and in no CI job. See docs/LIMITATIONS.md."
 
   # Format check (CI1). clang-format on CHANGED LINES only (git clang-format).
   # ADVISORY: it surfaces the diff but does not fail the job — the repo is not
@@ -500,6 +519,101 @@ jobs:
           python-version: "3.12"
       - name: Launch-guard gate (blocking)
         run: bash scripts/ci_static_gates.sh launchguards
+
+  # Assemble the compute_120f PTX fallback (#1650).
+  #
+  # It ships as `code=compute_120f`, the PTX-only form, so ptxas never runs over
+  # it in a build and the first thing that would is the driver's JIT on a GB203
+  # - a card nobody in this project owns. Assembling it needs no GPU: ptxas is a
+  # compiler.
+  #
+  # This has to be its own job because the `Build` job configures
+  # IMP_DISABLE_120F_FALLBACK=ON: that binary carries no PTX at all, so the
+  # check there measured nothing it could measure and failed the one required
+  # context on a build doing exactly what it was told.
+  #
+  # It builds the `imp` static library only - no tools, no server, no tests, no
+  # device link. cuobjdump reads the archive. Measured on the dev toolchain over
+  # the three heaviest TUs, the second gencode costs +53.1% device-compile time
+  # (47278 ms vs 30886 ms), which is why this is a separate non-required job
+  # rather than a flag flip on the required one.
+  ptx-fallback:
+    name: PTX fallback
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      CUDA_VERSION: "13.3"
+      CCACHE_DIR: /github/home/.ccache-ptx
+      CCACHE_MAXSIZE: 4G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: "1"
+    steps:
+      - name: Install toolchain
+        shell: sh
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bash git python3 cmake g++ ccache ca-certificates
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Trust the checkout (container UID differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Only device code, the gencode lines and this guard itself can change
+      # what ptxas sees. Fail-open: an unreadable diff runs the job.
+      - name: Does this run need the fallback build?
+        id: scope
+        run: |
+          run=true
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "push" ]; then
+            base="${{ github.event.pull_request.base.sha || github.event.before }}"
+            if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              files="$(git diff --name-only "$base" HEAD)"
+              if ! grep -qE '(\.cu$|\.cuh$|^CMakeLists\.txt$|^cmake/|^scripts/check_ptx_fallback\.sh$|^\.github/workflows/ci\.yml$)' <<< "$files"; then
+                run=false
+              fi
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "fallback build: run=$run"
+
+      - name: Restore ccache
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/cache@v6
+        with:
+          path: /github/home/.ccache-ptx
+          key: ${{ runner.os }}-cuda13.3-ccache-ptx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cuda13.3-ccache-ptx-
+
+      # No -DIMP_DISABLE_120F_FALLBACK: the default (OFF) is what ships, and it
+      # is the thing under test.
+      - name: Configure with the fallback on
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cmake -B build-ptx \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DIMP_BUILD_TESTS=OFF \
+            -DIMP_BUILD_TOOLS=OFF \
+            -DIMP_BUILD_SERVER=OFF \
+            -DIMP_BUILD_BENCH=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
+
+      - name: Build the device library
+        if: steps.scope.outputs.run == 'true'
+        run: cmake --build build-ptx --target imp -j$(nproc)
+
+      - name: Assemble every PTX image
+        if: steps.scope.outputs.run == 'true'
+        run: bash scripts/check_ptx_fallback.sh build-ptx/libimp.a
 
   # ASan + UBSan over the CPU test binaries, including the fuzz corpus (#1621).
   #

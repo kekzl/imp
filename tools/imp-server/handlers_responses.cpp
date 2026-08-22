@@ -283,7 +283,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     StreamDialect dialect;
     dialect.emit_text = emit_text;
     dialect.emit_reasoning = emit_thinking;
-    dialect.emit_content_token = emit_text;
+    dialect.emit_content_token = [&](const std::string& t, int) { return emit_text(t); };
     dialect.keepalive = [&]() -> bool {
         // SSE comment lines are spec-compliant and ignored by SSE parsers —
         // same cadence as the chat stream (#941).

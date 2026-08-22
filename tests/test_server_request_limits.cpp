@@ -131,4 +131,57 @@ TEST(SanitizeForEcho, TheResultSerialisesWhereTheRawPathThrows) {
     EXPECT_NO_THROW((void)dump_safe(raw));  // the other half of the fix
 }
 
+// ---------------------------------------------------------------------------
+// #1590 / #1595 / #1602 - what the response says about itself
+// ---------------------------------------------------------------------------
+
+// The engine has two finish reasons OpenAI does not. Shipping them verbatim on
+// a 200 sends a client through its default branch, where a failed generation
+// looks like a normal one.
+TEST(FinishReason, EngineOnlyValuesMapIntoTheOpenAiEnum) {
+    EXPECT_STREQ(openai_finish_reason("cancelled"), "length");
+    EXPECT_STREQ(openai_finish_reason("capacity"), "length");
+}
+
+TEST(FinishReason, TheEnumMembersPassThroughUnchanged) {
+    for (const char* v : {"stop", "length", "tool_calls", "content_filter", "function_call"})
+        EXPECT_STREQ(openai_finish_reason(v), v);
+    // nullptr is "the generation ended without a recorded reason", which is a
+    // normal stop, not a crash.
+    EXPECT_STREQ(openai_finish_reason(nullptr), "stop");
+}
+
+TEST(ErrorEnvelope, ParamAndCodeAppearOnlyWhenSupplied) {
+    httplib::Response res;
+    send_json_error(res, 400, "invalid_request_error", "plain");
+    json j = json::parse(res.body);
+    EXPECT_EQ(j["error"]["type"], "invalid_request_error");
+    // A client that checks `"code" in err` must not see a key saying nothing.
+    EXPECT_FALSE(j["error"].contains("param"));
+    EXPECT_FALSE(j["error"].contains("code"));
+
+    httplib::Response res2;
+    send_json_error(res2, 400, "invalid_request_error", "too long", "messages", "context_length_exceeded");
+    json j2 = json::parse(res2.body);
+    EXPECT_EQ(j2["error"]["param"], "messages");
+    EXPECT_EQ(j2["error"]["code"], "context_length_exceeded");
+    EXPECT_EQ(res2.status, 400);
+}
+
+// The fingerprint exists so a client can tell "same backend" from "different
+// backend" in one comparison. Both halves matter: stable, and not constant.
+TEST(SystemFingerprint, IsStablePerModelAndDiffersAcrossModels) {
+    const std::string a = system_fingerprint("Qwen3-8B-Q8_0.gguf");
+    EXPECT_EQ(a, system_fingerprint("Qwen3-8B-Q8_0.gguf"));
+    EXPECT_NE(a, system_fingerprint("Qwen3-4B-Q8_0.gguf"));
+    EXPECT_EQ(a.rfind("fp_", 0), 0u);
+    EXPECT_EQ(a.size(), 19u);  // "fp_" + 16 hex
+}
+
+TEST(SystemFingerprint, AnEmptyModelNameStillProducesOne) {
+    const std::string f = system_fingerprint("");
+    EXPECT_EQ(f.rfind("fp_", 0), 0u);
+    EXPECT_NE(f, system_fingerprint("x"));
+}
+
 }  // namespace

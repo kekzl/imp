@@ -180,6 +180,110 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Growing a KV pool with sliding-window layers wrote past the layer's own
+  region** (#1699). `commit_blocks_` zeroes newly committed blocks with one
+  memset per layer sized `(blocks - first_new) * layer_block_bytes_[l]`, but a
+  windowed layer's region is `swa_max_blocks_` blocks, not `max_blocks_` (24
+  against 256 on the failing configuration). The commit loop directly above has
+  that clamp and says so; the memset loop had the same arithmetic and none. For
+  the last windowed layer the write leaves the reservation:
+  `cudaErrorIllegalAddress`, which is sticky, so one fault took 36 suites down
+  with it. For a windowed layer that is not last, the overrun lands in the next
+  layer's live KV and zeroes it silently, which is the worse half. Measured on
+  the same invocation: 73 failures and 21 illegal accesses before, 0 and 0
+  after.
+
+- **Admission could starve a long prompt, and two knobs named `max_batch_size`
+  parked admitted rows** (#1634, #1637). The pending queue is re-sorted
+  shortest-first on every arrival, which is deliberate against head-of-line
+  blocking and unbounded on its own: under sustained short traffic a long
+  prompt is overtaken every round forever. Aging bounds it - a request waiting
+  `Scheduler::kAgingRounds` rounds sorts ahead of everything younger, ties by
+  length - so the property survives and the starvation does not.
+  `docs/roadmap.md` said "scheduling is arrival order", which it never was;
+  corrected in place with the date. Separately, `EngineConfig::max_batch_size`
+  caps admission while `runtime.max_batch_size` truncates the decode batch, and
+  when the second was smaller the rows admitted beyond it were prefilled, held
+  their KV and never decoded until a head row finished. Admission is clamped to
+  the smaller of the two and logs that it did.
+
+- **The `compute_120f` PTX fallback is assembled in CI** (#1650). It ships as
+  `code=compute_120f`, the PTX-only form, so `ptxas` never ran over it and the
+  first thing that would was the driver's JIT on a GB203 - a card nobody in
+  this project owns. `scripts/check_ptx_fallback.sh` extracts every PTX image
+  from a built artefact and assembles it; no GPU needed, since ptxas is a
+  compiler. Measured on `libimp.a`: all 155 images assemble for `sm_120`. It
+  runs as the separate `PTX fallback` job, which builds the `imp` library with
+  the fallback on, because the required `Build` job configures
+  `IMP_DISABLE_120F_FALLBACK=ON` and its binary carries no PTX at all. The
+  second gencode costs +53.1% device-compile time over the three heaviest TUs
+  (47278 ms against 30886 ms), which is why `Build` keeps its opt-out.
+
+- **`"speculative": false` left two of three drafters running, and three
+  server decisions had no counter** (#1639, #1640, #1641). The documented
+  per-request switch fed only the n-gram matcher: the MTP head and token
+  recycling kept drafting and the verify step kept running for a caller who had
+  turned speculation off. It now covers all three (`false` disables; `true`
+  still cannot conjure an MTP head the checkpoint lacks), and the request field
+  is named `spec_override` rather than `spec_ngram_override`. `/metrics` gained
+  `imp_requests_timed_out_total` (a `--request-timeout` kill is
+  `finish_reason: "length"` on the wire, indistinguishable from a spent budget),
+  `imp_kv_pressure_rejections_total` and `imp_kv_pool_growths_total`. The
+  pressure counter fires at four of the six cancellation sites: a failed
+  metadata allocation and a snapshot mismatch are different faults, and both
+  now carry a comment saying they are excluded on purpose.
+
+- **The perf gate measured a different quantity than the pin it compares
+  against, and two CI jobs claimed coverage they do not have** (#1600, #1624,
+  #1625, #1685). `scripts/bench_gate.sh` benched with n-gram speculation ON
+  while `tests/perf_baseline.json` states `speculative.ngram=false` in its own
+  `methodology` field; both scripts pass the flag now, and
+  `docs/internals/BENCHMARKING.md` carries a table of the remaining differences
+  instead of calling them one gate. The gate prints the pin's date, age and
+  model, and warns above 30 days: the measurement contract is single-session,
+  and host drift over a month (4.01 % measured on this box between runs hours
+  apart) is larger than the gate can tell from a code change. The CI job that
+  ran `pytest -m nomodel` is called `Real API contract (model-less)` now and
+  prints how many tests it deselected; the generation half, and the absence of
+  any server-side perf gate, are in `LIMITATIONS.md` rather than implied by a
+  green check.
+
+- **Eight places where the OpenAI surface answered instead of refusing, or said
+  nothing about itself** (#1590, #1591, #1593, #1595, #1596, #1598, #1599,
+  #1602). `response_format` with an unknown `type`, or a known type whose
+  payload is missing, was dropped silently and the request answered as free
+  text with 200; it is a 400 now, because a constraint that did not apply and
+  one that did look identical to the caller otherwise. `best_of > 1` was
+  accepted and ignored: also a 400, since imp generates no candidate set.
+  `finish_reason` shipped `cancelled` and `capacity`, neither in the OpenAI
+  enum, sending clients through their default branch; both map to `length`.
+  The streaming path wrote a server-authored English sentence into
+  `delta.content` where the non-streaming path wrote nothing, so the two
+  transports disagreed about the same request; it goes to the log now.
+  `error.param` and `error.code` exist on the shared envelope, so a context
+  overflow is `context_length_exceeded` rather than an English sentence.
+  `GET /v1/models/{id}` is registered, so `client.models.retrieve()` no longer
+  404s on the served model. `system_fingerprint` is emitted on all four
+  response shapes. And `docs/API.md` states the four sampling defaults that are
+  not OpenAI's, including one the issue did not name: **`top_k: 0` is not off,
+  it is 50**, a tighter truncation than the 40 default.
+
+- **Streamed logprobs were absent whenever a `stop` sequence was set, and
+  `/v1/completions` returned the wrong shape** (#1588, #1589, #1601). The
+  streaming driver attached per-token logprobs only on the branch taken when a
+  request carried no `stop`; with any stop present every chunk went out through
+  the logprob-free writer. Measured against a real server, Qwen3-4B-Q8_0,
+  `stop` set: 0 of 8 chunks carried logprobs before, 5 of 10 after.
+  `/v1/completions` returned the **Chat** object (`{"content":[...]}`) on a
+  `text_completion` response, so an SDK reading `.logprobs.tokens` found
+  nothing; it returns `{tokens, token_logprobs, top_logprobs, text_offset}` now,
+  and streams one chunk per token with its own offset (verified: every streamed
+  offset equals the length of the text reassembled so far). Both shapes come
+  from `utils.cpp` so they cannot drift apart again, and the token attribution
+  behind them is a pure component in `stream_pipeline.h` with 14 CPU-lane tests
+  covering it plus `safe_token_json` / `token_bytes_json`, which had no test in
+  any lane.
+
 - **Four tools that described themselves wrongly** (#1585, #1586, #1587,
   #1663). The pre-push gate's gtest filter carried `AttentionTest.*`, a suite
   renamed away before the pattern was added on 2026-04-27: gtest reports

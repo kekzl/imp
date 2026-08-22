@@ -431,7 +431,21 @@ int KVCache::commit_blocks_(int blocks) {
         const size_t bb = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
         if (bb == 0)
             continue;
-        const size_t bytes = static_cast<size_t>(blocks - first_new) * bb;
+        // Clamp to THIS layer's region. The commit loop above deliberately
+        // over-commits past a sliding-window layer (same reservation, wanted
+        // anyway, and the tail is clamped there); this loop had the same
+        // arithmetic and no clamp, so on a pool with windowed layers it wrote
+        // past the end of the reservation - `cudaMemset ... an illegal memory
+        // access`, which is sticky and took the whole test binary down with it.
+        //
+        // Two bugs, not one: for a windowed layer that is NOT last, the same
+        // overrun lands inside the next layer's live KV and zeroes it.
+        const size_t cap = layer_block_bytes_.empty() ? static_cast<size_t>(max_blocks_)
+                                                      : layer_capacity_(l);
+        const size_t hi = std::min(static_cast<size_t>(blocks), cap);
+        if (hi <= static_cast<size_t>(first_new))
+            continue;  // this layer's region is already fully zeroed
+        const size_t bytes = (hi - static_cast<size_t>(first_new)) * bb;
         IMP_CUDA_CHECK_LOG(cudaMemset(k_ptr(l, first_new), 0, bytes));
         IMP_CUDA_CHECK_LOG(cudaMemset(v_ptr(l, first_new), 0, bytes));
     }
@@ -456,6 +470,7 @@ int KVCache::try_grow_to(int wanted) {
     // Published only after the ids exist: a reader that saw the new capacity
     // first would admit a request the pool cannot yet hand blocks for.
     usable_blocks_.store(got, std::memory_order_release);
+    growths_.fetch_add(1, std::memory_order_relaxed);
     IMP_LOG_INFO(
         "KV cache: grew %d -> %d blocks (%.0f tokens, %.0f MiB committed of a %d-block "
         "ceiling)",
