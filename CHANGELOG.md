@@ -180,6 +180,26 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Twelve stale or self-contradicting documentation claims** (#1543, #1594,
+  #1651, #1668-#1673, #1680-#1682, #1684). The load-bearing ones: `CLAUDE.md` and
+  `AGENTS.md` told every agent that sm_120a has no TMA-WS grouped GEMM, which
+  the shipped cubin contains; `SM120.md`'s decode roofline was off by 1023x and
+  the "~28:1 memory:compute ratio" was derived from that quotient (it is
+  ~28,000:1); `MODELS.md` told operators to bound KV with `--max-seq-len`, which
+  exits 1 on `imp-server` (the two engine log lines that gave the same advice are fixed below, #1681); the quickstart's first command needs an image nothing
+  in the quickstart builds; seven `FEATURES.md` rows were green without a gate.
+  Two numbers were **withdrawn rather than corrected**: the MoE host-offload LRU
+  row had four values for one measurement and the checkpoint is not on this host
+  to re-run it (#1669), and the CI-lane case count is a command now rather than
+  a literal, having gone 248 stale in nine days (#1673).
+
+- **`sync_docs.py` published a provenance block it made up** (#1684):
+  `cuda=13.3` and `commit=1e4fad60` were string literals overwriting a baseline
+  that records `"cuda": "unknown"` and no commit at all. It reads the file now.
+  `gen_perf_baseline.sh` captures both going forward - its CUDA probe was
+  `a | b | c || fallback`, and sed exits 0 on empty input so the fallback never
+  ran. Verified in the build container: 13.3 instead of empty.
+
 - **`docs_lint.py` promised checks it did not run** (#1683). The header claimed
   all seven checks fail the build while staleness only warned, and the
   frontmatter error named four fields while one was validated: `audience:` and

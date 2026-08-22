@@ -77,7 +77,9 @@ is rationale, not restatement. L0 and L1 link.
 - ⚪ **not implemented** — deliberate → **must point at `DESIGN_DECISIONS.md`**
 
 **"Verified" never means "green in CI" for anything GPU-shaped.** CI has no GPU
-runner; the CPU lane runs ~1130 cases in 0.39 s without launching one kernel.
+runner; the CPU lane runs in under a second without launching one kernel
+(`python3 tools/check_test_lanes.py --report` for the count - a literal here
+went 248 stale in nine days, #1673).
 The gate is `make verify-fast`, locally, before push. Never write that CI tests
 the kernels.
 

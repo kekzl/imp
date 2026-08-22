@@ -43,12 +43,29 @@ def render(data: dict) -> str:
     out = ["| metric | value | threshold |", "|---|---|---|"]
     out += [f"| {a} | {b} | {c} |" for a, b, c in rows]
     out.append("")
+    # #1684: cuda, commit and quant were string literals here, and cuda=13.3
+    # OVERWROTE the baseline's own "unknown" - a provenance block asserting a
+    # toolchain version the measurement never recorded. Read what the file has,
+    # say `unknown` where it has nothing. gen_perf_baseline.sh does try to
+    # capture the CUDA version; that it produced "unknown" is the finding, and
+    # hiding it behind a constant is what this block is for.
+    cuda = data.get("cuda") or "unknown"
+    commit = data.get("commit") or "unknown"
+    quant = data.get("quant") or _quant_from_model(model)
+    gpu = data.get("gpu", "RTX5090").replace("NVIDIA GeForce ", "").replace(" ", "")
     out.append(
-        f"[PROV: commit=1e4fad60 date={date} hw=RTX5090 model={model} quant=Q8_0\n"
-        f"       cuda=13.3 path=gguf-dp4a cmd=`make verify-fast` "
+        f"[PROV: commit={commit} date={date} hw={gpu} model={model} quant={quant}\n"
+        f"       cuda={cuda} path=gguf-dp4a cmd=`make verify-fast` "
         f"n={data['n_trials']}x{data['reps']}]"
     )
     return "\n".join(out)
+
+
+def _quant_from_model(model: str) -> str:
+    """Quant from the checkpoint name; the baseline carries no quant field."""
+    import re
+    m = re.search(r"(Q\d+_[0-9KMS]+|NVFP4|MXFP4|BF16|FP8|F16)", model, re.I)
+    return m.group(1) if m else "unknown"
 
 
 def main() -> int:

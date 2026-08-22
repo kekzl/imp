@@ -59,8 +59,8 @@ because CI has no GPU runner.
 | prefill pp4096 | 15324.7 tok/s | 8 % |
 | peak VRAM (own) | 20716 MiB | 10 % |
 
-[PROV: commit=1e4fad60 date=2026-07-26 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
-       cuda=13.3 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
+[PROV: commit=unknown date=2026-07-26 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
+       cuda=unknown path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
 Pinned 2026-07-26, thresholds widened 2026-08-13 (#1400). Median of 5 trials x 5
@@ -116,21 +116,29 @@ over.
 
 ## MoE host offload
 
-Only relevant when a MoE model's experts do not fit in VRAM. GGUF experts have a
-working host path; NVFP4 experts are refused at load rather than served with
-their GEMMs skipped.
+Only relevant when a MoE model's experts do not fit in VRAM. Both GGUF and NVFP4
+experts have a working host path. NVFP4 was refused at load in #1403 and that
+refusal was replaced by an implementation
+(`src/exec/executor_forward_moe_nvfp4_host.cu`); this paragraph still said
+"refused" until #1670, while `FEATURES.md:102` and `LIMITATIONS.md:108-110`
+already described the shipped path, the latter with a measurement (23.3 tok/s
+against 384.0 resident). A placement the expert cache cannot hold at all is
+still refused - that part of #1403 stands.
 
 <!-- markdownlint-disable -->
 | arm | decode |
 |---|---|
 | experts resident | 311.24 tok/s |
-| all 48 layers host-resident, LRU cache | 48.3 tok/s |
+| all 48 layers host-resident, LRU cache | **withdrawn, #1669** |
 | staging buffer only (no cache) | 6.63 tok/s |
 
 [PROV: commit=1e4fad60 date=2026-08-11 hw=RTX5090 model=Qwen3-30B-A3B-Q4_K_M
        quant=Q4_K_M cuda=13.3 path=moe-host-offload
        cmd=`imp-cli --bench --set moe.force_host_experts=48 --bench-reps 3` n=5
        note=warm; a cold run of the same build reads 20.99 rather than 49.60]
+
+#1669: the withdrawn row read four different figures across this file and
+`roadmap.md:655` for one measurement; the checkpoint is not on this host to re-run.
 
 **Warm and cold differ by 2.4x on this path**, so a figure from it has to say
 which it is. Cache capacity is the lever: `moe.expert_cache_budget_pct` moves

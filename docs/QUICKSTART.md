@@ -33,7 +33,12 @@ docker ps
 
 ## 1. Get a model
 
+`stage-model.sh` needs the `imp:test` image and exits 1 without it, including on
+the download-only path (#1682). `make build` is what produces that tag;
+`docker compose build imp-server` produces `imp:latest`.
+
 ```bash
+make build                                     # ~3.5 min, produces imp:test
 scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4 ~/models/Qwen3.8-27B-NVFP4
 ```
 

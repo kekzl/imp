@@ -17,8 +17,10 @@ Legend:
 - ⚪ **not implemented** — deliberately absent, with the reasoning in [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)
 
 **What "verified" means here.** CI has no GPU runner: the `test` job is gated
-behind `vars.HAS_GPU_RUNNER` and the lane that does run executes 1130 cases in
-0.39 s without launching a single CUDA kernel. For anything GPU-shaped the gate
+behind `vars.HAS_GPU_RUNNER` and the lane that does run executes in under a
+second without launching a single CUDA kernel. For the current case count run
+`python3 tools/check_test_lanes.py --report` - a literal here was 248 low within
+nine days of being written (#1673), because every test PR moves it. For anything GPU-shaped the gate
 is `make verify-fast` run locally before push. No document in this repo should
 claim CI tests the kernels.
 
@@ -29,7 +31,7 @@ Source: `src/model/model_arch.h`, `src/model/model.cpp`.
 | architecture | status | note |
 |---|---|---|
 | LLaMA, Mistral, Mixtral | ✅ | |
-| Phi-4 | ✅ | **an alias onto the LLaMA path** (`model.cpp:316`), not a separate loader |
+| Phi-4 | 🟡 | **an alias onto the LLaMA path** (`model.cpp:316`), not a separate loader. No checkpoint of its own in any gate (#1680) |
 | DeepSeek, incl. V2 multi-head latent attention | ✅ | validated on DeepSeek-V2-Lite; latent-KV decode is opt-in |
 | Qwen3, Qwen3-MoE | ✅ | the pinned gate model is Qwen3-8B-Q8_0 |
 | Qwen3.5, Qwen3.5-MoE | ✅ | Gated DeltaNet family |
@@ -39,7 +41,8 @@ Source: `src/model/model_arch.h`, `src/model/model.cpp`.
 | Gemma-4 | ✅ | |
 | Nemotron-H MoE | ✅ | |
 | nomic-bert (encoder / embeddings) | ✅ | bidirectional, no KV, mean-pooled |
-| Qwen3-VL, and Qwen3.6-35B-A3B on the same tower | ✅ | `make test-vision` |
+| Qwen3-VL | ✅ | `make test-vision` (gemma-3-4b-vl, Qwen3-VL-4B-Instruct) |
+| Qwen3.6-35B-A3B on the same tower | 🟡 | shares the tower; `make test-vision` runs neither checkpoint against it (#1680) |
 | Llama-4 | 🟡 | arch exists, no dedicated gate |
 
 Per-checkpoint detail, including what each one needs at load, is in
@@ -51,8 +54,10 @@ Source: `src/core/qtype.h`.
 
 | format | status |
 |---|---|
-| Q4_0, Q4_1, Q5_0, Q5_1, Q8_0 | ✅ |
-| Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K | ✅ |
+| Q4_0, Q8_0 | ✅ |
+| Q4_1, Q5_0, Q5_1 | 🟡 | dequant path, no gate reads a checkpoint in these (#1680) |
+| Q4_K, Q5_K, Q6_K | ✅ |
+| Q2_K, Q3_K, Q8_K | 🟡 | dequant path, no gate reads a checkpoint in these (#1680) |
 | IQ4_NL, IQ4_XS | ✅ |
 | F32, F16, BF16 | ✅ |
 | NVFP4 (two-level block scaling) | ✅ the primary weight path |
@@ -70,17 +75,17 @@ Source: `src/core/qtype.h`.
 | OpenAI Responses `/v1/responses` | ✅ | the dialect Codex and the Agents SDK speak |
 | SSE streaming, per token, all three dialects | ✅ | one shared driver since v0.18.1 |
 | `/v1/embeddings` | ✅ | |
-| `/v1/rerank` (Cohere/Jina/vLLM shape) | ✅ | validated against llama.cpp on the same GGUF |
+| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:290-291`), so the default gate does not run it (#1680) |
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
-| `/admin/suspend`, `/admin/resume` | ✅ | frees the GPU in seconds, resumes without re-reading weights |
-| model swap on request (`server.model_swap`) | ✅ | in-flight generations drain, never cancelled |
+| `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |
+| model swap on request (`server.model_swap`) | 🟡 | in-flight generations drain, never cancelled. No gate exercises it (#1680) |
 | prefix caching, `cache_control` per breakpoint | ✅ | on by default for the server |
 | tool calling | ✅ | gated by real aider, Claude Code and OpenAI Agents SDK runs |
 | constrained decoding: JSON Schema, regex, GBNF | ✅ | an uncompilable constraint is a 400, not a free-text answer |
 | per-request speculative toggle | ✅ | |
 | auth (`--api-key`), `--metrics-require-auth` | ✅ | |
 | embedded web UI at `GET /` | ✅ | |
-| logprobs | ✅ | `tests/test_server_logprobs.py`: at temperature 0 the emitted token IS `top_logprobs[0]` and shares its logprob |
+| logprobs | ✅ non-streaming | `tests/test_server_logprobs.py` (in `make test-server`, not in CI): at temperature 0 the emitted token IS `top_logprobs[0]` and shares its logprob. The streaming path emits none, #1588 |
 | C library API, CLI | ✅ | |
 
 ## Engine
