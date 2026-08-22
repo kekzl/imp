@@ -112,9 +112,20 @@ echo "  tg128 samples: $(paste -sd, "$tg128_samples")  → median $tg128"
 # Get GPU info. Try nvcc first, then fall back to nvidia-smi cuda_version
 # (the runtime image has no nvcc, only the devel image does).
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-CUDA=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//' \
-       || nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:\s*\K[0-9.]+' \
-       || echo "unknown")
+# `a | b | c || fallback` never reaches the fallback: sed exits 0 on empty
+# input, so the pipeline succeeds with nothing and CUDA lands empty. That is how
+# the shipped baseline recorded cuda="unknown" while sync_docs.py published the
+# constant 13.3 over it (#1684). Test the value, not the exit code.
+CUDA=$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9.]+' | head -1)
+[ -n "$CUDA" ] || CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:\s*\K[0-9.]+' | head -1)
+[ -n "$CUDA" ] || CUDA="unknown"
+# The commit the numbers were measured at. Absent from every baseline until
+# #1684, which is why the generated PROV block had to invent one.
+COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null)
+[ -n "$COMMIT" ] || COMMIT="unknown"
+if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    COMMIT="${COMMIT}-dirty"
+fi
 VRAM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0")
 
 # Get model VRAM from benchmark output (independent quick run).
@@ -138,6 +149,7 @@ cat > "$OUTPUT" << EOF
   "model": "$(basename "$MODEL")",
   "gpu": "$GPU",
   "cuda": "$CUDA",
+  "commit": "$COMMIT",
   "vram_total_mb": $VRAM_TOTAL,
   "timestamp": "$TIMESTAMP",
   "methodology": "median of $N_TRIALS trials × $REPS reps, ${COOLDOWN_SEC}s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=$CHUNK_SIZE); speculative.ngram=false",
