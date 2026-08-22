@@ -1,7 +1,9 @@
 #include "utils.h"
+#include "imp/imp.h"
 #include "stream_pipeline.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 
 // Make a client-supplied string safe to put back into a response body.
@@ -150,8 +152,17 @@ std::string Utf8Stitch::feed(const std::string& piece) {
     return buf;
 }
 
-void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message) {
-    json err = {{"error", {{"message", message}, {"type", type}}}};
+void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message,
+                     const char* param, const char* code) {
+    json e = {{"message", message}, {"type", type}};
+    // Emitted only when supplied: OpenAI's own envelope carries them as null
+    // rather than absent, but a client that checks `"code" in err` should not
+    // see a key that says nothing.
+    if (param)
+        e["param"] = param;
+    if (code)
+        e["code"] = code;
+    json err = {{"error", std::move(e)}};
     res.status = status;
     res.set_content(dump_safe(err), "application/json");
 }
@@ -222,6 +233,28 @@ bool api_key_matches(const std::string& authorization, const std::string& x_api_
     if (!x_api_key.empty() && constant_time_equals(x_api_key, api_key))
         return true;
     return false;
+}
+
+std::string system_fingerprint(const std::string& model_name) {
+    // FNV-1a over version + model. Not a security hash; it exists so a client
+    // can tell "same backend" from "different backend" in one comparison.
+    const std::string material = std::string(imp_version()) + "\x1f" + model_name;
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : material) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "fp_%016llx", static_cast<unsigned long long>(h));
+    return buf;
+}
+
+const char* openai_finish_reason(const char* engine_finish) {
+    if (engine_finish == nullptr)
+        return "stop";
+    if (std::strcmp(engine_finish, "cancelled") == 0 || std::strcmp(engine_finish, "capacity") == 0)
+        return "length";
+    return engine_finish;
 }
 
 json safe_token_json(const std::string& text) {
@@ -734,6 +767,7 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
                 {"object", "chat.completion.chunk"},
                 {"created", created},
                 {"model", model},
+                {"system_fingerprint", system_fingerprint(model)},
                 {"choices", json::array({choice})}};
     return "data: " + dump_safe(obj) + "\n\n";
 }
@@ -748,6 +782,7 @@ std::string sse_completion_chunk(const std::string& id, int64_t created, const s
                 {"object", "text_completion"},
                 {"created", created},
                 {"model", model},
+                {"system_fingerprint", system_fingerprint(model)},
                 {"choices", json::array({choice})}};
     return "data: " + dump_safe(obj) + "\n\n";
 }

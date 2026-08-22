@@ -41,16 +41,47 @@ streaming driver, so a fix in streaming lands in all of them at once.
 | `model` | ✅ | **required**; basename of the file or directory |
 | `messages`, `prompt` | ✅ | |
 | `max_tokens` | ✅ | on a reasoning model the answer reserve scales with it (`max(256, max_tokens/4)`) |
-| `temperature`, `top_p`, `top_k`, `min_p` | ✅ | |
-| `presence_penalty`, `frequency_penalty`, `repetition_penalty` | ✅ | |
+| `temperature`, `top_p`, `top_k`, `min_p` | ✅ | **imp's defaults are not OpenAI's** - see the table below |
+| `presence_penalty`, `frequency_penalty`, `repetition_penalty` | ✅ | `repetition_penalty` has no OpenAI field; imp applies 1.05 by default |
 | `seed` | ✅ | greedy is reproducible; see [`determinism.md`](determinism.md) for the exact guarantee, which is narrower than "same seed, same bytes" |
 | `stop` | ✅ | |
 | `stream` | ✅ | per token, all three dialects |
 | `n` | ✅ | documented and tested as `[1,4]` |
-| `logprobs` | ✅ non-streaming, ⚪ streaming | `tests/test_server_logprobs.py` in `make test-server`. **Streaming emits none at all** (#1588). This row said 🟡 "no dedicated gate, listed in LIMITATIONS.md" until #1594: the gate exists and it was not listed there |
+| `logprobs` | ✅ | `tests/test_server_logprobs.py` in `make test-server`, plus `tests/test_logprobs_shapes.cpp` in the CPU lane. Streaming emitted none whenever a `stop` sequence was set until #1588; `/v1/completions` returned the Chat shape until #1589 |
+| `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
 | `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape |
 | `"lora": "name"` | ✅ | PEFT adapter hot-swap, works with every quant path |
+
+### Defaults, and where they differ from OpenAI
+
+A request that sets no sampling fields is not served with OpenAI's defaults
+(#1596). The values are deliberate - they suit local models better than
+`temperature 1.0` with no truncation - but they change what an identical
+request returns compared to the OpenAI API, so they are stated here rather than
+left in the source.
+
+| field | imp | OpenAI | to get OpenAI's behaviour |
+|---|---|---|---|
+| `temperature` | 0.7 | 1.0 | send `"temperature": 1.0` |
+| `top_p` | 0.95 | 1.0 | send `"top_p": 1.0` |
+| `top_k` | 40 | (no field) | send `"top_k": 999999` (see below) |
+| `repetition_penalty` | 1.05 | (no field) | send `"repetition_penalty": 1.0` |
+
+Two of these do not switch off the way the field name suggests.
+
+**`top_k: 0` is not "off", it is 50.** Every sampling site spells
+`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:193`, `:290`,
+`src/runtime/engine_scheduler.cpp:2572`), so zero and "unset" both land on 50 -
+a *tighter* truncation than the 40 default. The only way to disable top-k is a
+value at or above the vocabulary size, which the dispatcher clamps to the full
+vocabulary (`engine_scheduler.cpp:2573`).
+
+**`repetition_penalty` has no OpenAI field at all**, so a strictly
+spec-compliant client cannot switch it off and gets a mild anti-repetition bias
+it never asked for. Sending the non-OpenAI field with value `1.0` does disable
+it: the engine skips the penalty pass entirely when all three penalties are
+neutral (`src/runtime/engine_sampling_stop.cpp:212`).
 
 ## Constrained decoding
 

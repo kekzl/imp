@@ -590,25 +590,19 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // Server-side input-token limit (--max-input-tokens). Reject before
     // prefill so an oversized prompt never reaches the engine.
     if (state.max_input_tokens > 0 && ctx.snap.n_prompt_tokens > state.max_input_tokens) {
-        res.status = 400;
-        json error = {
-            {"error",
-             {{"message", "Prompt exceeds max input tokens (" + std::to_string(ctx.snap.n_prompt_tokens) +
-                              " > " + std::to_string(state.max_input_tokens) + ")"},
-              {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "Prompt exceeds max input tokens (" + std::to_string(ctx.snap.n_prompt_tokens) +
+                            " > " + std::to_string(state.max_input_tokens) + ")",
+                        "messages", "context_length_exceeded");
         return false;
     }
 
     // Validate prompt length against context window
     if (ctx.snap.n_prompt_tokens >= ctx.snap.max_seq_len) {
-        res.status = 400;
-        json error = {
-            {"error",
-             {{"message", "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
-                              " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)"},
-              {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
+                            " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)",
+                        "messages", "context_length_exceeded");
         return false;
     }
 
@@ -858,7 +852,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                                   "code kv_pool_floored and the exact capacity."
                                 : "Request does not fit the KV cache: the prompt needs more blocks than "
                                   "the pool can hold. Shorten the prompt, lower --max-seq-len, or give "
-                                  "the server more VRAM (see the engine log for the exact block counts).");
+                                  "the server more VRAM (see the engine log for the exact block counts).",
+                            /*param=*/nullptr, floored ? "kv_pool_floored" : "context_length_exceeded");
             return;
         }
 
@@ -1004,7 +999,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             msg["tool_call_validation_error"] = tool_validation_error;
         }
 
-        json choice = {{"index", ci}, {"message", msg}, {"finish_reason", finish}};
+        json choice = {{"index", ci}, {"message", msg}, {"finish_reason", openai_finish_reason(finish)}};
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
         }
@@ -1045,9 +1040,13 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                                               {"rejected_prediction_tokens", imp_req->pred_rejected}};
     }
 
-    json response = {{"id", comp_id},      {"object", "chat.completion"},
-                     {"created", created}, {"model", ctx.snap.model_name},
-                     {"choices", choices}, {"usage", usage}};
+    json response = {{"id", comp_id},
+                     {"object", "chat.completion"},
+                     {"created", created},
+                     {"model", ctx.snap.model_name},
+                     {"system_fingerprint", system_fingerprint(ctx.snap.model_name)},
+                     {"choices", choices},
+                     {"usage", usage}};
 
     // Pull the final finish_reason from choice 0 for log correlation;
     // multi-completion requests still record only the aggregate.

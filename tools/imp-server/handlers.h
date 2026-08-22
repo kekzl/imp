@@ -230,6 +230,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
 
 void handle_health(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_models(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, ServerState& state,
+                           const std::string& model_id);
 // Context-window probes for OpenAI-compatible clients that auto-detect the max
 // context length. /props follows llama.cpp (n_ctx), /info follows TGI
 // (max_total_tokens / max_input_tokens); /v1/models carries vLLM's

@@ -180,6 +180,26 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Eight places where the OpenAI surface answered instead of refusing, or said
+  nothing about itself** (#1590, #1591, #1593, #1595, #1596, #1598, #1599,
+  #1602). `response_format` with an unknown `type`, or a known type whose
+  payload is missing, was dropped silently and the request answered as free
+  text with 200; it is a 400 now, because a constraint that did not apply and
+  one that did look identical to the caller otherwise. `best_of > 1` was
+  accepted and ignored: also a 400, since imp generates no candidate set.
+  `finish_reason` shipped `cancelled` and `capacity`, neither in the OpenAI
+  enum, sending clients through their default branch; both map to `length`.
+  The streaming path wrote a server-authored English sentence into
+  `delta.content` where the non-streaming path wrote nothing, so the two
+  transports disagreed about the same request; it goes to the log now.
+  `error.param` and `error.code` exist on the shared envelope, so a context
+  overflow is `context_length_exceeded` rather than an English sentence.
+  `GET /v1/models/{id}` is registered, so `client.models.retrieve()` no longer
+  404s on the served model. `system_fingerprint` is emitted on all four
+  response shapes. And `docs/API.md` states the four sampling defaults that are
+  not OpenAI's, including one the issue did not name: **`top_k: 0` is not off,
+  it is 50**, a tighter truncation than the 40 default.
+
 - **Streamed logprobs were absent whenever a `stop` sequence was set, and
   `/v1/completions` returned the wrong shape** (#1588, #1589, #1601). The
   streaming driver attached per-token logprobs only on the branch taken when a

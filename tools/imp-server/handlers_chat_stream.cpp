@@ -7,6 +7,7 @@
 #include "handlers_internal.h"
 #include "stream_driver.h"
 #include "utils.h"
+#include "core/logging.h"
 #include "tool_call.h"
 
 #include "runtime/request.h"
@@ -174,18 +175,25 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     if (!run_stream_loop_(sink, ctx, state, server_req, dialect, out))
         return false;
 
-    // If the model exhausted tokens while still reasoning and never produced
-    // content, emit a notice so the user sees something instead of a blank
-    // response (fires only when max_tokens was the cause — see the driver's
-    // reasoning_truncated contract).
+    // The model exhausted its budget while still reasoning and never produced
+    // content. This used to write a server-authored English sentence into
+    // delta.content, which made the streaming and non-streaming answers to the
+    // identical request differ, and put text into `content` that no token
+    // produced (#1593). It is the same shape as the reasoning leak this file's
+    // invariant already forbids, so it goes where the non-streaming path
+    // already puts it: the server log. finish_reason is "length" either way,
+    // which is the machine-readable half a client can act on.
     if (out.reasoning_truncated) {
-        std::string notice = "[Reasoning truncated — increase max_tokens for a complete answer]";
-        sse_writer.write_content(notice, sink);
+        IMP_LOG_WARN(
+            "empty content: the answer never started because the token budget went to "
+            "reasoning (streaming, finish_reason=length). Raise max_tokens — a thinking "
+            "model needs room to answer AFTER it thinks.");
     }
 
     // Send final chunk with finish_reason
     json empty_delta = json::object();
-    std::string final_chunk = sse_chunk(comp_id, created, snap_model_name, empty_delta, out.finish);
+    std::string final_chunk = sse_chunk(comp_id, created, snap_model_name, empty_delta,
+                                        openai_finish_reason(out.finish));
     sink.write(final_chunk.data(), final_chunk.size());
 
     // Send usage chunk if requested

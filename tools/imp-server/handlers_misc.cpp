@@ -409,8 +409,9 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             }
             if (state.max_input_tokens > 0 && n_tokens > state.max_input_tokens) {
                 send_json_error(res, 400, "invalid_request_error",
-                                "Input exceeds --max-input-tokens (" + std::to_string(n_tokens) +
-                                    " > " + std::to_string(state.max_input_tokens) + ")");
+                                "Input exceeds --max-input-tokens (" + std::to_string(n_tokens) + " > " +
+                                    std::to_string(state.max_input_tokens) + ")",
+                                "input", "context_length_exceeded");
                 return;
             }
             // Chunked prefill pools per chunk (#1005), so the only hard bound

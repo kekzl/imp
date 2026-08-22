@@ -101,6 +101,24 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         return;
     }
 
+    // best_of asks the server to generate N candidates and return the best by
+    // total logprob. imp has no such path - no COW-fork, no candidate scoring -
+    // so the field was read by nothing and the caller got one ordinary
+    // completion with 200 (#1598). Same treatment as its neighbour n: an
+    // explicit refusal, because "best of 8" and "the first one" are different
+    // answers and the response cannot tell them apart.
+    if (body.contains("best_of") && !body["best_of"].is_null()) {
+        if (!body["best_of"].is_number_integer()) {
+            send_json_error(res, 400, "invalid_request_error", "\"best_of\" must be an integer");
+            return;
+        }
+        if (body["best_of"].get<int>() > 1) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "best_of>1 is not supported; imp generates no candidate set to choose from");
+            return;
+        }
+    }
+
     // Extract prompt
     std::string prompt = body.value("prompt", "");
     if (prompt.empty()) {
@@ -235,12 +253,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
     // Server-side input-token limit (--max-input-tokens). Reject pre-prefill.
     if (state.max_input_tokens > 0 && n_prompt_tokens > state.max_input_tokens) {
-        res.status = 400;
-        json error = {{"error",
-                       {{"message", "Prompt exceeds max input tokens (" + std::to_string(n_prompt_tokens) +
-                                        " > " + std::to_string(state.max_input_tokens) + ")"},
-                        {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "Prompt exceeds max input tokens (" + std::to_string(n_prompt_tokens) + " > " +
+                            std::to_string(state.max_input_tokens) + ")",
+                        "prompt", "context_length_exceeded");
         return;
     }
 
@@ -578,7 +594,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                     finish = "length";
 
                 // Final chunk with finish_reason
-                std::string final_chunk = sse_completion_chunk(comp_id, created, snap_model_name, "", finish);
+                std::string final_chunk = sse_completion_chunk(comp_id, created, snap_model_name, "",
+                                                               openai_finish_reason(finish));
                 sink.write(final_chunk.data(), final_chunk.size());
 
                 // Usage chunk if requested
@@ -708,7 +725,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
             logprobs_obj = completions_logprobs_json(active_req->output_logprobs, output_ids.size(), text);
         }
 
-        json choice = {{"index", 0}, {"text", text}, {"finish_reason", finish}};
+        json choice = {{"index", 0}, {"text", text}, {"finish_reason", openai_finish_reason(finish)}};
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
         }
@@ -717,6 +734,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                          {"object", "text_completion"},
                          {"created", created},
                          {"model", snap_model_name},
+                         {"system_fingerprint", system_fingerprint(snap_model_name)},
                          {"choices", json::array({choice})},
                          {"usage",
                           {{"prompt_tokens", n_prompt_tokens},
