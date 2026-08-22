@@ -191,6 +191,14 @@ private:
     // Per-layer KV shapes and offsets (for Gemma 4 dual attention geometry).
     // If empty, all layers use the scalar n_kv_heads_/head_dim_/block_bytes_.
     std::vector<size_t> layer_block_bytes_;  // block_size * nkv[l] * hd[l] * dtype_size
+    // Blocks layer l's own region holds. A sliding-window layer's region is
+    // swa_max_blocks_, not max_blocks_, and anything that strides or writes
+    // per layer has to respect that or it lands in the next layer's range.
+    size_t layer_capacity_(int l) const {
+        return (swa_max_blocks_ > 0 && l < static_cast<int>(layer_is_swa_.size()) && layer_is_swa_[l])
+                   ? static_cast<size_t>(swa_max_blocks_)
+                   : static_cast<size_t>(max_blocks_);
+    }
     std::vector<size_t> layer_k_offset_;     // byte offset of layer l's K region in pool
     std::vector<size_t> layer_v_offset_;     // byte offset of layer l's V region in pool
 

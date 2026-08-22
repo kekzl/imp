@@ -180,6 +180,19 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Growing a KV pool with sliding-window layers wrote past the layer's own
+  region** (#1699). `commit_blocks_` zeroes newly committed blocks with one
+  memset per layer sized `(blocks - first_new) * layer_block_bytes_[l]`, but a
+  windowed layer's region is `swa_max_blocks_` blocks, not `max_blocks_` (24
+  against 256 on the failing configuration). The commit loop directly above has
+  that clamp and says so; the memset loop had the same arithmetic and none. For
+  the last windowed layer the write leaves the reservation:
+  `cudaErrorIllegalAddress`, which is sticky, so one fault took 36 suites down
+  with it. For a windowed layer that is not last, the overrun lands in the next
+  layer's live KV and zeroes it silently, which is the worse half. Measured on
+  the same invocation: 73 failures and 21 illegal accesses before, 0 and 0
+  after.
+
 - **Admission could starve a long prompt, and two knobs named `max_batch_size`
   parked admitted rows** (#1634, #1637). The pending queue is re-sorted
   shortest-first on every arrival, which is deliberate against head-of-line
