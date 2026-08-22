@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 66 files, 464 sites
+# remaining: 66 files, 465 sites
 
 src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_sm120.cu  # 2
@@ -67,7 +67,7 @@ src/runtime/batch.cpp  # 10
 src/runtime/cuda_graph.cu  # 26
 src/runtime/engine.cpp  # 5
 src/runtime/engine_graph_decode.cpp  # 30
-src/runtime/engine_internal.h  # 4
+src/runtime/engine_internal.h  # 5
 src/runtime/engine_kv_cache_init.cpp  # 3
 src/runtime/engine_scheduler.cpp  # 24
 src/runtime/engine_spec_ngram.cpp  # 13

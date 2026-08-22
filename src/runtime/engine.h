@@ -1197,6 +1197,9 @@ private:
     void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
     void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool
+    // Teardown for a request that ends abnormally. finish_request is the
+    // graceful twin; both release the same per-request resources (#1632).
+    void cancel_sequence_(const std::shared_ptr<Request>& req);
     // Recurrent-state snapshots (hybrid prefix caching, engine_sampling_stop.cpp):
     // admission hook (longest restorable prefix, in blocks) + save/position helpers.
     int hybrid_prefix_reuse_limit_(Request& req);

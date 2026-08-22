@@ -928,6 +928,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_models.cpp
         tests/test_e2e_greedy_lock.cpp
         tests/test_continuous_batching.cpp
+        tests/test_scheduler.cpp
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp
         tests/test_weight_registry_preservation.cpp
@@ -996,8 +997,15 @@ if(IMP_BUILD_TESTS)
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_det_suite_filter.sh
                 $<TARGET_FILE:test-e2e> "${_det_e2e_filter}")
 
+    # #1632: a seventh cancel path that frees KV without releasing the
+    # recurrent slot is valid C++ and silent at runtime on dense models, so the
+    # guard is a grep rather than a type.
+    add_test(NAME guard_cancel_teardown
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_cancel_teardown.sh
+                ${CMAKE_CURRENT_SOURCE_DIR})
+
     set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split
-                         guard_det_suite_filter
+                         guard_det_suite_filter guard_cancel_teardown
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)

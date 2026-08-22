@@ -180,6 +180,20 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Three things a request left behind when it did not end normally** (#1632,
+  #1633, #1644). Six cancellation sites in the scheduler freed the sequence's
+  KV and never released its recurrent-state slot; the pool is fixed-size, and
+  an empty one puts every later sequence on `id % cap` aliasing, which is two
+  live sequences sharing one SSM state. They go through one teardown helper
+  now, and a CPU-lane guard fails if a seventh site frees KV directly. A
+  request cancelled while still queued was promoted anyway, because only the
+  active list was filtered by status, and the promotion overwrote `CANCELLED`
+  with `PREFILLING`: a full generation ran, holding KV and a batch slot, for a
+  client that had already disconnected. And on the non-pool prefill path a
+  sliding-window model leaked one SWA block table per chunk, because
+  `free_prefill_buffers` had no parameter for it and only the allocation-failure
+  path freed it.
+
 - **One request could cost the server an unbounded amount of work, and two of
   the limits keyed on what the client wrote** (#1614, #1615, #1616, #1617,
   #1618, #1619, #1622). The per-IP rate limit preferred `X-Forwarded-For`
