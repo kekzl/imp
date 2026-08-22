@@ -20,6 +20,12 @@ adapters on a shared core; the engine lives in `src/runtime/`.
 - **A request the server cannot honour is a 4xx, not a best-effort answer.** An
   uncompilable constraint, an unreadable image, a `tool_choice` naming an absent
   function: all 400. This is a deliberate, breaking-by-design stance.
+- **The server never connects to a host a request names, unless the operator
+  opted in.** `--allow-remote-images` gates the only such path (`image_url`),
+  and even then the destination is classified before the connect and redirects
+  are not followed (#1610, `image_fetch.h`). An error string that varies with
+  the destination is the same defect wearing a different hat: it makes the
+  endpoint a port scanner.
 - **Reasoning goes to `reasoning_content`**, never into `content`. This was once
   wrong on the streaming path only, which our own batteries could not see.
 

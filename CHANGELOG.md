@@ -163,6 +163,18 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`image_url` was an SSRF primitive: any host, any port, redirects followed,
+  no size cap, no read timeout** (#1610). An unauthenticated request body chose
+  where the server connected, which on a container host means loopback, the
+  compose network and the cloud metadata address. Measured, not read: with a
+  listener in the server's own network namespace, the pre-fix binary fetched
+  `http://127.0.0.1:9999/` on request; the fixed one does not, with the flag off
+  or on. Remote fetching is now behind `--allow-remote-images` (default off);
+  with it on the destination is resolved and refused if loopback, link-local,
+  RFC1918, CGNAT or ULA, redirects are not followed, the body is capped at
+  32 MiB and reads time out at 10 s. The error string is uniform and no longer
+  echoes the URL, so it cannot report which ports are open.
+
 - **`imp-server` did not start at shipped defaults on the repo's own
   perf-baseline model** (#1631). `imp-server --model Qwen3-8B-Q8_0.gguf` on an
   idle 32 GB card ended in 537 CUDA out-of-memory lines and exit 1: the planner

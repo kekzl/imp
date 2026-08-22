@@ -36,6 +36,14 @@ struct ServerArgs : CommonArgs {
     int request_timeout = 300;      // --request-timeout: per-request timeout in seconds (0=unlimited)
     int rate_limit = 0;             // --rate-limit: max requests per minute per IP (0=unlimited)
     int max_input_tokens = 0;       // --max-input-tokens: reject prompts longer than this (0=unlimited)
+    // --allow-remote-images: fetch http(s) image_url from a request body.
+    // Default OFF (#1610). With it on, an unauthenticated caller chooses which
+    // host and port this server connects to, and the interesting targets are
+    // the ones only the server can reach: loopback, the compose network, the
+    // cloud metadata endpoint. A data URI needs none of this and is what every
+    // real client sends. When on, the destination is classified and redirects
+    // are not followed - see image_fetch.h.
+    bool allow_remote_images = false;
     std::string prefix_cache_path;  // --prefix-cache: path to persist prefix cache
     std::string log_requests_path;  // --log-requests: append JSONL of every chat/messages request
 };

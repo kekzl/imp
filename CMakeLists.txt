@@ -542,6 +542,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_chat.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/handlers_chat_params.cpp
+        tools/imp-server/image_fetch.cpp
         tools/imp-server/handlers_chat_stream.cpp
         tools/imp-server/stream_driver.cpp
         tools/imp-server/handlers_messages.cpp
@@ -743,6 +744,11 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/constraint_validation.cpp
             tests/test_constraint_validation.cpp
             tests/test_server_args.cpp
+            # SSRF destination classifier (#1610). Pure address arithmetic plus
+            # getaddrinfo on literals, so it belongs in the CPU lane, which is
+            # the only lane CI runs.
+            tools/imp-server/image_fetch.cpp
+            tests/test_image_fetch.cpp
             # Generative FSM battery for the schema-less json_object grammar.
             # Lives in the CPU lane on purpose: the FSM is CUDA-free without
             # init(), and every past grammar bug escaped CI because its tests
