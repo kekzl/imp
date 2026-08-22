@@ -180,6 +180,26 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Four tools that described themselves wrongly** (#1585, #1586, #1587,
+  #1663). The pre-push gate's gtest filter carried `AttentionTest.*`, a suite
+  renamed away before the pattern was added on 2026-04-27: gtest reports
+  success for a filter that matches nothing, so the only gate that runs CUDA
+  kernels against correctness ran **zero attention tests for four months**. The
+  corrected pattern adds 67 tests and 2 seconds (3 s / 268 to 5 s / 335), and a
+  new `guard_verify_filter` fails when any pattern matches nothing. `CLAUDE.md`
+  priced `verify-fast` at 90 s while the target's own prerequisite is a full
+  image build; measured, the script half is 37 s and the build is what costs
+  minutes. `docs_lint.py` walked gitignored paths, so a local scratch directory
+  produced 160 errors on every run and the working answer became a `grep -v`.
+  And the ten-value `ImpError` taxonomy never reached a process exit code:
+  every binary collapsed onto 1, so a caller had to parse English to tell "no
+  such file" from "out of VRAM". Exit codes are the taxonomy, 1 to 9, and
+  `imp-quantize`'s undocumented 2 for usage errors is now 1 like everywhere
+  else. The teardown guard added with #1632 was itself a pure negative test
+  (a grep that passes when it finds nothing, which is also what it does when
+  pointed at the wrong file); it now asserts the six replacement calls are
+  present too.
+
 - **Three things a request left behind when it did not end normally** (#1632,
   #1633, #1644). Six cancellation sites in the scheduler freed the sequence's
   KV and never released its recurrent-state slot; the pool is fixed-size, and

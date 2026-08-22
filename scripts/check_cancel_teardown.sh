@@ -28,6 +28,22 @@ fi
 # elsewhere (eviction, reset) are not request teardown and are not in scope.
 HITS=$(grep -n 'free_sequence(req->id)' "$FILE" || true)
 
+# A guard that only ever says "I found nothing bad" is indistinguishable from
+# one pointed at the wrong file. This one asserts the positive too: the six
+# cancel sites the helper replaced must still be calling it. Rename the file,
+# move the code, or delete the helper, and this fails instead of passing.
+CALLS=$(grep -c 'cancel_sequence_(req)' "$FILE" || true)
+MIN_CALLS=6
+
+if [ "$CALLS" -lt "$MIN_CALLS" ]; then
+    echo "check_cancel_teardown: FAIL" >&2
+    echo "" >&2
+    echo "Found $CALLS call(s) to cancel_sequence_(req), expected at least $MIN_CALLS." >&2
+    echo "Either a cancel path was removed, or this guard is looking at the wrong" >&2
+    echo "file and would have passed without checking anything. See #1632." >&2
+    exit 1
+fi
+
 if [ -n "$HITS" ]; then
     echo "check_cancel_teardown: FAIL" >&2
     echo "" >&2
@@ -39,4 +55,4 @@ if [ -n "$HITS" ]; then
     exit 1
 fi
 
-echo "check_cancel_teardown: PASS (no direct free_sequence(req->id) in the scheduler)"
+echo "check_cancel_teardown: PASS ($CALLS teardown calls, no direct free_sequence(req->id))"

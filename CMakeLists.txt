@@ -485,7 +485,8 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/awq.cu
     )
     target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
-    target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                                   ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 
     # imp-bench
     if(IMP_BUILD_BENCH)
@@ -719,6 +720,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mla.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_checkpoint_limits.cpp
+        tests/test_exit_codes.cpp
         # imp-quantize's tensor-selection rule. The tool is not otherwise
         # covered, and this is the part of it that has already shipped a broken
         # checkpoint (#1159), so it is compiled into the CPU lane directly.
@@ -1004,8 +1006,17 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_cancel_teardown.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
+    # #1586: the pre-push gate's filter is a string literal in verify.sh, and a
+    # pattern that matches nothing is a gtest success. Reads the filter out of
+    # verify.sh rather than keeping a copy; skips when imp-tests cannot run.
+    # imp-tests is a generated wrapper script, not a target, so it is a path.
+    add_test(NAME guard_verify_filter
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_verify_filter.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/imp-tests ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify.sh)
+
     set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split
                          guard_det_suite_filter guard_cancel_teardown
+                         guard_verify_filter
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)

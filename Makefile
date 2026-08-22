@@ -343,7 +343,9 @@ test-golden: build
 verify: build check-gpu
 	@scripts/verify.sh full
 
-# verify-fast: pre-push gate (~90s). filtered tests + 1 smoke.
+# verify-fast: pre-push gate. `build` + filtered tests + perf + 1 smoke.
+# Measured on an unchanged tree: 3 s cached build + 37 s script. A source
+# change adds the full image build (#1587).
 # Perf gate uses --prefill-chunk-size 0 to stay apples-to-apples with tests/perf_baseline.json.
 verify-fast: build check-gpu
 	@scripts/verify.sh fast

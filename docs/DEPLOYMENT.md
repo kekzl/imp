@@ -62,6 +62,27 @@ The settings that most often need changing in a deployment:
 | `server.model_swap` | default on: a request naming another model in the directory swaps to it |
 | `moe.expert_cache_budget_pct` | only relevant when MoE experts do not fit; see [`PERF.md`](PERF.md) |
 
+## Exit codes
+
+The binaries return the C API's error taxonomy rather than a bare 1 (#1585), so
+a supervisor can tell a bad argument from a full GPU without parsing prose.
+
+| code | meaning | retry? |
+|---|---|---|
+| 0 | success | |
+| 1 | invalid argument, including a usage error | no, fix the call |
+| 2 | out of memory (host) | maybe, with less concurrency |
+| 3 | CUDA error | no |
+| 4 | file not found | no |
+| 5 | invalid model | no |
+| 6 | unsupported | no |
+| 7 | internal error | worth one retry |
+| 8 | cancelled | n/a |
+| 9 | capacity: the KV pool cannot fit this prompt | yes, shorter prompt or more VRAM |
+
+Codes above 9 are unused. `imp-quantize` returned 2 for usage errors before
+this; it returns 1 now, with every other invalid argument.
+
 ## Auth and exposure
 
 ```bash
