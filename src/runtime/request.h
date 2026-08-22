@@ -87,7 +87,12 @@ struct Request {
     // speculative.ngram default, 0 = force OFF, 1 = force ON. Lets a code-gen
     // request opt into speculation while a short tool-arg generation skips it
     // (and vice-versa) on the same server. Resolved via Engine::spec_ngram_enabled_.
-    int spec_ngram_override = -1;
+    // Per-request `"speculative": true/false`. -1 = unset, 0 = off, 1 = on.
+    // Named for the field, not for one of the drafters: "false" switches off
+    // the n-gram matcher AND the MTP head AND token recycling (#1639). "true"
+    // enables what the model and the operator config allow; it cannot conjure
+    // an MTP head the checkpoint does not carry.
+    int spec_override = -1;
     // OpenAI Predicted Outputs: client-supplied predicted completion tokens.
     // Never forwarded through the model — they only extend the n-gram draft
     // search corpus (input + prediction + output), so a response that tracks

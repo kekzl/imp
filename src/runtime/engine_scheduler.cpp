@@ -672,6 +672,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
             // freed a LIVE sequence (no recompute path) → silent corruption.
             // Reject-newest: cancel this request, leave in-flight ones intact.
             if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
                 cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 return false;
@@ -738,6 +739,8 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, pf_stream));
             if (d_context_lens)
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, pf_stream));
+            // Not counted as KV pressure: this is a metadata cudaMallocAsync
+            // failure, not the KV pool refusing blocks (#1641).
             cancel_sequence_(req);
             return false;
         }
@@ -912,6 +915,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             if (!ok) {
                 IMP_LOG_WARN("SwaSnapshot: restore failed for req %d at %d tokens — cancelling",
                              req->id, offset);
+                // Not KV pressure: a snapshot that does not match, not a pool
+                // that cannot allocate (#1641).
                 cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 return;
@@ -924,6 +929,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
         kv_manager_->swa_trim(req->id, offset);
         if (!kv_manager_->swa_prepare(req->id, offset, ctx_len)) {
+            kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
             cancel_sequence_(req);
             req->status = RequestStatus::CANCELLED;
             return;
@@ -1582,6 +1588,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     "pool was VRAM-clamped below the requested context; free VRAM, lower "
                     "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
                     req->id, blocks_needed, pool_blocks);
+                kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
                 cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 continue;
@@ -1597,6 +1604,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     "SWA KV sizing failed at decode: seq %d could not prepare its window at "
                     "ctx_len=%d — cancelling this sequence (see kv_cache.swa_sizing).",
                     req->id, ctx_len);
+                kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
                 cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 continue;

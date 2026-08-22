@@ -5,6 +5,7 @@
 #include "stream_driver.h"
 
 #include "utils.h"
+#include "core/logging.h"
 #include "tool_stream_filter.h"
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
@@ -180,10 +181,22 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         }
 
         // Check request timeout.
+        //
+        // finish stays "length" on the wire: the OpenAI enum has no member for
+        // "the server gave up", and inventing one is what #1590 just fixed in
+        // the other direction. What was missing is that nothing recorded it at
+        // all, so a server timing out under load looked like clients asking
+        // for short answers (#1640). The counter is the honest channel.
         if (state.request_timeout > 0) {
             auto elapsed = std::chrono::steady_clock::now() - request_start;
             if (elapsed > std::chrono::seconds(state.request_timeout)) {
                 server_req->cancel();
+                state.metrics.requests_timed_out++;
+                IMP_LOG_WARN(
+                    "request ended at --request-timeout (%d s); the client sees "
+                    "finish_reason=length, which is indistinguishable from a spent "
+                    "token budget - see imp_requests_timed_out_total",
+                    state.request_timeout);
                 finish = "length";
                 break;
             }

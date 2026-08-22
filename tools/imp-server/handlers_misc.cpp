@@ -184,6 +184,27 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_requests_cancelled_total Requests cancelled by client disconnect\n";
     out += "# TYPE imp_requests_cancelled_total counter\n";
     out += "imp_requests_cancelled_total " + std::to_string(m.requests_cancelled.load()) + "\n";
+    out += "# HELP imp_requests_timed_out_total Requests the server ended at --request-timeout\n";
+    out += "# TYPE imp_requests_timed_out_total counter\n";
+    out += "imp_requests_timed_out_total " + std::to_string(m.requests_timed_out.load()) + "\n";
+    // Read from the engine at scrape time rather than mirrored into
+    // ServerMetrics: the decision is the engine's, and a second copy is a
+    // second thing to keep in sync (#1641).
+    {
+        uint64_t kv_rejects = 0, kv_growths = 0;
+        if (state.ctx && state.ctx->engine) {
+            kv_rejects = state.ctx->engine->kv_pressure_rejections();
+            kv_growths = state.ctx->engine->kv_pool_growths();
+        }
+        out +=
+            "# HELP imp_kv_pressure_rejections_total Requests cancelled because the KV pool "
+            "could not give them blocks\n";
+        out += "# TYPE imp_kv_pressure_rejections_total counter\n";
+        out += "imp_kv_pressure_rejections_total " + std::to_string(kv_rejects) + "\n";
+        out += "# HELP imp_kv_pool_growths_total Times the growable KV pool committed more memory\n";
+        out += "# TYPE imp_kv_pool_growths_total counter\n";
+        out += "imp_kv_pool_growths_total " + std::to_string(kv_growths) + "\n";
+    }
     out += "# HELP imp_last_ttft_ms Time to first token of last request in milliseconds\n";
     out += "# TYPE imp_last_ttft_ms gauge\n";
     out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";

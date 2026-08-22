@@ -29,6 +29,7 @@
 #include "memory/vram_owned.h"
 #include "exec/executor.h"
 #include "core/cuda_raii.h"
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <map>
@@ -340,6 +341,17 @@ public:
     // full context — which is how an operator spends an afternoon looking at
     // the wrong component. The server reads this to answer honestly instead.
     bool kv_pool_floored() const noexcept { return kv_pool_floored_; }
+    // KV-pressure events, for /metrics (#1641). Every one of these was logged
+    // and counted nowhere, so "the pool is too small for this traffic" could
+    // only be found by reading server logs after the fact. Counted in the
+    // engine because that is where the decision is made; the server reads them
+    // at scrape time rather than being told.
+    uint64_t kv_pressure_rejections() const noexcept {
+        return kv_pressure_rejections_.load(std::memory_order_relaxed);
+    }
+    // Counted by the pool itself, not mirrored here: growth is decided in
+    // KVCache::try_grow_to and a second copy is a second thing to keep in sync.
+    uint64_t kv_pool_growths() const noexcept { return kv_cache_raw_ ? kv_cache_raw_->growths() : 0; }
     Model* model() const noexcept { return model_.get(); }
     // Effective context window actually allocated by the engine (after VRAM-aware
     // auto-sizing in init_compute_max_seq_len_). May be < the model's declared
@@ -403,6 +415,7 @@ private:
     std::unique_ptr<KVCacheManager> kv_manager_;
     KVCache* kv_cache_raw_ = nullptr;  // Non-owning pointer (owned by kv_manager_)
     bool kv_pool_floored_ = false;     // the pool is the rescue floor, not a size
+    std::atomic<uint64_t> kv_pressure_rejections_{0};
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;
     CudaStream stream_;
@@ -933,7 +946,7 @@ private:
     bool spec_captured_forward_(InferenceState& state, Tensor& logits_out, cudaStream_t stream);
     void free_spec_graphs_();
     // Effective n-gram speculation state for a request: honors the per-request
-    // tri-state override (Request::spec_ngram_override), else the global default.
+    // tri-state override (Request::spec_override), else the global default.
     bool spec_ngram_enabled_(const Request& req) const {
         // A model that can never speculate must not look "enabled" to anyone:
         // the decode loop chops itself into miss_burst bursts whenever this
@@ -966,10 +979,14 @@ private:
     SpecDrafterState spec_drafter_state_(const Request& req) const {
         SpecDrafterState s;
         s.model_capable = spec_ngram_model_capable_();
-        s.ngram_on = req.spec_ngram_override >= 0 ? req.spec_ngram_override == 1
-                                                  : runtime_config_.speculative.ngram;
-        s.mtp_on = mtp_spec_decode_enabled();
-        s.recycling_on = runtime_config_.speculative.token_recycling;
+        // "speculative": false means no speculation, not "no n-gram
+        // speculation". It used to feed s.ngram_on alone, so the MTP head and
+        // token recycling kept drafting and the verify step kept running for a
+        // caller who had switched the feature off (#1639).
+        const bool forced_off = req.spec_override == 0;
+        s.ngram_on = req.spec_override >= 0 ? req.spec_override == 1 : runtime_config_.speculative.ngram;
+        s.mtp_on = !forced_off && mtp_spec_decode_enabled();
+        s.recycling_on = !forced_off && runtime_config_.speculative.token_recycling;
         return s;
     }
     // The model-level half of spec_verify_gates_ok_: facts that cannot change

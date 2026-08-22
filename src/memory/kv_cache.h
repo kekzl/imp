@@ -62,6 +62,10 @@ public:
     // sitting at its ceiling, and those want opposite reactions: wait for the
     // card to free, or stop waiting.
     bool growable() const { return growable_; }
+    // How many times try_grow_to() actually committed more memory. Exposed for
+    // /metrics: a pool that keeps growing under load is the signal an operator
+    // wants before the pool stops being able to (#1641).
+    uint64_t growths() const { return growths_.load(std::memory_order_relaxed); }
 
     // Physical memory currently committed by a growable pool, 0 for a fixed
     // one. What the pool actually costs right now, as opposed to the address
@@ -173,6 +177,7 @@ private:
     // from the allocator exactly as before.
     Region region_;
     bool growable_ = false;
+    std::atomic<uint64_t> growths_{0};
     int committed_blocks_ = 0;  // blocks whose memory is backed in every layer
     // What may be handed out. Mirrored here rather than read from the block
     // pool because admission asks per pending request per step, and the pool's

@@ -304,7 +304,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
     if (body.contains("speculative") && body["speculative"].is_boolean())
-        imp_req->spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
+        imp_req->spec_override = body["speculative"].get<bool>() ? 1 : 0;
     // Predicted Outputs (string-content form) on the completions route: the
     // prediction only seeds the n-gram draft corpus, output is unchanged.
     if (body.contains("prediction") && body["prediction"].is_object()) {
@@ -443,6 +443,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                         auto elapsed = std::chrono::steady_clock::now() - request_start_c;
                         if (elapsed > std::chrono::seconds(state.request_timeout)) {
                             server_req->cancel();
+                            state.metrics.requests_timed_out++;
                             finish = "length";
                             break;
                         }
@@ -641,6 +642,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                 auto elapsed = std::chrono::steady_clock::now() - ns_comp_start;
                 if (elapsed > std::chrono::seconds(state.request_timeout)) {
                     server_req->cancel();
+                    state.metrics.requests_timed_out++;
                     finish = "length";
                     break;
                 }

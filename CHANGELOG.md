@@ -180,6 +180,20 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`"speculative": false` left two of three drafters running, and three
+  server decisions had no counter** (#1639, #1640, #1641). The documented
+  per-request switch fed only the n-gram matcher: the MTP head and token
+  recycling kept drafting and the verify step kept running for a caller who had
+  turned speculation off. It now covers all three (`false` disables; `true`
+  still cannot conjure an MTP head the checkpoint lacks), and the request field
+  is named `spec_override` rather than `spec_ngram_override`. `/metrics` gained
+  `imp_requests_timed_out_total` (a `--request-timeout` kill is
+  `finish_reason: "length"` on the wire, indistinguishable from a spent budget),
+  `imp_kv_pressure_rejections_total` and `imp_kv_pool_growths_total`. The
+  pressure counter fires at four of the six cancellation sites: a failed
+  metadata allocation and a snapshot mismatch are different faults, and both
+  now carry a comment saying they are excluded on purpose.
+
 - **The perf gate measured a different quantity than the pin it compares
   against, and two CI jobs claimed coverage they do not have** (#1600, #1624,
   #1625, #1685). `scripts/bench_gate.sh` benched with n-gram speculation ON

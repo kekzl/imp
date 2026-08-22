@@ -50,7 +50,7 @@ streaming driver, so a fix in streaming lands in all of them at once.
 | `logprobs` | ✅ | `tests/test_server_logprobs.py` in `make test-server`, plus `tests/test_logprobs_shapes.cpp` in the CPU lane. Streaming emitted none whenever a `stop` sequence was set until #1588; `/v1/completions` returned the Chat shape until #1589 |
 | `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
-| `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape |
+| `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape. `false` switches off **all three** drafters (n-gram, MTP head, token recycling) since #1639 - it used to reach only the n-gram matcher. `true` enables what the model and config allow; it cannot conjure an MTP head the checkpoint lacks |
 | `"lora": "name"` | ✅ | PEFT adapter hot-swap, works with every quant path |
 
 ### Defaults, and where they differ from OpenAI
@@ -82,6 +82,19 @@ spec-compliant client cannot switch it off and gets a mild anti-repetition bias
 it never asked for. Sending the non-OpenAI field with value `1.0` does disable
 it: the engine skips the penalty pass entirely when all three penalties are
 neutral (`src/runtime/engine_sampling_stop.cpp:212`).
+
+### Metrics for what the server decided
+
+`/metrics` carries counters for the decisions that used to be visible only in
+the server log (#1640, #1641):
+
+| counter | what moves it |
+|---|---|
+| `imp_requests_timed_out_total` | the server ended a request at `--request-timeout`. The client sees `finish_reason: "length"`, which is also what a spent token budget produces - this counter is the only way to tell them apart |
+| `imp_kv_pressure_rejections_total` | a request was cancelled because the KV pool could not give it blocks (admission or mid-decode). Not incremented for a failed metadata allocation or a snapshot mismatch, which are different faults |
+| `imp_kv_pool_growths_total` | the growable pool committed more memory. A pool that keeps growing under load is the signal that arrives before it stops being able to |
+
+`imp_requests_cancelled_total` remains client-disconnect only.
 
 ## Constrained decoding
 

@@ -456,6 +456,7 @@ int KVCache::try_grow_to(int wanted) {
     // Published only after the ids exist: a reader that saw the new capacity
     // first would admit a request the pool cannot yet hand blocks for.
     usable_blocks_.store(got, std::memory_order_release);
+    growths_.fetch_add(1, std::memory_order_relaxed);
     IMP_LOG_INFO(
         "KV cache: grew %d -> %d blocks (%.0f tokens, %.0f MiB committed of a %d-block "
         "ceiling)",

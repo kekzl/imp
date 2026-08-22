@@ -303,7 +303,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // Per-request speculative-decode override (imp extension). Absent → leave
     // tri-state at -1 (server default). Present bool → force on/off.
     if (body.contains("speculative") && body["speculative"].is_boolean())
-        ctx.params.spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
+        ctx.params.spec_override = body["speculative"].get<bool>() ? 1 : 0;
 
     // OpenAI Predicted Outputs: {"prediction": {"type": "content", "content":
     // string | [{"type":"text","text":...}...]}}. The text is a draft hint —

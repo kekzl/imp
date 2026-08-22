@@ -99,6 +99,12 @@ struct ServerMetrics {
     std::atomic<int64_t> tokens_completion_total{0};
     std::atomic<int64_t> tokens_cached_total{0};  // Prefix cache hits
     std::atomic<int64_t> requests_cancelled{0};   // Client-disconnect cancellations
+    // Requests the SERVER gave up on at --request-timeout. Distinct from
+    // requests_cancelled, which is the client going away: this one is imp's
+    // own decision and the operator's to tune (#1640). Without it a timeout
+    // was invisible - the client saw finish_reason "length", the same value a
+    // completed token budget produces, and no counter moved.
+    std::atomic<int64_t> requests_timed_out{0};
     // Constrained requests (json_schema/json_mode/enforced tools) that ALSO
     // request logprobs: they silently leave the ConstrainedPipeline fast path
     // for eager decode (~102 vs ~235 tok/s on the 8B reference) — surfaced
