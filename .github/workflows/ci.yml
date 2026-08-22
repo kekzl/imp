@@ -582,6 +582,22 @@ jobs:
       # A binary that contains none of the tests reports "PASSED 0 tests" and
       # exits 0. That is how the first version of this job would have gone green
       # without running anything.
+      # test-core links libcuda.so.1 and this runner has no driver, so the
+      # binary does not start: `error while loading shared libraries`. The CUDA
+      # image ships a stub for exactly this, under the name the linker wants but
+      # not the one the loader wants (libcuda.so, not .so.1) - hence the symlink.
+      # CUDA calls then fail at runtime, which is what the CPU lane expects
+      # anyway: those tests skip.
+      #
+      # Found only after making the assert print stderr. My first guess was the
+      # known ASan-vs-high-ASLR crash on Ubuntu 24.04; it was not that.
+      - name: CUDA driver stub (no GPU on this runner)
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/cudastub"
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cudastub/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cudastub" >> "$GITHUB_ENV"
+
       - name: Assert the fuzz corpus is in the binary
         if: steps.scope.outputs.run == 'true'
         run: |
@@ -596,6 +612,10 @@ jobs:
             exit 1
           fi
 
+      # Measured locally on this tree, GPU-less, same flags: test-core 741 pass,
+      # test-text 200 pass, no ASan report. FuzzCorpus.Regex is 11 s of that
+      # under ASan against 0.5 s without - the NFA compiler over 1500 mutations
+      # is what the sanitizer slows down.
       - name: Run
         if: steps.scope.outputs.run == 'true'
         env:
