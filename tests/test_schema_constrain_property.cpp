@@ -253,5 +253,137 @@ TEST(SchemaConstrainPropertyTest, NumberGrammarMatchesRfc8259) {
     }
 }
 
+// ===========================================================================
+// Parser-level cases: what the schema parser does with input it cannot handle.
+//
+// Every one of these used to return a non-null tree. The FSM then enforced
+// something the caller did not ask for, at HTTP 200, which is the outcome
+// docs/API.md excludes ("a constraint imp cannot compile is a 400").
+// ===========================================================================
+
+// #1564: parse_bool() returns false WITHOUT consuming when the value is not
+// true/false, so `additionalProperties: {schema}` left pos_ on '{' and every
+// key after it was dropped. With `properties` gone the node is an empty object
+// schema, which constraint_manager.cpp routes to the any-JSON constrainer:
+// the reply is JSON with arbitrary keys and nothing says so.
+TEST(SchemaParserDesync, AdditionalPropertiesAsObjectDoesNotTruncateTheSchema) {
+    const std::string schema = R"({"type":"object","additionalProperties":{"type":"number"},)"
+                               R"("properties":{"a":{"type":"string"}},"required":["a"]})";
+    auto node = parse_json_schema(schema);
+    ASSERT_NE(node, nullptr) << "the object form is legal JSON Schema and must parse";
+    EXPECT_EQ(node->type, SchemaType::OBJECT);
+    ASSERT_EQ(node->properties.size(), 1u)
+        << "keys after additionalProperties were dropped, so the request silently "
+           "downgrades to json_object";
+    EXPECT_EQ(node->properties[0].first, "a");
+    ASSERT_EQ(node->required.size(), 1u);
+    EXPECT_EQ(node->required[0], "a");
+}
+
+TEST(SchemaParserDesync, AdditionalPropertiesFalseStillParses) {
+    // Negative control: the boolean form is the common one and must be untouched.
+    auto node = parse_json_schema(R"({"type":"object","properties":{"v":{"type":"string"}},"required":["v"],)"
+                                  R"("additionalProperties":false})");
+    ASSERT_NE(node, nullptr);
+    EXPECT_FALSE(node->additional_properties);
+    EXPECT_EQ(node->properties.size(), 1u);
+}
+
+// #1564: parse_string() has the same non-consuming default, so {"enum":[1,2,3]}
+// produced enum_values == {""} and constrained the model to the empty string.
+// The FSM emits an enum as quoted string content, so there is no representation
+// for a numeric member: refusing is the only outcome that is not wrong.
+TEST(SchemaParserDesync, NonStringEnumIsRefused) {
+    EXPECT_EQ(parse_json_schema(R"({"type":"integer","enum":[1,2,3]})"), nullptr);
+    EXPECT_EQ(parse_json_schema(R"({"enum":[true,false]})"), nullptr);
+    EXPECT_EQ(parse_json_schema(R"({"enum":[null]})"), nullptr);
+}
+
+TEST(SchemaParserDesync, StringEnumStillParses) {
+    auto node = parse_json_schema(R"({"type":"string","enum":["red","green"]})");
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->type, SchemaType::ENUM);
+    ASSERT_EQ(node->enum_values.size(), 2u);
+    EXPECT_EQ(node->enum_values[0], "red");
+}
+
+TEST(SchemaParserDesync, TrailingInputIsAnError) {
+    EXPECT_EQ(parse_json_schema(R"({"type":"string"} {"type":"integer"})"), nullptr);
+}
+
+TEST(SchemaParserDesync, UnclosedObjectIsAnError) {
+    EXPECT_EQ(parse_json_schema(R"({"type":"object","properties":{"a":{"type":"string"})"), nullptr);
+}
+
+// #1567: thirteen standard assertion keywords were accepted and dropped by
+// skip_value(). A caller that bounds its output was answered as if it had not.
+TEST(SchemaUnenforceableKeywords, AssertionKeywordsAreRefused) {
+    const char* refused[] = {
+        R"({"type":"integer","minimum":1,"maximum":5})",
+        R"({"type":"integer","exclusiveMinimum":0})",
+        R"({"type":"number","multipleOf":2})",
+        R"({"allOf":[{"type":"string"}]})",
+        R"({"not":{"type":"string"}})",
+        R"({"type":"array","uniqueItems":true})",
+        R"({"type":"object","patternProperties":{"^a":{"type":"string"}}})",
+        R"({"type":"object","propertyNames":{"pattern":"^a"}})",
+        R"({"type":"array","prefixItems":[{"type":"string"}]})",
+        R"({"type":"object","minProperties":1})",
+    };
+    for (const char* s : refused) {
+        EXPECT_EQ(parse_json_schema(s), nullptr) << "must be refused, not silently dropped: " << s;
+    }
+}
+
+TEST(SchemaUnenforceableKeywords, AnnotationsAreStillIgnored) {
+    // format is an annotation in Draft 2020-12 unless the format-assertion
+    // vocabulary is in use, and these four change no legal value. Refusing them
+    // would break working clients for nothing.
+    auto node = parse_json_schema(R"({"$schema":"https://json-schema.org/draft/2020-12/schema",)"
+                                  R"("title":"T","description":"D","examples":["x"],"default":"x",)"
+                                  R"("type":"string","format":"date-time"})");
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->type, SchemaType::STRING);
+}
+
+TEST(SchemaUnenforceableKeywords, ConstIsEnforcedAsASingleValueEnum) {
+    auto node = parse_json_schema(R"({"const":"fixed"})");
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->type, SchemaType::ENUM);
+    ASSERT_EQ(node->enum_values.size(), 1u);
+    EXPECT_EQ(node->enum_values[0], "fixed");
+    // Same string-only limit as enum, and for the same reason.
+    EXPECT_EQ(parse_json_schema(R"({"const":42})"), nullptr);
+}
+
+// #1609: recursive descent over a request body. 10^5 nested "items" objects
+// overflow the worker thread's stack; the cap turns that into a parse error,
+// which the admission path already renders as a 400.
+TEST(SchemaDepthCap, DeeplyNestedSchemaIsRefusedInsteadOfOverflowing) {
+    std::string deep;
+    const int kLevels = 5000;
+    for (int i = 0; i < kLevels; i++)
+        deep += R"({"type":"array","items":)";
+    deep += R"({"type":"string"})";
+    for (int i = 0; i < kLevels; i++)
+        deep += "}";
+    EXPECT_EQ(parse_json_schema(deep), nullptr);
+}
+
+TEST(SchemaDepthCap, ModeratelyNestedSchemaStillParses) {
+    // Negative control: 8 levels is deeper than anything a real generator
+    // emits and must keep working.
+    std::string s;
+    const int kLevels = 8;
+    for (int i = 0; i < kLevels; i++)
+        s += R"({"type":"array","items":)";
+    s += R"({"type":"string"})";
+    for (int i = 0; i < kLevels; i++)
+        s += "}";
+    auto node = parse_json_schema(s);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->type, SchemaType::ARRAY);
+}
+
 }  // namespace
 }  // namespace imp

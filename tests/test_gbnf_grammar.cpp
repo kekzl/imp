@@ -17,6 +17,8 @@
 
 #include "compute/gbnf_grammar.h"
 
+#include <vector>
+
 #include <string>
 
 using imp::GbnfMatcher;
@@ -416,4 +418,26 @@ TEST(GbnfGrammar, ResetReturnsToTheStart) {
     EXPECT_FALSE(m.is_done());
     EXPECT_TRUE(m.would_accept("a"));
     EXPECT_FALSE(m.would_accept("b"));
+}
+
+// #1609: the GBNF parser is recursive descent over a request-supplied string
+// and had a repetition bound but no nesting bound, so `root ::= ((((...` cost
+// one stack frame per byte. A failed parse is already a 400 by design.
+TEST(GbnfDepthCap, DeeplyNestedGroupsAreRefusedInsteadOfOverflowing) {
+    std::string g = "root ::= ";
+    g.append(5000, '(');
+    g += "\"a\"";
+    g.append(5000, ')');
+    std::vector<imp::GbnfRule> rules;
+    int32_t root = -1;
+    std::string err;
+    EXPECT_FALSE(imp::parse_gbnf(g, rules, root, &err));
+    EXPECT_NE(err.find("nesting"), std::string::npos) << err;
+}
+
+TEST(GbnfDepthCap, OrdinaryNestingStillParses) {
+    std::vector<imp::GbnfRule> rules;
+    int32_t root = -1;
+    std::string err;
+    EXPECT_TRUE(imp::parse_gbnf("root ::= ((((\"a\" | \"b\"))))", rules, root, &err)) << err;
 }

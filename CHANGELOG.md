@@ -163,6 +163,31 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`json_schema`: two shapes desynced the parser and truncated the rest of the
+  schema** (#1564). `additionalProperties` as a schema object and a non-string
+  `enum` member each hit a parse helper that returns a default without consuming
+  input, so every key after them was dropped. With `properties` gone the request
+  silently became `json_object`; `{"enum":[1,2,3]}` constrained the model to the
+  empty string. The object form of `additionalProperties` now parses (its
+  constraint on extra keys is not enforced), a non-string `enum` is a `400`, and
+  trailing or unclosed input fails the parse instead of returning a partial tree.
+
+- **`json_schema`: assertion keywords are refused instead of dropped** (#1567).
+  `minimum`, `maximum`, `multipleOf`, `allOf`, `not`, `uniqueItems` and thirteen
+  more were accepted and ignored, so a caller who bounded a field got an
+  unbounded grammar at HTTP 200. They are a `400` now, per the contract in
+  `docs/API.md`. `const` is implemented. Annotations (`format`, `title`,
+  `description`, `default`) stay ignored. **Behaviour change for clients that
+  send these keywords today.**
+
+- **Three request-driven parsers had no cost bound** (#1608, #1609). Nesting
+  depth mapped 1:1 onto stack frames in the schema, regex and GBNF parsers
+  (`((((` is one frame per byte), and the regex `{n,m}` quantifier cloned its
+  atom `n` times with no cap: `a{2000000000}` ran a two-billion iteration
+  allocating loop on an HTTP worker thread, at admission, before the engine
+  lock. Depth is capped at 64, repeats at 1024 (matching the GBNF parser's
+  existing bound) and one pattern at 100k NFA states.
+
 - **Four out-of-bounds accesses in the model-file parsers, all reachable from a
   checkpoint directory before any inference runs** (#1603, #1604, #1605, #1606).
   A SafeTensors tensor was validated with one element width and read with
