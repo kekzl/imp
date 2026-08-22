@@ -77,8 +77,19 @@ rather than reporting it as a result.
 ## The gate
 
 - Canonical baseline: **`tests/perf_baseline.json`** — thresholds **8 % decode /
-  8 % prefill** (`scripts/bench_gate.sh`, used by `make verify*` and the GPU CI job)
-  and **10 % peak VRAM** (`scripts/verify.sh`, see below). One file, two gates.
+  8 % prefill** and **10 % peak VRAM**. One file, and **two scripts that are not
+  interchangeable** (#1625):
+
+| | `scripts/verify.sh` | `scripts/bench_gate.sh` |
+|---|---|---|
+| driven by | `make verify`, `make verify-fast`, the pre-push hook | the `Test` CI job (self-hosted GPU runner) |
+| trials | 3 independent processes, median | 1 process, 3 internal reps |
+| VRAM gate | yes | no |
+| speculation | off | off since #1625; **was on**, so it measured a quantity the pin does not describe |
+
+  Both pass `--set speculative.ngram=false` now, which is what
+  `tests/perf_baseline.json` states in its own `methodology` field. Until #1625
+  only `verify.sh` did, and the two were documented as one gate.
 - A decode delta worse than −8 % **fails**; a prefill delta worse than −8 % warns
   (cuBLAS variance).
 - **When it runs.** The pre-push hook runs the perf gate only when the diff can

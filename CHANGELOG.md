@@ -180,6 +180,21 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The perf gate measured a different quantity than the pin it compares
+  against, and two CI jobs claimed coverage they do not have** (#1600, #1624,
+  #1625, #1685). `scripts/bench_gate.sh` benched with n-gram speculation ON
+  while `tests/perf_baseline.json` states `speculative.ngram=false` in its own
+  `methodology` field; both scripts pass the flag now, and
+  `docs/internals/BENCHMARKING.md` carries a table of the remaining differences
+  instead of calling them one gate. The gate prints the pin's date, age and
+  model, and warns above 30 days: the measurement contract is single-session,
+  and host drift over a month (4.01 % measured on this box between runs hours
+  apart) is larger than the gate can tell from a code change. The CI job that
+  ran `pytest -m nomodel` is called `Real API contract (model-less)` now and
+  prints how many tests it deselected; the generation half, and the absence of
+  any server-side perf gate, are in `LIMITATIONS.md` rather than implied by a
+  green check.
+
 - **Eight places where the OpenAI surface answered instead of refusing, or said
   nothing about itself** (#1590, #1591, #1593, #1595, #1596, #1598, #1599,
   #1602). `response_format` with an unknown `type`, or a known type whose

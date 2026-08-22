@@ -327,6 +327,42 @@ fi
 
 # --------------------------------------------------------------------- 3. perf
 section "perf vs baseline"
+
+# Age and provenance of the pin (#1624).
+#
+# AGENTS.md and docs/internals/BENCHMARKING.md both say a comparison is only
+# meaningful within one session on one host, and then the gate compares against
+# a number measured weeks earlier with nothing saying how old it is. The
+# threshold is not a correctness bound, it is the point past which "the host
+# moved" outweighs "the code moved": measured on this box, three runs back to
+# back spread 0.09 % and the same binary hours apart spread 4.01 %, against an
+# 8 % gate. A pin older than a month is comparing across a distance the gate
+# cannot see.
+#
+# A warning, not a failure: a stale pin still catches a 30 % regression, and
+# failing the gate on a calendar date would train people to regenerate the pin
+# to make it quiet, which is the opposite of the point.
+if [ -f "$BASELINE" ]; then
+    _pin_ts=$(grep -oE '"timestamp"[[:space:]]*:[[:space:]]*"[^"]*"' "$BASELINE" |
+              head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    if [ -n "$_pin_ts" ]; then
+        _pin_epoch=$(date -u -d "$_pin_ts" +%s 2>/dev/null || echo "")
+        _now_epoch=$(date -u +%s)
+        if [ -n "$_pin_epoch" ]; then
+            _age_days=$(( (_now_epoch - _pin_epoch) / 86400 ))
+            _pin_model=$(grep -oE '"model"[[:space:]]*:[[:space:]]*"[^"]*"' "$BASELINE" |
+                         head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+            echo "  pin: $_pin_ts (${_age_days} days old), model $_pin_model"
+            if [ "$_age_days" -gt 30 ]; then
+                echo "  WARNING: the baseline is ${_age_days} days old. The measurement contract"
+                echo "           (AGENTS.md) is single-session; host drift over that span is larger"
+                echo "           than this gate can distinguish from a code change. Regenerate with"
+                echo "           scripts/gen_perf_baseline.sh when the current numbers are trusted."
+            fi
+        fi
+    fi
+fi
+
 if [ "${IMP_VERIFY_SKIP_PERF:-0}" = "1" ]; then
     skip "perf gate (IMP_VERIFY_SKIP_PERF=1)"
 elif [ ! -f "$BASELINE" ]; then

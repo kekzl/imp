@@ -30,9 +30,14 @@ run_bench() {
   # do NOT merge 2>&1 here — the measured call below captures stderr into $ERR and
   # parses it. (Merging would send the result lines to the caller's /dev/null and
   # leave $ERR empty, which set -e then turns into a silent early exit.)
+  # `speculative.ngram=false` is not optional here: tests/perf_baseline.json
+  # states in its own `methodology` field that the pin was taken spec-OFF, and
+  # scripts/verify.sh passes the same flag. Without it this script measured a
+  # different quantity than the number it compares against, while both were
+  # documented as one gate (#1625).
   CUBLAS_WORKSPACE_CONFIG=:4096:8 "$CLI" --model "$MODEL_PATH" --bench \
     --bench-pp 512 --bench-reps 3 --prefill-chunk-size 0 --max-tokens 128 \
-    --temperature 0
+    --temperature 0 --set speculative.ngram=false
 }
 
 # Warm the clocks: the GPU downclocks at idle and the first ~1s reads low. One

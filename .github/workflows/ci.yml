@@ -355,7 +355,7 @@ jobs:
   # Runs in the same CUDA image the Build job compiled in: the binary is linked
   # against that libstdc++, so a plain ubuntu-24.04 runner cannot load it.
   real-api:
-    name: Real API contract
+    name: Real API contract (model-less)
     needs: build
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -383,6 +383,22 @@ jobs:
           # conftest.py starts it model-less and shuts it down at session end.
           IMP_SERVER_BIN="$PWD/build/imp-server" \
             python3 -m pytest tests/api -m nomodel --tb=short -q
+
+      # What this job does NOT cover, printed rather than implied (#1600).
+      # Generation needs a GPU and CI has no GPU runner, so every test that
+      # produces a token is deselected here. The job name says "model-less" for
+      # the same reason: "Real API contract" green next to a streaming defect
+      # reads as coverage.
+      - name: State the uncovered half
+        run: |
+          total=$(python3 -m pytest tests/api --collect-only -q 2>/dev/null | tail -1)
+          covered=$(python3 -m pytest tests/api -m nomodel --collect-only -q 2>/dev/null | tail -1)
+          echo "collected here:  $covered"
+          echo "collected total: $total"
+          echo ""
+          echo "The difference is the generation contract: SSE frame structure, usage"
+          echo "accounting, finish_reason, tool-call streaming. It runs in 'make test-server'"
+          echo "on a machine with a GPU and in no CI job. See docs/LIMITATIONS.md."
 
   # Format check (CI1). clang-format on CHANGED LINES only (git clang-format).
   # ADVISORY: it surfaces the diff but does not fail the job — the repo is not
