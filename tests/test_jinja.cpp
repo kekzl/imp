@@ -517,6 +517,96 @@ TEST(JinjaTest, TojsonBool) {
 // Real Qwen3 chat template (with is string, system message, slice)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Macro parameters, block set, unknown tags (#1565, #1566)
+// ---------------------------------------------------------------------------
+
+// #1566: the parameter parser tested for OP "=", which the lexer never emits
+// for a bare '='. The default expression and the '=' were consumed as two
+// extra positional parameters, so the named parameter bound to none.
+TEST(JinjaTest, MacroDefaultParameter) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% macro f(a, b=false) %}{{ a }}|{{ b }}{% endmacro %}{{ f('x') }}"));
+    EXPECT_EQ(tpl.render({}), "x|False");
+}
+
+TEST(JinjaTest, MacroDefaultParameterOverridden) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% macro f(a, b=1) %}{{ a }}|{{ b }}{% endmacro %}{{ f('x', 9) }}"));
+    EXPECT_EQ(tpl.render({}), "x|9");
+}
+
+TEST(JinjaTest, MacroDefaultParameterStringLiteral) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% macro f(a='hi') %}[{{ a }}]{% endmacro %}{{ f() }}"));
+    EXPECT_EQ(tpl.render({}), "[hi]");
+}
+
+// #1565: {% set x %}...{% endset %} captures the block body into the variable.
+// Gemma-4's shipped chat_template.jinja uses it (captured_content), and
+// dropping `endset` printed the body inline and left the variable unset.
+TEST(JinjaTest, BlockSetCapturesBody) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{%- set x -%}hello{%- endset -%}[{{ x }}]"));
+    EXPECT_EQ(tpl.render({}), "[hello]");
+}
+
+TEST(JinjaTest, BlockSetBodyIsNotEmittedInline) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{%- set x -%}captured{%- endset -%}done"));
+    EXPECT_EQ(tpl.render({}), "done");
+}
+
+TEST(JinjaTest, BlockSetEvaluatesBody) {
+    Template tpl;
+    ASSERT_TRUE(
+        tpl.parse("{%- set x -%}{% for i in items %}{{ i }}{% endfor %}{%- endset -%}"
+                  "{{ x | length }}:{{ x }}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "2:ab");
+}
+
+TEST(JinjaTest, BlockSetFeedsFilters) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{%- set x -%}  {%- endset -%}{{ (x | trim | length) > 0 }}"));
+    EXPECT_EQ(tpl.render({}), "False");
+}
+
+// #1565: an unsupported tag was skipped to %} with no log and no error, so
+// parse() could not fail and ChatTemplate's fallback path was unreachable.
+TEST(JinjaTest, UnknownTagFailsParse) {
+    Template tpl;
+    EXPECT_FALSE(tpl.parse("hello {% frobnicate x %} world"));
+    EXPECT_NE(tpl.error().find("frobnicate"), std::string::npos) << tpl.error();
+}
+
+TEST(JinjaTest, UnsupportedJinjaTagFailsParse) {
+    // Real Jinja tags the engine does not implement must refuse, not render
+    // the wrong prompt: {% raw %} would otherwise emit its body with the
+    // escaping stripped.
+    for (const char* src : {"{% raw %}{{ x }}{% endraw %}", "{% include 'other.j2' %}",
+                            "{% filter upper %}a{% endfilter %}", "{% block b %}a{% endblock %}"}) {
+        Template tpl;
+        EXPECT_FALSE(tpl.parse(src)) << src;
+        EXPECT_FALSE(tpl.error().empty()) << src;
+    }
+}
+
+TEST(JinjaTest, UnbalancedEndTagFailsParse) {
+    Template tpl;
+    EXPECT_FALSE(tpl.parse("{% endif %}"));
+    EXPECT_NE(tpl.error().find("endif"), std::string::npos) << tpl.error();
+}
+
+// {% generation %} marks the assistant span for training masks. It has no
+// effect on the rendered text, and HF's own renderer ignores it, so refusing
+// the template would be wrong.
+TEST(JinjaTest, GenerationTagIsANoOp) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("a{% generation %}b{% endgeneration %}c"));
+    EXPECT_EQ(tpl.render({}), "abc");
+}
+
 TEST(JinjaChatTest, Qwen3RealTemplate) {
     Template tpl;
     ASSERT_TRUE(

@@ -742,6 +742,10 @@ struct SetNode : Node {
     std::string var_name;   // "x" or "ns" for ns.x
     std::string attr_name;  // "x" when doing ns.x = ...
     std::unique_ptr<Expr> value;
+    // Block form: {% set x %}...{% endset %}. The body renders into a string
+    // and that string is the value; `value` is null in this form.
+    std::vector<std::unique_ptr<Node>> body;
+    bool is_block = false;
 };
 
 struct MacroNode : Node {
@@ -765,7 +769,7 @@ public:
     bool parse(std::vector<std::unique_ptr<Node>>& out) {
         while (!at_end()) {
             auto node = parse_node();
-            if (too_deep_)
+            if (too_deep_ || !unknown_tag_.empty())
                 break;
             if (!node) {
                 // Skip problematic token and continue
@@ -775,7 +779,7 @@ public:
             }
             out.push_back(std::move(node));
         }
-        if (too_deep_) {
+        if (too_deep_ || !unknown_tag_.empty()) {
             // Half-built nodes can hold null sub-expressions, and the
             // evaluator dereferences those without checking. The caller
             // discards a failed parse, so leave nothing behind for it.
@@ -785,6 +789,9 @@ public:
         return true;
     }
 
+    // Empty unless parse() stopped on a tag this engine does not implement.
+    const std::string& unknown_tag() const { return unknown_tag_; }
+
 private:
     // The template comes out of the model file (`chat_template` in
     // tokenizer_config.json), so its nesting is not the operator's either.
@@ -793,12 +800,10 @@ private:
     // of 100 000 '(' overflows the stack during load. 256 is far past any
     // real chat template; the deepest in this tree is 6.
     //
-    // Note what this does NOT fix: an unknown tag is still dropped silently,
-    // so `parse()` still cannot fail for the reason a template author would
-    // expect. That is #1565 and it needs its own error channel.
     static constexpr int kMaxParseDepth = 256;
     int depth_ = 0;
     bool too_deep_ = false;
+    std::string unknown_tag_;
 
     struct DepthGuard {
         Parser& p;
@@ -886,11 +891,27 @@ private:
             return parse_set();
         if (check(TokenType::IDENT, "macro"))
             return parse_macro();
-        // Unknown statement — skip to %}
-        while (!at_end() && !check(TokenType::STMT_CLOSE))
-            advance();
-        if (check(TokenType::STMT_CLOSE))
-            advance();
+        // {% generation %}/{% endgeneration %} mark the assistant span for
+        // training masks. They contribute nothing to the rendered text and
+        // HF's renderer ignores them, so they are a no-op rather than a
+        // refusal.
+        if (check(TokenType::IDENT, "generation") || check(TokenType::IDENT, "endgeneration")) {
+            while (!at_end() && !check(TokenType::STMT_CLOSE))
+                advance();
+            if (check(TokenType::STMT_CLOSE))
+                advance();
+            // An empty node, not nullptr: the caller reads nullptr as "could
+            // not parse this token" and skips one MORE token, which ate the
+            // text right after the tag.
+            return std::make_unique<TextNode>(std::string());
+        }
+        // Anything else is a tag this engine does not implement, or an
+        // unbalanced end tag. Skipping it silently produced a wrong prompt
+        // with no error, and made ChatTemplate's "fall back to the hardcoded
+        // template" path unreachable (#1565): parse() could not fail.
+        unknown_tag_ = peek().value;
+        if (unknown_tag_.empty())
+            unknown_tag_ = "<empty>";
         return nullptr;
     }
 
@@ -972,8 +993,12 @@ private:
                 MacroNode::Param param;
                 param.name = peek().value;
                 advance();
-                // Optional default: =expr
-                if (check(TokenType::OP, "=")) {
+                // Optional default: =expr. The lexer emits ASSIGN for a bare
+                // '=' and OP only for "==" (#1566): testing for OP "=" matched
+                // nothing, so the '=' and the default expression were consumed
+                // as two extra positional parameters and the named one bound
+                // to none.
+                if (check(TokenType::ASSIGN)) {
                     advance();
                     param.default_value = parse_expr();
                 }
@@ -1073,8 +1098,28 @@ private:
             advance();
         }
 
-        if (check(TokenType::ASSIGN))
-            advance();
+        // Block form: {% set x %}...{% endset %} captures the rendered body.
+        // Gemma-4's shipped chat_template.jinja builds captured_content this
+        // way. Without it the '=' branch below ran parse_expr() on '%}', the
+        // body rendered inline into the output, and the variable stayed
+        // unset - so `captured_content | trim | length > 0` was always false
+        // (#1565).
+        if (!check(TokenType::ASSIGN)) {
+            node->is_block = true;
+            if (check(TokenType::STMT_CLOSE))
+                advance();
+            parse_body(node->body, {"endset"});
+            if (check(TokenType::STMT_OPEN)) {
+                advance();
+                if (check(TokenType::IDENT, "endset"))
+                    advance();
+                if (check(TokenType::STMT_CLOSE))
+                    advance();
+            }
+            return node;
+        }
+
+        advance();  // '='
 
         node->value = parse_expr();
         if (check(TokenType::STMT_CLOSE))
@@ -1085,6 +1130,10 @@ private:
 
     void parse_body(std::vector<std::unique_ptr<Node>>& body, const std::vector<std::string>& end_keywords) {
         while (!at_end()) {
+            // A tag the engine cannot parse ends the whole parse; without this
+            // the body loop keeps advancing to the end of the template first.
+            if (!unknown_tag_.empty() || too_deep_)
+                return;
             // Check if next is a closing statement keyword
             if (check(TokenType::STMT_OPEN)) {
                 size_t saved = pos_;
@@ -1728,6 +1777,19 @@ private:
     }
 
     void render_set(const SetNode& node) {
+        if (node.is_block) {
+            std::string captured;
+            for (const auto& n : node.body)
+                render_node(*n, captured);
+            if (!node.attr_name.empty()) {
+                Value ns = lookup(node.var_name);
+                if (ns.is_object())
+                    ns.set(node.attr_name, Value(std::move(captured)));
+            } else {
+                set_var_update(node.var_name, Value(std::move(captured)));
+            }
+            return;
+        }
         Value val = eval(*node.value);
         if (!node.attr_name.empty()) {
             // namespace set: ns.attr = val
@@ -2672,7 +2734,9 @@ bool Template::parse(const std::string& source_in) {
 
     detail::Parser parser(tokens);
     if (!parser.parse(nodes_)) {
-        error_ = "Parse error";
+        error_ = parser.unknown_tag().empty()
+                     ? "Parse error"
+                     : "unsupported or unbalanced tag: {% " + parser.unknown_tag() + " %}";
         return false;
     }
     return true;
