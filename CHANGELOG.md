@@ -180,6 +180,26 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Two binaries returned exit 0 after doing no work** (#1584). `imp-bench`
+  counted invocations rather than measurements, so a host with no CUDA device
+  printed "Benchmarks run: 4" and exited 0 with nothing measured; every bench
+  entry point was `void` and could not report otherwise. They return `bool`
+  now, the summary reads "run: N of M requested", and a shortfall exits 7.
+  Measured: `imp-bench gemm` without `--gpus` is **exit 7** and "0 of 1", with
+  a GPU **exit 0** and "1 of 1". `imp-server` likewise fell through a failed
+  `listen_after_bind` to `return 0`, so a supervisor that restarts on non-zero
+  did not restart a server that never listened.
+
+- **Per-request log lines bypassed `diagnostics.log_level`** (#1582, first
+  half). Eleven `fprintf(stderr, ...)` sites fire once or more per HTTP
+  request, which is exactly when volume matters, and none of them reached the
+  level check every `IMP_LOG_*` site in `src/` passes through. They are on the
+  facility now, so they carry a timestamp and an origin and obey the level.
+  Measured: three requests produce **3 lines at the default level and 0 at
+  `--set diagnostics.log_level=warn`**. Startup and pre-logging failures stay
+  on stderr deliberately. The second half of that issue - two disjoint
+  request-id spaces - is a design decision and is left open.
+
 - **`json_schema`: a `\uXXXX` escape compiled to a literal `?`** (#1563). The
   schema string parser skipped the four hex digits and appended `?`. That is
   not an edge case: `json.dumps` defaults to `ensure_ascii=True`, so a schema

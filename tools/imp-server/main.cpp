@@ -1,4 +1,5 @@
 #include "args.h"
+#include "common/exit_codes.h"
 #include "handlers.h"
 #include "utils.h"
 #include "webui_asset.h"  // generated: IMP_WEBUI_HTML
@@ -463,12 +464,18 @@ int main(int argc, char** argv) {
     printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 
+    // listen_after_bind() returns false on stop() AND on a listen failure, and
+    // the two used to leave the same exit code: 0. A supervisor that restarts
+    // on non-zero therefore did not restart a server that never listened
+    // (#1584). g_server is nulled by the signal handler, so it is what
+    // separates "we were asked to stop" from "we could not serve".
+    int exit_status = 0;
     if (!svr.listen_after_bind()) {
-        // listen_after_bind() returns false on stop() or bind failure
         if (!g_server.load(std::memory_order_relaxed)) {
             // Server was nulled by signal — clean shutdown
         } else {
             fprintf(stderr, "Failed to start server on %s:%d\n", args.host.c_str(), args.port);
+            exit_status = imp::tools::exit_code_for(IMP_ERROR_INTERNAL);
         }
     }
 
@@ -480,5 +487,5 @@ int main(int argc, char** argv) {
     imp_context_free(state.ctx);
     imp_model_free(state.model);
     imp_weights_snapshot_free(state.weight_snapshot);  // non-null only when suspended
-    return 0;
+    return exit_status;
 }

@@ -181,8 +181,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     // Parse stop sequences (same 16-entry cap as the chat parser).
     std::vector<std::string> stop_sequences;
     if (parse_stop_field(body, 16, stop_sequences)) {
-        fprintf(stderr, "warning: request sent %zu stop sequences; keeping the first 16\n",
-                body["stop"].size());
+        IMP_LOG_WARN("request sent %zu stop sequences; keeping the first 16", body["stop"].size());
     }
     size_t max_stop_len = 0;
     for (const auto& s : stop_sequences)
@@ -218,8 +217,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
     // Log request received
     std::string req_id = make_completion_id(state);
-    fprintf(stderr, "[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f\n", req_id.c_str(),
-            prompt.size(), stream ? "true" : "false", max_tokens, temperature);
+    IMP_LOG_INFO("[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f", req_id.c_str(),
+                 prompt.size(), stream ? "true" : "false", max_tokens, temperature);
 
     // Validate model field (required per OpenAI spec)
     std::string requested_model = body.value("model", "");
@@ -620,8 +619,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
                 auto t_end = std::chrono::high_resolution_clock::now();
                 double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-                fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n", comp_id.c_str(),
-                        n_prompt_tokens, n_output_tokens, ms);
+                IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(),
+                             n_prompt_tokens, n_output_tokens, ms);
                 state.metrics.requests_total++;
                 state.metrics.tokens_prompt_total += n_prompt_tokens;
                 state.metrics.tokens_completion_total += n_output_tokens;
@@ -711,8 +710,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n", comp_id.c_str(), n_prompt_tokens,
-                n_output_tokens, ms);
+        IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(), n_prompt_tokens,
+                     n_output_tokens, ms);
         state.metrics.requests_total++;
         state.metrics.tokens_prompt_total += n_prompt_tokens;
         state.metrics.tokens_completion_total += n_output_tokens;
