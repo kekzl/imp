@@ -141,6 +141,13 @@ public:
     // Phase 2+: forward+verify wiring.
     std::optional<MtpHead> mtp_;
 
+    // The checkpoint carries an MTP head that this load did NOT take, because
+    // speculative.mtp_k defaults to 0 (#1537). The loader logs one INFO line
+    // about it; this makes the same fact readable, so /health can say it and an
+    // operator does not have to grep a startup log to learn a documented
+    // +8 to +22% decode is sitting switched off.
+    bool mtp_head_available_unloaded_ = false;
+
     // Load-time scratch for NVFP4 prequant scale tensors.
     // Keys:
     //   "L{idx}.{slot}"          per-layer dense (e.g. "L5.wq", "L5.w_gate_shared")

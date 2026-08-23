@@ -180,6 +180,23 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`json_schema`: an unconstrained `integer` had no digit bound** (#1540). At
+  the server's default temperature the sampler could sit in the digit state and
+  emit `1020000000000000000000000000000000000000` for a population field - a
+  value no int64 consumer can read back; at temperature 0 the same request
+  answered `13528079`. The FSM stops the digit run at 19, int64's width, and
+  masks further digits so the model closes the value instead. `number` is
+  unchanged: there the digits carry precision, not magnitude.
+
+- **A checkpoint's unloaded MTP head is visible in `/health`** (#1537).
+  `speculative.mtp_k` defaults to 0, so a checkpoint that ships a head runs
+  without a documented +8 to +22% decode, and the only notice was one INFO line
+  an operator running a container never sees. `GET /health` reports
+  `mtp_head_available` with the trade. Measured on `Qwen3.8-27B-NVFP4`: present
+  by default, absent with `--set speculative.mtp_k=2`, where the head loads
+  (15 tensors, 0.79 GiB). The default is unchanged - turning it on for everyone
+  costs VRAM and is a decision, not a fix.
+
 - **What `runtime.deterministic` covers is now written down, and gated**
   (#1574). It reaches four kernel sites through
   `process_diag_deterministic_gemm()`; `gemm_cutlass_grouped_3x.cu` - the

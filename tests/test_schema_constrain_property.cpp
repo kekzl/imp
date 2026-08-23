@@ -315,6 +315,43 @@ TEST(SchemaParserDesync, UnclosedObjectIsAnError) {
     EXPECT_EQ(parse_json_schema(R"({"type":"object","properties":{"a":{"type":"string"})"), nullptr);
 }
 
+// #1540: an unconstrained `integer` had no digit bound. At the server's default
+// temperature the sampler stayed in the digit state and emitted
+// 1020000000000000000000000000000000000000 for a population field - a value no
+// int64 consumer can read back. Measured on Qwen3.8-27B-NVFP4 at temperature
+// 0.6; at temperature 0 the same request answered 13528079.
+TEST(SchemaIntegerBound, DigitsStopAtInt64Width) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"pop":{"type":"integer"}},)"
+                       R"("required":["pop"]})");
+    ASSERT_NE(sc, nullptr);
+
+    // 19 digits is int64's width and stays legal.
+    EXPECT_TRUE(sc->token_legal(R"({"pop": 9223372036854775807})"));
+    // 20 does not: the FSM masks the digit, so the model has to close the value.
+    EXPECT_FALSE(sc->token_legal(R"({"pop": 92233720368547758070})"));
+    // The reported output, at 40 digits.
+    EXPECT_FALSE(sc->token_legal(R"({"pop": 1020000000000000000000000000000000000000})"));
+}
+
+TEST(SchemaIntegerBound, ShortIntegersAreUnaffected) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"pop":{"type":"integer"}},)"
+                       R"("required":["pop"]})");
+    ASSERT_NE(sc, nullptr);
+    for (const char* doc :
+         {R"({"pop": 0})", R"({"pop": 42})", R"({"pop": -13528079})", R"({"pop": 3691000})"}) {
+        EXPECT_TRUE(sc->token_legal(doc)) << doc;
+    }
+}
+
+// The bound is on `integer`. A `number` keeps its JSON-legal mantissa, because
+// there the digits carry precision rather than magnitude.
+TEST(SchemaIntegerBound, NumberIsNotBounded) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"x":{"type":"number"}},)"
+                       R"("required":["x"]})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"x": 1.02000000000000000000000000000000000000001})"));
+}
+
 // #1567: thirteen standard assertion keywords were accepted and dropped by
 // skip_value(). A caller that bounds its output was answered as if it had not.
 TEST(SchemaUnenforceableKeywords, AssertionKeywordsAreRefused) {

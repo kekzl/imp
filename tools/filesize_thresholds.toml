@@ -74,7 +74,7 @@ roots = ["src", "tools", "tests"]
 "src/compute/gemv_dp4a_traits.cuh" = { code_loc = 1320, reason = "(b) trait-based template library: 8 DequantTraits<> specializations + 6 template GEMV kernels, consolidating ~33 hand-written kernels (header - wide include blast radius)" }
 "src/compute/json_schema.cpp" = { code_loc = 1147, reason = "(c) one module: JSON-schema parser + RegexNfa compiler/executor for constrained decode" }
 "src/compute/mtp_forward.cu" = { code_loc = 856, reason = "(c) MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature" }
-"src/compute/schema_constrain.cu" = { code_loc = 1181, reason = "(c) schema-constrained decode token-mask compute (host-side): the shared frame-stack simulator now carries TWO body grammars (JSON schema + Qwen-Coder XML tool calls) around one sim_advance source of truth; split candidate if a third grammar lands" }
+"src/compute/schema_constrain.cu" = { code_loc = 1184, reason = "(c) schema-constrained decode token-mask compute (host-side): the shared frame-stack simulator now carries TWO body grammars (JSON schema + Qwen-Coder XML tool calls) around one sim_advance source of truth; split candidate if a third grammar lands" }
 "src/exec/executor_forward.cu" = { code_loc = 732, reason = "(c) executor forward orchestration (one dense forward path + 2 scale helpers)" }
 "src/exec/executor_forward_moe_batch.cu" = { code_loc = 1061, reason = "(c) one path: batched-MoE forward dispatch (host-only)" }
 "src/exec/executor_workspace_buffers.cu" = { code_loc = 1350, reason = "(c) one concern: executor scratch/workspace sizing+allocation (host-only)" }
@@ -82,7 +82,7 @@ roots = ["src", "tools", "tests"]
 "src/model/gguf_loader.cpp" = { code_loc = 820, reason = "(a->c) the (a) split already happened: gguf_parse.cpp + gguf_tensor_assign.cpp came out of it and left 788 (AUDIT_FILESIZE.md). The residue is one linear load flow (mmap, header, metadata -> ModelConfig, shard stitch, tensor wiring) like the allowlisted safetensors_loader.cpp, and the file is in maintenance mode per its own header. Crossed 800 with the #1324 declared-layers consistency check." }
 "src/model/hf_config_loader.cpp" = { code_loc = 943, reason = "(tu) central HF config→ModelConfig parser; one accreting block per arch (MLA/YaRN/MoE/SWA/rope); splitting scatters the single parse flow" }
 "src/model/jinja.cpp" = { code_loc = 2366, reason = "(c) one cohesive Jinja2 engine: Value + Lexer + Parser + Evaluator" }
-"src/model/safetensors_loader.cpp" = { code_loc = 1152, reason = "(c) one loader: header validation + tensor assign + arch inference" }
+"src/model/safetensors_loader.cpp" = { code_loc = 1155, reason = "(c) one loader: header validation + tensor assign + arch inference" }
 "src/model/tokenizer.cpp" = { code_loc = 1818, reason = "(c) one tokenizer: BPE/SPM/WordPiece encode + merge + cache (JSON parsing now via shared model/json_util)" }
 "src/model/weight_map.cpp" = { code_loc = 1071, reason = "(c) one mapping module: weight-name parse + layer-index + arch inference" }
 "src/model/weight_upload.cu" = { code_loc = 1995, reason = "(c) one upload pipeline: pinned staging + checked malloc + tensor load orchestration" }
