@@ -243,8 +243,17 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
 
     // 3. Re-schedule incomplete PREFILLING requests (chunked prefill).
     //    Skip requests already in prefill_batch (just promoted from pending).
+    //
+    //    `>= 0`, not `> 0` (#1643): a request promoted in step 2 but not served
+    //    that tick still has offset 0, and the old condition dropped it here -
+    //    PREFILLING, admitted, holding KV, and in no batch ever again. Nothing
+    //    hit it while every promoted request was served immediately; the
+    //    per-step prefill cap makes "not served this tick" a normal state, and
+    //    two of three concurrent ingests then hung until the 300 s request
+    //    timeout. The `already_queued` scan below is what keeps the
+    //    just-promoted ones from being added twice.
     for (auto& req : active_) {
-        if (req->status == RequestStatus::PREFILLING && req->prefill_offset > 0 &&
+        if (req->status == RequestStatus::PREFILLING && req->prefill_offset >= 0 &&
             req->prefill_offset < static_cast<int>(req->input_tokens.size())) {
             bool already_queued = false;
             for (const auto& pf : prefill_batch) {

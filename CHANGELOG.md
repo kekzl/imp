@@ -187,6 +187,30 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The prefill latency guard capped chunk size, never chunk count** (#1643).
+  One engine step ran a chunk for *every* prefilling request, so k concurrent
+  ingests inserted k chunk forwards between two decode steps of every decoder -
+  and the pinned 1024 measurement behind the size cap was taken with a single
+  ingest, so nothing in it depends on k. New `runtime.prefill_batch_decode_cap`
+  (default 1) bounds the count while anyone is decoding, with a rotating start
+  index. Qwen3-8B Q8, one streaming decoder against three ~5.2k-token ingests:
+
+  | | before | after |
+  |---|---|---|
+  | worst inter-token gap | 259 / 254 ms | 112 / 88 ms |
+  | gaps over 100 ms | 6 / 6 | 1 / 0 |
+  | ingest wall time | 2017.7 ms | 2381.4 ms (+18.0%) |
+
+  The stall is spread, not removed: gaps over 50 ms go 6 -> 17. Harness:
+  `scripts/bench_prefill_latency.py`.
+
+- **A promoted request that missed its first chunk was never scheduled again.**
+  `Scheduler::schedule()` re-queued in-flight prefills on `prefill_offset > 0`,
+  so a request promoted but not served in that tick stayed PREFILLING, admitted
+  and holding KV, in no batch ever again. Nothing reached it while every
+  promotion was served immediately; with the cap above, two of three concurrent
+  ingests hung until the 300 s request timeout.
+
 - **The pre-commit GPU gate ran the full suite for Markdown and Python edits.**
   Its filter selected on the path prefix alone, and `tools/` and `tests/` also
   hold the `CLAUDE.md` tree and the gate/generator scripts - so editing

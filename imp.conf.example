@@ -61,6 +61,12 @@ prefill_chunk_size   = -1
 # multi-tenant serving; 0 = disable (full chunk). The full chunk returns as
 # soon as nobody is decoding.
 prefill_chunk_decode_cap = 1024
+# How MANY prefill chunks run per engine step while others decode. The cap above
+# bounds one chunk; k concurrent ingests still run k of them between two decode
+# steps. Measured with three concurrent ingests: worst inter-token gap 259 -> 112
+# ms, gaps over 100 ms 6 -> 1, at +18% ingest wall time. 0 = unbounded. The
+# starting index rotates, so no ingest is starved.
+prefill_batch_decode_cap = 1
 # Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are single-
 # sequence, so concurrent sessions time-slice the decode. Slice length in
 # tokens; after it the engine rotates round-robin to the next decoding

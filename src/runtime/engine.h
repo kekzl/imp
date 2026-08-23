@@ -429,6 +429,10 @@ private:
     std::vector<int> padded_block_table_;
     std::vector<int> padded_swa_block_table_;
     std::vector<std::shared_ptr<Request>> sched_prefill_batch_;
+    // Round-robin cursor for runtime.prefill_batch_decode_cap (#1643): taking a
+    // fixed prefix of the batch would starve every later ingest, which is the
+    // failure #1634/#1637 came from.
+    size_t sched_prefill_rr_ = 0;
     std::vector<std::shared_ptr<Request>> sched_decode_batch_;
     std::vector<std::shared_ptr<Request>> valid_decode_;
 

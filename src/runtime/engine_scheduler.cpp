@@ -580,10 +580,25 @@ void Engine::step_prefill(cudaStream_t stream) {
         effective_chunk = capped;
     }
 
-    for (auto& req : sched_prefill_batch_) {
+    // Decode-aware batching: the cap above bounds the SIZE of one chunk, this
+    // one bounds how MANY of them run before the decoders get their step
+    // (#1643). Starting index rotates so the ingests that do not run this step
+    // are the ones that ran last step.
+    const size_t n_prefill = sched_prefill_batch_.size();
+    size_t budget = n_prefill;
+    const int batch_cap = runtime_config_.runtime.prefill_batch_decode_cap;
+    if (batch_cap > 0 && !sched_decode_batch_.empty() && n_prefill > static_cast<size_t>(batch_cap))
+        budget = static_cast<size_t>(batch_cap);
+
+    for (size_t i = 0; i < budget; i++) {
+        auto& req = sched_prefill_batch_[(sched_prefill_rr_ + i) % n_prefill];
         step_prefill_one(req, effective_chunk, stream);
         kv_manager_->touch(req->id);
     }
+    if (budget < n_prefill)
+        sched_prefill_rr_ = (sched_prefill_rr_ + budget) % n_prefill;
+    else
+        sched_prefill_rr_ = 0;
 }
 
 // =====================================================================

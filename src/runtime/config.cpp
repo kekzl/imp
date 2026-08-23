@@ -161,6 +161,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("runtime.decode_burst", cfg.runtime.decode_burst);
     I("runtime.prefill_chunk_size", cfg.runtime.prefill_chunk_size);
     I("runtime.prefill_chunk_decode_cap", cfg.runtime.prefill_chunk_decode_cap);
+    I("runtime.prefill_batch_decode_cap", cfg.runtime.prefill_batch_decode_cap);
     I("runtime.hybrid_decode_quantum", cfg.runtime.hybrid_decode_quantum);
     B("runtime.decode_pipeline", cfg.runtime.decode_pipeline);
     I("runtime.vram_budget_mb", cfg.runtime.vram_budget_mb);
