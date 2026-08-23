@@ -143,7 +143,7 @@ MemError FakeBackend::do_acquire_growable(size_t reserve_bytes, size_t initial_c
     return MemError::Ok;
 }
 
-MemError FakeBackend::commit(Region& region, size_t new_committed) {
+MemError FakeBackend::do_commit(Region& region, size_t new_committed) {
     if (!growable_)
         return MemError::NotGrowable;
     if (!region.valid())

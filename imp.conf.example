@@ -248,6 +248,20 @@ library_reserve_mb = -1
 # hands the pools 639 MiB more to distribute.
 #   docker run -v $HOME/.cache/imp:/cache ... --set vram.library_reserve_cache=/cache/library_reserve
 library_reserve_cache =
+# Pinned staging ring for the weight upload: depth x chunk size in MiB.
+# Pinning host memory is expensive on WDDM, and the ring's cost is paid at every
+# process start. Swept on Qwen3-8B-Q8_0 (load time only, 3 starts per point):
+#
+#   4x128 MiB  4.55 s   4x32  4.16 s   2x64  4.12 s   2x32  4.00 s
+#   4x16 MiB   4.00 s   4x8   3.93 s   4x4   3.84 s   4x2   3.96 s
+#
+# Monotone down to 4 MiB and back up at 2 - the pinning cost dominates the
+# overlap the whole way, and below 4 MiB the per-chunk event pairs cost more
+# than the pinning saves. The defaults were 4 and 128 until #1653; the pair is a
+# key rather than a constant because the optimum is a property of the host's
+# pinning cost, not of imp. Re-run the sweep on a different host or driver.
+upload_ring_depth = 4
+upload_ring_chunk_mib = 4
 
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +

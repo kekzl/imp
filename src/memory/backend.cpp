@@ -175,9 +175,45 @@ AcquireResult Backend::acquire(size_t bytes, size_t alignment, RegionTag tag) {
     return res;
 }
 
-MemError Backend::commit_range(Region&, size_t, size_t) { return MemError::NotGrowable; }
+MemError Backend::do_commit_range(Region&, size_t, size_t) { return MemError::NotGrowable; }
 
 MemError Backend::decommit_range(Region&, size_t, size_t) { return MemError::NotGrowable; }
+
+// commit() and commit_range() guard, then dispatch. Both acquire physical
+// memory on a growable region, and #1649 found they did it past every I2
+// instrument: the phase counter, the --wrap interposer and check_alloc_sites.py
+// all watch acquire(), and a growable KV pool committing pages under load
+// touches none of them.
+//
+// The guard runs AFTER the call, on the delta the backend actually committed,
+// not before on the request. The request overstates: a range may be partly
+// mapped already, and commit(new_total) is a target rather than an amount. An
+// instrument whose job is "this must be visible" is worth more with the exact
+// number than a granule earlier with the wrong one. In a debug build the guard
+// aborts either way, and a process about to abort does not care that the pages
+// are mapped.
+namespace {
+
+// Positive growth only. Shrinking hands memory back and is not an acquisition.
+size_t committed_growth_(size_t before, size_t after) { return after > before ? after - before : 0; }
+
+}  // namespace
+
+MemError Backend::commit(Region& region, size_t new_committed) {
+    const size_t before = region.committed();
+    const MemError e = do_commit(region, new_committed);
+    if (const size_t grew = committed_growth_(before, region.committed()); grew > 0)
+        guard_serving_phase(grew, region.tag());
+    return e;
+}
+
+MemError Backend::commit_range(Region& region, size_t offset, size_t bytes) {
+    const size_t before = region.committed();
+    const MemError e = do_commit_range(region, offset, bytes);
+    if (const size_t grew = committed_growth_(before, region.committed()); grew > 0)
+        guard_serving_phase(grew, region.tag());
+    return e;
+}
 
 MemError Backend::do_acquire_growable(size_t, size_t, size_t, RegionTag, void**) {
     return MemError::NotGrowable;
@@ -209,7 +245,7 @@ namespace {
 
 class CudaMallocBackend final : public Backend {
 public:
-    MemError commit(Region&, size_t) override { return MemError::NotGrowable; }
+    MemError do_commit(Region&, size_t) override { return MemError::NotGrowable; }
 
     BackendStats stats() const override {
         std::lock_guard<std::mutex> lock(mu_);

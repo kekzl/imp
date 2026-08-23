@@ -211,6 +211,15 @@ struct RuntimeConfig {
         // constant (AUDIT B41/B49). Empty = the default cache location;
         // "off" disables it. A cache miss or an unwritable path is never fatal.
         std::string library_reserve_cache;
+        // Pinned staging ring for the weight upload (#1653). Pinning host
+        // memory is expensive on WDDM - the shipped 4x128 MiB cost 503 ms to
+        // acquire and 115 ms to release against the 208 ms of H2D the ring
+        // exists to overlap. Measured load time on Qwen3-8B-Q8_0, 5 alternating
+        // starts each: 4x128 MiB median 4.55 s, 4x4 MiB median 3.87 s. The
+        // optimum is a property of the host's pinning cost, not of imp, so it
+        // is a key rather than a constant.
+        int upload_ring_depth = 4;
+        int upload_ring_chunk_mib = 4;
     } vram;
 
     cfg::Attention attention;

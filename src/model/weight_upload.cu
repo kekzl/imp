@@ -14,6 +14,7 @@
 #include <cuda_fp16.h>
 #include <algorithm>
 #include <vector>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 
@@ -87,17 +88,43 @@ struct PinnedStager {
     // Ring of N pinned buffers — deeper pipeline lets CPU memcpy stay ahead of
     // queued DMAs, smoothing per-tensor stalls (each tensor wakes one DMA, ring
     // depth N keeps N-1 DMAs queued while CPU fills the next).
-    static constexpr int kRing = 4;
-    static constexpr size_t kChunkSize = 128 << 20;  // 128 MiB per buffer (4 × 128 MiB = 512 MiB)
+    // Depth and chunk come from vram.upload_ring_{depth,chunk_mib} (#1653).
+    // They were 4 and 128 MiB, constants that had never been varied, and
+    // pinning 512 MiB of host memory cost 503 ms to acquire and 115 ms to
+    // release against the 208 ms of H2D the ring exists to overlap. Swept on
+    // Qwen3-8B-Q8_0, load time only, 3 starts per point:
+    //
+    //   4x128 MiB  4.55 s   4x32  4.16 s   2x64  4.12 s   2x32  4.00 s
+    //   4x16 MiB   4.00 s   4x8   3.93 s   4x4   3.84 s   4x2   3.96 s
+    //   8x8 MiB    3.93 s
+    //
+    // Monotone until 4 MiB and back up at 2: the pin cost dominates the overlap
+    // the whole way down, and below 4 MiB the per-chunk event/memcpy pairs
+    // start to cost more than the pinning saves. Confirmed against the old
+    // default over 5 alternating starts each: 4.55 s against 3.87 s, ranges not
+    // overlapping.
+    //
+    // A key rather than a constant because the optimum is a property of the
+    // host's pinning cost - a WDDM number here - not of imp.
+    static int ring() {
+        static const int n = std::clamp(process_diag_upload_ring_depth(), 1, kRingMax);
+        return n;
+    }
+    static size_t chunk_size() {
+        static const size_t n = static_cast<size_t>(std::clamp(process_diag_upload_ring_chunk_mib(), 1, 1024))
+                                << 20;
+        return n;
+    }
+    static constexpr int kRingMax = 16;
     // T5a: transient load-time staging. PinnedBuffer owns it, so the partial
     // failure path below no longer has to unwind by hand (memory/host_pinned.h).
-    PinnedBuffer buf[kRing];
-    cudaEvent_t done[kRing] = {};
+    PinnedBuffer buf[kRingMax];
+    cudaEvent_t done[kRingMax] = {};
     int idx = 0;
 
     bool init() {
-        for (int i = 0; i < kRing; i++) {
-            buf[i] = PinnedBuffer::acquire(cuda_host_pinned_allocator(), kChunkSize);
+        for (int i = 0; i < ring(); i++) {
+            buf[i] = PinnedBuffer::acquire(cuda_host_pinned_allocator(), chunk_size());
             if (buf[i].empty()) {
                 destroy();
                 return false;
@@ -110,8 +137,8 @@ struct PinnedStager {
     cudaError_t copy(void* dst, const void* src, size_t n, cudaStream_t s) {
         cudaError_t last = cudaSuccess;
         for (size_t off = 0; off < n;) {
-            size_t chunk = std::min(n - off, kChunkSize);
-            int b = idx % kRing;
+            size_t chunk = std::min(n - off, chunk_size());
+            int b = idx % ring();
             cudaEventSynchronize(done[b]);
             memcpy(buf[b].data(), static_cast<const char*>(src) + off, chunk);
             last = cudaMemcpyAsync(static_cast<char*>(dst) + off, buf[b].data(), chunk,
@@ -124,7 +151,7 @@ struct PinnedStager {
     }
 
     void destroy() {
-        for (int i = 0; i < kRing; i++) {
+        for (int i = 0; i < ring(); i++) {
             if (done[i]) {
                 cudaEventSynchronize(done[i]);
                 cudaEventDestroy(done[i]);
@@ -2332,8 +2359,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
 
     if (staging_guard.stager.init()) {
         g_stager = &staging_guard.stager;
-        IMP_LOG_INFO("Pinned staging enabled (%dx %.0f MiB ring)", PinnedStager::kRing,
-                     PinnedStager::kChunkSize / (1024.0 * 1024.0));
+        IMP_LOG_INFO("Pinned staging enabled (%dx %.0f MiB ring)", PinnedStager::ring(),
+                     PinnedStager::chunk_size() / (1024.0 * 1024.0));
     } else {
         IMP_LOG_WARN("Pinned staging alloc failed, using default H2D path");
     }

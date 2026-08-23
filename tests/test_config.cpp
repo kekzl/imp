@@ -131,6 +131,10 @@ TEST(RuntimeConfigTest, ParsesRopeAndVramSections) {
     EXPECT_FLOAT_EQ(defaults.rope.attn_factor, 1.0f);
     EXPECT_FLOAT_EQ(defaults.vram.kv_fraction, 0.8f);
     EXPECT_EQ(defaults.vram.reserve_floor_pct, 10);
+    // #1653: 4x4 MiB, not the 4x128 that shipped until the sweep. A default
+    // that drifts back silently costs 0.68 s of every process start.
+    EXPECT_EQ(defaults.vram.upload_ring_depth, 4);
+    EXPECT_EQ(defaults.vram.upload_ring_chunk_mib, 4);
 
     TempFile f(R"(
 [rope]
@@ -158,6 +162,10 @@ reserve_floor_pct = 5
     EXPECT_EQ(cfg.vram.reserve_floor_pct, 5);
 
     // --set style overrides reach the same fields.
+    set_(cfg, {"vram.upload_ring_depth=2", "vram.upload_ring_chunk_mib=64"});
+    EXPECT_EQ(cfg.vram.upload_ring_depth, 2);
+    EXPECT_EQ(cfg.vram.upload_ring_chunk_mib, 64);
+
     set_(cfg, {"rope.scaling=linear", "rope.factor=2", "vram.kv_fraction=0.9"});
     EXPECT_EQ(cfg.rope.scaling, "linear");
     EXPECT_FLOAT_EQ(cfg.rope.factor, 2.0f);
