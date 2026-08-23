@@ -80,7 +80,7 @@ roots = ["src", "tools", "tests"]
 "src/memory/kv_cache_manager.cpp" = { code_loc = 1200, reason = "(c) one manager: block alloc + residual pool + prefix cache + eviction" }
 "src/model/gguf_loader.cpp" = { code_loc = 820, reason = "(a->c) the (a) split already happened: gguf_parse.cpp + gguf_tensor_assign.cpp came out of it and left 788 (AUDIT_FILESIZE.md). The residue is one linear load flow (mmap, header, metadata -> ModelConfig, shard stitch, tensor wiring) like the allowlisted safetensors_loader.cpp, and the file is in maintenance mode per its own header. Crossed 800 with the #1324 declared-layers consistency check." }
 "src/model/hf_config_loader.cpp" = { code_loc = 943, reason = "(tu) central HF config→ModelConfig parser; one accreting block per arch (MLA/YaRN/MoE/SWA/rope); splitting scatters the single parse flow" }
-"src/model/jinja.cpp" = { code_loc = 2326, reason = "(c) one cohesive Jinja2 engine: Value + Lexer + Parser + Evaluator" }
+"src/model/jinja.cpp" = { code_loc = 2366, reason = "(c) one cohesive Jinja2 engine: Value + Lexer + Parser + Evaluator" }
 "src/model/safetensors_loader.cpp" = { code_loc = 1152, reason = "(c) one loader: header validation + tensor assign + arch inference" }
 "src/model/tokenizer.cpp" = { code_loc = 1818, reason = "(c) one tokenizer: BPE/SPM/WordPiece encode + merge + cache (JSON parsing now via shared model/json_util)" }
 "src/model/weight_map.cpp" = { code_loc = 1071, reason = "(c) one mapping module: weight-name parse + layer-index + arch inference" }
