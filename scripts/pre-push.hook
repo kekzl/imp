@@ -49,7 +49,13 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     # Documentation cannot move a number or break a kernel, wherever it lives.
     # Without this, src/compute/CLAUDE.md matches PERF_RE and a docs-only push
     # pays the full perf gate — which then reports the host, not the change.
-    FILES=$(echo "$FILES" | grep -vE '\.md$' || true)
+    #
+    # Python neither: scripts/verify.sh invokes no .py at all (checked, not
+    # assumed), so nothing a Python edit can touch reaches the tests, the perf
+    # gate or the smoke prompts. tools/ and tests/ are full of it — the gate
+    # scripts and the API contract suite — and SOURCE_RE matches those
+    # directories by prefix. Same reasoning as the pre-commit filter (#1723).
+    FILES=$(echo "$FILES" | grep -vE '\.(md|py)$' || true)
     [ -z "$FILES" ] && continue
     echo "$FILES" | grep -qE "$SOURCE_RE" && NEEDS_VERIFY=1
     echo "$FILES" | grep -qE "$PERF_RE"   && NEEDS_PERF=1

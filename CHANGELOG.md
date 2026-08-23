@@ -204,6 +204,23 @@ there instead of retelling it.
   in here - that changes the quantiser's numerics and needs its own equivalence
   test.
 
+- **Three API-contract tests could have run in CI all along, and two passed
+  vacuously** (#1600). The `Real API contract` lane selects `-m nomodel`;
+  measured against the same model-less server it runs, 63 of 126 tests pass but
+  only 58 are marked, so five were coverable and deselected. Two of the five
+  pass on *nothing*: `test_sequence_numbers_monotonic` collected an empty SSE
+  list and asserted `[] == sorted([])`, and `test_probes_agree_on_context_length`
+  returned early when `/v1/models` was empty. Those two are fixed rather than
+  marked - the first now fails on an empty stream, which it would also have done
+  with a model - and the other three are marked. **CI lane 58 -> 61 tests.** The
+  generation contract (57 tests) still needs a GPU runner.
+
+- **The pre-push gate ran verify-fast for Python-only pushes.** It already
+  stripped `.md` before deciding; `.py` now goes with it, `scripts/verify.sh`
+  invoking no Python at all (checked). Same class as #1723 in the other hook.
+  `guard_precommit_filter` covers both hooks now, and fails if either starts
+  skipping buildable source.
+
 - **Two generators had drifted out of the `tests/refs/` index** — the table that
   says which golden each one writes and which test consumes it, and the only way
   rule 1 of that README ("every golden value traces to a committed generator")
