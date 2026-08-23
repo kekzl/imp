@@ -66,13 +66,14 @@ roots = ["src", "tools", "tests"]
 "src/compute/attention_fmha_mxfp4_sm120.cu" = { code_loc = 1520, reason = "(c) single MXFP4 FA2 attention kernel family" }
 "src/compute/attention_fmha_sm120.cu" = { code_loc = 1480, reason = "(c) single FA2 attention family (base/fp8/fa2 variants) sharing one smem layout" }
 "src/compute/attention_paged.cu" = { code_loc = 1215, reason = "(c) one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster - shared block/KV layout" }
-"src/compute/attention_paged_nvfp4_tc.cu" = { code_loc = 845, reason = "(c) NVFP4 tensor-core paged-attn family (decode/splitk/reduce) - shared TC path" }
+"src/compute/attention_paged_nvfp4_tc.cu" = { code_loc = 849, reason = "(c) NVFP4 tensor-core paged-attn family (decode/splitk/reduce) - shared TC path" }
+"src/compute/attention_paged_fp8.cu" = { code_loc = 603, reason = "(c) FP8 paged-attn family (decode/splitk/reduce) - same shape as its FP16 and NVFP4 siblings above; crossed 600 by the three -1 sentinel guards of #1678" }
 "src/compute/gemm.cu" = { code_loc = 727, reason = "(c) one module: generic cuBLAS GEMM wrapper + algo-reselect/fallback chain + packed-weight leak guards (pushed over 600 by the #925 defense-in-depth guards)" }
 "src/compute/gemm_dp4a.cu" = { code_loc = 601, reason = "(c) one dp4a q8_1 family: activation/rmsnorm quantize kernels + the per-qtype GEMV launcher set (pushed to 601 by the 2026-07-17 post-launch error checks)" }
 "src/compute/gemm_grouped_nvfp4_smallM.cu" = { code_loc = 693, reason = "(c) one small-M grouped-GEMM family (software-ref + prod + smoke variants)" }
 "src/compute/gemv_dp4a_traits.cuh" = { code_loc = 1320, reason = "(b) trait-based template library: 8 DequantTraits<> specializations + 6 template GEMV kernels, consolidating ~33 hand-written kernels (header - wide include blast radius)" }
 "src/compute/json_schema.cpp" = { code_loc = 1147, reason = "(c) one module: JSON-schema parser + RegexNfa compiler/executor for constrained decode" }
-"src/compute/mtp_forward.cu" = { code_loc = 855, reason = "(c) MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature" }
+"src/compute/mtp_forward.cu" = { code_loc = 856, reason = "(c) MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature" }
 "src/compute/schema_constrain.cu" = { code_loc = 1181, reason = "(c) schema-constrained decode token-mask compute (host-side): the shared frame-stack simulator now carries TWO body grammars (JSON schema + Qwen-Coder XML tool calls) around one sim_advance source of truth; split candidate if a third grammar lands" }
 "src/exec/executor_forward.cu" = { code_loc = 732, reason = "(c) executor forward orchestration (one dense forward path + 2 scale helpers)" }
 "src/exec/executor_forward_moe_batch.cu" = { code_loc = 1061, reason = "(c) one path: batched-MoE forward dispatch (host-only)" }

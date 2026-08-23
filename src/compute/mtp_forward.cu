@@ -371,8 +371,9 @@ __global__ void mtp_mrope_kernel(
         float c, s;
         if (ext_factor != 0.0f) {
             // YaRN mode: per-dimension frequency blending.
-            float theta_extrap =
-                static_cast<float>(pos) / powf(theta, static_cast<float>(2 * k) / static_cast<float>(rope_dim));
+            double theta_extrap = static_cast<double>(pos) /
+                                  pow(static_cast<double>(theta),
+                                      static_cast<double>(2 * k) / static_cast<double>(rope_dim));
             rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1, 2 * k, ext_factor, attn_factor, c, s);
         } else {
             // Linear mode: frequency = theta^(-2k/rope_dim), scaled by inv_scaling.

@@ -465,12 +465,23 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
     // opt-in; +40% at long context — see the kernel-side comment).
     const int Bkv = (head_dim >= 512) ? 32 : SM120_Bkv;
 
-    // Select Bq based on head_dim and shared memory fit.
-    // Prefer Bq=128 for higher throughput, fall back to 64 for larger HD.
-    // K and V share a single buffer, so smem = Q + KV + S + O_acc + row state.
-    //   HD=64:  Bq=128 -> 89 KB     HD=96:  Bq=64 -> 65 KB
-    //   HD=128: Bq=64  -> 81 KB     HD=256: Bq=32 -> 90 KB
-    //   HD=512: Bq=16  -> 82 KB (Bkv=32; only Bq that fits under the 99 KB opt-in)
+    // Select Bq from head_dim and shared-memory fit. K and V share one buffer,
+    // so smem = Q + KV + S + O_acc + row state (compute_smem_sm120 above).
+    //
+    // The first three branches compare against max_smem/2, not max_smem: two
+    // blocks per SM beat a bigger tile at one. That halving is what the table
+    // has to be read against, and the previous version of this comment was not
+    // - it listed the Bq each head_dim would take against the FULL limit and so
+    // named three Bq the selector never picks (#1679). Computed from
+    // compute_smem_sm120 at max_smem = 101376 (the sm_120 99 KB opt-in), so
+    // occ2_cap = 50688:
+    //
+    //   HD   Bkv   Bq   smem     which branch
+    //   64    64   64   48.5 KB  <= occ2_cap        (128 would be 89.0 KB)
+    //   96    64   32   38.2 KB  <= occ2_cap        (64 would be 64.5 KB)
+    //   128   64   32   48.2 KB  <= occ2_cap        (64 would be 81.0 KB)
+    //   256   64   32   88.2 KB  <= max_smem only   (occupancy 1)
+    //   512   32   16   82.1 KB  <= max_smem only   (occupancy 1)
     int Bq;
     {
         size_t smem_128 = compute_smem_sm120(128, Bkv, head_dim);

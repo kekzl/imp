@@ -164,10 +164,17 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
     const int chunk_begin = split_start * chunks_per_page;
     const int chunk_end = split_end * chunks_per_page;
 
+    // StreamingLLM eviction leaves -1 sentinels in the block table, and a
+    // negative physical block is an OOB read (#1678). This kernel prefetches
+    // through a cp_async ring, so it cannot `continue` past one the way the
+    // non-tiled twins do: the address is clamped into the pool and the tokens
+    // are dropped by the validity mask below instead.
+    auto page_live = [&](int ch) { return bt[ch / chunks_per_page] >= 0; };
     auto chunk_src = [&](int ch, const uint8_t* __restrict__ cache) {
         const int page = ch / chunks_per_page;
         const int slot0 = (ch - page * chunks_per_page) * kTileTokens;
-        return cache + (int64_t)bt[page] * kv_block_stride + slot0 * kv_slot_stride + kv_head_off;
+        const int phys = max(bt[page], 0);
+        return cache + (int64_t)phys * kv_block_stride + slot0 * kv_slot_stride + kv_head_off;
     };
 
     int chunk = chunk_begin + warp_id;
@@ -194,7 +201,7 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
         int tok_start = chunk * kTileTokens;
         int n_toks = min(ctx_len - tok_start, kTileTokens);
         int first_tok = max(effective_start - tok_start, 0);
-        const bool valid = (my_tok >= first_tok) && (my_tok < n_toks);
+        const bool valid = page_live(chunk) && (my_tok >= first_tok) && (my_tok < n_toks);
 
         // ---- Dot phase: lane (token, dim-half) computes a 64-dim partial ----
         const uint8_t* k_row = k_tiles[cur] + my_tok * kTileRowStride + my_half * (HEAD_DIM / 2);
@@ -381,10 +388,17 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     const int chunk_begin = split_start * chunks_per_page;
     const int chunk_end = split_end * chunks_per_page;
 
+    // StreamingLLM eviction leaves -1 sentinels in the block table, and a
+    // negative physical block is an OOB read (#1678). This kernel prefetches
+    // through a cp_async ring, so it cannot `continue` past one the way the
+    // non-tiled twins do: the address is clamped into the pool and the tokens
+    // are dropped by the validity mask below instead.
+    auto page_live = [&](int ch) { return bt[ch / chunks_per_page] >= 0; };
     auto chunk_src = [&](int ch, const uint8_t* __restrict__ cache) {
         const int page = ch / chunks_per_page;
         const int slot0 = (ch - page * chunks_per_page) * kTileTokens;
-        return cache + (int64_t)bt[page] * kv_block_stride + slot0 * kv_slot_stride + kv_head_off;
+        const int phys = max(bt[page], 0);
+        return cache + (int64_t)phys * kv_block_stride + slot0 * kv_slot_stride + kv_head_off;
     };
 
     const int tid = threadIdx.x;
@@ -419,7 +433,7 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
         int tok_start = chunk * kTileTokens;
         int n_toks = min(ctx_len - tok_start, kTileTokens);
         int first_tok = max(effective_start - tok_start, 0);
-        const bool valid = (my_tok >= first_tok) && (my_tok < n_toks);
+        const bool valid = page_live(chunk) && (my_tok >= first_tok) && (my_tok < n_toks);
 
         // ---- Dot phase (identical to the per-head tile kernel) ----
         const uint8_t* k_row = k_tiles[cur] + my_tok * kTileRowStride + my_half * (HEAD_DIM / 2);
