@@ -187,6 +187,26 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A `top_k` one candidate over the batching limit cost 14.5% of throughput,
+  and changed what the model sampled from** (#1654). `sample_topk_topp_async`
+  refused the CUB regime (`top_k > 128`), so the whole batch fell back to
+  per-sequence synchronous sampling - one host round trip per sequence per step
+  instead of one pinned gather for the batch. The CUB path was already all-async
+  internally; only its trailing readback forced the sync, so it enqueues now.
+  Qwen3-8B Q8, six concurrent sequences, `top_k=128` against `top_k=129` (one
+  candidate of 151k apart, so the path is the only variable), median of three
+  rounds:
+
+  | | top_k=128 | top_k=129 | delta |
+  |---|---|---|---|
+  | before | 555.4 tok/s | 475.0 tok/s | **-14.5%** |
+  | after | 546.5 tok/s | 544.6 tok/s | -0.3% |
+
+  `sample_topk_topp_device` also **clamped** `top_k` to 128 with a warning, so a
+  request with `top_k=200` sampled from 128 candidates alone in the batch and
+  from 200 sharing it - the same request, two distributions, decided by its
+  neighbours. Both honour the request now.
+
 - **Multi-sequence decode on the residual path faulted with an illegal memory
   access when CUDA graphs were on** (#1708). Silent wrong output, then a sticky
   context: the first fault took every later request in the process with it, and

@@ -441,12 +441,24 @@ TEST(SamplingTest, AsyncBatchedSlotsMatchSynchronousPerSequence) {
     for (int i = 0; i < n_seq; i++)
         EXPECT_EQ(h_pinned[i], ref_greedy[i]) << "greedy token diverged for sequence " << i;
 
-    // The CUB regime (top_k > SAMPLE_MAX_TOP_K) must decline the async path.
-    EXPECT_FALSE(sample_topk_topp_async(logits[0], SAMPLE_MAX_TOP_K + 1, top_p, temperature, 42u,
-                                        reinterpret_cast<int32_t*>(d_slots), nullptr));
-    EXPECT_FALSE(sample_topk_topp_async(logits[0], /*top_k=*/0, top_p, temperature, 42u,
-                                        reinterpret_cast<int32_t*>(d_slots), nullptr))
-        << "top_k<=0 normalizes to vocab and must take the CUB path";
+    // The CUB regime (top_k > SAMPLE_MAX_TOP_K) enqueues like any other k
+    // (#1654), and must produce the SAME token the synchronous CUB path does.
+    // This used to assert the async form DECLINED - which is what sent the
+    // whole batch to per-sequence synchronous sampling, at -14.5% aggregate
+    // throughput for a top_k one candidate over the limit. Declining is no
+    // longer the contract, so asserting the tokens match is the property left
+    // to guard.
+    for (int cub_k : {SAMPLE_MAX_TOP_K + 1, 0}) {
+        const int32_t want = sample_topk_topp(logits[0], cub_k, top_p, temperature, 42u, d_ref, nullptr);
+        auto* slot = reinterpret_cast<int32_t*>(d_slots);
+        ASSERT_TRUE(sample_topk_topp_async(logits[0], cub_k, top_p, temperature, 42u, slot, nullptr))
+            << "the CUB regime must enqueue, not decline (top_k=" << cub_k << ")";
+        int32_t got = -1;
+        ASSERT_EQ(cudaMemcpyAsync(&got, slot, sizeof(int32_t), cudaMemcpyDeviceToHost, nullptr), cudaSuccess);
+        ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+        EXPECT_EQ(got, want) << "enqueued CUB token diverged from the synchronous one (top_k=" << cub_k
+                             << "); top_k=0 normalises to vocab, which is the CUB path too";
+    }
 
     cudaFreeHost(h_pinned);
     cudaFree(d_slots);
