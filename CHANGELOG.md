@@ -204,6 +204,13 @@ there instead of retelling it.
   `guard_precommit_filter` covers both hooks now, and fails if either starts
   skipping buildable source.
 
+- **Two generators had drifted out of the `tests/refs/` index** — the table that
+  says which golden each one writes and which test consumes it, and the only way
+  rule 1 of that README ("every golden value traces to a committed generator")
+  can be checked at all. `gen_chat_goldens.py` and `gen_tokenizer_golden.py` are
+  listed now, and `scripts/docs_lint.py` fails when a `tests/refs/gen_*.py` has
+  no row, so the index cannot go stale again.
+
 - **A cuBLASLt matmul failure discarded the benchmarked algo without saying so**
   (#1545). `reselect_algo_for_entry` replaced the timed probe's pick with
   heuristic `results[0]` for the rest of the process and logged nothing; only a
