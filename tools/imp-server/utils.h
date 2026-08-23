@@ -106,6 +106,14 @@ size_t utf8_chunk_len(const std::string& s, size_t off, size_t max);
 void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message,
                      const char* param = nullptr, const char* code = nullptr);
 
+// What a client may actually send, in tokens: the smaller of what the resolver
+// planned and what the KV pool ended up holding. The two differ whenever the
+// pool is clamped after planning - 97204 against 52256 on Qwen3.8-27B-NVFP4 -
+// and /v1/models advertised the plan while /health reported the pool, so a
+// prompt between them was accepted as servable and was not (#1542).
+// kv_capacity_tokens <= 0 means "unknown", and the plan stands.
+int servable_context_tokens(int planned_max_seq_len, long long kv_capacity_tokens);
+
 // True for the endpoints that speak the Anthropic dialect, whose errors have a
 // different envelope: `{"type":"error","error":{...}}` rather than
 // `{"error":{...}}`. Four call sites in main.cpp used to spell this test out

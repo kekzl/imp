@@ -378,16 +378,38 @@ json anthropic_to_openai_body(const json& anth) {
             // is 0.5, so without zeroing it the model would still reason.
             oai["enable_thinking"] = false;
             oai["think_budget"] = 0.0;
-        } else if (ttype == "enabled") {
+        } else if (ttype == "enabled" || ttype == "adaptive") {
+            // "adaptive" is what current SDKs send: it is the documented
+            // on-mode for the 4.6+ models, which reject budget_tokens outright.
+            // It used to fall through both branches and set nothing, so the
+            // request ran at the server's default think_budget while the client
+            // believed it had configured thinking (#1560).
             oai["enable_thinking"] = true;
             if (think.contains("budget_tokens") && think["budget_tokens"].is_number()) {
                 double budget = think["budget_tokens"].get<double>();
+                // budget_tokens is an absolute token count upstream; imp's
+                // think_budget is a fraction of max_tokens. With max_tokens
+                // absent - which this server permits - the fraction had no
+                // denominator and the assignment was skipped silently, leaving
+                // the default in place. Fall back on the same default max the
+                // request itself will get, so the two are consistent.
                 double max_tokens = anth.value("max_tokens", 0.0);
+                if (max_tokens <= 0.0)
+                    max_tokens = anth.value("max_completion_tokens", 0.0);
                 if (budget > 0.0 && max_tokens > 0.0) {
                     double frac = budget / max_tokens;
                     oai["think_budget"] = frac > 1.0 ? 1.0 : frac;
+                } else if (budget <= 0.0) {
+                    // budget_tokens 0 with type enabled is a contradiction the
+                    // request states explicitly; honour the number.
+                    oai["enable_thinking"] = false;
+                    oai["think_budget"] = 0.0;
                 }
             }
+            // thinking.display is NOT a generation setting - it says whether
+            // the reasoning comes back - so it is not transformed here. Both
+            // /v1/messages paths read it off the request through
+            // thinking_display_omitted() and drop the block on the way out.
         }
     }
 
@@ -509,6 +531,25 @@ std::string tool_call_id_to_anthropic(const std::string& openai_id) {
     return std::string("toolu_") + openai_id;
 }
 
+std::string thinking_signature(const std::string& thinking) {
+    // FNV-1a over the block text. Deterministic, so the same block signs the
+    // same way on a retry, and cheap enough for the hot path.
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : thinking) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "imp_sig_%016llx", static_cast<unsigned long long>(h));
+    return std::string(buf);
+}
+
+bool thinking_display_omitted(const json& anth_body) {
+    if (!anth_body.contains("thinking") || !anth_body["thinking"].is_object())
+        return false;
+    return anth_body["thinking"].value("display", "") == "omitted";
+}
+
 const char* anthropic_stop_reason(const std::string& openai_finish, bool stop_sequence_matched) {
     if (openai_finish == "stop")
         return stop_sequence_matched ? "stop_sequence" : "end_turn";
@@ -531,7 +572,7 @@ const char* anthropic_stop_reason(const std::string& openai_finish, bool stop_se
 }
 
 json openai_to_anthropic_response(const json& oai, const std::string& anth_model,
-                                  const std::string& stop_sequence) {
+                                  const std::string& stop_sequence, bool omit_thinking) {
     // Pass through OpenAI error envelopes unchanged but flip the type.
     if (oai.contains("error")) {
         return {
@@ -551,10 +592,17 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
     // Build content[] blocks. Thinking first (Anthropic emits the thinking
     // block before the visible answer), then text, then tool_use entries.
     json content = json::array();
-    if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
+    if (!omit_thinking && msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
         std::string thinking = msg["reasoning_content"].get<std::string>();
         if (!thinking.empty()) {
-            content.push_back({{"type", "thinking"}, {"thinking", thinking}});
+            // signature: Anthropic's clients round-trip thinking blocks and
+            // their SDKs expect the field to exist. imp cannot produce an
+            // attestation - it is not the model vendor - so this is a stable
+            // digest of the text, which is what makes the block survive a
+            // round trip rather than being dropped as malformed (#1555). It
+            // proves the block came back unedited, and nothing more.
+            content.push_back(
+                {{"type", "thinking"}, {"thinking", thinking}, {"signature", thinking_signature(thinking)}});
         }
     }
     if (msg.contains("content") && msg["content"].is_string()) {

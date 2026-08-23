@@ -160,6 +160,12 @@ void send_json_error(httplib::Response& res, int status, const char* type, const
     res.set_content(dump_safe(err), "application/json");
 }
 
+int servable_context_tokens(int planned_max_seq_len, long long kv_capacity_tokens) {
+    if (kv_capacity_tokens <= 0 || kv_capacity_tokens >= planned_max_seq_len)
+        return planned_max_seq_len;
+    return static_cast<int>(kv_capacity_tokens);
+}
+
 bool is_anthropic_path(const std::string& path) { return path.rfind("/v1/messages", 0) == 0; }
 
 void send_anthropic_error(httplib::Response& res, int status, const char* type, const std::string& message,

@@ -180,6 +180,41 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`/v1/messages` held the first SSE byte behind a 100 ms poll** (#1558). The
+  wait existed so `message_start` could carry cache accounting, on the claim
+  that it cost no measurable TTFT - and it inverted against its own
+  justification: it exits on the first iteration when the queue is empty and
+  runs the full 100 ms when the request is queued, which is when TTFT matters.
+  Measured on `Qwen3-4B-Instruct-2507-Q8_0.gguf`, 8 concurrent streams, time to
+  `message_start`: **median 118.5 ms before (max 121.0), 11.4 ms after (max
+  12.8)**. The final `message_delta` already re-reports the accounting.
+
+- **`thinking: {"type": "adaptive"}` was a no-op** (#1560). It is the on-mode
+  current SDKs send, matched neither branch, and set nothing - the request ran
+  at the server's default `think_budget` while the client believed it had
+  configured thinking. `display: "omitted"` is honoured on both transports
+  (the model still reasons, the block is not returned), and `budget_tokens: 0`
+  with `type: enabled` now disables thinking instead of leaving the default.
+
+- **`thinking` blocks carry a `signature`, and the stream emits
+  `signature_delta`** (#1555). The field did not exist anywhere in the server
+  while Anthropic's SDKs round-trip it. It is a deterministic digest of the
+  block text, not an attestation: it proves the block came back unedited and
+  nothing more, and the code that emits it says so.
+
+- **`/v1/models` advertised a context the KV pool cannot serve** (#1542). The
+  resolver's `max_seq_len` is a plan and the pool is clamped after it, so a
+  prompt between the two was accepted as servable and was not. Measured on
+  `Qwen3.8-27B-NVFP4`: the log plans 131072, the pool holds 96960, and all four
+  probes (`/v1/models`, `/props`, `/info`, `/health`) now answer 96960.
+
+- **`anthropic-version` and `anthropic-beta` are read** (#1562). Both were
+  ignored, so a beta-gated request got a 200 and a response that does not
+  implement it. They are echoed back, and an unknown beta warns once per value.
+  Neither is enforced - refusing a request that omits a header imp does not
+  need would break more than it fixes - and `docs/API.md` states the asymmetry.
+
+
 - **`/v1/messages` never reported which stop sequence ended a turn** (#1550).
   A match came back as `stop_reason: "end_turn"` with `stop_sequence: null` on
   both transports; the Anthropic value `"stop_sequence"` was produced by no

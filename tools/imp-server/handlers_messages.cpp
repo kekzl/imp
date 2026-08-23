@@ -15,8 +15,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <set>
 #include <string>
-#include <thread>
 
 // ===========================================================================
 // Anthropic /v1/messages — native SSE streaming
@@ -85,8 +86,8 @@ enum class AnthBlock { NONE, THINKING, TEXT, TOOL_USE };
 //   content   -> text block (text_delta)
 //   tool call -> tool_use block (input_json_delta, chunked)
 bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
-                                  const std::shared_ptr<ServerRequest>& server_req,
-                                  const std::string& anth_model, const std::string& msg_id) {
+                           const std::shared_ptr<ServerRequest>& server_req, const std::string& anth_model,
+                           const std::string& msg_id, bool omit_thinking) {
     namespace anth = imp_server::anthropic;
     AnthropicSSE out{sink};
     auto active_req = server_req->request;
@@ -95,16 +96,18 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     // ---- message_start ----------------------------------------------------
     {
         // Cache accounting (#1006): harnesses read cache_read/creation from
-        // message_start to display live hit rates. cached_tokens is set at
-        // ADMISSION (before prefill compute), which happens within a scheduler
-        // step of submit — a short bounded poll for the PENDING→PREFILLING
-        // transition makes the values authoritative here without measurable
-        // TTFT cost. On timeout the fields ride at their initial values and
-        // the final message_delta (below) stays the corrective source.
-        if (active_req) {
-            for (int i = 0; i < 50 && active_req->status == imp::RequestStatus::PENDING; i++)
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        // message_start to display live hit rates, and cached_tokens is set at
+        // ADMISSION rather than at submit. This used to wait for the
+        // PENDING->PREFILLING transition first - 50 x 2 ms - on the claim that
+        // it cost no measurable TTFT. It cost exactly what it looks like, and
+        // inverted against its own justification: the poll exits on the first
+        // iteration when the queue is empty and runs the full 100 ms when the
+        // request is queued, which is when TTFT matters. Measured on
+        // Qwen3-4B-Instruct-2507-Q8_0 with 8 concurrent streams, time to
+        // message_start: median 118.5 ms with the poll (max 121.0), 11.4 ms
+        // without (max 12.8) (#1558). The final message_delta already re-reports the accounting
+        // and stays the corrective source, which is what makes the wait
+        // buy presentation accuracy rather than correctness.
         const int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
         const int creation = active_req ? cache_creation_tokens_(active_req, n_prompt_tokens) : 0;
         json usage = {{"input_tokens", n_prompt_tokens - cached},
@@ -139,9 +142,23 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     std::string text_delta_prefix, thinking_delta_prefix;
     static const std::string kDeltaSuffix = "\"}}\n\n";
 
+    // The thinking text as it goes out, so the block can be signed at its close
+    // (#1555): Anthropic emits signature_delta immediately before
+    // content_block_stop on a thinking block, and its SDKs round-trip the pair.
+    std::string thinking_so_far;
+
     auto stop_block = [&]() -> bool {
         if (open_block == AnthBlock::NONE)
             return true;
+        if (open_block == AnthBlock::THINKING && !thinking_so_far.empty()) {
+            if (!out.emit("content_block_delta",
+                          json{{"type", "content_block_delta"},
+                               {"index", block_index},
+                               {"delta",
+                                {{"type", "signature_delta"},
+                                 {"signature", anth::thinking_signature(thinking_so_far)}}}}))
+                return false;
+        }
         bool ok = out.emit("content_block_stop",
                            json{{"type", "content_block_stop"}, {"index", block_index}});
         open_block = AnthBlock::NONE;
@@ -183,8 +200,14 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     auto emit_thinking = [&](const std::string& text) -> bool {
         if (text.empty())
             return true;
+        // thinking.display "omitted": the model still reasons, the client asked
+        // not to be shown it. Dropping the deltas is the whole of it - no
+        // block is opened, so no start/stop pair goes out either (#1560).
+        if (omit_thinking)
+            return true;
         if (!start_thinking_block())
             return false;
+        thinking_so_far += text;
         return out.emit_delta(thinking_delta_prefix, kDeltaSuffix, text);
     };
     // Open a tool_use block (content_block_start). Arguments follow as
@@ -327,6 +350,37 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     const std::string request_id = make_request_id(state);
     res.set_header("request-id", request_id);
 
+    // anthropic-version and anthropic-beta were read by nothing (#1562).
+    // Upstream, a missing version is a 400 and an unknown beta is refused; imp
+    // deliberately does neither, because a client that works here and fails
+    // there is the lesser harm compared to 400-ing every request that omits a
+    // header this server does not need. What it must not do is stay silent: a
+    // beta header is a request for behaviour imp does not implement, and
+    // answering 200 makes that a false accept the client cannot see. Both are
+    // echoed back so the client can tell it was read, and an unknown beta warns
+    // once per value.
+    {
+        const std::string version = req.get_header_value("anthropic-version");
+        if (!version.empty())
+            res.set_header("anthropic-version", version);
+        const std::string beta = req.get_header_value("anthropic-beta");
+        if (!beta.empty()) {
+            res.set_header("anthropic-beta", beta);
+            static std::mutex warned_mu;
+            static std::set<std::string> warned;
+            bool first = false;
+            {
+                std::lock_guard<std::mutex> lk(warned_mu);
+                first = warned.insert(beta).second;
+            }
+            if (first)
+                IMP_LOG_WARN(
+                    "anthropic-beta: %s - imp implements no beta surfaces, so this request is "
+                    "served as if the flag were absent. Upstream would refuse an unknown beta.",
+                    sanitize_for_echo(beta, 96).c_str());
+        }
+    }
+
     // Any exception escaping the impl — notably from the inner
     // handle_chat_completions shim on the non-streaming path — must return the
     // Anthropic error envelope ({"type":"error",...}), not the OpenAI-shaped one
@@ -453,16 +507,18 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
 
         std::string msg_id = anth::make_message_id(static_cast<uint64_t>(state.next_id.fetch_add(1)));
         ctx.t_start = std::chrono::high_resolution_clock::now();
+        const bool omit_thinking = anth::thinking_display_omitted(anth_body);
 
         res.status = 200;
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
-        res.set_chunked_content_provider(
-            "text/event-stream",
-            [stream_ctx = std::move(ctx), &state, server_req, anth_model, msg_id](
-                size_t /*offset*/, httplib::DataSink& sink) mutable -> bool {
-                return run_anthropic_stream_(sink, stream_ctx, state, server_req, anth_model, msg_id);
-            });
+        res.set_chunked_content_provider("text/event-stream",
+                                         [stream_ctx = std::move(ctx), &state, server_req, anth_model, msg_id,
+                                          omit_thinking](size_t /*offset*/,
+                                                         httplib::DataSink& sink) mutable -> bool {
+                                             return run_anthropic_stream_(sink, stream_ctx, state, server_req,
+                                                                          anth_model, msg_id, omit_thinking);
+                                         });
         return;
     }
 
@@ -522,7 +578,8 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     // The shim's OpenAI body cannot say which stop sequence ended the
     // generation; the handler that matched it left the answer beside the body
     // (#1550).
-    json anth_response = anth::openai_to_anthropic_response(oai_response, anth_model, g_shim_stop_sequence);
+    json anth_response = anth::openai_to_anthropic_response(oai_response, anth_model, g_shim_stop_sequence,
+                                                            anth::thinking_display_omitted(anth_body));
 
     // JSONL log — built from Anthropic shapes so /v1/messages clients see
     // exactly what they sent and what they got back.
