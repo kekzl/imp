@@ -824,6 +824,7 @@ if(IMP_BUILD_TESTS)
         tests/test_chat_template.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_jinja.cpp
+        tests/test_chat_template_goldens.cpp
     )
 
     imp_add_test_module(test-compute SOURCES

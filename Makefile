@@ -18,7 +18,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -518,6 +518,16 @@ kernel-resources-update:
 
 kernel-resources-stats:
 	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py - --stats
+
+# Re-pin tests/refs/chat_template_goldens.h from the upstream chat templates.
+# Needs network (six of the nine families have no local checkpoint) and writes
+# as the calling user, so the generated header does not end up root-owned.
+chat-goldens:
+	@docker run --rm --network host --user $$(id -u):$$(id -g) \
+	  -e HOME=/tmp -e PYTHONPATH=/tmp/pylibs \
+	  -v $(PWD):/src -v $(HOME)/models:/models:ro -w /src python:3.12-slim bash -c \
+	  'pip install -q --target /tmp/pylibs jinja2 transformers >/dev/null 2>&1; \
+	   python3 tests/refs/gen_chat_goldens.py --verify'
 
 # Every pair the checker resolved, matched or not. Never fails.
 alloc-pairs-list:

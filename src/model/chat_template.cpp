@@ -771,9 +771,9 @@ void ChatTemplate::auto_detect_stop_tokens(const jinja::Context& ctx) const {
     }
 }
 
-std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
-                                               bool add_generation_prompt, bool suppress_thinking,
-                                               bool force_thinking) const {
+std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                       bool add_generation_prompt, bool suppress_thinking,
+                                       bool force_thinking) const {
     if (!jinja_tpl_)
         return {};
 
@@ -821,12 +821,22 @@ std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::
         IMP_LOG_DEBUG("[DEBUG_TPL_JINJA] rendered: \"%s\"", escaped.c_str());
     }
 
-    auto result = tokenize_rendered(tok, rendered);
-
-    // Auto-detect stop tokens if needed
+    // Auto-detect stop tokens if needed. Kept here rather than in the caller:
+    // it reads the context this function built, and a golden that renders
+    // without tokenising should still exercise it.
     auto_detect_stop_tokens(ctx);
 
-    return result;
+    return rendered;
+}
+
+std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                               bool add_generation_prompt, bool suppress_thinking,
+                                               bool force_thinking) const {
+    const std::string rendered = render_jinja(tok, msgs, add_generation_prompt, suppress_thinking,
+                                              force_thinking);
+    if (rendered.empty())
+        return {};
+    return tokenize_rendered(tok, rendered);
 }
 
 // Render a minimal fresh conversation and report whether the generation

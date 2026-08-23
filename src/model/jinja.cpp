@@ -273,6 +273,11 @@ struct Token {
     std::string value;
     bool trim_left = false;   // whitespace control: strip left
     bool trim_right = false;  // whitespace control: strip right
+    // TEXT only: this token began at the start of a source line. Needed by
+    // lstrip_blocks, because trim_blocks has usually already eaten the newline
+    // by then - the token is pure indentation and cannot tell on its own
+    // whether it is a line indent or the tail of a line with content on it.
+    bool line_start = false;
 };
 
 class Lexer {
@@ -300,11 +305,24 @@ public:
                 // Apply trim: strip trailing whitespace from last TEXT token
                 if (trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     rtrim(tokens.back().value);
+                // A comment is a block tag for lstrip_blocks/trim_blocks too
+                // (#1572). Skipping it here left a comment line's indentation
+                // and its newline in the prompt, which is how Nemotron-3-Nano's
+                // template put 20 spaces in front of `<|im_start|>assistant`
+                // while every other family rendered byte-exact.
+                if (!trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
+                    lstrip_block_indent(tokens.back().value, tokens.back().line_start);
                 // Skip leading whitespace after comment
-                if (trim_r)
+                if (trim_r) {
                     while (pos < src_.size() &&
                            (src_[pos] == ' ' || src_[pos] == '\t' || src_[pos] == '\n' || src_[pos] == '\r'))
                         pos++;
+                } else {
+                    if (pos < src_.size() && src_[pos] == '\r')
+                        pos++;
+                    if (pos < src_.size() && src_[pos] == '\n')
+                        pos++;
+                }
                 continue;
             }
 
@@ -323,6 +341,14 @@ public:
                 // Strip trailing whitespace from previous TEXT token
                 if (trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     rtrim(tokens.back().value);
+
+                // lstrip_blocks (#1572): whitespace from the start of a line up
+                // to a block tag is indentation, not output. Same reason as
+                // trim_blocks above - transformers sets lstrip_blocks=True, and
+                // without it an indented `{% if %}` leaks its indentation into
+                // the prompt.
+                if (!is_expr && !trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
+                    lstrip_block_indent(tokens.back().value, tokens.back().line_start);
 
                 Token open;
                 open.type = is_expr ? TokenType::EXPR_OPEN : TokenType::STMT_OPEN;
@@ -348,6 +374,7 @@ public:
                 Token t;
                 t.type = TokenType::TEXT;
                 t.value = src_.substr(text_start, pos - text_start);
+                t.line_start = (text_start == 0 || src_[text_start - 1] == '\n');
                 tokens.push_back(t);
             }
         }
@@ -356,6 +383,23 @@ public:
     }
 
 private:
+    // Drop a trailing run of spaces/tabs, but only when it is the whole
+    // indentation of a line: `\n    {% if %}` loses it, `{{ x }} {% endfor %}`
+    // does not. Matches Jinja's lstrip_blocks.
+    //
+    // `line_start` is what separates them when the run reaches the front of the
+    // token. Treating that as a line start unconditionally ate the separator in
+    // `{% for x in items %}{{ x }} {% endfor %}` and rendered "ab" for "a b ".
+    static void lstrip_block_indent(std::string& text, bool line_start) {
+        size_t i = text.size();
+        while (i > 0 && (text[i - 1] == ' ' || text[i - 1] == '\t'))
+            i--;
+        if (i == text.size())
+            return;
+        if (i > 0 ? text[i - 1] == '\n' : line_start)
+            text.erase(i);
+    }
+
     void tokenize_inner(std::vector<Token>& tokens, size_t& pos, const std::string& close_tag) {
         skip_ws(pos);
         while (pos < src_.size()) {
@@ -381,6 +425,20 @@ private:
                     Token close;
                     close.type = (close_tag == "}}") ? TokenType::EXPR_CLOSE : TokenType::STMT_CLOSE;
                     tokens.push_back(close);
+                    // trim_blocks (#1572): the newline that ends the line a block
+                    // tag sits on is part of the tag, not of the output. Jinja
+                    // defaults this off, but transformers renders every chat
+                    // template with trim_blocks=True, so a template written
+                    // against HF emits one spurious newline per block tag here.
+                    // `-%}` already ate all following whitespace and returned
+                    // above; this is the plain `%}` case. Statement tags only -
+                    // `{{ }}` is unaffected in Jinja too.
+                    if (close_tag == "%}") {
+                        if (pos < src_.size() && src_[pos] == '\r')
+                            pos++;
+                        if (pos < src_.size() && src_[pos] == '\n')
+                            pos++;
+                    }
                     return;
                 }
             }
@@ -2016,6 +2074,11 @@ private:
     Value eval_filter(const FilterExpr& f) {
         Value val = eval(*f.value);
 
+        // No autoescaping here, so `safe` is the identity - but an UNKNOWN
+        // filter is not: it warned and dropped the value, which is how a
+        // template silently loses whatever it marked safe (#1572).
+        if (f.name == "safe")
+            return val;
         if (f.name == "trim") {
             if (!val.is_string())
                 return val;
