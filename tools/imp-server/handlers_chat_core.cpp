@@ -724,6 +724,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     // For n > 1, run multiple independent generations sequentially
     json choices = json::array();
     int total_output_tokens = 0;
+    double ttft_ms = -1.0;  // first token of the FIRST completion (#1578)
     g_shim_stop_sequence.clear();
 
     for (int ci = 0; ci < ctx.params.n_completions; ci++) {
@@ -812,6 +813,20 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                 finish = evt.finish_reason ? evt.finish_reason : "length";
             }
 
+            // TTFT was recorded on the streaming path only, while this one
+            // still incremented requests_total - so the histogram described
+            // half the traffic and said nothing about which half (#1578).
+            if (output_ids.empty() && ttft_ms < 0.0) {
+                ttft_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::high_resolution_clock::now() - ctx.t_start)
+                              .count();
+                // Same point as the streaming path: by the first token the
+                // worker has admitted the request, so queue_ms is final
+                // (#1580).
+                const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                if (q >= 0.0)
+                    state.metrics.queue_time.observe(q / 1000.0);
+            }
             output_ids.push_back(token);
 
             // Check text-level stop sequences
@@ -1041,6 +1056,10 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     state.metrics.tokens_completion_total += total_output_tokens;
     state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
     state.metrics.request_duration.observe(ms / 1000.0);
+    if (ttft_ms >= 0.0) {
+        state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+        state.metrics.ttft.observe(ttft_ms / 1000.0);
+    }
 
     json usage = {{"prompt_tokens", ctx.snap.n_prompt_tokens},
                   {"completion_tokens", total_output_tokens},

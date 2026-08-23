@@ -67,23 +67,39 @@ struct RequestLogger {
 
 // Prometheus-style latency histogram (cumulative buckets, in seconds).
 // Lock-free: each observation bumps the matching cumulative buckets + sum +
-// count. Bucket upper bounds are shared by request-duration and TTFT; both
-// are sub-second-to-minutes scale so the same ladder fits.
+// count.
+//
+// The ladder is per-instance because one ladder does not fit every quantity
+// (#1577). Request duration and TTFT are sub-second-to-minutes; inter-token
+// latency is single-digit MILLISECONDS - at imp's own documented decode rates
+// every ITL observation landed in the first bucket of the shared ladder
+// (le=0.005), so histogram_quantile returned a function of the bucket bounds
+// rather than of the data.
 struct LatencyHistogram {
-    // le upper bounds in seconds; the implicit +Inf bucket is `count`.
     static constexpr int kNumBuckets = 11;
-    static constexpr double kBounds[kNumBuckets] = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
-                                                    0.5,   1.0,  2.5,   5.0,  10.0};
+    // Sub-second-to-minutes: request duration, TTFT.
+    static constexpr double kSecondsBounds[kNumBuckets] = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                                                           0.5,   1.0,  2.5,   5.0,  10.0};
+    // Milliseconds: inter-token latency. 400 tok/s is 2.5 ms, so the ladder
+    // has to resolve either side of that; the top end covers a stalled or
+    // heavily batched step.
+    static constexpr double kItlBounds[kNumBuckets] = {0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075,
+                                                       0.01,   0.025, 0.05,  0.1,   0.5};
+
+    const double* bounds = kSecondsBounds;  // set once at construction
     std::atomic<int64_t> buckets[kNumBuckets] = {};
     std::atomic<int64_t> count{0};
     // Sum of observed seconds, stored as micros to keep an integer atomic.
     std::atomic<int64_t> sum_us{0};
 
+    LatencyHistogram() = default;
+    explicit LatencyHistogram(const double* ladder) : bounds(ladder) {}
+
     void observe(double seconds) {
         if (seconds < 0)
             seconds = 0;
         for (int i = 0; i < kNumBuckets; ++i) {
-            if (seconds <= kBounds[i])
+            if (seconds <= bounds[i])
                 buckets[i].fetch_add(1, std::memory_order_relaxed);
         }
         count.fetch_add(1, std::memory_order_relaxed);
@@ -115,7 +131,22 @@ struct ServerMetrics {
     std::atomic<int64_t> model_loads_total{0};
     LatencyHistogram request_duration;  // end-to-end request latency
     LatencyHistogram ttft;              // time to first token
-    LatencyHistogram inter_token;       // mean inter-token latency (ITL) per request
+    // Per-TOKEN inter-token latency, on a millisecond ladder. It used to
+    // observe one per-request MEAN on the request-duration ladder, which
+    // answers neither "how long between tokens" nor "how does that vary"
+    // (#1577).
+    LatencyHistogram inter_token{LatencyHistogram::kItlBounds};
+    // Time from admission to the first decode step, i.e. how long a request
+    // waited behind others. Nothing measured queueing before (#1580).
+    LatencyHistogram queue_time;
+    // (Decode batch size lives on the BatchingEngine, where the batch is
+    // formed; /metrics reads it from there.)
+    // 4xx refusals. requests_failed counts 5xx only, and every rejection this
+    // server is designed to emit is a 4xx - so the error counter was blind to
+    // the whole designed error surface (#1579). Kept as its own series rather
+    // than folded in, because "the server broke" and "the server refused" are
+    // different alerts.
+    std::atomic<int64_t> requests_rejected{0};
     std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 };
 

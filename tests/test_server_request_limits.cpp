@@ -5,6 +5,7 @@
 // keyed on something the client writes. The pieces that can be reached without
 // a running server are tested here; the rest is in the API battery.
 
+#include "handlers.h"
 #include "rate_limit.h"
 #include "utils.h"
 
@@ -265,6 +266,61 @@ TEST(ServableContext, ThePlanStandsWhenThePoolIsLarger) {
 TEST(ServableContext, UnknownCapacityLeavesThePlanAlone) {
     EXPECT_EQ(servable_context_tokens(8192, -1), 8192);
     EXPECT_EQ(servable_context_tokens(8192, 0), 8192);
+}
+
+// ---------------------------------------------------------------------------
+// Latency histogram ladders (#1577)
+// ---------------------------------------------------------------------------
+
+// The defect: inter-token latency was observed on the request-duration ladder,
+// whose first bucket is 5 ms. imp decodes at 300-450 tok/s, i.e. 2.2-3.3 ms per
+// token, so every observation fell in bucket 0 and histogram_quantile returned
+// a function of the bounds rather than of the data.
+TEST(LatencyLadder, TheSecondsLadderCannotResolveInterTokenLatency) {
+    LatencyHistogram seconds;  // the shared ladder, as ITL used to use it
+    for (double tok_per_s : {300.0, 350.0, 400.0, 450.0})
+        seconds.observe(1.0 / tok_per_s);
+    // All four in the first bucket: indistinguishable.
+    EXPECT_EQ(seconds.buckets[0].load(), 4);
+}
+
+TEST(LatencyLadder, TheItlLadderSeparatesThoseSameValues) {
+    LatencyHistogram itl{LatencyHistogram::kItlBounds};
+    for (double tok_per_s : {300.0, 350.0, 400.0, 450.0})
+        itl.observe(1.0 / tok_per_s);
+    // 2.22 / 2.50 / 2.86 / 3.33 ms against bounds 2 ms and 3 ms: the values
+    // land in different buckets, which is what makes a quantile mean anything.
+    EXPECT_EQ(itl.buckets[2].load(), 0);  // le = 2 ms
+    EXPECT_EQ(itl.buckets[3].load(), 3);  // le = 3 ms
+    EXPECT_EQ(itl.buckets[4].load(), 4);  // le = 5 ms
+    EXPECT_EQ(itl.count.load(), 4);
+}
+
+TEST(LatencyLadder, DefaultConstructionKeepsTheSecondsLadder) {
+    LatencyHistogram h;
+    EXPECT_EQ(h.bounds, LatencyHistogram::kSecondsBounds);
+    LatencyHistogram i{LatencyHistogram::kItlBounds};
+    EXPECT_EQ(i.bounds, LatencyHistogram::kItlBounds);
+}
+
+// Cumulative, so a bucket count is "at most this", and the sum is in seconds.
+TEST(LatencyLadder, BucketsAreCumulativeAndTheSumIsSeconds) {
+    LatencyHistogram h;
+    h.observe(0.02);
+    h.observe(2.0);
+    EXPECT_EQ(h.buckets[0].load(), 0);  // le = 0.005
+    EXPECT_EQ(h.buckets[2].load(), 1);  // le = 0.025
+    EXPECT_EQ(h.buckets[8].load(), 2);  // le = 2.5
+    EXPECT_EQ(h.count.load(), 2);
+    EXPECT_NEAR(h.sum_us.load() / 1e6, 2.02, 1e-6);
+}
+
+// A negative reading is a clock going backwards, not a fast request.
+TEST(LatencyLadder, NegativeObservationsClampToZero) {
+    LatencyHistogram h;
+    h.observe(-1.0);
+    EXPECT_EQ(h.buckets[0].load(), 1);
+    EXPECT_EQ(h.sum_us.load(), 0);
 }
 
 }  // namespace
