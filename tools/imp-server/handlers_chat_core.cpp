@@ -693,6 +693,10 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
                                                  const std::vector<int32_t>& input_tokens, int completion_idx,
                                                  bool stream) {
     auto req = std::make_shared<imp::Request>();
+    // The id the client sees, carried into the engine so its log lines can be
+    // joined to this HTTP request (#1582). With n>1 several engine requests
+    // share one completion id, which is what the response says too.
+    req->trace_id = ctx.req_id;
     req->image = ctx.snap.vision_image;         // per-request vision (null for text)
     req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (empty otherwise)
     req->vision_content_hash = ctx.snap.vision_content_hash;

@@ -1017,6 +1017,13 @@ std::string Engine::generate(const std::string& prompt, int max_tokens, float te
 void Engine::add_request(std::shared_ptr<Request> req) {
     if (scheduler_) {
         req->id = next_request_id_++;
+        // The join between the two id spaces (#1582). Several engine log sites
+        // print `req %d` from the counter above, and some of them (the
+        // recurrent-slot and MTP ones) hold the integer without a Request to
+        // reach a string through - so the mapping is published once here
+        // instead of rewriting each site.
+        if (!req->trace_id.empty())
+            IMP_LOG_INFO("request %s -> engine req %d", req->trace_id.c_str(), req->id);
         // Initialize in_think_block from the prompt tail. Chat templates for
         // Qwen3 / Qwen3.5 / Qwen3.6 / DeepSeek-R1 inject `<think>\n` via
         // add_generation_prompt by default — without seeding the flag here,

@@ -39,6 +39,12 @@ const char* request_status_name(RequestStatus status);
 
 struct Request {
     int id = 0;
+    // The id the CALLER knows this request by - the server's `imp-N`, which is
+    // also what the HTTP response carries. `id` above is the engine's own
+    // counter and the two never met, so no engine log line could be attributed
+    // to an HTTP request (#1582). Empty for direct API users; add_request()
+    // emits the join line when it is set.
+    std::string trace_id;
     RequestStatus status = RequestStatus::PENDING;
 
     std::vector<int32_t> input_tokens;
