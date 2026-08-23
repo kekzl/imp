@@ -91,6 +91,7 @@ def test_temperature_zero_deterministic(client, model):
     assert c1 == c2, f"Non-deterministic at temp=0 seed=42: {c1!r} != {c2!r}"
 
 
+@pytest.mark.nomodel  # /v1/models answers without weights (#1600)
 def test_models_endpoint(client):
     r = client.get("/v1/models")
     assert r.status_code == 200
