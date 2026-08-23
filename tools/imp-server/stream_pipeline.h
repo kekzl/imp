@@ -52,6 +52,11 @@ inline size_t utf8_complete_len(const std::string& s) {
 struct HoldbackDecision {
     bool complete_match = false;  // a full stop sequence is present in the buffer
     size_t flush_len = 0;         // bytes safe to emit now (always <= buffer size)
+    // Index into `stop_sequences` of the sequence that matched, or -1. The
+    // Anthropic wire format reports which stop ended the turn
+    // (`stop_reason: "stop_sequence"`, `stop_sequence: "<text>"`), and it had
+    // nothing to report because the match was a bool (#1550).
+    int matched_index = -1;
 };
 
 // Decide how much of `pending` may be flushed.
@@ -72,15 +77,26 @@ struct HoldbackDecision {
 inline HoldbackDecision holdback_decision(const std::string& pending, size_t max_stop_len,
                                           const std::vector<std::string>& stop_sequences) {
     HoldbackDecision d;
-    for (const auto& stop : stop_sequences) {
+    // The EARLIEST occurrence, not the first sequence in the list that happens
+    // to occur anywhere: with stops {"B", "A"} on "xAyB" the list order used to
+    // cut at "B" (offset 3) and report "B", while the text the model produced
+    // ended at "A" (offset 1). The contract above always said "first
+    // occurrence"; only the loop disagreed.
+    size_t best = std::string::npos;
+    for (size_t i = 0; i < stop_sequences.size(); i++) {
+        const std::string& stop = stop_sequences[i];
         if (stop.empty())
             continue;
         size_t pos = pending.find(stop);
-        if (pos != std::string::npos) {
-            d.complete_match = true;
-            d.flush_len = pos;  // pos <= size, no clamp needed
-            return d;
+        if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
+            best = pos;
+            d.matched_index = static_cast<int>(i);
         }
+    }
+    if (best != std::string::npos) {
+        d.complete_match = true;
+        d.flush_len = best;  // best <= size, no clamp needed
+        return d;
     }
     if (pending.size() > max_stop_len) {
         size_t safe = pending.size() - max_stop_len + 1;

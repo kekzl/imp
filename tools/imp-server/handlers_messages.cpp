@@ -87,6 +87,7 @@ enum class AnthBlock { NONE, THINKING, TEXT, TOOL_USE };
 bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
                                   const std::shared_ptr<ServerRequest>& server_req,
                                   const std::string& anth_model, const std::string& msg_id) {
+    namespace anth = imp_server::anthropic;
     AnthropicSSE out{sink};
     auto active_req = server_req->request;
     int n_prompt_tokens = ctx.snap.n_prompt_tokens;
@@ -194,7 +195,6 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return false;
         ++block_index;
         open_block = AnthBlock::TOOL_USE;
-        namespace anth = imp_server::anthropic;
         return out.emit("content_block_start",
                         json{{"type", "content_block_start"},
                              {"index", block_index},
@@ -266,18 +266,24 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     // Close any block still open.
     stop_block();
 
-    // Map finish_reason -> Anthropic stop_reason.
-    std::string stop_reason;
-    if (strcmp(res.finish, "stop") == 0)
-        stop_reason = "end_turn";
-    else if (strcmp(res.finish, "length") == 0)
-        stop_reason = "max_tokens";
-    else if (strcmp(res.finish, "tool_calls") == 0)
-        stop_reason = "tool_use";
-    else if (strcmp(res.finish, "cancelled") == 0)
-        stop_reason = "end_turn";
-    else
-        stop_reason = res.finish;
+    // Map finish_reason -> Anthropic stop_reason, through the same function the
+    // non-streaming builder uses. This copy passed "capacity" through verbatim
+    // (#1552) and could not report a stop-sequence match (#1550).
+    const std::string stop_reason = anth::anthropic_stop_reason(res.finish, !res.stop_sequence.empty());
+
+    // A fault that ends the stream is an `error` event, not a completed turn
+    // (#1553). The status line is long gone by here, so the event is the only
+    // way to say the answer is not the model's: a server-side timeout used to
+    // arrive as stop_reason "max_tokens", indistinguishable from the model
+    // reaching its budget, and an admission refusal as "capacity", which is not
+    // an Anthropic stop_reason at all.
+    if (res.error_type) {
+        out.emit("error", json{{"type", "error"},
+                               {"error", {{"type", res.error_type}, {"message", res.error_message}}}});
+        sink.done();
+        finish_stream_accounting_(state, ctx, active_req, res, msg_id, "messages stream: ");
+        return true;
+    }
 
     // ---- message_delta + message_stop ------------------------------------
     // Cache accounting is only known after prefill ran, so it rides on the
@@ -294,7 +300,9 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     }
     out.emit("message_delta",
              json{{"type", "message_delta"},
-                  {"delta", {{"stop_reason", stop_reason}, {"stop_sequence", nullptr}}},
+                  {"delta",
+                   {{"stop_reason", stop_reason},
+                    {"stop_sequence", res.stop_sequence.empty() ? json(nullptr) : json(res.stop_sequence)}}},
                   {"usage", std::move(delta_usage)}});
     out.emit("message_stop", json{{"type", "message_stop"}});
     sink.done();
@@ -309,9 +317,16 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
 // Non-streaming reuses the OpenAI path via a shim; streaming drives the real
 // per-token loop above.
 // ===========================================================================
-static void handle_messages_impl(const httplib::Request& req, httplib::Response& res, ServerState& state);
+static void handle_messages_impl(const httplib::Request& req, httplib::Response& res, ServerState& state,
+                                 const std::string& request_id);
 
 void handle_messages(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // One id for this request, on every answer this endpoint gives - success or
+    // error (#1561). It is what a client quotes in a bug report and what ties
+    // the response to its line in the JSONL log.
+    const std::string request_id = make_request_id(state);
+    res.set_header("request-id", request_id);
+
     // Any exception escaping the impl — notably from the inner
     // handle_chat_completions shim on the non-streaming path — must return the
     // Anthropic error envelope ({"type":"error",...}), not the OpenAI-shaped one
@@ -319,19 +334,19 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     // fail to parse (#891). res is untouched by the shim (it writes a separate
     // shim_res) when the throw propagates, so it is safe to rewrite here.
     try {
-        handle_messages_impl(req, res, state);
+        handle_messages_impl(req, res, state, request_id);
     } catch (const std::exception& e) {
-        res.status = 500;
-        json err = {{"type", "error"}, {"error", {{"type", "server_error"}, {"message", e.what()}}}};
-        res.set_content(dump_safe(err), "application/json");
+        // api_error, not server_error: the latter is not one of Anthropic's
+        // error types, so an SDK switching on it lands in its default branch
+        // (#1556).
+        send_anthropic_error(res, 500, "api_error", e.what(), request_id);
     } catch (...) {
-        res.status = 500;
-        json err = {{"type", "error"}, {"error", {{"type", "server_error"}, {"message", "internal error"}}}};
-        res.set_content(dump_safe(err), "application/json");
+        send_anthropic_error(res, 500, "api_error", "internal error", request_id);
     }
 }
 
-static void handle_messages_impl(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+static void handle_messages_impl(const httplib::Request& req, httplib::Response& res, ServerState& state,
+                                 const std::string& request_id) {
     namespace anth = imp_server::anthropic;
 
     // Capture original Anthropic request data for opt-in JSONL logging.
@@ -351,21 +366,14 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     try {
         anth_body = json::parse(req.body);
     } catch (const std::exception& e) {
-        res.status = 400;
-        json err = {{"type", "error"},
-                    {"error",
-                     {{"type", "invalid_request_error"},
-                      {"message", std::string("Invalid JSON: ") + e.what()}}}};
-        res.set_content(dump_safe(err), "application/json");
+        send_anthropic_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what(),
+                             request_id);
         return;
     }
 
     if (!anth_body.is_object()) {
-        res.status = 400;
-        json err = {{"type", "error"},
-                    {"error",
-                     {{"type", "invalid_request_error"}, {"message", "Request body must be a JSON object"}}}};
-        res.set_content(dump_safe(err), "application/json");
+        send_anthropic_error(res, 400, "invalid_request_error", "Request body must be a JSON object",
+                             request_id);
         return;
     }
 
@@ -379,12 +387,8 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     try {
         oai_body = anth::anthropic_to_openai_body(anth_body);
     } catch (const std::exception& e) {
-        res.status = 400;
-        json err = {{"type", "error"},
-                    {"error",
-                     {{"type", "invalid_request_error"},
-                      {"message", std::string("Failed to transform Anthropic body: ") + e.what()}}}};
-        res.set_content(dump_safe(err), "application/json");
+        send_anthropic_error(res, 400, "invalid_request_error",
+                             std::string("Failed to transform Anthropic body: ") + e.what(), request_id);
         return;
     }
 
@@ -440,11 +444,8 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
         {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
             if (!state.batching || !state.batching->is_running()) {
-                res.status = 503;
-                json err = {{"type", "error"},
-                            {"error",
-                             {{"type", "server_error"}, {"message", "Inference engine not ready. Please retry."}}}};
-                res.set_content(dump_safe(err), "application/json");
+                send_anthropic_error(res, 503, "overloaded_error",
+                                     "Inference engine not ready. Please retry.", request_id);
                 return;
             }
             state.batching->submit(server_req);
@@ -486,15 +487,25 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     // a real error we should forward.
     const bool is_error = shim_res.status >= 400;
     if (is_error) {
-        res.status = shim_res.status;
-        json parsed;
+        // The shim answers in the OpenAI dialect, and its `type` was forwarded
+        // verbatim inside the Anthropic envelope - so `capacity_error` and
+        // `server_error`, neither of which Anthropic defines, reached SDK
+        // clients (#1556). Translate; keep param/code, which are additive.
+        json inner;
         try {
-            parsed = json::parse(shim_res.body);
+            inner = json::parse(shim_res.body).value("error", json::object());
         } catch (...) {
-            parsed = {{"error", {{"message", shim_res.body}, {"type", "server_error"}}}};
+            inner = json::object();
         }
-        json out = {{"type", "error"},
-                    {"error", parsed.value("error", json{{"type", "server_error"}, {"message", "unknown"}})}};
+        const std::string msg = inner.value("message", shim_res.body.empty() ? "unknown" : shim_res.body);
+        const std::string oai_type = inner.value("type", "");
+        json e = {{"type", anthropic_error_type_for(oai_type, shim_res.status)}, {"message", msg}};
+        if (inner.contains("code") && !inner["code"].is_null())
+            e["code"] = inner["code"];
+        if (inner.contains("param") && !inner["param"].is_null())
+            e["param"] = inner["param"];
+        json out = {{"type", "error"}, {"error", std::move(e)}, {"request_id", request_id}};
+        res.status = shim_res.status;
         res.set_content(dump_safe(out), "application/json");
         return;
     }
@@ -503,16 +514,15 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     try {
         oai_response = json::parse(shim_res.body);
     } catch (const std::exception& e) {
-        res.status = 500;
-        json err = {{"type", "error"},
-                    {"error",
-                     {{"type", "server_error"},
-                      {"message", std::string("Upstream returned non-JSON: ") + e.what()}}}};
-        res.set_content(dump_safe(err), "application/json");
+        send_anthropic_error(res, 500, "api_error", std::string("Upstream returned non-JSON: ") + e.what(),
+                             request_id);
         return;
     }
 
-    json anth_response = anth::openai_to_anthropic_response(oai_response, anth_model);
+    // The shim's OpenAI body cannot say which stop sequence ended the
+    // generation; the handler that matched it left the answer beside the body
+    // (#1550).
+    json anth_response = anth::openai_to_anthropic_response(oai_response, anth_model, g_shim_stop_sequence);
 
     // JSONL log — built from Anthropic shapes so /v1/messages clients see
     // exactly what they sent and what they got back.

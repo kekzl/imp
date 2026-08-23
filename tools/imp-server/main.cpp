@@ -228,9 +228,11 @@ int main(int argc, char** argv) {
             const std::string ip = state.rate_limit_key(req.remote_addr,
                                                         req.get_header_value("X-Forwarded-For"));
             if (!state.check_rate_limit(ip)) {
-                res.status = 429;
-                json err = {{"error", {{"message", "Rate limit exceeded"}, {"type", "rate_limit_error"}}}};
-                res.set_content(err.dump(), "application/json");
+                // Both dialects call this rate_limit_error; only the envelope
+                // differs, and this site shipped the OpenAI one to every
+                // endpoint (#1551).
+                send_dialect_error(res, req.path, 429, "rate_limit_error", "rate_limit_error",
+                                   "Rate limit exceeded");
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
@@ -244,11 +246,11 @@ int main(int argc, char** argv) {
                     queue = state.batching->queue_depth();
             }
             if (queue >= state.max_concurrent) {
-                res.status = 429;
-                json err = {{"error",
-                             {{"message", "Server overloaded, too many concurrent requests"},
-                              {"type", "rate_limit_error"}}}};
-                res.set_content(err.dump(), "application/json");
+                // Anthropic's name for "too many in flight right now" is
+                // overloaded_error (529 upstream; the status here stays 429,
+                // which is what this server's own docs and clients expect).
+                send_dialect_error(res, req.path, 429, "rate_limit_error", "overloaded_error",
+                                   "Server overloaded, too many concurrent requests");
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
@@ -262,16 +264,8 @@ int main(int argc, char** argv) {
             std::string auth = req.get_header_value("Authorization");
             std::string xkey = req.get_header_value("x-api-key");
             if (!api_key_matches(auth, xkey, state.api_key)) {
-                res.status = 401;
-                json err;
-                if (req.path.rfind("/v1/messages", 0) == 0) {
-                    err = {{"type", "error"},
-                           {"error", {{"type", "authentication_error"}, {"message", "Invalid API key"}}}};
-                } else {
-                    err = {{"error",
-                            {{"message", "Invalid API key"}, {"type", "invalid_request_error"}}}};
-                }
-                res.set_content(err.dump(), "application/json");
+                send_dialect_error(res, req.path, 401, "invalid_request_error", "authentication_error",
+                                   "Invalid API key");
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
@@ -376,18 +370,18 @@ int main(int argc, char** argv) {
     // those to 400. Everything else is a genuine internal failure → 500, but
     // still with a JSON body. dump_safe (inside send_json_error) guarantees the
     // envelope itself can't throw on bad bytes.
-    svr.set_exception_handler(
-        [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
-            try {
-                std::rethrow_exception(std::move(ep));
-            } catch (const nlohmann::json::exception& e) {
-                send_json_error(res, 400, "invalid_request_error", e.what());
-            } catch (const std::exception& e) {
-                send_json_error(res, 500, "server_error", e.what());
-            } catch (...) {
-                send_json_error(res, 500, "server_error", "unknown internal error");
-            }
-        });
+    svr.set_exception_handler([](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
+        try {
+            std::rethrow_exception(std::move(ep));
+        } catch (const nlohmann::json::exception& e) {
+            send_dialect_error(res, req.path, 400, "invalid_request_error", "invalid_request_error",
+                               e.what());
+        } catch (const std::exception& e) {
+            send_dialect_error(res, req.path, 500, "server_error", "api_error", e.what());
+        } catch (...) {
+            send_dialect_error(res, req.path, 500, "server_error", "api_error", "unknown internal error");
+        }
+    });
 
     // Any error response that would go out with an empty body gets the same
     // JSON envelope every handler uses. The reachable case is an unmatched
@@ -409,18 +403,14 @@ int main(int argc, char** argv) {
         const std::string msg = not_found ? "Unknown endpoint: " + sanitize_for_echo(req.method, 16) + " " +
                                                 sanitize_for_echo(req.path, 128)
                                           : "Request failed with status " + std::to_string(res.status);
-        if (req.path.rfind("/v1/messages", 0) == 0) {
-            json err = {{"type", "error"},
-                        {"error",
-                         {{"type", not_found ? "not_found_error" : "invalid_request_error"},
-                          {"message", msg}}}};
-            res.set_content(dump_safe(err), "application/json");
-        } else {
-            json err = {
-                {"error",
-                 {{"message", msg}, {"type", res.status >= 500 ? "server_error" : "invalid_request_error"}}}};
-            res.set_content(dump_safe(err), "application/json");
-        }
+        // api_error, not server_error: the latter is not an Anthropic error
+        // type (#1556).
+        const char* anthropic_type = not_found           ? "not_found_error"
+                                     : res.status >= 500 ? "api_error"
+                                                         : "invalid_request_error";
+        const char* openai_type = res.status >= 500 ? "server_error" : "invalid_request_error";
+        const int status = res.status;
+        send_dialect_error(res, req.path, status, openai_type, anthropic_type, msg);
         return httplib::Server::HandlerResponse::Handled;
     });
 

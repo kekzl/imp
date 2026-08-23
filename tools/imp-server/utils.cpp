@@ -59,15 +59,8 @@ bool reject_body_too_deep(const httplib::Request& req, httplib::Response& res) {
     if (req.body.empty() || json_nesting_depth(req.body, kMaxBodyNesting) <= kMaxBodyNesting)
         return false;
 
-    res.status = 400;
-    const char* msg = "request body nests deeper than 100 levels";
-    json err;
-    if (req.path.rfind("/v1/messages", 0) == 0) {
-        err = {{"type", "error"}, {"error", {{"type", "invalid_request_error"}, {"message", msg}}}};
-    } else {
-        err = {{"error", {{"message", msg}, {"type", "invalid_request_error"}}}};
-    }
-    res.set_content(err.dump(), "application/json");
+    send_dialect_error(res, req.path, 400, "invalid_request_error", "invalid_request_error",
+                       "request body nests deeper than 100 levels");
     return true;
 }
 
@@ -165,6 +158,50 @@ void send_json_error(httplib::Response& res, int status, const char* type, const
     json err = {{"error", std::move(e)}};
     res.status = status;
     res.set_content(dump_safe(err), "application/json");
+}
+
+bool is_anthropic_path(const std::string& path) { return path.rfind("/v1/messages", 0) == 0; }
+
+void send_anthropic_error(httplib::Response& res, int status, const char* type, const std::string& message,
+                          const std::string& request_id) {
+    json e = {{"type", type}, {"message", message}};
+    json err = {{"type", "error"}, {"error", std::move(e)}};
+    if (!request_id.empty()) {
+        err["request_id"] = request_id;
+        res.set_header("request-id", request_id);
+    }
+    res.status = status;
+    res.set_content(dump_safe(err), "application/json");
+}
+
+const char* anthropic_error_type_for(std::string_view openai_type, int status) {
+    // Anthropic's complete set. A type already in it passes through; the two
+    // this server invented do not (#1556).
+    static constexpr const char* kAnthropicTypes[] = {"invalid_request_error", "authentication_error",
+                                                      "billing_error",         "permission_error",
+                                                      "not_found_error",       "request_too_large",
+                                                      "rate_limit_error",      "api_error",
+                                                      "overloaded_error",      "timeout_error"};
+    for (const char* t : kAnthropicTypes)
+        if (openai_type == t)
+            return t;
+    if (openai_type == "capacity_error")
+        return "overloaded_error";
+    if (openai_type == "server_error")
+        return "api_error";
+    return status >= 500 ? "api_error" : "invalid_request_error";
+}
+
+void send_dialect_error(httplib::Response& res, const std::string& path, int status, const char* openai_type,
+                        const char* anthropic_type, const std::string& message,
+                        const std::string& request_id) {
+    if (is_anthropic_path(path)) {
+        send_anthropic_error(res, status, anthropic_type, message, request_id);
+        return;
+    }
+    if (!request_id.empty())
+        res.set_header("request-id", request_id);
+    send_json_error(res, status, openai_type, message);
 }
 
 bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning) {

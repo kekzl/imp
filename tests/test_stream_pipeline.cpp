@@ -78,6 +78,45 @@ TEST(Holdback, EmptyBufferFlushesNothing) {
 // Stop-sequence holdback across chunk boundaries.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Which stop sequence matched (#1550), and where.
+// ---------------------------------------------------------------------------
+
+TEST(Holdback, ReportsWhichStopSequenceMatched) {
+    std::string pending = "hello</tool>rest";
+    auto d = holdback_decision(pending, 7, {"</tool>"});
+    ASSERT_TRUE(d.complete_match);
+    EXPECT_EQ(d.matched_index, 0);
+    EXPECT_EQ(d.flush_len, 5u);
+}
+
+TEST(Holdback, NoMatchLeavesTheIndexUnset) {
+    std::string pending = "hello";
+    auto d = holdback_decision(pending, 7, {"</tool>"});
+    EXPECT_FALSE(d.complete_match);
+    EXPECT_EQ(d.matched_index, -1);
+}
+
+// The list order used to decide, so with {"B", "A"} on "xAyB" the cut landed at
+// offset 3 and the reported sequence was "B" - while the text the model
+// produced ended at "A", offset 1. The documented contract always said "first
+// occurrence".
+TEST(Holdback, EarliestOccurrenceWinsNotListOrder) {
+    std::string pending = "xAyB";
+    auto d = holdback_decision(pending, 1, {"B", "A"});
+    ASSERT_TRUE(d.complete_match);
+    EXPECT_EQ(d.flush_len, 1u);
+    EXPECT_EQ(d.matched_index, 1);  // "A"
+}
+
+TEST(Holdback, EmptyStopSequenceIsSkippedNotMatched) {
+    std::string pending = "abc";
+    auto d = holdback_decision(pending, 3, {"", "c"});
+    ASSERT_TRUE(d.complete_match);
+    EXPECT_EQ(d.matched_index, 1);
+    EXPECT_EQ(d.flush_len, 2u);
+}
+
 TEST(Holdback, HoldsBackPotentialPartialPrefix) {
     // stop="STOP" (len 4) -> max_stop_len 4. Buffer "helloST" could still grow
     // into "...STOP", so keep the last (4-1)=3 bytes ("lST"... actually the
@@ -104,26 +143,25 @@ TEST(Holdback, CompleteMatchFlushesPrefixAndSignalsStop) {
     EXPECT_EQ(d.flush_len, 3u);  // "abc"; the stop and "xyz" are dropped
 }
 
-TEST(Holdback, FirstStopInListOrderWins) {
-    // Contract (mirrors handlers.cpp's loop): stops are tried in LIST order and
-    // the first one that occurs anywhere wins — NOT the earliest position. Here
-    // "STOP" (list index 0) is found at byte 7 and reported even though "END"
-    // sits earlier at byte 2. This is intentional: it matches the production
-    // loop `for (stop : stops) { if (find(stop)) break; }`.
+// This used to assert the opposite - "stops are tried in LIST order and the
+// first one that occurs anywhere wins, NOT the earliest position ... this is
+// intentional" - and it was pinning the loop, not a requirement: the function's
+// own contract two screens up always said "byte offset of the FIRST such
+// occurrence", and list order shipped the text BETWEEN the two stops, which the
+// model was never supposed to have generated past. Both orders now cut at byte
+// 2 (#1550, found while making the matched sequence reportable).
+TEST(Holdback, EarliestOccurrenceWinsWhicheverOrderTheListIsIn) {
     std::vector<std::string> stops = {"STOP", "END"};
     auto d = holdback_decision("hiENDxxSTOP", 4, stops);
     EXPECT_TRUE(d.complete_match);
-    EXPECT_EQ(d.flush_len, 7u);  // flush up to "STOP" at byte 7 -> "hiENDxx"
-}
+    EXPECT_EQ(d.flush_len, 2u);  // "hi", cut at "END"
+    EXPECT_EQ(d.matched_index, 1);
 
-TEST(Holdback, EarlierListEntryMatchesAtItsPosition) {
-    // When the FIRST list entry ("END") does occur, its position (byte 2) is the
-    // flush length, regardless of a later-listed stop. Confirms the loop returns
-    // on the first list entry, at that entry's own match position.
-    std::vector<std::string> stops = {"END", "STOP"};
-    auto d = holdback_decision("hiENDxxSTOP", 4, stops);
-    EXPECT_TRUE(d.complete_match);
-    EXPECT_EQ(d.flush_len, 2u);  // "hi"
+    std::vector<std::string> reversed = {"END", "STOP"};
+    auto d2 = holdback_decision("hiENDxxSTOP", 4, reversed);
+    EXPECT_TRUE(d2.complete_match);
+    EXPECT_EQ(d2.flush_len, 2u);
+    EXPECT_EQ(d2.matched_index, 0);
 }
 
 TEST(StreamSim, StopMatchSplitAcrossChunksIsCaught) {

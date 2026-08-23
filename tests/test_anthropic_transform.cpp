@@ -531,7 +531,12 @@ TEST(AnthropicResponse, FinishReasonMapping) {
     EXPECT_EQ(stop_for("length"), "max_tokens");
     EXPECT_EQ(stop_for("tool_calls"), "tool_use");
     EXPECT_EQ(stop_for("cancelled"), "end_turn");
-    EXPECT_EQ(stop_for("content_filter"), "content_filter");  // unknown → passthrough
+    // Was `content_filter` passed straight through. That is OpenAI's name and
+    // not a member of Anthropic's stop_reason enum; "refusal" is (#1552).
+    EXPECT_EQ(stop_for("content_filter"), "refusal");
+    // Nothing unknown escapes the enum any more.
+    EXPECT_EQ(stop_for("capacity"), "end_turn");
+    EXPECT_EQ(stop_for("whatever"), "end_turn");
 }
 
 TEST(AnthropicResponse, UsageSplitsCacheReadFromInput) {
@@ -717,4 +722,79 @@ TEST(AnthropicGuidedPassthrough, AbsentFieldsAreNotInvented) {
     EXPECT_FALSE(oai.contains("guided_grammar"));
     EXPECT_FALSE(oai.contains("grammar"));
     EXPECT_FALSE(oai.contains("response_format"));
+}
+
+// ---------------------------------------------------------------------------
+// stop_reason / stop_sequence (#1550, #1552) and tool_result.is_error (#1557)
+// ---------------------------------------------------------------------------
+
+namespace {
+json minimal_oai_response(const char* finish) {
+    return json{{"id", "chatcmpl-1"},
+                {"choices", json::array({{{"index", 0},
+                                          {"finish_reason", finish},
+                                          {"message", {{"role", "assistant"}, {"content", "hi"}}}}})},
+                {"usage", {{"prompt_tokens", 3}, {"completion_tokens", 1}}}};
+}
+}  // namespace
+
+TEST(AnthropicStopReason, StopWithoutASequenceIsEndTurn) {
+    json out = openai_to_anthropic_response(minimal_oai_response("stop"), "m");
+    EXPECT_EQ(out["stop_reason"], "end_turn");
+    EXPECT_TRUE(out["stop_sequence"].is_null());
+}
+
+// The whole point of #1550: the same finish_reason, two different turns.
+TEST(AnthropicStopReason, StopWithASequenceNamesIt) {
+    json out = openai_to_anthropic_response(minimal_oai_response("stop"), "m", "</done>");
+    EXPECT_EQ(out["stop_reason"], "stop_sequence");
+    EXPECT_EQ(out["stop_sequence"], "</done>");
+}
+
+TEST(AnthropicStopReason, LengthAndToolCallsAreUnchanged) {
+    EXPECT_EQ(openai_to_anthropic_response(minimal_oai_response("length"), "m")["stop_reason"], "max_tokens");
+    EXPECT_EQ(openai_to_anthropic_response(minimal_oai_response("tool_calls"), "m")["stop_reason"],
+              "tool_use");
+}
+
+// "capacity" and "cancelled" are engine reasons, not Anthropic stop_reasons.
+// The streaming path used to ship "capacity" verbatim (#1552).
+TEST(AnthropicStopReason, EngineReasonsNeverShipVerbatim) {
+    using imp_server::anthropic::anthropic_stop_reason;
+    EXPECT_STREQ(anthropic_stop_reason("capacity", false), "end_turn");
+    EXPECT_STREQ(anthropic_stop_reason("cancelled", false), "end_turn");
+    EXPECT_STREQ(anthropic_stop_reason("anything_else", false), "end_turn");
+}
+
+TEST(AnthropicToolResult, IsErrorIsLabelledForTheModel) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages",
+                 json::array({{{"role", "user"},
+                               {"content", json::array({{{"type", "tool_result"},
+                                                         {"tool_use_id", "toolu_1"},
+                                                         {"is_error", true},
+                                                         {"content", "connection refused"}}})}}})}};
+    json oai = anthropic_to_openai_body(req);
+    bool found = false;
+    for (const auto& m : oai["messages"]) {
+        if (m.value("role", "") == "tool") {
+            found = true;
+            EXPECT_EQ(m["content"], "[tool error] connection refused");
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(AnthropicToolResult, SuccessfulResultIsUnlabelled) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "user"},
+                                           {"content", json::array({{{"type", "tool_result"},
+                                                                     {"tool_use_id", "toolu_1"},
+                                                                     {"content", "ok"}}})}}})}};
+    json oai = anthropic_to_openai_body(req);
+    for (const auto& m : oai["messages"])
+        if (m.value("role", "") == "tool")
+            EXPECT_EQ(m["content"], "ok");
 }

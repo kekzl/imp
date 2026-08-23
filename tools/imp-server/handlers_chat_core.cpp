@@ -37,6 +37,15 @@
 // so the Anthropic call only logs once at the outer handler.
 thread_local bool g_in_anthropic_shim = false;
 
+// The stop sequence that ended the last non-streaming generation on this
+// thread, or empty. The Anthropic shim runs the OpenAI handler in-process and
+// reads its JSON body back, and that body has no field for this - OpenAI's
+// finish_reason "stop" covers both "the model ended its turn" and "a stop
+// sequence matched". Anthropic distinguishes the two (#1550), so the fact
+// travels beside the body rather than inside it, the same way the log-suppress
+// flag above does.
+thread_local std::string g_shim_stop_sequence;
+
 // Write one JSONL line capturing this request: timing, endpoint, raw client
 // body, token counts, finish reason, and (for non-streaming) the response.
 // Streaming responses pass an empty `response_body` since per-chunk text is
@@ -715,6 +724,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     // For n > 1, run multiple independent generations sequentially
     json choices = json::array();
     int total_output_tokens = 0;
+    g_shim_stop_sequence.clear();
 
     for (int ci = 0; ci < ctx.params.n_completions; ci++) {
         // For subsequent completions, create a new request and submit it
@@ -735,6 +745,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         std::vector<int32_t> output_ids;
         const char* finish = nullptr;
         std::string output_text;  // accumulated output for stop matching
+        std::string matched_stop;  // which stop sequence ended it, for the Anthropic shim (#1550)
 
         auto ns_request_start = std::chrono::steady_clock::now();
         for (;;) {
@@ -807,16 +818,25 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             if (!ctx.params.stop_sequences.empty()) {
                 output_text += ctx.snap.tok->decode_token(token);
                 bool stop_found = false;
+                // Earliest occurrence, and remember which one: the Anthropic
+                // shim reports the matched sequence (#1550), and taking the
+                // first list entry that occurs anywhere cuts at the wrong
+                // offset when two stops are present.
+                size_t best = std::string::npos;
                 for (const auto& stop : ctx.params.stop_sequences) {
                     auto pos = output_text.find(stop);
-                    if (pos != std::string::npos) {
-                        output_text = output_text.substr(0, pos);
-                        stop_found = true;
-                        break;
+                    if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
+                        best = pos;
+                        matched_stop = stop;
                     }
+                }
+                if (best != std::string::npos) {
+                    output_text = output_text.substr(0, best);
+                    stop_found = true;
                 }
                 if (stop_found) {
                     finish = "stop";
+                    g_shim_stop_sequence = matched_stop;
                     break;
                 }
             }

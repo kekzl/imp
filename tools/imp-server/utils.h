@@ -106,6 +106,41 @@ size_t utf8_chunk_len(const std::string& s, size_t off, size_t max);
 void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message,
                      const char* param = nullptr, const char* code = nullptr);
 
+// True for the endpoints that speak the Anthropic dialect, whose errors have a
+// different envelope: `{"type":"error","error":{...}}` rather than
+// `{"error":{...}}`. Four call sites in main.cpp used to spell this test out
+// and two more forgot it, so a 429 on /v1/messages came back in the OpenAI
+// shape and no Anthropic SDK could classify it (#1551).
+bool is_anthropic_path(const std::string& path);
+
+// The Anthropic error envelope, with `request_id` when one is known.
+//
+// `type` must be one of Anthropic's error types - invalid_request_error,
+// authentication_error, billing_error, permission_error, not_found_error,
+// request_too_large, rate_limit_error, api_error, overloaded_error,
+// timeout_error. `server_error` and `capacity_error` are not among them and
+// were being emitted at seven sites (#1556).
+//
+// request_id is what support and log correlation are asked for first; no error
+// body carried one and no response carried a request-id header (#1561).
+void send_anthropic_error(httplib::Response& res, int status, const char* type, const std::string& message,
+                          const std::string& request_id = {});
+
+// Translate an OpenAI-dialect `error.type` into the Anthropic one.
+//
+// The non-streaming /v1/messages path runs through the OpenAI handler and
+// forwards whatever it produced, so `server_error` and `capacity_error` - which
+// are not Anthropic error types - reached Anthropic SDK clients verbatim
+// (#1556). Anything unrecognised falls back on the status: 5xx is api_error,
+// everything else invalid_request_error.
+const char* anthropic_error_type_for(std::string_view openai_type, int status);
+
+// Send whichever envelope `path` calls for. `openai_type` and `anthropic_type`
+// are the two dialects' names for the same condition.
+void send_dialect_error(httplib::Response& res, const std::string& path, int status, const char* openai_type,
+                        const char* anthropic_type, const std::string& message,
+                        const std::string& request_id = {});
+
 // Constant-time Bearer-token check. Returns true iff `authorization` equals
 // "Bearer " + api_key, compared without early-out so response timing cannot leak
 // the key prefix (std::string::operator== short-circuits on the first differing

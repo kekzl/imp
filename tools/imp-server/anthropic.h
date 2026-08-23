@@ -24,7 +24,20 @@ json anthropic_to_openai_body(const json& anth);
 // `anth_model` is the model name passed in the original Anthropic request
 // (used verbatim in the response — Anthropic clients expect the name they
 // sent, not whatever alias the OpenAI side resolved to).
-json openai_to_anthropic_response(const json& oai, const std::string& anth_model);
+// `stop_sequence` is the text that ended the generation, when one did. OpenAI's
+// finish_reason "stop" means both "the model ended its turn" and "a stop
+// sequence matched"; Anthropic reports them as end_turn and stop_sequence, and
+// names the matched text (#1550). The caller reads it off the shim
+// (g_shim_stop_sequence) or the stream loop result.
+json openai_to_anthropic_response(const json& oai, const std::string& anth_model,
+                                  const std::string& stop_sequence = {});
+
+// OpenAI finish_reason -> Anthropic stop_reason, in one place because the
+// streaming and non-streaming paths had two copies that disagreed: the
+// streaming one passed the engine's "capacity" straight through as a
+// stop_reason, which is not in Anthropic's enum (#1552), and neither could
+// produce "stop_sequence" (#1550).
+const char* anthropic_stop_reason(const std::string& openai_finish, bool stop_sequence_matched);
 
 // Generate an Anthropic message id (msg_XXXX). Uses the same atomic counter
 // semantics as make_completion_id; callers pass in a fresh integer.
