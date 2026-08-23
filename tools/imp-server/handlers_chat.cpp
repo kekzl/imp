@@ -278,6 +278,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     // Create an imp::Request and submit to batching engine (/v1/completions is
     // text-only — no vision).
     auto imp_req = std::make_shared<imp::Request>();
+    imp_req->trace_id = req_id;  // #1582: join the engine's log lines to this request
     imp_req->input_tokens = std::move(tokens);
     imp_req->max_tokens = max_tokens;
     imp_req->temperature = temperature;
