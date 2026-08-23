@@ -133,6 +133,23 @@ __global__ void residual_kv_write_indirect_kernel(
     int seq_slot,                                     // index into d_residual_widx_ptr
     int slot_elems);
 
+// Graph-capture-safe MULTI-seq variant of the above. The per-batch-index
+// destination is computed on the device from the layer base, the residual
+// per-seq stride and the ring index, so nothing about it is frozen at capture
+// time (#1708). The old form took a device ARRAY of destination pointers that
+// the host built and `cudaMallocAsync`'d per call, per layer - inside the
+// captured region, freed again right after, so a replay wrote to memory the
+// allocator had handed to someone else.
+__global__ void residual_kv_write_multi_indirect_kernel(
+    const half* __restrict__ k_in,                // [n_tokens, slot_elems]
+    const half* __restrict__ v_in,                // [n_tokens, slot_elems]
+    half* __restrict__ residual_k_layer_base,     // slot 0 of this layer, K
+    half* __restrict__ residual_v_layer_base,     // slot 0 of this layer, V
+    int64_t seq_stride_elems,                     // half-elements between seq slots
+    const int* __restrict__ d_seq_slots,          // [n_tokens] residual slot per batch idx
+    const int* __restrict__ d_residual_widx_ptr,  // [max_seqs] device array
+    int slot_elems);
+
 // Advance the residual ring state for one slot. Single-thread kernel:
 //   d_widx[slot] = (d_widx[slot] + 1) % residual_n_tokens
 //   d_fc[slot]   = min(d_fc[slot] + 1, residual_n_tokens)
@@ -141,6 +158,14 @@ __global__ void advance_residual_state_kernel(
     int* __restrict__ d_fc,
     int slot,
     int residual_n_tokens);
+
+// Same, for every sequence in a multi-seq decode step (#1708). The single-slot
+// form above is reached only when `state.kv_seq_id >= 0`, which only the N==1
+// path sets - so a multi-seq step advanced the ring on the HOST, and a graph
+// replay never ran that.
+__global__ void advance_residual_state_multi_kernel(int* __restrict__ d_widx, int* __restrict__ d_fc,
+                                                    const int* __restrict__ d_seq_slots, int n_seqs,
+                                                    int residual_n_tokens);
 
 __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,

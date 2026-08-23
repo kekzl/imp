@@ -187,6 +187,28 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Multi-sequence decode on the residual path faulted with an illegal memory
+  access when CUDA graphs were on** (#1708). Silent wrong output, then a sticky
+  context: the first fault took every later request in the process with it, and
+  the client saw `finish_reason: length` with a degenerate string, not an error.
+  Three things on that path were resolved on the host at capture time - a
+  device pointer array `cudaMallocAsync`'d per call and per layer inside the
+  captured region and freed right after it, the ring index baked into those
+  pointers, and a host-side ring advance that a replay never runs (the
+  device-side advance was gated on `kv_seq_id`, which only the single-sequence
+  path sets). All three are computed on the device now. Qwen3-8B-Q8_0,
+  `kv_cache.bitdecoding_residual_tokens=64`, six concurrent requests:
+
+  | | before | after |
+  |---|---|---|
+  | answers | 6/6 empty | 6/6 correct |
+  | `illegal memory access` in the log | 15 | 0 |
+
+  One request was clean before and stays clean; graphs off was clean before and
+  stays clean. `ResidualKvWriteMulti.ReplayFollowsTheRingInsteadOfTheCapturedIndex`
+  captures a graph, advances the ring on the device only, and asserts the replay
+  followed it - it fails on a frozen index, which is what the old path had.
+
 - **The prefill latency guard capped chunk size, never chunk count** (#1643).
   One engine step ran a chunk for *every* prefilling request, so k concurrent
   ingests inserted k chunk forwards between two decode steps of every decoder -

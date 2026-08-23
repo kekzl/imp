@@ -38,7 +38,6 @@ src/exec/executor_forward_moe.cu  # 5
 src/exec/executor_forward_moe_batch.cu  # 7
 src/exec/executor_forward_moe_cutlass.cu  # 10
 src/exec/executor_helpers.h  # 3
-src/exec/executor_kv_write.cu  # 4
 src/exec/executor_lora.cu  # 2
 src/exec/executor_perplexity.cu  # 8
 src/exec/executor_ssm_gdn.cu  # 2
