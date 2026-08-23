@@ -247,4 +247,24 @@ TEST(AnthropicEnvelope, TypeTranslationCoversTheInventedOnes) {
     EXPECT_STREQ(anthropic_error_type_for("", 500), "api_error");
 }
 
+// ---------------------------------------------------------------------------
+// What /v1/models may advertise (#1542)
+// ---------------------------------------------------------------------------
+
+TEST(ServableContext, ThePoolWinsWhenItIsSmaller) {
+    // The reported case: resolver planned 97204, the pool was clamped to 52256.
+    EXPECT_EQ(servable_context_tokens(97204, 52256), 52256);
+}
+
+TEST(ServableContext, ThePlanStandsWhenThePoolIsLarger) {
+    EXPECT_EQ(servable_context_tokens(131072, 209408), 131072);
+    EXPECT_EQ(servable_context_tokens(4096, 4096), 4096);
+}
+
+// A pool whose size could not be read must not silently advertise zero.
+TEST(ServableContext, UnknownCapacityLeavesThePlanAlone) {
+    EXPECT_EQ(servable_context_tokens(8192, -1), 8192);
+    EXPECT_EQ(servable_context_tokens(8192, 0), 8192);
+}
+
 }  // namespace

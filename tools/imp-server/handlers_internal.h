@@ -263,4 +263,4 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
 // Defined in handlers_messages.cpp.
 bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
                            const std::shared_ptr<ServerRequest>& server_req, const std::string& anth_model,
-                           const std::string& msg_id);
+                           const std::string& msg_id, bool omit_thinking);

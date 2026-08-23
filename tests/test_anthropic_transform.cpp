@@ -798,3 +798,85 @@ TEST(AnthropicToolResult, SuccessfulResultIsUnlabelled) {
         if (m.value("role", "") == "tool")
             EXPECT_EQ(m["content"], "ok");
 }
+
+// ---------------------------------------------------------------------------
+// thinking: adaptive, display, absolute budgets, signature (#1555, #1560)
+// ---------------------------------------------------------------------------
+
+namespace {
+json thinking_req(const json& thinking, int max_tokens = 4000) {
+    json r = {{"model", "m"},
+              {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})},
+              {"thinking", thinking}};
+    if (max_tokens > 0)
+        r["max_tokens"] = max_tokens;
+    return r;
+}
+}  // namespace
+
+// The on-mode current SDKs send. It matched neither branch and set nothing, so
+// the request ran at the server default while the client believed otherwise.
+TEST(AnthropicThinking, AdaptiveEnablesThinking) {
+    json oai = anthropic_to_openai_body(thinking_req({{"type", "adaptive"}}));
+    ASSERT_TRUE(oai.contains("enable_thinking"));
+    EXPECT_TRUE(oai["enable_thinking"].get<bool>());
+}
+
+TEST(AnthropicThinking, EnabledStillWorksAndBudgetIsAFraction) {
+    json oai = anthropic_to_openai_body(
+        thinking_req({{"type", "enabled"}, {"budget_tokens", 2000}}, /*max_tokens=*/4000));
+    EXPECT_TRUE(oai["enable_thinking"].get<bool>());
+    EXPECT_DOUBLE_EQ(oai["think_budget"].get<double>(), 0.5);
+}
+
+TEST(AnthropicThinking, DisabledZeroesTheBudget) {
+    json oai = anthropic_to_openai_body(thinking_req({{"type", "disabled"}}));
+    EXPECT_FALSE(oai["enable_thinking"].get<bool>());
+    EXPECT_DOUBLE_EQ(oai["think_budget"].get<double>(), 0.0);
+}
+
+// budget_tokens 0 with type enabled is a contradiction the request states
+// outright; it used to leave the server default in place.
+TEST(AnthropicThinking, ZeroBudgetWithEnabledIsHonoured) {
+    json oai = anthropic_to_openai_body(thinking_req({{"type", "enabled"}, {"budget_tokens", 0}}));
+    EXPECT_FALSE(oai["enable_thinking"].get<bool>());
+    EXPECT_DOUBLE_EQ(oai["think_budget"].get<double>(), 0.0);
+}
+
+TEST(AnthropicThinking, DisplayOmittedIsReadOffTheRequest) {
+    using imp_server::anthropic::thinking_display_omitted;
+    EXPECT_TRUE(thinking_display_omitted(thinking_req({{"type", "enabled"}, {"display", "omitted"}})));
+    EXPECT_FALSE(thinking_display_omitted(thinking_req({{"type", "enabled"}, {"display", "summarized"}})));
+    EXPECT_FALSE(thinking_display_omitted(thinking_req({{"type", "enabled"}})));
+    EXPECT_FALSE(thinking_display_omitted(json{{"model", "m"}}));
+}
+
+TEST(AnthropicThinking, OmittedDropsTheThinkingBlock) {
+    json oai = {{"id", "chatcmpl-1"},
+                {"choices", json::array({{{"index", 0},
+                                          {"finish_reason", "stop"},
+                                          {"message",
+                                           {{"role", "assistant"},
+                                            {"content", "the answer"},
+                                            {"reasoning_content", "the thinking"}}}}})},
+                {"usage", {{"prompt_tokens", 3}, {"completion_tokens", 2}}}};
+
+    json shown = openai_to_anthropic_response(oai, "m", "", /*omit_thinking=*/false);
+    ASSERT_EQ(shown["content"].size(), 2u);
+    EXPECT_EQ(shown["content"][0]["type"], "thinking");
+    EXPECT_TRUE(shown["content"][0].contains("signature"));
+
+    json hidden = openai_to_anthropic_response(oai, "m", "", /*omit_thinking=*/true);
+    ASSERT_EQ(hidden["content"].size(), 1u);
+    EXPECT_EQ(hidden["content"][0]["type"], "text");
+}
+
+// The signature is a digest, not an attestation: same text, same value, and it
+// changes when the text does. That is what makes a round trip verifiable.
+TEST(AnthropicThinking, SignatureIsDeterministicAndTextDependent) {
+    using imp_server::anthropic::thinking_signature;
+    const std::string a = thinking_signature("some reasoning");
+    EXPECT_EQ(a, thinking_signature("some reasoning"));
+    EXPECT_NE(a, thinking_signature("some reasoning "));
+    EXPECT_EQ(a.rfind("imp_sig_", 0), 0u);
+}

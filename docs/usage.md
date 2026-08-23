@@ -317,7 +317,11 @@ hard-coded table is needed: `/v1/models` carries vLLM's `max_model_len` and
 llama.cpp's `meta.n_ctx_train` on the model object, `GET /props` returns the
 llama.cpp `n_ctx` (top-level and under `default_generation_settings`), and
 `GET /info` returns TGI's `max_total_tokens` / `max_input_tokens`. All three
-report the same window (the engine-detected `max_seq_len`).
+report the same window, and it is what the KV pool can actually hold: the
+resolver's `max_seq_len` is a plan, the pool is clamped after it, and on a tight
+card the two differ (97204 against 52256 on Qwen3.8-27B-NVFP4). `/health`'s
+`kv_capacity_tokens` has always been the real number; the probes report the
+smaller of the two now (#1542).
 
 Server-only flags (not on `imp-cli`):
 

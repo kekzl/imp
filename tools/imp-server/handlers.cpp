@@ -183,12 +183,22 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     bool loaded = false;
     std::string model_name;
     int max_seq_len = 0;
+    // What the KV pool can actually hold. `max_seq_len` is what the resolver
+    // planned; the pool is clamped after that, and on a tight card the two
+    // differ by a lot - 97204 against 52256 on Qwen3.8-27B-NVFP4, so a prompt
+    // between them was advertised as servable and was not (#1542). /health has
+    // reported the real number all along; /v1/models reported the plan.
+    long long kv_capacity_tokens = -1;
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock()) {
             loaded = state.model_loaded();
             model_name = state.model_name;
             max_seq_len = state.max_seq_len;
+            if (state.ctx && state.ctx->engine) {
+                if (const auto* kv = state.ctx->engine->kv_cache())
+                    kv_capacity_tokens = static_cast<long long>(kv->total_blocks()) * kv->block_size();
+            }
         } else {
             ServerState::ObsStatus snap = state.model_status_snapshot();
             loaded = snap.loaded;
@@ -196,6 +206,7 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
             max_seq_len = state.max_seq_len;  // plain int, set once at load
         }
     }
+    max_seq_len = servable_context_tokens(max_seq_len, kv_capacity_tokens);
 
     // Expose what this server can actually serve. That used to mean the loaded
     // model alone, because listing the directory invited clients to request a
@@ -311,16 +322,24 @@ void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, 
 // other observability endpoints (#889).
 static void snapshot_ctx(ServerState& state, bool& loaded, std::string& model_name,
                          int& max_seq_len) {
+    long long kv_capacity_tokens = -1;
     std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
     if (lock.owns_lock()) {
         loaded = state.model_loaded();
         model_name = state.model_name;
+        if (state.ctx && state.ctx->engine) {
+            if (const auto* kv = state.ctx->engine->kv_cache())
+                kv_capacity_tokens = static_cast<long long>(kv->total_blocks()) * kv->block_size();
+        }
     } else {
         ServerState::ObsStatus snap = state.model_status_snapshot();
         loaded = snap.loaded;
         model_name = snap.model_name;
     }
     max_seq_len = state.max_seq_len;  // plain int, set once at load
+    // All three probes must answer the same question with the same number
+    // (docs/usage.md says so), so the pool clamp applies here too (#1542).
+    max_seq_len = servable_context_tokens(max_seq_len, kv_capacity_tokens);
 }
 
 // GET /props — llama.cpp-compatible context probe. llama.cpp clients read the

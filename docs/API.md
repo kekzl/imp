@@ -159,6 +159,15 @@ Two request fields do it, and **either one alone is enough**:
 | `think_budget` | OpenAI | fraction of `max_tokens` reserved for reasoning. **0 disables thinking** |
 | `enable_thinking` | OpenAI | `false` disables thinking |
 | `thinking: {type: "disabled"}` | Anthropic | same, and zeroes the budget |
+| `thinking: {type: "enabled"\|"adaptive"}` | Anthropic | thinking on. `adaptive` is what current SDKs send and used to set nothing at all |
+| `thinking: {budget_tokens: N}` | Anthropic | converted to a fraction of `max_tokens`. `0` disables thinking outright |
+| `thinking: {display: "omitted"}` | Anthropic | the model still reasons; the `thinking` block is not returned, on either transport |
+
+`thinking` blocks carry a `signature`, and the stream emits `signature_delta`
+before the block's `content_block_stop`, because the SDKs round-trip the pair.
+It is a deterministic digest of the block text, not an attestation: imp is not
+the model vendor and cannot sign anything. It proves the block came back
+unedited, and nothing more.
 
 Measured on Qwen3.8-27B with a JSON prompt at `max_tokens: 400`, counting
 `reasoning_content` characters: nothing set 160, `think_budget: 0` alone **0**,
@@ -231,6 +240,12 @@ A stream that ends on a server-side fault emits an `error` SSE event instead of
 `message_delta`/`message_stop`: a request timeout and an admission refusal used
 to arrive as an ordinary completed turn, indistinguishable from the model
 finishing.
+
+`anthropic-version` and `anthropic-beta` are read and echoed back. Neither is
+enforced: upstream a missing version is a 400 and an unknown beta is refused,
+while imp serves both - a client that works here can therefore fail there. An
+unknown beta is logged once per value, because imp implements no beta surface
+and answering 200 to a beta request is otherwise a silent false accept.
 
 Internal engine errors are translated to `ImpError` at the C API boundary
 (`src/api/imp_api.cpp`); this is intentional and is why a load failure surfaces
