@@ -187,6 +187,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A cuBLASLt matmul failure discarded the benchmarked algo without saying so**
+  (#1545). `reselect_algo_for_entry` replaced the timed probe's pick with
+  heuristic `results[0]` for the rest of the process and logged nothing; only a
+  *second* failure logged anything, so a shape could run on a different algo
+  than the one the probe chose, differently on each process start. The cache
+  entry now records whether its algo came from the probe or the heuristic, and
+  replacing a benchmarked one logs it once with the shape. The reselection
+  itself is unchanged - the retry is what keeps the matmul alive.
+
 - **Multi-sequence decode on the residual path faulted with an illegal memory
   access when CUDA graphs were on** (#1708). Silent wrong output, then a sticky
   context: the first fault took every later request in the process with it, and
