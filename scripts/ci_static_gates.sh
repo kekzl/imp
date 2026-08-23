@@ -67,6 +67,7 @@ if want filesize; then
     echo "== File size =="
     run "hard-review gate + allowlist ceilings" python3 tools/check_filesize.py
     run "tests that run in no CI lane"          python3 tools/check_test_lanes.py --report
+    run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py
     run "FATAL logs that do not stop"           python3 tools/check_log_fatal.py --list
 fi

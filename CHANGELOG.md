@@ -180,6 +180,35 @@ there instead of retelling it.
 
 ### Fixed
 
+- **What `runtime.deterministic` covers is now written down, and gated**
+  (#1574). It reaches four kernel sites through
+  `process_diag_deterministic_gemm()`; `gemm_cutlass_grouped_3x.cu` - the
+  primary GEMM for NVFP4 weights and every GGUF quant - reads none of them,
+  while the doc said "GEMM" without scoping it. Measured on
+  `Qwen3.8-27B-NVFP4`, three fresh processes per arm, teacher-forced NLL: **on
+  1.3113 / 1.3113 / 1.3113, off 1.3113 / 1.2889 / 1.2889** - so the mode does
+  make that checkpoint reproducible, through the sites it does cover, and what
+  is missing is the guarantee rather than the effect. Greedy bytes were
+  identical in all six runs and could not see any of it. Known limit 5 in
+  `docs/determinism.md` names the uncovered path, and
+  `tools/check_determinism_sites.py` fails when the code's sites and the doc's
+  list drift apart. Second hole closed: `reselect_algo_for_entry` replaced the
+  warmup-validated algo with a heuristic pick on a runtime matmul failure, with
+  no deterministic check - it now refuses in deterministic mode instead.
+
+- **The only end-to-end determinism gate never ran** (#1575).
+  `*DetEvalE2ETest*` takes its `GTEST_SKIP` branch unless a model env var is
+  set, and the pre-commit hook's "full suite" stage (`make test-gpu`) set none -
+  so the gate existed and executed nowhere except a target run by hand.
+  `test-gpu` runs it explicitly now, with only the two variables it needs.
+  Measured: 6 tests, 74 s.
+
+- **`--use_fast_math` is named as part of the determinism envelope** (#1576).
+  Every CUDA TU is compiled with it in both shipped configurations, which is
+  fine and deliberate - but it means the guarantees are about one binary, not
+  one commit. `docs/determinism.md` says so, and the eval recipe now says to
+  pin the image.
+
 - **The ITL histogram measured a per-request mean on the wrong ladder**
   (#1577). `imp_inter_token_seconds` observed one value per request - the mean
   - on the request-duration bucket ladder, whose first bound is 5 ms. imp

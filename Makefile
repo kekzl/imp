@@ -128,6 +128,16 @@ test-unit: build
 # stale.
 test-gpu: build
 	$(DOCKER_RUN) imp-tests
+	@# #1575: DetEvalE2ETest is the only end-to-end determinism gate in the
+	@# tree, and it takes its GTEST_SKIP branch unless a model env var is set.
+	@# DOCKER_RUN carries none, so the pre-commit hook's "full suite" stage ran
+	@# it as a skip - the gate existed and never executed. It runs here
+	@# explicitly, with only the two variables it needs, rather than handing
+	@# test-gpu the whole model battery.
+	docker run --rm --gpus all -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
+		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
+		$(DOCKER_IMG) imp-tests --gtest_filter="*DetEvalE2ETest*"
 
 # Stage 3 — the SERVER stage (local, GPU-only). Boots a real imp-server against
 # a live model and GATES on the OpenAI+Anthropic wire batteries (endpoints,
