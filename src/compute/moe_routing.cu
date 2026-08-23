@@ -477,20 +477,49 @@ __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
     }
     __syncthreads();
 
-    // Phase 4: Deterministic scatter — single thread walks flat_idx in order
-    // so a token's slot within its expert bucket is fixed regardless of warp
-    // scheduling.
-    if (tid == 0) {
-        for (int idx = 0; idx < total; idx++) {
-            int token = idx / top_k;
-            int expert = expert_indices[idx];
-            int pos = s_write_pos[expert]++;
-            int dest = expert_offsets[expert] + pos;
-            sorted_token_ids[dest] = token;
+    // Phase 4: deterministic scatter. A token's slot inside its expert bucket
+    // is its rank among the EARLIER flat indices routed to that expert, which
+    // is what makes the layout independent of warp scheduling.
+    //
+    // This was one thread walking all `total` entries: 4096 dependent
+    // shared-memory read-modify-writes for a 512-token top_k=8 chunk. Once the
+    // combine was fixed it became the dominant cost of deterministic MoE
+    // routing, 0.178 ms against the combine's 0.013 ms (#1546).
+    //
+    // One blockDim-sized chunk at a time produces the IDENTICAL layout: chunks
+    // are visited in index order, and inside a chunk a thread counts only
+    // lower thread ids, so the rank is still "how many earlier indices chose
+    // this expert".
+    int32_t* s_chunk = smem + 2 * n_experts;  // [blockDim.x]
+    const int block_n = static_cast<int>(blockDim.x);
+    for (int base = 0; base < total; base += block_n) {
+        const int idx = base + tid;
+        const int expert = (idx < total) ? expert_indices[idx] : -1;
+        s_chunk[tid] = expert;
+        __syncthreads();
+
+        if (idx < total) {
+            int rank = 0;
+            for (int j = 0; j < tid; j++)
+                rank += (s_chunk[j] == expert) ? 1 : 0;
+            const int dest = expert_offsets[expert] + s_write_pos[expert] + rank;
+            sorted_token_ids[dest] = idx / top_k;
             sorted_flat_idx[dest] = idx;
             if (token_to_expanded)
                 token_to_expanded[idx] = dest;
         }
+        __syncthreads();
+
+        // Advance the write positions by what this chunk consumed, so the next
+        // chunk starts where this one ended.
+        const int chunk_n = (total - base) < block_n ? (total - base) : block_n;
+        for (int e = tid; e < n_experts; e += block_n) {
+            int c = 0;
+            for (int j = 0; j < chunk_n; j++)
+                c += (s_chunk[j] == e) ? 1 : 0;
+            s_write_pos[e] += c;
+        }
+        __syncthreads();
     }
 }
 
@@ -603,8 +632,10 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
 
     // ---- Fused count + scan + scatter (single kernel) ----
     size_t smem_permute = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
+    // The deterministic kernel parks one chunk of expert ids alongside.
+    size_t smem_permute_det = smem_permute + static_cast<size_t>(BLOCK_SIZE) * sizeof(int32_t);
     if (process_diag_deterministic_gemm()) {
-        moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(
+        moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_permute_det, stream>>>(
             d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
             d_expert_offsets, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
@@ -720,9 +751,10 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
     if (!skip_sorting) {
         int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
         size_t smem_bytes = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
+        size_t smem_bytes_det = smem_bytes + static_cast<size_t>(BLOCK_SIZE) * sizeof(int32_t);
 
         if (process_diag_deterministic_gemm()) {
-            moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
+            moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_bytes_det, stream>>>(
                 d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
                 d_expert_offsets, buffers.token_to_expanded);
             IMP_CUDA_CHECK_LAUNCH();

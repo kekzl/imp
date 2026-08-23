@@ -110,8 +110,13 @@ TEST(SchemaConstrainTest, ToolCallEnvelopeAndNameBinding) {
 }
 
 TEST(SchemaConstrainTest, ToolCallBuilderRejectsUnenforceable) {
-    // Free-form parameters (no properties) → decline.
-    EXPECT_TRUE(build_tool_call_schema({{"t", R"({"type":"object"})"}}) == nullptr);
+    // Free-form parameters (no properties) BUILD since #1729: such an object
+    // is representable now (free keys, undescribed values), so declining it
+    // would refuse a tool the caller can legitimately offer. The XML dialect
+    // still declines, because it renders parameter keys as tags and a schema
+    // that declares none has no tag to render.
+    EXPECT_TRUE(build_tool_call_schema({{"t", R"({"type":"object"})"}}) != nullptr);
+    EXPECT_TRUE(build_xml_tool_call_schema({{"t", R"({"type":"object"})"}}) == nullptr);
     // Unresolvable $ref → parse fails → decline (would enforce a wrong grammar).
     EXPECT_TRUE(build_tool_call_schema(
                     {{"t", R"({"type":"object","properties":{"i":{"$ref":"#/$defs/Missing"}}})"}}) ==

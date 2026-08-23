@@ -89,31 +89,90 @@ __global__ void moe_scatter_kernel_impl(const T* __restrict__ expert_output,
     }
 }
 
-// Deterministic scatter-add: one block per OUTPUT token. Each block scans the
-// sorted rows in ascending row order and accumulates (in FP32 registers, fixed
-// order) every row that belongs to its token, then writes once. Avoids the FP
-// atomicAdd of moe_scatter_kernel_impl whose accumulation order is
-// scheduling-dependent (non-reproducible). Opt-in only (deterministic mode);
-// the default path keeps the faster atomic scatter.
+// Deterministic scatter-add: one block per OUTPUT token. Each block gathers the
+// sorted rows belonging to its token, accumulates them (in FP32 registers, in
+// ascending row order) and writes once. Avoids the FP atomicAdd of
+// moe_scatter_kernel_impl whose accumulation order is scheduling-dependent
+// (non-reproducible). Opt-in only (deterministic mode); the default path keeps
+// the faster atomic scatter.
+//
+// The gather used to sit INSIDE the column loop, so the O(total_rows) row scan
+// ran ceil(d_model / blockDim) times per token rather than once: 8 times over
+// 4096 rows for a 2048-wide model at 512 tokens, to find the same 8 rows every
+// time (#1546). It runs once now, and the column loop reads a shared-memory
+// list of length top_k.
+//
+// `cap` is the caller's upper bound on rows per token (0 = unknown). Exceeding
+// it falls back to the original scan, which produces the same numbers.
+constexpr int kMaxDetRowsPerToken = 64;
+
 template <typename T>
 __global__ void moe_scatter_deterministic_kernel_impl(const T* __restrict__ expert_output,
                                                       const int32_t* __restrict__ sorted_token_ids,
                                                       const int32_t* __restrict__ sorted_flat_idx,
                                                       const float* __restrict__ expert_weights,
                                                       float* __restrict__ output, int total_rows,
-                                                      int n_tokens, int d_model) {
+                                                      int n_tokens, int d_model, int cap) {
     const int token = blockIdx.x;
     if (token >= n_tokens)
         return;
 
+    extern __shared__ int32_t s_rows[];
+    __shared__ int s_count;
+    if (threadIdx.x == 0)
+        s_count = 0;
+    __syncthreads();
+
+    if (cap > 0) {
+        for (int row = threadIdx.x; row < total_rows; row += blockDim.x) {
+            if (sorted_token_ids[row] != token)
+                continue;
+            const int slot = atomicAdd(&s_count, 1);
+            if (slot < cap)
+                s_rows[slot] = row;
+        }
+        __syncthreads();
+        // Ascending row order IS the contract of this kernel: it is what makes
+        // the FP32 accumulation reproducible. atomicAdd appended in scheduling
+        // order, so sort the handful of entries back. top_k is 4-8 on every
+        // shipped MoE checkpoint, so one thread insertion-sorting beats a
+        // barrier-heavy parallel sort.
+        if (threadIdx.x == 0 && s_count <= cap) {
+            for (int i = 1; i < s_count; ++i) {
+                const int32_t v = s_rows[i];
+                int j = i - 1;
+                while (j >= 0 && s_rows[j] > v) {
+                    s_rows[j + 1] = s_rows[j];
+                    --j;
+                }
+                s_rows[j + 1] = v;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (cap > 0 && s_count <= cap) {
+        const int k = s_count;
+        for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
+            float sum = 0.0f;
+            for (int i = 0; i < k; ++i) {
+                const int row = s_rows[i];
+                const float weight = expert_weights[sorted_flat_idx[row]];
+                sum += weight * to_float(expert_output[static_cast<int64_t>(row) * d_model + col]);
+            }
+            output[static_cast<int64_t>(token) * d_model + col] = sum;
+        }
+        return;
+    }
+
+    // Fallback: a token carrying more rows than the caller's bound allowed for.
+    // Same ascending-row accumulation, so the same numbers, just slower.
     for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
         float sum = 0.0f;
-        // Scan rows in fixed ascending order; accumulate the ones mapping to
-        // this token. Deterministic regardless of routing/scheduling.
         for (int row = 0; row < total_rows; ++row) {
             if (sorted_token_ids[row] != token)
                 continue;
-            float weight = expert_weights[sorted_flat_idx[row]];
+            const float weight = expert_weights[sorted_flat_idx[row]];
             sum += weight * to_float(expert_output[static_cast<int64_t>(row) * d_model + col]);
         }
         output[static_cast<int64_t>(token) * d_model + col] = sum;
@@ -181,17 +240,29 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing, T
         // Deterministic mode: one block per output token, fixed-order FP32
         // accumulation over its rows. Writes output directly (no atomics, no
         // pre-zero needed). total_tokens here is the number of expanded rows.
+        //
+        // Rows per token is exactly top_k: top-k gating gives every token that
+        // many assignments and the permute assigns each one a slot, so the
+        // division is exact. Anything else (a routing path that drops or
+        // duplicates) leaves cap at 0 and the kernel takes its fallback scan.
+        int cap = 0;
+        if (n_tokens > 0 && total_tokens % n_tokens == 0) {
+            const int rows_per_token = total_tokens / n_tokens;
+            if (rows_per_token > 0 && rows_per_token <= kMaxDetRowsPerToken)
+                cap = rows_per_token;
+        }
+        const size_t smem = static_cast<size_t>(cap) * sizeof(int32_t);
         if (expert_output.qtype == QType::F16) {
             const half* d_expert_out = static_cast<const half*>(expert_output.data);
-            moe_scatter_deterministic_kernel_impl<<<n_tokens, BLOCK_SIZE, 0, stream>>>(
+            moe_scatter_deterministic_kernel_impl<<<n_tokens, BLOCK_SIZE, smem, stream>>>(
                 d_expert_out, d_sorted_token_ids, d_sorted_flat_idx, d_expert_weights, d_output, total_tokens,
-                n_tokens, d_model);
+                n_tokens, d_model, cap);
             IMP_CUDA_CHECK_LAUNCH();
         } else {
             const float* d_expert_out = static_cast<const float*>(expert_output.data);
-            moe_scatter_deterministic_kernel_impl<<<n_tokens, BLOCK_SIZE, 0, stream>>>(
+            moe_scatter_deterministic_kernel_impl<<<n_tokens, BLOCK_SIZE, smem, stream>>>(
                 d_expert_out, d_sorted_token_ids, d_sorted_flat_idx, d_expert_weights, d_output, total_tokens,
-                n_tokens, d_model);
+                n_tokens, d_model, cap);
             IMP_CUDA_CHECK_LAUNCH();
         }
         return;

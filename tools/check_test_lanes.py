@@ -126,7 +126,10 @@ def main():
                     help="expected unlaned macro count (default: read PINNED below)")
     args = ap.parse_args()
 
-    PINNED = 976
+    # 976 -> 979 (#1546): three GPU tests for the deterministic MoE combine
+    # and permute, a path that had none. They need a card because they run
+    # the kernels, so the unlaned count is the honest place for them.
+    PINNED = 979
 
     text = CMAKE.read_text()
     mods = module_sources(text)

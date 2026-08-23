@@ -8,6 +8,8 @@
 #include <numeric>
 #include <vector>
 #include <set>
+#include <cstring>
+#include "runtime/process_diag.h"
 
 namespace imp {
 namespace {
@@ -512,6 +514,143 @@ TEST(MoERoutingEdgeTest, AllTokensSameExpert) {
 
     free_tensor(d_gate);
     free_routing(routing);
+}
+
+
+// ===========================================================================
+// #1546: the deterministic combine gathered its token's rows inside the column
+// loop, so the O(total_rows) scan ran once per column chunk instead of once
+// per token. The gather is hoisted now. This path had no test at all, so these
+// pin its contract rather than the optimisation: same numbers as the atomic
+// path, and byte-identical across runs, which is the only reason it exists.
+// ===========================================================================
+
+// RAII for the process-wide deterministic switch, so a failing assertion
+// cannot leave it set for the rest of the binary.
+namespace {
+class DeterministicGemmScope {
+public:
+    DeterministicGemmScope() : prev_(imp::process_diag_deterministic_gemm()) {
+        imp::process_diag_set_deterministic_gemm(true);
+    }
+    ~DeterministicGemmScope() { imp::process_diag_set_deterministic_gemm(prev_); }
+
+private:
+    bool prev_;
+};
+}  // namespace
+
+TEST_F(MoERoutingTest, DeterministicScatterMatchesTheAtomicPath) {
+    static constexpr int kDModel = 16;
+    const int total = kNTokens * kTopK;
+
+    std::vector<float> h_rows(total * kDModel);
+    for (size_t i = 0; i < h_rows.size(); i++)
+        h_rows[i] = static_cast<float>(i % 37) * 0.25f - 3.0f;
+    int64_t rows_shape[2] = {total, kDModel};
+    Tensor d_rows = make_device_tensor(h_rows.data(), QType::F32, 2, rows_shape);
+
+    int64_t out_shape[2] = {kNTokens, kDModel};
+    Tensor d_atomic = make_device_tensor_zeros(QType::F32, 2, out_shape);
+    moe_scatter(d_rows, routing, d_atomic, /*stream=*/nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto h_atomic = to_host<float>(d_atomic);
+
+    Tensor d_det = make_device_tensor_zeros(QType::F32, 2, out_shape);
+    {
+        DeterministicGemmScope det;
+        moe_scatter(d_rows, routing, d_det, /*stream=*/nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    }
+    auto h_det = to_host<float>(d_det);
+
+    ASSERT_EQ(h_det.size(), h_atomic.size());
+    for (size_t i = 0; i < h_det.size(); i++)
+        EXPECT_NEAR(h_det[i], h_atomic[i], kTolerance)
+            << "deterministic and atomic combine disagree at element " << i;
+}
+
+TEST_F(MoERoutingTest, DeterministicScatterIsByteIdenticalAcrossRuns) {
+    static constexpr int kDModel = 32;
+    const int total = kNTokens * kTopK;
+
+    // Values whose FP32 sum is order-sensitive: a large magnitude next to
+    // small ones, so a reordered accumulation would round differently.
+    std::vector<float> h_rows(total * kDModel);
+    for (size_t i = 0; i < h_rows.size(); i++)
+        h_rows[i] = (i % 4 == 0) ? 1.0e7f : 1.0e-3f * static_cast<float>(i % 11 + 1);
+    int64_t rows_shape[2] = {total, kDModel};
+    Tensor d_rows = make_device_tensor(h_rows.data(), QType::F32, 2, rows_shape);
+    int64_t out_shape[2] = {kNTokens, kDModel};
+
+    DeterministicGemmScope det;
+    std::vector<float> first;
+    for (int run = 0; run < 5; run++) {
+        Tensor d_out = make_device_tensor_zeros(QType::F32, 2, out_shape);
+        moe_scatter(d_rows, routing, d_out, /*stream=*/nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        auto h_out = to_host<float>(d_out);
+        if (run == 0) {
+            first = h_out;
+            continue;
+        }
+        ASSERT_EQ(h_out.size(), first.size());
+        EXPECT_EQ(std::memcmp(h_out.data(), first.data(), first.size() * sizeof(float)), 0)
+            << "run " << run << " differs from run 0; the combine is not reproducible";
+    }
+}
+
+TEST(MoEDeterministicPermute, LayoutMatchesTheSerialRule) {
+    // The layout rule the single-threaded phase 4 implemented, and which the
+    // chunked version has to reproduce exactly: a flat index's slot inside its
+    // expert bucket is its rank among the EARLIER flat indices routed to that
+    // expert. Reference is that rule, written out serially on the host, so a
+    // mutation of the parallel rank (counting <= instead of <, or losing the
+    // chunk carry) fails here rather than showing up as a reordered bucket.
+    const int n_tokens = 300;  // deliberately not a multiple of the block size
+    const int top_k = 4;
+    const int n_experts = 16;
+    const int total = n_tokens * top_k;
+
+    std::vector<float> logits(static_cast<size_t>(n_tokens) * n_experts);
+    for (size_t i = 0; i < logits.size(); i++)
+        logits[i] = static_cast<float>((i * 2654435761u) % 977) * 0.01f;
+    int64_t lshape[2] = {n_tokens, n_experts};
+    Tensor d_logits = make_device_tensor(logits.data(), QType::F32, 2, lshape);
+
+    DeterministicGemmScope det;
+    MoeRoutingResult r{};
+    moe_topk_gating(d_logits, top_k, r, /*stream=*/nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    auto h_expert_idx = to_host<int32_t>(r.expert_indices);
+    auto h_offsets = to_host<int32_t>(r.expert_offsets);
+    // sorted_flat_idx lives immediately after sorted_token_ids in the same
+    // allocation (see moe_topk_gating / moe_scatter), so read both at once.
+    std::vector<int32_t> both(static_cast<size_t>(total) * 2);
+    ASSERT_EQ(cudaMemcpy(both.data(), r.sorted_token_ids.data, both.size() * sizeof(int32_t),
+                         cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    const int32_t* h_sorted_tok = both.data();
+    const int32_t* h_sorted_flat = both.data() + total;
+    ASSERT_EQ(static_cast<int>(h_expert_idx.size()), total);
+
+    std::vector<int32_t> ref_tok(total, -1), ref_flat(total, -1);
+    std::vector<int32_t> write_pos(n_experts, 0);
+    for (int idx = 0; idx < total; idx++) {
+        const int e = h_expert_idx[idx];
+        ASSERT_GE(e, 0);
+        ASSERT_LT(e, n_experts);
+        const int dest = h_offsets[e] + write_pos[e]++;
+        ASSERT_GE(dest, 0);
+        ASSERT_LT(dest, total);
+        ref_tok[dest] = idx / top_k;
+        ref_flat[dest] = idx;
+    }
+    for (int i = 0; i < total; i++) {
+        ASSERT_EQ(h_sorted_flat[i], ref_flat[i]) << "flat index differs at sorted slot " << i;
+        ASSERT_EQ(h_sorted_tok[i], ref_tok[i]) << "token differs at sorted slot " << i;
+    }
 }
 
 }  // namespace
