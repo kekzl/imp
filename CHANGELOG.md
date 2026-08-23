@@ -187,6 +187,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The pre-commit GPU gate ran the full suite for Markdown and Python edits.**
+  Its filter selected on the path prefix alone, and `tools/` and `tests/` also
+  hold the `CLAUDE.md` tree and the gate/generator scripts - so editing
+  `tests/CLAUDE.md` paid an image build plus the whole GTest suite for a result
+  that cannot move. `.html` and `.txt` still gate (`cmake/embed_webui.cmake`
+  compiles the web UI into `imp-server`; tests read corpora from `tests/refs` at
+  runtime). New CPU-lane guard `guard_precommit_filter` pins 19 cases on both
+  sides - over-excluding fails it too, because CI has no GPU runner and a C++
+  change that skips this hook is gated nowhere.
+
 - **Every second or third decode burst recaptured the conditional graph** (#1647).
   `rearm()` refuses when `context_len + step_limit` passes the captured ceiling
   `initial_context_len + max_steps`, and since #1636 `max_steps` was the KV

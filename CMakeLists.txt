@@ -1023,9 +1023,16 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_verify_filter.sh
                 ${CMAKE_CURRENT_BINARY_DIR}/imp-tests ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify.sh)
 
+    # The pre-commit hook runs the FULL GPU suite, so its path filter decides
+    # minutes of a shared card per commit - and CI has no GPU runner, so a C++
+    # change that slips past it is gated nowhere. Pins both directions.
+    add_test(NAME guard_precommit_filter
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_precommit_filter.sh
+                ${CMAKE_CURRENT_SOURCE_DIR})
+
     set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split
                          guard_det_suite_filter guard_cancel_teardown
-                         guard_verify_filter
+                         guard_verify_filter guard_precommit_filter
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)
