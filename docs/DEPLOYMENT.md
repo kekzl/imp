@@ -141,7 +141,7 @@ latency.
 | endpoint | use |
 |---|---|
 | `GET /health` | liveness. Answers before a model is loaded |
-| `GET /metrics` | Prometheus. TTFT and inter-token-latency histograms, cancellation counters, and a memory breakdown that separates capacity from occupancy |
+| `GET /metrics` | Prometheus. Latency histograms (request, TTFT, inter-token, queue), decode batch size, refusal and cancellation counters, and a memory breakdown that separates capacity from occupancy |
 | `GET /v1/models` | what is loaded, and what else is in the models directory |
 | `POST /admin/suspend` | park the weights in host RAM and free the GPU completely. Inference answers 503 while suspended |
 | `POST /admin/resume` | restore warm, in seconds, without re-reading weights |
@@ -149,6 +149,21 @@ latency.
 Suspend/resume is the answer to "I need the GPU for something else for ten
 minutes" without paying a cold load afterwards. Sessions and KV do not survive
 it; weights do.
+
+### Which series answer which question
+
+| question | series |
+|---|---|
+| how long did a request take | `imp_request_duration_seconds` (histogram) |
+| how long until the first token | `imp_ttft_seconds`. Recorded on **both** transports since #1578; before that, streaming only, while `imp_requests_total` counted everything |
+| how fast do tokens come out | `imp_inter_token_seconds`, **one observation per token** on a millisecond ladder (#1577). It used to be one per-request mean on the request-duration ladder, whose first bucket is 5 ms - at imp's own decode rates every observation landed in it, so `histogram_quantile` returned the bucket bounds rather than the data |
+| is the server busy or slow | `imp_queue_time_seconds` is the admission wait, prefill excluded (#1580). A rising queue time with flat request duration is load; the reverse is the model |
+| how much batching is happening | `rate(imp_decode_batch_rows_total[5m]) / rate(imp_decode_batch_steps_total[5m])`, and `imp_decode_batch_max` since start (#1580) |
+| did the server break, or refuse | `imp_requests_failed_total` is 5xx. Every refusal this server is designed to make is a **4xx**, and those are `imp_requests_rejected_total` (#1579). Two series because they want different alerts |
+
+`monitoring/grafana/dashboards/imp.json` plots the percentiles from those
+histograms. The `stat` panels beside them show the last value, which is a
+different thing and cannot show a tail.
 
 ## Capacity planning
 

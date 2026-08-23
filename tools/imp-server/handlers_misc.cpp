@@ -223,7 +223,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
         out += " histogram\n";
         for (int i = 0; i < LatencyHistogram::kNumBuckets; ++i) {
             char le[32];
-            std::snprintf(le, sizeof(le), "%g", LatencyHistogram::kBounds[i]);
+            std::snprintf(le, sizeof(le), "%g", h.bounds[i]);
             out += name;
             out += "_bucket{le=\"";
             out += le;
@@ -249,8 +249,34 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     emit_histogram("imp_request_duration_seconds", "Request end-to-end latency in seconds",
                    m.request_duration);
     emit_histogram("imp_ttft_seconds", "Time to first token in seconds", m.ttft);
-    emit_histogram("imp_inter_token_seconds", "Mean inter-token latency (ITL) per request in seconds",
+    emit_histogram("imp_inter_token_seconds", "Inter-token latency in seconds, one observation per token",
                    m.inter_token);
+    emit_histogram("imp_queue_time_seconds", "Seconds from admission to the first decode step", m.queue_time);
+    out += "# HELP imp_requests_rejected_total Requests refused with a 4xx\n";
+    out += "# TYPE imp_requests_rejected_total counter\n";
+    out += "imp_requests_rejected_total " + std::to_string(m.requests_rejected.load()) + "\n";
+    // Decode batch size, as a counter pair so a dashboard can rate() both and
+    // divide - the average over any window, without the server keeping one.
+    // The counters live on the BatchingEngine, which is where the batch is
+    // formed; read under the same bounded lock the rest of this endpoint uses.
+    {
+        int64_t steps = 0, rows = 0, bmax = 0;
+        std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+        if (lock.owns_lock() && state.batching) {
+            steps = state.batching->decode_steps.load();
+            rows = state.batching->decode_rows.load();
+            bmax = state.batching->decode_batch_max.load();
+        }
+        out += "# HELP imp_decode_batch_steps_total Decode steps executed\n";
+        out += "# TYPE imp_decode_batch_steps_total counter\n";
+        out += "imp_decode_batch_steps_total " + std::to_string(steps) + "\n";
+        out += "# HELP imp_decode_batch_rows_total Sequences decoded, summed over steps\n";
+        out += "# TYPE imp_decode_batch_rows_total counter\n";
+        out += "imp_decode_batch_rows_total " + std::to_string(rows) + "\n";
+        out += "# HELP imp_decode_batch_max Largest decode batch seen since start\n";
+        out += "# TYPE imp_decode_batch_max gauge\n";
+        out += "imp_decode_batch_max " + std::to_string(bmax) + "\n";
+    }
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
     bool loaded = false;

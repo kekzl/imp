@@ -37,6 +37,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     const bool snap_have_template = ctx.snap.have_template;
     const auto& snap_stop_token_ids = ctx.snap.stop_token_ids;
     const auto t_start = ctx.t_start;
+    auto t_prev_token = t_start;  // for the per-token ITL observation (#1577)
 
     const char* finish = nullptr;
 
@@ -278,9 +279,23 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         }
 
         out.n_output_tokens++;
-        if (out.n_output_tokens == 1) {
-            auto t_first = std::chrono::high_resolution_clock::now();
-            out.ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
+        {
+            // One ITL observation per token, taken here rather than as a
+            // per-request mean after the fact (#1577): a mean cannot show the
+            // variance, and variance is the whole reason to keep a histogram.
+            auto t_tok = std::chrono::high_resolution_clock::now();
+            if (out.n_output_tokens == 1) {
+                out.ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
+                // Queue time is known once the worker has admitted the request,
+                // which is guaranteed by the time a token comes back (#1580).
+                const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                if (q >= 0.0)
+                    state.metrics.queue_time.observe(q / 1000.0);
+            } else {
+                state.metrics.inter_token.observe(
+                    std::chrono::duration<double>(t_tok - t_prev_token).count());
+            }
+            t_prev_token = t_tok;
         }
         // A token can end mid-character; hold the partial bytes until the next
         // one completes them, or the delta ships half a character as U+FFFD.
@@ -581,10 +596,8 @@ void finish_stream_accounting_(ServerState& state, ChatRequestContext& ctx,
     state.metrics.request_duration.observe(ms / 1000.0);
     if (out.n_output_tokens > 0)
         state.metrics.ttft.observe(out.ttft_ms / 1000.0);
-    // Mean inter-token latency: post-first-token decode time spread over the
-    // remaining tokens. Streaming-only (non-stream has no per-token cadence).
-    if (out.n_output_tokens > 1)
-        state.metrics.inter_token.observe((ms - out.ttft_ms) / 1000.0 / (out.n_output_tokens - 1));
+
+    // Inter-token latency is observed per token inside the loop (#1577).
 
     // Streaming response content is not accumulated across SSE chunks, so the
     // JSONL `response` field stays null. The request body, token counts,

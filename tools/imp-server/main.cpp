@@ -418,6 +418,12 @@ int main(int argc, char** argv) {
     svr.set_post_routing_handler([&state](const httplib::Request&, httplib::Response& res) {
         if (res.status >= 500)
             state.metrics.requests_failed++;
+        // 4xx is where this server puts every refusal it is designed to make
+        // (tools/imp-server/CLAUDE.md), so counting only 5xx left the entire
+        // designed error surface invisible (#1579). Separate series, because
+        // "the server broke" and "the server refused" want different alerts.
+        else if (res.status >= 400)
+            state.metrics.requests_rejected++;
     });
 
     // Graceful shutdown on SIGINT/SIGTERM

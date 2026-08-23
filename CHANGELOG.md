@@ -180,6 +180,40 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The ITL histogram measured a per-request mean on the wrong ladder**
+  (#1577). `imp_inter_token_seconds` observed one value per request - the mean
+  - on the request-duration bucket ladder, whose first bound is 5 ms. imp
+  decodes at 300-450 tok/s, so every observation landed in that first bucket
+  and `histogram_quantile` returned a function of the bounds rather than of the
+  data. It is one observation per token now, on a millisecond ladder. Measured
+  on a live server, four requests: 4 observations in one bucket before, **39
+  observations spread over three buckets** after (5 under 2 ms, 34 under 3 ms,
+  39 under 5 ms).
+
+- **TTFT was recorded on the streaming path only** (#1578), while
+  `imp_requests_total` counted both - so the histogram described half the
+  traffic and did not say which half. The non-streaming path records it at its
+  first token. Measured: 3 non-streaming plus 1 streaming request produce 4
+  observations, not 1.
+
+- **`imp_requests_failed_total` counted 5xx only** (#1579). Every refusal this
+  server is designed to make is a 4xx (`tools/imp-server/CLAUDE.md`), so the
+  error counter was blind to the entire designed error surface.
+  `imp_requests_rejected_total` is its own series, because "the server broke"
+  and "the server refused" want different alerts.
+
+- **Nothing measured queueing or batching** (#1580).
+  `imp_queue_time_seconds` is the admission wait with prefill excluded, so a
+  busy server can be told from a slow one; `imp_decode_batch_{steps,rows}_total`
+  and `imp_decode_batch_max` say how many sequences actually decoded together.
+  Measured with six concurrent requests: `decode_batch_max 6`, 775 rows over
+  289 steps (2.68 mean), and 5 of 10 queue-time observations above 5 ms.
+
+- **The shipped Grafana dashboard plotted only last-value gauges** (#1581). Six
+  panels added, all percentile timeseries off the histograms that already
+  existed: request duration, TTFT, ITL, queue time, decode batch size, and
+  refusals against failures.
+
 - **The YaRN RoPE branch computed its angle in float and never reduced it**
   (#1630). #1316 fixed exactly this in `rope_forward`'s other two branches; the
   YaRN one kept calling the fast intrinsics on an unreduced argument, and the
