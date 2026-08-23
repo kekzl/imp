@@ -11,6 +11,8 @@
 // test NAMES, not files.
 
 #include <gtest/gtest.h>
+
+#include <algorithm>
 #include <cuda_runtime.h>
 
 #include "memory/kv_cache.h"
@@ -184,7 +186,15 @@ TEST(SchedulerTest, AdmissionReservesGeneration) {
     EXPECT_EQ(mgr->outstanding_reserved_blocks(), 5);
 
     sched.schedule(prefill, decode);
-    EXPECT_EQ(prefill.size(), 1u);
+    // Two, not one: the third is admitted now, and reqs[1] is still PREFILLING
+    // at offset 0 (nothing stepped it here) so it is re-queued with it. Before
+    // #1643 the refill required `prefill_offset > 0` and dropped it - in the
+    // engine that never showed, because every promoted request was served in
+    // the same tick it was promoted.
+    EXPECT_EQ(prefill.size(), 2u);
+    EXPECT_NE(std::find(prefill.begin(), prefill.end(), reqs[1]), prefill.end())
+        << "an admitted request that has not been stepped yet must stay schedulable";
+    EXPECT_NE(std::find(prefill.begin(), prefill.end(), reqs[2]), prefill.end());
     EXPECT_FALSE(sched.has_pending());
 }
 
