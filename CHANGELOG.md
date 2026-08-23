@@ -211,6 +211,16 @@ there instead of retelling it.
   promotion was served immediately; with the cap above, two of three concurrent
   ingests hung until the 300 s request timeout.
 
+- **No engine log line could be attributed to an HTTP request** (#1582, second
+  half). The server's `imp-N` and the engine's own request counter are disjoint
+  counters, and under concurrency they do not even run in step - three requests
+  sent at once mapped `imp-3 -> req 3`, `imp-2 -> req 4`, `imp-1 -> req 5`, so
+  the mapping cannot be inferred by arithmetic. `add_request()` now publishes it
+  once per request (`request imp-0 -> engine req 2`), which is what the eleven
+  engine sites printing `req %d` need: several of them hold only the integer and
+  have no `Request` to reach a string through. The two id spaces are joined, not
+  merged. Embeddings and rerank carry no client-facing id and are unaffected.
+
 - **The pre-commit GPU gate ran the full suite for Markdown and Python edits.**
   Its filter selected on the path prefix alone, and `tools/` and `tests/` also
   hold the `CLAUDE.md` tree and the gate/generator scripts - so editing
