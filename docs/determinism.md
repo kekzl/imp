@@ -20,8 +20,10 @@ variants:
 - **MoE token routing** — atomic expert-bucket scatter ordering.
 - **Top-k sampling** — atomicMax/atomicAdd softmax-stat races (single-block
   path, `top_k <= 128`).
-- **GEMM** — implies `deterministic_gemm` (cuBLASLt `no_reduce_split`;
-  timing-based algo selection is itself a non-determinism source).
+- **GEMM** — implies `deterministic_gemm`, which is **the cuBLASLt path**
+  (`no_reduce_split`, and no timing-based algo selection - the timing is itself
+  a non-determinism source). It does **not** reach the CUTLASS grouped NVFP4
+  GEMM; see known limit 5.
 
 With it ON, the gated guarantees (`DetEvalE2ETest`, PR #542) are:
 
@@ -190,6 +192,31 @@ accumulated via shared-memory FP `atomicAdd`, whose ordering is
 scheduling-dependent. Under deterministic mode this remains a documented
 exception — `typical_p` is not part of the temp=0 eval surface.
 
+### 5. The CUTLASS NVFP4 GEMM is not gated
+
+`runtime.deterministic` reaches four kernel sites, all through
+`process_diag_deterministic_gemm()`: `gemm.cu` (cuBLASLt), `sampling_topk_topp.cu`,
+and two in the MoE routing pair. `gemm_cutlass_grouped_3x.cu` - the primary GEMM
+for NVFP4 weights and every GGUF quant - reads none of them (#1574).
+
+**What that does and does not mean.** Measured 2026-08-23 on
+`Qwen3.8-27B-NVFP4`, three fresh processes per arm, teacher-forced NLL over
+`tools/analysis/ppl_corpus.txt`:
+
+| `deterministic` | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| `true` | 1.3113 | 1.3113 | 1.3113 |
+| `false` | 1.3113 | **1.2889** | **1.2889** |
+
+So the mode **does** make an NVFP4 checkpoint reproducible across processes,
+through the sites it does cover. What is missing is the guarantee: nothing in
+the CUTLASS path is pinned, so a future change there is not caught by the flag
+and not caught by the gate.
+
+Greedy bytes cannot see any of this. The same six runs produced one identical
+output in all six - the control and the treatment were byte-identical to each
+other, which is why this file has always said to compare NLL rather than bytes.
+
 ### 4. Cross-context-in-process
 
 `tests/test_determinism_e2e.cpp`:
@@ -214,6 +241,16 @@ same-context guarantee holds on both, which it did not when #1299 was filed.
 before #1341, whose own rationale names #1299 (decode-loop burst boundaries),
 but that attribution is the code's, not an A/B I ran.
 
+### 6. The build is part of the envelope
+
+Every CUDA translation unit is compiled with `--use_fast_math`
+(`cmake/CompilerFlags.cmake`), in both shipped configurations. That is a
+deliberate perf choice and it is stable for a given binary - but it means the
+guarantees above are about **one binary**, not about the source tree: a
+different toolchain or a different flag set can move the last bits without any
+of them being wrong (#1576). Pin the image, not just the config, when a result
+has to be reproducible later.
+
 ## Recipe: reproducible evals
 
 ```ini
@@ -221,6 +258,8 @@ but that attribution is the code's, not an A/B I ran.
 [runtime]
 deterministic = true
 ```
+
+Pin the binary too - the same image tag, not just the same commit (limit 6).
 
 - Compare **teacher-forced NLL** (`imp-cli --perplexity`), not greedy bytes.
 - temperature=0 / greedy only on prompts without logit ties, `top_k <= 128`.

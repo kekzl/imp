@@ -307,7 +307,22 @@ static void rebuild_layouts_for_m(GemmCacheEntry& entry, cudaDataType_t dtype_A,
 // Called when the cached algo (benchmarked for a different M within the
 // same bucket) is invalid for the current M — e.g. FP8 algos on sm_120
 // are sensitive to exact dimensions.
-static void reselect_algo_for_entry(GemmCacheEntry& entry) {
+// Re-pick an algo after a runtime matmul failure (a stale algo from a different
+// M in the same bucket).
+//
+// Returns false without touching the entry when deterministic mode is on: the
+// heuristic's results[0] is exactly the pick the deterministic branch above
+// refuses to trust without a warmup probe, and taking it here would discard
+// that validation silently, mid-run, on the one path that promises
+// reproducibility (#1574). The caller then falls back rather than retrying
+// with an unvalidated algo.
+static bool reselect_algo_for_entry(GemmCacheEntry& entry) {
+    if (imp::process_diag_deterministic_gemm()) {
+        IMP_LOG_DEBUG(
+            "[gemm-algo] matmul failed and deterministic_gemm is on: not re-picking by "
+            "heuristic (that would drop the warmup-validated algo)");
+        return false;
+    }
     cublasLtHandle_t lt = get_cublaslt_handle();
     cublasLtMatmulPreference_t pref = nullptr;
     cublasLtMatmulPreferenceCreate(&pref);
@@ -328,6 +343,7 @@ static void reselect_algo_for_entry(GemmCacheEntry& entry) {
         entry.has_algo = false;
         entry.workspace_size = 0;
     }
+    return true;
 }
 
 // Set per-call FP8 scale pointers on a matmul descriptor.
@@ -846,7 +862,9 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                                            entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             // Stale algo from a different M within the same bucket.
-            // Re-select via heuristic and retry before falling back.
+            // Re-select via heuristic and retry before falling back - unless
+            // deterministic mode is on, where the heuristic pick is exactly
+            // what the warmup probe exists to reject (#1574).
             {
                 std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
                 reselect_algo_for_entry(*entry);
