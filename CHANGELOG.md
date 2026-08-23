@@ -187,6 +187,27 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`additionalProperties` was parsed and never read, so a free-form object
+  could only ever be `{}`** (#1729). The FSM behaved as if every object were
+  `additionalProperties: false`: a caller who wrote `true` silently got only the
+  declared keys, and `{"type":"object"}` accepted no document but the empty one.
+  Undeclared keys are now legal where the schema allows them, and their values
+  are parsed by an embedded `JsonGrammar` (nesting, escapes and the number
+  sub-state included) rather than by the schema FSM. A property-less object
+  parses as free-form, matching JSON Schema's default; an object that declares
+  properties stays closed unless it says otherwise.
+
+- **`strict: true` was all-or-nothing, so one loose tool disabled argument
+  enforcement for every tool in the request** (#1597). OpenAI defines `strict`
+  per function and imp now enforces it per function: a tool that asked for it
+  keeps its schema, one that did not enters the name enum with a free-form
+  parameter schema instead of dropping the whole request to the prompt hint. The
+  realistic case is an agent set mixing a schema-bound `write_file` with a
+  free-text `bash`, where the caller got post-hoc validation for the one tool
+  whose arguments must parse. Needed #1729: before it there was nothing to put
+  in the enum for a free-form tool.
+
+
 - **`sim_token_valid` restored the JSON grammar state by hand, and that list had
   already gone stale once.** #1104 added the RFC 8259 number sub-state to the
   FSM and not to the eleven-field save/restore, so a simulated token that walked

@@ -718,3 +718,80 @@ TEST(ToolCallLlama3, BraceInsideStringDoesNotEndTheObject) {
     EXPECT_EQ(args["q"], "a } b");
     EXPECT_EQ(args["n"], 1);
 }
+
+// =============================================================================
+// #1597: `strict` is per-function in OpenAI's API. imp enforced it only when
+// EVERY tool in the request declared it and carried enforceable parameters, so
+// one loose tool turned off constrained decoding for the whole set. These pin
+// the per-function contract.
+// =============================================================================
+namespace {
+
+// Two tools, as a realistic agent set does it: one schema-bound, one free text.
+json mixed_tools(bool write_strict, bool bash_strict) {
+    json write_fn = {{"name", "write_file"},
+                     {"parameters",
+                      {{"type", "object"},
+                       {"properties", {{"path", {{"type", "string"}}}}},
+                       {"required", json::array({"path"})}}}};
+    json bash_fn = {{"name", "bash"}, {"parameters", {{"type", "object"}}}};
+    if (write_strict)
+        write_fn["strict"] = true;
+    if (bash_strict)
+        bash_fn["strict"] = true;
+    return json::array({{{"type", "function"}, {"function", write_fn}},
+                        {{"type", "function"}, {"function", bash_fn}}});
+}
+
+}  // namespace
+
+TEST(StrictToolConstraint, LooseToolNoLongerDisablesTheStrictOne) {
+    auto out = collect_strict_tool_constraint(ChatTemplateFamily::CHATML,
+                                              mixed_tools(/*write*/ true, /*bash*/ false), "auto");
+    ASSERT_EQ(out.size(), 2u) << "both tools must stay callable";
+    EXPECT_EQ(out[0].first, "write_file");
+    EXPECT_EQ(out[1].first, "bash");
+    // The tool that asked for enforcement keeps its own schema.
+    json write_params = json::parse(out[0].second);
+    EXPECT_TRUE(write_params.contains("properties"));
+    EXPECT_TRUE(write_params["properties"].contains("path"));
+    // The one that did not gets a free-form object, so its arguments are
+    // unconstrained rather than forced into the other tool's shape.
+    json bash_params = json::parse(out[1].second);
+    EXPECT_EQ(bash_params.value("type", ""), "object");
+    EXPECT_TRUE(bash_params.value("additionalProperties", false));
+    EXPECT_FALSE(bash_params.contains("properties"));
+}
+
+TEST(StrictToolConstraint, StrictToolWithFreeFormParamsIsStillCallable) {
+    // strict:true on a tool whose parameters declare no properties: the
+    // free-form object is the correct constraint, not a reason to bail.
+    auto out = collect_strict_tool_constraint(ChatTemplateFamily::CHATML,
+                                              mixed_tools(/*write*/ true, /*bash*/ true), "auto");
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[1].first, "bash");
+    EXPECT_TRUE(json::parse(out[1].second).value("additionalProperties", false));
+}
+
+TEST(StrictToolConstraint, NoToolAsksForStrictSoNothingIsEnforced) {
+    // Negative control: without a single strict:true the caller never asked
+    // for constrained decoding, and the prompt hint stays the mechanism.
+    auto out = collect_strict_tool_constraint(ChatTemplateFamily::CHATML,
+                                              mixed_tools(/*write*/ false, /*bash*/ false), "auto");
+    EXPECT_TRUE(out.empty());
+}
+
+TEST(StrictToolConstraint, NonChatMLFamilyStillOptsOut) {
+    // Negative control: the strict route is the ChatML `<tool_call>` envelope.
+    auto out = collect_strict_tool_constraint(ChatTemplateFamily::LLAMA3,
+                                              mixed_tools(/*write*/ true, /*bash*/ true), "auto");
+    EXPECT_TRUE(out.empty());
+}
+
+TEST(StrictToolConstraint, UnnamedToolRefusesTheWholeSet) {
+    // Negative control: a tool with no name cannot enter the name enum, and a
+    // partial enum would forbid a tool the caller offered.
+    json tools = json::array({{{"type", "function"},
+                               {"function", {{"name", ""}, {"strict", true}}}}});
+    EXPECT_TRUE(collect_strict_tool_constraint(ChatTemplateFamily::CHATML, tools, "auto").empty());
+}

@@ -466,5 +466,104 @@ TEST(SchemaDepthCap, ModeratelyNestedSchemaStillParses) {
     EXPECT_EQ(node->type, SchemaType::ARRAY);
 }
 
+
+// ===========================================================================
+// #1729: additionalProperties was parsed and never read, so the FSM behaved
+// as if every object were additionalProperties:false and a free-form object
+// could only ever be {}. Each case names the document the old FSM rejected.
+// ===========================================================================
+
+TEST(SchemaAdditionalProperties, ExplicitTrueAcceptsUndeclaredKey) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"a":{"type":"string"}},)"
+                       R"("additionalProperties":true})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"a":"x","b":"y"})"));
+}
+
+TEST(SchemaAdditionalProperties, FreeFormObjectAcceptsAnyKey) {
+    // A property-less object says nothing about its keys, and JSON Schema's
+    // default for the absent keyword is true. {} was the only document the
+    // old FSM would emit for this schema.
+    auto sc = make_fsm(R"({"type":"object"})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"anything":1})"));
+    EXPECT_TRUE(sc->token_legal(R"({})"));
+}
+
+TEST(SchemaAdditionalProperties, FreeValueCarriesNestedStructure) {
+    // The value of an undeclared key is undescribed, not scalar-only: the
+    // embedded JsonGrammar has to track nesting, strings and escapes.
+    auto sc = make_fsm(R"({"type":"object"})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"a":{"b":[1,2,{"c":null}]}})"));
+    EXPECT_TRUE(sc->token_legal(R"({"a":"quote \" and backslash \\"})"));
+    EXPECT_TRUE(sc->token_legal(R"({"a":true,"b":-1.5e3,"c":[]})"));
+}
+
+TEST(SchemaAdditionalProperties, FreeNumberEndsAtItsDelimiter) {
+    // A number is the one value with no closing char: it ends at the ','
+    // or '}' that belongs to the parent object. Getting that boundary wrong
+    // is what makes {"x":123} fail after the first digit.
+    auto sc = make_fsm(R"({"type":"object"})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"x":123})"));
+    EXPECT_TRUE(sc->token_legal(R"({"x":123,"y":4})"));
+    // Still a number grammar: "1." owes a digit and may not be closed.
+    EXPECT_FALSE(sc->token_legal(R"({"x":1.})"));
+}
+
+TEST(SchemaAdditionalProperties, FreeValueRejectsMalformedJson) {
+    auto sc = make_fsm(R"({"type":"object"})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_FALSE(sc->token_legal(R"({"a":[1,})"));
+    EXPECT_FALSE(sc->token_legal(R"({"a":tru})"));    // literal must complete
+    EXPECT_FALSE(sc->token_legal(R"({"a":1,,"b":2})"));
+}
+
+TEST(SchemaAdditionalProperties, DuplicateKeyRejectedEvenWhenFree) {
+    auto sc = make_fsm(R"({"type":"object"})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_FALSE(sc->token_legal(R"({"a":1,"a":2})"));
+}
+
+TEST(SchemaAdditionalProperties, RequiredKeysStillEnforcedAlongsideExtras) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"a":{"type":"string"}},)"
+                       R"("required":["a"],"additionalProperties":true})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"a":"x","b":2})"));
+    EXPECT_FALSE(sc->token_legal(R"({"b":2})"));  // closing without "a"
+}
+
+TEST(SchemaAdditionalProperties, DeclaredPropertyKeepsItsOwnSchema) {
+    // The extension must not leak into declared keys: "a" is still an integer.
+    auto sc = make_fsm(R"({"type":"object","properties":{"a":{"type":"integer"}},)"
+                       R"("additionalProperties":true})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"a":7,"b":"anything"})"));
+    EXPECT_FALSE(sc->token_legal(R"({"a":"seven"})"));
+}
+
+TEST(SchemaAdditionalProperties, FalseStillRejectsUndeclaredKey) {
+    // Negative control: the boolean form was the only one that worked before,
+    // and it must keep working.
+    auto sc = make_fsm(R"({"type":"object","properties":{"a":{"type":"string"}},)"
+                       R"("additionalProperties":false})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal(R"({"a":"x"})"));
+    EXPECT_FALSE(sc->token_legal(R"({"a":"x","b":"y"})"));
+}
+
+TEST(SchemaAdditionalProperties, DeclaredPropertiesStayStrictWhenKeywordAbsent) {
+    // The spec's default is true, but applying it to a schema that DOES
+    // declare properties would loosen every tool schema in the tree. An
+    // object with declared keys stays closed unless it says otherwise.
+    auto node = parse_json_schema(R"({"type":"object","properties":{"a":{"type":"string"}}})");
+    ASSERT_NE(node, nullptr);
+    EXPECT_FALSE(node->additional_properties);
+    auto sc = make_fsm(R"({"type":"object","properties":{"a":{"type":"string"}}})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_FALSE(sc->token_legal(R"({"a":"x","b":"y"})"));
+}
+
 }  // namespace
 }  // namespace imp

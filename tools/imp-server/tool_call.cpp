@@ -161,22 +161,39 @@ std::vector<std::pair<std::string, std::string>> collect_strict_tool_constraint(
     if (tool_choice.is_string() && tool_choice.get<std::string>() != "auto")
         return out;
 
-    // Every callable tool must declare `strict: true` AND carry enforceable
-    // params. A mixed strict/non-strict set falls back to the prompt hint —
-    // the uniform TOOL_CALL enum would otherwise over-constrain the arguments
-    // of a tool whose caller never asked for schema adherence.
+    // `strict` is per-function in OpenAI's API, so it is enforced per function
+    // here. A tool that did not ask for enforcement, or whose parameters carry
+    // no properties to enforce, still enters the name enum - with a free-form
+    // parameter schema, so its arguments stay unconstrained while every tool
+    // that did ask keeps its own schema.
+    //
+    // Bailing out instead (the previous behaviour) meant one loose tool in the
+    // set turned off constrained decoding for all of them: a realistic agent
+    // mixes a schema-bound `write_file` with a free-text `bash`, and the
+    // caller who set strict on the one whose arguments must parse got post-hoc
+    // validation for it (#1597). The free-form schema became representable in
+    // #1729; before that there was nothing to put in the enum for such a tool.
+    static constexpr const char* kFreeFormParams = R"({"type":"object","additionalProperties":true})";
+    bool any_strict = false;
     for (const auto& tool : tools) {
         if (!tool.contains("function"))
             continue;
         const auto& fn = tool["function"];
         std::string name = fn.value("name", "");
-        if (name.empty() || !fn.value("strict", false))
-            return {};
-        if (!fn.contains("parameters") || !fn["parameters"].is_object() ||
-            !fn["parameters"].contains("properties") || fn["parameters"]["properties"].empty())
-            return {};  // one unenforceable tool → whole request falls back
-        out.emplace_back(std::move(name), dump_safe(fn["parameters"]));
+        if (name.empty())
+            return {};  // an unnameable tool cannot enter the enum
+        const bool strict = fn.value("strict", false);
+        const bool enforceable_params = fn.contains("parameters") && fn["parameters"].is_object() &&
+                                        fn["parameters"].contains("properties") &&
+                                        !fn["parameters"]["properties"].empty();
+        any_strict = any_strict || strict;
+        out.emplace_back(std::move(name), (strict && enforceable_params)
+                                              ? dump_safe(fn["parameters"])
+                                              : std::string(kFreeFormParams));
     }
+    // No tool asked for enforcement: the prompt hint is what the caller wanted.
+    if (!any_strict)
+        return {};
     return out;
 }
 

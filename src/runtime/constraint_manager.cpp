@@ -138,10 +138,14 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     };
 
     // Free-form object schema ({"type":"object"} without properties/enum):
-    // the schema FSM knows no legal key, rejects every token in the key
-    // phase, and the empty-allow guard force-finishes right after "{".
-    // Semantically this IS json_object — route to the any-JSON constrainer,
-    // which is whole-token validated.
+    // semantically this IS json_object, so route it to the any-JSON
+    // constrainer, which is whole-token validated and does not carry the
+    // schema machinery.
+    //
+    // Since #1729 the schema FSM could also take it (a property-less object
+    // parses as additionalProperties: true and its keys and values are free),
+    // so this route is a cost choice now, not a correctness one. It stays
+    // because the two produce the same language and this one is cheaper.
     bool use_schema = !json_schema.empty();
     if (use_schema) {
         auto probe = parse_json_schema(json_schema);
