@@ -173,6 +173,27 @@ struct Speculative {
     // eager per-token path costs ~2x vs the loop — a draft-poor context
     // must not pay that for the whole generation). 0 = never give up.
     int give_up_after = 64;
+    // Prompt-lookup drafting is COLD by construction: it matches a suffix of
+    // the generated text against earlier occurrences, and until the generation
+    // is long enough there is nothing to match. Measured on Qwen3-14B Q6_K
+    // (the north-star model), one request, same prompt, 2026-08-21:
+    //
+    //   generated   accepted   tok/verify
+    //     128         0.0 %       0.00     drafter never fires
+    //     256         6.2 %       2.00     fires and LOSES
+    //     512        39.6 %       7.33     strongly profitable
+    //    1024        36.1 %       6.78
+    //
+    // A verify costs ~50 ms against a ~6 ms decode step on this checkpoint, so
+    // 2.0 tokens per verify is four times under water while 6.78 pays. The
+    // economics guard below cannot catch the cold phase: it arms on
+    // spec_verifies >= 8 PER REQUEST and a short request produces about one, so
+    // the verdict is never made rather than made badly.
+    //
+    // Conditioning on tokens generated SO FAR, which is known at the decision
+    // point, rather than on the request's eventual length, which is not.
+    // 0 disables the gate.
+    int min_history = 0;
     // Burst-hybrid: while given up, the async loop runs in bursts of
     // this many tokens; after each burst the request re-probes drafts
     // for a couple of steps (think models produce their draft-rich
