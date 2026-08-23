@@ -66,6 +66,20 @@ struct StreamDialect {
 // (see StreamDialect::emit_content_token / on_call_begin).
 struct StreamLoopResult {
     const char* finish = nullptr;
+    // The stop sequence that ended the generation, empty otherwise. The
+    // Anthropic wire format reports it (`stop_reason: "stop_sequence"`,
+    // `stop_sequence: "<text>"`); with only `finish = "stop"` to go on, a stop
+    // match was indistinguishable from the model ending its turn (#1550).
+    std::string stop_sequence;
+    // Set when the stream ended on a server-side fault rather than on the
+    // model finishing. The Anthropic dialect turns this into an `error` SSE
+    // event; without it a timeout arrived as stop_reason "max_tokens" and an
+    // admission refusal as "capacity", both reading as a completed turn
+    // (#1552, #1553). `error_type` is an Anthropic error type; null means no
+    // fault. The OpenAI dialect ignores both: its finish_reason enum has no
+    // member for either, which is deliberate (#1590).
+    const char* error_type = nullptr;
+    std::string error_message;
     int n_output_tokens = 0;
     int n_reasoning_tokens = 0;
     double ttft_ms = 0.0;

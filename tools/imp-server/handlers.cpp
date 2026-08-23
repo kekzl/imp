@@ -36,6 +36,17 @@ std::string make_completion_id(ServerState& state) {
     return "imp-" + std::to_string(state.next_id.fetch_add(1));
 }
 
+// The id a client quotes when reporting a problem, and the one that ties a
+// response to its line in the JSONL request log. No error body carried one and
+// no response carried the header (#1561). Same counter as the completion id, so
+// the two cannot collide.
+std::string make_request_id(ServerState& state) {
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "req_imp_%016llx",
+                  static_cast<unsigned long long>(state.next_id.fetch_add(1)));
+    return std::string(buf);
+}
+
 int64_t unix_timestamp() {
     return std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::system_clock::now().time_since_epoch())

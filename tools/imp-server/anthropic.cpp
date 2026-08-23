@@ -183,6 +183,14 @@ void push_user_turn(json& out, const json& anth_msg) {
                 body += "[" + std::to_string(n_images) +
                         " image(s) from this tool result follow in the next user message]";
             }
+            // is_error was read by nothing, so a tool that failed reached the
+            // model as an ordinary successful result and it went on as if the
+            // call had worked (#1557). OpenAI's role:"tool" turn has no field
+            // for this - the content IS the channel - so the failure is
+            // labelled in the text, which is what the model reads either way.
+            if (block.value("is_error", false)) {
+                body = body.empty() ? "[tool error]" : "[tool error] " + body;
+            }
             tool_results.push_back({
                 {"role", "tool"},
                 {"tool_call_id", block.value("tool_use_id", "")},
@@ -501,7 +509,29 @@ std::string tool_call_id_to_anthropic(const std::string& openai_id) {
     return std::string("toolu_") + openai_id;
 }
 
-json openai_to_anthropic_response(const json& oai, const std::string& anth_model) {
+const char* anthropic_stop_reason(const std::string& openai_finish, bool stop_sequence_matched) {
+    if (openai_finish == "stop")
+        return stop_sequence_matched ? "stop_sequence" : "end_turn";
+    if (openai_finish == "length")
+        return "max_tokens";
+    if (openai_finish == "tool_calls")
+        return "tool_use";
+    // Anthropic's name for the same thing. "content_filter" is OpenAI's and is
+    // not in Anthropic's stop_reason enum, so it used to pass through as an
+    // unknown value.
+    if (openai_finish == "content_filter")
+        return "refusal";
+    // "cancelled" is a client disconnect and "capacity" an admission refusal.
+    // Neither is an Anthropic stop_reason, and "capacity" used to ship verbatim
+    // on the streaming path while the non-streaming path answered 503 for the
+    // same condition (#1552). The stream cannot change its status once
+    // message_start is out, so it ends the turn and reports the fault as an
+    // `error` event (#1553).
+    return "end_turn";
+}
+
+json openai_to_anthropic_response(const json& oai, const std::string& anth_model,
+                                  const std::string& stop_sequence) {
     // Pass through OpenAI error envelopes unchanged but flip the type.
     if (oai.contains("error")) {
         return {
@@ -564,17 +594,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
 
     // Map finish_reason -> stop_reason.
     std::string finish = choice.value("finish_reason", "stop");
-    std::string stop_reason;
-    if (finish == "stop")
-        stop_reason = "end_turn";
-    else if (finish == "length")
-        stop_reason = "max_tokens";
-    else if (finish == "tool_calls")
-        stop_reason = "tool_use";
-    else if (finish == "cancelled")
-        stop_reason = "end_turn";
-    else
-        stop_reason = finish;  // pass through
+    std::string stop_reason = anthropic_stop_reason(finish, !stop_sequence.empty());
 
     json usage_out = {
         {"input_tokens", 0},
@@ -623,7 +643,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         {"content", std::move(content)},
         {"model", anth_model},
         {"stop_reason", std::move(stop_reason)},
-        {"stop_sequence", nullptr},
+        {"stop_sequence", stop_sequence.empty() ? json(nullptr) : json(stop_sequence)},
         {"usage", std::move(usage_out)},
     };
 }

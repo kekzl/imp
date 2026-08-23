@@ -206,6 +206,11 @@ inline nlohmann::json prompt_tokens_details_(const std::shared_ptr<imp::Request>
 // call only logs once at the outer handler. Defined in handlers_chat_core.cpp.
 extern thread_local bool g_in_anthropic_shim;
 
+// Set by the non-streaming path to the stop sequence that ended the
+// generation, empty otherwise. Read by the Anthropic shim, which cannot
+// recover it from the OpenAI body (#1550).
+extern thread_local std::string g_shim_stop_sequence;
+
 // ---------------------------------------------------------------------------
 // Shared server-private helpers (definitions split across handlers_*.cpp).
 // ---------------------------------------------------------------------------

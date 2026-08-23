@@ -180,6 +180,44 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`/v1/messages` never reported which stop sequence ended a turn** (#1550).
+  A match came back as `stop_reason: "end_turn"` with `stop_sequence: null` on
+  both transports; the Anthropic value `"stop_sequence"` was produced by no
+  code path. The matched text now rides out of the holdback matcher and the
+  non-streaming path alike. Measured on `Qwen3-4B-Instruct-2507-Q8_0.gguf` with
+  `stop_sequences: ["4"]`: `stop_reason: "stop_sequence"`, `stop_sequence: "4"`,
+  streaming and not. While making the match reportable, the matcher started
+  cutting at the **earliest** occurrence rather than at the first list entry
+  that occurs anywhere - list order shipped the text between two stops.
+
+- **A 429 on `/v1/messages` came back in the OpenAI envelope** (#1551). Both
+  pre-routing guards wrote `{"error":{...}}` with no top-level `"type":"error"`,
+  so an Anthropic SDK could not classify it, twenty lines above an auth path
+  that did branch. One helper now picks the envelope from the path, and the six
+  sites that spelled the test out use it.
+
+- **Anthropic error types are Anthropic's** (#1556). `server_error` and
+  `capacity_error` are this server's inventions and were emitted at seven sites
+  plus forwarded verbatim through the non-streaming shim. They map to
+  `api_error` and `overloaded_error`; anything unrecognised falls back on the
+  status. `content_filter` -> `refusal` for the same reason.
+
+- **A mid-stream fault is an `error` SSE event, not a completed turn** (#1552,
+  #1553). The event did not exist: a request timeout arrived as `stop_reason:
+  "max_tokens"` (indistinguishable from the model reaching its budget) and an
+  admission refusal as `"capacity"`, which is not an Anthropic stop_reason at
+  all, while the non-streaming path answered 503 for the same condition.
+  Measured with `--request-timeout 1`: `event: error` with
+  `{"type":"timeout_error"}`.
+
+- **`tool_result.is_error` was read by nothing** (#1557). A failed tool became
+  an ordinary successful `role: "tool"` turn, so the model was told the call
+  worked. The failure is labelled in the content, which is the only channel the
+  OpenAI tool turn has.
+
+- **Every `/v1/messages` response carries a `request-id`** (#1561), and error
+  bodies repeat it as `request_id`. Neither existed anywhere in the server.
+
 - **Jinja: `{% set x %}...{% endset %}` printed its body and left the variable
   empty, and macro default parameters never parsed** (#1565, #1566). The block
   form of `set` is what Gemma-4's shipped `chat_template.jinja` builds

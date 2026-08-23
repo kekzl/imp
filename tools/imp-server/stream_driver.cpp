@@ -198,6 +198,9 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                     "token budget - see imp_requests_timed_out_total",
                     state.request_timeout);
                 finish = "length";
+                out.error_type = "timeout_error";
+                out.error_message = "request exceeded the server's --request-timeout of " +
+                                    std::to_string(state.request_timeout) + " s";
                 break;
             }
         }
@@ -471,6 +474,8 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                 return false;
             if (hd.complete_match) {
                 text_stop_matched = true;
+                if (hd.matched_index >= 0 && static_cast<size_t>(hd.matched_index) < stop_sequences.size())
+                    out.stop_sequence = stop_sequences[hd.matched_index];
                 finish = "stop";
                 break;
             }
@@ -543,6 +548,17 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         finish = out.tool_calls_emitted ? "tool_calls" : "length";
     else if (out.tool_calls_emitted && std::strcmp(finish, "stop") == 0)
         finish = "tool_calls";
+
+    // The engine's "capacity" reaches here from four emission sites in
+    // batching_engine.cpp. Non-streaming answers 503 for the same condition;
+    // the stream cannot, so it says so in an `error` event instead of shipping
+    // "capacity" as a stop_reason no dialect defines (#1552, #1553).
+    if (std::strcmp(finish, "capacity") == 0 && !out.error_type) {
+        out.error_type = "overloaded_error";
+        out.error_message =
+            "the KV pool cannot hold this request; it was admitted and then dropped. "
+            "Shorten the prompt or retry when the server is less loaded.";
+    }
     out.finish = finish;
     return true;
 }

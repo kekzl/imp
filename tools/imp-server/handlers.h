@@ -224,6 +224,10 @@ extern std::atomic<httplib::Server*> g_server;
 
 void signal_handler(int sig);
 std::string make_completion_id(ServerState& state);
+
+// A `req_imp_...` id for one HTTP request: set as the `request-id` response
+// header and echoed in Anthropic error bodies (#1561).
+std::string make_request_id(ServerState& state);
 int64_t unix_timestamp();
 
 std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::string& dir);

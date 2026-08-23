@@ -220,6 +220,18 @@ Every error is a JSON envelope, never a bare status with an empty body, and
 `/v1/messages*` paths get the Anthropic error shape rather than the OpenAI one.
 An unmatched route answers with an envelope too.
 
+On `/v1/messages` the `error.type` is always one of Anthropic's own -
+`invalid_request_error`, `authentication_error`, `billing_error`,
+`permission_error`, `not_found_error`, `request_too_large`, `rate_limit_error`,
+`api_error`, `overloaded_error`, `timeout_error`. Every response from that
+endpoint also carries a `request-id` header, and error bodies repeat it as
+`request_id`.
+
+A stream that ends on a server-side fault emits an `error` SSE event instead of
+`message_delta`/`message_stop`: a request timeout and an admission refusal used
+to arrive as an ordinary completed turn, indistinguishable from the model
+finishing.
+
 Internal engine errors are translated to `ImpError` at the C API boundary
 (`src/api/imp_api.cpp`); this is intentional and is why a load failure surfaces
 as a typed message rather than a crash.

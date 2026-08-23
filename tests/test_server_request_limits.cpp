@@ -184,4 +184,67 @@ TEST(SystemFingerprint, AnEmptyModelNameStillProducesOne) {
     EXPECT_NE(f, system_fingerprint("x"));
 }
 
+// ---------------------------------------------------------------------------
+// The Anthropic error envelope (#1551, #1556, #1561)
+// ---------------------------------------------------------------------------
+
+TEST(AnthropicEnvelope, PathDecidesTheShape) {
+    EXPECT_TRUE(is_anthropic_path("/v1/messages"));
+    EXPECT_TRUE(is_anthropic_path("/v1/messages/count_tokens"));
+    EXPECT_FALSE(is_anthropic_path("/v1/chat/completions"));
+    EXPECT_FALSE(is_anthropic_path("/v1/completions"));
+}
+
+// A 429 came back in the OpenAI shape on /v1/messages, so an Anthropic SDK
+// could not classify it: no top-level "type":"error" (#1551).
+TEST(AnthropicEnvelope, DialectErrorPicksTheRightWrapper) {
+    httplib::Response anth;
+    send_dialect_error(anth, "/v1/messages", 429, "rate_limit_error", "overloaded_error", "busy");
+    json a = json::parse(anth.body);
+    EXPECT_EQ(a["type"], "error");
+    EXPECT_EQ(a["error"]["type"], "overloaded_error");
+    EXPECT_EQ(anth.status, 429);
+
+    httplib::Response oai;
+    send_dialect_error(oai, "/v1/chat/completions", 429, "rate_limit_error", "overloaded_error", "busy");
+    json o = json::parse(oai.body);
+    EXPECT_FALSE(o.contains("type"));
+    EXPECT_EQ(o["error"]["type"], "rate_limit_error");
+}
+
+TEST(AnthropicEnvelope, RequestIdRidesBodyAndHeader) {
+    httplib::Response res;
+    send_anthropic_error(res, 500, "api_error", "boom", "req_imp_0000000000000001");
+    json j = json::parse(res.body);
+    EXPECT_EQ(j["request_id"], "req_imp_0000000000000001");
+    EXPECT_EQ(res.get_header_value("request-id"), "req_imp_0000000000000001");
+}
+
+TEST(AnthropicEnvelope, NoRequestIdMeansNoKeyAndNoHeader) {
+    httplib::Response res;
+    send_anthropic_error(res, 400, "invalid_request_error", "bad");
+    json j = json::parse(res.body);
+    EXPECT_FALSE(j.contains("request_id"));
+    EXPECT_FALSE(res.has_header("request-id"));
+}
+
+// server_error and capacity_error are this server's inventions; neither is an
+// Anthropic error type, and both reached SDK clients verbatim (#1556).
+TEST(AnthropicEnvelope, TypeTranslationCoversTheInventedOnes) {
+    EXPECT_STREQ(anthropic_error_type_for("server_error", 500), "api_error");
+    EXPECT_STREQ(anthropic_error_type_for("capacity_error", 503), "overloaded_error");
+    // The name decides, not the status: at 500 the fallback would answer
+    // api_error anyway, so only a 4xx proves the mapping is doing the work.
+    EXPECT_STREQ(anthropic_error_type_for("server_error", 400), "api_error");
+    EXPECT_STREQ(anthropic_error_type_for("capacity_error", 429), "overloaded_error");
+    // Already-valid types pass through.
+    EXPECT_STREQ(anthropic_error_type_for("invalid_request_error", 400), "invalid_request_error");
+    EXPECT_STREQ(anthropic_error_type_for("rate_limit_error", 429), "rate_limit_error");
+    EXPECT_STREQ(anthropic_error_type_for("not_found_error", 404), "not_found_error");
+    // Unknown: the status decides, so nothing outside the set can escape.
+    EXPECT_STREQ(anthropic_error_type_for("something_new", 500), "api_error");
+    EXPECT_STREQ(anthropic_error_type_for("something_new", 422), "invalid_request_error");
+    EXPECT_STREQ(anthropic_error_type_for("", 500), "api_error");
+}
+
 }  // namespace
