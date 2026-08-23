@@ -3,6 +3,7 @@
 #include "compute/constrain_device_buffers.h"
 
 #include "compute/json_schema.h"
+#include "compute/json_constrain.h"  // JsonGrammar: the free-value sub-state (#1729)
 #include "compute/preamble_gate.h"
 #include "model/tokenizer.h"
 #include <cuda_runtime.h>
@@ -45,6 +46,10 @@ enum class SchemaPhase : uint8_t {
     XML_PARAMS,     // Matching "\n<parameter=" vs "\n</function>" (key_buffer)
     XML_PARAM_KEY,  // Unquoted parameter-key enum in the tag, closed by '>'
     XML_RAW_VALUE,  // Raw value text until the "\n</parameter>" delimiter
+    // A value the schema does not describe: the value of a key admitted by
+    // `additionalProperties`, or a tool whose parameters are free-form.
+    // Driven by an embedded JsonGrammar rather than this FSM (#1729).
+    FREE_VALUE,
     DONE
 };
 
@@ -72,6 +77,12 @@ struct SchemaFrame {
 
     // Array item count
     int item_count = 0;
+
+    // FREE_VALUE frames: the JSON grammar parsing the undescribed value.
+    // A whole JsonGrammar rather than a hand-kept depth counter, so a
+    // nested object, an escaped string and a number sub-state all behave
+    // exactly as they do in json_mode (#1729).
+    JsonGrammar free_grammar;
 
     // TOOL_CALL frames: the tool name chosen by the completed "name" enum —
     // "arguments" resolves against the root defs entry of this name.

@@ -404,6 +404,9 @@ private:
 
         auto node = std::make_unique<SchemaNode>();
         bool has_type = false;
+        // Distinguishes "additionalProperties: false" from the keyword being
+        // absent, which JSON Schema defines as true.
+        bool saw_additional_properties = false;
 
         skip_ws();
         if (peek() == '}') {
@@ -461,6 +464,7 @@ private:
             } else if (key == "required") {
                 node->required = parse_string_array();
             } else if (key == "additionalProperties") {
+                saw_additional_properties = true;
                 // #1564: parse_bool() returns false WITHOUT consuming when the
                 // value is not true/false, so the schema-object form left pos_
                 // on '{'. The key loop then saw '{' instead of ',', broke, and
@@ -632,6 +636,19 @@ private:
         if (!node->enum_values.empty() && node->type != SchemaType::REF)
             node->type = SchemaType::ENUM;
 
+        // An object that declares no properties and says nothing about
+        // additionalProperties is free-form: JSON Schema's default for the
+        // keyword is `true`, and with no declared key there is nothing else the
+        // node could mean. Without this the FSM knows no legal key and the only
+        // document it can emit is {} (#1729).
+        //
+        // Deliberately NOT applied to an object that does declare properties:
+        // the spec's default would loosen every tool schema in the tree, and
+        // the strictness there is what callers ask for.
+        if (node->type == SchemaType::OBJECT && node->properties.empty() &&
+            !saw_additional_properties)
+            node->additional_properties = true;
+
         return node;
     }
 };
@@ -801,10 +818,15 @@ static bool collect_tool_defs(const std::vector<std::pair<std::string, std::stri
             return false;
         auto params = parse_json_schema(params_json);
         const SchemaNode* res = params ? resolve_schema_ref(params.get(), params.get()) : nullptr;
-        // Enforceable structure only: a free-form object dead-ends the key
-        // phase (see the free_form route in ConstraintManager::prepare).
+        // Enforceable structure only. A free-form object is representable
+        // since #1729 - its keys are free and its values undescribed - but
+        // only in the JSON dialect: the XML dialect renders parameter KEYS as
+        // tags, and a schema that declares none has no tag to render.
+        const bool free_form_object = res && res->type == SchemaType::OBJECT &&
+                                      res->properties.empty() && res->additional_properties;
         const bool enforceable =
             res && ((res->type == SchemaType::OBJECT && !res->properties.empty()) ||
+                    (!xml && free_form_object) ||
                     (!xml && res->type == SchemaType::ENUM && !res->enum_values.empty()));
         if (!enforceable)
             return false;

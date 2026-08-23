@@ -221,8 +221,23 @@ static bool tool_call_key_available(const std::string& key, const std::set<std::
     return key == "arguments" && !emitted.count("arguments");
 }
 
+// `additionalProperties: true` (and a bare {"type":"object"}, which JSON Schema
+// defines the same way): keys the schema does not declare are legal and their
+// values are undescribed. Parsed since #1564 and read by nothing until #1729,
+// so the FSM behaved as if every object were additionalProperties:false and a
+// free-form object could only ever be {}.
+//
+// TOOL_CALL is deliberately excluded: its two keys are ORDERED and its
+// arguments bind a chosen tool's schema, so an extra key there is a desync,
+// not an extension.
+static bool object_allows_additional(const SchemaNode* n) {
+    return n && n->type == SchemaType::OBJECT && n->additional_properties;
+}
+
 bool SchemaConstrainer::is_valid_key_prefix(const SchemaNode* obj, const std::string& prefix,
                                             const std::set<std::string>& emitted) const {
+    if (object_allows_additional(obj))
+        return true;  // any key name is legal; nothing to prefix-match against
     for (auto& [name, _] : obj->properties) {
         if (emitted.count(name))
             continue;
@@ -445,6 +460,12 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             // XML tags and raw values span categories — same delegation.
             return 0xFFFF;
 
+        case SchemaPhase::FREE_VALUE:
+            // Every category can start or continue an undescribed value; which
+            // one is legal here is the grammar's business, and sim_advance asks
+            // it per token. Same delegation as the XML phases above.
+            return 0xFFFF;
+
         case SchemaPhase::DONE:
             return CAT_WHITESPACE;
     }
@@ -485,7 +506,13 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
     //    enum / key strings still simulate (prefix & regex constraints).
     need_token_allow_ = true;
     const SchemaPhase phase = top().phase;
-    const bool free_string = (phase == SchemaPhase::STRING_VALUE);
+    // A free value whose grammar sits inside a string is the same regime as a
+    // schema-described free string, and string content is most of what a free
+    // value costs, so give it the same O(1) shortcut (#1729).
+    const bool free_value_phase = (phase == SchemaPhase::FREE_VALUE);
+    const bool free_string = (phase == SchemaPhase::STRING_VALUE) ||
+                             (free_value_phase &&
+                              top().free_grammar.current_state == JsonState::IN_STRING);
     // XML cost control — the XML phases delegate the whole vocab to the
     // per-token simulation (category 0xFFFF), which deep-copies the frame
     // stack per candidate; unchecked that is ~150k stack copies per decode
@@ -509,8 +536,12 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
         phase == SchemaPhase::ENVELOPE_OPEN || phase == SchemaPhase::ENVELOPE_CLOSE ||
         (phase == SchemaPhase::VALUE_START && top().node &&
          top().node->type == SchemaType::XML_TOOL_CALL);
+    // FREE_VALUE delegates the whole vocabulary to the simulation exactly as the
+    // XML phases do, so it needs the same first-byte prefilter or it pays ~150k
+    // stack copies per decode step.
+    const bool first_byte_prefilter = xml_tag_phase || free_value_phase;
     bool first_ok[256];
-    if (xml_tag_phase) {
+    if (first_byte_prefilter) {
         for (int c = 0; c < 256; c++) {
             std::vector<SchemaFrame> probe = stack_;
             first_ok[c] = sim_advance(probe, static_cast<char>(c));
@@ -522,7 +553,7 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
             continue;
         }
         const std::string& text = token_texts_[i];
-        if (xml_tag_phase && !text.empty() &&
+        if (first_byte_prefilter && !text.empty() &&
             !first_ok[static_cast<unsigned char>(text[0])]) {
             token_allow_[i] = 0;
             continue;
@@ -768,7 +799,7 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 // Without a node the key is unconstrained (any string char
                 // is legal) — the candidate set below would not be a
                 // superset, so never force there.
-                if (!f.node)
+                if (!f.node || object_allows_additional(f.node))
                     return static_cast<int>(out.size());
                 cands = "\"";
                 for (const auto& [name, prop] : f.node->properties) {
@@ -784,6 +815,9 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 }
                 break;
             }
+            case SchemaPhase::FREE_VALUE:
+                // Undescribed: no character is forced, ever.
+                return static_cast<int>(out.size());
             case SchemaPhase::OBJECT_AFTER_KEY:
             case SchemaPhase::OBJECT_COLON:
                 cands = ":";
@@ -935,6 +969,8 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
     auto has_unemitted_property = [](const SchemaFrame& fr) {
         if (!fr.node)
             return true;  // unknown object — can't tell, allow another key
+        if (object_allows_additional(fr.node))
+            return true;  // an undeclared key can always follow a comma
         for (auto& [name, _] : fr.node->properties)
             if (!fr.emitted_keys.count(name))
                 return true;
@@ -1090,6 +1126,12 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                         }
                     }
                 }
+                // An undeclared key: legal iff the object takes additional
+                // properties, non-empty, and not already emitted (a duplicate
+                // key is a desync whatever the schema says).
+                if (!complete && object_allows_additional(f.node) && !f.key_buffer.empty() &&
+                    !f.emitted_keys.count(f.key_buffer))
+                    complete = true;
                 if (!complete)
                     return false;
                 f.current_key = f.key_buffer;
@@ -1131,10 +1173,73 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                         }
                     }
                 }
+                // No declared property for this key means it came in through
+                // additionalProperties: its value is undescribed, so hand it to
+                // the JSON grammar instead of to this FSM.
+                if (!prop && object_allows_additional(f.node)) {
+                    SchemaFrame nf;
+                    nf.node = nullptr;
+                    nf.phase = SchemaPhase::FREE_VALUE;
+                    // Seeded in AFTER_COLON, not START: START accepts only '{'
+                    // and '[', while an undescribed value may be any JSON value.
+                    // AFTER_COLON pushes AFTER_VALUE for every value form, so
+                    // that single stack entry is this frame's completion marker.
+                    nf.free_grammar.reset();
+                    nf.free_grammar.current_state = JsonState::AFTER_COLON;
+                    stk.push_back(std::move(nf));
+                    return true;
+                }
                 push_value(prop);
                 return true;
             }
             return false;
+        }
+
+        case SchemaPhase::FREE_VALUE: {
+            // A value the schema does not describe. The JSON grammar owns it;
+            // this frame only decides where it ENDS, because the char that ends
+            // a number belongs to the parent object, not to the value.
+            //
+            // No insignificant whitespace, for the reason VALUE_START gives: a
+            // free value must not reopen the newline escape hatch.
+            if (space && f.free_grammar.current_state != JsonState::IN_STRING &&
+                f.free_grammar.current_state != JsonState::IN_STRING_ESCAPE)
+                return false;
+            // Containers, strings and literals end ON their last character and
+            // are handled below. A number is the one value with no closing
+            // char: it ends at the first char that does not continue it, and
+            // that char is the parent's ',' or '}'. Decided on a COPY, because
+            // asking the real grammar would consume the char in the wrong
+            // context (its own IN_NUMBER handler re-processes it as if the
+            // enclosing object were the grammar's, not the schema's).
+            // Only when the number IS this frame's whole value: the single
+            // stack entry is the AFTER_VALUE seeded on entry. A number nested
+            // deeper (inside an object or array of the free value) is the
+            // grammar's own business, and its delimiter is too.
+            if (f.free_grammar.current_state == JsonState::IN_NUMBER &&
+                f.free_grammar.state_stack.size() == 1 &&
+                f.free_grammar.state_stack.back() == JsonState::AFTER_VALUE) {
+                JsonGrammar probe = f.free_grammar;
+                const bool continues =
+                    probe.advance_char(c) && probe.current_state == JsonState::IN_NUMBER;
+                if (!continues) {
+                    if (f.free_grammar.num_need_digit)
+                        return false;  // "1." / "1e" / "-" cannot end here
+                    stk.pop_back();
+                    sim_fixup_parent(stk);
+                    return sim_advance(stk, c);
+                }
+            }
+            if (!f.free_grammar.advance_char(c))
+                return false;
+            // Back at the AFTER_VALUE continuation seeded on entry with nothing
+            // else open: the value is complete.
+            if (f.free_grammar.state_stack.empty() &&
+                f.free_grammar.current_state == JsonState::AFTER_VALUE) {
+                stk.pop_back();
+                sim_fixup_parent(stk);
+            }
+            return true;
         }
 
         case SchemaPhase::OBJECT_COLON: {
