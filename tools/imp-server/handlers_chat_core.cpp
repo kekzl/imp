@@ -201,6 +201,44 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // parse-time family in handlers_chat_params is a pre-load best guess.
     collect_tool_enforcement_(ctx);
 
+    // #1592: refuse rather than degrade. `tool_choice: "required"` and a named
+    // function are enforced by the decode FSM only where the family's tool
+    // envelope has a grammar; everywhere else the constraint used to become a
+    // sentence in the prompt and the request was answered 200 with prose, with
+    // nothing saying so. An agent doing `msg.tool_calls[0]` gets a TypeError;
+    // one branching on finish_reason treats a required call as a chat turn.
+    //
+    // Measured on this build, `tool_choice: "required"` or a named function,
+    // 10 requests each at temperature 0.7:
+    //
+    //   gemma-3-12b Q4_K_M   (GEMMA)    0/10 required, 0/10 named
+    //   gemma-4-26B  Q4_K_M  (GEMMA)    0/10 required   ("<call>get_weather(city='Berlin')" as prose)
+    //   gpt-oss-20b MXFP4    (HARMONY)  0/10 required, 0/10 named (empty content)
+    //   Qwen3-4B Q8_0        (CHATML)   10/10 required, 10/10 named
+    //
+    // 0 of 40 on the families without a grammar. That is not "degrades
+    // sometimes", and a 400 the caller can branch on beats prose it cannot.
+    // `tool_choice: "auto"` is untouched - Gemma-4 still produced 1/10 there,
+    // and a best-effort call is what auto asks for.
+    if (ctx.params.has_tools && !tool_choice_is_enforceable(ctx.snap.tpl_family, ctx.params.tool_choice)) {
+        const char* fam = imp::chat_template_family_name(ctx.snap.tpl_family);
+        const bool named = ctx.params.tool_choice.is_object();
+        res.status = 400;
+        json error = {
+            {"error",
+             {{"message", std::string("\"tool_choice\": ") + (named ? "a named function" : "\"required\"") +
+                              " cannot be enforced on this model's chat template family (" + fam +
+                              "). \"required\" is enforced on chatml; a named function on chatml and "
+                              "llama3. On every other family it would degrade to a prompt hint and the "
+                              "model answers with prose instead of calling the tool. Send \"tool_choice\": "
+                              "\"auto\", or load a model whose template this server can constrain."},
+              {"type", "invalid_request_error"},
+              {"param", "tool_choice"},
+              {"code", "tool_choice_unenforceable"}}}};
+        res.set_content(dump_safe(error), "application/json");
+        return false;
+    }
+
     // Channel models (Gemma-4) are more susceptible to sampling-driven
     // degeneration on casual prompts than DeepSeek-style reasoning models.
     // If the caller didn't specify a sampler parameter, tighten the default

@@ -367,18 +367,37 @@ json anthropic_to_openai_body(const json& anth) {
     // max_tokens (default 0.5), so map Anthropic's absolute budget_tokens to
     // budget_tokens/max_tokens, clamped to [0,1]. Without this mapping a
     // think-model always reasoned on /v1/messages regardless of the request.
-    if (anth.contains("thinking") && anth["thinking"].is_object()) {
+    //
+    // Extended thinking is OPT-IN on this dialect (#1541). Anything that is not
+    // a recognised opt-in - no `thinking` field, a non-object, an unknown type -
+    // maps to disabled, so the default cannot depend on a field the server did
+    // not understand. Before this, imp's server default of think_budget = 0.5
+    // made a reasoning model reason on every /v1/messages request, and the
+    // answer arrived at content[1] with content[0].text empty for a client that
+    // never asked for thinking. The block order itself is contract-correct -
+    // Anthropic puts thinking first too - so the fix is the default, not a
+    // reorder. One field turns it back on.
+    //
+    // Only this dialect moves. /v1/chat/completions is unchanged: there the
+    // reasoning is a separate `reasoning_content` field and nothing shifts an
+    // index.
+    const bool thinking_requested = [&] {
+        if (!anth.contains("thinking") || !anth["thinking"].is_object())
+            return false;
+        const std::string t = anth["thinking"].value("type", "");
+        return t == "enabled" || t == "adaptive";
+    }();
+    if (!thinking_requested) {
+        // Suppressing thinking on a think-model needs BOTH signals: the
+        // orchestrator only sets suppress_thinking (which injects /no_think so
+        // the template emits no <think>) when enable_thinking is false AND
+        // think_budget <= 0 (handlers.cpp). The server's default budget is 0.5,
+        // so without zeroing it the model would still reason.
+        oai["enable_thinking"] = false;
+        oai["think_budget"] = 0.0;
+    } else {
         const auto& think = anth["thinking"];
-        const std::string ttype = think.value("type", "");
-        if (ttype == "disabled") {
-            // Suppressing thinking on a think-model needs BOTH signals: the
-            // orchestrator only sets suppress_thinking (which injects /no_think
-            // so the template emits no <think>) when enable_thinking is false
-            // AND think_budget <= 0 (handlers.cpp). The server's default budget
-            // is 0.5, so without zeroing it the model would still reason.
-            oai["enable_thinking"] = false;
-            oai["think_budget"] = 0.0;
-        } else if (ttype == "enabled" || ttype == "adaptive") {
+        {
             // "adaptive" is what current SDKs send: it is the documented
             // on-mode for the 4.6+ models, which reject budget_tokens outright.
             // It used to fall through both branches and set nothing, so the

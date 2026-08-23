@@ -180,6 +180,48 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`tool_choice` degraded to a prompt hint on every family but ChatML, and
+  `/v1/messages` returned thinking nobody asked for** (#1592, #1541). Two ways
+  the API answered something other than what the request said.
+
+  `tool_choice: "required"` and a named function are enforced by the decode FSM
+  only where the family's tool envelope has a grammar - `chatml` for
+  `"required"`, `chatml` and `llama3` for a named function. Everywhere else the
+  request was accepted with 200 and prose. Measured before the fix, 10 requests
+  each at `temperature 0.7`:
+
+  | model | family | `tool_choice` | tool calls |
+  |---|---|---|---|
+  | gemma-3-12b Q4_K_M | `gemma` | `required` / named | **0 / 10** each |
+  | gemma-4-26B Q4_K_M | `gemma` | `required` | **0 / 10** |
+  | gpt-oss-20b MXFP4 | `harmony` | `required` / named | **0 / 10** each |
+  | Qwen3-4B Q8_0 | `chatml` | `required` / named | 10 / 10 each |
+
+  0 of 40 on the families without a grammar, so it is a **400** now
+  (`code: "tool_choice_unenforceable"`) on all three dialects. `"auto"` is
+  untouched - Gemma-4 produced 1 of 10 there, and a best-effort call is what
+  `auto` asks for.
+
+  On `/v1/messages`, extended thinking is **opt-in**, as the dialect specifies.
+  imp's server default (`think_budget = 0.5`) made a reasoning model reason on
+  every request, so `content[0]` was a thinking block and `content[0].text` was
+  empty for a client that never asked. Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
+
+  | request `thinking` | `content` blocks | `content[0].text` |
+  |---|---|---|
+  | absent | `[text]` | `"Hi"` |
+  | `{"type":"adaptive"}` | `[thinking, text]` | `""` |
+  | `{"type":"adaptive","display":"omitted"}` | `[text]` | `"Hi"` |
+
+  The block order was never the bug - Anthropic puts thinking first too. Only
+  the default moved, and only on this dialect: `/v1/chat/completions` keeps
+  `reasoning_content` as a separate field where no index shifts.
+
+  Found while measuring: **gpt-oss tool calls are dropped entirely** - the model
+  says in its own reasoning that it means to call the tool, and the response
+  carries an empty `content` with `finish_reason: "stop"`. Filed as #1716; the
+  400 above is what a caller sees for it now instead of nothing.
+
 - **No shipped binary had a machine-readable output mode** (#1583). `--json`
   puts **exactly one JSON document on stdout** and every human line on stderr,
   on `imp-cli --bench` / `--perplexity` / `--prompt` and on `imp-bench`;
