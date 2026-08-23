@@ -49,7 +49,7 @@ These have a code path and no gate. They may work; nothing proves it.
 - **The generation half of the HTTP contract**: SSE frame structure, usage
   accounting, `finish_reason` and tool-call streaming. CI's `Real API contract
   (model-less)` job deselects every test that produces a token, because
-  generation needs a GPU and there is no GPU runner (#1600). They run in
+  generation needs a GPU and there is no GPU runner (#1600, #1559). They run in
   `make test-server` on a machine with a card, and in no CI job. The job prints
   the collected-here vs collected-total counts so the gap is visible in its own
   log rather than inferred from a job name.
@@ -63,6 +63,33 @@ These have a code path and no gate. They may work; nothing proves it.
 
 All seven were green in `FEATURES.md` without a gate until #1680, which makes
 them invisible here - the legend's whole point.
+
+## Gates that do not exist
+
+These are absent instruments, not untested features: nothing in the tree
+produces the number, so no threshold can be set on it.
+
+- **No correctness gate against a reference implementation** (#1571). There is
+  no KL divergence against an fp16/bf16 forward, no perplexity-drift baseline
+  and no tool-schema conformance rate. `scripts/validate_safetensors.py:11-14`
+  lists the phases it cannot run, and why: no BF16 checkpoint is on disk, and
+  imp consumes pre-quantised weights. `make test-niah` exists
+  (`Makefile:315`) and no workflow invokes it, because like every target with
+  `check-gpu` among its prerequisites it needs a card. Quantisation quality is
+  therefore judged by the degeneration smoke prompts and by hand, not against a
+  reference with a threshold.
+
+- **No soak or endurance test** (#1642). The largest request count any test
+  drives is 10 concurrent requests (`tests/api/test_concurrency.py:37`). Three
+  shipped comments describe what a soak would assert and no soak exists to
+  assert it: `tools/imp-server/metrics_memory.cpp:56`,
+  `tests/test_memory_backend.cpp:223` and `src/memory/alloc_interpose.cpp:129`,
+  the last of which describes an instrument meant "to be run once under a soak
+  and read afterwards". A leak, a fragmenting KV pool or a slow handle
+  exhaustion surfaces in production rather than in a gate.
+
+Both need a GPU runner or a long-running machine with a card, and CI has
+neither.
 
 ## Known-bad and known-limited behaviour
 
