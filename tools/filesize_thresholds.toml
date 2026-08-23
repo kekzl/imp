@@ -75,7 +75,7 @@ roots = ["src", "tools", "tests"]
 "src/compute/json_schema.cpp" = { code_loc = 1200, reason = "(c) one module: JSON-schema parser + RegexNfa compiler/executor for constrained decode" }
 "src/compute/mtp_forward.cu" = { code_loc = 856, reason = "(c) MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature" }
 "src/compute/schema_constrain.cu" = { code_loc = 1184, reason = "(c) schema-constrained decode token-mask compute (host-side): the shared frame-stack simulator now carries TWO body grammars (JSON schema + Qwen-Coder XML tool calls) around one sim_advance source of truth; split candidate if a third grammar lands" }
-"src/exec/executor_forward.cu" = { code_loc = 732, reason = "(c) executor forward orchestration (one dense forward path + 2 scale helpers)" }
+"src/exec/executor_forward.cu" = { code_loc = 738, reason = "(c) executor forward orchestration (one dense forward path + 2 scale helpers)" }
 "src/exec/executor_forward_moe_batch.cu" = { code_loc = 1061, reason = "(c) one path: batched-MoE forward dispatch (host-only)" }
 "src/exec/executor_workspace_buffers.cu" = { code_loc = 1350, reason = "(c) one concern: executor scratch/workspace sizing+allocation (host-only)" }
 "src/memory/kv_cache_manager.cpp" = { code_loc = 1207, reason = "(c) one manager: block alloc + residual pool + prefix cache + eviction" }

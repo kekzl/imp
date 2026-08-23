@@ -598,6 +598,16 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 state.kv_manager->residual_n_tokens());
             IMP_CUDA_CHECK_LAUNCH();
         }
+    } else if (!state.is_prefill && state.kv_manager != nullptr && state.kv_manager->residual_enabled() &&
+               state.d_residual_seq_slots != nullptr && state.n_sequences > 1) {
+        // Multi-seq: `kv_seq_id` is only set on the N==1 path, so the branch
+        // above never fired here and the ring was advanced on the host instead
+        // - which a graph replay does not run (#1708). Slots come from the
+        // engine's per-step upload, so this is correct across replays.
+        advance_residual_state_multi_kernel<<<1, state.n_sequences, 0, stream>>>(
+            state.kv_manager->d_residual_widx_ptr(), state.kv_manager->d_residual_fc_ptr(),
+            state.d_residual_seq_slots, state.n_sequences, state.kv_manager->residual_n_tokens());
+        IMP_CUDA_CHECK_LAUNCH();
     }
 
     // Final FP32→FP16 conversion for the tokens that need LM head projection.

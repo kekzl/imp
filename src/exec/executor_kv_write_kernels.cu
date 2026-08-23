@@ -473,6 +473,47 @@ __global__ void residual_kv_write_indirect_kernel(
     }
 }
 
+__global__ void residual_kv_write_multi_indirect_kernel(
+    const half* __restrict__ k_in, const half* __restrict__ v_in, half* __restrict__ residual_k_layer_base,
+    half* __restrict__ residual_v_layer_base, int64_t seq_stride_elems, const int* __restrict__ d_seq_slots,
+    const int* __restrict__ d_residual_widx_ptr, int slot_elems) {
+    const int token_idx = blockIdx.x;
+    const bool is_v = (blockIdx.y == 1);
+
+    const int seq_slot = d_seq_slots[token_idx];
+    if (seq_slot < 0)
+        return;
+    half* base = is_v ? residual_v_layer_base : residual_k_layer_base;
+    if (base == nullptr)
+        return;
+    base += static_cast<int64_t>(seq_slot) * seq_stride_elems;
+
+    const int widx = d_residual_widx_ptr[seq_slot];
+    half* dst = base + static_cast<int64_t>(widx) * slot_elems;
+    const half* src = (is_v ? v_in : k_in) + static_cast<int64_t>(token_idx) * slot_elems;
+
+    for (int i = threadIdx.x; i < slot_elems; i += blockDim.x) {
+        dst[i] = src[i];
+    }
+}
+
+__global__ void advance_residual_state_multi_kernel(int* __restrict__ d_widx, int* __restrict__ d_fc,
+                                                    const int* __restrict__ d_seq_slots, int n_seqs,
+                                                    int residual_n_tokens) {
+    const int i = threadIdx.x;
+    if (i >= n_seqs)
+        return;
+    const int slot = d_seq_slots[i];
+    if (slot < 0)
+        return;
+    // One thread per sequence, and two sequences never share a residual slot,
+    // so these are disjoint addresses - no atomics needed.
+    const int w = d_widx[slot];
+    const int f = d_fc[slot];
+    d_widx[slot] = (w + 1) % residual_n_tokens;
+    d_fc[slot] = (f < residual_n_tokens) ? (f + 1) : f;
+}
+
 __global__ void advance_residual_state_kernel(
     int* __restrict__ d_widx,
     int* __restrict__ d_fc,
