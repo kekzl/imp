@@ -944,7 +944,14 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         // template injects "<think>" as plain text — is_think_model is false
         // but the output is reasoning until the literal "</think>".
         std::string reasoning_content;
+        // Harmony's tool call IS a channel, and the split below consumes the
+        // channels. The tool parse runs ~60 lines further down, on `content` -
+        // by then the markup is gone and there is nothing left to find, which
+        // is why #1716 survived a green unit test of the parser itself. Keep
+        // the raw text for it.
+        std::string harmony_raw;
         if (ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY) {
+            harmony_raw = content;
             // gpt-oss Harmony: split the <|channel|>analysis|final<|message|>…
             // blocks so the analysis channel becomes reasoning_content and the
             // final channel becomes the answer. Without this the raw Harmony
@@ -1009,9 +1016,10 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         std::vector<ParsedToolCall> tool_calls;
         std::string tool_validation_error;
         if (ctx.params.has_tools) {
-            auto [pre_content, parsed_calls] =
-                parse_tool_calls(ctx.snap.tpl_family, content, state.next_tool_call_id,
-                                 tool_names_from_request(ctx.params.tools));
+            auto [pre_content, parsed_calls] = parse_tool_calls(ctx.snap.tpl_family,
+                                                                harmony_raw.empty() ? content : harmony_raw,
+                                                                state.next_tool_call_id,
+                                                                tool_names_from_request(ctx.params.tools));
             if (!parsed_calls.empty()) {
                 tool_calls = std::move(parsed_calls);
                 // OpenAI parallel_tool_calls=false: emit at most one call.
