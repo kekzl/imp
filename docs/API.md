@@ -164,6 +164,27 @@ requests each at `temperature 0.7` with one `get_weather` function:
 `"auto"` is untouched: Gemma-4 produced 1 of 10 there, and a best-effort call is
 what `auto` asks for.
 
+**gpt-oss calls tools now** (#1716). Its envelope is a channel with a recipient,
+not a tag:
+
+```
+<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Berlin"}<|call|>
+```
+
+The parser dispatched on family and had no Harmony branch, so the call fell
+through to the ChatML `<tool_call>` scanner, found nothing, and was dropped -
+the response carried an **empty `content` with `finish_reason: "stop"`** while
+the model's own `reasoning_content` said it meant to call. Measured on
+`gpt-oss-20b-mxfp4`, `tool_choice: "auto"`, 10 requests per row:
+
+| path | before | after |
+|---|---|---|
+| `/v1/chat/completions` | 0 / 10 | **10 / 10** |
+| the same, streaming | 0 / 10 | **10 / 10** |
+
+`tool_choice: "required"` on `harmony` is still a 400: the FSM has no grammar
+for this envelope, so the call is the model's choice rather than a guarantee.
+
 Reasoning models separate their chain of thought into `reasoning_content`
 (Anthropic: `thinking`) rather than emitting it as the answer. This holds on the
 streaming path too, which is where it was once wrong.

@@ -40,6 +40,105 @@ json weather_tools() {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// Harmony (gpt-oss) — the call is a channel with a recipient, not a tag (#1716)
+//
+// The bytes below are what the model actually emitted, captured from a live
+// gpt-oss-20b-mxfp4 run. It used to fall through to the ChatML scanner, which
+// found no <tool_call>, so the response carried an EMPTY content with
+// finish_reason "stop" while the model's own reasoning said it meant to call.
+// ---------------------------------------------------------------------------
+
+TEST(ToolCallHarmony, RecipientChannelBecomesACall) {
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|channel|>analysis<|message|>We need to use the get_weather function. "
+        "Provide city \"Berlin\".<|end|>"
+        "<|start|>assistant<|channel|>commentary to=functions.get_weather "
+        "<|constrain|>json<|message|>{\"city\":\"Berlin\"}<|call|>";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].name, "get_weather");
+    EXPECT_EQ(calls[0].arguments, "{\"city\":\"Berlin\"}");
+    EXPECT_TRUE(content.empty()) << "the analysis channel is reasoning, not content";
+}
+
+TEST(ToolCallHarmony, TruncatedCallWithNoTerminatorStillParses) {
+    // What the live run produced: max_tokens ended the generation before
+    // <|call|>. Requiring the terminator would drop the call the model made.
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|channel|>analysis<|message|>reasoning<|end|>"
+        "<|start|>assistant<|channel|>commentary to=functions.get_weather "
+        "<|constrain|>json<|message|>{\"city\":\"Berlin\"}";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].arguments, "{\"city\":\"Berlin\"}");
+}
+
+TEST(ToolCallHarmony, FinalChannelIsContentAndNotACall) {
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|channel|>analysis<|message|>thinking<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>It is 17 degrees.<|return|>";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    EXPECT_TRUE(calls.empty());
+    EXPECT_EQ(content, "It is 17 degrees.");
+}
+
+TEST(ToolCallHarmony, TwoCallsGetSequentialIds) {
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|start|>assistant<|channel|>commentary to=functions.a <|message|>{\"x\":1}<|call|>"
+        "<|start|>assistant<|channel|>commentary to=functions.b <|message|>{\"y\":2}<|call|>";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    ASSERT_EQ(calls.size(), 2u);
+    EXPECT_EQ(calls[0].name, "a");
+    EXPECT_EQ(calls[1].name, "b");
+    EXPECT_NE(calls[0].id, calls[1].id);
+}
+
+TEST(ToolCallHarmony, PlainCommentaryWithNoRecipientIsNotACall) {
+    // commentary without `to=` is chain-of-thought, and turning it into a call
+    // would invent one out of the model's own notes.
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|channel|>commentary<|message|>I could call get_weather here.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>Berlin is cold.<|return|>";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    EXPECT_TRUE(calls.empty());
+    EXPECT_EQ(content, "Berlin is cold.");
+}
+
+TEST(ToolCallHarmony, StreamScannerFindsTheChannelHeader) {
+    // Streaming shares the family dispatch, so it was equally blind.
+    const std::string buf =
+        "prefix<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>";
+    auto scan = scan_tool_tag(buf, ChatTemplateFamily::HARMONY);
+    ASSERT_EQ(scan.kind, ToolTagScan::Kind::OPEN);
+    EXPECT_EQ(scan.fn_name, "get_weather");
+    EXPECT_EQ(std::string(scan.close_tag), "<|call|>");
+    EXPECT_EQ(buf.substr(0, scan.content_len), "prefix") << "the channel markup must not reach the stream";
+    EXPECT_EQ(scan.body_start, buf.size());
+}
+
+TEST(ToolCallHarmony, StreamScannerWaitsForTheRestOfTheHeader) {
+    auto partial = scan_tool_tag("<|channel|>commentary to=functions.get_wea", ChatTemplateFamily::HARMONY);
+    EXPECT_EQ(partial.kind, ToolTagScan::Kind::PARTIAL) << "header not finished";
+
+    auto none = scan_tool_tag("just some prose", ChatTemplateFamily::HARMONY);
+    EXPECT_EQ(none.kind, ToolTagScan::Kind::NONE);
+}
+
+TEST(ToolCallHarmony, StreamBodyParsesAsBareArguments) {
+    // The name lives in the header, so the body is the bare args object - the
+    // same shape the Llama3 path produces.
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_stream_tool_body("{\"city\":\"Berlin\"}", /*gemma_body=*/false, "get_weather", tc));
+    EXPECT_EQ(tc.name, "get_weather");
+    EXPECT_EQ(tc.arguments, "{\"city\":\"Berlin\"}");
+}
+
+// ---------------------------------------------------------------------------
 // tool_choice enforcement, per template family (#1592)
 //
 // `tool_choice: "required"` and a named function are enforced by the decode FSM

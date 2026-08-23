@@ -663,31 +663,72 @@ ChannelSegments split_harmony_channels(const std::string& text) {
     static const std::string END = "<|end|>";
     static const std::string START = "<|start|>";
     static const std::string RET = "<|return|>";
+    static const std::string CALL = "<|call|>";
 
     ChannelSegments out;
-    std::string cur;  // current channel name; empty = no active channel
+    std::string cur;        // current channel name; empty = no active channel
+    std::string recipient;  // "functions.NAME" from the channel header, if any
+    std::string tool_body;  // body of a call addressed to a recipient
     bool in_msg = false;
     const size_t n = text.size();
     size_t i = 0;
     auto at = [&](const std::string& m) { return text.compare(i, m.size(), m) == 0; };
     auto emit = [&](char c) {
-        if (cur == "analysis" || cur == "commentary")
+        if (!recipient.empty())
+            tool_body.push_back(c);
+        else if (cur == "analysis" || cur == "commentary")
             out.reasoning.push_back(c);
         else if (cur == "final")
             out.content.push_back(c);
         else
             out.other.push_back(c);
     };
+    // Close whatever block is open. A body addressed to `functions.NAME`
+    // becomes a tool call rather than text.
+    auto close_block = [&]() {
+        constexpr const char* kFns = "functions.";
+        if (!recipient.empty() && recipient.compare(0, 10, kFns) == 0) {
+            size_t a = tool_body.find_first_not_of("\n\r\t ");
+            size_t b = tool_body.find_last_not_of("\n\r\t ");
+            if (a != std::string::npos)
+                out.tool_calls.push_back({recipient.substr(10), tool_body.substr(a, b - a + 1)});
+        }
+        recipient.clear();
+        tool_body.clear();
+        cur.clear();
+        in_msg = false;
+    };
     while (i < n) {
         if (at(CH)) {
             i += CH.size();
-            // Channel name runs up to <|message|> (or any other control marker).
-            std::string name;
+            // The header between <|channel|> and <|message|> is not just a
+            // name: a tool call carries a recipient and a constraint, as in
+            //   commentary to=functions.get_weather <|constrain|>json
+            // Splitting only on '<' left `cur` as the whole string, which
+            // matched no known channel, so the body went to `other` and was
+            // dropped (#1716). Take the first token as the channel and read a
+            // `to=` out of the rest.
+            std::string header;
             while (i < n && !at(MSG) && !at(END) && !at(START) && !at(CH) && text[i] != '<')
-                name.push_back(text[i++]);
-            size_t s = name.find_first_not_of("\n\r\t ");
-            size_t e = name.find_last_not_of("\n\r\t ");
-            cur = (s == std::string::npos) ? std::string() : name.substr(s, e - s + 1);
+                header.push_back(text[i++]);
+            size_t s = header.find_first_not_of("\n\r\t ");
+            if (s == std::string::npos) {
+                cur.clear();
+                recipient.clear();
+            } else {
+                size_t sp = header.find_first_of("\n\r\t ", s);
+                cur = header.substr(s, sp == std::string::npos ? std::string::npos : sp - s);
+                recipient.clear();
+                if (sp != std::string::npos) {
+                    const size_t to = header.find("to=", sp);
+                    if (to != std::string::npos) {
+                        size_t e = header.find_first_of("\n\r\t ", to + 3);
+                        recipient = header.substr(to + 3,
+                                                  e == std::string::npos ? std::string::npos : e - (to + 3));
+                    }
+                }
+            }
+            tool_body.clear();
             in_msg = false;
             continue;
         }
@@ -698,20 +739,24 @@ ChannelSegments split_harmony_channels(const std::string& text) {
         }
         if (at(END)) {
             i += END.size();
-            in_msg = false;
-            cur.clear();
+            close_block();
+            continue;
+        }
+        if (at(CALL)) {
+            // The marker that ends a tool call. It was in no control set, so
+            // it used to fall through as literal text.
+            i += CALL.size();
+            close_block();
             continue;
         }
         if (at(RET)) {
             i += RET.size();
-            in_msg = false;
-            cur.clear();
+            close_block();
             continue;
         }
         if (at(START)) {
             i += START.size();
-            in_msg = false;
-            cur.clear();
+            close_block();
             // Drop the role name up to the next control marker.
             while (i < n && !at(CH) && !at(MSG) && text[i] != '<')
                 i++;
@@ -721,6 +766,10 @@ ChannelSegments split_harmony_channels(const std::string& text) {
             emit(text[i]);
         i++;
     }
+    // A truncated generation - max_tokens, or a stop before <|call|> - leaves
+    // the last block open. Close it, or the tool call the model did emit is
+    // lost to a missing terminator.
+    close_block();
 
     auto trim = [](std::string& s) {
         size_t a = s.find_first_not_of("\n\r\t ");
