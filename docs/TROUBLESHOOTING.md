@@ -82,6 +82,25 @@ Also check `kv_cache.swa_snapshot_mb`: a value **below one snapshot size**
 silently disables prefix caching, which is worse than setting it to zero. It
 warns since #1092.
 
+## Requests queue while `/metrics` shows free KV blocks
+
+`imp_kv_blocks_reserved` is the answer, and it is a gauge since v0.29.0.
+
+Admission reserves prompt **plus `max_tokens`** (#1635). A request admitted on
+its prompt alone can run the pool dry halfway through its own answer, and the
+loser is whichever request needs the next block - a truncated answer after the
+client has already received part of it. Queueing is the better failure, so the
+promise is held from admission until the blocks are written.
+
+The visible cost is concurrency against a client that does not set `max_tokens`:
+the server default is 8192, so each such request reserves
+`ceil(8192/block_size) + 1` blocks whatever it ends up emitting. Set `max_tokens`
+to what the answer actually needs.
+
+On a pool too small to ever hold prompt + `max_tokens` the reserve is clamped to
+the pool, which is the pre-#1635 behaviour - there the mid-stream cancel is still
+possible, because no admission rule can promise memory that does not exist.
+
 ## After a restart, every prompt is cancelled
 
 Restarting the server while the previous process still holds the card gives you

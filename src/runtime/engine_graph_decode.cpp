@@ -36,12 +36,24 @@ const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
     return d_banned_tokens_.get();
 }
 
-int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
+int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
     int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
     if (remaining <= 0)
         return 0;
+
+    // Book for the burst that is about to run, not for the whole generation
+    // (#1636). The caller clamps the launch to runtime.decode_burst (128), to
+    // 16 while another request waits, or to speculative.miss_burst (8); the
+    // reservation was not clamped with it, so an 8192-token default booked 512
+    // blocks on the first decode step of an answer that may emit 40 tokens.
+    // append_block reclaims cached prefix blocks when the free pool is empty,
+    // so that reservation was paid for out of the prefix cache the next turn
+    // was going to hit. The loop relaunches per burst anyway.
+    int reserve_tokens = remaining;
+    if (step_limit > 0)
+        reserve_tokens = std::min(reserve_tokens, step_limit);
 
     constexpr int kMaxLayersForConditionalGraph = 128;
     if (model_->config().n_layers > kMaxLayersForConditionalGraph)
@@ -56,7 +68,7 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
 
     // Pre-allocate KV blocks
     int ctx_len = req->context_len();
-    int final_ctx = ctx_len + remaining;
+    int final_ctx = ctx_len + reserve_tokens;
     int blocks_needed = (final_ctx + kv_bs - 1) / kv_bs;
     int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
 
@@ -232,7 +244,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         !req->regex_pattern.empty() || !req->grammar.empty() || !req->tool_constraint_tools.empty())
         return false;
 
-    int remaining = prepare_graph_loop(req);
+    int remaining = prepare_graph_loop(req, step_limit);
     if (remaining <= 0)
         return false;
 

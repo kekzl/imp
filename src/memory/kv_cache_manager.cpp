@@ -289,6 +289,10 @@ int KVCacheManager::append_block(int seq_id) {
 }
 
 void KVCacheManager::free_sequence(int seq_id) {
+    // Before the early return: a reservation outlives the block table it was
+    // taken against, and an orphan keeps subtracting from can_allocate().
+    decode_reservations_.erase(seq_id);
+
     auto it = seq_blocks_.find(seq_id);
     if (it == seq_blocks_.end())
         return;
@@ -412,27 +416,41 @@ int KVCacheManager::evict_lru() {
     return -1;  // All sequences are pinned.
 }
 
+void KVCacheManager::set_decode_reservation(int seq_id, int total_blocks) {
+    if (total_blocks <= 0) {
+        decode_reservations_.erase(seq_id);
+        return;
+    }
+    decode_reservations_[seq_id] = total_blocks;
+}
+
+int KVCacheManager::outstanding_reserved_blocks() const {
+    int outstanding = 0;
+    for (const auto& [seq_id, promised] : decode_reservations_) {
+        auto it = seq_blocks_.find(seq_id);
+        const int held = it == seq_blocks_.end() ? 0 : static_cast<int>(it->second.size());
+        if (promised > held)
+            outstanding += promised - held;
+    }
+    return outstanding;
+}
+
 bool KVCacheManager::can_allocate(int num_blocks) const {
     if (num_blocks <= 0)
         return true;
 
-    // Fast path: free pool + reclaimable cached blocks (O(1) via counter)
-    int reclaimable = cache_->num_free_blocks() + reclaimable_cached_count_;
-    if (reclaimable >= num_blocks)
-        return true;
-
-    // Slow path: count blocks from evictable LRU sequences
-    for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
-        if (pinned_seq_blocks_.find(*it) != pinned_seq_blocks_.end())
-            continue;
-        auto seq_it = seq_blocks_.find(*it);
-        if (seq_it != seq_blocks_.end()) {
-            reclaimable += static_cast<int>(seq_it->second.size());
-        }
-        if (reclaimable >= num_blocks)
-            return true;
-    }
-    return false;
+    // Free pool + reclaimable cached blocks (O(1) via counter), minus what
+    // running sequences have already been promised and not yet written.
+    //
+    // There is deliberately no second source. The old slow path added the
+    // blocks of live LRU sequences, which evict_lru() would have to free —
+    // and evict_lru() has no production caller precisely because freeing a
+    // live sequence's KV corrupts it (no recompute path). The predicate
+    // therefore answered "there is room" with memory that never comes back,
+    // which is the over-admission half of #1635.
+    const int available = cache_->num_free_blocks() + reclaimable_cached_count_ -
+                          outstanding_reserved_blocks();
+    return available >= num_blocks;
 }
 
 // ─── Content-addressed prefix caching ────────────────────────────────

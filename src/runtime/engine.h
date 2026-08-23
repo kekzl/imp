@@ -1341,7 +1341,9 @@ private:
     // ── CUDA graph helpers ───────────────────────────────────────────
     // Pre-allocate KV blocks and check preconditions for graph loop.
     // Returns remaining tokens (>0 = ok, <=0 = cannot use graph).
-    int prepare_graph_loop(std::shared_ptr<Request>& req);
+    // step_limit > 0 books KV for that burst only; 0 books the whole
+    // remaining generation (the synchronous generate() loop, which runs it).
+    int prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit = 0);
 
     // Build InferenceState + CudaGraphConditionalRunner::Config for graph loop.
     CudaGraphConditionalRunner::Config build_graph_config(const Request& req, int remaining) const;
