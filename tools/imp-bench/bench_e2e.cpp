@@ -108,13 +108,13 @@ static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_head
 // bench_e2e: end-to-end prefill and decode benchmark
 // ---------------------------------------------------------------------------
 
-void bench_e2e() {
+bool bench_e2e() {
     // Check for CUDA device
     int device_count = 0;
     cudaGetDeviceCount(&device_count);
     if (device_count == 0) {
         printf("bench_e2e: no CUDA device found, skipping\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     // Model dimensions (small for benchmarking the full pipeline)
@@ -142,18 +142,18 @@ void bench_e2e() {
     auto model = make_bench_model(d_model, d_ff, n_heads, n_kv_heads, n_layers, vocab_size, max_seq_len);
     if (!model->upload_weights_gpu(QType::F16, nullptr)) {
         printf("bench_e2e: failed to upload weights to GPU\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     // Initialize executor
     GraphExecutor executor;
     if (!executor.init(*model, QType::F16, false)) {
         printf("bench_e2e: failed to initialize GraphExecutor\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
     if (!executor.allocate_workspaces()) {
         printf("bench_e2e: failed to allocate GPU workspaces\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     // -----------------------------------------------------------------------
@@ -263,6 +263,7 @@ void bench_e2e() {
     }
 
     printf("\n");
+    return true;
 }
 
 }  // namespace imp

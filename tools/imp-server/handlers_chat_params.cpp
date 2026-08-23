@@ -155,8 +155,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // machinery handles arbitrary lists; max_stop_len derives from the vector).
     constexpr size_t kMaxStopSequences = 16;
     if (parse_stop_field(body, kMaxStopSequences, ctx.params.stop_sequences)) {
-        fprintf(stderr, "warning: request sent %zu stop sequences; keeping the first %zu\n",
-                body["stop"].size(), kMaxStopSequences);
+        IMP_LOG_WARN("request sent %zu stop sequences; keeping the first %zu", body["stop"].size(),
+                     kMaxStopSequences);
     }
     ctx.params.max_stop_len = 0;
     for (const auto& s : ctx.params.stop_sequences)
@@ -471,9 +471,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
 
     // Log request received (structured)
     ctx.req_id = make_completion_id(state);
-    fprintf(stderr, "[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f\n",
-            ctx.req_id.c_str(), messages.size(), ctx.params.stream ? "true" : "false", ctx.params.max_tokens,
-            ctx.params.temperature);
+    IMP_LOG_INFO("[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f",
+                 ctx.req_id.c_str(), messages.size(), ctx.params.stream ? "true" : "false",
+                 ctx.params.max_tokens, ctx.params.temperature);
 
     // Validate model field (required per OpenAI spec)
     ctx.params.requested_model = body.value("model", "");

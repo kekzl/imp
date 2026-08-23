@@ -585,8 +585,8 @@ void finish_stream_accounting_(ServerState& state, ChatRequestContext& ctx,
     double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
     int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
     int n_prompt_tokens = ctx.snap.n_prompt_tokens;
-    fprintf(stderr, "[%s] %s%d prompt + %d completion tokens, %.1f ms (ttft=%.1f ms, cached=%d)\n",
-            req_id.c_str(), label, n_prompt_tokens, out.n_output_tokens, ms, out.ttft_ms, cached);
+    IMP_LOG_INFO("[%s] %s%d prompt + %d completion tokens, %.1f ms (ttft=%.1f ms, cached=%d)", req_id.c_str(),
+                 label, n_prompt_tokens, out.n_output_tokens, ms, out.ttft_ms, cached);
     state.metrics.requests_total++;
     state.metrics.tokens_prompt_total += n_prompt_tokens;
     state.metrics.tokens_completion_total += out.n_output_tokens;
