@@ -421,6 +421,23 @@ void Engine::init_resolve_kv_dtype_policy_() {
     } else {
         IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
     }
+
+    // Every decode-graph path is gated on n_sequences <= kMaxGraphPoolSize, so a
+    // batch above it runs the forward EAGERLY - with no clamp, no warning, and
+    // no branch that says so (#1646). Measured on this box, graphs on against
+    // off, tg256: 454 vs 190 tok/s, i.e. the configured value silently costs
+    // 2.4x decode the moment it exceeds the pool.
+    //
+    // Not clamped: the value also bounds admission and KV sizing, and silently
+    // serving fewer requests than asked is its own defect. Said out loud
+    // instead, once, at the place where the number is resolved.
+    if (config_.use_cuda_graphs && config_.max_batch_size > Engine::kMaxGraphPoolSize) {
+        IMP_LOG_WARN(
+            "max_batch_size %d exceeds the decode-graph pool (%d): any step with more than "
+            "%d sequences runs eager, which measured 2.4x slower decode on this box. "
+            "Lower max_batch_size, or accept eager decode above that width.",
+            config_.max_batch_size, Engine::kMaxGraphPoolSize, Engine::kMaxGraphPoolSize);
+    }
 }
 
 // Auto-detect SSM state dtype for hybrid models. Nemotron-H and similar

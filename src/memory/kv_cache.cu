@@ -449,6 +449,22 @@ int KVCache::commit_blocks_(int blocks) {
         IMP_CUDA_CHECK_LOG(cudaMemset(k_ptr(l, first_new), 0, bytes));
         IMP_CUDA_CHECK_LOG(cudaMemset(v_ptr(l, first_new), 0, bytes));
     }
+    // The memsets above run on the LEGACY DEFAULT STREAM, and the engine
+    // decodes on a cudaStreamNonBlocking stream - which by construction has no
+    // ordering relationship with stream 0. Publishing the capacity without
+    // waiting let a memset retire AFTER the first KV write into the same
+    // blocks, zeroing live KV (#1652). On a 36-layer model that is 72
+    // unordered memsets over exactly the blocks the next decode step is about
+    // to fill, and it breaks the invariant this zeroing exists to keep in the
+    // worse direction: not "stale bytes" but "your bytes, erased".
+    //
+    // Synchronising stream 0 rather than the device: the only work being waited
+    // on is these memsets, and cudaDeviceSynchronize would additionally stall
+    // on whatever the engine has in flight, for no benefit. Growth is rare (it
+    // fires when the pool is under pressure, not per step), so this costs a
+    // sync on a path that already commits driver pages.
+    if (blocks > first_new)
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(0));
     committed_blocks_ = blocks;
     return blocks;
 }

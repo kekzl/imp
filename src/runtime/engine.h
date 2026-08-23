@@ -783,13 +783,16 @@ private:
     size_t d_penalty_tokens_capacity_ = 0;
 
     // ── BitDecoding Phase 3 residual metadata (per-step) ─────────────
-    // residual_meta_d_buf_ is the legacy multi-seq metadata buffer
-    // (cudaMallocAsync per step in step_decode_continuous). d_kv_slot_buf_ is
+    // residual_meta_d_buf_ is the multi-seq metadata buffer. d_kv_slot_buf_ is
     // a persistent [max_batch_size] device array of slot indices indexed by
     // batch position, updated lazily via cudaMemcpyAsync when the batch
     // composition changes — graph-capture-safe (kernels read from a stable
     // device pointer; host updates between graph replays).
+    // Persistent, allocated once beside d_kv_slot_buf_ (#1648). Was a
+    // cudaMallocAsync per decode step whose address a replayed graph had
+    // already captured.
     int* residual_meta_d_buf_ = nullptr;
+    int residual_meta_capacity_ = 0;  // sequences the buffer above can hold
     int* d_kv_slot_buf_ = nullptr;
     std::vector<int> residual_meta_h_seq_ids_;
     std::vector<int> residual_meta_h_slots_;

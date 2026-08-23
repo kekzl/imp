@@ -144,6 +144,11 @@ Engine::~Engine() {
         cudaFree(d_kv_slot_buf_);
         d_kv_slot_buf_ = nullptr;
     }
+    if (residual_meta_d_buf_) {
+        cudaFree(residual_meta_d_buf_);
+        residual_meta_d_buf_ = nullptr;
+        residual_meta_capacity_ = 0;
+    }
     abandon_decode_pipeline();
     for (int p = 0; p < 2; ++p) {
         // T5b owners release themselves; the d_* mirrors are views into them, so

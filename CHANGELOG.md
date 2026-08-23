@@ -180,6 +180,36 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A growable KV pool zeroed new blocks on stream 0 and published them to a
+  non-blocking stream** (#1652). `cudaMemset` runs on the legacy default
+  stream; the engine decodes on a `cudaStreamNonBlocking` stream, which by
+  construction has no ordering relationship with it - so a memset could retire
+  *after* the first KV write into the same blocks and zero live KV. On a
+  36-layer model that is 72 unordered memsets over exactly the blocks the next
+  decode step fills. Stream 0 is synchronised before the new capacity is
+  published; growth is rare, and the path already commits driver pages.
+
+- **`max_batch_size` above the decode-graph pool ran eager, silently** (#1646).
+  Every graph path is gated on `n_sequences <= 64`, so a larger configured
+  batch fell to an eager forward with no clamp, no warning and no log line.
+  Measured on this box, graphs on against off: **454 vs 190 tok/s**, i.e. the
+  configured value costs 2.4x decode the moment it exceeds the pool. Not
+  clamped - the value also bounds admission and KV sizing - but said out loud,
+  once, where the number is resolved.
+
+- **The multi-sequence residual metadata buffer is persistent** (#1648). It was
+  `cudaMallocAsync`'d every decode step and its address baked into a captured
+  `forward_logits` graph that is then replayed, with no invalidation watching
+  it. That only ever worked because the default pool's release threshold is
+  pinned to `UINT64_MAX` so the same address came back - a pool setting, not an
+  invariant the graph path asserts. Allocated once beside `d_kv_slot_buf_`,
+  strided by capacity so a graph captured at one batch width stays correct at
+  another. It does **not** fix that path: measured on
+  `Qwen3-8B-Q8_0.gguf` with `--kv-nvfp4` and residual on, six concurrent
+  requests fault identically before and after (106998 / 111543 `illegal memory
+  access` lines), while `runtime.cuda_graphs=never` gives 0 and six correct
+  answers. Filed as #1708.
+
 - **`json_schema`: an unconstrained `integer` had no digit bound** (#1540). At
   the server's default temperature the sampler could sit in the digit state and
   emit `1020000000000000000000000000000000000000` for a population field - a
