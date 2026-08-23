@@ -203,6 +203,15 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         run: cmake --build build -j$(nproc)
 
+      # Per-kernel registers and local frame against the pin (#1549). Runs HERE
+      # because this is the one place both halves exist: the built artifact and
+      # the CUDA toolkit that carries cuobjdump. It reads the compiled library,
+      # so it needs no GPU - which is what makes a register-pressure gate
+      # possible in CI at all, where every throughput gate is impossible.
+      - name: Kernel resources
+        if: steps.changes.outputs.code == 'true'
+        run: cuobjdump -res-usage build/libimp.a | python3 tools/kernel_resources.py -
+
       - name: ccache stats
         if: steps.changes.outputs.code == 'true'
         run: ccache -s
