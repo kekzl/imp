@@ -6,6 +6,8 @@
 // roadmap. Methods remain Engine::* with declarations in engine.h.
 
 #include "runtime/engine.h"
+
+#include <set>
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
@@ -46,24 +48,37 @@ void Engine::init_apply_debug_raw_overrides_() {
     if (!debug_raw_)
         return;
     IMP_LOG_INFO(
-        "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic "
-        "cuBLAS)");
+        "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV and the MoE expert "
+        "cache off; deterministic cuBLAS, GDN reference scan)");
     // Weight storage: keep FP16 (skip the lossy cache paths)
     config_.use_fp8_prefill = 0;
     config_.use_nvfp4_decode = 0;
     config_.dual_path_quant = false;
-    // CUDA graphs off (graph capture can mask state bugs)
-    config_.use_cuda_graphs = 0;
-    setenv("IMP_NO_CUDA_GRAPH", "1", 0);
+    // #1628: four of these were `setenv()` on IMP_* variables that NOTHING in
+    // the tree reads, so warmup, deterministic cuBLAS and the MoE expert cache
+    // all stayed at their normal settings while the log line above and
+    // imp.conf.example:97 said otherwise. `grep -rn 'getenv("IMP_NO_WARMUP"'`
+    // and the other three: zero hits each. They are config assignments now.
+    //
+    // CUDA graphs off (graph capture can mask state bugs). Through
+    // demote_graphs_, not by writing the field: setting use_cuda_graphs
+    // directly left graph_demotion_ at None, so the resolved-dispatch summary
+    // printed `graphs=0(none)` - "graphs are off, reason: graphs still
+    // enabled" (#1658).
+    demote_graphs_(GraphDemotionReason::DebugRaw);
     // No warmup (warmup can leak state into first request)
-    setenv("IMP_NO_WARMUP", "1", 0);
+    runtime_config_.runtime.warmup = false;
     // Deterministic cuBLAS (bit-exact across runs, no algo jitter)
-    setenv("IMP_DETERMINISTIC_GEMM", "1", 0);
+    runtime_config_.runtime.deterministic_gemm = true;
+    // CUBLAS_WORKSPACE_CONFIG is read by cuBLAS itself, not by imp, so this one
+    // stays an environment variable.
     setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
     // MoE: no expert LRU cache (state-carrying)
-    setenv("IMP_NO_EXPERT_CACHE", "1", 0);
-    // GDN: use reference unfused scan (no register-state reordering)
-    setenv("IMP_GDN_REF", "1", 0);
+    runtime_config_.moe.no_expert_cache = true;
+    // GDN: reference unfused scan (no register-state reordering). The env var
+    // this used to set is dead, but the switch it stood for exists as a config
+    // key (`gdn.ref_kernel`, read at executor_ssm_gdn.cu:526).
+    runtime_config_.gdn.ref_kernel = true;
     // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
     // IMP_NO_MMVQ — those trigger incompatible kernel paths that produce IMAs on
     // some combinations. The RAW flag is about disabling *caches and approximations*,
@@ -250,6 +265,31 @@ void Engine::init_resolve_kv_dtype_policy_() {
         config_.kv_cache_dtype = QType::F16;
     }
 
+    // #1674: the guard above asks whether the dtype can serve SINKS. Whether it
+    // has a decode kernel for this model's head_dim was asked nowhere, and the
+    // launchers answered a miss with a log line and a return - leaving O
+    // unwritten, which is a wrong answer at exit code 0. Same fallback shape as
+    // the sink arm, over every distinct head_dim the model uses.
+    if (config_.kv_cache_dtype != QType::F16) {
+        std::set<int> dims;
+        if (mcfg.head_dim > 0)
+            dims.insert(mcfg.head_dim);
+        for (int d : mcfg.head_dim_per_layer)
+            if (d > 0)
+                dims.insert(d);
+        for (int d : dims) {
+            if (!paged_attention_serves_head_dim(config_.kv_cache_dtype, d)) {
+                IMP_LOG_WARN(
+                    "KV cache dtype: %s requested, but its paged decode kernels have no template "
+                    "for head_dim %d (#1674) — falling back to FP16 KV rather than leaving the "
+                    "attention output unwritten.",
+                    qtype_name(config_.kv_cache_dtype), d);
+                config_.kv_cache_dtype = QType::F16;
+                break;
+            }
+        }
+    }
+
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16 &&
         true) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
@@ -380,6 +420,23 @@ void Engine::init_resolve_kv_dtype_policy_() {
                      headroom / (1024.0 * 1024.0 * 1024.0), tier);
     } else {
         IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
+    }
+
+    // Every decode-graph path is gated on n_sequences <= kMaxGraphPoolSize, so a
+    // batch above it runs the forward EAGERLY - with no clamp, no warning, and
+    // no branch that says so (#1646). Measured on this box, graphs on against
+    // off, tg256: 454 vs 190 tok/s, i.e. the configured value silently costs
+    // 2.4x decode the moment it exceeds the pool.
+    //
+    // Not clamped: the value also bounds admission and KV sizing, and silently
+    // serving fewer requests than asked is its own defect. Said out loud
+    // instead, once, at the place where the number is resolved.
+    if (config_.use_cuda_graphs && config_.max_batch_size > Engine::kMaxGraphPoolSize) {
+        IMP_LOG_WARN(
+            "max_batch_size %d exceeds the decode-graph pool (%d): any step with more than "
+            "%d sequences runs eager, which measured 2.4x slower decode on this box. "
+            "Lower max_batch_size, or accept eager decode above that width.",
+            config_.max_batch_size, Engine::kMaxGraphPoolSize, Engine::kMaxGraphPoolSize);
     }
 }
 

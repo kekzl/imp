@@ -26,8 +26,10 @@
 #include <span>
 #include "memory/layer_offload.h"
 #include "memory/vram_allocator.h"
+#include "memory/vram_owned.h"
 #include "exec/executor.h"
 #include "core/cuda_raii.h"
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <map>
@@ -193,7 +195,7 @@ public:
     // Prefix-cache block reuse is bypassed while active so every position is
     // actually forwarded. end: fixed-order host reduction (bit-reproducible),
     // returns exp(mean NLL) in *out_ppl and always frees the buffers.
-    [[nodiscard]] bool begin_perplexity_capture(const int32_t* tokens, int n);
+    [[nodiscard]] bool begin_perplexity_capture(std::span<const int32_t> tokens);
     [[nodiscard]] bool end_perplexity_capture(double* out_ppl);
 
     // Image tokens the pending Qwen3-VL image expands to, 0 when none. The
@@ -205,16 +207,16 @@ public:
     std::vector<int> pending_image_token_counts() const;
     // Server path: CPU-only patchify (safe off the batch worker) and the token
     // count the prompt must reserve for it.
-    bool preprocess_image_qwen(const uint8_t* data, size_t len, QwenPatches& out) const;
+    bool preprocess_image_qwen(std::span<const uint8_t> data, QwenPatches& out) const;
     int image_tokens_of(const QwenPatches& patches) const;
     bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready(); }
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     // `set_` replaces whatever was pending; `add_` appends, which only the
     // Qwen3-VL tower supports (the mmproj tower holds exactly one image).
     [[nodiscard]] bool set_image(const std::string& path);
-    [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
+    [[nodiscard]] bool set_image_from_memory(std::span<const uint8_t> data);
     [[nodiscard]] bool add_image(const std::string& path);
-    [[nodiscard]] bool add_image_from_memory(const uint8_t* data, size_t len);
+    [[nodiscard]] bool add_image_from_memory(std::span<const uint8_t> data);
     void clear_image();
     bool has_vision() const noexcept { return vision_.is_available() || qwen_vision_.is_ready(); }
     bool has_vision_input() const noexcept { return vision_.has_input(); }
@@ -223,7 +225,7 @@ public:
     // the GPU encode for req->image into a per-request buffer (req->vision_emb) —
     // MUST be called from the batch worker (the encode is serialized + uses the
     // shared encoder workspace). Returns false if no vision model / no image.
-    [[nodiscard]] bool preprocess_image(const uint8_t* data, size_t len, ImageData& out);
+    [[nodiscard]] bool preprocess_image(std::span<const uint8_t> data, ImageData& out);
     [[nodiscard]] bool encode_image_for(Request& req);
 
     // Enable MTP-based speculative decoding. K = draft length (1-4 typical).
@@ -239,7 +241,7 @@ public:
     // should not invoke directly until Phase 4 wires this into the decode loop.
     // Encoder embedder (#836): pooled + L2-normalized embedding for `tokens`.
     // Only valid when the loaded model is encoder-only (profile().is_encoder).
-    bool encoder_embed(const int32_t* tokens, int n, std::vector<float>& out);
+    bool encoder_embed(std::span<const int32_t> tokens, std::vector<float>& out);
     bool is_encoder_model() const { return encoder_ws_storage_ != nullptr; }
 
     bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
@@ -339,6 +341,17 @@ public:
     // full context — which is how an operator spends an afternoon looking at
     // the wrong component. The server reads this to answer honestly instead.
     bool kv_pool_floored() const noexcept { return kv_pool_floored_; }
+    // KV-pressure events, for /metrics (#1641). Every one of these was logged
+    // and counted nowhere, so "the pool is too small for this traffic" could
+    // only be found by reading server logs after the fact. Counted in the
+    // engine because that is where the decision is made; the server reads them
+    // at scrape time rather than being told.
+    uint64_t kv_pressure_rejections() const noexcept {
+        return kv_pressure_rejections_.load(std::memory_order_relaxed);
+    }
+    // Counted by the pool itself, not mirrored here: growth is decided in
+    // KVCache::try_grow_to and a second copy is a second thing to keep in sync.
+    uint64_t kv_pool_growths() const noexcept { return kv_cache_raw_ ? kv_cache_raw_->growths() : 0; }
     Model* model() const noexcept { return model_.get(); }
     // Effective context window actually allocated by the engine (after VRAM-aware
     // auto-sizing in init_compute_max_seq_len_). May be < the model's declared
@@ -402,6 +415,7 @@ private:
     std::unique_ptr<KVCacheManager> kv_manager_;
     KVCache* kv_cache_raw_ = nullptr;  // Non-owning pointer (owned by kv_manager_)
     bool kv_pool_floored_ = false;     // the pool is the rescue floor, not a size
+    std::atomic<uint64_t> kv_pressure_rejections_{0};
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;
     CudaStream stream_;
@@ -415,6 +429,10 @@ private:
     std::vector<int> padded_block_table_;
     std::vector<int> padded_swa_block_table_;
     std::vector<std::shared_ptr<Request>> sched_prefill_batch_;
+    // Round-robin cursor for runtime.prefill_batch_decode_cap (#1643): taking a
+    // fixed prefix of the batch would starve every later ingest, which is the
+    // failure #1634/#1637 came from.
+    size_t sched_prefill_rr_ = 0;
     std::vector<std::shared_ptr<Request>> sched_decode_batch_;
     std::vector<std::shared_ptr<Request>> valid_decode_;
 
@@ -642,7 +660,11 @@ private:
     // launch and freed it again (AUDIT B28: part of the per-burst allocation
     // traffic the --wrap interposer named). One engine-owned copy, uploaded
     // once, serves all three.
-    int32_t* d_banned_tokens_ = nullptr;
+    // VramOwned, not a raw pointer plus a cudaFree in engine.cpp: the pairing
+    // used to span two files and tools/check_alloc_pairs.py had to re-derive it
+    // from source text. The handle frees through the allocator that produced it,
+    // once, in its own destructor.
+    VramOwned<int32_t> d_banned_tokens_;
     // Upload d_banned_tokens_ if not already resident. Returns nullptr when
     // the list is empty or the upload failed; callers then simply mask nothing.
     const int32_t* banned_tokens_device_(cudaStream_t stream);
@@ -765,13 +787,16 @@ private:
     size_t d_penalty_tokens_capacity_ = 0;
 
     // ── BitDecoding Phase 3 residual metadata (per-step) ─────────────
-    // residual_meta_d_buf_ is the legacy multi-seq metadata buffer
-    // (cudaMallocAsync per step in step_decode_continuous). d_kv_slot_buf_ is
+    // residual_meta_d_buf_ is the multi-seq metadata buffer. d_kv_slot_buf_ is
     // a persistent [max_batch_size] device array of slot indices indexed by
     // batch position, updated lazily via cudaMemcpyAsync when the batch
     // composition changes — graph-capture-safe (kernels read from a stable
     // device pointer; host updates between graph replays).
+    // Persistent, allocated once beside d_kv_slot_buf_ (#1648). Was a
+    // cudaMallocAsync per decode step whose address a replayed graph had
+    // already captured.
     int* residual_meta_d_buf_ = nullptr;
+    int residual_meta_capacity_ = 0;  // sequences the buffer above can hold
     int* d_kv_slot_buf_ = nullptr;
     std::vector<int> residual_meta_h_seq_ids_;
     std::vector<int> residual_meta_h_slots_;
@@ -928,7 +953,7 @@ private:
     bool spec_captured_forward_(InferenceState& state, Tensor& logits_out, cudaStream_t stream);
     void free_spec_graphs_();
     // Effective n-gram speculation state for a request: honors the per-request
-    // tri-state override (Request::spec_ngram_override), else the global default.
+    // tri-state override (Request::spec_override), else the global default.
     bool spec_ngram_enabled_(const Request& req) const {
         // A model that can never speculate must not look "enabled" to anyone:
         // the decode loop chops itself into miss_burst bursts whenever this
@@ -961,10 +986,14 @@ private:
     SpecDrafterState spec_drafter_state_(const Request& req) const {
         SpecDrafterState s;
         s.model_capable = spec_ngram_model_capable_();
-        s.ngram_on = req.spec_ngram_override >= 0 ? req.spec_ngram_override == 1
-                                                  : runtime_config_.speculative.ngram;
-        s.mtp_on = mtp_spec_decode_enabled();
-        s.recycling_on = runtime_config_.speculative.token_recycling;
+        // "speculative": false means no speculation, not "no n-gram
+        // speculation". It used to feed s.ngram_on alone, so the MTP head and
+        // token recycling kept drafting and the verify step kept running for a
+        // caller who had switched the feature off (#1639).
+        const bool forced_off = req.spec_override == 0;
+        s.ngram_on = req.spec_override >= 0 ? req.spec_override == 1 : runtime_config_.speculative.ngram;
+        s.mtp_on = !forced_off && mtp_spec_decode_enabled();
+        s.recycling_on = !forced_off && runtime_config_.speculative.token_recycling;
         return s;
     }
     // The model-level half of spec_verify_gates_ok_: facts that cannot change
@@ -1029,7 +1058,7 @@ private:
     int32_t* d_spec_argmax_ = nullptr;  // head of the [argmax | topm] block
     // diagnostics.spec_trace only: the chunk's full logits, so the trace can
     // report the top-2 gap per row rather than just which token won.
-    float* d_spec_logits_ = nullptr;
+    VramOwned<float> d_spec_logits_;
     std::vector<float> h_spec_logits_;
     PinnedBuffer h_spec_argmax_;  // pinned, [argmax | topm] twin (T5b)
     // Token-Recycling top-M harvest (speculative.token_recycling): per-row
@@ -1203,6 +1232,9 @@ private:
     void fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
     void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool
+    // Teardown for a request that ends abnormally. finish_request is the
+    // graceful twin; both release the same per-request resources (#1632).
+    void cancel_sequence_(const std::shared_ptr<Request>& req);
     // Recurrent-state snapshots (hybrid prefix caching, engine_sampling_stop.cpp):
     // admission hook (longest restorable prefix, in blocks) + save/position helpers.
     int hybrid_prefix_reuse_limit_(Request& req);
@@ -1324,7 +1356,9 @@ private:
     // ── CUDA graph helpers ───────────────────────────────────────────
     // Pre-allocate KV blocks and check preconditions for graph loop.
     // Returns remaining tokens (>0 = ok, <=0 = cannot use graph).
-    int prepare_graph_loop(std::shared_ptr<Request>& req);
+    // step_limit > 0 books KV for that burst only; 0 books the whole
+    // remaining generation (the synchronous generate() loop, which runs it).
+    int prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit = 0);
 
     // Build InferenceState + CudaGraphConditionalRunner::Config for graph loop.
     CudaGraphConditionalRunner::Config build_graph_config(const Request& req, int remaining) const;

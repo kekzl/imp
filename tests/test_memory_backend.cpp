@@ -136,6 +136,66 @@ TEST_F(PhaseFixture, ServingPhaseAcquisitionIsCounted) {
 #endif
 }
 
+// #1649: a growable pool committing pages on the request path acquires
+// physical memory exactly as acquire() does, and it used to be counted by none
+// of the three I2 instruments. commit() and commit_range() are non-virtual
+// wrappers around do_commit()/do_commit_range() now, for the same reason
+// acquire() wraps do_acquire(): a backend cannot forget the guard.
+TEST_F(PhaseFixture, ServingPhaseCommitIsCounted) {
+#ifdef NDEBUG
+    FakeBackend be(/*capacity_bytes=*/0, /*growable=*/true);
+    auto r = be.acquire_growable(64 * kMiB, 4096, 4096, RegionTag::KvBlockPool);
+    ASSERT_TRUE(r) << "growable acquire must work for this test to say anything";
+    Region region = std::move(r.region);
+    ASSERT_EQ(steady_state_allocations(), 0u) << "acquired while Loading";
+
+    set_alloc_phase(AllocPhase::Serving);
+    ASSERT_EQ(be.commit(region, 32 * kMiB), MemError::Ok);
+
+    EXPECT_EQ(steady_state_allocations(), 1u);
+    EXPECT_EQ(steady_state_allocations(RegionTag::KvBlockPool), 1u);
+#else
+    GTEST_SKIP() << "debug build aborts on a serving-phase acquisition by design";
+#endif
+}
+
+// Shrinking hands memory back. Counting it would make the instrument read
+// "allocations while serving" and mean "commit calls while serving".
+TEST_F(PhaseFixture, ServingPhaseShrinkIsNotCounted) {
+#ifdef NDEBUG
+    FakeBackend be(/*capacity_bytes=*/0, /*growable=*/true);
+    auto r = be.acquire_growable(64 * kMiB, 32 * kMiB, 4096, RegionTag::KvBlockPool);
+    ASSERT_TRUE(r);
+    Region region = std::move(r.region);
+
+    set_alloc_phase(AllocPhase::Serving);
+    ASSERT_EQ(be.commit(region, 8 * kMiB), MemError::Ok);
+    EXPECT_EQ(steady_state_allocations(), 0u);
+
+    // ... and the growth after it is counted again, so the guard is live.
+    ASSERT_EQ(be.commit(region, 24 * kMiB), MemError::Ok);
+    EXPECT_EQ(steady_state_allocations(), 1u);
+#else
+    GTEST_SKIP() << "debug build aborts on a serving-phase acquisition by design";
+#endif
+}
+
+// A commit that changes nothing is not an acquisition either.
+TEST_F(PhaseFixture, ServingPhaseNoOpCommitIsNotCounted) {
+#ifdef NDEBUG
+    FakeBackend be(/*capacity_bytes=*/0, /*growable=*/true);
+    auto r = be.acquire_growable(64 * kMiB, 32 * kMiB, 4096, RegionTag::KvBlockPool);
+    ASSERT_TRUE(r);
+    Region region = std::move(r.region);
+
+    set_alloc_phase(AllocPhase::Serving);
+    ASSERT_EQ(be.commit(region, 32 * kMiB), MemError::Ok);
+    EXPECT_EQ(steady_state_allocations(), 0u);
+#else
+    GTEST_SKIP() << "debug build aborts on a serving-phase acquisition by design";
+#endif
+}
+
 TEST_F(PhaseFixture, LoadingAndPlanningPhasesAreNotCounted) {
     FakeBackend be;
     set_alloc_phase(AllocPhase::Loading);

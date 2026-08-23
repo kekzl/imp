@@ -138,6 +138,14 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
 
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read. The FP16 twin has carried
+        // this since #963 and the quantised ones did not (#1678): host-side
+        // eviction keeps the window range valid, so this is defense-in-depth -
+        // future range drift degrades to a skipped block instead of an illegal
+        // access or silent garbage.
+        if (phys_block < 0)
+            continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
@@ -340,6 +348,14 @@ __global__ void paged_attention_splitk_fp8_kernel(
     // ---- Iterate over assigned KV blocks ----
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read. The FP16 twin has carried
+        // this since #963 and the quantised ones did not (#1678): host-side
+        // eviction keeps the window range valid, so this is defense-in-depth -
+        // future range drift degrades to a skipped block instead of an illegal
+        // access or silent garbage.
+        if (phys_block < 0)
+            continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
@@ -491,6 +507,14 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read. The FP16 twin has carried
+        // this since #963 and the quantised ones did not (#1678): host-side
+        // eviction keeps the window range valid, so this is defense-in-depth -
+        // future range drift degrades to a skipped block instead of an illegal
+        // access or silent garbage.
+        if (phys_block < 0)
+            continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
@@ -689,8 +713,7 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                     LAUNCH_SPLITK_FP8_PIPE(512);
                     break;  // Gemma 4 global
                 default:
-                    IMP_LOG_ERROR("paged_attention_splitk_fp8_pipeline: unsupported head_dim %d", head_dim);
-                    return;
+                    paged_attention_unsupported_head_dim("paged_attention_splitk_fp8_pipeline", head_dim);
             }
 #undef LAUNCH_SPLITK_FP8_PIPE
         } else {
@@ -721,8 +744,7 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                     LAUNCH_SPLITK_FP8(512);
                     break;  // Gemma 4 global
                 default:
-                    IMP_LOG_ERROR("paged_attention_splitk_fp8: unsupported head_dim %d", head_dim);
-                    return;
+                    paged_attention_unsupported_head_dim("paged_attention_splitk_fp8", head_dim);
             }
 #undef LAUNCH_SPLITK_FP8
         }
@@ -763,8 +785,7 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                 LAUNCH_FP8_FALLBACK(512);
                 break;  // Gemma 4 global attention
             default:
-                IMP_LOG_ERROR("paged_attention_decode_fp8: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_decode_fp8", head_dim);
         }
 #undef LAUNCH_FP8_FALLBACK
     }

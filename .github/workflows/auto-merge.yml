@@ -27,4 +27,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --squash "$PR_URL"
+        # --delete-branch is not redundant with the repository's
+        # deleteBranchOnMerge setting. An auto-merge request carries its own
+        # delete preference, and that is what GitHub honours at merge time, so
+        # arming without the flag leaves the head branch behind however the
+        # repository is configured. Measured 2026-08-21: #1531 armed by this
+        # workflow left its branch; #1532, re-armed by hand with the flag in the
+        # same hour, deleted its own. 21 branches had accumulated that way.
+        run: gh pr merge --auto --squash --delete-branch "$PR_URL"

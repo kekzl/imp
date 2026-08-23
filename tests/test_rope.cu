@@ -6,6 +6,7 @@
 #include "compute/mtp_forward.h"
 #include <vector>
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
 #include <numeric>
 
@@ -212,6 +213,84 @@ TEST(RoPETest, LongContextPositionsMatchDoubleReference) {
         Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
         Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
         rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        auto q_out = to_host(q_dev, n);
+        auto k_out = to_host(k_dev, n);
+        for (int64_t i = 0; i < n; i++) {
+            EXPECT_NEAR(q_out[i], q_ref[i], kTol) << "Q drifted from double truth at pos=" << pos;
+            EXPECT_NEAR(k_out[i], k_ref[i], kTol) << "K drifted from double truth at pos=" << pos;
+        }
+
+        cudaFree(q_dev);
+        cudaFree(k_dev);
+        cudaFree(pos_dev);
+    }
+}
+
+// =========================================================================
+// The YaRN branch, against DOUBLE truth (#1630).
+//
+// LongContextPositionsMatchDoubleReference above calls rope_forward with the
+// default ext_factor = 0.0f, so it takes the linear branch and cannot reach
+// this one. #1316 reduced the angle before the fast intrinsics in two of
+// rope_forward's three branches and left YaRN calling __sinf/__cosf on an
+// unreduced angle - which is the same defect the test above exists to catch,
+// on the path a long-context model actually takes.
+//
+// The oracle mirrors rope_yarn(): ramp, blend, mscale, all in double.
+// =========================================================================
+TEST(RoPETest, YarnLongContextPositionsMatchDoubleReference) {
+    const int batch = 1, seq_len = 1, n_heads = 1, n_kv_heads = 1, head_dim = 8;
+    const float theta = 10000.0f;
+    const float ext_factor = 1.0f;  // YaRN on
+    const float attn_factor = 1.0f;
+    const float scaling = 0.25f;  // 4x context extension: inv_scaling in the kernel
+    constexpr float kTol = 5e-4f;
+    const std::vector<int> positions = {0, 40, 500, 2000, 8000, 32768, 131071};
+
+    float corr[2];
+    imp::rope_yarn_corr_dims(head_dim, /*n_ctx_orig=*/32768, theta, /*beta_fast=*/32.0f,
+                             /*beta_slow=*/1.0f, corr);
+
+    auto ramp = [](double low, double high, int i0) {
+        double y = (i0 / 2.0 - low) / std::max(0.001, high - low);
+        return 1.0 - std::min(1.0, std::max(0.0, y));
+    };
+
+    for (int pos : positions) {
+        const int64_t n = (int64_t)batch * seq_len * n_heads * head_dim;
+        std::vector<float> q_host(n), k_host(n);
+        fill_linear(q_host);
+        fill_linear(k_host);
+
+        std::vector<float> q_ref(q_host), k_ref(k_host);
+        for (int i = 0; i < head_dim / 2; i++) {
+            // The kernel passes inv_scaling = 1/scaling as rope_yarn's freq_scale
+            // (rope.cu:165, :93), so the oracle must too.
+            const double inv_scaling = 1.0 / (double)scaling;
+            const double theta_extrap = (double)pos / std::pow((double)theta, (2.0 * i) / head_dim);
+            const double theta_interp = inv_scaling * theta_extrap;
+            const double ramp_mix = ramp(corr[0], corr[1], 2 * i) * (double)ext_factor;
+            const double angle = theta_interp * (1.0 - ramp_mix) + theta_extrap * ramp_mix;
+            const double mscale = (double)attn_factor * (1.0 + 0.1 * std::log(1.0 / inv_scaling));
+            const double ca = std::cos(angle) * mscale, sa = std::sin(angle) * mscale;
+            for (auto* v : {&q_ref, &k_ref}) {
+                const float a = (*v)[2 * i], b = (*v)[2 * i + 1];
+                (*v)[2 * i] = (float)(a * ca - b * sa);
+                (*v)[2 * i + 1] = (float)(a * sa + b * ca);
+            }
+        }
+
+        std::vector<int> pos_host = {pos};
+        float* q_dev = to_device(q_host.data(), n);
+        float* k_dev = to_device(k_host.data(), n);
+        int* pos_dev = to_device(pos_host.data(), pos_host.size());
+        Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
+        Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
+        // corr_dims is read on the HOST (rope.cu:167), so this is a host array.
+        rope_forward(Q, K, pos_dev, head_dim, theta, scaling, /*rope_dim=*/0, /*neox=*/false, ext_factor,
+                     attn_factor, corr);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         auto q_out = to_host(q_dev, n);

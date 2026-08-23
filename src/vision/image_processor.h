@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <span>
 #include <cstdint>
 #include <cuda_fp16.h>
 
@@ -80,7 +81,7 @@ bool load_and_preprocess_image(const std::string& path, int target_size, const f
                                const float std[3], ImageData& out);
 
 // Load image from memory buffer, resize + normalize + FP16 CHW.
-bool load_and_preprocess_image_from_memory(const uint8_t* data, size_t len, int target_size,
+bool load_and_preprocess_image_from_memory(std::span<const uint8_t> data, int target_size,
                                            const float mean[3], const float std[3], ImageData& out);
 
 }  // namespace imp

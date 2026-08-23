@@ -2,6 +2,7 @@
 #include "vision/vision_loader_check.h"
 #include "model/gguf_loader.h"
 #include "memory/engine_arena.h"
+#include "core/fp_bits.h"
 #include "core/logging.h"
 
 #include <fcntl.h>
@@ -13,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <span>
 #include <cmath>
 
 #include <cuda_runtime.h>
@@ -27,7 +29,7 @@ namespace {
 
 class BinaryReader {
 public:
-    BinaryReader(const uint8_t* data, size_t size) : data_(data), size_(size), pos_(0) {}
+    explicit BinaryReader(std::span<const uint8_t> data) : data_(data.data()), size_(data.size()), pos_(0) {}
 
     size_t pos() const { return pos_; }
     bool failed() const { return failed_; }
@@ -258,13 +260,8 @@ bool upload_tensor_fp16(const void* src, GgufWireType type, int64_t n_elements, 
         // Convert BF16 -> FP16 on host
         const uint16_t* bf16 = static_cast<const uint16_t*>(src);
         std::vector<half> h_fp16(static_cast<size_t>(n_elements));
-        for (int64_t i = 0; i < n_elements; i++) {
-            // BF16 -> F32 -> FP16
-            uint32_t bits = static_cast<uint32_t>(bf16[i]) << 16;
-            float f;
-            std::memcpy(&f, &bits, sizeof(float));
-            h_fp16[i] = __float2half(f);
-        }
+        for (int64_t i = 0; i < n_elements; i++)
+            h_fp16[i] = __float2half(bf16_to_float(bf16[i]));  // BF16 -> F32 -> FP16
         IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
     } else {
         IMP_LOG_ERROR("Vision: unsupported GGML type %u for tensor upload", std::to_underlying(type));
@@ -301,12 +298,8 @@ bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t r
             h_src[i] = __float2half(f32[i]);
     } else if (type == GgufWireType::BF16) {
         const uint16_t* bf16 = static_cast<const uint16_t*>(src);
-        for (int64_t i = 0; i < n; i++) {
-            uint32_t bits = static_cast<uint32_t>(bf16[i]) << 16;
-            float f;
-            std::memcpy(&f, &bits, sizeof(float));
-            h_src[i] = __float2half(f);
-        }
+        for (int64_t i = 0; i < n; i++)
+            h_src[i] = __float2half(bf16_to_float(bf16[i]));
     } else {
         IMP_LOG_ERROR("Vision: unsupported GGML type %u for transposed upload",
                       std::to_underlying(type));
@@ -357,7 +350,7 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
     madvise(mmap_base, file_size, MADV_SEQUENTIAL);
 
     auto data = reinterpret_cast<const uint8_t*>(mmap_base);
-    BinaryReader reader(data, file_size);
+    BinaryReader reader(std::span(data, file_size));
 
     // 2. Parse header
     uint32_t magic = reader.read_u32();

@@ -47,6 +47,13 @@ max_batch_size       = 0
 # paths are unaffected. 0 = legacy unbounded behavior. Ignored when
 # deterministic = true (the unbounded loop stays for bit-reproducible evals).
 decode_burst         = 128
+# Prefill chunk size. -1 = per-arch default (2048 where chunked prefill is
+# supported, 0 otherwise), 0 = no chunking. Sets the TTFT/ITL trade for every
+# prefill: chunked prefill re-reads every weight once per chunk, so 512-token
+# chunks cost NVFP4-MoE -43 % prefill at pp4096 against 2048. A --prefill-chunk
+# CLI value wins over this. Had no key at all until #1645, while the cap below
+# did.
+prefill_chunk_size   = -1
 # Cap the prefill chunk while other sequences are decoding: prefill and decode
 # share one stream, so every chunk forward inserts its full latency between two
 # decode steps of the active sessions. 1024 is the measured compromise (decoder
@@ -54,6 +61,12 @@ decode_burst         = 128
 # multi-tenant serving; 0 = disable (full chunk). The full chunk returns as
 # soon as nobody is decoding.
 prefill_chunk_decode_cap = 1024
+# How MANY prefill chunks run per engine step while others decode. The cap above
+# bounds one chunk; k concurrent ingests still run k of them between two decode
+# steps. Measured with three concurrent ingests: worst inter-token gap 259 -> 112
+# ms, gaps over 100 ms 6 -> 1, at +18% ingest wall time. 0 = unbounded. The
+# starting index rotates, so no ingest is starved.
+prefill_batch_decode_cap = 1
 # Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are single-
 # sequence, so concurrent sessions time-slice the decode. Slice length in
 # tokens; after it the engine rotates round-robin to the next decoding
@@ -94,7 +107,9 @@ max_seq_len          = 0
 vram_budget_mb       = 0
 # Disable Programmatic Dependent Launch (PDL). Diagnostic; small perf impact.
 no_pdl               = false
-# Naked FP16 path with FP8/NVFP4/graphs/warmup all forced off.
+# Naked FP16 path: FP8/NVFP4/graphs/warmup/FP8-KV and the MoE expert cache off,
+# deterministic cuBLAS and the GDN reference scan on. Four of those went through
+# dead env vars until #1628 and did nothing at all.
 debug_raw            = false
 # Disable SigLIP vision encoder CUDA-graph capture (debug).
 no_vision_graph      = false
@@ -239,6 +254,20 @@ library_reserve_mb = -1
 # hands the pools 639 MiB more to distribute.
 #   docker run -v $HOME/.cache/imp:/cache ... --set vram.library_reserve_cache=/cache/library_reserve
 library_reserve_cache =
+# Pinned staging ring for the weight upload: depth x chunk size in MiB.
+# Pinning host memory is expensive on WDDM, and the ring's cost is paid at every
+# process start. Swept on Qwen3-8B-Q8_0 (load time only, 3 starts per point):
+#
+#   4x128 MiB  4.55 s   4x32  4.16 s   2x64  4.12 s   2x32  4.00 s
+#   4x16 MiB   4.00 s   4x8   3.93 s   4x4   3.84 s   4x2   3.96 s
+#
+# Monotone down to 4 MiB and back up at 2 - the pinning cost dominates the
+# overlap the whole way, and below 4 MiB the per-chunk event pairs cost more
+# than the pinning saves. The defaults were 4 and 128 until #1653; the pair is a
+# key rather than a constant because the optimum is a property of the host's
+# pinning cost, not of imp. Re-run the sweep on a different host or driver.
+upload_ring_depth = 4
+upload_ring_chunk_mib = 4
 
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +
@@ -556,7 +585,7 @@ ngram                = true
 # costs ~2.1x a decode step at 2k ctx and ~5.2x at 16k (FA2 tile over the
 # pow2 ctx tier), so dense speculation (~2 tok/verify) is net-negative past
 # ~2k. Per-step gate; MoE-NVFP4 and GDN-hybrid drafts are exempt. 0 = no cap.
-draft_ctx_cap        = 2048
+draft_ctx_cap        = 0        # embedded default is 0, not 2048 (#1672)
 # Speculation on MoE models with native-NVFP4 experts (Qwen3-Coder-30B-FP4:
 # code-edit +49-81%, draft-poor floor -3-7%). GGUF-MoE never engages (its
 # batched verify re-dequants every activated expert per step, measured -22%)
@@ -627,7 +656,7 @@ mtp_nvfp4_head       = true
 # MTP economics guard: after an 8-verify sample, avg emitted tokens per
 # MTP-filled verify below this dooms MTP drafting for the request. 0 disables
 # the guard. Note: a chain of k emits at most k+1 per verify.
-mtp_econ_min_emit    = 4.0
+mtp_econ_min_emit    = -1.0     # embedded default is -1.0, not 4.0 (#1672)
 # Graph-captured verify (#847): cache one CUDA graph per draft-length bucket
 # and replay it each verify step (all growing lengths are read from device
 # buffers), removing the eager launch-pacing tax. Engages only where the

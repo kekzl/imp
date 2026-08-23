@@ -13,14 +13,14 @@
 
 namespace imp {
 
-const char* make_weight_key(char* buf, size_t buf_len, const char* name, int layer) {
+const char* make_weight_key(std::span<char> buf, const char* name, int layer) {
     if (layer >= 0)
-        snprintf(buf, buf_len, "L%d.%s", layer, name);
+        snprintf(buf.data(), buf.size(), "L%d.%s", layer, name);
     else if (layer == kMtpKeyLayer)
-        snprintf(buf, buf_len, "mtp.%s", name);
+        snprintf(buf.data(), buf.size(), "mtp.%s", name);
     else
-        snprintf(buf, buf_len, "%s", name);
-    return buf;
+        snprintf(buf.data(), buf.size(), "%s", name);
+    return buf.data();
 }
 
 WeightSnapshot::~WeightSnapshot() {

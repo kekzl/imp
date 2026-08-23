@@ -773,10 +773,10 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         const bool qwen3vl_tower = vision_tower_supported(vision_type);
         bool parsed = false;
         if (qwen3vl_tower && out_vision_tower) {
-            auto tower = std::make_unique<VisionModel>();
-            std::string verr;
-            if (parse_qwen3vl_vision_config(*vc, tower->config, verr)) {
-                *out_vision_tower = std::move(tower);
+            const auto parsed_cfg = parse_qwen3vl_vision_config(*vc);
+            if (parsed_cfg) {
+                *out_vision_tower = std::make_unique<VisionModel>();
+                (*out_vision_tower)->config = *parsed_cfg;
                 parsed = true;
                 IMP_LOG_INFO(
                     "Qwen3-VL vision tower: depth=%d hidden=%d heads=%d patch=%d merge=%d "
@@ -788,7 +788,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                     (*out_vision_tower)->config.deepstack_indexes.size());
             } else {
                 // Refusing beats loading a tower whose geometry we misread.
-                IMP_LOG_WARN("Qwen3-VL vision_config rejected (%s) — continuing text-only", verr.c_str());
+                IMP_LOG_WARN("Qwen3-VL vision_config rejected (%s), text-only", parsed_cfg.error().c_str());
             }
         }
         if (!parsed) {

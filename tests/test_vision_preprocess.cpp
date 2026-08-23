@@ -91,7 +91,7 @@ TEST(VisionPreprocess, ChwLayoutChannelOrderAndNormalization) {
     const float stdv[3] = {0.5f, 0.5f, 0.5f};
 
     ImageData img;
-    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp.data(), bmp.size(), 2, mean, stdv, img));
+    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp, 2, mean, stdv, img));
     ASSERT_EQ(img.width, 2);
     ASSERT_EQ(img.height, 2);
     ASSERT_EQ(img.pixels.size(), 3u * 2 * 2);
@@ -128,7 +128,7 @@ TEST(VisionPreprocess, PerChannelMeanStdApplied) {
     const float stdv[3] = {0.26862954f, 0.26130258f, 0.27577711f};  // CLIP std
 
     ImageData img;
-    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp.data(), bmp.size(), 2, mean, stdv, img));
+    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp, 2, mean, stdv, img));
     for (int c = 0; c < 3; c++) {
         float expect = norm_ref(128, mean[c], stdv[c]);
         for (int y = 0; y < 2; y++)
@@ -148,7 +148,7 @@ TEST(VisionPreprocess, ResizeToTargetSquare) {
     const float stdv[3] = {1.0f, 1.0f, 1.0f};
 
     ImageData img;
-    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp.data(), bmp.size(), 8, mean, stdv, img));
+    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp, 8, mean, stdv, img));
     ASSERT_EQ(img.width, 8);
     ASSERT_EQ(img.height, 8);
     ASSERT_EQ(img.pixels.size(), 3u * 8 * 8);
@@ -170,7 +170,7 @@ TEST(VisionPreprocess, NonSquareInputResizedToSquare) {
     const float stdv[3] = {1.0f, 1.0f, 1.0f};
 
     ImageData img;
-    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp.data(), bmp.size(), 4, mean, stdv, img));
+    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp, 4, mean, stdv, img));
     EXPECT_EQ(img.width, 4);
     EXPECT_EQ(img.height, 4);
     EXPECT_EQ(img.pixels.size(), 3u * 4 * 4);
@@ -182,12 +182,11 @@ TEST(VisionPreprocess, GarbageInputFailsCleanly) {
     ImageData img;
 
     std::vector<uint8_t> garbage = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33};
-    EXPECT_FALSE(load_and_preprocess_image_from_memory(garbage.data(), garbage.size(), 4, mean, stdv, img));
+    EXPECT_FALSE(load_and_preprocess_image_from_memory(garbage, 4, mean, stdv, img));
 
     // Truncated BMP header: magic ok, data missing.
     std::vector<uint8_t> truncated = {'B', 'M', 0x36, 0x00, 0x00, 0x00};
-    EXPECT_FALSE(
-        load_and_preprocess_image_from_memory(truncated.data(), truncated.size(), 4, mean, stdv, img));
+    EXPECT_FALSE(load_and_preprocess_image_from_memory(truncated, 4, mean, stdv, img));
 }
 
 TEST(VisionPreprocess, FileEntryPointMatchesMemoryPath) {
@@ -206,7 +205,7 @@ TEST(VisionPreprocess, FileEntryPointMatchesMemoryPath) {
 
     ImageData from_file, from_mem;
     ASSERT_TRUE(load_and_preprocess_image(path, 2, mean, stdv, from_file));
-    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp.data(), bmp.size(), 2, mean, stdv, from_mem));
+    ASSERT_TRUE(load_and_preprocess_image_from_memory(bmp, 2, mean, stdv, from_mem));
     ASSERT_EQ(from_file.pixels.size(), from_mem.pixels.size());
     for (size_t i = 0; i < from_file.pixels.size(); i++)
         EXPECT_EQ(__half2float(from_file.pixels[i]), __half2float(from_mem.pixels[i])) << "i=" << i;

@@ -96,10 +96,14 @@ bool validate_constraints(const json& body, httplib::Response& res) {
     // string rather than failing. Those are tolerances, not failures, so
     // turning them into 400s would break working clients.
     if (!schema.empty() && !imp::parse_json_schema(schema))
-        return reject("the JSON schema cannot be enforced as a constraint: it could not be "
-                      "parsed. An unresolvable or non-local \"$ref\" is the usual cause; "
-                      "only local \"#/$defs/...\" and \"#/definitions/...\" references are "
-                      "supported.");
+        return reject(
+            "the JSON schema cannot be enforced as a constraint: it could not be "
+            "parsed. Usual causes: a keyword this build cannot enforce "
+            "(minimum/maximum/multipleOf/allOf/not/uniqueItems and the rest listed "
+            "in docs/LIMITATIONS.md), a non-string \"enum\" or \"const\" member, "
+            "or an unresolvable \"$ref\" (only local \"#/$defs/...\" and "
+            "\"#/definitions/...\" are supported). The server log names the one "
+            "that fired.");
 
     return true;
 }

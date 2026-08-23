@@ -19,7 +19,7 @@ services:
   imp:
     image: ghcr.io/kekzl/imp:latest
     command: ["--model", "/models/your-model.gguf", "--api-key", "${IMP_API_KEY}"]
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]   # widen only together with --api-key
     volumes:
       - ./models:/models
       - imp-cache:/home/imp/.cache/imp
@@ -62,12 +62,58 @@ The settings that most often need changing in a deployment:
 | `server.model_swap` | default on: a request naming another model in the directory swaps to it |
 | `moe.expert_cache_budget_pct` | only relevant when MoE experts do not fit; see [`PERF.md`](PERF.md) |
 
+## Exit codes
+
+The binaries return the C API's error taxonomy rather than a bare 1 (#1585), so
+a supervisor can tell a bad argument from a full GPU without parsing prose.
+
+| code | meaning | retry? |
+|---|---|---|
+| 0 | success | |
+| 1 | invalid argument, including a usage error | no, fix the call |
+| 2 | out of memory (host) | maybe, with less concurrency |
+| 3 | CUDA error | no |
+| 4 | file not found | no |
+| 5 | invalid model | no |
+| 6 | unsupported | no |
+| 7 | internal error | worth one retry |
+| 8 | cancelled | n/a |
+| 9 | capacity: the KV pool cannot fit this prompt | yes, shorter prompt or more VRAM |
+
+Codes above 9 are unused. `imp-quantize` returned 2 for usage errors before
+this; it returns 1 now, with every other invalid argument.
+
 ## Auth and exposure
 
 ```bash
 --api-key "$IMP_API_KEY"      # bearer auth on the inference endpoints
 --metrics-require-auth        # fold /metrics behind the same key
+--trusted-proxy 10.0.0.5      # believe X-Forwarded-For from these peers only
 ```
+
+**There is no default credential and no default refusal.** Without `--api-key`
+every endpoint is open to whoever can reach the port, which is why the shipped
+compose file publishes on `127.0.0.1` and why widening it is a two-part change:
+`IMP_BIND` and `IMP_API_KEY` together (#1619).
+
+**`--trusted-proxy` is what makes rate limiting work behind a proxy.** Without
+it `X-Forwarded-For` is ignored and every request from the proxy shares one
+bucket; with it, the header is believed from those peers and the limit is
+per-client again. It is not believed from anyone else, because a client that
+can write the header can otherwise vary it per request and bypass the limit
+entirely (#1614).
+
+Per-request work is capped independently of the rate limit, because one request
+can ask for many units of it:
+
+| flag | default | bounds |
+|---|---|---|
+| `--max-n` | 8 | `n` completions per chat request |
+| `--max-batch-items` | 512 | rerank `documents`, embeddings `input` |
+| `--max-logit-bias` | 1024 | `logit_bias` entries |
+| `--http-read-timeout` | 60 s | socket read |
+| `--http-write-timeout` | 600 s | socket write, must outlast a stream |
+| `--http-keep-alive-max` | 100 | requests per connection |
 
 **CORS is wide open by design** (`Access-Control-Allow-Origin: *` plus an
 `OPTIONS` catch-all), because the built-in web UI and browser clients call the
@@ -95,7 +141,7 @@ latency.
 | endpoint | use |
 |---|---|
 | `GET /health` | liveness. Answers before a model is loaded |
-| `GET /metrics` | Prometheus. TTFT and inter-token-latency histograms, cancellation counters, and a memory breakdown that separates capacity from occupancy |
+| `GET /metrics` | Prometheus. Latency histograms (request, TTFT, inter-token, queue), decode batch size, refusal and cancellation counters, and a memory breakdown that separates capacity from occupancy |
 | `GET /v1/models` | what is loaded, and what else is in the models directory |
 | `POST /admin/suspend` | park the weights in host RAM and free the GPU completely. Inference answers 503 while suspended |
 | `POST /admin/resume` | restore warm, in seconds, without re-reading weights |
@@ -103,6 +149,21 @@ latency.
 Suspend/resume is the answer to "I need the GPU for something else for ten
 minutes" without paying a cold load afterwards. Sessions and KV do not survive
 it; weights do.
+
+### Which series answer which question
+
+| question | series |
+|---|---|
+| how long did a request take | `imp_request_duration_seconds` (histogram) |
+| how long until the first token | `imp_ttft_seconds`. Recorded on **both** transports since #1578; before that, streaming only, while `imp_requests_total` counted everything |
+| how fast do tokens come out | `imp_inter_token_seconds`, **one observation per token** on a millisecond ladder (#1577). It used to be one per-request mean on the request-duration ladder, whose first bucket is 5 ms - at imp's own decode rates every observation landed in it, so `histogram_quantile` returned the bucket bounds rather than the data |
+| is the server busy or slow | `imp_queue_time_seconds` is the admission wait, prefill excluded (#1580). A rising queue time with flat request duration is load; the reverse is the model |
+| how much batching is happening | `rate(imp_decode_batch_rows_total[5m]) / rate(imp_decode_batch_steps_total[5m])`, and `imp_decode_batch_max` since start (#1580) |
+| did the server break, or refuse | `imp_requests_failed_total` is 5xx. Every refusal this server is designed to make is a **4xx**, and those are `imp_requests_rejected_total` (#1579). Two series because they want different alerts |
+
+`monitoring/grafana/dashboards/imp.json` plots the percentiles from those
+histograms. The `stat` panels beside them show the last value, which is a
+different thing and cannot show a tail.
 
 ## Capacity planning
 

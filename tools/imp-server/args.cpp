@@ -42,6 +42,8 @@ void print_server_usage(const char* prog) {
             "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
             "  --api-key <key>       Require Bearer token authentication\n"
             "  --metrics-require-auth  Also gate /metrics behind --api-key\n"
+            "  --allow-remote-images Fetch http(s) image_url from request bodies (default: off).\n"
+            "                        Off, the server never connects anywhere a caller names.\n"
             "  --reasoning-format <f> deepseek (default) or none\n"
             "  --mem-report          Print the full VRAM attribution table at init\n"
             "  --vram-budget <mb>    Hard per-process VRAM cap in MiB — size everything as if\n"
@@ -51,6 +53,14 @@ void print_server_usage(const char* prog) {
             "  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)\n"
             "  --rate-limit <n>      Max requests/minute per IP (default: 0=unlimited)\n"
             "  --max-input-tokens <n> Reject prompts longer than n tokens with HTTP 400 (0=unlimited)\n"
+            "  --trusted-proxy <list> Comma-separated peer addresses whose X-Forwarded-For is\n"
+            "                         believed for rate limiting (default: header ignored)\n"
+            "  --max-n <n>            Cap on `n` completions per request (default 8, 0=unlimited)\n"
+            "  --max-batch-items <n>  Cap on rerank documents / embeddings input (default 512)\n"
+            "  --max-logit-bias <n>   Cap on logit_bias entries per request (default 1024)\n"
+            "  --http-read-timeout <s>     Socket read timeout (default 60)\n"
+            "  --http-write-timeout <s>    Socket write timeout (default 600)\n"
+            "  --http-keep-alive-max <n>   Requests per connection (default 100)\n"
             "  --log-requests <path> Append per-request JSONL with prompt + response content\n"
             "  --help                Show this help message\n",
             prog);
@@ -89,6 +99,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.api_key = argv[++i];
         } else if (std::strcmp(arg, "--metrics-require-auth") == 0) {
             args.metrics_require_auth = true;
+        } else if (std::strcmp(arg, "--allow-remote-images") == 0) {
+            args.allow_remote_images = true;
         } else if (std::strcmp(arg, "--reasoning-format") == 0 && i + 1 < argc) {
             args.reasoning_format = argv[++i];
         } else if (std::strcmp(arg, "--think-budget") == 0 && i + 1 < argc) {
@@ -101,6 +113,20 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.rate_limit = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--max-input-tokens") == 0 && i + 1 < argc) {
             args.max_input_tokens = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--trusted-proxy") == 0 && i + 1 < argc) {
+            args.trusted_proxies = argv[++i];
+        } else if (std::strcmp(arg, "--max-n") == 0 && i + 1 < argc) {
+            args.max_n = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--max-batch-items") == 0 && i + 1 < argc) {
+            args.max_batch_items = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--max-logit-bias") == 0 && i + 1 < argc) {
+            args.max_logit_bias = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--http-read-timeout") == 0 && i + 1 < argc) {
+            args.read_timeout = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--http-write-timeout") == 0 && i + 1 < argc) {
+            args.write_timeout = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--http-keep-alive-max") == 0 && i + 1 < argc) {
+            args.keep_alive_max = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--prefix-cache") == 0 && i + 1 < argc) {
             args.prefix_cache_path = argv[++i];
         } else if (std::strcmp(arg, "--log-requests") == 0 && i + 1 < argc) {

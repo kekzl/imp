@@ -30,9 +30,14 @@ run_bench() {
   # do NOT merge 2>&1 here — the measured call below captures stderr into $ERR and
   # parses it. (Merging would send the result lines to the caller's /dev/null and
   # leave $ERR empty, which set -e then turns into a silent early exit.)
+  # `speculative.ngram=false` is not optional here: tests/perf_baseline.json
+  # states in its own `methodology` field that the pin was taken spec-OFF, and
+  # scripts/verify.sh passes the same flag. Without it this script measured a
+  # different quantity than the number it compares against, while both were
+  # documented as one gate (#1625).
   CUBLAS_WORKSPACE_CONFIG=:4096:8 "$CLI" --model "$MODEL_PATH" --bench \
     --bench-pp 512 --bench-reps 3 --prefill-chunk-size 0 --max-tokens 128 \
-    --temperature 0
+    --temperature 0 --set speculative.ngram=false "$@"
 }
 
 # Warm the clocks: the GPU downclocks at idle and the first ~1s reads low. One
@@ -41,9 +46,12 @@ echo "warming clocks (discarded run)..."
 run_bench >/dev/null 2>&1 || true
 
 ERR=$(mktemp)
-run_bench >/dev/null 2>"$ERR"
-PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-TG=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+OUT=$(mktemp)
+# Numbers out of `--bench --json` (#1583), not out of the stderr table.
+run_bench --json >"$OUT" 2>"$ERR"
+PP=$(jq -er '.prefill_tps // empty' "$OUT" 2>/dev/null || true)
+TG=$(jq -er '.decode_tps // empty' "$OUT" 2>/dev/null || true)
+rm -f "$OUT"
 if [ -z "$PP" ] || [ -z "$TG" ]; then echo "could not parse bench output"; tail -15 "$ERR"; exit 1; fi
 
 DEC_DELTA=$(awk -v c="$TG" -v b="$BL_TG" 'BEGIN{printf "%.2f",(c-b)/b*100}')

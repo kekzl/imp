@@ -67,6 +67,7 @@ if want filesize; then
     echo "== File size =="
     run "hard-review gate + allowlist ceilings" python3 tools/check_filesize.py
     run "tests that run in no CI lane"          python3 tools/check_test_lanes.py --report
+    run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py
     run "FATAL logs that do not stop"           python3 tools/check_log_fatal.py --list
 fi
@@ -75,6 +76,24 @@ if want alloc; then
     echo "== Alloc sites =="
     run "I1 allowlist gate"                     python3 tools/check_alloc_sites.py
     run "allocate/free API pairing"             python3 tools/check_alloc_pairs.py
+fi
+
+# Needs a BUILT artifact plus cuobjdump, unlike every other gate here, which is
+# source-derived. Skips rather than fails when the build is absent so a fresh
+# checkout still gets the rest of the list; CI runs it unconditionally in the
+# `Build` job, where both halves exist.
+if want kernels; then
+    echo "== Kernel resources =="
+    KRES_LIB=""
+    [ -f build/libimp.a ] && KRES_LIB=build/libimp.a
+    [ -z "$KRES_LIB" ] && [ -f build-dev/libimp.a ] && KRES_LIB=build-dev/libimp.a
+    if [ -z "$KRES_LIB" ]; then
+        echo "  (skipped: no libimp.a — run 'make dev' or 'make build' first)"
+    elif ! command -v cuobjdump >/dev/null 2>&1 && ! docker image inspect imp:builder >/dev/null 2>&1; then
+        echo "  (skipped: no cuobjdump and no imp:builder image)"
+    else
+        run "registers + local frame vs the pin" make -s kernel-resources
+    fi
 fi
 
 if want launchguards; then

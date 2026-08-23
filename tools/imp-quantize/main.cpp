@@ -70,6 +70,7 @@
 // Useful today for: getting a model onto the NVFP4 path at all, and for
 // performance work where the weights only need to be the right shape.
 
+#include "common/exit_codes.h"
 #include "awq.h"
 #include "checkpoint_out.h"
 #include "fp8_source.h"
@@ -154,7 +155,7 @@ void usage() {
         "                keep a fused Q+gate q_proj (Qwen3.5 / Qwen3-Next\n"
         "                `attn_output_gate`) out of NVFP4. OFF by default: the gate\n"
         "                half carries #1273's divergence, but excluding it measured\n"
-        "                ~1.5%% WORSE on perplexity, not better, and costs 1-4% of\n"
+        "                ~1.5%% WORSE on perplexity, not better, and costs 1-4%% of\n"
         "                the checkpoint. Kept for models with a higher gate share.\n"
         "  --dry-run     report what would be quantized and how large the result\n"
         "                will be, against what the card has left. Writes nothing.\n");
@@ -195,18 +196,16 @@ struct Quantized {
 
 // `forced_scale` > 0 quantizes against a scale decided elsewhere — the shared
 // scale of a fused group. At 0 the tensor's own absmax decides.
-bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, float forced_scale,
-                  Quantized& out, std::string& err) {
+std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K,
+                                                   float forced_scale) {
+    Quantized out;
     void* d_in = nullptr;
     const size_t in_bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * 2;
-    if (cudaMalloc(&d_in, in_bytes) != cudaSuccess) {
-        err = "cudaMalloc failed for " + std::to_string(in_bytes) + " bytes";
-        return false;
-    }
+    if (cudaMalloc(&d_in, in_bytes) != cudaSuccess)
+        return std::unexpected("cudaMalloc failed for " + std::to_string(in_bytes) + " bytes");
     if (cudaMemcpy(d_in, h_fp16.data(), in_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
         cudaFree(d_in);
-        err = "H2D copy failed";
-        return false;
+        return std::unexpected("H2D copy failed");
     }
 
     int64_t shape[2] = {N, K};
@@ -220,8 +219,7 @@ bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, flo
     if (cudaDeviceSynchronize() != cudaSuccess) {
         cudaFree(d_in);
         free_nvfp4_result(q);
-        err = "quantization kernel failed";
-        return false;
+        return std::unexpected("quantization kernel failed");
     }
 
     out.packed.resize(static_cast<size_t>(N) * static_cast<size_t>(K / 2));
@@ -233,11 +231,9 @@ bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, flo
                   cudaSuccess;
     cudaFree(d_in);
     free_nvfp4_result(q);
-    if (!ok) {
-        err = "D2H copy failed";
-        return false;
-    }
-    return true;
+    if (!ok)
+        return std::unexpected("D2H copy failed");
+    return out;
 }
 
 // The FP16 form a tensor is quantized from: an FP8 source widened against its
@@ -246,18 +242,20 @@ bool quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K, flo
 // One function because two callers need it — the scale planner and the writer —
 // and a planner that measured a different tensor than the writer quantized
 // would produce scales that are wrong by exactly the transform.
-bool tensor_as_fp16(const RawTensor& t, const std::map<std::string, const RawTensor*>& fp8_scale_of,
-                    const awq::Plan& plan, std::vector<uint16_t>& out, std::string& err) {
-    const auto it = fp8_scale_of.find(t.name);
-    if (it != fp8_scale_of.end()) {
-        if (!quantize::fp8_block_scaled_to_fp16(t, *it->second, out, err))
-            return false;
+std::expected<std::vector<uint16_t>, std::string> tensor_as_fp16(
+    const RawTensor& t, const std::map<std::string, const RawTensor*>& fp8_scale_of, const awq::Plan& plan) {
+    std::vector<uint16_t> out;
+    if (const auto it = fp8_scale_of.find(t.name); it != fp8_scale_of.end()) {
+        auto widened = quantize::fp8_block_scaled_to_fp16(t, *it->second);
+        if (!widened)
+            return std::unexpected(widened.error());
+        out = std::move(*widened);
     } else {
         out = awq::raw_to_fp16(t);
     }
     awq_apply_matrix(out, t.shape[0], t.shape[1], plan_vec(plan.row_div, t.name),
                      plan_vec(plan.col_scale, t.name));
-    return true;
+    return out;
 }
 
 // What is gone from the card before imp allocates a single weight. Both are
@@ -345,7 +343,7 @@ int main(int argc, char** argv) {
             const std::string f = next();
             if (!quantize::parse_output_format(f, opt.format)) {
                 fprintf(stderr, "imp-quantize: unknown --format '%s' (modelopt | vllm)\n", f.c_str());
-                return 2;
+                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
             }
         } else if (a == "--calib-groups") {
             opt.calib_groups = next();
@@ -357,7 +355,7 @@ int main(int argc, char** argv) {
             if (opt.calib_groups.find_first_not_of(awq::kAwqAllGroups) != std::string::npos) {
                 fprintf(stderr, "imp-quantize: --calib-groups '%s' has a letter outside %s\n",
                         opt.calib_groups.c_str(), awq::kAwqAllGroups);
-                return 2;
+                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
             }
         } else if (a == "--dry-run")
             opt.dry_run = true;
@@ -367,12 +365,12 @@ int main(int argc, char** argv) {
         } else {
             fprintf(stderr, "unknown argument: %s\n", a.c_str());
             usage();
-            return 2;
+            return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
         }
     }
     if (opt.in_dir.empty() || (opt.out_dir.empty() && !opt.dry_run)) {
         usage();
-        return 2;
+        return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
     }
 
     std::vector<fs::path> shards;
@@ -390,9 +388,8 @@ int main(int argc, char** argv) {
         // Before any work: a source that cannot carry the chosen format's
         // declaration must cost a second, not a full conversion that then
         // refuses to finish.
-        std::string derr;
-        if (!quantize::can_declare_quantization(opt.in_dir, opt.format, derr)) {
-            fprintf(stderr, "%s\n", derr.c_str());
+        if (const auto declarable = quantize::can_declare_quantization(opt.in_dir, opt.format); !declarable) {
+            fprintf(stderr, "%s\n", declarable.error().c_str());
             return 1;
         }
         // Same reason: a combination that will not load where the caller is
@@ -539,11 +536,13 @@ int main(int argc, char** argv) {
                 index[t.name] = &t;
         printf("AWQ calibration: %zu entries from %s\n", stats.entries.size(),
                stats.model_id.empty() ? opt.calib_file.c_str() : stats.model_id.c_str());
-        if (!awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(), opt.calib_groups,
-                             plan, err)) {
-            fprintf(stderr, "%s\n", err.c_str());
+        auto built = awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(),
+                                     opt.calib_groups);
+        if (!built) {
+            fprintf(stderr, "%s\n", built.error().c_str());
             return 1;
         }
+        plan = std::move(*built);
         printf("AWQ: %d groups scaled, %d kept round-to-nearest, %d skipped", plan.groups_scaled,
                plan.groups_rtn, plan.groups_skipped);
         if (plan.groups_disabled > 0)
@@ -633,13 +632,12 @@ int main(int argc, char** argv) {
                 continue;  // a group of one shares with nobody
             float amax = 0.0f;
             for (const RawTensor* t : members) {
-                std::vector<uint16_t> h;
-                std::string err;
-                if (!tensor_as_fp16(*t, fp8_scale_of, plan, h, err)) {
-                    fprintf(stderr, "  %s: %s\n", t->name.c_str(), err.c_str());
+                const auto h = tensor_as_fp16(*t, fp8_scale_of, plan);
+                if (!h) {
+                    fprintf(stderr, "  %s: %s\n", t->name.c_str(), h.error().c_str());
                     return 1;
                 }
-                amax = std::max(amax, quantize::fp16_absmax(h.data(), h.size()));
+                amax = std::max(amax, quantize::fp16_absmax(h->data(), h->size()));
             }
             const float s = quantize::export_tensor_scale(amax);
             for (const RawTensor* t : members)
@@ -729,13 +727,12 @@ int main(int argc, char** argv) {
                         printf("  COPY  %-58s widened from FP8: %s\n", t.name.c_str(), why_fp8.c_str());
                         continue;
                     }
-                    std::vector<uint16_t> h;
-                    std::string werr;
-                    if (!tensor_as_fp16(t, fp8_scale_of, plan, h, werr)) {
-                        fprintf(stderr, "  %s: %s\n", t.name.c_str(), werr.c_str());
+                    auto h = tensor_as_fp16(t, fp8_scale_of, plan);
+                    if (!h) {
+                        fprintf(stderr, "  %s: %s\n", t.name.c_str(), h.error().c_str());
                         return 1;
                     }
-                    widened_store.push_back(std::move(h));
+                    widened_store.push_back(std::move(*h));
                     const std::vector<uint16_t>& w = widened_store.back();
                     out.push_back({t.name, "F16", t.shape, w.data(), w.size() * sizeof(uint16_t)});
                     continue;
@@ -747,18 +744,19 @@ int main(int argc, char** argv) {
                     n_quantized++;
                     continue;
                 }
-                std::vector<uint16_t> h;
-                std::string ferr;
-                if (!tensor_as_fp16(t, fp8_scale_of, plan, h, ferr)) {
-                    fprintf(stderr, "  %s: %s\n", t.name.c_str(), ferr.c_str());
+                const auto widened = tensor_as_fp16(t, fp8_scale_of, plan);
+                if (!widened) {
+                    fprintf(stderr, "  %s: %s\n", t.name.c_str(), widened.error().c_str());
                     return 1;
                 }
-                quant_store.emplace_back();
-                Quantized& q = quant_store.back();
-                if (!quantize_one(h, N, K, forced_of(t.name), q, err)) {
-                    fprintf(stderr, "  %s: %s\n", t.name.c_str(), err.c_str());
+                const std::vector<uint16_t>& h = *widened;
+                auto quantized = quantize_one(h, N, K, forced_of(t.name));
+                if (!quantized) {
+                    fprintf(stderr, "  %s: %s\n", t.name.c_str(), quantized.error().c_str());
                     return 1;
                 }
+                quant_store.push_back(std::move(*quantized));
+                const Quantized& q = quant_store.back();
                 emit_quantized(out, scale_store, t.name, N, K, q);
                 bytes_out += q.packed.size() + q.micro.size() + sizeof(float);
                 n_quantized++;
@@ -812,17 +810,19 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            std::vector<uint16_t> h;
-            if (!tensor_as_fp16(t, fp8_scale_of, plan, h, err)) {
-                fprintf(stderr, "  %s: %s\n", t.name.c_str(), err.c_str());
+            const auto widened = tensor_as_fp16(t, fp8_scale_of, plan);
+            if (!widened) {
+                fprintf(stderr, "  %s: %s\n", t.name.c_str(), widened.error().c_str());
                 return 1;
             }
-            quant_store.emplace_back();
-            Quantized& q = quant_store.back();
-            if (!quantize_one(h, N, K, forced_of(t.name), q, err)) {
-                fprintf(stderr, "  %s: %s\n", t.name.c_str(), err.c_str());
+            const std::vector<uint16_t>& h = *widened;
+            auto quantized = quantize_one(h, N, K, forced_of(t.name));
+            if (!quantized) {
+                fprintf(stderr, "  %s: %s\n", t.name.c_str(), quantized.error().c_str());
                 return 1;
             }
+            quant_store.push_back(std::move(*quantized));
+            const Quantized& q = quant_store.back();
             emit_quantized(out, scale_store, t.name, N, K, q);
             const size_t written = q.packed.size() + q.micro.size() + sizeof(float);
             // The forecast --dry-run printed is this same arithmetic. If the two
@@ -859,29 +859,32 @@ int main(int argc, char** argv) {
     }
 
     if (!opt.dry_run) {
-        std::string err;
         const bool calibrated = !opt.calib_file.empty();
-        if (!quantize::copy_aux_files(opt.in_dir, opt.out_dir, opt.format, excluded_modules, calibrated,
-                                      err)) {
-            fprintf(stderr, "%s\n", err.c_str());
+        if (const auto copied = quantize::copy_aux_files(opt.in_dir, opt.out_dir, opt.format,
+                                                         excluded_modules, calibrated);
+            !copied) {
+            fprintf(stderr, "%s\n", copied.error().c_str());
             return 1;
         }
         // Modelopt declares itself in a file of its own; compressed-tensors put
         // its declaration into the config.json copy_aux_files just patched, and
         // repeats it in recipe.yaml for readers that look only there.
-        const bool declared = opt.format == quantize::OutputFormat::Modelopt
+        const auto declared = opt.format == quantize::OutputFormat::Modelopt
                                   ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules,
-                                                                          calibrated, err)
-                                  : quantize::write_recipe_yaml(opt.out_dir, excluded_modules, err);
+                                                                          calibrated)
+                                  : quantize::write_recipe_yaml(opt.out_dir, excluded_modules);
         if (!declared) {
-            fprintf(stderr, "%s\n", err.c_str());
+            fprintf(stderr, "%s\n", declared.error().c_str());
             return 1;
         }
         // Single-shard checkpoints load off model.safetensors directly; sharded
         // ones need the index, and it must describe the tensors we wrote.
-        if (shards.size() > 1 && !quantize::write_shard_index(opt.out_dir, tensor_to_shard, bytes_out, err)) {
-            fprintf(stderr, "%s\n", err.c_str());
-            return 1;
+        if (shards.size() > 1) {
+            const auto indexed = quantize::write_shard_index(opt.out_dir, tensor_to_shard, bytes_out);
+            if (!indexed) {
+                fprintf(stderr, "%s\n", indexed.error().c_str());
+                return 1;
+            }
         }
     }
 

@@ -31,6 +31,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <span>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -53,7 +54,7 @@ struct SnapshotHostOomError : std::runtime_error {
 //   layer == kMtpKeyLayer -> "mtp.{name}"
 //   otherwise             -> "{name}"
 inline constexpr int kMtpKeyLayer = -2;
-const char* make_weight_key(char* buf, size_t buf_len, const char* name, int layer);
+const char* make_weight_key(std::span<char> buf, const char* name, int layer);
 
 struct WeightUploadRecord {
     std::string key;

@@ -4,6 +4,8 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <atomic>
+#include <optional>
+#include <string_view>
 
 namespace imp {
 
@@ -17,10 +19,12 @@ enum class LogLevel : int {
 
 void log_set_level(LogLevel level);
 
-// "debug" | "info" | "warn" | "error" | "fatal" (case-insensitive) → level.
-// Returns false and leaves `out` untouched on anything else, so the caller can
-// warn instead of silently picking a level nobody asked for.
-bool log_level_from_string(const char* s, LogLevel& out);
+// "debug" | "info" | "warn" | "error" | "fatal" (case-insensitive) -> level.
+// Returns nullopt on anything else, so the caller can warn instead of silently
+// picking a level nobody asked for. A string_view because there is nothing to
+// own and nothing to null-check: the old signature took a const char* and had
+// to defend against nullptr.
+[[nodiscard]] std::optional<LogLevel> log_level_from_string(std::string_view s);
 
 // Inline for zero-overhead log level check in hot paths.
 // The atomic is defined in logging.cpp; declared here for inlining.

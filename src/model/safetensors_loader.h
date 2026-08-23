@@ -21,6 +21,12 @@ namespace imp {
 // the head is wasted VRAM otherwise (server + normal CLI never use it).
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head = false);
 
+// True when a `model.safetensors.index.json` shard name is a bare filename
+// next to the index. The names are file content, so a separator in one escapes
+// the model directory into an arbitrary open()/mmap() (#1612). Exposed for the
+// test; the loader calls it before it opens anything.
+bool safetensors_shard_name_is_safe(const std::string& name);
+
 // ---- Test-visible validation helpers ----
 //
 // These mirror the production validation rules in load_shard()
@@ -57,6 +63,22 @@ bool validate_header_size(uint64_t file_size, uint64_t declared_header_size, std
 bool validate_tensor_offsets(uint64_t offset_start, uint64_t offset_end,
                              uint64_t expected_nbytes, uint64_t tensor_data_offset,
                              uint64_t file_size, std::string* err);
+
+// One row of the SafeTensors wire-dtype table (#1604). `wire_bytes` is the
+// on-disk element width and `qtype` is what the tensor is mapped to; for a
+// servable row those two widths MUST agree, otherwise the loader validates a
+// tensor with one width and its consumer reads it with another. Exposed so a
+// test can assert that equality over the whole table and fail when a new
+// proxy mapping is added.
+struct DtypeTableRow {
+    std::string name;
+    size_t wire_bytes;
+    QType qtype;
+    bool servable;
+};
+
+size_t dtype_table_size();
+DtypeTableRow dtype_table_row(size_t i);
 
 }  // namespace safetensors_internal
 

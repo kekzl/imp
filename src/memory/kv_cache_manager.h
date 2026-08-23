@@ -67,10 +67,26 @@ public:
     // pressure (it reject-newests instead). Manager primitive only.
     int evict_lru();
 
-    // Check whether `num_blocks` blocks are available.  Returns true if
-    // the free pool already has enough blocks *or* if evicting LRU
-    // sequences could free enough.
+    // Check whether `num_blocks` blocks are available, i.e. whether the free
+    // pool plus the reclaimable cached blocks cover them, minus what live
+    // sequences have already been promised (see set_decode_reservation).
+    //
+    // It used to answer "yes" off a second source as well: the blocks of live
+    // LRU sequences, on the assumption that evict_lru() could hand them back.
+    // It cannot — every lru_order_ entry is LIVE and there is no recompute
+    // path, so the engine stopped calling evict_lru() and the predicate was
+    // counting memory that will never be freed (#1635).
     [[nodiscard]] bool can_allocate(int num_blocks) const;
+
+    // Promise `total_blocks` (prompt + decode) to a sequence at admission.
+    // The unwritten part is subtracted from can_allocate() until the blocks
+    // are actually appended, so a later request queues instead of being
+    // admitted against memory the running one is going to need (#1635).
+    // Cleared by free_sequence().
+    void set_decode_reservation(int seq_id, int total_blocks);
+
+    // Promised-but-not-yet-held blocks, summed over live sequences.
+    [[nodiscard]] int outstanding_reserved_blocks() const;
 
     // ── Content-addressed prefix caching ─────────────────────────────
 
@@ -483,6 +499,10 @@ private:
     std::list<int> pin_fifo_;
     // Cap on unique pinned blocks (0 = unlimited).
     int pin_budget_blocks_ = 0;
+
+    // seq_id -> total blocks promised at admission (prompt + max_tokens).
+    // Only the part not yet held counts against can_allocate().
+    std::unordered_map<int, int> decode_reservations_;
 
     // Incrementally maintained count of reclaimable cached blocks
     // (cached_blocks_lru_.size() minus pinned cached blocks).

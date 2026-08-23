@@ -45,6 +45,8 @@
 #include "compute/rowwise_topm.h"
 
 #include <cuda_runtime.h>
+
+#include <span>
 #include <algorithm>
 #include <chrono>
 #include <vector>
@@ -220,9 +222,8 @@ SuffixDraftIndex& Engine::spec_suffix_index_(const Request& req) {
         it = spec_suffix_idx_
                  .emplace(req.id, SuffixDraftIndex(std::max(1, scfg.min_match), scfg.max_match))
                  .first;
-        it->second.append(req.input_tokens.data(), static_cast<int>(req.input_tokens.size()));
-        it->second.append(req.prediction_tokens.data(),
-                          static_cast<int>(req.prediction_tokens.size()));
+        it->second.append(req.input_tokens);
+        it->second.append(req.prediction_tokens);
     }
     return it->second;
 }
@@ -268,8 +269,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int pred_end = pred_begin + static_cast<int>(req->prediction_tokens.size());
 
     const int k = std::max(1, scfg.k);
-    int draft_start = -1;
-    std::vector<int32_t> draft;
+    // One object, two names: the draft and the history index it came from are
+    // produced together and were two locals only because the old signature
+    // wrote the index through a pointer.
+    NgramDraft nd;
+    auto& [draft, draft_start] = nd;
     // The history matcher is the n-gram source, so it answers to the n-gram
     // flag alone. The step itself is entered whenever ANY drafter is enabled
     // (spec_any_drafter_enabled_), which is what lets MTP and token recycling
@@ -284,10 +288,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // tokens appended incrementally (every emit path lands in
         // output_tokens, so loop-burst tokens are picked up here too).
         SuffixDraftIndex& idx = spec_suffix_index_(*req);
-        const int out_indexed = idx.size() - pred_end;
-        idx.append(req->output_tokens.data() + out_indexed,
-                   static_cast<int>(req->output_tokens.size()) - out_indexed);
-        draft = idx.draft(k, std::max(k, scfg.suffix_k_max), &draft_start);
+        const int out_indexed = std::clamp(idx.size() - pred_end, 0,
+                                           static_cast<int>(req->output_tokens.size()));
+        idx.append(std::span(req->output_tokens).subspan(static_cast<size_t>(out_indexed)));
+        nd = idx.draft(k, std::max(k, scfg.suffix_k_max));
     } else {
         std::vector<int32_t> history;
         history.reserve(req->input_tokens.size() + req->prediction_tokens.size() +
@@ -296,8 +300,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         history.insert(history.end(), req->prediction_tokens.begin(),
                        req->prediction_tokens.end());
         history.insert(history.end(), req->output_tokens.begin(), req->output_tokens.end());
-        draft = ngram_draft(history.data(), static_cast<int>(history.size()), k,
-                            std::max(1, scfg.min_match), scfg.max_match, &draft_start);
+        nd = ngram_draft(history, k, std::max(1, scfg.min_match), scfg.max_match);
     }
     const bool draft_from_prediction = draft_start >= pred_begin && draft_start < pred_end;
     // #964 stage 2 — depth-aware long-context gate: a verify step costs
@@ -310,8 +313,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         scfg.shallow_draft_ctx > 0 && req->context_len() > scfg.shallow_draft_ctx &&
         ssm_state_ == nullptr &&
         !(model_->profile().is_moe && scfg.moe && model_->profile().moe_experts_nvfp4)) {
-        draft.clear();
-        draft_start = -1;
+        nd = {};
     }
     // MTP fallback: when the matcher has no draft, the pending MTP chain
     // (drafted at the end of the previous verify step / prefill tail) fills
@@ -808,7 +810,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // Whole block in runtime/spec_trace.cpp: the speculation loop should
         // not carry its own diagnostics, and this one reads full logits.
         spec_trace_emit_verify(p0, t0, mc_on ? &mc[0] : &draft, mc_on ? static_cast<int>(mc.size()) : 0,
-                               h_spec_argmax_.as<int32_t>(), chunk_len, executor_.get(), d_spec_logits_,
+                               h_spec_argmax_.as<int32_t>(), chunk_len, executor_.get(), d_spec_logits_.get(),
                                h_spec_logits_, model_->config().vocab_size, stream);
     }
 
@@ -906,7 +908,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             } else {
                 tok = (j == 0) ? t0 : draft[j - 1];
             }
-            tr.observe_topk(tok, h_spec_topm_ + static_cast<size_t>(j) * recycle_m, recycle_m);
+            tr.observe_topk(tok, std::span(h_spec_topm_ + static_cast<size_t>(j) * recycle_m,
+                                           static_cast<size_t>(recycle_m)));
         }
     }
 

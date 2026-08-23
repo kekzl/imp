@@ -37,6 +37,15 @@
 // so the Anthropic call only logs once at the outer handler.
 thread_local bool g_in_anthropic_shim = false;
 
+// The stop sequence that ended the last non-streaming generation on this
+// thread, or empty. The Anthropic shim runs the OpenAI handler in-process and
+// reads its JSON body back, and that body has no field for this - OpenAI's
+// finish_reason "stop" covers both "the model ended its turn" and "a stop
+// sequence matched". Anthropic distinguishes the two (#1550), so the fact
+// travels beside the body rather than inside it, the same way the log-suppress
+// flag above does.
+thread_local std::string g_shim_stop_sequence;
+
 // Write one JSONL line capturing this request: timing, endpoint, raw client
 // body, token counts, finish reason, and (for non-streaming) the response.
 // Streaming responses pass an empty `response_body` since per-chunk text is
@@ -192,6 +201,44 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // parse-time family in handlers_chat_params is a pre-load best guess.
     collect_tool_enforcement_(ctx);
 
+    // #1592: refuse rather than degrade. `tool_choice: "required"` and a named
+    // function are enforced by the decode FSM only where the family's tool
+    // envelope has a grammar; everywhere else the constraint used to become a
+    // sentence in the prompt and the request was answered 200 with prose, with
+    // nothing saying so. An agent doing `msg.tool_calls[0]` gets a TypeError;
+    // one branching on finish_reason treats a required call as a chat turn.
+    //
+    // Measured on this build, `tool_choice: "required"` or a named function,
+    // 10 requests each at temperature 0.7:
+    //
+    //   gemma-3-12b Q4_K_M   (GEMMA)    0/10 required, 0/10 named
+    //   gemma-4-26B  Q4_K_M  (GEMMA)    0/10 required   ("<call>get_weather(city='Berlin')" as prose)
+    //   gpt-oss-20b MXFP4    (HARMONY)  0/10 required, 0/10 named (empty content)
+    //   Qwen3-4B Q8_0        (CHATML)   10/10 required, 10/10 named
+    //
+    // 0 of 40 on the families without a grammar. That is not "degrades
+    // sometimes", and a 400 the caller can branch on beats prose it cannot.
+    // `tool_choice: "auto"` is untouched - Gemma-4 still produced 1/10 there,
+    // and a best-effort call is what auto asks for.
+    if (ctx.params.has_tools && !tool_choice_is_enforceable(ctx.snap.tpl_family, ctx.params.tool_choice)) {
+        const char* fam = imp::chat_template_family_name(ctx.snap.tpl_family);
+        const bool named = ctx.params.tool_choice.is_object();
+        res.status = 400;
+        json error = {
+            {"error",
+             {{"message", std::string("\"tool_choice\": ") + (named ? "a named function" : "\"required\"") +
+                              " cannot be enforced on this model's chat template family (" + fam +
+                              "). \"required\" is enforced on chatml; a named function on chatml and "
+                              "llama3. On every other family it would degrade to a prompt hint and the "
+                              "model answers with prose instead of calling the tool. Send \"tool_choice\": "
+                              "\"auto\", or load a model whose template this server can constrain."},
+              {"type", "invalid_request_error"},
+              {"param", "tool_choice"},
+              {"code", "tool_choice_unenforceable"}}}};
+        res.set_content(dump_safe(error), "application/json");
+        return false;
+    }
+
     // Channel models (Gemma-4) are more susceptible to sampling-driven
     // degeneration on casual prompts than DeepSeek-style reasoning models.
     // If the caller didn't specify a sampler parameter, tighten the default
@@ -245,15 +292,14 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.vision_content_hash = 0;
         for (const auto& bytes : ctx.params.images)
             ctx.snap.vision_content_hash = imp::combine_image_hash(ctx.snap.vision_content_hash,
-                                                                   imp::image_content_hash(bytes.data(),
-                                                                                           bytes.size()));
+                                                                   imp::image_content_hash(bytes));
         if (state.ctx->engine->has_qwen_vision()) {
             // Dynamic resolution: patchify now (CPU only) so the token counts
             // are known before the prompt is tokenized — each placeholder has
             // to be expanded to exactly its own picture's count.
             for (const auto& bytes : ctx.params.images) {
                 auto patches = std::make_shared<imp::QwenPatches>();
-                if (!state.ctx->engine->preprocess_image_qwen(bytes.data(), bytes.size(), *patches))
+                if (!state.ctx->engine->preprocess_image_qwen(bytes, *patches))
                     return fail("Failed to process image");
                 const int tokens = state.ctx->engine->image_tokens_of(*patches);
                 if (tokens <= 0)
@@ -268,8 +314,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             return fail("this model accepts one image per request");
         } else {
             auto img = std::make_shared<imp::ImageData>();
-            if (!state.ctx->engine->preprocess_image(ctx.params.images[0].data(), ctx.params.images[0].size(),
-                                                     *img))
+            if (!state.ctx->engine->preprocess_image(ctx.params.images[0], *img))
                 return fail("Failed to process image");
             ctx.snap.vision_image = std::move(img);
         }
@@ -383,13 +428,12 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
                                                   force_thinking);
         const int32_t pad_id = ctx.snap.tok->find_token("<|image_pad|>");
-        std::string exp_err;
-        if (pad_id < 0 ||
-            !imp::expand_image_placeholders(ctx.snap.tokens, pad_id, ctx.snap.qwen_image_tokens, exp_err)) {
+        const auto expanded = pad_id < 0 ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
+                                         : imp::expand_image_placeholders(ctx.snap.tokens, pad_id,
+                                                                          ctx.snap.qwen_image_tokens);
+        if (!expanded) {
             res.status = 400;
-            json error = {{"error",
-                           {{"message", pad_id < 0 ? "tokenizer has no <|image_pad|>" : exp_err},
-                            {"type", "invalid_request_error"}}}};
+            json error = {{"error", {{"message", expanded.error()}, {"type", "invalid_request_error"}}}};
             res.set_content(dump_safe(error), "application/json");
             return false;
         }
@@ -593,25 +637,19 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // Server-side input-token limit (--max-input-tokens). Reject before
     // prefill so an oversized prompt never reaches the engine.
     if (state.max_input_tokens > 0 && ctx.snap.n_prompt_tokens > state.max_input_tokens) {
-        res.status = 400;
-        json error = {
-            {"error",
-             {{"message", "Prompt exceeds max input tokens (" + std::to_string(ctx.snap.n_prompt_tokens) +
-                              " > " + std::to_string(state.max_input_tokens) + ")"},
-              {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "Prompt exceeds max input tokens (" + std::to_string(ctx.snap.n_prompt_tokens) +
+                            " > " + std::to_string(state.max_input_tokens) + ")",
+                        "messages", "context_length_exceeded");
         return false;
     }
 
     // Validate prompt length against context window
     if (ctx.snap.n_prompt_tokens >= ctx.snap.max_seq_len) {
-        res.status = 400;
-        json error = {
-            {"error",
-             {{"message", "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
-                              " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)"},
-              {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "Prompt exceeds context window (" + std::to_string(ctx.snap.n_prompt_tokens) +
+                            " tokens >= " + std::to_string(ctx.snap.max_seq_len) + " max)",
+                        "messages", "context_length_exceeded");
         return false;
     }
 
@@ -655,6 +693,10 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
                                                  const std::vector<int32_t>& input_tokens, int completion_idx,
                                                  bool stream) {
     auto req = std::make_shared<imp::Request>();
+    // The id the client sees, carried into the engine so its log lines can be
+    // joined to this HTTP request (#1582). With n>1 several engine requests
+    // share one completion id, which is what the response says too.
+    req->trace_id = ctx.req_id;
     req->image = ctx.snap.vision_image;         // per-request vision (null for text)
     req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (empty otherwise)
     req->vision_content_hash = ctx.snap.vision_content_hash;
@@ -666,7 +708,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
     req->pin_kv_prefix = ctx.params.cache_prompt;
     req->pin_kv_prefix_tokens = ctx.snap.pin_prefix_tokens;
-    req->spec_ngram_override = ctx.params.spec_ngram_override;
+    req->spec_override = ctx.params.spec_override;
     req->prediction_tokens = ctx.snap.prediction_tokens;
     req->min_p = ctx.params.min_p;
     req->typical_p = ctx.params.typical_p;
@@ -724,6 +766,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     // For n > 1, run multiple independent generations sequentially
     json choices = json::array();
     int total_output_tokens = 0;
+    double ttft_ms = -1.0;  // first token of the FIRST completion (#1578)
+    g_shim_stop_sequence.clear();
 
     for (int ci = 0; ci < ctx.params.n_completions; ci++) {
         // For subsequent completions, create a new request and submit it
@@ -744,6 +788,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         std::vector<int32_t> output_ids;
         const char* finish = nullptr;
         std::string output_text;  // accumulated output for stop matching
+        std::string matched_stop;  // which stop sequence ended it, for the Anthropic shim (#1550)
 
         auto ns_request_start = std::chrono::steady_clock::now();
         for (;;) {
@@ -810,22 +855,45 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                 finish = evt.finish_reason ? evt.finish_reason : "length";
             }
 
+            // TTFT was recorded on the streaming path only, while this one
+            // still incremented requests_total - so the histogram described
+            // half the traffic and said nothing about which half (#1578).
+            if (output_ids.empty() && ttft_ms < 0.0) {
+                ttft_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::high_resolution_clock::now() - ctx.t_start)
+                              .count();
+                // Same point as the streaming path: by the first token the
+                // worker has admitted the request, so queue_ms is final
+                // (#1580).
+                const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                if (q >= 0.0)
+                    state.metrics.queue_time.observe(q / 1000.0);
+            }
             output_ids.push_back(token);
 
             // Check text-level stop sequences
             if (!ctx.params.stop_sequences.empty()) {
                 output_text += ctx.snap.tok->decode_token(token);
                 bool stop_found = false;
+                // Earliest occurrence, and remember which one: the Anthropic
+                // shim reports the matched sequence (#1550), and taking the
+                // first list entry that occurs anywhere cuts at the wrong
+                // offset when two stops are present.
+                size_t best = std::string::npos;
                 for (const auto& stop : ctx.params.stop_sequences) {
                     auto pos = output_text.find(stop);
-                    if (pos != std::string::npos) {
-                        output_text = output_text.substr(0, pos);
-                        stop_found = true;
-                        break;
+                    if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
+                        best = pos;
+                        matched_stop = stop;
                     }
+                }
+                if (best != std::string::npos) {
+                    output_text = output_text.substr(0, best);
+                    stop_found = true;
                 }
                 if (stop_found) {
                     finish = "stop";
+                    g_shim_stop_sequence = matched_stop;
                     break;
                 }
             }
@@ -861,7 +929,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                                   "code kv_pool_floored and the exact capacity."
                                 : "Request does not fit the KV cache: the prompt needs more blocks than "
                                   "the pool can hold. Shorten the prompt, lower --max-seq-len, or give "
-                                  "the server more VRAM (see the engine log for the exact block counts).");
+                                  "the server more VRAM (see the engine log for the exact block counts).",
+                            /*param=*/nullptr, floored ? "kv_pool_floored" : "context_length_exceeded");
             return;
         }
 
@@ -879,7 +948,14 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         // template injects "<think>" as plain text — is_think_model is false
         // but the output is reasoning until the literal "</think>".
         std::string reasoning_content;
+        // Harmony's tool call IS a channel, and the split below consumes the
+        // channels. The tool parse runs ~60 lines further down, on `content` -
+        // by then the markup is gone and there is nothing left to find, which
+        // is why #1716 survived a green unit test of the parser itself. Keep
+        // the raw text for it.
+        std::string harmony_raw;
         if (ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY) {
+            harmony_raw = content;
             // gpt-oss Harmony: split the <|channel|>analysis|final<|message|>…
             // blocks so the analysis channel becomes reasoning_content and the
             // final channel becomes the answer. Without this the raw Harmony
@@ -929,24 +1005,11 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         }
 
         // Build logprobs object if requested
+        // Chat shape here; /v1/completions builds the other one (#1589). Both
+        // come out of utils.cpp now, so the two cannot drift apart again.
         json logprobs_obj = nullptr;
         if (ctx.params.req_logprobs && active_req) {
-            const auto& lp_data = active_req->output_logprobs;
-            json content_logprobs = json::array();
-            for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
-                const auto& lp = lp_data[idx];
-                json top_arr = json::array();
-                for (const auto& t : lp.top) {
-                    top_arr.push_back({{"token", safe_token_json(t.text)},
-                                       {"logprob", t.logprob},
-                                       {"bytes", token_bytes_json(t.text)}});
-                }
-                content_logprobs.push_back({{"token", safe_token_json(lp.text)},
-                                            {"logprob", lp.logprob},
-                                            {"bytes", token_bytes_json(lp.text)},
-                                            {"top_logprobs", top_arr}});
-            }
-            logprobs_obj = {{"content", content_logprobs}};
+            logprobs_obj = chat_logprobs_json(active_req->output_logprobs, output_ids.size());
         }
 
         // Parse tool calls from model output. Run even on finish=length:
@@ -957,9 +1020,10 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         std::vector<ParsedToolCall> tool_calls;
         std::string tool_validation_error;
         if (ctx.params.has_tools) {
-            auto [pre_content, parsed_calls] =
-                parse_tool_calls(ctx.snap.tpl_family, content, state.next_tool_call_id,
-                                 tool_names_from_request(ctx.params.tools));
+            auto [pre_content, parsed_calls] = parse_tool_calls(ctx.snap.tpl_family,
+                                                                harmony_raw.empty() ? content : harmony_raw,
+                                                                state.next_tool_call_id,
+                                                                tool_names_from_request(ctx.params.tools));
             if (!parsed_calls.empty()) {
                 tool_calls = std::move(parsed_calls);
                 // OpenAI parallel_tool_calls=false: emit at most one call.
@@ -1020,7 +1084,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             msg["tool_call_validation_error"] = tool_validation_error;
         }
 
-        json choice = {{"index", ci}, {"message", msg}, {"finish_reason", finish}};
+        json choice = {{"index", ci}, {"message", msg}, {"finish_reason", openai_finish_reason(finish)}};
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
         }
@@ -1028,20 +1092,24 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         choices.push_back(choice);
 
         // Log each completion
-        fprintf(stderr, "[%s] completion %d/%d: %d tokens\n", comp_id.c_str(), ci + 1,
-                ctx.params.n_completions, n_output_tokens);
+        IMP_LOG_INFO("[%s] completion %d/%d: %d tokens", comp_id.c_str(), ci + 1, ctx.params.n_completions,
+                     n_output_tokens);
     }
 
     // Log aggregate request
     auto t_end = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
-    fprintf(stderr, "[%s] %d prompt + %d completion tokens (%d choices), %.1f ms\n", comp_id.c_str(),
-            ctx.snap.n_prompt_tokens, total_output_tokens, ctx.params.n_completions, ms);
+    IMP_LOG_INFO("[%s] %d prompt + %d completion tokens (%d choices), %.1f ms", comp_id.c_str(),
+                 ctx.snap.n_prompt_tokens, total_output_tokens, ctx.params.n_completions, ms);
     state.metrics.requests_total++;
     state.metrics.tokens_prompt_total += ctx.snap.n_prompt_tokens;
     state.metrics.tokens_completion_total += total_output_tokens;
     state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
     state.metrics.request_duration.observe(ms / 1000.0);
+    if (ttft_ms >= 0.0) {
+        state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+        state.metrics.ttft.observe(ttft_ms / 1000.0);
+    }
 
     json usage = {{"prompt_tokens", ctx.snap.n_prompt_tokens},
                   {"completion_tokens", total_output_tokens},
@@ -1061,9 +1129,13 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                                               {"rejected_prediction_tokens", imp_req->pred_rejected}};
     }
 
-    json response = {{"id", comp_id},      {"object", "chat.completion"},
-                     {"created", created}, {"model", ctx.snap.model_name},
-                     {"choices", choices}, {"usage", usage}};
+    json response = {{"id", comp_id},
+                     {"object", "chat.completion"},
+                     {"created", created},
+                     {"model", ctx.snap.model_name},
+                     {"system_fingerprint", system_fingerprint(ctx.snap.model_name)},
+                     {"choices", choices},
+                     {"usage", usage}};
 
     // Pull the final finish_reason from choice 0 for log correlation;
     // multi-completion requests still record only the aggregate.

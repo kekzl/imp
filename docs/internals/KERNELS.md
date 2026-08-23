@@ -62,8 +62,25 @@ O_acc       → REGISTERS, not smem (0 KB)
 **The lever that finances Bq=128:** `O_acc` leaves shared memory and lives as
 **MMA accumulator fragments in registers**, held by each warp across the *entire*
 KV loop (true FA2 register-resident). The tiled fallback keeps `O_acc` as a
-`float[Bq×HD]` = 64 KB smem block — which is precisely why it cannot fit Bq=128 in
-99 KB and degrades to Bq=64.
+`float[Bq×HD]` smem block, which is why it cannot fit Bq=128 in 99 KB.
+
+**What the fallback actually picks** (#1679). Its first three branches compare
+against `max_smem / 2`, because two blocks per SM beat a bigger tile at one - so
+the selection is against 50688 bytes, not 101376. Measured on this device
+(`cudaDevAttrMaxSharedMemoryPerBlockOptin` = 101376) and computed from
+`compute_smem_sm120`:
+
+| HD | Bkv | Bq | smem | branch |
+|---|---|---|---|---|
+| 64 | 64 | **64** | 48.5 KB | fits `occ2_cap` (Bq=128 would be 89.0 KB) |
+| 96 | 64 | **32** | 38.2 KB | fits `occ2_cap` (Bq=64 would be 64.5 KB) |
+| 128 | 64 | **32** | 48.2 KB | fits `occ2_cap` (Bq=64 would be 81.0 KB) |
+| 256 | 64 | 32 | 88.2 KB | `max_smem` only, occupancy 1 |
+| 512 | 32 | 16 | 82.1 KB | `max_smem` only, occupancy 1 |
+
+The three bold rows are the ones an earlier version of this section and the
+selector's own comment both got wrong: they named the Bq that fits the **full**
+limit, which is not the one the code takes.
 
 ### MMA: dual-precision, both f16-accumulate
 - **QK^T: `mma.sync.m16n8k16.f16.f16.f16.f16`** (f16 accumulator). Online-softmax

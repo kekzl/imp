@@ -10,6 +10,7 @@
 // the std::string '\0' terminator into every delta). Extracted here so the math
 // can be unit-tested on the CPU against hand-derived expectations.
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -51,6 +52,11 @@ inline size_t utf8_complete_len(const std::string& s) {
 struct HoldbackDecision {
     bool complete_match = false;  // a full stop sequence is present in the buffer
     size_t flush_len = 0;         // bytes safe to emit now (always <= buffer size)
+    // Index into `stop_sequences` of the sequence that matched, or -1. The
+    // Anthropic wire format reports which stop ended the turn
+    // (`stop_reason: "stop_sequence"`, `stop_sequence: "<text>"`), and it had
+    // nothing to report because the match was a bool (#1550).
+    int matched_index = -1;
 };
 
 // Decide how much of `pending` may be flushed.
@@ -71,15 +77,26 @@ struct HoldbackDecision {
 inline HoldbackDecision holdback_decision(const std::string& pending, size_t max_stop_len,
                                           const std::vector<std::string>& stop_sequences) {
     HoldbackDecision d;
-    for (const auto& stop : stop_sequences) {
+    // The EARLIEST occurrence, not the first sequence in the list that happens
+    // to occur anywhere: with stops {"B", "A"} on "xAyB" the list order used to
+    // cut at "B" (offset 3) and report "B", while the text the model produced
+    // ended at "A" (offset 1). The contract above always said "first
+    // occurrence"; only the loop disagreed.
+    size_t best = std::string::npos;
+    for (size_t i = 0; i < stop_sequences.size(); i++) {
+        const std::string& stop = stop_sequences[i];
         if (stop.empty())
             continue;
         size_t pos = pending.find(stop);
-        if (pos != std::string::npos) {
-            d.complete_match = true;
-            d.flush_len = pos;  // pos <= size, no clamp needed
-            return d;
+        if (pos != std::string::npos && (best == std::string::npos || pos < best)) {
+            best = pos;
+            d.matched_index = static_cast<int>(i);
         }
+    }
+    if (best != std::string::npos) {
+        d.complete_match = true;
+        d.flush_len = best;  // best <= size, no clamp needed
+        return d;
     }
     if (pending.size() > max_stop_len) {
         size_t safe = pending.size() - max_stop_len + 1;
@@ -93,5 +110,76 @@ inline HoldbackDecision holdback_decision(const std::string& pending, size_t max
     }
     return d;
 }
+
+// Which decoded token produced which bytes of a holdback buffer (#1588).
+//
+// The streaming paths buffer text before emitting it, so a flush boundary is
+// not a token boundary: the stop matcher decides how many bytes are safe, and
+// that cut can land in the middle of a token's contribution. A per-token
+// logprob therefore cannot be attached from a live "current token" counter -
+// by the time held-back bytes go out, the counter has moved on. That is why
+// the stop-sequence path shipped no logprobs at all rather than wrong ones.
+//
+// What is tracked is the bytes a token contributed AFTER the think-split and
+// tool-call filters, not the token's raw text, because those are the bytes the
+// client receives.
+//
+// Header-only and pure: no engine, no HTTP, no JSON. Tested in the CPU lane.
+class TokenSpans {
+public:
+    struct Emit {
+        size_t offset;    // start of this piece within the flushed prefix
+        size_t length;    // bytes
+        int token_index;  // -1 when the bytes span no single token
+    };
+
+    // Record that `bytes` bytes were appended to the buffer by token `index`.
+    void append(size_t bytes, int index) {
+        if (bytes == 0)
+            return;
+        end_ += bytes;
+        spans_.push_back({end_, index});
+    }
+
+    // Split the first `up_to` bytes into per-token pieces and drop them from
+    // the tracker. A trailing piece that no complete span covers is returned
+    // with token_index -1: the honest answer, rather than the nearest index.
+    std::vector<Emit> flush(size_t up_to) {
+        std::vector<Emit> out;
+        size_t emitted = 0;
+        size_t consumed = 0;
+        while (consumed < spans_.size() && spans_[consumed].end <= up_to) {
+            const size_t end = spans_[consumed].end;
+            if (end > emitted) {
+                out.push_back({emitted, end - emitted, spans_[consumed].index});
+                emitted = end;
+            }
+            ++consumed;
+        }
+        if (emitted < up_to)
+            out.push_back({emitted, up_to - emitted, -1});
+
+        spans_.erase(spans_.begin(), spans_.begin() + static_cast<long>(consumed));
+        for (auto& sp : spans_)
+            sp.end -= std::min(sp.end, up_to);
+        end_ -= std::min(end_, up_to);
+        return out;
+    }
+
+    void clear() {
+        spans_.clear();
+        end_ = 0;
+    }
+
+    [[nodiscard]] bool empty() const { return spans_.empty(); }
+
+private:
+    struct Span {
+        size_t end;  // one past this token's last byte, relative to the buffer start
+        int index;
+    };
+    std::vector<Span> spans_;
+    size_t end_ = 0;
+};
 
 }  // namespace imp::stream

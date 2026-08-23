@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace imp {
@@ -30,7 +31,7 @@ public:
     // Record the model's top-K successor candidates for `token` (best
     // first, e.g. from the verify-chunk logits). Establishes rank order:
     // ids[0] lands in slot 0. Out-of-range ids are skipped.
-    void observe_topk(int32_t token, const int32_t* ids, int n);
+    void observe_topk(int32_t token, std::span<const int32_t> ids);
 
     // Follow the front-slot successor chain from t0 for up to k tokens.
     // Stops early when a token has no successors, or (min_streak > 0) when

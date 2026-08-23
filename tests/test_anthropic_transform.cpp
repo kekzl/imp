@@ -219,10 +219,16 @@ TEST(AnthropicCacheUsage, NoDetailsMeansZeroCacheFields) {
 // clamped to [0,1]. Without this mapping /v1/messages on a think-model could
 // never be told NOT to reason (the request's intent was silently dropped).
 
-TEST(AnthropicThinking, NoFieldLeavesThinkingUnset) {
+// Extended thinking is opt-in on this dialect (#1541). This test used to assert
+// the opposite - that no `thinking` field left both keys unset - which meant the
+// server default (think_budget = 0.5) applied and a reasoning model reasoned on
+// every /v1/messages request. The answer then arrived at content[1] with
+// content[0].text empty, for a client that never asked for thinking.
+TEST(AnthropicThinking, NoFieldMeansNoThinking) {
     json oai = anthropic_to_openai_body(base_request());
-    EXPECT_FALSE(oai.contains("enable_thinking"));
-    EXPECT_FALSE(oai.contains("think_budget"));
+    ASSERT_TRUE(oai.contains("enable_thinking"));
+    EXPECT_FALSE(oai.value("enable_thinking", true));
+    EXPECT_FLOAT_EQ(oai.value("think_budget", -1.0f), 0.0f);
 }
 
 TEST(AnthropicThinking, DisabledMapsToEnableThinkingFalseAndZeroBudget) {
@@ -261,14 +267,31 @@ TEST(AnthropicThinking, EnabledWithoutBudgetSetsNoBudget) {
     EXPECT_FALSE(oai.contains("think_budget"));
 }
 
-TEST(AnthropicThinking, UnknownTypeOrMalformedIsIgnored) {
+// An opt-in the server does not understand is not an opt-in. Both of these used
+// to leave the keys unset, which is the same defect one level down: the default
+// would have depended on a field nobody could parse.
+TEST(AnthropicThinking, UnknownTypeOrMalformedMeansNoThinking) {
     json req = base_request();
     req["thinking"] = json{{"type", "weird"}};
-    EXPECT_FALSE(anthropic_to_openai_body(req).contains("enable_thinking"));
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_FALSE(oai.value("enable_thinking", true));
+    EXPECT_FLOAT_EQ(oai.value("think_budget", -1.0f), 0.0f);
 
     json req2 = base_request();
     req2["thinking"] = "not-an-object";
-    EXPECT_FALSE(anthropic_to_openai_body(req2).contains("enable_thinking"));
+    json oai2 = anthropic_to_openai_body(req2);
+    EXPECT_FALSE(oai2.value("enable_thinking", true));
+    EXPECT_FLOAT_EQ(oai2.value("think_budget", -1.0f), 0.0f);
+}
+
+TEST(AnthropicThinking, AdaptiveTurnsItBackOn) {
+    // The one field that restores the old behaviour, and the shape current
+    // SDKs send.
+    json req = base_request();
+    req["thinking"] = json{{"type", "adaptive"}};
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_TRUE(oai.value("enable_thinking", false));
+    EXPECT_FALSE(oai.contains("think_budget"));  // server default applies
 }
 
 // ---- tool_choice conversion + parallel_tool_calls (issue #892) -------------
@@ -531,7 +554,12 @@ TEST(AnthropicResponse, FinishReasonMapping) {
     EXPECT_EQ(stop_for("length"), "max_tokens");
     EXPECT_EQ(stop_for("tool_calls"), "tool_use");
     EXPECT_EQ(stop_for("cancelled"), "end_turn");
-    EXPECT_EQ(stop_for("content_filter"), "content_filter");  // unknown → passthrough
+    // Was `content_filter` passed straight through. That is OpenAI's name and
+    // not a member of Anthropic's stop_reason enum; "refusal" is (#1552).
+    EXPECT_EQ(stop_for("content_filter"), "refusal");
+    // Nothing unknown escapes the enum any more.
+    EXPECT_EQ(stop_for("capacity"), "end_turn");
+    EXPECT_EQ(stop_for("whatever"), "end_turn");
 }
 
 TEST(AnthropicResponse, UsageSplitsCacheReadFromInput) {
@@ -717,4 +745,161 @@ TEST(AnthropicGuidedPassthrough, AbsentFieldsAreNotInvented) {
     EXPECT_FALSE(oai.contains("guided_grammar"));
     EXPECT_FALSE(oai.contains("grammar"));
     EXPECT_FALSE(oai.contains("response_format"));
+}
+
+// ---------------------------------------------------------------------------
+// stop_reason / stop_sequence (#1550, #1552) and tool_result.is_error (#1557)
+// ---------------------------------------------------------------------------
+
+namespace {
+json minimal_oai_response(const char* finish) {
+    return json{{"id", "chatcmpl-1"},
+                {"choices", json::array({{{"index", 0},
+                                          {"finish_reason", finish},
+                                          {"message", {{"role", "assistant"}, {"content", "hi"}}}}})},
+                {"usage", {{"prompt_tokens", 3}, {"completion_tokens", 1}}}};
+}
+}  // namespace
+
+TEST(AnthropicStopReason, StopWithoutASequenceIsEndTurn) {
+    json out = openai_to_anthropic_response(minimal_oai_response("stop"), "m");
+    EXPECT_EQ(out["stop_reason"], "end_turn");
+    EXPECT_TRUE(out["stop_sequence"].is_null());
+}
+
+// The whole point of #1550: the same finish_reason, two different turns.
+TEST(AnthropicStopReason, StopWithASequenceNamesIt) {
+    json out = openai_to_anthropic_response(minimal_oai_response("stop"), "m", "</done>");
+    EXPECT_EQ(out["stop_reason"], "stop_sequence");
+    EXPECT_EQ(out["stop_sequence"], "</done>");
+}
+
+TEST(AnthropicStopReason, LengthAndToolCallsAreUnchanged) {
+    EXPECT_EQ(openai_to_anthropic_response(minimal_oai_response("length"), "m")["stop_reason"], "max_tokens");
+    EXPECT_EQ(openai_to_anthropic_response(minimal_oai_response("tool_calls"), "m")["stop_reason"],
+              "tool_use");
+}
+
+// "capacity" and "cancelled" are engine reasons, not Anthropic stop_reasons.
+// The streaming path used to ship "capacity" verbatim (#1552).
+TEST(AnthropicStopReason, EngineReasonsNeverShipVerbatim) {
+    using imp_server::anthropic::anthropic_stop_reason;
+    EXPECT_STREQ(anthropic_stop_reason("capacity", false), "end_turn");
+    EXPECT_STREQ(anthropic_stop_reason("cancelled", false), "end_turn");
+    EXPECT_STREQ(anthropic_stop_reason("anything_else", false), "end_turn");
+}
+
+TEST(AnthropicToolResult, IsErrorIsLabelledForTheModel) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages",
+                 json::array({{{"role", "user"},
+                               {"content", json::array({{{"type", "tool_result"},
+                                                         {"tool_use_id", "toolu_1"},
+                                                         {"is_error", true},
+                                                         {"content", "connection refused"}}})}}})}};
+    json oai = anthropic_to_openai_body(req);
+    bool found = false;
+    for (const auto& m : oai["messages"]) {
+        if (m.value("role", "") == "tool") {
+            found = true;
+            EXPECT_EQ(m["content"], "[tool error] connection refused");
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(AnthropicToolResult, SuccessfulResultIsUnlabelled) {
+    json req = {{"model", "m"},
+                {"max_tokens", 16},
+                {"messages", json::array({{{"role", "user"},
+                                           {"content", json::array({{{"type", "tool_result"},
+                                                                     {"tool_use_id", "toolu_1"},
+                                                                     {"content", "ok"}}})}}})}};
+    json oai = anthropic_to_openai_body(req);
+    for (const auto& m : oai["messages"])
+        if (m.value("role", "") == "tool")
+            EXPECT_EQ(m["content"], "ok");
+}
+
+// ---------------------------------------------------------------------------
+// thinking: adaptive, display, absolute budgets, signature (#1555, #1560)
+// ---------------------------------------------------------------------------
+
+namespace {
+json thinking_req(const json& thinking, int max_tokens = 4000) {
+    json r = {{"model", "m"},
+              {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})},
+              {"thinking", thinking}};
+    if (max_tokens > 0)
+        r["max_tokens"] = max_tokens;
+    return r;
+}
+}  // namespace
+
+// The on-mode current SDKs send. It matched neither branch and set nothing, so
+// the request ran at the server default while the client believed otherwise.
+TEST(AnthropicThinking, AdaptiveEnablesThinking) {
+    json oai = anthropic_to_openai_body(thinking_req({{"type", "adaptive"}}));
+    ASSERT_TRUE(oai.contains("enable_thinking"));
+    EXPECT_TRUE(oai["enable_thinking"].get<bool>());
+}
+
+TEST(AnthropicThinking, EnabledStillWorksAndBudgetIsAFraction) {
+    json oai = anthropic_to_openai_body(
+        thinking_req({{"type", "enabled"}, {"budget_tokens", 2000}}, /*max_tokens=*/4000));
+    EXPECT_TRUE(oai["enable_thinking"].get<bool>());
+    EXPECT_DOUBLE_EQ(oai["think_budget"].get<double>(), 0.5);
+}
+
+TEST(AnthropicThinking, DisabledZeroesTheBudget) {
+    json oai = anthropic_to_openai_body(thinking_req({{"type", "disabled"}}));
+    EXPECT_FALSE(oai["enable_thinking"].get<bool>());
+    EXPECT_DOUBLE_EQ(oai["think_budget"].get<double>(), 0.0);
+}
+
+// budget_tokens 0 with type enabled is a contradiction the request states
+// outright; it used to leave the server default in place.
+TEST(AnthropicThinking, ZeroBudgetWithEnabledIsHonoured) {
+    json oai = anthropic_to_openai_body(thinking_req({{"type", "enabled"}, {"budget_tokens", 0}}));
+    EXPECT_FALSE(oai["enable_thinking"].get<bool>());
+    EXPECT_DOUBLE_EQ(oai["think_budget"].get<double>(), 0.0);
+}
+
+TEST(AnthropicThinking, DisplayOmittedIsReadOffTheRequest) {
+    using imp_server::anthropic::thinking_display_omitted;
+    EXPECT_TRUE(thinking_display_omitted(thinking_req({{"type", "enabled"}, {"display", "omitted"}})));
+    EXPECT_FALSE(thinking_display_omitted(thinking_req({{"type", "enabled"}, {"display", "summarized"}})));
+    EXPECT_FALSE(thinking_display_omitted(thinking_req({{"type", "enabled"}})));
+    EXPECT_FALSE(thinking_display_omitted(json{{"model", "m"}}));
+}
+
+TEST(AnthropicThinking, OmittedDropsTheThinkingBlock) {
+    json oai = {{"id", "chatcmpl-1"},
+                {"choices", json::array({{{"index", 0},
+                                          {"finish_reason", "stop"},
+                                          {"message",
+                                           {{"role", "assistant"},
+                                            {"content", "the answer"},
+                                            {"reasoning_content", "the thinking"}}}}})},
+                {"usage", {{"prompt_tokens", 3}, {"completion_tokens", 2}}}};
+
+    json shown = openai_to_anthropic_response(oai, "m", "", /*omit_thinking=*/false);
+    ASSERT_EQ(shown["content"].size(), 2u);
+    EXPECT_EQ(shown["content"][0]["type"], "thinking");
+    EXPECT_TRUE(shown["content"][0].contains("signature"));
+
+    json hidden = openai_to_anthropic_response(oai, "m", "", /*omit_thinking=*/true);
+    ASSERT_EQ(hidden["content"].size(), 1u);
+    EXPECT_EQ(hidden["content"][0]["type"], "text");
+}
+
+// The signature is a digest, not an attestation: same text, same value, and it
+// changes when the text does. That is what makes a round trip verifiable.
+TEST(AnthropicThinking, SignatureIsDeterministicAndTextDependent) {
+    using imp_server::anthropic::thinking_signature;
+    const std::string a = thinking_signature("some reasoning");
+    EXPECT_EQ(a, thinking_signature("some reasoning"));
+    EXPECT_NE(a, thinking_signature("some reasoning "));
+    EXPECT_EQ(a.rfind("imp_sig_", 0), 0u);
 }

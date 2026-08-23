@@ -101,6 +101,7 @@ void BatchingEngine::resume() {
 }
 
 void BatchingEngine::submit(std::shared_ptr<ServerRequest> req) {
+    req->t_submit = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         pending_queue_.push_back(std::move(req));
@@ -175,6 +176,13 @@ void BatchingEngine::worker_loop() {
                     }
 
                     sr->notified_count = sr->request->output_tokens.size();
+                    // Waited-behind-others time, closed here rather than at the
+                    // first token: everything after this point is prefill and
+                    // decode, which the other histograms already describe.
+                    sr->queue_ms.store(std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - sr->t_submit)
+                                           .count(),
+                                       std::memory_order_relaxed);
                     engine->add_request(sr->request);
                     active_requests_.push_back(std::move(sr));
                 }
@@ -209,6 +217,25 @@ void BatchingEngine::worker_loop() {
         // mid-forward used to call std::terminate and kill the container,
         // taking every other in-flight request with it. Now we cancel all
         // active requests with a clear reason and keep the worker alive.
+        {
+            // What the engine is about to run together (#1580). Counted here
+            // rather than inside the engine because this is where the server
+            // already knows the set, and it keeps the metric out of the
+            // runtime's headers.
+            int rows = 0;
+            for (const auto& sr : active_requests_) {
+                if (sr->request->status != imp::RequestStatus::FINISHED &&
+                    sr->request->status != imp::RequestStatus::CANCELLED)
+                    rows++;
+            }
+            if (rows > 0) {
+                decode_steps.fetch_add(1, std::memory_order_relaxed);
+                decode_rows.fetch_add(rows, std::memory_order_relaxed);
+                int64_t prev = decode_batch_max.load(std::memory_order_relaxed);
+                while (rows > prev &&
+                       !decode_batch_max.compare_exchange_weak(prev, rows, std::memory_order_relaxed)) {}
+            }
+        }
         try {
             (void)engine->step();
         } catch (const std::exception& e) {

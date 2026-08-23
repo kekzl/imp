@@ -76,6 +76,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 }
 
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     // Parse request body
     json body;
     try {
@@ -96,6 +99,24 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         send_json_error(res, 400, "invalid_request_error",
                         "n>1 is not supported on /v1/completions; request one completion per call");
         return;
+    }
+
+    // best_of asks the server to generate N candidates and return the best by
+    // total logprob. imp has no such path - no COW-fork, no candidate scoring -
+    // so the field was read by nothing and the caller got one ordinary
+    // completion with 200 (#1598). Same treatment as its neighbour n: an
+    // explicit refusal, because "best of 8" and "the first one" are different
+    // answers and the response cannot tell them apart.
+    if (body.contains("best_of") && !body["best_of"].is_null()) {
+        if (!body["best_of"].is_number_integer()) {
+            send_json_error(res, 400, "invalid_request_error", "\"best_of\" must be an integer");
+            return;
+        }
+        if (body["best_of"].get<int>() > 1) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "best_of>1 is not supported; imp generates no candidate set to choose from");
+            return;
+        }
     }
 
     // Extract prompt
@@ -160,8 +181,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     // Parse stop sequences (same 16-entry cap as the chat parser).
     std::vector<std::string> stop_sequences;
     if (parse_stop_field(body, 16, stop_sequences)) {
-        fprintf(stderr, "warning: request sent %zu stop sequences; keeping the first 16\n",
-                body["stop"].size());
+        IMP_LOG_WARN("request sent %zu stop sequences; keeping the first 16", body["stop"].size());
     }
     size_t max_stop_len = 0;
     for (const auto& s : stop_sequences)
@@ -170,6 +190,14 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     // Parse logit_bias: map of token_id (string) -> bias (float)
     std::vector<std::pair<int32_t, float>> logit_bias;
     if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
+        // Same bound as the chat path (#1617); /v1/completions parses its own.
+        if (state.max_logit_bias > 0 && static_cast<int>(body["logit_bias"].size()) > state.max_logit_bias) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "\"logit_bias\" has " + std::to_string(body["logit_bias"].size()) +
+                                " entries, above the server limit of " +
+                                std::to_string(state.max_logit_bias) + " (--max-logit-bias)");
+            return;
+        }
         for (auto& [key, val] : body["logit_bias"].items()) {
             try {
                 int32_t token_id = std::stoi(key);
@@ -189,8 +217,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
     // Log request received
     std::string req_id = make_completion_id(state);
-    fprintf(stderr, "[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f\n", req_id.c_str(),
-            prompt.size(), stream ? "true" : "false", max_tokens, temperature);
+    IMP_LOG_INFO("[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f", req_id.c_str(),
+                 prompt.size(), stream ? "true" : "false", max_tokens, temperature);
 
     // Validate model field (required per OpenAI spec)
     std::string requested_model = body.value("model", "");
@@ -224,12 +252,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
     // Server-side input-token limit (--max-input-tokens). Reject pre-prefill.
     if (state.max_input_tokens > 0 && n_prompt_tokens > state.max_input_tokens) {
-        res.status = 400;
-        json error = {{"error",
-                       {{"message", "Prompt exceeds max input tokens (" + std::to_string(n_prompt_tokens) +
-                                        " > " + std::to_string(state.max_input_tokens) + ")"},
-                        {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(error), "application/json");
+        send_json_error(res, 400, "invalid_request_error",
+                        "Prompt exceeds max input tokens (" + std::to_string(n_prompt_tokens) + " > " +
+                            std::to_string(state.max_input_tokens) + ")",
+                        "prompt", "context_length_exceeded");
         return;
     }
 
@@ -252,6 +278,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     // Create an imp::Request and submit to batching engine (/v1/completions is
     // text-only — no vision).
     auto imp_req = std::make_shared<imp::Request>();
+    imp_req->trace_id = req_id;  // #1582: join the engine's log lines to this request
     imp_req->input_tokens = std::move(tokens);
     imp_req->max_tokens = max_tokens;
     imp_req->temperature = temperature;
@@ -277,7 +304,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
     if (body.contains("speculative") && body["speculative"].is_boolean())
-        imp_req->spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
+        imp_req->spec_override = body["speculative"].get<bool>() ? 1 : 0;
     // Predicted Outputs (string-content form) on the completions route: the
     // prediction only seeds the n-gram draft corpus, output is unchanged.
     if (body.contains("prediction") && body["prediction"].is_object()) {
@@ -319,9 +346,9 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [&state, server_req, comp_id, created, n_prompt_tokens, t_start, stop_sequences,
-             max_stop_len, echo, prompt, include_usage, snap_tok, snap_model_name,
-             snap_is_think_model](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+            [&state, server_req, comp_id, created, n_prompt_tokens, t_start, stop_sequences, max_stop_len,
+             echo, prompt, include_usage, snap_tok, snap_model_name, snap_is_think_model,
+             req_logprobs](size_t /*offset*/, httplib::DataSink& sink) -> bool {
                 int n_output_tokens = 0;
                 const char* finish = nullptr;
 
@@ -350,14 +377,44 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                 int think_tokens = 0;
                 const int kThinkScanLimit = 8;
 
+                // #1589: this path emitted no logprobs at all. It emits one
+                // chunk per token now when they were asked for, which is the
+                // shape a client can consume: a chunk carrying two tokens has
+                // nowhere to put two offsets.
+                imp::stream::TokenSpans pending_spans;
+                imp::stream::TokenSpans utf8_spans;
+                // think_buf holds tokens back too, so it needs the same
+                // bookkeeping: a completion shorter than the 8-token think
+                // scan window never leaves the buffer during the loop and used
+                // to reach the client as one unattributed chunk.
+                imp::stream::TokenSpans think_spans;
+                std::vector<imp::stream::TokenSpans::Emit> carried_spans;
+                size_t completion_offset = 0;  // byte offset of the next token in the completion
+
+                auto emit_completion_piece = [&](const std::string& piece_text, int token_index) {
+                    json lp_obj = nullptr;
+                    if (req_logprobs && token_index >= 0) {
+                        const auto& lps = server_req->request->output_logprobs;
+                        if (static_cast<size_t>(token_index) < lps.size()) {
+                            lp_obj = completions_logprobs_json_one(lps[static_cast<size_t>(token_index)],
+                                                                   completion_offset);
+                        }
+                    }
+                    completion_offset += piece_text.size();
+                    std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, piece_text,
+                                                           nullptr, lp_obj);
+                    return sink.write(sse.data(), sse.size());
+                };
+
                 auto flush_text = [&](size_t up_to) {
                     if (up_to == 0)
                         return true;
-                    std::string to_send = pending_text.substr(0, up_to);
+                    for (const auto& e : pending_spans.flush(up_to)) {
+                        if (!emit_completion_piece(pending_text.substr(e.offset, e.length), e.token_index))
+                            return false;
+                    }
                     pending_text = pending_text.substr(up_to);
-                    std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, to_send,
-                                                           nullptr);
-                    return sink.write(sse.data(), sse.size());
+                    return true;
                 };
 
                 auto request_start_c = std::chrono::steady_clock::now();
@@ -386,6 +443,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                         auto elapsed = std::chrono::steady_clock::now() - request_start_c;
                         if (elapsed > std::chrono::seconds(state.request_timeout)) {
                             server_req->cancel();
+                            state.metrics.requests_timed_out++;
                             finish = "length";
                             break;
                         }
@@ -426,6 +484,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                     // Strip <think>...</think> block for text completions
                     if (think_strip) {
                         think_buf += piece;
+                        think_spans.append(piece.size(), n_output_tokens - 1);
                         think_tokens++;
 
                         if (!think_confirmed) {
@@ -440,6 +499,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                             think_strip = false;
                             std::string after = think_buf.substr(end_pos + 8);
                             think_buf.clear();
+                            // Everything before </think> is dropped, so its
+                            // attribution goes with it; what follows belongs to
+                            // the token that closed the block.
+                            think_spans.clear();
                             auto start = after.find_first_not_of("\n\r\t ");
                             piece = (start != std::string::npos) ? after.substr(start) : "";
                             if (piece.empty())
@@ -452,22 +515,38 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                             think_strip = false;
                             piece = think_buf;
                             think_buf.clear();
+                            carried_spans = think_spans.flush(piece.size());
+                            think_spans.clear();
                         }
                     }
 
                     if (stop_sequences.empty()) {
                         utf8_buf += piece;
+                        if (carried_spans.empty()) {
+                            utf8_spans.append(piece.size(), n_output_tokens - 1);
+                        } else {
+                            for (const auto& e : carried_spans)
+                                utf8_spans.append(e.length, e.token_index);
+                            carried_spans.clear();
+                        }
                         size_t complete = utf8_complete_len(utf8_buf);
                         if (complete > 0) {
-                            std::string to_emit = utf8_buf.substr(0, complete);
+                            for (const auto& e : utf8_spans.flush(complete)) {
+                                if (!emit_completion_piece(utf8_buf.substr(e.offset, e.length),
+                                                           e.token_index))
+                                    return false;
+                            }
                             utf8_buf = utf8_buf.substr(complete);
-                            std::string chunk = sse_completion_chunk(comp_id, created, snap_model_name,
-                                                                     to_emit, nullptr);
-                            if (!sink.write(chunk.data(), chunk.size()))
-                                return false;
                         }
                     } else {
                         pending_text += piece;
+                        if (carried_spans.empty()) {
+                            pending_spans.append(piece.size(), n_output_tokens - 1);
+                        } else {
+                            for (const auto& e : carried_spans)
+                                pending_spans.append(e.length, e.token_index);
+                            carried_spans.clear();
+                        }
                         auto d = imp::stream::holdback_decision(pending_text, max_stop_len,
                                                                 stop_sequences);
                         if (!flush_text(d.flush_len))
@@ -485,30 +564,39 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
                 // Flush think buffer: strip think blocks and emit remaining content
                 if (!think_buf.empty()) {
+                    const size_t before = think_buf.size();
                     strip_think_block(think_buf);
                     if (!think_buf.empty()) {
+                        // Only carry the attribution across when the strip
+                        // changed nothing. Once bytes have been removed the
+                        // recorded offsets no longer describe this string, and
+                        // a plausible-looking wrong index is worse than none.
+                        if (think_buf.size() == before) {
+                            for (const auto& e : think_spans.flush(before))
+                                utf8_spans.append(e.length, e.token_index);
+                        } else {
+                            utf8_spans.append(think_buf.size(), -1);
+                        }
                         utf8_buf += think_buf;
                     }
+                    think_spans.clear();
                     think_buf.clear();
                 }
 
                 // Flush remaining buffers
                 if (!utf8_buf.empty() && !text_stop_matched) {
-                    std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, utf8_buf,
-                                                           nullptr);
-                    sink.write(sse.data(), sse.size());
+                    for (const auto& e : utf8_spans.flush(utf8_buf.size()))
+                        emit_completion_piece(utf8_buf.substr(e.offset, e.length), e.token_index);
                 }
-                if (!pending_text.empty() && !text_stop_matched) {
-                    std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, pending_text,
-                                                           nullptr);
-                    sink.write(sse.data(), sse.size());
-                }
+                if (!pending_text.empty() && !text_stop_matched)
+                    flush_text(pending_text.size());
 
                 if (!finish)
                     finish = "length";
 
                 // Final chunk with finish_reason
-                std::string final_chunk = sse_completion_chunk(comp_id, created, snap_model_name, "", finish);
+                std::string final_chunk = sse_completion_chunk(comp_id, created, snap_model_name, "",
+                                                               openai_finish_reason(finish));
                 sink.write(final_chunk.data(), final_chunk.size());
 
                 // Usage chunk if requested
@@ -532,8 +620,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
                 auto t_end = std::chrono::high_resolution_clock::now();
                 double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-                fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n", comp_id.c_str(),
-                        n_prompt_tokens, n_output_tokens, ms);
+                IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(),
+                             n_prompt_tokens, n_output_tokens, ms);
                 state.metrics.requests_total++;
                 state.metrics.tokens_prompt_total += n_prompt_tokens;
                 state.metrics.tokens_completion_total += n_output_tokens;
@@ -554,6 +642,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                 auto elapsed = std::chrono::steady_clock::now() - ns_comp_start;
                 if (elapsed > std::chrono::seconds(state.request_timeout)) {
                     server_req->cancel();
+                    state.metrics.requests_timed_out++;
                     finish = "length";
                     break;
                 }
@@ -622,35 +711,23 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n", comp_id.c_str(), n_prompt_tokens,
-                n_output_tokens, ms);
+        IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(), n_prompt_tokens,
+                     n_output_tokens, ms);
         state.metrics.requests_total++;
         state.metrics.tokens_prompt_total += n_prompt_tokens;
         state.metrics.tokens_completion_total += n_output_tokens;
         state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
         // Build logprobs if requested
+        // #1589: this is /v1/completions, so it gets the Completions shape.
+        // It used to build the Chat object here, which an OpenAI SDK reading
+        // `.logprobs.tokens` cannot see at all.
         json logprobs_obj = nullptr;
         if (req_logprobs && active_req) {
-            const auto& lp_data = active_req->output_logprobs;
-            json content_logprobs = json::array();
-            for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
-                const auto& lp = lp_data[idx];
-                json top_arr = json::array();
-                for (const auto& t : lp.top) {
-                    top_arr.push_back({{"token", safe_token_json(t.text)},
-                                       {"logprob", t.logprob},
-                                       {"bytes", token_bytes_json(t.text)}});
-                }
-                content_logprobs.push_back({{"token", safe_token_json(lp.text)},
-                                            {"logprob", lp.logprob},
-                                            {"bytes", token_bytes_json(lp.text)},
-                                            {"top_logprobs", top_arr}});
-            }
-            logprobs_obj = {{"content", content_logprobs}};
+            logprobs_obj = completions_logprobs_json(active_req->output_logprobs, output_ids.size(), text);
         }
 
-        json choice = {{"index", 0}, {"text", text}, {"finish_reason", finish}};
+        json choice = {{"index", 0}, {"text", text}, {"finish_reason", openai_finish_reason(finish)}};
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
         }
@@ -659,6 +736,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                          {"object", "text_completion"},
                          {"created", created},
                          {"model", snap_model_name},
+                         {"system_fingerprint", system_fingerprint(snap_model_name)},
                          {"choices", json::array({choice})},
                          {"usage",
                           {{"prompt_tokens", n_prompt_tokens},
@@ -682,6 +760,10 @@ void handle_count_tokens(const httplib::Request& req, httplib::Response& res, Se
         json err = {{"type", "error"}, {"error", {{"type", type}, {"message", message}}}};
         res.set_content(dump_safe(err), "application/json");
     };
+
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
 
     json anth_body;
     try {

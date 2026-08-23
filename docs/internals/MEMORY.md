@@ -474,7 +474,9 @@ from the driver.
 enum class AllocPhase { Loading, Planning, Serving };
 ```
 
-Process-global, monotonic, set by the engine. `Backend::acquire()` consults it:
+Process-global, monotonic, set by the engine. Every entry point that acquires
+physical memory consults it - `acquire()`, `acquire_growable()`, and since #1649
+`commit()` and `commit_range()` as well:
 
 - `Loading` / `Planning` — allowed.
 - `Serving` — **debug:** `IMP_ASSERT_FAIL` with the tag and a backtrace.
@@ -488,6 +490,21 @@ reach zero.
 
 One deliberate exception: `AllocPhase::Serving` is temporarily re-entered as
 `Planning` during `server.model_swap`, bracketed and logged.
+
+**Growth is an acquisition** (#1649). `commit()` and `commit_range()` are
+non-virtual wrappers around `do_commit()` / `do_commit_range()`, for the reason
+`acquire()` wraps `do_acquire()`: a backend cannot forget the guard. Until then
+a growable KV pool committing pages under load was counted by none of the three
+instruments - not the phase counter, not the `--wrap` interposer (which wraps
+`cudaMalloc*`, while the VMM backend calls `cuMemCreate` / `cuMemMap`), and not
+`check_alloc_sites.py` (which scans for driver APIs, and the driver call is
+inside `src/memory/` where it belongs).
+
+The guard runs **after** the call, on the delta the backend actually committed.
+The request overstates: a range may be partly mapped already, and
+`commit(new_total)` is a target rather than an amount. Shrinking is not counted
+- it hands memory back, and counting it would make the instrument read
+"allocations while serving" and mean "commit calls while serving".
 
 ### A3.3 L2 — Allocators, one per tier
 

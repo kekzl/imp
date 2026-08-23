@@ -52,7 +52,7 @@ struct ChatRequestParams {
     // 0 = force off, 1 = force on. From the imp extension body field
     // "speculative" (bool). Lets code-gen calls opt into speculation while
     // short tool-arg generations skip it on the same server.
-    int spec_ngram_override = -1;
+    int spec_override = -1;
     // OpenAI Predicted Outputs: concatenated text of the "prediction" body
     // field ({"type":"content","content": string | [{"type":"text","text"}]}).
     // Tokenized later in the snapshot stage (needs the tokenizer) and fed to
@@ -206,6 +206,11 @@ inline nlohmann::json prompt_tokens_details_(const std::shared_ptr<imp::Request>
 // call only logs once at the outer handler. Defined in handlers_chat_core.cpp.
 extern thread_local bool g_in_anthropic_shim;
 
+// Set by the non-streaming path to the stop sequence that ended the
+// generation, empty otherwise. Read by the Anthropic shim, which cannot
+// recover it from the OpenAI body (#1550).
+extern thread_local std::string g_shim_stop_sequence;
+
 // ---------------------------------------------------------------------------
 // Shared server-private helpers (definitions split across handlers_*.cpp).
 // ---------------------------------------------------------------------------
@@ -258,4 +263,4 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
 // Defined in handlers_messages.cpp.
 bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
                            const std::shared_ptr<ServerRequest>& server_req, const std::string& anth_model,
-                           const std::string& msg_id);
+                           const std::string& msg_id, bool omit_thinking);

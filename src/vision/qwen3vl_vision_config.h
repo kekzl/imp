@@ -10,18 +10,20 @@
 #include "model/json_util.h"
 #include "vision/vision_model.h"
 
+#include <expected>
 #include <string>
 
 namespace imp {
 
-// Fills the Qwen3-VL fields of `out` from a `vision_config` object.
+// Builds the Qwen3-VL VisionConfig from a `vision_config` object.
 //
-// Returns false — leaving `out` UNTOUCHED — when a required field is missing or
-// inconsistent, so a half-filled geometry can never reach the encoder. `err`
-// then names what was wrong. Checked: every dimension positive, hidden_size
-// divisible by num_heads, and num_position_embeddings a perfect square (it is a
-// square grid: 2304 = 48^2).
-bool parse_qwen3vl_vision_config(const JValue& vision_cfg, VisionConfig& out, std::string& err);
+// Returns the error text instead of a config when a required field is missing
+// or inconsistent. A half-filled geometry can never reach the encoder because
+// there is no half-filled value to hand back: the old signature filled an
+// out-parameter and relied on the caller checking the bool first. Checked:
+// every dimension positive, hidden_size divisible by num_heads, and
+// num_position_embeddings a perfect square (it is a square grid: 2304 = 48^2).
+[[nodiscard]] std::expected<VisionConfig, std::string> parse_qwen3vl_vision_config(const JValue& vision_cfg);
 
 // True if `vision_config.model_type` names a tower this parser covers.
 //

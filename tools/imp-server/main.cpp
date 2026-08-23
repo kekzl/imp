@@ -1,4 +1,5 @@
 #include "args.h"
+#include "common/exit_codes.h"
 #include "handlers.h"
 #include "utils.h"
 #include "webui_asset.h"  // generated: IMP_WEBUI_HTML
@@ -19,15 +20,27 @@
 
 using json = nlohmann::json;
 
-// The five inference routes that consume engine capacity and must go through
-// rate-limiting / max-concurrent admission control. /v1/messages (Anthropic)
-// and /v1/embeddings were previously omitted from these checks, silently
-// bypassing both guards (the non-stream /v1/messages path reaches inference by
-// directly calling handle_chat_completions() without re-entering pre-routing).
+// The routes that consume engine capacity and must go through --max-concurrent
+// admission control. /v1/messages (Anthropic) and /v1/embeddings were once
+// omitted from these checks, silently bypassing both guards (the non-stream
+// /v1/messages path reaches inference by directly calling
+// handle_chat_completions() without re-entering pre-routing).
 static bool is_inference_endpoint(const std::string& path) {
     return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/v1/responses" ||
            path == "/v1/messages" || path == "/v1/embeddings" || path == "/v1/rerank" ||
            path == "/rerank";
+}
+
+// What the RATE limit covers is a wider set, and the difference is the defect
+// in #1615: --max-concurrent protects the engine, so it belongs on the routes
+// that queue work, but --rate-limit is there to stop a client from hammering
+// the process at all. Tokenisation walks the whole prompt through the BPE
+// merge table on a server thread, and /admin/suspend flips global state; both
+// were reachable at any rate. The exemptions below are deliberate and short.
+static bool is_rate_limited_endpoint(const std::string& path) {
+    if (path == "/health" || path == "/metrics")
+        return false;
+    return true;
 }
 
 int main(int argc, char** argv) {
@@ -145,16 +158,52 @@ int main(int argc, char** argv) {
     // Limit request body size to 100 MiB (prevents DoS via large base64 images)
     svr.set_payload_max_length(static_cast<size_t>(100) * 1024 * 1024);
 
+    // Connection-level limits (#1622). Every one of these was previously
+    // whatever the build-time cpp-httplib defaulted to, which this repo cannot
+    // even read: the library is fetched at a pinned tag, not vendored. A slow
+    // reader holding a socket open costs a worker thread either way, so the
+    // point is that the number is ours and is written down.
+    //
+    // The write timeout is the one that must not be tightened casually: a
+    // streamed completion writes for as long as it generates, so 600 s is a
+    // deliberate asymmetry against the 60 s read side.
+    svr.set_read_timeout(args.read_timeout, 0);
+    svr.set_write_timeout(args.write_timeout, 0);
+    svr.set_keep_alive_max_count(args.keep_alive_max);
+
     // Store API key and limits in state
     state.api_key = args.api_key;
     state.metrics_require_auth = args.metrics_require_auth;
     state.max_concurrent = args.max_concurrent;
     state.request_timeout = args.request_timeout;
-    state.rate_limit = args.rate_limit;
+    state.rate_limiter.limit = args.rate_limit;
 
     // --max-input-tokens <n>: reject prompts whose tokenized length exceeds
     // <n> with HTTP 400 before prefill (0 = disabled).
     state.max_input_tokens = args.max_input_tokens;
+    state.max_n = args.max_n;
+    state.max_batch_items = args.max_batch_items;
+    state.max_logit_bias = args.max_logit_bias;
+
+    // --trusted-proxy a,b,c
+    {
+        const std::string& tp = args.trusted_proxies;
+        size_t pos = 0;
+        while (pos < tp.size()) {
+            size_t comma = tp.find(',', pos);
+            if (comma == std::string::npos)
+                comma = tp.size();
+            std::string one = tp.substr(pos, comma - pos);
+            const size_t b = one.find_first_not_of(" \t");
+            const size_t e = one.find_last_not_of(" \t");
+            if (b != std::string::npos)
+                state.rate_limiter.trusted_proxies.insert(one.substr(b, e - b + 1));
+            pos = comma + 1;
+        }
+        if (!state.rate_limiter.trusted_proxies.empty())
+            printf("Trusted proxies: %zu (X-Forwarded-For believed from these peers)\n",
+                   state.rate_limiter.trusted_proxies.size());
+    }
     if (!args.log_requests_path.empty()) {
         if (state.request_logger.open(args.log_requests_path)) {
             printf("Request logging: appending JSONL to %s\n", args.log_requests_path.c_str());
@@ -175,15 +224,16 @@ int main(int argc, char** argv) {
         if (req.path == "/health" || metrics_exempt || req.method == "OPTIONS")
             return httplib::Server::HandlerResponse::Unhandled;
 
-        // Rate limiting (per-IP, inference endpoints only)
-        if (state.rate_limit > 0 && is_inference_endpoint(req.path)) {
-            std::string ip = req.get_header_value("X-Forwarded-For");
-            if (ip.empty())
-                ip = req.remote_addr;
+        // Rate limiting (per-peer, everything but /health and /metrics)
+        if (state.rate_limiter.limit > 0 && is_rate_limited_endpoint(req.path)) {
+            const std::string ip = state.rate_limit_key(req.remote_addr,
+                                                        req.get_header_value("X-Forwarded-For"));
             if (!state.check_rate_limit(ip)) {
-                res.status = 429;
-                json err = {{"error", {{"message", "Rate limit exceeded"}, {"type", "rate_limit_error"}}}};
-                res.set_content(err.dump(), "application/json");
+                // Both dialects call this rate_limit_error; only the envelope
+                // differs, and this site shipped the OpenAI one to every
+                // endpoint (#1551).
+                send_dialect_error(res, req.path, 429, "rate_limit_error", "rate_limit_error",
+                                   "Rate limit exceeded");
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
@@ -197,11 +247,11 @@ int main(int argc, char** argv) {
                     queue = state.batching->queue_depth();
             }
             if (queue >= state.max_concurrent) {
-                res.status = 429;
-                json err = {{"error",
-                             {{"message", "Server overloaded, too many concurrent requests"},
-                              {"type", "rate_limit_error"}}}};
-                res.set_content(err.dump(), "application/json");
+                // Anthropic's name for "too many in flight right now" is
+                // overloaded_error (529 upstream; the status here stays 429,
+                // which is what this server's own docs and clients expect).
+                send_dialect_error(res, req.path, 429, "rate_limit_error", "overloaded_error",
+                                   "Server overloaded, too many concurrent requests");
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
@@ -215,16 +265,8 @@ int main(int argc, char** argv) {
             std::string auth = req.get_header_value("Authorization");
             std::string xkey = req.get_header_value("x-api-key");
             if (!api_key_matches(auth, xkey, state.api_key)) {
-                res.status = 401;
-                json err;
-                if (req.path.rfind("/v1/messages", 0) == 0) {
-                    err = {{"type", "error"},
-                           {"error", {{"type", "authentication_error"}, {"message", "Invalid API key"}}}};
-                } else {
-                    err = {{"error",
-                            {{"message", "Invalid API key"}, {"type", "invalid_request_error"}}}};
-                }
-                res.set_content(err.dump(), "application/json");
+                send_dialect_error(res, req.path, 401, "invalid_request_error", "authentication_error",
+                                   "Invalid API key");
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
@@ -247,6 +289,12 @@ int main(int argc, char** argv) {
 
     svr.Get("/v1/models", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res, state);
+    });
+
+    // The only path-parameter route in this server (#1599). A model id can
+    // contain a slash (a HuggingFace repo id), so the pattern is greedy.
+    svr.Get(R"(/v1/models/(.+))", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_model_retrieve(req, res, state, req.matches[1].str());
     });
 
     // Context-window auto-detection probes for OpenAI-compatible clients:
@@ -323,18 +371,18 @@ int main(int argc, char** argv) {
     // those to 400. Everything else is a genuine internal failure → 500, but
     // still with a JSON body. dump_safe (inside send_json_error) guarantees the
     // envelope itself can't throw on bad bytes.
-    svr.set_exception_handler(
-        [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
-            try {
-                std::rethrow_exception(std::move(ep));
-            } catch (const nlohmann::json::exception& e) {
-                send_json_error(res, 400, "invalid_request_error", e.what());
-            } catch (const std::exception& e) {
-                send_json_error(res, 500, "server_error", e.what());
-            } catch (...) {
-                send_json_error(res, 500, "server_error", "unknown internal error");
-            }
-        });
+    svr.set_exception_handler([](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
+        try {
+            std::rethrow_exception(std::move(ep));
+        } catch (const nlohmann::json::exception& e) {
+            send_dialect_error(res, req.path, 400, "invalid_request_error", "invalid_request_error",
+                               e.what());
+        } catch (const std::exception& e) {
+            send_dialect_error(res, req.path, 500, "server_error", "api_error", e.what());
+        } catch (...) {
+            send_dialect_error(res, req.path, 500, "server_error", "api_error", "unknown internal error");
+        }
+    });
 
     // Any error response that would go out with an empty body gets the same
     // JSON envelope every handler uses. The reachable case is an unmatched
@@ -347,20 +395,23 @@ int main(int argc, char** argv) {
         if (!res.body.empty())
             return httplib::Server::HandlerResponse::Unhandled;
         const bool not_found = res.status == 404;
-        const std::string msg = not_found ? "Unknown endpoint: " + req.method + " " + req.path
+        // The method and the path are the client's bytes. Echoing them raw put
+        // arbitrary input into a response body and into `.dump()`, which throws
+        // json::type_error.316 on ill-formed UTF-8 - so a 404 for a path with a
+        // stray 0x80 in it produced a 500 with an empty body instead (#1618).
+        // Both halves are fixed: the echo is sanitised and truncated, and the
+        // serialiser is the one that cannot throw.
+        const std::string msg = not_found ? "Unknown endpoint: " + sanitize_for_echo(req.method, 16) + " " +
+                                                sanitize_for_echo(req.path, 128)
                                           : "Request failed with status " + std::to_string(res.status);
-        if (req.path.rfind("/v1/messages", 0) == 0) {
-            json err = {{"type", "error"},
-                        {"error",
-                         {{"type", not_found ? "not_found_error" : "invalid_request_error"},
-                          {"message", msg}}}};
-            res.set_content(err.dump(), "application/json");
-        } else {
-            json err = {
-                {"error",
-                 {{"message", msg}, {"type", res.status >= 500 ? "server_error" : "invalid_request_error"}}}};
-            res.set_content(err.dump(), "application/json");
-        }
+        // api_error, not server_error: the latter is not an Anthropic error
+        // type (#1556).
+        const char* anthropic_type = not_found           ? "not_found_error"
+                                     : res.status >= 500 ? "api_error"
+                                                         : "invalid_request_error";
+        const char* openai_type = res.status >= 500 ? "server_error" : "invalid_request_error";
+        const int status = res.status;
+        send_dialect_error(res, req.path, status, openai_type, anthropic_type, msg);
         return httplib::Server::HandlerResponse::Handled;
     });
 
@@ -368,6 +419,12 @@ int main(int argc, char** argv) {
     svr.set_post_routing_handler([&state](const httplib::Request&, httplib::Response& res) {
         if (res.status >= 500)
             state.metrics.requests_failed++;
+        // 4xx is where this server puts every refusal it is designed to make
+        // (tools/imp-server/CLAUDE.md), so counting only 5xx left the entire
+        // designed error surface invisible (#1579). Separate series, because
+        // "the server broke" and "the server refused" want different alerts.
+        else if (res.status >= 400)
+            state.metrics.requests_rejected++;
     });
 
     // Graceful shutdown on SIGINT/SIGTERM
@@ -381,8 +438,8 @@ int main(int argc, char** argv) {
         printf("Max concurrent: %d\n", state.max_concurrent);
     if (state.request_timeout > 0)
         printf("Request timeout: %ds\n", state.request_timeout);
-    if (state.rate_limit > 0)
-        printf("Rate limit: %d req/min per IP\n", state.rate_limit);
+    if (state.rate_limiter.limit > 0)
+        printf("Rate limit: %d req/min per peer\n", state.rate_limiter.limit);
     if (state.max_input_tokens > 0)
         printf("Max input tokens: %d\n", state.max_input_tokens);
 
@@ -407,12 +464,18 @@ int main(int argc, char** argv) {
     printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 
+    // listen_after_bind() returns false on stop() AND on a listen failure, and
+    // the two used to leave the same exit code: 0. A supervisor that restarts
+    // on non-zero therefore did not restart a server that never listened
+    // (#1584). g_server is nulled by the signal handler, so it is what
+    // separates "we were asked to stop" from "we could not serve".
+    int exit_status = 0;
     if (!svr.listen_after_bind()) {
-        // listen_after_bind() returns false on stop() or bind failure
         if (!g_server.load(std::memory_order_relaxed)) {
             // Server was nulled by signal — clean shutdown
         } else {
             fprintf(stderr, "Failed to start server on %s:%d\n", args.host.c_str(), args.port);
+            exit_status = imp::tools::exit_code_for(IMP_ERROR_INTERNAL);
         }
     }
 
@@ -424,5 +487,5 @@ int main(int argc, char** argv) {
     imp_context_free(state.ctx);
     imp_model_free(state.model);
     imp_weights_snapshot_free(state.weight_snapshot);  // non-null only when suspended
-    return 0;
+    return exit_status;
 }

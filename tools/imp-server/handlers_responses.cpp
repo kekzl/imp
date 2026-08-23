@@ -32,6 +32,8 @@ namespace {
 struct ResponsesSSE {
     httplib::DataSink& sink;
     uint64_t seq = 0;
+    std::string hot_buf;  // reused by emit_delta, never by emit
+
     bool emit(const char* type, json payload) {
         payload["type"] = type;
         payload["sequence_number"] = seq++;
@@ -42,7 +44,37 @@ struct ResponsesSSE {
         buf += "\n\n";
         return sink.write(buf.data(), buf.size());
     }
+
+    // #1657: the per-token path. emit() builds a json object and dump()s it for
+    // every token; /v1/chat/completions has not done that since SSEChunkWriter.
+    // Everything but the sequence number and the text is constant for the whole
+    // item, so `prefix` is built once when the item opens and ends at
+    // `"sequence_number":`; `mid` reopens the object for the delta value.
+    bool emit_delta(const std::string& prefix, const char* mid, const std::string& text) {
+        hot_buf.clear();
+        hot_buf += prefix;
+        hot_buf += std::to_string(seq++);
+        hot_buf += mid;
+        json_escape_into(hot_buf, text.data(), text.size());
+        hot_buf += "\"}\n\n";
+        return sink.write(hot_buf.data(), hot_buf.size());
+    }
 };
+
+// The constant half of a delta frame, up to and including `"sequence_number":`.
+inline std::string rsp_delta_prefix(const char* event, const std::string& item_id, int output_index) {
+    std::string p = "event: ";
+    p += event;
+    p += "\ndata: {\"type\":\"";
+    p += event;
+    p += "\",\"item_id\":\"";
+    json_escape_into(p, item_id.data(), item_id.size());
+    p += "\",\"output_index\":";
+    p += std::to_string(output_index);
+    p += ",\"content_index\":0,\"sequence_number\":";
+    return p;
+}
+inline constexpr const char* kRspDeltaMid = ",\"delta\":\"";
 
 // Which output item is currently open in the stream.
 enum class RspItem { NONE, REASONING, MESSAGE, FUNCTION_CALL };
@@ -86,6 +118,8 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
         return false;
 
     int output_index = -1;
+    // Rebuilt when the message item opens; constant for every token in it.
+    std::string text_delta_prefix_;
     RspItem open_item = RspItem::NONE;
     uint64_t item_counter = 0;
     std::string cur_item_id;
@@ -166,6 +200,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
         open_item = RspItem::MESSAGE;
         acc_text.clear();
         cur_item_id = rsp::make_item_id("msg", item_counter++);
+        text_delta_prefix_ = rsp_delta_prefix("response.output_text.delta", cur_item_id, output_index);
         json item = {{"type", "message"},
                      {"id", cur_item_id},
                      {"status", "in_progress"},
@@ -205,10 +240,10 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
         if (!start_message_item())
             return false;
         acc_text += text;
-        return out.emit("response.output_text.delta", json{{"item_id", cur_item_id},
-                                                           {"output_index", output_index},
-                                                           {"content_index", 0},
-                                                           {"delta", text}});
+        // #1657: same per-token json object and dump() the Anthropic dialect
+        // had. The frame is constant for the item, so it is built when the item
+        // opens and the token is only escaped between the halves.
+        return out.emit_delta(text_delta_prefix_, kRspDeltaMid, text);
     };
     auto emit_thinking = [&](const std::string& text) -> bool {
         if (text.empty())
@@ -248,7 +283,7 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     StreamDialect dialect;
     dialect.emit_text = emit_text;
     dialect.emit_reasoning = emit_thinking;
-    dialect.emit_content_token = emit_text;
+    dialect.emit_content_token = [&](const std::string& t, int) { return emit_text(t); };
     dialect.keepalive = [&]() -> bool {
         // SSE comment lines are spec-compliant and ignored by SSE parsers —
         // same cadence as the chat stream (#941).
@@ -310,6 +345,10 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
     if (log_client_ip.empty())
         log_client_ip = req.remote_addr;
     const std::string log_raw_body = req.body;
+
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
 
     json body;
     try {

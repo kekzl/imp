@@ -583,6 +583,12 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
     };
 
     std::function<jinja::Value()> parse_value;
+    // #1607: this parser recurses once per nesting level over a string that
+    // came from a request body. The HTTP boundary caps the body at 100 levels,
+    // which is what actually bounds this today - the cap here is so a second
+    // caller, from a source that has no such boundary, cannot reintroduce it.
+    int depth = 0;
+    constexpr int kMaxDepth = 128;
 
     auto parse_string = [&]() -> std::string {
         if (pos >= json_str.size() || json_str[pos] != '"')
@@ -681,6 +687,14 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
     };
 
     parse_value = [&]() -> jinja::Value {
+        if (depth >= kMaxDepth)
+            return jinja::Value();
+        depth++;
+        struct Pop {
+            int& d;
+            ~Pop() { d--; }
+        } pop{depth};
+
         skip_ws();
         if (pos >= json_str.size())
             return jinja::Value();
@@ -757,9 +771,9 @@ void ChatTemplate::auto_detect_stop_tokens(const jinja::Context& ctx) const {
     }
 }
 
-std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
-                                               bool add_generation_prompt, bool suppress_thinking,
-                                               bool force_thinking) const {
+std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                       bool add_generation_prompt, bool suppress_thinking,
+                                       bool force_thinking) const {
     if (!jinja_tpl_)
         return {};
 
@@ -807,12 +821,22 @@ std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::
         IMP_LOG_DEBUG("[DEBUG_TPL_JINJA] rendered: \"%s\"", escaped.c_str());
     }
 
-    auto result = tokenize_rendered(tok, rendered);
-
-    // Auto-detect stop tokens if needed
+    // Auto-detect stop tokens if needed. Kept here rather than in the caller:
+    // it reads the context this function built, and a golden that renders
+    // without tokenising should still exercise it.
     auto_detect_stop_tokens(ctx);
 
-    return result;
+    return rendered;
+}
+
+std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                               bool add_generation_prompt, bool suppress_thinking,
+                                               bool force_thinking) const {
+    const std::string rendered = render_jinja(tok, msgs, add_generation_prompt, suppress_thinking,
+                                              force_thinking);
+    if (rendered.empty())
+        return {};
+    return tokenize_rendered(tok, rendered);
 }
 
 // Render a minimal fresh conversation and report whether the generation

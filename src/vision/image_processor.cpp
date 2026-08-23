@@ -158,16 +158,16 @@ bool load_and_preprocess_image(const std::string& path, int target_size, const f
     return ok;
 }
 
-bool load_and_preprocess_image_from_memory(const uint8_t* data, size_t len, int target_size,
+bool load_and_preprocess_image_from_memory(std::span<const uint8_t> data, int target_size,
                                            const float mean[3], const float std[3], ImageData& out) {
     int w, h, channels;
-    uint8_t* rgb = stbi_load_from_memory(data, static_cast<int>(len), &w, &h, &channels, 3);
+    uint8_t* rgb = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &channels, 3);
     if (!rgb) {
         IMP_LOG_ERROR("Vision: failed to decode image from memory (%s)", stbi_failure_reason());
         return false;
     }
 
-    IMP_LOG_INFO("Vision: decoded image %dx%d from memory (%zu bytes)", w, h, len);
+    IMP_LOG_INFO("Vision: decoded image %dx%d from memory (%zu bytes)", w, h, data.size());
 
     bool ok = preprocess_pixels(rgb, w, h, target_size, mean, std, out);
     stbi_image_free(rgb);

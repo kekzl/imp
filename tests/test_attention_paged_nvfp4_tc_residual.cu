@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "compute/attention_paged.h"
+#include "exec/executor_kernels.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -677,4 +678,120 @@ TEST_F(PagedAttentionNvfp4TCResidualTest, SplitKResidualLaunchSucceeds_HD128) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// #1708: the multi-seq residual KV write must be graph-safe.
+//
+// The path this guards wrote through a device pointer array the HOST built and
+// `cudaMallocAsync`'d per call, per layer, inside the captured region, freeing
+// it right after the launch. A replay then wrote through an address the
+// allocator had handed to someone else - "an illegal memory access", six
+// concurrent sequences, graphs on, silent wrong output before that.
+//
+// The property that broke is not "the kernel computes the right address once".
+// It is "the address it computes follows the ring across a REPLAY". So the test
+// captures a graph, advances the ring on the device without re-capturing, and
+// asserts the second write landed one slot further on.
+// ---------------------------------------------------------------------------
+
+TEST(ResidualKvWriteMulti, ReplayFollowsTheRingInsteadOfTheCapturedIndex) {
+    int dev = 0;
+    if (cudaGetDeviceCount(&dev) != cudaSuccess || dev == 0)
+        GTEST_SKIP() << "no CUDA device";
+
+    constexpr int kSeqs = 3;       // batch slots
+    constexpr int kSlotElems = 8;  // n_kv_heads * head_dim, tiny on purpose
+    constexpr int kRingSlots = 4;  // residual ring depth
+    constexpr int kMaxSlots = 8;   // residual slots the manager could hand out
+    // Stride between two sequences' residual regions, in halves.
+    constexpr int64_t kSeqStride = kRingSlots * kSlotElems;
+
+    // Batch index i writes for residual slot slots[i] - deliberately not the
+    // identity, because the batch index and the residual slot are exactly the
+    // two things the old code conflated.
+    const int h_slots[kSeqs] = {5, 0, 2};
+
+    half *d_k_in = nullptr, *d_v_in = nullptr, *d_k_base = nullptr, *d_v_base = nullptr;
+    int *d_slots = nullptr, *d_widx = nullptr;
+    const size_t in_bytes = kSeqs * kSlotElems * sizeof(half);
+    const size_t base_bytes = kMaxSlots * kSeqStride * sizeof(half);
+    ASSERT_EQ(cudaMalloc(&d_k_in, in_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_v_in, in_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_k_base, base_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_v_base, base_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_slots, kSeqs * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_widx, kMaxSlots * sizeof(int)), cudaSuccess);
+
+    std::vector<half> h_in(kSeqs * kSlotElems);
+    for (int s = 0; s < kSeqs; s++)
+        for (int e = 0; e < kSlotElems; e++)
+            h_in[s * kSlotElems + e] = __float2half(static_cast<float>(100 * (s + 1) + e));
+    ASSERT_EQ(cudaMemcpy(d_k_in, h_in.data(), in_bytes, cudaMemcpyHostToDevice), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_v_in, h_in.data(), in_bytes, cudaMemcpyHostToDevice), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_k_base, 0, base_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_v_base, 0, base_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_slots, h_slots, sizeof(h_slots), cudaMemcpyHostToDevice), cudaSuccess);
+    std::vector<int> h_widx(kMaxSlots, 0);
+    ASSERT_EQ(cudaMemcpy(d_widx, h_widx.data(), kMaxSlots * sizeof(int), cudaMemcpyHostToDevice),
+              cudaSuccess);
+
+    cudaStream_t stream;
+    ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t exec = nullptr;
+    ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), cudaSuccess);
+    residual_kv_write_multi_indirect_kernel<<<dim3(kSeqs, 2), 64, 0, stream>>>(d_k_in, d_v_in, d_k_base,
+                                                                               d_v_base, kSeqStride, d_slots,
+                                                                               d_widx, kSlotElems);
+    ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+    ASSERT_EQ(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0), cudaSuccess);
+
+    // Ring index 0.
+    ASSERT_EQ(cudaGraphLaunch(exec, stream), cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    // Advance the ring on the DEVICE only - no re-capture, no host pointer
+    // rebuild. This is what a real decode step does.
+    for (int i = 0; i < kSeqs; i++)
+        h_widx[h_slots[i]] = 1;
+    ASSERT_EQ(cudaMemcpy(d_widx, h_widx.data(), kMaxSlots * sizeof(int), cudaMemcpyHostToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaGraphLaunch(exec, stream), cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    std::vector<half> got(kMaxSlots * kSeqStride);
+    ASSERT_EQ(cudaMemcpy(got.data(), d_k_base, base_bytes, cudaMemcpyDeviceToHost), cudaSuccess);
+
+    for (int s = 0; s < kSeqs; s++) {
+        const int64_t region = static_cast<int64_t>(h_slots[s]) * kSeqStride;
+        for (int e = 0; e < kSlotElems; e++) {
+            const float want = static_cast<float>(100 * (s + 1) + e);
+            EXPECT_FLOAT_EQ(__half2float(got[region + 0 * kSlotElems + e]), want)
+                << "first launch, seq " << s << " elem " << e;
+            // The replay must have followed d_widx to ring index 1. Frozen at
+            // capture time this stays 0 and the test fails here.
+            EXPECT_FLOAT_EQ(__half2float(got[region + 1 * kSlotElems + e]), want)
+                << "replay did not follow the ring, seq " << s << " elem " << e;
+        }
+        // Nothing outside the two written ring slots.
+        for (int r = 2; r < kRingSlots; r++)
+            for (int e = 0; e < kSlotElems; e++)
+                EXPECT_FLOAT_EQ(__half2float(got[region + r * kSlotElems + e]), 0.0f);
+    }
+    // A slot no batch index named stays untouched.
+    for (int e = 0; e < kSlotElems; e++)
+        EXPECT_FLOAT_EQ(__half2float(got[static_cast<int64_t>(1) * kSeqStride + e]), 0.0f);
+
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+    cudaFree(d_k_in);
+    cudaFree(d_v_in);
+    cudaFree(d_k_base);
+    cudaFree(d_v_base);
+    cudaFree(d_slots);
+    cudaFree(d_widx);
+}
+
 }  // namespace imp

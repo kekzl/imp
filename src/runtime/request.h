@@ -39,6 +39,12 @@ const char* request_status_name(RequestStatus status);
 
 struct Request {
     int id = 0;
+    // The id the CALLER knows this request by - the server's `imp-N`, which is
+    // also what the HTTP response carries. `id` above is the engine's own
+    // counter and the two never met, so no engine log line could be attributed
+    // to an HTTP request (#1582). Empty for direct API users; add_request()
+    // emits the join line when it is set.
+    std::string trace_id;
     RequestStatus status = RequestStatus::PENDING;
 
     std::vector<int32_t> input_tokens;
@@ -87,7 +93,16 @@ struct Request {
     // speculative.ngram default, 0 = force OFF, 1 = force ON. Lets a code-gen
     // request opt into speculation while a short tool-arg generation skips it
     // (and vice-versa) on the same server. Resolved via Engine::spec_ngram_enabled_.
-    int spec_ngram_override = -1;
+    // Per-request `"speculative": true/false`. -1 = unset, 0 = off, 1 = on.
+    // Named for the field, not for one of the drafters: "false" switches off
+    // the n-gram matcher AND the MTP head AND token recycling (#1639). "true"
+    // enables what the model and the operator config allow; it cannot conjure
+    // an MTP head the checkpoint does not carry.
+    int spec_override = -1;
+    // Scheduler round this request was enqueued in. Only the scheduler writes
+    // it; it exists so admission can tell "short" from "short AND recent"
+    // (#1634).
+    uint64_t enqueued_round = 0;
     // OpenAI Predicted Outputs: client-supplied predicted completion tokens.
     // Never forwarded through the model — they only extend the n-gram draft
     // search corpus (input + prediction + output), so a response that tracks

@@ -10,6 +10,7 @@
 
 #include "vision/vision_model.h"
 
+#include <expected>
 #include <string>
 #include <vector>
 
@@ -28,9 +29,10 @@ namespace imp {
 // the slots — callers still invoke `qwen3vl_release_vision_tower` so a tower that
 // outlives the arena cannot be read.
 //
-// Returns false with `err` set when the arena cannot serve the tower, which means
-// the plan under-reserved: the encoder has no fallback for host-resident weights.
-bool qwen3vl_upload_vision_tower(VisionModel& model, size_t& bytes_out, std::string& err);
+// Returns the bytes uploaded, or the error text when the arena cannot serve the
+// tower, which means the plan under-reserved: the encoder has no fallback for
+// host-resident weights.
+[[nodiscard]] std::expected<size_t, std::string> qwen3vl_upload_vision_tower(VisionModel& model);
 
 // Point every tensor slot back at nothing. Call this when the device blocks the
 // upload handed out are released, so a tower that outlives them cannot be

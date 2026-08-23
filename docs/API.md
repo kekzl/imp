@@ -41,16 +41,66 @@ streaming driver, so a fix in streaming lands in all of them at once.
 | `model` | ✅ | **required**; basename of the file or directory |
 | `messages`, `prompt` | ✅ | |
 | `max_tokens` | ✅ | on a reasoning model the answer reserve scales with it (`max(256, max_tokens/4)`) |
-| `temperature`, `top_p`, `top_k`, `min_p` | ✅ | |
-| `presence_penalty`, `frequency_penalty`, `repetition_penalty` | ✅ | |
+| `temperature`, `top_p`, `top_k`, `min_p` | ✅ | **imp's defaults are not OpenAI's** - see the table below |
+| `presence_penalty`, `frequency_penalty`, `repetition_penalty` | ✅ | `repetition_penalty` has no OpenAI field; imp applies 1.05 by default |
 | `seed` | ✅ | greedy is reproducible; see [`determinism.md`](determinism.md) for the exact guarantee, which is narrower than "same seed, same bytes" |
 | `stop` | ✅ | |
 | `stream` | ✅ | per token, all three dialects |
 | `n` | ✅ | documented and tested as `[1,4]` |
-| `logprobs` | 🟡 | in the parameter surface, no dedicated gate. Listed in [`LIMITATIONS.md`](LIMITATIONS.md) |
+| `logprobs` | ✅ | `tests/test_server_logprobs.py` in `make test-server`, plus `tests/test_logprobs_shapes.cpp` in the CPU lane. Streaming emitted none whenever a `stop` sequence was set until #1588; `/v1/completions` returned the Chat shape until #1589 |
+| `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
-| `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape |
+| `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape. `false` switches off **all three** drafters (n-gram, MTP head, token recycling) since #1639 - it used to reach only the n-gram matcher. `true` enables what the model and config allow; it cannot conjure an MTP head the checkpoint lacks |
 | `"lora": "name"` | ✅ | PEFT adapter hot-swap, works with every quant path |
+
+### Defaults, and where they differ from OpenAI
+
+A request that sets no sampling fields is not served with OpenAI's defaults
+(#1596). The values are deliberate - they suit local models better than
+`temperature 1.0` with no truncation - but they change what an identical
+request returns compared to the OpenAI API, so they are stated here rather than
+left in the source.
+
+| field | imp | OpenAI | to get OpenAI's behaviour |
+|---|---|---|---|
+| `temperature` | 0.7 | 1.0 | send `"temperature": 1.0` |
+| `top_p` | 0.95 | 1.0 | send `"top_p": 1.0` |
+| `top_k` | 40 | (no field) | send `"top_k": 999999` (see below) |
+| `repetition_penalty` | 1.05 | (no field) | send `"repetition_penalty": 1.0` |
+
+Two of these do not switch off the way the field name suggests.
+
+**`top_k: 0` is not "off", it is 50.** Every sampling site spells
+`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:193`, `:290`,
+`src/runtime/engine_scheduler.cpp:2572`), so zero and "unset" both land on 50 -
+a *tighter* truncation than the 40 default. The only way to disable top-k is a
+value at or above the vocabulary size, which the dispatcher clamps to the full
+vocabulary (`engine_scheduler.cpp:2573`).
+
+**`repetition_penalty` has no OpenAI field at all**, so a strictly
+spec-compliant client cannot switch it off and gets a mild anti-repetition bias
+it never asked for. Sending the non-OpenAI field with value `1.0` does disable
+it: the engine skips the penalty pass entirely when all three penalties are
+neutral (`src/runtime/engine_sampling_stop.cpp:212`).
+
+### Metrics for what the server decided
+
+`/metrics` carries counters for the decisions that used to be visible only in
+the server log (#1640, #1641):
+
+| counter | what moves it |
+|---|---|
+| `imp_requests_timed_out_total` | the server ended a request at `--request-timeout`. The client sees `finish_reason: "length"`, which is also what a spent token budget produces - this counter is the only way to tell them apart |
+| `imp_kv_pressure_rejections_total` | a request was cancelled because the KV pool could not give it blocks (admission or mid-decode). Not incremented for a failed metadata allocation or a snapshot mismatch, which are different faults |
+| `imp_kv_pool_growths_total` | the growable pool committed more memory. A pool that keeps growing under load is the signal that arrives before it stops being able to |
+
+`imp_requests_cancelled_total` remains client-disconnect only.
+
+`imp_kv_blocks_reserved` (gauge) is what admission has promised to running
+requests for the rest of their generation and not yet written (#1635). Free
+blocks minus this gauge is what the next request is admitted against, so a
+queue in front of a pool with free blocks is explained by this number and by
+nothing else in `/metrics`.
 
 ## Constrained decoding
 
@@ -60,14 +110,21 @@ post-validation.
 | form | status |
 |---|---|
 | `response_format: {"type": "json_object"}` | ✅ |
-| `response_format: {"type": "json_schema", ...}` | ✅ whole-token validated |
+| `response_format: {"type": "json_schema", ...}` | ✅ whole-token validated. An `integer` is bounded at 19 digits (int64's width): unbounded, the sampler could stay in the digit state above temperature 0 and emit a 40-digit population (#1540) |
 | `response_format: {"type": "regex"}` / `guided_regex` | ✅ |
 | `response_format: {"type": "grammar"}` / `grammar` / `guided_grammar` | ✅ GBNF, a pushdown simulator, so recursive and bracket-balanced formats work |
 
 **A constraint imp cannot compile is a `400`, not an unconstrained answer.** That
 changed in v0.23.0 and it is a breaking difference from servers that log the
 rejection and answer anyway. Left recursion, undefined rules and a missing
-`root` are rejected at compile time.
+`root` are rejected at compile time, and since #1567 so are the JSON-Schema
+assertion keywords imp does not enforce. Which ones, and the three shapes that
+are accepted with a weaker guarantee than asked for, are listed in
+[`LIMITATIONS.md`](LIMITATIONS.md#known-bad-and-known-limited-behaviour).
+
+Schema, regex and grammar inputs are bounded: nesting past 64 levels, a `{n,m}`
+repeat above 1024, or a pattern needing more than 100k NFA states is a `400`
+rather than a stack overflow or an allocation storm (#1608, #1609).
 
 Constrained replies parse even when they hit `max_tokens`: the closer-narrowing
 and the no-closer-after-comma rules used to cancel each other out and release the
@@ -83,14 +140,73 @@ having to land an actual edit in a throwaway repository.
 `tool_choice` that contradicts the request is a `400`: naming a function absent
 from `tools`, or `"required"` with no tools.
 
+**`tool_choice` that this server cannot enforce is also a `400`** (#1592), with
+`code: "tool_choice_unenforceable"`. The decode FSM constrains the tool envelope
+only where the loaded model's chat template has a grammar for it:
+
+| `tool_choice` | enforced on |
+|---|---|
+| `"required"` | `chatml` |
+| a named function | `chatml`, `llama3` |
+| `"auto"` / `"none"` / absent | nothing to enforce, every family |
+
+On every other family the constraint used to degrade to a sentence in the prompt
+and the request was answered `200` with prose. Measured before the refusal, 10
+requests each at `temperature 0.7` with one `get_weather` function:
+
+| model | family | `tool_choice` | tool calls |
+|---|---|---|---|
+| gemma-3-12b Q4_K_M | `gemma` | `required` / named | **0 / 10** each |
+| gemma-4-26B Q4_K_M | `gemma` | `required` | **0 / 10** |
+| gpt-oss-20b MXFP4 | `harmony` | `required` / named | **0 / 10** each |
+| Qwen3-4B Q8_0 | `chatml` | `required` / named | 10 / 10 each |
+
+`"auto"` is untouched: Gemma-4 produced 1 of 10 there, and a best-effort call is
+what `auto` asks for.
+
+**gpt-oss calls tools now** (#1716). Its envelope is a channel with a recipient,
+not a tag:
+
+```
+<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Berlin"}<|call|>
+```
+
+The parser dispatched on family and had no Harmony branch, so the call fell
+through to the ChatML `<tool_call>` scanner, found nothing, and was dropped -
+the response carried an **empty `content` with `finish_reason: "stop"`** while
+the model's own `reasoning_content` said it meant to call. Measured on
+`gpt-oss-20b-mxfp4`, `tool_choice: "auto"`, 10 requests per row:
+
+| path | before | after |
+|---|---|---|
+| `/v1/chat/completions` | 0 / 10 | **10 / 10** |
+| the same, streaming | 0 / 10 | **10 / 10** |
+
+`tool_choice: "required"` on `harmony` is still a 400: the FSM has no grammar
+for this envelope, so the call is the model's choice rather than a guarantee.
+
 Reasoning models separate their chain of thought into `reasoning_content`
 (Anthropic: `thinking`) rather than emitting it as the answer. This holds on the
 streaming path too, which is where it was once wrong.
 
-**On `/v1/messages` that means `content[0]` is often not the text.** A reasoning
-model returns a `thinking` block first and the answer second, so a client reading
-`content[0].text` gets an empty string and concludes the model said nothing.
-Select by `type`:
+**On `/v1/messages`, thinking is opt-in** (#1541). A request without a `thinking`
+field gets no thinking block, so `content[0]` is the text - which is what the
+Anthropic dialect promises. Ask for it and the thinking block comes first, ahead
+of the answer, the way upstream orders it. Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
+
+| request `thinking` | `content` blocks | `content[0].text` |
+|---|---|---|
+| absent | `[text]` | `"Hi"` |
+| `{"type":"adaptive"}` | `[thinking, text]` | `""` |
+| `{"type":"adaptive","display":"omitted"}` | `[text]` | `"Hi"` |
+| `{"type":"disabled"}` | `[text]` | `"Hi"` |
+
+Only this dialect changed. On `/v1/chat/completions` the reasoning is a separate
+`reasoning_content` field, so nothing shifts an index and the server's
+`think_budget` default still applies.
+
+**When you do ask for thinking, `content[0]` is not the text.** Select by
+`type` rather than by index:
 
 ```python
 text = "".join(b["text"] for b in resp["content"] if b["type"] == "text")
@@ -99,15 +215,26 @@ text = "".join(b["text"] for b in resp["content"] if b["type"] == "text")
 Verified on Qwen3-8B-Q8_0: `content` = `[{type: thinking, ...}, {type: text,
 text: "The capital of France is Paris."}]`.
 
-### Turning thinking off
+### Turning thinking on and off
 
-Two request fields do it, and **either one alone is enough**:
+On `/v1/messages` it is off unless asked for. On `/v1/chat/completions` the
+server default (`--think-budget`, 0.5) applies and these fields turn it off -
+**either one alone is enough**:
 
 | field | dialect | effect |
 |---|---|---|
 | `think_budget` | OpenAI | fraction of `max_tokens` reserved for reasoning. **0 disables thinking** |
 | `enable_thinking` | OpenAI | `false` disables thinking |
 | `thinking: {type: "disabled"}` | Anthropic | same, and zeroes the budget |
+| `thinking: {type: "enabled"\|"adaptive"}` | Anthropic | thinking on. **Required to get it at all on this dialect** (#1541); `adaptive` is what current SDKs send |
+| `thinking: {budget_tokens: N}` | Anthropic | converted to a fraction of `max_tokens`. `0` disables thinking outright |
+| `thinking: {display: "omitted"}` | Anthropic | the model still reasons; the `thinking` block is not returned, on either transport |
+
+`thinking` blocks carry a `signature`, and the stream emits `signature_delta`
+before the block's `content_block_stop`, because the SDKs round-trip the pair.
+It is a deterministic digest of the block text, not an attestation: imp is not
+the model vendor and cannot sign anything. It proves the block came back
+unedited, and nothing more.
 
 Measured on Qwen3.8-27B with a JSON prompt at `max_tokens: 400`, counting
 `reasoning_content` characters: nothing set 160, `think_budget: 0` alone **0**,
@@ -140,13 +267,23 @@ never replayed.
 
 ## Images
 
-✅ on `/v1/chat/completions`, as `image_url` content parts, data-URI or fetched
-over HTTP. Several images in one request are encoded in prompt order.
+✅ on `/v1/chat/completions`, as `image_url` content parts. Several images in one
+request are encoded in prompt order.
+
+**A data URI works out of the box; an `http(s)` URL does not.** Fetching one
+makes the server open a connection to a host the caller names, and the caller is
+unauthenticated by default, so it is behind `--allow-remote-images` (#1610).
+With the flag on, the destination is resolved and refused if it is loopback,
+link-local (including the cloud metadata address), RFC1918, CGNAT or ULA;
+redirects are not followed, the body is capped at 32 MiB and the read has a
+10 s timeout. See [`LIMITATIONS.md`](LIMITATIONS.md) for the residual.
 
 Two refusals worth knowing, both deliberate:
 
 - An `image_url` that cannot be read is a `400`, not a skipped picture. Dropping
-  one would slide every later image onto the wrong placeholder.
+  one would slide every later image onto the wrong placeholder. The message is
+  the same whatever went wrong, and does not echo the URL, so the endpoint
+  cannot be used to tell an open port from a closed one.
 - A model whose vision tower imp cannot read loads **text-only** and says so; a
   request that sends it an image gets `400 vision_unavailable` rather than a
   confident description of a picture the model never received.
@@ -158,6 +295,24 @@ No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
 Every error is a JSON envelope, never a bare status with an empty body, and
 `/v1/messages*` paths get the Anthropic error shape rather than the OpenAI one.
 An unmatched route answers with an envelope too.
+
+On `/v1/messages` the `error.type` is always one of Anthropic's own -
+`invalid_request_error`, `authentication_error`, `billing_error`,
+`permission_error`, `not_found_error`, `request_too_large`, `rate_limit_error`,
+`api_error`, `overloaded_error`, `timeout_error`. Every response from that
+endpoint also carries a `request-id` header, and error bodies repeat it as
+`request_id`.
+
+A stream that ends on a server-side fault emits an `error` SSE event instead of
+`message_delta`/`message_stop`: a request timeout and an admission refusal used
+to arrive as an ordinary completed turn, indistinguishable from the model
+finishing.
+
+`anthropic-version` and `anthropic-beta` are read and echoed back. Neither is
+enforced: upstream a missing version is a 400 and an unknown beta is refused,
+while imp serves both - a client that works here can therefore fail there. An
+unknown beta is logged once per value, because imp implements no beta surface
+and answering 200 to a beta request is otherwise a silent false accept.
 
 Internal engine errors are translated to `ImpError` at the C API boundary
 (`src/api/imp_api.cpp`); this is intentional and is why a load failure surfaces

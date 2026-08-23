@@ -23,26 +23,37 @@ const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
     if (banned_token_ids_.empty())
         return nullptr;
     if (d_banned_tokens_)
-        return d_banned_tokens_;
-    const size_t bytes = banned_token_ids_.size() * sizeof(int32_t);
-    void* p = nullptr;
-    if (cudaMalloc(&p, bytes) != cudaSuccess) {
-        IMP_LOG_WARN("banned tokens: device upload failed (%zu B) — masking disabled", bytes);
+        return d_banned_tokens_.get();
+    VramOwned<int32_t> buf(vram_alloc_, banned_token_ids_.size(), "banned_tokens");
+    if (!buf) {
+        IMP_LOG_WARN("banned tokens: device upload failed (%zu B), masking disabled", buf.bytes());
         return nullptr;
     }
-    d_banned_tokens_ = static_cast<int32_t*>(p);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_banned_tokens_, banned_token_ids_.data(), bytes,
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(buf.get(), banned_token_ids_.data(), buf.bytes(),
                                        cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));  // once, at first use
-    return d_banned_tokens_;
+    d_banned_tokens_ = std::move(buf);
+    return d_banned_tokens_.get();
 }
 
-int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
+int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
     int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
     if (remaining <= 0)
         return 0;
+
+    // Book for the burst that is about to run, not for the whole generation
+    // (#1636). The caller clamps the launch to runtime.decode_burst (128), to
+    // 16 while another request waits, or to speculative.miss_burst (8); the
+    // reservation was not clamped with it, so an 8192-token default booked 512
+    // blocks on the first decode step of an answer that may emit 40 tokens.
+    // append_block reclaims cached prefix blocks when the free pool is empty,
+    // so that reservation was paid for out of the prefix cache the next turn
+    // was going to hit. The loop relaunches per burst anyway.
+    int reserve_tokens = remaining;
+    if (step_limit > 0)
+        reserve_tokens = std::min(reserve_tokens, step_limit);
 
     constexpr int kMaxLayersForConditionalGraph = 128;
     if (model_->config().n_layers > kMaxLayersForConditionalGraph)
@@ -57,7 +68,7 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
 
     // Pre-allocate KV blocks
     int ctx_len = req->context_len();
-    int final_ctx = ctx_len + remaining;
+    int final_ctx = ctx_len + reserve_tokens;
     int blocks_needed = (final_ctx + kv_bs - 1) / kv_bs;
     int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
 
@@ -233,7 +244,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         !req->regex_pattern.empty() || !req->grammar.empty() || !req->tool_constraint_tools.empty())
         return false;
 
-    int remaining = prepare_graph_loop(req);
+    int remaining = prepare_graph_loop(req, step_limit);
     if (remaining <= 0)
         return false;
 
@@ -307,19 +318,42 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     const auto& full_bt = kv_manager_->block_table(req->id);
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
+    // Size the buffer for everything this request can still reach, not for the
+    // table it happens to have now (#1647). Both this allocation and the
+    // `max_blocks_per_seq` baked into the graph below are what the rearm fast
+    // path checks against, and since #1636 the KV reservation is clamped to the
+    // current burst - so the table grows by a block every kv_bs tokens and a
+    // capacity sized to today's table is outgrown by the NEXT burst, by
+    // construction. That is the 8 `cudaGraphInstantiate` at 8.35 ms mean
+    // against a single `cudaGraphExecUpdate` the issue measured. It costs one
+    // int per block: an 8192-token ceiling is 2 KiB.
+    const int bt_kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    int bt_ctx_ceiling = req->context_len() +
+                         std::max(0, req->max_tokens - static_cast<int>(req->output_tokens.size()));
+    if (max_seq_len() > 0)
+        bt_ctx_ceiling = std::min(bt_ctx_ceiling, max_seq_len());
+    const int bt_capacity = std::max(max_blocks_per_seq, (bt_ctx_ceiling + bt_kv_bs - 1) / bt_kv_bs);
+
     int* d_bt = nullptr;
-    if (cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int)) != cudaSuccess)
+    if (cudaMalloc(&d_bt, static_cast<size_t>(bt_capacity) * sizeof(int)) != cudaSuccess)
         return false;
+    // The tail past the live table is never read (the kernels iterate over
+    // max_context_len and use max_blocks_per_seq as the row stride), but a
+    // zeroed tail keeps a stray index pointing at block 0 rather than at
+    // whatever the allocator returned.
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_bt, 0, static_cast<size_t>(bt_capacity) * sizeof(int), stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt, full_bt.data(), max_blocks_per_seq * sizeof(int),
                                        cudaMemcpyHostToDevice, stream));
     int* d_bt_swa = nullptr;
     if (swa_sizing_active_) {
         const auto& swa_bt = kv_manager_->swa_block_table(req->id);
         if (static_cast<int>(swa_bt.size()) != max_blocks_per_seq ||
-            cudaMalloc(&d_bt_swa, max_blocks_per_seq * sizeof(int)) != cudaSuccess) {
+            cudaMalloc(&d_bt_swa, static_cast<size_t>(bt_capacity) * sizeof(int)) != cudaSuccess) {
             IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
             return false;
         }
+        IMP_CUDA_CHECK_LOG(
+            cudaMemsetAsync(d_bt_swa, 0, static_cast<size_t>(bt_capacity) * sizeof(int), stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt_swa, swa_bt.data(), max_blocks_per_seq * sizeof(int),
                                            cudaMemcpyHostToDevice, stream));
     }
@@ -331,7 +365,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     state_template.block_tables = d_bt;
     state_template.block_tables_swa = d_bt_swa;
     state_template.n_sequences = 1;
-    state_template.max_blocks_per_seq = max_blocks_per_seq;
+    state_template.max_blocks_per_seq = bt_capacity;
     state_template.is_prefill = false;
 
     // Recurrent state for SSM/GDN layers — pointers are constant for
@@ -348,7 +382,26 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     if (runtime_config_.diagnostics.spec_trace)
         IMP_LOG_INFO("[burst-launch] FRESH seed=%d ctx=%d limit=%d remaining=%d", (int)first_token,
                      req->context_len(), step_limit, remaining);
-    auto gcfg = build_graph_config(*req, remaining);
+    // Capture a ceiling for the whole generation, not for this burst (#1647).
+    // `rearm()` refuses when `context_len + step_limit` passes
+    // `initial_context_len + max_steps`, and since #1636 `remaining` is the
+    // KV reservation for the CURRENT burst - so the captured ceiling is two or
+    // three bursts wide and the loop recaptures forever. Measured on
+    // `imp-cli --bench --bench-pp 16 --bench-reps 3 --max-tokens 128`: 44 rearm
+    // attempts, 36 of them refused here and rebuilt.
+    //
+    // Only when the launch is bounded. With `step_limit == 0` the on-device
+    // loop runs to `max_steps` with no host in between, and the KV blocks are
+    // reserved per burst - raising the ceiling there would let it decode past
+    // the blocks it has.
+    int capture_steps = remaining;
+    if (step_limit > 0) {
+        int span = req->max_tokens - static_cast<int>(req->output_tokens.size());
+        if (max_seq_len() > 0)
+            span = std::min(span, max_seq_len() - req->context_len());
+        capture_steps = std::max(remaining, span);
+    }
+    auto gcfg = build_graph_config(*req, capture_steps);
     gcfg.step_limit = step_limit;
 
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
@@ -368,7 +421,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
     async_d_block_tables_swa_ = d_bt_swa;
-    async_bt_capacity_ = max_blocks_per_seq;
+    async_bt_capacity_ = bt_capacity;
     async_parked_req_id_ = -1;
     IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens", state_template.n_d_banned_tokens);
     async_pending_tokens_.clear();

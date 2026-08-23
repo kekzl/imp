@@ -37,8 +37,98 @@ These have a code path and no gate. They may work; nothing proves it.
 
 - **Llama-4** architecture: loads, no dedicated gate.
 - **FP8 E5M2**: the type exists, nothing exercises it.
+- **Phi-4**: an alias onto the LLaMA path, no checkpoint of its own in a gate.
+- **Qwen3.6-35B-A3B vision**: shares the Qwen3-VL tower; `make test-vision`
+  runs gemma-3-4b-vl and Qwen3-VL-4B-Instruct, never a 35B-A3B checkpoint.
+- **Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K**: dequant paths with no gate reading a
+  checkpoint in those formats. Q4_0, Q8_0, Q4_K, Q5_K and Q6_K do have one.
+- **`/v1/rerank` against llama.cpp**: the cross-check is opt-in behind
+  `COMPARE_URL=`, so the default `make test-rerank` does not run it.
+- **`/admin/suspend`, `/admin/resume`** and **`server.model_swap`**: implemented,
+  no gate exercises either.
+- **The generation half of the HTTP contract**: SSE frame structure, usage
+  accounting, `finish_reason` and tool-call streaming. CI's `Real API contract
+  (model-less)` job deselects every test that produces a token, because
+  generation needs a GPU and there is no GPU runner (#1600). They run in
+  `make test-server` on a machine with a card, and in no CI job. The job prints
+  the collected-here vs collected-total counts so the gap is visible in its own
+  log rather than inferred from a job name.
+- **The per-token cost of the server streaming path**: the perf gate benches
+  `imp-cli`, which never enters the SSE writer, the tool-argument filter or the
+  per-chunk JSON serialisation (#1685). A change to `tools/imp-server/` cannot
+  regress the pinned numbers because the pinned numbers do not measure it.
+  Adding `tools/` to the pre-push path filter would not help: it would run a
+  benchmark of a different binary. Closing this needs a server-side benchmark
+  harness, which does not exist.
+
+All seven were green in `FEATURES.md` without a gate until #1680, which makes
+them invisible here - the legend's whole point.
 
 ## Known-bad and known-limited behaviour
+
+- **`server.green_contexts=true` does not give you green contexts on this
+  chip.** `cudaDevResourceGenerateDesc` fails for the decode partition
+  (`one or more resources passed in are not valid resource types for the
+  operation`), the manager falls back to ordinary priority streams with
+  distinct memSyncDomains, and `has_green_contexts()` is false from then on.
+  Measured 2026-08-22 on the RTX 5090 at 170 SMs, both at the 80/20 split and
+  at the 99/1 retry. Consequence worth knowing: the dynamic SM reconfiguration
+  in `step_schedule()` is gated on that flag, so it never runs here - the
+  reconfigure race #1656 describes is real code but unreachable on sm_120.
+
+- **Remote `image_url` fetching is off by default, and when on it is still
+  vulnerable to DNS rebinding.** `--allow-remote-images` classifies the
+  destination before connecting, but the check and the connection are two
+  separate resolutions, so a name whose records change in between still reaches
+  a private address. Closing that needs a connect-time callback, which httplib
+  does not expose. The off-by-default is what carries this; treat the flag as
+  "the network this server sits on is trusted".
+
+- **The VRAM planner's weight-cache reserve is an estimate with a floor, not a
+  measurement, and there is no retry if it is wrong.** A start that overcommits
+  still ends in `imp_context_create` aborting rather than degrading to a smaller
+  KV pool. #1631 fixed the case that made `imp-server` unstartable at defaults
+  on `Qwen3-8B-Q8_0` by raising the reserve to the planner's own projection plus
+  the reserve floor, and the margin matters: the projection alone plans 9977 KV
+  blocks and still OOMs, while the arm that works plans 7079. That is a 500 MiB
+  edge, so a model whose demand sits inside it can still fail to start. The
+  robust form is a retry at a smaller pool; it is not implemented.
+
+- **The measured library reserve is only remembered if the cache path outlives
+  the process.** `vram.library_reserve_cache` defaults inside the container, so
+  a `docker run --rm` server re-measures every start and plans with the 3900 MiB
+  constant, which is wrong in both directions (measured: 0 MiB on Qwen3-4B
+  IQ4_NL, 7460 MiB on Qwen3-8B-Q8_0). Mount that path to keep it.
+
+- **JSON Schema: assertion keywords imp cannot enforce are a `400`, not a
+  weaker grammar.** `minimum`, `maximum`, `exclusiveMinimum`,
+  `exclusiveMaximum`, `multipleOf`, `allOf`, `not`, `uniqueItems`,
+  `patternProperties`, `propertyNames`, `prefixItems`, `contains`,
+  `minContains`, `maxContains`, `minProperties`, `maxProperties`,
+  `dependentRequired`, `dependentSchemas`, `if`/`then`/`else` are rejected at
+  admission (#1567). They used to be accepted and dropped, so a request that
+  bounded its output was answered by an unbounded grammar at HTTP 200. Pure
+  annotations (`format`, `title`, `description`, `examples`, `default`,
+  `$schema`) are still ignored, which is what Draft 2020-12 says they do.
+  `const` is enforced, as a one-member enum.
+
+- **JSON Schema: `enum` and `const` members must be strings.** The FSM emits an
+  enum as quoted string content (`schema_constrain.cu:790`), so `{"enum":[1,2]}`
+  has no representation and is a `400`. Before #1564 it constrained the model to
+  the empty string instead.
+
+- **JSON Schema: `additionalProperties` as a schema object is not enforced, it
+  reads as `true`.** The boolean form is enforced. The object form (Pydantic
+  emits it for `Dict[str, T]`) is parsed and its constraint on extra keys is
+  dropped, which is weaker than asked for but not wrong. Before #1564 it
+  truncated the schema at that key: everything after it, `properties` included,
+  was silently discarded and the request downgraded to `json_object`.
+
+- **A `pattern` the regex engine cannot compile is not enforced, and the request
+  still returns 200.** `compile_patterns()` warns and leaves the node
+  unconstrained (`json_schema.cpp:558`), unlike a top-level `regex` constraint,
+  which is refused at admission. Same class as the keyword case above, on the
+  path that has no admission screen in front of it.
 
 - **Calibrated KV-cache scales shipped in a checkpoint are not read.** Six local
   checkpoints carry `*.self_attn.{k_proj.k_scale,v_proj.v_scale}` (96 tensors on
@@ -88,7 +178,11 @@ These have a code path and no gate. They may work; nothing proves it.
 - **MTP is released for one model class, and the class that is left out has a
   measured defect, not a missing feature.** `speculative.mtp_k` stays **0
   everywhere** — nothing below is on by default; the table says what a user opts
-  into and what they get.
+  into and what they get. On a checkpoint that ships a head, `GET /health`
+  reports `mtp_head_available` with the trade, so an operator can see the
+  switched-off gain without reading the startup log (#1537). The default itself
+  is unchanged: the head costs VRAM (0.79 GiB on Qwen3.8-27B-NVFP4) and turning
+  it on for everyone is a decision, not a fix.
 
   | class | example | cached verify graph vs an eager forward of the same state | MTP |
   |---|---|---|---|

@@ -183,6 +183,14 @@ void push_user_turn(json& out, const json& anth_msg) {
                 body += "[" + std::to_string(n_images) +
                         " image(s) from this tool result follow in the next user message]";
             }
+            // is_error was read by nothing, so a tool that failed reached the
+            // model as an ordinary successful result and it went on as if the
+            // call had worked (#1557). OpenAI's role:"tool" turn has no field
+            // for this - the content IS the channel - so the failure is
+            // labelled in the text, which is what the model reads either way.
+            if (block.value("is_error", false)) {
+                body = body.empty() ? "[tool error]" : "[tool error] " + body;
+            }
             tool_results.push_back({
                 {"role", "tool"},
                 {"tool_call_id", block.value("tool_use_id", "")},
@@ -359,27 +367,68 @@ json anthropic_to_openai_body(const json& anth) {
     // max_tokens (default 0.5), so map Anthropic's absolute budget_tokens to
     // budget_tokens/max_tokens, clamped to [0,1]. Without this mapping a
     // think-model always reasoned on /v1/messages regardless of the request.
-    if (anth.contains("thinking") && anth["thinking"].is_object()) {
+    //
+    // Extended thinking is OPT-IN on this dialect (#1541). Anything that is not
+    // a recognised opt-in - no `thinking` field, a non-object, an unknown type -
+    // maps to disabled, so the default cannot depend on a field the server did
+    // not understand. Before this, imp's server default of think_budget = 0.5
+    // made a reasoning model reason on every /v1/messages request, and the
+    // answer arrived at content[1] with content[0].text empty for a client that
+    // never asked for thinking. The block order itself is contract-correct -
+    // Anthropic puts thinking first too - so the fix is the default, not a
+    // reorder. One field turns it back on.
+    //
+    // Only this dialect moves. /v1/chat/completions is unchanged: there the
+    // reasoning is a separate `reasoning_content` field and nothing shifts an
+    // index.
+    const bool thinking_requested = [&] {
+        if (!anth.contains("thinking") || !anth["thinking"].is_object())
+            return false;
+        const std::string t = anth["thinking"].value("type", "");
+        return t == "enabled" || t == "adaptive";
+    }();
+    if (!thinking_requested) {
+        // Suppressing thinking on a think-model needs BOTH signals: the
+        // orchestrator only sets suppress_thinking (which injects /no_think so
+        // the template emits no <think>) when enable_thinking is false AND
+        // think_budget <= 0 (handlers.cpp). The server's default budget is 0.5,
+        // so without zeroing it the model would still reason.
+        oai["enable_thinking"] = false;
+        oai["think_budget"] = 0.0;
+    } else {
         const auto& think = anth["thinking"];
-        const std::string ttype = think.value("type", "");
-        if (ttype == "disabled") {
-            // Suppressing thinking on a think-model needs BOTH signals: the
-            // orchestrator only sets suppress_thinking (which injects /no_think
-            // so the template emits no <think>) when enable_thinking is false
-            // AND think_budget <= 0 (handlers.cpp). The server's default budget
-            // is 0.5, so without zeroing it the model would still reason.
-            oai["enable_thinking"] = false;
-            oai["think_budget"] = 0.0;
-        } else if (ttype == "enabled") {
+        {
+            // "adaptive" is what current SDKs send: it is the documented
+            // on-mode for the 4.6+ models, which reject budget_tokens outright.
+            // It used to fall through both branches and set nothing, so the
+            // request ran at the server's default think_budget while the client
+            // believed it had configured thinking (#1560).
             oai["enable_thinking"] = true;
             if (think.contains("budget_tokens") && think["budget_tokens"].is_number()) {
                 double budget = think["budget_tokens"].get<double>();
+                // budget_tokens is an absolute token count upstream; imp's
+                // think_budget is a fraction of max_tokens. With max_tokens
+                // absent - which this server permits - the fraction had no
+                // denominator and the assignment was skipped silently, leaving
+                // the default in place. Fall back on the same default max the
+                // request itself will get, so the two are consistent.
                 double max_tokens = anth.value("max_tokens", 0.0);
+                if (max_tokens <= 0.0)
+                    max_tokens = anth.value("max_completion_tokens", 0.0);
                 if (budget > 0.0 && max_tokens > 0.0) {
                     double frac = budget / max_tokens;
                     oai["think_budget"] = frac > 1.0 ? 1.0 : frac;
+                } else if (budget <= 0.0) {
+                    // budget_tokens 0 with type enabled is a contradiction the
+                    // request states explicitly; honour the number.
+                    oai["enable_thinking"] = false;
+                    oai["think_budget"] = 0.0;
                 }
             }
+            // thinking.display is NOT a generation setting - it says whether
+            // the reasoning comes back - so it is not transformed here. Both
+            // /v1/messages paths read it off the request through
+            // thinking_display_omitted() and drop the block on the way out.
         }
     }
 
@@ -501,7 +550,48 @@ std::string tool_call_id_to_anthropic(const std::string& openai_id) {
     return std::string("toolu_") + openai_id;
 }
 
-json openai_to_anthropic_response(const json& oai, const std::string& anth_model) {
+std::string thinking_signature(const std::string& thinking) {
+    // FNV-1a over the block text. Deterministic, so the same block signs the
+    // same way on a retry, and cheap enough for the hot path.
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : thinking) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "imp_sig_%016llx", static_cast<unsigned long long>(h));
+    return std::string(buf);
+}
+
+bool thinking_display_omitted(const json& anth_body) {
+    if (!anth_body.contains("thinking") || !anth_body["thinking"].is_object())
+        return false;
+    return anth_body["thinking"].value("display", "") == "omitted";
+}
+
+const char* anthropic_stop_reason(const std::string& openai_finish, bool stop_sequence_matched) {
+    if (openai_finish == "stop")
+        return stop_sequence_matched ? "stop_sequence" : "end_turn";
+    if (openai_finish == "length")
+        return "max_tokens";
+    if (openai_finish == "tool_calls")
+        return "tool_use";
+    // Anthropic's name for the same thing. "content_filter" is OpenAI's and is
+    // not in Anthropic's stop_reason enum, so it used to pass through as an
+    // unknown value.
+    if (openai_finish == "content_filter")
+        return "refusal";
+    // "cancelled" is a client disconnect and "capacity" an admission refusal.
+    // Neither is an Anthropic stop_reason, and "capacity" used to ship verbatim
+    // on the streaming path while the non-streaming path answered 503 for the
+    // same condition (#1552). The stream cannot change its status once
+    // message_start is out, so it ends the turn and reports the fault as an
+    // `error` event (#1553).
+    return "end_turn";
+}
+
+json openai_to_anthropic_response(const json& oai, const std::string& anth_model,
+                                  const std::string& stop_sequence, bool omit_thinking) {
     // Pass through OpenAI error envelopes unchanged but flip the type.
     if (oai.contains("error")) {
         return {
@@ -521,10 +611,17 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
     // Build content[] blocks. Thinking first (Anthropic emits the thinking
     // block before the visible answer), then text, then tool_use entries.
     json content = json::array();
-    if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
+    if (!omit_thinking && msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
         std::string thinking = msg["reasoning_content"].get<std::string>();
         if (!thinking.empty()) {
-            content.push_back({{"type", "thinking"}, {"thinking", thinking}});
+            // signature: Anthropic's clients round-trip thinking blocks and
+            // their SDKs expect the field to exist. imp cannot produce an
+            // attestation - it is not the model vendor - so this is a stable
+            // digest of the text, which is what makes the block survive a
+            // round trip rather than being dropped as malformed (#1555). It
+            // proves the block came back unedited, and nothing more.
+            content.push_back(
+                {{"type", "thinking"}, {"thinking", thinking}, {"signature", thinking_signature(thinking)}});
         }
     }
     if (msg.contains("content") && msg["content"].is_string()) {
@@ -564,17 +661,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
 
     // Map finish_reason -> stop_reason.
     std::string finish = choice.value("finish_reason", "stop");
-    std::string stop_reason;
-    if (finish == "stop")
-        stop_reason = "end_turn";
-    else if (finish == "length")
-        stop_reason = "max_tokens";
-    else if (finish == "tool_calls")
-        stop_reason = "tool_use";
-    else if (finish == "cancelled")
-        stop_reason = "end_turn";
-    else
-        stop_reason = finish;  // pass through
+    std::string stop_reason = anthropic_stop_reason(finish, !stop_sequence.empty());
 
     json usage_out = {
         {"input_tokens", 0},
@@ -623,7 +710,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         {"content", std::move(content)},
         {"model", anth_model},
         {"stop_reason", std::move(stop_reason)},
-        {"stop_sequence", nullptr},
+        {"stop_sequence", stop_sequence.empty() ? json(nullptr) : json(stop_sequence)},
         {"usage", std::move(usage_out)},
     };
 }

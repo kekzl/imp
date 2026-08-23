@@ -7,7 +7,8 @@
 # only local gate — the pre-push hook runs `verify-fast`, a filtered subset plus
 # the perf and smoke gates — but it is the only one that runs the FULL suite. It
 # fires only when staged changes touch buildable sources (src/, include/, tools/,
-# tests/, CMakeLists, *.cmake) — doc/config-only commits are not gated.
+# tests/, CMakeLists, *.cmake) — doc/config-only commits are not gated, and
+# neither are the .md and .py files that live inside those directories.
 #
 # Runs `make test-gpu` (Docker build + the full GTest suite via imp-tests; this
 # includes the CPU binaries too, so a commit that passes here has run everything).
@@ -17,8 +18,18 @@ set -uo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# The path prefix says WHERE, not WHETHER: `tools/` and `tests/` also hold
+# Markdown (the CLAUDE.md tree) and Python (the gates and generators), and
+# neither reaches the compiler or the suite - no test in tests/ shells out to a
+# script, and no CMake target embeds one. Editing tests/CLAUDE.md used to pay a
+# full image build plus the whole GTest suite for a result that could not move.
+#
+# Deliberately NOT excluded: .html, because cmake/embed_webui.cmake compiles
+# tools/imp-server/webui/index.html into imp-server, and .txt, because tests
+# read reference corpora from tests/refs at runtime.
 CHANGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
           | grep -E '^(src/|include/|tools/|tests/|CMakeLists\.txt|cmake/|.*\.cmake$)' \
+          | grep -vE '\.(md|py)$' \
           || true)
 
 if [ -z "$CHANGED" ]; then

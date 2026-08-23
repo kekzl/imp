@@ -40,6 +40,219 @@ json weather_tools() {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// Harmony (gpt-oss) — the call is a channel with a recipient, not a tag (#1716)
+//
+// The bytes below are what the model actually emitted, captured from a live
+// gpt-oss-20b-mxfp4 run. It used to fall through to the ChatML scanner, which
+// found no <tool_call>, so the response carried an EMPTY content with
+// finish_reason "stop" while the model's own reasoning said it meant to call.
+// ---------------------------------------------------------------------------
+
+TEST(ToolCallHarmony, RecipientChannelBecomesACall) {
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|channel|>analysis<|message|>We need to use the get_weather function. "
+        "Provide city \"Berlin\".<|end|>"
+        "<|start|>assistant<|channel|>commentary to=functions.get_weather "
+        "<|constrain|>json<|message|>{\"city\":\"Berlin\"}<|call|>";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].name, "get_weather");
+    EXPECT_EQ(calls[0].arguments, "{\"city\":\"Berlin\"}");
+    EXPECT_TRUE(content.empty()) << "the analysis channel is reasoning, not content";
+}
+
+TEST(ToolCallHarmony, TruncatedCallWithNoTerminatorStillParses) {
+    // What the live run produced: max_tokens ended the generation before
+    // <|call|>. Requiring the terminator would drop the call the model made.
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|channel|>analysis<|message|>reasoning<|end|>"
+        "<|start|>assistant<|channel|>commentary to=functions.get_weather "
+        "<|constrain|>json<|message|>{\"city\":\"Berlin\"}";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].arguments, "{\"city\":\"Berlin\"}");
+}
+
+TEST(ToolCallHarmony, FinalChannelIsContentAndNotACall) {
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|channel|>analysis<|message|>thinking<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>It is 17 degrees.<|return|>";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    EXPECT_TRUE(calls.empty());
+    EXPECT_EQ(content, "It is 17 degrees.");
+}
+
+TEST(ToolCallHarmony, TwoCallsGetSequentialIds) {
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|start|>assistant<|channel|>commentary to=functions.a <|message|>{\"x\":1}<|call|>"
+        "<|start|>assistant<|channel|>commentary to=functions.b <|message|>{\"y\":2}<|call|>";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    ASSERT_EQ(calls.size(), 2u);
+    EXPECT_EQ(calls[0].name, "a");
+    EXPECT_EQ(calls[1].name, "b");
+    EXPECT_NE(calls[0].id, calls[1].id);
+}
+
+TEST(ToolCallHarmony, PlainCommentaryWithNoRecipientIsNotACall) {
+    // commentary without `to=` is chain-of-thought, and turning it into a call
+    // would invent one out of the model's own notes.
+    std::atomic<int> id{0};
+    const std::string raw =
+        "<|channel|>commentary<|message|>I could call get_weather here.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>Berlin is cold.<|return|>";
+    auto [content, calls] = parse_tool_calls(ChatTemplateFamily::HARMONY, raw, id, {});
+    EXPECT_TRUE(calls.empty());
+    EXPECT_EQ(content, "Berlin is cold.");
+}
+
+TEST(ToolCallHarmony, StreamScannerFindsTheChannelHeader) {
+    // Streaming shares the family dispatch, so it was equally blind.
+    const std::string buf =
+        "prefix<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>";
+    auto scan = scan_tool_tag(buf, ChatTemplateFamily::HARMONY);
+    ASSERT_EQ(scan.kind, ToolTagScan::Kind::OPEN);
+    EXPECT_EQ(scan.fn_name, "get_weather");
+    EXPECT_EQ(std::string(scan.close_tag), "<|call|>");
+    EXPECT_EQ(buf.substr(0, scan.content_len), "prefix") << "the channel markup must not reach the stream";
+    EXPECT_EQ(scan.body_start, buf.size());
+}
+
+TEST(ToolCallHarmony, StreamScannerWaitsForTheRestOfTheHeader) {
+    auto partial = scan_tool_tag("<|channel|>commentary to=functions.get_wea", ChatTemplateFamily::HARMONY);
+    EXPECT_EQ(partial.kind, ToolTagScan::Kind::PARTIAL) << "header not finished";
+
+    auto none = scan_tool_tag("just some prose", ChatTemplateFamily::HARMONY);
+    EXPECT_EQ(none.kind, ToolTagScan::Kind::NONE);
+}
+
+TEST(ToolCallHarmony, StreamBodyParsesAsBareArguments) {
+    // The name lives in the header, so the body is the bare args object - the
+    // same shape the Llama3 path produces.
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_stream_tool_body("{\"city\":\"Berlin\"}", /*gemma_body=*/false, "get_weather", tc));
+    EXPECT_EQ(tc.name, "get_weather");
+    EXPECT_EQ(tc.arguments, "{\"city\":\"Berlin\"}");
+}
+
+// ---------------------------------------------------------------------------
+// tool_choice enforcement, per template family (#1592)
+//
+// `tool_choice: "required"` and a named function are enforced by the decode FSM
+// only where the family's tool envelope has a grammar. Everywhere else the
+// constraint degrades to a sentence in the prompt, and the request is still
+// accepted. This matrix is what makes that boundary reviewable: a family that
+// gains an envelope grammar, or loses one, moves a row here.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Every family the server can load, so a new enum entry shows up as a missing
+// row rather than as silently untested behaviour.
+constexpr ChatTemplateFamily kAllFamilies[] = {
+    ChatTemplateFamily::RAW,        ChatTemplateFamily::CHATML,      ChatTemplateFamily::LLAMA2,
+    ChatTemplateFamily::MISTRAL_V3, ChatTemplateFamily::LLAMA3,      ChatTemplateFamily::NEMOTRON,
+    ChatTemplateFamily::GEMMA,      ChatTemplateFamily::DEEPSEEK_R1, ChatTemplateFamily::PHI,
+    ChatTemplateFamily::HARMONY,
+};
+
+json named_choice(const char* name) { return {{"type", "function"}, {"function", {{"name", name}}}}; }
+
+}  // namespace
+
+TEST(ToolChoiceEnforcement, RequiredIsEnforcedOnChatMLOnly) {
+    for (ChatTemplateFamily f : kAllFamilies) {
+        const auto out = collect_tool_constraint(f, weather_tools(), json("required"));
+        const bool enforced = !out.empty();
+        EXPECT_EQ(enforced, f == ChatTemplateFamily::CHATML)
+            << "family " << imp::chat_template_family_name(f);
+    }
+}
+
+TEST(ToolChoiceEnforcement, NamedFunctionIsEnforcedOnChatMLAndLlama3) {
+    for (ChatTemplateFamily f : kAllFamilies) {
+        const bool chatml = !collect_tool_constraint(f, weather_tools(), named_choice("get_weather")).empty();
+        const bool llama3 =
+            !collect_llama3_forced_tool(f, weather_tools(), named_choice("get_weather")).first.empty();
+        const bool enforced = chatml || llama3;
+        const bool expected = f == ChatTemplateFamily::CHATML || f == ChatTemplateFamily::LLAMA3;
+        EXPECT_EQ(enforced, expected) << "family " << imp::chat_template_family_name(f);
+    }
+}
+
+TEST(ToolChoiceEnforcement, Llama3EnforcesTheNamedCaseButNotRequired) {
+    // The asymmetry is deliberate and is the reason this test exists: the
+    // Llama3 envelope carries the name in the TAG (`<function=NAME>`), so a
+    // forced single function maps onto the plain parameter schema, while
+    // "required" would need a name-in-tag enum binding that does not exist.
+    EXPECT_FALSE(
+        collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, weather_tools(), named_choice("get_weather"))
+            .first.empty());
+    EXPECT_TRUE(collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, weather_tools(), json("required"))
+                    .first.empty());
+    EXPECT_TRUE(
+        collect_tool_constraint(ChatTemplateFamily::LLAMA3, weather_tools(), json("required")).empty());
+}
+
+TEST(ToolChoiceEnforcement, AFreeFormSchemaFallsBackEverywhere) {
+    // No `properties` = nothing for the FSM's key phase to walk, so even ChatML
+    // degrades to the prompt hint. One unenforceable tool takes the whole
+    // request with it.
+    json tools = json::array(
+        {{{"type", "function"}, {"function", {{"name", "ping"}, {"parameters", {{"type", "object"}}}}}}});
+    EXPECT_TRUE(collect_tool_constraint(ChatTemplateFamily::CHATML, tools, json("required")).empty());
+    EXPECT_TRUE(
+        collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, tools, named_choice("ping")).first.empty());
+}
+
+TEST(ToolChoiceEnforcement, NamedFunctionNotInTheToolsArrayFallsBack) {
+    EXPECT_TRUE(
+        collect_tool_constraint(ChatTemplateFamily::CHATML, weather_tools(), named_choice("nope")).empty());
+    EXPECT_TRUE(collect_llama3_forced_tool(ChatTemplateFamily::LLAMA3, weather_tools(), named_choice("nope"))
+                    .first.empty());
+}
+
+TEST(ToolChoiceEnforcement, HelperAgreesWithTheCollectors) {
+    // The predicate and the collectors are two statements of one boundary, and
+    // a request is refused on the predicate while the FSM is built from the
+    // collectors. If they drift, the server refuses a request it could have
+    // enforced, or accepts one it cannot - and either reads as correct from
+    // the other side. Same inputs, both paths, asserted equal.
+    const json enforceable_schema = weather_tools();
+    for (ChatTemplateFamily f : kAllFamilies) {
+        for (const json& choice : {json("required"), named_choice("get_weather")}) {
+            const bool predicate = tool_choice_is_enforceable(f, choice);
+            const bool collected = !collect_tool_constraint(f, enforceable_schema, choice).empty() ||
+                                   !collect_llama3_forced_tool(f, enforceable_schema, choice).first.empty();
+            EXPECT_EQ(predicate, collected)
+                << "family " << imp::chat_template_family_name(f) << " choice " << choice.dump();
+        }
+    }
+}
+
+TEST(ToolChoiceEnforcement, AutoAndNoneAreAlwaysEnforceableBecauseTheyForceNothing) {
+    for (ChatTemplateFamily f : kAllFamilies) {
+        EXPECT_TRUE(tool_choice_is_enforceable(f, json("auto")));
+        EXPECT_TRUE(tool_choice_is_enforceable(f, json("none")));
+        EXPECT_TRUE(tool_choice_is_enforceable(f, json(nullptr)));
+        // An object without a name forces nothing either.
+        EXPECT_TRUE(tool_choice_is_enforceable(f, json{{"type", "function"}, {"function", json::object()}}));
+    }
+}
+
+TEST(ToolChoiceEnforcement, AutoAndNoneNeverForce) {
+    for (ChatTemplateFamily f : kAllFamilies) {
+        EXPECT_TRUE(collect_tool_constraint(f, weather_tools(), json("auto")).empty())
+            << imp::chat_template_family_name(f);
+        EXPECT_TRUE(collect_tool_constraint(f, weather_tools(), json("none")).empty())
+            << imp::chat_template_family_name(f);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ChatML (Qwen3, Hermes) — <tool_call>{json}</tool_call>
 // ---------------------------------------------------------------------------
 TEST(ToolCallChatML, SingleCallNameAndArgs) {

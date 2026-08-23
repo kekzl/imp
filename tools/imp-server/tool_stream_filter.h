@@ -28,6 +28,7 @@
 // that got that far virtually always completes the call.
 
 #include "tool_call.h"
+#include "stream_pipeline.h"  // imp::stream::utf8_complete_len (#1554)
 
 #include <algorithm>
 #include <string>
@@ -280,12 +281,36 @@ private:
             }
             size_t upto = (args_end_ != std::string::npos) ? args_end_ : i;
             if (upto > args_emitted_) {
-                Segment seg;
-                seg.kind = Segment::Kind::CALL_ARGS_DELTA;
-                seg.text = body_buf_.substr(args_emitted_, upto - args_emitted_);
-                streamed_args_ += seg.text;
-                r.push_back(std::move(seg));
-                args_emitted_ = upto;
+                std::string piece = body_buf_.substr(args_emitted_, upto - args_emitted_);
+                // #1554: `limit` above is pulled back by close_tag_.size() - 1
+                // BYTES so a partially arrived close tag cannot leak into the
+                // arguments. That cut lands mid-codepoint whenever a multi-byte
+                // character sits at the boundary, and each half is
+                // JSON-encoded into its own delta, where dump_safe turns it
+                // into U+FFFD. Measured on Qwen3-8B-Q8_0 with forced
+                // tool_choice: 10 replacement characters in one argument
+                // string. Hold the incomplete tail back for the next feed, the
+                // way the per-token content path has since #1310.
+                //
+                // Not when args_end_ is known: that is the real end of the
+                // value, there is no next feed to complete anything, and a tail
+                // there is genuinely ill-formed rather than split.
+                if (args_end_ == std::string::npos) {
+                    const size_t complete = imp::stream::utf8_complete_len(piece);
+                    // Same 3-byte bound as Utf8Stitch::feed: a split codepoint
+                    // is at most 3 bytes short, and holding a longer tail would
+                    // stall the stream on genuinely invalid input.
+                    if (complete < piece.size() && piece.size() - complete <= 3)
+                        piece.resize(complete);
+                }
+                if (!piece.empty()) {
+                    Segment seg;
+                    seg.kind = Segment::Kind::CALL_ARGS_DELTA;
+                    args_emitted_ += piece.size();
+                    streamed_args_ += piece;
+                    seg.text = std::move(piece);
+                    r.push_back(std::move(seg));
+                }
             }
             if (args_end_ != std::string::npos)
                 stream_state_ = StreamState::TAIL;

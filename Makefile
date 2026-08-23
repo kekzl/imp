@@ -18,7 +18,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -128,6 +128,16 @@ test-unit: build
 # stale.
 test-gpu: build
 	$(DOCKER_RUN) imp-tests
+	@# #1575: DetEvalE2ETest is the only end-to-end determinism gate in the
+	@# tree, and it takes its GTEST_SKIP branch unless a model env var is set.
+	@# DOCKER_RUN carries none, so the pre-commit hook's "full suite" stage ran
+	@# it as a skip - the gate existed and never executed. It runs here
+	@# explicitly, with only the two variables it needs, rather than handing
+	@# test-gpu the whole model battery.
+	docker run --rm --gpus all -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
+		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
+		$(DOCKER_IMG) imp-tests --gtest_filter="*DetEvalE2ETest*"
 
 # Stage 3 — the SERVER stage (local, GPU-only). Boots a real imp-server against
 # a live model and GATES on the OpenAI+Anthropic wire batteries (endpoints,
@@ -343,7 +353,9 @@ test-golden: build
 verify: build check-gpu
 	@scripts/verify.sh full
 
-# verify-fast: pre-push gate (~90s). filtered tests + 1 smoke.
+# verify-fast: pre-push gate. `build` + filtered tests + perf + 1 smoke.
+# Measured on an unchanged tree: 3 s cached build + 37 s script. A source
+# change adds the full image build (#1587).
 # Perf gate uses --prefill-chunk-size 0 to stay apples-to-apples with tests/perf_baseline.json.
 verify-fast: build check-gpu
 	@scripts/verify.sh fast
@@ -375,7 +387,11 @@ verify-north-star: build check-gpu
 # `-u` matches the host UID so the write succeeds.
 MODEL ?= /models/Qwen3-8B-Q8_0.gguf
 MODELS_DIR ?= $(HOME)/models
-gen-perf-baseline: build
+# #1623: every other bench target takes check-gpu; this one - the one that
+# re-pins what the gate compares against - did not. A baseline measured next to
+# a co-tenant becomes the number every later run is judged by, and nothing
+# downstream can tell.
+gen-perf-baseline: check-gpu build
 	@docker run --rm --gpus all \
 		-v $(MODELS_DIR):/models \
 		-v $(PWD):/src -w /src \
@@ -470,10 +486,48 @@ check-alloc-sites:
 alloc-sites-stats:
 	@python3 tools/check_alloc_sites.py --stats
 
+# Assemble the compute_120f PTX fallback out of a built artefact (#1650). Needs
+# ptxas, not a GPU. Runs in CI's `PTX fallback` job; this target reproduces it.
+# The default target is build-dev, which keeps the fallback on; a build
+# configured with IMP_DISABLE_120F_FALLBACK=ON is skipped, not failed.
+check-ptx-fallback:
+	@docker run --rm -v $(PWD):/src -w /src $(DEV_IMG) \
+		bash scripts/check_ptx_fallback.sh $(or $(PTX_BIN),build-dev/libimp.a)
+
 # Allocate/free API pairing: cudaMalloc<->cudaFree, cudaMallocAsync<->cudaFreeAsync,
 # cudaMallocHost/cudaHostAlloc<->cudaFreeHost. Host-only, no Docker.
 check-alloc-pairs:
 	@python3 tools/check_alloc_pairs.py
+
+# Per-kernel registers and local frame on sm_120a (#1549). cuobjdump reads the
+# BUILT artifact, so this needs no GPU and no special build flags - but it does
+# need the CUDA toolkit, which only the builder image has. Uses build-dev
+# (make dev) when present, build (make build) otherwise.
+KERNEL_RES_LIB = $$(test -f build/libimp.a && echo build/libimp.a || echo build-dev/libimp.a)
+kernel-resources-dump:
+	@test -f build/libimp.a -o -f build-dev/libimp.a || { \
+	  echo "kernel-resources: no libimp.a - run 'make dev' or 'make build' first" >&2; exit 2; }
+	@docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
+	  '/usr/local/cuda/bin/cuobjdump -res-usage /src/'"$(KERNEL_RES_LIB)"' 2>/dev/null'
+
+kernel-resources: 
+	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py -
+
+kernel-resources-update:
+	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py - --update
+
+kernel-resources-stats:
+	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py - --stats
+
+# Re-pin tests/refs/chat_template_goldens.h from the upstream chat templates.
+# Needs network (six of the nine families have no local checkpoint) and writes
+# as the calling user, so the generated header does not end up root-owned.
+chat-goldens:
+	@docker run --rm --network host --user $$(id -u):$$(id -g) \
+	  -e HOME=/tmp -e PYTHONPATH=/tmp/pylibs \
+	  -v $(PWD):/src -v $(HOME)/models:/models:ro -w /src python:3.12-slim bash -c \
+	  'pip install -q --target /tmp/pylibs jinja2 transformers >/dev/null 2>&1; \
+	   python3 tests/refs/gen_chat_goldens.py --verify'
 
 # Every pair the checker resolved, matched or not. Never fails.
 alloc-pairs-list:

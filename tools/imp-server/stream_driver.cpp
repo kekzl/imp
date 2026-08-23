@@ -5,6 +5,7 @@
 #include "stream_driver.h"
 
 #include "utils.h"
+#include "core/logging.h"
 #include "tool_stream_filter.h"
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
@@ -36,6 +37,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     const bool snap_have_template = ctx.snap.have_template;
     const auto& snap_stop_token_ids = ctx.snap.stop_token_ids;
     const auto t_start = ctx.t_start;
+    auto t_prev_token = t_start;  // for the per-token ITL observation (#1577)
 
     const char* finish = nullptr;
 
@@ -45,6 +47,11 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // provably does not contain (a prefix of) a stop match.
     std::string pending_text;
     bool text_stop_matched = false;
+
+    // Which token produced which bytes of the two holdback buffers (#1588).
+    // See stream_pipeline.h for why the live counter cannot answer that.
+    imp::stream::TokenSpans pending_spans;
+    imp::stream::TokenSpans utf8_spans;
 
     // Streaming tool-call demux (tool_stream_filter.h) — pure state machine.
     // Detects ChatML/Llama3/Gemma-4 open markers, holds back potential-tag
@@ -101,27 +108,55 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // current channel's bytes so a token that splits a multibyte char is not
     // emitted mid-codepoint (#760).
     const bool harmony = (tpl_family == imp::ChatTemplateFamily::HARMONY);
-    std::string hm_channel, hm_name, hm_buf;
-    bool hm_in_msg = false, hm_reading_name = false;
+    std::string hm_channel, hm_name, hm_buf, hm_recipient, hm_args;
+    bool hm_in_msg = false, hm_reading_name = false, hm_call_open = false;
     auto hm_flush = [&](bool force) -> bool {
         size_t complete = force ? hm_buf.size() : utf8_complete_len(hm_buf);
         if (complete == 0)
             return true;
         std::string chunk = hm_buf.substr(0, complete);
         hm_buf.erase(0, complete);
+        // A channel addressed to `functions.NAME` is a tool call, not text
+        // (#1716). Its body used to be routed by channel name alone, and
+        // "commentary to=functions.get_weather" matched neither the reasoning
+        // nor the content branch, so the arguments fell out of the stream.
+        if (hm_call_open) {
+            hm_args += chunk;
+            return d.on_call_args_delta(chunk);
+        }
         if (hm_channel == "analysis" || hm_channel == "commentary")
             return d.harmony_reasoning_on ? d.emit_reasoning(chunk) : true;
         return d.emit_text(chunk);
     };
+    // Close an open call: record the arguments and let the dialect close its
+    // frame, exactly as the tag path does at CALL_END.
+    auto hm_close_call = [&]() -> bool {
+        if (!hm_call_open)
+            return true;
+        hm_call_open = false;
+        if (!out.tool_calls.empty())
+            out.tool_calls.back().arguments = hm_args;
+        hm_args.clear();
+        return d.on_call_end(out.tool_calls.empty() ? nullptr : &out.tool_calls.back());
+    };
 
-    // Flush confirmed holdback text up to a byte position.
+    // Flush confirmed holdback text up to a byte position, one emission per
+    // token so the dialect can attach that token's logprob (#1588).
+    //
+    // A flush boundary is not a token boundary: `up_to` comes from the stop
+    // matcher, so it can land mid-token. The complete tokens go out with their
+    // own index; the remainder goes out as one chunk with -1, which is the
+    // honest answer rather than the nearest index.
     auto flush_text = [&](size_t up_to) -> bool {
         up_to = std::min(up_to, pending_text.size());  // never read past the buffer
         if (up_to == 0)
             return true;
-        bool ok = d.emit_text(pending_text.substr(0, up_to));
+        for (const auto& e : pending_spans.flush(up_to)) {
+            if (!d.emit_content_token(pending_text.substr(e.offset, e.length), e.token_index))
+                return false;
+        }
         pending_text.erase(0, up_to);
-        return ok;
+        return true;
     };
 
     // Flush held content buffers before emitting a tool call (or directly
@@ -166,11 +201,26 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         }
 
         // Check request timeout.
+        //
+        // finish stays "length" on the wire: the OpenAI enum has no member for
+        // "the server gave up", and inventing one is what #1590 just fixed in
+        // the other direction. What was missing is that nothing recorded it at
+        // all, so a server timing out under load looked like clients asking
+        // for short answers (#1640). The counter is the honest channel.
         if (state.request_timeout > 0) {
             auto elapsed = std::chrono::steady_clock::now() - request_start;
             if (elapsed > std::chrono::seconds(state.request_timeout)) {
                 server_req->cancel();
+                state.metrics.requests_timed_out++;
+                IMP_LOG_WARN(
+                    "request ended at --request-timeout (%d s); the client sees "
+                    "finish_reason=length, which is indistinguishable from a spent "
+                    "token budget - see imp_requests_timed_out_total",
+                    state.request_timeout);
                 finish = "length";
+                out.error_type = "timeout_error";
+                out.error_message = "request exceeded the server's --request-timeout of " +
+                                    std::to_string(state.request_timeout) + " s";
                 break;
             }
         }
@@ -248,9 +298,23 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         }
 
         out.n_output_tokens++;
-        if (out.n_output_tokens == 1) {
-            auto t_first = std::chrono::high_resolution_clock::now();
-            out.ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
+        {
+            // One ITL observation per token, taken here rather than as a
+            // per-request mean after the fact (#1577): a mean cannot show the
+            // variance, and variance is the whole reason to keep a histogram.
+            auto t_tok = std::chrono::high_resolution_clock::now();
+            if (out.n_output_tokens == 1) {
+                out.ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
+                // Queue time is known once the worker has admitted the request,
+                // which is guaranteed by the time a token comes back (#1580).
+                const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                if (q >= 0.0)
+                    state.metrics.queue_time.observe(q / 1000.0);
+            } else {
+                state.metrics.inter_token.observe(
+                    std::chrono::duration<double>(t_tok - t_prev_token).count());
+            }
+            t_prev_token = t_tok;
         }
         // A token can end mid-character; hold the partial bytes until the next
         // one completes them, or the delta ships half a character as U+FFFD.
@@ -260,7 +324,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         // special-token pieces.
         if (harmony) {
             if (piece == "<|channel|>" || piece == "<|message|>" || piece == "<|end|>" ||
-                piece == "<|return|>" || piece == "<|start|>") {
+                piece == "<|return|>" || piece == "<|start|>" || piece == "<|call|>") {
                 if (hm_in_msg && !hm_flush(/*force=*/true))
                     return false;
                 if (piece == "<|channel|>") {
@@ -268,15 +332,47 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                     hm_in_msg = false;
                     hm_name.clear();
                 } else if (piece == "<|message|>") {
+                    // The header is `NAME [to=RECIPIENT] [<|constrain|>FMT]`.
+                    // Splitting on whitespace is what separates the channel
+                    // from the recipient; taking the whole string as the name
+                    // is how the call used to disappear.
                     size_t s = hm_name.find_first_not_of("\n\r\t ");
-                    size_t e = hm_name.find_last_not_of("\n\r\t ");
-                    hm_channel = (s == std::string::npos) ? std::string() : hm_name.substr(s, e - s + 1);
+                    hm_recipient.clear();
+                    if (s == std::string::npos) {
+                        hm_channel.clear();
+                    } else {
+                        size_t sp = hm_name.find_first_of("\n\r\t ", s);
+                        hm_channel = hm_name.substr(s, sp == std::string::npos ? std::string::npos : sp - s);
+                        const size_t to = hm_name.find("to=functions.", s);
+                        if (to != std::string::npos) {
+                            const size_t b = to + 13;
+                            size_t e2 = hm_name.find_first_of("\n\r\t <", b);
+                            hm_recipient = hm_name.substr(b, e2 == std::string::npos ? std::string::npos
+                                                                                     : e2 - b);
+                        }
+                    }
                     hm_reading_name = false;
                     hm_in_msg = true;
-                } else {  // <|end|> / <|return|> / <|start|>: close the block
+                    if (!hm_recipient.empty()) {
+                        ParsedToolCall tc;
+                        tc.name = hm_recipient;
+                        tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+                        if (!flush_buffered_content())
+                            return false;
+                        out.tool_calls.push_back(std::move(tc));
+                        out.tool_calls_emitted = true;
+                        hm_call_open = true;
+                        hm_args.clear();
+                        if (!d.on_call_begin(out.tool_calls.back()))
+                            return false;
+                    }
+                } else {  // <|end|> / <|return|> / <|start|> / <|call|>: close
+                    if (!hm_close_call())
+                        return false;
                     hm_in_msg = false;
                     hm_reading_name = false;
                     hm_channel.clear();
+                    hm_recipient.clear();
                 }
                 continue;
             }
@@ -424,23 +520,28 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         if (stop_sequences.empty()) {
             // No stop sequences: stream directly (with UTF-8 buffering).
             utf8_buf += piece;
+            utf8_spans.append(piece.size(), out.n_output_tokens - 1);
             size_t complete = utf8_complete_len(utf8_buf);
             if (complete > 0) {
-                std::string chunk = utf8_buf.substr(0, complete);
+                for (const auto& e : utf8_spans.flush(complete)) {
+                    if (!d.emit_content_token(utf8_buf.substr(e.offset, e.length), e.token_index))
+                        return false;
+                }
                 utf8_buf.erase(0, complete);
-                if (!d.emit_content_token(chunk))
-                    return false;
             }
         } else {
             // Buffer text and check for stop matches via the pure holdback
             // pipeline (stream_pipeline.h). It returns the safe-to-emit prefix
             // and whether a complete stop sequence is present.
             pending_text += piece;
+            pending_spans.append(piece.size(), out.n_output_tokens - 1);
             auto hd = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
             if (!flush_text(hd.flush_len))
                 return false;
             if (hd.complete_match) {
                 text_stop_matched = true;
+                if (hd.matched_index >= 0 && static_cast<size_t>(hd.matched_index) < stop_sequences.size())
+                    out.stop_sequence = stop_sequences[hd.matched_index];
                 finish = "stop";
                 break;
             }
@@ -463,8 +564,18 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         auto rs = think_split.finish();
         if (!rs.reasoning.empty())
             d.emit_reasoning(rs.reasoning);
-        if (!rs.content.empty())
+        if (!rs.content.empty()) {
+            // No span recorded on purpose. The splitter reorders bytes between
+            // its reasoning and content sinks, so which token produced which
+            // byte of its held tail is not recoverable from here. Those bytes
+            // go out with token_index -1 and therefore no logprob, which is
+            // the honest answer; guessing the last index would attach a real
+            // number to the wrong token. Measured consequence: a completion
+            // short enough that the splitter never releases anything during
+            // the loop (max_tokens=5 on a think model) streams one chunk with
+            // no logprobs.
             utf8_buf += rs.content;
+        }
     }
 
     // The model exhausted max_tokens while still reasoning and never produced
@@ -492,15 +603,28 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
 
     // Flush any remaining buffers (skip after a text-level stop match or when
     // tool calls were emitted).
-    if (!utf8_buf.empty() && !text_stop_matched && !out.tool_calls_emitted)
-        d.emit_text(utf8_buf);
+    if (!utf8_buf.empty() && !text_stop_matched && !out.tool_calls_emitted) {
+        for (const auto& e : utf8_spans.flush(utf8_buf.size()))
+            d.emit_content_token(utf8_buf.substr(e.offset, e.length), e.token_index);
+    }
     if (!pending_text.empty() && !text_stop_matched && !out.tool_calls_emitted)
-        d.emit_text(pending_text);
+        flush_text(pending_text.size());
 
     if (!finish)
         finish = out.tool_calls_emitted ? "tool_calls" : "length";
     else if (out.tool_calls_emitted && std::strcmp(finish, "stop") == 0)
         finish = "tool_calls";
+
+    // The engine's "capacity" reaches here from four emission sites in
+    // batching_engine.cpp. Non-streaming answers 503 for the same condition;
+    // the stream cannot, so it says so in an `error` event instead of shipping
+    // "capacity" as a stop_reason no dialect defines (#1552, #1553).
+    if (std::strcmp(finish, "capacity") == 0 && !out.error_type) {
+        out.error_type = "overloaded_error";
+        out.error_message =
+            "the KV pool cannot hold this request; it was admitted and then dropped. "
+            "Shorten the prompt or retry when the server is less loaded.";
+    }
     out.finish = finish;
     return true;
 }
@@ -512,8 +636,8 @@ void finish_stream_accounting_(ServerState& state, ChatRequestContext& ctx,
     double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
     int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
     int n_prompt_tokens = ctx.snap.n_prompt_tokens;
-    fprintf(stderr, "[%s] %s%d prompt + %d completion tokens, %.1f ms (ttft=%.1f ms, cached=%d)\n",
-            req_id.c_str(), label, n_prompt_tokens, out.n_output_tokens, ms, out.ttft_ms, cached);
+    IMP_LOG_INFO("[%s] %s%d prompt + %d completion tokens, %.1f ms (ttft=%.1f ms, cached=%d)", req_id.c_str(),
+                 label, n_prompt_tokens, out.n_output_tokens, ms, out.ttft_ms, cached);
     state.metrics.requests_total++;
     state.metrics.tokens_prompt_total += n_prompt_tokens;
     state.metrics.tokens_completion_total += out.n_output_tokens;
@@ -523,10 +647,8 @@ void finish_stream_accounting_(ServerState& state, ChatRequestContext& ctx,
     state.metrics.request_duration.observe(ms / 1000.0);
     if (out.n_output_tokens > 0)
         state.metrics.ttft.observe(out.ttft_ms / 1000.0);
-    // Mean inter-token latency: post-first-token decode time spread over the
-    // remaining tokens. Streaming-only (non-stream has no per-token cadence).
-    if (out.n_output_tokens > 1)
-        state.metrics.inter_token.observe((ms - out.ttft_ms) / 1000.0 / (out.n_output_tokens - 1));
+
+    // Inter-token latency is observed per token inside the loop (#1577).
 
     // Streaming response content is not accumulated across SSE chunks, so the
     // JSONL `response` field stays null. The request body, token counts,

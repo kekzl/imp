@@ -301,11 +301,11 @@ static const GemmSize kNvfp4Sizes[] = {
 };
 static constexpr int kNumNvfp4Sizes = sizeof(kNvfp4Sizes) / sizeof(kNvfp4Sizes[0]);
 
-void bench_gemm_nvfp4_cutlass() {
+bool bench_gemm_nvfp4_cutlass() {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
         printf("bench_gemm_nvfp4_cutlass: no CUDA device available, skipping.\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
     printf("=== Production CUTLASS sm_120 NVFP4 dense GEMM ===\n");
     printf("(peak FP4 mma.sync ~2019 TOPS measured; standalone ref hits 48%%)\n\n");
@@ -319,15 +319,16 @@ void bench_gemm_nvfp4_cutlass() {
         printf("  [%-14s] %8.3f ms  %7.1f TOP/s  %5.1f%% of 2019 peak\n", sz.label, avg_ms, tops, pct_peak);
     }
     printf("\n");
+    return true;
 }
 
-void bench_gemm() {
+bool bench_gemm() {
     // Check for CUDA device availability
     int device_count = 0;
     cudaError_t err = cudaGetDeviceCount(&device_count);
     if (err != cudaSuccess || device_count == 0) {
         printf("bench_gemm: no CUDA device available, skipping.\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     printf("=== GEMM Benchmark ===\n\n");
@@ -351,6 +352,7 @@ void bench_gemm() {
         printf("  [%-30s] %8.3f ms  %7.2f TFLOPS\n", sz.label, avg_ms, tflops);
     }
     printf("\n");
+    return true;
 }
 
 }  // namespace imp

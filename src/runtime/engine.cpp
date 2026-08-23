@@ -123,10 +123,6 @@ Engine::~Engine() {
         IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
         async_d_block_tables_swa_ = nullptr;
     }
-    if (d_banned_tokens_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_banned_tokens_));
-        d_banned_tokens_ = nullptr;
-    }
     if (swa_snap_slab_) {
         IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));
         swa_snap_slab_ = nullptr;
@@ -147,6 +143,11 @@ Engine::~Engine() {
     if (d_kv_slot_buf_) {
         cudaFree(d_kv_slot_buf_);
         d_kv_slot_buf_ = nullptr;
+    }
+    if (residual_meta_d_buf_) {
+        cudaFree(residual_meta_d_buf_);
+        residual_meta_d_buf_ = nullptr;
+        residual_meta_capacity_ = 0;
     }
     abandon_decode_pipeline();
     for (int p = 0; p < 2; ++p) {
@@ -197,17 +198,15 @@ Engine::~Engine() {
 // in engine_spec_mtp.cpp — chunked-prefill capable, DeepSeek-aligned pairing,
 // feed-only forwards without the lm_head GEMV.)
 
-
-bool Engine::encoder_embed(const int32_t* tokens, int n, std::vector<float>& out) {
+bool Engine::encoder_embed(std::span<const int32_t> tokens, std::vector<float>& out) {
     if (encoder_ws_storage_ == nullptr || !model_) {
         IMP_LOG_ERROR("encoder_embed: no encoder workspace (not an encoder model?)");
         return false;
     }
     auto* ews = static_cast<imp::EncoderWorkspace*>(encoder_ws_storage_);
     out.resize(model_->config_.d_model);
-    return imp::encoder_embed(*model_, *ews, tokens, n, out.data(), stream_);
+    return imp::encoder_embed(*model_, *ews, tokens, out.data(), stream_);
 }
-
 
 // =====================================================================
 // Helper methods
@@ -379,6 +378,29 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         log_spec_stats_();
 }
 
+void Engine::cancel_sequence_(const std::shared_ptr<Request>& req) {
+    // The abnormal end of a request, as opposed to finish_request's graceful
+    // one. Both must release the same per-request resources.
+    //
+    // Six sites in the scheduler used to call free_sequence() alone (#1632).
+    // KV came back; the recurrent-state slot did not, and it is a fixed-size
+    // pool: once it is empty every later sequence falls back to the legacy
+    // `id % cap` aliasing, so two live sequences share one SSM state. On a
+    // dense model there is no slot and the release is a no-op, which is why
+    // this went unnoticed.
+    //
+    // Not shared with finish_request: prefix pinning (a cancelled request's
+    // prefix is not worth pinning) and the speculation telemetry (there was no
+    // completed generation to report).
+    kv_manager_->free_sequence(req->id);
+    release_recurrent_slot_(req->id);
+    req->recurrent_restore.reset();
+    req->swa_restore.reset();
+    spec_suffix_idx_.erase(req->id);
+    if (req->constraints)
+        constraints_return_(std::move(req->constraints));
+}
+
 void Engine::score_capture_(Request& req, const Tensor& logits, cudaStream_t stream) {
     if (req.score_token_ids.empty() || logits.data == nullptr)
         return;
@@ -502,13 +524,9 @@ void Engine::constraints_return_(std::shared_ptr<ConstraintManager> cm) {
 // Vision delegation
 // =====================================================================
 
-
-
-
-bool Engine::preprocess_image(const uint8_t* data, size_t len, ImageData& out) {
-    return vision_.preprocess(data, len, out);
+bool Engine::preprocess_image(std::span<const uint8_t> data, ImageData& out) {
+    return vision_.preprocess(data, out);
 }
-
 
 // =====================================================================
 // Initialization — decomposed into sub-phases
@@ -720,10 +738,21 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // *9/8 for 256-byte alignment padding across the arena's takes (integer
         // identical to t + t/8, just one expression instead of two).
         const size_t cap = std::max(kEngineArenaDefaultBytes, (d.total() + vision_bytes + batch_pool_bytes) * 9 / 8);
-        IMP_LOG_INFO("engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> %.1f MiB reserved",
-                     d.describe().c_str(), vision_bytes / (1024.0 * 1024.0),
-                     batch_pool_bytes / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
-        (void)engine_arena_open(cuda_malloc_backend(), cap);
+        // #1629: the INFO line printed "-> N MiB reserved" BEFORE the open and
+        // regardless of its outcome, and the outcome was discarded. Both made
+        // a failed open indistinguishable from a successful one in the log.
+        const MemError arena_err = engine_arena_open(cuda_malloc_backend(), cap);
+        if (arena_err == MemError::Ok) {
+            IMP_LOG_INFO("engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> %.1f MiB reserved",
+                         d.describe().c_str(), vision_bytes / (1024.0 * 1024.0),
+                         batch_pool_bytes / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
+        } else {
+            IMP_LOG_WARN(
+                "engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> open of "
+                "%.1f MiB FAILED; tenants fall back to their own allocations",
+                d.describe().c_str(), vision_bytes / (1024.0 * 1024.0), batch_pool_bytes / (1024.0 * 1024.0),
+                cap / (1024.0 * 1024.0));
+        }
         // Name the two charges that are already known, HERE rather than after
         // warmup. Both are facts by now — the context was measured above, the
         // arena just took its region — and naming them early is what lets
@@ -758,7 +787,27 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     } else {
         IMP_LOG_INFO("grouped-3x NVFP4 prewarm skipped: model has no experts");
     }
-    scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
+    // Two different values are called max_batch_size, and they bound the same
+    // pipeline at two different points (#1637): EngineConfig::max_batch_size
+    // caps ADMISSION here, and runtime.max_batch_size truncates the DECODE
+    // batch in engine_scheduler.cpp. When the decode cap is the smaller of the
+    // two, the rows admitted beyond it are prefilled, hold their KV, and never
+    // decode until a head row finishes - work paid for and parked.
+    //
+    // Admission is clamped to whichever is smaller, and says so. The names stay
+    // as they are: one is the C-API's EngineConfig field and the other is a
+    // documented imp.conf key, so renaming either breaks a published surface.
+    int admit_cap = config_.max_batch_size;
+    const int decode_cap = runtime_config_.runtime.max_batch_size;
+    if (decode_cap > 0 && admit_cap > decode_cap) {
+        IMP_LOG_INFO(
+            "admission capped at %d to match runtime.max_batch_size (EngineConfig::max_batch_size "
+            "is %d). Admitting more than the decode batch can serve parks the extra rows on their "
+            "KV until a head row finishes.",
+            decode_cap, admit_cap);
+        admit_cap = decode_cap;
+    }
+    scheduler_ = std::make_unique<Scheduler>(admit_cap);
     (void)stream_.create(cudaStreamNonBlocking);
     MemAccount::instance().checkpoint("01_prewarm_gemm");
 
@@ -968,6 +1017,13 @@ std::string Engine::generate(const std::string& prompt, int max_tokens, float te
 void Engine::add_request(std::shared_ptr<Request> req) {
     if (scheduler_) {
         req->id = next_request_id_++;
+        // The join between the two id spaces (#1582). Several engine log sites
+        // print `req %d` from the counter above, and some of them (the
+        // recurrent-slot and MTP ones) hold the integer without a Request to
+        // reach a string through - so the mapping is published once here
+        // instead of rewriting each site.
+        if (!req->trace_id.empty())
+            IMP_LOG_INFO("request %s -> engine req %d", req->trace_id.c_str(), req->id);
         // Initialize in_think_block from the prompt tail. Chat templates for
         // Qwen3 / Qwen3.5 / Qwen3.6 / DeepSeek-R1 inject `<think>\n` via
         // add_generation_prompt by default — without seeding the flag here,

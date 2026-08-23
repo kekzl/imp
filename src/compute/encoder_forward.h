@@ -26,6 +26,7 @@
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <vector>
+#include <span>
 
 namespace imp {
 
@@ -77,7 +78,7 @@ void encoder_workspace_free(EncoderWorkspace& ws);
 
 // Full pass: host tokens -> pooled, L2-normalized embedding (host float[d]).
 // Returns false on precondition violation (n > max_tokens, ws not init).
-bool encoder_embed(const Model& model, EncoderWorkspace& ws, const int32_t* tokens, int n,
-                   float* out_host, cudaStream_t stream);
+bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int32_t> tokens, float* out_host,
+                   cudaStream_t stream);
 
 }  // namespace imp

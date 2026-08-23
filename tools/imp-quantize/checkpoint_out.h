@@ -32,6 +32,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <string>
 #include <vector>
 
@@ -134,8 +135,8 @@ std::string compressed_tensors_quant_config(const std::vector<std::string>& igno
 // carry `"quantization_config": null` (Qwen3.8-27B does). Two keys of the same
 // name is legal JSON that most parsers resolve to the LAST one, so prepending
 // would produce a file that reads as unquantized.
-bool patch_config_json(const std::string& src, const std::string& quant_config_obj, std::string& out,
-                       std::string& err);
+[[nodiscard]] std::expected<std::string, std::string> patch_config_json(const std::string& src,
+                                                                        const std::string& quant_config_obj);
 
 // A combination that produces a checkpoint the target engine cannot load, or
 // nullptr when there is nothing to say. Reported before the conversion runs.
@@ -160,7 +161,8 @@ const char* portability_warning(OutputFormat fmt, bool quantize_lm_head);
 // Called BEFORE the first tensor is written, not at the copy step where the
 // file is actually needed: a source that cannot be declared should cost a
 // second, not the 25 minutes of a 27B conversion that then refuses to finish.
-bool can_declare_quantization(const std::string& in_dir, OutputFormat fmt, std::string& err);
+[[nodiscard]] std::expected<void, std::string> can_declare_quantization(const std::string& in_dir,
+                                                                        OutputFormat fmt);
 
 // Everything the checkpoint needs beside the weights.
 //
@@ -174,14 +176,15 @@ bool can_declare_quantization(const std::string& in_dir, OutputFormat fmt, std::
 // quantization_config the writer just produced, since that is where vLLM reads
 // the scheme from. In Modelopt mode it is copied verbatim and the declaration
 // goes to hf_quant_config.json, which is where imp's loader looks.
-bool copy_aux_files(const std::string& in_dir, const std::string& out_dir, OutputFormat fmt,
-                    const std::vector<std::string>& excluded_modules, bool calibrated, std::string& err);
+[[nodiscard]] std::expected<void, std::string> copy_aux_files(
+    const std::string& in_dir, const std::string& out_dir, OutputFormat fmt,
+    const std::vector<std::string>& excluded_modules, bool calibrated);
 
 // hf_quant_config.json — Modelopt's declaration. Not written for
 // compressed-tensors, where a second declaration in a DIFFERENT format is a way
 // for the two to disagree later.
-bool write_modelopt_quant_config(const std::string& out_dir, const std::vector<std::string>& excluded,
-                                 bool calibrated, std::string& err);
+[[nodiscard]] std::expected<void, std::string> write_modelopt_quant_config(
+    const std::string& out_dir, const std::vector<std::string>& excluded, bool calibrated);
 
 // recipe.yaml — llm-compressor's record of the run, written beside the
 // config.json block for compressed-tensors output.
@@ -191,14 +194,14 @@ bool write_modelopt_quant_config(const std::string& out_dir, const std::vector<s
 // of them reading this checkpoint as Modelopt inverts every tensor scale in
 // silence. It states the same scheme as the config block, from the same
 // arguments, so the two cannot say different things.
-bool write_recipe_yaml(const std::string& out_dir, const std::vector<std::string>& excluded,
-                       std::string& err);
+[[nodiscard]] std::expected<void, std::string> write_recipe_yaml(const std::string& out_dir,
+                                                                 const std::vector<std::string>& excluded);
 
 // A sharded checkpoint is only loadable with an index, and the index cannot be
 // copied from the source: quantizing one weight turns it into three tensors, so
 // the name->shard map has to be rebuilt from what was actually written.
-bool write_shard_index(const std::string& out_dir,
-                       const std::vector<std::pair<std::string, std::string>>& tensor_to_shard,
-                       size_t total_bytes, std::string& err);
+[[nodiscard]] std::expected<void, std::string> write_shard_index(
+    const std::string& out_dir, const std::vector<std::pair<std::string, std::string>>& tensor_to_shard,
+    size_t total_bytes);
 
 }  // namespace imp::quantize

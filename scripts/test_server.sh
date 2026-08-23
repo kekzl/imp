@@ -49,6 +49,16 @@ fi
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# Stage 3a: does the server start with NO capacity flags at all? Every battery
+# below runs against a server booted with four of them, so the configuration a
+# first-time reader runs was the one nothing covered (#1631). Its own script,
+# because it needs its own container with different arguments.
+echo "== default-start gate (#1631) =="
+if ! bash scripts/test_server_default_start.sh; then
+    echo "test-server: FAIL - imp-server does not start on shipped defaults"
+    exit 1
+fi
+
 echo "== launch imp-server ($MODEL) =="
 docker rm -f "$CTR" >/dev/null 2>&1 || true
 docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models -p "$PORT":"$PORT" "$IMG" \
@@ -89,6 +99,15 @@ run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
 run "vision refusal + utf8 (#1197/#1198)" python3 tests/test_server_vision_and_utf8.py
 run "embed/chat interleave" bash tests/test_server_embed_chat_interleave.sh 15
 run "0-token battery (#710)" env N=8 LOAD=80 FAIL_THRESHOLD=0.10 python3 tests/test_server_0token_battery.py
+# #1573: tools/analysis/degen_suite.py had ZERO invocation sites - 41 checks
+# that exit non-zero correctly and that nothing ever ran. The pre-push gate's
+# degeneration half is one smoke prompt against one model; this is the deep
+# battery, and this script already has the running server it needs.
+#
+# Categories, not --corpus: the corpus battery is ~250 prompts and belongs in a
+# longer lane. These are the server-protocol failure classes the C-API GTests
+# structurally cannot see (think-leak, special tokens, stream consistency).
+run "degeneration suite (#1573)" python3 tools/analysis/degen_suite.py --url "http://localhost:$PORT"
 
 echo
 if [ "${#fails[@]}" -ne 0 ]; then

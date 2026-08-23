@@ -17,7 +17,10 @@
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include "rate_limit.h"
+
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -64,23 +67,39 @@ struct RequestLogger {
 
 // Prometheus-style latency histogram (cumulative buckets, in seconds).
 // Lock-free: each observation bumps the matching cumulative buckets + sum +
-// count. Bucket upper bounds are shared by request-duration and TTFT; both
-// are sub-second-to-minutes scale so the same ladder fits.
+// count.
+//
+// The ladder is per-instance because one ladder does not fit every quantity
+// (#1577). Request duration and TTFT are sub-second-to-minutes; inter-token
+// latency is single-digit MILLISECONDS - at imp's own documented decode rates
+// every ITL observation landed in the first bucket of the shared ladder
+// (le=0.005), so histogram_quantile returned a function of the bucket bounds
+// rather than of the data.
 struct LatencyHistogram {
-    // le upper bounds in seconds; the implicit +Inf bucket is `count`.
     static constexpr int kNumBuckets = 11;
-    static constexpr double kBounds[kNumBuckets] = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
-                                                    0.5,   1.0,  2.5,   5.0,  10.0};
+    // Sub-second-to-minutes: request duration, TTFT.
+    static constexpr double kSecondsBounds[kNumBuckets] = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                                                           0.5,   1.0,  2.5,   5.0,  10.0};
+    // Milliseconds: inter-token latency. 400 tok/s is 2.5 ms, so the ladder
+    // has to resolve either side of that; the top end covers a stalled or
+    // heavily batched step.
+    static constexpr double kItlBounds[kNumBuckets] = {0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075,
+                                                       0.01,   0.025, 0.05,  0.1,   0.5};
+
+    const double* bounds = kSecondsBounds;  // set once at construction
     std::atomic<int64_t> buckets[kNumBuckets] = {};
     std::atomic<int64_t> count{0};
     // Sum of observed seconds, stored as micros to keep an integer atomic.
     std::atomic<int64_t> sum_us{0};
 
+    LatencyHistogram() = default;
+    explicit LatencyHistogram(const double* ladder) : bounds(ladder) {}
+
     void observe(double seconds) {
         if (seconds < 0)
             seconds = 0;
         for (int i = 0; i < kNumBuckets; ++i) {
-            if (seconds <= kBounds[i])
+            if (seconds <= bounds[i])
                 buckets[i].fetch_add(1, std::memory_order_relaxed);
         }
         count.fetch_add(1, std::memory_order_relaxed);
@@ -96,6 +115,12 @@ struct ServerMetrics {
     std::atomic<int64_t> tokens_completion_total{0};
     std::atomic<int64_t> tokens_cached_total{0};  // Prefix cache hits
     std::atomic<int64_t> requests_cancelled{0};   // Client-disconnect cancellations
+    // Requests the SERVER gave up on at --request-timeout. Distinct from
+    // requests_cancelled, which is the client going away: this one is imp's
+    // own decision and the operator's to tune (#1640). Without it a timeout
+    // was invisible - the client saw finish_reason "length", the same value a
+    // completed token budget produces, and no counter moved.
+    std::atomic<int64_t> requests_timed_out{0};
     // Constrained requests (json_schema/json_mode/enforced tools) that ALSO
     // request logprobs: they silently leave the ConstrainedPipeline fast path
     // for eager decode (~102 vs ~235 tok/s on the 8B reference) — surfaced
@@ -106,7 +131,22 @@ struct ServerMetrics {
     std::atomic<int64_t> model_loads_total{0};
     LatencyHistogram request_duration;  // end-to-end request latency
     LatencyHistogram ttft;              // time to first token
-    LatencyHistogram inter_token;       // mean inter-token latency (ITL) per request
+    // Per-TOKEN inter-token latency, on a millisecond ladder. It used to
+    // observe one per-request MEAN on the request-duration ladder, which
+    // answers neither "how long between tokens" nor "how does that vary"
+    // (#1577).
+    LatencyHistogram inter_token{LatencyHistogram::kItlBounds};
+    // Time from admission to the first decode step, i.e. how long a request
+    // waited behind others. Nothing measured queueing before (#1580).
+    LatencyHistogram queue_time;
+    // (Decode batch size lives on the BatchingEngine, where the batch is
+    // formed; /metrics reads it from there.)
+    // 4xx refusals. requests_failed counts 5xx only, and every rejection this
+    // server is designed to emit is a 4xx - so the error counter was blind to
+    // the whole designed error surface (#1579). Kept as its own series rather
+    // than folded in, because "the server broke" and "the server refused" are
+    // different alerts.
+    std::atomic<int64_t> requests_rejected{0};
     std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 };
 
@@ -166,12 +206,19 @@ struct ServerState {
     // Server limits
     int max_concurrent = 64;
     int request_timeout = 300;
-    int rate_limit = 0;        // requests per minute per IP (0=unlimited)
     int max_input_tokens = 0;  // reject prompts longer than this many tokens (0=disabled)
+    int max_n = 8;             // cap on `n` completions (0=unlimited)
+    int max_batch_items = 512;  // cap on rerank documents / embeddings input (0=unlimited)
+    int max_logit_bias = 1024;  // cap on logit_bias entries (0=unlimited)
 
-    // Rate limiter state: IP → list of request timestamps
-    std::mutex rate_mutex;
-    std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> rate_tracker;
+    // Rate limiting lives in its own unit so the CPU lane can test it
+    // (#1614); ServerState cannot be constructed there.
+    RateLimiter rate_limiter;
+
+    std::string rate_limit_key(const std::string& remote_addr, const std::string& xff) const {
+        return rate_limiter.key(remote_addr, xff);
+    }
+    bool check_rate_limit(const std::string& ip) { return rate_limiter.allow(ip); }
 
     // Per-request JSONL logger (opt-in via --log-requests).
     RequestLogger request_logger;
@@ -201,22 +248,6 @@ struct ServerState {
         return {obs_loaded, obs_model_name};
     }
 
-    // Check rate limit for an IP. Returns true if allowed.
-    bool check_rate_limit(const std::string& ip) {
-        if (rate_limit <= 0)
-            return true;
-        std::lock_guard<std::mutex> lock(rate_mutex);
-        auto now = std::chrono::steady_clock::now();
-        auto cutoff = now - std::chrono::seconds(60);
-        auto& stamps = rate_tracker[ip];
-        // Remove old entries
-        stamps.erase(std::remove_if(stamps.begin(), stamps.end(), [&](auto& t) { return t < cutoff; }),
-                     stamps.end());
-        if (static_cast<int>(stamps.size()) >= rate_limit)
-            return false;
-        stamps.push_back(now);
-        return true;
-    }
 };
 
 // Graceful shutdown
@@ -224,6 +255,10 @@ extern std::atomic<httplib::Server*> g_server;
 
 void signal_handler(int sig);
 std::string make_completion_id(ServerState& state);
+
+// A `req_imp_...` id for one HTTP request: set as the `request-id` response
+// header and echoed in Anthropic error bodies (#1561).
+std::string make_request_id(ServerState& state);
 int64_t unix_timestamp();
 
 std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::string& dir);
@@ -236,6 +271,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
 
 void handle_health(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_models(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, ServerState& state,
+                           const std::string& model_id);
 // Context-window probes for OpenAI-compatible clients that auto-detect the max
 // context length. /props follows llama.cpp (n_ctx), /info follows TGI
 // (max_total_tokens / max_input_tokens); /v1/models carries vLLM's

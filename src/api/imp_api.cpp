@@ -1,4 +1,6 @@
 #include "api/imp_internal.h"
+
+#include <atomic>
 #include "exec/executor.h"
 #include "runtime/engine.h"
 #include "model/gguf_loader.h"
@@ -312,12 +314,30 @@ int imp_context_max_seq_len(ImpContext ctx) {
 
 // --- Context / Runtime ---
 
+// #1629: the public header told callers to create one context per thread. Two
+// concurrent contexts do not work and cannot be made to work by the caller: the
+// T2 arena and the graph-slot pool are process-global, the second
+// engine_arena_open() returns InvalidArgument (the return value was discarded),
+// and whichever context is freed first closes both out from under the other.
+// Sequential create/free/create is fine and stays fine - reset_static_cuda_state()
+// exists for it - so the count is of LIVE contexts, not of contexts ever made.
+static std::atomic<int> g_live_contexts{0};
+
 ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext* out_ctx) {
     if (!model || !config || !out_ctx) {
         return IMP_ERROR_INVALID_ARG;
     }
 
     *out_ctx = nullptr;
+
+    if (g_live_contexts.load(std::memory_order_acquire) > 0) {
+        IMP_LOG_ERROR(
+            "imp_context_create: a context already exists in this process. The engine arena and "
+            "the graph-slot pool are process-global, so a second live context shares them and the "
+            "first free() releases them under the other one. Free the existing context first "
+            "(sequential create/free/create is supported), or run a second process. (#1629)");
+        return IMP_ERROR_INVALID_ARG;
+    }
 
     if (!model->model) {
         return IMP_ERROR_INVALID_MODEL;
@@ -375,6 +395,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         ctx->engine = std::move(engine);
         ctx->active_request = nullptr;
 
+        g_live_contexts.fetch_add(1, std::memory_order_release);
         *out_ctx = ctx;
         return IMP_SUCCESS;
     } catch (const std::bad_alloc&) {
@@ -391,6 +412,7 @@ void imp_context_free(ImpContext ctx) {
     if (!ctx)
         return;
     delete ctx;
+    g_live_contexts.fetch_sub(1, std::memory_order_release);
     imp::trim_device_mempool();
 }
 
@@ -794,7 +816,7 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
         // whenever the resolved prefill chunk size was smaller than the
         // corpus — which is the C-API DEFAULT: prefill_chunk_size=-1
         // resolves to 512 on dense archs.)
-        if (!ctx->engine->begin_perplexity_capture(tokens, n_tokens))
+        if (!ctx->engine->begin_perplexity_capture(std::span(tokens, static_cast<size_t>(n_tokens))))
             return IMP_ERROR_INTERNAL;
         ImpError e = imp_prefill(ctx, tokens, n_tokens);
         double ppl = -1.0;

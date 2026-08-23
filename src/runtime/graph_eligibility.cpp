@@ -8,6 +8,8 @@ const char* graph_demotion_reason_name(GraphDemotionReason r) {
             return "none";
         case GraphDemotionReason::ConfigNever:
             return "runtime.cuda_graphs=never";
+        case GraphDemotionReason::DebugRaw:
+            return "runtime.debug_raw=true";
         case GraphDemotionReason::Gemma4NoGraphs:
             return "gemma4.no_graphs=true";
         case GraphDemotionReason::CalibrationActive:

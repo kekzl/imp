@@ -1,7 +1,29 @@
 #include "utils.h"
+#include "imp/imp.h"
 #include "stream_pipeline.h"
 
+#include <algorithm>
+#include <cstring>
 #include <cstdio>
+
+// Make a client-supplied string safe to put back into a response body.
+//
+// Two independent problems, one helper. Ill-formed UTF-8 reaches `dump()` and
+// throws; control bytes and unbounded length reach whatever reads the response
+// (a log viewer, a terminal, a dashboard). Printable ASCII only, everything
+// else one '.', truncated with a marker so a reader can tell (#1618).
+std::string sanitize_for_echo(std::string_view in, size_t max_len) {
+    std::string out;
+    const size_t n = std::min(in.size(), max_len);
+    out.reserve(n + 3);
+    for (size_t i = 0; i < n; i++) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+        out.push_back((c >= 0x20 && c < 0x7f) ? static_cast<char>(c) : '.');
+    }
+    if (in.size() > max_len)
+        out += "...";
+    return out;
+}
 
 std::string dump_safe(const json& j) {
     // error_handler_t::replace: emit U+FFFD for ill-formed UTF-8 instead of
@@ -27,6 +49,86 @@ void drop_incomplete_utf8_tail(std::string& s) {
         s.resize(complete);
 }
 
+bool reject_body_too_deep(const httplib::Request& req, httplib::Response& res) {
+    // Every parser downstream is recursive and none bounds depth, nlohmann
+    // included and it runs first: measured on this tree, 50 000 nested arrays
+    // parse and dump() fine, 100 000 segfault the process. That is ~100 KB
+    // against a 100 MiB body cap, from an unauthenticated request, and one
+    // process means the SIGSEGV takes every in-flight stream with it.
+    constexpr int kMaxBodyNesting = 100;
+    if (req.body.empty() || json_nesting_depth(req.body, kMaxBodyNesting) <= kMaxBodyNesting)
+        return false;
+
+    send_dialect_error(res, req.path, 400, "invalid_request_error", "invalid_request_error",
+                       "request body nests deeper than 100 levels");
+    return true;
+}
+
+int json_nesting_depth(const std::string& body, int stop_at) {
+    int depth = 0, max_depth = 0;
+    bool in_string = false, escaped = false;
+    for (char c : body) {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        switch (c) {
+            case '"':
+                in_string = true;
+                break;
+            case '{':
+            case '[':
+                depth++;
+                if (depth > max_depth) {
+                    max_depth = depth;
+                    if (max_depth > stop_at)
+                        return max_depth;  // proven hostile, stop reading
+                }
+                break;
+            case '}':
+            case ']':
+                if (depth > 0)
+                    depth--;
+                break;
+            default:
+                break;
+        }
+    }
+    return max_depth;
+}
+
+size_t utf8_chunk_len(const std::string& s, size_t off, size_t max) {
+    if (off >= s.size())
+        return 0;
+    const size_t remaining = s.size() - off;
+    if (remaining <= max)
+        return remaining;  // the tail fits; whatever it is, it is not a split
+    const size_t complete = imp::stream::utf8_complete_len(s.substr(off, max));
+    if (complete > 0)
+        return complete;
+    // complete == 0 means no whole character fits in `max`. Emitting `max`
+    // bytes here would be the very split this function exists to prevent, so
+    // the cap yields: one character, whole, even if it is longer than `max`.
+    // A chunk size is a hint about frame size; a half character is wrong at any
+    // size. Falls back to one byte only for input that is ill-formed at `off`,
+    // where there is no character to keep intact and stalling is worse.
+    const unsigned char lead = static_cast<unsigned char>(s[off]);
+    size_t char_len = 1;
+    if ((lead & 0xE0) == 0xC0)
+        char_len = 2;
+    else if ((lead & 0xF0) == 0xE0)
+        char_len = 3;
+    else if ((lead & 0xF8) == 0xF0)
+        char_len = 4;
+    return std::min(char_len, remaining);
+}
+
 std::string Utf8Stitch::feed(const std::string& piece) {
     std::string buf = carry_ + piece;
     carry_.clear();
@@ -43,10 +145,69 @@ std::string Utf8Stitch::feed(const std::string& piece) {
     return buf;
 }
 
-void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message) {
-    json err = {{"error", {{"message", message}, {"type", type}}}};
+void send_json_error(httplib::Response& res, int status, const char* type, const std::string& message,
+                     const char* param, const char* code) {
+    json e = {{"message", message}, {"type", type}};
+    // Emitted only when supplied: OpenAI's own envelope carries them as null
+    // rather than absent, but a client that checks `"code" in err` should not
+    // see a key that says nothing.
+    if (param)
+        e["param"] = param;
+    if (code)
+        e["code"] = code;
+    json err = {{"error", std::move(e)}};
     res.status = status;
     res.set_content(dump_safe(err), "application/json");
+}
+
+int servable_context_tokens(int planned_max_seq_len, long long kv_capacity_tokens) {
+    if (kv_capacity_tokens <= 0 || kv_capacity_tokens >= planned_max_seq_len)
+        return planned_max_seq_len;
+    return static_cast<int>(kv_capacity_tokens);
+}
+
+bool is_anthropic_path(const std::string& path) { return path.rfind("/v1/messages", 0) == 0; }
+
+void send_anthropic_error(httplib::Response& res, int status, const char* type, const std::string& message,
+                          const std::string& request_id) {
+    json e = {{"type", type}, {"message", message}};
+    json err = {{"type", "error"}, {"error", std::move(e)}};
+    if (!request_id.empty()) {
+        err["request_id"] = request_id;
+        res.set_header("request-id", request_id);
+    }
+    res.status = status;
+    res.set_content(dump_safe(err), "application/json");
+}
+
+const char* anthropic_error_type_for(std::string_view openai_type, int status) {
+    // Anthropic's complete set. A type already in it passes through; the two
+    // this server invented do not (#1556).
+    static constexpr const char* kAnthropicTypes[] = {"invalid_request_error", "authentication_error",
+                                                      "billing_error",         "permission_error",
+                                                      "not_found_error",       "request_too_large",
+                                                      "rate_limit_error",      "api_error",
+                                                      "overloaded_error",      "timeout_error"};
+    for (const char* t : kAnthropicTypes)
+        if (openai_type == t)
+            return t;
+    if (openai_type == "capacity_error")
+        return "overloaded_error";
+    if (openai_type == "server_error")
+        return "api_error";
+    return status >= 500 ? "api_error" : "invalid_request_error";
+}
+
+void send_dialect_error(httplib::Response& res, const std::string& path, int status, const char* openai_type,
+                        const char* anthropic_type, const std::string& message,
+                        const std::string& request_id) {
+    if (is_anthropic_path(path)) {
+        send_anthropic_error(res, status, anthropic_type, message, request_id);
+        return;
+    }
+    if (!request_id.empty())
+        res.set_header("request-id", request_id);
+    send_json_error(res, status, openai_type, message);
 }
 
 bool answer_lost_to_reasoning(bool has_tool_calls, const std::string& content, const std::string& reasoning) {
@@ -117,6 +278,28 @@ bool api_key_matches(const std::string& authorization, const std::string& x_api_
     return false;
 }
 
+std::string system_fingerprint(const std::string& model_name) {
+    // FNV-1a over version + model. Not a security hash; it exists so a client
+    // can tell "same backend" from "different backend" in one comparison.
+    const std::string material = std::string(imp_version()) + "\x1f" + model_name;
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : material) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "fp_%016llx", static_cast<unsigned long long>(h));
+    return buf;
+}
+
+const char* openai_finish_reason(const char* engine_finish) {
+    if (engine_finish == nullptr)
+        return "stop";
+    if (std::strcmp(engine_finish, "cancelled") == 0 || std::strcmp(engine_finish, "capacity") == 0)
+        return "length";
+    return engine_finish;
+}
+
 json safe_token_json(const std::string& text) {
     std::string safe;
     safe.reserve(text.size());
@@ -167,6 +350,79 @@ json token_bytes_json(const std::string& text) {
     for (unsigned char c : text)
         arr.push_back(static_cast<int>(c));
     return arr;
+}
+
+json completions_logprobs_json_one(const imp::TokenLogprobInfo& lp, size_t text_offset) {
+    json top_obj = json::object();
+    for (const auto& t : lp.top) {
+        const json key = safe_token_json(t.text);
+        if (key.is_string())
+            top_obj[key.get<std::string>()] = t.logprob;
+    }
+    return json{{"tokens", json::array({safe_token_json(lp.text)})},
+                {"token_logprobs", json::array({lp.logprob})},
+                {"top_logprobs", json::array({top_obj})},
+                {"text_offset", json::array({static_cast<int>(text_offset)})}};
+}
+
+json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit) {
+    json content = json::array();
+    for (size_t i = 0; i < lps.size() && i < limit; i++) {
+        const auto& lp = lps[i];
+        json top_arr = json::array();
+        for (const auto& t : lp.top) {
+            top_arr.push_back({{"token", safe_token_json(t.text)},
+                               {"logprob", t.logprob},
+                               {"bytes", token_bytes_json(t.text)}});
+        }
+        content.push_back({{"token", safe_token_json(lp.text)},
+                           {"logprob", lp.logprob},
+                           {"bytes", token_bytes_json(lp.text)},
+                           {"top_logprobs", top_arr}});
+    }
+    return json{{"content", content}};
+}
+
+json completions_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
+                               const std::string& text) {
+    json tokens = json::array();
+    json token_logprobs = json::array();
+    json top_logprobs = json::array();
+    json text_offset = json::array();
+
+    // The offset walk: each token's offset is where its text begins in the
+    // completion. Tracked by advancing through `text` rather than by summing
+    // token lengths, because the decoded token text and the assembled string
+    // can disagree (a stop sequence trims the tail, and a detokenizer may drop
+    // a leading space). When they do, the offsets stop advancing rather than
+    // running past the end of the string.
+    size_t cursor = 0;
+    for (size_t i = 0; i < lps.size() && i < limit; i++) {
+        const auto& lp = lps[i];
+        tokens.push_back(safe_token_json(lp.text));
+        token_logprobs.push_back(lp.logprob);
+        text_offset.push_back(static_cast<int>(cursor));
+
+        // top_logprobs here is an OBJECT per position (token -> logprob), not
+        // the array of objects the Chat shape uses.
+        json top_obj = json::object();
+        for (const auto& t : lp.top) {
+            const json key = safe_token_json(t.text);
+            if (key.is_string())
+                top_obj[key.get<std::string>()] = t.logprob;
+        }
+        top_logprobs.push_back(top_obj);
+
+        if (!lp.text.empty() && cursor + lp.text.size() <= text.size() &&
+            text.compare(cursor, lp.text.size(), lp.text) == 0) {
+            cursor += lp.text.size();
+        }
+    }
+
+    return json{{"tokens", tokens},
+                {"token_logprobs", token_logprobs},
+                {"top_logprobs", top_logprobs},
+                {"text_offset", text_offset}};
 }
 
 size_t utf8_complete_len(const std::string& s) {
@@ -407,31 +663,72 @@ ChannelSegments split_harmony_channels(const std::string& text) {
     static const std::string END = "<|end|>";
     static const std::string START = "<|start|>";
     static const std::string RET = "<|return|>";
+    static const std::string CALL = "<|call|>";
 
     ChannelSegments out;
-    std::string cur;  // current channel name; empty = no active channel
+    std::string cur;        // current channel name; empty = no active channel
+    std::string recipient;  // "functions.NAME" from the channel header, if any
+    std::string tool_body;  // body of a call addressed to a recipient
     bool in_msg = false;
     const size_t n = text.size();
     size_t i = 0;
     auto at = [&](const std::string& m) { return text.compare(i, m.size(), m) == 0; };
     auto emit = [&](char c) {
-        if (cur == "analysis" || cur == "commentary")
+        if (!recipient.empty())
+            tool_body.push_back(c);
+        else if (cur == "analysis" || cur == "commentary")
             out.reasoning.push_back(c);
         else if (cur == "final")
             out.content.push_back(c);
         else
             out.other.push_back(c);
     };
+    // Close whatever block is open. A body addressed to `functions.NAME`
+    // becomes a tool call rather than text.
+    auto close_block = [&]() {
+        constexpr const char* kFns = "functions.";
+        if (!recipient.empty() && recipient.compare(0, 10, kFns) == 0) {
+            size_t a = tool_body.find_first_not_of("\n\r\t ");
+            size_t b = tool_body.find_last_not_of("\n\r\t ");
+            if (a != std::string::npos)
+                out.tool_calls.push_back({recipient.substr(10), tool_body.substr(a, b - a + 1)});
+        }
+        recipient.clear();
+        tool_body.clear();
+        cur.clear();
+        in_msg = false;
+    };
     while (i < n) {
         if (at(CH)) {
             i += CH.size();
-            // Channel name runs up to <|message|> (or any other control marker).
-            std::string name;
+            // The header between <|channel|> and <|message|> is not just a
+            // name: a tool call carries a recipient and a constraint, as in
+            //   commentary to=functions.get_weather <|constrain|>json
+            // Splitting only on '<' left `cur` as the whole string, which
+            // matched no known channel, so the body went to `other` and was
+            // dropped (#1716). Take the first token as the channel and read a
+            // `to=` out of the rest.
+            std::string header;
             while (i < n && !at(MSG) && !at(END) && !at(START) && !at(CH) && text[i] != '<')
-                name.push_back(text[i++]);
-            size_t s = name.find_first_not_of("\n\r\t ");
-            size_t e = name.find_last_not_of("\n\r\t ");
-            cur = (s == std::string::npos) ? std::string() : name.substr(s, e - s + 1);
+                header.push_back(text[i++]);
+            size_t s = header.find_first_not_of("\n\r\t ");
+            if (s == std::string::npos) {
+                cur.clear();
+                recipient.clear();
+            } else {
+                size_t sp = header.find_first_of("\n\r\t ", s);
+                cur = header.substr(s, sp == std::string::npos ? std::string::npos : sp - s);
+                recipient.clear();
+                if (sp != std::string::npos) {
+                    const size_t to = header.find("to=", sp);
+                    if (to != std::string::npos) {
+                        size_t e = header.find_first_of("\n\r\t ", to + 3);
+                        recipient = header.substr(to + 3,
+                                                  e == std::string::npos ? std::string::npos : e - (to + 3));
+                    }
+                }
+            }
+            tool_body.clear();
             in_msg = false;
             continue;
         }
@@ -442,20 +739,24 @@ ChannelSegments split_harmony_channels(const std::string& text) {
         }
         if (at(END)) {
             i += END.size();
-            in_msg = false;
-            cur.clear();
+            close_block();
+            continue;
+        }
+        if (at(CALL)) {
+            // The marker that ends a tool call. It was in no control set, so
+            // it used to fall through as literal text.
+            i += CALL.size();
+            close_block();
             continue;
         }
         if (at(RET)) {
             i += RET.size();
-            in_msg = false;
-            cur.clear();
+            close_block();
             continue;
         }
         if (at(START)) {
             i += START.size();
-            in_msg = false;
-            cur.clear();
+            close_block();
             // Drop the role name up to the next control marker.
             while (i < n && !at(CH) && !at(MSG) && text[i] != '<')
                 i++;
@@ -465,6 +766,10 @@ ChannelSegments split_harmony_channels(const std::string& text) {
             emit(text[i]);
         i++;
     }
+    // A truncated generation - max_tokens, or a stop before <|call|> - leaves
+    // the last block open. Close it, or the tool call the model did emit is
+    // lost to a missing terminator.
+    close_block();
 
     auto trim = [](std::string& s) {
         size_t a = s.find_first_not_of("\n\r\t ");
@@ -554,19 +859,22 @@ std::string sse_chunk(const std::string& id, int64_t created, const std::string&
                 {"object", "chat.completion.chunk"},
                 {"created", created},
                 {"model", model},
+                {"system_fingerprint", system_fingerprint(model)},
                 {"choices", json::array({choice})}};
     return "data: " + dump_safe(obj) + "\n\n";
 }
 
 std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
-                                 const std::string& text, const char* finish_reason) {
+                                 const std::string& text, const char* finish_reason, const json& logprobs) {
     json choice = {{"index", 0},
                    {"text", text},
+                   {"logprobs", logprobs},
                    {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}};
     json obj = {{"id", id},
                 {"object", "text_completion"},
                 {"created", created},
                 {"model", model},
+                {"system_fingerprint", system_fingerprint(model)},
                 {"choices", json::array({choice})}};
     return "data: " + dump_safe(obj) + "\n\n";
 }

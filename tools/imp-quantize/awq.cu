@@ -64,19 +64,16 @@ struct DeviceBuf {
 
 }  // namespace
 
-bool search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K, const std::vector<float>& act_mean,
-                        SearchResult& out, std::string& err) {
-    if (mats.empty() || K <= 0 || static_cast<int64_t>(act_mean.size()) != K) {
-        err = "search_group_scale: empty group or activation/K mismatch";
-        return false;
-    }
+std::expected<SearchResult, std::string> search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K,
+                                                            const std::vector<float>& act_mean) {
+    if (mats.empty() || K <= 0 || static_cast<int64_t>(act_mean.size()) != K)
+        return std::unexpected("search_group_scale: empty group or activation/K mismatch");
+    SearchResult out;
 
     int64_t max_rows = 0;
     for (const auto& m : mats) {
-        if (!m.data || m.N <= 0 || static_cast<int64_t>(m.data->size()) != m.N * K) {
-            err = "search_group_scale: matrix shape does not match [N, K]";
-            return false;
-        }
+        if (!m.data || m.N <= 0 || static_cast<int64_t>(m.data->size()) != m.N * K)
+            return std::unexpected("search_group_scale: matrix shape does not match [N, K]");
         max_rows = std::max(max_rows, m.N);
     }
 
@@ -94,7 +91,7 @@ bool search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K, const s
         out.s.assign(static_cast<size_t>(K), 1.0f);
         out.alpha = 0.0f;
         out.err_rtn = out.err_best = 0.0;
-        return true;
+        return out;
     }
     const float floor_a = static_cast<float>(amean) * 1e-4f;
 
@@ -104,22 +101,19 @@ bool search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K, const s
     if (!d_scaled.alloc(elems * sizeof(half)) || !d_deq.alloc(elems * sizeof(half)) ||
         !d_s.alloc(static_cast<size_t>(K) * sizeof(float)) ||
         !d_w.alloc(static_cast<size_t>(K) * sizeof(float))) {
-        err = "search_group_scale: cudaMalloc failed for scratch";
-        return false;
+        return std::unexpected("search_group_scale: cudaMalloc failed for scratch");
     }
     for (size_t i = 0; i < mats.size(); i++) {
         const size_t bytes = static_cast<size_t>(mats[i].N) * static_cast<size_t>(K) * sizeof(half);
         if (!d_src[i].alloc(bytes) ||
             cudaMemcpy(d_src[i].p, mats[i].data->data(), bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-            err = "search_group_scale: uploading group matrix failed";
-            return false;
+            return std::unexpected("search_group_scale: uploading group matrix failed");
         }
     }
 
     const int reduce_blocks = 1024;
     if (!d_partial.alloc(static_cast<size_t>(reduce_blocks) * sizeof(double))) {
-        err = "search_group_scale: cudaMalloc failed for reduction";
-        return false;
+        return std::unexpected("search_group_scale: cudaMalloc failed for reduction");
     }
     std::vector<double> h_partial(reduce_blocks);
 
@@ -157,8 +151,7 @@ bool search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K, const s
         }
         if (cudaMemcpy(d_s.p, s.data(), s.size() * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
             cudaMemcpy(d_w.p, w.data(), w.size() * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
-            err = "search_group_scale: scale upload failed";
-            return false;
+            return std::unexpected("search_group_scale: scale upload failed");
         }
 
         double err_alpha = 0.0;
@@ -185,8 +178,7 @@ bool search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K, const s
                                        cudaMemcpyDeviceToHost) == cudaSuccess;
             free_nvfp4_result(q);
             if (!ok) {
-                err = "search_group_scale: quantize/reduce failed";
-                return false;
+                return std::unexpected("search_group_scale: quantize/reduce failed");
             }
             for (double v : h_partial)
                 err_alpha += v;
@@ -211,7 +203,7 @@ bool search_group_scale(const std::vector<GroupMatrix>& mats, int64_t K, const s
     out.alpha = best_alpha;
     out.err_rtn = rtn_err;
     out.err_best = best_err;
-    return true;
+    return out;
 }
 
 }  // namespace imp::awq

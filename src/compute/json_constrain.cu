@@ -67,27 +67,31 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     return true;
 }
 
+void JsonGrammar::reset() {
+    state_stack.clear();
+    current_state = JsonState::START;
+    partial_literal.clear();
+    target_literal.clear();
+    ws_run = 0;
+    enter_number('0');  // clear the number sub-state (see #1104)
+    num_need_digit = false;
+}
+
 void JsonConstrainer::reset() {
-    state_stack_.clear();
-    current_state_ = JsonState::START;
-    partial_literal_.clear();
-    target_literal_.clear();
-    ws_run_ = 0;
-    enter_number_('0');  // clear the number sub-state (see #1104)
-    num_need_digit_ = false;
+    g_.reset();
     preamble_.reset();
 }
 
 // Seed the RFC 8259 number sub-state on entry. `c` is the first character of
 // the number: a bare '-' still owes its first digit, a digit does not.
-void JsonConstrainer::enter_number_(char c) {
-    num_seen_frac_ = false;
-    num_seen_exp_ = false;
-    num_exp_sign_ok_ = false;
-    num_need_digit_ = (c == '-');
+void JsonGrammar::enter_number(char c) {
+    num_seen_frac = false;
+    num_seen_exp = false;
+    num_exp_sign_ok = false;
+    num_need_digit = (c == '-');
 }
 
-uint16_t JsonConstrainer::compute_allowed_mask() const {
+uint16_t JsonGrammar::compute_allowed_mask() const {
     // Whitespace is legal between any JSON tokens, but cap the run length —
     // see advance_char. (EOS has its own CAT_EOS bit, allowed in DONE only.)
     constexpr int kMaxWsRun = 32;
@@ -100,8 +104,8 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
     // estimate deliberately errs high (the string's parent frame is already on
     // the stack), because closing a few tokens early is strictly better than
     // returning unparseable output. Disabled while the budget is unknown (-1).
-    force_close_active_ = false;
-    if (remaining_budget_ >= 0 && current_state_ != JsonState::DONE) {
+    force_close_active = false;
+    if (remaining_budget >= 0 && current_state != JsonState::DONE) {
         // A closer is not legal in every state, and demanding one where the
         // grammar forbids it is worse than not narrowing at all: the safety
         // net below then retries with the ordinary mask, the model carries on
@@ -117,7 +121,7 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
         // takes, counted high on purpose — closing early beats not closing.
         uint16_t escape_mask = 0;
         int escape_cost = 0;
-        switch (current_state_) {
+        switch (current_state) {
             case JsonState::IN_STRING:
                 escape_mask = CAT_QUOTE;  // close it, then AFTER_VALUE takes closers
                 escape_cost = 1;
@@ -148,7 +152,7 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
             case JsonState::IN_LITERAL:
                 // A closer ends a *complete* literal; a partial one owes its
                 // tail first. 4 covers the longest ("false").
-                if (target_literal_.empty() || partial_literal_.size() < target_literal_.size()) {
+                if (target_literal.empty() || partial_literal.size() < target_literal.size()) {
                     escape_mask = CAT_LITERAL_CONT;
                     escape_cost = 4;
                 }
@@ -160,31 +164,30 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
             default:
                 break;  // OBJECT_START / ARRAY_START / *_AFTER_VALUE / IN_NUMBER take a closer
         }
-        // state_stack_ holds only the RETURN states of *nested* values, not the
+        // state_stack holds only the RETURN states of *nested* values, not the
         // container we are currently inside — at `{"a"` the stack is empty
         // while a '}' is still owed. Count that container explicitly, or the
         // narrowing releases one token too early and the document is truncated
         // anyway (observed: needed=0 in AFTER_KEY with an object still open).
-        const bool in_container = (current_state_ != JsonState::START && current_state_ != JsonState::DONE);
+        const bool in_container = (current_state != JsonState::START && current_state != JsonState::DONE);
         // +1 margin: the escape step can itself push a frame (a forced number
         // enters IN_NUMBER inside its container), so an estimate that is exact
         // at the moment it is taken can still land one token short. Measured
         // on the #1291 repro: without it the walk emits `-1]` and runs out
         // before the `}`. Erring high costs a token of content; erring low
         // costs the whole document.
-        const int needed =
-            static_cast<int>(state_stack_.size()) + (in_container ? 1 : 0) + escape_cost + 1;
-        if (remaining_budget_ <= needed) {
-            force_close_active_ = true;
+        const int needed = static_cast<int>(state_stack.size()) + (in_container ? 1 : 0) + escape_cost + 1;
+        if (remaining_budget <= needed) {
+            force_close_active = true;
             if (escape_mask != 0)
                 return escape_mask;
             return CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
         }
     }
 
-    uint16_t mask = (ws_run_ < kMaxWsRun) ? CAT_WHITESPACE : 0;
+    uint16_t mask = (ws_run < kMaxWsRun) ? CAT_WHITESPACE : 0;
 
-    switch (current_state_) {
+    switch (current_state) {
         case JsonState::START:
             // Must start with { or [. (Forcing object-only at the root was
             // tried and reverted: a json-reluctant model then fights the
@@ -252,7 +255,7 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
             // Inside literal (true/false/null): only literal continuation chars
             mask |= CAT_LITERAL_CONT;
             // If the literal is complete, also allow post-value tokens
-            if (!target_literal_.empty() && partial_literal_.size() >= target_literal_.size()) {
+            if (!target_literal.empty() && partial_literal.size() >= target_literal.size()) {
                 mask |= CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
             }
             break;
@@ -274,7 +277,7 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
     return mask;
 }
 
-bool JsonConstrainer::advance_char(char c) {
+bool JsonGrammar::advance_char(char c) {
     // Skip whitespace in non-string states — but count the run. JSON allows
     // unlimited inter-token whitespace, and a model that doesn't want to emit
     // JSON exploits that as an escape hatch (greedy decode emits newlines
@@ -290,21 +293,21 @@ bool JsonConstrainer::advance_char(char c) {
     // a JSON number, yet the blanket skip below kept the FSM in IN_NUMBER and
     // let the emitted text interleave digits with spaces (#1104). Close the
     // number first, then let the whitespace be skipped in the parent state.
-    if (current_state_ == JsonState::IN_NUMBER && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
-        if (num_need_digit_)
+    if (current_state == JsonState::IN_NUMBER && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+        if (num_need_digit)
             return false;  // "1." / "1e" / "-" cannot end here
-        current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
-        if (!state_stack_.empty())
-            state_stack_.pop_back();
+        current_state = state_stack.empty() ? JsonState::DONE : state_stack.back();
+        if (!state_stack.empty())
+            state_stack.pop_back();
     }
-    if (current_state_ != JsonState::IN_STRING && current_state_ != JsonState::IN_STRING_ESCAPE &&
+    if (current_state != JsonState::IN_STRING && current_state != JsonState::IN_STRING_ESCAPE &&
         (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
-        ws_run_++;
+        ws_run++;
         return true;
     }
-    ws_run_ = 0;
+    ws_run = 0;
 
-    switch (current_state_) {
+    switch (current_state) {
         // Stack discipline: every opener pushes its CONTINUATION — the state
         // the parser resumes in after the construct closes — and every close
         // pops and *uses* it (empty stack -> DONE). The old code popped the
@@ -315,9 +318,9 @@ bool JsonConstrainer::advance_char(char c) {
             // Root construct: continuation after it closes is DONE, which the
             // empty-stack fallback in the close handlers provides — no push.
             if (c == '{') {
-                current_state_ = JsonState::OBJECT_START;
+                current_state = JsonState::OBJECT_START;
             } else if (c == '[') {
-                current_state_ = JsonState::ARRAY_START;
+                current_state = JsonState::ARRAY_START;
             } else {
                 return false;
             }
@@ -326,16 +329,16 @@ bool JsonConstrainer::advance_char(char c) {
         case JsonState::OBJECT_START:
         case JsonState::OBJECT_NEED_KEY:
             if (c == '"') {
-                current_state_ = JsonState::IN_STRING;
-                state_stack_.push_back(JsonState::AFTER_KEY);
+                current_state = JsonState::IN_STRING;
+                state_stack.push_back(JsonState::AFTER_KEY);
             } else if (c == '}') {
                 // Legal only for an EMPTY object: after a comma this would be
                 // a trailing comma (#1096).
-                if (current_state_ == JsonState::OBJECT_NEED_KEY)
+                if (current_state == JsonState::OBJECT_NEED_KEY)
                     return false;
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
-                if (!state_stack_.empty())
-                    state_stack_.pop_back();
+                current_state = state_stack.empty() ? JsonState::DONE : state_stack.back();
+                if (!state_stack.empty())
+                    state_stack.pop_back();
             } else {
                 return false;
             }
@@ -343,7 +346,7 @@ bool JsonConstrainer::advance_char(char c) {
 
         case JsonState::AFTER_KEY:
             if (c == ':') {
-                current_state_ = JsonState::AFTER_COLON;
+                current_state = JsonState::AFTER_COLON;
             } else {
                 return false;
             }
@@ -354,33 +357,33 @@ bool JsonConstrainer::advance_char(char c) {
             // handlers pop the continuation, so a missing push here made
             // them steal the enclosing container's entry.
             if (c == '"') {
-                state_stack_.push_back(JsonState::AFTER_VALUE);
-                current_state_ = JsonState::IN_STRING;
+                state_stack.push_back(JsonState::AFTER_VALUE);
+                current_state = JsonState::IN_STRING;
             } else if (c == '{') {
-                state_stack_.push_back(JsonState::AFTER_VALUE);
-                current_state_ = JsonState::OBJECT_START;
+                state_stack.push_back(JsonState::AFTER_VALUE);
+                current_state = JsonState::OBJECT_START;
             } else if (c == '[') {
-                state_stack_.push_back(JsonState::AFTER_VALUE);
-                current_state_ = JsonState::ARRAY_START;
+                state_stack.push_back(JsonState::AFTER_VALUE);
+                current_state = JsonState::ARRAY_START;
             } else if (c == 't') {
-                target_literal_ = "true";
-                partial_literal_ = "t";
-                state_stack_.push_back(JsonState::AFTER_VALUE);
-                current_state_ = JsonState::IN_LITERAL;
+                target_literal = "true";
+                partial_literal = "t";
+                state_stack.push_back(JsonState::AFTER_VALUE);
+                current_state = JsonState::IN_LITERAL;
             } else if (c == 'f') {
-                target_literal_ = "false";
-                partial_literal_ = "f";
-                state_stack_.push_back(JsonState::AFTER_VALUE);
-                current_state_ = JsonState::IN_LITERAL;
+                target_literal = "false";
+                partial_literal = "f";
+                state_stack.push_back(JsonState::AFTER_VALUE);
+                current_state = JsonState::IN_LITERAL;
             } else if (c == 'n') {
-                target_literal_ = "null";
-                partial_literal_ = "n";
-                state_stack_.push_back(JsonState::AFTER_VALUE);
-                current_state_ = JsonState::IN_LITERAL;
+                target_literal = "null";
+                partial_literal = "n";
+                state_stack.push_back(JsonState::AFTER_VALUE);
+                current_state = JsonState::IN_LITERAL;
             } else if ((c >= '0' && c <= '9') || c == '-') {
-                state_stack_.push_back(JsonState::AFTER_VALUE);
-                current_state_ = JsonState::IN_NUMBER;
-                enter_number_(c);
+                state_stack.push_back(JsonState::AFTER_VALUE);
+                current_state = JsonState::IN_NUMBER;
+                enter_number(c);
             } else {
                 return false;
             }
@@ -390,11 +393,11 @@ bool JsonConstrainer::advance_char(char c) {
             if (c == ',') {
                 // Next key in object — NOT OBJECT_START, which would also
                 // accept `}` and turn `{"a":1,}` into legal output (#1096).
-                current_state_ = JsonState::OBJECT_NEED_KEY;
+                current_state = JsonState::OBJECT_NEED_KEY;
             } else if (c == '}') {
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
-                if (!state_stack_.empty())
-                    state_stack_.pop_back();
+                current_state = state_stack.empty() ? JsonState::DONE : state_stack.back();
+                if (!state_stack.empty())
+                    state_stack.pop_back();
             } else {
                 return false;
             }
@@ -405,39 +408,39 @@ bool JsonConstrainer::advance_char(char c) {
             if (c == ']') {
                 // Legal only for an EMPTY array: after a comma this would be
                 // a trailing comma (#1096).
-                if (current_state_ == JsonState::ARRAY_NEED_VALUE)
+                if (current_state == JsonState::ARRAY_NEED_VALUE)
                     return false;
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
-                if (!state_stack_.empty())
-                    state_stack_.pop_back();
+                current_state = state_stack.empty() ? JsonState::DONE : state_stack.back();
+                if (!state_stack.empty())
+                    state_stack.pop_back();
             } else if (c == '"') {
-                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
-                current_state_ = JsonState::IN_STRING;
+                state_stack.push_back(JsonState::ARRAY_AFTER_VALUE);
+                current_state = JsonState::IN_STRING;
             } else if (c == '{') {
-                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
-                current_state_ = JsonState::OBJECT_START;
+                state_stack.push_back(JsonState::ARRAY_AFTER_VALUE);
+                current_state = JsonState::OBJECT_START;
             } else if (c == '[') {
-                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
-                current_state_ = JsonState::ARRAY_START;
+                state_stack.push_back(JsonState::ARRAY_AFTER_VALUE);
+                current_state = JsonState::ARRAY_START;
             } else if (c == 't') {
-                target_literal_ = "true";
-                partial_literal_ = "t";
-                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
-                current_state_ = JsonState::IN_LITERAL;
+                target_literal = "true";
+                partial_literal = "t";
+                state_stack.push_back(JsonState::ARRAY_AFTER_VALUE);
+                current_state = JsonState::IN_LITERAL;
             } else if (c == 'f') {
-                target_literal_ = "false";
-                partial_literal_ = "f";
-                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
-                current_state_ = JsonState::IN_LITERAL;
+                target_literal = "false";
+                partial_literal = "f";
+                state_stack.push_back(JsonState::ARRAY_AFTER_VALUE);
+                current_state = JsonState::IN_LITERAL;
             } else if (c == 'n') {
-                target_literal_ = "null";
-                partial_literal_ = "n";
-                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
-                current_state_ = JsonState::IN_LITERAL;
+                target_literal = "null";
+                partial_literal = "n";
+                state_stack.push_back(JsonState::ARRAY_AFTER_VALUE);
+                current_state = JsonState::IN_LITERAL;
             } else if ((c >= '0' && c <= '9') || c == '-') {
-                state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
-                current_state_ = JsonState::IN_NUMBER;
-                enter_number_(c);
+                state_stack.push_back(JsonState::ARRAY_AFTER_VALUE);
+                current_state = JsonState::IN_NUMBER;
+                enter_number(c);
             } else {
                 return false;
             }
@@ -446,11 +449,11 @@ bool JsonConstrainer::advance_char(char c) {
         case JsonState::ARRAY_AFTER_VALUE:
             if (c == ',') {
                 // See AFTER_VALUE: ARRAY_START would also accept `]`.
-                current_state_ = JsonState::ARRAY_NEED_VALUE;
+                current_state = JsonState::ARRAY_NEED_VALUE;
             } else if (c == ']') {
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
-                if (!state_stack_.empty())
-                    state_stack_.pop_back();
+                current_state = state_stack.empty() ? JsonState::DONE : state_stack.back();
+                if (!state_stack.empty())
+                    state_stack.pop_back();
             } else {
                 return false;
             }
@@ -458,14 +461,14 @@ bool JsonConstrainer::advance_char(char c) {
 
         case JsonState::IN_STRING:
             if (c == '\\') {
-                current_state_ = JsonState::IN_STRING_ESCAPE;
+                current_state = JsonState::IN_STRING_ESCAPE;
             } else if (c == '"') {
                 // End of string — pop to parent state
-                if (!state_stack_.empty()) {
-                    current_state_ = state_stack_.back();
-                    state_stack_.pop_back();
+                if (!state_stack.empty()) {
+                    current_state = state_stack.back();
+                    state_stack.pop_back();
                 } else {
-                    current_state_ = JsonState::DONE;
+                    current_state = JsonState::DONE;
                 }
             } else if (static_cast<unsigned char>(c) < 0x20) {
                 // JSON forbids raw control chars (U+0000–U+001F) inside
@@ -482,7 +485,7 @@ bool JsonConstrainer::advance_char(char c) {
             // escape sequence (the escape char itself must be printable).
             if (static_cast<unsigned char>(c) < 0x20)
                 return false;
-            current_state_ = JsonState::IN_STRING;
+            current_state = JsonState::IN_STRING;
             break;
 
         case JsonState::IN_NUMBER: {
@@ -492,38 +495,38 @@ bool JsonConstrainer::advance_char(char c) {
             bool ok = false;
             if (c >= '0' && c <= '9') {
                 ok = true;
-                num_need_digit_ = false;
-                num_exp_sign_ok_ = false;
+                num_need_digit = false;
+                num_exp_sign_ok = false;
             } else if (c == '.') {
-                ok = !num_seen_frac_ && !num_seen_exp_ && !num_need_digit_;
+                ok = !num_seen_frac && !num_seen_exp && !num_need_digit;
                 if (ok) {
-                    num_seen_frac_ = true;
-                    num_need_digit_ = true;  // frac = "." 1*DIGIT
+                    num_seen_frac = true;
+                    num_need_digit = true;  // frac = "." 1*DIGIT
                 }
             } else if (c == 'e' || c == 'E') {
-                ok = !num_seen_exp_ && !num_need_digit_;
+                ok = !num_seen_exp && !num_need_digit;
                 if (ok) {
-                    num_seen_exp_ = true;
-                    num_exp_sign_ok_ = true;
-                    num_need_digit_ = true;  // exp = e [sign] 1*DIGIT
+                    num_seen_exp = true;
+                    num_exp_sign_ok = true;
+                    num_need_digit = true;  // exp = e [sign] 1*DIGIT
                 }
             } else if (c == '+' || c == '-') {
-                ok = num_exp_sign_ok_;
+                ok = num_exp_sign_ok;
                 if (ok) {
-                    num_exp_sign_ok_ = false;
-                    num_need_digit_ = true;
+                    num_exp_sign_ok = false;
+                    num_need_digit = true;
                 }
             }
             if (!ok) {
                 // A number still owing a digit ("3.", "1e", "-") is incomplete:
                 // nothing may terminate it, not even a structural char.
-                if (num_need_digit_)
+                if (num_need_digit)
                     return false;
                 // Number ended — this char is part of the parent context
                 // Pop back to parent and re-process this character
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
-                if (!state_stack_.empty())
-                    state_stack_.pop_back();
+                current_state = state_stack.empty() ? JsonState::DONE : state_stack.back();
+                if (!state_stack.empty())
+                    state_stack.pop_back();
                 return advance_char(c);  // re-process in parent context
             }
             break;
@@ -532,15 +535,15 @@ bool JsonConstrainer::advance_char(char c) {
         case JsonState::IN_LITERAL:
             // Strict: the char must be the literal's next expected char
             // ("tru"+'x' was silently accepted before).
-            if (partial_literal_.size() >= target_literal_.size() ||
-                c != target_literal_[partial_literal_.size()])
+            if (partial_literal.size() >= target_literal.size() ||
+                c != target_literal[partial_literal.size()])
                 return false;
-            partial_literal_ += c;
-            if (partial_literal_.size() >= target_literal_.size()) {
+            partial_literal += c;
+            if (partial_literal.size() >= target_literal.size()) {
                 // Literal complete — transition to parent
-                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
-                if (!state_stack_.empty())
-                    state_stack_.pop_back();
+                current_state = state_stack.empty() ? JsonState::DONE : state_stack.back();
+                if (!state_stack.empty())
+                    state_stack.pop_back();
             }
             break;
 
@@ -554,36 +557,21 @@ bool JsonConstrainer::advance_char(char c) {
 bool JsonConstrainer::sim_token_valid(const std::string& text) {
     // Snapshot → strict-advance over the whole token text → restore.
     // advance_char is the single grammar source of truth (no parallel FSM).
-    const JsonState st = current_state_;
-    const size_t depth = state_stack_.size();
-    const std::string plit = partial_literal_;
-    const std::string tlit = target_literal_;
-    const int ws = ws_run_;
-    // The number sub-state is part of the FSM and MUST round-trip too — a
-    // simulated token that walks into a number would otherwise leave
-    // num_seen_frac_/num_need_digit_ mutated on the real state (#1104).
-    const bool nfrac = num_seen_frac_, nexp = num_seen_exp_;
-    const bool nsign = num_exp_sign_ok_, ndig = num_need_digit_;
-    std::vector<JsonState> stack_copy = state_stack_;
-
+    //
+    // One struct copy since #1729. This used to save and restore eleven fields
+    // by hand, and the number sub-state had to be added to that list after
+    // #1104 found it missing: a simulated token that walked into a number left
+    // num_seen_frac/num_need_digit mutated on the real state. A field added to
+    // the grammar now round-trips because it is in the grammar.
+    const JsonGrammar saved = g_;
     bool ok = true;
     for (char c : text) {
-        if (!advance_char(c)) {
+        if (!g_.advance_char(c)) {
             ok = false;
             break;
         }
     }
-
-    current_state_ = st;
-    state_stack_ = std::move(stack_copy);
-    (void)depth;
-    partial_literal_ = plit;
-    target_literal_ = tlit;
-    num_seen_frac_ = nfrac;
-    num_seen_exp_ = nexp;
-    num_exp_sign_ok_ = nsign;
-    num_need_digit_ = ndig;
-    ws_run_ = ws;
+    g_ = saved;
     return ok;
 }
 
@@ -630,8 +618,8 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     // or '\\' can never change FSM state — skip the simulation.
     if (token_allow_.size() != static_cast<size_t>(vocab_size))
         token_allow_.assign(vocab_size, 0);
-    const bool in_string =
-        current_state_ == JsonState::IN_STRING || current_state_ == JsonState::IN_STRING_ESCAPE;
+    const bool in_string = g_.current_state == JsonState::IN_STRING ||
+                           g_.current_state == JsonState::IN_STRING_ESCAPE;
     size_t n_allowed = 0;
     // vocab_size is the LOGITS width (model vocab); token_categories_ /
     // token_texts_ only cover the TOKENIZER vocab (vocab_size_). SafeTensors
@@ -663,11 +651,11 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     // with finish_reason="stop" (worse than the truncation it was meant to
     // prevent). Retry once with the ordinary mask: force-close may help, it
     // must never make the outcome worse.
-    if (n_allowed == 0 && force_close_active_) {
-        const int saved = remaining_budget_;
-        remaining_budget_ = -1;  // disable narrowing for this recompute
+    if (n_allowed == 0 && g_.force_close_active) {
+        const int saved = g_.remaining_budget;
+        g_.remaining_budget = -1;  // disable narrowing for this recompute
         mask = compute_allowed_mask();
-        remaining_budget_ = saved;
+        g_.remaining_budget = saved;
         for (int i = 0; i < n_classified; i++) {
             uint8_t allow = 0;
             if ((token_categories_[i] & mask) != 0) {
@@ -693,7 +681,7 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
                 token_allow_[eid] = 1;
         }
         IMP_LOG_WARN("JsonConstrainer: no token satisfies the grammar in state %d — allowing EOS",
-                     std::to_underlying(current_state_));
+                     std::to_underlying(g_.current_state));
     }
 
     if (!dev_.has_token_allow()) {

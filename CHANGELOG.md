@@ -13,6 +13,41 @@ there instead of retelling it.
 
 ### Added
 
+- **Chat-template goldens for nine families** (#1572), rendered from the upstream
+  templates and compared byte-for-byte: ChatML (three checkpoints), Gemma, Llama 3,
+  Llama 2, Mistral V3, Nemotron, DeepSeek R1, Phi. Previously only Harmony had a
+  golden and the rest were structural smoke tests. `make chat-goldens` re-pins them.
+  The goldens compare the rendered prompt, not token IDs, so the whole set runs in
+  the CPU lane with no skips.
+
+- **Fuzz targets for the six parsers that take untrusted bytes** (#1620), in
+  `fuzz/`: JSON Schema, regex, GBNF, the tool-call stream filter, the
+  SafeTensors loader and `tokenizer.json`. Standard `LLVMFuzzerTestOneInput`
+  entry points for libFuzzer (`-DIMP_FUZZERS=ON`, clang), and the same functions
+  driven over a committed corpus plus a deterministic mutator in the CPU lane,
+  0.7 s, on every PR. The corpus is the inputs that actually broke something.
+  `docs/audit/SETTLED.md` S-28 and `AUDIT_ARCH_2026_07_29.md` both claimed these
+  surfaces were "fuzzed, in CI" while no fuzz target existed; both are corrected.
+
+- **A `Sanitizers` CI job** (#1621). No lane ran any sanitizer in any category
+  before: ASan/UBSan existed behind a manual `make asan`, and the only job that
+  mentions compute-sanitizer is gated on a GPU runner that does not exist. It
+  builds test-core and test-text with ASan+UBSan and runs them, including the
+  fuzz corpus. Measured worth: against four reverted parser fixes the corpus
+  catches 3 of 5 targets without ASan and 4 of 5 with it - an out-of-bounds read
+  is invisible otherwise.
+
+- **`VramOwned<T>`: an owning handle for a `VRAMAllocator` allocation.** The
+  allocator says of itself, in its own destructor, that it is "a tracker, not an
+  owner", so ownership lived with the caller as a raw pointer plus a free somewhere
+  else. That spelling is where this week's allocation defects were: four pointers
+  freed through an allocator that had not produced them, and 128 MiB released with
+  the wrong API. The handle carries the allocator that produced it and releases
+  through that one; move-only, and no `release()`, because a raw-pointer escape
+  would make the class writable again. Two callers converted, and the direct-site
+  allowlist shrinks 466 to 464. (`AUDIT.md` R7 records that earlier audits referred
+  to this type before it existed.)
+
 - **The release blocker is now enforced where it is defined.** `GOAL.md` makes a
   hero regressing against a competitor a release blocker, over seven heroes, of
   which gates observed two: Gemma-4 sat 5.3 % down for six weeks and no gate
@@ -68,6 +103,16 @@ there instead of retelling it.
   different translation units and no per-file check can see it.
 
 ### Changed
+
+- **The tree is C++23 where the build said it already was.** `bool f(...,
+  std::string& err)` is gone from `src/`, `tools/` and `include/` (36 sites, 15
+  of them header declarations), replaced by `std::expected`; host pointer+length
+  pairs became `std::span` (12 uses to 87). Device pointers deliberately stay
+  raw: a span over one is a silent host segfault at the first `s[0]`. What nvcc
+  13.3 accepts in **device** code was measured on the card rather than assumed,
+  and the audit's "nvcc constrains what is usable in `.cu`" is refuted:
+  [`CPP23.md`](docs/internals/CPP23.md).
+
 
 - **A red gate now blocks the merge.** Ruleset `Require CI` requires exactly one
   context, `Build`, so every other check was advisory and two PRs merged over a red
@@ -141,6 +186,1091 @@ there instead of retelling it.
   ([`LIMITATIONS.md`](docs/LIMITATIONS.md))
 
 ### Fixed
+
+- **`sim_token_valid` restored the JSON grammar state by hand, and that list had
+  already gone stale once.** #1104 added the RFC 8259 number sub-state to the
+  FSM and not to the eleven-field save/restore, so a simulated token that walked
+  into a number left `num_seen_frac` / `num_need_digit` mutated on the real
+  state. The grammar is a `JsonGrammar` struct now, vocabulary-free, and the
+  snapshot is one copy — a field added to the grammar round-trips because it is
+  in the grammar. Pure move: `advance_char` and `compute_allowed_mask`
+  referenced no vocabulary member, and the 86 JSON/schema property tests pass
+  unchanged. Groundwork for #1729.
+
+- **A clipped NVFP4 activation scale was silent** (#1544). The dynamic quantiser
+  encodes the per-16-block scale as `absmax/6` into UE4M3, which saturates at
+  448 - so a block with `absmax > 2688` quantises against a scale that is too
+  small, and `float_to_fp8_e4m3` clamps and returns without a word. Measured,
+  largest per-16-block absmax over a 4096-token prefill:
+
+  | model | largest block absmax | of the 2688 ceiling |
+  |---|---|---|
+  | Gemma-4-12B-NVFP4 | 2468 | **92%** |
+  | Nemotron-3-Nano-30B-A3B-NVFP4 | < 1500 | < 56% |
+
+  It does not fire on these models; the headroom on Gemma-4 is 8%. A device flag
+  records a crossing and `gemm_cleanup()` reports it at shutdown, so it stops
+  being silent. The per-tensor global scale that would remove the ceiling is not
+  in here - that changes the quantiser's numerics and needs its own equivalence
+  test.
+
+- **Three API-contract tests could have run in CI all along, and two passed
+  vacuously** (#1600). The `Real API contract` lane selects `-m nomodel`;
+  measured against the same model-less server it runs, 63 of 126 tests pass but
+  only 58 are marked, so five were coverable and deselected. Two of the five
+  pass on *nothing*: `test_sequence_numbers_monotonic` collected an empty SSE
+  list and asserted `[] == sorted([])`, and `test_probes_agree_on_context_length`
+  returned early when `/v1/models` was empty. Those two are fixed rather than
+  marked - the first now fails on an empty stream, which it would also have done
+  with a model - and the other three are marked. **CI lane 58 -> 61 tests.** The
+  generation contract (57 tests) still needs a GPU runner.
+
+- **The pre-push gate ran verify-fast for Python-only pushes.** It already
+  stripped `.md` before deciding; `.py` now goes with it, `scripts/verify.sh`
+  invoking no Python at all (checked). Same class as #1723 in the other hook.
+  `guard_precommit_filter` covers both hooks now, and fails if either starts
+  skipping buildable source.
+
+- **Two generators had drifted out of the `tests/refs/` index** — the table that
+  says which golden each one writes and which test consumes it, and the only way
+  rule 1 of that README ("every golden value traces to a committed generator")
+  can be checked at all. `gen_chat_goldens.py` and `gen_tokenizer_golden.py` are
+  listed now, and `scripts/docs_lint.py` fails when a `tests/refs/gen_*.py` has
+  no row, so the index cannot go stale again.
+
+- **A cuBLASLt matmul failure discarded the benchmarked algo without saying so**
+  (#1545). `reselect_algo_for_entry` replaced the timed probe's pick with
+  heuristic `results[0]` for the rest of the process and logged nothing; only a
+  *second* failure logged anything, so a shape could run on a different algo
+  than the one the probe chose, differently on each process start. The cache
+  entry now records whether its algo came from the probe or the heuristic, and
+  replacing a benchmarked one logs it once with the shape. The reselection
+  itself is unchanged - the retry is what keeps the matmul alive.
+
+- **A `top_k` one candidate over the batching limit cost 14.5% of throughput,
+  and changed what the model sampled from** (#1654). `sample_topk_topp_async`
+  refused the CUB regime (`top_k > 128`), so the whole batch fell back to
+  per-sequence synchronous sampling - one host round trip per sequence per step
+  instead of one pinned gather for the batch. The CUB path was already all-async
+  internally; only its trailing readback forced the sync, so it enqueues now.
+  Qwen3-8B Q8, six concurrent sequences, `top_k=128` against `top_k=129` (one
+  candidate of 151k apart, so the path is the only variable), median of three
+  rounds:
+
+  | | top_k=128 | top_k=129 | delta |
+  |---|---|---|---|
+  | before | 555.4 tok/s | 475.0 tok/s | **-14.5%** |
+  | after | 546.5 tok/s | 544.6 tok/s | -0.3% |
+
+  `sample_topk_topp_device` also **clamped** `top_k` to 128 with a warning, so a
+  request with `top_k=200` sampled from 128 candidates alone in the batch and
+  from 200 sharing it - the same request, two distributions, decided by its
+  neighbours. Both honour the request now.
+
+- **Multi-sequence decode on the residual path faulted with an illegal memory
+  access when CUDA graphs were on** (#1708). Silent wrong output, then a sticky
+  context: the first fault took every later request in the process with it, and
+  the client saw `finish_reason: length` with a degenerate string, not an error.
+  Three things on that path were resolved on the host at capture time - a
+  device pointer array `cudaMallocAsync`'d per call and per layer inside the
+  captured region and freed right after it, the ring index baked into those
+  pointers, and a host-side ring advance that a replay never runs (the
+  device-side advance was gated on `kv_seq_id`, which only the single-sequence
+  path sets). All three are computed on the device now. Qwen3-8B-Q8_0,
+  `kv_cache.bitdecoding_residual_tokens=64`, six concurrent requests:
+
+  | | before | after |
+  |---|---|---|
+  | answers | 6/6 empty | 6/6 correct |
+  | `illegal memory access` in the log | 15 | 0 |
+
+  One request was clean before and stays clean; graphs off was clean before and
+  stays clean. `ResidualKvWriteMulti.ReplayFollowsTheRingInsteadOfTheCapturedIndex`
+  captures a graph, advances the ring on the device only, and asserts the replay
+  followed it - it fails on a frozen index, which is what the old path had.
+
+- **The prefill latency guard capped chunk size, never chunk count** (#1643).
+  One engine step ran a chunk for *every* prefilling request, so k concurrent
+  ingests inserted k chunk forwards between two decode steps of every decoder -
+  and the pinned 1024 measurement behind the size cap was taken with a single
+  ingest, so nothing in it depends on k. New `runtime.prefill_batch_decode_cap`
+  (default 1) bounds the count while anyone is decoding, with a rotating start
+  index. Qwen3-8B Q8, one streaming decoder against three ~5.2k-token ingests:
+
+  | | before | after |
+  |---|---|---|
+  | worst inter-token gap | 259 / 254 ms | 112 / 88 ms |
+  | gaps over 100 ms | 6 / 6 | 1 / 0 |
+  | ingest wall time | 2017.7 ms | 2381.4 ms (+18.0%) |
+
+  The stall is spread, not removed: gaps over 50 ms go 6 -> 17. Harness:
+  `scripts/bench_prefill_latency.py`.
+
+- **A promoted request that missed its first chunk was never scheduled again.**
+  `Scheduler::schedule()` re-queued in-flight prefills on `prefill_offset > 0`,
+  so a request promoted but not served in that tick stayed PREFILLING, admitted
+  and holding KV, in no batch ever again. Nothing reached it while every
+  promotion was served immediately; with the cap above, two of three concurrent
+  ingests hung until the 300 s request timeout.
+
+- **No engine log line could be attributed to an HTTP request** (#1582, second
+  half). The server's `imp-N` and the engine's own request counter are disjoint
+  counters, and under concurrency they do not even run in step - three requests
+  sent at once mapped `imp-3 -> req 3`, `imp-2 -> req 4`, `imp-1 -> req 5`, so
+  the mapping cannot be inferred by arithmetic. `add_request()` now publishes it
+  once per request (`request imp-0 -> engine req 2`), which is what the eleven
+  engine sites printing `req %d` need: several of them hold only the integer and
+  have no `Request` to reach a string through. The two id spaces are joined, not
+  merged. Embeddings and rerank carry no client-facing id and are unaffected.
+
+- **The pre-commit GPU gate ran the full suite for Markdown and Python edits.**
+  Its filter selected on the path prefix alone, and `tools/` and `tests/` also
+  hold the `CLAUDE.md` tree and the gate/generator scripts - so editing
+  `tests/CLAUDE.md` paid an image build plus the whole GTest suite for a result
+  that cannot move. `.html` and `.txt` still gate (`cmake/embed_webui.cmake`
+  compiles the web UI into `imp-server`; tests read corpora from `tests/refs` at
+  runtime). New CPU-lane guard `guard_precommit_filter` pins 19 cases on both
+  sides - over-excluding fails it too, because CI has no GPU runner and a C++
+  change that skips this hook is gated nowhere.
+
+- **gpt-oss tool calls were dropped entirely** (#1716). Harmony's envelope is a
+  channel with a recipient, not a tag:
+
+  ```
+  <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Berlin"}<|call|>
+  ```
+
+  `parse_tool_calls()` dispatched on family and had no `HARMONY` branch, so the
+  call fell through to the ChatML `<tool_call>` scanner and disappeared: the
+  response carried an **empty `content` with `finish_reason: "stop"`** while the
+  model's own `reasoning_content` read *"We should call get_weather with city:
+  Berlin"*. Measured on `gpt-oss-20b-mxfp4`, `tool_choice: "auto"`, 10 requests
+  per row:
+
+  | path | before | after |
+  |---|---|---|
+  | `/v1/chat/completions` | 0 / 10 | **10 / 10** |
+  | the same, streaming | 0 / 10 | **10 / 10** |
+
+  Two separate places had to change, and the second is why a green unit test of
+  the parser was not enough: `split_harmony_channels()` consumes the channels
+  ~60 lines before the tool parse runs, so by then there was nothing left to
+  find. The raw text is kept for it. The streaming router had the same shape -
+  it routed by channel name alone, and `commentary to=functions.get_weather`
+  matched neither the reasoning nor the content branch.
+
+  Controls, all unchanged: no tools (streaming and not) still answers `4` with
+  `finish_reason: "stop"`; tools present but no call wanted still answers
+  `banana` with no `tool_calls` key.
+
+- **Every second or third decode burst recaptured the conditional graph** (#1647).
+  `rearm()` refuses when `context_len + step_limit` passes the captured ceiling
+  `initial_context_len + max_steps`, and since #1636 `max_steps` was the KV
+  reservation for the *current* burst - so the ceiling was two or three bursts
+  wide by construction. The block-table buffer had the same shape: sized to the
+  table as it stood, outgrown by the next burst. Both had to move; each one alone
+  leaves the other gate refusing. Measured, `imp-cli --bench --bench-pp 16
+  --bench-reps 3 --max-tokens 128` on Qwen3-8B-Q8_0, three alternating rounds:
+
+  | | graph captures | tg128 tok/s (median) |
+  |---|---|---|
+  | before | 36 | 280.56 |
+  | after | 8 | 288.66 (+2.89%) |
+
+- **Jinja: `trim_blocks`, `lstrip_blocks` and the `safe` filter** (#1572). transformers
+  renders every chat template with both whitespace flags on; imp had neither, so a
+  template written against HF leaked one newline per block tag and every tag line's
+  indentation into the prompt. Nemotron-3-Nano rendered 20 stray spaces in front of
+  `<|im_start|>assistant`. `safe` was an unknown filter and dropped the value it
+  marked. All nine golden families now match the reference exactly.
+
+- **No committed artifact carried a per-kernel register or spill number**
+  (#1549). The build never asked for resource usage, while 82 hand-set
+  `__launch_bounds__` in `src/` steer register allocation by hand and
+  `src/compute/CLAUDE.md` says never to add one blind.
+
+  `make kernel-resources` reads the **built library** with `cuobjdump
+  -res-usage`, so it needs no GPU and no special build flags - which is what
+  makes a register-pressure gate possible in CI at all, where every throughput
+  gate is impossible. Measured on the current build:
+
+  | | |
+  |---|---|
+  | kernels | 823 |
+  | at risk (REG >= 240 or a local frame) | **71** |
+  | sitting exactly at the 255 ceiling | **6** |
+  | with a non-zero local frame | 70 |
+
+  The six at the ceiling are `gdn_scan_chunkwise_kernel`,
+  `gdn_scan_fused_kernel` and `fmha_sm120_fa2_kernel` - the GDN scan and the FA2
+  prefill, both hot. **No kernel spills today** (`LOCAL` is 0 everywhere), so the
+  pin is a keep-it-that-way ratchet rather than a list of debt.
+
+  `tools/kernel_resource_baseline.txt` is a **two-way ratchet**, like
+  `tools/alloc_allowlist.txt`: a kernel that starts spilling fails, and so does
+  a pinned kernel that improved, so the list cannot go stale in either
+  direction. Verified against all three drifts - a new entry, a stale entry and
+  a moved number - each failing with the kernel named.
+
+  Runs in the CI `Build` job, the one required context, right after the build.
+  `verify-fast` compares throughput at 8 %; one kernel dropping over the
+  register cliff inside a 48-layer forward is far below that.
+
+- **Pool growth allocated past every I2 instrument, and the staging ring cost
+  more than it saved** (#1649, #1653). Two memory costs nothing was measuring.
+
+  `Backend::commit()` and `commit_range()` acquire physical memory on a growable
+  region exactly as `acquire()` does, and neither consulted the phase guard - so
+  a growable KV pool committing pages under load was counted by none of the
+  three I2 instruments. Both are non-virtual wrappers around
+  `do_commit()` / `do_commit_range()` now, for the reason `acquire()` wraps
+  `do_acquire()`: a backend cannot forget the guard. The guard runs on the
+  **delta actually committed**, not on the request, which overstates; shrinking
+  is not counted.
+
+  The pinned staging ring for the weight upload was `4 x 128 MiB`, two constants
+  that had never been varied, and pinning 512 MiB of host memory cost 503 ms to
+  acquire and 115 ms to release against the 208 ms of H2D the ring exists to
+  overlap. Swept on `Qwen3-8B-Q8_0`, load time only, 3 starts per point:
+
+  | ring x chunk | 4x128 | 4x32 | 2x64 | 2x32 | 4x16 | 4x8 | **4x4** | 4x2 | 8x8 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | median load | 4.55 s | 4.16 | 4.12 | 4.00 | 4.00 | 3.93 | **3.84** | 3.96 | 3.93 |
+
+  Monotone down to 4 MiB and back up at 2: the pinning cost dominates the
+  overlap the whole way, and below 4 MiB the per-chunk event pairs cost more
+  than the pinning saves. Confirmed against the old default over 5 alternating
+  starts each - **4.55 s against 3.87 s, ranges not overlapping** - so the
+  default is `4 x 4 MiB`, **-0.68 s (-14.9 %) of every process start** and
+  512 MiB of pinned host memory down to 16.
+
+  A pair of keys (`vram.upload_ring_depth`, `vram.upload_ring_chunk_mib`) rather
+  than constants, because the optimum is a property of the host's pinning cost.
+
+- **`tool_choice` degraded to a prompt hint on every family but ChatML, and
+  `/v1/messages` returned thinking nobody asked for** (#1592, #1541). Two ways
+  the API answered something other than what the request said.
+
+  `tool_choice: "required"` and a named function are enforced by the decode FSM
+  only where the family's tool envelope has a grammar - `chatml` for
+  `"required"`, `chatml` and `llama3` for a named function. Everywhere else the
+  request was accepted with 200 and prose. Measured before the fix, 10 requests
+  each at `temperature 0.7`:
+
+  | model | family | `tool_choice` | tool calls |
+  |---|---|---|---|
+  | gemma-3-12b Q4_K_M | `gemma` | `required` / named | **0 / 10** each |
+  | gemma-4-26B Q4_K_M | `gemma` | `required` | **0 / 10** |
+  | gpt-oss-20b MXFP4 | `harmony` | `required` / named | **0 / 10** each |
+  | Qwen3-4B Q8_0 | `chatml` | `required` / named | 10 / 10 each |
+
+  0 of 40 on the families without a grammar, so it is a **400** now
+  (`code: "tool_choice_unenforceable"`) on all three dialects. `"auto"` is
+  untouched - Gemma-4 produced 1 of 10 there, and a best-effort call is what
+  `auto` asks for.
+
+  On `/v1/messages`, extended thinking is **opt-in**, as the dialect specifies.
+  imp's server default (`think_budget = 0.5`) made a reasoning model reason on
+  every request, so `content[0]` was a thinking block and `content[0].text` was
+  empty for a client that never asked. Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
+
+  | request `thinking` | `content` blocks | `content[0].text` |
+  |---|---|---|
+  | absent | `[text]` | `"Hi"` |
+  | `{"type":"adaptive"}` | `[thinking, text]` | `""` |
+  | `{"type":"adaptive","display":"omitted"}` | `[text]` | `"Hi"` |
+
+  The block order was never the bug - Anthropic puts thinking first too. Only
+  the default moved, and only on this dialect: `/v1/chat/completions` keeps
+  `reasoning_content` as a separate field where no index shifts.
+
+  Found while measuring: **gpt-oss tool calls are dropped entirely** - the model
+  says in its own reasoning that it means to call the tool, and the response
+  carries an empty `content` with `finish_reason: "stop"`. Filed as #1716; the
+  400 above is what a caller sees for it now instead of nothing.
+
+- **No shipped binary had a machine-readable output mode** (#1583). `--json`
+  puts **exactly one JSON document on stdout** and every human line on stderr,
+  on `imp-cli --bench` / `--perplexity` / `--prompt` and on `imp-bench`;
+  `--interactive` refuses it, because a token stream is not one document.
+
+  ```
+  $ imp-cli --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 16 --json 2>/dev/null
+  {"mode":"bench","model":"...","prefill_tps":5502.57,"decode_tps":438.59,"pp_tokens":128,
+   "pp_ms":23.26,"tg_tokens":16,"tg_ms":36.48,"reps":1,"peak_vram_mib":11188}
+  ```
+
+  The promise is structural rather than audited: stdout is pointed at stderr
+  for the whole run and the real stdout kept on a private fd, so a print site
+  added later cannot break it.
+
+  `scripts/gen_perf_baseline.sh`, `scripts/verify.sh` and
+  `scripts/bench_gate.sh` read the JSON instead of regexing the table, which
+  made the column layout a contract nobody had written down - and one whose
+  spacing inside the parens varies with the magnitude (`(13310.12 tok/s)`
+  against `( 148.58 tok/s)`). A missing key now aborts the run; an empty
+  capture used to produce a median over fewer samples than the header printed.
+
+  `--prompt --json` reports what stdout would have shown, not
+  `decode(output_ids)`: the hidden stop and think markers stay hidden, so the
+  document and the terminal agree.
+
+- **Admission reserved for the prompt and the graph loop reserved for the
+  whole generation** (#1635, #1636, #1662). Three ways the KV pool promised
+  what it could not keep.
+
+  `Scheduler::schedule` tested `can_allocate(prompt)` and ignored `max_tokens`,
+  so a batch whose prompts all fit could run the pool dry mid-generation and
+  the loser was cancelled after the client had already received part of the
+  answer. It admits on prompt + `max_tokens` now, and the promise is **held**
+  (`imp_kv_blocks_reserved`, new gauge) until the blocks are written - a test
+  that is not held admits the next request against the same memory one round
+  later. On a pool too small to ever hold prompt + `max_tokens` the reserve is
+  clamped to the pool, which is the old behaviour: no admission rule can
+  promise memory that does not exist.
+
+  The trade, measured on `Qwen3-8B-Q8_0.gguf` with 8 concurrent
+  `max_tokens: 1024` requests: at the default pool it costs nothing (551.3
+  against 519.2 tok/s, inside the run spread). On a 150-block pool `main`
+  truncates one to two of the eight answers per run and reports them as
+  `finish_reason: "length"`, indistinguishable from a spent budget; this PR
+  finishes all eight at **228.5 against 526.3 tok/s**. The reserve is sized by
+  `max_tokens`, so the lever is `max_tokens`, and the server default of 8192 is
+  its worst case.
+
+  `can_allocate` also stopped counting live sequences as reclaimable. Its slow
+  path summed the LRU list on the assumption that `evict_lru()` could hand
+  those blocks back, while `evict_lru()` has had no production caller for
+  exactly the reason that freeing a live sequence's KV corrupts it.
+
+  `prepare_graph_loop` booked KV for the entire remaining generation before a
+  burst that is bounded to `speculative.miss_burst`, `runtime.decode_burst` or
+  16. Measured on `Qwen3-8B-Q8_0.gguf`, `max_tokens: 8192`, same 355-token
+  answer both ways:
+
+  | reservation | peak `imp_kv_blocks_live` |
+  |---|---|
+  | whole generation (before) | 514 |
+  | the burst (after) | **26** |
+
+  It was paid for out of the prefix cache, because `append_block` reclaims
+  cached blocks when the free pool is empty. On a 600-block pool with a warm
+  prefix, same 344-token answer: `imp_kv_blocks_cached` **176 -> 108** before,
+  **176 -> 198** after.
+
+  Third: a KV pool that does not fit halves and retries down to the 16-block
+  floor instead of failing the load, with a WARN per attempt naming planned,
+  retried and the shortfall in MiB. Everything that sizes that pool runs before
+  the allocation, so all of it is a projection - #1631 fixed one wrong one, and
+  #1662 shows that even a correct projection is not sufficient on its own.
+
+- **Two binaries returned exit 0 after doing no work** (#1584). `imp-bench`
+  counted invocations rather than measurements, so a host with no CUDA device
+  printed "Benchmarks run: 4" and exited 0 with nothing measured; every bench
+  entry point was `void` and could not report otherwise. They return `bool`
+  now, the summary reads "run: N of M requested", and a shortfall exits 7.
+  Measured: `imp-bench gemm` without `--gpus` is **exit 7** and "0 of 1", with
+  a GPU **exit 0** and "1 of 1". `imp-server` likewise fell through a failed
+  `listen_after_bind` to `return 0`, so a supervisor that restarts on non-zero
+  did not restart a server that never listened.
+
+- **Per-request log lines bypassed `diagnostics.log_level`** (#1582, first
+  half). Eleven `fprintf(stderr, ...)` sites fire once or more per HTTP
+  request, which is exactly when volume matters, and none of them reached the
+  level check every `IMP_LOG_*` site in `src/` passes through. They are on the
+  facility now, so they carry a timestamp and an origin and obey the level.
+  Measured: three requests produce **3 lines at the default level and 0 at
+  `--set diagnostics.log_level=warn`**. Startup and pre-logging failures stay
+  on stderr deliberately. The second half of that issue - two disjoint
+  request-id spaces - is a design decision and is left open.
+
+- **The degeneration battery had zero call sites, and the gate that stood in
+  for it saw one shape** (#1573). `tools/analysis/degen_suite.py` is 41 checks
+  that exit non-zero correctly and that nothing ever ran; it is wired into
+  `make test-server` now, where the running server it needs already exists.
+  First run: **35 checks, 0 fail, 5 s**. Against `--kv-nvfp4` plus the residual
+  knob it found a real one on its first attempt (stream and non-stream
+  disagreeing at greedy) - added to #1708.
+
+  The pre-push smoke gate also gained the two criteria the skill it stands in
+  for already specifies: no token more than 4 times in a row, no 3-gram more
+  than 3 times. The old distinct-token count could not see a loop: a stream
+  with **15** distinct tokens in its last 32 passes it while repeating a 3-gram
+  four times. The token floor is per-prompt, because this gate's own prompt is
+  the "single-word factual" case the skill excepts - it answers in 11 tokens,
+  one above a flat limit of 10.
+
+  `verify.sh` also prints a UTC wall clock at the start and in the summary. Two
+  GPU jobs from different sessions overlapped twice in one day, and "did that
+  land inside my gate?" could not be answered from a log that carried no time;
+  the repeat run that settled it (283.35 against 283.04 tok/s, harmless) cost
+  more than the two lines. UTC because the script re-execs into a container
+  whose clock is UTC while the host runs local time.
+
+- **`json_schema`: a `\uXXXX` escape compiled to a literal `?`** (#1563). The
+  schema string parser skipped the four hex digits and appended `?`. That is
+  not an edge case: `json.dumps` defaults to `ensure_ascii=True`, so a schema
+  round-tripped through any Python client arrives with every non-ASCII
+  character escaped - and the same parser reads enum values, property names,
+  `required` entries and `pattern`, so the compiled grammar then *forced* the
+  model to emit `?` where the caller asked for a character. Escapes decode to
+  UTF-8 now, surrogate pairs included; a lone surrogate becomes U+FFFD and a
+  truncated escape ends the string rather than inventing one. Four CPU tests,
+  all four red without the fix.
+
+- **The regex constraint re-classified the whole vocabulary on every request**
+  (#1568). `prepare_grammar` has skipped that work for an unchanged grammar
+  since it was written; `prepare_regex` never had the check, so ~151K tokens
+  were re-classified on the scheduler thread for every request - and a client
+  that pins one pattern sends it on every request. Measured on
+  `Qwen3-4B-Instruct-2507-Q8_0.gguf`, same pattern eight times, median of
+  requests 2-8: **73.0 ms before, 37.0 ms after (-49.3%)**.
+
+- **A growable KV pool zeroed new blocks on stream 0 and published them to a
+  non-blocking stream** (#1652). `cudaMemset` runs on the legacy default
+  stream; the engine decodes on a `cudaStreamNonBlocking` stream, which by
+  construction has no ordering relationship with it - so a memset could retire
+  *after* the first KV write into the same blocks and zero live KV. On a
+  36-layer model that is 72 unordered memsets over exactly the blocks the next
+  decode step fills. Stream 0 is synchronised before the new capacity is
+  published; growth is rare, and the path already commits driver pages.
+
+- **`max_batch_size` above the decode-graph pool ran eager, silently** (#1646).
+  Every graph path is gated on `n_sequences <= 64`, so a larger configured
+  batch fell to an eager forward with no clamp, no warning and no log line.
+  Measured on this box, graphs on against off: **454 vs 190 tok/s**, i.e. the
+  configured value costs 2.4x decode the moment it exceeds the pool. Not
+  clamped - the value also bounds admission and KV sizing - but said out loud,
+  once, where the number is resolved.
+
+- **The multi-sequence residual metadata buffer is persistent** (#1648). It was
+  `cudaMallocAsync`'d every decode step and its address baked into a captured
+  `forward_logits` graph that is then replayed, with no invalidation watching
+  it. That only ever worked because the default pool's release threshold is
+  pinned to `UINT64_MAX` so the same address came back - a pool setting, not an
+  invariant the graph path asserts. Allocated once beside `d_kv_slot_buf_`,
+  strided by capacity so a graph captured at one batch width stays correct at
+  another. It does **not** fix that path: measured on
+  `Qwen3-8B-Q8_0.gguf` with `--kv-nvfp4` and residual on, six concurrent
+  requests fault identically before and after (106998 / 111543 `illegal memory
+  access` lines), while `runtime.cuda_graphs=never` gives 0 and six correct
+  answers. Filed as #1708.
+
+- **`json_schema`: an unconstrained `integer` had no digit bound** (#1540). At
+  the server's default temperature the sampler could sit in the digit state and
+  emit `1020000000000000000000000000000000000000` for a population field - a
+  value no int64 consumer can read back; at temperature 0 the same request
+  answered `13528079`. The FSM stops the digit run at 19, int64's width, and
+  masks further digits so the model closes the value instead. `number` is
+  unchanged: there the digits carry precision, not magnitude.
+
+- **A checkpoint's unloaded MTP head is visible in `/health`** (#1537).
+  `speculative.mtp_k` defaults to 0, so a checkpoint that ships a head runs
+  without a documented +8 to +22% decode, and the only notice was one INFO line
+  an operator running a container never sees. `GET /health` reports
+  `mtp_head_available` with the trade. Measured on `Qwen3.8-27B-NVFP4`: present
+  by default, absent with `--set speculative.mtp_k=2`, where the head loads
+  (15 tensors, 0.79 GiB). The default is unchanged - turning it on for everyone
+  costs VRAM and is a decision, not a fix.
+
+- **What `runtime.deterministic` covers is now written down, and gated**
+  (#1574). It reaches four kernel sites through
+  `process_diag_deterministic_gemm()`; `gemm_cutlass_grouped_3x.cu` - the
+  primary GEMM for NVFP4 weights and every GGUF quant - reads none of them,
+  while the doc said "GEMM" without scoping it. Measured on
+  `Qwen3.8-27B-NVFP4`, three fresh processes per arm, teacher-forced NLL: **on
+  1.3113 / 1.3113 / 1.3113, off 1.3113 / 1.2889 / 1.2889** - so the mode does
+  make that checkpoint reproducible, through the sites it does cover, and what
+  is missing is the guarantee rather than the effect. Greedy bytes were
+  identical in all six runs and could not see any of it. Known limit 5 in
+  `docs/determinism.md` names the uncovered path, and
+  `tools/check_determinism_sites.py` fails when the code's sites and the doc's
+  list drift apart. Second hole closed: `reselect_algo_for_entry` replaced the
+  warmup-validated algo with a heuristic pick on a runtime matmul failure, with
+  no deterministic check - it now refuses in deterministic mode instead.
+
+- **The only end-to-end determinism gate never ran** (#1575).
+  `*DetEvalE2ETest*` takes its `GTEST_SKIP` branch unless a model env var is
+  set, and the pre-commit hook's "full suite" stage (`make test-gpu`) set none -
+  so the gate existed and executed nowhere except a target run by hand.
+  `test-gpu` runs it explicitly now, with only the two variables it needs.
+  Measured: 6 tests, 74 s.
+
+- **`--use_fast_math` is named as part of the determinism envelope** (#1576).
+  Every CUDA TU is compiled with it in both shipped configurations, which is
+  fine and deliberate - but it means the guarantees are about one binary, not
+  one commit. `docs/determinism.md` says so, and the eval recipe now says to
+  pin the image.
+
+- **The ITL histogram measured a per-request mean on the wrong ladder**
+  (#1577). `imp_inter_token_seconds` observed one value per request - the mean
+  - on the request-duration bucket ladder, whose first bound is 5 ms. imp
+  decodes at 300-450 tok/s, so every observation landed in that first bucket
+  and `histogram_quantile` returned a function of the bounds rather than of the
+  data. It is one observation per token now, on a millisecond ladder. Measured
+  on a live server, four requests: 4 observations in one bucket before, **39
+  observations spread over three buckets** after (5 under 2 ms, 34 under 3 ms,
+  39 under 5 ms).
+
+- **TTFT was recorded on the streaming path only** (#1578), while
+  `imp_requests_total` counted both - so the histogram described half the
+  traffic and did not say which half. The non-streaming path records it at its
+  first token. Measured: 3 non-streaming plus 1 streaming request produce 4
+  observations, not 1.
+
+- **`imp_requests_failed_total` counted 5xx only** (#1579). Every refusal this
+  server is designed to make is a 4xx (`tools/imp-server/CLAUDE.md`), so the
+  error counter was blind to the entire designed error surface.
+  `imp_requests_rejected_total` is its own series, because "the server broke"
+  and "the server refused" want different alerts.
+
+- **Nothing measured queueing or batching** (#1580).
+  `imp_queue_time_seconds` is the admission wait with prefill excluded, so a
+  busy server can be told from a slow one; `imp_decode_batch_{steps,rows}_total`
+  and `imp_decode_batch_max` say how many sequences actually decoded together.
+  Measured with six concurrent requests: `decode_batch_max 6`, 775 rows over
+  289 steps (2.68 mean), and 5 of 10 queue-time observations above 5 ms.
+
+- **The shipped Grafana dashboard plotted only last-value gauges** (#1581). Six
+  panels added, all percentile timeseries off the histograms that already
+  existed: request duration, TTFT, ITL, queue time, decode batch size, and
+  refusals against failures.
+
+- **The YaRN RoPE branch computed its angle in float and never reduced it**
+  (#1630). #1316 fixed exactly this in `rope_forward`'s other two branches; the
+  YaRN one kept calling the fast intrinsics on an unreduced argument, and the
+  long-context regression test could not see it because it runs at the default
+  `ext_factor = 0.0f` and so takes the linear branch. Both halves are fixed -
+  the angle is formed in double at all four call sites and reduced before the
+  intrinsic - and a second test drives the YaRN branch against double truth to
+  position 131071. Against the unfixed kernel it fails at that position.
+
+- **Quantised paged-decode kernels dereferenced the `-1` block-table sentinel**
+  (#1678). StreamingLLM eviction writes it, the FP16 kernel has skipped it as
+  defense-in-depth since #963, and the FP8, FP8-tile, INT8, INT4, NVFP4 and
+  NVFP4-TC twins read it straight into a pointer. 12 guards plus the tiled
+  kernel, which prefetches through a `cp_async` ring and so clamps the address
+  and drops the tokens with its validity mask instead of skipping the block.
+  Measured cost over 10 alternating runs on `Qwen3-8B-Q8_0.gguf` with
+  `--kv-fp8`: **not separable from the noise** - median 384.88 against 396.41
+  tok/s while the arms' own spread is 4.1% and 6.4%, and the guarded arm is
+  faster in 4 of the 10 paired rounds.
+
+- **The FMHA tile table named three `Bq` the selector never picks** (#1679).
+  Its first three branches compare against `max_smem / 2`, so at hd=64 it takes
+  Bq=64 (the comment said 128) and at hd=96 and hd=128 it takes Bq=32 (the
+  comment said 64). Corrected in the kernel comment and in
+  `docs/internals/KERNELS.md`, computed from `compute_smem_sm120` against the
+  measured `cudaDevAttrMaxSharedMemoryPerBlockOptin` of 101376.
+
+- **`/v1/messages` held the first SSE byte behind a 100 ms poll** (#1558). The
+  wait existed so `message_start` could carry cache accounting, on the claim
+  that it cost no measurable TTFT - and it inverted against its own
+  justification: it exits on the first iteration when the queue is empty and
+  runs the full 100 ms when the request is queued, which is when TTFT matters.
+  Measured on `Qwen3-4B-Instruct-2507-Q8_0.gguf`, 8 concurrent streams, time to
+  `message_start`: **median 118.5 ms before (max 121.0), 11.4 ms after (max
+  12.8)**. The final `message_delta` already re-reports the accounting.
+
+- **`thinking: {"type": "adaptive"}` was a no-op** (#1560). It is the on-mode
+  current SDKs send, matched neither branch, and set nothing - the request ran
+  at the server's default `think_budget` while the client believed it had
+  configured thinking. `display: "omitted"` is honoured on both transports
+  (the model still reasons, the block is not returned), and `budget_tokens: 0`
+  with `type: enabled` now disables thinking instead of leaving the default.
+
+- **`thinking` blocks carry a `signature`, and the stream emits
+  `signature_delta`** (#1555). The field did not exist anywhere in the server
+  while Anthropic's SDKs round-trip it. It is a deterministic digest of the
+  block text, not an attestation: it proves the block came back unedited and
+  nothing more, and the code that emits it says so.
+
+- **`/v1/models` advertised a context the KV pool cannot serve** (#1542). The
+  resolver's `max_seq_len` is a plan and the pool is clamped after it, so a
+  prompt between the two was accepted as servable and was not. Measured on
+  `Qwen3.8-27B-NVFP4`: the log plans 131072, the pool holds 96960, and all four
+  probes (`/v1/models`, `/props`, `/info`, `/health`) now answer 96960.
+
+- **`anthropic-version` and `anthropic-beta` are read** (#1562). Both were
+  ignored, so a beta-gated request got a 200 and a response that does not
+  implement it. They are echoed back, and an unknown beta warns once per value.
+  Neither is enforced - refusing a request that omits a header imp does not
+  need would break more than it fixes - and `docs/API.md` states the asymmetry.
+
+
+- **`/v1/messages` never reported which stop sequence ended a turn** (#1550).
+  A match came back as `stop_reason: "end_turn"` with `stop_sequence: null` on
+  both transports; the Anthropic value `"stop_sequence"` was produced by no
+  code path. The matched text now rides out of the holdback matcher and the
+  non-streaming path alike. Measured on `Qwen3-4B-Instruct-2507-Q8_0.gguf` with
+  `stop_sequences: ["4"]`: `stop_reason: "stop_sequence"`, `stop_sequence: "4"`,
+  streaming and not. While making the match reportable, the matcher started
+  cutting at the **earliest** occurrence rather than at the first list entry
+  that occurs anywhere - list order shipped the text between two stops.
+
+- **A 429 on `/v1/messages` came back in the OpenAI envelope** (#1551). Both
+  pre-routing guards wrote `{"error":{...}}` with no top-level `"type":"error"`,
+  so an Anthropic SDK could not classify it, twenty lines above an auth path
+  that did branch. One helper now picks the envelope from the path, and the six
+  sites that spelled the test out use it.
+
+- **Anthropic error types are Anthropic's** (#1556). `server_error` and
+  `capacity_error` are this server's inventions and were emitted at seven sites
+  plus forwarded verbatim through the non-streaming shim. They map to
+  `api_error` and `overloaded_error`; anything unrecognised falls back on the
+  status. `content_filter` -> `refusal` for the same reason.
+
+- **A mid-stream fault is an `error` SSE event, not a completed turn** (#1552,
+  #1553). The event did not exist: a request timeout arrived as `stop_reason:
+  "max_tokens"` (indistinguishable from the model reaching its budget) and an
+  admission refusal as `"capacity"`, which is not an Anthropic stop_reason at
+  all, while the non-streaming path answered 503 for the same condition.
+  Measured with `--request-timeout 1`: `event: error` with
+  `{"type":"timeout_error"}`.
+
+- **`tool_result.is_error` was read by nothing** (#1557). A failed tool became
+  an ordinary successful `role: "tool"` turn, so the model was told the call
+  worked. The failure is labelled in the content, which is the only channel the
+  OpenAI tool turn has.
+
+- **Every `/v1/messages` response carries a `request-id`** (#1561), and error
+  bodies repeat it as `request_id`. Neither existed anywhere in the server.
+
+- **Jinja: `{% set x %}...{% endset %}` printed its body and left the variable
+  empty, and macro default parameters never parsed** (#1565, #1566). The block
+  form of `set` is what Gemma-4's shipped `chat_template.jinja` builds
+  `captured_content` with: `endset` was one of the tags the parser skipped
+  silently, so the body rendered inline and `captured_content | trim | length`
+  was always 0. Macro defaults tested for token `OP "="`, which the lexer never
+  emits for a bare `=` (it emits `ASSIGN`), so `is_nullable=false` became two
+  extra positional parameters. Measured on a minimal template: before
+  `... of France?] LEN[0]`, after `OUT[... of France?] LEN[30]`.
+
+- **Jinja: an unsupported tag is a parse error naming the tag, not a silent
+  skip** (#1565). `parse()` returned true unconditionally, so
+  `ChatTemplate`'s "fall back to the hardcoded template" branch could never
+  run and an unimplemented construct produced a wrong prompt with no log line.
+  `{% raw %}`, `{% include %}`, `{% filter %}`, `{% block %}` and an unbalanced
+  end tag now fail with `unsupported or unbalanced tag: {% <name> %}`;
+  `{% generation %}` stays a no-op because it does not affect rendered text.
+  All 15 chat templates in this project's model directory still parse.
+
+- **The HF tokenizer-parity test ran for the first time** (#1569, #1570). It
+  needed `IMP_TEST_GOLDEN`, which nothing in the repo set, against a golden
+  file that was never committed - so it skipped on every run there has ever
+  been. The golden is now a committed header
+  (`tests/refs/tokenizer_golden_qwen3.h`, generated by
+  `tests/refs/gen_tokenizer_golden.py`), which also removes the hand-written
+  JSON scan that cut each case at the first `}` and therefore never checked
+  the one case containing `{"key": "value"}`. The bar is every case rather
+  than 80% of them, `decoded` is asserted where it used to be generated and
+  ignored, and the corpus grew 20 -> 32 with more whitespace runs (the #657
+  class) and chat-control literals. Result on
+  `Qwen3-4B-Instruct-2507-Q8_0.gguf`: 32/32 encode and 32/32 decode.
+
+
+- **Growing a KV pool with sliding-window layers wrote past the layer's own
+  region** (#1699). `commit_blocks_` zeroes newly committed blocks with one
+  memset per layer sized `(blocks - first_new) * layer_block_bytes_[l]`, but a
+  windowed layer's region is `swa_max_blocks_` blocks, not `max_blocks_` (24
+  against 256 on the failing configuration). The commit loop directly above has
+  that clamp and says so; the memset loop had the same arithmetic and none. For
+  the last windowed layer the write leaves the reservation:
+  `cudaErrorIllegalAddress`, which is sticky, so one fault took 36 suites down
+  with it. For a windowed layer that is not last, the overrun lands in the next
+  layer's live KV and zeroes it silently, which is the worse half. Measured on
+  the same invocation: 73 failures and 21 illegal accesses before, 0 and 0
+  after.
+
+- **Admission could starve a long prompt, and two knobs named `max_batch_size`
+  parked admitted rows** (#1634, #1637). The pending queue is re-sorted
+  shortest-first on every arrival, which is deliberate against head-of-line
+  blocking and unbounded on its own: under sustained short traffic a long
+  prompt is overtaken every round forever. Aging bounds it - a request waiting
+  `Scheduler::kAgingRounds` rounds sorts ahead of everything younger, ties by
+  length - so the property survives and the starvation does not.
+  `docs/roadmap.md` said "scheduling is arrival order", which it never was;
+  corrected in place with the date. Separately, `EngineConfig::max_batch_size`
+  caps admission while `runtime.max_batch_size` truncates the decode batch, and
+  when the second was smaller the rows admitted beyond it were prefilled, held
+  their KV and never decoded until a head row finished. Admission is clamped to
+  the smaller of the two and logs that it did.
+
+- **The `compute_120f` PTX fallback is assembled in CI** (#1650). It ships as
+  `code=compute_120f`, the PTX-only form, so `ptxas` never ran over it and the
+  first thing that would was the driver's JIT on a GB203 - a card nobody in
+  this project owns. `scripts/check_ptx_fallback.sh` extracts every PTX image
+  from a built artefact and assembles it; no GPU needed, since ptxas is a
+  compiler. Measured on `libimp.a`: all 155 images assemble for `sm_120`. It
+  runs as the separate `PTX fallback` job, which builds the `imp` library with
+  the fallback on, because the required `Build` job configures
+  `IMP_DISABLE_120F_FALLBACK=ON` and its binary carries no PTX at all. The
+  second gencode costs +53.1% device-compile time over the three heaviest TUs
+  (47278 ms against 30886 ms), which is why `Build` keeps its opt-out.
+
+- **`"speculative": false` left two of three drafters running, and three
+  server decisions had no counter** (#1639, #1640, #1641). The documented
+  per-request switch fed only the n-gram matcher: the MTP head and token
+  recycling kept drafting and the verify step kept running for a caller who had
+  turned speculation off. It now covers all three (`false` disables; `true`
+  still cannot conjure an MTP head the checkpoint lacks), and the request field
+  is named `spec_override` rather than `spec_ngram_override`. `/metrics` gained
+  `imp_requests_timed_out_total` (a `--request-timeout` kill is
+  `finish_reason: "length"` on the wire, indistinguishable from a spent budget),
+  `imp_kv_pressure_rejections_total` and `imp_kv_pool_growths_total`. The
+  pressure counter fires at four of the six cancellation sites: a failed
+  metadata allocation and a snapshot mismatch are different faults, and both
+  now carry a comment saying they are excluded on purpose.
+
+- **The perf gate measured a different quantity than the pin it compares
+  against, and two CI jobs claimed coverage they do not have** (#1600, #1624,
+  #1625, #1685). `scripts/bench_gate.sh` benched with n-gram speculation ON
+  while `tests/perf_baseline.json` states `speculative.ngram=false` in its own
+  `methodology` field; both scripts pass the flag now, and
+  `docs/internals/BENCHMARKING.md` carries a table of the remaining differences
+  instead of calling them one gate. The gate prints the pin's date, age and
+  model, and warns above 30 days: the measurement contract is single-session,
+  and host drift over a month (4.01 % measured on this box between runs hours
+  apart) is larger than the gate can tell from a code change. The CI job that
+  ran `pytest -m nomodel` is called `Real API contract (model-less)` now and
+  prints how many tests it deselected; the generation half, and the absence of
+  any server-side perf gate, are in `LIMITATIONS.md` rather than implied by a
+  green check.
+
+- **Eight places where the OpenAI surface answered instead of refusing, or said
+  nothing about itself** (#1590, #1591, #1593, #1595, #1596, #1598, #1599,
+  #1602). `response_format` with an unknown `type`, or a known type whose
+  payload is missing, was dropped silently and the request answered as free
+  text with 200; it is a 400 now, because a constraint that did not apply and
+  one that did look identical to the caller otherwise. `best_of > 1` was
+  accepted and ignored: also a 400, since imp generates no candidate set.
+  `finish_reason` shipped `cancelled` and `capacity`, neither in the OpenAI
+  enum, sending clients through their default branch; both map to `length`.
+  The streaming path wrote a server-authored English sentence into
+  `delta.content` where the non-streaming path wrote nothing, so the two
+  transports disagreed about the same request; it goes to the log now.
+  `error.param` and `error.code` exist on the shared envelope, so a context
+  overflow is `context_length_exceeded` rather than an English sentence.
+  `GET /v1/models/{id}` is registered, so `client.models.retrieve()` no longer
+  404s on the served model. `system_fingerprint` is emitted on all four
+  response shapes. And `docs/API.md` states the four sampling defaults that are
+  not OpenAI's, including one the issue did not name: **`top_k: 0` is not off,
+  it is 50**, a tighter truncation than the 40 default.
+
+- **Streamed logprobs were absent whenever a `stop` sequence was set, and
+  `/v1/completions` returned the wrong shape** (#1588, #1589, #1601). The
+  streaming driver attached per-token logprobs only on the branch taken when a
+  request carried no `stop`; with any stop present every chunk went out through
+  the logprob-free writer. Measured against a real server, Qwen3-4B-Q8_0,
+  `stop` set: 0 of 8 chunks carried logprobs before, 5 of 10 after.
+  `/v1/completions` returned the **Chat** object (`{"content":[...]}`) on a
+  `text_completion` response, so an SDK reading `.logprobs.tokens` found
+  nothing; it returns `{tokens, token_logprobs, top_logprobs, text_offset}` now,
+  and streams one chunk per token with its own offset (verified: every streamed
+  offset equals the length of the text reassembled so far). Both shapes come
+  from `utils.cpp` so they cannot drift apart again, and the token attribution
+  behind them is a pure component in `stream_pipeline.h` with 14 CPU-lane tests
+  covering it plus `safe_token_json` / `token_bytes_json`, which had no test in
+  any lane.
+
+- **Four tools that described themselves wrongly** (#1585, #1586, #1587,
+  #1663). The pre-push gate's gtest filter carried `AttentionTest.*`, a suite
+  renamed away before the pattern was added on 2026-04-27: gtest reports
+  success for a filter that matches nothing, so the only gate that runs CUDA
+  kernels against correctness ran **zero attention tests for four months**. The
+  corrected pattern adds 67 tests and 2 seconds (3 s / 268 to 5 s / 335), and a
+  new `guard_verify_filter` fails when any pattern matches nothing. `CLAUDE.md`
+  priced `verify-fast` at 90 s while the target's own prerequisite is a full
+  image build; measured, the script half is 37 s and the build is what costs
+  minutes. `docs_lint.py` walked gitignored paths, so a local scratch directory
+  produced 160 errors on every run and the working answer became a `grep -v`.
+  And the ten-value `ImpError` taxonomy never reached a process exit code:
+  every binary collapsed onto 1, so a caller had to parse English to tell "no
+  such file" from "out of VRAM". Exit codes are the taxonomy, 1 to 9, and
+  `imp-quantize`'s undocumented 2 for usage errors is now 1 like everywhere
+  else. The teardown guard added with #1632 was itself a pure negative test
+  (a grep that passes when it finds nothing, which is also what it does when
+  pointed at the wrong file); it now asserts the six replacement calls are
+  present too.
+
+- **Three things a request left behind when it did not end normally** (#1632,
+  #1633, #1644). Six cancellation sites in the scheduler freed the sequence's
+  KV and never released its recurrent-state slot; the pool is fixed-size, and
+  an empty one puts every later sequence on `id % cap` aliasing, which is two
+  live sequences sharing one SSM state. They go through one teardown helper
+  now, and a CPU-lane guard fails if a seventh site frees KV directly. A
+  request cancelled while still queued was promoted anyway, because only the
+  active list was filtered by status, and the promotion overwrote `CANCELLED`
+  with `PREFILLING`: a full generation ran, holding KV and a batch slot, for a
+  client that had already disconnected. And on the non-pool prefill path a
+  sliding-window model leaked one SWA block table per chunk, because
+  `free_prefill_buffers` had no parameter for it and only the allocation-failure
+  path freed it.
+
+- **One request could cost the server an unbounded amount of work, and two of
+  the limits keyed on what the client wrote** (#1614, #1615, #1616, #1617,
+  #1618, #1619, #1622). The per-IP rate limit preferred `X-Forwarded-For`
+  whenever present, so varying one header both bypassed the limit and added a
+  permanent tracker entry; the header is now believed only from a peer named by
+  `--trusted-proxy`, and buckets that go quiet are evicted. Rate limiting
+  covered seven exact paths, so `/tokenize`, `/v1/messages/count_tokens` and
+  `/admin/*` were reachable at any rate; it now covers everything except
+  `/health` and `/metrics`. `n`, rerank `documents`, embeddings `input` and
+  `logit_bias` each multiplied one request's work with no ceiling and are
+  capped by `--max-n` (8), `--max-batch-items` (512) and `--max-logit-bias`
+  (1024). `logit_bias` also cost one **blocking** device-to-host copy per entry
+  per decode step in three copied loops; it is one upload and one kernel now.
+  The 404 envelope echoed the raw request path through `json::dump()`, which
+  throws on ill-formed UTF-8, turning a 404 into a 500 with an empty body. And
+  the shipped compose file published on every interface with no way to switch
+  authentication on: the host binding is `127.0.0.1` by default and
+  `IMP_API_KEY` reaches `--api-key`. Read, write and keep-alive limits are
+  configured rather than inherited from whatever cpp-httplib defaults to.
+
+- **A checkpoint could size imp's allocations, its parser stack, and the path it
+  opens** (#1611, #1612, #1613). A layer index parsed out of a tensor name went
+  straight into `resize`, and `sizeof(TransformerLayer)` is 9680 bytes, so
+  `model.layers.2147483000.…` asks for 18.9 TiB; `num_hidden_layers` in
+  `config.json` and `block_count` in GGUF reach the same `resize` without a
+  tensor name at all. Declared counts are now refused above 1024 layers / 4096
+  experts, an index out of a name is dropped with a counted warning, and
+  `std::atoi` is gone: it returned 0 for `"4294967296"`, so that name silently
+  overwrote layer 0. Shard filenames from `model.safetensors.index.json` are
+  concatenated onto the model directory and were opened and mmapped as given,
+  `../` included; they must now be bare filenames. Both recursive-descent
+  parsers are depth-capped: measured, `JsonParser` takes SIGSEGV before 40 000
+  nesting levels on an 8 MiB stack while a SafeTensors header may declare
+  128 MiB, and the Jinja template parser, whose input is the `chat_template`
+  inside the model file, does the same.
+
+- **A paged decode launcher answered an unserved `head_dim` by leaving the
+  output unwritten** (#1674). Seventeen sites logged an error and returned, so
+  `O` kept the previous layer's `attn_out_` and the answer was silently wrong -
+  the failure mode `SETTLED` S-22 exists to forbid, while the prefill chain
+  throws for the same class of miss. They throw now, and
+  `paged_attention_serves_head_dim()` refuses the dtype at init with a fallback
+  to FP16 KV, the way the sink guard beside it already did. NVFP4 serves no
+  head_dim 96; nothing said so anywhere.
+
+- **Sink models lost the FMHA chunk carve-out** (#1675). `max_safe_prefill_chunk`
+  still treated learned sinks as cuBLAS-only and skipped all three no-clamp
+  returns for them, although #992 made the FP16 WMMA FMHA tier sink-capable and
+  the dispatch routes sinks straight there. gpt-oss-20b prefill on a quiet card,
+  median of 3 runs each: **24289 -> 35579 tok/s at pp4096 (+46.5 %)**, chunk
+  sizes 432/832/1072/1760 -> a flat 2048. Decode unchanged (157.9 -> 157.4, both
+  arms spread ~3 %).
+
+- **`attention.fa2_fp16qk="never"` was not an off switch above the threshold**
+  (#1676). It is documented as restoring the materialized path and did so only
+  below `fmha_prefill_threshold`; above it the FMHA chain re-entered the same
+  FA2 kernel with `fp16_qk=true`. The explicit fp8-QK opt-in (`never` together
+  with `fp8_fmha=on`) still takes FA2, which is what that pair is for.
+
+- **`ATTENTION_DISPATCH.md`'s decode table named one kernel per dtype** (#1677)
+  where each launcher fans out over up to five, and its FP16 row named a symbol
+  that does not exist in the tree. Rewritten as launcher plus the kernels it can
+  pick, with the head_dim coverage that #1674 made explicit.
+
+
+- **A second `ImpContext` in one process was accepted and then broke both**
+  (#1629). `imp.h` told callers to create one context per thread; the engine
+  arena and the graph-slot pool are process-global, the second
+  `engine_arena_open()` returned `InvalidArgument` into a discarded value, and
+  the first `imp_context_free()` released both out from under the other. A
+  second LIVE context is refused now; sequential create/free/create is
+  unaffected. The arena's INFO line also printed "N MiB reserved" before the
+  open and regardless of its result.
+
+- **Green-context reconfiguration destroyed both streams with work in flight**
+  (#1656): `reconfigure()` runs from `step_schedule()` when the prefill/decode
+  mix changes, `cudaStreamDestroy` does not wait, and the replacement streams
+  carry no ordering against the old work. They are drained first now. Not
+  reachable on sm_120 - see the new `LIMITATIONS.md` entry on why green
+  contexts fall back to ordinary streams here.
+
+
+- **`/v1/messages` and `/v1/responses` built and dumped a JSON object for every
+  emitted token** (#1657), which is what the shared writer's own header forbids
+  on the hot path and what `/v1/chat/completions` stopped doing when it got
+  `SSEChunkWriter`. Both now build the constant part of the frame once per block
+  and only escape the token between the halves. Measured in isolation: 0.568 us
+  per delta against 0.006, a factor of 87. Wire output is byte-compatible -
+  same event count, same key sets, same reassembled text including non-ASCII,
+  checked against a recording from the pre-fix binary.
+
+
+- **`--set` accepted any value for 157 of the 185 bound keys** (#1627). The key
+  half was rejected, the value half was not: `parse_bool`/`parse_int`/
+  `parse_float` returned the current value for input they could not read, with
+  no warning, so `--set server.prefix_cache=disabled` kept the default and said
+  nothing. `stoi` also stopped at the first non-digit, making `16k` parse as 16.
+  Both are a rejection now, in `--set` and in `imp.conf`.
+
+- **`speculative.batch_rr` could not be set** (#1638). A default-on scheduling
+  switch read on the decode path (`engine_scheduler.cpp:1422,2882`) whose own
+  comment calls it a kill switch for A/B, bound to no config key.
+
+- **`runtime.debug_raw` did four of its seven effects through dead env vars**
+  (#1628). `IMP_NO_WARMUP`, `IMP_DETERMINISTIC_GEMM`, `IMP_NO_EXPERT_CACHE` and
+  `IMP_GDN_REF` are read by nothing in the tree, so warmup, deterministic
+  cuBLAS, the MoE expert cache and the GDN scan all stayed at their normal
+  settings while the log line and `imp.conf.example:97` said otherwise. All
+  four are config assignments now; the switch each stood for existed.
+
+- **The `clang-tidy` CI job had never linted a file** (#1626). Its first `git`
+  call died with exit 128 (`dubious ownership` - the container UID is not the
+  checkout's owner), the file list came back empty, and `continue-on-error`
+  reported green. It trusts the checkout now, and a failing `git diff` is an
+  error rather than an empty list.
+
+- **`prefill_chunk_size` had no `imp.conf` key** (#1645) while the knob that
+  merely caps it did. It sets the TTFT/ITL trade for every prefill and was
+  reachable only from the CLI and a per-request override. `runtime.prefill_chunk_size`
+  now, CLI wins over the file. Two comments documenting the retired default 512
+  are corrected to 2048.
+
+- **`runtime.debug_raw` printed `graphs=0(none)`** (#1658): "graphs are off,
+  reason: graphs still enabled". It wrote `use_cuda_graphs = 0` directly instead
+  of going through `demote_graphs_`, so the reason stayed `None`. It has its own
+  reason now.
+
+- **`make gen-perf-baseline` had no GPU guard** (#1623) while every other bench
+  target does - the one target that re-pins what the perf gate compares against.
+
+
+- **Twelve stale or self-contradicting documentation claims** (#1543, #1594,
+  #1651, #1668-#1673, #1680-#1682, #1684). The load-bearing ones: `CLAUDE.md` and
+  `AGENTS.md` told every agent that sm_120a has no TMA-WS grouped GEMM, which
+  the shipped cubin contains; `SM120.md`'s decode roofline was off by 1023x and
+  the "~28:1 memory:compute ratio" was derived from that quotient (it is
+  ~28,000:1); `MODELS.md` told operators to bound KV with `--max-seq-len`, which
+  exits 1 on `imp-server` (the two engine log lines that gave the same advice are fixed below, #1681); the quickstart's first command needs an image nothing
+  in the quickstart builds; seven `FEATURES.md` rows were green without a gate.
+  Two numbers were **withdrawn rather than corrected**: the MoE host-offload LRU
+  row had four values for one measurement and the checkpoint is not on this host
+  to re-run it (#1669), and the CI-lane case count is a command now rather than
+  a literal, having gone 248 stale in nine days (#1673).
+
+- **`sync_docs.py` published a provenance block it made up** (#1684):
+  `cuda=13.3` and `commit=1e4fad60` were string literals overwriting a baseline
+  that records `"cuda": "unknown"` and no commit at all. It reads the file now.
+  `gen_perf_baseline.sh` captures both going forward - its CUDA probe was
+  `a | b | c || fallback`, and sed exits 0 on empty input so the fallback never
+  ran. Verified in the build container: 13.3 instead of empty.
+
+- **`docs_lint.py` promised checks it did not run** (#1683). The header claimed
+  all seven checks fail the build while staleness only warned, and the
+  frontmatter error named four fields while one was validated: `audience:` and
+  `commit:` were read by no line. Both are checked now, and a document edited
+  since the commit it claims to be verified against is reported - 41 of them
+  are. That check counts edits to the file, not commits to the repo: a
+  threshold on repo commits was the first attempt and did not fire on the case
+  that motivated it.
+
+- **The engine told server operators to use a flag that kills the server**
+  (#1681). `engine_kv_cache_init.cpp:432,459` say "lower --max-seq-len"; both
+  messages are shared by imp-cli and imp-server, and `imp-server --max-seq-len N`
+  exits 1. They name `--set runtime.max_seq_len=N` now.
+
+
+- **A nested `tools[].function.parameters` crashed the whole server** (#1607).
+  Every parser on the request path is recursive and none bounded depth,
+  nlohmann included and it runs first: measured here, 50 000 nested arrays parse
+  and `dump()` fine and 100 000 segfault the process, i.e. ~100 KB of body
+  against a 100 MiB cap, unauthenticated, taking every in-flight stream with it.
+  Bodies deeper than 100 levels are now a `400` at all nine request-parse sites,
+  and `json_string_to_value` and the `tojson` walker have their own caps behind
+  that. The check does **not** live in the pre-routing handler: httplib calls
+  that before the body is read, where `req.body` is empty, and a 10 000-level
+  body still returned 200 from there.
+
+- **Streamed tool arguments arrived as U+FFFD wherever a multi-byte character
+  crossed a delta boundary** (#1554). `StreamToolCallFilter` holds back
+  `close_tag_.size() - 1` **bytes** so a partially arrived close tag cannot leak
+  into the arguments, and that cut lands mid-character; each half is
+  JSON-encoded into its own SSE delta, where `dump_safe` substitutes. Measured
+  on Qwen3-8B-Q8_0 with a forced `tool_choice`: 10 replacement characters in one
+  argument, 0 after the fix, with the non-streaming control clean throughout.
+  The buffered 48-byte chunker was hardened at the same time, but it is not the
+  path a shipped model takes here.
+
+- **`image_url` was an SSRF primitive: any host, any port, redirects followed,
+  no size cap, no read timeout** (#1610). An unauthenticated request body chose
+  where the server connected, which on a container host means loopback, the
+  compose network and the cloud metadata address. Measured, not read: with a
+  listener in the server's own network namespace, the pre-fix binary fetched
+  `http://127.0.0.1:9999/` on request; the fixed one does not, with the flag off
+  or on. Remote fetching is now behind `--allow-remote-images` (default off);
+  with it on the destination is resolved and refused if loopback, link-local,
+  RFC1918, CGNAT or ULA, redirects are not followed, the body is capped at
+  32 MiB and reads time out at 10 s. The error string is uniform and no longer
+  echoes the URL, so it cannot report which ports are open.
+
+- **`imp-server` did not start at shipped defaults on the repo's own
+  perf-baseline model** (#1631). `imp-server --model Qwen3-8B-Q8_0.gguf` on an
+  idle 32 GB card ended in 537 CUDA out-of-memory lines and exit 1: the planner
+  cross-checks its NVFP4 heuristic against the storage planner's projection but
+  only acted on a 2x divergence, and this model diverges 1.35x (6100 vs 4511
+  MiB), so the KV pool took the difference and the first cuBLASLt call had
+  nothing left. Any divergence now raises the reserve. The pool is smaller
+  (11390 to 7079 blocks, 105136 tokens of capacity) and the server answers in
+  3 s. `scripts/test_server_default_start.sh` gates it, wired into
+  `make test-server`, because every other server battery boots with capacity
+  flags and the default configuration was covered by none of them.
+
+- **`json_schema`: two shapes desynced the parser and truncated the rest of the
+  schema** (#1564). `additionalProperties` as a schema object and a non-string
+  `enum` member each hit a parse helper that returns a default without consuming
+  input, so every key after them was dropped. With `properties` gone the request
+  silently became `json_object`; `{"enum":[1,2,3]}` constrained the model to the
+  empty string. The object form of `additionalProperties` now parses (its
+  constraint on extra keys is not enforced), a non-string `enum` is a `400`, and
+  trailing or unclosed input fails the parse instead of returning a partial tree.
+
+- **`json_schema`: assertion keywords are refused instead of dropped** (#1567).
+  `minimum`, `maximum`, `multipleOf`, `allOf`, `not`, `uniqueItems` and thirteen
+  more were accepted and ignored, so a caller who bounded a field got an
+  unbounded grammar at HTTP 200. They are a `400` now, per the contract in
+  `docs/API.md`. `const` is implemented. Annotations (`format`, `title`,
+  `description`, `default`) stay ignored. **Behaviour change for clients that
+  send these keywords today.**
+
+- **Three request-driven parsers had no cost bound** (#1608, #1609). Nesting
+  depth mapped 1:1 onto stack frames in the schema, regex and GBNF parsers
+  (`((((` is one frame per byte), and the regex `{n,m}` quantifier cloned its
+  atom `n` times with no cap: `a{2000000000}` ran a two-billion iteration
+  allocating loop on an HTTP worker thread, at admission, before the engine
+  lock. Depth is capped at 64, repeats at 1024 (matching the GBNF parser's
+  existing bound) and one pattern at 100k NFA states.
+
+- **Four out-of-bounds accesses in the model-file parsers, all reachable from a
+  checkpoint directory before any inference runs** (#1603, #1604, #1605, #1606).
+  A SafeTensors tensor was validated with one element width and read with
+  another (I16: 2 on disk, 4 in the QType it was mapped to), an unknown dtype
+  skipped the only validator that looks at `offset_start`, the shape product had
+  no overflow or sign guard, and a negative `tokenizer.json` id indexed
+  `vocab_` at `size_t(-1)`. A dtype with no equal-width engine type is now
+  refused instead of re-typed, and token ids are bounded at both ends.
+
+- **`make asan` could not build its own binaries** (#1659). Two test files that
+  use nlohmann sat in the unconditional `test-core` list while nlohmann is only
+  fetched under `IMP_BUILD_SERVER`, which the sanitizer target turns off, so
+  test-core did not compile in any `-DIMP_BUILD_SERVER=OFF` configuration.
+  Now clean: test-core 734, test-text 200, no ASan or UBSan report.
+
+- **imp-quantize read every subnormal value in an F16 `scale_inv` grid up to
+  1025x too large** (`0x0001` as 6.1e-05 where the value is 5.96e-08): the
+  hand-written widening pasted the subnormal mantissa under a normal exponent
+  instead of renormalising, and each such scale multiplies a whole weight block.
+  All 2046 subnormal patterns were affected. That dtype is documented as not
+  seen in a released checkpoint. Found by merging that conversion out of ten
+  files into `src/core/fp_bits.h` and checking the copies against each other
+  over all 2^16 half and all 2^32 float patterns first.
+
+- **`imp-quantize --help` was undefined behaviour.** `costs 1-4% of` inside a
+  printf format string makes `% o` a conversion specifier. GCC warned about it
+  and the warning was never read.
+
 
 - **The GPU guard asked one question and answered two with it.**
   `require_free_gpu.sh` refused on `memory.used > 2000 MiB` alone, which misses a

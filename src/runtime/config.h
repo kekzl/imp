@@ -130,7 +130,31 @@ struct RuntimeConfig {
         // 65 ms at +85%. 1024 is the default compromise; set 512 for
         // latency-critical multi-tenant serving, 0 to disable (full chunk).
         // The full chunk returns as soon as nobody is decoding.
+        // -1 = per-arch default (2048 where chunked prefill is supported, 0
+        // otherwise). #1645: only the CLI flag and a per-request override could
+        // reach this, while the knob that merely CAPS it - the line below - had
+        // a key. A CLI value wins over the file.
+        int prefill_chunk_size = -1;
         int prefill_chunk_decode_cap = 1024;
+        // Cap the NUMBER of prefill chunk forwards per engine step while other
+        // sequences are DECODING (#1643). The size cap above bounds ONE chunk;
+        // with k concurrent ingests the step loop still runs k of them between
+        // two decode steps of every decoder, and no term in the size cap
+        // depends on k - the 1024 measurement above was taken with a single
+        // ingest. 0 = unbounded (the pre-#1643 behaviour). The starting index
+        // rotates, so a later ingest is not starved behind an earlier one.
+        //
+        // Measured (Qwen3-8B Q8, one streaming decoder, three concurrent
+        // ~5.2k-token ingests, two alternating rounds per arm):
+        //   worst inter-token gap  259/254 ms -> 112/88 ms
+        //   gaps over 100 ms       6/6        -> 1/0
+        //   gaps over 50 ms        6/6        -> 16/17
+        //   ingest wall time       2017.7 ms  -> 2381.4 ms (+18.0%)
+        // The stall is spread instead of removed: more small gaps, no large
+        // ones. Same trade the chunk cap above already takes (+27% TTFT for
+        // bounded latency), so the default follows it. The cap does not apply
+        // when nobody is decoding, so batch ingest throughput is untouched.
+        int prefill_batch_decode_cap = 1;
         // Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are
         // single-sequence, so concurrent sessions time-slice the decode.
         // This is the slice length in tokens — after it, the engine rotates
@@ -206,6 +230,15 @@ struct RuntimeConfig {
         // constant (AUDIT B41/B49). Empty = the default cache location;
         // "off" disables it. A cache miss or an unwritable path is never fatal.
         std::string library_reserve_cache;
+        // Pinned staging ring for the weight upload (#1653). Pinning host
+        // memory is expensive on WDDM - the shipped 4x128 MiB cost 503 ms to
+        // acquire and 115 ms to release against the 208 ms of H2D the ring
+        // exists to overlap. Measured load time on Qwen3-8B-Q8_0, 5 alternating
+        // starts each: 4x128 MiB median 4.55 s, 4x4 MiB median 3.87 s. The
+        // optimum is a property of the host's pinning cost, not of imp, so it
+        // is a key rather than a constant.
+        int upload_ring_depth = 4;
+        int upload_ring_chunk_mib = 4;
     } vram;
 
     cfg::Attention attention;

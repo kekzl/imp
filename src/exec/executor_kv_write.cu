@@ -266,40 +266,39 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
                         // once per step by advance_residual_state_kernel in forward_logits.
                     }
                 }
-            } else if (state.h_residual_seq_ids != nullptr) {
-                // Multi-seq: build device pointer arrays per layer (host-side,
-                // upload via the per-step residual_meta buffer is left to the
-                // engine to pre-upload — we fall back to per-call upload here
-                // for simplicity; n_sequences > 1 is rare so this is OK).
-                std::vector<half*> k_ptrs(n, nullptr), v_ptrs(n, nullptr);
-                for (int s = 0; s < n; s++) {
-                    int seq_id = state.h_residual_seq_ids[s];
-                    if (seq_id < 0) continue;
-                    void* dst_k = state.kv_manager->residual_k_ptr(seq_id, kv_layer);
-                    void* dst_v = state.kv_manager->residual_v_ptr(seq_id, kv_layer);
-                    if (dst_k == nullptr || dst_v == nullptr) continue;
-                    auto rs = state.kv_manager->residual_state(seq_id);
-                    k_ptrs[s] = static_cast<half*>(dst_k) + rs.write_idx * slot_elems;
-                    v_ptrs[s] = static_cast<half*>(dst_v) + rs.write_idx * slot_elems;
+            } else if (state.d_residual_seq_slots != nullptr) {
+                // Multi-seq, graph-safe (#1708). Everything the destination
+                // depends on is resolved on the DEVICE at execution time: the
+                // layer base plus the per-seq stride, the residual slot from
+                // the engine's per-step upload, and the ring index from the
+                // manager's device array.
+                //
+                // What this replaces built a device array of destination
+                // pointers per call and per layer, with `cudaMallocAsync` and a
+                // matching `cudaFreeAsync` around the launch - inside the
+                // captured region. A replay wrote through the captured address
+                // after it had been freed and reused ("an illegal memory
+                // access"), with the ring index frozen at capture time on top.
+                // It was written when `n_sequences > 1` was rare; the comment
+                // said so.
+                void* k_layer_base = state.kv_manager->residual_k_layer_base(kv_layer);
+                void* v_layer_base = state.kv_manager->residual_v_layer_base(kv_layer);
+                const int* d_widx = state.kv_manager->d_residual_widx_ptr();
+                if (k_layer_base != nullptr && v_layer_base != nullptr && d_widx != nullptr) {
+                    const int64_t seq_stride_elems = static_cast<int64_t>(
+                        state.kv_manager->residual_seq_stride_bytes() / sizeof(half));
+                    dim3 grid_multi(n, 2);
+                    residual_kv_write_multi_indirect_kernel<<<grid_multi, kThreads, 0, stream>>>(
+                        src_k_base, src_v_base, static_cast<half*>(k_layer_base),
+                        static_cast<half*>(v_layer_base), seq_stride_elems, state.d_residual_seq_slots,
+                        d_widx, slot_elems);
+                    IMP_CUDA_CHECK_LAUNCH();
                 }
-                half** d_k_ptrs = nullptr;
-                half** d_v_ptrs = nullptr;
-                cudaMallocAsync(&d_k_ptrs, n * sizeof(half*), stream);
-                cudaMallocAsync(&d_v_ptrs, n * sizeof(half*), stream);
-                cudaMemcpyAsync(d_k_ptrs, k_ptrs.data(), n * sizeof(half*),
-                                cudaMemcpyHostToDevice, stream);
-                cudaMemcpyAsync(d_v_ptrs, v_ptrs.data(), n * sizeof(half*),
-                                cudaMemcpyHostToDevice, stream);
-                dim3 grid_multi(n, 2);
-                residual_kv_write_multi_kernel<<<grid_multi, kThreads, 0, stream>>>(
-                    src_k_base, src_v_base, d_k_ptrs, d_v_ptrs, slot_elems);
-                IMP_CUDA_CHECK_LAUNCH();
-                cudaFreeAsync(d_k_ptrs, stream);
-                cudaFreeAsync(d_v_ptrs, stream);
-                for (int s = 0; s < n; s++) {
-                    int seq_id = state.h_residual_seq_ids[s];
-                    if (seq_id >= 0) state.kv_manager->advance_residual(seq_id);
-                }
+                // No host advance_residual: the ring is advanced on device once
+                // per step by advance_residual_state_multi_kernel, inside the
+                // captured graph. The host call this replaces ran at capture
+                // time only, so replays left the ring where the capture found
+                // it.
             }
         }
     }

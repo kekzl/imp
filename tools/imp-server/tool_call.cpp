@@ -62,6 +62,17 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
     return prompt;
 }
 
+bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice) {
+    if (tool_choice.is_object() && tool_choice.contains("function")) {
+        if (tool_choice["function"].value("name", "").empty())
+            return true;  // an object without a name forces nothing
+        return family == imp::ChatTemplateFamily::CHATML || family == imp::ChatTemplateFamily::LLAMA3;
+    }
+    if (tool_choice.is_string() && tool_choice.get<std::string>() == "required")
+        return family == imp::ChatTemplateFamily::CHATML;
+    return true;
+}
+
 std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
                                                                          const json& tools,
                                                                          const json& tool_choice) {
@@ -460,6 +471,26 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
     return {content, calls};
 }
 
+std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_harmony(
+    const std::string& text, std::atomic<int>& next_tool_call_id) {
+    ChannelSegments segs = split_harmony_channels(text);
+    std::vector<ParsedToolCall> calls;
+    for (auto& tc : segs.tool_calls) {
+        ParsedToolCall p;
+        p.name = std::move(tc.name);
+        // The body is the arguments object verbatim. Keep it as text rather
+        // than re-serialising: a re-dump would silently normalise whatever the
+        // model produced, and a body that is not valid JSON is the caller's to
+        // see. validate_tool_call() checks it against the schema afterwards.
+        p.arguments = std::move(tc.arguments);
+        p.id = "call_" + std::to_string(next_tool_call_id.fetch_add(1));
+        calls.push_back(std::move(p));
+    }
+    // The visible answer is the final channel. Without this the caller would
+    // get the raw Harmony markup back alongside the calls.
+    return {std::move(segs.content), std::move(calls)};
+}
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(
     imp::ChatTemplateFamily family, const std::string& text, std::atomic<int>& next_tool_call_id,
     const std::vector<std::string>& known_tool_names) {
@@ -467,6 +498,11 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(
         return parse_tool_calls_llama3(text, next_tool_call_id, known_tool_names);
     if (family == imp::ChatTemplateFamily::GEMMA)
         return parse_tool_calls_gemma(text, next_tool_call_id);
+    // Harmony's envelope is a channel with a recipient, not a <tool_call> tag.
+    // It used to fall through to the ChatML scanner, which found nothing, so
+    // the call was dropped and the response carried an empty content (#1716).
+    if (family == imp::ChatTemplateFamily::HARMONY)
+        return parse_tool_calls_harmony(text, next_tool_call_id);
     return parse_tool_calls_chatml(text, next_tool_call_id);
 }
 
@@ -511,6 +547,45 @@ ToolTagScan scan_tool_tag(const std::string& buf, imp::ChatTemplateFamily family
         }
         r.kind = suffix_is_marker_prefix(buf, kFn, kFnLen) ? ToolTagScan::Kind::PARTIAL
                                                            : ToolTagScan::Kind::NONE;
+        return r;
+    }
+
+    if (family == imp::ChatTemplateFamily::HARMONY) {
+        // The open marker is a channel header addressed to a function:
+        //   <|channel|>commentary to=functions.NAME <|constrain|>json<|message|>
+        // The name is in the header, so the body is the bare arguments object -
+        // the same shape the Llama3 path produces, and parse_stream_tool_body
+        // already handles it via fn_name.
+        constexpr const char* kTo = "to=functions.";
+        constexpr size_t kToLen = 13;
+        const size_t to_pos = buf.find(kTo);
+        if (to_pos != std::string::npos) {
+            static const std::string MSG = "<|message|>";
+            const size_t msg = buf.find(MSG, to_pos);
+            if (msg == std::string::npos) {
+                r.kind = ToolTagScan::Kind::PARTIAL;  // header not finished yet
+                return r;
+            }
+            size_t e = buf.find_first_of("\n\r\t <", to_pos + kToLen);
+            if (e == std::string::npos || e > msg)
+                e = msg;
+            // Content before the marker is whatever preceded the channel
+            // header, not the header itself: rewind to the <|channel|> that
+            // opened it so the markup never reaches the stream.
+            static const std::string CH = "<|channel|>";
+            const size_t ch = buf.rfind(CH, to_pos);
+            r.kind = ToolTagScan::Kind::OPEN;
+            r.content_len = ch == std::string::npos ? to_pos : ch;
+            r.body_start = msg + MSG.size();
+            r.close_tag = "<|call|>";
+            r.fn_name = buf.substr(to_pos + kToLen, e - (to_pos + kToLen));
+            return r;
+        }
+        if (suffix_is_marker_prefix(buf, kTo, kToLen)) {
+            r.kind = ToolTagScan::Kind::PARTIAL;
+            return r;
+        }
+        r.kind = ToolTagScan::Kind::NONE;
         return r;
     }
 

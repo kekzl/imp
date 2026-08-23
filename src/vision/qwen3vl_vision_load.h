@@ -10,6 +10,7 @@
 #include "core/tensor.h"
 #include "vision/vision_model.h"
 
+#include <expected>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -22,12 +23,19 @@ struct Qwen3VLVisionLoadStats {
     int missing = 0;  // slots the checkpoint never filled
 };
 
+// A refusal carries the counts too: the caller logs how far the load got, and
+// dropping that on the failure path is what an out-parameter made easy.
+struct Qwen3VLVisionLoadError {
+    std::string what;
+    Qwen3VLVisionLoadStats stats;
+};
+
 // `tensors` is the full shard map (names as they appear in the checkpoint).
-// Only `model.visual.*` entries are touched. Returns false with `err` set when a
-// required slot is missing or a shape contradicts the config — a vision tower
-// with a null slot must not reach the encoder.
-bool load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& tensors, VisionModel& out,
-                                 Qwen3VLVisionLoadStats& stats, std::string& err);
+// Only `model.visual.*` entries are touched. Returns the counts, or the refusal
+// when a required slot is missing or a shape contradicts the config: a vision
+// tower with a null slot must not reach the encoder.
+[[nodiscard]] std::expected<Qwen3VLVisionLoadStats, Qwen3VLVisionLoadError> load_qwen3vl_vision_tensors(
+    const std::unordered_map<std::string, Tensor>& tensors, VisionModel& out);
 
 // Visit every tensor slot of the tower exactly once, with the checkpoint name it
 // came from. Single source of truth on purpose: the load-completeness check and

@@ -5,6 +5,7 @@
 #include "api/imp_internal.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -34,6 +35,14 @@ struct ServerRequest {
 
     // Track how many output tokens we have already delivered
     size_t notified_count = 0;
+
+    // Queue observability (#1580). t_submit is set by submit(); queue_ms is
+    // filled in when the worker moves this request from pending to active,
+    // i.e. it is the time spent waiting behind other requests and NOT the
+    // prefill. Nothing measured that before, so "the server is slow" and "the
+    // server is busy" looked the same from outside.
+    std::chrono::steady_clock::time_point t_submit{};
+    std::atomic<double> queue_ms{-1.0};
 
     // Push a token event (called from worker thread)
     void push_token(int32_t token_id, bool is_last, const char* reason) {
@@ -74,6 +83,13 @@ struct ServerRequest {
 // scheduler.
 class BatchingEngine {
 public:
+    // Decode-batch observability (#1580): the knob that bounds batch size is
+    // configurable and the result was unobservable. Counter pair rather than an
+    // average, so a dashboard can rate() both and divide over any window.
+    std::atomic<int64_t> decode_steps{0};
+    std::atomic<int64_t> decode_rows{0};
+    std::atomic<int64_t> decode_batch_max{0};
+
     BatchingEngine() = default;
     ~BatchingEngine();
 

@@ -1,6 +1,9 @@
 #pragma once
 
+#include "runtime/ngram_draft.h"
+
 #include <cstdint>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -30,15 +33,15 @@ public:
     SuffixDraftIndex(int min_match, int max_match);
 
     // Append tokens to the indexed history.
-    void append(const int32_t* toks, int n);
+    void append(std::span<const int32_t> toks);
     int size() const { return static_cast<int>(hist_.size()); }
 
     // Draft up to k (base) / k_max (evidence-backed) tokens continuing the
-    // current history suffix. Returns empty when no min_match suffix gram
-    // recurs. draft_start (optional) receives the history index the winning
-    // continuation was copied from — one past the matched occurrence — for
-    // source-region classification (prompt / prediction / prior output).
-    std::vector<int32_t> draft(int k, int k_max, int* draft_start = nullptr) const;
+    // current history suffix. Returns an empty draft when no min_match suffix
+    // gram recurs. `start` is the history index the winning continuation was
+    // copied from, one past the matched occurrence, for source-region
+    // classification (prompt / prediction / prior output).
+    [[nodiscard]] NgramDraft draft(int k, int k_max) const;
 
 private:
     uint64_t gram_hash_at_(int end) const;  // hash of hist_[end - min_match_, end)

@@ -391,8 +391,13 @@ bool Engine::supports_chunked_prefill_() const {
 
 int Engine::resolve_prefill_chunk_size_() const {
     int explicit_val = config_.prefill_chunk_size;
+    // #1645: the EngineConfig field is set by the CLI flag and the per-request
+    // override; imp.conf reaches it through runtime.prefill_chunk_size, which
+    // yields to an explicit CLI value.
+    if (explicit_val < 0 && runtime_config_.runtime.prefill_chunk_size >= 0)
+        explicit_val = runtime_config_.runtime.prefill_chunk_size;
     if (explicit_val < 0) {
-        // Default 2048 (was 512 until 2026-06-11). Chunked prefill re-reads
+        // Default 2048 since 2026-06-11. Chunked prefill re-reads
         // every weight once per chunk, so the memory-bound GEMMs pay the
         // weight traffic per chunk: at pp4096, 512-token chunks cost
         // NVFP4-MoE −43% prefill vs 2048 (14.8k -> 26.2k tok/s) and dense
@@ -421,8 +426,9 @@ int Engine::resolve_prefill_chunk_size_() const {
 // (imp_perplexity). See engine.h for the contract.
 // =====================================================================
 
-bool Engine::begin_perplexity_capture(const int32_t* tokens, int n) {
-    if (ppl_capture_.active || !tokens || n < 2 || !executor_) {
+bool Engine::begin_perplexity_capture(std::span<const int32_t> tokens) {
+    const int n = static_cast<int>(tokens.size());
+    if (ppl_capture_.active || n < 2 || !executor_) {
         return false;
     }
     if (cudaMalloc(&ppl_capture_.d_tokens, static_cast<size_t>(n) * sizeof(int32_t)) != cudaSuccess) {
@@ -435,7 +441,7 @@ bool Engine::begin_perplexity_capture(const int32_t* tokens, int n) {
         ppl_capture_.d_nll = nullptr;
         return false;
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpy(ppl_capture_.d_tokens, tokens,
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(ppl_capture_.d_tokens, tokens.data(),
                                   static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice));
     IMP_CUDA_CHECK_LOG(cudaMemset(ppl_capture_.d_nll, 0, static_cast<size_t>(n) * sizeof(double)));
     // Greedy-agreement probe rides along for free (fused into the NLL max
@@ -574,10 +580,25 @@ void Engine::step_prefill(cudaStream_t stream) {
         effective_chunk = capped;
     }
 
-    for (auto& req : sched_prefill_batch_) {
+    // Decode-aware batching: the cap above bounds the SIZE of one chunk, this
+    // one bounds how MANY of them run before the decoders get their step
+    // (#1643). Starting index rotates so the ingests that do not run this step
+    // are the ones that ran last step.
+    const size_t n_prefill = sched_prefill_batch_.size();
+    size_t budget = n_prefill;
+    const int batch_cap = runtime_config_.runtime.prefill_batch_decode_cap;
+    if (batch_cap > 0 && !sched_decode_batch_.empty() && n_prefill > static_cast<size_t>(batch_cap))
+        budget = static_cast<size_t>(batch_cap);
+
+    for (size_t i = 0; i < budget; i++) {
+        auto& req = sched_prefill_batch_[(sched_prefill_rr_ + i) % n_prefill];
         step_prefill_one(req, effective_chunk, stream);
         kv_manager_->touch(req->id);
     }
+    if (budget < n_prefill)
+        sched_prefill_rr_ = (sched_prefill_rr_ + budget) % n_prefill;
+    else
+        sched_prefill_rr_ = 0;
 }
 
 // =====================================================================
@@ -666,7 +687,8 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
             // freed a LIVE sequence (no recompute path) → silent corruption.
             // Reject-newest: cancel this request, leave in-flight ones intact.
             if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                kv_manager_->free_sequence(req->id);
+                kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+                cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 return false;
             }
@@ -732,7 +754,9 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req,
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, pf_stream));
             if (d_context_lens)
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, pf_stream));
-            kv_manager_->free_sequence(req->id);
+            // Not counted as KV pressure: this is a metadata cudaMallocAsync
+            // failure, not the KV pool refusing blocks (#1641).
+            cancel_sequence_(req);
             return false;
         }
     }
@@ -906,7 +930,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             if (!ok) {
                 IMP_LOG_WARN("SwaSnapshot: restore failed for req %d at %d tokens — cancelling",
                              req->id, offset);
-                kv_manager_->free_sequence(req->id);
+                // Not KV pressure: a snapshot that does not match, not a pool
+                // that cannot allocate (#1641).
+                cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 return;
             }
@@ -918,7 +944,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
         kv_manager_->swa_trim(req->id, offset);
         if (!kv_manager_->swa_prepare(req->id, offset, ctx_len)) {
-            kv_manager_->free_sequence(req->id);
+            kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+            cancel_sequence_(req);
             req->status = RequestStatus::CANCELLED;
             return;
         }
@@ -1142,7 +1169,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             embed_accumulate_chunk_(*req, chunk_len, pf_stream);
 
         if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
+                                 pf_stream);
         }
 
         // MTP: feed this chunk's (token, hidden) pairs while the executor's
@@ -1166,7 +1194,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         Tensor score_logits;
         executor_->forward_logits(state, score_logits, pf_stream);
         if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
+                                 pf_stream);
         }
         score_capture_(*req, score_logits, pf_stream);
         finish_request(req);
@@ -1178,7 +1207,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         Tensor logits_unused;
         executor_->forward_logits(state, logits_unused, pf_stream);
         if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
+                                 pf_stream);
         }
         embed_accumulate_chunk_(*req, chunk_len, pf_stream);
         const size_t total = req->input_tokens.size();
@@ -1233,7 +1263,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             cudaEventRecord(prefill_done_, pf_stream);
 
             if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
+                                     d_context_lens, pf_stream);
             }
 
             cudaEventSynchronize(prefill_done_);
@@ -1244,13 +1275,15 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             next_token = sampled[0];
 
             if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
+                                     d_context_lens, pf_stream);
             }
         } else {
             next_token = executor_->forward(state, pf_stream);
 
             if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_context_lens, pf_stream);
+                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
+                                     d_context_lens, pf_stream);
             }
         }
 
@@ -1570,7 +1603,8 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     "pool was VRAM-clamped below the requested context; free VRAM, lower "
                     "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
                     req->id, blocks_needed, pool_blocks);
-                kv_manager_->free_sequence(req->id);
+                kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+                cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 continue;
             }
@@ -1585,7 +1619,8 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     "SWA KV sizing failed at decode: seq %d could not prepare its window at "
                     "ctx_len=%d — cancelling this sequence (see kv_cache.swa_sizing).",
                     req->id, ctx_len);
-                kv_manager_->free_sequence(req->id);
+                kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+                cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 continue;
             }
@@ -1711,19 +1746,38 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
                 residual_meta_h_counts_[i] = rs.fill_count;
                 residual_meta_h_widxes_[i] = rs.write_idx;
             }
-            const size_t meta_bytes = static_cast<size_t>(3) * N * sizeof(int);
-            if (cudaMallocAsync(&residual_meta_d_buf_, meta_bytes, dec_stream) == cudaSuccess) {
+            // The buffer is persistent and sized for max_batch_size (#1648):
+            // a per-step cudaMallocAsync address was baked into a captured
+            // graph that is replayed, and nothing invalidated the graph when
+            // the allocator handed back a different one. Stride by the
+            // CAPACITY, not by N, so the three sub-arrays keep fixed offsets
+            // across steps whatever the batch width - a graph captured at one
+            // N stays correct at another.
+            if (residual_meta_d_buf_ != nullptr && N <= residual_meta_capacity_) {
                 int* base = residual_meta_d_buf_;
-                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(0) * N, residual_meta_h_slots_.data(),
-                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(1) * N, residual_meta_h_counts_.data(),
-                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(2) * N, residual_meta_h_widxes_.data(),
-                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
-                state.d_residual_seq_slots = base + static_cast<ptrdiff_t>(0) * N;
-                state.d_residual_counts = base + static_cast<ptrdiff_t>(1) * N;
-                state.d_residual_write_idxes = base + static_cast<ptrdiff_t>(2) * N;
+                const ptrdiff_t stride = residual_meta_capacity_;
+                cudaMemcpyAsync(base + 0 * stride, residual_meta_h_slots_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + 1 * stride, residual_meta_h_counts_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + 2 * stride, residual_meta_h_widxes_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                state.d_residual_seq_slots = base + 0 * stride;
+                state.d_residual_counts = base + 1 * stride;
+                state.d_residual_write_idxes = base + 2 * stride;
                 state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+            } else {
+                // Neither case is expected: the buffer is sized for
+                // max_batch_size at init and admission is clamped to it. Say
+                // so once rather than decoding with stale metadata.
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    IMP_LOG_WARN(
+                        "residual metadata unavailable for a %d-sequence decode "
+                        "(buffer=%p, capacity=%d); this step runs without it",
+                        N, static_cast<const void*>(residual_meta_d_buf_), residual_meta_capacity_);
+                }
             }
         }
     }
@@ -1801,10 +1855,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
 
         const auto& bt = kv_manager_->block_table(req->id);
         const auto& sbt = kv_manager_->swa_block_table(req->id);
-        decode_builder_.add_decode_sequence(last_token, position, bt.data(), static_cast<int>(bt.size()),
-                                            ctx_len,
-                                            swa_sizing_active_ && !sbt.empty() ? sbt.data() : nullptr,
-                                            static_cast<int>(sbt.size()));
+        decode_builder_.add_decode_sequence(last_token, position, bt, ctx_len,
+                                            swa_sizing_active_ ? std::span<const int>(sbt)
+                                                               : std::span<const int>{});
     }
 
     Batch batch = decode_builder_.build();
@@ -2070,13 +2123,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         gpu_batch.free();
     }
 
-    // Free per-step residual metadata buffer (allocated in step_decode_forward
-    // when residual is enabled). cudaFreeAsync orders behind the just-issued
-    // forward + sample on dec_stream.
-    if (residual_meta_d_buf_ != nullptr) {
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(residual_meta_d_buf_, dec_stream));
-        residual_meta_d_buf_ = nullptr;
-    }
+    // (The residual metadata buffer is persistent since #1648 - allocated once
+    // beside d_kv_slot_buf_ and freed with it in the destructor. Freeing it per
+    // step is what made a replayed graph hold a dangling address.)
 
     // Phase 3.5 telemetry: measure MTP-draft prediction accuracy without
     // changing generation. Single-sequence only (batch=1 simplifies hidden-

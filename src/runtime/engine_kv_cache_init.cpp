@@ -429,10 +429,12 @@ bool Engine::init_kv_cache() {
                 "KV cache: the pool ends up at %d blocks (%.0f MiB, %.0f tokens) but the "
                 "requested max_seq_len=%d needs %d blocks (%.0f MiB). Every full-length request "
                 "will be cancelled at admission even though this load reports success. Lower "
-                "--max-seq-len, lower the weight-cache demand (moe.reserve_mib, --kv-fp8), or "
+                "runtime.max_seq_len (imp-cli: --max-seq-len; imp-server: --set "
+                "runtime.max_seq_len=N, the flag is CLI-only and exits 1 there, #1681), lower "
+                "the weight-cache demand (moe.reserve_mib, --kv-fp8), or "
                 "free at least %.0f MiB for the KV pool.",
-                sizing.blocks, have_mib, static_cast<double>(sizing.blocks) * kv_bs,
-                config_.max_seq_len, need_blocks, need_mib, need_mib - have_mib);
+                sizing.blocks, have_mib, static_cast<double>(sizing.blocks) * kv_bs, config_.max_seq_len,
+                need_blocks, need_mib, need_mib - have_mib);
         }
     }
 
@@ -456,9 +458,10 @@ bool Engine::init_kv_cache() {
                 "--vram-budget %zu MiB is too small for this model: the KV pool ends up at %d "
                 "blocks (%.0f MiB) but one max_seq_len=%d sequence needs %d blocks (%.0f MiB). "
                 "Every request would be cancelled at admission. Raise --vram-budget by at least "
-                "%.0f MiB, or lower --max-seq-len.",
-                vram_budget_bytes() >> 20, max_blocks, have_mib, config_.max_seq_len,
-                blocks_per_seq, need_mib, need_mib - have_mib);
+                "%.0f MiB, or lower runtime.max_seq_len (imp-server: --set "
+                "runtime.max_seq_len=N; --max-seq-len is imp-cli only, #1681).",
+                vram_budget_bytes() >> 20, max_blocks, have_mib, config_.max_seq_len, blocks_per_seq,
+                need_mib, need_mib - have_mib);
             return false;
         }
     }
@@ -468,6 +471,8 @@ bool Engine::init_kv_cache() {
     // reading that is wrong most often — free VRAM while another process is
     // still letting go of the card — stops being final.
     const int kv_ceiling_blocks = runtime_config_.kv_cache.growable ? kv_blocks_planned : 0;
+    // What the pool was actually built with; the retry loop below may lower it.
+    int kv_ceiling_effective = kv_ceiling_blocks;
     if (kv_ceiling_blocks > 0) {
         // Commit a fraction on purpose, where the operator asked for it. The
         // clamp above answers "what fits" from a reading that is wrong in both
@@ -506,35 +511,96 @@ bool Engine::init_kv_cache() {
     // Per-layer KV shape path (Gemma 4 dual attention geometry): build per-layer
     // nkv/hd arrays restricted to attention layers (hybrid models may have non-attn layers).
     // SWA sizing also requires the per-layer path (per-layer region capacities).
-    std::unique_ptr<KVCache> kv_cache;
-    if ((!mcfg.head_dim_per_layer.empty() || swa_sizing_active_) &&
-        config_.kv_cache_dtype != QType::INT8 && config_.kv_cache_dtype != QType::INT4) {
-        std::vector<int> per_layer_nkv(n_kv_layers, 0);
-        std::vector<int> per_layer_hd(n_kv_layers, 0);
-        std::vector<char> per_layer_swa(swa_sizing_active_ ? n_kv_layers : 0, 0);
-        for (int l = 0, k = 0; l < mcfg.n_layers && k < n_kv_layers; l++) {
-            // Only attention layers get KV cache entries
-            int attn_nkv = (l < (int)mcfg.n_kv_heads_per_layer.size()) ? mcfg.n_kv_heads_per_layer[l]
-                                                                       : mcfg.n_kv_heads;
-            if (kv_layer_map[l] < 0)
-                continue;  // non-attention layer (SSM/GDN)
-            if (attn_nkv <= 0)
-                attn_nkv = mcfg.n_kv_heads;
-            per_layer_nkv[k] = attn_nkv;
-            per_layer_hd[k] = (l < (int)mcfg.head_dim_per_layer.size() && mcfg.head_dim_per_layer[l] > 0)
-                                  ? mcfg.head_dim_per_layer[l]
-                                  : head_dim;
-            if (swa_sizing_active_)
-                per_layer_swa[k] = layer_swa_window(mcfg, model_->profile(), l) > 0 ? 1 : 0;
-            k++;
+    auto make_kv_cache = [&](int blocks, int ceiling) -> std::unique_ptr<KVCache> {
+        std::unique_ptr<KVCache> kv_cache;
+        if ((!mcfg.head_dim_per_layer.empty() || swa_sizing_active_) &&
+            config_.kv_cache_dtype != QType::INT8 && config_.kv_cache_dtype != QType::INT4) {
+            std::vector<int> per_layer_nkv(n_kv_layers, 0);
+            std::vector<int> per_layer_hd(n_kv_layers, 0);
+            std::vector<char> per_layer_swa(swa_sizing_active_ ? n_kv_layers : 0, 0);
+            for (int l = 0, k = 0; l < mcfg.n_layers && k < n_kv_layers; l++) {
+                // Only attention layers get KV cache entries
+                int attn_nkv = (l < (int)mcfg.n_kv_heads_per_layer.size()) ? mcfg.n_kv_heads_per_layer[l]
+                                                                           : mcfg.n_kv_heads;
+                if (kv_layer_map[l] < 0)
+                    continue;  // non-attention layer (SSM/GDN)
+                if (attn_nkv <= 0)
+                    attn_nkv = mcfg.n_kv_heads;
+                per_layer_nkv[k] = attn_nkv;
+                per_layer_hd[k] = (l < (int)mcfg.head_dim_per_layer.size() && mcfg.head_dim_per_layer[l] > 0)
+                                      ? mcfg.head_dim_per_layer[l]
+                                      : head_dim;
+                if (swa_sizing_active_)
+                    per_layer_swa[k] = layer_swa_window(mcfg, model_->profile(), l) > 0 ? 1 : 0;
+                k++;
+            }
+            kv_cache = std::make_unique<KVCache>(n_kv_layers, per_layer_nkv, per_layer_hd,
+                                                 config_.kv_cache_dtype, blocks, kv_bs, &vram_alloc_,
+                                                 per_layer_swa,
+                                                 swa_sizing_active_ ? vram_budget.swa_max_blocks : 0,
+                                                 ceiling);
+        } else {
+            kv_cache = std::make_unique<KVCache>(n_kv_layers, mcfg.n_kv_heads, head_dim,
+                                                 config_.kv_cache_dtype, blocks, kv_bs, &vram_alloc_,
+                                                 ceiling);
         }
-        kv_cache = std::make_unique<KVCache>(n_kv_layers, per_layer_nkv, per_layer_hd, config_.kv_cache_dtype,
-                                             max_blocks, kv_bs, &vram_alloc_, per_layer_swa,
-                                             swa_sizing_active_ ? vram_budget.swa_max_blocks : 0,
-                                             kv_ceiling_blocks);
-    } else {
-        kv_cache = std::make_unique<KVCache>(n_kv_layers, mcfg.n_kv_heads, head_dim, config_.kv_cache_dtype,
-                                             max_blocks, kv_bs, &vram_alloc_, kv_ceiling_blocks);
+        return kv_cache;
+    };
+
+    // #1662: a pool that does not fit is a smaller pool, not a dead process.
+    //
+    // Everything that sizes this pool runs BEFORE the allocation - the planner,
+    // the clamp, the residual re-sizing - so all of it is working from a
+    // projection. #1631 fixed one wrong projection; the arms in #1662 show that
+    // even the planner's own correct projection is not sufficient on its own
+    // (library_reserve_mb=6100 plans 9977 blocks and OOMs, 7460 plans 7079 and
+    // serves). Halving down to the 16-block floor is the backstop for the next
+    // one: the operator gets a smaller KV pool instead of 537 error lines.
+    //
+    // Only the pool retries. The weight caches are already built at this point
+    // and the model's source tensors may be consumed, so a retry one level up
+    // (imp_context_create) cannot rebuild this engine at all.
+    std::unique_ptr<KVCache> kv_cache;
+    {
+        constexpr int kKVFloorBlocks = 16;
+        const int planned = max_blocks;
+        int attempt_blocks = max_blocks;
+        int attempt_ceiling = kv_ceiling_blocks;
+        for (;;) {
+            try {
+                kv_cache = make_kv_cache(attempt_blocks, attempt_ceiling);
+                break;
+            } catch (const std::exception& e) {
+                if (attempt_blocks <= kKVFloorBlocks) {
+                    IMP_LOG_ERROR(
+                        "KV cache: %d blocks is the %d-block floor and it still does not "
+                        "fit - giving up (%s)",
+                        attempt_blocks, kKVFloorBlocks, e.what());
+                    throw;
+                }
+                const int next = std::max(kKVFloorBlocks, attempt_blocks / 2);
+                const double short_mib = static_cast<double>(n_kv_layers) * (attempt_blocks - next) *
+                                         kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs,
+                                                                  mcfg.n_kv_heads, head_dim) /
+                                         (1024.0 * 1024.0);
+                IMP_LOG_WARN(
+                    "KV cache: %d blocks did not fit (planned %d), retrying at %d blocks "
+                    "- %.1f MiB less (%s)",
+                    attempt_blocks, planned, next, short_mib, e.what());
+                attempt_blocks = next;
+                // The ceiling is a reservation of the same pool, so a retry
+                // that only halves the committed part reserves the same
+                // address space again and fails the same way.
+                if (attempt_ceiling > 0)
+                    attempt_ceiling = std::max(next, attempt_ceiling / 2);
+            }
+        }
+        if (attempt_blocks != max_blocks) {
+            max_blocks = attempt_blocks;
+            kv_ceiling_effective = attempt_ceiling;
+            IMP_LOG_WARN("KV cache: serving %d blocks (%.0f tokens) instead of the planned %d", max_blocks,
+                         static_cast<double>(max_blocks) * kv_bs, planned);
+        }
     }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
@@ -562,6 +628,20 @@ bool Engine::init_kv_cache() {
                 std::vector<int> init_slots(max_seqs, -1);
                 cudaMemcpy(d_kv_slot_buf_, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice);
                 d_kv_slot_last_uploaded_.assign(max_seqs, -1);
+                // Same treatment for the multi-sequence metadata (#1648). It
+                // used to be cudaMallocAsync'd per decode step, and its address
+                // was baked into a captured forward_logits graph that is then
+                // REPLAYED - with none of the graph-invalidation triggers
+                // watching it. That only ever worked because the default pool's
+                // release threshold is pinned to UINT64_MAX so the same address
+                // came back; a pool setting, not an invariant the graph path
+                // asserts. Three [max_batch_size] int arrays, allocated once.
+                size_t meta_bytes = static_cast<size_t>(3) * max_seqs * sizeof(int);
+                if (cudaMalloc(&residual_meta_d_buf_, meta_bytes) == cudaSuccess) {
+                    residual_meta_capacity_ = max_seqs;
+                    std::vector<int> init_meta(3 * static_cast<size_t>(max_seqs), 0);
+                    cudaMemcpy(residual_meta_d_buf_, init_meta.data(), meta_bytes, cudaMemcpyHostToDevice);
+                }
             }
         } else if (residual_n > 0) {
             IMP_LOG_INFO("kv_cache.bitdecoding_residual_tokens=%d ignored (only active with kv_cache_dtype=NVFP4)",
@@ -772,7 +852,7 @@ bool Engine::init_kv_cache() {
         // grew to serve a 25 222-token prompt and the upload then failed with
         // `prefill memcpy block_tables failed: invalid argument`. It is four
         // bytes per block of a pool that may never exist, which is nothing.
-        size_t bt_bytes = static_cast<size_t>(std::max(max_blocks, kv_ceiling_blocks)) * sizeof(int);
+        size_t bt_bytes = static_cast<size_t>(std::max(max_blocks, kv_ceiling_effective)) * sizeof(int);
         size_t swa_bt_bytes = swa_sizing_active_ ? bt_bytes : 0;
         size_t cl_bytes = sizeof(int);
         prefill_pool_size_ = tok_bytes + pos_bytes + bt_bytes + swa_bt_bytes + cl_bytes;

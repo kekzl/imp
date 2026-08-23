@@ -10,6 +10,7 @@ namespace imp {
 Scheduler::Scheduler(int max_batch_size) : max_batch_size_(max_batch_size) {}
 
 void Scheduler::add_request(std::shared_ptr<Request> req) {
+    req->enqueued_round = round_;
     pending_.push_back(std::move(req));
     pending_dirty_ = true;
 }
@@ -19,15 +20,46 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     prefill_batch.clear();
     decode_batch.clear();
 
-    // 1. Remove finished/cancelled requests from active_
-    std::erase_if(active_, [](const std::shared_ptr<Request>& r) {
+    // 1. Remove finished/cancelled requests from active_ AND from pending_.
+    //
+    // pending_ was not filtered (#1633). A request cancelled while queued -
+    // which is what the server does when the client disconnects - was promoted
+    // anyway a few lines below, and the promotion overwrote CANCELLED with
+    // PREFILLING, so nothing downstream could tell either. It then ran a full
+    // generation, holding KV and a batch slot, for a client that was gone.
+    const auto is_done = [](const std::shared_ptr<Request>& r) {
         return r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED;
-    });
+    };
+    std::erase_if(active_, is_done);
+    std::erase_if(pending_, is_done);
 
-    // 2. Sort pending by ascending input token count (shortest-first)
-    //    to reduce head-of-line blocking in continuous batching.
-    if (pending_dirty_) {
-        std::ranges::sort(pending_, [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
+    // 2. Sort pending shortest-first, with aging.
+    //
+    // Shortest-first reduces head-of-line blocking, which is why it is here.
+    // On its own it also starves: the queue is re-sorted on every arrival, so
+    // a long prompt is passed over by every shorter one that shows up while
+    // the batch is full, for as long as that lasts. Under sustained short
+    // traffic "for as long as that lasts" has no bound (#1634).
+    //
+    // Aging puts a bound on it without giving up the property: a request that
+    // has been waiting kAgingRounds scheduling rounds sorts ahead of every
+    // request that has not, and ties fall back to length. So the ordering is
+    // shortest-first among peers, and arrival order across the aging boundary.
+    //
+    // The sort has to run whenever the round advances, not only when the queue
+    // changed - the aging bucket of a request changes with time, not with
+    // arrivals, and `pending_dirty_` cannot see time passing.
+    ++round_;
+    const uint64_t now = round_;
+    if (pending_dirty_ || !pending_.empty()) {
+        std::ranges::sort(pending_, [now](const std::shared_ptr<Request>& a,
+                                          const std::shared_ptr<Request>& b) {
+            const bool a_aged = now - a->enqueued_round >= static_cast<uint64_t>(kAgingRounds);
+            const bool b_aged = now - b->enqueued_round >= static_cast<uint64_t>(kAgingRounds);
+            if (a_aged != b_aged)
+                return a_aged;  // waited long enough beats short
+            if (a_aged)
+                return a->enqueued_round < b->enqueued_round;  // among the aged, oldest first
             return a->input_tokens.size() < b->input_tokens.size();
         });
         pending_dirty_ = false;
@@ -44,7 +76,26 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 int ctx_len = req->context_len();
                 const int bs = kv_manager_->kv_cache()->block_size();
                 int blocks_needed = (ctx_len + bs - 1) / bs;
-                if (!kv_manager_->can_allocate(blocks_needed)) {
+
+                // Admit on prompt + generation, not on the prompt alone
+                // (#1635). context_len() counts what exists NOW, so a batch
+                // whose prompts all fit could still run the pool dry mid-
+                // generation, and the loser is cancelled after the client has
+                // already received part of the answer. The grow branch below
+                // has computed the decode half correctly since it was written;
+                // the admission test above it did not read it.
+                //
+                // Clamped to the pool: on a cache too small to ever hold
+                // prompt + max_tokens (the 16-block floor case) the full
+                // reserve would queue every request forever. There the
+                // guarantee degrades to the old prompt-only admission rather
+                // than to a refusal, and the mid-stream cancel stays possible.
+                const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
+                const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
+                const int admit_blocks = std::min(blocks_needed + decode_blocks,
+                                                  std::max(blocks_needed, pool_blocks));
+
+                if (!kv_manager_->can_allocate(admit_blocks)) {
                     // If the request needs more blocks than the KV cache can
                     // ever hold, no eviction will free enough — leaving the
                     // request in pending_ would busy-loop the worker forever
@@ -74,7 +125,6 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         // block short, after paying for the growth. Measured on
                         // a 25 222-token prompt: grew 810 -> 1577 blocks, then
                         // refused.
-                        const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
                         cap = kv_manager_->kv_cache()->try_grow_to(blocks_needed + decode_blocks);
                     }
                     if (blocks_needed > cap) {
@@ -169,6 +219,20 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 }
             }
 
+            if (kv_manager_) {
+                // Hold the promise, do not just test it. Without this the next
+                // request is admitted against the blocks this one has not
+                // written yet, which is the same over-admission one round
+                // later (#1635). It decays as the blocks are appended and is
+                // dropped by free_sequence().
+                const int bs = kv_manager_->kv_cache()->block_size();
+                const int prompt_blocks = (req->context_len() + bs - 1) / bs;
+                const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
+                const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
+                kv_manager_->set_decode_reservation(req->id, std::min(prompt_blocks + decode_blocks,
+                                                                      std::max(prompt_blocks, pool_blocks)));
+            }
+
             auto r = *it;
             it = pending_.erase(it);
             r->status = RequestStatus::PREFILLING;
@@ -179,8 +243,17 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
 
     // 3. Re-schedule incomplete PREFILLING requests (chunked prefill).
     //    Skip requests already in prefill_batch (just promoted from pending).
+    //
+    //    `>= 0`, not `> 0` (#1643): a request promoted in step 2 but not served
+    //    that tick still has offset 0, and the old condition dropped it here -
+    //    PREFILLING, admitted, holding KV, and in no batch ever again. Nothing
+    //    hit it while every promoted request was served immediately; the
+    //    per-step prefill cap makes "not served this tick" a normal state, and
+    //    two of three concurrent ingests then hung until the 300 s request
+    //    timeout. The `already_queued` scan below is what keeps the
+    //    just-promoted ones from being added twice.
     for (auto& req : active_) {
-        if (req->status == RequestStatus::PREFILLING && req->prefill_offset > 0 &&
+        if (req->status == RequestStatus::PREFILLING && req->prefill_offset >= 0 &&
             req->prefill_offset < static_cast<int>(req->input_tokens.size())) {
             bool already_queued = false;
             for (const auto& pf : prefill_batch) {

@@ -5,6 +5,8 @@
 
 #include "runtime/suffix_draft.h"
 
+#include <span>
+
 #include <gtest/gtest.h>
 #include <vector>
 
@@ -14,14 +16,14 @@ namespace {
 
 SuffixDraftIndex make_index(const std::vector<int32_t>& hist, int min_match = 3, int max_match = 8) {
     SuffixDraftIndex idx(min_match, max_match);
-    idx.append(hist.data(), static_cast<int>(hist.size()));
+    idx.append(hist);
     return idx;
 }
 
 std::vector<int32_t> draft(const std::vector<int32_t>& hist, int k, int min_match = 3, int max_match = 8,
-                           int k_max = 0, int* start = nullptr) {
+                           int k_max = 0) {
     auto idx = make_index(hist, min_match, max_match);
-    return idx.draft(k, k_max > 0 ? k_max : k, start);
+    return idx.draft(k, k_max > 0 ? k_max : k).tokens;
 }
 
 TEST(SuffixDraft, EmptyWhenNoRepeat) { EXPECT_TRUE(draft({1, 2, 3, 4, 5, 6, 7, 8}, 4).empty()); }
@@ -101,7 +103,8 @@ TEST(SuffixDraft, DegenerateParamsRejected) {
     auto idx = make_index(h);
     EXPECT_TRUE(idx.draft(0, 0).empty());
     SuffixDraftIndex empty_idx(3, 8);
-    empty_idx.append(nullptr, 5);
+    // Was append(nullptr, 5): a span cannot claim five tokens it does not have.
+    empty_idx.append({});
     EXPECT_EQ(empty_idx.size(), 0);
     EXPECT_TRUE(empty_idx.draft(4, 4).empty());
 }
@@ -112,16 +115,15 @@ TEST(SuffixDraft, IncrementalAppendMatchesBulkBuild) {
     std::vector<int32_t> h = {10, 11, 12, 13, 14, 99, 42, 10, 11, 12, 13, 14, 99, 10, 11, 12};
     auto bulk = make_index(h, 3, 8);
     SuffixDraftIndex inc(3, 8);
-    for (const int32_t t : h)
-        inc.append(&t, 1);
+    for (const int32_t& t : h)
+        inc.append(std::span(&t, 1));
     ASSERT_EQ(bulk.size(), inc.size());
-    int s1 = -1, s2 = -1;
-    auto d1 = bulk.draft(8, 8, &s1);
-    auto d2 = inc.draft(8, 8, &s2);
-    EXPECT_EQ(d1, d2);
-    EXPECT_EQ(s1, s2);
+    const auto d1 = bulk.draft(8, 8);
+    const auto d2 = inc.draft(8, 8);
+    EXPECT_EQ(d1.tokens, d2.tokens);
+    EXPECT_EQ(d1.start, d2.start);
     ASSERT_FALSE(d1.empty());
-    EXPECT_EQ(d1[0], 13);
+    EXPECT_EQ(d1.tokens[0], 13);
 }
 
 TEST(SuffixDraft, AdaptiveLengthExtendsOnMultiOccurrenceAgreement) {
@@ -168,11 +170,10 @@ TEST(SuffixDraft, AdaptiveLengthExtendsOnMaximalContextMatch) {
 
 TEST(SuffixDraft, DraftStartClassifiesSourceRegion) {
     std::vector<int32_t> h = {10, 11, 12, 13, 14, 99, 10, 11, 12};
-    int start = -1;
     auto idx = make_index(h);
-    auto d = idx.draft(4, 4, &start);
+    const auto d = idx.draft(4, 4);
     ASSERT_FALSE(d.empty());
-    EXPECT_EQ(start, 3);  // one past the matched [10,11,12] occurrence
+    EXPECT_EQ(d.start, 3);  // one past the matched [10,11,12] occurrence
 }
 
 }  // namespace

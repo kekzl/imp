@@ -14,6 +14,7 @@
 // were laid out somewhere else, and describes a different picture.
 
 #include <cstdint>
+#include <expected>
 #include <string>
 #include <utility>
 #include <vector>
@@ -34,11 +35,18 @@ struct MRopeImageGrid {
 // rather than silently mis-positioning the rest of the prompt.
 //
 // `start_pos` is the position the first token takes (0 for a fresh prompt, the
-// continuation point when appending). `out` is filled as [3, n_tokens],
-// axis-major, ready for MRopeParams. `next_pos` receives the position a token
-// appended after this sequence would take.
-bool qwen_build_mrope_positions(const std::vector<uint8_t>& is_image,
-                                const std::vector<MRopeImageGrid>& grids, int start_pos,
-                                std::vector<int32_t>& out, int& next_pos, std::string& err);
+// continuation point when appending).
+struct MRopePositions {
+    // [3, n_tokens], axis-major, ready for MRopeParams.
+    std::vector<int32_t> pos;
+    // The position a token appended after this sequence would take. It travels
+    // with `pos` because it is only meaningful together with it: the two used
+    // to be separate out-parameters, and a caller that read one without the
+    // other got a delta computed against the wrong sequence.
+    int next_pos = 0;
+};
+
+[[nodiscard]] std::expected<MRopePositions, std::string> qwen_build_mrope_positions(
+    const std::vector<uint8_t>& is_image, const std::vector<MRopeImageGrid>& grids, int start_pos);
 
 }  // namespace imp

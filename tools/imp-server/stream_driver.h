@@ -28,11 +28,18 @@ struct StreamDialect {
     // User-visible content / reasoning deltas.
     std::function<bool(const std::string&)> emit_text;
     std::function<bool(const std::string&)> emit_reasoning;
-    // Content from the no-stop-sequence hot path, called once per decoded
-    // token: the chat dialect attaches per-token logprobs here (the index is
-    // StreamLoopResult::n_output_tokens - 1, updated live by the driver); the
-    // other dialects alias this to emit_text.
-    std::function<bool(const std::string&)> emit_content_token;
+    // Content carrying a token index, so the chat dialect can attach the
+    // right per-token logprob. The other dialects alias this to emit_text and
+    // ignore the index.
+    //
+    // The index is passed rather than read off StreamLoopResult::n_output_tokens
+    // because the two emission paths disagree about "now": without stop
+    // sequences the driver emits as it decodes, so the live counter is right,
+    // but with them it holds bytes back until a stop match is ruled out, and by
+    // the time those bytes go out the counter has moved on. That is why the
+    // stop path used to bypass this sink entirely and ship no logprobs at all
+    // (#1588). -1 means the driver cannot attribute the bytes to one token.
+    std::function<bool(const std::string&, int token_index)> emit_content_token;
     // Idle keepalive, sent when no token arrived for ~10s. A false return is
     // treated as a client disconnect (request cancelled).
     std::function<bool()> keepalive;
@@ -59,6 +66,20 @@ struct StreamDialect {
 // (see StreamDialect::emit_content_token / on_call_begin).
 struct StreamLoopResult {
     const char* finish = nullptr;
+    // The stop sequence that ended the generation, empty otherwise. The
+    // Anthropic wire format reports it (`stop_reason: "stop_sequence"`,
+    // `stop_sequence: "<text>"`); with only `finish = "stop"` to go on, a stop
+    // match was indistinguishable from the model ending its turn (#1550).
+    std::string stop_sequence;
+    // Set when the stream ended on a server-side fault rather than on the
+    // model finishing. The Anthropic dialect turns this into an `error` SSE
+    // event; without it a timeout arrived as stop_reason "max_tokens" and an
+    // admission refusal as "capacity", both reading as a completed turn
+    // (#1552, #1553). `error_type` is an Anthropic error type; null means no
+    // fault. The OpenAI dialect ignores both: its finish_reason enum has no
+    // member for either, which is deliberate (#1590).
+    const char* error_type = nullptr;
+    std::string error_message;
     int n_output_tokens = 0;
     int n_reasoning_tokens = 0;
     double ttft_ms = 0.0;

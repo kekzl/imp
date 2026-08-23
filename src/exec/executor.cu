@@ -147,20 +147,8 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
     }
 
     // Apply logit bias
-    if (state.n_logit_bias > 0 && state.logit_bias != nullptr) {
-        for (int i = 0; i < state.n_logit_bias; i++) {
-            int32_t tid = state.logit_bias[i].first;
-            float bias = state.logit_bias[i].second;
-            if (tid >= 0 && tid < vocab_size) {
-                float logit;
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpy(&logit, logits_ptr + tid, sizeof(float), cudaMemcpyDeviceToHost));
-                logit += bias;
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpyAsync(logits_ptr + tid, &logit, sizeof(float), cudaMemcpyHostToDevice, stream));
-            }
-        }
-    }
+    if (state.n_logit_bias > 0 && state.logit_bias != nullptr)
+        apply_logit_bias(logits_ptr, vocab_size, state.logit_bias, state.n_logit_bias, stream);
 
     // Force token: set all logits except force_token to -inf.
     // Used by think-budget to force </think> via logit manipulation
@@ -252,19 +240,8 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
             apply_dry_penalty(lp, vocab, st.host_penalty_tokens, st.n_penalty_tokens, st.dry_multiplier,
                               st.dry_base, st.dry_allowed_length, st.dry_penalty_last_n, stream);
         }
-        if (st.n_logit_bias > 0 && st.logit_bias != nullptr) {
-            for (int i = 0; i < st.n_logit_bias; i++) {
-                int32_t tid = st.logit_bias[i].first;
-                float bias = st.logit_bias[i].second;
-                if (tid >= 0 && tid < vocab) {
-                    float logit;
-                    IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost));
-                    logit += bias;
-                    IMP_CUDA_CHECK_LOG(
-                        cudaMemcpyAsync(lp + tid, &logit, sizeof(float), cudaMemcpyHostToDevice, stream));
-                }
-            }
-        }
+        if (st.n_logit_bias > 0 && st.logit_bias != nullptr)
+            apply_logit_bias(lp, vocab, st.logit_bias, st.n_logit_bias, stream);
         apply_constraint_mask(st, lp, vocab, stream);
         // Ban special tokens (chat template delimiters etc.). MUST happen
         // before sampling — without this, greedy can pick a banned token
@@ -335,13 +312,13 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
         const float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
         // Eligibility is batch-uniform (depends only on shared sampling params
         // and vocab), so decide BEFORE applying any penalties — no sequence is
-        // ever half-processed across the two paths. top_k <= 0 / > vocab
-        // normalizes to vocab inside the samplers, which lands in the CUB
-        // regime (> SAMPLE_MAX_TOP_K) that syncs internally.
-        const int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
-        const int eff_top_k = (top_k <= 0 || top_k > vocab) ? vocab : top_k;
-        const bool can_batch = d_sample_result_ && h_sample_pinned_.as<int32_t>() && n_seq <= sample_slots_ &&
-                               (greedy || eff_top_k <= SAMPLE_MAX_TOP_K);
+        // ever half-processed across the two paths.
+        //
+        // No top_k term any more (#1654): sample_topk_topp_async enqueues the
+        // CUB regime too, so a top_k over SAMPLE_MAX_TOP_K no longer drops the
+        // whole batch onto the per-sequence synchronous path. It used to, and
+        // that cost 14.5% of aggregate throughput at six sequences.
+        const bool can_batch = d_sample_result_ && h_sample_pinned_.as<int32_t>() && n_seq <= sample_slots_;
         if (can_batch) {
             for (int i = 0; i < n_seq; i++) {
                 Tensor seq_logits = flatten_logits(logits.slice(i, i + 1));
@@ -450,19 +427,8 @@ void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceStat
         }
     }
     // Apply logit bias
-    if (state.n_logit_bias > 0 && state.logit_bias != nullptr) {
-        for (int i = 0; i < state.n_logit_bias; i++) {
-            int32_t tid = state.logit_bias[i].first;
-            float bias = state.logit_bias[i].second;
-            if (tid >= 0 && tid < vocab) {
-                float logit;
-                IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost));
-                logit += bias;
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemcpyAsync(lp + tid, &logit, sizeof(float), cudaMemcpyHostToDevice, stream));
-            }
-        }
-    }
+    if (state.n_logit_bias > 0 && state.logit_bias != nullptr)
+        apply_logit_bias(lp, vocab, state.logit_bias, state.n_logit_bias, stream);
     // Force token (think-budget)
     if (state.force_token >= 0 && state.force_token < vocab) {
         force_single_token(lp, vocab, state.force_token, stream);
@@ -539,9 +505,11 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     const bool greedy = (state.temperature <= 0.0f || state.top_k == 1);
     const int top_k = state.top_k > 0 ? state.top_k : 50;
     const int eff_top_k = (top_k <= 0 || top_k > vocab) ? vocab : top_k;
-    if (!greedy && eff_top_k > SAMPLE_MAX_TOP_K)
-        return false;  // CUB regime syncs internally
-
+    // No blanket CUB-regime refusal any more (#1654): sample_topk_topp_async
+    // enqueues that regime now. Only the ROW-PARALLEL stash below is still
+    // limited to SAMPLE_MAX_TOP_K - launch_topk_topp_rows takes top_k in
+    // [1, SAMPLE_MAX_TOP_K] by contract - so a larger k skips the stash and
+    // enqueues per row instead of dropping the caller onto a synchronous path.
     apply_row_filters_(lp, vocab, state, stream);
 
     auto* slot = reinterpret_cast<int32_t*>(reinterpret_cast<char*>(d_sample_result_) +
@@ -552,7 +520,7 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     }
     unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
     float temperature = state.temperature <= 0.0f ? 1.0f : state.temperature;
-    if (h_row_args_.as<TopkRowArgs>() && d_row_args_) {
+    if (h_row_args_.as<TopkRowArgs>() && d_row_args_ && eff_top_k <= SAMPLE_MAX_TOP_K) {
         // STASH the row for the row-parallel batched launch in
         // collect_sampled_tokens — n serialized <<<64>>>+<<<1>>> launch pairs
         // become ONE partial + ONE finalize launch for the whole batch.

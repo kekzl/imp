@@ -51,9 +51,13 @@ Everything runs in Docker. You do not need a CUDA toolkit on the host. The
 worked example is **Qwen3.8-27B**: a 27B multimodal model, quantized to NVFP4 so
 it fits a single 5090 with room for a real context.
 
-**Get the weights** (19.2 GiB, download only, nothing to convert):
+**Get the weights** (19.2 GiB, download only, nothing to convert). `make build`
+first: the script needs the `imp:test` image and exits 1 without it, even on
+this download-only path (#1682). `docker compose build imp-server` produces
+`imp:latest`, which is a different tag.
 
 ```bash
+make build                                     # ~3.5 min, produces imp:test
 scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4 ~/models/Qwen3.8-27B-NVFP4
 ```
 
@@ -61,7 +65,7 @@ scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4 ~/models/Qwen3.8-27B-NVFP4
 
 ```bash
 docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
-  -p 8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
+  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
 
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -115,8 +119,8 @@ answer and plots inter-token latency as it is written.
 | prefill pp4096 | 15324.7 tok/s | 8 % |
 | peak VRAM (own) | 20716 MiB | 10 % |
 
-[PROV: commit=1e4fad60 date=2026-07-26 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
-       cuda=13.3 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
+[PROV: commit=unknown date=2026-07-26 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
+       cuda=unknown path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
 **Read the caveat before quoting these.** Decode on this host moves several
@@ -216,7 +220,7 @@ Tracks `main` rather than the latest release.
 ```bash
 git clone https://github.com/kekzl/imp.git && cd imp
 docker compose build imp-server
-docker run --gpus all -v ./models:/models -p 8080:8080 \
+docker run --gpus all -v ./models:/models -p 127.0.0.1:8080:8080 \
   imp:latest --model /models/your-model.gguf
 ```
 

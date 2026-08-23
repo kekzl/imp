@@ -73,6 +73,26 @@ fi
 
 MODE="${1:-fast}"
 
+# Wall clock, at the start and at the summary.
+#
+# Every measurement below is a throughput number, and this box is shared with
+# other sessions. Twice in one day a neighbouring GPU job overlapped a run and
+# the question "did that land inside my gate?" could not be answered from the
+# log: nothing in it carried a time. Reconstructing it from file mtimes cost
+# more than a repeat run, and the repeat is what settled it (283.35 against
+# 283.04 tok/s - the overlap turned out to be harmless, which is exactly what
+# could not be known beforehand).
+#
+# Two lines, so the next such question takes seconds. Suggested by the session
+# on the other side of that collision.
+#
+# UTC, with the Z: this script re-execs into the imp:test container on a
+# clean host, and the container's clock is UTC while the host runs local time.
+# A bare "07:55" from one side and "05:55" from the other is worse than no
+# timestamp, because it looks comparable.
+VERIFY_T_START="$(date -u +%H:%M:%SZ)"
+echo "verify: started $VERIFY_T_START ($MODE)"
+
 BIN="${IMP_VERIFY_BIN:-build/imp-cli}"
 TESTS_BIN="${IMP_VERIFY_TESTS:-build/imp-tests}"
 MODELS="${IMP_VERIFY_MODELS:-models}"
@@ -244,7 +264,7 @@ if [ ! -d "$MODELS_ABS" ]; then
     echo "    ln -s \"\$HOME/models\" models"
     echo "    IMP_VERIFY_MODELS=\"\$HOME/models\" make verify-fast"
     echo
-    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST}"
+    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST} (started $VERIFY_T_START, ended $(date -u +%H:%M:%SZ))"
     exit 1
 fi
 
@@ -279,7 +299,14 @@ else
         # CI cannot run it, and DecodeLogitsInvariantToBatchComposition (#1314)
         # is the only assert in the tree that a sequence's logits do not depend
         # on its batch neighbours — the class #1044/#1045 came from.
-        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:AttentionTest.*:VramBudget*:ForwardPassTest.*"
+        #
+        # `*Attention*` was `AttentionTest.*` from 2026-04-27 until #1586. That
+        # suite had already been renamed, so the pattern matched nothing and
+        # gtest reported success for it: the gate ran ZERO attention tests for
+        # four months, in the subsystem with the most kernel churn in the tree.
+        # check_verify_filter.sh now fails when any pattern here matches
+        # nothing.
+        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:*Attention*:VramBudget*:ForwardPassTest.*"
         if "$TESTS_BIN" --gtest_filter="$FILTER" >/tmp/imp_verify_tests.log 2>&1; then
             pass "fast gtest filter"
         else
@@ -320,6 +347,42 @@ fi
 
 # --------------------------------------------------------------------- 3. perf
 section "perf vs baseline"
+
+# Age and provenance of the pin (#1624).
+#
+# AGENTS.md and docs/internals/BENCHMARKING.md both say a comparison is only
+# meaningful within one session on one host, and then the gate compares against
+# a number measured weeks earlier with nothing saying how old it is. The
+# threshold is not a correctness bound, it is the point past which "the host
+# moved" outweighs "the code moved": measured on this box, three runs back to
+# back spread 0.09 % and the same binary hours apart spread 4.01 %, against an
+# 8 % gate. A pin older than a month is comparing across a distance the gate
+# cannot see.
+#
+# A warning, not a failure: a stale pin still catches a 30 % regression, and
+# failing the gate on a calendar date would train people to regenerate the pin
+# to make it quiet, which is the opposite of the point.
+if [ -f "$BASELINE" ]; then
+    _pin_ts=$(grep -oE '"timestamp"[[:space:]]*:[[:space:]]*"[^"]*"' "$BASELINE" |
+              head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    if [ -n "$_pin_ts" ]; then
+        _pin_epoch=$(date -u -d "$_pin_ts" +%s 2>/dev/null || echo "")
+        _now_epoch=$(date -u +%s)
+        if [ -n "$_pin_epoch" ]; then
+            _age_days=$(( (_now_epoch - _pin_epoch) / 86400 ))
+            _pin_model=$(grep -oE '"model"[[:space:]]*:[[:space:]]*"[^"]*"' "$BASELINE" |
+                         head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+            echo "  pin: $_pin_ts (${_age_days} days old), model $_pin_model"
+            if [ "$_age_days" -gt 30 ]; then
+                echo "  WARNING: the baseline is ${_age_days} days old. The measurement contract"
+                echo "           (AGENTS.md) is single-session; host drift over that span is larger"
+                echo "           than this gate can distinguish from a code change. Regenerate with"
+                echo "           scripts/gen_perf_baseline.sh when the current numbers are trusted."
+            fi
+        fi
+    fi
+fi
+
 if [ "${IMP_VERIFY_SKIP_PERF:-0}" = "1" ]; then
     skip "perf gate (IMP_VERIFY_SKIP_PERF=1)"
 elif [ ! -f "$BASELINE" ]; then
@@ -357,12 +420,14 @@ else
             model_gate_ran
             ERR=$(mktemp)
             gpu_sample_start
+            OUT=$(mktemp)
             "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
-                  --prefill-chunk-size "$BENCH_CHUNK" --max-tokens 256 --temperature 0 \
-                  --set speculative.ngram=false >/dev/null 2>"$ERR"
+                  --prefill-chunk-size "$BENCH_CHUNK" --max-tokens 256 --temperature 0 --json \
+                  --set speculative.ngram=false >"$OUT" 2>"$ERR"
             gpu_sample_stop
-            PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-            TG=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+            PP=$(jq -er '.prefill_tps // empty' "$OUT" 2>/dev/null || true)
+            TG=$(jq -er '.decode_tps // empty' "$OUT" 2>/dev/null || true)
+            rm -f "$OUT"
             if [ -z "$PP" ] || [ -z "$TG" ]; then
                 fail "$BL_MODEL: could not parse bench output (see $ERR)"
                 tail -10 "$ERR"
@@ -434,20 +499,25 @@ else
             TG_ALL=""; PP_ALL=""
             gpu_sample_start
             for _t in $(seq 1 "$TRIALS"); do
+                OUT=$(mktemp)
                 "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
-                      --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 \
-                      --set speculative.ngram=false >/dev/null 2>"$ERR"
-                _tg=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-                _pp=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+                      --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 --json \
+                      --set speculative.ngram=false >"$OUT" 2>"$ERR"
+                _tg=$(jq -er '.decode_tps // empty' "$OUT" 2>/dev/null || true)
+                _pp=$(jq -er '.prefill_tps // empty' "$OUT" 2>/dev/null || true)
+                rm -f "$OUT"
                 [ -n "$_tg" ] && TG_ALL="$TG_ALL$_tg\n"
                 [ -n "$_pp" ] && PP_ALL="$PP_ALL$_pp\n"
             done
             gpu_sample_stop
             median() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR==0)exit 1; print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}'; }
             spread() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR<2)exit 0; printf "%.2f", (a[NR]-a[1])/a[1]*100}'; }
-            # Bench lines (stderr) have variable spacing inside parens for short numbers:
-            #   "pp   512 tokens  avg    38.47 ms  (13310.12 tok/s)  [3 reps]"
-            #   "tg   128 tokens  avg   861.50 ms  ( 148.58 tok/s)  [3 reps]"
+            # Numbers come from `--bench --json` (#1583). They used to be regexed
+            # out of the stderr table, whose spacing inside the parens varies
+            # with the magnitude ("(13310.12 tok/s)" against "( 148.58 tok/s)")
+            # - a layout that was load-bearing for the gate and documented
+            # nowhere. An empty capture there produced a median over fewer
+            # samples than the header printed.
             PP=$(median "$PP_ALL" || true)
             TG=$(median "$TG_ALL" || true)
             TG_SPREAD=$(spread "$TG_ALL")
@@ -494,11 +564,12 @@ else
                     BL_PP=$(jq -r ".metrics.prefill_tps.pp${PPLEN} // empty" "$BASELINE")
                     [ -z "$BL_PP" ] && continue
                     ERR2=$(mktemp)
+                    OUT2=$(mktemp)
                     "$BIN" --model "$MODEL_PATH" --bench --bench-pp "$PPLEN" --bench-reps $REPS \
                           --prefill-chunk-size 0 --max-tokens 1 --temperature 0 --max-seq-len 70000 \
-                          >/dev/null 2>"$ERR2"
-                    PPTPS=$(grep -oP "^pp\s+${PPLEN}\s.*\(\s*\K[0-9.]+(?=\s+tok/s)" "$ERR2" | head -1)
-                    rm -f "$ERR2"
+                          --json >"$OUT2" 2>"$ERR2"
+                    PPTPS=$(jq -er '.prefill_tps // empty' "$OUT2" 2>/dev/null || true)
+                    rm -f "$ERR2" "$OUT2"
                     [ -z "$PPTPS" ] && continue
                     PP_DELTA=$(awk -v cur="$PPTPS" -v base="$BL_PP" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
                     PP_REG=$(awk -v d="$PP_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')
@@ -662,8 +733,13 @@ section "smoke prompts (degeneration check)"
 # Greedy decode on a known-deterministic prompt.
 # Quality gate: output must contain expected substring AND last 32 tokens must
 # have at least 8 distinct tokens (catches "own own own" stuck-token failures).
+# $5 (optional): minimum generated tokens. The skill's figure is 10, with its
+# own exception for "single-word factual" prompts - and this gate's own prompt
+# is one: "The capital of France is" answers in 11 tokens on the 4B model, so a
+# flat 10 would sit one token from a false red. Per-prompt, with the default
+# where the skill put it.
 smoke_prompt() {
-    local label="$1" model="$2" prompt="$3" expect="$4"
+    local label="$1" model="$2" prompt="$3" expect="$4" min_toks="${5:-10}"
     if [ ! -f "$MODELS/$model" ]; then
         skip "$label ($model not present)"
         return
@@ -677,7 +753,17 @@ smoke_prompt() {
     DISTINCT=$(echo "$TOKS" | sort -u | wc -l)
     # Generated word stream (stripped of token id prefix) for NaN/Inf scan
     WORDS=$(grep -oP "\[tok=[0-9]+ '\K[^']*" "$ERR" | tr '\n' ' ')
+    # The repetition and early-abort checks below read the WHOLE run, not the
+    # trailing window. Derived here so the temp file is gone before any of the
+    # early returns below - they used to be the only `rm` and adding checks in
+    # front of it would have leaked one file per failed smoke run.
+    ALL_TOKS=$(grep -oP '\[tok=\K[0-9]+' "$ERR")
     rm -f "$ERR"
+    N_TOKS=$(printf '%s\n' "$ALL_TOKS" | grep -c .)
+    RUNMAX=$(printf '%s\n' "$ALL_TOKS" | uniq -c | awk '{if($1>m)m=$1}END{print m+0}')
+    GRAMMAX=$(printf '%s\n' "$ALL_TOKS" | awk '{a[NR]=$0} END{
+        for(i=1;i+2<=NR;i++){k=a[i]" "a[i+1]" "a[i+2]; c[k]++; if(c[k]>m)m=c[k]}
+        print m+0}')
 
     # Herestrings, not `echo ... | grep -q`: grep -q leaves at the first match and
     # closes the pipe, echo dies of EPIPE, and `set -o pipefail` (:40) turns that
@@ -695,25 +781,54 @@ smoke_prompt() {
         echo "  tokens: $(echo "$TOKS" | tr '\n' ' ')"
         return
     fi
+    # The distinct-token count is one shape of degeneration, and the skill this
+    # gate stands in for names three more (#1573). Two of them are checkable
+    # here, from output this gate already collects, with the skill's own
+    # thresholds:
+    #
+    #   1. verbatim repetition — no token more than 4 times in a row, no 3-gram
+    #      more than 3 times. "a b c a b c a b c a b c" has 3 distinct tokens
+    #      per window and passes the count above; it is the shape #1248 had.
+    #   2. early abort — at least 10 generated tokens. A 3-token answer to a
+    #      sentence-completion prompt is a stop-condition defect, and it also
+    #      makes every check above vacuous: 3 tokens cannot fail a 32-token
+    #      window.
+    if [ "$RUNMAX" -gt 4 ]; then
+        fail "$label — a token repeats $RUNMAX times in a row (skill limit: 4)"
+        echo "  tokens: $(printf '%s ' $ALL_TOKS)"
+        return
+    fi
+    if [ "$GRAMMAX" -gt 3 ]; then
+        fail "$label — a 3-gram repeats $GRAMMAX times (skill limit: 3)"
+        echo "  tokens: $(printf '%s ' $ALL_TOKS)"
+        return
+    fi
+    if [ "$N_TOKS" -lt "$min_toks" ]; then
+        fail "$label — stopped after $N_TOKS tokens (limit: $min_toks)"
+        echo "  words: $WORDS"
+        return
+    fi
     # Generated text appears interleaved with logs on stdout — substring match works
     if ! grep -q "$expect" <<< "$OUT$WORDS"; then
         fail "$label — expected '$expect' in output"
         echo "  words: $WORDS"
         return
     fi
-    pass "$label (distinct=$DISTINCT, contains '$expect')"
+    pass "$label (distinct=$DISTINCT, tokens=$N_TOKS, max-run=$RUNMAX, max-3gram=$GRAMMAX, contains '$expect')"
 }
 
 smoke_prompt "Qwen3-4B Q8_0 (dense)" \
     "Qwen3-4B-Instruct-2507-Q8_0.gguf" \
     "The capital of France is" \
-    "Paris"
+    "Paris" \
+    5
 
 if [ "$MODE" = "full" ]; then
     smoke_prompt "Qwen3.5-4B MXFP4 (GDN)" \
         "Qwen3.5-4B-mxfp4.gguf" \
         "The capital of France is" \
-        "Paris"
+        "Paris" \
+        5
 fi
 
 # ------------------------------------------------------------------- summary
@@ -730,9 +845,9 @@ fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then
-    echo "${GRN}=== verify $MODE: OK ===${RST}"
+    echo "${GRN}=== verify $MODE: OK ===${RST} (started $VERIFY_T_START, ended $(date -u +%H:%M:%SZ))"
     exit 0
 else
-    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST}"
+    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST} (started $VERIFY_T_START, ended $(date -u +%H:%M:%SZ))"
     exit 1
 fi

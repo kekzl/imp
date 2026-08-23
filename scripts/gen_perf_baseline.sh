@@ -42,10 +42,27 @@ echo "Generating performance baseline..."
 echo "Model: $MODEL"
 echo "Trials: $N_TRIALS × $REPS reps, $COOLDOWN_SEC s cooldown between trials"
 
-# Extract the tok/s value inside parens. Bench line format:
-#   `pp   512 tokens  avg    33.95 ms  (15083.10 tok/s)  [5 reps]`
+# Read one throughput number out of `imp-cli --bench --json` (#1583).
+#
+# This used to regex the human table (`pp 512 tokens avg 33.95 ms (15083.10
+# tok/s) [5 reps]`), which made the column layout a contract nobody had
+# written down: a formatting change here silently produced an empty sample,
+# and an empty sample is a median computed from fewer runs than the header
+# claims. With --json, stdout carries exactly one document and the two
+# numbers have names.
+#
+# $1 = "prefill" or "decode"; stdin = the run's stdout.
+#
+# `jq -e` exits non-zero on a missing key, and this aborts the whole run rather
+# than appending nothing: an empty sample is a median computed over fewer runs
+# than the header claims, which is the silent half of the old regex.
 extract_tps() {
-    grep -oP "$1"'\s+\d+\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' | head -1
+    local v
+    v=$(jq -er ".${1}_tps") || {
+        echo "gen_perf_baseline: no .${1}_tps in the bench output - is --json supported by this build?" >&2
+        exit 1
+    }
+    printf '%s\n' "$v"
 }
 
 # Median of stdin (one number per line). Sort + pick middle.
@@ -58,13 +75,15 @@ median() {
 # (pp512 + tg128 are measured together in the loop below, gate-matched.)
 run_trial() {
     local pp_size="$1"
-    local prefix="$2"      # "pp" or "tg"
+    local prefix="$2"      # "prefill" or "decode"
     local chunk="${3:-}"   # optional --prefill-chunk-size
     local chunk_arg=()
     [ -n "$chunk" ] && chunk_arg=(--prefill-chunk-size "$chunk")
+    # 2>/dev/null, not 2>&1: the human tables go to stderr under --json and
+    # would otherwise land in jq's stdin.
     $CLI --model "$MODEL" --bench --bench-pp "$pp_size" --bench-reps "$REPS" \
-        "${chunk_arg[@]}" --max-tokens 128 --temperature 0 \
-        --set speculative.ngram=false 2>&1 | extract_tps "^$prefix"
+        "${chunk_arg[@]}" --max-tokens 128 --temperature 0 --json \
+        --set speculative.ngram=false 2>/dev/null | extract_tps "$prefix"
 }
 
 pp128_samples=$(mktemp)
@@ -75,7 +94,7 @@ trap 'rm -f "$pp128_samples" "$pp512_samples" "$pp4096_samples" "$tg128_samples"
 
 for trial in $(seq 1 "$N_TRIALS"); do
     echo "  trial $trial/$N_TRIALS..."
-    run_trial 128 pp >> "$pp128_samples"
+    run_trial 128 prefill >> "$pp128_samples"
     # pp512 AND tg128 come from ONE invocation, exactly how verify.sh measures
     # the gate (tg128 = decode at ctx≈512 after the pp512 prefill, single-chunk).
     # The old behaviour measured tg after a pp128 prefill, which pins a
@@ -86,14 +105,14 @@ for trial in $(seq 1 "$N_TRIALS"); do
     # prompt (~99.9% accept) makes spec-ON tg measure the batched verify GEMMs,
     # which are restart-volatile (11% swing on healthy clocks, 2026-07-15).
     gate_out=$($CLI --model "$MODEL" --bench --bench-pp 512 --bench-reps "$REPS" \
-        --prefill-chunk-size "$CHUNK_SIZE" --max-tokens 128 --temperature 0 \
-        --set speculative.ngram=false 2>&1)
-    echo "$gate_out" | extract_tps '^pp' >> "$pp512_samples"
-    echo "$gate_out" | extract_tps '^tg' >> "$tg128_samples"
+        --prefill-chunk-size "$CHUNK_SIZE" --max-tokens 128 --temperature 0 --json \
+        --set speculative.ngram=false 2>/dev/null)
+    echo "$gate_out" | extract_tps prefill >> "$pp512_samples"
+    echo "$gate_out" | extract_tps decode >> "$tg128_samples"
     # pp4096 with single-chunk (--prefill-chunk-size 0) so it crosses the
     # cuBLAS→FMHA threshold and exercises the register-resident FA2 kernel
     # (attention.fmha_fa2=on default). verify.sh benches it the same way.
-    run_trial 4096 pp 0 >> "$pp4096_samples"
+    run_trial 4096 prefill 0 >> "$pp4096_samples"
     if [ "$trial" -lt "$N_TRIALS" ]; then
         sleep "$COOLDOWN_SEC"
     fi
@@ -112,9 +131,20 @@ echo "  tg128 samples: $(paste -sd, "$tg128_samples")  → median $tg128"
 # Get GPU info. Try nvcc first, then fall back to nvidia-smi cuda_version
 # (the runtime image has no nvcc, only the devel image does).
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-CUDA=$(nvcc --version 2>/dev/null | grep "release" | sed 's/.*release //' | sed 's/,.*//' \
-       || nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:\s*\K[0-9.]+' \
-       || echo "unknown")
+# `a | b | c || fallback` never reaches the fallback: sed exits 0 on empty
+# input, so the pipeline succeeds with nothing and CUDA lands empty. That is how
+# the shipped baseline recorded cuda="unknown" while sync_docs.py published the
+# constant 13.3 over it (#1684). Test the value, not the exit code.
+CUDA=$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9.]+' | head -1)
+[ -n "$CUDA" ] || CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:\s*\K[0-9.]+' | head -1)
+[ -n "$CUDA" ] || CUDA="unknown"
+# The commit the numbers were measured at. Absent from every baseline until
+# #1684, which is why the generated PROV block had to invent one.
+COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null)
+[ -n "$COMMIT" ] || COMMIT="unknown"
+if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    COMMIT="${COMMIT}-dirty"
+fi
 VRAM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0")
 
 # Get model VRAM from benchmark output (independent quick run).
@@ -138,6 +168,7 @@ cat > "$OUTPUT" << EOF
   "model": "$(basename "$MODEL")",
   "gpu": "$GPU",
   "cuda": "$CUDA",
+  "commit": "$COMMIT",
   "vram_total_mb": $VRAM_TOTAL,
   "timestamp": "$TIMESTAMP",
   "methodology": "median of $N_TRIALS trials × $REPS reps, ${COOLDOWN_SEC}s cooldown between trials (cuBLAS algo drift resistant); tg128 from the pp512 run (gate-matched, chunk=$CHUNK_SIZE); speculative.ngram=false",

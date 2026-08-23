@@ -39,7 +39,7 @@ no perf numbers, only a link to `docs/PERF.md`.
 Docs are layered and gated by `scripts/docs_lint.py`: `README.md` L0,
 `docs/*.md` L1, `docs/internals/*.md` L2, the `CLAUDE.md` tree L3.
 
-Canonical references: `docs/internals/ARCHITECTURE.md` (narrative), `docs/internals/SM120.md` (hardware), `docs/internals/MEMORY.md` (memory subsystem: tiers, allocators, invariants I1-I7), `AGENTS.md` (subagent roles + guardrails), `docs/internals/BENCHMARKING.md` (measurement contract).
+Canonical references: `docs/internals/ARCHITECTURE.md` (narrative), `docs/internals/SM120.md` (hardware), `docs/internals/MEMORY.md` (memory subsystem: tiers, allocators, invariants I1-I7), `AGENTS.md` (subagent roles + guardrails), `docs/internals/BENCHMARKING.md` (measurement contract), `docs/internals/CPP23.md` (which C++23 the tree uses; device pointers are not `std::span`).
 
 ## Two facts about this box that mislead rather than fail
 
@@ -62,7 +62,7 @@ The host has **no CUDA toolkit** by design — build inside Docker. `build/` and
 ```
 make dev / make dev-test   # incremental (2-14 s) + the real CI lane — iterate here
 make build                 # full image (~3.5 min) — the gate, benchmarks, pre-push
-make verify-fast           # ~90 s pre-push gate    make verify   # ~5 min full
+make verify-fast           # pre-push gate: build + 37 s script (#1587)   make verify   # full
 ```
 
 `make build` for anything you *measure* or push; `make dev` for everything else. `make test-unit` is a different binary from the CI lane — green there is not green in CI. Details, target list and CI job names: skill **building-and-testing**.
@@ -100,9 +100,10 @@ The cost of an oversized file here is **recompile blast radius**, not line count
 
 ## Hardware reality (sm_120 ≠ datacenter Blackwell)
 
-- **No `tcgen05` / TMEM / wgmma / TMA-WS grouped GEMM.** The FP4 path is
-  `mma.sync` `mxf4nvf4` with FA2-style block-scaling. Ignore B200/`sm_100`
-  (FlashAttention-4-style) kernel designs unless porting.
+- **No `tcgen05` / TMEM / wgmma.** The FP4 path is `mma.sync` `mxf4nvf4` with
+  FA2-style block-scaling. Ignore B200/`sm_100` designs unless porting.
+  **TMA-WS block-scaled GEMM ships** on sm_120a (#1543); only the
+  `compute_120f` PTX fallback loses it.
 - **No FP4 cuBLASLt kernels on sm_120** → CUTLASS is the primary GEMM path; FP8
   prefill is unavailable. Dependency pins are single-sourced in
   `cmake/imp-deps.cmake` — bump only that file.

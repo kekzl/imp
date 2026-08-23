@@ -16,8 +16,9 @@
 // ============================================================================
 
 #include "model/gguf_loader.h"
+#include "model/model_limits.h"
 #include "model/gguf_loader_internal.h"
-#include "model/gguf_half.h"
+#include "core/fp_bits.h"
 #include "model/loader_assign.h"
 #include "model/model_arch.h"
 #include "model/tensor_kind_matcher.h"
@@ -42,8 +43,8 @@
 
 namespace imp {
 
-// Host half/bf16 <-> float helpers for the gpt-oss 2^-4 residual rescale moved to
-// model/gguf_half.h so they can be unit-tested on the CPU (see test_gguf_half.cpp).
+// Host half/bf16 <-> float helpers for the gpt-oss 2^-4 residual rescale live in
+// core/fp_bits.h, the tree's single copy of them (see test_fp_bits.cpp).
 
 // Format tables (gguf_blck_size / gguf_type_size / gguf_row_size /
 // gguf_type_to_qtype / gguf_type_name), the BinaryReader / GGUFValue plumbing,
@@ -87,7 +88,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     madvise(mmap_base, file_size, MADV_SEQUENTIAL);
 
     auto data = reinterpret_cast<const uint8_t*>(mmap_base);
-    BinaryReader reader(data, file_size);
+    BinaryReader reader(std::span(data, file_size));
 
     // 2. Parse header
     uint32_t magic = reader.read_u32();
@@ -228,7 +229,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
                 // Parse shard header to get tensor infos
                 auto* sdata = reinterpret_cast<const uint8_t*>(shard_mmap);
-                BinaryReader sreader(sdata, shard_size);
+                BinaryReader sreader(std::span(sdata, shard_size));
                 uint32_t smagic = sreader.read_u32();
                 sreader.read_u32();  // sversion (unused)
                 uint64_t stensor_count = sreader.read_u64();
@@ -617,6 +618,16 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
 
     // 7. Allocate layers and assign weights
+    //
+    // `block_count` and the expert count are GGUF metadata, so they are the
+    // file's claim about itself and are checked before they size anything.
+    {
+        std::string dim_err;
+        if (!validate_declared_dimensions(cfg, &dim_err)) {
+            IMP_LOG_ERROR("GGUF: %s", dim_err.c_str());
+            return nullptr;
+        }
+    }
     model->layers_.resize(cfg.n_layers);
 
     if (cfg.n_experts > 0) {
@@ -944,7 +955,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 return false;
             const uint16_t* src = static_cast<const uint16_t*>(t.data);
             for (int64_t i = 0; i < n; i++)
-                dst[i] = gguf_float_to_half(gguf_half_to_float(src[i]) * 0.0625f);
+                dst[i] = float_to_half(half_to_float(src[i]) * 0.0625f);
             model->host_owned_buffers_.push_back(dst);
             t.data = dst;
             return true;
@@ -956,7 +967,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 return false;
             const uint16_t* src = static_cast<const uint16_t*>(t.data);
             for (int64_t i = 0; i < n; i++)
-                dst[i] = gguf_float_to_bf16(gguf_bf16_to_float(src[i]) * 0.0625f);
+                dst[i] = float_to_bf16(bf16_to_float(src[i]) * 0.0625f);
             model->host_owned_buffers_.push_back(dst);
             t.data = dst;
             return true;
@@ -975,7 +986,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             std::memcpy(dst, t.data, bytes);
             for (int64_t b = 0; b < nblocks; b++) {
                 uint16_t* d = reinterpret_cast<uint16_t*>(dst + static_cast<size_t>(b) * 34);
-                *d = gguf_float_to_half(gguf_half_to_float(*d) * 0.0625f);
+                *d = float_to_half(half_to_float(*d) * 0.0625f);
             }
             model->host_owned_buffers_.push_back(dst);
             t.data = dst;

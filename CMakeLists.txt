@@ -72,6 +72,11 @@ if(IMP_ALLOC_INTERPOSE)
     message(STATUS "Allocation interposition ENABLED (measurement build)")
 endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+# libFuzzer binaries, one per target in fuzz/ (#1620). Needs clang: g++ has no
+# -fsanitize=fuzzer. The same targets run without clang in the CPU lane via
+# tests/test_fuzz_corpus.cpp, which is what CI executes; this option is for the
+# long runs. See fuzz/README.md.
+option(IMP_FUZZERS "Build libFuzzer binaries from fuzz/ (clang only)" OFF)
 
 if(IMP_SANITIZERS)
     set(SANITIZER_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer -g")
@@ -463,6 +468,8 @@ if(IMP_BUILD_TOOLS)
         tools/imp-cli/main.cpp
     tools/common/args_common.cpp
     tools/imp-cli/args.cpp
+    tools/imp-cli/json_report.cpp
+    tools/imp-cli/mode_perplexity.cpp
     )
     target_link_libraries(imp-cli PRIVATE imp imp_warnings)
     if(IMP_ALLOC_INTERPOSE)
@@ -481,7 +488,8 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/awq.cu
     )
     target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
-    target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                                   ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 
     # imp-bench
     if(IMP_BUILD_BENCH)
@@ -492,7 +500,8 @@ if(IMP_BUILD_TOOLS)
             tools/imp-bench/bench_e2e.cpp
         )
         target_link_libraries(imp-bench PRIVATE imp imp_warnings)
-        target_include_directories(imp-bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_include_directories(imp-bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                                     ${CMAKE_CURRENT_SOURCE_DIR}/tools)
         set_target_properties(imp-bench PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON
@@ -534,6 +543,7 @@ if(IMP_BUILD_SERVER)
     tools/common/args_common.cpp
     tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
+        tools/imp-server/rate_limit.cpp
         tools/imp-server/tool_call.cpp
         tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/anthropic.cpp
@@ -543,6 +553,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_chat.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/handlers_chat_params.cpp
+        tools/imp-server/image_fetch.cpp
         tools/imp-server/handlers_chat_stream.cpp
         tools/imp-server/stream_driver.cpp
         tools/imp-server/handlers_messages.cpp
@@ -591,6 +602,9 @@ if(IMP_BUILD_TESTS)
         target_include_directories(${target} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests
+            # tools/, for the header-only pieces the shipped binaries share
+            # (common/json_out.h, common/exit_codes.h).
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools
         )
         set_target_properties(${target} PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
@@ -603,15 +617,22 @@ if(IMP_BUILD_TESTS)
         # also require a GPU at configure-time (the binaries enumerate CUDA tests).
     endfunction()
 
+    set_source_files_properties(
+        fuzz/fuzz_json_schema.cpp fuzz/fuzz_regex.cpp fuzz/fuzz_gbnf.cpp
+        fuzz/fuzz_safetensors.cpp fuzz/fuzz_tokenizer_json.cpp
+        PROPERTIES COMPILE_DEFINITIONS "IMP_FUZZ_NO_ENTRY")
+    set(IMP_FUZZ_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fuzz)
+
     imp_add_test_module(test-core SOURCES
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
         tests/test_tensor_kind_matcher.cpp
         tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
+        tests/test_json_out.cpp
         tests/test_gguf_loader.cpp
         tests/test_gguf_fault_injection.cpp
-        tests/test_gguf_half.cpp
+        tests/test_fp_bits.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_hf_config_loader.cpp
         tests/test_safetensors_loader.cpp
@@ -642,14 +663,21 @@ if(IMP_BUILD_TESTS)
         # Pre-cudaDeviceReset hook registry (#1207): self-registration replaced a
         # hand-maintained call list, so the new failure mode is an EMPTY registry.
         tests/test_cuda_static_reset.cpp
-        # Generative FSM battery for the schema-less json_object grammar. Lives
-        # in the CPU lane on purpose: the FSM is CUDA-free without init(), and
-        # every past grammar bug escaped CI because its tests need a GPU.
-        tests/test_json_constrain_property.cpp
-        tests/test_schema_constrain_property.cpp
         # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
         # CPU-only by construction — see the file header.
         tests/test_gbnf_grammar.cpp
+        # Fuzz targets driven over a committed corpus + a deterministic mutator
+        # (#1620), the same entry points libFuzzer drives. Unconditional so the
+        # sanitizer build (-DIMP_BUILD_SERVER=OFF) runs them too - which is the
+        # half that matters, since an out-of-bounds read is invisible without
+        # ASan. IMP_FUZZ_NO_ENTRY drops the LLVMFuzzerTestOneInput definitions
+        # so six of them do not collide in one binary.
+        fuzz/fuzz_json_schema.cpp
+        fuzz/fuzz_regex.cpp
+        fuzz/fuzz_gbnf.cpp
+        fuzz/fuzz_safetensors.cpp
+        fuzz/fuzz_tokenizer_json.cpp
+        tests/test_fuzz_corpus.cpp
         # Pre-dequant VRAM budget split (#1100). CPU-only: pure arithmetic in
         # runtime/vram_budget.h, and it belongs in the lane CI actually runs.
         tests/test_pre_dequant_budget.cpp
@@ -699,6 +727,8 @@ if(IMP_BUILD_TESTS)
         tests/test_mrope_positions.cpp
         tests/test_mla.cpp
         tests/test_weight_map_expert_gate.cpp
+        tests/test_checkpoint_limits.cpp
+        tests/test_exit_codes.cpp
         # imp-quantize's tensor-selection rule. The tool is not otherwise
         # covered, and this is the part of it that has already shipped a broken
         # checkpoint (#1159), so it is compiled into the CPU lane directly.
@@ -737,23 +767,52 @@ if(IMP_BUILD_TESTS)
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
             tests/test_sse_stream_utils.cpp
+            tests/test_logprobs_shapes.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
+            tools/imp-server/rate_limit.cpp
+            tests/test_server_request_limits.cpp
             # Admission-time rejection of unenforceable constraints (#1256). The
             # alias coverage is the part that rots: a new spelling in the
             # parameter parser without a line here is a validation bypass.
             tools/imp-server/constraint_validation.cpp
             tests/test_constraint_validation.cpp
             tests/test_server_args.cpp
+            # SSRF destination classifier (#1610). Pure address arithmetic plus
+            # getaddrinfo on literals, so it belongs in the CPU lane, which is
+            # the only lane CI runs.
+            tools/imp-server/image_fetch.cpp
+            tests/test_image_fetch.cpp
+            # Generative FSM battery for the schema-less json_object grammar.
+            # Lives in the CPU lane on purpose: the FSM is CUDA-free without
+            # init(), and every past grammar bug escaped CI because its tests
+            # need a GPU. It sits in THIS block rather than the unconditional
+            # list because both files use nlohmann as their oracle, and
+            # nlohmann is only fetched under IMP_BUILD_SERVER (:503). Listed
+            # unconditionally, test-core does not compile in any
+            # -DIMP_BUILD_SERVER=OFF configuration - which is what `make asan`
+            # configures, so the sanitizer target could not build its own
+            # binaries.
+            tests/test_json_constrain_property.cpp
+            tests/test_schema_constrain_property.cpp
+            # Only this target needs the server sources: tool_call.h pulls in
+            # nlohmann. The other five are unconditional below, so `make asan`
+            # (-DIMP_BUILD_SERVER=OFF) still runs them - the first version put
+            # all six here and the sanitizer binary silently contained none.
+            fuzz/fuzz_tool_stream.cpp
             tests/test_base64.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
                                                      ${CMAKE_CURRENT_SOURCE_DIR}/tools)
         target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
+        set_source_files_properties(fuzz/fuzz_tool_stream.cpp
+            PROPERTIES COMPILE_DEFINITIONS "IMP_FUZZ_NO_ENTRY")
+        target_compile_definitions(test-core PRIVATE IMP_FUZZ_HAVE_TOOL_STREAM)
     endif()
+    target_include_directories(test-core PRIVATE ${IMP_FUZZ_INCLUDE_DIR})
     # test_stream_pipeline.cpp includes the self-contained pure header
     # tools/imp-server/stream_pipeline.h (no httplib/json deps).
     target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
@@ -766,6 +825,7 @@ if(IMP_BUILD_TESTS)
         tests/test_chat_template.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_jinja.cpp
+        tests/test_chat_template_goldens.cpp
     )
 
     imp_add_test_module(test-compute SOURCES
@@ -880,6 +940,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_models.cpp
         tests/test_e2e_greedy_lock.cpp
         tests/test_continuous_batching.cpp
+        tests/test_scheduler.cpp
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp
         tests/test_weight_registry_preservation.cpp
@@ -948,8 +1009,31 @@ if(IMP_BUILD_TESTS)
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_det_suite_filter.sh
                 $<TARGET_FILE:test-e2e> "${_det_e2e_filter}")
 
+    # #1632: a seventh cancel path that frees KV without releasing the
+    # recurrent slot is valid C++ and silent at runtime on dense models, so the
+    # guard is a grep rather than a type.
+    add_test(NAME guard_cancel_teardown
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_cancel_teardown.sh
+                ${CMAKE_CURRENT_SOURCE_DIR})
+
+    # #1586: the pre-push gate's filter is a string literal in verify.sh, and a
+    # pattern that matches nothing is a gtest success. Reads the filter out of
+    # verify.sh rather than keeping a copy; skips when imp-tests cannot run.
+    # imp-tests is a generated wrapper script, not a target, so it is a path.
+    add_test(NAME guard_verify_filter
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_verify_filter.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/imp-tests ${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify.sh)
+
+    # The pre-commit hook runs the FULL GPU suite, so its path filter decides
+    # minutes of a shared card per commit - and CI has no GPU runner, so a C++
+    # change that slips past it is gated nowhere. Pins both directions.
+    add_test(NAME guard_precommit_filter
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_precommit_filter.sh
+                ${CMAKE_CURRENT_SOURCE_DIR})
+
     set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split
-                         guard_det_suite_filter
+                         guard_det_suite_filter guard_cancel_teardown
+                         guard_verify_filter guard_precommit_filter
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)
@@ -1030,4 +1114,39 @@ endif()
 
 if(IMP_BUILD_SERVER)
     install(TARGETS imp-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# ---- libFuzzer binaries (#1620) ----
+#
+# One binary per target, standard LLVMFuzzerTestOneInput entry points, so these
+# are also the shape OSS-Fuzz wants. clang only. The CPU lane runs the same
+# target functions through tests/test_fuzz_corpus.cpp with g++, which is what
+# gates a pull request; this is for the long runs. fuzz/README.md has the
+# commands.
+if(IMP_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "IMP_FUZZERS=ON needs clang (-fsanitize=fuzzer); "
+                            "got ${CMAKE_CXX_COMPILER_ID}. See fuzz/README.md.")
+    endif()
+    # fuzz_tool_stream needs nlohmann through tool_call.h, so it is only built
+    # when the server sources are configured in.
+    set(IMP_FUZZ_TARGETS json_schema regex gbnf safetensors tokenizer_json)
+    if(IMP_BUILD_SERVER)
+        list(APPEND IMP_FUZZ_TARGETS tool_stream)
+    endif()
+    foreach(t ${IMP_FUZZ_TARGETS})
+        add_executable(fuzz_${t} fuzz/fuzz_${t}.cpp)
+        target_include_directories(fuzz_${t} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+        target_compile_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined
+                                                 -fno-omit-frame-pointer -g)
+        target_link_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined)
+        target_link_libraries(fuzz_${t} PRIVATE imp)
+        if(IMP_BUILD_SERVER)
+            target_link_libraries(fuzz_${t} PRIVATE nlohmann_json::nlohmann_json)
+        endif()
+    endforeach()
 endif()

@@ -517,6 +517,96 @@ TEST(JinjaTest, TojsonBool) {
 // Real Qwen3 chat template (with is string, system message, slice)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Macro parameters, block set, unknown tags (#1565, #1566)
+// ---------------------------------------------------------------------------
+
+// #1566: the parameter parser tested for OP "=", which the lexer never emits
+// for a bare '='. The default expression and the '=' were consumed as two
+// extra positional parameters, so the named parameter bound to none.
+TEST(JinjaTest, MacroDefaultParameter) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% macro f(a, b=false) %}{{ a }}|{{ b }}{% endmacro %}{{ f('x') }}"));
+    EXPECT_EQ(tpl.render({}), "x|False");
+}
+
+TEST(JinjaTest, MacroDefaultParameterOverridden) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% macro f(a, b=1) %}{{ a }}|{{ b }}{% endmacro %}{{ f('x', 9) }}"));
+    EXPECT_EQ(tpl.render({}), "x|9");
+}
+
+TEST(JinjaTest, MacroDefaultParameterStringLiteral) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% macro f(a='hi') %}[{{ a }}]{% endmacro %}{{ f() }}"));
+    EXPECT_EQ(tpl.render({}), "[hi]");
+}
+
+// #1565: {% set x %}...{% endset %} captures the block body into the variable.
+// Gemma-4's shipped chat_template.jinja uses it (captured_content), and
+// dropping `endset` printed the body inline and left the variable unset.
+TEST(JinjaTest, BlockSetCapturesBody) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{%- set x -%}hello{%- endset -%}[{{ x }}]"));
+    EXPECT_EQ(tpl.render({}), "[hello]");
+}
+
+TEST(JinjaTest, BlockSetBodyIsNotEmittedInline) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{%- set x -%}captured{%- endset -%}done"));
+    EXPECT_EQ(tpl.render({}), "done");
+}
+
+TEST(JinjaTest, BlockSetEvaluatesBody) {
+    Template tpl;
+    ASSERT_TRUE(
+        tpl.parse("{%- set x -%}{% for i in items %}{{ i }}{% endfor %}{%- endset -%}"
+                  "{{ x | length }}:{{ x }}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "2:ab");
+}
+
+TEST(JinjaTest, BlockSetFeedsFilters) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{%- set x -%}  {%- endset -%}{{ (x | trim | length) > 0 }}"));
+    EXPECT_EQ(tpl.render({}), "False");
+}
+
+// #1565: an unsupported tag was skipped to %} with no log and no error, so
+// parse() could not fail and ChatTemplate's fallback path was unreachable.
+TEST(JinjaTest, UnknownTagFailsParse) {
+    Template tpl;
+    EXPECT_FALSE(tpl.parse("hello {% frobnicate x %} world"));
+    EXPECT_NE(tpl.error().find("frobnicate"), std::string::npos) << tpl.error();
+}
+
+TEST(JinjaTest, UnsupportedJinjaTagFailsParse) {
+    // Real Jinja tags the engine does not implement must refuse, not render
+    // the wrong prompt: {% raw %} would otherwise emit its body with the
+    // escaping stripped.
+    for (const char* src : {"{% raw %}{{ x }}{% endraw %}", "{% include 'other.j2' %}",
+                            "{% filter upper %}a{% endfilter %}", "{% block b %}a{% endblock %}"}) {
+        Template tpl;
+        EXPECT_FALSE(tpl.parse(src)) << src;
+        EXPECT_FALSE(tpl.error().empty()) << src;
+    }
+}
+
+TEST(JinjaTest, UnbalancedEndTagFailsParse) {
+    Template tpl;
+    EXPECT_FALSE(tpl.parse("{% endif %}"));
+    EXPECT_NE(tpl.error().find("endif"), std::string::npos) << tpl.error();
+}
+
+// {% generation %} marks the assistant span for training masks. It has no
+// effect on the rendered text, and HF's own renderer ignores it, so refusing
+// the template would be wrong.
+TEST(JinjaTest, GenerationTagIsANoOp) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("a{% generation %}b{% endgeneration %}c"));
+    EXPECT_EQ(tpl.render({}), "abc");
+}
+
 TEST(JinjaChatTest, Qwen3RealTemplate) {
     Template tpl;
     ASSERT_TRUE(
@@ -670,4 +760,46 @@ TEST(JinjaChatTest, GemmaRealTemplateNoSystem) {
 
     EXPECT_NE(result.find("<start_of_turn>user\nHello<end_of_turn>"), std::string::npos);
     EXPECT_NE(result.find("<start_of_turn>model\n"), std::string::npos);
+}
+
+// trim_blocks / lstrip_blocks (#1572). transformers renders every chat template
+// with both enabled, so a template written against HF and rendered without them
+// leaks one newline per block tag and every line's indentation into the prompt.
+TEST(JinjaTest, TrimBlocksEatsTheNewlineAfterABlockTag) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if true %}\nA{% endif %}\n"));
+    EXPECT_EQ(tpl.render({}), "A");
+}
+
+TEST(JinjaTest, LstripBlocksOnlyStripsALineIndent) {
+    Template tpl;
+    // The indent in front of the tag goes; the single space after `}}` stays,
+    // because it is not the start of a line.
+    ASSERT_TRUE(tpl.parse("X\n    {% if true %}\nY{% endif %}"));
+    EXPECT_EQ(tpl.render({}), "X\nY");
+
+    Template inline_tpl;
+    ASSERT_TRUE(inline_tpl.parse("{% for x in items %}{{ x }} {% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b"))});
+    EXPECT_EQ(inline_tpl.render({{"items", items}}), "a b ");
+}
+
+TEST(JinjaTest, IndentAfterAConsumedNewlineIsStillAnIndent) {
+    // The shape from Nemotron-3-Nano's template, and the one that made its
+    // render diverge by 20 spaces while the other eight families matched.
+    // trim_blocks eats the newline after `{% if %}` FIRST, so by the time the
+    // comment on the next line is reached the text token is bare indentation
+    // with no newline in it - deciding "is this a line indent" from the token's
+    // own contents says no, and the spaces reach the prompt.
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if true %}\n        {# c #}\nX{% endif %}"));
+    EXPECT_EQ(tpl.render({}), "X");
+}
+
+TEST(JinjaTest, LstripProbes) {
+    Template a, b;
+    ASSERT_TRUE(a.parse("A\n    {% if true %}B{% endif %}"));
+    EXPECT_EQ(a.render({}), "A\nB") << "indent before a plain block tag";
+    ASSERT_TRUE(b.parse("A\n    {# c #}\nB"));
+    EXPECT_EQ(b.render({}), "A\nB") << "indent before a comment";
 }

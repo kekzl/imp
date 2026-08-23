@@ -607,3 +607,114 @@ TEST(HealthUnservable, UnknownCapacityIsNotAVerdict) {
     EXPECT_TRUE(health_unservable_reason(false, false, -1, -1).empty());
     EXPECT_STREQ(health_unservable_code(false, false), "");
 }
+
+// ---- #1554: tool-argument chunks end on codepoint boundaries ----
+//
+// Buffered tool calls were sliced every 48 BYTES and each slice JSON-encoded on
+// its own, so a multi-byte character straddling a boundary was cut in half and
+// dump_safe replaced each half with U+FFFD. The client concatenates the pieces
+// and gets a corrupt argument. Two of the three dialects did this; /v1/responses
+// does not chunk and was immune.
+
+TEST(Utf8ChunkLen, NeverSplitsAMultiByteCharacter) {
+    // "ü" is 2 bytes. With max=5 over "aaaaü", a byte slice takes 5 bytes and
+    // cuts the ü in half.
+    const std::string s =
+        "aaaa\xc3\xbc"
+        "bbbb";
+    const size_t n = utf8_chunk_len(s, 0, 5);
+    EXPECT_EQ(n, 4u) << "must stop before the split character, not inside it";
+    // Continuing from there takes the whole character.
+    EXPECT_EQ(utf8_chunk_len(s, 4, 5), 5u);
+}
+
+TEST(Utf8ChunkLen, HandlesThreeAndFourByteSequences) {
+    const std::string cjk = "ab\xe4\xb8\xad";  // 'ab' + U+4E2D (3 bytes)
+    EXPECT_EQ(utf8_chunk_len(cjk, 0, 3), 2u);  // stop before the CJK char
+    EXPECT_EQ(utf8_chunk_len(cjk, 0, 4), 2u);
+    EXPECT_EQ(utf8_chunk_len(cjk, 0, 5), 5u);       // whole string fits
+    const std::string emoji = "x\xf0\x9f\x98\x80";  // 'x' + U+1F600 (4 bytes)
+    EXPECT_EQ(utf8_chunk_len(emoji, 0, 3), 1u);
+    EXPECT_EQ(utf8_chunk_len(emoji, 0, 5), 5u);
+}
+
+TEST(Utf8ChunkLen, ReassemblingTheChunksReproducesTheInput) {
+    // The property that actually matters: chunking and concatenating is the
+    // identity, for any max, on real tool-argument content.
+    const std::string args = R"({"city":"München","note":"Grüße aus Köln 😀","path":"/tmp/übung"})";
+    for (size_t max : {1u, 2u, 3u, 4u, 5u, 7u, 16u, 48u}) {
+        std::string rebuilt;
+        for (size_t off = 0; off < args.size();) {
+            const size_t n = utf8_chunk_len(args, off, max);
+            ASSERT_GT(n, 0u) << "max=" << max << " off=" << off;
+            const std::string piece = args.substr(off, n);
+            // Every piece must be valid UTF-8 on its own - that is the whole
+            // point, since each one is JSON-encoded separately.
+            EXPECT_EQ(imp::stream::utf8_complete_len(piece), piece.size())
+                << "max=" << max << " produced a piece ending mid-character";
+            rebuilt += piece;
+            off += n;
+        }
+        EXPECT_EQ(rebuilt, args) << "max=" << max;
+    }
+}
+
+TEST(Utf8ChunkLen, AlwaysMakesProgress) {
+    const std::string s = "\xc3\xbc\xc3\xbc";  // two 2-byte chars
+    // max=1 cannot fit a character; it must still advance rather than loop.
+    EXPECT_GT(utf8_chunk_len(s, 0, 1), 0u);
+    EXPECT_EQ(utf8_chunk_len(s, 4, 8), 0u);  // nothing left
+}
+
+// ---- #1607: request-body nesting depth, counted without parsing ----
+
+TEST(JsonNestingDepth, CountsPlainNesting) {
+    EXPECT_EQ(json_nesting_depth("{}", 100), 1);
+    EXPECT_EQ(json_nesting_depth("[[[]]]", 100), 3);
+    EXPECT_EQ(json_nesting_depth(R"({"a":{"b":{"c":1}}})", 100), 3);
+    EXPECT_EQ(json_nesting_depth("", 100), 0);
+    EXPECT_EQ(json_nesting_depth("123", 100), 0);
+}
+
+TEST(JsonNestingDepth, IgnoresBracesInsideStrings) {
+    // A brace in a string is text. Counting it would reject legitimate bodies -
+    // a prompt containing JSON, which is most agent traffic.
+    EXPECT_EQ(json_nesting_depth(R"({"a":"{{{{{{{{{{"})", 100), 1);
+    EXPECT_EQ(json_nesting_depth(R"({"a":"[[[["})", 100), 1);
+    // ...including an escaped quote, which must not end the string early.
+    EXPECT_EQ(json_nesting_depth(R"({"a":"he said \"{{{\" to me"})", 100), 1);
+    EXPECT_EQ(json_nesting_depth(R"({"a":"trailing backslash \\"})", 100), 1);
+}
+
+TEST(JsonNestingDepth, TracksTheMaximumNotTheFinalDepth) {
+    // Two siblings, each one level inside the root: depth returns to 1 between
+    // them and the maximum is 2, not the sum and not the last value.
+    EXPECT_EQ(json_nesting_depth(R"({"a":{"b":1},"c":{"d":1}})", 100), 2);
+    // Deepen only the second sibling: the maximum has to follow it.
+    EXPECT_EQ(json_nesting_depth(R"({"a":{"b":1},"c":{"d":{"e":{"f":1}}}})", 100), 4);
+}
+
+TEST(JsonNestingDepth, StopsEarlyOnceTheLimitIsExceeded) {
+    // 200 levels against a limit of 100: the answer only has to prove "over".
+    std::string deep(200, '[');
+    deep.append(200, ']');
+    const int d = json_nesting_depth(deep, 100);
+    EXPECT_GT(d, 100);
+    EXPECT_LE(d, 101) << "the scan must stop at the limit, not count to 200";
+}
+
+TEST(JsonNestingDepth, TheHostileBodyIsOverTheLimitAndARealOneIsNot) {
+    // The payload from the issue: ~100 KB of '[' segfaults nlohmann (measured:
+    // 50k levels parse fine, 100k crash).
+    std::string bomb(100000, '[');
+    EXPECT_GT(json_nesting_depth(bomb, 100), 100);
+
+    // A realistic body with tools, nested schema and multi-part content is
+    // nowhere near it. This is the arm that says the limit is not too tight.
+    const std::string real =
+        R"({"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],)"
+        R"("tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object",)"
+        R"("properties":{"a":{"type":"array","items":{"type":"object","properties":)"
+        R"({"b":{"type":"string"}}}}}}}}]})";
+    EXPECT_LE(json_nesting_depth(real, 100), 12);
+}

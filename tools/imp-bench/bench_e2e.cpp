@@ -1,43 +1,17 @@
 #include "model/model.h"
 #include "exec/executor.h"
 #include "compute/gemm.h"
+#include "core/fp_bits.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <chrono>
 #include <cstdio>
 #include <vector>
-#include <cstring>
 #include <cmath>
 #include <random>
 
 namespace imp {
-
-// ---------------------------------------------------------------------------
-// Host-side FP16 conversion helpers (bitwise, no CUDA device intrinsics)
-// ---------------------------------------------------------------------------
-
-static uint16_t float_to_fp16(float val) {
-    uint32_t fbits;
-    std::memcpy(&fbits, &val, 4);
-    uint32_t f_sign = (fbits >> 31) & 1;
-    int f_exp = static_cast<int>((fbits >> 23) & 0xFF) - 127;
-    uint32_t f_man = fbits & 0x7FFFFF;
-    if ((fbits & 0x7FFFFFFF) == 0)
-        return static_cast<uint16_t>(f_sign << 15);
-    if (f_exp > 15)
-        return static_cast<uint16_t>((f_sign << 15) | 0x7C00);
-    if (f_exp < -24)
-        return static_cast<uint16_t>(f_sign << 15);
-    if (f_exp < -14) {
-        int shift = -14 - f_exp;
-        uint32_t subnormal_man = (0x800000 | f_man) >> (shift + 13);
-        return static_cast<uint16_t>((f_sign << 15) | (subnormal_man & 0x3FF));
-    }
-    uint16_t h_exp = static_cast<uint16_t>(f_exp + 15);
-    uint16_t h_man = static_cast<uint16_t>(f_man >> 13);
-    return static_cast<uint16_t>((f_sign << 15) | (h_exp << 10) | h_man);
-}
 
 // ---------------------------------------------------------------------------
 // Build a synthetic FP16 model for benchmarking
@@ -66,7 +40,7 @@ static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_head
         auto* buf = new uint16_t[n];
         std::uniform_real_distribution<float> dist(-0.01f, 0.01f);
         for (size_t i = 0; i < n; ++i) {
-            buf[i] = float_to_fp16(dist(rng));
+            buf[i] = float_to_half(dist(rng));
         }
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
         return Tensor(buf, QType::F16, 2, shape, false);
@@ -75,7 +49,7 @@ static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_head
     // Helper: create 1D FP16 norm weight on host (all 1.0).
     auto make_norm_weight = [](int dim) -> Tensor {
         auto* buf = new uint16_t[dim];
-        uint16_t one = float_to_fp16(1.0f);
+        uint16_t one = float_to_half(1.0f);
         for (int i = 0; i < dim; ++i)
             buf[i] = one;
         int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
@@ -134,13 +108,13 @@ static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_head
 // bench_e2e: end-to-end prefill and decode benchmark
 // ---------------------------------------------------------------------------
 
-void bench_e2e() {
+bool bench_e2e() {
     // Check for CUDA device
     int device_count = 0;
     cudaGetDeviceCount(&device_count);
     if (device_count == 0) {
         printf("bench_e2e: no CUDA device found, skipping\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     // Model dimensions (small for benchmarking the full pipeline)
@@ -168,18 +142,18 @@ void bench_e2e() {
     auto model = make_bench_model(d_model, d_ff, n_heads, n_kv_heads, n_layers, vocab_size, max_seq_len);
     if (!model->upload_weights_gpu(QType::F16, nullptr)) {
         printf("bench_e2e: failed to upload weights to GPU\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     // Initialize executor
     GraphExecutor executor;
     if (!executor.init(*model, QType::F16, false)) {
         printf("bench_e2e: failed to initialize GraphExecutor\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
     if (!executor.allocate_workspaces()) {
         printf("bench_e2e: failed to allocate GPU workspaces\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     // -----------------------------------------------------------------------
@@ -289,6 +263,7 @@ void bench_e2e() {
     }
 
     printf("\n");
+    return true;
 }
 
 }  // namespace imp

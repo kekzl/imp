@@ -23,6 +23,14 @@ public:
     std::unique_ptr<SchemaNode> parse() {
         skip_ws();
         auto node = parse_schema_object();
+        // #1564: the object loop breaks on anything that is not ',' and the
+        // closing expect() was discarded, so a desync inside the document
+        // returned a truncated tree that still looked like a parse. Trailing
+        // input is the outermost symptom of that and the cheapest place to
+        // catch a shape nothing else noticed.
+        skip_ws();
+        if (!eof())
+            fail("trailing input after the schema object");
         return node;
     }
 
@@ -34,7 +42,39 @@ public:
     bool ref_error_ = false;
     bool ref_error() const { return ref_error_; }
 
+    // Set when the document is structurally unparseable or uses a keyword this
+    // build cannot enforce. Same contract as ref_error_: the whole parse fails,
+    // and the caller turns that into a 400. Silently dropping the keyword would
+    // answer a bounded request with an unbounded grammar.
+    bool parse_error() const { return parse_error_; }
+    const std::string& error_reason() const { return error_reason_; }
+
 private:
+    bool parse_error_ = false;
+    std::string error_reason_;
+
+    // Recursion depth of parse_schema_object(). A schema is request-supplied
+    // text and the parser is recursive descent, so nesting depth maps 1:1 onto
+    // stack frames (#1609). Real schemas nest a handful deep.
+    int depth_ = 0;
+    static constexpr int kMaxSchemaDepth = 64;
+
+    // Scope-bound depth counter: every early return out of
+    // parse_schema_object() has to decrement, and there are several.
+    struct DepthGuard {
+        int& d;
+        explicit DepthGuard(int& depth) : d(depth) { d++; }
+        ~DepthGuard() { d--; }
+    };
+
+    bool fail(const std::string& why) {
+        if (!parse_error_) {
+            parse_error_ = true;
+            error_reason_ = why;
+        }
+        return false;
+    }
+
     const char* data_;
     size_t len_;
     size_t pos_;
@@ -55,6 +95,52 @@ private:
             return true;
         }
         return false;
+    }
+
+    // Four hex digits into `out`. False when fewer than four remain or one is
+    // not hex - a truncated escape is malformed input, not a character.
+    bool read_hex4(uint32_t& out) {
+        if (pos_ + 4 > len_)
+            return false;
+        uint32_t v = 0;
+        for (int i = 0; i < 4; i++) {
+            const char c = data_[pos_ + i];
+            uint32_t d;
+            if (c >= '0' && c <= '9')
+                d = static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f')
+                d = static_cast<uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F')
+                d = static_cast<uint32_t>(c - 'A' + 10);
+            else
+                return false;
+            v = (v << 4) | d;
+        }
+        pos_ += 4;
+        out = v;
+        return true;
+    }
+
+    // A lone surrogate is not a legal codepoint; JSON allows one to appear and
+    // the standard replacement character is what every other decoder emits.
+    static void append_utf8(std::string& s, uint32_t cp) {
+        if (cp >= 0xD800 && cp <= 0xDFFF)
+            cp = 0xFFFD;
+        if (cp < 0x80) {
+            s += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            s += static_cast<char>(0xC0 | (cp >> 6));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            s += static_cast<char>(0xE0 | (cp >> 12));
+            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            s += static_cast<char>(0xF0 | (cp >> 18));
+            s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        }
     }
 
     std::string parse_string() {
@@ -93,10 +179,33 @@ private:
                         s += '\f';
                         break;
                     case 'u': {
-                        // Skip unicode escape (4 hex digits)
-                        for (int i = 0; i < 4 && !eof(); i++)
-                            pos_++;
-                        s += '?';
+                        // \uXXXX -> UTF-8. This used to skip the four hex
+                        // digits and append a literal '?', which is not a
+                        // near-miss: json.dumps defaults to ensure_ascii=True,
+                        // so a schema round-tripped through any Python client
+                        // arrives with EVERY non-ASCII character escaped - and
+                        // parse_string() is the reader for enum values,
+                        // property names, `required` entries and `pattern`, so
+                        // the grammar then forced the model to emit '?' where
+                        // the caller asked for a character (#1563).
+                        uint32_t cp = 0;
+                        if (!read_hex4(cp))
+                            return s;  // truncated escape: stop, do not invent
+                        // A high surrogate must be followed by \uDC00-\uDFFF;
+                        // the pair encodes one codepoint above the BMP.
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            if (pos_ + 1 < len_ && data_[pos_] == '\\' && data_[pos_ + 1] == 'u') {
+                                const size_t save = pos_;
+                                pos_ += 2;
+                                uint32_t lo = 0;
+                                if (read_hex4(lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                } else {
+                                    pos_ = save;  // not a pair; emit the lone surrogate below
+                                }
+                            }
+                        }
+                        append_utf8(s, cp);
                         break;
                     }
                     default:
@@ -225,6 +334,41 @@ private:
         return result;
     }
 
+    // Assertion keywords this build parses past but cannot enforce. Split from
+    // annotations on purpose: `format`, `title`, `description`, `examples`,
+    // `default`, `deprecated`, `readOnly`, `writeOnly` change no legal value
+    // and stay silently ignored, which is what the spec says they do.
+    static bool is_unenforceable_keyword(const std::string& k) {
+        static const char* kUnenforceable[] = {
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+            "allOf",
+            "not",
+            "uniqueItems",
+            "patternProperties",
+            "propertyNames",
+            "prefixItems",
+            "contains",
+            "minContains",
+            "maxContains",
+            "minProperties",
+            "maxProperties",
+            "dependentRequired",
+            "dependentSchemas",
+            "if",
+            "then",
+            "else",
+        };
+        for (const char* u : kUnenforceable) {
+            if (k == u)
+                return true;
+        }
+        return false;
+    }
+
     static SchemaType type_from_string(const std::string& s) {
         if (s == "string")
             return SchemaType::STRING;
@@ -244,9 +388,19 @@ private:
     }
 
     std::unique_ptr<SchemaNode> parse_schema_object() {
-        skip_ws();
-        if (!expect('{'))
+        // #1609: one frame per nesting level, from an unauthenticated request
+        // body. 10^5 nested "items" objects overflow the worker thread's stack.
+        if (depth_ >= kMaxSchemaDepth) {
+            fail("schema nests deeper than " + std::to_string(kMaxSchemaDepth) + " levels");
             return nullptr;
+        }
+        DepthGuard guard(depth_);
+
+        skip_ws();
+        if (!expect('{')) {
+            fail("expected '{' at the start of a schema object");
+            return nullptr;
+        }
 
         auto node = std::make_unique<SchemaNode>();
         bool has_type = false;
@@ -274,8 +428,10 @@ private:
                     while (!eof() && peek() != '}') {
                         std::string prop_name = parse_string();
                         skip_ws();
-                        if (!expect(':'))
+                        if (!expect(':')) {
+                            fail("expected ':' after a property name");
                             break;
+                        }
                         auto prop_schema = parse_schema_object();
                         if (prop_schema) {
                             node->properties.emplace_back(std::move(prop_name), std::move(prop_schema));
@@ -305,7 +461,23 @@ private:
             } else if (key == "required") {
                 node->required = parse_string_array();
             } else if (key == "additionalProperties") {
-                node->additional_properties = parse_bool();
+                // #1564: parse_bool() returns false WITHOUT consuming when the
+                // value is not true/false, so the schema-object form left pos_
+                // on '{'. The key loop then saw '{' instead of ',', broke, and
+                // every key after this one was dropped - including
+                // `properties`, which downgrades the request to json_object at
+                // constraint_manager.cpp:149. Consume the value either way.
+                skip_ws();
+                if (peek() == 't' || peek() == 'f') {
+                    node->additional_properties = parse_bool();
+                } else {
+                    // The schema form ({"type": "..."}) is legal and common
+                    // (Pydantic emits it for Dict[str, T]). imp does not
+                    // enforce a schema on extra keys, so this reads as the
+                    // permissive `true` - a weaker constraint, not a wrong one.
+                    skip_value();
+                    node->additional_properties = true;
+                }
             } else if (key == "items") {
                 node->items = parse_schema_object();
                 if (!has_type)
@@ -320,10 +492,25 @@ private:
                     node->max_items = static_cast<int>(v);
             } else if (key == "enum") {
                 skip_ws();
-                if (expect('[')) {
+                if (!expect('[')) {
+                    fail("enum is not an array");
+                } else {
                     skip_ws();
                     while (!eof() && peek() != ']') {
-                        // Store enum values as raw strings
+                        // #1564: parse_string() also returns "" without
+                        // consuming. A non-string member therefore produced
+                        // enum_values == {""} and left pos_ on the member, so
+                        // the rest of the schema was dropped AND the only legal
+                        // output became the empty string. The FSM emits an enum
+                        // as quoted string content (schema_constrain.cu:790),
+                        // so a numeric or boolean member has no representation:
+                        // refuse rather than constrain to something else.
+                        if (peek() != '"') {
+                            fail(
+                                "enum members must be strings; a number, boolean or null "
+                                "enum cannot be enforced by this build");
+                            break;
+                        }
                         node->enum_values.push_back(parse_string());
                         skip_ws();
                         if (peek() == ',') {
@@ -333,7 +520,8 @@ private:
                         }
                         break;
                     }
-                    expect(']');
+                    if (!parse_error_ && !expect(']'))
+                        fail("enum array is not closed");
                 }
                 node->type = SchemaType::ENUM;
             } else if (key == "$ref") {
@@ -397,8 +585,31 @@ private:
                     expect(']');
                 }
                 node->type = SchemaType::ANY_OF;
+            } else if (key == "const") {
+                // #1567: const is enum with one member, and the FSM already
+                // has that path. Same string-only limit as enum above.
+                skip_ws();
+                if (peek() != '"') {
+                    fail(
+                        "const must be a string; a number, boolean or null const "
+                        "cannot be enforced by this build");
+                } else {
+                    node->enum_values.push_back(parse_string());
+                    node->type = SchemaType::ENUM;
+                }
+            } else if (is_unenforceable_keyword(key)) {
+                // #1567: these are assertions, not annotations. Dropping one
+                // answers a request that bounded its output with a grammar that
+                // does not - the exact failure #1540/#751 describes, reached by
+                // a caller who did bound the field. docs/API.md: "A constraint
+                // imp cannot compile is a 400, not an unconstrained answer."
+                fail("schema keyword '" + key + "' is not enforceable by this build");
+                skip_value();
             } else {
-                // Skip unknown fields ($schema, title, description, etc.)
+                // Skip unknown fields and pure annotations ($schema, title,
+                // description, examples, default, format - which is an
+                // annotation in Draft 2020-12 unless the format-assertion
+                // vocabulary is in use, and imp does not claim it).
                 skip_value();
             }
 
@@ -410,7 +621,8 @@ private:
             }
             break;
         }
-        expect('}');
+        if (!expect('}'))
+            fail("schema object is not closed; a value before this point was not consumed");
 
         // Enum takes precedence over a co-declared "type". Key order in the
         // object is not significant in JSON, and clients commonly emit
@@ -504,6 +716,10 @@ std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json) {
     }
     if (parser.ref_error()) {
         IMP_LOG_ERROR("Failed to parse JSON schema: unsupported $ref form");
+        return nullptr;
+    }
+    if (parser.parse_error()) {
+        IMP_LOG_ERROR("Failed to parse JSON schema: %s", parser.error_reason().c_str());
         return nullptr;
     }
     // Attach definitions collected anywhere in the document to the root —
@@ -674,6 +890,15 @@ std::unique_ptr<SchemaNode> build_xml_tool_call_schema(
 // ===========================================================================
 
 int RegexNfa::new_state() {
+    // #1608: the {n,m} builder allocates per clone and the nested form
+    // multiplies, so the state count is the resource an attacker actually
+    // spends. Once the budget is gone the parse is an error and every caller
+    // unwinds through the `error_` checks; returning the last valid index keeps
+    // the add_edge()/add_epsilon() calls already in flight in bounds.
+    if (states_.size() >= kMaxStates) {
+        error_ = true;
+        return states_.empty() ? 0 : static_cast<int>(states_.size()) - 1;
+    }
     states_.emplace_back();
     return static_cast<int>(states_.size()) - 1;
 }
@@ -974,7 +1199,11 @@ bool RegexNfa::parse_repeat(Frag& out) {
             long v = 0;
             bool any = false;
             while (pos_ < src_->size() && (*src_)[pos_] >= '0' && (*src_)[pos_] <= '9') {
-                v = v * 10 + ((*src_)[pos_] - '0');
+                // #1608: `v = v*10 + d` over an unbounded digit run is signed
+                // overflow, i.e. UB, before it is ever compared to a limit.
+                // Saturate at the repeat cap; the caller rejects from there.
+                if (v <= kMaxRepeat)
+                    v = v * 10 + ((*src_)[pos_] - '0');
                 pos_++;
                 any = true;
             }
@@ -1000,6 +1229,15 @@ bool RegexNfa::parse_repeat(Frag& out) {
         if (!comma)
             m = n;  // {n}
 
+        // #1608: n is a clone count. `a{2000000000}` ran a two-billion
+        // iteration loop, each iteration re-parsing the atom and allocating
+        // states, on an HTTP worker thread at admission time. The GBNF parser
+        // has had this same bound since it was written.
+        if (n > kMaxRepeat || m > kMaxRepeat) {
+            error_ = true;
+            return false;
+        }
+
         // Build: n mandatory copies, then either unbounded (*) or (m-n) optional.
         int s = new_state();
         int cur = s;
@@ -1018,11 +1256,16 @@ bool RegexNfa::parse_repeat(Frag& out) {
             pos_ = 0;
             error_ = false;
             bool ok = parse_repeat(f);  // atom may itself be a repeat-free atom
-            // restore
+            // The clone's own error has to survive the restore. It did not:
+            // error_ was overwritten with prev_err and THEN read, so `!error_`
+            // reported the state before the clone. That also swallowed the
+            // state-budget signal new_state() raises (#1608), which is what
+            // stops the nested `(((a{100}){100}){100})` form.
+            bool inner_err = error_;
             src_ = prev_src;
             pos_ = prev_pos;
-            error_ = prev_err;
-            return ok && !error_;
+            error_ = prev_err || inner_err;
+            return ok && !inner_err;
         };
 
         // first mandatory copy is the already-built `atom`
@@ -1104,6 +1347,20 @@ bool RegexNfa::parse_concat(Frag& out) {
 
 // alt := concat ('|' concat)*
 bool RegexNfa::parse_alt(Frag& out) {
+    // #1609: parse_atom() recurses back into parse_alt() for a group, so a
+    // pattern of '(' costs one frame per byte - the cheapest stack overflow in
+    // the request surface. parse_alt is the single point that closes the
+    // mutual recursion, so one guard here covers all four functions.
+    if (depth_ >= kMaxDepth) {
+        error_ = true;
+        return false;
+    }
+    depth_++;
+    struct Pop {
+        int& d;
+        ~Pop() { d--; }
+    } pop{depth_};
+
     Frag first{};
     if (!parse_concat(first))
         return false;
@@ -1132,6 +1389,7 @@ bool RegexNfa::compile(const std::string& pattern) {
     states_.clear();
     compiled_ = false;
     error_ = false;
+    depth_ = 0;
     src_ = &pattern;
     pos_ = 0;
 

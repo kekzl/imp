@@ -7,6 +7,7 @@
 #include "handlers_internal.h"
 #include "stream_driver.h"
 #include "utils.h"
+#include "core/logging.h"
 #include "tool_call.h"
 
 #include "runtime/request.h"
@@ -77,13 +78,13 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             return true;
         return sse_writer.write_reasoning(text, sink);
     };
-    dialect.emit_content_token = [&](const std::string& text) -> bool {
+    dialect.emit_content_token = [&](const std::string& text, int token_index) -> bool {
         if (req_logprobs && active_req) {
             // Logprobs path: fall back to sse_chunk (rare)
             json content_delta = {{"content", text}};
             json lp_chunk = nullptr;
-            size_t lp_idx = static_cast<size_t>(out.n_output_tokens) - 1;
-            if (lp_idx < active_req->output_logprobs.size()) {
+            size_t lp_idx = static_cast<size_t>(token_index);
+            if (token_index >= 0 && lp_idx < active_req->output_logprobs.size()) {
                 const auto& lp = active_req->output_logprobs[lp_idx];
                 json top_arr = json::array();
                 for (const auto& t : lp.top) {
@@ -156,14 +157,17 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
             sink.write(sse.data(), sse.size());
         }
-        for (size_t aoff = 0; aoff < full_args.size(); aoff += kArgChunk) {
-            size_t an = std::min(kArgChunk, full_args.size() - aoff);
+        // #1554: codepoint-aligned slices, same reason as the Anthropic
+        // dialect. The /v1/responses dialect never chunked and was immune.
+        for (size_t aoff = 0; aoff < full_args.size();) {
+            const size_t an = utf8_chunk_len(full_args, aoff, kArgChunk);
             json args_delta = {
                 {"tool_calls",
                  json::array({{{"index", idx},
                                {"function", {{"arguments", full_args.substr(aoff, an)}}}}})}};
             sse = sse_chunk(comp_id, created, snap_model_name, args_delta, nullptr);
             sink.write(sse.data(), sse.size());
+            aoff += an;
         }
         return true;
     };
@@ -171,18 +175,25 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     if (!run_stream_loop_(sink, ctx, state, server_req, dialect, out))
         return false;
 
-    // If the model exhausted tokens while still reasoning and never produced
-    // content, emit a notice so the user sees something instead of a blank
-    // response (fires only when max_tokens was the cause — see the driver's
-    // reasoning_truncated contract).
+    // The model exhausted its budget while still reasoning and never produced
+    // content. This used to write a server-authored English sentence into
+    // delta.content, which made the streaming and non-streaming answers to the
+    // identical request differ, and put text into `content` that no token
+    // produced (#1593). It is the same shape as the reasoning leak this file's
+    // invariant already forbids, so it goes where the non-streaming path
+    // already puts it: the server log. finish_reason is "length" either way,
+    // which is the machine-readable half a client can act on.
     if (out.reasoning_truncated) {
-        std::string notice = "[Reasoning truncated — increase max_tokens for a complete answer]";
-        sse_writer.write_content(notice, sink);
+        IMP_LOG_WARN(
+            "empty content: the answer never started because the token budget went to "
+            "reasoning (streaming, finish_reason=length). Raise max_tokens — a thinking "
+            "model needs room to answer AFTER it thinks.");
     }
 
     // Send final chunk with finish_reason
     json empty_delta = json::object();
-    std::string final_chunk = sse_chunk(comp_id, created, snap_model_name, empty_delta, out.finish);
+    std::string final_chunk = sse_chunk(comp_id, created, snap_model_name, empty_delta,
+                                        openai_finish_reason(out.finish));
     sink.write(final_chunk.data(), final_chunk.size());
 
     // Send usage chunk if requested

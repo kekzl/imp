@@ -10,6 +10,7 @@
 #include "stream_pipeline.h"
 
 #include "api/imp_internal.h"
+#include "core/fp_bits.h"
 #include "vision/image_processor.h"
 #include "runtime/request.h"
 #include "model/hf_hub.h"
@@ -26,6 +27,9 @@
 #include <cuda_runtime.h>
 
 void handle_tokenize(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     json body;
     try {
         body = json::parse(req.body);
@@ -79,6 +83,9 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
 }
 
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     json body;
     try {
         body = json::parse(req.body);
@@ -177,6 +184,27 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_requests_cancelled_total Requests cancelled by client disconnect\n";
     out += "# TYPE imp_requests_cancelled_total counter\n";
     out += "imp_requests_cancelled_total " + std::to_string(m.requests_cancelled.load()) + "\n";
+    out += "# HELP imp_requests_timed_out_total Requests the server ended at --request-timeout\n";
+    out += "# TYPE imp_requests_timed_out_total counter\n";
+    out += "imp_requests_timed_out_total " + std::to_string(m.requests_timed_out.load()) + "\n";
+    // Read from the engine at scrape time rather than mirrored into
+    // ServerMetrics: the decision is the engine's, and a second copy is a
+    // second thing to keep in sync (#1641).
+    {
+        uint64_t kv_rejects = 0, kv_growths = 0;
+        if (state.ctx && state.ctx->engine) {
+            kv_rejects = state.ctx->engine->kv_pressure_rejections();
+            kv_growths = state.ctx->engine->kv_pool_growths();
+        }
+        out +=
+            "# HELP imp_kv_pressure_rejections_total Requests cancelled because the KV pool "
+            "could not give them blocks\n";
+        out += "# TYPE imp_kv_pressure_rejections_total counter\n";
+        out += "imp_kv_pressure_rejections_total " + std::to_string(kv_rejects) + "\n";
+        out += "# HELP imp_kv_pool_growths_total Times the growable KV pool committed more memory\n";
+        out += "# TYPE imp_kv_pool_growths_total counter\n";
+        out += "imp_kv_pool_growths_total " + std::to_string(kv_growths) + "\n";
+    }
     out += "# HELP imp_last_ttft_ms Time to first token of last request in milliseconds\n";
     out += "# TYPE imp_last_ttft_ms gauge\n";
     out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";
@@ -195,7 +223,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
         out += " histogram\n";
         for (int i = 0; i < LatencyHistogram::kNumBuckets; ++i) {
             char le[32];
-            std::snprintf(le, sizeof(le), "%g", LatencyHistogram::kBounds[i]);
+            std::snprintf(le, sizeof(le), "%g", h.bounds[i]);
             out += name;
             out += "_bucket{le=\"";
             out += le;
@@ -221,8 +249,34 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     emit_histogram("imp_request_duration_seconds", "Request end-to-end latency in seconds",
                    m.request_duration);
     emit_histogram("imp_ttft_seconds", "Time to first token in seconds", m.ttft);
-    emit_histogram("imp_inter_token_seconds", "Mean inter-token latency (ITL) per request in seconds",
+    emit_histogram("imp_inter_token_seconds", "Inter-token latency in seconds, one observation per token",
                    m.inter_token);
+    emit_histogram("imp_queue_time_seconds", "Seconds from admission to the first decode step", m.queue_time);
+    out += "# HELP imp_requests_rejected_total Requests refused with a 4xx\n";
+    out += "# TYPE imp_requests_rejected_total counter\n";
+    out += "imp_requests_rejected_total " + std::to_string(m.requests_rejected.load()) + "\n";
+    // Decode batch size, as a counter pair so a dashboard can rate() both and
+    // divide - the average over any window, without the server keeping one.
+    // The counters live on the BatchingEngine, which is where the batch is
+    // formed; read under the same bounded lock the rest of this endpoint uses.
+    {
+        int64_t steps = 0, rows = 0, bmax = 0;
+        std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+        if (lock.owns_lock() && state.batching) {
+            steps = state.batching->decode_steps.load();
+            rows = state.batching->decode_rows.load();
+            bmax = state.batching->decode_batch_max.load();
+        }
+        out += "# HELP imp_decode_batch_steps_total Decode steps executed\n";
+        out += "# TYPE imp_decode_batch_steps_total counter\n";
+        out += "imp_decode_batch_steps_total " + std::to_string(steps) + "\n";
+        out += "# HELP imp_decode_batch_rows_total Sequences decoded, summed over steps\n";
+        out += "# TYPE imp_decode_batch_rows_total counter\n";
+        out += "imp_decode_batch_rows_total " + std::to_string(rows) + "\n";
+        out += "# HELP imp_decode_batch_max Largest decode batch seen since start\n";
+        out += "# TYPE imp_decode_batch_max gauge\n";
+        out += "imp_decode_batch_max " + std::to_string(bmax) + "\n";
+    }
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
     bool loaded = false;
@@ -247,37 +301,10 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     res.set_content(out, "text/plain; version=0.0.4; charset=utf-8");
 }
 
-// Convert IEEE 754 FP16 (uint16_t) to FP32 on host
-static float fp16_to_fp32(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp = (h >> 10) & 0x1f;
-    uint32_t mant = h & 0x3ff;
-
-    uint32_t f;
-    if (exp == 0) {
-        if (mant == 0) {
-            f = sign << 31;
-        } else {
-            // Subnormal: normalize
-            exp = 1;
-            while (!(mant & 0x400)) {
-                mant <<= 1;
-                exp--;
-            }
-            mant &= 0x3ff;
-            f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
-        }
-    } else if (exp == 0x1f) {
-        f = (sign << 31) | 0x7f800000 | (mant << 13);
-    } else {
-        f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
-    }
-    float result;
-    std::memcpy(&result, &f, sizeof(float));
-    return result;
-}
-
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return;
     // Parse request body
     json body;
     try {
@@ -293,6 +320,17 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         if (body["input"].is_string()) {
             inputs.push_back(body["input"].get<std::string>());
         } else if (body["input"].is_array()) {
+            // One request, one rate-limit unit, N forward passes (#1616).
+            if (state.max_batch_items > 0 && static_cast<int>(body["input"].size()) > state.max_batch_items) {
+                res.status = 400;
+                json err = {{"error",
+                             {{"message", "\"input\" has " + std::to_string(body["input"].size()) +
+                                              " entries, above the server limit of " +
+                                              std::to_string(state.max_batch_items) + " (--max-batch-items)"},
+                              {"type", "invalid_request_error"}}}};
+                res.set_content(dump_safe(err), "application/json");
+                return;
+            }
             for (const auto& item : body["input"]) {
                 if (item.is_string()) {
                     inputs.push_back(item.get<std::string>());
@@ -418,8 +456,9 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             }
             if (state.max_input_tokens > 0 && n_tokens > state.max_input_tokens) {
                 send_json_error(res, 400, "invalid_request_error",
-                                "Input exceeds --max-input-tokens (" + std::to_string(n_tokens) +
-                                    " > " + std::to_string(state.max_input_tokens) + ")");
+                                "Input exceeds --max-input-tokens (" + std::to_string(n_tokens) + " > " +
+                                    std::to_string(state.max_input_tokens) + ")",
+                                "input", "context_length_exceeded");
                 return;
             }
             // Chunked prefill pools per chunk (#1005), so the only hard bound
@@ -607,7 +646,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             if (sep >= 0 && framed.back() != sep)
                 framed.push_back(sep);
             std::vector<float> emb;
-            if (!engine->encoder_embed(framed.data(), static_cast<int>(framed.size()), emb)) {
+            if (!engine->encoder_embed(framed, emb)) {
                 nlohmann::json error = {
                     {"error",
                      {{"message", "encoder forward failed (input too long for the encoder "
@@ -684,7 +723,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         std::vector<float> embedding(d_model, 0.0f);
         for (int t = 0; t < n_tokens; ++t) {
             for (int d = 0; d < d_model; ++d) {
-                embedding[d] += fp16_to_fp32(h_hidden[t * d_model + d]);
+                embedding[d] += imp::half_to_float(h_hidden[t * d_model + d]);
             }
         }
         float inv_n = 1.0f / static_cast<float>(n_tokens);

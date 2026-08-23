@@ -199,6 +199,26 @@ void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
 // the shared split-K reduce being wired is not enough to make them correct.
 bool paged_attention_applies_sinks(QType kv_dtype);
 
+// Which head_dims a KV dtype's paged DECODE launchers have a template for
+// (#1674). Same "wire a dtype, edit here" contract as the function above, and
+// the same reason: the answer lived only in the switch statements, so a model
+// with an unserved head_dim reached them, hit `default:`, logged an error and
+// RETURNED - leaving O unwritten with the previous layer's attn_out_ still in
+// it. That is the failure mode SETTLED S-22 exists to forbid, and the prefill
+// chain throws for the same class of miss.
+//
+// Returns true for a dtype this table does not know: a guard must not refuse a
+// combination nobody has checked.
+//
+// The launchers themselves now THROW on a head_dim they cannot serve, instead
+// of logging and returning. This function is what keeps that throw from ever
+// firing: the resolver consults it at init and falls back to FP16 KV.
+bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim);
+
+// Terminal for a launcher that has no template for `head_dim`. One function so
+// the 17 sites are one line each and the message is written once.
+[[noreturn]] void paged_attention_unsupported_head_dim(const char* fn, int head_dim);
+
 // Launch the split-K reduce kernel (shared across FP16/FP8/INT8).
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
                                    int num_splits, cudaStream_t stream,

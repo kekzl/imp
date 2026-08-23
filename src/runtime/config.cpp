@@ -45,30 +45,57 @@ std::string strip_quotes(const std::string& s) {
     return s;
 }
 
-bool parse_bool(const std::string& v, bool fallback) {
+// #1627: these returned `fallback` for anything they did not recognise, with
+// no signal, so `--set server.prefix_cache=disabled` kept the default and said
+// nothing. The key half was already rejected; the value half was not, and 157
+// of the 185 bound keys go through these three. `ok` is set to false on a value
+// the parser cannot read, and the caller turns that into a rejection.
+bool parse_bool(const std::string& v, bool fallback, bool* ok = nullptr) {
     if (v == "true" || v == "True" || v == "1" || v == "yes" || v == "on")
         return true;
     if (v == "false" || v == "False" || v == "0" || v == "no" || v == "off")
         return false;
+    if (ok)
+        *ok = false;
     return fallback;
 }
 
-int parse_int(const std::string& v, int fallback) {
-    if (v.empty())
+int parse_int(const std::string& v, int fallback, bool* ok = nullptr) {
+    if (v.empty()) {
+        if (ok)
+            *ok = false;
         return fallback;
+    }
     try {
-        return std::stoi(v);
+        size_t used = 0;
+        int out = std::stoi(v, &used);
+        // stoi stops at the first non-digit, so "16k" and "1,2" parsed as 16
+        // and 1 without complaint. Trailing garbage is a bad value.
+        if (used != v.size() && ok)
+            *ok = false;
+        return out;
     } catch (...) {
+        if (ok)
+            *ok = false;
         return fallback;
     }
 }
 
-float parse_float(const std::string& v, float fallback) {
-    if (v.empty())
+float parse_float(const std::string& v, float fallback, bool* ok = nullptr) {
+    if (v.empty()) {
+        if (ok)
+            *ok = false;
         return fallback;
+    }
     try {
-        return std::stof(v);
+        size_t used = 0;
+        float out = std::stof(v, &used);
+        if (used != v.size() && ok)
+            *ok = false;
+        return out;
     } catch (...) {
+        if (ok)
+            *ok = false;
         return fallback;
     }
 }
@@ -77,7 +104,8 @@ float parse_float(const std::string& v, float fallback) {
 // Returns false when the key is not bound — the caller decides what that
 // means: an imp.conf may legitimately carry a key this build does not know,
 // a `--set` on the command line is a typo and must not pass silently.
-bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::string& raw) {
+bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::string& raw,
+               bool* value_ok = nullptr) {
     std::string val = strip_quotes(trim(raw));
 
     // Typed key binders. Each binds one dotted key to its destination field;
@@ -85,14 +113,24 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // to a wrong-typed field. First match wins (the `matched` guard mirrors the
     // old else-if short-circuit); unknown keys fall through to the warning.
     bool matched = false;
+    bool value_ok_local = true;
     auto B = [&](const char* k, bool& f) {
-        if (!matched && dotted_key == k) { f = parse_bool(val, f); matched = true; }
+        if (!matched && dotted_key == k) {
+            f = parse_bool(val, f, &value_ok_local);
+            matched = true;
+        }
     };
     auto I = [&](const char* k, int& f) {
-        if (!matched && dotted_key == k) { f = parse_int(val, f); matched = true; }
+        if (!matched && dotted_key == k) {
+            f = parse_int(val, f, &value_ok_local);
+            matched = true;
+        }
     };
     auto F = [&](const char* k, float& f) {
-        if (!matched && dotted_key == k) { f = parse_float(val, f); matched = true; }
+        if (!matched && dotted_key == k) {
+            f = parse_float(val, f, &value_ok_local);
+            matched = true;
+        }
     };
     auto S = [&](const char* k, std::string& f) {
         if (!matched && dotted_key == k) { f = val; matched = true; }
@@ -101,7 +139,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [runtime]
     B("runtime.deterministic_gemm", cfg.runtime.deterministic_gemm);
     if (!matched && dotted_key == "runtime.deterministic") {
-        cfg.runtime.deterministic = parse_bool(val, cfg.runtime.deterministic);
+        cfg.runtime.deterministic = parse_bool(val, cfg.runtime.deterministic, &value_ok_local);
         // Full determinism implies deterministic GEMM algo selection — the
         // compute kernels gate routing/sampling determinism on the same
         // process_diag_deterministic_gemm() snapshot, so this one switch
@@ -121,7 +159,9 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("runtime.prefill_graph", cfg.runtime.prefill_graph);
     I("runtime.max_batch_size", cfg.runtime.max_batch_size);
     I("runtime.decode_burst", cfg.runtime.decode_burst);
+    I("runtime.prefill_chunk_size", cfg.runtime.prefill_chunk_size);
     I("runtime.prefill_chunk_decode_cap", cfg.runtime.prefill_chunk_decode_cap);
+    I("runtime.prefill_batch_decode_cap", cfg.runtime.prefill_batch_decode_cap);
     I("runtime.hybrid_decode_quantum", cfg.runtime.hybrid_decode_quantum);
     B("runtime.decode_pipeline", cfg.runtime.decode_pipeline);
     I("runtime.vram_budget_mb", cfg.runtime.vram_budget_mb);
@@ -150,6 +190,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     F("vram.kv_fraction", cfg.vram.kv_fraction);
     I("vram.reserve_floor_pct", cfg.vram.reserve_floor_pct);
     I("vram.library_reserve_mb", cfg.vram.library_reserve_mb);
+    I("vram.upload_ring_depth", cfg.vram.upload_ring_depth);
+    I("vram.upload_ring_chunk_mib", cfg.vram.upload_ring_chunk_mib);
     S("vram.library_reserve_cache", cfg.vram.library_reserve_cache);
 
     // [attention]
@@ -228,10 +270,14 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("gemm.nvfp4_lm_head", cfg.gemm.nvfp4_lm_head);
     if (!matched && dotted_key == "gemm.cublas_fp16_acc") {
         // tri-state auto|on|off; legacy bool spellings stay valid
-        if (val == "auto" || val == "on" || val == "off")
+        if (val == "auto" || val == "on" || val == "off") {
             cfg.gemm.cublas_fp16_acc = val;
-        else
-            cfg.gemm.cublas_fp16_acc = parse_bool(val, false) ? "on" : "off";
+        } else {
+            // A tri-state that also takes booleans; anything else is a bad
+            // value, not a third spelling of off (#1627).
+            bool b = parse_bool(val, false, &value_ok_local);
+            cfg.gemm.cublas_fp16_acc = b ? "on" : "off";
+        }
         matched = true;
     }
     B("gemm.nvfp4_lm_head_gdn", cfg.gemm.nvfp4_lm_head_gdn);
@@ -342,9 +388,14 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("speculative.mtp_k", cfg.speculative.mtp_k);
     B("speculative.mtp_nvfp4_head", cfg.speculative.mtp_nvfp4_head);
     F("speculative.mtp_econ_min_emit", cfg.speculative.mtp_econ_min_emit);
+    // #1638: read at engine_scheduler.cpp:1422 and :2882, its own comment calls
+    // it a "kill switch for A/B", and it was bound to no key at all.
+    B("speculative.batch_rr", cfg.speculative.batch_rr);
     B("speculative.capture", cfg.speculative.capture);
     I("speculative.capture_ctx_cap", cfg.speculative.capture_ctx_cap);
 
+    if (value_ok)
+        *value_ok = value_ok_local;
     return matched;
 }
 
@@ -465,8 +516,12 @@ bool RuntimeConfig::load_from_file(const std::string& path) {
             dotted += '.';
             dotted += key;
         }
-        if (!apply_one(*this, dotted, val))
+        bool value_ok = true;
+        if (!apply_one(*this, dotted, val, &value_ok))
             IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted.c_str(), val.c_str());
+        else if (!value_ok)
+            IMP_LOG_WARN("imp.conf: key '%s' has an unreadable value '%s' — the default is kept (#1627)",
+                         dotted.c_str(), val.c_str());
     }
     return true;
 }
@@ -481,8 +536,11 @@ std::vector<std::string> RuntimeConfig::apply_overrides(const std::vector<std::s
         }
         std::string key = trim(kv.substr(0, eq));
         std::string val = trim(kv.substr(eq + 1));
-        if (!apply_one(*this, key, val))
+        bool value_ok = true;
+        if (!apply_one(*this, key, val, &value_ok))
             rejected.push_back(kv + "  (no such key)");
+        else if (!value_ok)
+            rejected.push_back(kv + "  (value not readable for this key; the default is kept)");
     }
     return rejected;
 }

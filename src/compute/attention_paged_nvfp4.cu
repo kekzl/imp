@@ -135,6 +135,14 @@ __global__ void paged_attention_decode_nvfp4_kernel(
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read. The FP16 twin has carried
+        // this since #963 and the quantised ones did not (#1678): host-side
+        // eviction keeps the window range valid, so this is defense-in-depth -
+        // future range drift degrades to a skipped block instead of an illegal
+        // access or silent garbage.
+        if (phys_block < 0)
+            continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
         const uint8_t* K_sc_block = K_scales + (int64_t)phys_block * sc_block_stride;
@@ -278,6 +286,14 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
 
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read. The FP16 twin has carried
+        // this since #963 and the quantised ones did not (#1678): host-side
+        // eviction keeps the window range valid, so this is defense-in-depth -
+        // future range drift degrades to a skipped block instead of an illegal
+        // access or silent garbage.
+        if (phys_block < 0)
+            continue;
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
         const uint8_t* K_sc_block = K_scales + (int64_t)phys_block * sc_block_stride;
@@ -407,8 +423,8 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                 LAUNCH_SPLITK_NVFP4(512);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_nvfp4 splitk: unsupported head_dim %d", head_dim);
-                return;
+                // #1674: logged and returned, leaving O unwritten.
+                paged_attention_unsupported_head_dim("paged_attention_decode_nvfp4 splitk", head_dim);
         }
 #undef LAUNCH_SPLITK_NVFP4
 
@@ -440,8 +456,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                 LAUNCH_NVFP4(512);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_nvfp4: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_decode_nvfp4", head_dim);
         }
 #undef LAUNCH_NVFP4
     }
@@ -505,8 +520,8 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                 LAUNCH_SPLITK_MXFP4KV(512);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_mxfp4_kv splitk: unsupported head_dim %d", head_dim);
-                return;
+                // #1674: logged and returned, leaving O unwritten.
+                paged_attention_unsupported_head_dim("paged_attention_decode_mxfp4_kv splitk", head_dim);
         }
 #undef LAUNCH_SPLITK_MXFP4KV
 
@@ -538,8 +553,7 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                 LAUNCH_MXFP4KV(512);
                 break;
             default:
-                IMP_LOG_ERROR("paged_attention_decode_mxfp4_kv: unsupported head_dim %d", head_dim);
-                return;
+                paged_attention_unsupported_head_dim("paged_attention_decode_mxfp4_kv", head_dim);
         }
 #undef LAUNCH_MXFP4KV
     }

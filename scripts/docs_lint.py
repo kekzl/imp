@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Documentation linter. Fails the build on the seven checks below.
+"""Documentation linter. Six checks fail the build; staleness only warns.
+
+That split was undocumented until #1683, which found the header claiming all
+seven were blocking while check 7 appended to `warnings` and the exit code read
+`errors` alone. Staleness stays a warning on purpose - a date does not tell you
+whether the content moved - but it says so now, and the commit marker it sits
+next to is checked and reported (see check 3).
 
 The point of each check is that it catches a class of defect this repo has
 actually shipped before, not that it enforces a style:
@@ -29,6 +35,7 @@ import datetime as dt
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -115,8 +122,67 @@ README_MAX_LINES = 400
 CLAUDE_ROOT_MAX_TOKENS = 2000
 CLAUDE_DIR_MAX_TOKENS = 800
 STALE_DAYS = 180
+# A `commit:` marker is reported when THE FILE ITSELF changed after it, not at
+# some commit count. The count was the first attempt and it was arbitrary: 200
+# did not fire on the case that motivated the check (40 files pinned at
+# 81ffa573 with main 133 commits ahead), and any number that did fire would
+# have been picked to fit that one case. "Was this file edited since it was
+# last verified" needs no threshold and is the question the field claims to
+# answer (#1683).
+_COMMIT_DEPTH_CACHE: dict = {}
+
+
+def _edits_since(sha: str, path: str):
+    """Commits touching `path` after `sha`. None if `sha` is not in history."""
+    key = (sha, path)
+    if key in _COMMIT_DEPTH_CACHE:
+        return _COMMIT_DEPTH_CACHE[key]
+    import subprocess
+    val = None
+    try:
+        if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+                          capture_output=True, timeout=10).returncode == 0:
+            out = subprocess.run(["git", "rev-list", "--count", f"{sha}..HEAD", "--", path],
+                                 capture_output=True, text=True, timeout=10)
+            if out.returncode == 0 and out.stdout.strip():
+                val = int(out.stdout.strip())
+    except Exception:
+        val = None
+    _COMMIT_DEPTH_CACHE[key] = val
+    return val
+
 
 BASELINE = ROOT / "tests" / "perf_baseline.json"
+
+
+def _ignored_paths(candidates: list[str]) -> set[str]:
+    """The subset of `candidates` that .gitignore excludes (#1663).
+
+    Without this the linter walks whatever happens to be in the tree. A local
+    scratch directory - `_audit/` during the 2026-08 audit - produced 160
+    errors on every run, and the working answer became `| grep -v '^FAIL
+    _audit/'`. A gate whose output has to be filtered by hand is one command
+    away from not being read at all.
+
+    `git check-ignore` rather than `git ls-files`: a doc that is written but
+    not yet added is still in scope, and would otherwise pass locally and fail
+    in CI. Falls back to "nothing is ignored" when git is unavailable, which is
+    the old behaviour.
+    """
+    if not candidates:
+        return set()
+    try:
+        r = subprocess.run(
+            ["git", "check-ignore", "--stdin"],
+            input="\n".join(candidates),
+            capture_output=True, text=True, cwd=ROOT, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    # exit 0 = some paths ignored, 1 = none, 128 = not a git repo
+    if r.returncode not in (0, 1):
+        return set()
+    return {line.strip() for line in r.stdout.splitlines() if line.strip()}
 
 
 def in_scope(rel: str) -> bool:
@@ -149,6 +215,22 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
         errors.append(f"{rel}: missing frontmatter (needs layer/audience/verified/commit)")
     else:
         fm = m.group(1) or m.group(2)
+        # The error message above promises four fields and this validated one
+        # until #1683: `audience:` and `commit:` were read by no line in the
+        # file, so 40 documents carried `commit: 81ffa573` unnoticed while main
+        # moved 133 commits past it.
+        for field in ("audience", "commit"):
+            if not re.search(rf"^{field}:\s*\S+", fm, re.M):
+                errors.append(f"{rel}: frontmatter has no `{field}:`")
+        cm = re.search(r"^commit:\s*([0-9a-f]{7,40})", fm, re.M)
+        if cm:
+            edits = _edits_since(cm.group(1), rel)
+            if edits is None:
+                warnings.append(f"{rel}: commit {cm.group(1)} is not in this history")
+            elif edits > 0:
+                warnings.append(
+                    f"{rel}: edited {edits}x since the commit it says it was verified "
+                    f"against ({cm.group(1)})")
         lm = re.search(r"^layer:\s*(\S+)", fm, re.M)
         if not lm:
             errors.append(f"{rel}: frontmatter has no `layer:`")
@@ -237,6 +319,30 @@ def check_generated_blocks(errors: list) -> None:
             )
 
 
+def check_refs_generators_listed(errors: list) -> None:
+    """7. Every generator in tests/refs/ has a row in tests/refs/README.md.
+
+    That table is the only index of which golden a generator writes and which
+    test consumes it, and rule 1 of that README ("every golden value traces to a
+    committed generator") is only checkable through it. Two generators had
+    drifted out of it - gen_tokenizer_golden.py and gen_chat_goldens.py - which
+    is the repo's recurring shape: the artefact exists, nothing references it,
+    and its absence reads like absence of the thing itself.
+    """
+    refs = ROOT / "tests" / "refs"
+    readme = refs / "README.md"
+    if not refs.is_dir() or not readme.exists():
+        return
+    text = readme.read_text(encoding="utf-8")
+    missing = sorted(p.name for p in refs.glob("gen_*.py") if p.name not in text)
+    if missing:
+        errors.append(
+            "tests/refs/README.md: generator(s) with no row in the table: "
+            + ", ".join(missing)
+            + " — add one naming the golden it writes and the test that consumes it"
+        )
+
+
 def check_budgets(errors: list) -> None:
     """6. README and CLAUDE.md size budgets."""
     readme = ROOT / "README.md"
@@ -250,9 +356,11 @@ def check_budgets(errors: list) -> None:
         if t > CLAUDE_ROOT_MAX_TOKENS:
             errors.append(f"CLAUDE.md: ~{t} tokens > {CLAUDE_ROOT_MAX_TOKENS}")
 
-    for p in ROOT.rglob("CLAUDE.md"):
-        rel = p.relative_to(ROOT).as_posix()
-        if rel == "CLAUDE.md" or rel.startswith(EXCLUDED_PREFIXES):
+    claude_files = [p.relative_to(ROOT).as_posix() for p in ROOT.rglob("CLAUDE.md")]
+    ignored = _ignored_paths(claude_files)
+    for rel in claude_files:
+        p = ROOT / rel
+        if rel == "CLAUDE.md" or rel in ignored or rel.startswith(EXCLUDED_PREFIXES):
             continue
         t = approx_tokens(p.read_text(encoding="utf-8"))
         if t > CLAUDE_DIR_MAX_TOKENS:
@@ -263,13 +371,15 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    for path in sorted(ROOT.rglob("*.md")):
-        rel = path.relative_to(ROOT).as_posix()
-        if not in_scope(rel):
+    candidates = [p.relative_to(ROOT).as_posix() for p in sorted(ROOT.rglob("*.md"))]
+    ignored = _ignored_paths(candidates)
+    for rel in candidates:
+        if rel in ignored or not in_scope(rel):
             continue
-        check_file(path, rel, errors, warnings)
+        check_file(ROOT / rel, rel, errors, warnings)
 
     check_generated_blocks(errors)
+    check_refs_generators_listed(errors)
     check_budgets(errors)
 
     if warnings:

@@ -186,6 +186,8 @@ Model:
   --gpu-layers <n>          Layers on GPU, -1 = all (default: -1)
   --config <path>           Path to imp.conf (overrides search-path)
   --set section.key=value   Per-run override (repeatable)
+  --json                    One JSON document on stdout, every human line on
+                            stderr (see "Machine-readable output" below)
 
 Generation:
   --prompt <text>           Input prompt
@@ -250,6 +252,39 @@ Benchmark / eval:
 ```
 
 </details>
+
+### Machine-readable output — `--json`
+
+`--json` puts **exactly one JSON document on stdout** and every human line on
+stderr, so a caller pipes it into `jq` instead of regexing a column layout that
+is not a contract (#1583). It works on `imp-cli --bench`, `--perplexity` and
+`--prompt`, and on `imp-bench`; `--interactive` refuses it, because a token
+stream is not one document.
+
+```bash
+$ imp-cli --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 16 --json 2>/dev/null
+{"mode":"bench","model":"...","prefill_tps":5502.57,"decode_tps":438.59,"pp_tokens":128,
+ "pp_ms":23.26,"tg_tokens":16,"tg_ms":36.48,"reps":1,"peak_vram_mib":11188}
+
+$ imp-bench gemm --json 2>/dev/null
+{"mode":"bench-suite","requested":1,"run":1,"wall_s":3.40,
+ "benchmarks":[{"name":"gemm","measured":true,"seconds":3.399}]}
+```
+
+| mode | keys |
+|---|---|
+| `bench` | `prefill_tps`, `decode_tps`, `pp_tokens`, `pp_ms`, `tg_tokens`, `tg_ms`, `reps`, `peak_vram_mib` |
+| `perplexity` | `perplexity`, `tokens`, `corpus`, `calibration` (when `--calibrate-out`) |
+| `generate` | `text`, `prompt_tokens`, `completion_tokens`, `prefill_tps`, `decode_tps`, `prefill_ms`, `decode_ms`, `total_ms` |
+| `bench-suite` | `requested`, `run`, `wall_s`, `benchmarks[].{name,measured,seconds}` |
+
+`text` is what stdout would have shown, not `decode(output_ids)`: the hidden
+stop and think markers stay hidden, so the document and the terminal agree.
+
+`imp-bench` reports per-benchmark *timings*, not the tables. The five bench
+entry points return `bool`, and their numbers have no shared shape to
+serialise; the consumer that needed machine-readable throughput is
+`scripts/gen_perf_baseline.sh`, and it reads `imp-cli --bench --json`.
 
 ## Server — imp-server (OpenAI + Anthropic compatible)
 
@@ -317,7 +352,11 @@ hard-coded table is needed: `/v1/models` carries vLLM's `max_model_len` and
 llama.cpp's `meta.n_ctx_train` on the model object, `GET /props` returns the
 llama.cpp `n_ctx` (top-level and under `default_generation_settings`), and
 `GET /info` returns TGI's `max_total_tokens` / `max_input_tokens`. All three
-report the same window (the engine-detected `max_seq_len`).
+report the same window, and it is what the KV pool can actually hold: the
+resolver's `max_seq_len` is a plan, the pool is clamped after it, and on a tight
+card the two differ (97204 against 52256 on Qwen3.8-27B-NVFP4). `/health`'s
+`kv_capacity_tokens` has always been the real number; the probes report the
+smaller of the two now (#1542).
 
 Server-only flags (not on `imp-cli`):
 

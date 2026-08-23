@@ -59,6 +59,7 @@ Nothing else in the tree states these. Everything else links here.
 | [`internals/MEMORY.md`](internals/MEMORY.md) | tiers, allocators, invariants I1-I7. Read before anything about VRAM |
 | [`internals/QUANT_PIPELINE.md`](internals/QUANT_PIPELINE.md) | the two layers handling quantized weights |
 | [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) | the measurement contract |
+| [`internals/CPP23.md`](internals/CPP23.md) | which C++23 the tree uses, and where the host/device line runs |
 | [`internals/PROFILING.md`](internals/PROFILING.md) | nsys and ncu on this host |
 
 ## Records, not documentation

@@ -273,6 +273,11 @@ struct Token {
     std::string value;
     bool trim_left = false;   // whitespace control: strip left
     bool trim_right = false;  // whitespace control: strip right
+    // TEXT only: this token began at the start of a source line. Needed by
+    // lstrip_blocks, because trim_blocks has usually already eaten the newline
+    // by then - the token is pure indentation and cannot tell on its own
+    // whether it is a line indent or the tail of a line with content on it.
+    bool line_start = false;
 };
 
 class Lexer {
@@ -300,11 +305,24 @@ public:
                 // Apply trim: strip trailing whitespace from last TEXT token
                 if (trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     rtrim(tokens.back().value);
+                // A comment is a block tag for lstrip_blocks/trim_blocks too
+                // (#1572). Skipping it here left a comment line's indentation
+                // and its newline in the prompt, which is how Nemotron-3-Nano's
+                // template put 20 spaces in front of `<|im_start|>assistant`
+                // while every other family rendered byte-exact.
+                if (!trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
+                    lstrip_block_indent(tokens.back().value, tokens.back().line_start);
                 // Skip leading whitespace after comment
-                if (trim_r)
+                if (trim_r) {
                     while (pos < src_.size() &&
                            (src_[pos] == ' ' || src_[pos] == '\t' || src_[pos] == '\n' || src_[pos] == '\r'))
                         pos++;
+                } else {
+                    if (pos < src_.size() && src_[pos] == '\r')
+                        pos++;
+                    if (pos < src_.size() && src_[pos] == '\n')
+                        pos++;
+                }
                 continue;
             }
 
@@ -323,6 +341,14 @@ public:
                 // Strip trailing whitespace from previous TEXT token
                 if (trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
                     rtrim(tokens.back().value);
+
+                // lstrip_blocks (#1572): whitespace from the start of a line up
+                // to a block tag is indentation, not output. Same reason as
+                // trim_blocks above - transformers sets lstrip_blocks=True, and
+                // without it an indented `{% if %}` leaks its indentation into
+                // the prompt.
+                if (!is_expr && !trim_l && !tokens.empty() && tokens.back().type == TokenType::TEXT)
+                    lstrip_block_indent(tokens.back().value, tokens.back().line_start);
 
                 Token open;
                 open.type = is_expr ? TokenType::EXPR_OPEN : TokenType::STMT_OPEN;
@@ -348,6 +374,7 @@ public:
                 Token t;
                 t.type = TokenType::TEXT;
                 t.value = src_.substr(text_start, pos - text_start);
+                t.line_start = (text_start == 0 || src_[text_start - 1] == '\n');
                 tokens.push_back(t);
             }
         }
@@ -356,6 +383,23 @@ public:
     }
 
 private:
+    // Drop a trailing run of spaces/tabs, but only when it is the whole
+    // indentation of a line: `\n    {% if %}` loses it, `{{ x }} {% endfor %}`
+    // does not. Matches Jinja's lstrip_blocks.
+    //
+    // `line_start` is what separates them when the run reaches the front of the
+    // token. Treating that as a line start unconditionally ate the separator in
+    // `{% for x in items %}{{ x }} {% endfor %}` and rendered "ab" for "a b ".
+    static void lstrip_block_indent(std::string& text, bool line_start) {
+        size_t i = text.size();
+        while (i > 0 && (text[i - 1] == ' ' || text[i - 1] == '\t'))
+            i--;
+        if (i == text.size())
+            return;
+        if (i > 0 ? text[i - 1] == '\n' : line_start)
+            text.erase(i);
+    }
+
     void tokenize_inner(std::vector<Token>& tokens, size_t& pos, const std::string& close_tag) {
         skip_ws(pos);
         while (pos < src_.size()) {
@@ -381,6 +425,20 @@ private:
                     Token close;
                     close.type = (close_tag == "}}") ? TokenType::EXPR_CLOSE : TokenType::STMT_CLOSE;
                     tokens.push_back(close);
+                    // trim_blocks (#1572): the newline that ends the line a block
+                    // tag sits on is part of the tag, not of the output. Jinja
+                    // defaults this off, but transformers renders every chat
+                    // template with trim_blocks=True, so a template written
+                    // against HF emits one spurious newline per block tag here.
+                    // `-%}` already ate all following whitespace and returned
+                    // above; this is the plain `%}` case. Statement tags only -
+                    // `{{ }}` is unaffected in Jinja too.
+                    if (close_tag == "%}") {
+                        if (pos < src_.size() && src_[pos] == '\r')
+                            pos++;
+                        if (pos < src_.size() && src_[pos] == '\n')
+                            pos++;
+                    }
                     return;
                 }
             }
@@ -742,6 +800,10 @@ struct SetNode : Node {
     std::string var_name;   // "x" or "ns" for ns.x
     std::string attr_name;  // "x" when doing ns.x = ...
     std::unique_ptr<Expr> value;
+    // Block form: {% set x %}...{% endset %}. The body renders into a string
+    // and that string is the value; `value` is null in this form.
+    std::vector<std::unique_ptr<Node>> body;
+    bool is_block = false;
 };
 
 struct MacroNode : Node {
@@ -765,6 +827,8 @@ public:
     bool parse(std::vector<std::unique_ptr<Node>>& out) {
         while (!at_end()) {
             auto node = parse_node();
+            if (too_deep_ || !unknown_tag_.empty())
+                break;
             if (!node) {
                 // Skip problematic token and continue
                 if (!at_end())
@@ -773,10 +837,47 @@ public:
             }
             out.push_back(std::move(node));
         }
+        if (too_deep_ || !unknown_tag_.empty()) {
+            // Half-built nodes can hold null sub-expressions, and the
+            // evaluator dereferences those without checking. The caller
+            // discards a failed parse, so leave nothing behind for it.
+            out.clear();
+            return false;
+        }
         return true;
     }
 
+    // Empty unless parse() stopped on a tag this engine does not implement.
+    const std::string& unknown_tag() const { return unknown_tag_; }
+
 private:
+    // The template comes out of the model file (`chat_template` in
+    // tokenizer_config.json), so its nesting is not the operator's either.
+    // `parse_primary` recurses back into `parse_expr` on '(' and statement
+    // bodies recurse through `parse_node`, both with no bound, so a template
+    // of 100 000 '(' overflows the stack during load. 256 is far past any
+    // real chat template; the deepest in this tree is 6.
+    //
+    static constexpr int kMaxParseDepth = 256;
+    int depth_ = 0;
+    bool too_deep_ = false;
+    std::string unknown_tag_;
+
+    struct DepthGuard {
+        Parser& p;
+        bool ok;
+        explicit DepthGuard(Parser& parser) : p(parser), ok(parser.depth_ < kMaxParseDepth) {
+            if (ok)
+                ++p.depth_;
+            else
+                p.too_deep_ = true;
+        }
+        ~DepthGuard() {
+            if (ok)
+                --p.depth_;
+        }
+    };
+
     const Token& peek() const { return pos_ < tokens_.size() ? tokens_[pos_] : tokens_.back(); }
 
     const Token& advance() {
@@ -816,6 +917,9 @@ private:
     }
 
     std::unique_ptr<Node> parse_node() {
+        DepthGuard guard(*this);
+        if (!guard.ok)
+            return nullptr;
         if (check(TokenType::TEXT)) {
             auto text = peek().value;
             advance();
@@ -845,11 +949,27 @@ private:
             return parse_set();
         if (check(TokenType::IDENT, "macro"))
             return parse_macro();
-        // Unknown statement — skip to %}
-        while (!at_end() && !check(TokenType::STMT_CLOSE))
-            advance();
-        if (check(TokenType::STMT_CLOSE))
-            advance();
+        // {% generation %}/{% endgeneration %} mark the assistant span for
+        // training masks. They contribute nothing to the rendered text and
+        // HF's renderer ignores them, so they are a no-op rather than a
+        // refusal.
+        if (check(TokenType::IDENT, "generation") || check(TokenType::IDENT, "endgeneration")) {
+            while (!at_end() && !check(TokenType::STMT_CLOSE))
+                advance();
+            if (check(TokenType::STMT_CLOSE))
+                advance();
+            // An empty node, not nullptr: the caller reads nullptr as "could
+            // not parse this token" and skips one MORE token, which ate the
+            // text right after the tag.
+            return std::make_unique<TextNode>(std::string());
+        }
+        // Anything else is a tag this engine does not implement, or an
+        // unbalanced end tag. Skipping it silently produced a wrong prompt
+        // with no error, and made ChatTemplate's "fall back to the hardcoded
+        // template" path unreachable (#1565): parse() could not fail.
+        unknown_tag_ = peek().value;
+        if (unknown_tag_.empty())
+            unknown_tag_ = "<empty>";
         return nullptr;
     }
 
@@ -931,8 +1051,12 @@ private:
                 MacroNode::Param param;
                 param.name = peek().value;
                 advance();
-                // Optional default: =expr
-                if (check(TokenType::OP, "=")) {
+                // Optional default: =expr. The lexer emits ASSIGN for a bare
+                // '=' and OP only for "==" (#1566): testing for OP "=" matched
+                // nothing, so the '=' and the default expression were consumed
+                // as two extra positional parameters and the named one bound
+                // to none.
+                if (check(TokenType::ASSIGN)) {
                     advance();
                     param.default_value = parse_expr();
                 }
@@ -1032,8 +1156,28 @@ private:
             advance();
         }
 
-        if (check(TokenType::ASSIGN))
-            advance();
+        // Block form: {% set x %}...{% endset %} captures the rendered body.
+        // Gemma-4's shipped chat_template.jinja builds captured_content this
+        // way. Without it the '=' branch below ran parse_expr() on '%}', the
+        // body rendered inline into the output, and the variable stayed
+        // unset - so `captured_content | trim | length > 0` was always false
+        // (#1565).
+        if (!check(TokenType::ASSIGN)) {
+            node->is_block = true;
+            if (check(TokenType::STMT_CLOSE))
+                advance();
+            parse_body(node->body, {"endset"});
+            if (check(TokenType::STMT_OPEN)) {
+                advance();
+                if (check(TokenType::IDENT, "endset"))
+                    advance();
+                if (check(TokenType::STMT_CLOSE))
+                    advance();
+            }
+            return node;
+        }
+
+        advance();  // '='
 
         node->value = parse_expr();
         if (check(TokenType::STMT_CLOSE))
@@ -1044,6 +1188,10 @@ private:
 
     void parse_body(std::vector<std::unique_ptr<Node>>& body, const std::vector<std::string>& end_keywords) {
         while (!at_end()) {
+            // A tag the engine cannot parse ends the whole parse; without this
+            // the body loop keeps advancing to the end of the template first.
+            if (!unknown_tag_.empty() || too_deep_)
+                return;
             // Check if next is a closing statement keyword
             if (check(TokenType::STMT_OPEN)) {
                 size_t saved = pos_;
@@ -1071,6 +1219,9 @@ private:
     // ---- Expression parsing with precedence climbing ----
 
     std::unique_ptr<Expr> parse_expr() {
+        DepthGuard guard(*this);
+        if (!guard.ok)
+            return nullptr;
         auto expr = parse_ternary();
         return expr;
     }
@@ -1684,6 +1835,19 @@ private:
     }
 
     void render_set(const SetNode& node) {
+        if (node.is_block) {
+            std::string captured;
+            for (const auto& n : node.body)
+                render_node(*n, captured);
+            if (!node.attr_name.empty()) {
+                Value ns = lookup(node.var_name);
+                if (ns.is_object())
+                    ns.set(node.attr_name, Value(std::move(captured)));
+            } else {
+                set_var_update(node.var_name, Value(std::move(captured)));
+            }
+            return;
+        }
         Value val = eval(*node.value);
         if (!node.attr_name.empty()) {
             // namespace set: ns.attr = val
@@ -1910,6 +2074,11 @@ private:
     Value eval_filter(const FilterExpr& f) {
         Value val = eval(*f.value);
 
+        // No autoescaping here, so `safe` is the identity - but an UNKNOWN
+        // filter is not: it warned and dropped the value, which is how a
+        // template silently loses whatever it marked safe (#1572).
+        if (f.name == "safe")
+            return val;
         if (f.name == "trim") {
             if (!val.is_string())
                 return val;
@@ -2509,7 +2678,13 @@ private:
         return Value();
     }
 
-    static std::string value_to_json(const Value& val) {
+    // #1607: the tojson filter walks the value tree recursively, and that tree
+    // comes from a request-supplied schema. Depth is bounded at the HTTP
+    // boundary; this is the second line, for a tree built any other way.
+    static std::string value_to_json(const Value& val, int depth = 0) {
+        constexpr int kMaxJsonDepth = 128;
+        if (depth >= kMaxJsonDepth)
+            return "null";
         if (val.is_none())
             return "null";
         if (val.is_bool())
@@ -2564,7 +2739,7 @@ private:
             for (size_t i = 0; i < arr.size(); i++) {
                 if (i > 0)
                     r += ", ";
-                r += value_to_json(arr[i]);
+                r += value_to_json(arr[i], depth + 1);
             }
             r += "]";
             return r;
@@ -2575,7 +2750,7 @@ private:
             for (auto& [k, v] : *val.as_object()) {
                 if (!first)
                     r += ", ";
-                r += "\"" + k + "\": " + value_to_json(v);
+                r += "\"" + k + "\": " + value_to_json(v, depth + 1);
                 first = false;
             }
             r += "}";
@@ -2622,7 +2797,9 @@ bool Template::parse(const std::string& source_in) {
 
     detail::Parser parser(tokens);
     if (!parser.parse(nodes_)) {
-        error_ = "Parse error";
+        error_ = parser.unknown_tag().empty()
+                     ? "Parse error"
+                     : "unsupported or unbalanced tag: {% " + parser.unknown_tag() + " %}";
         return false;
     }
     return true;

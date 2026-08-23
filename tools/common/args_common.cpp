@@ -33,6 +33,8 @@ bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i) {
         args.prefill_chunk_size = std::atoi(argv[++i]);
 
         // --- boolean flags ---
+    } else if (std::strcmp(a, "--json") == 0) {
+        args.json_out = true;
     } else if (std::strcmp(a, "--mem-report") == 0) {
         args.mem_report = true;
     } else if (std::strcmp(a, "--no-cuda-graphs") == 0) {

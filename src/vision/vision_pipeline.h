@@ -8,6 +8,7 @@
 #include <cuda_runtime.h>
 #include <memory>
 #include <string>
+#include <span>
 #include <cstdint>
 
 namespace imp {
@@ -36,14 +37,14 @@ public:
     [[nodiscard]] bool set_image(const std::string& path, cudaStream_t stream);
 
     // Encode an image from memory buffer. Blocks on stream sync.
-    [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len, cudaStream_t stream);
+    [[nodiscard]] bool set_image_from_memory(std::span<const uint8_t> data, cudaStream_t stream);
 
     void clear_image() { has_input_ = false; }
 
     // --- Per-request binding API (server batched path) -------------------
     // CPU-only preprocess (decode/resize/normalize) — safe to call off the
     // batch worker (e.g. an HTTP handler thread). Fills `out` with FP16 pixels.
-    [[nodiscard]] bool preprocess(const uint8_t* data, size_t len, ImageData& out) const;
+    [[nodiscard]] bool preprocess(std::span<const uint8_t> data, ImageData& out) const;
     // Encode a preprocessed image into the caller's `out` device buffer (sized
     // embeddings_bytes()). Encodes into the STABLE scratch d_embeddings_ first
     // (the encoder CUDA graph is keyed on the output pointer, so a per-request

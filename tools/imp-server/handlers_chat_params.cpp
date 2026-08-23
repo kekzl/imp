@@ -11,6 +11,7 @@
 #include "tool_call.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
+#include "image_fetch.h"
 #include "reasoning_split.h"
 
 #include "api/imp_internal.h"
@@ -45,11 +46,15 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // state.request_logger.enabled and the call is not an inner shim.
     ctx.t_log_start = std::chrono::system_clock::now();
     ctx.log_endpoint = req.path;
-    ctx.log_client_ip = req.get_header_value("X-Forwarded-For");
-    if (ctx.log_client_ip.empty())
-        ctx.log_client_ip = req.remote_addr;
+    // Same key the rate limiter uses: an untrusted X-Forwarded-For in the
+    // request log is a forged identity in the audit trail (#1614).
+    ctx.log_client_ip = state.rate_limit_key(req.remote_addr, req.get_header_value("X-Forwarded-For"));
     ctx.log_raw_body = req.body;
     ctx.log_skip = g_in_anthropic_shim;
+
+    // #1607: bound the nesting before any recursive parser sees it.
+    if (reject_body_too_deep(req, res))
+        return false;
 
     // Parse request body
     json body;
@@ -107,6 +112,16 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.params.n_completions = body.value("n", 1);
     if (ctx.params.n_completions < 1)
         ctx.params.n_completions = 1;
+    // Each n is a full independent generation, run sequentially, and the whole
+    // request still counts as ONE against --rate-limit and --max-concurrent.
+    // The neighbouring max_tokens is clamped to the context window; this was
+    // not clamped at all (#1616).
+    if (state.max_n > 0 && ctx.params.n_completions > state.max_n) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "\"n\" is " + std::to_string(ctx.params.n_completions) +
+                            ", above the server limit of " + std::to_string(state.max_n) + " (--max-n)");
+        return false;
+    }
 
     // Streaming with n > 1 is not supported
     if (ctx.params.stream && ctx.params.n_completions > 1) {
@@ -140,8 +155,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // machinery handles arbitrary lists; max_stop_len derives from the vector).
     constexpr size_t kMaxStopSequences = 16;
     if (parse_stop_field(body, kMaxStopSequences, ctx.params.stop_sequences)) {
-        fprintf(stderr, "warning: request sent %zu stop sequences; keeping the first %zu\n",
-                body["stop"].size(), kMaxStopSequences);
+        IMP_LOG_WARN("request sent %zu stop sequences; keeping the first %zu", body["stop"].size(),
+                     kMaxStopSequences);
     }
     ctx.params.max_stop_len = 0;
     for (const auto& s : ctx.params.stop_sequences)
@@ -167,6 +182,12 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.regex_pattern = rf["regex"].get<std::string>();
             else if (rf.contains("pattern") && rf["pattern"].is_string())
                 ctx.params.regex_pattern = rf["pattern"].get<std::string>();
+            else {
+                send_json_error(res, 400, "invalid_request_error",
+                                "\"response_format\" is type \"regex\" but carries no string "
+                                "\"regex\" (or \"pattern\")");
+                return false;
+            }
         } else if (fmt_type == "grammar") {
             // {"type":"grammar","grammar":"root ::= ..."} — a GBNF grammar the
             // whole reply must derive. "gbnf" is accepted as a spelling too,
@@ -176,10 +197,28 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 ctx.params.grammar = rf["grammar"].get<std::string>();
             else if (rf.contains("gbnf") && rf["gbnf"].is_string())
                 ctx.params.grammar = rf["gbnf"].get<std::string>();
+            else {
+                send_json_error(res, 400, "invalid_request_error",
+                                "\"response_format\" is type \"grammar\" but carries no string "
+                                "\"grammar\" (or \"gbnf\")");
+                return false;
+            }
         } else if (fmt_type == "json_object") {
             ctx.params.json_mode = true;
         } else if (fmt_type == "json_schema") {
             ctx.params.json_mode = true;
+            const auto& rf = body["response_format"];
+            if (!rf.contains("json_schema") || !rf["json_schema"].is_object()) {
+                send_json_error(res, 400, "invalid_request_error",
+                                "\"response_format\" is type \"json_schema\" but carries no object "
+                                "\"json_schema\"");
+                return false;
+            }
+            if (!rf["json_schema"].contains("schema") || !rf["json_schema"]["schema"].is_object()) {
+                send_json_error(res, 400, "invalid_request_error",
+                                "\"response_format.json_schema\" carries no object \"schema\"");
+                return false;
+            }
             if (body["response_format"].contains("json_schema") &&
                 body["response_format"]["json_schema"].is_object()) {
                 auto& js = body["response_format"]["json_schema"];
@@ -199,6 +238,15 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     }
                 }
             }
+        } else if (fmt_type != "text") {
+            // The whole point of response_format is that the answer is
+            // constrained. A type this build does not know is not a weaker
+            // request, it is a different one, and answering it as free text
+            // with 200 tells the caller their constraint held (#1591).
+            send_json_error(res, 400, "invalid_request_error",
+                            "unknown \"response_format.type\": \"" + sanitize_for_echo(fmt_type, 64) +
+                                "\" (known: text, json_object, json_schema, regex, grammar)");
+            return false;
         }
     }
 
@@ -219,6 +267,17 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
 
     // Parse logit_bias: map of token_id (string) -> bias (float)
     if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
+        // Every entry costs a blocking device-to-host copy per decode step, so
+        // the map size multiplies the cost of every token, not of the request
+        // (#1617). Refuse rather than truncate: a silently dropped bias changes
+        // the output without saying so.
+        if (state.max_logit_bias > 0 && static_cast<int>(body["logit_bias"].size()) > state.max_logit_bias) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "\"logit_bias\" has " + std::to_string(body["logit_bias"].size()) +
+                                " entries, above the server limit of " +
+                                std::to_string(state.max_logit_bias) + " (--max-logit-bias)");
+            return false;
+        }
         for (auto& [key, val] : body["logit_bias"].items()) {
             try {
                 int32_t token_id = std::stoi(key);
@@ -244,7 +303,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // Per-request speculative-decode override (imp extension). Absent → leave
     // tri-state at -1 (server default). Present bool → force on/off.
     if (body.contains("speculative") && body["speculative"].is_boolean())
-        ctx.params.spec_ngram_override = body["speculative"].get<bool>() ? 1 : 0;
+        ctx.params.spec_override = body["speculative"].get<bool>() ? 1 : 0;
 
     // OpenAI Predicted Outputs: {"prediction": {"type": "content", "content":
     // string | [{"type":"text","text":...}...]}}. The text is a draft hint —
@@ -363,40 +422,41 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                             image_bytes = base64_decode(url.substr(comma + 1));
                         }
                     } else if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
-                        // Remote URL: fetch image via HTTP
-                        // Parse URL into host + path
-                        bool is_https = (url.rfind("https://", 0) == 0);
-                        std::string rest = url.substr(is_https ? 8 : 7);
-                        auto slash = rest.find('/');
-                        std::string host = (slash != std::string::npos) ? rest.substr(0, slash) : rest;
-                        std::string path_str = (slash != std::string::npos) ? rest.substr(slash) : "/";
-                        if (is_https) {
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-                            httplib::SSLClient cli(host);
-                            cli.set_follow_location(true);
-                            cli.set_connection_timeout(10);
-                            auto img_res = cli.Get(path_str);
-                            if (img_res && img_res->status == 200) {
-                                image_bytes.assign(img_res->body.begin(), img_res->body.end());
-                            }
-#else
-                            ctx.params.image_error = "https image_url needs an imp built with OpenSSL";
-#endif
+                        // #1610: this used to build an httplib client straight
+                        // from the request's host, follow redirects, and buffer
+                        // whatever came back. That is an SSRF primitive on an
+                        // endpoint that is unauthenticated by default: the
+                        // caller picks the host and port and the server has
+                        // reach the caller does not. Off by default now, and
+                        // bounded when on. See image_fetch.h.
+                        auto fetched = imp_server::fetch_remote_image(url,
+                                                                      state.default_args.allow_remote_images);
+                        if (fetched.ok) {
+                            image_bytes = std::move(fetched.bytes);
                         } else {
-                            httplib::Client cli(host);
-                            cli.set_follow_location(true);
-                            cli.set_connection_timeout(10);
-                            auto img_res = cli.Get(path_str);
-                            if (img_res && img_res->status == 200) {
-                                image_bytes.assign(img_res->body.begin(), img_res->body.end());
-                            }
+                            IMP_LOG_WARN("image_url not fetched: %s", fetched.detail.c_str());
                         }
                     }
                     // A scheme we do not fetch (file://, plain paths) leaves the
                     // slot empty, same as a failed request. Both are refused
                     // below rather than silently dropping a picture.
-                    if (image_bytes.empty() && ctx.params.image_error.empty())
-                        ctx.params.image_error = "could not read image_url: " + url.substr(0, 64);
+                    //
+                    // One string for every cause, and it does NOT echo the URL.
+                    // Distinguishable errors turned this into a port scanner of
+                    // the server's own network: "connection refused" and "200
+                    // with unparseable bytes" read differently from outside.
+                    //
+                    // The two variants below differ by SERVER CONFIGURATION,
+                    // never by what the URL named, so neither tells a caller
+                    // anything about the destination.
+                    if (image_bytes.empty() && ctx.params.image_error.empty()) {
+                        const bool remote = url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+                        ctx.params.image_error =
+                            (remote && !state.default_args.allow_remote_images)
+                                ? "could not read image_url: remote URLs are disabled on this "
+                                  "server; send a data: URI, or start it with --allow-remote-images"
+                                : "could not read image_url";
+                    }
                 }
             }
             ctx.params.chat_msgs.push_back({role, text_parts});
@@ -411,9 +471,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
 
     // Log request received (structured)
     ctx.req_id = make_completion_id(state);
-    fprintf(stderr, "[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f\n",
-            ctx.req_id.c_str(), messages.size(), ctx.params.stream ? "true" : "false", ctx.params.max_tokens,
-            ctx.params.temperature);
+    IMP_LOG_INFO("[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f",
+                 ctx.req_id.c_str(), messages.size(), ctx.params.stream ? "true" : "false",
+                 ctx.params.max_tokens, ctx.params.temperature);
 
     // Validate model field (required per OpenAI spec)
     ctx.params.requested_model = body.value("model", "");

@@ -131,6 +131,10 @@ TEST(RuntimeConfigTest, ParsesRopeAndVramSections) {
     EXPECT_FLOAT_EQ(defaults.rope.attn_factor, 1.0f);
     EXPECT_FLOAT_EQ(defaults.vram.kv_fraction, 0.8f);
     EXPECT_EQ(defaults.vram.reserve_floor_pct, 10);
+    // #1653: 4x4 MiB, not the 4x128 that shipped until the sweep. A default
+    // that drifts back silently costs 0.68 s of every process start.
+    EXPECT_EQ(defaults.vram.upload_ring_depth, 4);
+    EXPECT_EQ(defaults.vram.upload_ring_chunk_mib, 4);
 
     TempFile f(R"(
 [rope]
@@ -158,6 +162,10 @@ reserve_floor_pct = 5
     EXPECT_EQ(cfg.vram.reserve_floor_pct, 5);
 
     // --set style overrides reach the same fields.
+    set_(cfg, {"vram.upload_ring_depth=2", "vram.upload_ring_chunk_mib=64"});
+    EXPECT_EQ(cfg.vram.upload_ring_depth, 2);
+    EXPECT_EQ(cfg.vram.upload_ring_chunk_mib, 64);
+
     set_(cfg, {"rope.scaling=linear", "rope.factor=2", "vram.kv_fraction=0.9"});
     EXPECT_EQ(cfg.rope.scaling, "linear");
     EXPECT_FLOAT_EQ(cfg.rope.factor, 2.0f);
@@ -262,3 +270,81 @@ TEST(RuntimeConfigTest, MissingFileFallsBackToDefaults) {
 
 }  // namespace
 }  // namespace imp
+
+// ---- #1627: an unreadable VALUE is rejected, not silently dropped ----
+//
+// `--set` refused an unknown KEY and accepted anything as a value: the three
+// parsers returned the current value for input they could not read, with no
+// warning, so `--set server.prefix_cache=disabled` kept the default and said
+// nothing. 157 of the 185 bound keys go through those three.
+
+TEST(ConfigBadValue, BoolKeyRejectsANonBoolean) {
+    imp::RuntimeConfig cfg;
+    const bool before = cfg.speculative.capture;
+    auto rejected = cfg.apply_overrides({"speculative.capture=disabled"});
+    ASSERT_EQ(rejected.size(), 1u) << "an unreadable value must be reported";
+    EXPECT_NE(rejected[0].find("value not readable"), std::string::npos) << rejected[0];
+    EXPECT_EQ(cfg.speculative.capture, before) << "and the default must be kept";
+}
+
+TEST(ConfigBadValue, IntKeyRejectsWordsAndTrailingGarbage) {
+    imp::RuntimeConfig cfg;
+    EXPECT_EQ(cfg.apply_overrides({"speculative.k=one"}).size(), 1u);
+    // stoi stops at the first non-digit, so this parsed as 16 and reported
+    // nothing. The whole string has to be consumed.
+    EXPECT_EQ(cfg.apply_overrides({"speculative.k=16k"}).size(), 1u);
+    EXPECT_EQ(cfg.apply_overrides({"speculative.k=1,2"}).size(), 1u);
+}
+
+TEST(ConfigBadValue, FloatKeyRejectsANonNumber) {
+    imp::RuntimeConfig cfg;
+    EXPECT_EQ(cfg.apply_overrides({"speculative.mtp_econ_min_emit=high"}).size(), 1u);
+}
+
+TEST(ConfigBadValue, EveryAcceptedBooleanSpellingStillWorks) {
+    // Negative control. imp.conf.example uses table values on all 107 boolean
+    // lines, so a stricter parser must not start rejecting them.
+    for (const char* v : {"true", "True", "1", "yes", "on"}) {
+        imp::RuntimeConfig cfg;
+        EXPECT_TRUE(cfg.apply_overrides({std::string("speculative.capture=") + v}).empty()) << v;
+        EXPECT_TRUE(cfg.speculative.capture) << v;
+    }
+    for (const char* v : {"false", "False", "0", "no", "off"}) {
+        imp::RuntimeConfig cfg;
+        EXPECT_TRUE(cfg.apply_overrides({std::string("speculative.capture=") + v}).empty()) << v;
+        EXPECT_FALSE(cfg.speculative.capture) << v;
+    }
+}
+
+TEST(ConfigBadValue, TriStateKeyKeepsItsThreeSpellings) {
+    for (const char* v : {"auto", "on", "off"}) {
+        imp::RuntimeConfig cfg;
+        EXPECT_TRUE(cfg.apply_overrides({std::string("gemm.cublas_fp16_acc=") + v}).empty()) << v;
+        EXPECT_EQ(cfg.gemm.cublas_fp16_acc, v) << v;
+    }
+    imp::RuntimeConfig cfg;
+    EXPECT_EQ(cfg.apply_overrides({"gemm.cublas_fp16_acc=sometimes"}).size(), 1u);
+}
+
+// ---- #1638: a decode-path switch nothing could set ----
+
+TEST(ConfigBinding, SpeculativeBatchRrIsBound) {
+    imp::RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.speculative.batch_rr) << "default is on";
+    EXPECT_TRUE(cfg.apply_overrides({"speculative.batch_rr=false"}).empty())
+        << "read at engine_scheduler.cpp:1422 and :2882, bound to no key until #1638";
+    EXPECT_FALSE(cfg.speculative.batch_rr);
+}
+
+// #1645: the knob that sets the prefill TTFT/ITL trade had no imp.conf key,
+// while the knob that merely caps it did.
+TEST(ConfigBinding, PrefillChunkSizeIsBound) {
+    imp::RuntimeConfig cfg;
+    EXPECT_EQ(cfg.runtime.prefill_chunk_size, -1) << "default is the per-arch resolver";
+    EXPECT_TRUE(cfg.apply_overrides({"runtime.prefill_chunk_size=512"}).empty());
+    EXPECT_EQ(cfg.runtime.prefill_chunk_size, 512);
+    EXPECT_TRUE(cfg.apply_overrides({"runtime.prefill_chunk_size=0"}).empty());
+    EXPECT_EQ(cfg.runtime.prefill_chunk_size, 0);
+    // And it is still a number, not anything (#1627).
+    EXPECT_EQ(cfg.apply_overrides({"runtime.prefill_chunk_size=large"}).size(), 1u);
+}

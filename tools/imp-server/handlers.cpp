@@ -36,6 +36,17 @@ std::string make_completion_id(ServerState& state) {
     return "imp-" + std::to_string(state.next_id.fetch_add(1));
 }
 
+// The id a client quotes when reporting a problem, and the one that ties a
+// response to its line in the JSONL request log. No error body carried one and
+// no response carried the header (#1561). Same counter as the completion id, so
+// the two cannot collide.
+std::string make_request_id(ServerState& state) {
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "req_imp_%016llx",
+                  static_cast<unsigned long long>(state.next_id.fetch_add(1)));
+    return std::string(buf);
+}
+
 int64_t unix_timestamp() {
     return std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -106,6 +117,19 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         // caller to derive it from a pair that cannot express it.
         body["kv_pool_growable"] = kv_growable;
     }
+    // #1537: the checkpoint carries an MTP head this load did not take, because
+    // speculative.mtp_k defaults to 0. That is a documented +8 to +22% decode
+    // sitting switched off, and the only notice was one INFO line at startup -
+    // which an operator running a container never sees. Reported here so it is
+    // discoverable without grepping a log.
+    if (state.model && state.model->model && state.model->model->mtp_head_available_unloaded_) {
+        body["mtp_head_available"] = true;
+        body["mtp_head_hint"] =
+            "this checkpoint ships an MTP head that is not loaded "
+            "(speculative.mtp_k=0). --set speculative.mtp_k=2 measured +15% decode "
+            "on Qwen3.8-27B-NVFP4 (range +8 to +22%), for the head's VRAM.";
+    }
+
     if (!unservable.empty()) {
         // A client has to tell a permanent 503 from a transient one, or it
         // retries a condition retrying cannot fix and burns its budget doing
@@ -172,12 +196,22 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     bool loaded = false;
     std::string model_name;
     int max_seq_len = 0;
+    // What the KV pool can actually hold. `max_seq_len` is what the resolver
+    // planned; the pool is clamped after that, and on a tight card the two
+    // differ by a lot - 97204 against 52256 on Qwen3.8-27B-NVFP4, so a prompt
+    // between them was advertised as servable and was not (#1542). /health has
+    // reported the real number all along; /v1/models reported the plan.
+    long long kv_capacity_tokens = -1;
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock()) {
             loaded = state.model_loaded();
             model_name = state.model_name;
             max_seq_len = state.max_seq_len;
+            if (state.ctx && state.ctx->engine) {
+                if (const auto* kv = state.ctx->engine->kv_cache())
+                    kv_capacity_tokens = static_cast<long long>(kv->total_blocks()) * kv->block_size();
+            }
         } else {
             ServerState::ObsStatus snap = state.model_status_snapshot();
             loaded = snap.loaded;
@@ -185,6 +219,7 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
             max_seq_len = state.max_seq_len;  // plain int, set once at load
         }
     }
+    max_seq_len = servable_context_tokens(max_seq_len, kv_capacity_tokens);
 
     // Expose what this server can actually serve. That used to mean the loaded
     // model alone, because listing the directory invited clients to request a
@@ -228,21 +263,96 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     res.set_content(dump_safe(body), "application/json");
 }
 
+// GET /v1/models/{id} — `client.models.retrieve(...)` (#1599).
+//
+// The route did not exist, so the SDK call fell through to the unmatched-route
+// handler and 404'd even for the model the server is currently serving. There
+// is no path-parameter route anywhere else in this server, which is why it was
+// missed: the list endpoint looked like complete coverage.
+void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, ServerState& state,
+                           const std::string& model_id) {
+    bool loaded = false;
+    std::string model_name;
+    int max_seq_len = 0;
+    {
+        std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+        if (lock.owns_lock()) {
+            loaded = state.model_loaded();
+            model_name = state.model_name;
+            max_seq_len = state.max_seq_len;
+        } else {
+            ServerState::ObsStatus snap = state.model_status_snapshot();
+            loaded = snap.loaded;
+            model_name = snap.model_name;
+            max_seq_len = state.max_seq_len;
+        }
+    }
+
+    if (loaded && model_id == model_name) {
+        json model = {{"id", model_name},
+                      {"object", "model"},
+                      {"created", unix_timestamp()},
+                      {"owned_by", "imp"},
+                      {"loaded", true}};
+        if (max_seq_len > 0) {
+            model["max_model_len"] = max_seq_len;
+            model["meta"] = {{"n_ctx_train", max_seq_len}};
+        }
+        res.set_content(dump_safe(model), "application/json");
+        return;
+    }
+
+    // A model on disk that this server would swap in. Same answer the list
+    // endpoint gives for it, so the two cannot disagree.
+    if (state.runtime_config.server.model_swap) {
+        for (const auto& [fname, fpath] : scan_model_files(state.models_dir)) {
+            (void)fpath;
+            if (fname != model_id)
+                continue;
+            json model = {{"id", fname},
+                          {"object", "model"},
+                          {"created", unix_timestamp()},
+                          {"owned_by", "imp"},
+                          {"loaded", false}};
+            res.set_content(dump_safe(model), "application/json");
+            return;
+        }
+    }
+
+    // OpenAI answers a missing model with 404 and a typed envelope naming the
+    // parameter, not the generic unmatched-route body.
+    res.status = 404;
+    json err = {{"error",
+                 {{"message", "The model '" + sanitize_for_echo(model_id, 128) + "' does not exist"},
+                  {"type", "invalid_request_error"},
+                  {"param", "model"},
+                  {"code", "model_not_found"}}}};
+    res.set_content(dump_safe(err), "application/json");
+}
+
 // Snapshot {loaded, model_name, max_seq_len} for the context-length probes
 // below, using the same bounded-lock / fall-back-to-snapshot discipline as the
 // other observability endpoints (#889).
 static void snapshot_ctx(ServerState& state, bool& loaded, std::string& model_name,
                          int& max_seq_len) {
+    long long kv_capacity_tokens = -1;
     std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
     if (lock.owns_lock()) {
         loaded = state.model_loaded();
         model_name = state.model_name;
+        if (state.ctx && state.ctx->engine) {
+            if (const auto* kv = state.ctx->engine->kv_cache())
+                kv_capacity_tokens = static_cast<long long>(kv->total_blocks()) * kv->block_size();
+        }
     } else {
         ServerState::ObsStatus snap = state.model_status_snapshot();
         loaded = snap.loaded;
         model_name = snap.model_name;
     }
     max_seq_len = state.max_seq_len;  // plain int, set once at load
+    // All three probes must answer the same question with the same number
+    // (docs/usage.md says so), so the pool clamp applies here too (#1542).
+    max_seq_len = servable_context_tokens(max_seq_len, kv_capacity_tokens);
 }
 
 // GET /props — llama.cpp-compatible context probe. llama.cpp clients read the

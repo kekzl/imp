@@ -94,15 +94,13 @@ TEST(Fp8Source, AppliesThePerBlockScaleToTheRightTile) {
     // row/column mix-up visible, which a uniform scale would hide.
     const uint8_t w[4] = {0x38, 0x38, 0x38, 0x38};  // all 1.0
     const float s[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    std::vector<uint16_t> out;
-    std::string err;
-    ASSERT_TRUE(fp8_block_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("F32", {2, 2}, s), out, err))
-        << err;
-    ASSERT_EQ(out.size(), 4u);
-    EXPECT_FLOAT_EQ(fp16_to_float(out[0]), 1.0f);
-    EXPECT_FLOAT_EQ(fp16_to_float(out[1]), 2.0f);
-    EXPECT_FLOAT_EQ(fp16_to_float(out[2]), 3.0f);  // row 1 must take s[2], not s[1]
-    EXPECT_FLOAT_EQ(fp16_to_float(out[3]), 4.0f);
+    const auto out = fp8_block_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("F32", {2, 2}, s));
+    ASSERT_TRUE(out) << out.error();
+    ASSERT_EQ(out->size(), 4u);
+    EXPECT_FLOAT_EQ(fp16_to_float((*out)[0]), 1.0f);
+    EXPECT_FLOAT_EQ(fp16_to_float((*out)[1]), 2.0f);
+    EXPECT_FLOAT_EQ(fp16_to_float((*out)[2]), 3.0f);  // row 1 must take s[2], not s[1]
+    EXPECT_FLOAT_EQ(fp16_to_float((*out)[3]), 4.0f);
 }
 
 TEST(Fp8Source, ReadsABf16ScaleGridAsBf16) {
@@ -110,40 +108,36 @@ TEST(Fp8Source, ReadsABf16ScaleGridAsBf16) {
     // is a large silent factor, so both paths are pinned.
     const uint8_t w[1] = {0x38};                      // 1.0
     const uint16_t s_bf16[1] = {0x4040};              // 3.0 in BF16
-    std::vector<uint16_t> out;
-    std::string err;
-    ASSERT_TRUE(
-        fp8_block_scaled_to_fp16(make("F8_E4M3", {1, 1}, w), make("BF16", {1, 1}, s_bf16), out, err))
-        << err;
-    EXPECT_FLOAT_EQ(fp16_to_float(out[0]), 3.0f);
+    const auto out = fp8_block_scaled_to_fp16(make("F8_E4M3", {1, 1}, w), make("BF16", {1, 1}, s_bf16));
+    ASSERT_TRUE(out) << out.error();
+    EXPECT_FLOAT_EQ(fp16_to_float((*out)[0]), 3.0f);
 }
 
 TEST(Fp8Source, OneScaleCoversItsWholeTile) {
     // 2x2 weight under a single scale: the 1x1 grid means block edge 2.
     const uint8_t w[4] = {0x38, 0x40, 0x38, 0x40};  // 1, 2, 1, 2
     const float s[1] = {0.5f};
-    std::vector<uint16_t> out;
-    std::string err;
-    ASSERT_TRUE(fp8_block_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("F32", {1, 1}, s), out, err))
-        << err;
-    EXPECT_FLOAT_EQ(fp16_to_float(out[0]), 0.5f);
-    EXPECT_FLOAT_EQ(fp16_to_float(out[1]), 1.0f);
-    EXPECT_FLOAT_EQ(fp16_to_float(out[3]), 1.0f);
+    const auto out = fp8_block_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("F32", {1, 1}, s));
+    ASSERT_TRUE(out) << out.error();
+    EXPECT_FLOAT_EQ(fp16_to_float((*out)[0]), 0.5f);
+    EXPECT_FLOAT_EQ(fp16_to_float((*out)[1]), 1.0f);
+    EXPECT_FLOAT_EQ(fp16_to_float((*out)[3]), 1.0f);
 }
 
-TEST(Fp8Source, RefusesRatherThanReturningAPartialBuffer) {
+// "must not hand back a partial buffer" used to be a property of the code that
+// a test had to check, by passing a pre-filled vector and asserting it survived.
+// It is now a property of the signature: a refusal carries no vector at all.
+TEST(Fp8Source, RefusesWithAReasonAndNoBuffer) {
     const uint8_t w[4] = {0x38, 0x38, 0x38, 0x38};
     const float s[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    std::vector<uint16_t> out{42, 42};  // caller's buffer must survive a refusal
-    std::string err;
     // Wrong weight dtype.
-    EXPECT_FALSE(fp8_block_scaled_to_fp16(make("BF16", {2, 2}, w), make("F32", {2, 2}, s), out, err));
-    EXPECT_FALSE(err.empty());
+    const auto bad_weight = fp8_block_scaled_to_fp16(make("BF16", {2, 2}, w), make("F32", {2, 2}, s));
+    ASSERT_FALSE(bad_weight.has_value());
+    EXPECT_FALSE(bad_weight.error().empty());
     // Unreadable scale dtype.
-    EXPECT_FALSE(fp8_block_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("U8", {2, 2}, s), out, err));
+    EXPECT_FALSE(fp8_block_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("U8", {2, 2}, s)).has_value());
     // Scale grid that no block size explains.
-    EXPECT_FALSE(fp8_block_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("F32", {3, 1}, s), out, err));
-    ASSERT_EQ(out.size(), 2u) << "a refused conversion must not touch the output";
+    EXPECT_FALSE(fp8_block_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("F32", {3, 1}, s)).has_value());
 }
 
 TEST(Fp8Source, AcceptsTheDtypeSpellingsExportersUse) {

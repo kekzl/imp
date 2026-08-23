@@ -639,7 +639,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     moe_.d_slot_idx_count = moe_.d_slot_idx ? idx_count : 0;
                 }
             } else if (has_host_experts) {
-                IMP_LOG_INFO("Expert LRU cache disabled via IMP_NO_EXPERT_CACHE (staging fallback)");
+                IMP_LOG_INFO("Expert LRU cache disabled via moe.no_expert_cache (staging fallback)");
             }
 
             // Whole-layer staging buffer for the NVFP4 host prefill. Sized for
@@ -1654,6 +1654,15 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
             break;
         }
     }
+    // #1675: a sink model routes straight to the FP16 WMMA FMHA tier
+    // (attention_dispatch.cu:86-92) since #992, and that tier needs no
+    // S-matrix. All three no-clamp returns below excluded sinks, so gpt-oss
+    // took the quadratic clamp for a reason the dispatch stopped having - the
+    // chunk collapsing with offset, at no benefit. The condition mirrors the
+    // dispatch exactly: if the tier declines, the dispatch throws rather than
+    // falling back to something that would need the S-matrix.
+    if (sinks && uniform && att.fmha_sm120 != "never" && fmha_serves_head_dim(hd_u))
+        return desired;
     // Mirrors the chunked dispatch in executor_attention_prefill.cu:
     // FP16-QK FA2 serves every hd=128 chunk with no S-matrix.
     if (uniform && !sinks && hd_u == 128 && att.fa2_fp16qk != "never")

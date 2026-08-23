@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "compute/regex_constrain.h"
+#include "compute/json_schema.h"  // RegexNfa, the shared engine
 
 #include <memory>
 #include <string>
@@ -211,4 +212,51 @@ TEST(RegexConstrain, ResetReturnsToTheStart) {
     EXPECT_FALSE(rc->is_done());
     EXPECT_TRUE(rc->would_accept("a"));
     EXPECT_FALSE(rc->would_accept("b"));
+}
+
+// =============================================================================
+// Cost bounds on the shared engine (#1608, #1609).
+//
+// A pattern is request-supplied text on an endpoint that is unauthenticated by
+// default, and it is compiled at admission, on the HTTP worker thread, before
+// the engine lock. Both of these were unbounded. Driving RegexNfa directly
+// rather than through the constrainer, because the JSON-Schema `pattern` path
+// calls the compiler with no construct screen in front of it.
+// =============================================================================
+
+TEST(RegexNfaCostBounds, LargeRepeatCountIsRefused) {
+    // {n} is built by cloning the atom n times, so n is an allocation count.
+    imp::RegexNfa nfa;
+    EXPECT_FALSE(nfa.compile("a{2000000000}"));
+    EXPECT_FALSE(nfa.compile("a{0,2000000000}"));
+    // The digit run itself used to overflow `long` before any comparison.
+    EXPECT_FALSE(nfa.compile("a{99999999999999999999999}"));
+}
+
+TEST(RegexNfaCostBounds, NestedRepeatsAreRefused) {
+    // Each level multiplies: ~10^8 states from 28 bytes, each state's edges
+    // carrying a 256-entry char class. The per-level bound alone does not stop
+    // this; the state budget does.
+    imp::RegexNfa nfa;
+    EXPECT_FALSE(nfa.compile("(((a{100}){100}){100}){100}"));
+}
+
+TEST(RegexNfaCostBounds, DeepGroupNestingIsRefused) {
+    // parse_atom -> parse_alt is one stack frame per '(', so this is the
+    // cheapest stack overflow in the request surface: one byte per frame.
+    std::string deep(5000, '(');
+    deep += "a";
+    deep.append(5000, ')');
+    imp::RegexNfa nfa;
+    EXPECT_FALSE(nfa.compile(deep));
+}
+
+TEST(RegexNfaCostBounds, OrdinaryPatternsStillCompile) {
+    // Negative control. The bounds must not cost a pattern anyone writes.
+    imp::RegexNfa nfa;
+    EXPECT_TRUE(nfa.compile("a{3}"));
+    EXPECT_TRUE(nfa.compile("[0-9]{1,64}"));
+    EXPECT_TRUE(nfa.compile("(foo|bar)+baz"));
+    EXPECT_TRUE(nfa.compile(R"(\d{4}-\d{2}-\d{2})"));
+    EXPECT_TRUE(nfa.compile("((((a))))"));
 }

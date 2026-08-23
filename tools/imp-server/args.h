@@ -36,6 +36,31 @@ struct ServerArgs : CommonArgs {
     int request_timeout = 300;      // --request-timeout: per-request timeout in seconds (0=unlimited)
     int rate_limit = 0;             // --rate-limit: max requests per minute per IP (0=unlimited)
     int max_input_tokens = 0;       // --max-input-tokens: reject prompts longer than this (0=unlimited)
+    // --trusted-proxy: comma-separated remote addresses whose X-Forwarded-For
+    // this server believes. Empty (the default) means the header is ignored
+    // and the peer address is the rate-limit key. Without this the limit keys
+    // on a string the client writes, so varying one header bypasses it, and
+    // every distinct value is a permanent entry in the tracker (#1614).
+    std::string trusted_proxies;
+    // Per-request work multipliers. Each of these turns one HTTP request into
+    // N units of engine work while counting as one against --rate-limit and
+    // --max-concurrent (#1616).
+    int max_n = 8;              // --max-n: cap on `n` (chat/completions)
+    int max_batch_items = 512;  // --max-batch-items: cap on rerank `documents` / embeddings `input`
+    int max_logit_bias = 1024;  // --max-logit-bias: cap on logit_bias entries (#1617)
+    // Connection-level limits. Everything here was whatever the build-time
+    // cpp-httplib happened to default to (#1622).
+    int read_timeout = 60;     // --http-read-timeout: seconds
+    int write_timeout = 600;   // --http-write-timeout: seconds, must outlast a long stream
+    int keep_alive_max = 100;  // --http-keep-alive-max: requests per connection
+    // --allow-remote-images: fetch http(s) image_url from a request body.
+    // Default OFF (#1610). With it on, an unauthenticated caller chooses which
+    // host and port this server connects to, and the interesting targets are
+    // the ones only the server can reach: loopback, the compose network, the
+    // cloud metadata endpoint. A data URI needs none of this and is what every
+    // real client sends. When on, the destination is classified and redirects
+    // are not followed - see image_fetch.h.
+    bool allow_remote_images = false;
     std::string prefix_cache_path;  // --prefix-cache: path to persist prefix cache
     std::string log_requests_path;  // --log-requests: append JSONL of every chat/messages request
 };

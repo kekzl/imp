@@ -20,10 +20,10 @@ using imp::WeightUploadLog;
 
 TEST(WeightKeyTest, CanonicalFormats) {
     char buf[96];
-    EXPECT_STREQ(make_weight_key(buf, sizeof(buf), "wq", 5), "L5.wq");
-    EXPECT_STREQ(make_weight_key(buf, sizeof(buf), "expert_w_gate.7", 12), "L12.expert_w_gate.7");
-    EXPECT_STREQ(make_weight_key(buf, sizeof(buf), "tok_emb", -1), "tok_emb");
-    EXPECT_STREQ(make_weight_key(buf, sizeof(buf), "q_norm", imp::kMtpKeyLayer), "mtp.q_norm");
+    EXPECT_STREQ(make_weight_key(buf, "wq", 5), "L5.wq");
+    EXPECT_STREQ(make_weight_key(buf, "expert_w_gate.7", 12), "L12.expert_w_gate.7");
+    EXPECT_STREQ(make_weight_key(buf, "tok_emb", -1), "tok_emb");
+    EXPECT_STREQ(make_weight_key(buf, "q_norm", imp::kMtpKeyLayer), "mtp.q_norm");
 }
 
 TEST(MeminfoParseTest, ParsesMemAvailable) {

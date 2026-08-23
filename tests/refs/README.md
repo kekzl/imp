@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-23
+commit: 36a5a4fb
 -->
 
 # tests/refs/ — independent reference goldens
@@ -53,6 +53,8 @@ Generators:
 | `gen_nvfp4_outlier_golden.py` | `nvfp4_outlier_golden.h` | `tests/test_nvfp4_outlier_ref.cu` |
 | `gen_yarn_rope_golden.py` | `yarn_rope_golden.h` | `tests/test_gpt_oss_yarn_ref.cu` |
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
+| `gen_chat_goldens.py` | `chat_template_goldens.h` | `tests/test_chat_template_goldens.cpp` |
+| `gen_tokenizer_golden.py` | `tokenizer_golden_qwen3.h` | `tests/test_tokenizer_compat.cpp` |
 | `tests/test_vision_golden.cu` (dump mode = its own generator) | `vision_encoder_golden.h` | `tests/test_vision_golden.cu` |
 | `gen_reference.py` | — (none committed) | **dormant** (TEST_AUDIT (retired) §7) — HF layer-by-layer dump infra for future use; no test consumes it |
 
@@ -74,6 +76,19 @@ date:` line is normalized in both — documented in the test). Needs
 `transformers`, only the tokenizer/template (no weights):
 `docker run --rm -v $PWD:/work -v $HOME/models:/models -w /work
 python:3.12-slim sh -c "pip install -q transformers jinja2 && MODEL=/models/gpt-oss-20b python3 tests/refs/gen_harmony_golden.py"`.
+
+Chat-template goldens (#1572): the RENDERED PROMPT for nine families, taken from
+each family's upstream template and rendered in the Jinja configuration
+transformers uses. The golden is the rendered string rather than token IDs, so
+it needs no vocabulary and the whole set runs in the CPU lane with no skips —
+pinning IDs would have made every case a model-gated skip. Six of the nine
+families have no local checkpoint, so their templates are fetched by repo id;
+that replication is not assumed faithful but CHECKED, by re-rendering through
+the real `AutoTokenizer.apply_chat_template` for every family that does have one
+(`--verify` refuses to write the header if that number is 0). The family under
+test comes from imp's own `detect_family()`, not from a label chosen by hand:
+Nemotron-3-Nano and Phi-4-reasoning both ship ChatML templates.
+Regenerate with `make chat-goldens` (needs network).
 
 Vision encoder golden (R9 / #583) is the one exception to rule 1's "independent
 generator": there is no fp64 oracle for the SigLIP / gemma4v encoder + projector

@@ -21,6 +21,9 @@ struct ProcessDiag {
 
     // Runtime
     bool no_pdl = false;
+    // Pinned staging ring for the weight upload (#1653).
+    int upload_ring_depth = 4;
+    int upload_ring_chunk_mib = 4;
     bool no_vision_graph = false;
     std::string graph_capture_mode = "relaxed";
     bool prefill_graph_enabled = true;
@@ -72,9 +75,8 @@ void process_diag_install(const RuntimeConfig& cfg) {
     // level: the whole point of this key is that the level used to be
     // unsettable, and a typo that quietly resolves to INFO would restore that.
     {
-        LogLevel lvl;
-        if (log_level_from_string(cfg.diagnostics.log_level.c_str(), lvl)) {
-            log_set_level(lvl);
+        if (const auto lvl = log_level_from_string(cfg.diagnostics.log_level)) {
+            log_set_level(*lvl);
         } else {
             IMP_LOG_WARN(
                 "diagnostics.log_level: unknown value '%s' — keeping the current level "
@@ -97,6 +99,8 @@ void process_diag_install(const RuntimeConfig& cfg) {
     }
     d.graph_dump_dir = cfg.diagnostics.graph_dump_dir;
     d.no_pdl = cfg.runtime.no_pdl;
+    d.upload_ring_depth = cfg.vram.upload_ring_depth;
+    d.upload_ring_chunk_mib = cfg.vram.upload_ring_chunk_mib;
     d.no_vision_graph = cfg.runtime.no_vision_graph;
     d.graph_capture_mode = cfg.runtime.graph_capture_mode;
     d.prefill_graph_enabled = cfg.runtime.prefill_graph;
@@ -141,6 +145,8 @@ const char* process_diag_graph_dump_dir() {
     return slot().graph_dump_dir.empty() ? nullptr : slot().graph_dump_dir.c_str();
 }
 bool process_diag_no_pdl() { return slot().no_pdl; }
+int process_diag_upload_ring_depth() { return slot().upload_ring_depth; }
+int process_diag_upload_ring_chunk_mib() { return slot().upload_ring_chunk_mib; }
 bool process_diag_no_vision_graph() { return slot().no_vision_graph; }
 const std::string& process_diag_graph_capture_mode() { return slot().graph_capture_mode; }
 bool process_diag_prefill_graph_enabled() { return slot().prefill_graph_enabled; }

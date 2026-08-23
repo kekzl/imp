@@ -190,15 +190,27 @@ jobs:
           # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. IMP_DISABLE_120F_FALLBACK=ON
           # builds the sm_120a SASS only (no compute_120f PTX fallback) — CI just
           # verifies the build compiles + CPU tests; runtime tests need a self-hosted
-          # RTX 5090 runner. This halves device-compile time and stops every .cu
+          # RTX 5090 runner. Measured over the three heaviest TUs on the dev
+          # toolchain, the second gencode costs +53.1% device-compile time
+          # (47278 ms with it, 30886 ms without), and it stops every .cu
           # diagnostic from being emitted twice (once per gencode). The shipped
-          # fatbin (release-docker) keeps the 120f PTX fallback for 5080/5070 SKUs.
+          # fatbin (release-docker) keeps the 120f PTX fallback for 5080/5070
+          # SKUs; the `PTX fallback` job below is what assembles it (#1650).
           # IMP_BUILD_BENCH=OFF skips ~30-60s of mxf4nvf4 microbench TUs that
           # are bench-only — production server builds don't link them.
 
       - name: Build
         if: steps.changes.outputs.code == 'true'
         run: cmake --build build -j$(nproc)
+
+      # Per-kernel registers and local frame against the pin (#1549). Runs HERE
+      # because this is the one place both halves exist: the built artifact and
+      # the CUDA toolkit that carries cuobjdump. It reads the compiled library,
+      # so it needs no GPU - which is what makes a register-pressure gate
+      # possible in CI at all, where every throughput gate is impossible.
+      - name: Kernel resources
+        if: steps.changes.outputs.code == 'true'
+        run: cuobjdump -res-usage build/libimp.a | python3 tools/kernel_resources.py -
 
       - name: ccache stats
         if: steps.changes.outputs.code == 'true'
@@ -275,6 +287,14 @@ jobs:
             imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
             imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
             imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
+      # #1626: without this the job's first `git` call dies with exit 128
+      # ("dubious ownership" — the container UID is not the checkout's owner),
+      # the file list comes back empty, the step prints "nothing to lint" and
+      # `continue-on-error` reports green. It had never linted a file. The Build
+      # job has carried this line since check-release.sh hit the same wall.
+      - name: Trust the checkout (container UID differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: clang-tidy (changed .cpp only, advisory)
         continue-on-error: true  # advisory — flip to a hard gate once baseline-clean
         run: |
@@ -283,8 +303,16 @@ jobs:
           if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
             base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
           fi
-          mapfile -t changed < <(git diff --name-only "$base" HEAD | grep -E '^(src|tools)/.*\.cpp$' || true)
+          # `|| true` on the pipeline made "git failed" and "no .cpp changed"
+          # the same outcome (#1626). Fail the diff loudly, keep the empty list
+          # quiet - only one of those two is normal.
+          if ! diff_out="$(git diff --name-only "$base" HEAD)"; then
+            echo "::error::git diff failed against base $base — the lint list would be empty"
+            exit 1
+          fi
+          mapfile -t changed < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools)/.*\.cpp$' || true)
           if [ ${#changed[@]} -eq 0 ]; then echo "no src/tools .cpp changed — nothing to lint"; exit 0; fi
+          echo "linting ${#changed[@]} file(s): ${changed[*]}"
           # compile_commands.json comes from the cached build/. If the cache missed
           # (cold key), reconfigure — _deps in the restored build/ keeps it cheap;
           # a fully cold _deps fetch is the rare worst case.
@@ -339,7 +367,7 @@ jobs:
   # Runs in the same CUDA image the Build job compiled in: the binary is linked
   # against that libstdc++, so a plain ubuntu-24.04 runner cannot load it.
   real-api:
-    name: Real API contract
+    name: Real API contract (model-less)
     needs: build
     if: needs.build.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -367,6 +395,22 @@ jobs:
           # conftest.py starts it model-less and shuts it down at session end.
           IMP_SERVER_BIN="$PWD/build/imp-server" \
             python3 -m pytest tests/api -m nomodel --tb=short -q
+
+      # What this job does NOT cover, printed rather than implied (#1600).
+      # Generation needs a GPU and CI has no GPU runner, so every test that
+      # produces a token is deselected here. The job name says "model-less" for
+      # the same reason: "Real API contract" green next to a streaming defect
+      # reads as coverage.
+      - name: State the uncovered half
+        run: |
+          total=$(python3 -m pytest tests/api --collect-only -q 2>/dev/null | tail -1)
+          covered=$(python3 -m pytest tests/api -m nomodel --collect-only -q 2>/dev/null | tail -1)
+          echo "collected here:  $covered"
+          echo "collected total: $total"
+          echo ""
+          echo "The difference is the generation contract: SSE frame structure, usage"
+          echo "accounting, finish_reason, tool-call streaming. It runs in 'make test-server'"
+          echo "on a machine with a GPU and in no CI job. See docs/LIMITATIONS.md."
 
   # Format check (CI1). clang-format on CHANGED LINES only (git clang-format).
   # ADVISORY: it surfaces the diff but does not fail the job — the repo is not
@@ -484,6 +528,242 @@ jobs:
           python-version: "3.12"
       - name: Launch-guard gate (blocking)
         run: bash scripts/ci_static_gates.sh launchguards
+
+  # Assemble the compute_120f PTX fallback (#1650).
+  #
+  # It ships as `code=compute_120f`, the PTX-only form, so ptxas never runs over
+  # it in a build and the first thing that would is the driver's JIT on a GB203
+  # - a card nobody in this project owns. Assembling it needs no GPU: ptxas is a
+  # compiler.
+  #
+  # This has to be its own job because the `Build` job configures
+  # IMP_DISABLE_120F_FALLBACK=ON: that binary carries no PTX at all, so the
+  # check there measured nothing it could measure and failed the one required
+  # context on a build doing exactly what it was told.
+  #
+  # It builds the `imp` static library only - no tools, no server, no tests, no
+  # device link. cuobjdump reads the archive. Measured on the dev toolchain over
+  # the three heaviest TUs, the second gencode costs +53.1% device-compile time
+  # (47278 ms vs 30886 ms), which is why this is a separate non-required job
+  # rather than a flag flip on the required one.
+  ptx-fallback:
+    name: PTX fallback
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      CUDA_VERSION: "13.3"
+      CCACHE_DIR: /github/home/.ccache-ptx
+      CCACHE_MAXSIZE: 4G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: "1"
+    steps:
+      - name: Install toolchain
+        shell: sh
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bash git python3 cmake g++ ccache ca-certificates
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Trust the checkout (container UID differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Only device code, the gencode lines and this guard itself can change
+      # what ptxas sees. Fail-open: an unreadable diff runs the job.
+      - name: Does this run need the fallback build?
+        id: scope
+        run: |
+          run=true
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "push" ]; then
+            base="${{ github.event.pull_request.base.sha || github.event.before }}"
+            if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              files="$(git diff --name-only "$base" HEAD)"
+              if ! grep -qE '(\.cu$|\.cuh$|^CMakeLists\.txt$|^cmake/|^scripts/check_ptx_fallback\.sh$|^\.github/workflows/ci\.yml$)' <<< "$files"; then
+                run=false
+              fi
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "fallback build: run=$run"
+
+      - name: Restore ccache
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/cache@v6
+        with:
+          path: /github/home/.ccache-ptx
+          key: ${{ runner.os }}-cuda13.3-ccache-ptx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cuda13.3-ccache-ptx-
+
+      # No -DIMP_DISABLE_120F_FALLBACK: the default (OFF) is what ships, and it
+      # is the thing under test.
+      - name: Configure with the fallback on
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cmake -B build-ptx \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DIMP_BUILD_TESTS=OFF \
+            -DIMP_BUILD_TOOLS=OFF \
+            -DIMP_BUILD_SERVER=OFF \
+            -DIMP_BUILD_BENCH=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
+
+      - name: Build the device library
+        if: steps.scope.outputs.run == 'true'
+        run: cmake --build build-ptx --target imp -j$(nproc)
+
+      - name: Assemble every PTX image
+        if: steps.scope.outputs.run == 'true'
+        run: bash scripts/check_ptx_fallback.sh build-ptx/libimp.a
+
+  # ASan + UBSan over the CPU test binaries, including the fuzz corpus (#1621).
+  #
+  # Before this job no CI lane ran any sanitizer in any category: ASAN/UBSAN
+  # existed behind a manual `make asan`, the one job that mentions
+  # compute-sanitizer is gated on a GPU runner the owner decided against, and
+  # its memcheck step is `continue-on-error` anyway.
+  #
+  # It is what makes the fuzz corpus worth running. Measured against the four
+  # reverted parser fixes, per target:
+  #
+  #             without ASan      with ASan
+  #   schema    green             stack-overflow
+  #   regex     hang              hang
+  #   gbnf      SEGV              stack-overflow
+  #   tokenizer hang              heap-use-after-free
+  #
+  # An out-of-bounds read is invisible without it: the process reads a
+  # neighbouring allocation and carries on.
+  #
+  # PR runs are gated on the parser/loader paths so the CUDA build is not paid
+  # on every PR; nightly and workflow_dispatch always run it. Advisory in
+  # practice like every job except `Build` (ruleset 14716423 requires that one
+  # context) - so read it after a merge, not only before.
+  sanitizers:
+    name: Sanitizers
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.3.1-devel-ubuntu26.04
+    # This image ships no bash, so GitHub picks `sh -e {0}` and any bashism is a
+    # syntax error at step start. The first version used a here-string and the
+    # job died in 1m15s before building anything - with `Build` the only
+    # required check, that merged. Declared explicitly, and bash installed below.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install toolchain
+        shell: sh
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bash git python3 cmake ninja-build ca-certificates
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Does this run need the sanitizer build?
+        id: scope
+        run: |
+          run=true
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "push" ]; then
+            base="${{ github.event.pull_request.base.sha || github.event.before }}"
+            if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              files="$(git diff --name-only "$base" HEAD)"
+              # Fail-open: an unreadable diff runs the job.
+              # grep -q exits at the first match and pipefail turns the
+              # producer EPIPE into a non-zero pipeline (#1499): here-string.
+              if ! grep -qE '^(fuzz/|tests/test_fuzz_corpus|src/compute/json_schema|src/compute/gbnf|src/model/(safetensors_loader|tokenizer|json_util)|tools/imp-server/tool_stream_filter|CMakeLists.txt|\.github/workflows/ci\.yml)' <<< "$files"; then
+                run=false
+              fi
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "sanitizer build: run=$run"
+
+      - name: Fetch pinned deps
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          # Two separate traps, both hit on the way here. The pin line is
+          #   set(IMP_DEP_GOOGLETEST_TAG    v1.18.0  CACHE STRING "...")
+          # with RUN-LENGTH whitespace, so a pattern with one space matches
+          # nothing, grep exits 1 and `-e` kills the step with no message at
+          # all. And `grep | head -1` under `-o pipefail` is #1499: head closes
+          # the pipe, grep dies of EPIPE, the pipeline is non-zero even on a
+          # hit. `\s+` fixes the first, `-m1` instead of a pipe the second.
+          GT="$(grep -m1 -oP 'IMP_DEP_GOOGLETEST_TAG\s+\K[^ )]+' cmake/imp-deps.cmake)"
+          test -n "$GT" || { echo "googletest pin not found in cmake/imp-deps.cmake"; exit 1; }
+          echo "googletest pin: $GT"
+          git clone --depth=1 --branch "$GT" https://github.com/google/googletest.git /deps/googletest
+
+      # No tools, no bench, no server: the same configuration `make asan` uses,
+      # which is also why the five unconditional fuzz targets must not live in
+      # the IMP_BUILD_SERVER block - the first version of them did, and the
+      # sanitizer binary silently contained none of them (0 tests, "PASSED").
+      - name: Build test-core + test-text with ASan/UBSan
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cmake -B build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DIMP_SANITIZERS=ON \
+            -DIMP_BUILD_TOOLS=OFF -DIMP_BUILD_BENCH=OFF -DIMP_BUILD_SERVER=OFF \
+            -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest
+          cmake --build build-asan --target test-core test-text -j"$(nproc)"
+
+      # A binary that contains none of the tests reports "PASSED 0 tests" and
+      # exits 0. That is how the first version of this job would have gone green
+      # without running anything.
+      # test-core links libcuda.so.1 and this runner has no driver, so the
+      # binary does not start: `error while loading shared libraries`. The CUDA
+      # image ships a stub for exactly this, under the name the linker wants but
+      # not the one the loader wants (libcuda.so, not .so.1) - hence the symlink.
+      # CUDA calls then fail at runtime, which is what the CPU lane expects
+      # anyway: those tests skip.
+      #
+      # Found only after making the assert print stderr. My first guess was the
+      # known ASan-vs-high-ASLR crash on Ubuntu 24.04; it was not that.
+      - name: CUDA driver stub (no GPU on this runner)
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/cudastub"
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cudastub/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cudastub" >> "$GITHUB_ENV"
+
+      - name: Assert the fuzz corpus is in the binary
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          # `2>/dev/null` here hid WHY on the first red run: an ASan binary that
+          # cannot start prints to stderr and lists nothing, which reads
+          # identical to a binary built without the tests. Keep stderr.
+          ./build-asan/test-core --gtest_list_tests > /tmp/tests.txt
+          if ! grep -q '^FuzzCorpus' /tmp/tests.txt; then
+            echo "FuzzCorpus missing from the sanitizer binary."
+            echo "suites it does have:"
+            grep -E '^[A-Za-z]' /tmp/tests.txt | head -40
+            exit 1
+          fi
+
+      # Measured locally on this tree, GPU-less, same flags: test-core 741 pass,
+      # test-text 200 pass, no ASan report. FuzzCorpus.Regex is 11 s of that
+      # under ASan against 0.5 s without - the NFA compiler over 1500 mutations
+      # is what the sanitizer slows down.
+      - name: Run
+        if: steps.scope.outputs.run == 'true'
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          LSAN_OPTIONS: suppressions=tools/sanitizers/lsan.supp
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1:suppressions=tools/sanitizers/ubsan.supp
+        run: |
+          ./build-asan/test-core
+          ./build-asan/test-text
 
   test:
     name: Test

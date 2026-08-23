@@ -19,57 +19,56 @@ constexpr int32_t kPad = 151655;  // <|image_pad|>
 
 TEST(ImagePlaceholders, ExpandsTheSinglePlaceholder) {
     std::vector<int32_t> t = {1, 2, kPad, 3, 4};
-    std::string err;
-    ASSERT_TRUE(expand_image_placeholders(t, kPad, {3}, err)) << err;
+    const auto r = expand_image_placeholders(t, kPad, {3});
+    ASSERT_TRUE(r) << r.error();
     EXPECT_EQ(t, (std::vector<int32_t>{1, 2, kPad, kPad, kPad, 3, 4}));
 }
 
 TEST(ImagePlaceholders, ExpandsEachImageToItsOwnCount) {
     std::vector<int32_t> t = {kPad, 7, kPad};
-    std::string err;
-    ASSERT_TRUE(expand_image_placeholders(t, kPad, {2, 3}, err)) << err;
+    const auto r = expand_image_placeholders(t, kPad, {2, 3});
+    ASSERT_TRUE(r) << r.error();
     EXPECT_EQ(t, (std::vector<int32_t>{kPad, kPad, 7, kPad, kPad, kPad}));
 }
 
 TEST(ImagePlaceholders, ACountOfOneLeavesTheSequenceUnchanged) {
     const std::vector<int32_t> before = {5, kPad, 6};
     std::vector<int32_t> t = before;
-    std::string err;
-    ASSERT_TRUE(expand_image_placeholders(t, kPad, {1}, err)) << err;
+    const auto r = expand_image_placeholders(t, kPad, {1});
+    ASSERT_TRUE(r) << r.error();
     EXPECT_EQ(t, before);
 }
 
 TEST(ImagePlaceholders, NoImagesAndNoPlaceholdersIsANoOp) {
     const std::vector<int32_t> before = {1, 2, 3};
     std::vector<int32_t> t = before;
-    std::string err;
-    ASSERT_TRUE(expand_image_placeholders(t, kPad, {}, err)) << err;
+    const auto r = expand_image_placeholders(t, kPad, {});
+    ASSERT_TRUE(r) << r.error();
     EXPECT_EQ(t, before);
 }
 
 // The two mismatch directions. Either one means the prompt and the encoder
 // describe different inputs.
 TEST(ImagePlaceholders, RefusesACountMismatch) {
-    std::string err;
     std::vector<int32_t> a = {kPad};
-    EXPECT_FALSE(expand_image_placeholders(a, kPad, {4, 4}, err));
-    EXPECT_NE(err.find("1 image placeholder"), std::string::npos) << err;
+    const auto ra = expand_image_placeholders(a, kPad, {4, 4});
+    ASSERT_FALSE(ra.has_value());
+    EXPECT_NE(ra.error().find("1 image placeholder"), std::string::npos) << ra.error();
 
     std::vector<int32_t> b = {kPad, kPad};
-    err.clear();
-    EXPECT_FALSE(expand_image_placeholders(b, kPad, {4}, err));
-    EXPECT_NE(err.find("2 image placeholder"), std::string::npos) << err;
+    const auto rb = expand_image_placeholders(b, kPad, {4});
+    ASSERT_FALSE(rb.has_value());
+    EXPECT_NE(rb.error().find("2 image placeholder"), std::string::npos) << rb.error();
 
     std::vector<int32_t> c = {1, 2};
-    err.clear();
-    EXPECT_FALSE(expand_image_placeholders(c, kPad, {4}, err));
+    EXPECT_FALSE(expand_image_placeholders(c, kPad, {4}).has_value());
 }
 
 TEST(ImagePlaceholders, RefusesAnImageThatProducedNothing) {
     std::vector<int32_t> t = {kPad};
-    std::string err;
-    EXPECT_FALSE(expand_image_placeholders(t, kPad, {0}, err));
-    EXPECT_NE(err.find("no tokens"), std::string::npos) << err;
+    const auto r = expand_image_placeholders(t, kPad, {0});
+    ASSERT_FALSE(r.has_value());
+    EXPECT_NE(r.error().find("no tokens"), std::string::npos) << r.error();
     EXPECT_EQ(t.size(), 1u) << "a rejection must leave the sequence alone";
 }
 
@@ -77,15 +76,14 @@ TEST(ImagePlaceholders, RefusesAnImageThatProducedNothing) {
 TEST(ImagePlaceholders, RejectionLeavesTheSequenceUntouched) {
     const std::vector<int32_t> before = {kPad, 9, kPad, 8};
     std::vector<int32_t> t = before;
-    std::string err;
-    EXPECT_FALSE(expand_image_placeholders(t, kPad, {3}, err));
+    EXPECT_FALSE(expand_image_placeholders(t, kPad, {3}).has_value());
     EXPECT_EQ(t, before);
 }
 
 TEST(ImagePlaceholders, HandlesAdjacentPlaceholders) {
     std::vector<int32_t> t = {kPad, kPad};
-    std::string err;
-    ASSERT_TRUE(expand_image_placeholders(t, kPad, {2, 2}, err)) << err;
+    const auto r = expand_image_placeholders(t, kPad, {2, 2});
+    ASSERT_TRUE(r) << r.error();
     EXPECT_EQ(t.size(), 4u);
 }
 
