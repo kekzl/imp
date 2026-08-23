@@ -187,6 +187,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`sim_token_valid` restored the JSON grammar state by hand, and that list had
+  already gone stale once.** #1104 added the RFC 8259 number sub-state to the
+  FSM and not to the eleven-field save/restore, so a simulated token that walked
+  into a number left `num_seen_frac` / `num_need_digit` mutated on the real
+  state. The grammar is a `JsonGrammar` struct now, vocabulary-free, and the
+  snapshot is one copy — a field added to the grammar round-trips because it is
+  in the grammar. Pure move: `advance_char` and `compute_allowed_mask`
+  referenced no vocabulary member, and the 86 JSON/schema property tests pass
+  unchanged. Groundwork for #1729.
+
 - **A clipped NVFP4 activation scale was silent** (#1544). The dynamic quantiser
   encodes the per-16-block scale as `absmax/6` into UE4M3, which saturates at
   448 - so a block with `absmax > 2688` quantises against a scale that is too

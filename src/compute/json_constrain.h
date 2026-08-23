@@ -62,6 +62,52 @@ enum JsonTokenCat : uint16_t {
 static constexpr uint16_t CAT_VALUE_START = CAT_OPEN_BRACE | CAT_OPEN_BRACKET | CAT_QUOTE | CAT_NUMBER_START |
                                             CAT_TRUE_START | CAT_FALSE_START | CAT_NULL_START;
 
+// The JSON grammar with no vocabulary attached (#1729).
+//
+// Split out of JsonConstrainer so the grammar can be reused without dragging a
+// classified vocabulary along — #1729 needs exactly that, to run a free-form
+// JSON value as a nested sub-state of the schema FSM.
+//
+// The split is a MOVE, not a rewrite: `advance_char` and `compute_allowed_mask`
+// referenced zero vocabulary members (measured: 0 hits for token_categories_,
+// token_texts_, token_allow_, vocab_size_, eos_ids_), so nothing about the
+// grammar had to change to lift it out.
+//
+// What it buys today is sim_token_valid: snapshot and restore are one struct
+// copy instead of eleven fields listed by hand. That list had already gone
+// stale once — #1104 added the number sub-state to the FSM and not to the
+// save/restore, so a simulated token that walked into a number mutated the
+// real state. A field added to the grammar now round-trips because it is in
+// the grammar.
+struct JsonGrammar {
+    std::vector<JsonState> state_stack;
+    JsonState current_state = JsonState::START;
+    // Consecutive whitespace chars in non-string states (escape-hatch cap).
+    int ws_run = 0;
+    // JSON number sub-state (RFC 8259: [minus] int [frac] [exp]). Without it
+    // IN_NUMBER accepted '.', 'e', 'E', '+', '-' unlimited times, so
+    // "3.5.5.5.5…" was a legal continuation and a model that wandered into a
+    // number could never be forced out of it (#1104).
+    bool num_seen_frac = false;
+    bool num_seen_exp = false;
+    bool num_exp_sign_ok = false;
+    bool num_need_digit = false;
+    int remaining_budget = -1;                // see JsonConstrainer::set_remaining_budget
+    mutable bool force_close_active = false;  // last compute_allowed_mask() narrowed
+    std::string partial_literal;              // partial "true"/"false"/"null"
+    std::string target_literal;               // full expected literal
+
+    void reset();
+    // Category mask legal in the current state.
+    uint16_t compute_allowed_mask() const;
+    // Advance by one character; false = not a legal continuation.
+    bool advance_char(char c);
+    // Seed the number sub-state on entry: a bare '-' still owes its first digit.
+    void enter_number(char c);
+    // True once the document is complete.
+    bool done() const { return current_state == JsonState::DONE; }
+};
+
 class JsonConstrainer {
 public:
     JsonConstrainer() = default;
@@ -85,7 +131,7 @@ public:
     // remain to close every open structure, the mask narrows to the closers so
     // the document always ends well-formed instead of being truncated (#1104).
     // -1 (default) disables the narrowing entirely.
-    void set_remaining_budget(int n) { remaining_budget_ = n; }
+    void set_remaining_budget(int n) { g_.remaining_budget = n; }
 
     // Check if initialized
     bool is_initialized() const { return initialized_; }
@@ -149,25 +195,8 @@ private:
     // Per-token decoded text (for FSM update)
     std::vector<std::string> token_texts_;
 
-    // FSM state
-    std::vector<JsonState> state_stack_;
-    JsonState current_state_ = JsonState::START;
-    // Consecutive whitespace chars in non-string states (escape-hatch cap,
-    // see advance_char/compute_allowed_mask).
-    int ws_run_ = 0;
-    // JSON number sub-state (RFC 8259: [minus] int [frac] [exp]). Without it
-    // IN_NUMBER accepted '.', 'e', 'E', '+', '-' an unlimited number of times,
-    // so "3.5.5.5.5…" was a legal continuation and a model that wandered into
-    // a number could never be forced out of it — the request then ran to
-    // max_tokens and returned truncated, unparseable JSON (#1104).
-    bool num_seen_frac_ = false;    // a '.' has been consumed
-    bool num_seen_exp_ = false;     // an 'e'/'E' has been consumed
-    bool num_exp_sign_ok_ = false;  // '+'/'-' legal only right after 'e'/'E'
-    bool num_need_digit_ = false;   // a digit is required next (after '-', '.', 'e', sign)
-    int remaining_budget_ = -1;     // see set_remaining_budget
-    mutable bool force_close_active_ = false;  // last compute_allowed_mask() narrowed
-    std::string partial_literal_;  // for tracking partial "true"/"false"/"null"
-    std::string target_literal_;   // full expected literal
+    // FSM state (#1729: the grammar itself, vocabulary-free)
+    JsonGrammar g_;
 
     // Per-token whole-token-validated allow list (host side)
     std::vector<uint8_t> token_allow_;
@@ -178,12 +207,10 @@ private:
     // Preamble pass-through (reasoning models emit <think>...</think> first)
     PreambleGate preamble_;
 
-    // Compute allowed category mask from current FSM state
-    uint16_t compute_allowed_mask() const;
-
-    // Advance FSM by one character
-    bool advance_char(char c);
-    void enter_number_(char c);  // seed the RFC 8259 number sub-state (#1104)
+    // Forwarders onto g_ — kept so the call sites below and the tests read the
+    // same as before the split.
+    uint16_t compute_allowed_mask() const { return g_.compute_allowed_mask(); }
+    bool advance_char(char c) { return g_.advance_char(c); }
 };
 
 }  // namespace imp
