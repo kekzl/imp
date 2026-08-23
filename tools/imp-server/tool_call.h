@@ -35,6 +35,18 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
 // "required" or a forced function AND the family speaks the ChatML
 // `<tool_call>` JSON envelope. Tools with missing/free-form parameters yield
 // an empty result (the engine-side builder re-validates and falls back too).
+// Whether the loaded template family can ENFORCE this tool_choice through the
+// decode FSM, as opposed to degrading it to a sentence in the prompt (#1592).
+//
+//   "required"        -> CHATML only
+//   {"function":{..}} -> CHATML (JSON envelope) and LLAMA3 (name-in-tag)
+//   "auto"/"none"/absent -> nothing to enforce, always true
+//
+// This is the same boundary the collectors below implement, stated once so a
+// caller can ask before running them; ToolChoiceEnforcement.HelperAgreesWith-
+// TheCollectors asserts the two do not drift.
+bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice);
+
 std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
                                                                          const json& tools,
                                                                          const json& tool_choice);
