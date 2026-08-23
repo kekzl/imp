@@ -116,12 +116,12 @@ static float bench_kernel(const AttentionConfig& cfg, int seq_len, bool use_cutl
     return avg_ms;
 }
 
-void bench_attention() {
+bool bench_attention() {
     int device_count = 0;
     cudaGetDeviceCount(&device_count);
     if (device_count == 0) {
         printf("bench_attention: no CUDA device found, skipping\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     printf("=== Attention Prefill: CUTLASS FMHA vs WMMA Blackwell ===\n");
@@ -268,6 +268,7 @@ void bench_attention() {
             cudaStreamDestroy(s);
         }
     }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,12 +385,12 @@ static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, 
     return avg_ms;
 }
 
-void bench_paged_attention() {
+bool bench_paged_attention() {
     int device_count = 0;
     cudaGetDeviceCount(&device_count);
     if (device_count == 0) {
         printf("bench_paged_attention: no CUDA device found, skipping\n");
-        return;
+        return false;  // measured nothing (#1584)
     }
 
     printf("=== Paged Attention Decode: FP16 KV Cache ===\n");
@@ -443,6 +444,7 @@ void bench_paged_attention() {
     }
 
     cudaStreamDestroy(stream);
+    return true;
 }
 
 }  // namespace imp

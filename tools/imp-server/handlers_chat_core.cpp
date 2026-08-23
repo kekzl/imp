@@ -1042,15 +1042,15 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         choices.push_back(choice);
 
         // Log each completion
-        fprintf(stderr, "[%s] completion %d/%d: %d tokens\n", comp_id.c_str(), ci + 1,
-                ctx.params.n_completions, n_output_tokens);
+        IMP_LOG_INFO("[%s] completion %d/%d: %d tokens", comp_id.c_str(), ci + 1, ctx.params.n_completions,
+                     n_output_tokens);
     }
 
     // Log aggregate request
     auto t_end = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t_end - ctx.t_start).count();
-    fprintf(stderr, "[%s] %d prompt + %d completion tokens (%d choices), %.1f ms\n", comp_id.c_str(),
-            ctx.snap.n_prompt_tokens, total_output_tokens, ctx.params.n_completions, ms);
+    IMP_LOG_INFO("[%s] %d prompt + %d completion tokens (%d choices), %.1f ms", comp_id.c_str(),
+                 ctx.snap.n_prompt_tokens, total_output_tokens, ctx.params.n_completions, ms);
     state.metrics.requests_total++;
     state.metrics.tokens_prompt_total += ctx.snap.n_prompt_tokens;
     state.metrics.tokens_completion_total += total_output_tokens;

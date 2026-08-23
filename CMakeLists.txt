@@ -497,7 +497,8 @@ if(IMP_BUILD_TOOLS)
             tools/imp-bench/bench_e2e.cpp
         )
         target_link_libraries(imp-bench PRIVATE imp imp_warnings)
-        target_include_directories(imp-bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_include_directories(imp-bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                                     ${CMAKE_CURRENT_SOURCE_DIR}/tools)
         set_target_properties(imp-bench PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
             CUDA_RESOLVE_DEVICE_SYMBOLS ON

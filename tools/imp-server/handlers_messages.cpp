@@ -252,8 +252,8 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
         if (tc) {
             validate_tool_call(*tc, ctx.params.tools);
             if (!tc->valid) {
-                fprintf(stderr, "[%s] tool-call arg validation failed: %s: %s\n",
-                        msg_id.c_str(), tc->name.c_str(), tc->error.c_str());
+                IMP_LOG_INFO("[%s] tool-call arg validation failed: %s: %s", msg_id.c_str(), tc->name.c_str(),
+                             tc->error.c_str());
             }
         }
         return stop_block();
@@ -263,8 +263,8 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
         // close.
         validate_tool_call(tc, ctx.params.tools);
         if (!tc.valid) {
-            fprintf(stderr, "[%s] tool-call arg validation failed: %s: %s\n",
-                    msg_id.c_str(), tc.name.c_str(), tc.error.c_str());
+            IMP_LOG_INFO("[%s] tool-call arg validation failed: %s: %s", msg_id.c_str(), tc.name.c_str(),
+                         tc.error.c_str());
         }
         if (!open_tool_use_block(tc))
             return false;

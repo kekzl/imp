@@ -1,3 +1,4 @@
+#include "common/exit_codes.h"
 #include "runtime/config.h"
 #include "runtime/process_diag.h"
 
@@ -8,11 +9,15 @@
 #include <vector>
 
 namespace imp {
-void bench_gemm();
-void bench_gemm_nvfp4_cutlass();
-void bench_attention();
-void bench_paged_attention();
-void bench_e2e();
+// bool, not void (#1584): each of these returns early when there is no CUDA
+// device, and every one of them used to do that silently into an exit 0. A
+// benchmark that measured nothing is not a successful benchmark run - it is
+// the one result a CI job or a shell script must be able to see.
+bool bench_gemm();
+bool bench_gemm_nvfp4_cutlass();
+bool bench_attention();
+bool bench_paged_attention();
+bool bench_e2e();
 }  // namespace imp
 
 static void print_usage(const char* prog) {
@@ -117,34 +122,36 @@ int main(int argc, char** argv) {
 
     auto wall_start = std::chrono::high_resolution_clock::now();
 
+    // Requested against measured. The old counter incremented per INVOCATION,
+    // so "Benchmarks run: 4" was printed by a host with no GPU that ran none.
     int benchmarks_run = 0;
+    int benchmarks_requested = 0;
 
-    if (run_gemm) {
-        imp::bench_gemm();
-        ++benchmarks_run;
-    }
-    if (run_gemm_nvfp4) {
-        imp::bench_gemm_nvfp4_cutlass();
-        ++benchmarks_run;
-    }
-    if (run_attention) {
-        imp::bench_attention();
-        ++benchmarks_run;
-    }
-    if (run_decode_attn) {
-        imp::bench_paged_attention();
-        ++benchmarks_run;
-    }
-    if (run_e2e) {
-        imp::bench_e2e();
-        ++benchmarks_run;
-    }
+    auto run_one = [&](bool wanted, bool (*fn)()) {
+        if (!wanted)
+            return;
+        ++benchmarks_requested;
+        if (fn())
+            ++benchmarks_run;
+    };
+
+    run_one(run_gemm, imp::bench_gemm);
+    run_one(run_gemm_nvfp4, imp::bench_gemm_nvfp4_cutlass);
+    run_one(run_attention, imp::bench_attention);
+    run_one(run_decode_attn, imp::bench_paged_attention);
+    run_one(run_e2e, imp::bench_e2e);
 
     auto wall_end = std::chrono::high_resolution_clock::now();
     double total_s = std::chrono::duration<double>(wall_end - wall_start).count();
 
     printf("--------------------------------------------------\n");
-    printf("Benchmarks run: %d    Total wall time: %.2f s\n", benchmarks_run, total_s);
+    printf("Benchmarks run: %d of %d requested    Total wall time: %.2f s\n", benchmarks_run,
+           benchmarks_requested, total_s);
 
+    if (benchmarks_run < benchmarks_requested) {
+        fprintf(stderr, "imp-bench: %d of %d benchmark(s) measured nothing\n",
+                benchmarks_requested - benchmarks_run, benchmarks_requested);
+        return imp::tools::exit_code_for(IMP_ERROR_INTERNAL);
+    }
     return 0;
 }
