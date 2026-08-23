@@ -196,6 +196,13 @@ there instead of retelling it.
   the "single-word factual" case the skill excepts - it answers in 11 tokens,
   one above a flat limit of 10.
 
+  `verify.sh` also prints a UTC wall clock at the start and in the summary. Two
+  GPU jobs from different sessions overlapped twice in one day, and "did that
+  land inside my gate?" could not be answered from a log that carried no time;
+  the repeat run that settled it (283.35 against 283.04 tok/s, harmless) cost
+  more than the two lines. UTC because the script re-execs into a container
+  whose clock is UTC while the host runs local time.
+
 - **`json_schema`: a `\uXXXX` escape compiled to a literal `?`** (#1563). The
   schema string parser skipped the four hex digits and appended `?`. That is
   not an edge case: `json.dumps` defaults to `ensure_ascii=True`, so a schema

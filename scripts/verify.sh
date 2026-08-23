@@ -73,6 +73,26 @@ fi
 
 MODE="${1:-fast}"
 
+# Wall clock, at the start and at the summary.
+#
+# Every measurement below is a throughput number, and this box is shared with
+# other sessions. Twice in one day a neighbouring GPU job overlapped a run and
+# the question "did that land inside my gate?" could not be answered from the
+# log: nothing in it carried a time. Reconstructing it from file mtimes cost
+# more than a repeat run, and the repeat is what settled it (283.35 against
+# 283.04 tok/s - the overlap turned out to be harmless, which is exactly what
+# could not be known beforehand).
+#
+# Two lines, so the next such question takes seconds. Suggested by the session
+# on the other side of that collision.
+#
+# UTC, with the Z: this script re-execs into the imp:test container on a
+# clean host, and the container's clock is UTC while the host runs local time.
+# A bare "07:55" from one side and "05:55" from the other is worse than no
+# timestamp, because it looks comparable.
+VERIFY_T_START="$(date -u +%H:%M:%SZ)"
+echo "verify: started $VERIFY_T_START ($MODE)"
+
 BIN="${IMP_VERIFY_BIN:-build/imp-cli}"
 TESTS_BIN="${IMP_VERIFY_TESTS:-build/imp-tests}"
 MODELS="${IMP_VERIFY_MODELS:-models}"
@@ -244,7 +264,7 @@ if [ ! -d "$MODELS_ABS" ]; then
     echo "    ln -s \"\$HOME/models\" models"
     echo "    IMP_VERIFY_MODELS=\"\$HOME/models\" make verify-fast"
     echo
-    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST}"
+    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST} (started $VERIFY_T_START, ended $(date -u +%H:%M:%SZ))"
     exit 1
 fi
 
@@ -817,9 +837,9 @@ fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then
-    echo "${GRN}=== verify $MODE: OK ===${RST}"
+    echo "${GRN}=== verify $MODE: OK ===${RST} (started $VERIFY_T_START, ended $(date -u +%H:%M:%SZ))"
     exit 0
 else
-    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST}"
+    echo "${RED}=== verify $MODE: $FAIL failure(s) ===${RST} (started $VERIFY_T_START, ended $(date -u +%H:%M:%SZ))"
     exit 1
 fi
