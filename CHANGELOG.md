@@ -217,6 +217,20 @@ there instead of retelling it.
   `finish_reason: "stop"`; tools present but no call wanted still answers
   `banana` with no `tool_calls` key.
 
+- **Every second or third decode burst recaptured the conditional graph** (#1647).
+  `rearm()` refuses when `context_len + step_limit` passes the captured ceiling
+  `initial_context_len + max_steps`, and since #1636 `max_steps` was the KV
+  reservation for the *current* burst - so the ceiling was two or three bursts
+  wide by construction. The block-table buffer had the same shape: sized to the
+  table as it stood, outgrown by the next burst. Both had to move; each one alone
+  leaves the other gate refusing. Measured, `imp-cli --bench --bench-pp 16
+  --bench-reps 3 --max-tokens 128` on Qwen3-8B-Q8_0, three alternating rounds:
+
+  | | graph captures | tg128 tok/s (median) |
+  |---|---|---|
+  | before | 36 | 280.56 |
+  | after | 8 | 288.66 (+2.89%) |
+
 - **Jinja: `trim_blocks`, `lstrip_blocks` and the `safe` filter** (#1572). transformers
   renders every chat template with both whitespace flags on; imp had neither, so a
   template written against HF leaked one newline per block tag and every tag line's
