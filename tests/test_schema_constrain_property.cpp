@@ -315,6 +315,50 @@ TEST(SchemaParserDesync, UnclosedObjectIsAnError) {
     EXPECT_EQ(parse_json_schema(R"({"type":"object","properties":{"a":{"type":"string"})"), nullptr);
 }
 
+// #1563: \uXXXX was skipped and replaced with a literal '?'. That is not an
+// edge case: json.dumps defaults to ensure_ascii=True, so a schema round-tripped
+// through any Python client arrives with every non-ASCII character escaped -
+// and parse_string() reads enum values, property names, `required` entries and
+// `pattern`, so the compiled grammar then forced the model to emit '?'.
+TEST(SchemaUnicodeEscape, BmpEscapeBecomesUtf8) {
+    // "Berlin, Straße" with the sharp s escaped, as json.dumps writes it.
+    auto sc = make_fsm(R"({"type":"object","properties":{"city":{"type":"string",)"
+                       R"("enum":["Stra\u00dfe"]}},"required":["city"]})");
+    ASSERT_NE(sc, nullptr);
+    // "\xc3\x9fe": C++ keeps consuming hex digits after \x, so the trailing 'e'
+    // would join the escape and overflow. Split the literal.
+    EXPECT_TRUE(
+        sc->token_legal("{\"city\": \"Stra\xc3\x9f"
+                        "e\"}"));
+    EXPECT_FALSE(sc->token_legal(R"({"city": "Stra?e"})"));
+}
+
+TEST(SchemaUnicodeEscape, PropertyNamesDecodeToo) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"stra\u00dfe":{"type":"string"}},)"
+                       R"("required":["stra\u00dfe"]})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(
+        sc->token_legal("{\"stra\xc3\x9f"
+                        "e\": \"x\"}"));
+}
+
+// Above the BMP arrives as a surrogate pair and encodes to four bytes.
+TEST(SchemaUnicodeEscape, SurrogatePairsBecomeOneCodepoint) {
+    // U+1F600 GRINNING FACE
+    auto sc = make_fsm(R"({"type":"object","properties":{"e":{"type":"string",)"
+                       R"("enum":["\ud83d\ude00"]}},"required":["e"]})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal("{\"e\": \"\xf0\x9f\x98\x80\"}"));
+}
+
+// CJK, three bytes, the case a '?' substitution mangles most visibly.
+TEST(SchemaUnicodeEscape, ThreeByteEscapes) {
+    auto sc = make_fsm(R"({"type":"object","properties":{"c":{"type":"string",)"
+                       R"("enum":["\u4e2d\u6587"]}},"required":["c"]})");
+    ASSERT_NE(sc, nullptr);
+    EXPECT_TRUE(sc->token_legal("{\"c\": \"\xe4\xb8\xad\xe6\x96\x87\"}"));
+}
+
 // #1540: an unconstrained `integer` had no digit bound. At the server's default
 // temperature the sampler stayed in the digit state and emitted
 // 1020000000000000000000000000000000000000 for a population field - a value no

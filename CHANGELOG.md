@@ -180,6 +180,25 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`json_schema`: a `\uXXXX` escape compiled to a literal `?`** (#1563). The
+  schema string parser skipped the four hex digits and appended `?`. That is
+  not an edge case: `json.dumps` defaults to `ensure_ascii=True`, so a schema
+  round-tripped through any Python client arrives with every non-ASCII
+  character escaped - and the same parser reads enum values, property names,
+  `required` entries and `pattern`, so the compiled grammar then *forced* the
+  model to emit `?` where the caller asked for a character. Escapes decode to
+  UTF-8 now, surrogate pairs included; a lone surrogate becomes U+FFFD and a
+  truncated escape ends the string rather than inventing one. Four CPU tests,
+  all four red without the fix.
+
+- **The regex constraint re-classified the whole vocabulary on every request**
+  (#1568). `prepare_grammar` has skipped that work for an unchanged grammar
+  since it was written; `prepare_regex` never had the check, so ~151K tokens
+  were re-classified on the scheduler thread for every request - and a client
+  that pins one pattern sends it on every request. Measured on
+  `Qwen3-4B-Instruct-2507-Q8_0.gguf`, same pattern eight times, median of
+  requests 2-8: **73.0 ms before, 37.0 ms after (-49.3%)**.
+
 - **A growable KV pool zeroed new blocks on stream 0 and published them to a
   non-blocking stream** (#1652). `cudaMemset` runs on the legacy default
   stream; the engine decodes on a `cudaStreamNonBlocking` stream, which by

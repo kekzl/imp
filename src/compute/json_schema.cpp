@@ -97,6 +97,52 @@ private:
         return false;
     }
 
+    // Four hex digits into `out`. False when fewer than four remain or one is
+    // not hex - a truncated escape is malformed input, not a character.
+    bool read_hex4(uint32_t& out) {
+        if (pos_ + 4 > len_)
+            return false;
+        uint32_t v = 0;
+        for (int i = 0; i < 4; i++) {
+            const char c = data_[pos_ + i];
+            uint32_t d;
+            if (c >= '0' && c <= '9')
+                d = static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f')
+                d = static_cast<uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F')
+                d = static_cast<uint32_t>(c - 'A' + 10);
+            else
+                return false;
+            v = (v << 4) | d;
+        }
+        pos_ += 4;
+        out = v;
+        return true;
+    }
+
+    // A lone surrogate is not a legal codepoint; JSON allows one to appear and
+    // the standard replacement character is what every other decoder emits.
+    static void append_utf8(std::string& s, uint32_t cp) {
+        if (cp >= 0xD800 && cp <= 0xDFFF)
+            cp = 0xFFFD;
+        if (cp < 0x80) {
+            s += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            s += static_cast<char>(0xC0 | (cp >> 6));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            s += static_cast<char>(0xE0 | (cp >> 12));
+            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            s += static_cast<char>(0xF0 | (cp >> 18));
+            s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+
     std::string parse_string() {
         skip_ws();
         if (peek() != '"')
@@ -133,10 +179,33 @@ private:
                         s += '\f';
                         break;
                     case 'u': {
-                        // Skip unicode escape (4 hex digits)
-                        for (int i = 0; i < 4 && !eof(); i++)
-                            pos_++;
-                        s += '?';
+                        // \uXXXX -> UTF-8. This used to skip the four hex
+                        // digits and append a literal '?', which is not a
+                        // near-miss: json.dumps defaults to ensure_ascii=True,
+                        // so a schema round-tripped through any Python client
+                        // arrives with EVERY non-ASCII character escaped - and
+                        // parse_string() is the reader for enum values,
+                        // property names, `required` entries and `pattern`, so
+                        // the grammar then forced the model to emit '?' where
+                        // the caller asked for a character (#1563).
+                        uint32_t cp = 0;
+                        if (!read_hex4(cp))
+                            return s;  // truncated escape: stop, do not invent
+                        // A high surrogate must be followed by \uDC00-\uDFFF;
+                        // the pair encodes one codepoint above the BMP.
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            if (pos_ + 1 < len_ && data_[pos_] == '\\' && data_[pos_ + 1] == 'u') {
+                                const size_t save = pos_;
+                                pos_ += 2;
+                                uint32_t lo = 0;
+                                if (read_hex4(lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                } else {
+                                    pos_ = save;  // not a pair; emit the lone surrogate below
+                                }
+                            }
+                        }
+                        append_utf8(s, cp);
                         break;
                     }
                     default:
