@@ -180,6 +180,33 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The YaRN RoPE branch computed its angle in float and never reduced it**
+  (#1630). #1316 fixed exactly this in `rope_forward`'s other two branches; the
+  YaRN one kept calling the fast intrinsics on an unreduced argument, and the
+  long-context regression test could not see it because it runs at the default
+  `ext_factor = 0.0f` and so takes the linear branch. Both halves are fixed -
+  the angle is formed in double at all four call sites and reduced before the
+  intrinsic - and a second test drives the YaRN branch against double truth to
+  position 131071. Against the unfixed kernel it fails at that position.
+
+- **Quantised paged-decode kernels dereferenced the `-1` block-table sentinel**
+  (#1678). StreamingLLM eviction writes it, the FP16 kernel has skipped it as
+  defense-in-depth since #963, and the FP8, FP8-tile, INT8, INT4, NVFP4 and
+  NVFP4-TC twins read it straight into a pointer. 12 guards plus the tiled
+  kernel, which prefetches through a `cp_async` ring and so clamps the address
+  and drops the tokens with its validity mask instead of skipping the block.
+  Measured cost over 10 alternating runs on `Qwen3-8B-Q8_0.gguf` with
+  `--kv-fp8`: **not separable from the noise** - median 384.88 against 396.41
+  tok/s while the arms' own spread is 4.1% and 6.4%, and the guarded arm is
+  faster in 4 of the 10 paired rounds.
+
+- **The FMHA tile table named three `Bq` the selector never picks** (#1679).
+  Its first three branches compare against `max_smem / 2`, so at hd=64 it takes
+  Bq=64 (the comment said 128) and at hd=96 and hd=128 it takes Bq=32 (the
+  comment said 64). Corrected in the kernel comment and in
+  `docs/internals/KERNELS.md`, computed from `compute_smem_sm120` against the
+  measured `cudaDevAttrMaxSharedMemoryPerBlockOptin` of 101376.
+
 - **`/v1/messages` held the first SSE byte behind a 100 ms poll** (#1558). The
   wait existed so `message_start` could carry cache accounting, on the claim
   that it cost no measurable TTFT - and it inverted against its own

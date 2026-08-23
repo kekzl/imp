@@ -10,37 +10,8 @@
 
 namespace imp {
 
-// Accurate sin/cos for RoPE (#1316).
-//
-// __sinf/__cosf are the fast intrinsics; NVIDIA specifies their argument
-// reduction as accurate only for |x| < 48039. At pair_idx 0 the frequency is
-// exactly theta^0 = 1.0f, so the angle IS the token position — and the drift is
-// measurable long before that bound: against a CPU reference, max|gpu-cpu| goes
-// 3.0e-6 at position 40, 2.3e-4 at 2000, 1.0e-2 at 131071, the trained context
-// limit. That is above FP16 noise and it lands on the lowest-frequency rotary
-// pair, the one carrying long-range position information.
-//
-// The build is compiled with --use_fast_math (cmake/CompilerFlags.cmake:19),
-// which maps sinf/cosf/sincosf straight back onto the fast intrinsics — so
-// simply calling the accurate names changes nothing (measured: byte-identical
-// error at every position). The reduction has to happen before the call.
-//
-// Doing it in double costs one extra multiply and one floor per element and
-// leaves the intrinsic operating on an argument in [0, 2*pi), where it is
-// accurate. Full double sin/cos would also work but FP64 is 1/64 rate on
-// sm_120, and none of that throughput is needed to fix an argument-reduction
-// problem.
-__device__ __forceinline__ void rope_sincos(double angle_exact, float* s, float* c) {
-    constexpr double kTwoPi = 6.283185307179586476925286766559;
-    constexpr double kInvTwoPi = 0.15915494309189533576888376337251;
-    // Multiply by the reciprocal rather than divide: FP64 division is the
-    // expensive part on sm_120 (1/64 rate), and the reduction does not need
-    // the extra accuracy a true divide would buy.
-    double reduced = fma(-kTwoPi, floor(angle_exact * kInvTwoPi), angle_exact);
-    *s = __sinf(static_cast<float>(reduced));
-    *c = __cosf(static_cast<float>(reduced));
-}
-
+// rope_sincos (the #1316 argument reduction) lives in compute/rope_yarn.cuh,
+// because the YaRN branch needs it too (#1630).
 
 // YaRN device helpers (rope_yarn_ramp / rope_yarn) live in compute/rope_yarn.cuh,
 // shared with the MTP draft head so the two rope paths cannot drift (issue #897).
@@ -117,8 +88,12 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
         rope_sincos(angle, &sin_val, &cos_val);
     } else if (ext_factor != 0.0f) {
         // YaRN mode: per-dimension frequency blending
-        float theta_extrap = static_cast<float>(pos) /
-                             powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
+        // Double, for the same reason the linear branch below is: at the
+        // context limit the position times the frequency does not survive
+        // float (#1630).
+        double theta_extrap = static_cast<double>(pos) /
+                              pow(static_cast<double>(theta),
+                                  (2.0 * pair_idx) / static_cast<double>(2 * rope_pairs));
         rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1, 2 * pair_idx, ext_factor, attn_factor,
                   cos_val, sin_val);
     } else {
@@ -285,7 +260,8 @@ __global__ void qknorm_rope_fused_fp16_kernel(
                 double angle = (double)pos * (double)longrope_inv_freqs[pair];
                 rope_sincos(angle, &sin_val, &cos_val);
             } else if (ext_factor != 0.0f) {
-                float theta_extrap = (float)pos / powf(theta, (2.0f * pair) / (float)(2 * rope_pairs));
+                double theta_extrap = (double)pos /
+                                      pow((double)theta, (2.0 * pair) / (double)(2 * rope_pairs));
                 rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1, 2 * pair, ext_factor,
                           attn_factor, cos_val, sin_val);
             } else {
@@ -347,7 +323,8 @@ __global__ void qknorm_rope_fused_fp16_kernel(
                 double angle = (double)pos * (double)longrope_inv_freqs[pair];
                 rope_sincos(angle, &sin_val, &cos_val);
             } else if (ext_factor != 0.0f) {
-                float theta_extrap = (float)pos / powf(theta, (2.0f * pair) / (float)(2 * rope_pairs));
+                double theta_extrap = (double)pos /
+                                      pow((double)theta, (2.0 * pair) / (double)(2 * rope_pairs));
                 rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1, 2 * pair, ext_factor,
                           attn_factor, cos_val, sin_val);
             } else {

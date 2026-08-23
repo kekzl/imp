@@ -126,7 +126,7 @@ def main():
                     help="expected unlaned macro count (default: read PINNED below)")
     args = ap.parse_args()
 
-    PINNED = 973
+    PINNED = 975
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -125,6 +125,14 @@ __global__ void paged_attention_splitk_int8_kernel(
     // ---- Iterate over assigned KV blocks ----
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read. The FP16 twin has carried
+        // this since #963 and the quantised ones did not (#1678): host-side
+        // eviction keeps the window range valid, so this is defense-in-depth -
+        // future range drift degrades to a skipped block instead of an illegal
+        // access or silent garbage.
+        if (phys_block < 0)
+            continue;
         const int8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const int8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
         const half* K_sc_block = K_scales + (int64_t)phys_block * scale_block_stride;
@@ -340,6 +348,14 @@ __global__ void paged_attention_decode_int8_kernel(
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
+        // StreamingLLM eviction leaves -1 sentinels in the table; a negative
+        // physical block would be an OOB KV read. The FP16 twin has carried
+        // this since #963 and the quantised ones did not (#1678): host-side
+        // eviction keeps the window range valid, so this is defense-in-depth -
+        // future range drift degrades to a skipped block instead of an illegal
+        // access or silent garbage.
+        if (phys_block < 0)
+            continue;
         const int8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
         const int8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
         const half* K_sc_block = K_scales + (int64_t)phys_block * scale_block_stride;

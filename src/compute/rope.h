@@ -48,8 +48,9 @@ struct MRopeParams {
 // YaRN parameters (ext_factor > 0 enables YaRN blending):
 //   ext_factor:  0 = linear/none, 1.0 = YaRN
 //   attn_factor: mscale for attention (pre-compensated)
-//   corr_dims:   [2] float, dimension boundaries for YaRN ramp
-//                (precomputed by rope_yarn_corr_dims())
+//   corr_dims:   [2] float on the HOST, dimension boundaries for YaRN ramp
+//                (precomputed by rope_yarn_corr_dims()). Read host-side and
+//                passed to the kernel by value - a device pointer here hangs.
 void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, float theta = 10000.0f,
                   float scaling = 1.0f, int rope_dim = 0, bool neox = false, float ext_factor = 0.0f,
                   float attn_factor = 1.0f, const float* corr_dims = nullptr, cudaStream_t stream = nullptr,
