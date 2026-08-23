@@ -310,10 +310,17 @@ bool ConstraintManager::prepare_regex(const std::string& pattern, Tokenizer* tok
         return false;
     if (!regex_constrainer_)
         regex_constrainer_ = std::make_unique<RegexConstrainer>();
+    // Same pattern this pooled manager already serves: skip re-compiling and
+    // re-classifying ~151K tokens, and keep the warm mask cache. prepare_grammar
+    // below has carried this check since it was written; the regex path never
+    // had one, so every request paid a full vocabulary classification on the
+    // scheduler thread - and a client that pins one pattern sends it on every
+    // request (#1568).
+    const bool reuse = regex_constrainer_->is_initialized() && regex_constrainer_->pattern() == pattern;
     // vocab_size here is the LOGITS width; the constrainer clamps its own
     // classification to the tokenizer vocab (SafeTensors models pad lm_head
     // past it — indexing to the logits width read out of bounds once).
-    if (!regex_constrainer_->init(pattern, tokenizer)) {
+    if (!reuse && !regex_constrainer_->init(pattern, tokenizer)) {
         IMP_LOG_WARN("ConstraintManager: regex '%s' rejected — not enforcing it", pattern.c_str());
         return false;
     }
@@ -322,7 +329,8 @@ bool ConstraintManager::prepare_regex(const std::string& pattern, Tokenizer* tok
         regex_constrainer_->set_preamble(think_close, 8192, thinking_open);
     regex_constrainer_->reset();
     active_regex_ = true;
-    IMP_LOG_INFO("ConstraintManager: constraining output to regex '%s'", pattern.c_str());
+    IMP_LOG_INFO("ConstraintManager: constraining output to regex '%s'%s", pattern.c_str(),
+                 reuse ? " (reused classification)" : "");
     return true;
 }
 
