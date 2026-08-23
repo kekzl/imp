@@ -265,6 +265,11 @@ struct GemmCacheEntry {
     cublasLtMatmulAlgo_t algo;
     size_t workspace_size;
     bool has_algo;
+    // The algo came from the TIMED probe, not from the heuristic. Without this
+    // the reselect path cannot tell which of the two it is about to overwrite,
+    // so discarding a benchmarked pin looked exactly like re-picking a
+    // heuristic one - i.e. like nothing at all (#1545).
+    bool benchmarked = false;
     int64_t desc_M;  // M dimension baked into layout descriptors
 };
 
@@ -316,7 +321,7 @@ static void rebuild_layouts_for_m(GemmCacheEntry& entry, cudaDataType_t dtype_A,
 // that validation silently, mid-run, on the one path that promises
 // reproducibility (#1574). The caller then falls back rather than retrying
 // with an unvalidated algo.
-static bool reselect_algo_for_entry(GemmCacheEntry& entry) {
+static bool reselect_algo_for_entry(GemmCacheEntry& entry, int64_t M, int64_t K, int64_t N) {
     if (imp::process_diag_deterministic_gemm()) {
         IMP_LOG_DEBUG(
             "[gemm-algo] matmul failed and deterministic_gemm is on: not re-picking by "
@@ -336,9 +341,24 @@ static bool reselect_algo_for_entry(GemmCacheEntry& entry) {
     cublasLtMatmulPreferenceDestroy(pref);
 
     if (nresults > 0) {
+        // Say it once, when it happens. The benchmarked pin is being replaced
+        // by heuristic results[0] for the REST OF THE PROCESS, and the old code
+        // logged nothing here - only a second failure, further down, logged
+        // anything at all. So a shape could quietly run on a different algo
+        // than the one the probe chose, differently on each process start
+        // (#1545). `benchmarked` is cleared with it, so this fires once per
+        // pin rather than once per failure.
+        if (entry.benchmarked) {
+            IMP_LOG_WARN(
+                "[gemm-algo] matmul failed with the BENCHMARKED algo for M=%ld K=%ld N=%ld "
+                "(bucket desc_M=%ld) — replacing it with the heuristic pick for the rest of the "
+                "process; the probe's choice is gone until restart",
+                (long)M, (long)K, (long)N, (long)entry.desc_M);
+        }
         entry.algo = results[0].algo;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
+        entry.benchmarked = false;
     } else {
         entry.has_algo = false;
         entry.workspace_size = 0;
@@ -504,6 +524,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         entry.workspace_size =
             (results[pick].workspaceSize <= s_workspace_size) ? results[pick].workspaceSize : 0;
         entry.has_algo = true;
+        entry.benchmarked = false;
         if (gemm_algo_log_enabled() && M > 0) {
             IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] (deterministic, warmup-validated)", pick);
         }
@@ -515,6 +536,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         entry.algo = results[0].algo;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
+        entry.benchmarked = false;
         return;
     }
     void* temp_c = s_bench_scratch;
@@ -653,6 +675,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     entry.algo = results[best_idx].algo;
     entry.workspace_size = results[best_idx].workspaceSize;
     entry.has_algo = true;
+    entry.benchmarked = true;
     if (gemm_algo_log_enabled() && M > 0) {
         int picked_tile = -1;
         cublasLtMatmulAlgoConfigGetAttribute(&entry.algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &picked_tile,
@@ -867,7 +890,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
             // what the warmup probe exists to reject (#1574).
             {
                 std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
-                reselect_algo_for_entry(*entry);
+                reselect_algo_for_entry(*entry, M, K, N);
             }
             st = cublasLtMatmul(lt, entry->opDesc, p_alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
                                 p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
@@ -1027,7 +1050,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
         // may be invalid for the current M. Re-select via heuristic and retry.
         {
             std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
-            reselect_algo_for_entry(*entry);
+            reselect_algo_for_entry(*entry, M, K, N);
         }
         set_gemm_scale_pointers(entry->opDesc, aScale, bScale);
         st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc, &beta,
