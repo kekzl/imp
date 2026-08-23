@@ -104,6 +104,14 @@ there instead of retelling it.
 
 ### Changed
 
+- **`docs/LIMITATIONS.md` gains a "Gates that do not exist" section** (#1571,
+  #1642), for absent instruments rather than untested features: no KL / PPL
+  drift gate against a reference forward, and no soak or endurance test. Both
+  need a card, and CI has no GPU runner, so a reader deciding against imp sees
+  the gap without reading the issue tracker. The bullet on the generation half
+  of the HTTP contract now also cites #1559, which is the same wall.
+
+
 - **The tree is C++23 where the build said it already was.** `bool f(...,
   std::string& err)` is gone from `src/`, `tools/` and `include/` (36 sites, 15
   of them header declarations), replaced by `std::expected`; host pointer+length
