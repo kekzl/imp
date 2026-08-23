@@ -178,7 +178,11 @@ them invisible here - the legend's whole point.
 - **MTP is released for one model class, and the class that is left out has a
   measured defect, not a missing feature.** `speculative.mtp_k` stays **0
   everywhere** — nothing below is on by default; the table says what a user opts
-  into and what they get.
+  into and what they get. On a checkpoint that ships a head, `GET /health`
+  reports `mtp_head_available` with the trade, so an operator can see the
+  switched-off gain without reading the startup log (#1537). The default itself
+  is unchanged: the head costs VRAM (0.79 GiB on Qwen3.8-27B-NVFP4) and turning
+  it on for everyone is a decision, not a fix.
 
   | class | example | cached verify graph vs an eager forward of the same state | MTP |
   |---|---|---|---|

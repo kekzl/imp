@@ -18,6 +18,13 @@ namespace imp {
 // schema-valid — any finite nesting satisfies a recursive schema).
 static constexpr size_t kMaxSchemaStackDepth = 192;
 
+// Digits an `integer` may run to (#1540). int64 is 19 digits wide, and a JSON
+// integer past it is not a value the caller can read back into anything - the
+// schema's own `maximum` would be the precise bound, but it is refused at parse
+// time as unenforceable (#1567). Applies to `integer` only; `number` keeps its
+// JSON-legal mantissa.
+static constexpr int kMaxIntegerDigits = 19;
+
 // Effective item ceiling for an array frame: explicit "maxItems" wins; an
 // enum-items array without one is capped at the enum's cardinality — a list
 // that repeats an enum member more often than the enum has members carries no
@@ -1274,6 +1281,20 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 }
                 if (f.num_leading_zero)
                     return false;  // JSON forbids leading zeros: `0` then digit
+                // #1540: an unconstrained `integer` had no digit bound, so
+                // above temperature 0 the sampler could sit in the digit state
+                // and emit 1020000000000000000000000000000000000000. JSON puts
+                // no bound on an integer literal, but every practical consumer
+                // does: int64 is 19 digits, and a value past it is not a number
+                // the caller can read back. `maximum` would be the precise
+                // bound - it is refused at parse time as unenforceable (#1567),
+                // so this is the floor that keeps the output usable.
+                //
+                // The FSM masks further digits rather than erroring: at 19
+                // digits the value is complete and legal, so the model's next
+                // legal tokens are the ones that close it.
+                if (is_int && f.string_len >= kMaxIntegerDigits)
+                    return false;
                 f.string_len++;
                 f.num_need_digit = false;
                 f.num_sign_ok = false;

@@ -117,6 +117,19 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         // caller to derive it from a pair that cannot express it.
         body["kv_pool_growable"] = kv_growable;
     }
+    // #1537: the checkpoint carries an MTP head this load did not take, because
+    // speculative.mtp_k defaults to 0. That is a documented +8 to +22% decode
+    // sitting switched off, and the only notice was one INFO line at startup -
+    // which an operator running a container never sees. Reported here so it is
+    // discoverable without grepping a log.
+    if (state.model && state.model->model && state.model->model->mtp_head_available_unloaded_) {
+        body["mtp_head_available"] = true;
+        body["mtp_head_hint"] =
+            "this checkpoint ships an MTP head that is not loaded "
+            "(speculative.mtp_k=0). --set speculative.mtp_k=2 measured +15% decode "
+            "on Qwen3.8-27B-NVFP4 (range +8 to +22%), for the head's VRAM.";
+    }
+
     if (!unservable.empty()) {
         // A client has to tell a permanent 503 from a transient one, or it
         // retries a condition retrying cannot fix and burns its budget doing

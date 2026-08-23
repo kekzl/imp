@@ -1050,6 +1050,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         return head;
     };
 
+    // Set when the checkpoint carries an MTP head this load did not take
+    // (#1537), so /health can report it instead of only the startup log.
+    bool mtp_available_unloaded = false;
     if (load_mtp_head && !model_dir.empty()) {
         std::string mtp_path = model_dir + "/model_mtp.safetensors";
         std::error_code ec;
@@ -1099,10 +1102,12 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             "Qwen3.8-27B-NVFP4, range +8 to +22 %%, in exchange for the head's VRAM "
             "(0.79 GiB there) and reproducible output across processes. "
             "See docs/LIMITATIONS.md");
+        mtp_available_unloaded = true;
     }
 
     // Create model
     auto model = std::make_unique<Model>();
+    model->mtp_head_available_unloaded_ = mtp_available_unloaded;
     model->source_path_ = path;
     if (mtp_local.has_value()) {
         model->mtp_ = std::move(mtp_local);
