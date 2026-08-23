@@ -1,5 +1,8 @@
 #include "api/imp_internal.h"
 #include "common/exit_codes.h"
+#include "common/json_out.h"
+#include "json_report.h"
+#include "modes.h"
 #include "args.h"
 #include "model/chat_template.h"
 #include "model/image_placeholders.h"
@@ -10,6 +13,7 @@
 #include "runtime/config.h"
 #include "runtime/process_diag.h"
 #include "runtime/engine.h"
+#include "memory/vram_query.h"
 
 #include <chrono>
 #include <cstdio>
@@ -20,6 +24,19 @@
 
 int main(int argc, char** argv) {
     CliArgs args = parse_args(argc, argv);
+
+    // #1583: with --json, stdout belongs to the single JSON document. Reserve
+    // it here, before the first print, and route every human line to stderr.
+    // Interactive mode has no single document to emit, so it declines.
+    if (args.json_out) {
+        if (args.interactive) {
+            fprintf(stderr,
+                    "Error: --json has no meaning with --interactive (the output is a "
+                    "token stream, not one document)\n");
+            return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
+        }
+        imp_tools::json_stdout_reserve();
+    }
 
     // Load imp.conf (if present) + apply --set overrides, then stash for
     // Engine::init to pick up (Phase 5 Track D follow-up: replaces the
@@ -375,28 +392,10 @@ int main(int argc, char** argv) {
     }
 
     if (!args.perplexity_file.empty()) {
-        double ppl = -1.0;
-        ImpError pe = imp_perplexity(ctx, ppl_tokens.data(), static_cast<int>(ppl_tokens.size()), &ppl);
-        if (pe != IMP_SUCCESS) {
-            fprintf(stderr, "perplexity failed: %s\n", imp_error_string(pe));
-            imp_context_free(ctx);
-            imp_model_free(model);
-            return 1;
-        }
-        printf("perplexity: %.4f  (%zu tokens)\n", ppl, ppl_tokens.size());
-        if (!args.calibrate_out.empty()) {
-            ImpError ce = imp_calibration_write(ctx, args.calibrate_out.c_str());
-            if (ce != IMP_SUCCESS) {
-                fprintf(stderr, "calibration write failed: %s\n", imp_error_string(ce));
-                imp_context_free(ctx);
-                imp_model_free(model);
-                return 1;
-            }
-            printf("calibration: %s\n", args.calibrate_out.c_str());
-        }
+        const int rc = imp_cli::run_perplexity(ctx, args, ppl_tokens, resolved_model);
         imp_context_free(ctx);
         imp_model_free(model);
-        return 0;
+        return rc;
     }
 
     if (args.bench) {
@@ -474,6 +473,11 @@ int main(int argc, char** argv) {
                 pp_toks, args.bench_reps);
         fprintf(stderr, "tg %5d tokens  avg %8.2f ms  (%7.2f tok/s)  [%d reps]\n", tg_tokens, tg_avg_ms,
                 tg_toks, args.bench_reps);
+
+        if (args.json_out)
+            imp_cli::emit_bench({resolved_model, pp_toks, tg_toks, args.bench_pp, pp_avg_ms, tg_tokens,
+                                 tg_avg_ms, args.bench_reps,
+                                 static_cast<long long>(imp::vram_own_peak_bytes() >> 20)});
     } else if (args.interactive) {
         // Interactive/agentic defaults to 16384 max tokens (needs headroom for
         // long reasoning chains, code generation, and multi-step tool use)
@@ -852,6 +856,10 @@ int main(int argc, char** argv) {
             auto t_decode_start = std::chrono::high_resolution_clock::now();
             std::vector<int32_t> output_ids;
             std::string output_text;
+            // Exactly what stdout shows, for --json (#1583). Not
+            // tok->decode(output_ids): that one carries the hidden stop and
+            // think markers, so the document would disagree with the terminal.
+            std::string visible_text;
             if (ctx->active_request && !ctx->active_request->output_tokens.empty()) {
                 int32_t first_tok = ctx->active_request->output_tokens.back();
                 // Check stop conditions on first token
@@ -874,6 +882,7 @@ int main(int argc, char** argv) {
                         std::string piece = tok->decode_token(first_tok);
                         fprintf(stderr, "[tok=%d '%s'] ", first_tok, piece.c_str());
                         printf("%s", piece.c_str());
+                        visible_text += piece;
                         fflush(stdout);
                         if (!args.stop_sequences.empty())
                             output_text += piece;
@@ -923,6 +932,7 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
                 if (!hide_token) {
                     printf("%s", piece.c_str());
+                    visible_text += piece;
                     fflush(stdout);
                 }
 
@@ -962,6 +972,13 @@ int main(int argc, char** argv) {
             fprintf(stderr, "tg %5d tokens in %8.2f ms  (%7.2f tok/s)\n", n_output_tokens, decode_ms,
                     tg_toks);
             fprintf(stderr, "total   %8.2f ms\n", total_ms);
+
+            // The generated text is on stderr with everything else under
+            // --json, so it has to come back in the document or the mode
+            // would silently swallow the answer.
+            if (args.json_out)
+                imp_cli::emit_generate({resolved_model, visible_text, n_prompt_tokens, n_output_tokens,
+                                        pp_toks, tg_toks, prefill_ms, decode_ms, total_ms});
 
             // Phase 3.5 telemetry: report MTP draft accuracy if measured.
             if (imp::Engine* engine = ctx->engine.get(); engine && engine->mtp_spec_decode_enabled()) {
