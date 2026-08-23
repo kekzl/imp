@@ -180,6 +180,23 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The degeneration battery had zero call sites, and the gate that stood in
+  for it saw one shape** (#1573). `tools/analysis/degen_suite.py` is 41 checks
+  that exit non-zero correctly and that nothing ever ran; it is wired into
+  `make test-server` now, where the running server it needs already exists.
+  First run: **35 checks, 0 fail, 5 s**. Against `--kv-nvfp4` plus the residual
+  knob it found a real one on its first attempt (stream and non-stream
+  disagreeing at greedy) - added to #1708.
+
+  The pre-push smoke gate also gained the two criteria the skill it stands in
+  for already specifies: no token more than 4 times in a row, no 3-gram more
+  than 3 times. The old distinct-token count could not see a loop: a stream
+  with **15** distinct tokens in its last 32 passes it while repeating a 3-gram
+  four times. The token floor is per-prompt, because this gate's own prompt is
+  the "single-word factual" case the skill excepts - it answers in 11 tokens,
+  one above a flat limit of 10.
+
+
 - **`json_schema`: an unconstrained `integer` had no digit bound** (#1540). At
   the server's default temperature the sampler could sit in the digit state and
   emit `1020000000000000000000000000000000000000` for a population field - a
