@@ -1,4 +1,5 @@
 #include "compute/gemm.h"
+#include "compute/gemm_cutlass_sm120.h"
 #include <atomic>
 #include "compute/gemm_capture_fp16_sm120.h"
 #include "core/cuda_static_reset.h"
@@ -685,6 +686,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
 }
 
 void gemm_cleanup() {
+    // Say it before the caches go: a clipped activation scale is silent
+    // otherwise, and the flag lives on the device (#1544).
+    nvfp4_report_scale_clipping();
     std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
     for (auto& [key, entry] : s_gemm_cache) {
         cublasLtMatrixLayoutDestroy(entry.Adesc);

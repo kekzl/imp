@@ -58,6 +58,10 @@ void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfa
 // Quantize FP16 activation [M,K] to NVFP4 in CUTLASS block-scaled format.
 // dst_data: pre-allocated [M, K/2] RowMajor packed FP4 bytes
 // dst_sf:   pre-allocated SfAtom layout UE4M3 scales (cutlass_nvfp4_sf_size bytes)
+// Warn once at shutdown if any activation micro-block clipped the UE4M3 scale
+// ceiling during the run (#1544). Called from gemm_cleanup().
+void nvfp4_report_scale_clipping();
+
 void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
                                     cudaStream_t stream);
 
