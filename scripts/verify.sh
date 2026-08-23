@@ -705,8 +705,13 @@ section "smoke prompts (degeneration check)"
 # Greedy decode on a known-deterministic prompt.
 # Quality gate: output must contain expected substring AND last 32 tokens must
 # have at least 8 distinct tokens (catches "own own own" stuck-token failures).
+# $5 (optional): minimum generated tokens. The skill's figure is 10, with its
+# own exception for "single-word factual" prompts - and this gate's own prompt
+# is one: "The capital of France is" answers in 11 tokens on the 4B model, so a
+# flat 10 would sit one token from a false red. Per-prompt, with the default
+# where the skill put it.
 smoke_prompt() {
-    local label="$1" model="$2" prompt="$3" expect="$4"
+    local label="$1" model="$2" prompt="$3" expect="$4" min_toks="${5:-10}"
     if [ ! -f "$MODELS/$model" ]; then
         skip "$label ($model not present)"
         return
@@ -720,7 +725,17 @@ smoke_prompt() {
     DISTINCT=$(echo "$TOKS" | sort -u | wc -l)
     # Generated word stream (stripped of token id prefix) for NaN/Inf scan
     WORDS=$(grep -oP "\[tok=[0-9]+ '\K[^']*" "$ERR" | tr '\n' ' ')
+    # The repetition and early-abort checks below read the WHOLE run, not the
+    # trailing window. Derived here so the temp file is gone before any of the
+    # early returns below - they used to be the only `rm` and adding checks in
+    # front of it would have leaked one file per failed smoke run.
+    ALL_TOKS=$(grep -oP '\[tok=\K[0-9]+' "$ERR")
     rm -f "$ERR"
+    N_TOKS=$(printf '%s\n' "$ALL_TOKS" | grep -c .)
+    RUNMAX=$(printf '%s\n' "$ALL_TOKS" | uniq -c | awk '{if($1>m)m=$1}END{print m+0}')
+    GRAMMAX=$(printf '%s\n' "$ALL_TOKS" | awk '{a[NR]=$0} END{
+        for(i=1;i+2<=NR;i++){k=a[i]" "a[i+1]" "a[i+2]; c[k]++; if(c[k]>m)m=c[k]}
+        print m+0}')
 
     # Herestrings, not `echo ... | grep -q`: grep -q leaves at the first match and
     # closes the pipe, echo dies of EPIPE, and `set -o pipefail` (:40) turns that
@@ -738,25 +753,54 @@ smoke_prompt() {
         echo "  tokens: $(echo "$TOKS" | tr '\n' ' ')"
         return
     fi
+    # The distinct-token count is one shape of degeneration, and the skill this
+    # gate stands in for names three more (#1573). Two of them are checkable
+    # here, from output this gate already collects, with the skill's own
+    # thresholds:
+    #
+    #   1. verbatim repetition — no token more than 4 times in a row, no 3-gram
+    #      more than 3 times. "a b c a b c a b c a b c" has 3 distinct tokens
+    #      per window and passes the count above; it is the shape #1248 had.
+    #   2. early abort — at least 10 generated tokens. A 3-token answer to a
+    #      sentence-completion prompt is a stop-condition defect, and it also
+    #      makes every check above vacuous: 3 tokens cannot fail a 32-token
+    #      window.
+    if [ "$RUNMAX" -gt 4 ]; then
+        fail "$label — a token repeats $RUNMAX times in a row (skill limit: 4)"
+        echo "  tokens: $(printf '%s ' $ALL_TOKS)"
+        return
+    fi
+    if [ "$GRAMMAX" -gt 3 ]; then
+        fail "$label — a 3-gram repeats $GRAMMAX times (skill limit: 3)"
+        echo "  tokens: $(printf '%s ' $ALL_TOKS)"
+        return
+    fi
+    if [ "$N_TOKS" -lt "$min_toks" ]; then
+        fail "$label — stopped after $N_TOKS tokens (limit: $min_toks)"
+        echo "  words: $WORDS"
+        return
+    fi
     # Generated text appears interleaved with logs on stdout — substring match works
     if ! grep -q "$expect" <<< "$OUT$WORDS"; then
         fail "$label — expected '$expect' in output"
         echo "  words: $WORDS"
         return
     fi
-    pass "$label (distinct=$DISTINCT, contains '$expect')"
+    pass "$label (distinct=$DISTINCT, tokens=$N_TOKS, max-run=$RUNMAX, max-3gram=$GRAMMAX, contains '$expect')"
 }
 
 smoke_prompt "Qwen3-4B Q8_0 (dense)" \
     "Qwen3-4B-Instruct-2507-Q8_0.gguf" \
     "The capital of France is" \
-    "Paris"
+    "Paris" \
+    5
 
 if [ "$MODE" = "full" ]; then
     smoke_prompt "Qwen3.5-4B MXFP4 (GDN)" \
         "Qwen3.5-4B-mxfp4.gguf" \
         "The capital of France is" \
-        "Paris"
+        "Paris" \
+        5
 fi
 
 # ------------------------------------------------------------------- summary
