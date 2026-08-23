@@ -565,6 +565,20 @@ bool Engine::init_kv_cache() {
                 std::vector<int> init_slots(max_seqs, -1);
                 cudaMemcpy(d_kv_slot_buf_, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice);
                 d_kv_slot_last_uploaded_.assign(max_seqs, -1);
+                // Same treatment for the multi-sequence metadata (#1648). It
+                // used to be cudaMallocAsync'd per decode step, and its address
+                // was baked into a captured forward_logits graph that is then
+                // REPLAYED - with none of the graph-invalidation triggers
+                // watching it. That only ever worked because the default pool's
+                // release threshold is pinned to UINT64_MAX so the same address
+                // came back; a pool setting, not an invariant the graph path
+                // asserts. Three [max_batch_size] int arrays, allocated once.
+                size_t meta_bytes = static_cast<size_t>(3) * max_seqs * sizeof(int);
+                if (cudaMalloc(&residual_meta_d_buf_, meta_bytes) == cudaSuccess) {
+                    residual_meta_capacity_ = max_seqs;
+                    std::vector<int> init_meta(3 * static_cast<size_t>(max_seqs), 0);
+                    cudaMemcpy(residual_meta_d_buf_, init_meta.data(), meta_bytes, cudaMemcpyHostToDevice);
+                }
             }
         } else if (residual_n > 0) {
             IMP_LOG_INFO("kv_cache.bitdecoding_residual_tokens=%d ignored (only active with kv_cache_dtype=NVFP4)",

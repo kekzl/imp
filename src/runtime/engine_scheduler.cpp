@@ -1731,19 +1731,38 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
                 residual_meta_h_counts_[i] = rs.fill_count;
                 residual_meta_h_widxes_[i] = rs.write_idx;
             }
-            const size_t meta_bytes = static_cast<size_t>(3) * N * sizeof(int);
-            if (cudaMallocAsync(&residual_meta_d_buf_, meta_bytes, dec_stream) == cudaSuccess) {
+            // The buffer is persistent and sized for max_batch_size (#1648):
+            // a per-step cudaMallocAsync address was baked into a captured
+            // graph that is replayed, and nothing invalidated the graph when
+            // the allocator handed back a different one. Stride by the
+            // CAPACITY, not by N, so the three sub-arrays keep fixed offsets
+            // across steps whatever the batch width - a graph captured at one
+            // N stays correct at another.
+            if (residual_meta_d_buf_ != nullptr && N <= residual_meta_capacity_) {
                 int* base = residual_meta_d_buf_;
-                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(0) * N, residual_meta_h_slots_.data(),
-                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(1) * N, residual_meta_h_counts_.data(),
-                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + static_cast<ptrdiff_t>(2) * N, residual_meta_h_widxes_.data(),
-                                N * sizeof(int), cudaMemcpyHostToDevice, dec_stream);
-                state.d_residual_seq_slots = base + static_cast<ptrdiff_t>(0) * N;
-                state.d_residual_counts = base + static_cast<ptrdiff_t>(1) * N;
-                state.d_residual_write_idxes = base + static_cast<ptrdiff_t>(2) * N;
+                const ptrdiff_t stride = residual_meta_capacity_;
+                cudaMemcpyAsync(base + 0 * stride, residual_meta_h_slots_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + 1 * stride, residual_meta_h_counts_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                cudaMemcpyAsync(base + 2 * stride, residual_meta_h_widxes_.data(), N * sizeof(int),
+                                cudaMemcpyHostToDevice, dec_stream);
+                state.d_residual_seq_slots = base + 0 * stride;
+                state.d_residual_counts = base + 1 * stride;
+                state.d_residual_write_idxes = base + 2 * stride;
                 state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+            } else {
+                // Neither case is expected: the buffer is sized for
+                // max_batch_size at init and admission is clamped to it. Say
+                // so once rather than decoding with stale metadata.
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    IMP_LOG_WARN(
+                        "residual metadata unavailable for a %d-sequence decode "
+                        "(buffer=%p, capacity=%d); this step runs without it",
+                        N, static_cast<const void*>(residual_meta_d_buf_), residual_meta_capacity_);
+                }
             }
         }
     }
@@ -2089,13 +2108,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         gpu_batch.free();
     }
 
-    // Free per-step residual metadata buffer (allocated in step_decode_forward
-    // when residual is enabled). cudaFreeAsync orders behind the just-issued
-    // forward + sample on dec_stream.
-    if (residual_meta_d_buf_ != nullptr) {
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(residual_meta_d_buf_, dec_stream));
-        residual_meta_d_buf_ = nullptr;
-    }
+    // (The residual metadata buffer is persistent since #1648 - allocated once
+    // beside d_kv_slot_buf_ and freed with it in the destructor. Freeing it per
+    // step is what made a replayed graph hold a dangling address.)
 
     // Phase 3.5 telemetry: measure MTP-draft prediction accuracy without
     // changing generation. Single-sequence only (batch=1 simplifies hidden-
