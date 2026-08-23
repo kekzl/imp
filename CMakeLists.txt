@@ -467,6 +467,8 @@ if(IMP_BUILD_TOOLS)
         tools/imp-cli/main.cpp
     tools/common/args_common.cpp
     tools/imp-cli/args.cpp
+    tools/imp-cli/json_report.cpp
+    tools/imp-cli/mode_perplexity.cpp
     )
     target_link_libraries(imp-cli PRIVATE imp imp_warnings)
     if(IMP_ALLOC_INTERPOSE)
@@ -599,6 +601,9 @@ if(IMP_BUILD_TESTS)
         target_include_directories(${target} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests
+            # tools/, for the header-only pieces the shipped binaries share
+            # (common/json_out.h, common/exit_codes.h).
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools
         )
         set_target_properties(${target} PROPERTIES
             CUDA_SEPARABLE_COMPILATION ON
@@ -623,6 +628,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor_kind_matcher.cpp
         tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
+        tests/test_json_out.cpp
         tests/test_gguf_loader.cpp
         tests/test_gguf_fault_injection.cpp
         tests/test_fp_bits.cpp

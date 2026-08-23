@@ -420,12 +420,14 @@ else
             model_gate_ran
             ERR=$(mktemp)
             gpu_sample_start
+            OUT=$(mktemp)
             "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
-                  --prefill-chunk-size "$BENCH_CHUNK" --max-tokens 256 --temperature 0 \
-                  --set speculative.ngram=false >/dev/null 2>"$ERR"
+                  --prefill-chunk-size "$BENCH_CHUNK" --max-tokens 256 --temperature 0 --json \
+                  --set speculative.ngram=false >"$OUT" 2>"$ERR"
             gpu_sample_stop
-            PP=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-            TG=$(grep -oP '^tg\s+256\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+            PP=$(jq -er '.prefill_tps // empty' "$OUT" 2>/dev/null || true)
+            TG=$(jq -er '.decode_tps // empty' "$OUT" 2>/dev/null || true)
+            rm -f "$OUT"
             if [ -z "$PP" ] || [ -z "$TG" ]; then
                 fail "$BL_MODEL: could not parse bench output (see $ERR)"
                 tail -10 "$ERR"
@@ -497,20 +499,25 @@ else
             TG_ALL=""; PP_ALL=""
             gpu_sample_start
             for _t in $(seq 1 "$TRIALS"); do
+                OUT=$(mktemp)
                 "$BIN" --model "$MODEL_PATH" --bench --bench-pp 512 --bench-reps $REPS \
-                      --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 \
-                      --set speculative.ngram=false >/dev/null 2>"$ERR"
-                _tg=$(grep -oP '^tg\s+128\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
-                _pp=$(grep -oP '^pp\s+512\s.*\(\s*\K[0-9.]+(?=\s+tok/s)' "$ERR" | head -1)
+                      --prefill-chunk-size "${CHUNK_SIZE}" --max-tokens 128 --temperature 0 --json \
+                      --set speculative.ngram=false >"$OUT" 2>"$ERR"
+                _tg=$(jq -er '.decode_tps // empty' "$OUT" 2>/dev/null || true)
+                _pp=$(jq -er '.prefill_tps // empty' "$OUT" 2>/dev/null || true)
+                rm -f "$OUT"
                 [ -n "$_tg" ] && TG_ALL="$TG_ALL$_tg\n"
                 [ -n "$_pp" ] && PP_ALL="$PP_ALL$_pp\n"
             done
             gpu_sample_stop
             median() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR==0)exit 1; print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}'; }
             spread() { printf "$1" | grep -v '^$' | sort -n | awk '{a[NR]=$1} END{if(NR<2)exit 0; printf "%.2f", (a[NR]-a[1])/a[1]*100}'; }
-            # Bench lines (stderr) have variable spacing inside parens for short numbers:
-            #   "pp   512 tokens  avg    38.47 ms  (13310.12 tok/s)  [3 reps]"
-            #   "tg   128 tokens  avg   861.50 ms  ( 148.58 tok/s)  [3 reps]"
+            # Numbers come from `--bench --json` (#1583). They used to be regexed
+            # out of the stderr table, whose spacing inside the parens varies
+            # with the magnitude ("(13310.12 tok/s)" against "( 148.58 tok/s)")
+            # - a layout that was load-bearing for the gate and documented
+            # nowhere. An empty capture there produced a median over fewer
+            # samples than the header printed.
             PP=$(median "$PP_ALL" || true)
             TG=$(median "$TG_ALL" || true)
             TG_SPREAD=$(spread "$TG_ALL")
@@ -557,11 +564,12 @@ else
                     BL_PP=$(jq -r ".metrics.prefill_tps.pp${PPLEN} // empty" "$BASELINE")
                     [ -z "$BL_PP" ] && continue
                     ERR2=$(mktemp)
+                    OUT2=$(mktemp)
                     "$BIN" --model "$MODEL_PATH" --bench --bench-pp "$PPLEN" --bench-reps $REPS \
                           --prefill-chunk-size 0 --max-tokens 1 --temperature 0 --max-seq-len 70000 \
-                          >/dev/null 2>"$ERR2"
-                    PPTPS=$(grep -oP "^pp\s+${PPLEN}\s.*\(\s*\K[0-9.]+(?=\s+tok/s)" "$ERR2" | head -1)
-                    rm -f "$ERR2"
+                          --json >"$OUT2" 2>"$ERR2"
+                    PPTPS=$(jq -er '.prefill_tps // empty' "$OUT2" 2>/dev/null || true)
+                    rm -f "$ERR2" "$OUT2"
                     [ -z "$PPTPS" ] && continue
                     PP_DELTA=$(awk -v cur="$PPTPS" -v base="$BL_PP" 'BEGIN{printf "%.2f", (cur-base)/base*100}')
                     PP_REG=$(awk -v d="$PP_DELTA" -v t="$PRE_THR" 'BEGIN{print (-d > t) ? 1 : 0}')

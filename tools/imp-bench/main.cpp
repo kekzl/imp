@@ -1,4 +1,5 @@
 #include "common/exit_codes.h"
+#include "common/json_out.h"
 #include "runtime/config.h"
 #include "runtime/process_diag.h"
 
@@ -34,10 +35,22 @@ static void print_usage(const char* prog) {
     printf("\nOptions:\n");
     printf("  --config <path>       imp.conf path (default: ./imp.conf, ~/.config/imp/imp.conf)\n");
     printf("  --set <sec.key=val>   Override one imp.conf key (repeatable)\n");
+    printf("  --json                One JSON document on stdout, tables on stderr\n");
     printf("  --help, -h            Show this help message\n");
 }
 
 int main(int argc, char** argv) {
+    // Pre-scan for --json: the banner below is the first thing on stdout, and
+    // with --json stdout belongs to the single JSON document (#1583).
+    bool json_out = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--json") == 0) {
+            json_out = true;
+            imp_tools::json_stdout_reserve();
+            break;
+        }
+    }
+
     printf("IMP Benchmark Tool\n");
     printf("==================\n\n");
 
@@ -66,6 +79,9 @@ int main(int argc, char** argv) {
             config_path = argv[++i];
         } else if (strcmp(arg, "--set") == 0 && i + 1 < argc) {
             config_overrides.emplace_back(argv[++i]);
+        } else if (strcmp(arg, "--json") == 0) {
+            // Consumed by the pre-scan above; accepted here so it is not an
+            // "unknown option".
         } else if (arg[0] == '-') {
             printf("Unknown option: '%s'\n\n", arg);
             print_usage(argv[0]);
@@ -127,19 +143,33 @@ int main(int argc, char** argv) {
     int benchmarks_run = 0;
     int benchmarks_requested = 0;
 
-    auto run_one = [&](bool wanted, bool (*fn)()) {
+    std::string entries;  // rendered JSON array elements, in run order
+
+    auto run_one = [&](bool wanted, const char* name, bool (*fn)()) {
         if (!wanted)
             return;
         ++benchmarks_requested;
-        if (fn())
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        const bool measured = fn();
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        if (measured)
             ++benchmarks_run;
+        if (!json_out)
+            return;
+        imp_tools::JsonOut e;
+        e.str("name", name)
+            .boolean("measured", measured)
+            .num("seconds", std::chrono::duration<double>(t1 - t0).count(), 3);
+        if (!entries.empty())
+            entries += ',';
+        entries += e.str();
     };
 
-    run_one(run_gemm, imp::bench_gemm);
-    run_one(run_gemm_nvfp4, imp::bench_gemm_nvfp4_cutlass);
-    run_one(run_attention, imp::bench_attention);
-    run_one(run_decode_attn, imp::bench_paged_attention);
-    run_one(run_e2e, imp::bench_e2e);
+    run_one(run_gemm, "gemm", imp::bench_gemm);
+    run_one(run_gemm_nvfp4, "nvfp4", imp::bench_gemm_nvfp4_cutlass);
+    run_one(run_attention, "attention", imp::bench_attention);
+    run_one(run_decode_attn, "decode-attn", imp::bench_paged_attention);
+    run_one(run_e2e, "e2e", imp::bench_e2e);
 
     auto wall_end = std::chrono::high_resolution_clock::now();
     double total_s = std::chrono::duration<double>(wall_end - wall_start).count();
@@ -147,6 +177,24 @@ int main(int argc, char** argv) {
     printf("--------------------------------------------------\n");
     printf("Benchmarks run: %d of %d requested    Total wall time: %.2f s\n", benchmarks_run,
            benchmarks_requested, total_s);
+
+    if (json_out) {
+        // Per-benchmark timings and the measured flag, not the tables: the five
+        // bench entry points return bool, and the numbers inside them (GFLOPS,
+        // tok/s, per-shape rows) have no shared shape to serialise. The
+        // consumer that needed machine-readable throughput is
+        // scripts/gen_perf_baseline.sh, and it reads `imp-cli --bench --json`.
+        imp_tools::JsonOut j;
+        j.str("mode", "bench-suite")
+            .intg("requested", benchmarks_requested)
+            .intg("run", benchmarks_run)
+            .num("wall_s", total_s, 2)
+            .key("benchmarks");
+        std::string doc = j.str();
+        doc.pop_back();  // the trailing '}' - the array closes the document
+        doc += "[" + entries + "]}";
+        imp_tools::json_emit(doc);
+    }
 
     if (benchmarks_run < benchmarks_requested) {
         fprintf(stderr, "imp-bench: %d of %d benchmark(s) measured nothing\n",
