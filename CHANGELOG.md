@@ -222,6 +222,32 @@ there instead of retelling it.
   carries an empty `content` with `finish_reason: "stop"`. Filed as #1716; the
   400 above is what a caller sees for it now instead of nothing.
 
+- **No shipped binary had a machine-readable output mode** (#1583). `--json`
+  puts **exactly one JSON document on stdout** and every human line on stderr,
+  on `imp-cli --bench` / `--perplexity` / `--prompt` and on `imp-bench`;
+  `--interactive` refuses it, because a token stream is not one document.
+
+  ```
+  $ imp-cli --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 16 --json 2>/dev/null
+  {"mode":"bench","model":"...","prefill_tps":5502.57,"decode_tps":438.59,"pp_tokens":128,
+   "pp_ms":23.26,"tg_tokens":16,"tg_ms":36.48,"reps":1,"peak_vram_mib":11188}
+  ```
+
+  The promise is structural rather than audited: stdout is pointed at stderr
+  for the whole run and the real stdout kept on a private fd, so a print site
+  added later cannot break it.
+
+  `scripts/gen_perf_baseline.sh`, `scripts/verify.sh` and
+  `scripts/bench_gate.sh` read the JSON instead of regexing the table, which
+  made the column layout a contract nobody had written down - and one whose
+  spacing inside the parens varies with the magnitude (`(13310.12 tok/s)`
+  against `( 148.58 tok/s)`). A missing key now aborts the run; an empty
+  capture used to produce a median over fewer samples than the header printed.
+
+  `--prompt --json` reports what stdout would have shown, not
+  `decode(output_ids)`: the hidden stop and think markers stay hidden, so the
+  document and the terminal agree.
+
 - **Admission reserved for the prompt and the graph loop reserved for the
   whole generation** (#1635, #1636, #1662). Three ways the KV pool promised
   what it could not keep.
