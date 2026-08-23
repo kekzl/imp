@@ -293,12 +293,36 @@ __device__ __forceinline__ uint8_t pack_fp4_pair_hw(float v0, float v1) {
 // pack FP4 bytes. The caller supplies the values (so this helper is reusable
 // for fused paths like SwiGLU+quantize where values come from a computation
 // rather than a direct FP16 load).
+// The UE4M3 scale saturates at 448, so a micro-block whose absmax exceeds
+// 448*6 = 2688 has its scale clipped and its values quantised against a scale
+// that is too small - silently, because `float_to_fp8_e4m3` clamps and returns
+// (#1544). Measured headroom on the models here, largest per-16-block absmax
+// over a 4096-token prefill:
+//
+//   Gemma-4-12B-NVFP4              2468   92% of the limit
+//   Nemotron-3-Nano-30B-A3B-NVFP4  <1500
+//
+// So it does not fire today, and Gemma-4 is 8% away from it. The flag below
+// says so if it ever does; `nvfp4_report_scale_clipping()` reads it at engine
+// shutdown.
+//
+// A device `printf` here instead of a flag would be more direct, and costs
+// more than it looks: it gave FIVE quantiser kernels an 8-byte local frame
+// (`make kernel-resources`: quantize_fp16_nvfp4_cutlass_kernel and four
+// siblings, stack 0 -> 8), because the call has to be set up whether or not it
+// is taken. A flag store leaves the kernels at stack=0. The cost is one float
+// compare in a function that has already computed `local_absmax`.
+__device__ unsigned int g_nvfp4_scale_clipped = 0;
+
 __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float vals[kSFVecSize],
                                                                      float local_absmax,
                                                                      uint8_t* packed_out_row, int k_group,
                                                                      uint8_t* sfa_target) {
     // Encode UE4M3 scale (positive — `float_to_fp8_e4m3` handles clamp + rounding
     // and returns sign=0 for non-negative input, which is a valid UE4M3 byte).
+    if (local_absmax > 2688.0f)
+        g_nvfp4_scale_clipped = 1u;
+
     float scale_f = local_absmax / 6.0f;
     uint8_t ue4m3 = float_to_fp8_e4m3(scale_f);
 
@@ -847,5 +871,21 @@ size_t gemm_nvfp4_cutlass_sm120_fp32_workspace(int M, int N, int K) {
 }
 
 bool cutlass_sm120_nvfp4_available() { return true; }
+
+// Read the clip flag once and say so. Called from gemm_cleanup(), i.e. at
+// engine shutdown: the event is a "should never happen", and reporting it there
+// keeps the check out of every prefill. A cudaMemcpyFromSymbol synchronises,
+// which is why it does not sit on the hot path (#1544).
+void nvfp4_report_scale_clipping() {
+    unsigned int clipped = 0;
+    if (cudaMemcpyFromSymbol(&clipped, g_nvfp4_scale_clipped, sizeof(clipped)) != cudaSuccess ||
+        clipped == 0)
+        return;
+    IMP_LOG_WARN(
+        "[NVFP4] at least one activation micro-block had absmax above the UE4M3 scale ceiling "
+        "(448 * 6 = 2688) during this run: its block scale was clipped, so those values were "
+        "quantised against a scale that is too small (#1544). Measured headroom when this check "
+        "was added: Gemma-4-12B reached 2468, 92%% of the ceiling.");
+}
 
 }  // namespace imp

@@ -187,6 +187,23 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A clipped NVFP4 activation scale was silent** (#1544). The dynamic quantiser
+  encodes the per-16-block scale as `absmax/6` into UE4M3, which saturates at
+  448 - so a block with `absmax > 2688` quantises against a scale that is too
+  small, and `float_to_fp8_e4m3` clamps and returns without a word. Measured,
+  largest per-16-block absmax over a 4096-token prefill:
+
+  | model | largest block absmax | of the 2688 ceiling |
+  |---|---|---|
+  | Gemma-4-12B-NVFP4 | 2468 | **92%** |
+  | Nemotron-3-Nano-30B-A3B-NVFP4 | < 1500 | < 56% |
+
+  It does not fire on these models; the headroom on Gemma-4 is 8%. A device flag
+  records a crossing and `gemm_cleanup()` reports it at shutdown, so it stops
+  being silent. The per-tensor global scale that would remove the ceiling is not
+  in here - that changes the quantiser's numerics and needs its own equivalence
+  test.
+
 - **Three API-contract tests could have run in CI all along, and two passed
   vacuously** (#1600). The `Real API contract` lane selects `-m nomodel`;
   measured against the same model-less server it runs, 63 of 126 tests pass but
