@@ -180,6 +180,36 @@ there instead of retelling it.
 
 ### Fixed
 
+- **gpt-oss tool calls were dropped entirely** (#1716). Harmony's envelope is a
+  channel with a recipient, not a tag:
+
+  ```
+  <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Berlin"}<|call|>
+  ```
+
+  `parse_tool_calls()` dispatched on family and had no `HARMONY` branch, so the
+  call fell through to the ChatML `<tool_call>` scanner and disappeared: the
+  response carried an **empty `content` with `finish_reason: "stop"`** while the
+  model's own `reasoning_content` read *"We should call get_weather with city:
+  Berlin"*. Measured on `gpt-oss-20b-mxfp4`, `tool_choice: "auto"`, 10 requests
+  per row:
+
+  | path | before | after |
+  |---|---|---|
+  | `/v1/chat/completions` | 0 / 10 | **10 / 10** |
+  | the same, streaming | 0 / 10 | **10 / 10** |
+
+  Two separate places had to change, and the second is why a green unit test of
+  the parser was not enough: `split_harmony_channels()` consumes the channels
+  ~60 lines before the tool parse runs, so by then there was nothing left to
+  find. The raw text is kept for it. The streaming router had the same shape -
+  it routed by channel name alone, and `commentary to=functions.get_weather`
+  matched neither the reasoning nor the content branch.
+
+  Controls, all unchanged: no tools (streaming and not) still answers `4` with
+  `finish_reason: "stop"`; tools present but no call wanted still answers
+  `banana` with no `tool_calls` key.
+
 - **Pool growth allocated past every I2 instrument, and the staging ring cost
   more than it saved** (#1649, #1653). Two memory costs nothing was measuring.
 

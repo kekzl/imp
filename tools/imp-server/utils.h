@@ -280,10 +280,21 @@ void strip_channel_headers(std::string& text);
 // segments and returns the reasoning (= "thought" channel) separately from the
 // user-facing content (= "final" channel + any pre-channel text). Bodies are
 // preserved verbatim minus the markers/header names. Each segment is trimmed.
+// One Harmony tool call: `<|channel|>commentary to=functions.NAME ...
+// <|message|>{args}<|call|>`. Only split_harmony_channels() fills this.
+struct HarmonyToolCall {
+    std::string name;       // the part after "functions."
+    std::string arguments;  // the message body, verbatim
+};
+
 struct ChannelSegments {
     std::string reasoning;  // "thought" channel(s)
     std::string content;    // "final" channel(s) + un-channeled text
     std::string other;      // any unrecognised channel name (debug)
+    // Harmony only: bodies addressed to a function recipient. These used to
+    // land in `other`, which nothing reads, so a gpt-oss tool call was
+    // silently dropped and the response carried an empty content (#1716).
+    std::vector<HarmonyToolCall> tool_calls;
 };
 ChannelSegments split_channel_segments(const std::string& text);
 

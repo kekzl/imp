@@ -88,6 +88,13 @@ inline constexpr size_t kGemmaQuoteLen = 5;
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_gemma(
     const std::string& text, std::atomic<int>& next_tool_call_id);
 
+// Harmony (gpt-oss): the call is a channel, not a tag —
+//   <|channel|>commentary to=functions.NAME <|constrain|>json<|message|>{args}<|call|>
+// Everything else in the text is left alone; split_harmony_channels() does the
+// channel walk, this only turns its recipients into ParsedToolCall.
+std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_harmony(
+    const std::string& text, std::atomic<int>& next_tool_call_id);
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(
     imp::ChatTemplateFamily family, const std::string& text, std::atomic<int>& next_tool_call_id,
     const std::vector<std::string>& known_tool_names = {});

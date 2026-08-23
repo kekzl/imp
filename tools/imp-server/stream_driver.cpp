@@ -108,17 +108,36 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // current channel's bytes so a token that splits a multibyte char is not
     // emitted mid-codepoint (#760).
     const bool harmony = (tpl_family == imp::ChatTemplateFamily::HARMONY);
-    std::string hm_channel, hm_name, hm_buf;
-    bool hm_in_msg = false, hm_reading_name = false;
+    std::string hm_channel, hm_name, hm_buf, hm_recipient, hm_args;
+    bool hm_in_msg = false, hm_reading_name = false, hm_call_open = false;
     auto hm_flush = [&](bool force) -> bool {
         size_t complete = force ? hm_buf.size() : utf8_complete_len(hm_buf);
         if (complete == 0)
             return true;
         std::string chunk = hm_buf.substr(0, complete);
         hm_buf.erase(0, complete);
+        // A channel addressed to `functions.NAME` is a tool call, not text
+        // (#1716). Its body used to be routed by channel name alone, and
+        // "commentary to=functions.get_weather" matched neither the reasoning
+        // nor the content branch, so the arguments fell out of the stream.
+        if (hm_call_open) {
+            hm_args += chunk;
+            return d.on_call_args_delta(chunk);
+        }
         if (hm_channel == "analysis" || hm_channel == "commentary")
             return d.harmony_reasoning_on ? d.emit_reasoning(chunk) : true;
         return d.emit_text(chunk);
+    };
+    // Close an open call: record the arguments and let the dialect close its
+    // frame, exactly as the tag path does at CALL_END.
+    auto hm_close_call = [&]() -> bool {
+        if (!hm_call_open)
+            return true;
+        hm_call_open = false;
+        if (!out.tool_calls.empty())
+            out.tool_calls.back().arguments = hm_args;
+        hm_args.clear();
+        return d.on_call_end(out.tool_calls.empty() ? nullptr : &out.tool_calls.back());
     };
 
     // Flush confirmed holdback text up to a byte position, one emission per
@@ -305,7 +324,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         // special-token pieces.
         if (harmony) {
             if (piece == "<|channel|>" || piece == "<|message|>" || piece == "<|end|>" ||
-                piece == "<|return|>" || piece == "<|start|>") {
+                piece == "<|return|>" || piece == "<|start|>" || piece == "<|call|>") {
                 if (hm_in_msg && !hm_flush(/*force=*/true))
                     return false;
                 if (piece == "<|channel|>") {
@@ -313,15 +332,47 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                     hm_in_msg = false;
                     hm_name.clear();
                 } else if (piece == "<|message|>") {
+                    // The header is `NAME [to=RECIPIENT] [<|constrain|>FMT]`.
+                    // Splitting on whitespace is what separates the channel
+                    // from the recipient; taking the whole string as the name
+                    // is how the call used to disappear.
                     size_t s = hm_name.find_first_not_of("\n\r\t ");
-                    size_t e = hm_name.find_last_not_of("\n\r\t ");
-                    hm_channel = (s == std::string::npos) ? std::string() : hm_name.substr(s, e - s + 1);
+                    hm_recipient.clear();
+                    if (s == std::string::npos) {
+                        hm_channel.clear();
+                    } else {
+                        size_t sp = hm_name.find_first_of("\n\r\t ", s);
+                        hm_channel = hm_name.substr(s, sp == std::string::npos ? std::string::npos : sp - s);
+                        const size_t to = hm_name.find("to=functions.", s);
+                        if (to != std::string::npos) {
+                            const size_t b = to + 13;
+                            size_t e2 = hm_name.find_first_of("\n\r\t <", b);
+                            hm_recipient = hm_name.substr(b, e2 == std::string::npos ? std::string::npos
+                                                                                     : e2 - b);
+                        }
+                    }
                     hm_reading_name = false;
                     hm_in_msg = true;
-                } else {  // <|end|> / <|return|> / <|start|>: close the block
+                    if (!hm_recipient.empty()) {
+                        ParsedToolCall tc;
+                        tc.name = hm_recipient;
+                        tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+                        if (!flush_buffered_content())
+                            return false;
+                        out.tool_calls.push_back(std::move(tc));
+                        out.tool_calls_emitted = true;
+                        hm_call_open = true;
+                        hm_args.clear();
+                        if (!d.on_call_begin(out.tool_calls.back()))
+                            return false;
+                    }
+                } else {  // <|end|> / <|return|> / <|start|> / <|call|>: close
+                    if (!hm_close_call())
+                        return false;
                     hm_in_msg = false;
                     hm_reading_name = false;
                     hm_channel.clear();
+                    hm_recipient.clear();
                 }
                 continue;
             }
