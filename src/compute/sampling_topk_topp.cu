@@ -557,13 +557,33 @@ struct CubSortScratch {
 
 static CubSortScratch s_cub_scratch;
 
-// CUB-based top-k sampling for k > MAX_TOP_K.
-static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int top_k, float top_p,
-                                    float inv_temperature, unsigned int seed, int32_t* d_result,
-                                    cudaStream_t stream) {
+// Initialise the softmax accumulators on the device (#1654). They used to be
+// two `cudaMemcpyAsync` from function-local `int`/`float`, which is only safe
+// because the enclosing function synchronised before returning. The enqueue
+// form below does not, and a stack address that outlives its frame is the kind
+// of bug that reproduces once a month.
+__global__ void init_cub_max_sum_kernel(float* __restrict__ d_max_sum) {
+    if (threadIdx.x == 0) {
+        d_max_sum[0] = -FLT_MAX;
+        d_max_sum[1] = 0.0f;
+    }
+}
+
+// CUB-based top-k sampling for k > MAX_TOP_K. ENQUEUE ONLY: everything below
+// runs on `stream`, nothing reads back and nothing synchronises, so a caller can
+// queue one of these per sequence and gather every token with a single pinned
+// D2H at the end (#1654). Returns false when the scratch is unavailable.
+//
+// It was already all-async internally; only the trailing readback forced the
+// sync, and that one readback is why crossing MAX_TOP_K dropped aggregate
+// throughput 14.5% at six concurrent sequences - one host round trip per
+// sequence per step instead of one for the batch.
+static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, int top_k, float top_p,
+                                         float inv_temperature, unsigned int seed, int32_t* d_result,
+                                         cudaStream_t stream) {
     if (!s_cub_scratch.ensure(vocab_size, stream)) {
         IMP_LOG_ERROR("CUB sort scratch allocation failed for vocab_size=%d", vocab_size);
-        return 0;
+        return false;
     }
 
     auto& sc = s_cub_scratch;
@@ -571,14 +591,8 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
     // Step 1: Compute softmax stats (max, then sum) entirely on device.
     // All intermediate values stay in d_max_sum — no D2H syncs needed.
     // d_max_sum[0] = global max, d_max_sum[1] = sum of exp.
-    float neg_inf_val = -FLT_MAX;
-    int neg_inf_bits;
-    std::memcpy(&neg_inf_bits, &neg_inf_val, sizeof(int));
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(sc.d_max_sum, &neg_inf_bits, sizeof(int), cudaMemcpyHostToDevice, stream));
-    float zero = 0.0f;
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(sc.d_max_sum + 1, &zero, sizeof(float), cudaMemcpyHostToDevice, stream));
+    init_cub_max_sum_kernel<<<1, 1, 0, stream>>>(sc.d_max_sum);
+    IMP_CUDA_CHECK_LAUNCH();
 
     int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
 
@@ -639,7 +653,7 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
                 "sample_topk_topp_cub: CUB sort failed (%s) for vocab=%d top_k=%d — no token "
                 "sampled",
                 cudaGetErrorString(rc), vocab_size, top_k);
-            return 0;
+            return false;
         }
     }
 
@@ -647,11 +661,19 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
     topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(sc.d_keys_out, sc.d_vals_out, top_k, top_p, seed,
                                                         d_result);
     IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
 
+// Synchronous wrapper, for the callers that want the token in hand.
+static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int top_k, float top_p,
+                                    float inv_temperature, unsigned int seed, int32_t* d_result,
+                                    cudaStream_t stream) {
+    if (!sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
+                                      stream))
+        return 0;
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
-
     return h_result;
 }
 
@@ -725,11 +747,17 @@ bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float 
     // tokens for the same logits/seed).
     if (top_k <= 0 || top_k > vocab_size)
         top_k = vocab_size;
-    if (top_k > MAX_TOP_K)
-        return false;  // CUB regime syncs internally — caller uses the sync variant
     if (temperature <= 0.0f)
         temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
+
+    // The CUB regime enqueues like any other now (#1654). It used to return
+    // false here and send the caller to the synchronous variant, which cost one
+    // host round trip per sequence per step: 14.5% of aggregate throughput at
+    // six concurrent sequences, for a top_k one candidate over the limit.
+    if (top_k > MAX_TOP_K)
+        return sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
+                                            d_result, stream);
 
     launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
     return true;
@@ -742,15 +770,23 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float
 
     if (top_k <= 0 || top_k > vocab_size)
         top_k = vocab_size;
-    if (top_k > MAX_TOP_K) {
-        IMP_LOG_WARN("top_k=%d exceeds MAX_TOP_K=%d, clamping", top_k, MAX_TOP_K);
-        top_k = MAX_TOP_K;
-    }
     if (temperature <= 0.0f)
         temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
+    // No clamp (#1654). This used to cut top_k down to MAX_TOP_K with a warning,
+    // so a request with top_k=200 sampled from 128 candidates when it was alone
+    // in the batch and from 200 when it shared the batch with another sequence -
+    // the same request, two distributions, decided by its neighbours. The CUB
+    // path enqueues now, so both honour what was asked.
+    if (top_k > MAX_TOP_K) {
+        if (!sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
+                                          stream))
+            return;
+    } else {
+        launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
+                                    stream);
+    }
 
     // Async copy to mapped pinned memory — no sync needed.
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
