@@ -102,6 +102,22 @@ public:
     bool supports_tools() const;
     const std::string& default_system_message() const { return default_system_message_; }
 
+    // The rendered prompt, before tokenisation - what apply_jinja() feeds to
+    // tokenize_rendered().
+    //
+    // Public so a golden can compare imp's render against an HF reference
+    // byte-for-byte WITHOUT a real vocabulary, which is what lets those goldens
+    // run in the CPU lane with no model and no skips (#1572). It is the
+    // production path, not a parallel one: apply_jinja() calls this. The
+    // pre-existing Harmony golden drove jinja::Template directly and rebuilt
+    // this context by hand, so the context builder - where the thinking flags,
+    // bos/eos stamping and message shaping live - was outside every golden.
+    //
+    // Empty when no Jinja template is driving (hardcoded families, RAW).
+    std::string render_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                             bool add_generation_prompt = true, bool suppress_thinking = false,
+                             bool force_thinking = false) const;
+
     // Special token accessors (for banned token list)
     int32_t im_start_id() const { return im_start_id_; }
     int32_t start_header_id() const { return start_header_id_; }
