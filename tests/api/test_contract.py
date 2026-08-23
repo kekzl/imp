@@ -97,7 +97,9 @@ class TestContextProbes:
         # All three conventions must report the same window.
         models = client.get("/v1/models").json()["data"]
         if not models:
-            return
+            # `return` here made this a silent pass on a model-less server -
+            # indistinguishable from three probes that agreed (#1600).
+            pytest.skip("no model loaded: nothing to compare the three probes against")
         max_model_len = models[0]["max_model_len"]
         assert client.get("/props").json()["n_ctx"] == max_model_len
         assert client.get("/info").json()["max_total_tokens"] == max_model_len
@@ -140,6 +142,8 @@ class TestChatCompletionsSchema:
         assert usage["completion_tokens"] > 0
         assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
 
+    # Holds model-less too: the error envelope is JSON by invariant (#1600).
+    @pytest.mark.nomodel
     def test_content_type_json(self, client, model):
         r = client.post("/v1/chat/completions", json={
             "model": model,

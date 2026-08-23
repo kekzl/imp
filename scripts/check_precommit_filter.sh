@@ -11,6 +11,10 @@
 # The filter is READ OUT OF the hook rather than copied here. A guard with its
 # own copy of the expression guards the copy.
 #
+# Guards the pre-push hook's filter as well: it strips the same extensions before
+# deciding whether to run verify-fast, and it gates on a card shared with another
+# session, so over-gating there is not free either.
+#
 # Usage: check_precommit_filter.sh <repo-root>
 # Exit 0 = every case below lands on the expected side.
 
@@ -73,5 +77,47 @@ if [ "$bad" -ne 0 ]; then
     exit 1
 fi
 
-echo "check_precommit_filter: $(echo "$cases" | wc -l) case(s) match the pre-commit filter"
+# --- the pre-push hook strips the same extensions -------------------------
+PUSH="$ROOT/scripts/pre-push.hook"
+if [ -f "$PUSH" ]; then
+    PDROP=$(grep -m1 -- "grep -vE '\\\\." "$PUSH" | sed "s/.*grep -vE '//; s/' .*//")
+    if [ -z "$PDROP" ]; then
+        echo "check_precommit_filter: could not read the extension filter out of $PUSH" >&2
+        exit 1
+    fi
+    for f in tests/CLAUDE.md tools/kernel_resources.py tests/api/test_chat.py; do
+        if printf '%s\n' "$f" | grep -qE "$PDROP"; then :; else
+            echo "check_precommit_filter: pre-push would gate '$f' (docs/scripts cannot move a number)" >&2
+            exit 1
+        fi
+    done
+    for f in src/model/jinja.cpp tools/imp-server/webui/index.html; do
+        if printf '%s\n' "$f" | grep -qE "$PDROP"; then
+            echo "check_precommit_filter: pre-push would SKIP '$f' — that is buildable source" >&2
+            exit 1
+        fi
+    done
+fi
+
+# --- the INSTALLED hook is a copy -----------------------------------------
+# `make install-hooks` copies scripts/pre-commit.hook into .git/hooks/. Editing
+# the repo copy changes nothing until that runs again, so a shipped hook fix can
+# sit inactive on the machine that shipped it - which is how the #1723 filter
+# was still gating .py locally after it had merged. It also fires while a branch
+# that edits a hook is checked out without installing it - same true statement,
+# same fix. Absent (a fresh clone, CI) is fine; present and different is not.
+for h in pre-commit pre-push; do
+    INSTALLED="$ROOT/.git/hooks/$h"
+    [ -f "$INSTALLED" ] || continue
+    if ! cmp -s "$INSTALLED" "$ROOT/scripts/$h.hook"; then
+        echo "check_precommit_filter: .git/hooks/$h differs from scripts/$h.hook — what runs is" >&2
+        echo "  not what this tree says. Either the installed copy predates a merged hook change" >&2
+        echo "  (the case this exists for: #1723 shipped and kept gating .py locally), or you are" >&2
+        echo "  on a branch whose hook edit is not installed. Both resolve the same way:" >&2
+        echo "    make install-hooks" >&2
+        exit 1
+    fi
+done
+
+echo "check_precommit_filter: $(echo "$cases" | wc -l) pre-commit case(s), 5 pre-push case(s), installed hooks current"
 exit 0

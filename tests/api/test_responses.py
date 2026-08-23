@@ -69,6 +69,8 @@ class TestResponsesNonStream:
         args = json.loads(fc["arguments"])
         assert isinstance(args, dict)
 
+    # Validation runs before model resolution, so this holds model-less (#1600).
+    @pytest.mark.nomodel
     def test_stateful_fields_rejected(self, model):
         with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
             r = c.post("/v1/responses", json={
@@ -114,6 +116,11 @@ class TestResponsesStream:
                 for line in r.iter_lines():
                     if line.startswith("data: "):
                         seqs.append(json.loads(line[6:])["sequence_number"])
+        # Without this the test passes on an EMPTY stream: [] == sorted([]) and
+        # 0 == 0. That is how it "passed" against a model-less server, and it
+        # would pass the same way here if the stream ever came back empty
+        # (#1600).
+        assert seqs, "no SSE data frames arrived — nothing to check monotonicity on"
         assert seqs == sorted(seqs)
         assert len(set(seqs)) == len(seqs)
 
