@@ -180,6 +180,38 @@ there instead of retelling it.
 
 ### Fixed
 
+- **No committed artifact carried a per-kernel register or spill number**
+  (#1549). The build never asked for resource usage, while 82 hand-set
+  `__launch_bounds__` in `src/` steer register allocation by hand and
+  `src/compute/CLAUDE.md` says never to add one blind.
+
+  `make kernel-resources` reads the **built library** with `cuobjdump
+  -res-usage`, so it needs no GPU and no special build flags - which is what
+  makes a register-pressure gate possible in CI at all, where every throughput
+  gate is impossible. Measured on the current build:
+
+  | | |
+  |---|---|
+  | kernels | 823 |
+  | at risk (REG >= 240 or a local frame) | **71** |
+  | sitting exactly at the 255 ceiling | **6** |
+  | with a non-zero local frame | 70 |
+
+  The six at the ceiling are `gdn_scan_chunkwise_kernel`,
+  `gdn_scan_fused_kernel` and `fmha_sm120_fa2_kernel` - the GDN scan and the FA2
+  prefill, both hot. **No kernel spills today** (`LOCAL` is 0 everywhere), so the
+  pin is a keep-it-that-way ratchet rather than a list of debt.
+
+  `tools/kernel_resource_baseline.txt` is a **two-way ratchet**, like
+  `tools/alloc_allowlist.txt`: a kernel that starts spilling fails, and so does
+  a pinned kernel that improved, so the list cannot go stale in either
+  direction. Verified against all three drifts - a new entry, a stale entry and
+  a moved number - each failing with the kernel named.
+
+  Runs in the CI `Build` job, the one required context, right after the build.
+  `verify-fast` compares throughput at 8 %; one kernel dropping over the
+  register cliff inside a 48-layer forward is far below that.
+
 - **Pool growth allocated past every I2 instrument, and the staging ring cost
   more than it saved** (#1649, #1653). Two memory costs nothing was measuring.
 

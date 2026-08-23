@@ -18,7 +18,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -498,6 +498,26 @@ check-ptx-fallback:
 # cudaMallocHost/cudaHostAlloc<->cudaFreeHost. Host-only, no Docker.
 check-alloc-pairs:
 	@python3 tools/check_alloc_pairs.py
+
+# Per-kernel registers and local frame on sm_120a (#1549). cuobjdump reads the
+# BUILT artifact, so this needs no GPU and no special build flags - but it does
+# need the CUDA toolkit, which only the builder image has. Uses build-dev
+# (make dev) when present, build (make build) otherwise.
+KERNEL_RES_LIB = $$(test -f build/libimp.a && echo build/libimp.a || echo build-dev/libimp.a)
+kernel-resources-dump:
+	@test -f build/libimp.a -o -f build-dev/libimp.a || { \
+	  echo "kernel-resources: no libimp.a - run 'make dev' or 'make build' first" >&2; exit 2; }
+	@docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
+	  '/usr/local/cuda/bin/cuobjdump -res-usage /src/'"$(KERNEL_RES_LIB)"' 2>/dev/null'
+
+kernel-resources: 
+	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py -
+
+kernel-resources-update:
+	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py - --update
+
+kernel-resources-stats:
+	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py - --stats
 
 # Every pair the checker resolved, matched or not. Never fails.
 alloc-pairs-list:

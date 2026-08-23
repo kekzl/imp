@@ -78,6 +78,24 @@ if want alloc; then
     run "allocate/free API pairing"             python3 tools/check_alloc_pairs.py
 fi
 
+# Needs a BUILT artifact plus cuobjdump, unlike every other gate here, which is
+# source-derived. Skips rather than fails when the build is absent so a fresh
+# checkout still gets the rest of the list; CI runs it unconditionally in the
+# `Build` job, where both halves exist.
+if want kernels; then
+    echo "== Kernel resources =="
+    KRES_LIB=""
+    [ -f build/libimp.a ] && KRES_LIB=build/libimp.a
+    [ -z "$KRES_LIB" ] && [ -f build-dev/libimp.a ] && KRES_LIB=build-dev/libimp.a
+    if [ -z "$KRES_LIB" ]; then
+        echo "  (skipped: no libimp.a — run 'make dev' or 'make build' first)"
+    elif ! command -v cuobjdump >/dev/null 2>&1 && ! docker image inspect imp:builder >/dev/null 2>&1; then
+        echo "  (skipped: no cuobjdump and no imp:builder image)"
+    else
+        run "registers + local frame vs the pin" make -s kernel-resources
+    fi
+fi
+
 if want launchguards; then
     echo "== Launch guards =="
     run "post-launch check gate"                python3 tools/check_launch_guards.py
