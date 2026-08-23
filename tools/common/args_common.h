@@ -42,6 +42,11 @@ struct CommonArgs {
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron, gemma
     std::string mmproj_path;             // --mmproj: vision encoder GGUF
 
+    // --json: stdout carries EXACTLY one JSON document and nothing else, so a
+    // caller can pipe it into jq without a regex over a column layout that is
+    // not a contract (#1583). Everything human-readable goes to stderr.
+    bool json_out = false;
+
     bool mem_report = false;      // --mem-report: full VRAM attribution table at init
     int vram_budget_mb = 0;       // --vram-budget: hard per-process VRAM cap in MiB (0 = uncapped)
     int min_kv_tokens = 0;        // --min-kv-tokens: floor KV capacity (0 = auto)
