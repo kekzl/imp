@@ -138,6 +138,38 @@ For each kernel, extract:
 
 Compare against the published peak for SM120 for that precision/op. The gap is the headroom.
 
+### Register pressure without a GPU
+
+Register pressure is the one item on that list you do not need a device for.
+`cuobjdump -res-usage` reads the **compiled library**, so it works in CI, in a
+container with no card, and against any build:
+
+```
+make kernel-resources         # check the pinned kernels
+make kernel-resources-stats   # totals only
+make kernel-resources-update  # re-pin, deliberately
+```
+
+| field | meaning |
+|---|---|
+| `REG` | registers per thread. **255 is the hardware ceiling** - ptxas spills past it |
+| `STACK` | per-thread local frame in bytes. Non-zero = state in local memory |
+| `LOCAL` | separately declared local memory |
+
+On the current build: **823 kernels, 71 at risk, 6 sitting exactly at 255**
+(`gdn_scan_chunkwise_kernel`, `gdn_scan_fused_kernel`, `fmha_sm120_fa2_kernel`)
+and 70 with a non-zero local frame. `tools/kernel_resource_baseline.txt` pins
+those 71 as a **two-way ratchet**: a kernel that starts spilling fails the gate,
+and so does a pinned kernel that improved, so the list cannot go stale in either
+direction.
+
+This is the gate the throughput gates cannot be. `verify-fast` compares decode
+and prefill at an 8 % threshold; one kernel dropping over the register cliff
+inside a 48-layer forward is far below that, and would ship silently. It also
+makes the 82 hand-set `__launch_bounds__` auditable - `src/compute/CLAUDE.md`
+says never to add one blind, and until #1549 the measurement that sentence
+demands did not exist in the tree.
+
 ---
 
 ## Phase 4: Findings & Prioritized Action List
