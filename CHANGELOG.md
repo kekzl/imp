@@ -180,6 +180,37 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Pool growth allocated past every I2 instrument, and the staging ring cost
+  more than it saved** (#1649, #1653). Two memory costs nothing was measuring.
+
+  `Backend::commit()` and `commit_range()` acquire physical memory on a growable
+  region exactly as `acquire()` does, and neither consulted the phase guard - so
+  a growable KV pool committing pages under load was counted by none of the
+  three I2 instruments. Both are non-virtual wrappers around
+  `do_commit()` / `do_commit_range()` now, for the reason `acquire()` wraps
+  `do_acquire()`: a backend cannot forget the guard. The guard runs on the
+  **delta actually committed**, not on the request, which overstates; shrinking
+  is not counted.
+
+  The pinned staging ring for the weight upload was `4 x 128 MiB`, two constants
+  that had never been varied, and pinning 512 MiB of host memory cost 503 ms to
+  acquire and 115 ms to release against the 208 ms of H2D the ring exists to
+  overlap. Swept on `Qwen3-8B-Q8_0`, load time only, 3 starts per point:
+
+  | ring x chunk | 4x128 | 4x32 | 2x64 | 2x32 | 4x16 | 4x8 | **4x4** | 4x2 | 8x8 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | median load | 4.55 s | 4.16 | 4.12 | 4.00 | 4.00 | 3.93 | **3.84** | 3.96 | 3.93 |
+
+  Monotone down to 4 MiB and back up at 2: the pinning cost dominates the
+  overlap the whole way, and below 4 MiB the per-chunk event pairs cost more
+  than the pinning saves. Confirmed against the old default over 5 alternating
+  starts each - **4.55 s against 3.87 s, ranges not overlapping** - so the
+  default is `4 x 4 MiB`, **-0.68 s (-14.9 %) of every process start** and
+  512 MiB of pinned host memory down to 16.
+
+  A pair of keys (`vram.upload_ring_depth`, `vram.upload_ring_chunk_mib`) rather
+  than constants, because the optimum is a property of the host's pinning cost.
+
 - **`tool_choice` degraded to a prompt hint on every family but ChatML, and
   `/v1/messages` returned thinking nobody asked for** (#1592, #1541). Two ways
   the API answered something other than what the request said.

@@ -189,6 +189,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     F("vram.kv_fraction", cfg.vram.kv_fraction);
     I("vram.reserve_floor_pct", cfg.vram.reserve_floor_pct);
     I("vram.library_reserve_mb", cfg.vram.library_reserve_mb);
+    I("vram.upload_ring_depth", cfg.vram.upload_ring_depth);
+    I("vram.upload_ring_chunk_mib", cfg.vram.upload_ring_chunk_mib);
     S("vram.library_reserve_cache", cfg.vram.library_reserve_cache);
 
     // [attention]

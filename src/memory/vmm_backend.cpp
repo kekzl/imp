@@ -127,7 +127,7 @@ public:
         return ok;
     }
 
-    MemError commit_range(Region& region, size_t offset, size_t bytes) override {
+    MemError do_commit_range(Region& region, size_t offset, size_t bytes) override {
         if (bytes == 0)
             return MemError::Ok;
         std::lock_guard<std::mutex> lock(mu_);
@@ -162,7 +162,7 @@ public:
         return MemError::Ok;
     }
 
-    MemError commit(Region& region, size_t new_committed) override {
+    MemError do_commit(Region& region, size_t new_committed) override {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = regions_.find(region.base());
         if (it == regions_.end())

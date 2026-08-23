@@ -42,7 +42,7 @@ public:
     explicit FakeBackend(size_t capacity_bytes = 0, bool growable = true);
     ~FakeBackend() override;
 
-    MemError commit(Region& region, size_t new_committed) override;
+    MemError do_commit(Region& region, size_t new_committed) override;
     BackendStats stats() const override;
     size_t capacity() const override { return capacity_; }
 

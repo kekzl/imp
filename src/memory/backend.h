@@ -181,7 +181,12 @@ public:
 
     // Grow/shrink a growable region in place, keeping `base()` stable.
     // Returns MemError::NotGrowable on backends that cannot (cudaMalloc).
-    virtual MemError commit(Region& region, size_t new_committed) = 0;
+    //
+    // Non-virtual, like acquire(): it consults the phase guard and then
+    // dispatches to do_commit(). A growable pool committing pages on the
+    // request path acquires physical memory exactly as acquire() does, and it
+    // used to be counted by none of the three I2 instruments (#1649).
+    MemError commit(Region& region, size_t new_committed);
 
     // Commit (or release) one interior range of a growable region.
     //
@@ -196,7 +201,9 @@ public:
     // share pages. The KV pool pads its per-layer strides for exactly that
     // reason: padding costs address space, which is free, and never physical
     // memory.
-    virtual MemError commit_range(Region& region, size_t offset, size_t bytes);
+    //
+    // Also non-virtual, and guarded, for the same reason as commit().
+    MemError commit_range(Region& region, size_t offset, size_t bytes);
     virtual MemError decommit_range(Region& region, size_t offset, size_t bytes);
 
     virtual BackendStats stats() const = 0;
@@ -210,6 +217,12 @@ protected:
     virtual MemError do_acquire(size_t bytes, size_t alignment, RegionTag tag, void** out_base,
                                 size_t* out_reserved) = 0;
     virtual void do_release(void* base, size_t committed, size_t reserved, RegionTag tag) = 0;
+
+    // Growth. `commit()`/`commit_range()` wrap these with the phase guard, so
+    // no backend can forget it - the same argument acquire()/do_acquire() makes
+    // above, applied to the entry points that grow rather than acquire.
+    virtual MemError do_commit(Region& region, size_t new_committed) = 0;
+    virtual MemError do_commit_range(Region& region, size_t offset, size_t bytes);
 
     // Growable acquisition. Default: unsupported.
     virtual MemError do_acquire_growable(size_t reserve_bytes, size_t initial_commit,

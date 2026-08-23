@@ -37,6 +37,12 @@ const char* process_diag_graph_dump_dir();    // nullptr when unset
 
 // Runtime modes
 bool process_diag_no_pdl();
+
+// Pinned staging ring for the weight upload (#1653). Depth and chunk size in
+// MiB; the defaults are 4 and 4. Load-time only - the ring is built once per
+// upload pass and destroyed with it.
+int process_diag_upload_ring_depth();
+int process_diag_upload_ring_chunk_mib();
 bool process_diag_no_vision_graph();
 // "global" | "relaxed" | "thread_local" (default "relaxed")
 const std::string& process_diag_graph_capture_mode();
