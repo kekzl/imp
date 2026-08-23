@@ -761,3 +761,45 @@ TEST(JinjaChatTest, GemmaRealTemplateNoSystem) {
     EXPECT_NE(result.find("<start_of_turn>user\nHello<end_of_turn>"), std::string::npos);
     EXPECT_NE(result.find("<start_of_turn>model\n"), std::string::npos);
 }
+
+// trim_blocks / lstrip_blocks (#1572). transformers renders every chat template
+// with both enabled, so a template written against HF and rendered without them
+// leaks one newline per block tag and every line's indentation into the prompt.
+TEST(JinjaTest, TrimBlocksEatsTheNewlineAfterABlockTag) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if true %}\nA{% endif %}\n"));
+    EXPECT_EQ(tpl.render({}), "A");
+}
+
+TEST(JinjaTest, LstripBlocksOnlyStripsALineIndent) {
+    Template tpl;
+    // The indent in front of the tag goes; the single space after `}}` stays,
+    // because it is not the start of a line.
+    ASSERT_TRUE(tpl.parse("X\n    {% if true %}\nY{% endif %}"));
+    EXPECT_EQ(tpl.render({}), "X\nY");
+
+    Template inline_tpl;
+    ASSERT_TRUE(inline_tpl.parse("{% for x in items %}{{ x }} {% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b"))});
+    EXPECT_EQ(inline_tpl.render({{"items", items}}), "a b ");
+}
+
+TEST(JinjaTest, IndentAfterAConsumedNewlineIsStillAnIndent) {
+    // The shape from Nemotron-3-Nano's template, and the one that made its
+    // render diverge by 20 spaces while the other eight families matched.
+    // trim_blocks eats the newline after `{% if %}` FIRST, so by the time the
+    // comment on the next line is reached the text token is bare indentation
+    // with no newline in it - deciding "is this a line indent" from the token's
+    // own contents says no, and the spaces reach the prompt.
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if true %}\n        {# c #}\nX{% endif %}"));
+    EXPECT_EQ(tpl.render({}), "X");
+}
+
+TEST(JinjaTest, LstripProbes) {
+    Template a, b;
+    ASSERT_TRUE(a.parse("A\n    {% if true %}B{% endif %}"));
+    EXPECT_EQ(a.render({}), "A\nB") << "indent before a plain block tag";
+    ASSERT_TRUE(b.parse("A\n    {# c #}\nB"));
+    EXPECT_EQ(b.render({}), "A\nB") << "indent before a comment";
+}

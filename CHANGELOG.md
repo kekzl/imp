@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Added
 
+- **Chat-template goldens for nine families** (#1572), rendered from the upstream
+  templates and compared byte-for-byte: ChatML (three checkpoints), Gemma, Llama 3,
+  Llama 2, Mistral V3, Nemotron, DeepSeek R1, Phi. Previously only Harmony had a
+  golden and the rest were structural smoke tests. `make chat-goldens` re-pins them.
+  The goldens compare the rendered prompt, not token IDs, so the whole set runs in
+  the CPU lane with no skips.
+
 - **Fuzz targets for the six parsers that take untrusted bytes** (#1620), in
   `fuzz/`: JSON Schema, regex, GBNF, the tool-call stream filter, the
   SafeTensors loader and `tokenizer.json`. Standard `LLVMFuzzerTestOneInput`
@@ -209,6 +216,13 @@ there instead of retelling it.
   Controls, all unchanged: no tools (streaming and not) still answers `4` with
   `finish_reason: "stop"`; tools present but no call wanted still answers
   `banana` with no `tool_calls` key.
+
+- **Jinja: `trim_blocks`, `lstrip_blocks` and the `safe` filter** (#1572). transformers
+  renders every chat template with both whitespace flags on; imp had neither, so a
+  template written against HF leaked one newline per block tag and every tag line's
+  indentation into the prompt. Nemotron-3-Nano rendered 20 stray spaces in front of
+  `<|im_start|>assistant`. `safe` was an unknown filter and dropped the value it
+  marked. All nine golden families now match the reference exactly.
 
 - **No committed artifact carried a per-kernel register or spill number**
   (#1549). The build never asked for resource usage, while 82 hand-set
