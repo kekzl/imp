@@ -180,6 +180,55 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Admission reserved for the prompt and the graph loop reserved for the
+  whole generation** (#1635, #1636, #1662). Three ways the KV pool promised
+  what it could not keep.
+
+  `Scheduler::schedule` tested `can_allocate(prompt)` and ignored `max_tokens`,
+  so a batch whose prompts all fit could run the pool dry mid-generation and
+  the loser was cancelled after the client had already received part of the
+  answer. It admits on prompt + `max_tokens` now, and the promise is **held**
+  (`imp_kv_blocks_reserved`, new gauge) until the blocks are written - a test
+  that is not held admits the next request against the same memory one round
+  later. On a pool too small to ever hold prompt + `max_tokens` the reserve is
+  clamped to the pool, which is the old behaviour: no admission rule can
+  promise memory that does not exist.
+
+  The trade, measured on `Qwen3-8B-Q8_0.gguf` with 8 concurrent
+  `max_tokens: 1024` requests: at the default pool it costs nothing (551.3
+  against 519.2 tok/s, inside the run spread). On a 150-block pool `main`
+  truncates one to two of the eight answers per run and reports them as
+  `finish_reason: "length"`, indistinguishable from a spent budget; this PR
+  finishes all eight at **228.5 against 526.3 tok/s**. The reserve is sized by
+  `max_tokens`, so the lever is `max_tokens`, and the server default of 8192 is
+  its worst case.
+
+  `can_allocate` also stopped counting live sequences as reclaimable. Its slow
+  path summed the LRU list on the assumption that `evict_lru()` could hand
+  those blocks back, while `evict_lru()` has had no production caller for
+  exactly the reason that freeing a live sequence's KV corrupts it.
+
+  `prepare_graph_loop` booked KV for the entire remaining generation before a
+  burst that is bounded to `speculative.miss_burst`, `runtime.decode_burst` or
+  16. Measured on `Qwen3-8B-Q8_0.gguf`, `max_tokens: 8192`, same 355-token
+  answer both ways:
+
+  | reservation | peak `imp_kv_blocks_live` |
+  |---|---|
+  | whole generation (before) | 514 |
+  | the burst (after) | **26** |
+
+  It was paid for out of the prefix cache, because `append_block` reclaims
+  cached blocks when the free pool is empty. On a 600-block pool with a warm
+  prefix, same 344-token answer: `imp_kv_blocks_cached` **176 -> 108** before,
+  **176 -> 198** after.
+
+  Third: a KV pool that does not fit halves and retries down to the 16-block
+  floor instead of failing the load, with a WARN per attempt naming planned,
+  retried and the shortfall in MiB. Everything that sizes that pool runs before
+  the allocation, so all of it is a projection - #1631 fixed one wrong one, and
+  #1662 shows that even a correct projection is not sufficient on its own.
+
 - **Two binaries returned exit 0 after doing no work** (#1584). `imp-bench`
   counted invocations rather than measurements, so a host with no CUDA device
   printed "Benchmarks run: 4" and exited 0 with nothing measured; every bench

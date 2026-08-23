@@ -96,6 +96,12 @@ the server log (#1640, #1641):
 
 `imp_requests_cancelled_total` remains client-disconnect only.
 
+`imp_kv_blocks_reserved` (gauge) is what admission has promised to running
+requests for the rest of their generation and not yet written (#1635). Free
+blocks minus this gauge is what the next request is admitted against, so a
+queue in front of a pool with free blocks is explained by this number and by
+nothing else in `/metrics`.
+
 ## Constrained decoding
 
 Four flavours, all enforced by masking at decode time rather than by

@@ -47,6 +47,8 @@ RequestTest.DefaultState
 RequestTest.StatusTransitions
 SchedulerTest.ACancelledQueueSchedulesNothing
 SchedulerTest.AddRemoveRapidly
+SchedulerTest.AdmissionClampsReserveToPoolSize
+SchedulerTest.AdmissionReservesGeneration
 SchedulerTest.AgingStopsALongPromptFromStarving
 SchedulerTest.AllRequestsTooLargeForMemory
 SchedulerTest.BasicPrefillThenDecode

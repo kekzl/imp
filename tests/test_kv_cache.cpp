@@ -477,6 +477,13 @@ TEST(KVCacheManagerTest, AllocationNeverEvictsLiveSequenceUnderPressure) {
 }
 
 // 18. ManagerCanAllocate
+//
+// The contract changed with #1635: a LIVE sequence's blocks are not a source
+// of memory. They used to be - can_allocate() summed the LRU list on the
+// assumption that evict_lru() could hand them back, while evict_lru() has had
+// no production caller for exactly the reason that freeing a live sequence's
+// KV corrupts it. So this test used to assert that a full pool could still
+// allocate 8 more blocks.
 TEST(KVCacheManagerTest, ManagerCanAllocate) {
     SKIP_IF_NO_CUDA();
 
@@ -486,19 +493,52 @@ TEST(KVCacheManagerTest, ManagerCanAllocate) {
     (void)mgr->allocate_blocks(1, 4);
     EXPECT_EQ(mgr->num_free_blocks(), 0);
 
-    // We have 0 free blocks, but can evict 4+4 = 8 blocks total.
-    // So can_allocate(4) should be true (eviction can recover enough).
-    EXPECT_TRUE(mgr->can_allocate(4));
-
-    // can_allocate(8) should also be true (evict everything).
-    EXPECT_TRUE(mgr->can_allocate(8));
-
-    // can_allocate(9) should be false -- even evicting all sequences only
-    // frees 8 blocks, which is less than 9.
-    EXPECT_FALSE(mgr->can_allocate(9));
+    // Nothing is free and nothing is cached: the answer is no, at any size.
+    EXPECT_FALSE(mgr->can_allocate(1));
+    EXPECT_FALSE(mgr->can_allocate(4));
+    EXPECT_FALSE(mgr->can_allocate(8));
 
     // Edge case: can_allocate(0) is trivially true.
     EXPECT_TRUE(mgr->can_allocate(0));
+
+    // Finishing a sequence is what returns its blocks.
+    mgr->free_sequence(0);
+    EXPECT_TRUE(mgr->can_allocate(4));
+    EXPECT_FALSE(mgr->can_allocate(5));
+}
+
+// 18b. A reservation is subtracted until the blocks are actually written.
+TEST(KVCacheManagerTest, DecodeReservationHoldsUnwrittenBlocks) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);
+
+    ASSERT_TRUE(mgr->allocate_blocks(0, 2));
+    EXPECT_EQ(mgr->num_free_blocks(), 6);
+    EXPECT_EQ(mgr->outstanding_reserved_blocks(), 0);
+
+    // Promise 6 blocks total; 2 are held, so 4 are outstanding.
+    mgr->set_decode_reservation(0, 6);
+    EXPECT_EQ(mgr->outstanding_reserved_blocks(), 4);
+    EXPECT_TRUE(mgr->can_allocate(2));
+    EXPECT_FALSE(mgr->can_allocate(3));
+
+    // Writing a promised block converts reserve into use - the total
+    // available to a second sequence does not move.
+    EXPECT_GE(mgr->append_block(0), 0);
+    EXPECT_EQ(mgr->outstanding_reserved_blocks(), 3);
+    EXPECT_TRUE(mgr->can_allocate(2));
+    EXPECT_FALSE(mgr->can_allocate(3));
+
+    // Overshooting the promise does not go negative.
+    for (int i = 0; i < 5; i++)
+        (void)mgr->append_block(0);
+    EXPECT_EQ(mgr->outstanding_reserved_blocks(), 0);
+
+    // free_sequence drops the reservation with the blocks.
+    mgr->free_sequence(0);
+    EXPECT_EQ(mgr->outstanding_reserved_blocks(), 0);
+    EXPECT_TRUE(mgr->can_allocate(8));
 }
 
 // 19. ManagerPrefixCaching -- legacy register/find/share_prefix removed.
@@ -876,17 +916,22 @@ TEST(KVCacheManagerTest, PinPrefixCanAllocateAccuracy) {
     (void)mgr->allocate_blocks(1, 4);
     EXPECT_EQ(mgr->num_free_blocks(), 0);
 
-    // Pin seq 0. Now only seq 1's 4 blocks are reclaimable via eviction.
+    // Pinning changes nothing here: neither sequence's blocks were ever a
+    // source can_allocate() may draw on while they are live (#1635).
     mgr->pin_prefix(0, 4);
 
-    EXPECT_TRUE(mgr->can_allocate(4));   // Can evict seq 1.
-    EXPECT_FALSE(mgr->can_allocate(5));  // Seq 0 is pinned, can't reclaim its blocks.
+    EXPECT_FALSE(mgr->can_allocate(1));
+    EXPECT_FALSE(mgr->can_allocate(4));
 
     mgr->unpin_prefix(0);
-    EXPECT_TRUE(mgr->can_allocate(8));  // Both sequences reclaimable now.
+    EXPECT_FALSE(mgr->can_allocate(1));
+
+    // A pin does survive free_sequence, so seq 0's blocks stay held while
+    // seq 1's come back.
+    mgr->free_sequence(1);
+    EXPECT_TRUE(mgr->can_allocate(4));
 
     mgr->free_sequence(0);
-    mgr->free_sequence(1);
 }
 
 // ============================================================================

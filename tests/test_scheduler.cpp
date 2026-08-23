@@ -103,28 +103,117 @@ TEST(SchedulerTest, RemovesFinishedRequests) {
 TEST(SchedulerTest, MemoryAwareScheduling) {
     SKIP_IF_NO_CUDA();
 
-    // Create a small KV cache with limited blocks
+    // Pool of 8 blocks = 128 tokens. Each request is a 32-token prompt
+    // (2 blocks) plus max_tokens=16 (1 block + the partial-block spare), so
+    // one reservation is 4 blocks and exactly two fit.
     auto cache = std::make_unique<KVCache>(
-        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);
+        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8);
 
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
     Scheduler sched(16);  // high batch size, but limited by memory
     sched.set_kv_manager(mgr.get());
 
-    // Each request with 32 tokens needs 2 blocks (kKVBlockSize=16)
     for (int i = 0; i < 5; i++) {
         auto req = std::make_shared<Request>();
+        req->id = i;                      // distinct KV sequences
         req->input_tokens.resize(32, i);  // 32 tokens = 2 blocks
+        req->max_tokens = 16;             // + 1 block + 1 spare
         sched.add_request(req);
     }
 
     std::vector<std::shared_ptr<Request>> prefill, decode;
     sched.schedule(prefill, decode);
 
-    // Only 2 requests should be admitted (2 blocks each = 4 blocks total)
     EXPECT_EQ(prefill.size(), 2u);
     EXPECT_TRUE(sched.has_pending());
+}
+
+// 10b. Admission reserves the generation, not just the prompt (#1635).
+//
+// Before the fix this admitted both requests: the test is `prompt fits`, and
+// four 2-block prompts fit an 8-block pool. The generation then ran the pool
+// dry and the loser was cancelled mid-stream, after the client had already
+// received part of the answer.
+TEST(SchedulerTest, AdmissionReservesGeneration) {
+    SKIP_IF_NO_CUDA();
+
+    // 16 blocks = 256 tokens. Each request: 32-token prompt (2 blocks) +
+    // max_tokens=64 (4 blocks + 1 spare) = 7 blocks reserved, so two fit and
+    // the third must queue.
+    //
+    // Three requests, not two: with two, the first request's reservation
+    // alone already starves the second, and the test would pass with the
+    // admission quantity mutated back to the prompt. The third is what the
+    // admission test has to see - free blocks say yes (10 left), the
+    // outstanding reservations say no.
+    auto cache = std::make_unique<KVCache>(
+        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/16);
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+
+    Scheduler sched(16);
+    sched.set_kv_manager(mgr.get());
+
+    std::vector<std::shared_ptr<Request>> reqs;
+    for (int i = 0; i < 3; i++) {
+        auto req = std::make_shared<Request>();
+        req->id = i;
+        req->input_tokens.resize(32, i);
+        req->max_tokens = 64;
+        reqs.push_back(req);
+        sched.add_request(req);
+    }
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    // Two admitted, one still queued - and none cancelled.
+    EXPECT_EQ(prefill.size(), 2u);
+    EXPECT_TRUE(sched.has_pending());
+    for (const auto& r : reqs)
+        EXPECT_NE(r->status, RequestStatus::CANCELLED);
+
+    // 12 blocks are free and 10 are promised: the free count on its own
+    // would have admitted the third.
+    EXPECT_EQ(mgr->num_free_blocks(), 12);
+    EXPECT_EQ(mgr->outstanding_reserved_blocks(), 10);
+
+    // When one finishes, its reservation goes with it.
+    mgr->free_sequence(reqs[0]->id);
+    reqs[0]->status = RequestStatus::FINISHED;
+    EXPECT_EQ(mgr->outstanding_reserved_blocks(), 5);
+
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(prefill.size(), 1u);
+    EXPECT_FALSE(sched.has_pending());
+}
+
+// 10c. A pool too small to ever hold prompt + max_tokens degrades to
+// prompt-only admission instead of queueing the request forever (#1635).
+TEST(SchedulerTest, AdmissionClampsReserveToPoolSize) {
+    SKIP_IF_NO_CUDA();
+
+    // 4 blocks = 64 tokens, against a 32-token prompt + max_tokens=256.
+    // The full reserve (2 + 17) never fits, so the clamp is what keeps this
+    // request servable at all.
+    auto cache = std::make_unique<KVCache>(
+        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+
+    Scheduler sched(16);
+    sched.set_kv_manager(mgr.get());
+
+    auto req = std::make_shared<Request>();
+    req->id = 0;
+    req->input_tokens.resize(32, 7);
+    req->max_tokens = 256;
+    sched.add_request(req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    EXPECT_EQ(prefill.size(), 1u);
+    EXPECT_NE(req->status, RequestStatus::CANCELLED);
 }
 // 11. Continuous batching: prefill priority over decode
 TEST(SchedulerTest, PrefillPriorityOverDecode) {

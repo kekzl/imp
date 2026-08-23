@@ -76,7 +76,26 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 int ctx_len = req->context_len();
                 const int bs = kv_manager_->kv_cache()->block_size();
                 int blocks_needed = (ctx_len + bs - 1) / bs;
-                if (!kv_manager_->can_allocate(blocks_needed)) {
+
+                // Admit on prompt + generation, not on the prompt alone
+                // (#1635). context_len() counts what exists NOW, so a batch
+                // whose prompts all fit could still run the pool dry mid-
+                // generation, and the loser is cancelled after the client has
+                // already received part of the answer. The grow branch below
+                // has computed the decode half correctly since it was written;
+                // the admission test above it did not read it.
+                //
+                // Clamped to the pool: on a cache too small to ever hold
+                // prompt + max_tokens (the 16-block floor case) the full
+                // reserve would queue every request forever. There the
+                // guarantee degrades to the old prompt-only admission rather
+                // than to a refusal, and the mid-stream cancel stays possible.
+                const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
+                const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
+                const int admit_blocks = std::min(blocks_needed + decode_blocks,
+                                                  std::max(blocks_needed, pool_blocks));
+
+                if (!kv_manager_->can_allocate(admit_blocks)) {
                     // If the request needs more blocks than the KV cache can
                     // ever hold, no eviction will free enough — leaving the
                     // request in pending_ would busy-loop the worker forever
@@ -106,7 +125,6 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         // block short, after paying for the growth. Measured on
                         // a 25 222-token prompt: grew 810 -> 1577 blocks, then
                         // refused.
-                        const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
                         cap = kv_manager_->kv_cache()->try_grow_to(blocks_needed + decode_blocks);
                     }
                     if (blocks_needed > cap) {
@@ -199,6 +217,20 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         continue;
                     }
                 }
+            }
+
+            if (kv_manager_) {
+                // Hold the promise, do not just test it. Without this the next
+                // request is admitted against the blocks this one has not
+                // written yet, which is the same over-admission one round
+                // later (#1635). It decays as the blocks are appended and is
+                // dropped by free_sequence().
+                const int bs = kv_manager_->kv_cache()->block_size();
+                const int prompt_blocks = (req->context_len() + bs - 1) / bs;
+                const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
+                const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
+                kv_manager_->set_decode_reservation(req->id, std::min(prompt_blocks + decode_blocks,
+                                                                      std::max(prompt_blocks, pool_blocks)));
             }
 
             auto r = *it;

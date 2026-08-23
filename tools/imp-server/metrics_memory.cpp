@@ -73,6 +73,14 @@ if (state.ctx && state.ctx->engine) {
             out += "# TYPE imp_kv_blocks_live gauge\n";
             out += "imp_kv_blocks_live " + std::to_string(total_blocks - free_blocks - cached) +
                    "\n";
+            // Promised at admission and not yet written (#1635). Free blocks
+            // minus this is what the next request is admitted against, and
+            // without it a queue behind a full-looking pool reads as a bug.
+            out +=
+                "# HELP imp_kv_blocks_reserved KV blocks promised to admitted requests for "
+                "their remaining generation, not yet written\n";
+            out += "# TYPE imp_kv_blocks_reserved gauge\n";
+            out += "imp_kv_blocks_reserved " + std::to_string(mgr->outstanding_reserved_blocks()) + "\n";
         }
 
         // Speculative decoding (#1321). Without these a spec-decoding test
