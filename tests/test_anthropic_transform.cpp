@@ -219,10 +219,16 @@ TEST(AnthropicCacheUsage, NoDetailsMeansZeroCacheFields) {
 // clamped to [0,1]. Without this mapping /v1/messages on a think-model could
 // never be told NOT to reason (the request's intent was silently dropped).
 
-TEST(AnthropicThinking, NoFieldLeavesThinkingUnset) {
+// Extended thinking is opt-in on this dialect (#1541). This test used to assert
+// the opposite - that no `thinking` field left both keys unset - which meant the
+// server default (think_budget = 0.5) applied and a reasoning model reasoned on
+// every /v1/messages request. The answer then arrived at content[1] with
+// content[0].text empty, for a client that never asked for thinking.
+TEST(AnthropicThinking, NoFieldMeansNoThinking) {
     json oai = anthropic_to_openai_body(base_request());
-    EXPECT_FALSE(oai.contains("enable_thinking"));
-    EXPECT_FALSE(oai.contains("think_budget"));
+    ASSERT_TRUE(oai.contains("enable_thinking"));
+    EXPECT_FALSE(oai.value("enable_thinking", true));
+    EXPECT_FLOAT_EQ(oai.value("think_budget", -1.0f), 0.0f);
 }
 
 TEST(AnthropicThinking, DisabledMapsToEnableThinkingFalseAndZeroBudget) {
@@ -261,14 +267,31 @@ TEST(AnthropicThinking, EnabledWithoutBudgetSetsNoBudget) {
     EXPECT_FALSE(oai.contains("think_budget"));
 }
 
-TEST(AnthropicThinking, UnknownTypeOrMalformedIsIgnored) {
+// An opt-in the server does not understand is not an opt-in. Both of these used
+// to leave the keys unset, which is the same defect one level down: the default
+// would have depended on a field nobody could parse.
+TEST(AnthropicThinking, UnknownTypeOrMalformedMeansNoThinking) {
     json req = base_request();
     req["thinking"] = json{{"type", "weird"}};
-    EXPECT_FALSE(anthropic_to_openai_body(req).contains("enable_thinking"));
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_FALSE(oai.value("enable_thinking", true));
+    EXPECT_FLOAT_EQ(oai.value("think_budget", -1.0f), 0.0f);
 
     json req2 = base_request();
     req2["thinking"] = "not-an-object";
-    EXPECT_FALSE(anthropic_to_openai_body(req2).contains("enable_thinking"));
+    json oai2 = anthropic_to_openai_body(req2);
+    EXPECT_FALSE(oai2.value("enable_thinking", true));
+    EXPECT_FLOAT_EQ(oai2.value("think_budget", -1.0f), 0.0f);
+}
+
+TEST(AnthropicThinking, AdaptiveTurnsItBackOn) {
+    // The one field that restores the old behaviour, and the shape current
+    // SDKs send.
+    json req = base_request();
+    req["thinking"] = json{{"type", "adaptive"}};
+    json oai = anthropic_to_openai_body(req);
+    EXPECT_TRUE(oai.value("enable_thinking", false));
+    EXPECT_FALSE(oai.contains("think_budget"));  // server default applies
 }
 
 // ---- tool_choice conversion + parallel_tool_calls (issue #892) -------------

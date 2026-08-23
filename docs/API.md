@@ -140,14 +140,52 @@ having to land an actual edit in a throwaway repository.
 `tool_choice` that contradicts the request is a `400`: naming a function absent
 from `tools`, or `"required"` with no tools.
 
+**`tool_choice` that this server cannot enforce is also a `400`** (#1592), with
+`code: "tool_choice_unenforceable"`. The decode FSM constrains the tool envelope
+only where the loaded model's chat template has a grammar for it:
+
+| `tool_choice` | enforced on |
+|---|---|
+| `"required"` | `chatml` |
+| a named function | `chatml`, `llama3` |
+| `"auto"` / `"none"` / absent | nothing to enforce, every family |
+
+On every other family the constraint used to degrade to a sentence in the prompt
+and the request was answered `200` with prose. Measured before the refusal, 10
+requests each at `temperature 0.7` with one `get_weather` function:
+
+| model | family | `tool_choice` | tool calls |
+|---|---|---|---|
+| gemma-3-12b Q4_K_M | `gemma` | `required` / named | **0 / 10** each |
+| gemma-4-26B Q4_K_M | `gemma` | `required` | **0 / 10** |
+| gpt-oss-20b MXFP4 | `harmony` | `required` / named | **0 / 10** each |
+| Qwen3-4B Q8_0 | `chatml` | `required` / named | 10 / 10 each |
+
+`"auto"` is untouched: Gemma-4 produced 1 of 10 there, and a best-effort call is
+what `auto` asks for.
+
 Reasoning models separate their chain of thought into `reasoning_content`
 (Anthropic: `thinking`) rather than emitting it as the answer. This holds on the
 streaming path too, which is where it was once wrong.
 
-**On `/v1/messages` that means `content[0]` is often not the text.** A reasoning
-model returns a `thinking` block first and the answer second, so a client reading
-`content[0].text` gets an empty string and concludes the model said nothing.
-Select by `type`:
+**On `/v1/messages`, thinking is opt-in** (#1541). A request without a `thinking`
+field gets no thinking block, so `content[0]` is the text - which is what the
+Anthropic dialect promises. Ask for it and the thinking block comes first, ahead
+of the answer, the way upstream orders it. Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
+
+| request `thinking` | `content` blocks | `content[0].text` |
+|---|---|---|
+| absent | `[text]` | `"Hi"` |
+| `{"type":"adaptive"}` | `[thinking, text]` | `""` |
+| `{"type":"adaptive","display":"omitted"}` | `[text]` | `"Hi"` |
+| `{"type":"disabled"}` | `[text]` | `"Hi"` |
+
+Only this dialect changed. On `/v1/chat/completions` the reasoning is a separate
+`reasoning_content` field, so nothing shifts an index and the server's
+`think_budget` default still applies.
+
+**When you do ask for thinking, `content[0]` is not the text.** Select by
+`type` rather than by index:
 
 ```python
 text = "".join(b["text"] for b in resp["content"] if b["type"] == "text")
@@ -156,16 +194,18 @@ text = "".join(b["text"] for b in resp["content"] if b["type"] == "text")
 Verified on Qwen3-8B-Q8_0: `content` = `[{type: thinking, ...}, {type: text,
 text: "The capital of France is Paris."}]`.
 
-### Turning thinking off
+### Turning thinking on and off
 
-Two request fields do it, and **either one alone is enough**:
+On `/v1/messages` it is off unless asked for. On `/v1/chat/completions` the
+server default (`--think-budget`, 0.5) applies and these fields turn it off -
+**either one alone is enough**:
 
 | field | dialect | effect |
 |---|---|---|
 | `think_budget` | OpenAI | fraction of `max_tokens` reserved for reasoning. **0 disables thinking** |
 | `enable_thinking` | OpenAI | `false` disables thinking |
 | `thinking: {type: "disabled"}` | Anthropic | same, and zeroes the budget |
-| `thinking: {type: "enabled"\|"adaptive"}` | Anthropic | thinking on. `adaptive` is what current SDKs send and used to set nothing at all |
+| `thinking: {type: "enabled"\|"adaptive"}` | Anthropic | thinking on. **Required to get it at all on this dialect** (#1541); `adaptive` is what current SDKs send |
 | `thinking: {budget_tokens: N}` | Anthropic | converted to a fraction of `max_tokens`. `0` disables thinking outright |
 | `thinking: {display: "omitted"}` | Anthropic | the model still reasons; the `thinking` block is not returned, on either transport |
 

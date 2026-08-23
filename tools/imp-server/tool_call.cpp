@@ -62,6 +62,17 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
     return prompt;
 }
 
+bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice) {
+    if (tool_choice.is_object() && tool_choice.contains("function")) {
+        if (tool_choice["function"].value("name", "").empty())
+            return true;  // an object without a name forces nothing
+        return family == imp::ChatTemplateFamily::CHATML || family == imp::ChatTemplateFamily::LLAMA3;
+    }
+    if (tool_choice.is_string() && tool_choice.get<std::string>() == "required")
+        return family == imp::ChatTemplateFamily::CHATML;
+    return true;
+}
+
 std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
                                                                          const json& tools,
                                                                          const json& tool_choice) {
