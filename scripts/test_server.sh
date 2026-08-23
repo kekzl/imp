@@ -99,6 +99,15 @@ run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
 run "vision refusal + utf8 (#1197/#1198)" python3 tests/test_server_vision_and_utf8.py
 run "embed/chat interleave" bash tests/test_server_embed_chat_interleave.sh 15
 run "0-token battery (#710)" env N=8 LOAD=80 FAIL_THRESHOLD=0.10 python3 tests/test_server_0token_battery.py
+# #1573: tools/analysis/degen_suite.py had ZERO invocation sites - 41 checks
+# that exit non-zero correctly and that nothing ever ran. The pre-push gate's
+# degeneration half is one smoke prompt against one model; this is the deep
+# battery, and this script already has the running server it needs.
+#
+# Categories, not --corpus: the corpus battery is ~250 prompts and belongs in a
+# longer lane. These are the server-protocol failure classes the C-API GTests
+# structurally cannot see (think-leak, special tokens, stream consistency).
+run "degeneration suite (#1573)" python3 tools/analysis/degen_suite.py --url "http://localhost:$PORT"
 
 echo
 if [ "${#fails[@]}" -ne 0 ]; then
