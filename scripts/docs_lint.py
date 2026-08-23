@@ -319,6 +319,30 @@ def check_generated_blocks(errors: list) -> None:
             )
 
 
+def check_refs_generators_listed(errors: list) -> None:
+    """7. Every generator in tests/refs/ has a row in tests/refs/README.md.
+
+    That table is the only index of which golden a generator writes and which
+    test consumes it, and rule 1 of that README ("every golden value traces to a
+    committed generator") is only checkable through it. Two generators had
+    drifted out of it - gen_tokenizer_golden.py and gen_chat_goldens.py - which
+    is the repo's recurring shape: the artefact exists, nothing references it,
+    and its absence reads like absence of the thing itself.
+    """
+    refs = ROOT / "tests" / "refs"
+    readme = refs / "README.md"
+    if not refs.is_dir() or not readme.exists():
+        return
+    text = readme.read_text(encoding="utf-8")
+    missing = sorted(p.name for p in refs.glob("gen_*.py") if p.name not in text)
+    if missing:
+        errors.append(
+            "tests/refs/README.md: generator(s) with no row in the table: "
+            + ", ".join(missing)
+            + " — add one naming the golden it writes and the test that consumes it"
+        )
+
+
 def check_budgets(errors: list) -> None:
     """6. README and CLAUDE.md size budgets."""
     readme = ROOT / "README.md"
@@ -355,6 +379,7 @@ def main() -> int:
         check_file(ROOT / rel, rel, errors, warnings)
 
     check_generated_blocks(errors)
+    check_refs_generators_listed(errors)
     check_budgets(errors)
 
     if warnings:
