@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-08-24
+
 ### Fixed
 
 - **The build-from-source docker recipe did not mount the cache volume, and the
