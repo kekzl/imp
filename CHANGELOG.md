@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-08-24
+
 ### Added
 
 - **Per-launch expert imbalance is recorded and readable while serving**
