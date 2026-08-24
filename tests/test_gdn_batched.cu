@@ -21,6 +21,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include "compute/gdn.h"
+#include "compute/ssm.h"
 
 #include <cstdint>
 #include <random>
@@ -300,6 +301,81 @@ TEST_F(GdnBatchedScanTest, MultiTokenRowsStayCausalPerSequence) {
     // sequence the scan is still sequential over tokens, and batching must not
     // leak row t of one sequence into row t of another.
     run_and_compare(ScanShape{4, 6}, {3, 1, 2, 0});
+}
+
+// ---------------------------------------------------------------------------
+// The conv1d half. The scan is useless batched if the depthwise causal conv in
+// front of it still runs one sequence per launch — both are per-sequence state.
+// ---------------------------------------------------------------------------
+
+TEST_F(GdnBatchedScanTest, Conv1dDecodeBatchedMatchesPerSequence) {
+    const int n_seq = 32, channels = 10240, ksize = 4;
+    const size_t state_elems = static_cast<size_t>(channels) * ksize;
+    const size_t pool_elems = static_cast<size_t>(n_seq) * state_elems;
+
+    std::vector<float> h_state_init(pool_elems), h_w(state_elems), h_b(channels);
+    std::vector<float> h_xf(static_cast<size_t>(n_seq) * channels);
+    fill(h_state_init, 11, -1.0f, 1.0f);
+    fill(h_w, 22, -0.5f, 0.5f);
+    fill(h_b, 33, -0.2f, 0.2f);
+    fill(h_xf, 44, -2.0f, 2.0f);
+    std::vector<half> h_wh(state_elems), h_bh(channels), h_x(h_xf.size());
+    for (size_t i = 0; i < state_elems; i++) h_wh[i] = __float2half(h_w[i]);
+    for (int i = 0; i < channels; i++) h_bh[i] = __float2half(h_b[i]);
+    for (size_t i = 0; i < h_xf.size(); i++) h_x[i] = __float2half(h_xf[i]);
+
+    // Slots deliberately sparse and unordered, as the scheduler's free list is.
+    std::vector<int> slots(n_seq);
+    for (int i = 0; i < n_seq; i++) slots[i] = (n_seq - 1) - i;
+
+    float *d_pool = nullptr, *d_out = nullptr;
+    half *d_w = nullptr, *d_b = nullptr, *d_x = nullptr;
+    int* d_slots = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_pool, pool_elems * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, h_xf.size() * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w, state_elems * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_b, channels * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, h_x.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_slots, n_seq * sizeof(int)), cudaSuccess);
+    cudaMemcpy(d_w, h_wh.data(), state_elems * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_bh.data(), channels * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_slots, slots.data(), n_seq * sizeof(int), cudaMemcpyHostToDevice);
+
+    Tensor w{}; w.data = d_w; w.ndim = 2; w.shape[0] = channels; w.shape[1] = ksize; w.qtype = QType::F16;
+    Tensor b{}; b.data = d_b; b.ndim = 1; b.shape[0] = channels; b.qtype = QType::F16;
+    Tensor x1{}; x1.ndim = 1; x1.shape[0] = channels; x1.qtype = QType::F16;
+
+    // arm A: per sequence
+    cudaMemcpy(d_pool, h_state_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_out, 0, h_xf.size() * sizeof(float));
+    for (int i = 0; i < n_seq; i++) {
+        x1.data = d_x + static_cast<size_t>(i) * channels;
+        ssm_conv1d_decode_f32_silu(d_pool + static_cast<size_t>(slots[i]) * state_elems, x1, w, b,
+                                   d_out + static_cast<size_t>(i) * channels, ksize, nullptr);
+    }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> pool_a(pool_elems), out_a(h_xf.size());
+    cudaMemcpy(pool_a.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_a.data(), d_out, out_a.size() * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // arm B: one launch
+    cudaMemcpy(d_pool, h_state_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_out, 0, h_xf.size() * sizeof(float));
+    ssm_conv1d_decode_f32_silu_batched(d_pool, d_slots, static_cast<int64_t>(state_elems), d_x, w, b,
+                                       d_out, n_seq, channels, ksize, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> pool_b(pool_elems), out_b(h_xf.size());
+    cudaMemcpy(pool_b.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_b.data(), d_out, out_b.size() * sizeof(float), cudaMemcpyDeviceToHost);
+
+    size_t sd = 0, od = 0;
+    for (size_t i = 0; i < pool_elems; i++) if (pool_a[i] != pool_b[i]) sd++;
+    for (size_t i = 0; i < out_a.size(); i++) if (out_a[i] != out_b[i]) od++;
+    EXPECT_EQ(sd, 0u) << "conv state differs in " << sd << " of " << pool_elems;
+    EXPECT_EQ(od, 0u) << "conv output differs in " << od << " of " << out_a.size();
+
+    cudaFree(d_pool); cudaFree(d_out); cudaFree(d_w); cudaFree(d_b); cudaFree(d_x); cudaFree(d_slots);
 }
 
 }  // namespace

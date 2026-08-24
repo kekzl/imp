@@ -40,7 +40,24 @@ struct InferenceState {
 
     // SSM state for Mamba2 layers (nullptr for non-hybrid models)
     SSMState* ssm_state = nullptr;
-    int ssm_seq_id = 0;  // sequence ID for SSM state access
+    int ssm_seq_id = 0;  // sequence ID for SSM state access (single-sequence path)
+
+    // Batched GDN decode: when ssm_n_seq > 1 the rows of this step belong to
+    // ssm_n_seq DIFFERENT sequences, one token each, and ssm_seq_slots is a
+    // DEVICE array of their recurrent-state slot ids (ssm_n_seq ints).
+    //
+    // The recurrent scan is sequential in TOKENS, which is why one sequence
+    // cannot be parallelised over its own timeline. Separate sequences share
+    // nothing but weights, so they batch — and without this the whole decode
+    // step, including the FFN and attention projections that are ordinary
+    // GEMMs, runs at M=1 (profiled: 82 % of GPU time in GEMV kernels against
+    // 1 % in CUTLASS GEMM, where a dense model is the other way round).
+    //
+    // The array is a stable device buffer, not the values: a CUDA graph
+    // captures the pointer, and the host refills it per step, so a changed set
+    // of sequences does not force a re-capture.
+    const int* ssm_seq_slots = nullptr;
+    int ssm_n_seq = 1;
 
     // BitDecoding Phase 3 residual KV cache.
     //

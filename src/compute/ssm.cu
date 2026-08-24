@@ -148,10 +148,19 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     const half* __restrict__ weight,  // [channels, kernel_size] FP16
     const half* __restrict__ bias,    // [channels] or nullptr
     float* __restrict__ x_out,        // [channels] FP32
-    int channels, int kernel_size) {
+    int channels, int kernel_size,
+    // --- batched decode over independent sequences ---
+    // seq_slots: per-blockIdx.y conv-state slot, or nullptr for the
+    // single-sequence call (gridDim.y == 1, every offset below is zero).
+    const int* __restrict__ seq_slots = nullptr, int64_t conv_state_seq_stride = 0) {
     int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= channels)
         return;
+    const int seq = blockIdx.y;
+    if (seq_slots)
+        conv_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(conv_state_seq_stride);
+    x_in += static_cast<size_t>(seq) * channels;
+    x_out += static_cast<size_t>(seq) * channels;
 
     float* state = conv_state + ch * kernel_size;
     for (int k = 0; k < kernel_size - 1; k++)
@@ -166,6 +175,24 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
 
     // Fused SiLU: x / (1 + exp(-x))
     x_out[ch] = sum / (1.0f + expf(-sum));
+}
+
+// Batched conv1d decode over N independent sequences. Same contract as the GDN
+// scan's batched form: sequences on blockIdx.y, slot table selects each one's
+// conv state, x_in/x_out are [n_seq, channels] sequence-major.
+void ssm_conv1d_decode_f32_silu_batched(void* conv_state_pool, const int* seq_slots,
+                                        int64_t conv_state_seq_stride, const half* x_in,
+                                        const Tensor& weight, const Tensor& bias, float* x_out_f32,
+                                        int n_seq, int channels, int conv_kernel, cudaStream_t stream) {
+    if (n_seq <= 0)
+        return;
+    int threads = 256;
+    dim3 blocks((channels + threads - 1) / threads, n_seq);
+    ssm_conv1d_decode_f32_silu_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<float*>(conv_state_pool), x_in, static_cast<const half*>(weight.data),
+        bias.data ? static_cast<const half*>(bias.data) : nullptr, x_out_f32, channels, conv_kernel,
+        seq_slots, conv_state_seq_stride);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void ssm_conv1d_decode_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,

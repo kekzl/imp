@@ -980,33 +980,18 @@ neither.
    cuda=13.3 path=server-prefill
    cmd="imp-cli --perplexity ppl_corpus_45k.txt --set kv_cache.dtype={fp16,nvfp4}, alternating arms"
    n=3]
-- **GDN-hybrid models do not gain throughput from concurrency.** Measured on one
-  host, 32 concurrent 200-token requests: Qwen3-14B-NVFP4 (dense, no GDN) reaches
-  1427 tok/s aggregate, while Qwen3.8-27B-NVFP4 reaches 81.5 — the same as its
-  single-stream rate — and Qwen3.6-35B-A3B-NVFP4 reaches 132 against 320
-  single-stream, i.e. it gets slower under load. All 32 requests are admitted and
-  in flight simultaneously (verified per-request), and their outputs stay
-  byte-exact and isolated; the work does not batch. Plan a GDN deployment for
-  latency, not for aggregate throughput. **Profiled 2026-08-24**: the cause is
-  `engine_scheduler.cpp:1503` — the recurrent scan kernels are single-sequence,
-  so a GDN decode step serves ONE sequence and concurrent sessions are
-  time-multiplexed round-robin (`runtime.hybrid_decode_quantum`, default 128
-  tokens). nsys under identical 32-way load: CUTLASS GEMM is 71.8 % of GPU time
-  on a dense model and 1.0 % on this one, while M=1 GEMV kernels are ~82 % here
-  and ~7 % there. The scan that genuinely cannot batch is 3.8 % of the profile
-  and drags the other 82 % onto the M=1 path with it.
-  [PROV: commit=bf8c1e4 date=2026-08-24 hw=RTX5090 model=Qwen3.8-27B-NVFP4,Qwen3-14B-NVFP4,Qwen3.6-35B-A3B-NVFP4
-   quant=NVFP4 cuda=13.3 path=server-batched-decode
-   cmd="imp-server --set runtime.max_batch_size=32; 32 concurrent POST /v1/completions, max_tokens=200, temperature=0"
-   n=3]
-- **No BF16-against-BF16 parity check exists for any model this card cannot hold
-  in BF16.** Qwen3.8-27B is 51.75 GiB in BF16 against 32 GB of VRAM, so every
-  reference comparison for it is 4.5-bit weights against a 16-bit reference and
-  cannot separate imp's arithmetic from the quantizer's. What is measured
-  instead is the quantization price: teacher-forced perplexity 4.6202 (imp
-  NVFP4) against 4.4194 (transformers 5.15.1, BF16, CPU) on
-  `ppl_corpus_45k.txt`, 13810 counted tokens both, **+4.54 %**. Details and the
-  per-prompt logit table: [`plans/2026-08-24-qwen38-port.md`](plans/2026-08-24-qwen38-port.md).
+- **GDN-hybrid concurrency was fixed on 2026-08-24; the numbers below are the
+  OLD behaviour, kept because the fix is one release old.** Until then a GDN
+  decode step served ONE sequence and concurrent ones were time-multiplexed, so
+  32 streams delivered what one delivered (81.5 tok/s aggregate on
+  Qwen3.8-27B-NVFP4 against 1427 for a dense model). `runtime.gdn_batched_decode`
+  (default on) now batches them: **474.9 tok/s aggregate at 32-way, 5.8x**, with
+  no cross-sequence contamination and single-stream decode unchanged. Set it
+  false to get the old rotation back.
+  [PROV: commit=ce77a94 date=2026-08-24 hw=RTX5090 model=Qwen3.8-27B-NVFP4 quant=NVFP4
+   cuda=13.3 path=server-batched-decode
+   cmd="imp-server --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096; 32 concurrent POST /v1/completions max_tokens=200"
+   n=1]
 - **The Qwen3.8-27B FP8 release is a quantization SOURCE, not a servable
   checkpoint.** `imp-quantize` reads its per-layer `layers-N.safetensors` layout,
   but nothing serves it: its weights are 25.87 GiB against roughly 27 GiB of

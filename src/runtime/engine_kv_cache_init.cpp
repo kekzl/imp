@@ -705,6 +705,19 @@ bool Engine::init_kv_cache() {
                 IMP_LOG_WARN("Failed to init SSM state, continuing without it");
                 ssm_state_.reset();
             }
+            // Slot table for batched GDN decode. Allocated once and kept at a
+            // stable address so a captured decode graph does not have to be
+            // rebuilt when the set of active sequences changes.
+            if (ssm_state_ && config_.max_batch_size > 0) {
+                const size_t bytes = static_cast<size_t>(config_.max_batch_size) * sizeof(int);
+                if (cudaMalloc(&d_ssm_seq_slots_, bytes) != cudaSuccess) {
+                    IMP_LOG_WARN("batched GDN decode: slot table alloc failed — staying single-sequence");
+                    d_ssm_seq_slots_ = nullptr;
+                } else {
+                    cudaMemset(d_ssm_seq_slots_, 0, bytes);
+                    h_ssm_seq_slots_.assign(static_cast<size_t>(config_.max_batch_size), 0);
+                }
+            }
         }
 
         // Recurrent-state snapshots: KV block reuse alone cannot skip prefill

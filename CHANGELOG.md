@@ -13,6 +13,20 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Concurrent GDN decode now batches: 81.5 -> 474.9 tok/s aggregate at 32-way,
+  5.8x.** A GDN decode step used to serve ONE sequence, with concurrent ones
+  time-multiplexed round-robin, because the recurrent scan kernels were
+  single-sequence. That forced the whole step — including the FFN and attention
+  projections, which are ordinary GEMMs — onto the M=1 path: profiled at 32-way
+  load, 82 % of GPU time sat in GEMV kernels and 1 % in CUTLASS GEMM, where a
+  dense model is the other way round. The scan that genuinely cannot batch was
+  3.8 % of that profile. Sequences are independent (each owns a state slot), so
+  they now parallelise across `blockIdx.y` while tokens within a sequence stay
+  sequential. Wall time for 32x200 tokens: 78.5 s -> 13.5 s, no cross-sequence
+  contamination, single-stream decode unchanged (82.29 against a 79.78 baseline
+  on the same build, i.e. noise). `runtime.gdn_batched_decode=false` restores the
+  rotation.
+
 - **A latent race in the GDN scan kernel, and the batched scan that exposed it.**
   Between reading `s_reduce[0]` for the K normalisation and overwriting
   `s_reduce` for the Q reduction there was no barrier, so a fast thread could

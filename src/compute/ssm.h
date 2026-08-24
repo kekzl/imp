@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cuda_fp16.h>
+
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 
@@ -14,6 +16,14 @@ namespace imp {
 // FP32-output conv1d decode with fused SiLU (for GDN FP32 pipeline)
 void ssm_conv1d_decode_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
                                 const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream);
+
+// Batched conv1d decode over N independent sequences (concurrent GDN decode).
+// x_in / x_out_f32 are [n_seq, channels] sequence-major; seq_slots selects each
+// sequence's conv state out of the pool.
+void ssm_conv1d_decode_f32_silu_batched(void* conv_state_pool, const int* seq_slots,
+                                        int64_t conv_state_seq_stride, const half* x_in,
+                                        const Tensor& weight, const Tensor& bias, float* x_out_f32,
+                                        int n_seq, int channels, int conv_kernel, cudaStream_t stream);
 
 // For decode: n_tokens = 1 per sequence
 void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
