@@ -385,8 +385,23 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
     if (head_dim_ssm == 128 && state_size == 128) {
         // SPLIT=2: two threads per state column. At SS=128 one-thread-per-column
         // needs 128 registers for the state alone and ptxas spills (255 used,
-        // 88 B stack); halving the slice removes the spill and doubles the
-        // blocks that fit per SM.
+        // 88 B stack); halving the slice removes the spill.
+        //
+        // 4 and 8 were measured and are WORSE, despite strictly better register
+        // pressure and occupancy (114 and 64 registers, up to 1024 threads/SM
+        // against 256). us/launch on this card, 48 heads:
+        //
+        //   n_seq   SPLIT=2   SPLIT=4   SPLIT=8
+        //      16     26.49     40.40     58.15
+        //      32     96.25    100.28    109.67
+        //      64    280.39    286.14    293.16
+        //
+        // The kernel is bandwidth-bound, so occupancy is not the binding
+        // constraint — coalescing is, and SPLIT spends it: SPLIT threads share
+        // one column, so a warp touches 32/SPLIT distinct columns and reads
+        // 128/SPLIT bytes per access. SPLIT=1 would be perfectly coalesced and
+        // spills instead. 2 is where the spill is gone and the access is still
+        // half a cache line. Do not raise it without re-measuring.
         constexpr int SPLIT = 2;
         const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
         gdn_scan_fused_kernel<128, 128, half, SPLIT><<<grid, 128 * SPLIT, smem, stream>>>(
