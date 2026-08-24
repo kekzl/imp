@@ -28,6 +28,15 @@ there instead of retelling it.
 
 ### Added
 
+- **The 128k context point is reachable on this card — the default KV dtype was
+  the limit, not the hardware.** Qwen3.8-27B declares no FP8-KV hint, so the
+  default stays FP16 and `max_model_len` resolves to 48 512 tokens. Measured,
+  same card, nothing else changed: `kv_cache.dtype=fp8` → **96 960** tokens for
+  +0.02 % perplexity; `nvfp4` → **131 072** (172 032 with `runtime.max_seq_len`
+  raised) for +0.53 %. The KV cache holds K and V for the 16 attention layers
+  only — 64 KiB/token at FP16, and that dtype is a config key. TTFT at nvfp4:
+  852 ms / 7.7 s / 34.4 s at 5225 / 41 680 / 123 822 prompt tokens, output
+  coherent. This corrects the phase-5 note that called 128k unreachable.
 - **GDN hybrids gain nothing from concurrency, measured.** 32 concurrent
   200-token requests on one host: Qwen3-14B-NVFP4 (dense, no GDN) 1427 tok/s
   aggregate; Qwen3.8-27B-NVFP4 **81.5**, the same as its single-stream rate;

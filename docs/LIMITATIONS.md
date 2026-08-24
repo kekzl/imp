@@ -966,6 +966,19 @@ neither.
   corpus is broken, so it stays FP16 KV unless you opt in.
 - **Qwen3.6-35B / Qwen3.5**: declare no FP8 KV hint, so they stay FP16 KV by
   default.
+- **The default KV dtype costs 3.5x of this card's context capacity.**
+  Qwen3.8-27B declares no `kv_cache_quant_algo` hint, so `kv_cache.dtype=auto`
+  keeps FP16 and `max_model_len` resolves to 48 512 tokens. Measured on the same
+  card, nothing else changed: `fp8` gives 96 960 tokens for **+0.02 %**
+  perplexity (4.6150 against 4.6142), `nvfp4` gives 131 072 — 172 032 with
+  `runtime.max_seq_len` raised — for **+0.53 %** (4.6385). The conservative
+  default is deliberate (see `kv_fp8_hint_default_safe`), but an operator who
+  wants context should set the key. At `nvfp4`, TTFT is 852 ms at 5225 prompt
+  tokens, 7.7 s at 41 680 and 34.4 s at 123 822, with coherent output.
+  [PROV: commit=d6477d9 date=2026-08-24 hw=RTX5090 model=Qwen3.8-27B-NVFP4 quant=NVFP4
+   cuda=13.3 path=server-prefill
+   cmd="imp-server --set kv_cache.dtype={fp16,fp8,nvfp4}; imp-cli --perplexity ppl_corpus_45k.txt"
+   n=1]
 - **GDN-hybrid models do not gain throughput from concurrency.** Measured on one
   host, 32 concurrent 200-token requests: Qwen3-14B-NVFP4 (dense, no GDN) reaches
   1427 tok/s aggregate, while Qwen3.8-27B-NVFP4 reaches 81.5 — the same as its
