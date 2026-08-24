@@ -195,6 +195,33 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The deterministic MoE combine scanned every expert row per output column,
+  not per token** (#1546). The row search sat inside the column loop, so the
+  O(total_rows) scan ran once per column chunk rather than once per token: 8
+  times over 4096 rows for a 2048-wide model at 512 tokens, to find the same 8
+  rows each time. Gathered once into shared memory now, accumulation order
+  unchanged (ascending row), so the numbers are identical. Measured at
+  n_tokens=512, top_k=8, d_model=2048: **3.159 ms to 0.0127 ms per call, 249x**.
+
+- **The deterministic MoE permutation assigned every slot on one thread**
+  (#1546). Phase 4 walked all `n_tokens * top_k` entries serially, a chain of
+  4096 dependent shared-memory read-modify-writes, and became the dominant cost
+  once the combine above was fixed. It processes one block-sized chunk at a
+  time now, which produces the identical layout because chunks run in index
+  order and a thread counts only lower thread ids. **0.177 ms to 0.059 ms, 3.0x**,
+  which puts it inside the run-to-run spread of the non-deterministic path it
+  mirrors. Both are opt-in (`runtime.deterministic_gemm`); the default atomic
+  paths are untouched.
+
+- **A tool-call test asserted the contract #1729 replaced.** `{"type":"object"}`
+  as tool parameters is enforceable since #1729, and
+  `ToolCallBuilderRejectsUnenforceable` still required it to be declined. It
+  lives in `test-moe-gdn`, a GPU module, so no CI job could report it and #1735
+  merged with it red. Pulled onto the new contract, with the XML dialect kept as
+  the negative control: that one still declines, because it renders parameter
+  keys as tags and a schema declaring none has no tag to render.
+
+
 - **`additionalProperties` was parsed and never read, so a free-form object
   could only ever be `{}`** (#1729). The FSM behaved as if every object were
   `additionalProperties: false`: a caller who wrote `true` silently got only the
