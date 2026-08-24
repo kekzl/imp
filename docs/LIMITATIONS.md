@@ -987,7 +987,14 @@ neither.
   single-stream, i.e. it gets slower under load. All 32 requests are admitted and
   in flight simultaneously (verified per-request), and their outputs stay
   byte-exact and isolated; the work does not batch. Plan a GDN deployment for
-  latency, not for aggregate throughput.
+  latency, not for aggregate throughput. **Profiled 2026-08-24**: the cause is
+  `engine_scheduler.cpp:1503` — the recurrent scan kernels are single-sequence,
+  so a GDN decode step serves ONE sequence and concurrent sessions are
+  time-multiplexed round-robin (`runtime.hybrid_decode_quantum`, default 128
+  tokens). nsys under identical 32-way load: CUTLASS GEMM is 71.8 % of GPU time
+  on a dense model and 1.0 % on this one, while M=1 GEMV kernels are ~82 % here
+  and ~7 % there. The scan that genuinely cannot batch is 3.8 % of the profile
+  and drags the other 82 % onto the M=1 path with it.
   [PROV: commit=bf8c1e4 date=2026-08-24 hw=RTX5090 model=Qwen3.8-27B-NVFP4,Qwen3-14B-NVFP4,Qwen3.6-35B-A3B-NVFP4
    quant=NVFP4 cuda=13.3 path=server-batched-decode
    cmd="imp-server --set runtime.max_batch_size=32; 32 concurrent POST /v1/completions, max_tokens=200, temperature=0"

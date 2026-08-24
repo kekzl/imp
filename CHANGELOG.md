@@ -55,7 +55,14 @@ there instead of retelling it.
   Qwen3.6-35B-A3B-NVFP4 132 against 320 single-stream, i.e. slower under load.
   All 32 are admitted and in flight at once (start spread 0.02 s, peak in-flight
   32, verified per request) and their outputs stay byte-exact and isolated — the
-  work simply does not batch. Recorded in `LIMITATIONS.md` so a deployment is
+  work simply does not batch. **Profiled**: CUTLASS GEMM is 71.8 % of GPU time on
+  the dense control and 1.0 % here, while M=1 GEMV kernels are ~82 % here and ~7 %
+  there — 305 152 GEMV launches for 4800 tokens across 64 layers is one per token
+  per layer, against 48 000 CUTLASS launches per batch step on the dense model.
+  Cause is `engine_scheduler.cpp:1503`: the recurrent scan kernels are
+  single-sequence, so a GDN decode step serves one sequence and concurrent ones
+  round-robin. The scan itself is 3.8 % of the profile and forces the other 82 %
+  onto the M=1 path. Recorded in `LIMITATIONS.md` so a deployment is
   planned for latency rather than aggregate throughput. TTFT on the same build:
   767 ms at 5225 prompt tokens, 7760 ms at 41680; 128k is unreachable
   (`max_model_len` 48512). llama.cpp cannot serve this checkpoint at all — the
