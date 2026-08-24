@@ -930,6 +930,7 @@ if(IMP_BUILD_TESTS)
         tests/test_moe_executor.cu
         tests/test_expert_cache.cu
         tests/test_gdn.cu
+        tests/test_gdn_batched.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
         tests/test_schema_constrain.cu

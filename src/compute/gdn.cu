@@ -39,10 +39,22 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
     int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout,
     const int* __restrict__ d_real_n,    // device chunk length (padded verify chunk) or nullptr
     float* __restrict__ h_snap,          // second state output, or nullptr
-    const int* __restrict__ d_snap_n) {  // row count h_snap is taken at
+    const int* __restrict__ d_snap_n,    // row count h_snap is taken at
+    // --- batched decode over independent sequences (#GDN-batch) ---
+    // seq_slots: per-blockIdx.y recurrent-state slot id, or nullptr for the
+    // single-sequence call (then h_state is already the caller's slot pointer
+    // and gridDim.y is 1, so every offset below is zero and the emitted code
+    // is the one this kernel always ran).
+    // Concurrent GDN sequences are INDEPENDENT — each owns its own state slot —
+    // so they parallelise across blockIdx.y exactly like heads do across
+    // blockIdx.x. Tokens within one sequence stay sequential, which is the part
+    // that genuinely cannot batch.
+    const int* __restrict__ seq_slots = nullptr,
+    int64_t h_state_seq_stride = 0) {
     const int h = blockIdx.x;
     if (h >= n_heads)
         return;
+    const int seq = blockIdx.y;
     const int d = threadIdx.x;
     // Padded verify chunk (#847): y is produced for every row (padding rows
     // are causally invisible downstream), but the committed h_state is the
@@ -59,6 +71,16 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
     // grouped_layout=1 selects the HF formula.
     const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     const int inner = n_heads * HD;
+
+    // Rebase every per-sequence pointer. With gridDim.y == 1 and no slot table
+    // these are all +0.
+    if (seq_slots) {
+        h_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(h_state_seq_stride);
+    }
+    conv_f32 += static_cast<size_t>(seq) * n_tokens * conv_channels;
+    alpha_all += static_cast<size_t>(seq) * n_tokens * n_heads;
+    beta_all += static_cast<size_t>(seq) * n_tokens * n_heads;
+    y_out += static_cast<size_t>(seq) * n_tokens * inner;
     const int BC_size = n_groups * SS;
     const float scale = rsqrtf(static_cast<float>(HD));
 
@@ -133,6 +155,20 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
             // outputs at layers where some heads have near-zero K (e.g. L1 h19/20/22/25/29).
             float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
+            // Every thread has to finish READING s_reduce[0] above before any
+            // thread overwrites s_reduce for the q reduction. Without this
+            // barrier thread 0 can store q_sq into s_reduce[0] while a slower
+            // warp is still loading k_inv from it, and that warp normalises K
+            // by Q's norm.
+            //
+            // Latent since the kernel was written and invisible at the shipped
+            // grid: (n_heads) is at most 48 blocks here, well under the 170 SMs,
+            // so every block had an SM to itself and its four warps ran in
+            // lockstep. Batching decode over sequences makes the grid
+            // (n_heads x n_seq) — at 256 blocks the race fires and one block's
+            // state comes out different run to run (measured: stable through
+            // 128 blocks, 16384 of 4194304 floats differing at 256).
+            __syncthreads();
             s_reduce[d] = q_sq;
             __syncthreads();
             for (int stride = HD / 2; stride > 0; stride >>= 1) {
@@ -294,6 +330,46 @@ void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int 
 // Host launchers
 // ---------------------------------------------------------------------------
 
+
+// Batched fused scan over N INDEPENDENT sequences, n_tokens rows each.
+//
+// This is what lets concurrent GDN decode batch. The recurrent scan is
+// sequential in TOKENS, which is why a single sequence cannot be parallelised
+// over its own timeline — but separate sequences share nothing except the
+// weights, so they map onto blockIdx.y the same way heads map onto blockIdx.x.
+// At decode n_tokens is 1 and the launch goes from (n_heads) blocks, which
+// leaves an RTX 5090 almost idle, to (n_heads x n_seq).
+//
+// h_state_pool: base of the recurrent-state pool; seq_slots[i] selects the slot
+// for sequence i (device pointer, n_seq ints). h_state_seq_stride is the
+// distance between slots in FLOATS.
+// conv_f32 / alpha / beta / y are [n_seq * n_tokens, ...] with sequence-major
+// rows — the layout a batched decode step already produces.
+void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const half* alpha,
+                                const half* beta, const float* A_log, const float* dt_bias,
+                                float* h_state_pool, const int* seq_slots, int64_t h_state_seq_stride,
+                                half* y, int n_seq, int n_tokens, int n_heads, int head_dim_ssm,
+                                int state_size, int n_groups, cudaStream_t stream, int grouped_layout,
+                                const int* d_real_n) {
+    if (n_seq <= 0)
+        return;
+    size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
+    dim3 grid(n_heads, n_seq);
+    if (head_dim_ssm == 128 && state_size == 128) {
+        gdn_scan_fused_kernel<128, 128, half><<<grid, 128, smem, stream>>>(
+            conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
+            conv_channels, grouped_layout, d_real_n, nullptr, nullptr, seq_slots, h_state_seq_stride);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else if (head_dim_ssm == 64 && state_size == 64) {
+        gdn_scan_fused_kernel<64, 64, half><<<grid, 64, smem, stream>>>(
+            conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
+            conv_channels, grouped_layout, d_real_n, nullptr, nullptr, seq_slots, h_state_seq_stride);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
+        IMP_LOG_ERROR("gdn_scan_fused_f32_batched: unsupported head_dim=%d state_size=%d", head_dim_ssm,
+                      state_size);
+    }
+}
 
 // Fused scan: processes all tokens in one kernel launch.
 // conv_f32: [n_tokens, conv_channels] FP32 — full conv output (Q|K|V interleaved per token)

@@ -13,6 +13,18 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A latent race in the GDN scan kernel, and the batched scan that exposed it.**
+  Between reading `s_reduce[0]` for the K normalisation and overwriting
+  `s_reduce` for the Q reduction there was no barrier, so a fast thread could
+  store `q_sq` into `s_reduce[0]` while a slower warp was still loading `k_inv`
+  from it — that warp then normalised K by Q's norm. Invisible at the shipped
+  grid: it launches `(n_heads)` blocks, at most 48 here against 170 SMs, so
+  every block had an SM to itself and its four warps ran in lockstep. Measured
+  with a wider grid: stable through 128 blocks, non-deterministic at 256 (16384
+  of 4194304 state floats differing between two identical runs). Fixed with one
+  `__syncthreads()`; decode cost 79.82 against 79.78 tok/s without it, i.e.
+  nothing.
+
 - **`reasoning_effort` was accepted on the wire and never reached the chat
   template.** Every request rendered the template's own default. On
   Qwen3.8-27B-NVFP4 the same message now renders 11 / 41 / 53 prompt tokens for
@@ -49,6 +61,13 @@ there instead of retelling it.
   only — 64 KiB/token at FP16, and that dtype is a config key. TTFT at nvfp4:
   852 ms / 7.7 s / 34.4 s at 5225 / 41 680 / 123 822 prompt tokens, output
   coherent. This corrects the phase-5 note that called 128k unreachable.
+- `gdn_scan_fused_f32_batched()`: the GDN scan over N independent sequences in
+  one launch, sequences on `blockIdx.y`. Tokens within a sequence stay
+  sequential — that part genuinely cannot batch — but separate sequences share
+  nothing except weights. Bit-identical to N single-sequence launches across 7
+  cases incl. sparse unordered state slots. This is the kernel half of making
+  concurrent GDN decode batch; the executor and scheduler still run one sequence
+  per step, so it is not yet on the serving path.
 - **GDN hybrids gain nothing from concurrency, measured.** 32 concurrent
   200-token requests on one host: Qwen3-14B-NVFP4 (dense, no GDN) 1427 tok/s
   aggregate; Qwen3.8-27B-NVFP4 **81.5**, the same as its single-stream rate;
