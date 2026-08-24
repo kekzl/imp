@@ -18,11 +18,11 @@ there instead of retelling it.
   library-reserve constant on every start and that comes out of the KV pool, so
   a copied recipe costs KV capacity rather than startup time. AUDIT B77 measured
   639 MiB per restart on Qwen3-14B-Q6_K; on a model whose first forward claims
-  almost nothing the gap is the whole constant. Measured again on
-  Qwen3.8-27B-NVFP4 while finding this: pinning the reserve to what the model
-  actually claims takes the pool from 1516 to 2811 blocks, +85 %, conformance
-  green in both arms. Both recipes mount it now and the quickstart says what
-  the second half of the volume is for.
+  almost nothing the gap is the whole constant. Measured on Qwen3.8-27B-NVFP4,
+  mounted against not, KV dtype held at FP8: 3030 to 3639 blocks, 96960 to
+  116448 tokens, +20 %, because the second start plans the measured 3291 MiB
+  instead of the 3900 MiB constant. Both recipes mount it now and the
+  quickstart says what the second half of the volume is for.
 
 ## [0.30.0] - 2026-08-24
 
