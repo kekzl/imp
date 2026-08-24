@@ -28,6 +28,20 @@ there instead of retelling it.
 
 ### Added
 
+- **Qwen3.8-27B serves 32 concurrent sequences with byte-identical output**, on
+  this card, with no code change — `runtime.max_batch_size=32`,
+  `kv_cache.dtype=fp8`, `runtime.max_seq_len=4096`, `runtime.deterministic=true`,
+  `server.prefix_cache=false`. Resident: weights 17920 MiB, GDN state 4848 MiB
+  (48 layers × 32 sequences), KV 42976 tokens. 32 interleaved requests across two
+  unrelated prompt families returned 16/16 and 16/16 byte-identical to their
+  batch=1 references with zero cross-contamination, and a 32-way load leaves the
+  next sequential request identical to the cold one (3/3). What blocked the load
+  before is the pre-upload reserve clamping KV headroom to `total_vram/5`
+  regardless of dtype (`engine_weight_upload.cpp:180-195`); bounding
+  `max_seq_len` puts the estimate under the clamp. Byte-identity needs both
+  switches: prefix cache off gets 31/32, determinism closes the last one.
+  Trade-offs (short context, FP8 KV, re-prefill on multi-turn) in
+  [`docs/plans/2026-08-24-qwen38-port.md`](docs/plans/2026-08-24-qwen38-port.md).
 - **Two diagnostics that make reference parity measurable.**
   `diagnostics.dump_final_logits_dir` writes the post-soft-cap LM logits of each
   forward pass as FP32 `.npy`; `diagnostics.dump_gdn_state_dir` writes the
