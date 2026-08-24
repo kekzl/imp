@@ -132,7 +132,10 @@ def main():
     # 979 -> 982 (#1548): three more, running the expert-imbalance kernel that
     # ships against the host reference beside it. The reference's own four
     # tests went into the CPU lane, which is why this only moved by three.
-    PINNED = 982
+    # 982 -> 983 (#1747): one GPU test pinning that the pre-floor KV figure
+    # survives the min_kv_tokens raise. VramBudget* is SKIP_IF_NO_CUDA by
+    # construction (AUDIT B64), so it cannot be anywhere else.
+    PINNED = 983
 
     text = CMAKE.read_text()
     mods = module_sources(text)

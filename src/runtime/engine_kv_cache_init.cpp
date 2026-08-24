@@ -282,8 +282,20 @@ bool Engine::init_kv_cache() {
                 // Not a failure — the two are allowed to differ, and the plan is
                 // the one that charges what the live read cannot see. Logged
                 // because a silent divergence is how the old pass drifted.
-                IMP_LOG_INFO("KV blocks: plan %d (live pass would have said %d)", max_blocks,
-                             vram_budget.kv_max_blocks);
+                // The live figure is the pre-floor one: kv_max_blocks may have
+                // been raised by min_kv_tokens, and printing that under "live
+                // pass would have said" reported a lower bound of the
+                // configuration as a reading (#1747). Both are named when they
+                // differ, so a rescued pass is distinguishable from one that
+                // disagreed.
+                const int live_raw = vram_budget.kv_blocks_pre_floor > 0 ? vram_budget.kv_blocks_pre_floor
+                                                                         : vram_budget.kv_max_blocks;
+                if (live_raw != vram_budget.kv_max_blocks) {
+                    IMP_LOG_INFO("KV blocks: plan %d (live pass sized %d, raised to %d by min_kv_tokens)",
+                                 max_blocks, live_raw, vram_budget.kv_max_blocks);
+                } else {
+                    IMP_LOG_INFO("KV blocks: plan %d (live pass sized %d)", max_blocks, live_raw);
+                }
             }
         } else {
             // The plan refuses this configuration. D8 argues that should fail
