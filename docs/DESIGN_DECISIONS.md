@@ -96,3 +96,47 @@ step there costs about four decode steps and returns 1.7 tokens.
 
 **Reopens if:** the draft path becomes capturable, or a model's verify ratio
 drops far enough that the arithmetic changes.
+
+## The two gates that keep speculation off a default server request
+
+**Decision:** speculation stays refused for non-greedy sampling and inside a
+budgeted think block. Both were filed as defects (#1538, #1539); both were
+measured and both stay.
+
+**Why:** on this hardware a verify chunk has to earn back what it costs, and on
+the model measured it does not. Qwen3-14B-Q6_K, one RTX 5090, 400-token
+completions, same prompt, arms alternated:
+
+| arm | tok/s | verify steps |
+|---|---|---|
+| `temperature: 0.7` (server default) | 157.79, 158.46 | 0 |
+| `temperature: 0` (speculation eligible) | 157.61, 157.87 | 6 |
+
+Turning speculation ON is not faster. The log says why: 18.6 % acceptance, 5.83
+tokens emitted per verify, 51-68 ms per verify against a 6.3 ms decode step. A
+verify costs eight to ten decode steps and returns under six tokens.
+
+The think-block gate was A/B'd the same way, two images, arms alternated, by
+relaxing it to fire only when a chunk could overshoot the budget rather than for
+the whole block:
+
+| arm | tok/s | verify steps |
+|---|---|---|
+| gate as shipped | 162.43, 162.96 | 12 |
+| gate relaxed | 157.92, 157.85 | 24 |
+
+Twice the verify steps, 3.0 % less throughput. The gate is not an oversight
+keeping speculation out of most of a reasoning answer; it is what keeps that
+part of the answer from paying for chunks that lose.
+
+Relaxing the think gate alone is also not enough to be coherent: the acceptance
+loop breaks on `in_think_block` too (`engine_spec_ngram.cpp`), so a relaxed gate
+without a matching loop change accepts one token per chunk, which is strictly
+worse than refusing.
+
+**Reopens if:** a model's verify ratio clears its verify cost, which is the same
+condition the entry above names. Removing the greedy restriction additionally
+needs the verify to accept with min(1, p/q) and resample from the corrected
+distribution instead of comparing argmax; that is a feature, and the measurement
+above says what it would currently buy.
+

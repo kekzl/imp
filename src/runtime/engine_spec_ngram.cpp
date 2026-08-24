@@ -140,29 +140,38 @@ bool Engine::spec_burst_launch_ok_(const Request& req) const {
     return true;
 }
 
-bool Engine::spec_verify_gates_ok_(const Request& req, bool ignore_think) const {
-    if (req.spec_ngram_given_up) return false;
+// Which gate refuses this request, or nullptr when none does.
+//
+// Split out of spec_verify_gates_ok_ because the one-time diagnosis in
+// engine_scheduler.cpp printed eighteen request fields and named none of them
+// as the cause, so "why is speculation off" was a manual re-derivation of this
+// function against a log line. #1538 and #1539 were both filed against that
+// line; answering either took reading this file. The strings are the gate
+// names, stable enough to grep for.
+const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_think) const {
+    if (req.spec_ngram_given_up) return "given_up";
     // Greedy sampling only: verify compares argmax tokens.
     const bool greedy = (req.temperature <= 0.0f || req.top_k == 1);
-    if (!greedy) return false;
+    if (!greedy) return "sampling_not_greedy";
     // rep/freq/presence penalties are replicated in the verify
     // (greedy_argmax_all) for the unbounded window; a bounded repeat_last_n
     // window slides per chunk row and is not replicated — stay eager there.
     const bool penalties = req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
                            req.presence_penalty != 0.0f;
-    if (penalties && req.repeat_last_n != 0) return false;
+    if (penalties && req.repeat_last_n != 0) return "bounded_repeat_window";
     // Logit-shaping the verify chunk does not replicate disqualifies.
     if (req.dry_multiplier != 0.0f || req.mirostat != 0 || !req.logit_bias.empty())
-        return false;
+        return "logit_shaping";
     if (req.logprobs || req.json_mode || !req.json_schema.empty() ||
         !req.regex_pattern.empty() || !req.grammar.empty() || !req.tool_constraint_tools.empty())
-        return false;  // constrained decode: verify replicates no FSM masks (#1002)
+        return "constrained_decode";  // verify replicates no FSM masks (#1002)
     // Think budget forces tokens INSIDE the think block (loop/host-side) —
     // verify only outside it; the think interior runs loop bursts, which
     // handle the budget device-side.
-    if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) return false;
-    if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return false;
-    if (spec_history_too_short_(req)) return false;  // cold start, see min_history
+    if (!ignore_think && req.think_budget > 0.0f && req.in_think_block)
+        return "think_budget_in_block";
+    if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return "not_decoding";
+    if (spec_history_too_short_(req)) return "cold_start";  // see speculative.min_history
     // Long-context economics on the DENSE path (#964): the captured chunk
     // verify runs the FA2 tile + paged-KV gather over the ctx TIER (pow2,
     // floor 4096, clamped to max_seq_len) — its cost follows the tier, not
@@ -180,12 +189,12 @@ bool Engine::spec_verify_gates_ok_(const Request& req, bool ignore_think) const 
                                     model_->profile().moe_experts_nvfp4;
         const bool hybrid_path = ssm_state_ != nullptr;  // only reachable with speculative.hybrid
         if (!moe_nvfp4_path && !hybrid_path && cap > 0 && req.context_len() > cap)
-            return false;
+            return "draft_ctx_cap";
     }
     // Recurrent state (SSM/GDN) advances on every forwarded token. The
     // hybrid verify path (speculative.hybrid) rides SSMState's contiguous
     // per-sequence slab for snapshot/restore.
-    if (ssm_state_ && !runtime_config_.speculative.hybrid) return false;
+    if (ssm_state_ && !runtime_config_.speculative.hybrid) return "recurrent_without_hybrid";
     // MoE speculation engages only for native-NVFP4 experts: the batched
     // verify forward reads the NVFP4 expert cache directly and nets +49-81%
     // on draft-rich code-edit (Qwen3-Coder-30B-FP4, 2026-07-02) with a -3-7%
@@ -193,8 +202,12 @@ bool Engine::spec_verify_gates_ok_(const Request& req, bool ignore_think) const 
     // activated expert per step and measured -22% — those stay on the async
     // conditional-graph loop (as does everything when speculative.moe=false).
     if (!spec_ngram_model_capable_())
-        return false;
-    return true;
+        return "model_not_capable";
+    return nullptr;
+}
+
+bool Engine::spec_verify_gates_ok_(const Request& req, bool ignore_think) const {
+    return spec_verify_gate_refusal_(req, ignore_think) == nullptr;
 }
 
 // Model-level gates, split out of spec_verify_gates_ok_ so spec_ngram_enabled_
