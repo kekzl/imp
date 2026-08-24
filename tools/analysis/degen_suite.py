@@ -801,11 +801,14 @@ class Suite:
                         f"text={r['text'][:80]!r}")
             return
 
-        # 1. Non-stream default: reasoning must arrive as a `thinking` content
-        #    block, the answer as a `text` block — with NO request flags.
+        # 1. Non-stream DEFAULT: extended thinking is opt-in upstream, so a
+        #    request that does not ask for it gets a text block and no thinking
+        #    block. imp returned one until #1560 made the surface match, which
+        #    is the behaviour this pair now pins from both sides.
         r = self.srv.messages(q, max_tokens=n)
-        self.record("anthropic-thinking", "default non-stream: thinking block present",
-                    bool(r["thinking"].strip()), f"blocks={[b.get('type') for b in r['raw'].get('content', [])]}")
+        self.record("anthropic-thinking", "default non-stream: no thinking block (opt-in)",
+                    not r["thinking"].strip(),
+                    f"blocks={[b.get('type') for b in r['raw'].get('content', [])]}")
         self.record("anthropic-thinking", "default non-stream: text block is the answer",
                     bool(r["text"].strip()) and reasoning_opener(r["text"]) is None,
                     f"text={r['text'][:100]!r}")
@@ -816,14 +819,39 @@ class Suite:
                     r["usage"].get("input_tokens", 0) > 0 and r["usage"].get("output_tokens", 0) > 0,
                     str(r["usage"]))
 
-        # 2. Streaming default: thinking_delta blocks, then text_delta.
+        # 2. Streaming default: text deltas only, same reason as above.
         r = self.srv.messages_stream(q, max_tokens=n)
-        self.record("anthropic-thinking", "default stream: thinking_delta events",
-                    bool(r["thinking"].strip()), f"events={sorted(r['events'])}")
+        self.record("anthropic-thinking", "default stream: no thinking_delta (opt-in)",
+                    not r["thinking"].strip(), f"events={sorted(r['events'])}")
         self.record("anthropic-thinking", "default stream: text deltas are answer",
                     bool(r["text"].strip()) and reasoning_opener(r["text"]) is None
                     and "<think>" not in r["text"],
                     f"text={r['text'][:100]!r}")
+
+        # 3. Asked for: `thinking.type=enabled` is the on-switch, and it has to
+        #    produce the block on both transports. Nothing covered this before:
+        #    the default path was asserted to think, so the opt-in was never
+        #    distinguished from it.
+        think_on = {"type": "enabled", "budget_tokens": max(1024, n // 2)}
+        r = self.srv.messages(q, max_tokens=n, thinking=think_on)
+        self.record("anthropic-thinking", "thinking=enabled non-stream: thinking block present",
+                    bool(r["thinking"].strip()),
+                    f"blocks={[b.get('type') for b in r['raw'].get('content', [])]}")
+        self.record("anthropic-thinking", "thinking=enabled non-stream: text is still the answer",
+                    bool(r["text"].strip()) and reasoning_opener(r["text"]) is None,
+                    f"text={r['text'][:100]!r}")
+        r = self.srv.messages_stream(q, max_tokens=n, thinking=think_on)
+        self.record("anthropic-thinking", "thinking=enabled stream: thinking_delta events",
+                    bool(r["thinking"].strip()), f"events={sorted(r['events'])}")
+
+        # 4. display=omitted: the model still reasons, the block is withheld
+        #    (#1560). Distinct from the default, where it does not reason.
+        r = self.srv.messages(q, max_tokens=n,
+                              thinking={"type": "enabled", "budget_tokens": max(1024, n // 2),
+                                        "display": "omitted"})
+        self.record("anthropic-thinking", "display=omitted: no thinking block, answer intact",
+                    not r["thinking"].strip() and bool(r["text"].strip()),
+                    f"blocks={[b.get('type') for b in r['raw'].get('content', [])]}")
 
 
     # -- data-driven corpus -------------------------------------------------
