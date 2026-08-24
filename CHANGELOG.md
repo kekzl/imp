@@ -240,6 +240,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The degeneration suite asserted the thinking contract #1560 replaced.** Its
+  `anthropic-thinking` category, written 2026-06-06, required a `thinking` block
+  on a `/v1/messages` request that never asked for one. Extended thinking is
+  opt-in upstream and imp matches that since #1560, so the check failed the
+  release gate against correct behaviour. Both sides are pinned now, and the
+  opt-in path (`thinking.type=enabled` on either transport, plus
+  `display: "omitted"`) gained the four checks that nothing covered while the
+  default was asserted to think.
+
+
 - **The CUTLASS NVFP4 GEMM handler accepted a `beta` and dropped it** (#1547).
   `GemmKernelArgs::beta` reached it and the epilogue is built with a literal 0,
   so a `beta = 1` call would have written the product over the residual instead
