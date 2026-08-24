@@ -104,6 +104,18 @@ there instead of retelling it.
 
 ### Changed
 
+- **`pdl.h` said the launch attribute overlaps a kernel's tail with the next
+  kernel's head; it cannot** (#1655). Programmatic dependent launch needs a
+  device half, and no kernel in `src/` calls
+  `cudaTriggerProgrammaticLaunchCompletion()` or
+  `cudaGridDependencySynchronize()`, so a converted edge releases where the
+  default edge did. Measured before deciding: `runtime.no_pdl` on against off
+  is 12508 vs 12455 tok/s prefill and 385.8 vs 382.3 tok/s decode, both inside
+  the arms' spread. The wiring stays, the claim is corrected, and this audit's
+  summary rows stop counting PDL as working idiom while their own evidence file
+  records `griddepcontrol: 0`.
+
+
 - **The "speculation is off" diagnosis names the gate that refused** (#1538,
   #1539). It printed eighteen request fields and marked none of them, so
   answering "why is speculation off for my request" meant re-deriving

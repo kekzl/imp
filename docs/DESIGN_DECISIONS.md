@@ -182,3 +182,43 @@ Opening this needs that understood first.
 **Reopens if:** the prefill win can be measured above the host's spread, or a
 workload is found where the changed rounding does not move the token stream.
 
+## PDL is wired without its device half, and stays that way
+
+**Decision:** the 34 `pdl::launch` sites and the graph-edge rewrite stay, the
+device half is not added, and nothing is deleted. #1655 offered both; this is
+the third answer.
+
+**Why:** programmatic dependent launch needs a producer to call
+`cudaTriggerProgrammaticLaunchCompletion()` and a consumer to call
+`cudaGridDependencySynchronize()`. No kernel in `src/` calls either, so a
+converted edge releases the consumer at exactly the point the default edge did.
+The mechanism is inert, and the header claimed otherwise until this change.
+
+Keeping it costs nothing measurable. Qwen3-8B-Q8_0, one RTX 5090, three
+alternating rounds, `runtime.no_pdl` true against false:
+
+| | prefill pp512 | decode tg8192 |
+|---|---|---|
+| wiring off | 12508, 12630, 12462 tok/s | 385.8, 387.8, 385.5 tok/s |
+| wiring on | 12455, 12531, 12091 tok/s | 390.0, 381.8, 382.3 tok/s |
+
+  [PROV: commit=d38ad8a9 date=2026-08-24 hw=RTX5090 model=Qwen3-8B-Q8_0
+         quant=Q8_0 cuda=13.3 path=imp-cli --bench
+         cmd=`imp-cli --bench --bench-pp 512 --bench-reps 3 --set runtime.no_pdl=<v>`
+         n=3 rounds per arm, arms alternated, one process per round]
+
+Off is 0.4 % ahead on prefill and 0.9 % on decode, both inside the arms' own
+spread, and `is_enabled()` returns before the per-launch set lookup when
+`no_pdl` is set, so that lookup is inside the measurement rather than beside it.
+
+Adding the device half means putting `cudaGridDependencySynchronize()` in every
+consumer of every triggering producer, on the decode hot path, for a benefit
+nothing here can predict. Deleting it means touching 34 launch sites on the same
+path for a legibility gain, against a measured cost of zero. Neither trade is
+worth making blind, so what changes is the claim: `pdl.h` says what the
+mechanism does today, and this audit's summary rows no longer count PDL as
+working sm_120a idiom while its own evidence file records `griddepcontrol: 0`.
+
+**Reopens if:** someone completes one producer/consumer pair and measures an
+overlap, which is the only thing that would make the rest worth wiring.
+
