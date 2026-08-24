@@ -11,6 +11,30 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`reasoning_effort` was accepted on the wire and never reached the chat
+  template.** Every request rendered the template's own default. On
+  Qwen3.8-27B-NVFP4 the same message now renders 11 / 41 / 53 prompt tokens for
+  `medium` / `low` / `xhigh`, and 53 when the field is absent (its default);
+  before, `low` and `xhigh` both produced 67 on an identical prompt.
+
+- **jinja: `x is undefined` was true for any falsy value.** `undefined` was not
+  in the parser's known-test list, so the expression fell through to
+  `x == undefined` and `false == none` compares equal. Any HF template asking
+  "did the caller set this?" got "no" while the caller was explicitly saying
+  false — on Qwen3.8 a suppressed-thinking render still emitted the
+  reasoning-effort preamble. `is not undefined` added alongside.
+
+### Added
+
+- Qwen3.8-27B tokenizer parity against HuggingFace: 32 cases, encode **and**
+  decode compared byte-for-byte (`make test-gpu`, needs no GPU — it reads
+  `tokenizer.json` only). Both halves mutation-validated.
+- `docs/plans/2026-08-24-qwen38-port.md`: measured inventory of what Qwen3.8-27B
+  support already is, with the four gaps that remain and the memory arithmetic
+  behind them (KV 65536 B/token, recurrent state 151.5 MiB/sequence).
+
 ## [0.30.1] - 2026-08-24
 
 ### Fixed

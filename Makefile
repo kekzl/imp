@@ -138,6 +138,14 @@ test-gpu: build
 		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
 		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
 		$(DOCKER_IMG) imp-tests --gtest_filter="*DetEvalE2ETest*"
+	@# Same shape as the line above: the Qwen3.8 tokenizer parity battery skips
+	@# unless IMP_TEST_MODEL_QWEN38 is set, and nothing else sets it. It needs no
+	@# GPU (it reads tokenizer.json only, ~0.4 s), but it needs the models mount,
+	@# so this is where it can actually run. A set-but-wrong path FAILS rather
+	@# than skipping.
+	docker run --rm -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL_QWEN38=/models/Qwen3.8-27B \
+		$(DOCKER_IMG) test-text --gtest_filter="*Qwen38TokenizerParity*"
 
 # Stage 3 — the SERVER stage (local, GPU-only). Boots a real imp-server against
 # a live model and GATES on the OpenAI+Anthropic wire batteries (endpoints,

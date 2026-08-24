@@ -382,6 +382,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // suppresses, rather than only a zero budget.
     ctx.snap.suppress_thinking = imp::server::should_stamp_thinking_off(
         ctx.snap.is_think_model, ctx.snap.enable_thinking, budget_disables_thinking, want_thinking);
+    ctx.snap.reasoning_effort = ctx.params.reasoning_effort;
 
     // If thinking IS enabled, remove the provisional <think> stop token.
     if (ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
@@ -426,7 +427,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                 break;
             }
         ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
-                                                  force_thinking);
+                                                  force_thinking, ctx.snap.reasoning_effort);
         const int32_t pad_id = ctx.snap.tok->find_token("<|image_pad|>");
         const auto expanded = pad_id < 0 ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
                                          : imp::expand_image_placeholders(ctx.snap.tokens, pad_id,
@@ -439,13 +440,15 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         }
     } else if (ctx.snap.have_template && ctx.snap.has_vision_request) {
         ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_image(*ctx.snap.tok, ctx.params.chat_msgs, 256,
-                                                             ctx.snap.suppress_thinking, force_thinking);
+                                                             ctx.snap.suppress_thinking, force_thinking,
+                                                             ctx.snap.reasoning_effort);
     } else if (ctx.snap.have_template && ctx.snap.tools_via_jinja) {
         std::string tc_str = ctx.params.tool_choice.is_string() ? ctx.params.tool_choice.get<std::string>()
                                                                 : "auto";
         ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_tools(*ctx.snap.tok, ctx.params.chat_msgs,
                                                              ctx.snap.tool_defs, tc_str,
-                                                             ctx.snap.suppress_thinking, force_thinking);
+                                                             ctx.snap.suppress_thinking, force_thinking,
+                                                             ctx.snap.reasoning_effort);
         // If Jinja2 tools render failed, fall back to text-based tool prompt injection
         if (ctx.snap.tokens.empty()) {
             IMP_LOG_INFO("Jinja2 tools path failed, falling back to text-based tool prompt");
@@ -483,7 +486,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                 }
             }
             ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs,
-                                                      ctx.snap.suppress_thinking, force_thinking);
+                                                      ctx.snap.suppress_thinking, force_thinking,
+                                                      ctx.snap.reasoning_effort);
         }
     } else if (ctx.snap.have_template) {
         // No tools, or no Jinja2 support — inject text-based tool prompt if tools present
@@ -511,7 +515,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             }
         }
         ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs,
-                                                  ctx.snap.suppress_thinking, force_thinking);
+                                                  ctx.snap.suppress_thinking, force_thinking,
+                                                  ctx.snap.reasoning_effort);
     } else {
         // Concatenate all message content as raw text
         std::string raw;
@@ -534,7 +539,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             ctx.params.chat_msgs.begin() + ctx.params.cache_prefix_messages);
         ctx.snap.pin_prefix_tokens = static_cast<int>(
             ctx.snap.chat_tpl
-                .apply(*ctx.snap.tok, prefix_msgs, ctx.snap.suppress_thinking, force_thinking)
+                .apply(*ctx.snap.tok, prefix_msgs, ctx.snap.suppress_thinking, force_thinking,
+                       ctx.snap.reasoning_effort)
                 .size());
     }
 

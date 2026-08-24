@@ -966,6 +966,13 @@ neither.
   corpus is broken, so it stays FP16 KV unless you opt in.
 - **Qwen3.6-35B / Qwen3.5**: declare no FP8 KV hint, so they stay FP16 KV by
   default.
+- **The Qwen3.8-27B FP8 release is a quantization SOURCE, not a servable
+  checkpoint.** `imp-quantize` reads its per-layer `layers-N.safetensors` layout,
+  but nothing serves it: its weights are 25.87 GiB against roughly 27 GiB of
+  usable VRAM before the KV pool and the recurrent state, and `sm_120` has no FP8
+  GEMM, so even if it fit there would be no fast path. Quantize it to NVFP4 and
+  serve that. Dequantizing it to FP16 at load is not an option either — that is
+  the 51.75 GiB BF16 footprint.
 
 ## Operational sharp edges
 

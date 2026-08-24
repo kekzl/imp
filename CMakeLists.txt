@@ -822,9 +822,12 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer.cpp
         tests/test_tokenizer_robustness.cpp
         tests/test_tokenizer_compat.cpp
+        tests/test_tokenizer_qwen38.cpp
         tests/test_chat_template.cpp
         tests/test_gpt_oss_harmony_golden.cpp
+        tests/test_qwen38_chat_template.cpp
         tests/test_jinja.cpp
+        tests/test_jinja_undefined.cpp
         tests/test_chat_template_goldens.cpp
     )
 

@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Generate the tokenizer parity golden from HuggingFace transformers.
 
-    python3 tests/refs/gen_tokenizer_golden.py <model_dir> <out.h>
+    python3 tests/refs/gen_tokenizer_golden.py <model_dir> <out.h> [namespace]
+
+`namespace` defaults to tokenizer_golden. Pass a distinct one when a second
+model's golden has to link alongside the first: two headers both declaring
+tokenizer_golden::k_model in one test binary is a redefinition, and the
+tokenizers are genuinely different (Qwen3 is 151k, Qwen3.8 is 248k).
 
 The output is a committed C++ header, not a JSON file read at run time
 (#1569): the previous generator wrote JSON that nothing committed and the
@@ -94,6 +99,7 @@ def main() -> int:
         print(f"Usage: {sys.argv[0]} <model_dir> <out.h>")
         return 1
     model_path, out_path = sys.argv[1], sys.argv[2]
+    ns = sys.argv[3] if len(sys.argv) > 3 else "tokenizer_golden"
 
     tok = AutoTokenizer.from_pretrained(model_path)
     cases = []
@@ -107,8 +113,7 @@ def main() -> int:
         "//",
         f"// Reference: transformers AutoTokenizer.from_pretrained({name!r}),",
         "// encode(add_special_tokens=False) and decode() over the corpus in the",
-        "// generator. Every Qwen3 checkpoint in this project shares this",
-        "// tokenizer; the test refuses a model whose fingerprint differs rather",
+        "// generator. The test refuses a model whose fingerprint differs rather",
         "// than comparing against the wrong reference (#1569, #1570).",
         "#pragma once",
         "",
@@ -116,7 +121,7 @@ def main() -> int:
         "#include <string>",
         "#include <vector>",
         "",
-        "namespace tokenizer_golden {",
+        f"namespace {ns} {{",
         "",
         "struct Case {",
         "    const char* text;",
@@ -148,7 +153,7 @@ def main() -> int:
         "    return v;",
         "}",
         "",
-        "}  // namespace tokenizer_golden",
+        f"}}  // namespace {ns}",
         "",
     ]
     with open(out_path, "w") as f:

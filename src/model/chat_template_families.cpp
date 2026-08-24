@@ -395,11 +395,12 @@ std::vector<int32_t> ChatTemplate::apply_harmony(const Tokenizer& tok,
 std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
                                                     const std::vector<ChatMessage>& messages,
                                                     int n_image_tokens, bool suppress_thinking,
-                                                    bool force_thinking) const {
+                                                    bool force_thinking,
+                                                    const std::string& reasoning_effort) const {
     // Currently only Gemma family supports vision tokens.
     // For other families, fall back to text-only apply.
     if (family_ != ChatTemplateFamily::GEMMA || boi_id_ < 0 || eoi_id_ < 0 || img_soft_token_id_ < 0) {
-        return apply(tok, messages, suppress_thinking, force_thinking);
+        return apply(tok, messages, suppress_thinking, force_thinking, reasoning_effort);
     }
 
     // The image rides the FIRST USER turn — not message index 0. Keying it on
