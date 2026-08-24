@@ -28,8 +28,23 @@ void enable_kernel(KernelFunc func) {
 // ---------------------------------------------------------------------------
 // PDL-aware kernel launch.  Uses cudaLaunchKernelEx with the
 // ProgrammaticStreamSerialization attribute when PDL is enabled for the
-// kernel, allowing the kernel's tail to overlap with the next kernel's head.
-// Falls back to standard <<<>>> launch when PDL is not enabled/available.
+// kernel.  Falls back to standard <<<>>> launch when PDL is not
+// enabled/available.
+//
+// THIS DOES NOT PRODUCE TAIL/HEAD OVERLAP TODAY, and this comment used to say
+// that it did (#1655). Programmatic dependent launch is two halves: the host
+// attribute here, and a device half in the kernels themselves. No kernel in
+// src/ calls cudaTriggerProgrammaticLaunchCompletion() or
+// cudaGridDependencySynchronize(), so a producer's completion event fires only
+// after its last block exits, which is exactly when the default dependency
+// would have released the consumer. Same schedule, extra machinery.
+//
+// Measured before deciding to keep it (Qwen3-8B-Q8_0, RTX 5090, 3 alternating
+// rounds of `imp-cli --bench --bench-pp 512 --bench-reps 3`): runtime.no_pdl
+// true against false is 12508 vs 12455 tok/s prefill and 385.8 vs 382.3 tok/s
+// decode, both inside their own arms' spread. It costs nothing measurable and
+// buys nothing measurable. docs/DESIGN_DECISIONS.md says why it is still here
+// rather than deleted.
 //
 // Usage:
 //   pdl::launch(my_kernel, grid, block, smem, stream, arg1, arg2, ...);
