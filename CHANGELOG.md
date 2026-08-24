@@ -25,7 +25,11 @@ there instead of retelling it.
   sequential. Wall time for 32x200 tokens: 78.5 s -> 13.5 s, no cross-sequence
   contamination, single-stream decode unchanged (82.29 against a 79.78 baseline
   on the same build, i.e. noise). `runtime.gdn_batched_decode=false` restores the
-  rotation.
+  rotation. Re-profiled after the fix: CUTLASS GEMM 1.0 % -> **66.2 %** of GPU
+  time (a dense model reads 71.8 %), M=1 GEMV ~82 % -> ~1.5 %, and the scan runs
+  21 024 times where it ran 230 400 — once per batch step per layer instead of
+  once per token. The scan is now 19.3 % of the profile and the next lever; it
+  scales sublinearly because each thread holds 128 state floats in registers.
 
 - **A latent race in the GDN scan kernel, and the batched scan that exposed it.**
   Between reading `s_reduce[0]` for the K normalisation and overwriting
