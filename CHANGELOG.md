@@ -40,6 +40,18 @@ there instead of retelling it.
   once per token. The scan is now 19.3 % of the profile and the next lever; it
   scales sublinearly because each thread holds 128 state floats in registers.
 
+- **The MTP prefill feed no longer costs -83% prefill.** Enabling MTP fed the
+  draft head's KV cache one prompt token at a time, a full 425M-param M=1
+  forward per token: Qwen3.8-27B pp512 7426 -> 1252 tok/s. Dense heads now
+  feed in one M=rows pass per prefill chunk (`mtp_feed_batch`); measured
+  pp512 6385-6510 tok/s across 5 runs against a 7070-7123 baseline (-8.8%),
+  accept rate unchanged at 90.5-93.3%. MoE heads keep the per-pair loop.
+
+- **`--set speculative.mtp_k=K` now enables MTP under `imp-cli`.** The startup
+  hint recommended exactly that spelling, but the CLI only read its own
+  `--mtp-spec-decode` flag and silently ignored the `--set`: a bench with the
+  recommended knob measured "MTP off" while claiming it on.
+
 - **A latent race in the GDN scan kernel, and the batched scan that exposed it.**
   Between reading `s_reduce[0]` for the K normalisation and overwriting
   `s_reduce` for the Q reduction there was no barrier, so a fast thread could
