@@ -104,6 +104,23 @@ there instead of retelling it.
 
 ### Changed
 
+- **The "speculation is off" diagnosis names the gate that refused** (#1538,
+  #1539). It printed eighteen request fields and marked none of them, so
+  answering "why is speculation off for my request" meant re-deriving
+  `spec_verify_gates_ok_` by hand against a log line. Both issues were filed
+  against that line. It now reads `refused by 'sampling_not_greedy'`, from the
+  same function that makes the decision, and the field dump stays because the
+  neighbouring values are usually wanted too.
+
+- **Both gates that keep speculation off a default server request were measured
+  and both stay** (#1538, #1539), recorded in `docs/DESIGN_DECISIONS.md`.
+  Qwen3-14B-Q6_K on one RTX 5090, arms alternated: enabling speculation by
+  dropping `temperature` to 0 is not faster (157.6 against 157.8 tok/s), and
+  relaxing the think-block gate doubles verify steps for 3.0 % less throughput
+  (157.9 against 162.7). A verify there costs eight to ten decode steps and
+  returns 5.83 tokens.
+
+
 - **`docs/LIMITATIONS.md` gains a "Gates that do not exist" section** (#1571,
   #1642), for absent instruments rather than untested features: no KL / PPL
   drift gate against a reference forward, and no soak or endurance test. Both

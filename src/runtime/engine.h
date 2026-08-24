@@ -1020,6 +1020,9 @@ private:
         const int n = runtime_config_.speculative.min_history;
         return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
     }
+    // Which gate refuses, or nullptr when none does. See the definition in
+    // engine_spec_ngram.cpp for why the reason is a string and not a bool.
+    const char* spec_verify_gate_refusal_(const Request& req, bool ignore_think = false) const;
     bool spec_verify_gates_ok_(const Request& req, bool ignore_think = false) const;
     bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;

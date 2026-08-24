@@ -1428,12 +1428,17 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             if (!s_gate_logged && !decode_batch[0]->spec_ngram_given_up) {
                 s_gate_logged = true;
                 const auto& r = *decode_batch[0];
+                // Name the gate. The field dump below stays because a reader
+                // usually wants the neighbouring values too, but it is no
+                // longer the only thing to go on (#1538, #1539).
+                const char* why = spec_verify_gate_refusal_(r);
                 IMP_LOG_INFO(
-                    "spec-ngram: gates failed (temp=%.2f top_k=%d rep_pen=%.2f freq=%.2f "
+                    "spec-ngram: gates failed, refused by '%s' (temp=%.2f top_k=%d rep_pen=%.2f freq=%.2f "
                     "pres=%.2f dry=%.2f mirostat=%d bias=%zu logprobs=%d json=%d schema=%d "
                     "think_budget=%.2f ssm=%d moe=%d moe_nvfp4=%d spec_moe=%d mtp=%d "
                     "chunked_prefill=%d)",
-                    r.temperature, r.top_k, r.repetition_penalty, r.frequency_penalty,
+                    why ? why : "nothing (raced)", r.temperature, r.top_k, r.repetition_penalty,
+                    r.frequency_penalty,
                     r.presence_penalty, r.dry_multiplier, r.mirostat, r.logit_bias.size(),
                     (int)r.logprobs, (int)r.json_mode, (int)!r.json_schema.empty(), r.think_budget,
                     (int)(ssm_state_ != nullptr),
