@@ -841,6 +841,22 @@ private:
                              bool fp32_gate_logits_ready, bool will_decode_fast,
                              const void* router_bias_ptr, bool use_sigmoid,
                              bool norm_weights, MoeRoutingResult& routing);
+public:
+    // Per-layer expert imbalance, readable while serving (#1548). peak is the
+    // worst max(M_e) seen on that layer, mean_max the average of the per-launch
+    // maxima, mean_rows the average rows per expert per launch. The ratio
+    // mean_max / mean_rows is what says whether a layer is padding-bound: the
+    // grouped GEMM pads every expert to one M tile, so a single hot expert sets
+    // it for all of them. Empty until a MoE layer has run.
+    struct MoeImbalance {
+        uint32_t peak_max = 0;
+        double mean_max = 0.0;
+        double mean_rows = 0.0;
+        uint32_t launches = 0;
+    };
+    std::vector<MoeImbalance> moe_imbalance() const;
+
+private:
     // Write + release the expert-activation histogram (diagnostics.moe_expert_hist).
     // Destructor-time, so it covers the whole process rather than one request.
     void dump_moe_expert_hist_();

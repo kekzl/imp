@@ -10,6 +10,7 @@
 #include <set>
 #include <cstring>
 #include "runtime/process_diag.h"
+#include "exec/moe_imbalance.h"
 
 namespace imp {
 namespace {
@@ -651,6 +652,71 @@ TEST(MoEDeterministicPermute, LayoutMatchesTheSerialRule) {
         ASSERT_EQ(h_sorted_flat[i], ref_flat[i]) << "flat index differs at sorted slot " << i;
         ASSERT_EQ(h_sorted_tok[i], ref_tok[i]) << "token differs at sorted slot " << i;
     }
+}
+
+// ===========================================================================
+// #1548: the recorded max(M_e) is what an operator reads off /metrics to tell
+// a padding-bound layer from a bandwidth-bound one. These run the kernel that
+// actually ships against the host reference in moe_imbalance.h, because a
+// reference nothing executes proves nothing about the number in the gauge.
+// ===========================================================================
+
+namespace {
+// Run the shipping kernel over one launch's offsets and read the counters back.
+std::vector<unsigned int> run_imbalance(const std::vector<int32_t>& offsets, int ne, int layer,
+                                        int n_layers) {
+    int32_t* d_off = nullptr;
+    unsigned int* d_acc = nullptr;
+    cudaMalloc(&d_off, offsets.size() * sizeof(int32_t));
+    cudaMalloc(&d_acc, static_cast<size_t>(n_layers) * 4 * sizeof(unsigned int));
+    cudaMemcpy(d_off, offsets.data(), offsets.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemset(d_acc, 0, static_cast<size_t>(n_layers) * 4 * sizeof(unsigned int));
+    moe_imbalance_kernel<<<1, 256>>>(d_off, d_acc, ne, layer);
+    cudaDeviceSynchronize();
+    std::vector<unsigned int> raw(static_cast<size_t>(n_layers) * 4, 0u);
+    cudaMemcpy(raw.data(), d_acc, raw.size() * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    cudaFree(d_off);
+    cudaFree(d_acc);
+    return raw;
+}
+}  // namespace
+
+TEST(MoeImbalanceKernel, OneHotExpertTakesEveryRow) {
+    // The case the whole-process histogram averages away: expert 2 has all 96
+    // rows, so the grouped GEMM pads all five experts to a tile that fits 96.
+    const std::vector<int32_t> off = {0, 0, 0, 96, 96, 96};
+    const auto ref = moe_launch_rows(off.data(), 5);
+    const auto raw = run_imbalance(off, 5, /*layer=*/1, /*n_layers=*/3);
+    EXPECT_EQ(raw[4 + 0], static_cast<unsigned int>(ref.max_rows)) << "peak_max";
+    EXPECT_EQ(raw[4 + 1], static_cast<unsigned int>(ref.max_rows)) << "sum_max";
+    EXPECT_EQ(raw[4 + 2], static_cast<unsigned int>(ref.total_rows)) << "sum_rows";
+    EXPECT_EQ(raw[4 + 3], 1u) << "launches";
+    // The mutation this kills: recording the mean in the max slot. 96/5 = 19.
+    EXPECT_NE(raw[4 + 0], 19u);
+    // Neighbouring layers must stay untouched, or the layer index is wrong.
+    EXPECT_EQ(raw[0], 0u);
+    EXPECT_EQ(raw[8], 0u);
+}
+
+TEST(MoeImbalanceKernel, MatchesTheHostReferenceOnSkewedRouting) {
+    const std::vector<int32_t> off = {0, 100, 104, 108, 112, 116, 120, 124, 128};
+    const auto ref = moe_launch_rows(off.data(), 8);
+    const auto raw = run_imbalance(off, 8, 0, 1);
+    EXPECT_EQ(raw[0], static_cast<unsigned int>(ref.max_rows));
+    EXPECT_EQ(raw[2], static_cast<unsigned int>(ref.total_rows));
+}
+
+TEST(MoeImbalanceKernel, MoreExpertsThanThreadsStillFindsTheMax) {
+    // 300 experts against a 256-thread block: the strided loop has to wrap, and
+    // a max kept per thread without the shared reduction would miss the tail.
+    std::vector<int32_t> off(301, 0);
+    for (int e = 0; e < 300; ++e)
+        off[e + 1] = off[e] + (e == 299 ? 500 : 1);
+    const auto ref = moe_launch_rows(off.data(), 300);
+    ASSERT_EQ(ref.max_rows, 500);
+    const auto raw = run_imbalance(off, 300, 0, 1);
+    EXPECT_EQ(raw[0], 500u);
+    EXPECT_EQ(raw[2], static_cast<unsigned int>(ref.total_rows));
 }
 
 }  // namespace

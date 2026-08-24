@@ -129,7 +129,10 @@ def main():
     # 976 -> 979 (#1546): three GPU tests for the deterministic MoE combine
     # and permute, a path that had none. They need a card because they run
     # the kernels, so the unlaned count is the honest place for them.
-    PINNED = 979
+    # 979 -> 982 (#1548): three more, running the expert-imbalance kernel that
+    # ships against the host reference beside it. The reference's own four
+    # tests went into the CPU lane, which is why this only moved by three.
+    PINNED = 982
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -285,7 +285,38 @@ def main():
     if not args.histogram:
         p.error("give a histogram path, or --self-test")
     hist = load_and_sum(args.histogram)
-    return report(hist, args)
+    rc = report(hist, args)
+    report_launch_imbalance(hist)
+    return rc
+
+
+def report_launch_imbalance(hist):
+    """Per-launch max(M_e) against the mean, which the summed counts cannot show.
+
+    The counts above are a whole-process aggregate. What decides grouped-GEMM
+    cost is max(M_e) at ONE launch: the kernel pads every expert to a single M
+    tile, so one hot expert sets it for all of them and the rest is padding.
+    Summing over a run averages exactly that away, which is why imp records the
+    per-launch figure separately (#1548).
+    """
+    rows = hist.get("per_layer_imbalance")
+    if not rows:
+        print("\nper-launch imbalance: not in this histogram "
+              "(written by imp since #1548; older files carry counts only)")
+        return
+    live = [r for r in rows if r.get("launches", 0) > 0]
+    if not live:
+        print("\nper-launch imbalance: no MoE layer ran")
+        return
+    print("\nper-launch expert imbalance (max(M_e) over mean rows per expert)")
+    print("  layer  launches  peak_max  mean_max  mean_rows  ratio")
+    for r in live:
+        print(f"  {r['layer']:5d}  {r['launches']:8d}  {r['max_rows']:8d}"
+              f"  {r['mean_max_rows']:8.1f}  {r['mean_rows']:9.1f}  {r['ratio']:5.2f}x")
+    worst = max(live, key=lambda r: r["ratio"])
+    mean_ratio = sum(r["ratio"] for r in live) / len(live)
+    print(f"  worst layer {worst['layer']} at {worst['ratio']:.2f}x, mean {mean_ratio:.2f}x")
+    print("  1.00x means every expert took the same rows and no tile row is padding.")
 
 
 if __name__ == "__main__":
