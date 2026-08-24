@@ -53,6 +53,15 @@ namespace imp {
 // so the executor is destroyed first and both are still alive. Reordering those
 // members would turn this into a use-after-free.
 void GraphExecutor::dump_moe_expert_hist_() {
+    // Read the imbalance counters (#1548) before releasing them, and release
+    // them BEFORE the early return below: they are allocated whenever a MoE
+    // model runs a prefill, while the histogram needs a diagnostics key, so
+    // hanging their release off the histogram's presence would leak them in
+    // the normal case.
+    const auto imb = moe_imbalance();
+    vram_free(vram_alloc_, moe_.imb_acc);
+    moe_.imb_acc = nullptr;
+    moe_.imb_layers = 0;
     if (moe_.expert_hist == nullptr)
         return;
     const std::string& path = runtime_config().diagnostics.moe_expert_hist;
@@ -77,6 +86,20 @@ void GraphExecutor::dump_moe_expert_hist_() {
                 for (int e = 0; e < moe_.hist_experts; e++)
                     fprintf(f, "%s%u", e ? "," : "", h[static_cast<size_t>(l) * moe_.hist_experts + e]);
                 fprintf(f, "]%s\n", l + 1 < moe_.hist_layers ? "," : "");
+            }
+            fprintf(f, "  ],\n");
+            // Per-launch imbalance (#1548). The counts above are a whole-process
+            // aggregate, which averages away the skew that decides cost: what
+            // sets the grouped GEMM's M tile is max(M_e) at ONE launch, and a
+            // sum over the run cannot be read back into it.
+            fprintf(f, "  \"per_layer_imbalance\": [\n");
+            for (size_t l = 0; l < imb.size(); l++) {
+                const double ratio = imb[l].mean_rows > 0.0 ? imb[l].mean_max / imb[l].mean_rows : 0.0;
+                fprintf(f,
+                        "    {\"layer\": %zu, \"launches\": %u, \"max_rows\": %u, "
+                        "\"mean_max_rows\": %.2f, \"mean_rows\": %.2f, \"ratio\": %.2f}%s\n",
+                        l, imb[l].launches, imb[l].peak_max, imb[l].mean_max, imb[l].mean_rows, ratio,
+                        l + 1 < imb.size() ? "," : "");
             }
             fprintf(f, "  ]\n}\n");
             fclose(f);

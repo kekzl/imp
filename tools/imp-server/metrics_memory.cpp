@@ -14,6 +14,7 @@
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/mem_account.h"
+#include "exec/executor.h"
 #include "runtime/engine.h"
 
 #include <string>
@@ -37,6 +38,35 @@ for (const auto& t : imp::memory_tier_stats()) {
 // process-global snapshot. blocks, not bytes: it is the unit admission
 // control actually rations.
 if (state.ctx && state.ctx->engine) {
+    // MoE expert imbalance (#1548). max(M_e) per launch is what decides grouped
+    // GEMM cost: the kernel pads every expert to one M tile, so one hot expert
+    // sets it for all of them and the padding is the difference between this
+    // ratio and 1. It was computed on the host, used for tiling and dropped, so
+    // "would moe.nvfp4_smallM fire on my workload" could only be answered by
+    // enabling it and reading a once-per-process INFO line.
+    //
+    // Scraped live, not written at shutdown like the histogram file: a serving
+    // process is exactly the one that could not be asked before.
+    if (const auto* ex = state.ctx->engine->executor()) {
+        const auto imb = ex->moe_imbalance();
+        bool any = false;
+        for (const auto& l : imb)
+            any = any || l.launches > 0;
+        if (any) {
+            out += "# HELP imp_moe_expert_imbalance mean max(M_e) over mean rows per expert, per layer\n";
+            out += "# TYPE imp_moe_expert_imbalance gauge\n";
+            out += "# HELP imp_moe_expert_peak_rows worst max(M_e) seen on that layer\n";
+            out += "# TYPE imp_moe_expert_peak_rows gauge\n";
+            for (size_t l = 0; l < imb.size(); ++l) {
+                if (imb[l].launches == 0)
+                    continue;  // dense layer of a hybrid, or not reached yet
+                const std::string tag = std::string("{layer=\"") + std::to_string(l) + "\"} ";
+                const double ratio = imb[l].mean_rows > 0.0 ? imb[l].mean_max / imb[l].mean_rows : 0.0;
+                out += "imp_moe_expert_imbalance" + tag + std::to_string(ratio) + "\n";
+                out += "imp_moe_expert_peak_rows" + tag + std::to_string(imb[l].peak_max) + "\n";
+            }
+        }
+    }
     if (const auto* kv = state.ctx->engine->kv_cache()) {
         const int total_blocks = kv->total_blocks();
         const int free_blocks = kv->num_free_blocks();

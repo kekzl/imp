@@ -13,6 +13,20 @@ there instead of retelling it.
 
 ### Added
 
+- **Per-launch expert imbalance is recorded and readable while serving**
+  (#1548). `max(M_e)` is what decides grouped-GEMM cost, because the kernel pads
+  every expert to one M tile and a single hot expert sets it for all of them. It
+  was computed on the host at three sites, used to pick the tile, and dropped;
+  the only record was a whole-process activation histogram written at shutdown,
+  which averages that skew away. Four device counters per layer now carry peak
+  and mean `max(M_e)`, `/metrics` serves them as `imp_moe_expert_imbalance` and
+  `imp_moe_expert_peak_rows` from a running server, the histogram JSON gains a
+  `per_layer_imbalance` block, and `moe_routing_skew.py` prints the ratio.
+  Measured on Qwen3-30B-A3B-NVFP4 at 40 tokens: layer 0 at 13.1x, so 92 % of
+  the tile rows are padding. Recorded only at n > 1, where the number decides
+  something: a decode step would pay a kernel launch per MoE layer for nothing.
+
+
 - **Chat-template goldens for nine families** (#1572), rendered from the upstream
   templates and compared byte-for-byte: ChatML (three checkpoints), Gemma, Llama 3,
   Llama 2, Mistral V3, Nemotron, DeepSeek R1, Phi. Previously only Harmony had a

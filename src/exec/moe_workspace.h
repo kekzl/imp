@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "core/tensor.h"
 #include "compute/moe_routing.h"
 #include "memory/vram_allocator.h"
@@ -51,6 +53,22 @@ struct MoEWorkspace {
     int hist_layers = 0;
     int hist_experts = 0;
     int hist_top_k = 0;
+
+    // Per-launch expert imbalance (#1548). max(M_e) is what decides grouped-GEMM
+    // cost: the kernel pads every expert to one M tile, so a single hot expert
+    // sets it for all of them and everything under it is padding. imp computed
+    // that number on the host at three sites, used it to pick the tile, and
+    // dropped it; the only record was a whole-process activation histogram,
+    // which averages exactly that skew away.
+    //
+    // Device-side, because the default NVFP4 prefill path keeps expert args on
+    // the card on purpose (that is what makes it graph-capturable) and reading
+    // them back would trade capture for a diagnostic. Four counters per layer:
+    // [peak_max, sum_max, sum_rows, launches]. Recorded only at n > 1, which is
+    // the only place max(M_e) chooses anything, so decode pays nothing.
+    unsigned int* imb_acc = nullptr;
+    int imb_layers = 0;
+    int imb_experts = 0;
 
     // Per-token expert trace (diagnostics.moe_expert_trace). Flat append of
     // records [layer, e0..e_{top_k-1}], one per (token, layer), in stream order.

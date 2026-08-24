@@ -3,6 +3,7 @@
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
+#include "exec/moe_imbalance.h"
 #include "compute/mmq_q8_imma.h"
 #include "core/cuda_static_reset.h"
 #include "exec/executor_forward_moe_internal.h"
@@ -52,7 +53,64 @@
 #include <algorithm>
 #include <utility>
 
+
+
 namespace imp {
+
+// Per-launch max(M_e) and total rows, accumulated on the device (#1548).
+//
+// The host-side recorder above covers the paths that already copy the offsets
+// D2H for tile selection. The default NVFP4 prefill path deliberately does not:
+// keeping expert args on the device is what makes it graph-capturable
+// (executor_forward_moe_cutlass.cu:136), so reading them back would trade a
+// diagnostic for capture. One block over ne offsets instead.
+//
+// Slot layout per layer: [peak_max, sum_max, sum_rows, launches].
+__global__ void moe_imbalance_kernel(const int32_t* __restrict__ offsets, unsigned int* __restrict__ acc,
+                                     int ne, int layer) {
+    __shared__ int s_max;
+    __shared__ int s_total;
+    if (threadIdx.x == 0) {
+        s_max = 0;
+        s_total = 0;
+    }
+    __syncthreads();
+    for (int e = threadIdx.x; e < ne; e += blockDim.x) {
+        const int m = offsets[e + 1] - offsets[e];
+        atomicMax(&s_max, m);
+        atomicAdd(&s_total, m);
+    }
+    __syncthreads();
+    if (threadIdx.x != 0)
+        return;
+    unsigned int* slot = acc + static_cast<size_t>(layer) * 4;
+    atomicMax(&slot[0], static_cast<unsigned int>(s_max));
+    atomicAdd(&slot[1], static_cast<unsigned int>(s_max));
+    atomicAdd(&slot[2], static_cast<unsigned int>(s_total));
+    atomicAdd(&slot[3], 1u);
+}
+std::vector<GraphExecutor::MoeImbalance> GraphExecutor::moe_imbalance() const {
+    std::vector<MoeImbalance> out;
+    if (moe_.imb_acc == nullptr || moe_.imb_layers <= 0)
+        return out;
+    std::vector<unsigned int> raw(static_cast<size_t>(moe_.imb_layers) * 4, 0u);
+    // A scrape, not the hot path: /metrics asks for this, the forward never does.
+    if (cudaMemcpy(raw.data(), moe_.imb_acc, raw.size() * sizeof(unsigned int),
+                   cudaMemcpyDeviceToHost) != cudaSuccess)
+        return out;
+    out.resize(moe_.imb_layers);
+    for (int l = 0; l < moe_.imb_layers; ++l) {
+        const unsigned int* slot = raw.data() + static_cast<size_t>(l) * 4;
+        out[l].peak_max = slot[0];
+        out[l].launches = slot[3];
+        if (slot[3] > 0) {
+            out[l].mean_max = static_cast<double>(slot[1]) / slot[3];
+            const double rows = static_cast<double>(slot[2]) / slot[3];
+            out[l].mean_rows = moe_.imb_experts > 0 ? rows / moe_.imb_experts : 0.0;
+        }
+    }
+    return out;
+}
 
 bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStream_t stream,
                                                              MoeFfnContext& ctx) {
@@ -837,6 +895,35 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                 "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",
                 layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6],
                 h_idx[7], h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
+        }
+    }
+
+    // Per-launch expert imbalance (#1548). Same hook point as the histogram
+    // below, and always on rather than behind a diagnostics key: the figure it
+    // answers ("is this layer padding-bound, would moe.nvfp4_smallM fire here")
+    // is one an operator asks about a running server, and the histogram is only
+    // written at shutdown.
+    //
+    // n > 1 only. max(M_e) chooses an M tile, which is a prefill/verify
+    // question; a decode step routes one token and would pay a kernel launch
+    // per MoE layer for a number that decides nothing. On a 48-layer MoE that
+    // is ~48 launches per decode step against a ~2.5 ms step, which is not a
+    // trade a diagnostic gets to make.
+    if (n > 1 && ne > 0) {
+        const int n_layers_imb = model_->config().n_layers;
+        if (moe_.imb_acc == nullptr && n_layers_imb > 0) {
+            const size_t bytes = static_cast<size_t>(n_layers_imb) * 4 * sizeof(unsigned int);
+            moe_.imb_acc = static_cast<unsigned int*>(vram_alloc(vram_alloc_, bytes, "moe_imbalance"));
+            if (moe_.imb_acc != nullptr) {
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.imb_acc, 0, bytes, stream));
+                moe_.imb_layers = n_layers_imb;
+                moe_.imb_experts = ne;
+            }
+        }
+        if (moe_.imb_acc != nullptr && layer < moe_.imb_layers && ne == moe_.imb_experts) {
+            moe_imbalance_kernel<<<1, 256, 0, stream>>>(
+                static_cast<const int32_t*>(routing.expert_offsets.data), moe_.imb_acc, ne, layer);
+            IMP_CUDA_CHECK_LAUNCH();
         }
     }
 

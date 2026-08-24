@@ -6,6 +6,7 @@
 
 #include "compute/attention_dispatch_decision.h"
 #include "exec/moe_prefill_decision.h"
+#include "exec/moe_imbalance.h"
 
 #include <gtest/gtest.h>
 
@@ -495,4 +496,49 @@ TEST(MoeTierPrecedence, EntryGateBeatsEveryReadyTier) {
     auto ws = all_ready();
     ws.grouped_available = false;  // the six early returns in the .cu
     EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::LEGACY);
+}
+
+
+// ===========================================================================
+// #1548: max(M_e) per launch decides the grouped GEMM's M tile and the smallM
+// tier gate, and imp computed it on the host at three sites and dropped it.
+// The arithmetic lives here so it can be wrong in a place a CPU test reaches.
+// ===========================================================================
+
+TEST(MoeLaunchRows, OneHotExpertTakesEveryRow) {
+    // The case the recorded max must not average away: expert 2 has all of it.
+    const int32_t offsets[] = {0, 0, 0, 96, 96, 96};
+    const auto r = moe_launch_rows(offsets, 5);
+    EXPECT_EQ(r.max_rows, 96);
+    EXPECT_EQ(r.total_rows, 96);
+    // Recording the mean in the max slot is the mutation this guards: the mean
+    // over 5 experts is 19.2, which is nothing like the tile it would pick.
+    EXPECT_NE(r.max_rows, static_cast<int32_t>(r.total_rows / 5));
+}
+
+TEST(MoeLaunchRows, EvenRoutingHasMaxEqualToTheMean) {
+    const int32_t offsets[] = {0, 8, 16, 24, 32};
+    const auto r = moe_launch_rows(offsets, 4);
+    EXPECT_EQ(r.max_rows, 8);
+    EXPECT_EQ(r.total_rows, 32);
+    EXPECT_EQ(r.max_rows, static_cast<int32_t>(r.total_rows / 4));
+}
+
+TEST(MoeLaunchRows, SkewIsTheRatioNotTheDifference) {
+    // 128 rows over 8 experts: mean 16, max 100. The grouped GEMM pads all
+    // eight to the tile that fits 100, so 6.25x the mean is the padding story.
+    const int32_t offsets[] = {0, 100, 104, 108, 112, 116, 120, 124, 128};
+    const auto r = moe_launch_rows(offsets, 8);
+    EXPECT_EQ(r.max_rows, 100);
+    EXPECT_EQ(r.total_rows, 128);
+    EXPECT_DOUBLE_EQ(static_cast<double>(r.max_rows) / (r.total_rows / 8.0), 6.25);
+}
+
+TEST(MoeLaunchRows, EmptyAndDegenerateInputsAreZero) {
+    const int32_t offsets[] = {0, 0, 0};
+    const auto r = moe_launch_rows(offsets, 2);
+    EXPECT_EQ(r.max_rows, 0);
+    EXPECT_EQ(r.total_rows, 0);
+    EXPECT_EQ(moe_launch_rows(nullptr, 4).max_rows, 0);
+    EXPECT_EQ(moe_launch_rows(offsets, 0).total_rows, 0);
 }
