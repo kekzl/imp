@@ -212,6 +212,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The CUTLASS NVFP4 GEMM handler accepted a `beta` and dropped it** (#1547).
+  `GemmKernelArgs::beta` reached it and the epilogue is built with a literal 0,
+  so a `beta = 1` call would have written the product over the residual instead
+  of adding to it, and answered with quiet garbage. It refuses now, which hands
+  the caller to the dequant path that does honour beta. Unreachable today
+  because both callers that can set beta exclude the tier, which is one edit
+  away from not being true.
+
+
 - **The deterministic MoE combine scanned every expert row per output column,
   not per token** (#1546). The row search sat inside the column loop, so the
   O(total_rows) scan ran once per column chunk rather than once per token: 8

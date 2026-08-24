@@ -140,3 +140,45 @@ needs the verify to accept with min(1, p/q) and resample from the corrected
 distribution instead of comparing argmax; that is a feature, and the measurement
 above says what it would currently buy.
 
+## The NVFP4 residual add stays a separate kernel
+
+**Decision:** the CUTLASS NVFP4 epilogue keeps beta = 0, and `o_proj` /
+`down_proj` on a native-NVFP4 checkpoint keep paying a residual copy plus an
+elementwise add. Filed as #1547; built, measured, and not shipped.
+
+**Why:** three measurements, Qwen3-14B-NVFP4 (281 CUTLASS tensors, so the tier
+is actually exercised), one RTX 5090, arms alternated, 3 rounds each.
+
+Prefill, which is what the fusion targets: the fused arm won all three paired
+rounds, but the within-arm spread of the UNCHANGED arm was 43.8 % (15787,
+22707, 20896 tok/s). A delta inside that is not a result, and the issue's own
+ceiling arithmetic put the prize at ~1.5 %.
+
+  [PROV: commit=4cb36025 date=2026-08-24 hw=RTX5090 model=Qwen3-14B-NVFP4
+         quant=NVFP4 cuda=13.3 path=imp-cli --bench
+         cmd=`imp-cli --bench --bench-pp 512 --bench-reps 3` and the same with
+         `--set speculative.ngram=false`
+         n=3 rounds per arm, arms alternated, one process per round]
+
+Decode with speculation off, which isolates the kernels: 159.97 against 160.00
+tok/s. Neutral, as expected for a change that only fires at M > 1.
+
+Decode with speculation on, which is the default here: 272.2 against 354.4
+tok/s, 23 % down, with the spread under 1 %. The mechanism is not the kernel.
+The fused epilogue rounds once (FP32 accumulate, then one conversion) where the
+copy-plus-add rounds twice, so the token stream changes; n-gram acceptance fell
+from 99.8 % to 98.8 % and tokens per verify from 8.15 to 6.75 on a deliberately
+repetitive bench prompt. On a real request measured the same evening acceptance
+is 18.6 %, where a point of acceptance is noise. So the 23 % is a property of
+the benchmark, not a regression, and it is also not a reason to take a prefill
+change that cannot be measured.
+
+The wiring is also not the two-step the issue describes. With the epilogue
+taking beta and a test exercising it, `AlphaIsActuallyApplied` began leaving a
+sticky `invalid argument` that the next GEMM's own guard reported, three runs
+out of three, against three clean runs of the same pair on the tree without it.
+Opening this needs that understood first.
+
+**Reopens if:** the prefill win can be measured above the host's spread, or a
+workload is found where the changed rounding does not move the token stream.
+
