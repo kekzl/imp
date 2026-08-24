@@ -308,38 +308,57 @@ void Engine::build_banned_token_list() {
 // it out of the class keeps engine.h (a god-header already at its size limit)
 // from growing for a diagnostic. Returns the measured claim, SIZE_MAX if it
 // could not be measured.
-static size_t report_library_reserve(size_t free_before, int library_reserve_mb) {
+static size_t measure_library_forward_window(size_t free_before) {
     if (free_before == 0)
         return SIZE_MAX;
     size_t free_after = 0;
     if (!vram_budget_mem_get_info(&free_after, nullptr))
         return SIZE_MAX;
-    const size_t measured = free_before > free_after ? free_before - free_after : 0;
+    return free_before > free_after ? free_before - free_after : 0;
+}
+
+// Report the charge against what the plan assumed, and name the value to pin.
+//
+// This used to live inside the measurement and recommend the FORWARD WINDOW,
+// which is not what anything charges: the caller takes
+// max(forward_window, whole_init) and caches that. On the NVFP4 path the two
+// are three orders of magnitude apart, because CUTLASS claims during the
+// phase-02 cache build and the window only opens at the warmup forward (AUDIT
+// B79). An operator following the old advice pinned 4 MiB on a model that
+// charges 3292, and got the under-reserve the same warning describes in its
+// other branch (#1746).
+//
+// So it runs here, after the charge is decided, and recommends that number.
+static void report_library_reserve(size_t charge, size_t forward_window, size_t whole_init,
+                                   int library_reserve_mb) {
+    if (charge == SIZE_MAX)
+        return;
     const size_t charged = engine_internal::library_reserve_charge(library_reserve_mb);
-    const double meas_mib = measured / (1024.0 * 1024.0);
     const double chg_mib = charged / (1024.0 * 1024.0);
-    // 20 % of the charge, floored at 256 MiB: below that the difference cannot
-    // move a plan decision and the line would be noise on every start.
+    const double use_mib = charge / (1024.0 * 1024.0);
     const size_t tol = std::max<size_t>(charged / 5, 256ull * 1024 * 1024);
-    const size_t diff = measured > charged ? measured - charged : charged - measured;
+    const size_t diff = charge > charged ? charge - charged : charged - charge;
     if (diff <= tol) {
-        IMP_LOG_INFO("library reserve: charged %.0f MiB, first forward claimed %.0f MiB (within "
-                     "tolerance)",
-                     chg_mib, meas_mib);
-        return measured;
+        IMP_LOG_INFO(
+            "library reserve: charged %.0f MiB, this start measured %.0f MiB (within "
+            "tolerance)",
+            chg_mib, use_mib);
+        return;
     }
-    IMP_LOG_WARN("library reserve MISMATCH: the plan charged %.0f MiB, the first forward actually "
-                 "claimed %.0f MiB (%+.0f MiB). %s Pin it for this model with "
-                 "'vram.library_reserve_mb = %.0f' in imp.conf — it is stable per model and quant "
-                 "path, and invariant to batch and context (AUDIT B41).",
-                 chg_mib, meas_mib, meas_mib - chg_mib,
-                 measured > charged
-                     ? "The plan therefore under-reserved: caches and the KV pool were sized "
-                       "against VRAM that the libraries then took."
-                     : "The plan therefore over-reserved: that much KV pool was set aside for "
-                       "nothing.",
-                 meas_mib);
-    return measured;
+    IMP_LOG_WARN(
+        "library reserve MISMATCH: the plan charged %.0f MiB, this start measured %.0f MiB "
+        "(%+.0f MiB, forward window %.0f MiB / whole-init %.0f MiB). %s Pin it for this "
+        "model with 'vram.library_reserve_mb = %.0f' in imp.conf: that is the number the "
+        "plan and the measurement cache both use. The charge is stable per model and "
+        "quant path; the forward WINDOW is not, which is why the two figures above can "
+        "differ by orders of magnitude (AUDIT B79).",
+        chg_mib, use_mib, use_mib - chg_mib,
+        forward_window == SIZE_MAX ? 0.0 : forward_window / (1024.0 * 1024.0), whole_init / (1024.0 * 1024.0),
+        charge > charged ? "The plan therefore under-reserved: caches and the KV pool were sized "
+                           "against VRAM that the libraries then took."
+                         : "The plan therefore over-reserved: that much KV pool was set aside for "
+                           "nothing.",
+        use_mib);
 }
 
 void Engine::warmup() {
@@ -399,7 +418,7 @@ void Engine::warmup() {
         req->status = RequestStatus::CANCELLED;
     }
     MemAccount::instance().checkpoint("05b_post_warmup_forward");
-    const size_t forward_window = report_library_reserve(warm_free_before, config_.library_reserve_mb);
+    const size_t forward_window = measure_library_forward_window(warm_free_before);
 
     // Which library claims WHEN depends on the model's execution path, so the
     // forward window only ever sees part of the charge: Q8_0 first touches
@@ -426,6 +445,9 @@ void Engine::warmup() {
             forward_window / (1024.0 * 1024.0), whole_init / (1024.0 * 1024.0),
             measured_library_reserve_ / (1024.0 * 1024.0));
     }
+    // Only now is there a number to recommend: everything above decides it, and
+    // the warning that names it has to come after, not before (#1746).
+    report_library_reserve(measured_library_reserve_, forward_window, whole_init, config_.library_reserve_mb);
     // Remember it, so the NEXT start on this model charges the measured value
     // instead of the constant (AUDIT B49). A write failure is a warning, never a
     // load failure — refusing to serve a model over a cache file would be absurd.

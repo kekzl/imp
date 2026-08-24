@@ -24,6 +24,24 @@ there instead of retelling it.
   instead of the 3900 MiB constant. Both recipes mount it now and the
   quickstart says what the second half of the volume is for.
 
+- **The library-reserve warning recommended a value the server does not charge**
+  (#1746). It named the forward window while the plan, the cache and the next
+  start all use `max(forward_window, whole-init)`, which on the NVFP4 path is
+  three orders of magnitude larger: an operator pinning the recommended 4 MiB on
+  a model that charges 3060 got exactly the under-reserve the same warning
+  describes in its other branch. The report now runs after the charge is decided
+  and names that number, prints both figures so the gap is visible, and cites
+  AUDIT B79 rather than the B41 stability claim B79 superseded. Verified on
+  Qwen3.8-27B-NVFP4: the warning recommends 3060 MiB, which is what the line
+  above it records.
+
+- **`live pass would have said N` printed a rescue floor, not a reading**
+  (#1747). It logged `kv_max_blocks` after `min_kv_tokens` had raised it, so a
+  start that hit the floor reported a lower bound of the configuration as if it
+  were the live pass's own figure, and a reader nearly concluded a pool held 512
+  blocks where it held 3639. Both numbers are named when they differ: `KV
+  blocks: plan 3628 (live pass sized 197, raised to 512 by min_kv_tokens)`.
+
 ## [0.30.0] - 2026-08-24
 
 ### Added

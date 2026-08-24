@@ -660,3 +660,42 @@ TEST(VramBudgetReserve, KvBlockBytesPerLayerIsPackingAndScaleAware) {
     EXPECT_EQ(kv_block_bytes_per_layer(QType::MXFP4_KV, bs, nkv, hd), packed4);
     EXPECT_GT(kv_block_bytes_per_layer(QType::NVFP4, bs, nkv, hd), 0u);
 }
+
+// #1747: the divergence log printed kv_max_blocks under "live pass would have
+// said", and kv_max_blocks may already have been raised by the min_kv_tokens
+// rescue floor. A start that hit the floor therefore reported a lower bound of
+// the CONFIGURATION as if it were a reading of what the live pass sized. The
+// pre-floor figure is kept so the log can name both; this pins that it is the
+// unfloored one, which is what the mutation "assign after the raise" breaks.
+TEST(VramBudgetReserve, PreFloorBlocksSurviveTheMinKvTokensRaise) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::Q8_0, QType::Q8_0);
+
+    EngineConfig config;
+    config.max_seq_len = 32768;
+    config.max_batch_size = 1;
+    config.use_cuda_graphs = false;
+    config.kv_cache_dtype = QType::F16;
+    config.min_kv_tokens = 16384;  // 1024 blocks at block size 16
+
+    // 8 GiB is chosen, not arbitrary: the sizing lands at 618 blocks there and
+    // the floor raises it to 1024. At 9 GiB and above the floor never fires and
+    // this test would pass while proving nothing, which is why the assertion
+    // below is an ASSERT on the floor having fired at all.
+    const size_t tight = 8ull * 1024 * 1024 * 1024;
+    VRAMBudget b = compute_vram_budget(m, config, 36, 128, tight);
+
+    ASSERT_LT(b.kv_blocks_pre_floor, b.kv_max_blocks)
+        << "the floor did not fire at this shape, so nothing here is being tested: pre="
+        << b.kv_blocks_pre_floor << " final=" << b.kv_max_blocks;
+    EXPECT_EQ(b.kv_max_blocks, config.min_kv_tokens / 16)
+        << "the raise should land exactly on the configured floor";
+    EXPECT_GT(b.kv_blocks_pre_floor, 0) << "pre-floor figure was never recorded";
+
+    // The point of the field. Assigning it after the raise instead of before
+    // makes these two equal, which is the state the divergence log used to
+    // report as "live pass would have said" (#1747).
+    EXPECT_NE(b.kv_blocks_pre_floor, b.kv_max_blocks);
+}

@@ -572,6 +572,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // budget in exchange for more context.
     int cap = user_requested_min ? max_affordable : static_cast<int>(max_affordable * kv_fraction);
     min_kv_blocks = std::min(min_kv_blocks, cap);
+    budget.kv_blocks_pre_floor = budget.kv_max_blocks;
     if (budget.kv_max_blocks < min_kv_blocks) {
         IMP_LOG_INFO("VRAM budget: raising KV from %d to %d blocks (min_kv_tokens=%d)", budget.kv_max_blocks,
                      min_kv_blocks, min_kv_tok);

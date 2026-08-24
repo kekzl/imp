@@ -42,6 +42,13 @@ struct VRAMBudget {
     size_t nvfp4_cache_bytes = 0;
     size_t reserve_bytes = 1024ULL * 1024 * 1024;  // 1 GiB safety
     int kv_max_blocks = 0;
+    // What the sizing arrived at BEFORE the min_kv_tokens rescue floor raised
+    // it (vram_budget.cpp, "raising KV from N to M blocks"). Kept because the
+    // divergence log in engine_kv_cache_init.cpp printed the floored figure
+    // under "live pass would have said", so a start that hit the floor
+    // reported a lower bound of the configuration as if it were a reading
+    // (#1747). Equal to kv_max_blocks when no floor was applied.
+    int kv_blocks_pre_floor = 0;
     // SWA-aware sizing (kv_cache.swa_sizing): capacity of the dedicated
     // sliding-window block group (0 = feature off). Sized batch-shaped:
     // ceil(swa_live_tokens / block_size) + 1 blocks per sequence slot.
