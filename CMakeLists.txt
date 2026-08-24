@@ -931,6 +931,7 @@ if(IMP_BUILD_TESTS)
         tests/test_expert_cache.cu
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
+        tests/test_mtp_feed_batch.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
         tests/test_schema_constrain.cu

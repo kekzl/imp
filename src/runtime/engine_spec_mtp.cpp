@@ -83,7 +83,27 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
 
     const char* base = static_cast<const char*>(d_hidden_rows);
     int pred = -1;
-    for (int j = 0; j < n_pairs; ++j) {
+    // Batched feed (dense heads): the per-pair loop reads the whole head's
+    // weights once per token, which priced Qwen3.8-27B prefill at -83%
+    // (pp512 7426 → 1252 tok/s; batched: 6510). When this feed chains, the
+    // last pair stays on the per-pair path — it is the one that drafts.
+    // Below 8 pairs (decode verify catch-up feeds 1-2) the batch setup costs
+    // more launches than it saves.
+    int j0 = 0;
+    const int n_feed = chain_after ? n_pairs - 1 : n_pairs;
+    if (n_feed >= 8 && ws->feed_rows_cap > 0) {
+        while (j0 < n_feed) {
+            const int m = std::min(ws->feed_rows_cap, n_feed - j0);
+            const void* rows = base + static_cast<size_t>(j0) * hidden_dim * sizeof(__half);
+            if (!imp::mtp_feed_batch(tokens + j0, rows, m, *model_->mtp_, model_->tok_emb_,
+                                     *ws, hidden_dim, decode_stream()))
+                break;  // unsupported head or transient failure — per-pair takes over
+            for (int j = j0; j < j0 + m; ++j)
+                mtp_history_.push_back(tokens[j]);
+            j0 += m;
+        }
+    }
+    for (int j = j0; j < n_pairs; ++j) {
         const void* h_j = base + static_cast<size_t>(j) * hidden_dim * sizeof(__half);
         const bool last = (j == n_pairs - 1);
         if (chain_after && last && device_chain) {
