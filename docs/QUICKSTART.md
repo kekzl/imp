@@ -87,9 +87,20 @@ docker run --gpus all \
   ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
 ```
 
-The cache volume is optional and pays for itself immediately: it holds the
-transformed weights, so a second start skips the conversion. On
-Qwen3-14B-NVFP4 that is 7.9 s cold against 2.1 s warm.
+Mount the cache volume. It holds two things, and the second one costs VRAM
+rather than time:
+
+- the transformed weights, so a second start skips the conversion: on
+  Qwen3-14B-NVFP4, 7.9 s cold against 2.1 s warm;
+- the measured library reserve. Without it the memory plan charges a 3900 MiB
+  constant on every start, and that comes out of the KV pool. Measured on
+  Qwen3-14B-Q6_K: 0 MiB planned with the path mounted against 3900 MiB without
+  it, which hands 639 MiB back to the pools on every restart. On a model whose
+  first forward claims almost nothing the gap is the whole constant, and the
+  server says so after its first forward ("library reserve MISMATCH").
+
+A `docker run --rm` without this volume re-measures every start and never uses
+the answer.
 
 Watch for these lines; they tell you the engine picked the fast paths. On
 Qwen3.8-27B:

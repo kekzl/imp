@@ -11,6 +11,19 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The build-from-source docker recipe did not mount the cache volume, and the
+  quickstart called it optional.** Without it the memory plan charges a 3900 MiB
+  library-reserve constant on every start and that comes out of the KV pool, so
+  a copied recipe costs KV capacity rather than startup time. AUDIT B77 measured
+  639 MiB per restart on Qwen3-14B-Q6_K; on a model whose first forward claims
+  almost nothing the gap is the whole constant. Measured again on
+  Qwen3.8-27B-NVFP4 while finding this: pinning the reserve to what the model
+  actually claims takes the pool from 1516 to 2811 blocks, +85 %, conformance
+  green in both arms. Both recipes mount it now and the quickstart says what
+  the second half of the volume is for.
+
 ## [0.30.0] - 2026-08-24
 
 ### Added
