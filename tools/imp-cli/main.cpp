@@ -207,10 +207,8 @@ int main(int argc, char** argv) {
     // Only load the MTP head sidecar (~1.57 GiB BF16 on Qwen3.6) when the user
     // actually requested MTP spec-decode. Otherwise it is dead VRAM.
     // Both spellings count: the startup hint recommends --set
-    // speculative.mtp_k=2 (the server's knob), and until this line the CLI
-    // silently ignored it — measuring "MTP off" while claiming it on.
-    const int mtp_k = args.mtp_spec_decode_k > 0 ? args.mtp_spec_decode_k
-                                                 : runtime_cfg.speculative.mtp_k;
+    // speculative.mtp_k=2, and until this line the CLI silently ignored it.
+    const int mtp_k = args.mtp_spec_decode_k > 0 ? args.mtp_spec_decode_k : runtime_cfg.speculative.mtp_k;
     ImpError err = imp_model_load_ex(resolved_model.c_str(), format,
                                      /*load_mtp_head=*/mtp_k > 0, &model);
     if (err != IMP_SUCCESS) {
