@@ -28,6 +28,18 @@ there instead of retelling it.
 
 ### Added
 
+- **NVFP4 KV is now the default for QWEN35 (Qwen3.8-27B and its Qwen3.5
+  siblings), taking `max_model_len` from 48 512 to 131 072 tokens.** The KV cache
+  holds K and V for the 16 attention layers only — 64 KiB/token at FP16 — and on
+  a GDN hybrid it is what bounds context, so its dtype decides how much context
+  fits. Cost, measured with alternating arms over `ppl_corpus_45k.txt`: +0.29 to
+  +0.35 % perplexity on Qwen3.8-27B-NVFP4 (FP16 bit-stable at 4.6124 across 3
+  runs), +0.15 to +0.18 % on Qwen3.5-4B mxfp4. `degen_suite.py` against a server
+  on NVFP4 KV: 50 checks, 0 FAIL. This is a deliberate capacity trade, not the
+  ~neutral bar the two FP8 gates use — `kv_cache.dtype=fp16` opts out. The MoE
+  GDN siblings stay on their old default on purpose (FP8 KV already costs
+  QWEN36_MOE +1.47 % PPL; NVFP4 KV is more aggressive and unmeasured there).
+  New gate `kv_nvfp4_default_safe()` with a CPU-lane allowlist test.
 - **The 128k context point is reachable on this card — the default KV dtype was
   the limit, not the hardware.** Qwen3.8-27B declares no FP8-KV hint, so the
   default stays FP16 and `max_model_len` resolves to 48 512 tokens. Measured,

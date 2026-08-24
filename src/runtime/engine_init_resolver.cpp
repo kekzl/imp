@@ -213,6 +213,17 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 "kv_cache.dtype=\"%s\" is not a known value "
                 "(auto|fp16|fp8|int8|int4|nvfp4|mxfp4) — keeping FP16 KV.",
                 kv_str.c_str());
+        } else if (kv_str == "auto" && kv_nvfp4_default_safe(mcfg.arch)) {
+            // Capacity, not speed: on a GDN hybrid the KV cache covers only the
+            // attention layers, and it is what bounds max_seq_len. NVFP4 costs
+            // ~0.3% PPL on this family and buys 2.7x the context (48 512 ->
+            // 131 072 tokens on a 32 GB card). Checked BEFORE the FP8 arms so a
+            // family on both lists gets the capacity trade; the head_dim and
+            // sink fallbacks below still apply and can put it back on FP16.
+            config_.kv_cache_dtype = QType::NVFP4;
+            IMP_LOG_INFO("KV cache dtype: NVFP4 (auto — %s measured at +0.3%% PPL for 2.7x the "
+                         "context; set kv_cache.dtype=fp16 to opt out)",
+                         model_arch_name(mcfg.arch));
         } else if (kv_str == "auto" && mcfg.kv_cache_quant_hint == "FP8" &&
                    kv_fp8_hint_default_safe(mcfg.arch)) {
             config_.kv_cache_dtype = QType::FP8_E4M3;

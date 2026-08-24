@@ -39,6 +39,13 @@ bool kv_fp8_hint_default_safe(ModelArch arch);
 // model.cpp for the per-family evidence and the measured exclusions.
 bool kv_fp8_no_hint_default_safe(ModelArch arch);
 
+// True iff this arch family has been measured safe for DEFAULT NVFP4 KV. This
+// is a capacity gate, not a speed one: the KV cache is what bounds context
+// length, and on a GDN hybrid only the attention layers hold one at all, so the
+// dtype decides how much context fits rather than how fast decode runs. See
+// model.cpp for the per-family measurements.
+bool kv_nvfp4_default_safe(ModelArch arch);
+
 // C API enum value for this architecture.
 int model_arch_c_api_id(ModelArch arch);
 

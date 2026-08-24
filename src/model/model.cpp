@@ -279,6 +279,48 @@ bool kv_fp8_no_hint_default_safe(ModelArch arch) {
     }
 }
 
+// Arch families measured safe for DEFAULT NVFP4 KV.
+//
+// Why this gate is not the FP8 one with a different constant: the FP8 lists
+// above trade quality for long-context DECODE SPEED, and their exclusion note
+// for QWEN36_MOE turns on exactly that — "hybrids also have a small KV surface
+// (most layers are GDN), so the long-context decode upside is small". For
+// CAPACITY the same fact points the other way. A GDN hybrid keeps a KV cache
+// for its attention layers only, so that cache is small AND it is the thing
+// that bounds max_seq_len; shrinking it buys context that cannot be bought any
+// other way on a 32 GB card.
+//
+// Measured 2026-08-24, teacher-forced PPL over ppl_corpus_45k.txt (13810
+// counted tokens), fresh process per run, arms ALTERNATED (a fixed arm order
+// overstates the delta on this host):
+//
+//   QWEN35  Qwen3.8-27B-NVFP4    FP16 4.6124 / 4.6124 / 4.6124  (bit-stable)
+//                                NVFP4 4.6259 / 4.6259 / 4.6287   +0.29..+0.35%
+//           Qwen3.5-4B mxfp4 GGUF FP16 9.3869 / 9.3862
+//                                NVFP4 9.4038 / 9.3999            +0.15..+0.18%
+//
+// And what it buys, same card, same model, nothing else changed:
+//   max_model_len 48 512 -> 131 072 tokens; KV pool 3032 -> 2304 MiB.
+//   TTFT 852 ms @5225 tok, 7.7 s @41 680, 34.4 s @123 822 — output coherent.
+//   degen_suite.py against a server on NVFP4 KV: 50 checks, 0 FAIL.
+//
+// The cost is real and larger than the FP8 lists' ~neutral bar, so this is a
+// deliberate different trade, not the same bar met: half a percent of
+// perplexity for 2.7x the context. `kv_cache.dtype=fp16` opts out.
+//
+// NOT added, and the reason is the one already recorded for FP8 above:
+// QWEN36_MOE / QWEN35_MOE stay off. FP8 KV costs those +1.47% PPL because
+// NVFP4 attention weights compound with a quantised KV, and NVFP4 KV is the
+// more aggressive quantiser of the two; unmeasured there, so not defaulted.
+bool kv_nvfp4_default_safe(ModelArch arch) {
+    switch (arch) {
+        case ModelArch::QWEN35:
+            return true;
+        default:
+            return false;
+    }
+}
+
 int model_arch_c_api_id(ModelArch arch) { return lookup_arch(arch).c_api_id; }
 
 void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top_p, int& top_k) {
