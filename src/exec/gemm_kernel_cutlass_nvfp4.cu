@@ -106,6 +106,18 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     if (!args.act_prequantized || args.mxfp4_payload != nullptr)
         quantize_fp16_to_nvfp4_cutlass(args.input->data, args.cutlass_act_data, args.cutlass_act_sf, M, K,
                                        args.stream);
+    // GemmKernelArgs carries a beta and this handler cannot honour it: the
+    // CUTLASS NVFP4 epilogue is built with a literal 0, so a beta=1 call would
+    // write the product OVER the residual instead of adding to it and answer
+    // with quiet garbage. Refusing hands the caller to the dequant path, which
+    // does honour beta.
+    //
+    // The two callers that can set beta (o_proj, down_proj) exclude this tier
+    // today, so this is unreachable by construction. It is here because that
+    // is one edit away from not being true, and the failure it would produce
+    // is silent (#1547).
+    if (args.beta != 0.0f)
+        return GemmDispatchResult::PreconditionFail;
     bool ok = gemm_nvfp4_cutlass_sm120(args.cutlass_act_data, args.cutlass_act_sf, payload,
                                        args.output->data, M, N, K, args.cutlass_workspace,
                                        args.cutlass_workspace_size, args.stream);
