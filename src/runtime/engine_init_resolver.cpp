@@ -415,12 +415,49 @@ void Engine::init_resolve_kv_dtype_policy_() {
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
             int hd = mcfg.head_dim > 0 ? mcfg.head_dim
                                        : (mcfg.n_heads > 0 ? mcfg.d_model / mcfg.n_heads : 128);
-            // K+V, 2 B/elem (fp16-conservative; FP8 KV is half), all layers.
-            size_t per_tok_kv = static_cast<size_t>(nkv) * hd * 2 * 2 * mcfg.n_layers;
-            size_t per_slot_kv = per_tok_kv * static_cast<size_t>(kRefCtxTokens);
-            if (per_slot_kv > 0) {
+            // Attention layers only: hybrids populate n_kv_heads_per_layer with
+            // zeros on the recurrent layers, and those hold no KV. Counting all
+            // layers overestimated Qwen3.8-27B 4x (64 counted, 16 with KV) and
+            // auto-sized batch 5 where 32 fits and runs — measured 224 vs 937
+            // tok/s aggregate at 32 concurrent requests (2026-08-25).
+            int kv_layers = mcfg.n_layers;
+            if (!mcfg.n_kv_heads_per_layer.empty()) {
+                int populated = 0;
+                for (int v : mcfg.n_kv_heads_per_layer)
+                    if (v > 0)
+                        ++populated;
+                if (populated > 0)
+                    kv_layers = populated;
+            }
+            // The KV dtype is final here (init_resolve_kv_dtype_ runs before
+            // this), so size with its real per-element cost instead of the old
+            // FP16 guess — the NVFP4-KV default on QWEN35 is 4x smaller.
+            const QType kvd = config_.kv_cache_dtype;
+            const bool kv_4bit =
+                (kvd == QType::INT4 || kvd == QType::NVFP4 || kvd == QType::MXFP4_KV);
+            size_t per_tok_elems = static_cast<size_t>(nkv) * hd * 2 * kv_layers;
+            size_t per_tok_kv = kv_4bit ? per_tok_elems / 2 : per_tok_elems * dtype_size(kvd);
+            // Recurrent per-sequence state (GDN/Mamba2 hybrids): unlike KV it
+            // does NOT clamp downstream — SSMState allocates
+            // max_batch_size × per_seq up front (151.5 MiB/seq on Qwen3.8-27B),
+            // so it must be in the per-slot price or auto over-commits.
+            size_t per_slot_state = 0;
+            if (mcfg.ssm_inner_size > 0 && mcfg.ssm_state_size > 0) {
+                int n_ssm = (kv_layers < mcfg.n_layers) ? (mcfg.n_layers - kv_layers)
+                                                        : mcfg.n_layers;
+                int ssm_heads = mcfg.ssm_dt_rank > 0 ? mcfg.ssm_dt_rank : 1;
+                int ssm_hd = mcfg.ssm_inner_size / ssm_heads;
+                // h state FP32-conservative (GDN pins FP32; Mamba2 may resolve
+                // FP16 later) + conv state FP16.
+                size_t h_b = static_cast<size_t>(ssm_heads) * ssm_hd * mcfg.ssm_state_size * 4;
+                size_t conv_b =
+                    static_cast<size_t>(mcfg.ssm_conv_channels()) * mcfg.ssm_conv_kernel * 2;
+                per_slot_state = (h_b + conv_b) * static_cast<size_t>(n_ssm);
+            }
+            size_t per_slot = per_tok_kv * static_cast<size_t>(kRefCtxTokens) + per_slot_state;
+            if (per_slot > 0) {
                 int fit = static_cast<int>((static_cast<double>(headroom) * kKvHeadroomFrac) /
-                                           static_cast<double>(per_slot_kv));
+                                           static_cast<double>(per_slot));
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
         }
@@ -759,10 +796,14 @@ void Engine::init_compute_max_seq_len_() {
             }
         }
         auto kv = config_.kv_cache_dtype;
-        bool packed_int4 = (kv == QType::INT4);
+        // All packed-4-bit KV dtypes: qtype_elem_bytes() cannot express half a
+        // byte and returns 0 for NVFP4/MXFP4_KV, which made kv_bytes_per_token
+        // 0 and max_by_vram fall through to the cap — the auto context ignored
+        // VRAM entirely on the NVFP4-KV default (found 2026-08-25).
+        bool packed_4bit = (kv == QType::INT4 || kv == QType::NVFP4 || kv == QType::MXFP4_KV);
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
                                2;  // K+V, per KV head, attention layers only
-        size_t kv_bytes_per_token = packed_int4 ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
+        size_t kv_bytes_per_token = packed_4bit ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
         // The budget planner downstream targets kv_fraction (default 0.8) of
         // free VRAM for KV. Cap the auto-detect at 0.75 × that (0.6 at the
         // default) so it doesn't undershoot what the planner can afford and

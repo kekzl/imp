@@ -13,6 +13,20 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The auto batch resolver priced a hybrid's KV 4x too high and its recurrent
+  state at zero: Qwen3.8-27B auto-sized `max_batch_size` 5 where 28 fits.**
+  It counted all 64 layers as KV-carrying (16 are) at FP16 (the model defaults
+  NVFP4 KV) and ignored the 151.5 MiB/sequence DeltaNet state, which unlike KV
+  does not clamp downstream. Measured at 32 concurrent requests, out of the
+  box: 224.7 -> 630.2 tok/s aggregate (auto 5 -> 28; a hand-pinned
+  `runtime.max_batch_size=32` with `max_seq_len=4096` reads 937.1).
+
+- **`max_seq_len: auto` ignored VRAM entirely on packed-4-bit KV.**
+  `qtype_elem_bytes(NVFP4)` is 0 (half-bytes are inexpressible), so
+  `kv=0 B/tok` and the resolver fell through to the 131072 cap regardless of
+  the card; the downstream KV clamp was the only thing keeping it honest.
+  NVFP4/MXFP4_KV now size as 4-bit like INT4.
+
 - **Concurrent GDN decode now batches: 81.5 -> 474.9 tok/s aggregate at 32-way,
   5.8x.** A GDN decode step used to serve ONE sequence, with concurrent ones
   time-multiplexed round-robin, because the recurrent scan kernels were
