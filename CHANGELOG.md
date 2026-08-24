@@ -28,6 +28,14 @@ there instead of retelling it.
 
 ### Added
 
+- **Qwen3.8-27B vision measured against the HF reference.** Preprocessing and
+  splicing are exact — 124 prompt tokens and 64 image placeholder tokens (8×8
+  from a 16×16 grid) on both sides, both fixtures. Top-1 and top-2 tokens agree;
+  softmax total variation is 0.104-0.318 with an image against 0.0042 for a
+  text-only control through the same template path, so the vision path does add
+  divergence and the decision survives it. Text-only unchanged: perplexity 4.6124
+  against 4.6202, −0.17 %. Video stays absent by decision and is rejected at
+  admission rather than silently dropped.
 - **Qwen3.8-27B serves 32 concurrent sequences with byte-identical output**, on
   this card, with no code change — `runtime.max_batch_size=32`,
   `kv_cache.dtype=fp8`, `runtime.max_seq_len=4096`, `runtime.deterministic=true`,
