@@ -966,6 +966,18 @@ neither.
   corpus is broken, so it stays FP16 KV unless you opt in.
 - **Qwen3.6-35B / Qwen3.5**: declare no FP8 KV hint, so they stay FP16 KV by
   default.
+- **GDN-hybrid models do not gain throughput from concurrency.** Measured on one
+  host, 32 concurrent 200-token requests: Qwen3-14B-NVFP4 (dense, no GDN) reaches
+  1427 tok/s aggregate, while Qwen3.8-27B-NVFP4 reaches 81.5 — the same as its
+  single-stream rate — and Qwen3.6-35B-A3B-NVFP4 reaches 132 against 320
+  single-stream, i.e. it gets slower under load. All 32 requests are admitted and
+  in flight simultaneously (verified per-request), and their outputs stay
+  byte-exact and isolated; the work does not batch. Plan a GDN deployment for
+  latency, not for aggregate throughput.
+  [PROV: commit=bf8c1e4 date=2026-08-24 hw=RTX5090 model=Qwen3.8-27B-NVFP4,Qwen3-14B-NVFP4,Qwen3.6-35B-A3B-NVFP4
+   quant=NVFP4 cuda=13.3 path=server-batched-decode
+   cmd="imp-server --set runtime.max_batch_size=32; 32 concurrent POST /v1/completions, max_tokens=200, temperature=0"
+   n=3]
 - **No BF16-against-BF16 parity check exists for any model this card cannot hold
   in BF16.** Qwen3.8-27B is 51.75 GiB in BF16 against 32 GB of VRAM, so every
   reference comparison for it is 4.5-bit weights against a 16-bit reference and

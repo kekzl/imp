@@ -28,6 +28,17 @@ there instead of retelling it.
 
 ### Added
 
+- **GDN hybrids gain nothing from concurrency, measured.** 32 concurrent
+  200-token requests on one host: Qwen3-14B-NVFP4 (dense, no GDN) 1427 tok/s
+  aggregate; Qwen3.8-27B-NVFP4 **81.5**, the same as its single-stream rate;
+  Qwen3.6-35B-A3B-NVFP4 132 against 320 single-stream, i.e. slower under load.
+  All 32 are admitted and in flight at once (start spread 0.02 s, peak in-flight
+  32, verified per request) and their outputs stay byte-exact and isolated — the
+  work simply does not batch. Recorded in `LIMITATIONS.md` so a deployment is
+  planned for latency rather than aggregate throughput. TTFT on the same build:
+  767 ms at 5225 prompt tokens, 7760 ms at 41680; 128k is unreachable
+  (`max_model_len` 48512). llama.cpp cannot serve this checkpoint at all — the
+  reference build b10524 has no `Qwen3_5` converter.
 - **Qwen3.8-27B vision measured against the HF reference.** Preprocessing and
   splicing are exact — 124 prompt tokens and 64 image placeholder tokens (8×8
   from a 16×16 grid) on both sides, both fixtures. Top-1 and top-2 tokens agree;
