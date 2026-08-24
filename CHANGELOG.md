@@ -25,7 +25,16 @@ there instead of retelling it.
   sequential. Wall time for 32x200 tokens: 78.5 s -> 13.5 s, no cross-sequence
   contamination, single-stream decode unchanged (82.29 against a 79.78 baseline
   on the same build, i.e. noise). `runtime.gdn_batched_decode=false` restores the
-  rotation. Re-profiled after the fix: CUTLASS GEMM 1.0 % -> **66.2 %** of GPU
+  rotation. The scan kernel then became the largest non-GEMM item, and it was
+  spilling: at the 128/128 shape one thread owned a whole state column, which
+  costs 128 registers for the state alone — ptxas reported 255 registers, an
+  88-byte stack frame and 128 bytes of spill stores, 2 blocks/SM and 8.3 %
+  occupancy. Splitting the column across two adjacent lanes (the two dot
+  products reduce with one `__shfl_xor_sync`) removes the spill entirely: **180
+  registers, 0 spill**, and the kernel is **18 % faster at n_seq=32** (116.3 ->
+  98.3 us). End to end, warm: 794 -> **886 tok/s aggregate**. Single-sequence
+  decode keeps the unsplit kernel, where that shape is faster. Re-profiled after
+  the batching fix: CUTLASS GEMM 1.0 % -> **66.2 %** of GPU
   time (a dense model reads 71.8 %), M=1 GEMV ~82 % -> ~1.5 %, and the scan runs
   21 024 times where it ran 230 400 — once per batch step per layer instead of
   once per token. The scan is now 19.3 % of the profile and the next lever; it
