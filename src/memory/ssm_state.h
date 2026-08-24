@@ -54,6 +54,10 @@ public:
     int max_sequences() const { return max_sequences_; }
     int n_ssm_layers() const { return n_ssm_layers_; }
     QType h_dtype() const { return h_dtype_; }
+    // Bytes of the recurrent h state per (sequence, layer). Read by the
+    // diagnostics.dump_gdn_state_dir drift dump, which has to size a host
+    // buffer for one layer's state without re-deriving the geometry.
+    size_t h_bytes() const { return h_bytes_; }
 
 private:
     VRAMAllocator* alloc_ = nullptr;

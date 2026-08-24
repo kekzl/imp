@@ -966,6 +966,14 @@ neither.
   corpus is broken, so it stays FP16 KV unless you opt in.
 - **Qwen3.6-35B / Qwen3.5**: declare no FP8 KV hint, so they stay FP16 KV by
   default.
+- **No BF16-against-BF16 parity check exists for any model this card cannot hold
+  in BF16.** Qwen3.8-27B is 51.75 GiB in BF16 against 32 GB of VRAM, so every
+  reference comparison for it is 4.5-bit weights against a 16-bit reference and
+  cannot separate imp's arithmetic from the quantizer's. What is measured
+  instead is the quantization price: teacher-forced perplexity 4.6202 (imp
+  NVFP4) against 4.4194 (transformers 5.15.1, BF16, CPU) on
+  `ppl_corpus_45k.txt`, 13810 counted tokens both, **+4.54 %**. Details and the
+  per-prompt logit table: [`plans/2026-08-24-qwen38-port.md`](plans/2026-08-24-qwen38-port.md).
 - **The Qwen3.8-27B FP8 release is a quantization SOURCE, not a servable
   checkpoint.** `imp-quantize` reads its per-layer `layers-N.safetensors` layout,
   but nothing serves it: its weights are 25.87 GiB against roughly 27 GiB of

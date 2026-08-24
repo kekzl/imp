@@ -723,6 +723,7 @@ if(IMP_BUILD_TESTS)
         tests/test_routing_decision.cpp
         tests/test_think_stop_logic.cpp
         tests/test_stream_pipeline.cpp
+        tests/test_npy_writer.cpp
         tests/test_vision_preprocess.cpp
         tests/test_mrope_positions.cpp
         tests/test_mla.cpp

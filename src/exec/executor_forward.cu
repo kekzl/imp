@@ -916,6 +916,121 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         IMP_CUDA_CHECK_LAUNCH();
     }
 
+    // ---- Final-logit dump (reference parity) ----
+    //
+    // What the sampler sees, after the soft-cap, as FP32 .npy. One file per
+    // forward pass, named by pass index and row count so a prefill (1 row when
+    // all_logits is off) and the decode steps that follow it stay separable.
+    //
+    // This is the only way to compare imp's logits against an independent
+    // implementation: /v1/chat/completions can report top_logprobs, which
+    // settles token ORDER but not the values, and the per-layer hidden dump
+    // above stops before the final norm and the LM head — the exact span where
+    // #1273 hid for four months.
+    //
+    // Skipped while the stream is being captured into a CUDA graph: the sync
+    // and the device-to-host copy below are both illegal there and fail the
+    // capture ("end_capture failed: operation failed due to a previous error
+    // during capture"), which turns a diagnostic into a broken decode path.
+    // The prefill pass — the one a parity harness wants — is not captured, so
+    // it still lands.
+    if (!runtime_config().diagnostics.dump_final_logits_dir.empty()) {
+        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+        if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
+            cap = cudaStreamCaptureStatusNone;
+        if (cap != cudaStreamCaptureStatusNone) {
+            static bool warned = false;
+            if (!warned) {
+                IMP_LOG_INFO(
+                    "[DUMP_LOGITS] skipping passes captured into a CUDA graph; the prefill pass "
+                    "is dumped. Set runtime.cuda_graphs=never to capture decode steps too.");
+                warned = true;
+            }
+            goto final_logits_dump_done;
+        }
+        {
+        const std::string& dir = runtime_config().diagnostics.dump_final_logits_dir;
+        static int dump_pass = 0;
+        const int rows = static_cast<int>(logits_out.shape[0]);
+        const int vocab = cfg.vocab_size;
+        std::vector<float> host(static_cast<size_t>(rows) * vocab);
+        cudaStreamSynchronize(stream);
+        cudaMemcpy(host.data(), logits_out.data, host.size() * sizeof(float), cudaMemcpyDeviceToHost);
+        char fname[512];
+        // The INPUT token count goes in the name, not just the output row
+        // count: with all_logits off a prefill emits one row, and so does every
+        // engine warm-up pass, so `rows` alone cannot tell them apart. Reading
+        // the first dump as "the prefill" is wrong — the warm-up passes come
+        // first and carry dummy input (measured: pearson 0.36 against the HF
+        // reference for those, 0.986 for the real one).
+        snprintf(fname, sizeof(fname), "%s/imp_logits_pass%03d_in%d_n%d.npy", dir.c_str(), dump_pass, n,
+                 rows);
+        write_npy_fp32(fname, host.data(), rows, vocab);
+        IMP_LOG_INFO("[DUMP_LOGITS] %s (in=%d rows=%d vocab=%d)", fname, n, rows, vocab);
+        dump_pass++;
+        }
+    }
+final_logits_dump_done:
+
+    // ---- Gated-DeltaNet recurrent-state dump (long-context drift) ----
+    //
+    // The state is FP32 by the checkpoint's own contract (mamba_ssm_dtype), and
+    // the reason that matters is drift: a downcast does not fail, it diverges
+    // quietly over tens of thousands of tokens. Logits at the end of a long
+    // prefill cannot distinguish "the state stayed sane" from "the state rotted
+    // and the last chunk happened to look fine", so this records the state
+    // itself.
+    //
+    // gdn_state.npy holds the LAST pass (overwritten each time), and every pass
+    // appends one line to gdn_state_stats.jsonl — so a 46k-token prefill leaves
+    // a per-chunk record of RMS and non-finite counts, which IS the drift curve.
+    // Skipped under graph capture for the same reason the logit dump is.
+    if (!runtime_config().diagnostics.dump_gdn_state_dir.empty() && state.ssm_state != nullptr &&
+        state.ssm_seq_id >= 0) {
+        cudaStreamCaptureStatus gcap = cudaStreamCaptureStatusNone;
+        if (cudaStreamIsCapturing(stream, &gcap) != cudaSuccess)
+            gcap = cudaStreamCaptureStatusNone;
+        if (gcap == cudaStreamCaptureStatusNone && state.ssm_state->h_dtype() == QType::F32) {
+            const std::string& gdir = runtime_config().diagnostics.dump_gdn_state_dir;
+            const int n_gdn = state.ssm_state->n_ssm_layers();
+            const size_t hb = state.ssm_state->h_bytes();
+            const int per_layer = static_cast<int>(hb / sizeof(float));
+            static int gdn_pass = 0;
+            std::vector<float> all(static_cast<size_t>(n_gdn) * per_layer);
+            cudaStreamSynchronize(stream);
+            for (int l = 0; l < n_gdn; l++) {
+                cudaMemcpy(all.data() + static_cast<size_t>(l) * per_layer,
+                           state.ssm_state->h_state(state.ssm_seq_id, l), hb, cudaMemcpyDeviceToHost);
+            }
+            double ss = 0.0;
+            float mn = all.empty() ? 0.0f : all[0], mx = mn;
+            size_t nonfinite = 0;
+            for (float v : all) {
+                if (!std::isfinite(v)) {
+                    nonfinite++;
+                    continue;
+                }
+                ss += static_cast<double>(v) * v;
+                mn = std::min(mn, v);
+                mx = std::max(mx, v);
+            }
+            const double rms = all.empty() ? 0.0 : std::sqrt(ss / static_cast<double>(all.size()));
+            write_npy_fp32((gdir + "/gdn_state.npy").c_str(), all.data(), n_gdn, per_layer);
+            if (FILE* jf = fopen((gdir + "/gdn_state_stats.jsonl").c_str(), "a")) {
+                fprintf(jf,
+                        "{\"pass\":%d,\"in_tokens\":%d,\"layers\":%d,\"per_layer\":%d,"
+                        "\"rms\":%.8g,\"min\":%.8g,\"max\":%.8g,\"nonfinite\":%zu}\n",
+                        gdn_pass, n, n_gdn, per_layer, rms, static_cast<double>(mn),
+                        static_cast<double>(mx), nonfinite);
+                fclose(jf);
+            }
+            IMP_LOG_INFO("[DUMP_GDN] pass=%d in=%d layers=%d rms=%.6g min=%.4g max=%.4g nonfinite=%zu",
+                         gdn_pass, n, n_gdn, rms, static_cast<double>(mn), static_cast<double>(mx),
+                         nonfinite);
+            gdn_pass++;
+        }
+    }
+
     // ---- Profile summary ----
     if (profile_active) {
         cudaEventRecord(ev_lm, stream);

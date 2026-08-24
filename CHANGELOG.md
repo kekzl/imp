@@ -28,6 +28,20 @@ there instead of retelling it.
 
 ### Added
 
+- **Two diagnostics that make reference parity measurable.**
+  `diagnostics.dump_final_logits_dir` writes the post-soft-cap LM logits of each
+  forward pass as FP32 `.npy`; `diagnostics.dump_gdn_state_dir` writes the
+  Gated-DeltaNet recurrent state plus a per-pass RMS / non-finite line. Both skip
+  passes captured into a CUDA graph, where the device-to-host copy would fail the
+  capture. First result on Qwen3.8-27B-NVFP4 against transformers 5.15.1 BF16:
+  perplexity 4.6202 vs 4.4194 (+4.54 %, the 4-bit price), top-1 token agreeing on
+  14 of 17 prompts, and **0 non-finite state values across a 46579-token
+  prefill** with a flat RMS. See
+  [`docs/plans/2026-08-24-qwen38-port.md`](docs/plans/2026-08-24-qwen38-port.md).
+- `write_npy_fp32` now has tests (NPY v1.0 magic, 64-byte header padding,
+  row-major payload, `(1, N)` rank for a single row). Every dump above is read
+  back through numpy, so a silently transposed or unreadable header would have
+  looked like an engine defect.
 - Qwen3.8-27B tokenizer parity against HuggingFace: 32 cases, encode **and**
   decode compared byte-for-byte (`make test-gpu`, needs no GPU — it reads
   `tokenizer.json` only). Both halves mutation-validated.
