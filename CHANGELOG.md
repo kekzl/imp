@@ -13,6 +13,21 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A 32-stream burst no longer starves its own tail.** Three defects, one
+  per layer, found by tracing per-request arrival and first-prefill times:
+  the HTTP worker pool was sized to cores (cpp-httplib default max(8,
+  cores-1) = 15 here) while a streamed completion holds its worker for the
+  whole generation, so late requests ARRIVED 4-7 s late; the prefill
+  scheduler ran one forward per step while anyone decoded
+  (`prefill_batch_decode_cap` 1 -> 0, replaced by a token-charged budget:
+  one full `prefill_chunk_decode_cap` chunk per step as before, several
+  small prompts together, each charged a 256-token launch-cost floor); and
+  the prefill round-robin rotor drifted over the shrinking batch (now
+  rotates by last-served request id). At 32 streams: TTFT max 6.8-8.0 s ->
+  2.2-3.7 s, stragglers 1-10 -> 0, and the 4-wave bench reads 1047-1073
+  tok/s on EVERY wave against 629/954-991 before - the wave-1 "ramp" was
+  these defects. Details: `docs/plans/2026-08-24-qwen38-port.md`.
+
 - **The decode loop's host time is now instrumented end to end**
   (`diagnostics.step_timing`: engine phases + step_impl blocks;
   `IMP_WORKER_TIMING=1`: server worker phases). It settled the last idle

@@ -165,7 +165,16 @@ struct RuntimeConfig {
         // ones. Same trade the chunk cap above already takes (+27% TTFT for
         // bounded latency), so the default follows it. The cap does not apply
         // when nobody is decoding, so batch ingest throughput is untouched.
-        int prefill_batch_decode_cap = 1;
+        // Default 0 since the token-charged budget (engine_scheduler.cpp,
+        // prefill loop) took over the protective role: the budget admits
+        // exactly one FULL-sized chunk per step (the #1643 schedule for
+        // large ingests, unchanged by construction) but lets several small
+        // prompts through together, each charged a 256-token launch-cost
+        // floor. The count cap of 1 serialised 31 concurrent ~110-token
+        // prompts to one per engine step: burst-arrival TTFT reached 8 s at
+        // 32 streams while the pool sat idle. Set a positive value to
+        // reimpose a hard forward-count cap on top of the token budget.
+        int prefill_batch_decode_cap = 0;
         // Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are
         // single-sequence, so concurrent sessions time-slice the decode.
         // This is the slice length in tokens — after it, the engine rotates

@@ -614,25 +614,65 @@ void Engine::step_prefill(cudaStream_t stream) {
         effective_chunk = capped;
     }
 
-    // Decode-aware batching: the cap above bounds the SIZE of one chunk, this
-    // one bounds how MANY of them run before the decoders get their step
-    // (#1643). Starting index rotates so the ingests that do not run this step
-    // are the ones that ran last step.
+    // Decode-aware batching: the size cap above bounds ONE chunk, this bounds
+    // how much prefill runs per step before the decoders get their turn
+    // (#1643). The budget is TOKEN-charged, not forward-counted: the old
+    // count cap of 1 was measured on ~5.2k-token ingests, where one forward
+    // IS the whole latency story - but it also serialised 31 concurrent
+    // ~110-token prompts to one per engine step, which starved a burst
+    // arrival for seconds (TTFT up to 8 s at 32 streams; the decoders being
+    // protected were the burst's own first finishers). Each forward charges
+    // at least kPrefillForwardFloorTokens, because a short forward's cost is
+    // launch-bound (64 layers), not token-bound - so a 1024 budget admits at
+    // most 4 small forwards (~100 ms stall, the same bound the size cap
+    // targets) and exactly 1 full-sized chunk (the #1643 schedule,
+    // unchanged). Starting index rotates so the ingests that do not run this
+    // step are the ones that ran last step.
     const size_t n_prefill = sched_prefill_batch_.size();
     size_t budget = n_prefill;
     const int batch_cap = runtime_config_.runtime.prefill_batch_decode_cap;
     if (batch_cap > 0 && !sched_decode_batch_.empty() && n_prefill > static_cast<size_t>(batch_cap))
         budget = static_cast<size_t>(batch_cap);
+    constexpr int kPrefillForwardFloorTokens = 256;
+    const bool budgeted = decode_cap > 0 && !sched_decode_batch_.empty();
+    int token_budget = budgeted ? std::max(decode_cap, kPrefillForwardFloorTokens) : 0;
 
+    // Rotation is by request ID, not by index: requests LEAVE the batch as
+    // their prefill completes, so an index-based rotor drifts over the
+    // shrunken list and systematically jumps a moving cohort (measured as
+    // 5 of 32 burst requests starved to wave-end TTFT while the budget had
+    // room). The rotor remembers the last-served id and starts just past
+    // it; ids are admission-ordered, so this is a clean round-robin under
+    // membership churn.
+    size_t start = 0;
+    for (size_t i = 0; i < n_prefill; i++) {
+        if (sched_prefill_batch_[i]->id > sched_prefill_last_id_) {
+            start = i;
+            break;
+        }
+    }
+    size_t ran = 0;
     for (size_t i = 0; i < budget; i++) {
-        auto& req = sched_prefill_batch_[(sched_prefill_rr_ + i) % n_prefill];
+        auto& req = sched_prefill_batch_[(start + i) % n_prefill];
+        // Charge from the PRE-call remaining: step_prefill_one advances
+        // prefill_offset, so reading it afterwards undercharges any chunk
+        // that does not finish the prompt.
+        const int remaining = static_cast<int>(req->input_tokens.size()) - req->prefill_offset;
+        const int charge = std::max(kPrefillForwardFloorTokens,
+                                    std::min(std::max(remaining, 0), effective_chunk));
+        // `budgeted`, not `token_budget > 0`: an exhausted budget must break,
+        // not disarm the check (that bug ran the whole batch after charge 4).
+        if (budgeted && ran > 0 && charge > token_budget)
+            break;
         step_prefill_one(req, effective_chunk, stream);
         kv_manager_->touch(req->id);
+        ran++;
+        sched_prefill_last_id_ = req->id;
+        if (budgeted)
+            token_budget -= charge;
     }
-    if (budget < n_prefill)
-        sched_prefill_rr_ = (sched_prefill_rr_ + budget) % n_prefill;
-    else
-        sched_prefill_rr_ = 0;
+    if (ran >= n_prefill)
+        sched_prefill_last_id_ = -1;
 }
 
 // =====================================================================
