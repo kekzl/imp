@@ -3,10 +3,13 @@
 #include <cuda_fp16.h>
 #include "compute/activation.h"
 #include "compute/softmax.h"
+#include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 
 #include <vector>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <algorithm>
 
@@ -513,6 +516,80 @@ TEST(SoftmaxTest, LargeRow) {
 
     free_gpu_tensor(d_x);
     free_gpu_tensor(d_out);
+}
+
+// ===========================================================================
+// SwigluNvfp4ProducerBitIdentity -- the fused swiglu + NVFP4 quantize
+// producer kernel must emit (a) the same FP16 bytes as swiglu() and (b) the
+// same packed nibbles + FP8 micro-scales as quantize_fp16_to_nvfp4_into()
+// run on that FP16 output. Inputs include near-zero and +/-1000-range
+// micro-blocks to exercise both scale clamps.
+// ===========================================================================
+TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
+    const int shapes[][2] = {{3, 4096}, {32, 17408}};
+    for (auto& sh : shapes) {
+        const int rows = sh[0], cols = sh[1];
+        const size_t n = (size_t)rows * cols;
+        std::vector<float> h_g(n), h_u(n);
+        for (size_t i = 0; i < n; i++) {
+            const size_t mb = i / 16;
+            if (mb % 7 == 3) {
+                h_g[i] = 0.0f;  // silu(0)*u = 0: low scale clamp
+                h_u[i] = 1.0f;
+            } else if (mb % 7 == 5) {
+                h_g[i] = 40.0f;  // silu ~= identity here
+                h_u[i] = 25.0f * (((i * 13) % 7) - 3.0f);  // |out| up to ~3000
+            } else {
+                h_g[i] = 0.05f * static_cast<float>((i * 37) % 101) - 2.5f;
+                h_u[i] = 0.04f * static_cast<float>((i * 53) % 97) - 1.9f;
+            }
+        }
+        Tensor d_g = make_gpu_tensor(h_g.data(), QType::F16, {rows, cols});
+        Tensor d_u = make_gpu_tensor(h_u.data(), QType::F16, {rows, cols});
+        Tensor d_out_ref = alloc_gpu_tensor(QType::F16, {rows, cols});
+        Tensor d_out_fused = alloc_gpu_tensor(QType::F16, {rows, cols});
+        const size_t packed_bytes = n / 2;
+        const size_t scale_bytes = n / 16;
+        uint8_t *ref_packed, *ref_scales, *f_packed, *f_scales;
+        ASSERT_EQ(cudaMalloc(&ref_packed, packed_bytes), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&ref_scales, scale_bytes), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&f_packed, packed_bytes), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&f_scales, scale_bytes), cudaSuccess);
+        cudaMemset(f_packed, 0xAA, packed_bytes);
+        cudaMemset(f_scales, 0xAA, scale_bytes);
+
+        swiglu(d_g, d_u, d_out_ref, nullptr);
+        quantize_fp16_to_nvfp4_into(d_out_ref.data, rows, cols, ref_packed, ref_scales,
+                                    /*tensor_scale=*/1.0f, nullptr);
+        ASSERT_TRUE(swiglu_quantize_nvfp4(d_g, d_u, d_out_fused, f_packed, f_scales, nullptr));
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+        std::vector<uint8_t> h_ref_out(d_out_ref.nbytes()), h_f_out(d_out_fused.nbytes());
+        cudaMemcpy(h_ref_out.data(), d_out_ref.data, d_out_ref.nbytes(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_f_out.data(), d_out_fused.data, d_out_fused.nbytes(), cudaMemcpyDeviceToHost);
+        EXPECT_EQ(0, memcmp(h_ref_out.data(), h_f_out.data(), h_ref_out.size()))
+            << "FP16 out differs, rows=" << rows << " cols=" << cols;
+
+        std::vector<uint8_t> h_rp(packed_bytes), h_fp(packed_bytes), h_rs(scale_bytes),
+            h_fs(scale_bytes);
+        cudaMemcpy(h_rp.data(), ref_packed, packed_bytes, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_fp.data(), f_packed, packed_bytes, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_rs.data(), ref_scales, scale_bytes, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_fs.data(), f_scales, scale_bytes, cudaMemcpyDeviceToHost);
+        EXPECT_EQ(0, memcmp(h_rs.data(), h_fs.data(), scale_bytes))
+            << "micro-scales differ, rows=" << rows << " cols=" << cols;
+        EXPECT_EQ(0, memcmp(h_rp.data(), h_fp.data(), packed_bytes))
+            << "packed nibbles differ, rows=" << rows << " cols=" << cols;
+
+        cudaFree(ref_packed);
+        cudaFree(ref_scales);
+        cudaFree(f_packed);
+        cudaFree(f_scales);
+        free_gpu_tensor(d_g);
+        free_gpu_tensor(d_u);
+        free_gpu_tensor(d_out_ref);
+        free_gpu_tensor(d_out_fused);
+    }
 }
 
 }  // namespace

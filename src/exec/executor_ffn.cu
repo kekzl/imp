@@ -196,7 +196,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                ly.w_gate.qtype, stream);
         } else {
-            rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
+            // Producer fusion: quantize into the small-M scratch inside the
+            // norm kernel when gate will take that route (batched decode,
+            // CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
+            rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
             bool fp8_ffn = (n > 1 && !cur_force_fp16_ && hwg && hwg->primary_tier == StorageTier::FP8 &&
@@ -441,7 +444,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     geglu(go, uo, so, stream);
                     break;
                 default:
-                    swiglu(go, uo, so, stream);
+                    // Producer fusion: quantize into the small-M scratch
+                    // inside the activation kernel when down will take that
+                    // route; falls back to plain swiglu.
+                    swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, stream);
                     break;
             }
             if (will_fuse_down_beta1 && !cur_force_fp16_ && wd_tier == StorageTier::FP8 &&

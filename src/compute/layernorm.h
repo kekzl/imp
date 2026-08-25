@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include <cuda_runtime.h>
+#include <cstdint>
 
 namespace imp {
 
@@ -13,6 +14,17 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual, const Tensor& wei
 // Simple RMSNorm: out = norm(x) * (weight + weight_offset)
 void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps = 1e-5f,
              cudaStream_t stream = nullptr, float weight_offset = 0.0f);
+
+// Batched-decode producer fusion: rmsnorm + NVFP4 activation quantize in one
+// kernel. Writes the same FP16 `out` as rmsnorm() (bit-identical) plus the
+// packed nibbles [rows, d/2] and FP8 micro-scales [rows, d/16] the small-M
+// NVFP4 GEMM reads (plain layout, tensor_scale 1.0 — bit-identical to
+// quantize_fp16_to_nvfp4_into on the stored FP16). Returns false when the
+// shape is outside the fused envelope (F16, rows 2..64, d % 256 == 0,
+// d <= 8192); the caller must then fall back to rmsnorm().
+bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* xq_packed,
+                   uint8_t* xq_scales, float eps = 1e-5f, cudaStream_t stream = nullptr,
+                   float weight_offset = 0.0f);
 
 // RMSNorm with FP32 input and FP16 output. Used when the residual stream is
 // kept in FP32 (Gemma-4 post-norm arch) but the downstream GEMM wants FP16.
