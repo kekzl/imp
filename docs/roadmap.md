@@ -74,9 +74,16 @@ Ranked by what an agent workload notices first.
    token — plus a handful of 26-42 ms host stalls), and ~135 across small
    classes mostly coupled to the launch count. Closing the two engine-side
    posts alone bounds imp at ~1195 tok/s, within 19% of vLLM. Levers, in
-   value order: (a) a Marlin-class small-M GEMM (port or split-K CUTLASS
-   with persistent, graph-safe reduction), (b) launch-density and the
-   large host gaps, (c) kernel fusion across the small classes. The
+   value order (updated 2026-08-25 evening after the deferred-delivery win,
+   #1758, and the wave-ramp attribution): (a) a GENUINE Marlin port for the
+   M<=32 GEMM class - the split-K wmma kernel built in #1756/#1757 beats
+   CUTLASS 42% in isolation but loses e2e without TMA/cp.async pipelining;
+   three measured dead ends bound the design. (b) decode-graph batch-size
+   BUCKETS with padded rows: today every never-seen batch size captures a
+   fresh graph (75 captures over a 4-wave run; wave 1 reads 704 tok/s
+   against 953-976 steady), which is also what production batch fluctuation
+   pays. (c) kernel fusion across the small launch-coupled classes
+   (norms 26 us/token, act-quantize 15, elementwise). The
    630-vs-936 delta between auto=28 and pinned=32 on this bench is NOT a
    rotation cost (scheduler admits 28, the last 4 drain as a near-empty
    batch; auto=28 sustains full rate under continuous arrival); raising
