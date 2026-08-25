@@ -860,6 +860,24 @@ bool Engine::init_kv_cache() {
             IMP_LOG_WARN("Failed to pre-allocate penalty token buffer");
             d_penalty_tokens_capacity_ = 0;
         }
+        // Batched-decode penalty histories (see engine.h). max_batch_size
+        // slots x max_seq_len tokens; 32 x 4096 = 512 KiB, 64 x 131072 = 32 MiB.
+        penalty_hist_slots_ =
+            std::min(config_.max_batch_size, (int)imp::PenaltyAppendArgs::kMaxRows);
+        penalty_hist_cap_ = config_.max_seq_len;
+        if (penalty_hist_slots_ > 1 && penalty_hist_cap_ > 0) {
+            d_penalty_hist_ = static_cast<int32_t*>(vram_alloc_.allocate(
+                (size_t)penalty_hist_slots_ * penalty_hist_cap_ * sizeof(int32_t),
+                "penalty_hist"));
+            if (d_penalty_hist_) {
+                penalty_hist_state_.assign(penalty_hist_slots_, {});
+            } else {
+                IMP_LOG_WARN("penalty_hist: alloc failed — batched sampling keeps the "
+                             "per-row upload path");
+                penalty_hist_slots_ = 0;
+                penalty_hist_cap_ = 0;
+            }
+        }
     }
 
     // Pre-allocate prefill metadata pool (avoids per-request cudaMallocAsync)

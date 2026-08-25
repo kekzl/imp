@@ -247,4 +247,32 @@ void sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_ma
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
 }
 
+// ---------------------------------------------------------------------------
+// Batched penalty-history append (n>1 decode loop). See sampling.h.
+// ---------------------------------------------------------------------------
+namespace {
+__global__ void penalty_hist_append_kernel(const char* __restrict__ sample_base,
+                                           size_t slot_stride, PenaltyAppendArgs args,
+                                           int32_t* __restrict__ hist) {
+    const int i = threadIdx.x;
+    if (i >= args.n)
+        return;
+    const int off = args.offs[i];
+    if (off < 0 || off >= args.cap)
+        return;
+    const int32_t tok = *reinterpret_cast<const int32_t*>(sample_base + (size_t)i * slot_stride);
+    hist[(size_t)args.slots[i] * args.cap + off] = tok;
+}
+}  // namespace
+
+void penalty_hist_append(const void* d_sample_base, size_t slot_stride_bytes,
+                         const PenaltyAppendArgs& args, int32_t* d_hist, cudaStream_t stream) {
+    if (args.n <= 0 || args.n > PenaltyAppendArgs::kMaxRows || d_sample_base == nullptr ||
+        d_hist == nullptr)
+        return;
+    penalty_hist_append_kernel<<<1, PenaltyAppendArgs::kMaxRows, 0, stream>>>(
+        static_cast<const char*>(d_sample_base), slot_stride_bytes, args, d_hist);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 }  // namespace imp

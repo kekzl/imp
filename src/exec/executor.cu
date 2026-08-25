@@ -556,6 +556,16 @@ void GraphExecutor::flush_pending_topk_rows_(cudaStream_t stream) {
     pending_topk_max_k_ = 0;
 }
 
+bool GraphExecutor::append_sampled_history(const PenaltyAppendArgs& args, int32_t* d_hist,
+                                           cudaStream_t stream) {
+    if (!d_sample_result_ || args.n <= 0 || args.n > sample_slots_ || d_hist == nullptr)
+        return false;
+    const char* base = reinterpret_cast<const char*>(d_sample_result_) +
+                       static_cast<size_t>(sample_parity_) * sample_slots_ * SAMPLE_SCRATCH_BYTES;
+    penalty_hist_append(base, SAMPLE_SCRATCH_BYTES, args, d_hist, stream);
+    return true;
+}
+
 const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t stream) {
     if (!d_sample_result_ || !h_sample_pinned_.as<int32_t>() || n_slots <= 0 || n_slots > sample_slots_) {
         n_pending_topk_rows_ = 0;

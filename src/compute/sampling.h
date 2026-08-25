@@ -176,6 +176,24 @@ void apply_logit_bias(float* d_logits, int vocab_size, const std::pair<int32_t, 
 // changes the output without saying so.
 void sampling_preallocate_logit_bias(int max_entries);
 
+// Batched penalty-history append for the n>1 decode loop: after a step's
+// tokens are sampled into the executor's strided sample slots, ONE launch
+// appends row i's token to its request's device-resident history at
+// hist[slots[i] * cap + offs[i]]. Replaces the per-row pageable H2D
+// re-upload of the whole output history every step (measured 2026-08-25:
+// 8.5k pageable H2Ds per 32-stream wave, each a synchronous host stall).
+// Row/slot/offset tables ride in the kernel arguments — no upload at all.
+struct PenaltyAppendArgs {
+    static constexpr int kMaxRows = 64;  // = Engine::kMaxGraphPoolSize
+    int n = 0;
+    int cap = 0;
+    int slots[kMaxRows];
+    int offs[kMaxRows];
+};
+void penalty_hist_append(const void* d_sample_base, size_t slot_stride_bytes,
+                         const PenaltyAppendArgs& args, int32_t* d_hist,
+                         cudaStream_t stream = nullptr);
+
 // Free persistent CUB sort scratch (call at engine shutdown).
 void sampling_cleanup();
 

@@ -788,6 +788,26 @@ private:
     int spec_rr_yield_interval_ = 8;
 
     int32_t* d_penalty_tokens_ = nullptr;
+    // Per-request device-resident penalty histories for the n>1 decode loop
+    // (#1755): the batched sampler used to re-upload each row's WHOLE output
+    // history from pageable memory every step — a synchronous host stall per
+    // row per step (8.5k of them per 32-stream wave, nsys 2026-08-25). Now a
+    // slot holds the history on device; one kernel appends each step's
+    // sampled tokens straight from the sample slots. Slots are engine-side
+    // only: req_id-keyed with lazy evict, a synced-length guard resyncs any
+    // divergence (host output_tokens stays the source of truth).
+    int32_t* d_penalty_hist_ = nullptr;
+    int penalty_hist_cap_ = 0;    // tokens per slot (= max_seq_len)
+    int penalty_hist_slots_ = 0;  // = max_batch_size, <= PenaltyAppendArgs::kMaxRows
+    struct PenaltyHistSlot {
+        int req_id = -1;
+        int synced = -1;  // tokens of req->output_tokens present on device
+    };
+    std::vector<PenaltyHistSlot> penalty_hist_state_;
+    // Find/assign the slot for req_id; evicts a slot whose owner is not in
+    // the current batch when full. Returns -1 only if the pool is absent.
+    int penalty_hist_slot_(int req_id, const std::vector<std::shared_ptr<Request>>& batch);
+    void log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>& rows);
     // Embedding pooling scratch (#1005): [d_model] fp32 chunk partial sums,
     // consumed synchronously per chunk (host accumulation on the request) so
     // interleaved chunks of concurrent embedding requests can share it.
