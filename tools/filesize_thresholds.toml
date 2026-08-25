@@ -89,7 +89,7 @@ roots = ["src", "tools", "tests"]
 "src/model/weight_upload.cu" = { code_loc = 2004, reason = "(c) one upload pipeline: pinned staging + checked malloc + tensor load orchestration" }
 "src/runtime/cuda_graph.cu" = { code_loc = 1046, reason = "(c) one module: graph capture/mode-resolve + PDL edges + barrier insert + replay" }
 "src/runtime/engine_scheduler.cpp" = { code_loc = 2210, reason = "(c) one scheduler: prefill/decode scheduling + chunked exec + perplexity capture" }
-"tests/test_gdn.cu" = { code_loc = 1026, reason = "(c) 12 tests of the GDN state-recurrent module - one test target" }
+"tests/test_gdn.cu" = { code_loc = 1096, reason = "(c) 12 tests of the GDN state-recurrent module - one test target" }
 "tests/test_gemm_kernel_registry.cu" = { code_loc = 1259, reason = "(c) 41 tests of the gemm_kernel_registry dispatch contract - one test target" }
 "tests/test_kv_cache.cpp" = { code_loc = 1184, reason = "(c) 60 tests across KV allocator/cache/manager - one test target" }
 "tests/test_paged_attention.cu" = { code_loc = 1202, reason = "(c) 26 tests of the paged-attention kernel - one test target" }

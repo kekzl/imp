@@ -2,9 +2,12 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include "compute/gdn.h"
+#include "quant/nvfp4_quant.h"
 
 #include <vector>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 
 namespace imp {
 namespace {
@@ -1312,6 +1315,90 @@ TEST(GDNScanTest, PaddedChunkDeviceLength) {
     cudaFree(d_dt);
     cudaFree(d_alpha);
     cudaFree(d_beta);
+}
+
+// ===========================================================================
+// RMSNormGatedSiLUNvfp4ProducerBitIdentity -- the fused gated-norm + NVFP4
+// quantize producer kernel must emit (a) the same y bytes as
+// gdn_rmsnorm_gated_silu() and (b) the same packed nibbles + FP8
+// micro-scales as quantize_fp16_to_nvfp4_into() run on that y. Inputs
+// include near-zero heads (low scale clamp) and large-magnitude heads.
+// ===========================================================================
+TEST(GDNScanTest, RMSNormGatedSiLUNvfp4ProducerBitIdentity) {
+    constexpr int n_tokens = 32, n_heads = 48, head_dim = 128;
+    constexpr int total = n_tokens * n_heads * head_dim;
+    constexpr int inner = n_heads * head_dim;
+    const float eps = 1e-5f;
+
+    srand(7);
+    std::vector<half> hy(total), hg(total), hw(head_dim);
+    for (int i = 0; i < total; i++) {
+        const int h = (i / head_dim) % n_heads;
+        float v;
+        if (h % 7 == 3)
+            v = 0.0f;  // near-zero head: low scale clamp
+        else if (h % 7 == 5)
+            v = 30.0f * ((rand() % 200 - 100) / 100.0f);  // large-magnitude head
+        else
+            v = (rand() % 200 - 100) / 100.0f;
+        hy[i] = __float2half(v);
+        hg[i] = __float2half((rand() % 200 - 100) / 50.0f);
+    }
+    for (int i = 0; i < head_dim; i++)
+        hw[i] = __float2half(0.5f + (rand() % 100) / 200.0f);
+
+    half *d_y_ref, *d_y_fused, *d_gate, *d_weight;
+    cudaMalloc(&d_y_ref, total * sizeof(half));
+    cudaMalloc(&d_y_fused, total * sizeof(half));
+    cudaMalloc(&d_gate, total * sizeof(half));
+    cudaMalloc(&d_weight, head_dim * sizeof(half));
+    cudaMemcpy(d_y_ref, hy.data(), total * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_y_fused, hy.data(), total * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_gate, hg.data(), total * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weight, hw.data(), head_dim * sizeof(half), cudaMemcpyHostToDevice);
+
+    const size_t packed_bytes = (size_t)total / 2;
+    const size_t scale_bytes = (size_t)total / 16;
+    uint8_t *ref_packed, *ref_scales, *f_packed, *f_scales;
+    ASSERT_EQ(cudaMalloc(&ref_packed, packed_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&ref_scales, scale_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&f_packed, packed_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&f_scales, scale_bytes), cudaSuccess);
+    cudaMemset(f_packed, 0xAA, packed_bytes);
+    cudaMemset(f_scales, 0xAA, scale_bytes);
+
+    gdn_rmsnorm_gated_silu(d_y_ref, d_gate, d_weight, eps, n_tokens, n_heads, head_dim, nullptr);
+    quantize_fp16_to_nvfp4_into(d_y_ref, n_tokens, inner, ref_packed, ref_scales,
+                                /*tensor_scale=*/1.0f, nullptr);
+    ASSERT_TRUE(gdn_rmsnorm_gated_silu_nvfp4(d_y_fused, d_gate, d_weight, f_packed, f_scales, eps,
+                                             n_tokens, n_heads, head_dim, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    std::vector<uint8_t> a(total * sizeof(half)), b(total * sizeof(half));
+    cudaMemcpy(a.data(), d_y_ref, a.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(b.data(), d_y_fused, b.size(), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(0, memcmp(a.data(), b.data(), a.size())) << "y bytes differ";
+
+    std::vector<uint8_t> rp(packed_bytes), fp(packed_bytes), rs(scale_bytes), fs(scale_bytes);
+    cudaMemcpy(rp.data(), ref_packed, packed_bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(fp.data(), f_packed, packed_bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(rs.data(), ref_scales, scale_bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(fs.data(), f_scales, scale_bytes, cudaMemcpyDeviceToHost);
+    EXPECT_EQ(0, memcmp(rs.data(), fs.data(), scale_bytes)) << "micro-scales differ";
+    EXPECT_EQ(0, memcmp(rp.data(), fp.data(), packed_bytes)) << "packed nibbles differ";
+
+    // Envelope refusal: non-power-of-two head_dim.
+    EXPECT_FALSE(gdn_rmsnorm_gated_silu_nvfp4(d_y_fused, d_gate, d_weight, f_packed, f_scales, eps,
+                                              n_tokens, n_heads, /*head_dim=*/96, nullptr));
+
+    cudaFree(ref_packed);
+    cudaFree(ref_scales);
+    cudaFree(f_packed);
+    cudaFree(f_scales);
+    cudaFree(d_y_ref);
+    cudaFree(d_y_fused);
+    cudaFree(d_gate);
+    cudaFree(d_weight);
 }
 
 }  // namespace

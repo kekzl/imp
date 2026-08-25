@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cstdint>
 
 namespace imp {
 
@@ -114,6 +115,16 @@ void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float
 // FP32-input variant. Reads scan output from FP32 buffer (preserves precision
 // when scan values are subnormal in FP16, ~6e-5). Writes FP16 result to `y`.
 // Use together with FP32 scan output to match llama.cpp numerics.
+// Producer fusion: same as gdn_rmsnorm_gated_silu plus the NVFP4 activation
+// quantize for the ssm_out small-M GEMM (packed nibbles [n, inner/2] + FP8
+// micro-scales [n, inner/16], plain layout, tensor_scale 1.0 — bit-identical
+// to quantize_fp16_to_nvfp4_into on the stored y). Returns false outside the
+// fused envelope (head_dim power of two, % 32 == 0, <= 1024); caller falls
+// back to the unfused kernel.
+bool gdn_rmsnorm_gated_silu_nvfp4(half* y, const half* gate, const half* weight, uint8_t* xq_packed,
+                                  uint8_t* xq_scales, float eps, int n_tokens, int n_heads,
+                                  int head_dim, cudaStream_t stream);
+
 void gdn_rmsnorm_gated_silu_fp32in(half* y_fp16_out, const float* y_fp32_in, const half* gate,
                                    const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
                                    cudaStream_t stream);

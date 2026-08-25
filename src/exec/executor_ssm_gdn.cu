@@ -669,9 +669,25 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         norm_eps = runtime_config().gdn.norm_eps_override;
     }
     if (!use_fp32_scan) {
-        gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data), static_cast<const half*>(gate_out.data),
-                               static_cast<const half*>(ly.ssm_norm_w.data), norm_eps, n, n_heads,
-                               head_dim_ssm, stream);
+        // Producer fusion: quantize into the small-M scratch inside the
+        // gated-norm kernel when ssm_out will take that route (batched
+        // decode, CUTLASS_NVFP4 tier); falls back to the unfused kernel.
+        const int inner_q = n_heads * head_dim_ssm;
+        uint8_t* xq_scales = nullptr;
+        uint8_t* xq_packed = smallm_producer_xq_(ly.ssm_out_id, n, inner_q, stream, &xq_scales);
+        if (xq_packed != nullptr &&
+            gdn_rmsnorm_gated_silu_nvfp4(static_cast<half*>(y_buf.data),
+                                         static_cast<const half*>(gate_out.data),
+                                         static_cast<const half*>(ly.ssm_norm_w.data), xq_packed,
+                                         xq_scales, norm_eps, n, n_heads, head_dim_ssm, stream)) {
+            smallm_producer_tag_(y_buf.data, n, inner_q);
+        } else {
+            gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data), static_cast<const half*>(gate_out.data),
+                                   static_cast<const half*>(ly.ssm_norm_w.data), norm_eps, n, n_heads,
+                                   head_dim_ssm, stream);
+            if (smallm_xq_src_ == y_buf.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == inner_q)
+                smallm_xq_from_producer_ = false;
+        }
     }
 
     // Per-element dump: post-rmsnorm-gated scan output (FP16), pre-ssm_out GEMM.
