@@ -382,23 +382,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             // x tile; packed x is ~92 KiB. Scratch sized for K_max on first
             // eager use, like the split-K workspace.
             const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
-            if (xq_need > smallm_xq_bytes_) {
-                cudaStreamCaptureStatus cap2 = cudaStreamCaptureStatusNone;
-                if (cudaStreamIsCapturing(ctx.stream, &cap2) != cudaSuccess)
-                    cap2 = cudaStreamCaptureStatusActive;
-                if (cap2 == cudaStreamCaptureStatusNone) {
-                    if (smallm_xq_)
-                        cudaFree(smallm_xq_);
-                    if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
-                        smallm_xq_bytes_ = xq_need;
-                    else {
-                        smallm_xq_ = nullptr;
-                        smallm_xq_bytes_ = 0;
-                    }
-                    smallm_xq_src_ = nullptr;  // fresh scratch holds nothing
-                    smallm_xq_from_producer_ = false;
-                }
-            }
+            ensure_smallm_xq_(xq_need, ctx.stream);
             if (smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
                 uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
                 uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
@@ -670,6 +654,29 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
 // fails the caller runs the unfused kernels and the dispatch quantizes as
 // before.
 // ---------------------------------------------------------------------------
+// Grow the small-M activation-quantize scratch to `xq_need` bytes. Never
+// allocates while `stream` is capturing (the eager warmup pass sizes it for
+// the graph run); a resize invalidates the shared-activation tag.
+void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
+    if (xq_need <= smallm_xq_bytes_)
+        return;
+    cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
+        cap = cudaStreamCaptureStatusActive;  // be conservative
+    if (cap != cudaStreamCaptureStatusNone)
+        return;
+    if (smallm_xq_)
+        cudaFree(smallm_xq_);
+    if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
+        smallm_xq_bytes_ = xq_need;
+    else {
+        smallm_xq_ = nullptr;
+        smallm_xq_bytes_ = 0;
+    }
+    smallm_xq_src_ = nullptr;  // fresh scratch holds nothing
+    smallm_xq_from_producer_ = false;
+}
+
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                             uint8_t** scales_out) {
     if (!runtime_config().gemm.nvfp4_smallm || cur_spec_verify_)
@@ -684,25 +691,9 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
         static_cast<int>(h.shape[1] * 2) != K)
         return nullptr;
     const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
-    if (xq_need > smallm_xq_bytes_) {
-        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
-        if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
-            cap = cudaStreamCaptureStatusActive;  // be conservative
-        if (cap != cudaStreamCaptureStatusNone)
-            return nullptr;
-        if (smallm_xq_)
-            cudaFree(smallm_xq_);
-        if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
-            smallm_xq_bytes_ = xq_need;
-        else {
-            smallm_xq_ = nullptr;
-            smallm_xq_bytes_ = 0;
-        }
-        smallm_xq_src_ = nullptr;
-        smallm_xq_from_producer_ = false;
-        if (smallm_xq_bytes_ < xq_need)
-            return nullptr;
-    }
+    ensure_smallm_xq_(xq_need, stream);
+    if (smallm_xq_bytes_ < xq_need)
+        return nullptr;
     *scales_out = static_cast<uint8_t*>(smallm_xq_) + (size_t)32 * (K / 2);
     return static_cast<uint8_t*>(smallm_xq_);
 }

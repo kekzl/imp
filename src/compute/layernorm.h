@@ -15,6 +15,12 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual, const Tensor& wei
 void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps = 1e-5f,
              cudaStream_t stream = nullptr, float weight_offset = 0.0f);
 
+// Batched-decode row-block RMSNorm launcher (layernorm_rowblock.cu): one
+// register-resident CTA per row. Caller checked F16, rows 2..64,
+// d % 8 == 0, d <= 8192 — rmsnorm() routes here.
+void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, int rows, int d_model,
+                           float eps, cudaStream_t stream, float weight_offset);
+
 // Batched-decode producer fusion: rmsnorm + NVFP4 activation quantize in one
 // kernel. Writes the same FP16 `out` as rmsnorm() (bit-identical) plus the
 // packed nibbles [rows, d/2] and FP8 micro-scales [rows, d/16] the small-M

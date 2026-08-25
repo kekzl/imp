@@ -275,6 +275,9 @@ public:
     // Never read by the CUTLASS prefill consumer (its scratch is separate).
     bool smallm_xq_from_producer_ = false;
 
+    // Grow the small-M xq scratch (no-op while capturing; resize
+    // invalidates the shared-activation tag).
+    void ensure_smallm_xq_(size_t xq_need, cudaStream_t stream);
     // Producer-fusion gate + scratch handout: returns the xq packed/scales
     // pointers when `consumer_id`'s weight will take the small-M NVFP4 route
     // for [M, K] F16 activations and the scratch is (or can be made) large

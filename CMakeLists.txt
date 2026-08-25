@@ -226,6 +226,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_dispatch.cu
     src/compute/rope.cu
     src/compute/layernorm.cu
+    src/compute/layernorm_rowblock.cu
     src/compute/mla_kv_assemble.cu
     src/compute/mla_absorb.cu
     src/compute/activation.cu
