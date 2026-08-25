@@ -135,7 +135,7 @@ def main():
     # 982 -> 983 (#1747): one GPU test pinning that the pre-floor KV figure
     # survives the min_kv_tokens raise. VramBudget* is SKIP_IF_NO_CUDA by
     # construction (AUDIT B64), so it cannot be anywhere else.
-    PINNED = 994
+    PINNED = 996
 
     text = CMAKE.read_text()
     mods = module_sources(text)
