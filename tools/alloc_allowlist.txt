@@ -42,8 +42,8 @@ src/exec/executor_lora.cu  # 2
 src/exec/executor_perplexity.cu  # 8
 src/exec/executor_ssm_gdn.cu  # 2
 src/exec/executor_workspace.cu  # 7
-src/exec/executor_gemm_dispatch.cu  # 2
-src/exec/executor_workspace_buffers.cu  # 16
+src/exec/executor_gemm_dispatch.cu  # 4
+src/exec/executor_workspace_buffers.cu  # 17
 src/exec/expert_cache.cu  # 4
 src/exec/gemm_scratch.cu  # 1
 src/exec/moe_workspace.cu  # 2

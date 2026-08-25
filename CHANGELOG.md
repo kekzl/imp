@@ -13,6 +13,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The small-M GEMM's A4 variant exists and is measured** (`gemm_nvfp4_smallm_a4`
+  + graph-safe `quantize_fp16_to_nvfp4_into`): both sides packed NVFP4. E2e it
+  reads 742-747 tok/s aggregate at 32 streams against 955-963 with the CUTLASS
+  path - worse than the FP16 variant - and its microbench stays bimodal at a
+  92 KiB activation working set, retiring L2 eviction as the main driver. The
+  route to Marlin-class small-M economics is a genuine Marlin port (cp.async
+  pipeline, stripe partitioning); the config comment carries the numbers.
+  Default stays OFF.
+
 - **A Marlin-class small-M NVFP4 GEMM exists now** (`gemm_nvfp4_smallm`,
   `gemm.nvfp4_smallm`, default OFF): W4A16 dequant-to-FP16 in smem + HMMA +
   split-K on the plain weight layout. Isolated on the batched-decode shape

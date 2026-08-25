@@ -137,7 +137,7 @@ def main():
     # construction (AUDIT B64), so it cannot be anywhere else.
     # 997 -> 999 (#this): two GPU tests for gemm_nvfp4_smallm (host-reference
     # walk + bandwidth regression bar) — kernel tests, card required.
-    PINNED = 999
+    PINNED = 1001
 
     text = CMAKE.read_text()
     mods = module_sources(text)

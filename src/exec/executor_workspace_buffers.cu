@@ -1343,6 +1343,11 @@ void GraphExecutor::free_buffers() {
         smallm_ws_ = nullptr;
         smallm_ws_bytes_ = 0;
     }
+    if (smallm_xq_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(smallm_xq_));
+        smallm_xq_ = nullptr;
+        smallm_xq_bytes_ = 0;
+    }
     if (lora_scratch_) {
         IMP_CUDA_CHECK_LOG(cudaFree(lora_scratch_));
         lora_scratch_ = nullptr;

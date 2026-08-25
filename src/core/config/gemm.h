@@ -124,8 +124,15 @@ struct GEMM {
     // the x tile; in the real batched step (GDN scan streaming 9.7 GB/step
     // through L2) it runs at 45.8 us and costs ~11% aggregate (measured
     // 824-836 vs 933-935 tok/s at 32 streams, alternating A/B, 2026-08-25).
-    // Default OFF until the A side reads quantized activations too (x drops
-    // 327 KB -> ~90 KB, L2-robust) or the executor pins a policy window.
+    // Default OFF. BOTH priced routes are now measured: the A4 variant
+    // (quantized activations, x 327 KB -> ~92 KB) reads 742-747 tok/s
+    // aggregate at 32 streams against 955-963 OFF — worse than the FP16
+    // variant's 824-836, the per-GEMM quantize launch included. The x
+    // working set was not the main driver: the split-K kernel is bimodal
+    // even at 92 KB. What the shipping CUTLASS path has that these SIMT-load
+    // kernels lack under real step pressure is TMA + a cp.async pipeline —
+    // i.e. the remaining route is a real Marlin port (ldmatrix/mma pipeline,
+    // stripe partitioning), not another dispatch or load-hint variant.
     bool nvfp4_smallm = false;
     // (gemm.nvfp4_ssm_proj — the 2026-05-30 opt-in that forced GGUF-hybrid
     // GDN projections into the NVFP4 decode cache — was REMOVED 2026-07-11:
