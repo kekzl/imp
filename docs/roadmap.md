@@ -12,14 +12,27 @@ The goal is making imp the fastest local engine for AI agent workloads on consum
 - **Concurrent requests** (#454) -- multi-request decode batching (`runtime.max_batch_size`).
 - **KV streaming** (#455) -- StreamingLLM auto-enables when the KV cache runs full: sink tokens + sliding window, agent sessions effectively unlimited.
 
-## Current focus: operational robustness for agent workloads
+## Current focus: concurrent decode at agentic fan-out
 
-The engine is past the raw-speed land-grab; current work is making it boringly reliable to *operate* under agent load:
+Batch=1 is settled; what is being worked now is **aggregate throughput when tens
+of requests run at once**, which is the shape an agent harness actually produces.
+The last ~60 commits are almost entirely this, each measured at 32 streams:
 
-- **Fast (re)starts** -- on-disk warm weight cache (cold boots skip weight conversion, #956) and suspend-to-RAM (`/admin/suspend`/`resume`: free the GPU in seconds, resume without re-reading weights, #954).
-- **Determinism as a product property** -- greedy request-order independence (decode-graph pool pre-armed in warmup, `runtime.warmup` default-on, #957); see [`determinism.md`](determinism.md).
-- **Model-support debt burn-down** -- last hard crash (gemma-3-12b GGUF decode IMA) fixed in #959; remaining blockers under "Known limitations".
-- **MLA family expansion** -- DeepSeek-V2-Lite is validated (#802/#803 latent-KV decode, opt-in); DeepSeek-V3 / GLM / Kimi / Ling reuse the same path once weights are staged locally.
+- **Serving loop** -- a 32-stream burst no longer starves its own tail (#1762);
+  token delivery deferred off the GPU driver loop, +4-5% (#1758); decode-graph
+  prewarm at init, wave-1 p50 -3-12% (#1761).
+- **Small-M kernels** -- native `mxf4nvf4` small-M GEMM v2, batched decode +16%
+  (#1766); row-block batched-decode RMSNorm, +6.8% (#1769); shared-activation
+  quantize, +4.6% (#1771).
+- **Sizing** -- the auto batch resolver priced a hybrid's KV 4x too high, and
+  `max_seq_len: auto` ignored VRAM entirely on packed-4-bit KV.
+
+The items this section used to list are **shipped**, not in progress, and are
+kept here only as the ground the current work stands on: the on-disk warm weight
+cache (#956), suspend-to-RAM (`/admin/suspend`/`resume`, #954), greedy
+request-order independence with `runtime.warmup` default-on (#957), and the
+gemma-3-12b GGUF decode IMA fix (#959). Remaining model-support blockers are
+under "Known limitations".
 
 ## What a 2026 engine has to do (assessed 2026-08-21)
 
@@ -159,7 +172,7 @@ A ranked audit of what still separates imp from "best agentic engine on a 5090".
 | # | Gap | State |
 |---|---|---|
 | 1 | First-party NVFP4 quantizer | **partial** — `imp-quantize` converts, the output runs, and **AWQ calibration ships** (`--calib`): Qwen3-0.6B +25.1% → +18.3% PPL vs BF16. Modelopt head-to-head done (imp ahead on one model). 3-D stacked experts are **refused** rather than mangled, and supporting them is **not** the cheap job it looked. **A model too large to run can now be calibrated off a quantized twin — and that showed `--calib` HURTS at 14B** (both measured 2026-08-01, below) |
-| 2 | Vision beyond Gemma | **largely closed** — Qwen3-VL runs end to end (#1163-#1180): dynamic resolution, DeepStack, three-axis M-RoPE, images over `/v1/chat/completions` and `imp-cli --image`, several images per request. Qwen3.6-35B-A3B-NVFP4 joined on the same tower (#1379 + this PR). What remains: no video, and no VL family with a genuinely different tower |
+| 2 | Vision beyond Gemma | **largely closed** — Qwen3-VL runs end to end (#1163-#1180): dynamic resolution, DeepStack, three-axis M-RoPE, images over `/v1/chat/completions` and `imp-cli --image`, several images per request. Qwen3.6-35B-A3B-NVFP4 joined on the same tower (#1379 + #1384). What remains: no video, and no VL family with a genuinely different tower |
 | 3 | One server, one model | **closed** — `server.model_swap` (#1080) |
 | 4 | Constrained decoding is JSON-only | **closed** — `response_format: regex` / `guided_regex` (#1091) and GBNF grammars (#1095) ship; `/v1/rerank` remains a separate item |
 | 5 | No speculation **tree** | **half closed, and the other half is no longer negative** (2026-08-19). A trained draft head is not missing: the MTP head pays **+21.3 %** at `speculative.mtp_k=1` since `ea547a53` (see the re-measurement below). No EAGLE/Medusa/multi-candidate **tree** exists, and that part stands. The −7 % that used to close this row was `token_recycling`, re-measured on the current build at **−0.27 %** — neutral, not a loss |
@@ -197,7 +210,7 @@ Shipped alongside, not from this list: the live web UI at `GET /` (#1078) and th
     - **No video.** `temporal_patch_size` is parsed and used, but only as a still-image repeat. Video needs a decoder (only `stb` is vendored), a frame axis on `QwenPatches`, a real temporal axis in M-RoPE (today every image token in a run shares one `t`), a `<|video_pad|>` convention, and a budget that is not per-image.
     - **No VL family with a *different* tower.** There is still no vision arch registry; what exists is an allowlist of `vision_config.model_type` values that name the *same* Qwen3-VL layout (`vision_tower_supported()`). InternVL/Pixtral each need a config parser, a tensor name map, a loader and an encoder forward; `Qwen2VLForConditionalGeneration` / `Qwen2_5_VLForConditionalGeneration` are not even in the text arch map. Qwen2.5-VL would additionally need windowed encoder attention (`window_size` + `fullatt_block_indexes`). InternVL's tiling produces several crops per image; that dependency is now satisfied — the multi-image path above treats N pictures as one concatenated embedding, which is exactly what a tiled image needs.
 
-    **A second *model* on the existing tower cost two gates, not a port (#1379 + this PR).** The entry below used to claim it "needs a checkpoint staged plus an encoder forward of roughly the size of the Qwen3-VL port itself (fifteen PRs)". Both halves were wrong for Qwen3.6-35B-A3B-NVFP4: the checkpoint had been staged all along with a complete 333-tensor tower, and no encoder was needed because it *is* the Qwen3-VL tower. What blocked it was a literal string compare on `model_type`, and an unconditional `model.visual.*` skip in the llm-compressor loader that also made the shard-drop discard `model_visual.safetensors` whole. The estimate was right about the *class* of work (a genuinely new tower) and wrong about this instance — worth remembering as an instance of costing a task by its category rather than by reading the checkpoint.
+    **A second *model* on the existing tower cost two gates, not a port (#1379 + #1384).** The entry below used to claim it "needs a checkpoint staged plus an encoder forward of roughly the size of the Qwen3-VL port itself (fifteen PRs)". Both halves were wrong for Qwen3.6-35B-A3B-NVFP4: the checkpoint had been staged all along with a complete 333-tensor tower, and no encoder was needed because it *is* the Qwen3-VL tower. What blocked it was a literal string compare on `model_type`, and an unconditional `model.visual.*` skip in the llm-compressor loader that also made the shard-drop discard `model_visual.safetensors` whole. The estimate was right about the *class* of work (a genuinely new tower) and wrong about this instance — worth remembering as an instance of costing a task by its category rather than by reading the checkpoint.
 
     So one piece remains a project rather than a task: **video** needs a container/codec dependency in a tree that vendors only `stb`. A genuinely new tower (InternVL/Pixtral) still carries the port-sized estimate above.
 
@@ -980,7 +993,7 @@ Closed competitive records (kept for the record, not active work):
 
     **Resolved 2026-08-20: the 0-9 % was a defect, and the two numbers are the
     same quantity.** A fully rejected verify chunk takes the cheap path in
-    `engine_spec_ngram.cpp:1072-1079` — it adopts `spec_snap_slab`, the recurrent
+    `engine_spec_ngram.cpp:944-950` — it adopts `spec_snap_slab`, the recurrent
     state the chunk forward wrote as of its first row, instead of restoring the
     pre-chunk slab and re-forwarding. `run_gdn` has written that slab since #847.
     `run_ssm` never did: `ssm_scan_prefill` had no snapshot parameter at all and
@@ -998,10 +1011,10 @@ Closed competitive records (kept for the record, not active work):
     | before | 851/2097 = **40.6 %** | 0/24 = **0.0 %** | 354.80, 356.54 tok/s |
     | after | 861/2097 = **41.1 %** | 590/1507, 587/1510 = **39.2 / 38.9 %** | 177.17, 175.12 tok/s |
 
-    The offline counter (`engine_scheduler.cpp:2069-2071`) scores, per eager
+    The offline counter (`engine_scheduler.cpp:2364-2366`) scores, per eager
     decode step, whether the head's depth-1 draft equals the token the main model
-    then emits. The serving counter (`engine_spec_ngram.cpp:1119-1120`, exported
-    at `metrics_memory.cpp:85,88`) counts, per verify chunk, how many of the K
+    then emits. The serving counter (`engine_spec_ngram.cpp:992-993`, exported
+    at `tools/imp-server/metrics_memory.cpp:120-121`) counts, per verify chunk, how many of the K
     drafts equal the verify forward's argmax at their row. At k=1 those are the
     same question, and they now answer it the same way. Before the fix they could
     not: the first fully rejected verify destroyed the state, the emitted stream
@@ -1047,7 +1060,7 @@ Closed competitive records (kept for the record, not active work):
     **The two traps, for whoever touches this next.** A first attempt registered the entry without the phase-4 rule; `infer_tier_from_wcache` derives a tier from *which cache holds a weight*, so prefill moved to FP8 as well and died on `status 15`. Phase 3 then read the entry as "has an FP8 alternative" and freed the FP16 copy prefill depends on — an illegal access that **only appears under decode mode 2**: the plain CLI run passed, `--bench` is what exposed it. Both are the same underlying shape: one lookup answering two different questions.
 
     **Measured** (`gemm.fp8_ssm_proj` on/off, same build, paired, 12 in-process reps each): **median +7.5 %** decode over 27 pairs, t=3.33. Order matters and was balanced deliberately — measuring ON first reads +8.2 % median, OFF first +3.8 %, so a single-order A/B would have overstated it. The independent prediction from bytes/bandwidth (890 MB/token instead of 1780 across the 46 tensors, at 1792 GB/s) is +6.9 %, which the median matches. Do not quote the mean (+11.1 %): this host's per-process spread on this model is wide enough that outliers pull it.
-- ~~**No dequant path for native FP8 weights**~~ -- **closed.** Native-FP8 weights get an FP16 companion at load, which is what `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` needed (Modelopt `MIXED_PRECISION`: 5935 MoE expert tensors NVFP4, 46 Mamba `in_proj`/`out_proj` FP8). sm_120 has no FP8 prefill GEMM, so the raw bytes used to reach cuBLAS as `dtB=CUDA_R_8F_E4M3` and abort with `status 15`. Phase 0 now records the per-tensor scalar scale instead of mis-promoting the weight to NVFP4, and Phase 1 expands it with the existing `dequantize_fp8_e4m3_to_fp16`. Costs 1698 MiB of FP16 cache on this model; init lands at 24.4 of 32.6 GB. See `docs/supported-models.md`.
+- ~~**No dequant path for native FP8 weights**~~ -- **closed.** Native-FP8 weights get an FP16 companion at load, which is what `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` needed (Modelopt `MIXED_PRECISION`: 5935 MoE expert tensors NVFP4, 46 Mamba `in_proj`/`out_proj` FP8). sm_120 has no FP8 prefill GEMM, so the raw bytes used to reach cuBLAS as `dtB=CUDA_R_8F_E4M3` and abort with `status 15`. Phase 0 now records the per-tensor scalar scale instead of mis-promoting the weight to NVFP4, and Phase 1 expands it with the existing `dequantize_fp8_e4m3_to_fp16`. Costs 1698 MiB of FP16 cache on this model; init lands at 24.4 of 32.6 GB. See `docs/MODELS.md`.
 
 ## Investigated and shelved
 
