@@ -11,10 +11,10 @@
 # the PR which way it moved.
 #
 # kernel<tab>arch<tab>reg<tab>stack<tab>local
+void imp::gdn_scan_fused_kernel<128, 128, __half, 1>	sm_120a	255	96	0
+void imp::gdn_scan_fused_kernel<128, 128, float, 1>	sm_120a	255	96	0
 void imp::gdn_scan_chunkwise_kernel<128, 128, 64, __half>	sm_120a	255	80	0
 void imp::gdn_scan_chunkwise_kernel<128, 128, 64, float>	sm_120a	255	80	0
-void imp::gdn_scan_fused_kernel<128, 128, __half>	sm_120a	255	80	0
-void imp::gdn_scan_fused_kernel<128, 128, float>	sm_120a	255	80	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 64, true, false, false>	sm_120a	255	32	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, false, false>	sm_120a	255	0	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	243	32	0
