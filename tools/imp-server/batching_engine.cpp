@@ -1,4 +1,8 @@
 #include "batching_engine.h"
+#include <pthread.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "core/logging.h"
 #include "model/tokenizer.h"
 
@@ -45,6 +49,7 @@ void BatchingEngine::start(ImpContext ctx) {
     paused_.store(false);
     running_.store(true);
     worker_thread_ = std::thread(&BatchingEngine::worker_loop, this);
+    notify_thread_ = std::thread(&BatchingEngine::notify_loop_, this);
 }
 
 void BatchingEngine::stop() {
@@ -53,6 +58,9 @@ void BatchingEngine::stop() {
     stop_requested_.store(true);
     queue_cv_.notify_all();
     pause_cv_.notify_all();  // wake the worker if it is parked in pause()
+    nq_cv_.notify_all();
+    if (notify_thread_.joinable())
+        notify_thread_.join();
     if (worker_thread_.joinable()) {
         worker_thread_.join();
     }
@@ -114,7 +122,46 @@ int BatchingEngine::queue_depth() const {
     return static_cast<int>(pending_queue_.size()) + static_cast<int>(active_requests_.size());
 }
 
+void BatchingEngine::notify_loop_() {
+    std::vector<PendingDelivery> batch;
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(nq_mutex_);
+            nq_cv_.wait(lock, [this] {
+                return !nq_.empty() || stop_requested_.load(std::memory_order_relaxed);
+            });
+            if (nq_.empty() && stop_requested_.load(std::memory_order_relaxed))
+                return;
+            batch.swap(nq_);
+        }
+        for (auto& d : batch) {
+            if (d.finish_only)
+                d.sr->push_finish(d.reason);
+            else
+                d.sr->push_token(d.token_id, d.is_last, d.reason);
+        }
+        batch.clear();
+    }
+}
+
 void BatchingEngine::worker_loop() {
+    // Best-effort scheduling boost for the ONE thread that drives the GPU.
+    // Step-phase timing at 32 streams put 6.4 ms per step OUTSIDE the engine
+    // (19% of the period): each step's token delivery wakes up to 32 SSE
+    // handler threads that detokenise and write between steps, and the OS
+    // preempts this thread among them. A higher priority keeps the GPU
+    // driver loop scheduled; EPERM (no CAP_SYS_NICE) is silently accepted.
+    {
+        sched_param sp{};
+        sp.sched_priority = 10;
+        if (pthread_setschedparam(pthread_self(), SCHED_RR, &sp) != 0) {
+            errno = 0;
+            if (setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), -10) == 0)
+                IMP_LOG_INFO("BatchingEngine: worker niced to -10");
+        } else {
+            IMP_LOG_INFO("BatchingEngine: worker on SCHED_RR prio 10");
+        }
+    }
     imp::Engine* engine = ctx_->engine.get();
     imp::KVCacheManager* kv_mgr = engine->kv_manager();
 
@@ -300,7 +347,11 @@ void BatchingEngine::worker_loop() {
             continue;
         }
 
-        // 4. Deliver new tokens and check for completion
+        // 4. Deliver new tokens and check for completion. Events are staged
+        // and handed to notify_loop_ in ONE batch (see the header note): a
+        // direct push_token here wakes the SSE handler before the worker can
+        // start the next GPU step.
+        std::vector<PendingDelivery> staged;
         imp::Tokenizer* tok = engine->model()->tokenizer();
         const auto& stop_ids = engine->chat_template().stop_token_ids();
 
@@ -355,12 +406,12 @@ void BatchingEngine::worker_loop() {
                     }
                     if (is_stop_token) {
                         // Don't include stop/banned tokens in output text
-                        sr->push_finish(reason);
+                        staged.push_back({sr, -1, true, reason, /*finish_only=*/true});
                     } else {
-                        sr->push_token(token, true, reason);
+                        staged.push_back({sr, token, true, reason, false});
                     }
                 } else {
-                    sr->push_token(token, false, nullptr);
+                    staged.push_back({sr, token, false, nullptr, false});
                 }
             }
             sr->notified_count = current_count;
@@ -384,12 +435,20 @@ void BatchingEngine::worker_loop() {
                             }
                         }
                     }
-                    sr->push_finish(reason);
+                    staged.push_back({sr, -1, true, reason, /*finish_only=*/true});
                 }
                 it = active_requests_.erase(it);
             } else {
                 ++it;
             }
+        }
+        if (!staged.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(nq_mutex_);
+                nq_.insert(nq_.end(), std::make_move_iterator(staged.begin()),
+                           std::make_move_iterator(staged.end()));
+            }
+            nq_cv_.notify_one();
         }
     }
 }

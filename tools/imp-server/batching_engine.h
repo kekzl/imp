@@ -137,6 +137,26 @@ private:
     ImpContext ctx_ = nullptr;  // non-owning
 
     std::thread worker_thread_;
+    // Deferred delivery (#step-timing 2026-08-25): every push_token's
+    // notify_one wakes an SSE handler that runs (detokenise + socket write)
+    // before the worker regains the core — at 32 streams that serialised
+    // ~6.4 ms of handler work per step INTO the GPU driver loop (19% of the
+    // step period). The worker now hands the step's events to this thread in
+    // one batch and proceeds to the next GPU step; the notifier does the
+    // wakeups while the GPU is busy. Per-request ordering is preserved (one
+    // notifier, FIFO).
+    struct PendingDelivery {
+        std::shared_ptr<ServerRequest> sr;
+        int32_t token_id;
+        bool is_last;
+        const char* reason;  // nullptr = plain token; is_last: finish reason
+        bool finish_only;    // push_finish instead of push_token
+    };
+    std::thread notify_thread_;
+    std::mutex nq_mutex_;
+    std::condition_variable nq_cv_;
+    std::vector<PendingDelivery> nq_;
+    void notify_loop_();
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> faulted_{false};

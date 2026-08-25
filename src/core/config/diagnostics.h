@@ -126,6 +126,10 @@ struct Diagnostics {
     bool log_gemm_algo = false;
     // MTP pattern logging (predicted, actual, match per step).
     bool mtp_pattern_log = false;
+    // Host-side phase attribution for batched decode steps (build / forward /
+    // sample / distribute / outside), aggregated every 256 steps. The GPU gap
+    // profile locates idle; this says which HOST phase produces it.
+    bool step_timing = false;
     // Stage 0 tree-ceiling probe: ask the MTP head for its top-4 candidates on
     // every chain step and tally, per depth, whether the true next token was
     // within top-w. imp-cli prints the table at the end of a run.

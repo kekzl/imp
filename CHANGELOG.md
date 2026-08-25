@@ -13,6 +13,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Token delivery no longer preempts the GPU driver loop.** Each step's
+  `push_token` woke its SSE handler immediately, and at 32 streams ~6.4 ms of
+  handler work (detokenise + socket write) ran per step BEFORE the worker
+  could start the next GPU step - 19% of the step period, measured by the new
+  `diagnostics.step_timing` phase attribution. The worker now stages the
+  step's events and hands them to a notifier thread in one batch; wakeups
+  happen while the GPU is busy. 32-stream aggregate 933-963 -> 967-990 tok/s
+  (median 987, three runs), per-request event order preserved, SSE and
+  finish_reason verified, degen_suite 50/50.
+
 - **The small-M GEMM's A4 variant exists and is measured** (`gemm_nvfp4_smallm_a4`
   + graph-safe `quantize_fp16_to_nvfp4_into`): both sides packed NVFP4. E2e it
   reads 742-747 tok/s aggregate at 32 streams against 955-963 with the CUTLASS
