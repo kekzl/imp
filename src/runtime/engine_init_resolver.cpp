@@ -411,6 +411,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // workspaces into bytes the cache build will take.
             if (mcfg.is_nvfp4_prequant)
                 upload_bytes += native_cache_demand().total();
+            // MTP head (speculative.mtp_k > 0): uploaded AFTER the pools, so
+            // the auto batch must leave it room — the hybrid-aware sizing
+            // below otherwise spends the 832 MiB the Qwen3.8-27B head needs
+            // on recurrent-state slots and the head upload fails (2026-08-25).
+            // ~130 MiB on top for the draft workspace + batched-feed scratch.
+            if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
+                model_->mtp_->loaded)
+                upload_bytes += mtp_upload_peak_bytes(*model_->mtp_) + (130ULL << 20);
             headroom = (free_vram > upload_bytes) ? (free_vram - upload_bytes) : 0;
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
             int hd = mcfg.head_dim > 0 ? mcfg.head_dim
@@ -458,6 +466,19 @@ void Engine::init_resolve_kv_dtype_policy_() {
             if (per_slot > 0) {
                 int fit = static_cast<int>((static_cast<double>(headroom) * kKvHeadroomFrac) /
                                            static_cast<double>(per_slot));
+                // MTP head on a hybrid: the head uploads AFTER the recurrent
+                // state is priced into the upload reserve, so room for it must
+                // come out of state slots at the state price. 2x the head: the
+                // async pool doubles the first large request it serves
+                // (measured 2026-08-19), and the head is exactly that request.
+                // Measured on Qwen3.8-27B (state 151.5 MiB/slot, head 832 MiB):
+                // upload fails at batch >= 16, works at <= 12; this lands 12.
+                if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
+                    model_->mtp_->loaded && per_slot_state > 0) {
+                    const size_t mtp_cost =
+                        2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
+                    fit -= static_cast<int>((mtp_cost + per_slot_state - 1) / per_slot_state);
+                }
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
         }
