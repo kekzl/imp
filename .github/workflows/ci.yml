@@ -483,6 +483,20 @@ jobs:
       - name: File-size gates (blocking)
         run: bash scripts/ci_static_gates.sh filesize
 
+  # The unlaned-GTest pin (tools/check_test_lanes.py). Its own check name:
+  # it fires on every added GPU test, and inside the "File size" job its
+  # failures read as file-size problems (twice on 2026-08-25).
+  testlanes:
+    name: Test lanes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Test-lane gate (blocking)
+        run: bash scripts/ci_static_gates.sh lanes
+
   # Documentation layer contract (docs/audit/docs-rewrite/). Seven checks, all
   # of which map to a defect this repo actually shipped: a datacenter-Blackwell
   # feature named as an imp feature, a throughput number that outlived its
