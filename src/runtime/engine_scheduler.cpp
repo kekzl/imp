@@ -75,7 +75,19 @@ bool Engine::step() {
     return more;
 }
 
+namespace {
+struct OutsideTiming {
+    double resume = 0, cp = 0, sched = 0, prefill = 0, decode_wrap = 0;
+    int n = 0;
+};
+OutsideTiming g_ot;
+}  // namespace
+
 bool Engine::step_impl_() {
+    const bool s_ot = runtime_config_.diagnostics.step_timing;
+    std::chrono::steady_clock::time_point o0, o1, o2, o3, o4;
+    if (s_ot)
+        o0 = std::chrono::steady_clock::now();
     // Fast path: async conditional graph loop completed on GPU.
     int async_result = step_async_graph_resume();
     if (async_result == 1)
@@ -85,6 +97,8 @@ bool Engine::step_impl_() {
     }
 
     // Fast path: pipelined constrained decode (json/schema) — one token/tick.
+    if (s_ot)
+        o1 = std::chrono::steady_clock::now();
     int cp_result = step_constrained_pipeline();
     if (cp_result == 1)
         return true;
@@ -93,6 +107,8 @@ bool Engine::step_impl_() {
     }
 
     // Schedule prefill/decode batches and reconfigure green contexts.
+    if (s_ot)
+        o2 = std::chrono::steady_clock::now();
     if (!step_schedule()) {
         // No schedulable work — but an in-flight pipelined step may still
         // hold tokens + deferred KV (all rows finished last step). Drain so
@@ -109,12 +125,30 @@ bool Engine::step_impl_() {
         drain_decode_pipeline();
 
     // Process prefill requests.
+    if (s_ot)
+        o3 = std::chrono::steady_clock::now();
     if (!sched_prefill_batch_.empty()) {
         step_prefill(prefill_stream());
         ensure_prefill_workspace(executor_.get());
     }
 
     // Process decode requests (batched).
+    if (s_ot)
+        o4 = std::chrono::steady_clock::now();
+    if (s_ot) {
+        auto us = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
+        g_ot.resume += us(o0, o1);
+        g_ot.cp += us(o1, o2);
+        g_ot.sched += us(o2, o3);
+        g_ot.prefill += us(o3, o4);
+        if (++g_ot.n >= 256) {
+            const double inv = 1.0 / g_ot.n;
+            IMP_LOG_INFO("outside-timing (n=%d): resume %.0f us, constrained %.0f, schedule %.0f, "
+                         "prefill-block %.0f",
+                         g_ot.n, g_ot.resume * inv, g_ot.cp * inv, g_ot.sched * inv, g_ot.prefill * inv);
+            g_ot = {};
+        }
+    }
     if (!sched_decode_batch_.empty()) {
         step_decode(decode_stream());
         ensure_prefill_workspace(executor_.get());

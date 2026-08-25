@@ -144,6 +144,19 @@ void BatchingEngine::notify_loop_() {
     }
 }
 
+namespace {
+// Worker-side phase attribution (companion to diagnostics.step_timing, which
+// covers the engine's step): admission (steps 0-2), engine->step(), delivery
+// staging (step 4). Enabled by IMP_WORKER_TIMING=1; logs every 256 loops.
+struct WorkerTiming {
+    double admit = 0, step = 0, stage = 0;
+    int n = 0;
+    bool enabled = false;
+    bool init_done = false;
+};
+WorkerTiming g_wt;
+}  // namespace
+
 void BatchingEngine::worker_loop() {
     // Best-effort scheduling boost for the ONE thread that drives the GPU.
     // Step-phase timing at 32 streams put 6.4 ms per step OUTSIDE the engine
@@ -164,8 +177,14 @@ void BatchingEngine::worker_loop() {
     }
     imp::Engine* engine = ctx_->engine.get();
     imp::KVCacheManager* kv_mgr = engine->kv_manager();
+    if (!g_wt.init_done) {
+        const char* e = getenv("IMP_WORKER_TIMING");
+        g_wt.enabled = (e && e[0] == '1');
+        g_wt.init_done = true;
+    }
 
     while (!stop_requested_.load(std::memory_order_relaxed)) {
+        auto wt0 = std::chrono::steady_clock::now();
         // 0. Graceful pause handshake. When a caller wants exclusive engine
         //    access (embeddings / blocking vision), it calls pause(). We must
         //    NOT cancel in-flight generations — instead we keep stepping until
@@ -283,6 +302,7 @@ void BatchingEngine::worker_loop() {
                        !decode_batch_max.compare_exchange_weak(prev, rows, std::memory_order_relaxed)) {}
             }
         }
+        auto wt1 = std::chrono::steady_clock::now();
         try {
             (void)engine->step();
         } catch (const std::exception& e) {
@@ -347,6 +367,7 @@ void BatchingEngine::worker_loop() {
             continue;
         }
 
+        auto wt2 = std::chrono::steady_clock::now();
         // 4. Deliver new tokens and check for completion. Events are staged
         // and handed to notify_loop_ in ONE batch (see the header note): a
         // direct push_token here wakes the SSE handler before the worker can
@@ -449,6 +470,23 @@ void BatchingEngine::worker_loop() {
                            std::make_move_iterator(staged.end()));
             }
             nq_cv_.notify_one();
+        }
+        if (g_wt.enabled) {
+            auto wt3 = std::chrono::steady_clock::now();
+            auto us = [](auto a, auto b) {
+                return std::chrono::duration<double, std::micro>(b - a).count();
+            };
+            g_wt.admit += us(wt0, wt1);
+            g_wt.step += us(wt1, wt2);
+            g_wt.stage += us(wt2, wt3);
+            if (++g_wt.n >= 256) {
+                const double inv = 1.0 / g_wt.n;
+                IMP_LOG_INFO("worker-timing (n=%d): admit %.0f us, engine-step %.0f, stage %.0f",
+                             g_wt.n, g_wt.admit * inv, g_wt.step * inv, g_wt.stage * inv);
+                g_wt = {};
+                g_wt.enabled = true;
+                g_wt.init_done = true;
+            }
         }
     }
 }

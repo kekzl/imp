@@ -13,6 +13,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The decode loop's host time is now instrumented end to end**
+  (`diagnostics.step_timing`: engine phases + step_impl blocks;
+  `IMP_WORKER_TIMING=1`: server worker phases). It settled the last idle
+  question with numbers: the steady-state loop is clean (resume/constrained/
+  schedule at 0/0/1 us) and the residual "outside" time is the WAVE RAMP -
+  prefills plus one CUDA-graph capture per never-seen batch size (75 captures
+  across a 4-wave run; wave 1 reads 704 tok/s against 953-976 for waves 2-4).
+  Batch-size bucketing with padded rows (the vLLM answer) is the priced
+  follow-up in `docs/roadmap.md`.
+
 - **Token delivery no longer preempts the GPU driver loop.** Each step's
   `push_token` woke its SSE handler immediately, and at 32 streams ~6.4 ms of
   handler work (detokenise + socket write) ran per step BEFORE the worker
