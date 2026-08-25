@@ -66,10 +66,17 @@ SELECT_ALL=0
 if want filesize; then
     echo "== File size =="
     run "hard-review gate + allowlist ceilings" python3 tools/check_filesize.py
-    run "tests that run in no CI lane"          python3 tools/check_test_lanes.py --report
     run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py
     run "FATAL logs that do not stop"           python3 tools/check_log_fatal.py --list
+fi
+
+# Own group so its failure carries its own CI check name: both 2026-08-25
+# "File size" reds were THIS pin (a new GPU test bumps the unlaned count),
+# and the job name sent two readers to the wrong mechanism.
+if want lanes; then
+    echo "== Test lanes =="
+    run "tests that run in no CI lane"          python3 tools/check_test_lanes.py --report
 fi
 
 if want alloc; then
