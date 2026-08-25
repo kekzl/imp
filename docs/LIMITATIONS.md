@@ -966,6 +966,39 @@ neither.
   corpus is broken, so it stays FP16 KV unless you opt in.
 - **Qwen3.6-35B / Qwen3.5**: declare no FP8 KV hint, so they stay FP16 KV by
   default.
+- **Quantised KV is a default only for QWEN35, and it is a trade, not a
+  freebie.** `kv_cache.dtype=auto` now resolves to NVFP4 for that family
+  (Qwen3.8-27B and its Qwen3.5 siblings): measured **+0.29..0.35 %** perplexity
+  on Qwen3.8-27B-NVFP4 and **+0.15..0.18 %** on Qwen3.5-4B mxfp4, alternating
+  arms, in exchange for `max_model_len` going 48 512 -> **131 072** tokens on a
+  32 GB card. Every other family keeps its previous default, deliberately: the
+  MoE GDN siblings (QWEN36_MOE, QWEN35_MOE) are excluded because FP8 KV already
+  costs them +1.47 % PPL — NVFP4 attention weights compound with a quantised KV
+  — and NVFP4 KV is the more aggressive quantiser, unmeasured there. Opt out
+  with `kv_cache.dtype=fp16`; opt in elsewhere with `=nvfp4`.
+  [PROV: commit=982cd43 date=2026-08-24 hw=RTX5090 model=Qwen3.8-27B-NVFP4,Qwen3.5-4B-mxfp4 quant=NVFP4
+   cuda=13.3 path=server-prefill
+   cmd="imp-cli --perplexity ppl_corpus_45k.txt --set kv_cache.dtype={fp16,nvfp4}, alternating arms"
+   n=3]
+- **GDN-hybrid concurrency was fixed on 2026-08-24; the numbers below are the
+  OLD behaviour, kept because the fix is one release old.** Until then a GDN
+  decode step served ONE sequence and concurrent ones were time-multiplexed, so
+  32 streams delivered what one delivered (81.5 tok/s aggregate on
+  Qwen3.8-27B-NVFP4 against 1427 for a dense model). `runtime.gdn_batched_decode`
+  (default on) now batches them: **474.9 tok/s aggregate at 32-way, 5.8x**, with
+  no cross-sequence contamination and single-stream decode unchanged. Set it
+  false to get the old rotation back.
+  [PROV: commit=ce77a94 date=2026-08-24 hw=RTX5090 model=Qwen3.8-27B-NVFP4 quant=NVFP4
+   cuda=13.3 path=server-batched-decode
+   cmd="imp-server --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096; 32 concurrent POST /v1/completions max_tokens=200"
+   n=1]
+- **The Qwen3.8-27B FP8 release is a quantization SOURCE, not a servable
+  checkpoint.** `imp-quantize` reads its per-layer `layers-N.safetensors` layout,
+  but nothing serves it: its weights are 25.87 GiB against roughly 27 GiB of
+  usable VRAM before the KV pool and the recurrent state, and `sm_120` has no FP8
+  GEMM, so even if it fit there would be no fast path. Quantize it to NVFP4 and
+  serve that. Dequantizing it to FP16 at load is not an option either — that is
+  the 51.75 GiB BF16 footprint.
 
 ## Operational sharp edges
 

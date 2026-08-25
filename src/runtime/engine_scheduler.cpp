@@ -1508,7 +1508,11 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // instead; the decode graphs re-capture for the new sequence's state
     // slot on rotation (~10-20 ms), which the quantum amortizes.
     hybrid_decode_waiting_ = false;
-    if (ssm_state_ && decode_batch.size() > 1) {
+    // Batched GDN decode runs all of them in one step; the rotation below is
+    // the fallback for when it is off or unavailable (no slot table). See
+    // runtime.gdn_batched_decode.
+    const bool gdn_batch_ok = runtime_config_.runtime.gdn_batched_decode && d_ssm_seq_slots_ != nullptr;
+    if (ssm_state_ && decode_batch.size() > 1 && !gdn_batch_ok) {
         const int quantum = runtime_config_.runtime.hybrid_decode_quantum;
         if (quantum > 0) {
             int cur = -1;
@@ -1701,6 +1705,34 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     state.positions = gpu_batch.d_positions;
     state.n_tokens = gpu_batch.total_tokens;
     state.n_sequences = gpu_batch.n_sequences;
+
+    // Batched GDN decode: hand the recurrent kernels one slot id per sequence.
+    // Only for a genuine multi-sequence decode step — a single sequence keeps
+    // the pointer null and takes the path it always took.
+    state.ssm_seq_slots = nullptr;
+    state.ssm_n_seq = 1;
+    if (ssm_state_ && d_ssm_seq_slots_ && gpu_batch.n_sequences > 1 &&
+        gpu_batch.total_tokens == gpu_batch.n_sequences &&
+        static_cast<size_t>(gpu_batch.n_sequences) <= h_ssm_seq_slots_.size()) {
+        bool all_known = true;
+        for (int i = 0; i < gpu_batch.n_sequences; ++i) {
+            auto it = recurrent_slot_of_.find(valid_decode[static_cast<size_t>(i)]->id);
+            if (it == recurrent_slot_of_.end()) {
+                all_known = false;
+                break;
+            }
+            h_ssm_seq_slots_[static_cast<size_t>(i)] = it->second;
+        }
+        // A request without a slot would read another sequence's state, so the
+        // whole step falls back rather than guessing one.
+        if (all_known) {
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ssm_seq_slots_, h_ssm_seq_slots_.data(),
+                                               static_cast<size_t>(gpu_batch.n_sequences) * sizeof(int),
+                                               cudaMemcpyHostToDevice, dec_stream));
+            state.ssm_seq_slots = d_ssm_seq_slots_;
+            state.ssm_n_seq = gpu_batch.n_sequences;
+        }
+    }
     state.max_blocks_per_seq = gpu_batch.max_blocks_per_seq;
     state.kv_cache = kv_cache_raw_;
     state.block_tables = gpu_batch.d_block_tables;

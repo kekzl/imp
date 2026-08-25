@@ -213,6 +213,17 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 "kv_cache.dtype=\"%s\" is not a known value "
                 "(auto|fp16|fp8|int8|int4|nvfp4|mxfp4) — keeping FP16 KV.",
                 kv_str.c_str());
+        } else if (kv_str == "auto" && kv_nvfp4_default_safe(mcfg.arch)) {
+            // Capacity, not speed: on a GDN hybrid the KV cache covers only the
+            // attention layers, and it is what bounds max_seq_len. NVFP4 costs
+            // ~0.3% PPL on this family and buys 2.7x the context (48 512 ->
+            // 131 072 tokens on a 32 GB card). Checked BEFORE the FP8 arms so a
+            // family on both lists gets the capacity trade; the head_dim and
+            // sink fallbacks below still apply and can put it back on FP16.
+            config_.kv_cache_dtype = QType::NVFP4;
+            IMP_LOG_INFO("KV cache dtype: NVFP4 (auto — %s measured at +0.3%% PPL for 2.7x the "
+                         "context; set kv_cache.dtype=fp16 to opt out)",
+                         model_arch_name(mcfg.arch));
         } else if (kv_str == "auto" && mcfg.kv_cache_quant_hint == "FP8" &&
                    kv_fp8_hint_default_safe(mcfg.arch)) {
             config_.kv_cache_dtype = QType::FP8_E4M3;
@@ -400,16 +411,74 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // workspaces into bytes the cache build will take.
             if (mcfg.is_nvfp4_prequant)
                 upload_bytes += native_cache_demand().total();
+            // MTP head (speculative.mtp_k > 0): uploaded AFTER the pools, so
+            // the auto batch must leave it room — the hybrid-aware sizing
+            // below otherwise spends the 832 MiB the Qwen3.8-27B head needs
+            // on recurrent-state slots and the head upload fails (2026-08-25).
+            // ~130 MiB on top for the draft workspace + batched-feed scratch.
+            if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
+                model_->mtp_->loaded)
+                upload_bytes += mtp_upload_peak_bytes(*model_->mtp_) + (130ULL << 20);
             headroom = (free_vram > upload_bytes) ? (free_vram - upload_bytes) : 0;
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
             int hd = mcfg.head_dim > 0 ? mcfg.head_dim
                                        : (mcfg.n_heads > 0 ? mcfg.d_model / mcfg.n_heads : 128);
-            // K+V, 2 B/elem (fp16-conservative; FP8 KV is half), all layers.
-            size_t per_tok_kv = static_cast<size_t>(nkv) * hd * 2 * 2 * mcfg.n_layers;
-            size_t per_slot_kv = per_tok_kv * static_cast<size_t>(kRefCtxTokens);
-            if (per_slot_kv > 0) {
+            // Attention layers only: hybrids populate n_kv_heads_per_layer with
+            // zeros on the recurrent layers, and those hold no KV. Counting all
+            // layers overestimated Qwen3.8-27B 4x (64 counted, 16 with KV) and
+            // auto-sized batch 5 where 32 fits and runs — measured 224 vs 937
+            // tok/s aggregate at 32 concurrent requests (2026-08-25).
+            int kv_layers = mcfg.n_layers;
+            if (!mcfg.n_kv_heads_per_layer.empty()) {
+                int populated = 0;
+                for (int v : mcfg.n_kv_heads_per_layer)
+                    if (v > 0)
+                        ++populated;
+                if (populated > 0)
+                    kv_layers = populated;
+            }
+            // The KV dtype is final here (init_resolve_kv_dtype_ runs before
+            // this), so size with its real per-element cost instead of the old
+            // FP16 guess — the NVFP4-KV default on QWEN35 is 4x smaller.
+            const QType kvd = config_.kv_cache_dtype;
+            const bool kv_4bit =
+                (kvd == QType::INT4 || kvd == QType::NVFP4 || kvd == QType::MXFP4_KV);
+            size_t per_tok_elems = static_cast<size_t>(nkv) * hd * 2 * kv_layers;
+            size_t per_tok_kv = kv_4bit ? per_tok_elems / 2 : per_tok_elems * dtype_size(kvd);
+            // Recurrent per-sequence state (GDN/Mamba2 hybrids): unlike KV it
+            // does NOT clamp downstream — SSMState allocates
+            // max_batch_size × per_seq up front (151.5 MiB/seq on Qwen3.8-27B),
+            // so it must be in the per-slot price or auto over-commits.
+            size_t per_slot_state = 0;
+            if (mcfg.ssm_inner_size > 0 && mcfg.ssm_state_size > 0) {
+                int n_ssm = (kv_layers < mcfg.n_layers) ? (mcfg.n_layers - kv_layers)
+                                                        : mcfg.n_layers;
+                int ssm_heads = mcfg.ssm_dt_rank > 0 ? mcfg.ssm_dt_rank : 1;
+                int ssm_hd = mcfg.ssm_inner_size / ssm_heads;
+                // h state FP32-conservative (GDN pins FP32; Mamba2 may resolve
+                // FP16 later) + conv state FP16.
+                size_t h_b = static_cast<size_t>(ssm_heads) * ssm_hd * mcfg.ssm_state_size * 4;
+                size_t conv_b =
+                    static_cast<size_t>(mcfg.ssm_conv_channels()) * mcfg.ssm_conv_kernel * 2;
+                per_slot_state = (h_b + conv_b) * static_cast<size_t>(n_ssm);
+            }
+            size_t per_slot = per_tok_kv * static_cast<size_t>(kRefCtxTokens) + per_slot_state;
+            if (per_slot > 0) {
                 int fit = static_cast<int>((static_cast<double>(headroom) * kKvHeadroomFrac) /
-                                           static_cast<double>(per_slot_kv));
+                                           static_cast<double>(per_slot));
+                // MTP head on a hybrid: the head uploads AFTER the recurrent
+                // state is priced into the upload reserve, so room for it must
+                // come out of state slots at the state price. 2x the head: the
+                // async pool doubles the first large request it serves
+                // (measured 2026-08-19), and the head is exactly that request.
+                // Measured on Qwen3.8-27B (state 151.5 MiB/slot, head 832 MiB):
+                // upload fails at batch >= 16, works at <= 12; this lands 12.
+                if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
+                    model_->mtp_->loaded && per_slot_state > 0) {
+                    const size_t mtp_cost =
+                        2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
+                    fit -= static_cast<int>((mtp_cost + per_slot_state - 1) / per_slot_state);
+                }
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
         }
@@ -748,10 +817,14 @@ void Engine::init_compute_max_seq_len_() {
             }
         }
         auto kv = config_.kv_cache_dtype;
-        bool packed_int4 = (kv == QType::INT4);
+        // All packed-4-bit KV dtypes: qtype_elem_bytes() cannot express half a
+        // byte and returns 0 for NVFP4/MXFP4_KV, which made kv_bytes_per_token
+        // 0 and max_by_vram fall through to the cap — the auto context ignored
+        // VRAM entirely on the NVFP4-KV default (found 2026-08-25).
+        bool packed_4bit = (kv == QType::INT4 || kv == QType::NVFP4 || kv == QType::MXFP4_KV);
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
                                2;  // K+V, per KV head, attention layers only
-        size_t kv_bytes_per_token = packed_int4 ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
+        size_t kv_bytes_per_token = packed_4bit ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
         // The budget planner downstream targets kv_fraction (default 0.8) of
         // free VRAM for KV. Cap the auto-detect at 0.75 × that (0.6 at the
         // default) so it doesn't undershoot what the planner can afford and

@@ -206,8 +206,11 @@ int main(int argc, char** argv) {
     ImpModel model = nullptr;
     // Only load the MTP head sidecar (~1.57 GiB BF16 on Qwen3.6) when the user
     // actually requested MTP spec-decode. Otherwise it is dead VRAM.
+    // Both spellings count: the startup hint recommends --set
+    // speculative.mtp_k=2, and until this line the CLI silently ignored it.
+    const int mtp_k = args.mtp_spec_decode_k > 0 ? args.mtp_spec_decode_k : runtime_cfg.speculative.mtp_k;
     ImpError err = imp_model_load_ex(resolved_model.c_str(), format,
-                                     /*load_mtp_head=*/args.mtp_spec_decode_k > 0, &model);
+                                     /*load_mtp_head=*/mtp_k > 0, &model);
     if (err != IMP_SUCCESS) {
         fprintf(stderr, "Error loading model: %s\n", imp_error_string(err));
         return imp::tools::exit_code_for(err);
@@ -345,11 +348,11 @@ int main(int argc, char** argv) {
 
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);
-    if (err == IMP_SUCCESS && args.mtp_spec_decode_k > 0) {
-        ImpError mtp_err = imp_enable_mtp_spec_decode(ctx, args.mtp_spec_decode_k);
+    if (err == IMP_SUCCESS && mtp_k > 0) {
+        ImpError mtp_err = imp_enable_mtp_spec_decode(ctx, mtp_k);
         if (mtp_err != IMP_SUCCESS) {
-            fprintf(stderr, "Warning: --mtp-spec-decode %d failed (%s); continuing without spec-decode\n",
-                    args.mtp_spec_decode_k, imp_error_string(mtp_err));
+            fprintf(stderr, "Warning: MTP spec-decode k=%d failed (%s); continuing without spec-decode\n",
+                    mtp_k, imp_error_string(mtp_err));
         }
     }
     if (err != IMP_SUCCESS) {

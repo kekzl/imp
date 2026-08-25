@@ -381,12 +381,28 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // Decode: FP32 fused conv+SiLU (matching llama.cpp precision).
             // Copy FP16 input to xBC_out first to avoid aliasing: conv_f32
             // writes FP32 back into ssm_proj_buf_ which overlaps xBC_in.
+            // n rows, not one: at batched decode the step carries one row per
+            // sequence, and copying a single row left the other sequences
+            // reading stale buffer contents (measured as coherent output for
+            // sequence 0 and garbage for the rest). n == 1 on the
+            // single-sequence path, so this is the same copy it always was.
             IMP_CUDA_CHECK_LOG(
                 cudaMemcpyAsync(xBC_out.data, xBC_in.data,
-                                static_cast<size_t>(conv_channels) * dtype_size(compute_dtype_),
+                                static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
                                 cudaMemcpyDeviceToDevice, stream));
-            ssm_conv1d_decode_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
-                                       conv_kernel, stream);
+            // Batched decode: ssm_n_seq sequences, one token each, each with
+            // its own conv state. Falls through to the single-sequence call
+            // when the step carries one sequence.
+            if (state.ssm_seq_slots && state.ssm_n_seq > 1) {
+                ssm_conv1d_decode_f32_silu_batched(
+                    state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
+                    static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)),
+                    static_cast<const half*>(xBC_out.data), ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
+                    state.ssm_n_seq, conv_channels, conv_kernel, stream);
+            } else {
+                ssm_conv1d_decode_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
+                                           conv_kernel, stream);
+            }
         }
     } else {
         // Fallback: copy input to output + SiLU + FP32 conversion
@@ -580,6 +596,20 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                    static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                    static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
                                    stream, gl, state.d_chunk_len);
+        } else if (state.ssm_seq_slots && state.ssm_n_seq > 1) {
+            // Batched decode over independent sequences: n rows are n
+            // sequences, one token each. The chunkwise path is a prefill
+            // optimisation (it splits ONE sequence's timeline), so it does not
+            // apply here — at one token per sequence there is nothing to chunk.
+            const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
+            gdn_scan_fused_f32_batched(
+                conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
+                static_cast<const float*>(ly.ssm_dt_b.data),
+                static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
+                static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)),
+                static_cast<half*>(y_buf.data), state.ssm_n_seq, /*n_tokens=*/1, n_heads, head_dim_ssm,
+                ssize, n_groups, stream, gl, /*d_real_n=*/nullptr);
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             if (use_chunkwise) {

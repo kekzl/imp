@@ -613,6 +613,14 @@ private:
     // differed by a multiple of capacity; allocate a distinct free slot instead.
     std::vector<int> free_recurrent_slots_;           // available slot ids
     std::unordered_map<int, int> recurrent_slot_of_;  // req.id -> slot
+    // Device-side slot table for BATCHED GDN decode: max_batch_size ints,
+    // allocated once beside the SSM state and refilled per step. It is a stable
+    // POINTER on purpose — a CUDA graph captures the address, so changing which
+    // sequences are in the step does not force a re-capture, which is what made
+    // the old design serialise them (engine_scheduler.cpp: rotation cost
+    // ~10-20 ms of re-capture, so it ran one sequence per step instead).
+    int* d_ssm_seq_slots_ = nullptr;
+    std::vector<int> h_ssm_seq_slots_;
     bool recurrent_slots_initialized_ = false;
     // Recurrent-state snapshots (hybrid prefix caching): LRU store of
     // per-sequence SSM/GDN state slabs keyed by the chained KV block hash of

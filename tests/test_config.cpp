@@ -86,6 +86,32 @@ TEST(RuntimeConfigTest, KvFp8HintDefaultSafeAllowlist) {
     EXPECT_FALSE(kv_fp8_hint_default_safe(ModelArch::GENERIC));
 }
 
+// The NVFP4-KV capacity gate (kv_cache.dtype=auto). Unlike the two FP8 lists,
+// this one is not a ~neutral-quality bar: it is a deliberate trade of ~0.3 % PPL
+// for 2.7x the context, because on a GDN hybrid the KV cache is what bounds
+// max_seq_len (only the attention layers hold one). Measured 2026-08-24 on
+// Qwen3.8-27B-NVFP4 (+0.29..0.35 %) and Qwen3.5-4B mxfp4 (+0.15..0.18 %),
+// alternating arms; see model.cpp.
+TEST(RuntimeConfigTest, KvNvfp4DefaultSafeAllowlist) {
+    EXPECT_TRUE(kv_nvfp4_default_safe(ModelArch::QWEN35));
+    // The MoE siblings are deliberately OFF: FP8 KV already costs QWEN36_MOE
+    // +1.47 % PPL because NVFP4 attention weights compound with a quantised KV,
+    // and NVFP4 KV is the more aggressive quantiser. Unmeasured there.
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN36_MOE));
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN35_MOE));
+    // Families the FP8 lists already serve must not be flipped by this gate.
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN3));
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN3_MOE));
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::LLAMA));
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::NEMOTRON_H_MOE));
+    // GPT_OSS carries learned attention sinks; a quantised KV drops the sink
+    // term, and the resolver's sink fallback is the backstop — this gate must
+    // not walk into it in the first place.
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::GPT_OSS));
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::GEMMA4));
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::GENERIC));
+}
+
 // The NO-HINT FP8-KV gate (kv_cache.dtype=auto on checkpoints without a
 // kv_cache_quant_algo hint — i.e. every GGUF). Stricter bar than the hint list:
 // the family must gate ~PPL-neutral at 16k context. See model.cpp for the

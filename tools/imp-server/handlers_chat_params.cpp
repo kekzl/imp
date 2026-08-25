@@ -488,6 +488,14 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.params.enable_thinking_requested = body.value("enable_thinking", false);
     ctx.params.enable_thinking_set = body.contains("enable_thinking") && body["enable_thinking"].is_boolean();
 
+    // reasoning_effort: handed to the chat template verbatim. A non-string is
+    // ignored rather than rejected, matching how the other optional scalars
+    // here treat a wrong type. Templates that do not reference the variable are
+    // unaffected; one that does and dislikes the value says so through its own
+    // raise_exception (imp logs it and renders without the branch).
+    if (body.contains("reasoning_effort") && body["reasoning_effort"].is_string())
+        ctx.params.reasoning_effort = body["reasoning_effort"].get<std::string>();
+
     // Per-request LoRA adapter selection ("lora": "<name>"; absent/"" = base).
     ctx.params.lora_name = body.value("lora", std::string());
 

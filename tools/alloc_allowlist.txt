@@ -23,7 +23,7 @@ src/compute/mmq_q4k_imma_tile.cu  # 6
 src/compute/mmq_q8_imma.cu  # 3
 src/compute/mmq_q8_imma_scratch.cu  # 4
 src/compute/moe_routing.cu  # 12
-src/compute/mtp_forward.cu  # 11
+src/compute/mtp_forward.cu  # 12
 src/compute/quantize_fp16_nvfp4_moe_native.cu  # 6
 src/compute/sampling.cu  # 1
 src/compute/sampling_penalties.cu  # 2
@@ -67,7 +67,8 @@ src/runtime/cuda_graph.cu  # 26
 src/runtime/engine.cpp  # 6
 src/runtime/engine_graph_decode.cpp  # 30
 src/runtime/engine_internal.h  # 5
-src/runtime/engine_kv_cache_init.cpp  # 4
+src/runtime/engine_kv_cache_init.cpp  # 5
+src/runtime/engine_spec_mtp.cpp  # 2
 src/runtime/engine_scheduler.cpp  # 22
 src/runtime/engine_spec_buffers.cpp  # 13
 src/runtime/engine_workspace_warmup.cpp  # 2

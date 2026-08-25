@@ -164,6 +164,15 @@ struct RuntimeConfig {
         // (128 ≈ 1-2% at typical hybrid decode rates). 0 restores the old
         // head-of-line behavior (first request runs to completion).
         int hybrid_decode_quantum = 128;
+        // Batch concurrent GDN/SSM sequences into ONE decode step instead of
+        // time-slicing them (the hybrid_decode_quantum rotation above). The
+        // recurrent scan is sequential in tokens, not in sequences, so separate
+        // sequences parallelise across blockIdx.y; without this the whole step
+        // — including the FFN and attention GEMMs — runs at M=1. Profiled at
+        // 32-way load: 82 % of GPU time in M=1 GEMV kernels against 1 % in
+        // CUTLASS GEMM, where a dense model is the other way round.
+        // Set false to fall back to the rotation.
+        bool gdn_batched_decode = true;
         // Pipelined batched decode (n>=2, CUDA graphs on): keep ONE decode
         // step in flight — step N+1 (device-side token chain + graph replay
         // + sampler enqueue) is enqueued BEFORE step N's tokens are read

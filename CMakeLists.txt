@@ -723,6 +723,7 @@ if(IMP_BUILD_TESTS)
         tests/test_routing_decision.cpp
         tests/test_think_stop_logic.cpp
         tests/test_stream_pipeline.cpp
+        tests/test_npy_writer.cpp
         tests/test_vision_preprocess.cpp
         tests/test_mrope_positions.cpp
         tests/test_mla.cpp
@@ -822,9 +823,12 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer.cpp
         tests/test_tokenizer_robustness.cpp
         tests/test_tokenizer_compat.cpp
+        tests/test_tokenizer_qwen38.cpp
         tests/test_chat_template.cpp
         tests/test_gpt_oss_harmony_golden.cpp
+        tests/test_qwen38_chat_template.cpp
         tests/test_jinja.cpp
+        tests/test_jinja_undefined.cpp
         tests/test_chat_template_goldens.cpp
     )
 
@@ -926,6 +930,8 @@ if(IMP_BUILD_TESTS)
         tests/test_moe_executor.cu
         tests/test_expert_cache.cu
         tests/test_gdn.cu
+        tests/test_gdn_batched.cu
+        tests/test_mtp_feed_batch.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
         tests/test_schema_constrain.cu

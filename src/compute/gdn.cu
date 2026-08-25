@@ -27,8 +27,15 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
 //
 // Shared memory: K_norm[state_size] + Q_norm[state_size] + reduce[block_dim]
 // ---------------------------------------------------------------------------
-template <int HD, int SS, typename YOut>
-__global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
+// SPLIT: how many threads cooperate on one state column. 1 is the original
+// shape — one thread owns H[0..SS-1, d] entirely, which at SS=128 costs 128
+// registers for the state alone and made ptxas spill (88 B stack, 128 B spill
+// stores, 255 registers used, 2 blocks/SM, 8.3 % occupancy). With SPLIT=2 each
+// thread owns half a column, the two partners sit in ADJACENT lanes so the two
+// dot products reduce with a single __shfl_xor_sync, and the register pressure
+// halves.
+template <int HD, int SS, typename YOut, int SPLIT = 1>
+__global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
     const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
     const half* __restrict__ beta_all,   // [n_tokens, n_heads] FP16
@@ -39,11 +46,28 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
     int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout,
     const int* __restrict__ d_real_n,    // device chunk length (padded verify chunk) or nullptr
     float* __restrict__ h_snap,          // second state output, or nullptr
-    const int* __restrict__ d_snap_n) {  // row count h_snap is taken at
+    const int* __restrict__ d_snap_n,    // row count h_snap is taken at
+    // --- batched decode over independent sequences (#GDN-batch) ---
+    // seq_slots: per-blockIdx.y recurrent-state slot id, or nullptr for the
+    // single-sequence call (then h_state is already the caller's slot pointer
+    // and gridDim.y is 1, so every offset below is zero and the emitted code
+    // is the one this kernel always ran).
+    // Concurrent GDN sequences are INDEPENDENT — each owns its own state slot —
+    // so they parallelise across blockIdx.y exactly like heads do across
+    // blockIdx.x. Tokens within one sequence stay sequential, which is the part
+    // that genuinely cannot batch.
+    const int* __restrict__ seq_slots = nullptr,
+    int64_t h_state_seq_stride = 0) {
     const int h = blockIdx.x;
     if (h >= n_heads)
         return;
-    const int d = threadIdx.x;
+    const int seq = blockIdx.y;
+    // SPLIT partners are ADJACENT lanes (d = tid / SPLIT), so the cross-partner
+    // reductions below are a warp shuffle rather than a shared-memory round.
+    const int d = (SPLIT == 1) ? static_cast<int>(threadIdx.x) : static_cast<int>(threadIdx.x) / SPLIT;
+    const int part = (SPLIT == 1) ? 0 : static_cast<int>(threadIdx.x) % SPLIT;
+    constexpr int SS_PER = SS / SPLIT;   // state rows this thread owns
+    const int s_base = part * SS_PER;
     // Padded verify chunk (#847): y is produced for every row (padding rows
     // are causally invisible downstream), but the committed h_state is the
     // register snapshot at the real last row — H_reg keeps evolving through
@@ -59,6 +83,16 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
     // grouped_layout=1 selects the HF formula.
     const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     const int inner = n_heads * HD;
+
+    // Rebase every per-sequence pointer. With gridDim.y == 1 and no slot table
+    // these are all +0.
+    if (seq_slots) {
+        h_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(h_state_seq_stride);
+    }
+    conv_f32 += static_cast<size_t>(seq) * n_tokens * conv_channels;
+    alpha_all += static_cast<size_t>(seq) * n_tokens * n_heads;
+    beta_all += static_cast<size_t>(seq) * n_tokens * n_heads;
+    y_out += static_cast<size_t>(seq) * n_tokens * inner;
     const int BC_size = n_groups * SS;
     const float scale = rsqrtf(static_cast<float>(HD));
 
@@ -68,12 +102,12 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
 
     // Load state into registers — the critical optimization.
     // Each thread holds SS floats = one column of H[SS, HD].
-    float H_reg[SS];
+    float H_reg[SS_PER];
     {
         const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
-        for (int s = 0; s < SS; s++)
-            H_reg[s] = H_col[s * HD];
+        for (int s = 0; s < SS_PER; s++)
+            H_reg[s] = H_col[(s_base + s) * HD];
     }
 
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce_buf[HD]
@@ -106,25 +140,29 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
         // Each thread loads SS/HD elements and contributes to the reduction.
         // With HD=128 threads and SS=128 elements, each thread loads 1 element.
         {
+            // Indexed by the REAL thread id, not by the column: with SPLIT > 1
+            // two threads share `d` and would both write s_k[d] and s_reduce[d].
+            constexpr int NT = HD * SPLIT;
+            const int tid = static_cast<int>(threadIdx.x);
             // Load K and Q into shared memory
-            if (d < SS) {
-                s_k[d] = K_g[d];
-                s_q[d] = Q_g[d];
+            if (tid < SS) {
+                s_k[tid] = K_g[tid];
+                s_q[tid] = Q_g[tid];
             }
             __syncthreads();
 
             // Parallel sum-of-squares reduction
             float k_sq = 0.0f, q_sq = 0.0f;
-            for (int i = d; i < SS; i += HD) {
+            for (int i = tid; i < SS; i += NT) {
                 k_sq += s_k[i] * s_k[i];
                 q_sq += s_q[i] * s_q[i];
             }
             // Block reduction for k_sq
-            s_reduce[d] = k_sq;
+            s_reduce[tid] = k_sq;
             __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
+            for (int stride = NT / 2; stride > 0; stride >>= 1) {
+                if (tid < stride)
+                    s_reduce[tid] += s_reduce[tid + stride];
                 __syncthreads();
             }
             // PyTorch-style L2 norm (matches llama's ggml_l2_norm): rsqrtf(max(sum_sq, eps^2)).
@@ -133,19 +171,34 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
             // outputs at layers where some heads have near-zero K (e.g. L1 h19/20/22/25/29).
             float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
-            s_reduce[d] = q_sq;
+            // Every thread has to finish READING s_reduce[0] above before any
+            // thread overwrites s_reduce for the q reduction. Without this
+            // barrier thread 0 can store q_sq into s_reduce[0] while a slower
+            // warp is still loading k_inv from it, and that warp normalises K
+            // by Q's norm.
+            //
+            // Latent since the kernel was written and invisible at the shipped
+            // grid: (n_heads) is at most 48 blocks here, well under the 170 SMs,
+            // so every block had an SM to itself and its four warps ran in
+            // lockstep. Batching decode over sequences makes the grid
+            // (n_heads x n_seq) — at 256 blocks the race fires and one block's
+            // state comes out different run to run (measured: stable through
+            // 128 blocks, 16384 of 4194304 floats differing at 256).
             __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
+            s_reduce[tid] = q_sq;
+            __syncthreads();
+            for (int stride = NT / 2; stride > 0; stride >>= 1) {
+                if (tid < stride)
+                    s_reduce[tid] += s_reduce[tid + stride];
                 __syncthreads();
             }
             float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
             // Normalize in-place
-            if (d < SS) {
-                s_k[d] *= k_inv;
-                s_q[d] *= q_inv;
+            __syncthreads();
+            if (tid < SS) {
+                s_k[tid] *= k_inv;
+                s_q[tid] *= q_inv;
             }
             __syncthreads();
         }
@@ -154,8 +207,14 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
         // Step 1: kv = H^T @ k_norm (dot product of state column with k)
         float kv_d = 0.0f;
 #pragma unroll
-        for (int s = 0; s < SS; s++)
-            kv_d += H_reg[s] * s_k[s];
+        for (int s = 0; s < SS_PER; s++)
+            kv_d += H_reg[s] * s_k[s_base + s];
+        if constexpr (SPLIT > 1) {
+            // Sum the partners' halves. Adjacent lanes, so one shuffle.
+#pragma unroll
+            for (int off = 1; off < SPLIT; off <<= 1)
+                kv_d += __shfl_xor_sync(0xffffffffu, kv_d, off);
+        }
 
         // Step 2: delta = (v - g*kv) * beta
         float delta_d = (v_d - g_t * kv_d) * beta_h;
@@ -163,13 +222,18 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
         // Step 3: Update state + compute output
         float y_partial = 0.0f;
 #pragma unroll
-        for (int s = 0; s < SS; s++) {
-            float h_new = g_t * H_reg[s] + s_k[s] * delta_d;
+        for (int s = 0; s < SS_PER; s++) {
+            float h_new = g_t * H_reg[s] + s_k[s_base + s] * delta_d;
             H_reg[s] = h_new;
-            y_partial += h_new * s_q[s];
+            y_partial += h_new * s_q[s_base + s];
+        }
+        if constexpr (SPLIT > 1) {
+#pragma unroll
+            for (int off = 1; off < SPLIT; off <<= 1)
+                y_partial += __shfl_xor_sync(0xffffffffu, y_partial, off);
         }
 
-        {
+        if (part == 0) {
             const float out_val = y_partial * scale;
             if constexpr (std::is_same_v<YOut, float>) {
                 y_out[t * inner + h * HD + d] = out_val;
@@ -184,14 +248,14 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
         if (t + 1 == real_n) {
             float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
-            for (int s = 0; s < SS; s++)
-                H_col[s * HD] = H_reg[s];
+            for (int s = 0; s < SS_PER; s++)
+                H_col[(s_base + s) * HD] = H_reg[s];
         }
         if (t + 1 == snap_n) {
             float* S_col = h_snap + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
-            for (int s = 0; s < SS; s++)
-                S_col[s * HD] = H_reg[s];
+            for (int s = 0; s < SS_PER; s++)
+                S_col[(s_base + s) * HD] = H_reg[s];
         }
 
         // Sync before next token — the next iteration overwrites s_k/s_q in
@@ -294,6 +358,67 @@ void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int 
 // Host launchers
 // ---------------------------------------------------------------------------
 
+
+// Batched fused scan over N INDEPENDENT sequences, n_tokens rows each.
+//
+// This is what lets concurrent GDN decode batch. The recurrent scan is
+// sequential in TOKENS, which is why a single sequence cannot be parallelised
+// over its own timeline — but separate sequences share nothing except the
+// weights, so they map onto blockIdx.y the same way heads map onto blockIdx.x.
+// At decode n_tokens is 1 and the launch goes from (n_heads) blocks, which
+// leaves an RTX 5090 almost idle, to (n_heads x n_seq).
+//
+// h_state_pool: base of the recurrent-state pool; seq_slots[i] selects the slot
+// for sequence i (device pointer, n_seq ints). h_state_seq_stride is the
+// distance between slots in FLOATS.
+// conv_f32 / alpha / beta / y are [n_seq * n_tokens, ...] with sequence-major
+// rows — the layout a batched decode step already produces.
+void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const half* alpha,
+                                const half* beta, const float* A_log, const float* dt_bias,
+                                float* h_state_pool, const int* seq_slots, int64_t h_state_seq_stride,
+                                half* y, int n_seq, int n_tokens, int n_heads, int head_dim_ssm,
+                                int state_size, int n_groups, cudaStream_t stream, int grouped_layout,
+                                const int* d_real_n) {
+    if (n_seq <= 0)
+        return;
+    dim3 grid(n_heads, n_seq);
+    if (head_dim_ssm == 128 && state_size == 128) {
+        // SPLIT=2: two threads per state column. At SS=128 one-thread-per-column
+        // needs 128 registers for the state alone and ptxas spills (255 used,
+        // 88 B stack); halving the slice removes the spill.
+        //
+        // 4 and 8 were measured and are WORSE, despite strictly better register
+        // pressure and occupancy (114 and 64 registers, up to 1024 threads/SM
+        // against 256). us/launch on this card, 48 heads:
+        //
+        //   n_seq   SPLIT=2   SPLIT=4   SPLIT=8
+        //      16     26.49     40.40     58.15
+        //      32     96.25    100.28    109.67
+        //      64    280.39    286.14    293.16
+        //
+        // The kernel is bandwidth-bound, so occupancy is not the binding
+        // constraint — coalescing is, and SPLIT spends it: SPLIT threads share
+        // one column, so a warp touches 32/SPLIT distinct columns and reads
+        // 128/SPLIT bytes per access. SPLIT=1 would be perfectly coalesced and
+        // spills instead. 2 is where the spill is gone and the access is still
+        // half a cache line. Do not raise it without re-measuring.
+        constexpr int SPLIT = 2;
+        const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
+        gdn_scan_fused_kernel<128, 128, half, SPLIT><<<grid, 128 * SPLIT, smem, stream>>>(
+            conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
+            conv_channels, grouped_layout, d_real_n, nullptr, nullptr, seq_slots, h_state_seq_stride);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else if (head_dim_ssm == 64 && state_size == 64) {
+        const size_t smem = (2 * 64 + 64) * sizeof(float);
+        gdn_scan_fused_kernel<64, 64, half><<<grid, 64, smem, stream>>>(
+            conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
+            conv_channels, grouped_layout, d_real_n, nullptr, nullptr, seq_slots, h_state_seq_stride);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
+        IMP_LOG_ERROR("gdn_scan_fused_f32_batched: unsupported head_dim=%d state_size=%d", head_dim_ssm,
+                      state_size);
+    }
+}
 
 // Fused scan: processes all tokens in one kernel launch.
 // conv_f32: [n_tokens, conv_channels] FP32 — full conv output (Q|K|V interleaved per token)

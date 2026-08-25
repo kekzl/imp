@@ -2,8 +2,7 @@
 //
 // Reference: transformers AutoTokenizer.from_pretrained('Qwen3-0.6B'),
 // encode(add_special_tokens=False) and decode() over the corpus in the
-// generator. Every Qwen3 checkpoint in this project shares this
-// tokenizer; the test refuses a model whose fingerprint differs rather
+// generator. The test refuses a model whose fingerprint differs rather
 // than comparing against the wrong reference (#1569, #1570).
 #pragma once
 

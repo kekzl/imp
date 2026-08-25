@@ -37,6 +37,20 @@ struct Diagnostics {
     bool debug_template = false;
     std::string dump_hidden_dir;
     std::string dump_logits_dir;   // path or empty
+    // Directory for the FINAL LM logits of each forward pass, one .npy per
+    // pass ([rows, vocab] FP32). Empty = off. Distinct from dump_logits_dir,
+    // which dumps MoE GATE logits at one layer: this is what the sampler sees,
+    // and it is what a reference-parity harness compares against HF. Written
+    // after the soft-cap so it is the final value, not an intermediate.
+    std::string dump_final_logits_dir;
+    // Directory for the Gated-DeltaNet recurrent state. Writes
+    // gdn_state.npy ([n_gdn_layers, heads*head_dim*state_size] FP32, the LAST
+    // forward pass wins) plus gdn_state_stats.jsonl, one line per pass with
+    // per-pass min/max/RMS and a non-finite count. The .jsonl is the drift
+    // record over a long prefill: the state is FP32 by contract
+    // (mamba_ssm_dtype), and silent divergence over tens of thousands of
+    // tokens is the failure mode that dtype exists to prevent. Empty = off.
+    std::string dump_gdn_state_dir;
     std::string dump_routing_dir;  // path or empty
     // Path for the per-layer MoE expert-activation histogram (JSON), written at
     // executor teardown. Empty = off. Unlike dump_routing_dir, which logs one

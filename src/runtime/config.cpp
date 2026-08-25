@@ -163,6 +163,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("runtime.prefill_chunk_decode_cap", cfg.runtime.prefill_chunk_decode_cap);
     I("runtime.prefill_batch_decode_cap", cfg.runtime.prefill_batch_decode_cap);
     I("runtime.hybrid_decode_quantum", cfg.runtime.hybrid_decode_quantum);
+    B("runtime.gdn_batched_decode", cfg.runtime.gdn_batched_decode);
     B("runtime.decode_pipeline", cfg.runtime.decode_pipeline);
     I("runtime.vram_budget_mb", cfg.runtime.vram_budget_mb);
 
@@ -327,6 +328,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.debug_template", cfg.diagnostics.debug_template);
     S("diagnostics.dump_hidden_dir", cfg.diagnostics.dump_hidden_dir);
     S("diagnostics.dump_logits_dir", cfg.diagnostics.dump_logits_dir);
+    S("diagnostics.dump_final_logits_dir", cfg.diagnostics.dump_final_logits_dir);
+    S("diagnostics.dump_gdn_state_dir", cfg.diagnostics.dump_gdn_state_dir);
     S("diagnostics.dump_routing_dir", cfg.diagnostics.dump_routing_dir);
     S("diagnostics.moe_expert_hist", cfg.diagnostics.moe_expert_hist);
     S("diagnostics.moe_expert_trace", cfg.diagnostics.moe_expert_trace);

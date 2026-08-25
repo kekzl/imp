@@ -83,6 +83,7 @@ Source: `src/core/qtype.h`.
 | tool calling | ✅ | gated by real aider, Claude Code and OpenAI Agents SDK runs |
 | constrained decoding: JSON Schema, regex, GBNF | ✅ | an uncompilable constraint is a 400, not a free-text answer |
 | per-request speculative toggle | ✅ | |
+| `reasoning_effort` body field | ✅ | passed to the chat template verbatim; legal values are the template's, not ours. On Qwen3.8-27B the three it accepts render three different prompts (11 / 41 / 53 prompt tokens for medium / low / xhigh on the same message) |
 | auth (`--api-key`), `--metrics-require-auth` | ✅ | |
 | embedded web UI at `GET /` | ✅ | |
 | logprobs | ✅ non-streaming | `tests/test_server_logprobs.py` (in `make test-server`, not in CI): at temperature 0 the emitted token IS `top_logprobs[0]` and shares its logprob. The streaming path emits none, #1588 |

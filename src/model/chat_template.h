@@ -63,8 +63,16 @@ public:
     //   instead opens the block for an explicit caller request. suppress wins if
     //   both are set. Default (neither) leaves the variable undefined so each
     //   template author's own default applies (Qwen3 open vs Gemma-4 closed).
+    // reasoning_effort: stamped into the Jinja context verbatim when non-empty,
+    //   left undefined otherwise so the template's own default applies. imp does
+    //   not police the value: which strings are legal is the template author's
+    //   business (Qwen3.8 takes xhigh/medium/low and raise_exception's the rest;
+    //   the OpenAI convention is low/medium/high). A template that rejects a
+    //   value logs through jinja's raise_exception and renders without its
+    //   preamble — it does NOT silently fall back to the default.
     std::vector<int32_t> apply(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
-                               bool suppress_thinking = false, bool force_thinking = false) const;
+                               bool suppress_thinking = false, bool force_thinking = false,
+                               const std::string& reasoning_effort = "") const;
 
     // Build token ID vector with tool definitions passed to Jinja2 context.
     // Falls back to standard apply() if Jinja2 doesn't handle tools.
@@ -72,13 +80,15 @@ public:
                                           const std::vector<ToolFunction>& tools,
                                           const std::string& tool_choice = "auto",
                                           bool suppress_thinking = false,
-                                          bool force_thinking = false) const;
+                                          bool force_thinking = false,
+                                          const std::string& reasoning_effort = "") const;
 
     // Build token ID vector with image tokens inserted before the first user message.
     // Produces: <boi> <img_soft_token>*n_image_tokens <eoi> \n {text}
     std::vector<int32_t> apply_with_image(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
                                           int n_image_tokens, bool suppress_thinking = false,
-                                          bool force_thinking = false) const;
+                                          bool force_thinking = false,
+                                          const std::string& reasoning_effort = "") const;
 
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
@@ -116,7 +126,8 @@ public:
     // Empty when no Jinja template is driving (hardcoded families, RAW).
     std::string render_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
                              bool add_generation_prompt = true, bool suppress_thinking = false,
-                             bool force_thinking = false) const;
+                             bool force_thinking = false,
+                             const std::string& reasoning_effort = "") const;
 
     // Special token accessors (for banned token list)
     int32_t im_start_id() const { return im_start_id_; }
@@ -186,7 +197,8 @@ private:
     bool probe_render_teaches_xml_tools(const Tokenizer& tok) const;
     std::vector<int32_t> apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
                                      bool add_generation_prompt = true, bool suppress_thinking = false,
-                                     bool force_thinking = false) const;
+                                     bool force_thinking = false,
+                                     const std::string& reasoning_effort = "") const;
 
     // Jinja2-based apply with tool definitions in context
     std::vector<int32_t> apply_jinja_with_tools(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
@@ -194,7 +206,8 @@ private:
                                                 const std::string& tool_choice,
                                                 bool add_generation_prompt = true,
                                                 bool suppress_thinking = false,
-                                                bool force_thinking = false) const;
+                                                bool force_thinking = false,
+                                                const std::string& reasoning_effort = "") const;
 
     // Shared helper: split rendered string on control tokens and encode
     std::vector<int32_t> tokenize_rendered(const Tokenizer& tok, const std::string& rendered) const;

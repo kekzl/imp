@@ -1303,10 +1303,10 @@ private:
                 // "is defined", "is none", "is string", "is iterable", "is mapping", "is number"
                 if (check(TokenType::IDENT)) {
                     std::string test_name = peek().value;
-                    if (test_name == "defined" || test_name == "none" || test_name == "string" ||
-                        test_name == "iterable" || test_name == "mapping" || test_name == "number" ||
-                        test_name == "integer" || test_name == "float" || test_name == "boolean" ||
-                        test_name == "sequence") {
+                    if (test_name == "defined" || test_name == "undefined" || test_name == "none" ||
+                        test_name == "string" || test_name == "iterable" || test_name == "mapping" ||
+                        test_name == "number" || test_name == "integer" || test_name == "float" ||
+                        test_name == "boolean" || test_name == "sequence") {
                         advance();
                         auto bin = std::make_unique<BinOpExpr>();
                         bin->op = "is " + test_name;
@@ -1328,10 +1328,10 @@ private:
                 advance();
                 if (check(TokenType::IDENT)) {
                     std::string test_name = peek().value;
-                    if (test_name == "defined" || test_name == "none" || test_name == "string" ||
-                        test_name == "iterable" || test_name == "mapping" || test_name == "number" ||
-                        test_name == "integer" || test_name == "float" || test_name == "boolean" ||
-                        test_name == "sequence") {
+                    if (test_name == "defined" || test_name == "undefined" || test_name == "none" ||
+                        test_name == "string" || test_name == "iterable" || test_name == "mapping" ||
+                        test_name == "number" || test_name == "integer" || test_name == "float" ||
+                        test_name == "boolean" || test_name == "sequence") {
                         advance();
                         auto bin = std::make_unique<BinOpExpr>();
                         bin->op = "is not " + test_name;
@@ -1989,6 +1989,17 @@ private:
                 Value left = eval(*bin.left);
                 return Value(!left.is_none());
             }
+            // "is undefined" is the exact inverse and must NOT be answered by
+            // value truthiness: a variable stamped `false` is defined. Without
+            // this branch it fell through to the generic "is X" equality path
+            // and became `x == undefined`, where `false == none` compares true
+            // — so an explicit false read as "caller said nothing".
+            if (test_name == "undefined") {
+                if (auto* var = dynamic_cast<const VariableExpr*>(bin.left.get()))
+                    return Value(!is_defined(var->name));
+                Value left = eval(*bin.left);
+                return Value(left.is_none());
+            }
             Value left = eval(*bin.left);
             return Value(eval_type_test(test_name, left));
         }
@@ -1999,6 +2010,12 @@ private:
                     return Value(!is_defined(var->name));
                 Value left = eval(*bin.left);
                 return Value(left.is_none());
+            }
+            if (test_name == "undefined") {
+                if (auto* var = dynamic_cast<const VariableExpr*>(bin.left.get()))
+                    return Value(is_defined(var->name));
+                Value left = eval(*bin.left);
+                return Value(!left.is_none());
             }
             Value left = eval(*bin.left);
             return Value(!eval_type_test(test_name, left));

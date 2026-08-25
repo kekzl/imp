@@ -23,6 +23,7 @@
 // =============================================================================
 
 #include "memory/backend.h"
+#include "compute/layernorm.h"
 #include "compute/mtp_forward.h"
 #include "core/logging.h"
 #include "exec/executor.h"
@@ -81,9 +82,55 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     const bool device_chain = chain_after && ws->n_experts == 0 &&
                               ws->d_chain_tokens != nullptr && K <= imp::kMtpMaxChainK;
 
+    // diagnostics.mtp_prenorm_h: feed the head the POST-final-norm hidden.
+    // Upstream (vLLM/HF) taps the target's returned hidden, which has
+    // model.norm applied; imp's executor hidden_ is the pre-norm residual.
+    // The knob used to cover only the chain input in the scheduler — the KV
+    // cache itself was still built from pre-norm rows, which is why the old
+    // A/B read exactly 0. Now it covers every fed pair.
+    if (runtime_config_.diagnostics.mtp_prenorm_h) {
+        static void* s_norm_scratch = nullptr;
+        static size_t s_norm_cap = 0;
+        const size_t need = static_cast<size_t>(n_pairs) * hidden_dim * sizeof(__half);
+        if (need > s_norm_cap) {
+            if (s_norm_scratch) cudaFree(s_norm_scratch);
+            if (cudaMalloc(&s_norm_scratch, need) != cudaSuccess) {
+                s_norm_scratch = nullptr;
+                s_norm_cap = 0;
+                return false;
+            }
+            s_norm_cap = need;
+        }
+        int64_t shape[2] = {n_pairs, hidden_dim};
+        Tensor in_v(const_cast<void*>(d_hidden_rows), QType::F16, 2, shape, true);
+        Tensor out_v(s_norm_scratch, QType::F16, 2, shape, true);
+        imp::rmsnorm(in_v, model_->output_norm(), out_v, model_->config_.rms_norm_eps,
+                     decode_stream(), model_->config_.norm_weight_offset);
+        d_hidden_rows = s_norm_scratch;
+    }
     const char* base = static_cast<const char*>(d_hidden_rows);
     int pred = -1;
-    for (int j = 0; j < n_pairs; ++j) {
+    // Batched feed (dense heads): the per-pair loop reads the whole head's
+    // weights once per token, which priced Qwen3.8-27B prefill at -83%
+    // (pp512 7426 → 1252 tok/s; batched: 6510). When this feed chains, the
+    // last pair stays on the per-pair path — it is the one that drafts.
+    // Below 8 pairs (decode verify catch-up feeds 1-2) the batch setup costs
+    // more launches than it saves.
+    int j0 = 0;
+    const int n_feed = chain_after ? n_pairs - 1 : n_pairs;
+    if (n_feed >= 8 && ws->feed_rows_cap > 0) {
+        while (j0 < n_feed) {
+            const int m = std::min(ws->feed_rows_cap, n_feed - j0);
+            const void* rows = base + static_cast<size_t>(j0) * hidden_dim * sizeof(__half);
+            if (!imp::mtp_feed_batch(tokens + j0, rows, m, *model_->mtp_, model_->tok_emb_,
+                                     *ws, hidden_dim, decode_stream()))
+                break;  // unsupported head or transient failure — per-pair takes over
+            for (int j = j0; j < j0 + m; ++j)
+                mtp_history_.push_back(tokens[j]);
+            j0 += m;
+        }
+    }
+    for (int j = j0; j < n_pairs; ++j) {
         const void* h_j = base + static_cast<size_t>(j) * hidden_dim * sizeof(__half);
         const bool last = (j == n_pairs - 1);
         if (chain_after && last && device_chain) {

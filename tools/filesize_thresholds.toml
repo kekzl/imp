@@ -74,21 +74,21 @@ roots = ["src", "tools", "tests"]
 "src/compute/gemm_grouped_nvfp4_smallM.cu" = { code_loc = 693, reason = "(c) one small-M grouped-GEMM family (software-ref + prod + smoke variants)" }
 "src/compute/gemv_dp4a_traits.cuh" = { code_loc = 1320, reason = "(b) trait-based template library: 8 DequantTraits<> specializations + 6 template GEMV kernels, consolidating ~33 hand-written kernels (header - wide include blast radius)" }
 "src/compute/json_schema.cpp" = { code_loc = 1208, reason = "(c) one module: JSON-schema parser + RegexNfa compiler/executor for constrained decode" }
-"src/compute/mtp_forward.cu" = { code_loc = 856, reason = "(c) MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature" }
+"src/compute/mtp_forward.cu" = { code_loc = 1084, reason = "(c) MTP forward path: many small fused ops (emb_gather/concat/argmax/attn_kv_scan/mrope) for one feature" }
 "src/compute/schema_constrain.cu" = { code_loc = 1238, reason = "(c) schema-constrained decode token-mask compute (host-side): the shared frame-stack simulator now carries TWO body grammars (JSON schema + Qwen-Coder XML tool calls) around one sim_advance source of truth; split candidate if a third grammar lands. The #1729 free-value phase is not that third grammar: it delegates to JsonGrammar rather than adding phases of its own, which is why it cost 54 lines and not a body's worth" }
-"src/exec/executor_forward.cu" = { code_loc = 738, reason = "(c) executor forward orchestration (one dense forward path + 2 scale helpers)" }
+"src/exec/executor_forward.cu" = { code_loc = 814, reason = "(c) executor forward orchestration (one dense forward path + 2 scale helpers)" }
 "src/exec/executor_forward_moe_batch.cu" = { code_loc = 1123, reason = "(c) one path: batched-MoE forward dispatch. Host-only until #1548 put the expert-imbalance kernel here, next to the routing hook it reads from: splitting one 30-line diagnostic kernel into its own TU would cost a recompile edge for less than it saves" }
 "src/exec/executor_workspace_buffers.cu" = { code_loc = 1350, reason = "(c) one concern: executor scratch/workspace sizing+allocation (host-only)" }
 "src/memory/kv_cache_manager.cpp" = { code_loc = 1207, reason = "(c) one manager: block alloc + residual pool + prefix cache + eviction" }
 "src/model/gguf_loader.cpp" = { code_loc = 820, reason = "(a->c) the (a) split already happened: gguf_parse.cpp + gguf_tensor_assign.cpp came out of it and left 788 (AUDIT_FILESIZE.md). The residue is one linear load flow (mmap, header, metadata -> ModelConfig, shard stitch, tensor wiring) like the allowlisted safetensors_loader.cpp, and the file is in maintenance mode per its own header. Crossed 800 with the #1324 declared-layers consistency check." }
 "src/model/hf_config_loader.cpp" = { code_loc = 943, reason = "(tu) central HF config→ModelConfig parser; one accreting block per arch (MLA/YaRN/MoE/SWA/rope); splitting scatters the single parse flow" }
-"src/model/jinja.cpp" = { code_loc = 2395, reason = "(c) one cohesive Jinja2 engine: Value + Lexer + Parser + Evaluator" }
+"src/model/jinja.cpp" = { code_loc = 2407, reason = "(c) one cohesive Jinja2 engine: Value + Lexer + Parser + Evaluator" }
 "src/model/safetensors_loader.cpp" = { code_loc = 1155, reason = "(c) one loader: header validation + tensor assign + arch inference" }
 "src/model/tokenizer.cpp" = { code_loc = 1818, reason = "(c) one tokenizer: BPE/SPM/WordPiece encode + merge + cache (JSON parsing now via shared model/json_util)" }
 "src/model/weight_map.cpp" = { code_loc = 1071, reason = "(c) one mapping module: weight-name parse + layer-index + arch inference" }
 "src/model/weight_upload.cu" = { code_loc = 2004, reason = "(c) one upload pipeline: pinned staging + checked malloc + tensor load orchestration" }
 "src/runtime/cuda_graph.cu" = { code_loc = 1046, reason = "(c) one module: graph capture/mode-resolve + PDL edges + barrier insert + replay" }
-"src/runtime/engine_scheduler.cpp" = { code_loc = 1997, reason = "(c) one scheduler: prefill/decode scheduling + chunked exec + perplexity capture" }
+"src/runtime/engine_scheduler.cpp" = { code_loc = 2020, reason = "(c) one scheduler: prefill/decode scheduling + chunked exec + perplexity capture" }
 "tests/test_gdn.cu" = { code_loc = 1026, reason = "(c) 12 tests of the GDN state-recurrent module - one test target" }
 "tests/test_gemm_kernel_registry.cu" = { code_loc = 1259, reason = "(c) 41 tests of the gemm_kernel_registry dispatch contract - one test target" }
 "tests/test_kv_cache.cpp" = { code_loc = 1184, reason = "(c) 60 tests across KV allocator/cache/manager - one test target" }

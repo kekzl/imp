@@ -11,6 +11,179 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The auto batch resolver priced a hybrid's KV 4x too high and its recurrent
+  state at zero: Qwen3.8-27B auto-sized `max_batch_size` 5 where 28 fits.**
+  It counted all 64 layers as KV-carrying (16 are) at FP16 (the model defaults
+  NVFP4 KV) and ignored the 151.5 MiB/sequence DeltaNet state, which unlike KV
+  does not clamp downstream. Measured at 32 concurrent requests, out of the
+  box: 224.7 -> 630.2 tok/s aggregate (auto 5 -> 28; a hand-pinned
+  `runtime.max_batch_size=32` with `max_seq_len=4096` reads 937.1).
+
+- **`max_seq_len: auto` ignored VRAM entirely on packed-4-bit KV.**
+  `qtype_elem_bytes(NVFP4)` is 0 (half-bytes are inexpressible), so
+  `kv=0 B/tok` and the resolver fell through to the 131072 cap regardless of
+  the card; the downstream KV clamp was the only thing keeping it honest.
+  NVFP4/MXFP4_KV now size as 4-bit like INT4.
+
+- **Concurrent GDN decode now batches: 81.5 -> 474.9 tok/s aggregate at 32-way,
+  5.8x.** A GDN decode step used to serve ONE sequence, with concurrent ones
+  time-multiplexed round-robin, because the recurrent scan kernels were
+  single-sequence. That forced the whole step — including the FFN and attention
+  projections, which are ordinary GEMMs — onto the M=1 path: profiled at 32-way
+  load, 82 % of GPU time sat in GEMV kernels and 1 % in CUTLASS GEMM, where a
+  dense model is the other way round. The scan that genuinely cannot batch was
+  3.8 % of that profile. Sequences are independent (each owns a state slot), so
+  they now parallelise across `blockIdx.y` while tokens within a sequence stay
+  sequential. Wall time for 32x200 tokens: 78.5 s -> 13.5 s, no cross-sequence
+  contamination, single-stream decode unchanged (82.29 against a 79.78 baseline
+  on the same build, i.e. noise). `runtime.gdn_batched_decode=false` restores the
+  rotation. The scan kernel then became the largest non-GEMM item, and it was
+  spilling: at the 128/128 shape one thread owned a whole state column, which
+  costs 128 registers for the state alone — ptxas reported 255 registers, an
+  88-byte stack frame and 128 bytes of spill stores, 2 blocks/SM and 8.3 %
+  occupancy. Splitting the column across two adjacent lanes (the two dot
+  products reduce with one `__shfl_xor_sync`) removes the spill entirely: **180
+  registers, 0 spill**, and the kernel is **18 % faster at n_seq=32** (116.3 ->
+  98.3 us). End to end, warm: 794 -> **886 tok/s aggregate**. Single-sequence
+  decode keeps the unsplit kernel, where that shape is faster. Re-profiled after
+  the batching fix: CUTLASS GEMM 1.0 % -> **66.2 %** of GPU
+  time (a dense model reads 71.8 %), M=1 GEMV ~82 % -> ~1.5 %, and the scan runs
+  21 024 times where it ran 230 400 — once per batch step per layer instead of
+  once per token. The scan is now 19.3 % of the profile and the next lever; it
+  scales sublinearly because each thread holds 128 state floats in registers.
+
+- **The MTP prefill feed no longer costs -83% prefill.** Enabling MTP fed the
+  draft head's KV cache one prompt token at a time, a full 425M-param M=1
+  forward per token: Qwen3.8-27B pp512 7426 -> 1252 tok/s. Dense heads now
+  feed in one M=rows pass per prefill chunk (`mtp_feed_batch`); measured
+  pp512 6385-6510 tok/s across 5 runs against a 7070-7123 baseline (-8.8%),
+  accept rate unchanged at 90.5-93.3%. MoE heads keep the per-pair loop.
+
+- **`--set speculative.mtp_k=K` now enables MTP under `imp-cli`.** The startup
+  hint recommended exactly that spelling, but the CLI only read its own
+  `--mtp-spec-decode` flag and silently ignored the `--set`: a bench with the
+  recommended knob measured "MTP off" while claiming it on.
+
+- **A latent race in the GDN scan kernel, and the batched scan that exposed it.**
+  Between reading `s_reduce[0]` for the K normalisation and overwriting
+  `s_reduce` for the Q reduction there was no barrier, so a fast thread could
+  store `q_sq` into `s_reduce[0]` while a slower warp was still loading `k_inv`
+  from it — that warp then normalised K by Q's norm. Invisible at the shipped
+  grid: it launches `(n_heads)` blocks, at most 48 here against 170 SMs, so
+  every block had an SM to itself and its four warps ran in lockstep. Measured
+  with a wider grid: stable through 128 blocks, non-deterministic at 256 (16384
+  of 4194304 state floats differing between two identical runs). Fixed with one
+  `__syncthreads()`; decode cost 79.82 against 79.78 tok/s without it, i.e.
+  nothing.
+
+- **`reasoning_effort` was accepted on the wire and never reached the chat
+  template.** Every request rendered the template's own default. On
+  Qwen3.8-27B-NVFP4 the same message now renders 11 / 41 / 53 prompt tokens for
+  `medium` / `low` / `xhigh`, and 53 when the field is absent (its default);
+  before, `low` and `xhigh` both produced 67 on an identical prompt.
+
+- **jinja: `x is undefined` was true for any falsy value.** `undefined` was not
+  in the parser's known-test list, so the expression fell through to
+  `x == undefined` and `false == none` compares equal. Any HF template asking
+  "did the caller set this?" got "no" while the caller was explicitly saying
+  false — on Qwen3.8 a suppressed-thinking render still emitted the
+  reasoning-effort preamble. `is not undefined` added alongside.
+
+### Added
+
+- **NVFP4 KV is now the default for QWEN35 (Qwen3.8-27B and its Qwen3.5
+  siblings), taking `max_model_len` from 48 512 to 131 072 tokens.** The KV cache
+  holds K and V for the 16 attention layers only — 64 KiB/token at FP16 — and on
+  a GDN hybrid it is what bounds context, so its dtype decides how much context
+  fits. Cost, measured with alternating arms over `ppl_corpus_45k.txt`: +0.29 to
+  +0.35 % perplexity on Qwen3.8-27B-NVFP4 (FP16 bit-stable at 4.6124 across 3
+  runs), +0.15 to +0.18 % on Qwen3.5-4B mxfp4. `degen_suite.py` against a server
+  on NVFP4 KV: 50 checks, 0 FAIL. This is a deliberate capacity trade, not the
+  ~neutral bar the two FP8 gates use — `kv_cache.dtype=fp16` opts out. The MoE
+  GDN siblings stay on their old default on purpose (FP8 KV already costs
+  QWEN36_MOE +1.47 % PPL; NVFP4 KV is more aggressive and unmeasured there).
+  New gate `kv_nvfp4_default_safe()` with a CPU-lane allowlist test.
+- **The 128k context point is reachable on this card — the default KV dtype was
+  the limit, not the hardware.** Qwen3.8-27B declares no FP8-KV hint, so the
+  default stays FP16 and `max_model_len` resolves to 48 512 tokens. Measured,
+  same card, nothing else changed: `kv_cache.dtype=fp8` → **96 960** tokens for
+  +0.02 % perplexity; `nvfp4` → **131 072** (172 032 with `runtime.max_seq_len`
+  raised) for +0.53 %. The KV cache holds K and V for the 16 attention layers
+  only — 64 KiB/token at FP16, and that dtype is a config key. TTFT at nvfp4:
+  852 ms / 7.7 s / 34.4 s at 5225 / 41 680 / 123 822 prompt tokens, output
+  coherent. This corrects the phase-5 note that called 128k unreachable.
+- `gdn_scan_fused_f32_batched()`: the GDN scan over N independent sequences in
+  one launch, sequences on `blockIdx.y`. Tokens within a sequence stay
+  sequential — that part genuinely cannot batch — but separate sequences share
+  nothing except weights. Bit-identical to N single-sequence launches across 7
+  cases incl. sparse unordered state slots. This is the kernel half of making
+  concurrent GDN decode batch; the executor and scheduler still run one sequence
+  per step, so it is not yet on the serving path.
+- **GDN hybrids gain nothing from concurrency, measured.** 32 concurrent
+  200-token requests on one host: Qwen3-14B-NVFP4 (dense, no GDN) 1427 tok/s
+  aggregate; Qwen3.8-27B-NVFP4 **81.5**, the same as its single-stream rate;
+  Qwen3.6-35B-A3B-NVFP4 132 against 320 single-stream, i.e. slower under load.
+  All 32 are admitted and in flight at once (start spread 0.02 s, peak in-flight
+  32, verified per request) and their outputs stay byte-exact and isolated — the
+  work simply does not batch. **Profiled**: CUTLASS GEMM is 71.8 % of GPU time on
+  the dense control and 1.0 % here, while M=1 GEMV kernels are ~82 % here and ~7 %
+  there — 305 152 GEMV launches for 4800 tokens across 64 layers is one per token
+  per layer, against 48 000 CUTLASS launches per batch step on the dense model.
+  Cause is `engine_scheduler.cpp:1503`: the recurrent scan kernels are
+  single-sequence, so a GDN decode step serves one sequence and concurrent ones
+  round-robin. The scan itself is 3.8 % of the profile and forces the other 82 %
+  onto the M=1 path. Recorded in `LIMITATIONS.md` so a deployment is
+  planned for latency rather than aggregate throughput. TTFT on the same build:
+  767 ms at 5225 prompt tokens, 7760 ms at 41680; 128k is unreachable
+  (`max_model_len` 48512). llama.cpp cannot serve this checkpoint at all — the
+  reference build b10524 has no `Qwen3_5` converter.
+- **Qwen3.8-27B vision measured against the HF reference.** Preprocessing and
+  splicing are exact — 124 prompt tokens and 64 image placeholder tokens (8×8
+  from a 16×16 grid) on both sides, both fixtures. Top-1 and top-2 tokens agree;
+  softmax total variation is 0.104-0.318 with an image against 0.0042 for a
+  text-only control through the same template path, so the vision path does add
+  divergence and the decision survives it. Text-only unchanged: perplexity 4.6124
+  against 4.6202, −0.17 %. Video stays absent by decision and is rejected at
+  admission rather than silently dropped.
+- **Qwen3.8-27B serves 32 concurrent sequences with byte-identical output**, on
+  this card, with no code change — `runtime.max_batch_size=32`,
+  `kv_cache.dtype=fp8`, `runtime.max_seq_len=4096`, `runtime.deterministic=true`,
+  `server.prefix_cache=false`. Resident: weights 17920 MiB, GDN state 4848 MiB
+  (48 layers × 32 sequences), KV 42976 tokens. 32 interleaved requests across two
+  unrelated prompt families returned 16/16 and 16/16 byte-identical to their
+  batch=1 references with zero cross-contamination, and a 32-way load leaves the
+  next sequential request identical to the cold one (3/3). What blocked the load
+  before is the pre-upload reserve clamping KV headroom to `total_vram/5`
+  regardless of dtype (`engine_weight_upload.cpp:180-195`); bounding
+  `max_seq_len` puts the estimate under the clamp. Byte-identity needs both
+  switches: prefix cache off gets 31/32, determinism closes the last one.
+  Trade-offs (short context, FP8 KV, re-prefill on multi-turn) in
+  [`docs/plans/2026-08-24-qwen38-port.md`](docs/plans/2026-08-24-qwen38-port.md).
+- **Two diagnostics that make reference parity measurable.**
+  `diagnostics.dump_final_logits_dir` writes the post-soft-cap LM logits of each
+  forward pass as FP32 `.npy`; `diagnostics.dump_gdn_state_dir` writes the
+  Gated-DeltaNet recurrent state plus a per-pass RMS / non-finite line. Both skip
+  passes captured into a CUDA graph, where the device-to-host copy would fail the
+  capture. First result on Qwen3.8-27B-NVFP4 against transformers 5.15.1 BF16:
+  perplexity 4.6202 vs 4.4194 (+4.54 %, the 4-bit price), top-1 token agreeing on
+  14 of 17 prompts, and **0 non-finite state values across a 46579-token
+  prefill** with a flat RMS. At that length the prediction still matches exactly
+  (softmax total variation 0.0000) while the logit values drift — pearson
+  0.986 → 0.747 from short to 46k context. See
+  [`docs/plans/2026-08-24-qwen38-port.md`](docs/plans/2026-08-24-qwen38-port.md).
+- `write_npy_fp32` now has tests (NPY v1.0 magic, 64-byte header padding,
+  row-major payload, `(1, N)` rank for a single row). Every dump above is read
+  back through numpy, so a silently transposed or unreadable header would have
+  looked like an engine defect.
+- Qwen3.8-27B tokenizer parity against HuggingFace: 32 cases, encode **and**
+  decode compared byte-for-byte (`make test-gpu`, needs no GPU — it reads
+  `tokenizer.json` only). Both halves mutation-validated.
+- `docs/plans/2026-08-24-qwen38-port.md`: measured inventory of what Qwen3.8-27B
+  support already is, with the four gaps that remain and the memory arithmetic
+  behind them (KV 65536 B/token, recurrent state 151.5 MiB/sequence).
+
 ## [0.30.1] - 2026-08-24
 
 ### Fixed

@@ -59,6 +59,11 @@ struct ChatRequestParams {
     // the n-gram draft corpus. Empty = no prediction.
     std::string prediction_text;
     bool enable_thinking_requested = false;  // value of "enable_thinking" if present
+    // "reasoning_effort" body field, passed through to the chat template
+    // verbatim (empty = not sent, template default applies). Legal values are
+    // the template's business, not ours: Qwen3.8 takes xhigh/medium/low, the
+    // OpenAI convention is low/medium/high.
+    std::string reasoning_effort;
     std::string lora_name;                   // "lora" body field (empty = base model)
     bool enable_thinking_set = false;        // true iff body contained "enable_thinking"
     // Stop sequences
@@ -136,6 +141,7 @@ struct ChatStateSnapshot {
     std::vector<imp::ToolFunction> tool_defs;
     bool tools_via_jinja = false;
     bool enable_thinking = false, suppress_thinking = false;
+    std::string reasoning_effort;  // copied from params; stamped into the Jinja context
     std::vector<int32_t> tokens;
     int n_prompt_tokens = 0;
     // Tokenized Predicted-Outputs text (params.prediction_text) — encoded here
