@@ -165,6 +165,16 @@ there instead of retelling it.
 
 ### Added
 
+- **Shared-activation quantize for batched decode (+4.6% aggregate at 32
+  streams).** gate/up, q/k/v and GDN in/z read the same normed input, and the
+  small-M dispatch quantized it once PER GEMM - 1:1 quantize launches on the
+  decode critical path. The dispatch now honors the existing act-quant hint
+  (the CUTLASS prefill sharing mechanism) plus a scratch tag, skipping the
+  re-quantize for the second and third member of a pair: quantize:GEMM launch
+  ratio 1.0 -> 0.64 (nsys), bit-identical xq. Qwen3.8-27B-NVFP4, 32 streams,
+  alternating two-image A/B, 3 trials: 1132.2 -> 1183.8 tok/s median, +3.6
+  to +4.6% pairwise in 3 of 3 pairs. degen_suite 50/0.
+
 - **Batched-decode RMSNorm: one register-resident CTA per row (+6.8%
   aggregate at 32 streams).** The FP16 norm at 2-64 rows ran the warp-per-row
   prefill kernel: 4 CTAs on 170 SMs, every row read twice - 6.3 us median
