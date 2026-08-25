@@ -41,8 +41,10 @@
                 }
             }
 
-            // 1. Attention RMSNorm: norm_out = rmsnorm(hidden, attn_norm)
-            rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+            // 1. Attention RMSNorm: norm_out = rmsnorm(hidden, attn_norm).
+            // Helper (with no small-M consumer named) keeps the producer-
+            // quantize tag honest when this arm rewrites a tagged buffer.
+            rmsnorm_for_smallm_(h, ly.attn_norm, no, kInvalidTensorID, n, eps, stream, norm_w_off_);
 
             const int kv_lora_rank   = cfg.kv_lora_rank;
             const int rope_dim       = cfg.qk_rope_head_dim;
@@ -243,7 +245,10 @@
                 Tensor fp32_h = view_tokens(fp32_hidden_, n);
                 rmsnorm_fp32_to_fp16(fp32_h, ly.attn_norm, no, eps, stream, norm_w_off_);
             } else {
-                rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+                // Producer fusion: quantize into the small-M scratch inside
+                // the norm kernel when Q will take that route (batched
+                // decode, CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
+                rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.wq_id, n, eps, stream, norm_w_off_);
             }
 
             // FP8 prefill path: quantize norm_out→FP8 once, 3 separate FP8 GEMMs

@@ -2,11 +2,21 @@
 
 #include "core/tensor.h"
 #include <cuda_runtime.h>
+#include <cstdint>
 
 namespace imp {
 
 // Fused SwiGLU: out = silu(gate) * up
 void swiglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stream = nullptr);
+
+// Batched-decode producer fusion: swiglu + NVFP4 activation quantize in one
+// kernel. Writes the same FP16 `out` as swiglu() (bit-identical) plus the
+// packed nibbles [n/2 bytes] and FP8 micro-scales [n/16] the small-M NVFP4
+// GEMM reads (plain layout, tensor_scale 1.0 — bit-identical to
+// quantize_fp16_to_nvfp4_into on the stored FP16). Returns false outside the
+// fused envelope (all F16, numel % 16 == 0); caller falls back to swiglu().
+bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
+                           uint8_t* xq_scales, cudaStream_t stream = nullptr);
 
 // Fused GeGLU: out = gelu_tanh(gate) * up  (Gemma-3)
 void geglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stream = nullptr);

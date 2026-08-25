@@ -143,6 +143,17 @@ there instead of retelling it.
 
 ### Added
 
+- **Producer-side NVFP4 activation quantize for batched decode (+2.6%
+  aggregate at 32 streams).** The fused rmsnorm+quantize and swiglu+quantize
+  kernels emit the small-M xq scratch inside the kernel that writes the FP16
+  activation, so the dispatch skips its quantize launch and its [M,K] FP16
+  re-read for the qkv/gate/GDN-in norms and the down-projection input
+  (up to 192 of ~256 quantize launches per step). Bit-identity to the
+  separate kernels is gated by GPU tests (FP16 out + packed nibbles +
+  micro-scales byte-exact, both scale clamps). Qwen3.8-27B-NVFP4, 32
+  streams, alternating two-image A/B, 3 trials: 1160.4 -> 1191.0 tok/s
+  median, B over A in 3 of 3 pairs (+1.5 to +3.2%). degen_suite 50/0.
+
 - **Shared-activation quantize for batched decode (+4.6% aggregate at 32
   streams).** gate/up, q/k/v and GDN in/z read the same normed input, and the
   small-M dispatch quantized it once PER GEMM - 1:1 quantize launches on the

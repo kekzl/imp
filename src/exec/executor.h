@@ -267,6 +267,37 @@ public:
     const void* smallm_xq_src_ = nullptr;
     int smallm_xq_src_m_ = 0;
     int smallm_xq_src_k_ = 0;
+    // True when the scratch was filled by a PRODUCER fusion (fused
+    // rmsnorm/swiglu + quantize) rather than by the dispatch's own quantize.
+    // The small-M block accepts a matching tag without an act-quant hint in
+    // that case — the producer updated the tag on the very write that
+    // produced the FP16 buffer, so the pointer cannot hold newer content.
+    // Never read by the CUTLASS prefill consumer (its scratch is separate).
+    bool smallm_xq_from_producer_ = false;
+
+    // Grow the small-M xq scratch (no-op while capturing; resize
+    // invalidates the shared-activation tag).
+    void ensure_smallm_xq_(size_t xq_need, cudaStream_t stream);
+    // Producer-fusion gate + scratch handout: returns the xq packed/scales
+    // pointers when `consumer_id`'s weight will take the small-M NVFP4 route
+    // for [M, K] F16 activations and the scratch is (or can be made) large
+    // enough. Returns nullptr otherwise — caller runs the unfused kernels.
+    // Never allocates while `stream` is capturing.
+    uint8_t* smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
+                                 uint8_t** scales_out);
+    // Tag the scratch as holding quantize(out[0..M,0..K)) written by a fused
+    // producer kernel.
+    void smallm_producer_tag_(const void* out_data, int M, int K);
+    // Fused rmsnorm+quantize when the consumer takes the small-M route;
+    // falls back to plain rmsnorm() internally. `consumer_id` is the FIRST
+    // GEMM reading `no` (q / gate / GDN in) — all further readers skip via
+    // the act-quant hint as before.
+    void rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no, TensorID consumer_id,
+                             int n, float eps, cudaStream_t stream, float weight_offset);
+    // Fused swiglu+quantize when the down projection takes the small-M
+    // route; falls back to plain swiglu() internally.
+    void swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
+                            int n, cudaStream_t stream);
     // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV.
     // Fills `out` from the secondary decode cache (wcache_.nvfp4) or the
     // native-NVFP4 registry tier — the same sources the decode-path LM head

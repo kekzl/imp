@@ -1,6 +1,7 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_utils.cuh"
+#include "quant/nvfp4_pack.cuh"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -125,41 +126,9 @@ static constexpr float kFP8E4M3Max = 448.0f;
 
 __constant__ float kFP4E2M1Dequant[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
 
-// ---------------------------------------------------------------------------
-// Device helper: quantize a single FP32 magnitude to FP4 E2M1 (3-bit code)
-// Uses round-to-nearest-even among the 8 representable magnitudes.
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ uint8_t float_abs_to_fp4_e2m1(float abs_val) {
-    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
-    // Thresholds between adjacent representable values:
-    //   0    0.5    1.0    1.5    2.0    3.0    4.0    6.0
-    //     0.25  0.75  1.25  1.75  2.5   3.5    5.0
-    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f) + (abs_val >= 1.75f) +
-                   (abs_val >= 2.5f) + (abs_val >= 3.5f) + (abs_val >= 5.0f);
-    return code;  // 0..7
-}
-
-// HW FP32 pair → packed E2M1 byte (low = v0, high = v1). IEEE RNE rounding,
-// saturates to ±6. Single PTX instruction on sm_120+.
-__device__ __forceinline__ uint8_t nvfp4_pack_pair_hw(float v0, float v1) {
-#if __CUDA_ARCH__ >= 1200
-    uint32_t out;
-    asm volatile(
-        "{ .reg .b8 b;\n"
-        "  cvt.rn.satfinite.e2m1x2.f32 b, %2, %1;\n"
-        "  cvt.u32.u8 %0, b; }\n"
-        : "=r"(out)
-        : "f"(v0), "f"(v1));
-    return static_cast<uint8_t>(out);
-#else
-    uint8_t sign0 = (v0 < 0.0f) ? 1u : 0u;
-    uint8_t sign1 = (v1 < 0.0f) ? 1u : 0u;
-    uint8_t c0 = (sign0 << 3) | float_abs_to_fp4_e2m1(fabsf(v0));
-    uint8_t c1 = (sign1 << 3) | float_abs_to_fp4_e2m1(fabsf(v1));
-    return (c1 << 4) | c0;
-#endif
-}
-
+// float_abs_to_fp4_e2m1() and nvfp4_pack_pair_hw() moved VERBATIM to
+// quant/nvfp4_pack.cuh — shared with the producer-side fused quantize
+// kernels (rmsnorm_nvfp4, swiglu_quantize_nvfp4).
 // float_to_fp8_e4m3() and fp8_e4m3_to_float() are provided by fp8_utils.cuh.
 
 // ---------------------------------------------------------------------------
@@ -191,20 +160,9 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restric
     }
 
     // Step 2: Compute micro-scale = local_absmax / (tensor_scale * 6.0).
-    // Clamp to avoid division by zero and FP8 representable range.
-    float micro_scale_f = local_absmax / (tensor_scale * kFP4E2M1Max);
-    if (micro_scale_f < 1.0f / 512.0f)
-        micro_scale_f = 1.0f / 512.0f;  // FP8 E4M3 min subnormal
-    if (micro_scale_f > kFP8E4M3Max)
-        micro_scale_f = kFP8E4M3Max;
-
-    // Convert micro-scale to FP8 E4M3.
-    uint8_t micro_scale_fp8 = float_to_fp8_e4m3(micro_scale_f);
-
-    // Reconstruct the actual micro-scale from FP8 (for quantization consistency).
-    float micro_scale_actual = fp8_e4m3_to_float(micro_scale_fp8);
-    if (micro_scale_actual == 0.0f)
-        micro_scale_actual = 1.0f / 512.0f;
+    // Shared encode (clamps + FP8 round-trip): nvfp4_pack.cuh.
+    uint8_t micro_scale_fp8;
+    float micro_scale_actual = nvfp4_encode_micro_scale(local_absmax, tensor_scale, &micro_scale_fp8);
 
     // Store micro-scale.
     micro_scales[row * num_mb_per_row + col_mb] = micro_scale_fp8;

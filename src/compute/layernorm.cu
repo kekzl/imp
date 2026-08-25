@@ -209,81 +209,8 @@ __global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
     }
 }
 
-// --------------------------------------------------------------------------
-// Row-block FP16 RMSNorm — the batched-decode variant (2 <= rows <= 64).
-//
-// At mbs<=32 the warp-per-row kernel above launches 4 CTAs on 170 SMs and
-// walks every row TWICE through DRAM (sum-of-squares pass + normalize
-// pass): measured 6.3 us median for 0.65 MB of traffic at rows=32 d=5120,
-// ~6% of DRAM bandwidth, pure latency (nsys 2026-08-25, the norms row of
-// the concurrency-gap attribution). One CTA per row keeps the row
-// REGISTER-resident across the reduction: read once, one block reduce,
-// write once — and rows x 1 CTA puts every row's loads in flight at once.
-// --------------------------------------------------------------------------
-template <int kVecs>
-__global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const __half* __restrict__ weight,
-                                             __half* __restrict__ out, int d_model, float eps,
-                                             float weight_offset) {
-    const int d_vec = d_model >> 3;
-    const float4* x_vec = reinterpret_cast<const float4*>(x + static_cast<int64_t>(blockIdx.x) * d_model);
-    const float4* w_vec = reinterpret_cast<const float4*>(weight);
-    float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(blockIdx.x) * d_model);
-
-    float4 v[kVecs];
-    float sum_sq = 0.0f;
-#pragma unroll
-    for (int j = 0; j < kVecs; ++j) {
-        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
-        if (i < d_vec) {
-            v[j] = x_vec[i];
-            const half2* h = reinterpret_cast<const half2*>(&v[j]);
-#pragma unroll
-            for (int k = 0; k < 4; ++k) {
-                const float2 f = __half22float2(h[k]);
-                sum_sq += f.x * f.x + f.y * f.y;
-            }
-        }
-    }
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-        sum_sq += __shfl_xor_sync(0xFFFFFFFFu, sum_sq, off);
-    __shared__ float s_part[32];
-    __shared__ float s_inv;
-    const int warp = threadIdx.x >> 5;
-    const int lane = threadIdx.x & 31;
-    if (lane == 0)
-        s_part[warp] = sum_sq;
-    __syncthreads();
-    if (warp == 0) {
-        float t = (lane < (static_cast<int>(blockDim.x) >> 5)) ? s_part[lane] : 0.0f;
-#pragma unroll
-        for (int off = 16; off > 0; off >>= 1)
-            t += __shfl_xor_sync(0xFFFFFFFFu, t, off);
-        if (lane == 0)
-            s_inv = rsqrtf(t / static_cast<float>(d_model) + eps);
-    }
-    __syncthreads();
-    const float inv_rms = s_inv;
-#pragma unroll
-    for (int j = 0; j < kVecs; ++j) {
-        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
-        if (i < d_vec) {
-            const float4 wv = w_vec[i];
-            const half2* xh = reinterpret_cast<const half2*>(&v[j]);
-            const half2* wh = reinterpret_cast<const half2*>(&wv);
-            float4 result;
-            half2* rh = reinterpret_cast<half2*>(&result);
-#pragma unroll
-            for (int k = 0; k < 4; ++k) {
-                const float2 xf = __half22float2(xh[k]);
-                const float2 wf = __half22float2(wh[k]);
-                rh[k] = __float22half2_rn(make_float2(xf.x * inv_rms * (wf.x + weight_offset),
-                                                      xf.y * inv_rms * (wf.y + weight_offset)));
-            }
-            out_vec[i] = result;
-        }
-    }
-}
+// Row-block batched-decode kernels (plain + NVFP4 producer fusion) live in
+// layernorm_rowblock.cu — see rmsnorm_fp16_rowblock() / rmsnorm_nvfp4().
 
 // --------------------------------------------------------------------------
 // Fused RMSNorm + residual for FP32
@@ -436,14 +363,7 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
             // resident single DRAM pass — the warp kernel reads every row
             // twice and fields 4 CTAs at rows=32 (see its comment).
             if (rows >= 2 && rows <= 64 && (d_model & 7) == 0 && (d_model >> 3) <= 1024) {
-                if ((d_model >> 3) <= 512)
-                    pdl::launch(rmsnorm_fp16_rowblock_kernel<1>, dim3(rows), dim3(512), 0, stream,
-                                static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
-                                static_cast<__half*>(out.data), d_model, eps, weight_offset);
-                else
-                    pdl::launch(rmsnorm_fp16_rowblock_kernel<2>, dim3(rows), dim3(512), 0, stream,
-                                static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
-                                static_cast<__half*>(out.data), d_model, eps, weight_offset);
+                rmsnorm_fp16_rowblock(x, weight, out, rows, d_model, eps, stream, weight_offset);
                 break;
             }
             // Batch prefill (#602): warp-per-row — no barriers/smem; the

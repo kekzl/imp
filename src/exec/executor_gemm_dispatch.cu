@@ -29,6 +29,8 @@
 #include "exec/gemm_kernel_q4k_hmma.h"
 #include "compute/hadamard.h"
 #include "runtime/pdl.h"
+#include "compute/activation.h"
+#include "compute/layernorm.h"
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 
@@ -380,22 +382,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             // x tile; packed x is ~92 KiB. Scratch sized for K_max on first
             // eager use, like the split-K workspace.
             const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
-            if (xq_need > smallm_xq_bytes_) {
-                cudaStreamCaptureStatus cap2 = cudaStreamCaptureStatusNone;
-                if (cudaStreamIsCapturing(ctx.stream, &cap2) != cudaSuccess)
-                    cap2 = cudaStreamCaptureStatusActive;
-                if (cap2 == cudaStreamCaptureStatusNone) {
-                    if (smallm_xq_)
-                        cudaFree(smallm_xq_);
-                    if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
-                        smallm_xq_bytes_ = xq_need;
-                    else {
-                        smallm_xq_ = nullptr;
-                        smallm_xq_bytes_ = 0;
-                    }
-                    smallm_xq_src_ = nullptr;  // fresh scratch holds nothing
-                }
-            }
+            ensure_smallm_xq_(xq_need, ctx.stream);
             if (smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
                 uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
                 uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
@@ -405,16 +392,23 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 // scratch tag confirms the scratch still holds exactly that
                 // quantize. Saves one quantize launch + a [M,K] FP16 read per
                 // second member of a gate/up, q/k/v or GDN in/z pair.
-                const bool prequant = ctx.act_quant_hint_data != nullptr &&
-                                      ctx.act_quant_hint_data == input.data && ctx.act_quant_hint_m == M &&
-                                      ctx.act_quant_hint_k == K && smallm_xq_src_ == input.data &&
-                                      smallm_xq_src_m_ == M && smallm_xq_src_k_ == K;
+                const bool tag_match = smallm_xq_src_ == input.data && smallm_xq_src_m_ == M &&
+                                       smallm_xq_src_k_ == K;
+                const bool hint_match = ctx.act_quant_hint_data != nullptr &&
+                                        ctx.act_quant_hint_data == input.data &&
+                                        ctx.act_quant_hint_m == M && ctx.act_quant_hint_k == K;
+                // Producer fusion (fused rmsnorm/swiglu + quantize) accepts a
+                // matching tag without a hint: the producer re-tags on the
+                // very write that produced the FP16 buffer, so the pointer
+                // cannot hold newer content than the scratch.
+                const bool prequant = tag_match && (hint_match || smallm_xq_from_producer_);
                 if (!prequant) {
                     quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales,
                                                 /*tensor_scale=*/1.0f, ctx.stream);
                     smallm_xq_src_ = input.data;
                     smallm_xq_src_m_ = M;
                     smallm_xq_src_k_ = K;
+                    smallm_xq_from_producer_ = false;
                 }
                 NvFP4QuantResult nv;
                 nv.packed_data = const_cast<void*>(h.source_data);
@@ -647,6 +641,100 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
 
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
                        ws_.shared(), ws_.shared_size(), ctx.stream);
+}
+
+// ---------------------------------------------------------------------------
+// Producer-side NVFP4 quantize fusion (batched decode).
+//
+// The small-M block above quantizes its FP16 input into smallm_xq_ once per
+// consumer GROUP (the act-quant hint dedupes pair members). The producer
+// fusion moves that quantize into the kernel that WRITES the FP16 buffer
+// (fused rmsnorm / swiglu), killing the separate launch and the [M,K] FP16
+// re-read. Gate mirrors the small-M route conditions; when any of them
+// fails the caller runs the unfused kernels and the dispatch quantizes as
+// before.
+// ---------------------------------------------------------------------------
+// Grow the small-M activation-quantize scratch to `xq_need` bytes. Never
+// allocates while `stream` is capturing (the eager warmup pass sizes it for
+// the graph run); a resize invalidates the shared-activation tag.
+void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
+    if (xq_need <= smallm_xq_bytes_)
+        return;
+    cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
+        cap = cudaStreamCaptureStatusActive;  // be conservative
+    if (cap != cudaStreamCaptureStatusNone)
+        return;
+    if (smallm_xq_)
+        cudaFree(smallm_xq_);
+    if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
+        smallm_xq_bytes_ = xq_need;
+    else {
+        smallm_xq_ = nullptr;
+        smallm_xq_bytes_ = 0;
+    }
+    smallm_xq_src_ = nullptr;  // fresh scratch holds nothing
+    smallm_xq_from_producer_ = false;
+}
+
+uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
+                                            uint8_t** scales_out) {
+    if (!runtime_config().gemm.nvfp4_smallm || cur_spec_verify_)
+        return nullptr;
+    if (M < 2 || M > 32 || K <= 0 || (K & 255) != 0)
+        return nullptr;
+    if (consumer_id == kInvalidTensorID)
+        return nullptr;
+    const auto& h = registry_.handle(consumer_id);
+    if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.source_data == nullptr ||
+        h.source_scales == nullptr || dequant_gpu_supported(h.source_qtype) ||
+        static_cast<int>(h.shape[1] * 2) != K)
+        return nullptr;
+    const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
+    ensure_smallm_xq_(xq_need, stream);
+    if (smallm_xq_bytes_ < xq_need)
+        return nullptr;
+    *scales_out = static_cast<uint8_t*>(smallm_xq_) + (size_t)32 * (K / 2);
+    return static_cast<uint8_t*>(smallm_xq_);
+}
+
+void GraphExecutor::smallm_producer_tag_(const void* out_data, int M, int K) {
+    smallm_xq_src_ = out_data;
+    smallm_xq_src_m_ = M;
+    smallm_xq_src_k_ = K;
+    smallm_xq_from_producer_ = true;
+}
+
+void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no,
+                                        TensorID consumer_id, int n, float eps, cudaStream_t stream,
+                                        float weight_offset) {
+    const int K = static_cast<int>(h.shape[1]);
+    uint8_t* xq_scales = nullptr;
+    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
+    if (xq_packed != nullptr &&
+        rmsnorm_nvfp4(h, w, no, xq_packed, xq_scales, eps, stream, weight_offset)) {
+        smallm_producer_tag_(no.data, n, K);
+        return;
+    }
+    rmsnorm(h, w, no, eps, stream, weight_offset);
+    // The unfused write may have replaced the content behind a still-matching
+    // tag (same buffer, same shape, new values) — invalidate it.
+    if (smallm_xq_src_ == no.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
+        smallm_xq_from_producer_ = false;
+}
+
+void GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
+                                       TensorID consumer_id, int n, cudaStream_t stream) {
+    const int K = static_cast<int>(so.shape[1]);
+    uint8_t* xq_scales = nullptr;
+    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
+    if (xq_packed != nullptr && swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream)) {
+        smallm_producer_tag_(so.data, n, K);
+        return;
+    }
+    swiglu(go, uo, so, stream);
+    if (smallm_xq_src_ == so.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
+        smallm_xq_from_producer_ = false;
 }
 
 }  // namespace imp

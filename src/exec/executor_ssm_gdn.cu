@@ -61,7 +61,11 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
     // 1. Save residual + RMSNorm
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
-    rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+    // Producer fusion: quantize into the small-M scratch inside the norm
+    // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
+    // tier); falls back to plain rmsnorm. The n==1 packed-input path is
+    // unaffected (producer gate requires n >= 2).
+    rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
 
     // GemmContext for all weight GEMM dispatches in this function.
     //
@@ -311,7 +315,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
     // 1. Save residual + RMSNorm
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
-    rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+    // Producer fusion: quantize into the small-M scratch inside the norm
+    // kernel when ssm_in will take that route (batched decode, CUTLASS_NVFP4
+    // tier); falls back to plain rmsnorm. The n==1 packed-input path is
+    // unaffected (producer gate requires n >= 2).
+    rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
 
     // M=1 decode 4-way input fusion: when the load-time pack succeeded, run a
     // single GEMV against [conv_channels+inner+2*n_heads, d_model] and slice
