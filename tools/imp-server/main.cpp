@@ -170,6 +170,16 @@ int main(int argc, char** argv) {
     svr.set_read_timeout(args.read_timeout, 0);
     svr.set_write_timeout(args.write_timeout, 0);
     svr.set_keep_alive_max_count(args.keep_alive_max);
+    // Worker threads must cover the CONCURRENT STREAMS, not the cores: a
+    // streamed completion holds its worker for the whole generation, and the
+    // library default (max(8, cores-1) = 15 here) silently queued the tail
+    // of a 32-stream burst behind finished streams - measured as 6-10
+    // requests arriving at the scheduler 4-7 s late with TTFT at wave-end
+    // while the engine sat ready (2026-08-25). +8 covers health checks and
+    // admin routes while every stream slot is held.
+    svr.new_task_queue = [&args] {
+        return new httplib::ThreadPool(static_cast<size_t>(args.max_concurrent) + 8);
+    };
 
     // Store API key and limits in state
     state.api_key = args.api_key;

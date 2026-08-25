@@ -88,7 +88,15 @@ Ranked by what an agent workload notices first.
    prewarm does buy: wave-1 median request latency -3-12% (p50 6.2 s tight
    across trials vs 6.4-7.1 s) and a tail that no longer pays first-capture
    stalls. (c) kernel fusion across the small launch-coupled classes
-   (norms 26 us/token, act-quantize 15, elementwise). The
+   (norms 26 us/token, act-quantize 15, elementwise). (d) cross-sequence
+   prefill batching: a 32-prompt burst prefills one sequence per forward
+   at ~1700 tok/s effective (launch-bound, 64 layers), so every first
+   token waits 2-3.5 s; batching prefill rows the way decode batches
+   would amortise the fixed cost. UPDATE 2026-08-25 night: after the
+   burst-serving fixes (HTTP pool sized to streams, token-charged prefill
+   budget, id-based rotor - see the plan doc) the 4-wave bench reads
+   1047-1073 tok/s on every wave; the measured gap to vLLM stands at
+   ~1.35x. The
    630-vs-936 delta between auto=28 and pinned=32 on this bench is NOT a
    rotation cost (scheduler admits 28, the last 4 drain as a near-empty
    batch; auto=28 sustains full rate under continuous arrival); raising
