@@ -50,10 +50,10 @@ constexpr int kThreads = 160;  // 4 consumer warps + 1 producer warp
 constexpr int kNibStride = 144;
 constexpr int kSfStride = 16;
 
-constexpr int kWNibBytes = kNR * kNibStride;   // 9216
-constexpr int kXNibBytes = kSmM * kNibStride;  // 4608
-constexpr int kWSfBytes = kNR * kSfStride;     // 1024
-constexpr int kXSfBytes = kSmM * kSfStride;    // 512
+constexpr int kWNibBytes = kNR * kNibStride;                                  // 9216
+constexpr int kXNibBytes = kSmM * kNibStride;                                 // 4608
+constexpr int kWSfBytes = kNR * kSfStride;                                    // 1024
+constexpr int kXSfBytes = kSmM * kSfStride;                                   // 512
 constexpr int kStageBytes = kWNibBytes + kXNibBytes + kWSfBytes + kXSfBytes;  // 15360
 constexpr int kDefaultStages = 6;  // smem ring depth; 6 measured best at stripes=1 (sweep 2026-08-25)
 
@@ -133,9 +133,8 @@ __global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed
                                             const uint8_t* __restrict__ w_scales,
                                             const uint8_t* __restrict__ xq_packed,
                                             const uint8_t* __restrict__ xq_scales,
-                                            float* __restrict__ ws_partials, half* __restrict__ y,
-                                            float ts, int acc_flag, int M, int N_out, int K,
-                                            int stripes) {
+                                            float* __restrict__ ws_partials, half* __restrict__ y, float ts,
+                                            int acc_flag, int M, int N_out, int K, int stripes) {
     extern __shared__ uint8_t smem[];
     __shared__ uint64_t bar_full[kStages];
     __shared__ uint64_t bar_empty[kStages];
@@ -216,7 +215,7 @@ __global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed
         const int warp_n = warp >> 1;
         const int T0 = lane & 3;
         const int T1 = lane >> 2;
-        const int a_row = warp_m * 16 + T1;              // A fragment row (V1=0)
+        const int a_row = warp_m * 16 + T1;  // A fragment row (V1=0)
         const int sfa_row = warp_m * 16 + (lane & 1) * 8 + (lane >> 2);
         float acc[4][4];
 #pragma unroll
@@ -242,16 +241,15 @@ __global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed
                 a[1] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride);
                 a[2] = *reinterpret_cast<const uint32_t*>(xr + 16);
                 a[3] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride + 16);
-                const uint32_t sfa =
-                    *reinterpret_cast<const uint32_t*>(s_xsf + sfa_row * kSfStride + c * 4);
+                const uint32_t sfa = *reinterpret_cast<const uint32_t*>(s_xsf + sfa_row * kSfStride + c * 4);
 #pragma unroll
                 for (int nf = 0; nf < 4; ++nf) {
                     const int n_row = warp_n * 32 + nf * 8 + T1;
                     const uint8_t* wr = s_wn + n_row * kNibStride + T0 * 4 + c * 32;
                     const uint32_t b0 = *reinterpret_cast<const uint32_t*>(wr);
                     const uint32_t b1 = *reinterpret_cast<const uint32_t*>(wr + 16);
-                    const uint32_t sfb =
-                        *reinterpret_cast<const uint32_t*>(s_wsf + n_row * kSfStride + c * 4);
+                    const uint32_t sfb = *reinterpret_cast<const uint32_t*>(s_wsf + n_row * kSfStride +
+                                                                            c * 4);
                     mma_mxf4nvf4(acc[nf], a, b0, b1, sfa, sfb);
                 }
             }
@@ -303,16 +301,16 @@ __global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed
 // Reduce the stripe partial planes into FP16 y, applying the combined tensor
 // scale. kAcc adds onto the existing y (o/down residual call sites, beta=1).
 template <bool kAcc>
-__global__ void smallm_v2_reduce_kernel(const float* __restrict__ ws_partials, half* __restrict__ y,
-                                        int M, int N_out, int stripes, float ts) {
+__global__ void smallm_v2_reduce_kernel(const float* __restrict__ ws_partials, half* __restrict__ y, int M,
+                                        int N_out, int stripes, float ts) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= M * N_out)
         return;
     const int m = i / N_out, n = i % N_out;
     float acc = 0.0f;
     for (int sp = 0; sp < stripes; ++sp)
-        acc += __ldcs(&ws_partials[static_cast<size_t>(sp) * kSmM * N_out +
-                                   static_cast<int64_t>(m) * N_out + n]);
+        acc += __ldcs(
+            &ws_partials[static_cast<size_t>(sp) * kSmM * N_out + static_cast<int64_t>(m) * N_out + n]);
     const int64_t o = static_cast<int64_t>(m) * N_out + n;
     y[o] = __float2half(ts * acc + (kAcc ? __half2float(y[o]) : 0.0f));
 }
@@ -349,8 +347,8 @@ size_t gemm_nvfp4_smallm_v2_workspace_bytes(int N_out, int K) {
 namespace {
 
 template <int kStages>
-bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M, int N_out,
-                      int K, void* d_workspace, cudaStream_t stream, bool accumulate, int stripes) {
+bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M, int N_out, int K,
+                      void* d_workspace, cudaStream_t stream, bool accumulate, int stripes) {
     static const bool smem_ok = [] {
         return cudaFuncSetAttribute(gemm_nvfp4_smallm_v2_kernel<kStages>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -362,19 +360,20 @@ bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, hal
     const float ts = W.tensor_scale * Xq.tensor_scale;
     gemm_nvfp4_smallm_v2_kernel<kStages><<<grid, kThreads, kStages * kStageBytes, stream>>>(
         reinterpret_cast<const uint8_t*>(W.packed_data), reinterpret_cast<const uint8_t*>(W.micro_scales),
-        reinterpret_cast<const uint8_t*>(Xq.packed_data),
-        reinterpret_cast<const uint8_t*>(Xq.micro_scales), static_cast<float*>(d_workspace), y, ts,
-        accumulate ? 1 : 0, M, N_out, K, stripes);
+        reinterpret_cast<const uint8_t*>(Xq.packed_data), reinterpret_cast<const uint8_t*>(Xq.micro_scales),
+        static_cast<float*>(d_workspace), y, ts, accumulate ? 1 : 0, M, N_out, K, stripes);
     IMP_CUDA_CHECK_LAUNCH();
     if (stripes == 1)
         return true;
     const int total = M * N_out;
     if (accumulate)
-        smallm_v2_reduce_kernel<true><<<(total + 255) / 256, 256, 0, stream>>>(
-            static_cast<const float*>(d_workspace), y, M, N_out, stripes, ts);
+        smallm_v2_reduce_kernel<true>
+            <<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const float*>(d_workspace), y, M, N_out,
+                                                      stripes, ts);
     else
-        smallm_v2_reduce_kernel<false><<<(total + 255) / 256, 256, 0, stream>>>(
-            static_cast<const float*>(d_workspace), y, M, N_out, stripes, ts);
+        smallm_v2_reduce_kernel<false>
+            <<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const float*>(d_workspace), y, M, N_out,
+                                                      stripes, ts);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }
@@ -391,20 +390,19 @@ bool smallm_v2_args_ok(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, in
 
 }  // namespace
 
-bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
-                             int N_out, int K, void* d_workspace, cudaStream_t stream, bool accumulate) {
+bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M, int N_out,
+                             int K, void* d_workspace, cudaStream_t stream, bool accumulate) {
     const int stripes = gemm_nvfp4_smallm_v2_stripes(N_out, K);
     if (!smallm_v2_args_ok(W, Xq, M, N_out, K, d_workspace, stripes))
         return false;
-    return launch_smallm_v2<kDefaultStages>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate,
-                                            stripes);
+    return launch_smallm_v2<kDefaultStages>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
 }
 
 // Tuning hook for the isolated sweep (tests only): explicit stage depth and
 // stripe count. Workspace must hold `stripes` planes.
 bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
-                                   int N_out, int K, void* d_workspace, cudaStream_t stream,
-                                   bool accumulate, int stages, int stripes) {
+                                   int N_out, int K, void* d_workspace, cudaStream_t stream, bool accumulate,
+                                   int stages, int stripes) {
     if (!smallm_v2_args_ok(W, Xq, M, N_out, K, d_workspace, stripes))
         return false;
     if (stripes < 1 || stripes > K / kKT)

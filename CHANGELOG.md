@@ -11,6 +11,20 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **Native mxf4nvf4 small-M GEMM (v2) for batched decode, default ON.** The
+  M<=32 decode projections on NVFP4 checkpoints now run a block-scaled
+  `mma.sync.kind::mxf4nvf4` kernel with a producer/consumer cp.async+mbarrier
+  pipeline on the plain weight layout (no dequant, no second weight copy —
+  the route the discarded Marlin W4A16 sidecar PR #1764 approximated with
+  12.8 GiB of repack). Qwen3.8-27B-NVFP4, alternating A/B, 3 trials:
+  32 streams 992.5 -> 1151.7 tok/s aggregate (+16.0%), 8 streams 363.8 ->
+  494.6 (+36.0%); isolated M=32 N=5120 K=5120 10.4 us vs CUTLASS's 41.4
+  in-situ (weight floor 8.2). degen_suite 50/0. `gemm.nvfp4_smallm_impl=1`
+  keeps the refuted W4A16 kernel for A/B. Design + kill-gates:
+  `docs/plans/2026-08-24-qwen38-port.md`.
+
 ### Fixed
 
 - **A 32-stream burst no longer starves its own tail.** Three defects, one

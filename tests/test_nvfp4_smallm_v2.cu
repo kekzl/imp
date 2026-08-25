@@ -36,8 +36,8 @@ bool gpu_available() {
 }
 
 // Host dequant of one element from plain packed buffers (UE4M3 micro-scales).
-float host_dequant(const std::vector<uint8_t>& packed, const std::vector<uint8_t>& scales,
-                   float tensor_scale, int n, int k, int K) {
+float host_dequant(const std::vector<uint8_t>& packed, const std::vector<uint8_t>& scales, float tensor_scale,
+                   int n, int k, int K) {
     static const float lut[16] = {0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
                                   -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
     uint8_t byte = packed[(size_t)n * (K / 2) + k / 2];
@@ -74,7 +74,7 @@ struct DeviceQuant {
 };
 
 class NvFP4SmallMV2Test : public ::testing::Test {
-  protected:
+protected:
     void SetUp() override {
         if (!gpu_available())
             GTEST_SKIP() << "no CUDA device";
@@ -105,13 +105,12 @@ void run_case(int M, int N, int K, bool accumulate) {
     ASSERT_EQ(cudaMemcpy(d_y, y0_h.data(), (size_t)M * N * sizeof(__half), cudaMemcpyHostToDevice),
               cudaSuccess);
 
-    ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr,
-                                             accumulate));
+    ASSERT_TRUE(
+        imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr, accumulate));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     std::vector<__half> y_h((size_t)M * N);
-    ASSERT_EQ(cudaMemcpy(y_h.data(), d_y, y_h.size() * sizeof(__half), cudaMemcpyDeviceToHost),
-              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(y_h.data(), d_y, y_h.size() * sizeof(__half), cudaMemcpyDeviceToHost), cudaSuccess);
 
     const float ts = W.q.tensor_scale * X.q.tensor_scale;
     double max_rel = 0.0;
@@ -184,16 +183,16 @@ TEST_F(NvFP4SmallMV2Test, BandwidthAboveStarvationFloor) {
     float ms = 0.0f;
     for (int w = 0; w < 100; ++w) {
         for (int i = 0; i < 1000; ++i)
-            ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws,
-                                                     nullptr));
+            ASSERT_TRUE(
+                imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr));
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     }
     double best_ms = 1e30;
     for (int r = 0; r < 3; ++r) {
         cudaEventRecord(t0);
         for (int i = 0; i < 1000; ++i)
-            ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws,
-                                                     nullptr));
+            ASSERT_TRUE(
+                imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr));
         cudaEventRecord(t1);
         ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
         cudaEventElapsedTime(&ms, t0, t1);
@@ -204,8 +203,8 @@ TEST_F(NvFP4SmallMV2Test, BandwidthAboveStarvationFloor) {
     const double bytes = (double)N * K / 2 + (double)N * K / 16;
     const double floor_us = bytes / 1792e9 * 1e6;  // 8.2 us
     const double pct = floor_us / us * 100.0;
-    printf("[ BENCH    ] smallm_v2 M=32 N=5120 K=5120: %.1f us/call, %.0f%% of weight floor (%.1f us)\n",
-           us, pct, floor_us);
+    printf("[ BENCH    ] smallm_v2 M=32 N=5120 K=5120: %.1f us/call, %.0f%% of weight floor (%.1f us)\n", us,
+           pct, floor_us);
     EXPECT_GT(pct, 40.0) << us << " us — starvation regression (CUTLASS in-situ is 41.4 us)";
 
     cudaFree(d_y);
@@ -234,8 +233,7 @@ TEST_F(NvFP4SmallMV2Test, SweepTuning) {
     ASSERT_EQ(cudaMalloc(&d_ws, (size_t)kMaxStripes * 32 * N * sizeof(float)), cudaSuccess);
     // clock ramp
     for (int i = 0; i < 20000; ++i)
-        ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws,
-                                                 nullptr));
+        ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0);
@@ -246,8 +244,8 @@ TEST_F(NvFP4SmallMV2Test, SweepTuning) {
         for (int sp : stripes_v) {
             float ms = 0.0f;
             double best = 1e30;
-            if (!imp::gemm_nvfp4_smallm_v2_a4_tuned(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws,
-                                                    nullptr, false, st, sp))
+            if (!imp::gemm_nvfp4_smallm_v2_a4_tuned(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr,
+                                                    false, st, sp))
                 continue;
             for (int r = 0; r < 3; ++r) {
                 cudaEventRecord(t0);
@@ -259,8 +257,7 @@ TEST_F(NvFP4SmallMV2Test, SweepTuning) {
                 cudaEventElapsedTime(&ms, t0, t1);
                 best = std::min(best, (double)ms);
             }
-            printf("[ SWEEP    ] stages=%d stripes=%d ctas=%d: %.2f us/call\n", st, sp, (N / 64) * sp,
-                   best);
+            printf("[ SWEEP    ] stages=%d stripes=%d ctas=%d: %.2f us/call\n", st, sp, (N / 64) * sp, best);
         }
     }
     cudaFree(d_y);

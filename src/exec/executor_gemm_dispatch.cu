@@ -334,20 +334,17 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             return;
         }
 
-        // Small-M NVFP4 GEMM (gemm.nvfp4_smallm, default on): batched decode
-        // at n_seq <= 32 used to run these through the CUTLASS 128x128
-        // block-scaled tile — 40 CTAs on the N=5120 shapes, 41.4 us for a
-        // 14 MB weight read (19% of the floor; the cross-engine profile in
-        // BENCHMARKS.md). gemm_nvfp4_smallm is the Marlin recipe (W4A16:
-        // dequant-to-FP16 in smem + HMMA + split-K) on the SAME plain weight
-        // bytes the M=1 decode GEMVs read: 23.9 us median on that shape.
-        // W4A16 vs the CUTLASS path's quantized activations is a numerics
-        // upgrade, not a match. Default OFF: in the real step the GDN scan's
-        // L2 traffic evicts the x tile and the kernel runs at 45.8 us
-        // (isolated: 23.9 with a policy window), costing ~11% aggregate —
-        // see the gemm.h comment for the numbers and the two routes that
-        // would flip the sign. Spec-verify chunks keep their documented
-        // paths (argmax parity, #1055).
+        // Small-M NVFP4 GEMM (gemm.nvfp4_smallm, default ON since v2):
+        // batched decode at n_seq <= 32 used to run these through the
+        // CUTLASS 128x128 block-scaled tile — 40 CTAs on the N=5120 shapes,
+        // 41.4 us for a 14 MB weight read (19% of the floor). impl 2 (the
+        // default) is the native mxf4nvf4 producer/consumer pipeline on the
+        // SAME plain weight bytes the M=1 decode GEMVs read — measured
+        // +16.0% aggregate at 32 streams / +36.0% at 8 on Qwen3.8-27B-NVFP4
+        // (gemm.h has the numbers); impl 1 keeps the refuted W4A16
+        // dequant+HMMA kernel for A/B. Both read quantized activations
+        // (same numerics family as the CUTLASS path). Spec-verify chunks
+        // keep their documented paths (argmax parity, #1055).
         if (runtime_config().gemm.nvfp4_smallm && !ctx.spec_verify_small_m && M <= 32 &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && input.qtype == QType::F16 &&
             output.qtype == QType::F16 && h.primary_tier == StorageTier::CUTLASS_NVFP4 &&
@@ -355,7 +352,11 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             !dequant_gpu_supported(h.source_qtype) && (h.shape[1] * 2) % 128 == 0) {
             const int N = static_cast<int>(h.shape[0]);
             const int K = static_cast<int>(h.shape[1] * 2);
-            const size_t need = gemm_nvfp4_smallm_workspace_bytes(N);
+            // impl 2 = the native mxf4nvf4 pipeline kernel (v2), impl 1 = the
+            // W4A16 dequant+HMMA kernel; unaligned shapes fall back to v1.
+            const bool v2 = runtime_config().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
+            const size_t need = v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
+                                   : gemm_nvfp4_smallm_workspace_bytes(N);
             if (need > smallm_ws_bytes_) {
                 cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
                 if (cudaStreamIsCapturing(ctx.stream, &cap) != cudaSuccess)
@@ -411,8 +412,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 xq.tensor_scale = 1.0f;
                 xq.N = M;
                 xq.K = K;
-                if (gemm_nvfp4_smallm_a4(nv, xq, reinterpret_cast<half*>(output.data), M, N, K,
-                                         smallm_ws_, ctx.stream, /*accumulate=*/ctx.beta == 1.0f))
+                const bool ok = v2 ? gemm_nvfp4_smallm_v2_a4(nv, xq, reinterpret_cast<half*>(output.data), M,
+                                                             N, K, smallm_ws_, ctx.stream,
+                                                             /*accumulate=*/ctx.beta == 1.0f)
+                                   : gemm_nvfp4_smallm_a4(nv, xq, reinterpret_cast<half*>(output.data), M, N,
+                                                          K, smallm_ws_, ctx.stream,
+                                                          /*accumulate=*/ctx.beta == 1.0f);
+                if (ok)
                     return;
             }
         }
