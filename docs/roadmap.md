@@ -66,10 +66,15 @@ Ranked by what an agent workload notices first.
    85 -> 29 tok/s across 1 -> 32 where vLLM falls 69 -> 46 — see
    [`BENCHMARKS.md`](BENCHMARKS.md), "imp vs vLLM at concurrency"). Single
    stream imp leads by 22%. The batched-GDN decode in #1750 closed the gap
-   from ~6.5x; what remains splits into (a) the batch-decode step cost
-   (scan + attention at n>1) and (b) state-slot rotation when admitted
-   requests exceed `max_batch_size` (630 vs 936 tok/s at auto=28 vs
-   pinned=32 — recurrent-state paging, the plan's item 6).
+   from ~6.5x; what remains is (a) the batch-decode step cost (scan + attention at
+   n>1: ~34 ms/step at 32 where vLLM's equivalent is ~22, against a
+   ~11 ms weight-read floor both share). The 630-vs-936 delta between
+   auto=28 and pinned=32 on this bench is NOT a rotation cost: the
+   scheduler admits 28 and the last 4 requests drain as a near-empty
+   batch (predicted 667 from the two phases, measured 630) — under
+   continuous arrival auto=28 sustains the full-batch rate. Raising
+   slots per GiB is still what the plan's item 6 (recurrent-state
+   paging) would buy.
 
 1. **Scheduling has no per-request priority.** Nothing in the scheduler reads
    one, so a caller cannot say which request matters. `max_concurrent` bounds
