@@ -13,6 +13,21 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The n>1 decode loop no longer re-uploads each row's whole output history
+  from pageable memory every step.** With the server's repetition-penalty
+  default every batched row paid one pageable H2D per step (8.5k per
+  32-stream wave, each a synchronous host stall); histories now live in
+  per-request device slots and ONE kernel appends each step's sampled tokens
+  straight from the sample slots. Measured throughput-neutral (the stalls
+  were not the idle driver); the host-side stall class is gone and the old
+  shared-buffer path remains as fallback.
+
+- **The seven decode-pipeline gates now say which one closed** (same logging
+  blind spot the prefill-graph gates had, #1646): one INFO line per process
+  from the first batch that asked, plus an ENTERED/DECLINED line. Found
+  immediately what it exists to find: the pipeline was assumed inactive on a
+  workload where it in fact entered.
+
 - **The auto batch resolver priced a hybrid's KV 4x too high and its recurrent
   state at zero: Qwen3.8-27B auto-sized `max_batch_size` 5 where 28 fits.**
   It counted all 64 layers as KV-carrying (16 are) at FP16 (the model defaults

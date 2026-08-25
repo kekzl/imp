@@ -1691,6 +1691,38 @@ void Engine::step_decode(cudaStream_t dec_stream) {
 // step_decode_forward — build batch, run forward pass, sample, process
 // =====================================================================
 
+int Engine::penalty_hist_slot_(int req_id, const std::vector<std::shared_ptr<Request>>& batch) {
+    if (d_penalty_hist_ == nullptr || penalty_hist_slots_ <= 0)
+        return -1;
+    int free_i = -1;
+    for (int i = 0; i < penalty_hist_slots_; i++) {
+        if (penalty_hist_state_[i].req_id == req_id)
+            return i;
+        if (penalty_hist_state_[i].req_id < 0 && free_i < 0)
+            free_i = i;
+    }
+    if (free_i < 0) {
+        // Evict a slot whose owner is not in the current batch. One exists:
+        // the caller's row has no slot, so at most batch.size()-1 slots are
+        // owned by current rows and penalty_hist_slots_ >= max_batch_size.
+        for (int i = 0; i < penalty_hist_slots_ && free_i < 0; i++) {
+            bool live = false;
+            for (const auto& r : batch)
+                if (r->id == penalty_hist_state_[i].req_id) {
+                    live = true;
+                    break;
+                }
+            if (!live)
+                free_i = i;
+        }
+    }
+    if (free_i < 0)
+        return -1;
+    penalty_hist_state_[free_i].req_id = req_id;
+    penalty_hist_state_[free_i].synced = -1;
+    return free_i;
+}
+
 // Populate the InferenceState for a decode step from the uploaded GPU batch.
 // Handles per-seq residual metadata (single-seq fast path vs multi-seq
 // per-batch upload), sampling params, decode-step seed, penalties, recurrent
@@ -1963,6 +1995,16 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // top_k) decline untouched in pass 1 and sample synchronously after
         // the gather.
         std::vector<int> sync_rows;
+        // Device-resident penalty histories (#1755): row i's history lives in
+        // slot hist_slot[i]; after the gather ONE kernel appends this step's
+        // sampled tokens (offs[i] < 0 skips a row). Replaces a pageable H2D
+        // of the whole output history per row per step.
+        imp::PenaltyAppendArgs pen_append;
+        pen_append.n = n;
+        pen_append.cap = penalty_hist_cap_;
+        std::vector<int> pen_row_slot(n, -1);
+        for (int i = 0; i < n; i++)
+            pen_append.offs[i] = -1;
         for (int i = 0; i < n; i++) {
             auto& req = valid_decode[i];
             InferenceState per_state = state;
@@ -1973,14 +2015,31 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             per_state.n_penalty_tokens = 0;
             bool req_needs_pen = (req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
                                   req->presence_penalty != 0.0f);
-            if (req_needs_pen && !req->output_tokens.empty() && d_penalty_tokens_) {
-                size_t rn = req->output_tokens.size();
-                if (rn <= d_penalty_tokens_capacity_) {
+            if (req_needs_pen && !req->output_tokens.empty()) {
+                const int need = static_cast<int>(req->output_tokens.size());
+                int slot = penalty_hist_slot_(req->id, valid_decode);
+                if (slot >= 0 && need <= penalty_hist_cap_) {
+                    auto& hs = penalty_hist_state_[slot];
+                    if (hs.synced != need) {
+                        // Full (re)sync — first batch entry of this request, or
+                        // the host history diverged (sync-row step, think strip).
+                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                            d_penalty_hist_ + (size_t)slot * penalty_hist_cap_,
+                            req->output_tokens.data(), (size_t)need * sizeof(int32_t),
+                            cudaMemcpyHostToDevice, dec_stream));
+                        hs.synced = need;
+                    }
+                    per_state.penalty_tokens = d_penalty_hist_ + (size_t)slot * penalty_hist_cap_;
+                    per_state.n_penalty_tokens = need;
+                    pen_row_slot[i] = slot;
+                } else if (d_penalty_tokens_ &&
+                           (size_t)need <= d_penalty_tokens_capacity_) {
+                    // No slot pool — the old shared-buffer upload path.
                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
-                                                       rn * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                                       dec_stream));
+                                                       (size_t)need * sizeof(int32_t),
+                                                       cudaMemcpyHostToDevice, dec_stream));
                     per_state.penalty_tokens = d_penalty_tokens_;
-                    per_state.n_penalty_tokens = static_cast<int>(rn);
+                    per_state.n_penalty_tokens = need;
                 }
             }
             // Per-row constraint masks: keeps json_schema/json_mode enforced
@@ -2000,14 +2059,35 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             }
             per_state.n_sequences = 1;
             Tensor seq_logits = logits.slice(i, i + 1);
-            if (!executor_->sample_single_from_logits_async(seq_logits, per_state, i, dec_stream))
+            if (!executor_->sample_single_from_logits_async(seq_logits, per_state, i, dec_stream)) {
                 sync_rows.push_back(i);
+                // Sync-row token never lands in sample slot i — the device
+                // history would diverge; force a resync next step.
+                if (pen_row_slot[i] >= 0)
+                    penalty_hist_state_[pen_row_slot[i]].synced = -1;
+            } else if (pen_row_slot[i] >= 0) {
+                pen_append.slots[i] = pen_row_slot[i];
+                pen_append.offs[i] = static_cast<int>(req->output_tokens.size());
+            }
         }
         if (static_cast<int>(sync_rows.size()) < n) {
             const int32_t* toks = executor_->collect_sampled_tokens(n, dec_stream);
             if (toks) {
                 for (int i = 0; i < n; i++)
                     result[i] = toks[i];
+                // Append this step's tokens to the device histories. AFTER
+                // collect on purpose: the row-batched top-k stash only writes
+                // its sample slots inside collect's flush, and the parity has
+                // not flipped yet, so the slots still hold this step.
+                bool any_append = false;
+                for (int i = 0; i < n && !any_append; i++)
+                    any_append = pen_append.offs[i] >= 0;
+                if (any_append &&
+                    executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream)) {
+                    for (int i = 0; i < n; i++)
+                        if (pen_append.offs[i] >= 0)
+                            penalty_hist_state_[pen_append.slots[i]].synced = pen_append.offs[i] + 1;
+                }
             } else {
                 // Collector unavailable (no slot buffers) — every row falls
                 // back to the synchronous path below.
@@ -2144,6 +2224,14 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         if (!needs_logprobs && !needs_constrained && pipeline_batch_eligible_(valid_decode)) {
             piped = pipeline_enter_(valid_decode, gpu_batch, graph_idx, state, logits_out,
                                     dec_stream, tokens);
+            static bool entered_logged = false;
+            if (!entered_logged) {
+                entered_logged = true;
+                IMP_LOG_INFO("decode-pipeline: first eligible batch n=%d -> %s",
+                             (int)valid_decode.size(), piped ? "ENTERED" : "enter DECLINED");
+            }
+        } else if (valid_decode.size() >= 2) {
+            log_pipeline_gate_once_(valid_decode);
         }
         // Eager sampling (handles all modes: greedy, top-k/p, penalties,
         // force_token, constraints, logprobs, mirostat)
@@ -2662,7 +2750,17 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
         return false;
     if (!decode_batch_pool_.is_allocated())
         return false;
-    if (ssm_state_ || offload_mgr_)
+    if (offload_mgr_)
+        return false;
+    // Recurrent hybrids: excluded in #975 because a GDN decode step then
+    // served one sequence. #1750's batched decode (stable device slot table)
+    // made the pipeline RUNNABLE here — and measured SLOWER: alternating A/B
+    // on Qwen3.8-27B at 32 streams, fresh server per arm, 2026-08-25:
+    // pipeline ON 862-914 tok/s aggregate (median ~890) against OFF 940-953
+    // (median ~945), non-overlapping. The chained advance + event waits cost
+    // more on the hybrid step than the overlapped host gap returns. Keep the
+    // exclusion as a measured verdict, not an inherited one.
+    if (ssm_state_)
         return false;
     if (swa_sizing_active_ || config_.streaming_kv_enabled)
         return false;
@@ -2674,6 +2772,34 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
         if (!pipeline_row_eligible_(*r))
             return false;
     return true;
+}
+
+// Same logging blind spot the prefill-graph gates had (#1646): seven
+// conditions gate the pipelined loop and none of them said anything, so a
+// model that never pipelines looks exactly like one that does. Report the
+// closed gate once per process, from the first batch that got as far as
+// asking.
+void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>& rows) {
+    static bool logged = false;
+    if (logged)
+        return;
+    logged = true;
+    bool rows_ok = true;
+    for (const auto& r : rows)
+        if (!pipeline_row_eligible_(*r)) {
+            rows_ok = false;
+            break;
+        }
+    IMP_LOG_INFO(
+        "decode-pipeline: not entering — cfg=%d n=%d graphs=%d profile=%d pool=%d offload=%d "
+        "ssm_ok=%d swa=%d streaming_kv=%d residual=%d sampler_ready=%d rows_ok=%d",
+        (int)runtime_config_.runtime.decode_pipeline, (int)rows.size(), (int)config_.use_cuda_graphs,
+        (int)runtime_config_.diagnostics.profile, (int)decode_batch_pool_.is_allocated(),
+        (int)(offload_mgr_ != nullptr),
+        (int)!(ssm_state_ && !(runtime_config_.runtime.gdn_batched_decode && d_ssm_seq_slots_ != nullptr)),
+        (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
+        (int)(kv_manager_ && kv_manager_->residual_enabled()), (int)executor_->sample_pipeline_ready(),
+        (int)rows_ok);
 }
 
 InferenceState Engine::pipeline_row_state_(Request& req, int row_idx) const {

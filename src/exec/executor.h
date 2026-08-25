@@ -185,6 +185,12 @@ public:
     bool sample_single_from_logits_async(const Tensor& logits, const InferenceState& state, int slot_idx,
                                          cudaStream_t stream = nullptr);
     const int32_t* collect_sampled_tokens(int n_slots, cudaStream_t stream = nullptr);
+    // One-launch append of this step's sampled tokens (strided sample slots,
+    // ACTIVE parity half) into per-request device penalty histories. Row i of
+    // `args` maps sample slot i -> hist[slots[i]*cap + offs[i]]; offs[i] < 0
+    // skips the row. Enqueue AFTER the row samplers, BEFORE the parity flip.
+    bool append_sampled_history(const PenaltyAppendArgs& args, int32_t* d_hist,
+                                cudaStream_t stream = nullptr);
 
     // Parity-buffered sampling for the pipelined batched decode (one step in
     // flight): the slot region, pinned gather buffer, and top-k row-args
