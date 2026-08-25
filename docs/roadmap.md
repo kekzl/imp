@@ -75,10 +75,12 @@ Ranked by what an agent workload notices first.
    classes mostly coupled to the launch count. Closing the two engine-side
    posts alone bounds imp at ~1195 tok/s, within 19% of vLLM. Levers, in
    value order (updated 2026-08-25 evening after the deferred-delivery win,
-   #1758, and the wave-ramp attribution): (a) a GENUINE Marlin port for the
-   M<=32 GEMM class - the split-K wmma kernel built in #1756/#1757 beats
-   CUTLASS 42% in isolation but loses e2e without TMA/cp.async pipelining;
-   three measured dead ends bound the design. (b) RETIRED as a
+   #1758, and the wave-ramp attribution): (a) CLOSED 2026-08-25 night: the
+   native mxf4nvf4 small-M v2 kernel (producer/consumer cp.async pipeline on
+   the plain layout, `gemm.nvfp4_smallm` default ON) measures +16.0%
+   aggregate at 32 streams (992.5 -> 1151.7) and +36.0% at 8 (363.8 ->
+   494.6) on Qwen3.8-27B-NVFP4 - the GEMM-class post is paid without the
+   Marlin sidecar's repacked weight copy (PR #1764 closed unmerged). (b) RETIRED as a
    throughput lever, shipped as a latency one: the graph prewarm (walks one
    staggered dummy batch at init, 32/32 sizes captured in 2.3 s,
    `runtime.graph_prewarm`) is the direct intervention - wave-1 aggregate

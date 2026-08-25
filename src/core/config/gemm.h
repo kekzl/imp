@@ -117,23 +117,28 @@ struct GEMM {
     // LM head (for_each_lm_head_batch_ allow_cutlass=false) never take
     // this path. Set false for maximum batched-serving coherence.
     bool nvfp4_lm_head_cutlass = true;
-    // Small-M (<=32) NVFP4 GEMM for batched decode: W4A16 dequant-to-FP16 +
-    // HMMA + split-K on the plain weight layout. Isolated it beats the
-    // grid-starved CUTLASS 128x128 block-scaled tile 41.4 -> 23.9 us on the
-    // N=5120 decode shape — but only with an L2 access-policy window pinning
-    // the x tile; in the real batched step (GDN scan streaming 9.7 GB/step
-    // through L2) it runs at 45.8 us and costs ~11% aggregate (measured
-    // 824-836 vs 933-935 tok/s at 32 streams, alternating A/B, 2026-08-25).
-    // Default OFF. BOTH priced routes are now measured: the A4 variant
-    // (quantized activations, x 327 KB -> ~92 KB) reads 742-747 tok/s
-    // aggregate at 32 streams against 955-963 OFF — worse than the FP16
-    // variant's 824-836, the per-GEMM quantize launch included. The x
-    // working set was not the main driver: the split-K kernel is bimodal
-    // even at 92 KB. What the shipping CUTLASS path has that these SIMT-load
-    // kernels lack under real step pressure is TMA + a cp.async pipeline —
-    // i.e. the remaining route is a real Marlin port (ldmatrix/mma pipeline,
-    // stripe partitioning), not another dispatch or load-hint variant.
-    bool nvfp4_smallm = false;
+    // Small-M (<=32) NVFP4 GEMM for batched decode (impl selected below).
+    // History: the W4A16 dequant+HMMA v1 won isolated (23.9 vs CUTLASS's
+    // 41.4 us in-situ on N=5120) and LOST the real 32-stream step (45.8 us,
+    // -11% aggregate) — its synchronous SIMT loads are exposed to the GDN
+    // scan's L2 pressure, and the A4 variant proved footprint was not the
+    // driver (742-747 vs 955-963 tok/s). The v2 kernel closes exactly that
+    // hole: native block-scaled mxf4nvf4 MMA fed by a producer/consumer
+    // cp.async+mbarrier pipeline on the SAME plain weight bytes the M=1
+    // GEMVs read — zero extra VRAM (unlike the discarded Marlin W4A16
+    // sidecar, PR #1764, which needed a repacked second weight copy and
+    // capped out at 13% coverage on the 27B). Measured 2026-08-25,
+    // Qwen3.8-27B-NVFP4, mbs=32/seq4096, alternating A/B, 3 trials each:
+    // 32 streams 992.5 -> 1151.7 tok/s aggregate (+16.0%, all 9 ON waves
+    // above all 9 OFF waves), 8 streams 363.8 -> 494.6 (+36.0%); isolated
+    // M=32 N=5120 K=5120: 10.4 us vs CUTLASS 41.4 in-situ (weight floor
+    // 8.2). degen_suite 50/0 ON. Default ON since the v2 A/B.
+    bool nvfp4_smallm = true;
+    // Which small-M implementation the gate above dispatches: 1 = the W4A16
+    // dequant+HMMA kernel (kept for A/B), 2 = the native mxf4nvf4
+    // producer/consumer pipeline (nvfp4_gemm_smallm_v2.cu; isolated 10.4 us
+    // on M=32 N=5120 K=5120 vs v1's 23.9 and CUTLASS's 41.4 in-situ).
+    int nvfp4_smallm_impl = 2;
     // (gemm.nvfp4_ssm_proj — the 2026-05-30 opt-in that forced GGUF-hybrid
     // GDN projections into the NVFP4 decode cache — was REMOVED 2026-07-11:
     // it had bit-rotted in the tier refactors (measured 71 tok/s vs its

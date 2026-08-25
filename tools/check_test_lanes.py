@@ -137,7 +137,11 @@ def main():
     # construction (AUDIT B64), so it cannot be anywhere else.
     # 997 -> 999 (#this): two GPU tests for gemm_nvfp4_smallm (host-reference
     # walk + bandwidth regression bar) — kernel tests, card required.
-    PINNED = 1001
+    # 1001 -> 1007 (#1766): six GPU tests for the native mxf4nvf4 small-M
+    # GEMM v2 (host-reference correctness incl. accumulate + multi-stripe,
+    # shape-precondition rejects, bandwidth floor, tuning sweep) - GPU-only
+    # by nature, run via make test-gpu / verify-fast.
+    PINNED = 1007
 
     text = CMAKE.read_text()
     mods = module_sources(text)

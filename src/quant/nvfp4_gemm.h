@@ -54,6 +54,19 @@ bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M,
 bool gemm_nvfp4_smallm_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                           int N_out, int K, void* d_workspace, cudaStream_t stream,
                           bool accumulate = false);
+// v2: native block-scaled mxf4nvf4 MMA on both plain-NVFP4 sides, fed by a
+// producer/consumer cp.async pipeline (no dequant, no FP16 staging). M <= 32,
+// K % 256 == 0, N % 64 == 0; see nvfp4_gemm_smallm_v2.cu for the design and
+// gemm.h for the v1 postmortem that motivates it.
+int gemm_nvfp4_smallm_v2_stripes(int N_out, int K);
+size_t gemm_nvfp4_smallm_v2_workspace_bytes(int N_out, int K);
+bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
+                             int N_out, int K, void* d_workspace, cudaStream_t stream,
+                             bool accumulate = false);
+// Tuning hook (tests only): explicit stage depth {2,3,4,6} and stripe count.
+bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
+                                   int N_out, int K, void* d_workspace, cudaStream_t stream,
+                                   bool accumulate, int stages, int stripes);
 
 void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
                         int n_act, cudaStream_t stream);
