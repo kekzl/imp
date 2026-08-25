@@ -11,6 +11,19 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **Marlin W4A16 GEMM for the batched-decode class** (`gemm.marlin`, off by
+  default): the real Marlin kernel (vendored from vLLM, Apache-2.0) on a
+  budget-aware repacked sidecar of the plain NVFP4 weights, serving M 2..32
+  decode GEMMs with FP16 activations. Isolated M=32 N=5120 K=5120: 14.4 us
+  vs the CUTLASS block-scaled tile's 21-24 (41.4 in the real step); e2e at
+  24-slot/32-stream serving on Qwen3.8-27B-NVFP4 with 1.7 GiB (~13%)
+  coverage: 636 vs 614 tok/s aggregate (+3.6%, alternating A/B, n=2 each).
+  Prefill, M=1 GEMV and spec-verify keep their paths. Sidecar VRAM comes out
+  of free headroom only (never SSM/KV), so on a full card coverage is 0 -
+  see `docs/roadmap.md` item 0(a) for the storage trade.
+
 ### Fixed
 
 - **A 32-stream burst no longer starves its own tail.** Three defects, one

@@ -285,6 +285,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.nvfp4_lm_head_gdn", cfg.gemm.nvfp4_lm_head_gdn);
     B("gemm.nvfp4_lm_head_cutlass", cfg.gemm.nvfp4_lm_head_cutlass);
     B("gemm.nvfp4_smallm", cfg.gemm.nvfp4_smallm);
+    B("gemm.marlin", cfg.gemm.marlin);
+    I("gemm.marlin_budget_mb", cfg.gemm.marlin_budget_mb);
     B("gemm.nvfp4_attn_proj", cfg.gemm.nvfp4_attn_proj);
     B("gemm.fp8_ssm_proj", cfg.gemm.fp8_ssm_proj);
     S("gemm.fp8_attn_proj", cfg.gemm.fp8_attn_proj);

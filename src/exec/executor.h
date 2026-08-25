@@ -254,6 +254,12 @@ public:
     // LM head is NVFP4. Must run AFTER pre_dequant_weights().
     void build_lm_head_cutlass_(cudaStream_t stream);
 
+    // Marlin W4A16 scratch (gemm.marlin): lock array (zeroed once; the kernel
+    // restores it to zero) + FP32 global-reduce buffer. Allocated on the first
+    // eager use, stable across graph capture.
+    int* marlin_locks_ = nullptr;
+    float* marlin_ctmp_ = nullptr;
+    size_t marlin_ctmp_bytes_ = 0;
     // Split-K workspace for gemm_nvfp4_smallm (batched-decode small-M GEMMs).
     // Sized lazily on the first eager use, stable across graph capture.
     void* smallm_ws_ = nullptr;

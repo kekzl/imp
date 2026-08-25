@@ -18,6 +18,10 @@
 
 namespace imp {
 
+namespace marlin_w4a16 {
+struct MarlinWeight;
+}
+
 struct WeightHandle {
     TensorID id = kInvalidTensorID;
     TensorKind kind = TensorKind::UNKNOWN;
@@ -43,6 +47,12 @@ struct WeightHandle {
     QType source_qtype = QType::NONE;
     void* source_scales = nullptr;
     float source_tensor_scale = 1.0f;
+
+    // Marlin W4A16 batched-decode sidecar (gemm.marlin): borrowed pointer into
+    // wcache_.marlin (stable — unordered_map nodes don't move). Null when the
+    // weight has no Marlin repack (budget ran out, unsupported shape, or the
+    // feature is off). Sidecar only — primary/prefill tiers are untouched.
+    const marlin_w4a16::MarlinWeight* marlin_sidecar = nullptr;
 
     union {
         struct {

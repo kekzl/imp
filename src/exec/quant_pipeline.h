@@ -123,6 +123,8 @@ private:
     void nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const VRAMBudget& budget,
                                        size_t& remaining_budget, cudaStream_t stream);
     void nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cfg, cudaStream_t stream);
+    void nvfp4_build_marlin_sidecar_(const ModelConfig& cfg, const VRAMBudget& budget,
+                                     cudaStream_t stream);
     void nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream);
     void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, const VRAMBudget& budget,
                                          size_t& remaining_budget, cudaStream_t stream,

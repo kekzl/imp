@@ -76,9 +76,24 @@ Ranked by what an agent workload notices first.
    posts alone bounds imp at ~1195 tok/s, within 19% of vLLM. Levers, in
    value order (updated 2026-08-25 evening after the deferred-delivery win,
    #1758, and the wave-ramp attribution): (a) a GENUINE Marlin port for the
-   M<=32 GEMM class - the split-K wmma kernel built in #1756/#1757 beats
-   CUTLASS 42% in isolation but loses e2e without TMA/cp.async pipelining;
-   three measured dead ends bound the design. (b) RETIRED as a
+   M<=32 GEMM class - SHIPPED 2026-08-25 night (`gemm.marlin`, vendored vLLM
+   Marlin, Apache-2.0): isolated 14.4 us on M=32 N=5120 K=5120 vs CUTLASS
+   21-24, and unlike the #1756/#1757 split-K wmma kernel it HOLDS e2e
+   (+3.6% aggregate at 13% weight coverage, alternating A/B). What remains
+   of (a) is STORAGE, not kernel: the sidecar is a second copy of the 4-bit
+   bytes (~12.8 GiB for full 27B coverage), so on a full card coverage is
+   ~0 and the win scales with whatever VRAM the operator trades (each
+   max_batch_size slot = 151.5 MiB SSM state + KV). Two follow-ups, in
+   value order: (a1) a hand-written small-M mxf4nvf4 kernel - Marlin's
+   stripe-split-K/cp.async structure but native FP4 block-scaled mma.sync
+   and a custom scale layout (the 128-row SfAtom forbids 32-row M-tiles in
+   stock CUTLASS). Weight-stream floor on the M=32 shape is 8.6 us vs
+   Marlin's measured 14.4, so up to ~1.6x kernel headroom; no existence
+   proof, priced as a real campaign. (a2) a serving profile that stores
+   Marlin INSTEAD of plain+CUTLASS (vLLM parity, zero VRAM delta, full
+   coverage) - costs the CUTLASS prefill path (M=2048: 86 us CUTLASS vs 474
+   Marlin) and the M=1 GEMV fusions, so it is a mode, not a default.
+   (b) RETIRED as a
    throughput lever, shipped as a latency one: the graph prewarm (walks one
    staggered dummy batch at init, 32/32 sizes captured in 2.3 s,
    `runtime.graph_prewarm`) is the direct intervention - wave-1 aggregate
@@ -203,7 +218,7 @@ Shipped alongside, not from this list: the live web UI at `GET /` (#1078) and th
 
 4. **Regex-constrained decoding — shipped (GBNF followed as item 8; rerank remains).** `response_format: {"type":"regex"}` (and vLLM's `guided_regex`) constrain the whole reply to a pattern, so a diff header, an ID format, an enum or a small DSL is enforceable without prompting and hoping. Built on the `RegexNfa` already in the tree for JSON-Schema `pattern` — a second engine was written and discarded after measuring identical behaviour. What this needed was the decode-time wrapper: `RegexConstrainer` with the JSON constrainers' `apply_mask` contract, a per-state-set mask cache, EOS gated on an accepting state, and — the part that actually took the time — closing every path that bypasses the mask (the spec-ngram and graph-loop routers, two further `apply_mask` call sites, thinking-default suppression, and pooled-manager state that leaked between requests). The full grammar surface followed as item 8; `/v1/rerank` remains open as item 9.
 
-5. **Speculation has no tree.** No EAGLE / Medusa / multi-candidate path exists in the tree. **"And no trained draft head" is retired (2026-08-19):** the MTP head is one, and it pays +21.3 % at `speculative.mtp_k=1` — see "Re-measured on the fixed build" below. Prompt-lookup n-gram only drafts spans that already appear in the context, so it contributes nothing on free-form reasoning output, and the verify-in-loop experiment was removed after a nine-class sweep found no prompt class where it won (see `CHANGELOG.md`, Unreleased).
+5. **Speculation has no tree.** No EAGLE / Medusa / multi-candidate path exists in the tree. That now includes a concrete unsupported artifact: **the Nemotron-3.5 DSpark drafter** (`Qwen3DSparkModel`, staged locally) — a 6-layer DFlash/EAGLE-class draft model reading aux hidden states from 6 target layers, SWA 1024, block_size 8 with mask tokens, and a rank-512 Markov fixup head. Supporting it means a second model resident beside the target, target-layer hidden-state taps, a block-verify path, and the fixup head — a real campaign. Priors to price it against before starting: NVIDIA's own drafter measures **-42% in vLLM on this card** (351 -> 202, bandwidth-bound verify), and imp's measured MTP economics say the verify chunk, not the draft, is the cost. The cheap fraction of the value is already shipped for Qwen3.8 via its MTP head (`speculative.mtp_k`, +15% measured on the 27B). **"And no trained draft head" is retired (2026-08-19):** the MTP head is one, and it pays +21.3 % at `speculative.mtp_k=1` — see "Re-measured on the fixed build" below. Prompt-lookup n-gram only drafts spans that already appear in the context, so it contributes nothing on free-form reasoning output, and the verify-in-loop experiment was removed after a nine-class sweep found no prompt class where it won (see `CHANGELOG.md`, Unreleased).
 
     **Re-measured 2026-08-19: the −7 % is gone, and `token_recycling` is now
     neutral.** Same model and prompt class as the 2026-07-27 run below,

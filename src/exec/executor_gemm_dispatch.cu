@@ -23,6 +23,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/marlin/marlin_w4a16.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/mmq_q8_imma.h"
@@ -332,6 +333,51 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                reinterpret_cast<half*>(output.data), static_cast<int>(nv.N),
                static_cast<int>(nv.K), M, ctx.stream);
             return;
+        }
+
+        // Marlin W4A16 sidecar (gemm.marlin): the vendored Marlin kernel on a
+        // repacked copy of the plain NVFP4 weight, FP16 activations read
+        // directly (no act-quantize launch). Serves the M 2..32 batched-decode
+        // GEMMs on covered weights; beta=1 (fused residual accumulate) is not
+        // expressible in Marlin's overwrite epilogue and falls through, as do
+        // spec-verify chunks (documented argmax-parity paths, #1055).
+        if (runtime_config().gemm.marlin && !ctx.spec_verify_small_m && M >= 2 && M <= 32 &&
+            ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
+            h.marlin_sidecar != nullptr) {
+            const int K = static_cast<int>(h.shape[1] * 2);
+            const size_t ctmp_need = marlin_w4a16::c_tmp_bytes(32);
+            if (marlin_locks_ == nullptr || marlin_ctmp_bytes_ < ctmp_need) {
+                cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+                if (cudaStreamIsCapturing(ctx.stream, &cap) != cudaSuccess)
+                    cap = cudaStreamCaptureStatusActive;  // be conservative
+                if (cap == cudaStreamCaptureStatusNone) {
+                    if (marlin_locks_ == nullptr) {
+                        const size_t lb = marlin_w4a16::workspace_bytes();
+                        if (cudaMalloc(&marlin_locks_, lb) == cudaSuccess)
+                            cudaMemset(marlin_locks_, 0, lb);
+                        else
+                            marlin_locks_ = nullptr;
+                    }
+                    if (marlin_ctmp_bytes_ < ctmp_need) {
+                        if (marlin_ctmp_)
+                            cudaFree(marlin_ctmp_);
+                        if (cudaMalloc(&marlin_ctmp_, ctmp_need) == cudaSuccess)
+                            marlin_ctmp_bytes_ = ctmp_need;
+                        else {
+                            marlin_ctmp_ = nullptr;
+                            marlin_ctmp_bytes_ = 0;
+                        }
+                    }
+                }
+                // Capturing with missing scratch: fall through; the eager
+                // warmup pass allocates it for the graph run.
+            }
+            if (marlin_locks_ != nullptr && marlin_ctmp_bytes_ >= ctmp_need &&
+                marlin_w4a16::gemm(*h.marlin_sidecar,
+                                   reinterpret_cast<const half*>(input.data),
+                                   reinterpret_cast<half*>(output.data), M, /*lda=*/K,
+                                   marlin_locks_, marlin_ctmp_, ctx.stream))
+                return;
         }
 
         // Small-M NVFP4 GEMM (gemm.nvfp4_smallm, default on): batched decode

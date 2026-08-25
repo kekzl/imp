@@ -1338,6 +1338,15 @@ void GraphExecutor::release_moe_batch_buf() {
 }
 
 void GraphExecutor::free_buffers() {
+    if (marlin_locks_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(marlin_locks_));
+        marlin_locks_ = nullptr;
+    }
+    if (marlin_ctmp_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(marlin_ctmp_));
+        marlin_ctmp_ = nullptr;
+        marlin_ctmp_bytes_ = 0;
+    }
     if (smallm_ws_) {
         IMP_CUDA_CHECK_LOG(cudaFree(smallm_ws_));
         smallm_ws_ = nullptr;
@@ -1445,6 +1454,11 @@ void GraphExecutor::free_buffers() {
             wcache_.cutlass_sf_slab = nullptr;
             wcache_.cutlass_sf_slab_size = 0;
         }
+        // Marlin W4A16 sidecar (entries own their buffers)
+        for (auto& [ptr, mw] : wcache_.marlin)
+            marlin_w4a16::release(mw);
+        wcache_.marlin.clear();
+        wcache_.marlin_bytes = 0;
         // Per-(layer, projection) SfAtom slabs from the MoE phase. Their
         // slices are sf_borrowed, so this is the only owner.
         for (void* slab : wcache_.owned_sf_slabs)

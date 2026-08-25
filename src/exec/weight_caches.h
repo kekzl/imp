@@ -4,6 +4,7 @@
 #include "quant/nvfp4_quant.h"               // NvFP4QuantResult, NvFP4MoEQuantResult
 #include "compute/gemm_cutlass_sm120.h"      // CutlassNvFP4Weight
 #include "compute/gemm_cutlass_mxfp4_sm120.h"// CutlassMxFP4Weight
+#include "quant/marlin/marlin_w4a16.h"       // marlin_w4a16::MarlinWeight
 #include <cuda_fp16.h>
 #include <unordered_map>
 #include <cstddef>
@@ -100,6 +101,14 @@ struct WeightCaches {
     // --- CUTLASS sm_120 block-scaled NVFP4 ---
     std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4;
     size_t cutlass_nvfp4_bytes = 0;
+
+    // --- Marlin W4A16 batched-decode sidecar (gemm.marlin) ---
+    // Repacked copy of the 4-bit data + processed scales per dense weight,
+    // budget-aware (a full copy of every linear is ~12.8 GiB on the 27B, so
+    // coverage is whatever VRAM affords, largest weights first). Entries own
+    // their buffers; freed via marlin_w4a16::release() at teardown.
+    std::unordered_map<const void*, marlin_w4a16::MarlinWeight> marlin;
+    size_t marlin_bytes = 0;
 
     // Single bulk allocation backing every cutlass_nvfp4 entry's SfAtom scale
     // factors (mirrors fp16_bulk_data). Each entry's scale_factors is a

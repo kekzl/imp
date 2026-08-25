@@ -402,6 +402,9 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
     }
 
+    // Phase 3e: Marlin W4A16 batched-decode sidecar (gemm.marlin, budget-aware).
+    nvfp4_build_marlin_sidecar_(cfg, budget, stream);
+
     nvfp4_decode_convert_mxfp4_and_native_(cfg, stream);
 
     if (qscratch_->mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {

@@ -134,6 +134,20 @@ struct GEMM {
     // i.e. the remaining route is a real Marlin port (ldmatrix/mma pipeline,
     // stripe partitioning), not another dispatch or load-hint variant.
     bool nvfp4_smallm = false;
+    // Marlin W4A16 batched-decode sidecar: the real Marlin kernel (vendored
+    // from vLLM, Apache-2.0 — the route the nvfp4_smallm postmortem above
+    // named), fed by a budget-aware repacked copy of the plain NVFP4 weights
+    // built at init. Serves the M 2..32 decode GEMMs on covered weights;
+    // prefill, M=1 GEMV and spec-verify keep their paths. Isolated on the
+    // N=5120 decode shape: 14.4 us vs the CUTLASS tile's 21-24 (41.4 in the
+    // real step). A full copy of every 27B linear is ~12.8 GiB, so coverage
+    // is whatever marlin_budget_mb affords, largest weights first.
+    bool marlin = false;
+    // CAP on the Marlin sidecar's VRAM in MiB; 0 = uncapped. The sidecar
+    // never takes more than free VRAM minus the downstream charges (SSM
+    // state, KV pool, reserve floor), so on a full card coverage is 0 —
+    // make room by lowering runtime.max_batch_size or runtime.max_seq_len.
+    int marlin_budget_mb = 0;
     // (gemm.nvfp4_ssm_proj — the 2026-05-30 opt-in that forced GGUF-hybrid
     // GDN projections into the NVFP4 decode cache — was REMOVED 2026-07-11:
     // it had bit-rotted in the tier refactors (measured 71 tok/s vs its

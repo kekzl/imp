@@ -124,6 +124,9 @@ inline void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc, 
         default:
             break;
     }
+    // Marlin W4A16 sidecar attaches independent of the primary tier.
+    if (auto it = wc.marlin.find(src_ptr); it != wc.marlin.end())
+        h.marlin_sidecar = &it->second;
 }
 
 // nvfp4_beneficial() moved to core/qtype.h — the VRAM-budget heuristic
