@@ -11,6 +11,17 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- **Decode-graph prewarm at init** (`runtime.graph_prewarm`, default on,
+  no-op at `max_batch_size` 1): one staggered dummy batch walks every batch
+  size once before the engine goes ready, so all per-size decode graphs
+  (32/32 in 2.3 s on Qwen3.8-27B) capture at startup instead of during the
+  first wave of real traffic. Wave-1 median request latency -3-12% at 32
+  streams; aggregate throughput unchanged - which retires the "captures
+  cost wave-1 throughput" attribution, see
+  `docs/plans/2026-08-24-qwen38-port.md`.
+
 ### Fixed
 
 - **The decode loop's host time is now instrumented end to end**

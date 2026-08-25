@@ -55,6 +55,17 @@ struct RuntimeConfig {
         // trade reproducibility for init time (dev/CI). Gemma-4 and MXFP4
         // models keep their warmup skips (Engine::warmup).
         bool warmup = true;
+        // Pre-capture the per-batch-size decode graph pool at init (server
+        // shapes only: no-op unless max_batch_size > 1 and graphs are on).
+        // Without it every never-seen batch size pays its capture during the
+        // first wave of real traffic: measured 75 captures across a 4-wave
+        // 32-stream run, wave 1 at 704 tok/s against 953-976 steady. The
+        // prewarm walks one staggered dummy batch from max_batch_size down
+        // to 1 so each pool slot captures before the engine goes ready. One
+        // anchor request carries a ~1000-token prompt so the captures bake
+        // the 1024 context bucket, not the 64 one. Costs init time; set
+        // false to trade first-wave throughput for startup.
+        bool graph_prewarm = true;
         // NOTE: full run-to-run determinism additionally needs stable cuBLAS
         // algo selection across processes — see runtime.deterministic_gemm.
         int max_seq_len = 0;               // 0 = use model default

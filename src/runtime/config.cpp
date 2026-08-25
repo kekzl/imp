@@ -150,6 +150,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     }
     S("runtime.cuda_graphs", cfg.runtime.cuda_graphs);
     B("runtime.warmup", cfg.runtime.warmup);
+    B("runtime.graph_prewarm", cfg.runtime.graph_prewarm);
     I("runtime.max_seq_len", cfg.runtime.max_seq_len);
     B("runtime.no_pdl", cfg.runtime.no_pdl);
     B("runtime.debug_raw", cfg.runtime.debug_raw);
