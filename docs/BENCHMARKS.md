@@ -502,6 +502,36 @@ project) and cross-sequence prefill batching (`docs/roadmap.md` item
        quant=NVFP4-CT cuda=13.3 path=server-api cmd=bench_conc.py+waves3.py n=3
        flags=max_batch_size=32,max_seq_len=4096]
 
+
+### The GEMM-class lever, shipped (2026-08-25, night)
+
+The native mxf4nvf4 small-M GEMM (v2, #1766, `gemm.nvfp4_smallm` default ON)
+closes the table's largest engine-side post. Same checkpoint, same 32-stream
+wave shape (32x unique short prompts, 300-tok greedy gens), server under nsys
+(`--cuda-graph-trace=node`, Nsight 2026.1.3), kernel-time sums over the
+3-wave window divided by the 28665 emitted tokens:
+
+[PROV: commit=41b9d7e1 date=2026-08-25 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=server-api cmd=nsys+conc_client.py n=1
+       window=3-waves tokens=28665 flags=--max-concurrent 32
+       --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096]
+
+| us/token | imp before (steady wave) | imp with v2 (3-wave window) | vLLM 0.27.1 |
+|---|---:|---:|---:|
+| GEMM class | 613 | **388.9** | 468 (Marlin 413 + bf16 rest 55) |
+| activation quantize | 15 | 19.4 | — |
+| GDN scan | 181 | 188.8 | 158 |
+| norms | 35 | 36.2 | 10 |
+
+The v2 kernel is the top GPU kernel of the serving run (51.5% of kernel
+time, med 29.2 us/launch in-situ vs the CUTLASS tile's 41.4) and the CUTLASS
+block-scaled tile disappears from the decode class (remaining instances are
+prefill). Window caveat: this window includes wave boundaries and tails, so
+its wall (953 us/token) and idle are NOT comparable to the steady-state
+wave-2 method above; the like-for-like end-to-end number is the alternating
+A/B: 992.5 -> 1151.7 tok/s aggregate at 32 streams (+16.0%), 363.8 -> 494.6
+at 8 (+36.0%), 3 trials/arm, `tools/analysis/smallm_v2_conc_ab.sh`.
+
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
 First tracked long-context table (the GOAL benchmarking discipline asks for
