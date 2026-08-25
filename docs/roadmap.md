@@ -107,8 +107,10 @@ Ranked by what an agent workload notices first.
    the act-quantize post is largely paid - producer-side fusion (the
    norm/swiglu kernels emit the small-M xq scratch directly) measures
    +2.6% aggregate at 32 streams (1160.4 -> 1191.0 median, 3/3 pairs);
-   remaining in class: gdn_rmsnorm_gated_silu -> out-proj quantize,
-   o-proj input quantize, elementwise. (d) cross-sequence
+   the GDN-out half of the remainder was built and measured NEUTRAL
+   (+0.4% over 6 trials, PR #1774 closed unmerged - the class left after
+   #1773 is under the noise floor); still open in class: elementwise,
+   gate|up single-launch. (d) cross-sequence
    prefill batching: a 32-prompt burst prefills one sequence per forward
    at ~1700 tok/s effective (launch-bound, 64 layers), so every first
    token waits 2-3.5 s; batching prefill rows the way decode batches
