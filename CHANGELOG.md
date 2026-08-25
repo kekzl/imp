@@ -13,6 +13,19 @@ there instead of retelling it.
 
 ### Fixed
 
+- **A Marlin-class small-M NVFP4 GEMM exists now** (`gemm_nvfp4_smallm`,
+  `gemm.nvfp4_smallm`, default OFF): W4A16 dequant-to-FP16 in smem + HMMA +
+  split-K on the plain weight layout. Isolated on the batched-decode shape
+  (M=32 N=5120 K=5120) it reads 23.9 us median against the shipping CUTLASS
+  tile's 41.4 - the "no-split ceiling" from the five-approach survey falls.
+  In the real step the GDN scan's 9.7 GB/step of L2 traffic evicts the
+  activation tile and it runs at 45.8 us, costing ~11% aggregate, hence the
+  default. The two routes that flip the sign are priced in the config
+  comment. Kernel-level and host-reference tests ship with it; the eight
+  measurement iterations (536.5 -> 23.9 us, including a 32-way smem bank
+  conflict, a warmup-ramp trap and an L2 set-conflict bimodality) are in
+  `docs/plans/2026-08-24-qwen38-port.md`.
+
 - **The n>1 decode loop no longer re-uploads each row's whole output history
   from pageable memory every step.** With the server's repetition-penalty
   default every batched row paid one pageable H2D per step (8.5k per

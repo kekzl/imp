@@ -254,6 +254,10 @@ public:
     // LM head is NVFP4. Must run AFTER pre_dequant_weights().
     void build_lm_head_cutlass_(cudaStream_t stream);
 
+    // Split-K workspace for gemm_nvfp4_smallm (batched-decode small-M GEMMs).
+    // Sized lazily on the first eager use, stable across graph capture.
+    void* smallm_ws_ = nullptr;
+    size_t smallm_ws_bytes_ = 0;
     // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV.
     // Fills `out` from the secondary decode cache (wcache_.nvfp4) or the
     // native-NVFP4 registry tier — the same sources the decode-path LM head
