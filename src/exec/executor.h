@@ -260,6 +260,13 @@ public:
     size_t smallm_ws_bytes_ = 0;
     void* smallm_xq_ = nullptr;   // A4 activation quantize scratch [32, Kmax]
     size_t smallm_xq_bytes_ = 0;
+    // What smallm_xq_ currently holds (source pointer + shape of the last
+    // activation quantize). Lets a dispatch with a matching act-quant hint
+    // skip the re-quantize when two GEMMs share one normed input (gate/up,
+    // q/k/v, GDN in/z). The triple self-invalidates on every fresh quantize.
+    const void* smallm_xq_src_ = nullptr;
+    int smallm_xq_src_m_ = 0;
+    int smallm_xq_src_k_ = 0;
     // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV.
     // Fills `out` from the secondary decode cache (wcache_.nvfp4) or the
     // native-NVFP4 registry tier — the same sources the decode-path LM head

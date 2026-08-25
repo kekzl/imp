@@ -482,7 +482,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         gate_out = Tensor(gate_ptr, compute_dtype_, 2, gate_shape, true);
     } else {
         gate_out = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-        gemm_via_handle_(ly.gdn_gate_id, no, gate_out, ctx);
+        // ssm_in (above) quantized the same normed input into the activation
+        // scratch and no GEMM dispatches in between — mark it shared (the
+        // dispatch verifies against its scratch tag before skipping).
+        GemmContext gate_ctx = ctx;
+        if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n) &&
+            prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n))
+            gate_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
+        gemm_via_handle_(ly.gdn_gate_id, no, gate_out, gate_ctx);
     }
 
     const bool use_fp32_scan = runtime_config().gdn.fp32_scan;

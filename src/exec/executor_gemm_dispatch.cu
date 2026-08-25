@@ -393,13 +393,29 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                         smallm_xq_ = nullptr;
                         smallm_xq_bytes_ = 0;
                     }
+                    smallm_xq_src_ = nullptr;  // fresh scratch holds nothing
                 }
             }
             if (smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
                 uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
                 uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
-                quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales,
-                                            /*tensor_scale=*/1.0f, ctx.stream);
+                // Shared-activation skip: the call site marked this input as
+                // already quantized by the PREVIOUS dispatch (act-quant hint,
+                // same mechanism the CUTLASS prefill block uses), and the
+                // scratch tag confirms the scratch still holds exactly that
+                // quantize. Saves one quantize launch + a [M,K] FP16 read per
+                // second member of a gate/up, q/k/v or GDN in/z pair.
+                const bool prequant = ctx.act_quant_hint_data != nullptr &&
+                                      ctx.act_quant_hint_data == input.data && ctx.act_quant_hint_m == M &&
+                                      ctx.act_quant_hint_k == K && smallm_xq_src_ == input.data &&
+                                      smallm_xq_src_m_ == M && smallm_xq_src_k_ == K;
+                if (!prequant) {
+                    quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales,
+                                                /*tensor_scale=*/1.0f, ctx.stream);
+                    smallm_xq_src_ = input.data;
+                    smallm_xq_src_m_ = M;
+                    smallm_xq_src_k_ = K;
+                }
                 NvFP4QuantResult nv;
                 nv.packed_data = const_cast<void*>(h.source_data);
                 nv.micro_scales = h.source_scales;
