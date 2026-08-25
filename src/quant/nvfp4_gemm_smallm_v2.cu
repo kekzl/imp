@@ -366,15 +366,17 @@ bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, hal
     if (stripes == 1)
         return true;
     const int total = M * N_out;
-    if (accumulate)
+    if (accumulate) {
         smallm_v2_reduce_kernel<true>
             <<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const float*>(d_workspace), y, M, N_out,
                                                       stripes, ts);
-    else
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
         smallm_v2_reduce_kernel<false>
             <<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const float*>(d_workspace), y, M, N_out,
                                                       stripes, ts);
-    IMP_CUDA_CHECK_LAUNCH();
+        IMP_CUDA_CHECK_LAUNCH();
+    }
     return true;
 }
 

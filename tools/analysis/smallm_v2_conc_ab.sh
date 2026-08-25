@@ -2,6 +2,7 @@
 # smallm_v2_conc_ab.sh - alternating A/B for gemm.nvfp4_smallm (off vs on)
 # 3 trials/arm, 3 waves/trial at CONC streams. mbs/seq pinned (free-VRAM swing).
 set -u
+MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MODEL=/models/Qwen3.8-27B-NVFP4
 PORT=8090
@@ -14,7 +15,7 @@ LOG="${TMPDIR:-/tmp}/ab_conc_${CONC}.log"
 start_server() {  # $1 = extra --set args
     docker rm -f imp-ab >/dev/null 2>&1
     # shellcheck disable=SC2086
-    docker run -d --name imp-ab --gpus all -v /home/kekz/models:/models \
+    docker run -d --name imp-ab --gpus all -v ${MODELS_DIR:-$HOME/models}:/models \
         -p ${PORT}:${PORT} imp:test imp-server --model $MODEL --port $PORT \
         --host 0.0.0.0 --max-concurrent $CONC \
         --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 $1 >/dev/null
