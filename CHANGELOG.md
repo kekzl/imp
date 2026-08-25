@@ -11,17 +11,6 @@ there instead of retelling it.
 
 ## [Unreleased]
 
-### Added
-
-- **Decode-graph prewarm at init** (`runtime.graph_prewarm`, default on,
-  no-op at `max_batch_size` 1): one staggered dummy batch walks every batch
-  size once before the engine goes ready, so all per-size decode graphs
-  (32/32 in 2.3 s on Qwen3.8-27B) capture at startup instead of during the
-  first wave of real traffic. Wave-1 median request latency -3-12% at 32
-  streams; aggregate throughput unchanged - which retires the "captures
-  cost wave-1 throughput" attribution, see
-  `docs/plans/2026-08-24-qwen38-port.md`.
-
 ### Fixed
 
 - **The decode loop's host time is now instrumented end to end**
@@ -161,6 +150,14 @@ there instead of retelling it.
 
 ### Added
 
+- **Decode-graph prewarm at init** (`runtime.graph_prewarm`, default on,
+  no-op at `max_batch_size` 1): one staggered dummy batch walks every batch
+  size once before the engine goes ready, so all per-size decode graphs
+  (32/32 in 2.3 s on Qwen3.8-27B) capture at startup instead of during the
+  first wave of real traffic. Wave-1 median request latency -3-12% at 32
+  streams; aggregate throughput unchanged - which retires the "captures
+  cost wave-1 throughput" attribution, see
+  `docs/plans/2026-08-24-qwen38-port.md`.
 - **NVFP4 KV is now the default for QWEN35 (Qwen3.8-27B and its Qwen3.5
   siblings), taking `max_model_len` from 48 512 to 131 072 tokens.** The KV cache
   holds K and V for the 16 attention layers only — 64 KiB/token at FP16 — and on
