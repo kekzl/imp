@@ -141,7 +141,10 @@ def main():
     # GEMM v2 (host-reference correctness incl. accumulate + multi-stripe,
     # shape-precondition rejects, bandwidth floor, tuning sweep) - GPU-only
     # by nature, run via make test-gpu / verify-fast.
-    PINNED = 1007
+    # 1007 -> 1008 (#1769): LayerNormTest.RMSNormRowBlockDecodeShapes, the
+    # row-block batched-decode RMSNorm against the CPU reference on three
+    # decode shapes - needs a GPU.
+    PINNED = 1008
 
     text = CMAKE.read_text()
     mods = module_sources(text)

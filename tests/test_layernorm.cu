@@ -375,5 +375,43 @@ TEST(LayerNormTest, EpsilonEffect) {
     free_gpu_tensor(d_out_l);
 }
 
+// ===========================================================================
+// RMSNormRowBlockDecodeShapes -- the batched-decode row-block kernel
+// (2 <= rows <= 64): real decode shapes incl. the kVecs=2 instantiation
+// (d_vec > 512) and both edges of the row gate.
+// ===========================================================================
+TEST(LayerNormTest, RMSNormRowBlockDecodeShapes) {
+    constexpr float eps = 1e-5f;
+    const int shapes[][2] = {{2, 2048}, {32, 5120}, {64, 8192}};
+    for (auto& sh : shapes) {
+        const int rows = sh[0], cols = sh[1];
+        std::vector<float> h_x((size_t)rows * cols), h_w(cols);
+        for (size_t i = 0; i < h_x.size(); i++)
+            h_x[i] = 0.02f * static_cast<float>((i * 37) % 101) - 1.0f;
+        for (int c = 0; c < cols; c++)
+            h_w[c] = 0.5f + 0.001f * static_cast<float>(c % 500);
+        std::vector<float> h_x_fp16(h_x.size()), h_w_fp16(cols), h_ref(h_x.size());
+        for (size_t i = 0; i < h_x.size(); i++)
+            h_x_fp16[i] = __half2float(__float2half(h_x[i]));
+        for (int c = 0; c < cols; c++)
+            h_w_fp16[c] = __half2float(__float2half(h_w[c]));
+        cpu_rmsnorm(h_x_fp16.data(), h_w_fp16.data(), h_ref.data(), rows, cols, eps);
+
+        Tensor d_x = make_gpu_tensor(h_x.data(), QType::F16, {rows, cols});
+        Tensor d_w = make_gpu_tensor(h_w.data(), QType::F16, {cols});
+        Tensor d_out = alloc_gpu_tensor(QType::F16, {rows, cols});
+        rmsnorm(d_x, d_w, d_out, eps, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        auto h_out = read_gpu_tensor(d_out);
+        double max_err = 0.0;
+        for (size_t i = 0; i < h_x.size(); i++)
+            max_err = std::max(max_err, (double)std::abs(h_out[i] - h_ref[i]));
+        EXPECT_LT(max_err, 1e-2) << "rows=" << rows << " cols=" << cols;
+        free_gpu_tensor(d_x);
+        free_gpu_tensor(d_w);
+        free_gpu_tensor(d_out);
+    }
+}
+
 }  // namespace
 }  // namespace imp

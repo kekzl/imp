@@ -165,6 +165,16 @@ there instead of retelling it.
 
 ### Added
 
+- **Batched-decode RMSNorm: one register-resident CTA per row (+6.8%
+  aggregate at 32 streams).** The FP16 norm at 2-64 rows ran the warp-per-row
+  prefill kernel: 4 CTAs on 170 SMs, every row read twice - 6.3 us median
+  for 0.65 MB (6% of DRAM bandwidth) and 36.2 us/token of critical-path norm
+  time in the concurrency-gap attribution (vLLM: 10). The row-block kernel
+  reads each row once into registers, one block reduce, writes once.
+  Qwen3.8-27B-NVFP4, 32 streams, alternating two-image A/B, 3 trials:
+  1115.5 -> 1191.1 tok/s aggregate median. degen_suite 50/0. M=1 and
+  large-row prefill paths unchanged.
+
 - **Native mxf4nvf4 small-M GEMM (v2) for batched decode, default ON.** The
   M<=32 decode projections on NVFP4 checkpoints now run a block-scaled
   `mma.sync.kind::mxf4nvf4` kernel with a producer/consumer cp.async+mbarrier
