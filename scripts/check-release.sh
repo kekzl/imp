@@ -381,6 +381,22 @@ else
     fail "version drift — CMakeLists '$CM_VER', CHANGELOG '${CL_VER:-none}', BENCHMARKS '${BM_VER:-none}'"
 fi
 
+# ------------------------------------------------ 5a. roadmap citations
+# docs/roadmap.md is the one L1 doc docs_lint.py deliberately excludes (it is a
+# record; stripping it for provenance blocks would destroy that record), and it
+# carries no verified:/commit: frontmatter. So the document that answers "what is
+# open?" is the only one nothing checks, and it drifts silently. This gates the
+# two mechanical drift classes: a file:line citation past EOF, and a bare
+# docs/*.md name that was renamed (not a markdown link, so the link checker
+# never sees it). Judgement calls stay human.
+section "roadmap citations"
+if python3 scripts/check_doc_citations.py . >/tmp/imp_check_citations.log 2>&1; then
+    pass "docs/roadmap.md citations resolve"
+else
+    sed 's/^/  /' /tmp/imp_check_citations.log
+    fail "docs/roadmap.md cites files or lines that no longer exist"
+fi
+
 # ------------------------------------------- 5b. changelog section hygiene
 # Entries get prepended to [Unreleased] one PR at a time, and prepending a
 # "### Changed" block in front of an existing one produces a section with the
