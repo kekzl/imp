@@ -60,21 +60,28 @@ neighbour, publishes no 2026 roadmap.
 
 Ranked by what an agent workload notices first.
 
-0. **Concurrency scaling on the GDN hybrid trails vLLM 1.58x at 32 streams**
-   (measured 2026-08-25, same compressed-tensors NVFP4 checkpoint, same
-   client: imp 935.7 vs vLLM 1475.2 tok/s aggregate; imp per-stream falls
-   85 -> 29 tok/s across 1 -> 32 where vLLM falls 69 -> 46 — see
-   [`BENCHMARKS.md`](BENCHMARKS.md), "imp vs vLLM at concurrency"). Single
-   stream imp leads by 22%. The batched-GDN decode in #1750 closed the gap
-   from ~6.5x; what remains is (a) the batch-decode step cost (scan + attention at
-   n>1: ~34 ms/step at 32 where vLLM's equivalent is ~22, against a
-   ~11 ms weight-read floor both share). The 630-vs-936 delta between
-   auto=28 and pinned=32 on this bench is NOT a rotation cost: the
-   scheduler admits 28 and the last 4 requests drain as a near-empty
-   batch (predicted 667 from the two phases, measured 630) — under
-   continuous arrival auto=28 sustains the full-batch rate. Raising
-   slots per GiB is still what the plan's item 6 (recurrent-state
-   paging) would buy.
+0. **Concurrency scaling on the GDN hybrid trails vLLM 1.58x at 32 streams —
+   now ATTRIBUTED per component** (nsys on both engines, same checkpoint,
+   same 32-stream wave; full table with PROV in
+   [`BENCHMARKS.md`](BENCHMARKS.md), "The 1.58x concurrency gap,
+   attributed"). Of the 422 us/token wall delta: **GEMM class 145** (imp's
+   CUTLASS block-scaled at M=32 loses ~24% to vLLM's Marlin — W4A16
+   split-K with atomic reduction; the five-approach "no-split ceiling"
+   survey in `docs/plans/2026-08-24-qwen38-port.md` holds only for
+   no-K-split designs, and Marlin is the running existence proof for the
+   split-K route on this very card), **GPU idle 143** (imp 15.9% idle vs
+   vLLM 5.2%: 438k kernel launches per window against 200k — 2.2x per
+   token — plus a handful of 26-42 ms host stalls), and ~135 across small
+   classes mostly coupled to the launch count. Closing the two engine-side
+   posts alone bounds imp at ~1195 tok/s, within 19% of vLLM. Levers, in
+   value order: (a) a Marlin-class small-M GEMM (port or split-K CUTLASS
+   with persistent, graph-safe reduction), (b) launch-density and the
+   large host gaps, (c) kernel fusion across the small classes. The
+   630-vs-936 delta between auto=28 and pinned=32 on this bench is NOT a
+   rotation cost (scheduler admits 28, the last 4 drain as a near-empty
+   batch; auto=28 sustains full rate under continuous arrival); raising
+   slots per GiB is still what the plan's item 6 (recurrent-state paging)
+   would buy.
 
 1. **Scheduling has no per-request priority.** Nothing in the scheduler reads
    one, so a caller cannot say which request matters. `max_concurrent` bounds
