@@ -7,7 +7,7 @@ checks it at all. The two drift classes that costs are mechanical:
 
   * a `src/foo.cpp:1234` citation whose file has since shrunk, or whose lines
     moved, so the reader lands on unrelated code;
-  * a bare `docs/thing.md` name that was renamed, which the markdown-link
+  * a bare `docs/<name>.md` reference that was renamed, which the markdown-link
     checker never sees because it is not a link.
 
 Neither needs judgement, so neither should need a human to notice.
