@@ -2,6 +2,7 @@
 # conc_client.py - N concurrent unique short prompts against a running
 # imp-server, 300-token greedy gens, aggregate tok/s = sum completion
 # tokens / wall. Usage: conc_client.py PORT CONC WAVES [TAG].
+import json
 import sys
 import threading
 import time

@@ -90,7 +90,12 @@ Ranked by what an agent workload notices first.
    prewarm does buy: wave-1 median request latency -3-12% (p50 6.2 s tight
    across trials vs 6.4-7.1 s) and a tail that no longer pays first-capture
    stalls. (c) kernel fusion across the small launch-coupled classes
-   (norms 26 us/token, act-quantize 15, elementwise). (d) cross-sequence
+   (norms 26 us/token, act-quantize 15, elementwise). UPDATE 2026-08-26:
+   the act-quantize post is largely paid - producer-side fusion (the
+   norm/swiglu kernels emit the small-M xq scratch directly) measures
+   +2.6% aggregate at 32 streams (1160.4 -> 1191.0 median, 3/3 pairs);
+   remaining in class: gdn_rmsnorm_gated_silu -> out-proj quantize,
+   o-proj input quantize, elementwise. (d) cross-sequence
    prefill batching: a 32-prompt burst prefills one sequence per forward
    at ~1700 tok/s effective (launch-bound, 64 layers), so every first
    token waits 2-3.5 s; batching prefill rows the way decode batches
