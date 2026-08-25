@@ -403,6 +403,45 @@ cannot proceed.
 the error and costs vLLM most of its decode speed (12.2 tok/s in an earlier,
 discarded run), so an eager-mode comparison is not a comparison.
 
+## imp vs vLLM at concurrency, same checkpoint (2026-08-25)
+
+The missing half of the 2026-08-16 comparison: what happens past batch 1.
+Same 19.6 GiB compressed-tensors NVFP4 checkpoint served by both engines
+(`imp-quantize --format vllm` from `Qwen/Qwen3.8-27B-FP8`), same host, same
+client and prompt (200-token technical answer, `temperature=0`,
+`/v1/completions`, `cache_prompt=false`), aggregate tok/s = sum of completion
+tokens / wall, median of 3 waves per point.
+
+[PROV: commit=de24ee09 date=2026-08-25 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4-CT cuda=13.3 path=server-api cmd=bench_conc.py n=3
+       vllm=v0.27.1 flags=--gpu-memory-utilization 0.90 --max-model-len 16384
+       --max-num-seqs 32, VLLM_WSL2_ENABLE_PIN_MEMORY=1;
+       imp=--max-concurrent 32 --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096]
+
+| concurrency | imp (pinned 32/4096) | imp (defaults) | vLLM 0.27.1 |
+|---:|---:|---:|---:|
+| 1 | **84.65** | 86.44 | 69.13 |
+| 8 | 358.39 | 192.88* | **503.55** |
+| 32 | 935.70 | 630.19* | **1475.19** |
+
+\* defaults measured before the auto-batch fix landed in the same branch
+resolved `max_batch_size: auto` 5 → 28; the 630.19 row is auto=28. The
+pre-fix default (auto=5) read 224.68.
+
+Readings:
+
+- **Single stream imp leads by 22%** (native FP4 decode against Marlin
+  dequant-to-BF16 — vLLM's own startup log says sm_120 has no native FP4
+  path for it), consistent with the 2026-08-16 result.
+- **From concurrency 8 up vLLM leads: +41% at 8, +58% at 32.** Its
+  per-stream decode falls 69 -> 46 tok/s across 1 -> 32 streams where imp
+  falls 85 -> 29. The batched-GDN work in this branch closed the gap from
+  ~6.5x (81.5 tok/s aggregate before it) to 1.58x; the rest is the open
+  concurrency-scaling gap and lives in `docs/roadmap.md`.
+- vLLM serves 32 streams over 16k model len inside 0.90 utilization on this
+  card — the Mamba-cache-block startup constraint from 2026-08-16 is handled
+  by `--max-num-seqs 32`.
+
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
 First tracked long-context table (the GOAL benchmarking discipline asks for

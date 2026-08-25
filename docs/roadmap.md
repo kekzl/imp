@@ -60,6 +60,17 @@ neighbour, publishes no 2026 roadmap.
 
 Ranked by what an agent workload notices first.
 
+0. **Concurrency scaling on the GDN hybrid trails vLLM 1.58x at 32 streams**
+   (measured 2026-08-25, same compressed-tensors NVFP4 checkpoint, same
+   client: imp 935.7 vs vLLM 1475.2 tok/s aggregate; imp per-stream falls
+   85 -> 29 tok/s across 1 -> 32 where vLLM falls 69 -> 46 — see
+   [`BENCHMARKS.md`](BENCHMARKS.md), "imp vs vLLM at concurrency"). Single
+   stream imp leads by 22%. The batched-GDN decode in #1750 closed the gap
+   from ~6.5x; what remains splits into (a) the batch-decode step cost
+   (scan + attention at n>1) and (b) state-slot rotation when admitted
+   requests exceed `max_batch_size` (630 vs 936 tok/s at auto=28 vs
+   pinned=32 — recurrent-state paging, the plan's item 6).
+
 1. **Scheduling has no per-request priority.** Nothing in the scheduler reads
    one, so a caller cannot say which request matters. `max_concurrent` bounds
    the queue, it does not order it. Both other engines are refactoring their
