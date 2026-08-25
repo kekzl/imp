@@ -334,6 +334,59 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             return;
         }
 
+        // Small-M NVFP4 GEMM (gemm.nvfp4_smallm, default on): batched decode
+        // at n_seq <= 32 used to run these through the CUTLASS 128x128
+        // block-scaled tile — 40 CTAs on the N=5120 shapes, 41.4 us for a
+        // 14 MB weight read (19% of the floor; the cross-engine profile in
+        // BENCHMARKS.md). gemm_nvfp4_smallm is the Marlin recipe (W4A16:
+        // dequant-to-FP16 in smem + HMMA + split-K) on the SAME plain weight
+        // bytes the M=1 decode GEMVs read: 23.9 us median on that shape.
+        // W4A16 vs the CUTLASS path's quantized activations is a numerics
+        // upgrade, not a match. Default OFF: in the real step the GDN scan's
+        // L2 traffic evicts the x tile and the kernel runs at 45.8 us
+        // (isolated: 23.9 with a policy window), costing ~11% aggregate —
+        // see the gemm.h comment for the numbers and the two routes that
+        // would flip the sign. Spec-verify chunks keep their documented
+        // paths (argmax parity, #1055).
+        if (runtime_config().gemm.nvfp4_smallm && !ctx.spec_verify_small_m && M <= 32 &&
+            (ctx.beta == 0.0f || ctx.beta == 1.0f) && input.qtype == QType::F16 &&
+            output.qtype == QType::F16 && h.primary_tier == StorageTier::CUTLASS_NVFP4 &&
+            h.source_data != nullptr && h.source_scales != nullptr &&
+            !dequant_gpu_supported(h.source_qtype) && (h.shape[1] * 2) % 128 == 0) {
+            const int N = static_cast<int>(h.shape[0]);
+            const int K = static_cast<int>(h.shape[1] * 2);
+            const size_t need = gemm_nvfp4_smallm_workspace_bytes(N);
+            if (need > smallm_ws_bytes_) {
+                cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+                if (cudaStreamIsCapturing(ctx.stream, &cap) != cudaSuccess)
+                    cap = cudaStreamCaptureStatusActive;  // be conservative
+                if (cap == cudaStreamCaptureStatusNone) {
+                    if (smallm_ws_)
+                        cudaFree(smallm_ws_);
+                    if (cudaMalloc(&smallm_ws_, need) == cudaSuccess)
+                        smallm_ws_bytes_ = need;
+                    else {
+                        smallm_ws_ = nullptr;
+                        smallm_ws_bytes_ = 0;
+                    }
+                }
+                // Capturing with a too-small workspace: fall through to
+                // CUTLASS; the eager warmup pass sizes it for the graph run.
+            }
+            if (smallm_ws_bytes_ >= need) {
+                NvFP4QuantResult nv;
+                nv.packed_data = const_cast<void*>(h.source_data);
+                nv.micro_scales = h.source_scales;
+                nv.tensor_scale = h.source_tensor_scale;
+                nv.N = N;
+                nv.K = K;
+                if (gemm_nvfp4_smallm(nv, reinterpret_cast<const half*>(input.data),
+                                      reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_,
+                                      ctx.stream, /*accumulate=*/ctx.beta == 1.0f))
+                    return;
+            }
+        }
+
         // Q4_K HMMA GEMM: in-SMEM dequant + FP16 HMMA m16n8k16 tile kernel.
         // Config-gated (gemm.q4k_hmma_enabled, default false). Bypasses
         // dequant-to-FP16 + cuBLAS by decoding Q4_K nibbles directly in SMEM.

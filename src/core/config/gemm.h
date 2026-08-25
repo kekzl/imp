@@ -117,6 +117,16 @@ struct GEMM {
     // LM head (for_each_lm_head_batch_ allow_cutlass=false) never take
     // this path. Set false for maximum batched-serving coherence.
     bool nvfp4_lm_head_cutlass = true;
+    // Small-M (<=32) NVFP4 GEMM for batched decode: W4A16 dequant-to-FP16 +
+    // HMMA + split-K on the plain weight layout. Isolated it beats the
+    // grid-starved CUTLASS 128x128 block-scaled tile 41.4 -> 23.9 us on the
+    // N=5120 decode shape — but only with an L2 access-policy window pinning
+    // the x tile; in the real batched step (GDN scan streaming 9.7 GB/step
+    // through L2) it runs at 45.8 us and costs ~11% aggregate (measured
+    // 824-836 vs 933-935 tok/s at 32 streams, alternating A/B, 2026-08-25).
+    // Default OFF until the A side reads quantized activations too (x drops
+    // 327 KB -> ~90 KB, L2-robust) or the executor pins a policy window.
+    bool nvfp4_smallm = false;
     // (gemm.nvfp4_ssm_proj — the 2026-05-30 opt-in that forced GGUF-hybrid
     // GDN projections into the NVFP4 decode cache — was REMOVED 2026-07-11:
     // it had bit-rotted in the tier refactors (measured 71 tok/s vs its

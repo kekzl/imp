@@ -189,6 +189,7 @@ set(IMP_QUANT_SOURCES
     src/quant/nvfp4_gemm.cu
     src/quant/nvfp4_gemv_dense.cu
     src/quant/nvfp4_gemv_batched.cu
+    src/quant/nvfp4_gemm_smallm.cu
     src/quant/nvfp4_gemv_fused.cu
     src/quant/nvfp4_gemv_moe.cu
     src/quant/mxfp4_gemm.cu
@@ -893,6 +894,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cutlass_grouped_3x_nvfp4.cu
         tests/test_cutlass_grouped_ref.cu
         tests/test_cutlass_nvfp4_alpha.cu
+        tests/test_nvfp4_smallm.cu
         tests/test_smallm_dense_bench.cu
         tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_nvfp4_batched_smallm_equiv.cu

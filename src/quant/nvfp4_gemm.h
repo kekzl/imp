@@ -44,6 +44,13 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
 // fallback costs a full FP16 materialization of the weight per call — 52% of
 // the decode window on Qwen3-14B Q6_K verify chunks). Same tiling as the
 // FP32 LM-head variant above.
+// Small-M W4A16 GEMM (plain NVFP4 layout, Marlin recipe: dequant-to-FP16 in
+// smem + FP16 tensor-core MMA). M <= 32, K % 128 == 0. Built for the batched
+// decode projections; see nvfp4_gemm_smallm.cu for the measured history.
+size_t gemm_nvfp4_smallm_workspace_bytes(int N_out);
+bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M, int N_out, int K,
+                       void* d_workspace, cudaStream_t stream, bool accumulate = false);
+
 void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
                         int n_act, cudaStream_t stream);
 // beta=1 twin: y += A @ x (o/down residual-add verify GEMMs, #1055).
