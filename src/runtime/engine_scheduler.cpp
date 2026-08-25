@@ -1899,8 +1899,29 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     }
 }
 
+namespace {
+// diagnostics.step_timing: host-side phase attribution for a batched decode
+// step. The GPU-side gap profile said 143 us/token of idle sits between the
+// sampler tail and the next step's first kernel; this measures WHERE the
+// host spends that time. Aggregated every 256 steps at n>1.
+struct StepTiming {
+    double build = 0, fwd = 0, sample = 0, dist = 0, outside = 0;
+    int n = 0;
+    std::chrono::steady_clock::time_point last_end{};
+};
+StepTiming g_step_timing;
+}  // namespace
+
 void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode,
                                  cudaStream_t dec_stream) {
+    const bool s_timing = runtime_config_.diagnostics.step_timing && valid_decode.size() > 1;
+    std::chrono::steady_clock::time_point tp0, tp1, tp2, tp3;
+    if (s_timing) {
+        tp0 = std::chrono::steady_clock::now();
+        if (g_step_timing.last_end.time_since_epoch().count() != 0)
+            g_step_timing.outside +=
+                std::chrono::duration<double, std::micro>(tp0 - g_step_timing.last_end).count();
+    }
     // Switch workspace for decode
     if (executor_->has_decode_workspace() && valid_decode.size() == 1) {
         executor_->use_workspace(1);
@@ -1968,6 +1989,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     InferenceState state;
     bool needs_logprobs = false;
     bool needs_constrained = false;
+    if (s_timing)
+        tp1 = std::chrono::steady_clock::now();
     decode_build_inference_state_(gpu_batch, valid_decode, max_ctx, dec_stream, state, needs_logprobs,
                                   needs_constrained);
 
@@ -2233,10 +2256,14 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         } else if (valid_decode.size() >= 2) {
             log_pipeline_gate_once_(valid_decode);
         }
+        if (s_timing)
+            tp2 = std::chrono::steady_clock::now();
         // Eager sampling (handles all modes: greedy, top-k/p, penalties,
         // force_token, constraints, logprobs, mirostat)
         if (!piped)
             tokens = sample_per_request(logits_out);
+        if (s_timing)
+            tp3 = std::chrono::steady_clock::now();
         if (needs_logprobs)
             decode_logits_out = logits_out;
     } else {
@@ -2465,6 +2492,30 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     // Process outputs: logprobs extraction + token distribution
     step_decode_process_outputs(valid_decode, tokens, decode_logits_out, needs_logprobs, needs_constrained,
                                 dec_stream);
+    if (s_timing) {
+        auto tp4 = std::chrono::steady_clock::now();
+        // Non-graph fallback path never sets tp2/tp3: fold everything after
+        // build into "fwd" rather than reporting garbage.
+        if (tp2.time_since_epoch().count() == 0)
+            tp2 = tp4;
+        if (tp3.time_since_epoch().count() == 0)
+            tp3 = tp4;
+        auto us = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
+        g_step_timing.build += us(tp0, tp1);
+        g_step_timing.fwd += us(tp1, tp2);
+        g_step_timing.sample += us(tp2, tp3);
+        g_step_timing.dist += us(tp3, tp4);
+        g_step_timing.last_end = tp4;
+        if (++g_step_timing.n >= 256) {
+            const double inv = 1.0 / g_step_timing.n;
+            IMP_LOG_INFO("step-timing (n=%d, batch=%zu): build %.0f us, fwd-enqueue+wait %.0f, "
+                         "sample %.0f, distribute %.0f, outside-step %.0f  (per step)",
+                         g_step_timing.n, valid_decode.size(), g_step_timing.build * inv,
+                         g_step_timing.fwd * inv, g_step_timing.sample * inv, g_step_timing.dist * inv,
+                         g_step_timing.outside * inv);
+            g_step_timing = {};
+        }
+    }
 }
 
 // =====================================================================
