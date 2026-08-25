@@ -442,6 +442,51 @@ Readings:
   card — the Mamba-cache-block startup constraint from 2026-08-16 is handled
   by `--max-num-seqs 32`.
 
+### The 1.58x concurrency gap, attributed (2026-08-25)
+
+Both engines profiled under nsys (`--cuda-graph-trace=node`, host Nsight
+2026.1.3 mounted into each container) serving the identical 32-stream wave
+(6400 tokens, 200 per stream, same checkpoint, same client). Under the
+profiler imp reads 908 tok/s and vLLM 1477 — both within noise of their
+unprofiled numbers, so the windows are representative. Per emitted token,
+steady-state wave only:
+
+[PROV: commit=9ff730db date=2026-08-25 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4-CT cuda=13.3 path=server-api cmd=nsys+load32.py n=1
+       window=wave2 tokens=6400]
+
+| us/token | imp | vLLM 0.27.1 | delta | share of gap |
+|---|---:|---:|---:|---:|
+| GEMM class | 613 | 468 (Marlin 413 + bf16 rest 55) | 145 | 34% |
+| **GPU idle** | 179 | 36 | 143 | 34% |
+| norms | 35 | 10 | 26 | 6% |
+| GDN scan | 181 | 158 | 23 | 6% |
+| M=1 GEMV (wave tails) | 22 | — | 22 | 5% |
+| activation quantize | 15 | — | 15 | 4% |
+| conv1d | 17 | 5 | 11 | 3% |
+| attention decode | 22 | 11 | 10 | 2% |
+| cuBLAS fp16 + other | 38 | 18 | 25 | 6% |
+| **wall** | **1125** | **703** | **422** | 100% |
+
+Three readings, one of them a correction:
+
+- **The "structural FP4 trade" framing was wrong.** imp's GEMM class costs
+  MORE than vLLM's despite native FP4: Marlin (W4A16, split-K with atomic
+  reduction, built for small M) beats the CUTLASS block-scaled cooperative
+  tile by ~24% on the same shapes and the same card. The ~41 us "ceiling"
+  the five-approach survey established holds only for no-K-split designs —
+  Marlin is the running existence proof for the split-K route.
+- **Idle is as large as the GEMM deficit.** imp leaves the GPU empty 15.9%
+  of the steady-state window (vLLM: 5.2%): 415k inter-kernel gaps, 687 ms
+  of them under 100 us (launch/replay density — imp issues 438k kernels in
+  the window against vLLM's 200k, 2.2x per token) and 484 ms above 100 us
+  (host moments; the largest single gaps are 42/39/26 ms).
+- The remaining ~135 us/token is a sum of small classes, mostly coupled to
+  the launch count.
+
+Ceiling if both engine-side posts closed: ~1125 - 288 = ~837 us/token,
+i.e. ~1195 tok/s aggregate — within 19% of vLLM without touching the scan.
+
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
 First tracked long-context table (the GOAL benchmarking discipline asks for
