@@ -50,6 +50,10 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
 size_t gemm_nvfp4_smallm_workspace_bytes(int N_out);
 bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M, int N_out, int K,
                        void* d_workspace, cudaStream_t stream, bool accumulate = false);
+// A4 variant: both sides packed NVFP4 (activations quantized by the caller).
+bool gemm_nvfp4_smallm_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
+                          int N_out, int K, void* d_workspace, cudaStream_t stream,
+                          bool accumulate = false);
 
 void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
                         int n_act, cudaStream_t stream);

@@ -373,16 +373,46 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 // Capturing with a too-small workspace: fall through to
                 // CUTLASS; the eager warmup pass sizes it for the graph run.
             }
-            if (smallm_ws_bytes_ >= need) {
+            // A4: quantize the activation rows into the executor scratch
+            // (plain layout, unit tensor scale) and read both sides packed.
+            // The FP16 variant lost ~11% e2e to L2 eviction of its 327 KiB
+            // x tile; packed x is ~92 KiB. Scratch sized for K_max on first
+            // eager use, like the split-K workspace.
+            const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
+            if (xq_need > smallm_xq_bytes_) {
+                cudaStreamCaptureStatus cap2 = cudaStreamCaptureStatusNone;
+                if (cudaStreamIsCapturing(ctx.stream, &cap2) != cudaSuccess)
+                    cap2 = cudaStreamCaptureStatusActive;
+                if (cap2 == cudaStreamCaptureStatusNone) {
+                    if (smallm_xq_)
+                        cudaFree(smallm_xq_);
+                    if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
+                        smallm_xq_bytes_ = xq_need;
+                    else {
+                        smallm_xq_ = nullptr;
+                        smallm_xq_bytes_ = 0;
+                    }
+                }
+            }
+            if (smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
+                uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
+                uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
+                quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales,
+                                            /*tensor_scale=*/1.0f, ctx.stream);
                 NvFP4QuantResult nv;
                 nv.packed_data = const_cast<void*>(h.source_data);
                 nv.micro_scales = h.source_scales;
                 nv.tensor_scale = h.source_tensor_scale;
                 nv.N = N;
                 nv.K = K;
-                if (gemm_nvfp4_smallm(nv, reinterpret_cast<const half*>(input.data),
-                                      reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_,
-                                      ctx.stream, /*accumulate=*/ctx.beta == 1.0f))
+                NvFP4QuantResult xq;
+                xq.packed_data = xq_packed;
+                xq.micro_scales = xq_scales;
+                xq.tensor_scale = 1.0f;
+                xq.N = M;
+                xq.K = K;
+                if (gemm_nvfp4_smallm_a4(nv, xq, reinterpret_cast<half*>(output.data), M, N, K,
+                                         smallm_ws_, ctx.stream, /*accumulate=*/ctx.beta == 1.0f))
                     return;
             }
         }

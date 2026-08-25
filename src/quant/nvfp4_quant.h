@@ -44,6 +44,12 @@ void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaS
 //
 // A scale of 0 or a non-finite one is rejected: it would divide every value in
 // the tensor by it.
+// Graph-safe: quantize [M, K] FP16 into CALLER-OWNED packed/scale buffers
+// with a fixed tensor scale (no allocation, no host sync).
+void quantize_fp16_to_nvfp4_into(const void* d_input_fp16, int M, int K, uint8_t* d_packed,
+                                 uint8_t* d_micro_scales, float tensor_scale,
+                                 cudaStream_t stream = nullptr);
+
 void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, NvFP4QuantResult& result,
                                        cudaStream_t stream = nullptr);
 

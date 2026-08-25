@@ -64,9 +64,18 @@ constexpr int kSplitK = 3;      // grid.y: K-range splits. 160 blocks starved
 
 // smem: x tile 32*136*2 = 8.5 KiB, w tile 32*136*2 = 8.5 KiB,
 // output staging 32*32*2 = 2 KiB. ~19 KiB — 2+ blocks per SM.
+//
+// kAQuant: the A side reads PACKED NVFP4 activations (+ linear micro-scales,
+// x_ts = activation tensor scale) instead of FP16. The FP16 variant's e2e
+// loss traced to L2: every block re-reads the 327 KiB x tile and the GDN
+// scan evicts it (45.8 us in the real step vs 23.9 isolated). Packed x is
+// ~92 KiB — small enough to survive without an access-policy window.
+template <bool kAQuant>
 __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
-    const half* __restrict__ x, float* __restrict__ ws_partials, int M, int N_out, int K) {
+    const half* __restrict__ x, const uint8_t* __restrict__ xq_packed,
+    const uint8_t* __restrict__ xq_scales, float x_ts, float* __restrict__ ws_partials, int M, int N_out,
+    int K) {
     const int n_base = blockIdx.x * kNR;
     const int split = blockIdx.y;
     const int tid = threadIdx.x;
@@ -90,11 +99,31 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     // Register prefetch for the NEXT tile (v4 double buffering).
     constexpr int kXVecs = (kSmM * kKT / 8) / kThreads;   // uint4 x-loads per thread
     constexpr int kWMbs = (kNR * kMbPerTile) / kThreads;  // micro-blocks per thread
+    constexpr int kXMbs = (kSmM * kMbPerTile) / kThreads;  // A4: x micro-blocks/thread
     uint4 px[kXVecs];
     uint2 pw[kWMbs];
     float pcs[kWMbs];
+    uint2 pxq[kXMbs > 0 ? kXMbs : 1];
+    float pxs[kXMbs > 0 ? kXMbs : 1];
     auto fetch = [&](int t) {
         const int k_base = t * kKT;
+        if (kAQuant) {
+#pragma unroll
+            for (int v = 0; v < kXMbs; ++v) {
+                const int xi = tid + v * kThreads;
+                const int m = xi / kMbPerTile;
+                const int mi = (k_base / kMicroBlockSize) + (xi % kMbPerTile);
+                if (m < M) {
+                    pxq[v] = *reinterpret_cast<const uint2*>(xq_packed + (int64_t)m * (K / 2) +
+                                                             (int64_t)mi * 8);
+                    pxs[v] = x_ts * fp8_e4m3_to_float_fast(
+                                        xq_scales[(int64_t)m * (K / kMicroBlockSize) + mi]);
+                } else {
+                    pxq[v] = uint2{0, 0};
+                    pxs[v] = 0.0f;
+                }
+            }
+        } else {
 #pragma unroll
         for (int v = 0; v < kXVecs; v += 2) {
             // 32 B per thread (evict_last's minimum on this arch): thread
@@ -109,6 +138,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
                 px[v] = uint4{0, 0, 0, 0};
                 px[v + 1] = uint4{0, 0, 0, 0};
             }
+        }
         }
 #pragma unroll
         for (int v = 0; v < kWMbs; ++v) {
@@ -131,6 +161,25 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         }
     };
     auto stage = [&]() {
+        if (kAQuant) {
+#pragma unroll
+            for (int v = 0; v < kXMbs; ++v) {
+                const int xi = tid + v * kThreads;
+                const int m = xi / kMbPerTile;
+                const int mb = xi % kMbPerTile;
+                const uint8_t* pb = reinterpret_cast<const uint8_t*>(&pxq[v]);
+                const half2 cs2 = __float2half2_rn(pxs[v]);
+                half2* dst = reinterpret_cast<half2*>(&s_x[m][mb * kMicroBlockSize]);
+#pragma unroll
+                for (int b = 0; b < 8; ++b) {
+                    uint32_t w_fp16x2;
+                    asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
+                        : "=r"(w_fp16x2)
+                        : "r"(static_cast<uint32_t>(pb[b])));
+                    dst[b] = __hmul2(*reinterpret_cast<const half2*>(&w_fp16x2), cs2);
+                }
+            }
+        } else {
 #pragma unroll
         for (int v = 0; v < kXVecs; v += 2) {
             const int i = tid * 2 + (v / 2) * kThreads * 2;
@@ -138,6 +187,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
             const int kv = (i % (kKT / 8)) * 8;
             *reinterpret_cast<uint4*>(&s_x[m][kv]) = px[v];
             *reinterpret_cast<uint4*>(&s_x[m][kv + 8]) = px[v + 1];
+        }
         }
 #pragma unroll
         for (int v = 0; v < kWMbs; ++v) {
@@ -183,13 +233,17 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         __shared__ float s_acc[kSmM][kNR];
         wmma::store_matrix_sync(&s_acc[warp_m * 16][warp_n * 16], acc, kNR, wmma::mem_row_major);
         __syncthreads();
+        // Streaming stores: each partial is written once and read once by
+        // the reduce kernel — letting it age normally in L2 knocks sets out
+        // from under the weight stream (the split-K bimodality: identical
+        // configs read 26 vs 63 us depending on where cudaMalloc landed ws).
         float* plane = ws_partials + (size_t)split * kSmM * N_out;
         for (int i = tid; i < kSmM * kNR; i += kThreads) {
             const int m = i / kNR;
             const int n = i % kNR;
             const int gn = n_base + n;
             if (gn < N_out)
-                plane[(int64_t)m * N_out + gn] = s_acc[m][n];
+                __stcs(&plane[(int64_t)m * N_out + gn], s_acc[m][n]);
         }
     }
     (void)s_out;
@@ -207,7 +261,7 @@ __global__ void smallm_splitk_reduce_kernel(const float* __restrict__ ws_partial
     float acc = kAcc ? __half2float(y[(int64_t)m * N_out + n]) : 0.0f;
 #pragma unroll
     for (int sp = 0; sp < kSplitK; ++sp)
-        acc += ws_partials[(size_t)sp * kSmM * N_out + (int64_t)m * N_out + n];
+        acc += __ldcs(&ws_partials[(size_t)sp * kSmM * N_out + (int64_t)m * N_out + n]);
     y[(int64_t)m * N_out + n] = __float2half(acc);
 }
 
@@ -227,9 +281,38 @@ bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M,
     if (W.packed_data == nullptr || W.micro_scales == nullptr || d_workspace == nullptr)
         return false;
     const dim3 grid((N_out + kNR - 1) / kNR, kSplitK);
-    gemm_nvfp4_smallm_kernel<<<grid, kThreads, 0, stream>>>(
+    gemm_nvfp4_smallm_kernel<false><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(W.packed_data), reinterpret_cast<const uint8_t*>(W.micro_scales),
-        W.tensor_scale, x, static_cast<float*>(d_workspace), M, N_out, K);
+        W.tensor_scale, x, nullptr, nullptr, 1.0f, static_cast<float*>(d_workspace), M, N_out, K);
+    IMP_CUDA_CHECK_LAUNCH();
+    const int total = M * N_out;
+    if (accumulate)
+        smallm_splitk_reduce_kernel<true><<<(total + 255) / 256, 256, 0, stream>>>(
+            static_cast<const float*>(d_workspace), y, M, N_out);
+    else
+        smallm_splitk_reduce_kernel<false><<<(total + 255) / 256, 256, 0, stream>>>(
+            static_cast<const float*>(d_workspace), y, M, N_out);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
+// A4 entry: both sides packed NVFP4 with linear micro-scales. x_ts is the
+// activation-side tensor scale (fixed 1.0 when the caller quantizes with a
+// unit global scale). Working set of the A side drops 327 KiB -> ~92 KiB,
+// which is the whole point — see the kernel comment.
+bool gemm_nvfp4_smallm_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
+                          int N_out, int K, void* d_workspace, cudaStream_t stream, bool accumulate) {
+    if (M <= 0 || M > kSmM || (K % kKT) != 0)
+        return false;
+    if (W.packed_data == nullptr || W.micro_scales == nullptr || Xq.packed_data == nullptr ||
+        Xq.micro_scales == nullptr || d_workspace == nullptr)
+        return false;
+    const dim3 grid((N_out + kNR - 1) / kNR, kSplitK);
+    gemm_nvfp4_smallm_kernel<true><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(W.packed_data), reinterpret_cast<const uint8_t*>(W.micro_scales),
+        W.tensor_scale, nullptr, reinterpret_cast<const uint8_t*>(Xq.packed_data),
+        reinterpret_cast<const uint8_t*>(Xq.micro_scales), Xq.tensor_scale,
+        static_cast<float*>(d_workspace), M, N_out, K);
     IMP_CUDA_CHECK_LAUNCH();
     const int total = M * N_out;
     if (accumulate)

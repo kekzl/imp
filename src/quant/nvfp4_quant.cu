@@ -455,6 +455,19 @@ void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, 
     result.K = K;
 }
 
+void quantize_fp16_to_nvfp4_into(const void* d_input_fp16, int M, int K, uint8_t* d_packed,
+                                 uint8_t* d_micro_scales, float tensor_scale, cudaStream_t stream) {
+    const half* d_input = static_cast<const half*>(d_input_fp16);
+    // Graph-safe twin of quantize_fp16_to_nvfp4_with_scale: caller-owned
+    // buffers, no allocation, no checks that could throw mid-capture. Built
+    // for the small-M A4 GEMM's per-step activation quantize.
+    const int64_t total_micro_blocks = (int64_t)M * (K / kMicroBlockSize);
+    const int num_blocks = (int)((total_micro_blocks + kBlockSize - 1) / kBlockSize);
+    quantize_nvfp4_kernel<<<num_blocks, kBlockSize, 0, stream>>>(d_input, d_packed, d_micro_scales,
+                                                                 tensor_scale, M, K);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaStream_t stream) {
     IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4: input must be on device");
     IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4: input must be FP16, got qtype=%d",
