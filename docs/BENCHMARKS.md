@@ -487,6 +487,21 @@ Three readings, one of them a correction:
 Ceiling if both engine-side posts closed: ~1125 - 288 = ~837 us/token,
 i.e. ~1195 tok/s aggregate — within 19% of vLLM without touching the scan.
 
+**Update after the idle-post fixes (2026-08-25 night):** deferred token
+delivery (#1758), the graph prewarm (#1761) and the burst-serving fixes
+(#1762: HTTP pool sized to streams, token-charged prefill budget,
+id-based prefill rotor) moved the same 32-stream wave from 936-990 to
+**1028-1073 tok/s on every wave** — the wave-1 ramp (629) is gone
+entirely. n=1 reads 84.0, n=8 374.5, n=32 aggregate 1050.1 (median of
+3). Against vLLM's 1477 profiled the gap stands at ~1.4x; what remains
+of the engine-side posts is the GEMM class (Marlin port, a standalone
+project) and cross-sequence prefill batching (`docs/roadmap.md` item
+0(a)/(d)).
+
+[PROV: commit=957653ea date=2026-08-25 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4-CT cuda=13.3 path=server-api cmd=bench_conc.py+waves3.py n=3
+       flags=max_batch_size=32,max_seq_len=4096]
+
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
 First tracked long-context table (the GOAL benchmarking discipline asks for
