@@ -78,11 +78,16 @@ Ranked by what an agent workload notices first.
    #1758, and the wave-ramp attribution): (a) a GENUINE Marlin port for the
    M<=32 GEMM class - the split-K wmma kernel built in #1756/#1757 beats
    CUTLASS 42% in isolation but loses e2e without TMA/cp.async pipelining;
-   three measured dead ends bound the design. (b) decode-graph batch-size
-   BUCKETS with padded rows: today every never-seen batch size captures a
-   fresh graph (75 captures over a 4-wave run; wave 1 reads 704 tok/s
-   against 953-976 steady), which is also what production batch fluctuation
-   pays. (c) kernel fusion across the small launch-coupled classes
+   three measured dead ends bound the design. (b) RETIRED as a
+   throughput lever, shipped as a latency one: the graph prewarm (walks one
+   staggered dummy batch at init, 32/32 sizes captured in 2.3 s,
+   `runtime.graph_prewarm`) is the direct intervention - wave-1 aggregate
+   throughput did NOT move (629-650 tok/s prewarmed vs 627 not, same
+   953-991 steady), so the per-size captures never were the wave-1 cost and
+   batch-size buckets with padded rows would buy the same nothing. What the
+   prewarm does buy: wave-1 median request latency -3-12% (p50 6.2 s tight
+   across trials vs 6.4-7.1 s) and a tail that no longer pays first-capture
+   stalls. (c) kernel fusion across the small launch-coupled classes
    (norms 26 us/token, act-quantize 15, elementwise). The
    630-vs-936 delta between auto=28 and pinned=32 on this bench is NOT a
    rotation cost (scheduler admits 28, the last 4 drain as a near-empty

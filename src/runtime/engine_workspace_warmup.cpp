@@ -35,6 +35,7 @@
 
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -507,6 +508,79 @@ void Engine::warmup() {
     // failure on consumer GPUs — the error propagates to cuBLAS otherwise).
     cudaGetLastError();
     cudaDeviceSynchronize();  // ensure all weight upload/dequant kernels are done
+
+    // Graph prewarm: capture the per-batch-size decode graph pool BEFORE the
+    // engine goes ready. Continuous batching visits every batch size on the
+    // way up and down, and each never-seen size pays its capture in the first
+    // wave of real traffic (measured: 75 captures across a 4-wave 32-stream
+    // run, wave 1 at 704 tok/s against 953-976 steady). One staggered dummy
+    // batch walks max_batch_size -> 1 so each pool slot captures now. The
+    // last request carries a ~1000-token prompt so max_ctx during every
+    // capture sits in the 1024 pow2 bucket - the growth-only re-capture
+    // trigger (see engine_scheduler.cpp) then stays quiet for real requests
+    // up to that context. Runs before reset_kv_calibration below, so the
+    // synthetic tokens never leave a calibration trace either.
+    if (runtime_config_.runtime.graph_prewarm && config_.use_cuda_graphs &&
+        config_.max_batch_size > 1) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const int n = std::min(config_.max_batch_size, (int)kMaxGraphPoolSize);
+        const int anchor_len = std::min(1000, std::max(16, config_.max_seq_len - 64));
+        std::vector<std::shared_ptr<Request>> reqs;
+        reqs.reserve(n);
+        for (int i = 0; i < n; i++) {
+            auto req = std::make_shared<Request>();
+            req->id = next_request_id_++;
+            // The anchor goes FIRST so its long prefill completes before the
+            // short ones start decoding - queued last, the batch peaked at
+            // n-1 because the shortest-budget request finished during the
+            // anchor's prefill (measured: 31/32 captured).
+            const bool is_anchor = (i == 0);
+            req->input_tokens.resize(is_anchor ? anchor_len : 16, warmup_id);
+            // Staggered budgets: the batch passes through every size n..1;
+            // the anchor lives longest. The +4 base keeps the shortest
+            // request alive across the chunked-prefill window in which late
+            // requests still prefill while early ones already decode - with
+            // a base of 2 the first request finished before the batch ever
+            // assembled fully and size n never captured.
+            req->max_tokens = is_anchor ? n + 8 : i + 4;
+            req->temperature = 0.0f;
+            req->ignore_eos = true;
+            scheduler_->add_request(req);
+            reqs.push_back(std::move(req));
+        }
+        // n+2 decode steps finish the whole ladder; prefill takes a few more.
+        const int step_budget = 4 * n + 32;
+        int steps = 0;
+        auto unfinished = [&]() {
+            for (const auto& r : reqs)
+                if (r->status != RequestStatus::FINISHED) return true;
+            return false;
+        };
+        while (unfinished() && steps < step_budget) {
+            (void)step();
+            steps++;
+        }
+        int captured = 0;
+        std::string missing;
+        for (int i = 0; i < n; i++) {
+            if (decode_graph_pool_[i].is_ready())
+                captured++;
+            else
+                missing += " " + std::to_string(i + 1);
+        }
+        for (const auto& r : reqs) {
+            kv_manager_->free_sequence(r->id);
+            reset_ssm_state(r->id);
+            r->status = RequestStatus::CANCELLED;
+        }
+        while (kv_manager_->evict_cached_block()) {}
+        decode_batch_pool_.reset_upload_cache();
+        cudaDeviceSynchronize();
+        const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        IMP_LOG_INFO("graph prewarm: %d/%d decode graphs captured (%d steps, %.1f s)%s%s",
+                     captured, n, steps, dt, missing.empty() ? "" : ", missing sizes:",
+                     missing.c_str());
+    }
     // Drop FP8 KV calibrated_ flags so the first real prefill re-runs absmax
     // and promotes the per-layer scale via high-water-mark. Warmup uses
     // synthetic BOS tokens whose K/V absmax is unrepresentative; without this
