@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
 namespace imp {
 
@@ -31,6 +32,29 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                         int grouped_layout = 0, const int* d_real_n = nullptr);
+
+// BF16-state twins (gdn.state_bf16): h_state stored as __nv_bfloat16, all
+// arithmetic FP32 in registers — halves the state traffic that dominates
+// batched decode (the FP32 kernel measures 1527 GB/s = this box's resident
+// bandwidth ceiling; bytes are the only lever left). HD=SS=128 only; the
+// init resolver refuses BF16 state for other shapes and for the
+// ref/chunkwise scan routes. Batched stride is in BF16 ELEMENTS.
+void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const half* alpha,
+                                 const half* beta, const float* A_log, const float* dt_bias,
+                                 __nv_bfloat16* h_state_pool, const int* seq_slots,
+                                 int64_t h_state_seq_stride, half* y, int n_seq, int n_tokens, int n_heads,
+                                 int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                                 int grouped_layout = 0, const int* d_real_n = nullptr);
+void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                         const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
+                         int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                         cudaStream_t stream, int grouped_layout = 0, const int* d_real_n = nullptr);
+void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const half* alpha,
+                                 const half* beta, const float* A_log, const float* dt_bias,
+                                 __nv_bfloat16* h_state, float* y_fp32, int n_tokens, int n_heads,
+                                 int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                                 int grouped_layout = 0, const int* d_real_n = nullptr,
+                                 __nv_bfloat16* h_snap = nullptr, const int* d_snap_n = nullptr);
 
 // EXPERIMENTAL — Phase 1b scaffolding for chunkwise SSD scan.
 // Same signature as `gdn_scan_fused_f32`. Will eventually implement the

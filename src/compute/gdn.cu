@@ -1,6 +1,7 @@
 #include "compute/gdn_internal.cuh"
 #include "core/logging.h"
 
+#include <cuda_bf16.h>
 #include <stdexcept>
 #include <string>
 
@@ -34,18 +35,24 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
 // thread owns half a column, the two partners sit in ADJACENT lanes so the two
 // dot products reduce with a single __shfl_xor_sync, and the register pressure
 // halves.
-template <int HD, int SS, typename YOut, int SPLIT = 1>
+// StateT: h_state STORAGE type — float (default) or __nv_bfloat16
+// (gdn.state_bf16: halves the state traffic that dominates batched decode;
+// the microbench reads the FP32 kernel at 1527 GB/s = the box's resident
+// ceiling, so bytes are the only lever). All arithmetic stays FP32 in
+// registers; loads/stores convert. BF16 keeps FP32's range — FP16 state was
+// refuted for GDN (subnormal truncation at ~6e-5 breaks near-zero heads).
+template <int HD, int SS, typename YOut, int SPLIT = 1, typename StateT = float>
 __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
     const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
     const half* __restrict__ beta_all,   // [n_tokens, n_heads] FP16
     const float* __restrict__ A_log,     // [n_heads] FP32
     const float* __restrict__ dt_bias,   // [n_heads] FP32
-    float* __restrict__ h_state,         // [n_heads, SS, HD] FP32
+    StateT* __restrict__ h_state,        // [n_heads, SS, HD] in StateT
     YOut* __restrict__ y_out,            // [n_tokens, n_heads * HD] FP16 or FP32
     int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout,
     const int* __restrict__ d_real_n,    // device chunk length (padded verify chunk) or nullptr
-    float* __restrict__ h_snap,          // second state output, or nullptr
+    StateT* __restrict__ h_snap,         // second state output, or nullptr
     const int* __restrict__ d_snap_n,    // row count h_snap is taken at
     // --- batched decode over independent sequences (#GDN-batch) ---
     // seq_slots: per-blockIdx.y recurrent-state slot id, or nullptr for the
@@ -104,10 +111,10 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     // Each thread holds SS floats = one column of H[SS, HD].
     float H_reg[SS_PER];
     {
-        const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+        const StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS_PER; s++)
-            H_reg[s] = H_col[(s_base + s) * HD];
+            H_reg[s] = static_cast<float>(H_col[(s_base + s) * HD]);
     }
 
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce_buf[HD]
@@ -246,16 +253,16 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
         // no barrier needed). For the unpadded case real_n == n_tokens and
         // this is the single end-of-scan store the kernel always did.
         if (t + 1 == real_n) {
-            float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+            StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
             for (int s = 0; s < SS_PER; s++)
-                H_col[(s_base + s) * HD] = H_reg[s];
+                H_col[(s_base + s) * HD] = static_cast<StateT>(H_reg[s]);
         }
         if (t + 1 == snap_n) {
-            float* S_col = h_snap + static_cast<size_t>(h) * SS * HD + d;
+            StateT* S_col = h_snap + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
             for (int s = 0; s < SS_PER; s++)
-                S_col[(s_base + s) * HD] = H_reg[s];
+                S_col[(s_base + s) * HD] = static_cast<StateT>(H_reg[s]);
         }
 
         // Sync before next token — the next iteration overwrites s_k/s_q in
@@ -266,50 +273,7 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fused RMSNormGated + SiLU kernel.
-// Computes: y[t,h,:] = rmsnorm(y[t,h,:], weight) * silu(gate[t,h,:])
-//
-// Grid:  (n_tokens, n_heads)
-// Block: (head_dim)
-// ---------------------------------------------------------------------------
-__global__ void gdn_rmsnorm_gated_silu_kernel(
-    half* __restrict__ y,             // [n_tokens, n_heads * head_dim] in/out
-    const half* __restrict__ gate,    // [n_tokens, n_heads * head_dim]
-    const half* __restrict__ weight,  // [head_dim] shared norm weight
-    float eps, int n_heads, int head_dim) {
-    const int t = blockIdx.x;
-    const int h = blockIdx.y;
-    const int d = threadIdx.x;
-    if (d >= head_dim)
-        return;
-
-    const int inner = n_heads * head_dim;
-    const int base = t * inner + h * head_dim;
-
-    // Load y value
-    float val = __half2float(y[base + d]);
-
-    // Parallel sum-of-squares for RMSNorm
-    extern __shared__ float s_buf[];
-    s_buf[d] = val * val;
-    __syncthreads();
-    for (int stride = head_dim / 2; stride > 0; stride >>= 1) {
-        if (d < stride)
-            s_buf[d] += s_buf[d + stride];
-        __syncthreads();
-    }
-    float inv_rms = rsqrtf(s_buf[0] / static_cast<float>(head_dim) + eps);
-
-    // RMSNorm: normalize and scale by weight
-    float normed = val * inv_rms * __half2float(weight[d]);
-
-    // SiLU on gate and multiply
-    float g = __half2float(gate[base + d]);
-    float silu_g = g / (1.0f + expf(-g));
-
-    y[base + d] = __float2half(normed * silu_g);
-}
+// Gated-norm family (FP16/FP32 variants) lives in gdn_gated_norm.cu.
 
 // ---------------------------------------------------------------------------
 // V-head reorder: tiled -> grouped (undo GGUF converter reorder for ssm_out)
@@ -406,18 +370,44 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
         const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
         gdn_scan_fused_kernel<128, 128, half, SPLIT><<<grid, 128 * SPLIT, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
-            conv_channels, grouped_layout, d_real_n, nullptr, nullptr, seq_slots, h_state_seq_stride);
+            conv_channels, grouped_layout, d_real_n, static_cast<float*>(nullptr), nullptr, seq_slots,
+            h_state_seq_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         const size_t smem = (2 * 64 + 64) * sizeof(float);
         gdn_scan_fused_kernel<64, 64, half><<<grid, 64, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
-            conv_channels, grouped_layout, d_real_n, nullptr, nullptr, seq_slots, h_state_seq_stride);
+            conv_channels, grouped_layout, d_real_n, static_cast<float*>(nullptr), nullptr, seq_slots,
+            h_state_seq_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         IMP_LOG_ERROR("gdn_scan_fused_f32_batched: unsupported head_dim=%d state_size=%d", head_dim_ssm,
                       state_size);
     }
+}
+
+// BF16-state twin (gdn.state_bf16). h_state_seq_stride is in BF16 ELEMENTS.
+// HD=SS=128 only — the init resolver refuses BF16 state for other shapes,
+// so reaching the else here is a wiring bug, not a serving condition.
+void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const half* alpha,
+                                 const half* beta, const float* A_log, const float* dt_bias,
+                                 __nv_bfloat16* h_state_pool, const int* seq_slots,
+                                 int64_t h_state_seq_stride, half* y, int n_seq, int n_tokens, int n_heads,
+                                 int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                                 int grouped_layout, const int* d_real_n) {
+    if (n_seq <= 0)
+        return;
+    if (head_dim_ssm != 128 || state_size != 128)
+        throw std::runtime_error("gdn_scan_fused_bf16_batched: no kernel for HD=" +
+                                 std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
+    dim3 grid(n_heads, n_seq);
+    constexpr int SPLIT = 2;
+    const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
+    gdn_scan_fused_kernel<128, 128, half, SPLIT, __nv_bfloat16><<<grid, 128 * SPLIT, smem, stream>>>(
+        conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups, conv_channels,
+        grouped_layout, d_real_n, static_cast<__nv_bfloat16*>(nullptr), nullptr, seq_slots,
+        h_state_seq_stride);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused scan: processes all tokens in one kernel launch.
@@ -436,13 +426,13 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
         gdn_scan_fused_kernel<128, 128, half>
             <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
                                              n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                                             nullptr, nullptr);
+                                             static_cast<float*>(nullptr), nullptr);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         gdn_scan_fused_kernel<64, 64, half>
             <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
                                             n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                                            nullptr, nullptr);
+                                            static_cast<float*>(nullptr), nullptr);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Fallback: per-token loop (for unsupported HD/SS sizes). The host
@@ -463,6 +453,23 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
             IMP_CUDA_CHECK_LAUNCH();
         }
     }
+}
+
+// BF16-state twin of gdn_scan_fused_f32 (prefill / single-sequence path).
+// HD=SS=128 only — see the batched twin's comment.
+void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                         const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
+                         int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                         cudaStream_t stream, int grouped_layout, const int* d_real_n) {
+    if (head_dim_ssm != 128 || state_size != 128)
+        throw std::runtime_error("gdn_scan_fused_bf16: no kernel for HD=" + std::to_string(head_dim_ssm) +
+                                 " SS=" + std::to_string(state_size));
+    size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
+    gdn_scan_fused_kernel<128, 128, half, 1, __nv_bfloat16>
+        <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
+                                         n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
+                                         static_cast<__nv_bfloat16*>(nullptr), nullptr);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // FP32-output variant — writes scan result as FP32 for downstream
@@ -507,6 +514,25 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
                                  "its FP32 output, so serving this shape would return a scan that did "
                                  "nothing.");
     }
+}
+
+// BF16-state twin of gdn_scan_fused_fp32out (the gdn.fp32_scan combo).
+// HD=SS=128 only — see the batched twin's comment.
+void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const half* alpha,
+                                 const half* beta, const float* A_log, const float* dt_bias,
+                                 __nv_bfloat16* h_state, float* y_fp32, int n_tokens, int n_heads,
+                                 int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                                 int grouped_layout, const int* d_real_n, __nv_bfloat16* h_snap,
+                                 const int* d_snap_n) {
+    if (head_dim_ssm != 128 || state_size != 128)
+        throw std::runtime_error("gdn_scan_fused_fp32out_bf16: no kernel for HD=" +
+                                 std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
+    size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
+    gdn_scan_fused_kernel<128, 128, float, 1, __nv_bfloat16>
+        <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
+                                         n_heads, n_groups, conv_channels, grouped_layout, d_real_n, h_snap,
+                                         d_snap_n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------
@@ -684,107 +710,6 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half
                                                                        n_groups, head_dim_ssm, state_size,
                                                                        conv_channels, grouped_layout,
                                                                        d_real_n);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
-// FP32-input variant: reads y as FP32, writes FP16. Used together with
-// `gdn_scan_fused_fp32out` so the RMS reduction sees full-precision scan output
-// (without FP16 subnormal truncation at ~6e-5).
-__global__ void gdn_rmsnorm_gated_silu_fp32in_kernel(
-    half* __restrict__ y_fp16_out,        // [n_tokens, n_heads * head_dim]
-    const float* __restrict__ y_fp32_in,  // [n_tokens, n_heads * head_dim]
-    const half* __restrict__ gate, const half* __restrict__ weight, float eps, int n_heads, int head_dim) {
-    const int t = blockIdx.x;
-    const int h = blockIdx.y;
-    const int d = threadIdx.x;
-    if (d >= head_dim)
-        return;
-
-    const int inner = n_heads * head_dim;
-    const int base = t * inner + h * head_dim;
-
-    float val = y_fp32_in[base + d];
-
-    extern __shared__ float s_buf[];
-    s_buf[d] = val * val;
-    __syncthreads();
-    for (int stride = head_dim / 2; stride > 0; stride >>= 1) {
-        if (d < stride)
-            s_buf[d] += s_buf[d + stride];
-        __syncthreads();
-    }
-    float inv_rms = rsqrtf(s_buf[0] / static_cast<float>(head_dim) + eps);
-
-    float normed = val * inv_rms * __half2float(weight[d]);
-
-    float g = __half2float(gate[base + d]);
-    float silu_g = g / (1.0f + expf(-g));
-
-    y_fp16_out[base + d] = __float2half(normed * silu_g);
-}
-
-void gdn_rmsnorm_gated_silu_fp32in(half* y_fp16_out, const float* y_fp32_in, const half* gate,
-                                   const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
-                                   cudaStream_t stream) {
-    size_t smem = head_dim * sizeof(float);
-    dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_fp32in_kernel<<<grid, head_dim, smem, stream>>>(y_fp16_out, y_fp32_in, gate,
-                                                                           weight, eps, n_heads, head_dim);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
-// FP32-in, FP32-out: keeps full precision through gated norm so ssm_out GEMM
-// sees FP32 input (fixes 6% accumulation drift in FP16-input matmul).
-__global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(float* __restrict__ y_fp32_out,
-                                                        const float* __restrict__ y_fp32_in,
-                                                        const half* __restrict__ gate,
-                                                        const half* __restrict__ weight, float eps,
-                                                        int n_heads, int head_dim) {
-    const int t = blockIdx.x;
-    const int h = blockIdx.y;
-    const int d = threadIdx.x;
-    if (d >= head_dim)
-        return;
-
-    const int inner = n_heads * head_dim;
-    const int base = t * inner + h * head_dim;
-
-    float val = y_fp32_in[base + d];
-
-    extern __shared__ float s_buf[];
-    s_buf[d] = val * val;
-    __syncthreads();
-    for (int stride = head_dim / 2; stride > 0; stride >>= 1) {
-        if (d < stride)
-            s_buf[d] += s_buf[d + stride];
-        __syncthreads();
-    }
-    float inv_rms = rsqrtf(s_buf[0] / static_cast<float>(head_dim) + eps);
-
-    float normed = val * inv_rms * __half2float(weight[d]);
-
-    float g = __half2float(gate[base + d]);
-    float silu_g = g / (1.0f + expf(-g));
-
-    y_fp32_out[base + d] = normed * silu_g;
-}
-
-void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in, const half* gate,
-                                      const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
-                                      cudaStream_t stream) {
-    size_t smem = head_dim * sizeof(float);
-    dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_fp32inout_kernel<<<grid, head_dim, smem, stream>>>(y_fp32_out, y_fp32_in, gate,
-                                                                              weight, eps, n_heads, head_dim);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
-// Fused RMSNormGated + SiLU
-void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,
-                            int n_heads, int head_dim, cudaStream_t stream) {
-    size_t smem = head_dim * sizeof(float);
-    dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_kernel<<<grid, head_dim, smem, stream>>>(y, gate, weight, eps, n_heads, head_dim);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

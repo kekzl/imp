@@ -50,6 +50,13 @@ struct GDN {
     // exhaustively benched, Phase 1b.1 remains the fastest chunkwise
     // path on sm_120 — the WY-rep + TC-MMA variants all stay behind it.
     bool chunkwise_scan = true;
+    // Store the GDN recurrent state as BF16 instead of FP32 (halves the
+    // state traffic that dominates batched decode; arithmetic stays FP32 in
+    // registers). HD=SS=128 models only; forces the fused scan route (the
+    // chunkwise/ref kernels are FP32-state only) — the executor drops
+    // chunkwise when the pool is BF16, the init resolver refuses the
+    // ref_kernel combo. FP16 state stays refuted (subnormal truncation).
+    bool state_bf16 = false;
     // Override gated-DeltaNet weight layout.
     std::string layout_override;
 };

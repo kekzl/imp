@@ -555,7 +555,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
         //   models with sparse scan activations (Qwen 3.6 L1 head 0).
         const bool use_ref = runtime_config().gdn.ref_kernel;
-        const bool use_chunkwise = runtime_config().gdn.chunkwise_scan && !use_ref;
+        // BF16 recurrent state (gdn.state_bf16): only the fused scan has a
+        // BF16-state kernel — the chunkwise route stays FP32-only, so a BF16
+        // pool drops it here (the init resolver already refused ref_kernel).
+        const bool state_bf16 = (state.ssm_state && state.ssm_state->h_dtype() == QType::BF16);
+        const bool use_chunkwise = runtime_config().gdn.chunkwise_scan && !use_ref && !state_bf16;
         if (use_fp32_scan) {
             // Layout in conv_f32 tail:
             //   [n*conv_channels)                : conv_f32 (done)
@@ -576,6 +580,13 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                            static_cast<float*>(h_st), y_fp32, n, n_heads, head_dim_ssm, ssize,
                                            n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len,
                                            static_cast<float*>(h_snap), h_snap ? state.d_snap_n : nullptr);
+            } else if (state_bf16) {
+                gdn_scan_fused_fp32out_bf16(
+                    conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                    static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
+                    static_cast<const float*>(ly.ssm_dt_b.data), static_cast<__nv_bfloat16*>(h_st), y_fp32,
+                    n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl, state.d_chunk_len,
+                    static_cast<__nv_bfloat16*>(h_snap), h_snap ? state.d_snap_n : nullptr);
             } else {
                 gdn_scan_fused_fp32out(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                                        static_cast<const half*>(beta_proj_out.data),
@@ -617,14 +628,25 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // optimisation (it splits ONE sequence's timeline), so it does not
             // apply here — at one token per sequence there is nothing to chunk.
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            gdn_scan_fused_f32_batched(
-                conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
-                static_cast<const float*>(ly.ssm_dt_b.data),
-                static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
-                static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)),
-                static_cast<half*>(y_buf.data), state.ssm_n_seq, /*n_tokens=*/1, n_heads, head_dim_ssm,
-                ssize, n_groups, stream, gl, /*d_real_n=*/nullptr);
+            if (state_bf16) {
+                gdn_scan_fused_bf16_batched(
+                    conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                    static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
+                    static_cast<const float*>(ly.ssm_dt_b.data),
+                    static_cast<__nv_bfloat16*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
+                    static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(__nv_bfloat16)),
+                    static_cast<half*>(y_buf.data), state.ssm_n_seq, /*n_tokens=*/1, n_heads, head_dim_ssm,
+                    ssize, n_groups, stream, gl, /*d_real_n=*/nullptr);
+            } else {
+                gdn_scan_fused_f32_batched(
+                    conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                    static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
+                    static_cast<const float*>(ly.ssm_dt_b.data),
+                    static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
+                    static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)),
+                    static_cast<half*>(y_buf.data), state.ssm_n_seq, /*n_tokens=*/1, n_heads, head_dim_ssm,
+                    ssize, n_groups, stream, gl, /*d_real_n=*/nullptr);
+            }
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             if (use_chunkwise) {
@@ -635,6 +657,13 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                        static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                        static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize,
                                        n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len);
+            } else if (state_bf16) {
+                gdn_scan_fused_bf16(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                                    static_cast<const half*>(beta_proj_out.data),
+                                    static_cast<const float*>(ly.ssm_a.data),
+                                    static_cast<const float*>(ly.ssm_dt_b.data),
+                                    static_cast<__nv_bfloat16*>(h_st), static_cast<half*>(y_buf.data), n,
+                                    n_heads, head_dim_ssm, ssize, n_groups, stream, gl, state.d_chunk_len);
             } else {
                 gdn_scan_fused_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                                    static_cast<const half*>(beta_proj_out.data),

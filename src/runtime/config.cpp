@@ -258,6 +258,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gdn.ref_kernel", cfg.gdn.ref_kernel);
     B("gdn.vhead_reorder", cfg.gdn.vhead_reorder);
     B("gdn.chunkwise_scan", cfg.gdn.chunkwise_scan);
+    B("gdn.state_bf16", cfg.gdn.state_bf16);
 
     // [gemm]
     B("gemm.no_dp4a_gemv", cfg.gemm.no_dp4a_gemv);
