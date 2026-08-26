@@ -216,27 +216,35 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
 
     // Device metadata: per-step stream-ordered allocs. Prefill is never
     // graph-captured, so the pool amortises these (same acknowledged
-    // exception as the chunked-prefill gather scratch).
-    int32_t* d_tok = nullptr;
-    int* d_pos = nullptr;
-    int* d_bt = nullptr;
-    int* d_ctx = nullptr;
-    int* d_soff = nullptr;
-    int* d_slots = nullptr;
-    auto cleanup = [&]() {
-        if (d_tok)
-            cudaFreeAsync(d_tok, stream);
-        if (d_pos)
-            cudaFreeAsync(d_pos, stream);
-        if (d_bt)
-            cudaFreeAsync(d_bt, stream);
-        if (d_ctx)
-            cudaFreeAsync(d_ctx, stream);
-        if (d_soff)
-            cudaFreeAsync(d_soff, stream);
-        if (d_slots)
-            cudaFreeAsync(d_slots, stream);
-    };
+    // exception as the chunked-prefill gather scratch). RAII, not a manual
+    // cleanup call: forward_logits and the sampling epilogue below can throw
+    // (n_tokens guard, CUDA errors translated at the API boundary), and the
+    // frees must run on that unwind too.
+    struct RaggedMeta {
+        int32_t* d_tok = nullptr;
+        int* d_pos = nullptr;
+        int* d_bt = nullptr;
+        int* d_ctx = nullptr;
+        int* d_soff = nullptr;
+        int* d_slots = nullptr;
+        cudaStream_t stream;
+        explicit RaggedMeta(cudaStream_t s) : stream(s) {}
+        ~RaggedMeta() {
+            for (void* p :
+                 {static_cast<void*>(d_tok), static_cast<void*>(d_pos), static_cast<void*>(d_bt),
+                  static_cast<void*>(d_ctx), static_cast<void*>(d_soff), static_cast<void*>(d_slots)})
+                if (p)
+                    cudaFreeAsync(p, stream);
+        }
+        RaggedMeta(const RaggedMeta&) = delete;
+        RaggedMeta& operator=(const RaggedMeta&) = delete;
+    } meta(stream);
+    auto& d_tok = meta.d_tok;
+    auto& d_pos = meta.d_pos;
+    auto& d_bt = meta.d_bt;
+    auto& d_ctx = meta.d_ctx;
+    auto& d_soff = meta.d_soff;
+    auto& d_slots = meta.d_slots;
     bool alloc_ok = cudaMallocAsync(&d_tok, h_tok.size() * sizeof(int32_t), stream) == cudaSuccess &&
                     cudaMallocAsync(&d_pos, h_pos.size() * sizeof(int), stream) == cudaSuccess &&
                     cudaMallocAsync(&d_bt, std::max<size_t>(h_bt.size(), 1) * sizeof(int), stream) ==
@@ -246,7 +254,6 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
                     cudaMallocAsync(&d_slots, h_slots.size() * sizeof(int), stream) == cudaSuccess;
     if (!alloc_ok) {
         IMP_LOG_ERROR("prefill_batch: metadata allocation failed — cancelling %d requests", n_seq);
-        cleanup();
         for (auto& g : geoms) {
             cancel_sequence_(g.req);
             g.req->status = RequestStatus::CANCELLED;
@@ -352,7 +359,6 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
 
     if (deferred > 0)
         IMP_LOG_DEBUG("Ragged prefill: %zu requests deferred to the next step (row cap)", deferred);
-    cleanup();
 }
 
 }  // namespace imp

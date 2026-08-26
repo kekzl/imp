@@ -315,6 +315,8 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_workspace_warmup.cpp
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
+    src/runtime/engine_prefill.cpp
+    src/runtime/engine_decode_pipeline.cpp
     src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
     src/runtime/engine_spec_ngram.cpp

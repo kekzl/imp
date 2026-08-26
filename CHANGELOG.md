@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Ragged prefill no longer leaks its device metadata on an exception.** The
+  six per-step buffers were freed by a manual cleanup call that an exception
+  from the forward or the sampling epilogue skipped; they are now owned by an
+  RAII guard. Found in the encapsulation pass that split engine_scheduler.cpp
+  (2230 code LOC) into engine_prefill.cpp and engine_decode_pipeline.cpp
+  (pure moves, byte-identical bodies).
+
 - **Ragged prefill members no longer pay the 256-token launch floor each.**
   The prefill token budget charged every request in a ragged group
   max(256, chunk) although the group shares one launch set; 30-70-row

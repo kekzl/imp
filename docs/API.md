@@ -72,10 +72,10 @@ Two of these do not switch off the way the field name suggests.
 
 **`top_k: 0` is not "off", it is 50.** Every sampling site spells
 `top_k > 0 ? top_k : 50` (`src/exec/executor.cu:193`, `:290`,
-`src/runtime/engine_scheduler.cpp:2572`), so zero and "unset" both land on 50 -
-a *tighter* truncation than the 40 default. The only way to disable top-k is a
-value at or above the vocabulary size, which the dispatcher clamps to the full
-vocabulary (`engine_scheduler.cpp:2573`).
+`src/runtime/engine_decode_pipeline.cpp:82`), so zero and "unset" both land on
+50 - a *tighter* truncation than the 40 default. The only way to disable top-k
+is a value at or above the vocabulary size, which the dispatcher clamps to the
+full vocabulary (`engine_decode_pipeline.cpp:83`).
 
 **`repetition_penalty` has no OpenAI field at all**, so a strictly
 spec-compliant client cannot switch it off and gets a mild anti-repetition bias
