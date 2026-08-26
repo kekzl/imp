@@ -66,11 +66,16 @@ if [ "$NEEDS_VERIFY" -eq 0 ]; then
     exit 0
 fi
 
-# Cheap static gates first (seconds, no GPU, no build): the test-lane pin and
-# the file-size ceilings otherwise surface only in CI, one full roundtrip
-# after the push (both 2026-08-25 "File size" reds were the pin, found in CI).
+# Cheap static gates first (seconds, no GPU, no build): everything that would
+# otherwise surface only in CI, one full roundtrip after the push. Both
+# 2026-08-25 "File size" reds were the lane pin, and the 2026-08-26 #1782
+# scheduler split went red in CI on a roadmap.md citation — each class below
+# has cost a roundtrip at least once. All six selections together measure
+# ~2 s; only `kernels` (needs a built artifact) and `hygiene` (subsumes
+# citations via check-release.sh and runs the full release checklist) stay
+# CI-side.
 if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
-    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes; then
+    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes alloc launchguards docs citations; then
         echo "pre-push: static gates failed (see above) - fix or push --no-verify"
         exit 1
     fi

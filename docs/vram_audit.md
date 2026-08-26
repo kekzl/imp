@@ -157,7 +157,7 @@ reservations + WSL2/WDDM driver overhead** (baseline checkpoint 00 alone is
 
 The 1728 MiB `nvfp4_moe_ms_ref` is **not a duplicate** — #679 already frees the
 scattered per-expert source scales after the contiguous copy
-(`pre_dequant_phase3_nvfp4_decode.cu:1676`, confirmed in the run log: "freed
+(`pre_dequant_phase3_nvfp4_decode.cu:512`, confirmed in the run log: "freed
 1728.00 MiB duplicated per-expert micro-scales"). Making the SafeTensors loader
 emit a contiguous scale slab would set `scales_contig=true` and skip the *copy*,
 but the scales must be resident for NVFP4 decode either way — it only removes a
@@ -245,7 +245,7 @@ at short prefill** (`imp-cli --bench`, 12 reps, 2-3 trials, healthy host 13801 M
 matrix — short prefill is exactly where cuBLAS wins most, and it is the common
 TTFT case. The 380 MiB attn_scores buffer is **load-bearing for short-prefill
 throughput** (and, separately, for hd=256 / gemma-3 correctness —
-`executor_attention.cu:973-990`, where FA2 mis-serves hd=256). Not reclaimable.
+`executor_attention_prefill.cu`, the FA2 hd=256 dispatch, where FA2 mis-serves hd=256). Not reclaimable.
 
 Lesson: pp2048 alone (−0.43%) would have green-lit a −92% pp512 regression. The
 gated metric (pp512) and the short-prefill regime must be measured explicitly.
