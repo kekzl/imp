@@ -315,6 +315,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_workspace_warmup.cpp
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
+    src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
     src/runtime/engine_spec_ngram.cpp
     src/runtime/engine_spec_buffers.cpp
@@ -950,6 +951,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-e2e WITH_STUB SOURCES
         tests/test_forward_pass.cu
         tests/test_engine_integration.cu
+        tests/test_prefill_ragged.cu
         tests/test_e2e.cpp
         tests/test_e2e_models.cpp
         tests/test_e2e_greedy_lock.cpp

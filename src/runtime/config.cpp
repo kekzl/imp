@@ -166,6 +166,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("runtime.hybrid_decode_quantum", cfg.runtime.hybrid_decode_quantum);
     B("runtime.gdn_batched_decode", cfg.runtime.gdn_batched_decode);
     B("runtime.decode_pipeline", cfg.runtime.decode_pipeline);
+    B("runtime.prefill_batch", cfg.runtime.prefill_batch);
     I("runtime.vram_budget_mb", cfg.runtime.vram_budget_mb);
 
     // [kv_cache]

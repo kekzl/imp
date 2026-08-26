@@ -652,6 +652,12 @@ void Engine::step_prefill(cudaStream_t stream) {
         }
     }
     size_t ran = 0;
+    // Cross-sequence ragged prefill (runtime.prefill_batch): eligible requests
+    // are collected and run as ONE ragged forward after the loop; ineligible
+    // ones keep the serial path. Selection order, budget charging and the
+    // rotor are identical either way.
+    const bool ragged_mode = prefill_ragged_enabled_();
+    std::vector<std::shared_ptr<Request>> ragged_batch;
     for (size_t i = 0; i < budget; i++) {
         auto& req = sched_prefill_batch_[(start + i) % n_prefill];
         // Charge from the PRE-call remaining: step_prefill_one advances
@@ -664,13 +670,20 @@ void Engine::step_prefill(cudaStream_t stream) {
         // not disarm the check (that bug ran the whole batch after charge 4).
         if (budgeted && ran > 0 && charge > token_budget)
             break;
-        step_prefill_one(req, effective_chunk, stream);
+        if (ragged_mode && prefill_ragged_req_ok_(*req))
+            ragged_batch.push_back(req);
+        else
+            step_prefill_one(req, effective_chunk, stream);
         kv_manager_->touch(req->id);
         ran++;
         sched_prefill_last_id_ = req->id;
         if (budgeted)
             token_budget -= charge;
     }
+    if (ragged_batch.size() == 1)
+        step_prefill_one(ragged_batch[0], effective_chunk, stream);
+    else if (!ragged_batch.empty())
+        step_prefill_ragged_(ragged_batch, effective_chunk, stream);
     if (ran >= n_prefill)
         sched_prefill_last_id_ = -1;
 }

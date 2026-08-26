@@ -204,6 +204,21 @@ struct RuntimeConfig {
         // mirostat/logit-bias/constraints/logprobs, and SWA/StreamingLLM/
         // residual-KV configs, keep the per-step path.
         bool decode_pipeline = true;
+        // Cross-sequence prefill batching (roadmap 0(d)): assemble the
+        // prefill chunks of several admitted requests into ONE ragged forward
+        // — GEMMs/norms/elementwise run over the concatenated rows, attention
+        // and the GDN conv loop per sequence, the GDN scan batches via a
+        // row-offset table. A 32-prompt burst otherwise prefills one sequence
+        // per forward (launch-bound, ~25% of a burst wave's wall). Measured
+        // 2026-08-26 on Qwen3.8-27B-NVFP4 (32-stream burst, 4 waves x 3
+        // alternating trials/arm): aggregate 977.3 -> 1038.2 tok/s median
+        // (+6.2%, all 12 ON waves above all 12 OFF waves), TTFT p50 4.11 ->
+        // 2.55 s. Byte-level A/B at deterministic+no-prefix-cache matches the
+        // serial control's batch-shape noise (27/32 vs 24/32 identical).
+        // Requests with vision, constraints, logprobs, embeddings or rerank
+        // scoring — and Mamba2 / MLA models, MTP, SWA sizing, residual KV,
+        // gdn.fp32_scan/ref_kernel — keep the serial path.
+        bool prefill_batch = true;
     } runtime;
 
     cfg::KVCache kv_cache;

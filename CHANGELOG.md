@@ -143,6 +143,17 @@ there instead of retelling it.
 
 ### Added
 
+- **Cross-sequence prefill batching (`runtime.prefill_batch`, default ON):
+  +6.2% aggregate and TTFT p50 4.11 -> 2.55 s on a 32-stream burst.** The
+  prefill chunks of several admitted requests run as ONE ragged forward:
+  the GEMM class batches over the concatenated rows, attention and the GDN
+  conv loop per sequence, the GDN scan takes the #1779 row-offset table.
+  Measured on Qwen3.8-27B-NVFP4 (4 waves x 3 alternating trials/arm):
+  aggregate 977.3 -> 1038.2 tok/s median, all 12 ON waves above all 12 OFF
+  waves; byte A/B and degen match the serial control. Vision/constraints/
+  logprobs/embeddings/rerank requests stay serial; Mamba2/MLA/MTP configs
+  disable the path. Details: `docs/plans/2026-08-24-qwen38-port.md`.
+
 - **BF16 recurrent state for the GDN scan (`gdn.state_bf16`, default ON since the follow-up flip): +12.5%
   aggregate at 32 streams.** The FP32 scan sits at this box's resident
   bandwidth ceiling (1527 GB/s measured isolated), so halving the state

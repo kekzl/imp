@@ -91,6 +91,39 @@ void Engine::bind_mrope_prefill_(InferenceState& state, const Request& req, int 
     bind_mrope_(state, chunk_len, d_mrope_prefill_, mrope_prefill_cap_, /*fixed=*/false, stream);
 }
 
+void Engine::bind_mrope_prefill_ragged_(InferenceState& state,
+                                        const std::vector<std::shared_ptr<Request>>& reqs,
+                                        const std::vector<int>& offsets, const std::vector<int>& lens,
+                                        int total_rows, cudaStream_t stream) {
+    const ModelConfig& mc = model_->config_;
+    if (!mc.has_mrope() || total_rows <= 0)
+        return;
+
+    // Axis-major [3, total_rows]: each request's chunk contributes its rows at
+    // the same column range on all three axes. Vision requests are excluded
+    // from ragged assembly, so every request takes the plain-ascending branch
+    // of bind_mrope_prefill_ — replicated here per sub-range.
+    h_mrope_scratch_.assign(static_cast<size_t>(3) * total_rows, 0);
+    int col = 0;
+    for (size_t r = 0; r < reqs.size(); ++r) {
+        const Request& req = *reqs[r];
+        const int offset = offsets[r];
+        const int chunk_len = lens[r];
+        const size_t n_prompt = req.input_tokens.size();
+        const bool laid_out = req.mrope_positions.size() == 3 * n_prompt &&
+                              offset + chunk_len <= static_cast<int>(n_prompt);
+        for (int a = 0; a < 3; ++a) {
+            for (int i = 0; i < chunk_len; ++i) {
+                h_mrope_scratch_[static_cast<size_t>(a) * total_rows + col + i] =
+                    laid_out ? req.mrope_positions[static_cast<size_t>(a) * n_prompt + offset + i]
+                             : offset + i;
+            }
+        }
+        col += chunk_len;
+    }
+    bind_mrope_(state, total_rows, d_mrope_prefill_, mrope_prefill_cap_, /*fixed=*/false, stream);
+}
+
 void Engine::bind_mrope_single_(InferenceState& state, const Request& req, cudaStream_t stream) {
     (void)stream;
     const ModelConfig& mc = model_->config_;

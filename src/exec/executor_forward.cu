@@ -669,7 +669,28 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             set_l2_streaming(stream, w.data, w.nbytes());
     }
 
-    if (state.is_prefill && !state.all_logits) {
+    // Ragged cross-sequence prefill: every sequence needs ITS last row through
+    // the LM head, not just row n-1. Forward-compact the K last rows into rows
+    // [0, K) of hidden_ (safe in increasing order: dst row s < src row
+    // h_seq_offsets[s+1]-1 whenever they differ, and no later source row can
+    // equal an earlier destination), then run the batched decode-style LM head
+    // below with n = K. Logits row s belongs to sequence s.
+    const bool ragged_lm = state.ragged_prefill() && !state.all_logits;
+    if (ragged_lm) {
+        const size_t row_bytes = static_cast<size_t>(cfg.d_model) * dtype_size(hidden_.qtype);
+        char* hbase = static_cast<char*>(hidden_.data);
+        for (int s = 0; s < state.n_sequences; ++s) {
+            const int src = state.h_seq_offsets[s + 1] - 1;
+            if (src != s) {
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(hbase + static_cast<size_t>(s) * row_bytes,
+                                                   hbase + static_cast<size_t>(src) * row_bytes, row_bytes,
+                                                   cudaMemcpyDeviceToDevice, stream));
+            }
+        }
+        n = state.n_sequences;
+    }
+
+    if (state.is_prefill && !state.all_logits && !ragged_lm) {
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
         Tensor lg = view_tokens(logits_, 1);
 

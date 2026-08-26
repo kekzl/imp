@@ -83,6 +83,15 @@ hybrid_decode_quantum = 128
 # constraints/logprobs requests use the per-step path. false = always
 # per-step.
 decode_pipeline      = true
+# Cross-sequence prefill batching: run the prefill chunks of several admitted
+# requests as ONE ragged forward (GEMMs/norms over the concatenated rows,
+# attention and the GDN conv per sequence, GDN scan batched via a row-offset
+# table). Targets burst arrivals, where prefill otherwise runs one sequence
+# per forward: measured +6.2% aggregate and TTFT p50 4.11 -> 2.55 s on a
+# 32-stream burst (Qwen3.8-27B-NVFP4). Requests with vision, constraints,
+# logprobs, embeddings or rerank scoring keep the serial path, as do
+# Mamba2/MLA models, MTP, SWA sizing and residual KV.
+prefill_batch        = true
 # Engine warmup at init (two tiny requests, ~2-4 s on a 30B): primes cuBLAS
 # handles + L2 AND pre-arms the decode graph pool so the FIRST real request
 # takes the same graph-kernel path as every later one — without it greedy

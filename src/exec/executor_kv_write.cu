@@ -18,7 +18,9 @@
 
 namespace imp {
 
-void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream) {
+void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream,
+                                   int row_begin, int n_rows, const int* bt_flat,
+                                   const int* bt_swa_flat, const int* positions_override) {
     if (!state.kv_cache || !state.block_tables)
         return;
 
@@ -28,14 +30,35 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         return;  // not an attention layer
 
     KVCache* cache = state.kv_cache;
-    int n = state.n_tokens;
+    const bool row_range = (bt_flat != nullptr);
+    int n = (n_rows >= 0) ? n_rows : state.n_tokens;
+    const int* positions = positions_override ? positions_override : state.positions;
+    // Row-range mode indexes the flat per-seq table (single-sequence kernel
+    // semantics); the default mode keeps the historical 2D/flat selection.
+    const int wr_max_blocks = row_range ? 0 : state.max_blocks_per_seq;
+    const int wr_n_seq = row_range ? 1 : state.n_sequences;
     const auto& cfg = model_->config();
     // SWA-aware KV sizing (kv_cache.swa_sizing): windowed layers write into
     // the SWA block group through the parallel table (-1 holes below the
     // window are skipped by the kernels' block_id<0 guard).
-    const int* block_tables = state.block_tables;
-    if (state.block_tables_swa != nullptr && layer_swa_window(cfg, model_->profile(), layer) > 0)
+    const bool layer_swa = layer_swa_window(cfg, model_->profile(), layer) > 0;
+    const int* block_tables = row_range ? bt_flat : state.block_tables;
+    if (row_range) {
+        if (bt_swa_flat != nullptr && layer_swa)
+            block_tables = bt_swa_flat;
+    } else if (state.block_tables_swa != nullptr && layer_swa) {
         block_tables = state.block_tables_swa;
+    }
+    // Row-range view into the shared K/V workspaces: same [rows, cols] layout,
+    // starting at row_begin instead of 0.
+    auto view_rows = [&](const Tensor& buf, int rows) -> Tensor {
+        Tensor t = view_tokens(buf, rows);
+        if (row_begin > 0) {
+            t.data = static_cast<char*>(t.data) +
+                     static_cast<size_t>(row_begin) * t.shape[1] * dtype_size(t.qtype);
+        }
+        return t;
+    };
     // Per-layer shape support (Gemma 4 dual attention geometry)
     int nkv, hd;
     if (!cfg.n_kv_heads_per_layer.empty() && layer < (int)cfg.n_kv_heads_per_layer.size() &&
@@ -63,65 +86,65 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     bool use_mxfp4_kv = (cache->qtype() == QType::MXFP4_KV);
     if (use_nvfp4) {
         // NVFP4 quantized KV cache write — 2 FP4 values packed per byte, UE4M3 scale per group of 16
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
+        Tensor kv = view_rows(k_, n);
+        Tensor vv = view_rows(v_, n);
         int nvfp4_block_stride = kv_block_size * nkv * hd / 2;            // bytes
         int nvfp4_scale_block_stride = kv_block_size * nkv * (hd / 16);   // bytes (UE4M3)
         dim3 grid_nvfp4(n, 2);
         write_kv_cache_nvfp4_kernel<<<grid_nvfp4, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
             block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), nvfp4_block_stride,
-            nvfp4_scale_block_stride, nkv, hd, kv_block_size, n, state.max_blocks_per_seq,
-            state.n_sequences);
+            nvfp4_scale_block_stride, nkv, hd, kv_block_size, n, wr_max_blocks,
+            wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_mxfp4_kv) {
         // MXFP4-KV quantized KV cache write — identical layout to NVFP4 but UE8M0 scales
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
+        Tensor kv = view_rows(k_, n);
+        Tensor vv = view_rows(v_, n);
         int mxfp4_block_stride = kv_block_size * nkv * hd / 2;           // bytes (same as NVFP4)
         int mxfp4_scale_block_stride = kv_block_size * nkv * (hd / 16);  // bytes (UE8M0)
         dim3 grid_mxfp4(n, 2);
         write_kv_cache_mxfp4_kv_kernel<<<grid_mxfp4, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
             block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), mxfp4_block_stride,
-            mxfp4_scale_block_stride, nkv, hd, kv_block_size, n, state.max_blocks_per_seq,
-            state.n_sequences);
+            mxfp4_scale_block_stride, nkv, hd, kv_block_size, n, wr_max_blocks,
+            wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_int4) {
         // INT4 quantized KV cache write — 2 values packed per byte, per-head scales
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
+        Tensor kv = view_rows(k_, n);
+        Tensor vv = view_rows(v_, n);
         int int4_block_stride = kv_block_size * nkv * hd / 2;  // bytes (half the INT8 stride)
         int scale_block_stride = kv_block_size * nkv;
         dim3 grid_int4(n, 2);
         write_kv_cache_int4_kernel<<<grid_int4, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
             block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), int4_block_stride, scale_block_stride, nkv,
-            hd, kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
+            hd, kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_int8) {
         // INT8 quantized KV cache write path with per-head scales.
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
+        Tensor kv = view_rows(k_, n);
+        Tensor vv = view_rows(v_, n);
 
         int scale_block_stride = kv_block_size * nkv;
         dim3 grid_int8(n, 2);  // blockIdx.y: 0=K, 1=V
         write_kv_cache_int8_kernel<<<grid_int8, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
             block_tables, static_cast<int8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<int8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), block_stride, scale_block_stride, nkv, hd,
-            kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
+            kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_fp8) {
         // FP8 E4M3 quantized KV cache write path with online calibration.
@@ -147,8 +170,8 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             // permanently locking the FP8 dynamic range to the wrong value
             // (was the root cause of the Gemma-4 force-FP16 carve-out at
             // engine.cpp:567).
-            Tensor kv_cal = view_tokens(k_, n);
-            Tensor vv_cal = view_tokens(v_, n);
+            Tensor kv_cal = view_rows(k_, n);
+            Tensor vv_cal = view_rows(v_, n);
             const int64_t live_cols = static_cast<int64_t>(nkv) * hd;
             if (kv_cal.shape[1] != live_cols) {
                 kv_cal.shape[1] = live_cols;
@@ -174,14 +197,14 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             inv_scale = 1.0f;
         }
 
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
+        Tensor kv = view_rows(k_, n);
+        Tensor vv = view_rows(v_, n);
         dim3 fp8_grid(n, 2);
         write_kv_cache_fp8_fused_kernel<<<fp8_grid, threads, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
             block_tables, static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
             static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), inv_scale, block_stride, row_elems,
-            kv_block_size, n, state.max_blocks_per_seq, state.n_sequences);
+            kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Standard FP16 KV cache write path — fused K+V in single launch.
@@ -192,14 +215,14 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         // stores hd-wide K and hd-wide (padded) V uniformly — no asymmetric V
         // path is needed. Decode reads only v_head_dim per V head; the zero tail
         // is harmless. row_elems == nkv * hd for both K and V.
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
+        Tensor kv = view_rows(k_, n);
+        Tensor vv = view_rows(v_, n);
         dim3 fused_grid(n, 2);  // blockIdx.y: 0=K, 1=V
         write_kv_cache_fused_kernel<<<fused_grid, threads, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), state.positions,
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
             block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
-            state.max_blocks_per_seq, state.n_sequences);
+            wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     }
 
@@ -217,7 +240,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     // Two seq-id sources, mirroring the attention dispatcher:
     //   - state.h_residual_seq_ids: host array of length n_sequences (multi-seq)
     //   - state.kv_seq_id: single int (legacy single-seq, used when h_… is null)
-    if (!state.is_prefill && use_nvfp4 && state.kv_manager != nullptr &&
+    if (!row_range && !state.is_prefill && use_nvfp4 && state.kv_manager != nullptr &&
         state.kv_manager->residual_enabled() && n == state.n_sequences) {
         const int res_n_kv = cache->n_kv_heads();
         const int res_hd = cache->head_dim();
