@@ -11,36 +11,54 @@
 # only through the teardown helper, so adding a cancel path without the slot
 # release fails here rather than in someone's output six months later.
 #
+# Scope: the engine step-execution TUs. engine_scheduler.cpp was split on
+# 2026-08-26 (engine_prefill.cpp, engine_decode_pipeline.cpp came out of it;
+# engine_prefill_ragged.cpp existed since #1780), so the guard walks the
+# family instead of one file.
+#
 # Usage: check_cancel_teardown.sh <repo-root>
 # Exit 0 = no direct call; non-zero = a site bypasses the helper.
 
 set -eu
 
 ROOT="${1:-.}"
-FILE="$ROOT/src/runtime/engine_scheduler.cpp"
+FILES="src/runtime/engine_scheduler.cpp \
+       src/runtime/engine_prefill.cpp \
+       src/runtime/engine_prefill_ragged.cpp \
+       src/runtime/engine_decode_pipeline.cpp"
 
-if [ ! -f "$FILE" ]; then
-    echo "check_cancel_teardown: $FILE not found" >&2
-    exit 2
-fi
-
-# free_sequence on the request being torn down. The KV manager's own callers
-# elsewhere (eviction, reset) are not request teardown and are not in scope.
-HITS=$(grep -n 'free_sequence(req->id)' "$FILE" || true)
+CALLS=0
+HITS=""
+for f in $FILES; do
+    P="$ROOT/$f"
+    if [ ! -f "$P" ]; then
+        echo "check_cancel_teardown: $P not found" >&2
+        exit 2
+    fi
+    # free_sequence on the request being torn down. The KV manager's own
+    # callers elsewhere (eviction, reset) are not request teardown and are
+    # not in scope.
+    H=$(grep -n 'free_sequence(req->id)' "$P" || true)
+    if [ -n "$H" ]; then
+        HITS="$HITS$f: $H
+"
+    fi
+    C=$(grep -c 'cancel_sequence_(' "$P" || true)
+    CALLS=$((CALLS + C))
+done
 
 # A guard that only ever says "I found nothing bad" is indistinguishable from
-# one pointed at the wrong file. This one asserts the positive too: the six
-# cancel sites the helper replaced must still be calling it. Rename the file,
-# move the code, or delete the helper, and this fails instead of passing.
-CALLS=$(grep -c 'cancel_sequence_(req)' "$FILE" || true)
+# one pointed at the wrong file. This one asserts the positive too: the cancel
+# sites the helper replaced must still be calling it. Rename the files, move
+# the code, or delete the helper, and this fails instead of passing.
 MIN_CALLS=6
 
 if [ "$CALLS" -lt "$MIN_CALLS" ]; then
     echo "check_cancel_teardown: FAIL" >&2
     echo "" >&2
-    echo "Found $CALLS call(s) to cancel_sequence_(req), expected at least $MIN_CALLS." >&2
+    echo "Found $CALLS call(s) to cancel_sequence_(...), expected at least $MIN_CALLS." >&2
     echo "Either a cancel path was removed, or this guard is looking at the wrong" >&2
-    echo "file and would have passed without checking anything. See #1632." >&2
+    echo "files and would have passed without checking anything. See #1632." >&2
     exit 1
 fi
 

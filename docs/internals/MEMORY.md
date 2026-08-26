@@ -83,7 +83,7 @@ By subsystem:
 | `lora/` | 1 | |
 
 Top files by site count: `exec/executor_workspace_buffers.cu` (47),
-`model/weight_upload.cu` (19), `runtime/engine_scheduler.cpp` (17),
+`model/weight_upload.cu` (19), `runtime/engine_prefill.cpp` + `engine_scheduler.cpp` (17 combined, split 2026-08-26),
 `runtime/cuda_graph.cu` (17), `compute/gemm_grouped_nvfp4_smallM.cu` (14),
 `runtime/engine_graph_decode.cpp` (13),
 `exec/pre_dequant_phase3_nvfp4_decode.cu` (13).
@@ -276,7 +276,7 @@ into a captured CUDA graph (prefill and decode are both graphified).
 | `compute/gemm.cu` | algo-bench scratch | 32 MiB fixed | engine-persistent | n/a | ✗ (static) |
 | `compute/gemm_cutlass_sm120.cu` | CUTLASS fallback workspace | `GemmT::get_workspace_size(M,N,K)`, **grown lazily at GEMM time** | engine-persistent | ✗ | ✗ (static) |
 | `runtime/engine_graph_decode.cpp` | block tables, banned-token list | `max_blocks_per_seq × 4 B`, `n_banned × 4 B` | **per-request, `cudaMallocAsync`** | ✓ | ✗ |
-| `runtime/engine_scheduler.cpp` | prefill metadata (token ids, positions, block tables, ctx lens) | `chunk_len × 4 B` etc., pooled when it fits, else `cudaMallocAsync` | **per-request** | ✓ | ✗ |
+| `runtime/engine_prefill.cpp` (split from engine_scheduler.cpp 2026-08-26) | prefill metadata (token ids, positions, block tables, ctx lens) | `chunk_len × 4 B` etc., pooled when it fits, else `cudaMallocAsync` | **per-request** | ✓ | ✗ |
 | `runtime/engine_spec_*` | draft/verify staging + `spec_graphs_` | `k_max × …` per bucket | engine-persistent (invalidated) | ✓ | ✗ |
 | `vision/` | tower weights, pixel buffer, embedding buffer | `Σ tower tensors`; `image_size²·3·2 B` (mmproj) or `vision_max_patches × features × 2 B` (Qwen3-VL); `num_image_tokens × d_model × 2 B`, plus one such buffer per DeepStack tap | model-resident | ✗ | via `VRAMAllocator` |
 | `memory/layer_offload.cu` | double-buffered H2D layer staging | `2 × max_layer_bytes` | engine-persistent | ✗ | ✗ |

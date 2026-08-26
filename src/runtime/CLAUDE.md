@@ -27,7 +27,9 @@ capture, and the configuration surface everything else reads.
 ## Entry points
 
 - `engine.cpp` — lifecycle, suspend/resume, the top-level step
-- `engine_scheduler.cpp`, `scheduler.cpp` — admission and continuous batching
+- `engine_scheduler.cpp`, `scheduler.cpp` — admission and continuous batching;
+  prefill execution lives in `engine_prefill.cpp` / `engine_prefill_ragged.cpp`,
+  the pipelined batched decode in `engine_decode_pipeline.cpp`
 - `engine_kv_cache_init.cpp` — KV block geometry and pool sizing
 - `engine_graph_decode.cpp`, `cuda_graph.cu` — capture and replay
 - `config.h` / `config.cpp` — every key, with its default and rationale inline

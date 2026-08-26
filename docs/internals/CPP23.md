@@ -111,8 +111,9 @@ it can be checked by `static_assert` instead of by a test run
 is for the layers below that boundary that already returned a bool.
 
 **`std::unreachable()` is deliberately absent.** The tree has exactly two
-branches commented "statically unreachable" (`engine_scheduler.cpp:2747` and
-`:2801`), and both carry a safe fallback: log and abandon the half-enqueued
+branches commented "statically unreachable" (both in
+`engine_decode_pipeline.cpp`, split out of `engine_scheduler.cpp` 2026-08-26),
+and both carry a safe fallback: log and abandon the half-enqueued
 step, or re-run the row through the legacy collect path. Replacing a fallback
 with undefined behaviour is not a modernisation, it is a bet that the comment is
 right. `[[assume]]` is absent for the same reason.
