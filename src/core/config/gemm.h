@@ -139,6 +139,12 @@ struct GEMM {
     // producer/consumer pipeline (nvfp4_gemm_smallm_v2.cu; isolated 10.4 us
     // on M=32 N=5120 K=5120 vs v1's 23.9 and CUTLASS's 41.4 in-situ).
     int nvfp4_smallm_impl = 2;
+    // Sibling-pair launch for the v2 kernel: two weights that consume the
+    // SAME activation (FFN gate|up, GDN in|z) run as ONE launch — same CTA
+    // body, bit-identical per tensor (SmallMV2Pair gate), saves one launch's
+    // fixed cost + one tail wave per pair, 112 launches per 64-layer decode
+    // step on Qwen3.8-27B. Kill switch for A/B; requires impl 2.
+    bool nvfp4_smallm_pair = true;
     // (gemm.nvfp4_ssm_proj — the 2026-05-30 opt-in that forced GGUF-hybrid
     // GDN projections into the NVFP4 decode cache — was REMOVED 2026-07-11:
     // it had bit-rotted in the tier refactors (measured 71 tok/s vs its

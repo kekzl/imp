@@ -794,6 +794,13 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
+    // Sibling-pair small-M dispatch: both weights consume the SAME input and
+    // both route to the smallm v2 kernel — run them as one launch
+    // (gemm_nvfp4_smallm_v2_pair_a4). Returns false (and does nothing) when
+    // either weight would not take that route; the caller then issues the
+    // two gemm_via_handle_ calls it would have issued anyway.
+    bool try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
+                                   Tensor& out_a, Tensor& out_b, const GemmContext& ctx);
     // True when an M>1 dispatch of `id` is guaranteed to take the CUTLASS
     // NVFP4 prefill block in gemm_via_handle_ (which quantizes the input
     // into the shared activation scratch). Gate for the act-quant-hint

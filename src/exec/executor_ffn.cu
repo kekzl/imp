@@ -237,6 +237,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 if (n > 1 && fused_gu) {
                     // Batched gate+up: single cuBLAS call for both projections
                     gemm_pair_batched(no, *fused_gu, go, uo, stream);
+                } else if (try_smallm_pair_dispatch_(ly.w_gate_id, ly.w_up_id, no, go, uo, ctx)) {
+                    // Batched-decode sibling pair: gate and up in ONE smallm
+                    // v2 launch (same quantized activation, two weight sets).
                 } else {
                     // NVFP4-CUTLASS prefill gate/up share the normed input —
                     // gate's dispatch quantizes it into the activation

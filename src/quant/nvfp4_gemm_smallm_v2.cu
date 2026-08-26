@@ -125,25 +125,19 @@ __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], 
 
 // ---- kernel -----------------------------------------------------------------
 
-// grid = (N/kNR, stripes). Each CTA walks a contiguous stripe of K-tiles for
-// its n-tile and writes one FP32 partial plane per stripe (stripe-exclusive
-// -> deterministic reduce). Dynamic smem: kStages * kStageBytes.
+// Shared CTA body. All tensor-dependent values arrive resolved (w/y/ts/N/
+// n_base); the single-tensor and pair kernels differ only in how they resolve
+// them from blockIdx. Everything from barrier init through the epilogue is
+// identical to the shipped single-tensor kernel.
 template <int kStages>
-__global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed,
-                                            const uint8_t* __restrict__ w_scales,
-                                            const uint8_t* __restrict__ xq_packed,
-                                            const uint8_t* __restrict__ xq_scales,
-                                            float* __restrict__ ws_partials, half* __restrict__ y, float ts,
-                                            int acc_flag, int M, int N_out, int K, int stripes) {
-    extern __shared__ uint8_t smem[];
-    __shared__ uint64_t bar_full[kStages];
-    __shared__ uint64_t bar_empty[kStages];
-
+__device__ __forceinline__ void smallm_v2_cta_body(
+    const uint8_t* __restrict__ w_packed, const uint8_t* __restrict__ w_scales,
+    const uint8_t* __restrict__ xq_packed, const uint8_t* __restrict__ xq_scales,
+    float* __restrict__ ws_partials, half* __restrict__ y, float ts, int acc_flag, int M, int N_out, int K,
+    int stripes, int n_base, int stripe, uint8_t* smem, uint64_t* bar_full, uint64_t* bar_empty) {
     const int tid = threadIdx.x;
     const int warp = tid / 32;
     const int lane = tid & 31;
-    const int n_base = blockIdx.x * kNR;
-    const int stripe = blockIdx.y;
 
     if (tid == 0) {
 #pragma unroll
@@ -298,6 +292,47 @@ __global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed
     }
 }
 
+// grid = (N/kNR, stripes). Each CTA walks a contiguous stripe of K-tiles for
+// its n-tile and writes one FP32 partial plane per stripe (stripe-exclusive
+// -> deterministic reduce). Dynamic smem: kStages * kStageBytes.
+template <int kStages>
+__global__ void gemm_nvfp4_smallm_v2_kernel(const uint8_t* __restrict__ w_packed,
+                                            const uint8_t* __restrict__ w_scales,
+                                            const uint8_t* __restrict__ xq_packed,
+                                            const uint8_t* __restrict__ xq_scales,
+                                            float* __restrict__ ws_partials, half* __restrict__ y, float ts,
+                                            int acc_flag, int M, int N_out, int K, int stripes) {
+    extern __shared__ uint8_t smem[];
+    __shared__ uint64_t bar_full[kStages];
+    __shared__ uint64_t bar_empty[kStages];
+    smallm_v2_cta_body<kStages>(w_packed, w_scales, xq_packed, xq_scales, ws_partials, y, ts, acc_flag, M,
+                                N_out, K, stripes, blockIdx.x * kNR, blockIdx.y, smem, bar_full, bar_empty);
+}
+
+// Pair variant: two weight tensors sharing ONE quantized activation, one
+// launch. grid.x covers the n-tiles of W1 then W2; each CTA resolves which
+// tensor it owns and runs the shared body unchanged. stripes == 1 only (every
+// call-site N is >= 5120, where the stripe policy is 1), so there is no
+// workspace and no reduce. Saves one launch's fixed cost + one tail wave per
+// sibling pair (FFN gate|up, GDN in|z) per layer per batched-decode step.
+template <int kStages>
+__global__ void gemm_nvfp4_smallm_v2_pair_kernel(
+    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ s1, half* __restrict__ y1, float ts1,
+    int n_tiles1, int N1, const uint8_t* __restrict__ w2, const uint8_t* __restrict__ s2,
+    half* __restrict__ y2, float ts2, int N2, const uint8_t* __restrict__ xq_packed,
+    const uint8_t* __restrict__ xq_scales, int M, int K) {
+    extern __shared__ uint8_t smem[];
+    __shared__ uint64_t bar_full[kStages];
+    __shared__ uint64_t bar_empty[kStages];
+    const int nt = blockIdx.x;
+    const bool second = nt >= n_tiles1;
+    smallm_v2_cta_body<kStages>(second ? w2 : w1, second ? s2 : s1, xq_packed, xq_scales,
+                                /*ws_partials=*/nullptr, second ? y2 : y1, second ? ts2 : ts1,
+                                /*acc_flag=*/0, M, second ? N2 : N1, K, /*stripes=*/1,
+                                (second ? nt - n_tiles1 : nt) * kNR, /*stripe=*/0, smem, bar_full,
+                                bar_empty);
+}
+
 // Reduce the stripe partial planes into FP16 y, applying the combined tensor
 // scale. kAcc adds onto the existing y (o/down residual call sites, beta=1).
 template <bool kAcc>
@@ -398,6 +433,38 @@ bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& 
     if (!smallm_v2_args_ok(W, Xq, M, N_out, K, d_workspace, stripes))
         return false;
     return launch_smallm_v2<kDefaultStages>(W, Xq, y, M, N_out, K, d_workspace, stream, accumulate, stripes);
+}
+
+// Two sibling tensors (same K, same quantized activation), one launch. Only
+// the stripes==1 regime (both Ns >= 5120) — a caller with a striped shape gets
+// `false` and falls back to two single launches. No workspace, no accumulate:
+// every pair call site writes fresh outputs (beta = 0).
+bool gemm_nvfp4_smallm_v2_pair_a4(const NvFP4QuantResult& W1, const NvFP4QuantResult& W2,
+                                  const NvFP4QuantResult& Xq, half* y1, half* y2, int M, int N1, int N2,
+                                  int K, cudaStream_t stream) {
+    if (gemm_nvfp4_smallm_v2_stripes(N1, K) != 1 || gemm_nvfp4_smallm_v2_stripes(N2, K) != 1)
+        return false;
+    if (!smallm_v2_args_ok(W1, Xq, M, N1, K, /*d_workspace=*/nullptr, /*stripes=*/1) ||
+        !smallm_v2_args_ok(W2, Xq, M, N2, K, /*d_workspace=*/nullptr, /*stripes=*/1))
+        return false;
+    static const bool smem_ok = [] {
+        return cudaFuncSetAttribute(gemm_nvfp4_smallm_v2_pair_kernel<kDefaultStages>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    kDefaultStages * kStageBytes) == cudaSuccess;
+    }();
+    if (!smem_ok)
+        return false;
+    const int n_tiles1 = N1 / kNR;
+    const dim3 grid(n_tiles1 + N2 / kNR);
+    gemm_nvfp4_smallm_v2_pair_kernel<kDefaultStages><<<grid, kThreads, kDefaultStages * kStageBytes, stream>>>(
+        reinterpret_cast<const uint8_t*>(W1.packed_data), reinterpret_cast<const uint8_t*>(W1.micro_scales),
+        y1, W1.tensor_scale * Xq.tensor_scale, n_tiles1, N1,
+        reinterpret_cast<const uint8_t*>(W2.packed_data), reinterpret_cast<const uint8_t*>(W2.micro_scales),
+        y2, W2.tensor_scale * Xq.tensor_scale, N2,
+        reinterpret_cast<const uint8_t*>(Xq.packed_data), reinterpret_cast<const uint8_t*>(Xq.micro_scales),
+        M, K);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
 }
 
 // Tuning hook for the isolated sweep (tests only): explicit stage depth and

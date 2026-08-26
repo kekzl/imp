@@ -109,8 +109,12 @@ Ranked by what an agent workload notices first.
    +2.6% aggregate at 32 streams (1160.4 -> 1191.0 median, 3/3 pairs);
    the GDN-out half of the remainder was built and measured NEUTRAL
    (+0.4% over 6 trials, PR #1774 closed unmerged - the class left after
-   #1773 is under the noise floor); still open in class: elementwise,
-   gate|up single-launch. (d) cross-sequence
+   #1773 is under the noise floor). UPDATE 2026-08-27: the gate|up
+   single-launch idea is SHIPPED and generalized - `gemm.nvfp4_smallm_pair`
+   (default ON) runs FFN gate|up and GDN in|z as one sibling-pair smallm
+   launch each (112 fewer launches per step), measured +1.7% aggregate at 32
+   streams (1713.3 -> 1742.0 median, 3/3 alternating pairs positive).
+   Still open in class: elementwise. (d) cross-sequence
    prefill batching: a 32-prompt burst prefills one sequence per forward
    at ~1700 tok/s effective (launch-bound, 64 layers), so every first
    token waits 2-3.5 s; batching prefill rows the way decode batches
@@ -132,7 +136,8 @@ Ranked by what an agent workload notices first.
    +0.21%. Together with the #1765 plan fix (KV no longer collapsible to
    the one-sequence floor) the measured gap to vLLM stands at ~1.08x
    pinned. Largest remaining engine-side posts: (d) above, the
-   launch-coupled idle, and the elementwise/gate|up fusion tail.
+   launch-coupled idle, and the elementwise fusion tail (the gate|up half
+   shipped 2026-08-27 as the sibling-pair launch, see (c)).
    UPDATE 2026-08-27: the Qwen3.8 PORT roadmap is CLOSED - every item in
    docs/plans/2026-08-24-qwen38-port.md is done, answered, or closed with a
    recorded verdict (final table there). What remains in THIS file for the
