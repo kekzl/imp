@@ -386,6 +386,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                              demand.moe_slab_bytes / (1024.0 * 1024.0),
                              phase3_reserve / (1024.0 * 1024.0));
                 cutlass_sf_estimate = native_need;
+                // The reserve part is init-transient; demand.total() is the
+                // persistent slice. See weight_cache_transient_bytes.
+                budget.weight_cache_transient_bytes = phase3_reserve;
             }
         } else if (per_block_total > 0) {
             // GGUF sources the heuristic can't see: Q4_K/Q3_K weights are not
@@ -437,6 +440,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                         plan.projected_vram_bytes / (1024.0 * 1024.0),
                         heuristic / (1024.0 * 1024.0), guarantee_blocks);
                     cutlass_sf_estimate = reserve - nvfp4_estimate;
+                    // Anything the reserve holds beyond the planner's
+                    // projected persistent demand is the init-time margin.
+                    // See weight_cache_transient_bytes.
+                    budget.weight_cache_transient_bytes =
+                        reserve > plan.projected_vram_bytes ? reserve - plan.projected_vram_bytes : 0;
                 }
             }
         }
