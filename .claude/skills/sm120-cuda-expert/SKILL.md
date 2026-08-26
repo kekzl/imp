@@ -31,18 +31,24 @@ kernel looks falsely bad.
 
 **Calibrate %-of-roofline expectations against the measured baseline, not
 theory** — `tools/roofline/history/BASELINE` plus the newest report in
-`docs/audit/`. Two readings from it that change decisions: the dense NVFP4
-decode GEMV class sits at its structural ceiling (multiple levers refuted —
-see known-issues), while paged decode attention shows single-digit %-roofline
-that is *latency-bound at M=1*, so the mechanical "target 70%" there is not
-real headroom.
+`docs/archive/roofline_*.md` (note: the pinned BASELINE predates the 08-25/26
+batched-decode kernel wave). Readings that change decisions: the dense NVFP4
+decode GEMV class sits at its structural ceiling **at M=1** (multiple levers
+refuted - see known-issues), while the M<=32 GEMM class moved 613 → 388.9
+us/token via the native smallm v2 kernel (#1766) with a perfect-floor bound of
+~237 still open (per-shape 68-86% of floor, not reachable through grid
+geometry). Paged decode attention shows single-digit %-roofline that is
+*latency/L2-bound*, so the mechanical "target 70%" there is not real headroom
+(the GQA-tile variant built against it measured -9% e2e, #1785).
 
 ## The three laws
 
 1. **Decode at batch=1 is launch-overhead-bound first, memory-bound second.**
    With ~80–120 launches per layer, per-launch µs dominate once GEMM is fast.
-   Order: (a) make per-launch GEMM fast — CUTLASS sm_120 NVFP4 fast-path, not
-   the `gemm_nvfp4` dequant→cuBLAS fallback; (b) capture decode in a CUDA Graph
+   Order: (a) make per-launch GEMM fast - at M=1..32 that is the native
+   `mxf4nvf4` smallm v2 kernel (`gemm.nvfp4_smallm`, default ON, #1766) with
+   CUTLASS as the large-M path, never the `gemm_nvfp4` dequant→cuBLAS
+   fallback; (b) capture decode in a CUDA Graph
    (`CudaGraphConditionalRunner`, `src/runtime/cuda_graph.h`); (c) only then
    chase memory traffic. A faster kernel alone shows little tok/s gain — it
    *enables* the graph win. Always re-bench graphs-ON after a hot-path patch.
@@ -50,6 +56,13 @@ real headroom.
    conditional loop and costs −27–45% decode.** When adding a feature to the
    decode path, check it does not force a host sync (logprobs still does one —
    an open lever).
+
+   **Batched decode (M<=32, the serving regime) is its own regime.** Levers
+   refuted at batch=1 pay there: grid-shape work (row-block RMSNorm +6.8%,
+   #1769), launch-count fusion (shared act-quantize +4.6% #1771, producer-side
+   quantize fusion +2.6% #1773), and byte shrink on state (gdn.state_bf16
+   +12.5%, #1776). Measure such levers with a 32-stream aggregate A/B
+   (`benchmark-cuda`), never with batch=1 tok/s.
 
 2. **Occupancy is king — for reaching the roofline, not passing it.** Keep
    registers ≤48/thread for 100% occupancy. **Don't add `__launch_bounds__`**
@@ -70,9 +83,11 @@ real headroom.
 3. **Quantization type determines kernel strategy.** Q8_0 (simple dequant) →
    bandwidth-bound → row-parallel + smem-cached activations. Q6_K (complex
    dequant) → compute-influenced → K-parallel + warp-level division. NVFP4
-   prequant → must reach `StorageTier::CUTLASS_NVFP4` (SfAtom layout) for the
-   fast path; plain `StorageTier::NVFP4` falls through to slow `gemm_nvfp4`.
-   There is no universal best GEMV.
+   prequant → must reach `StorageTier::CUTLASS_NVFP4` for the large-M fast
+   path (SfAtom layout); the M<=32 smallm v2 kernel instead reads the PLAIN
+   packed bytes (`h.source_data`/`h.source_scales`) directly, so "SfAtom is
+   the fast path" only describes large M. Plain `StorageTier::NVFP4` at large
+   M falls through to slow `gemm_nvfp4`. There is no universal best GEMV.
 
 ## Paths that must stay active (verify before optimizing anything else)
 
@@ -85,16 +100,21 @@ A "slow kernel" is usually a path that fell back, not a kernel that needs work:
 - **FA2 prefill family** (`attention.fmha_fa2`, `fa2_hd256`, `fa2_fp16qk`, all
   default-on) — the prefill attention path on this chip. Other head dims decline
   to cuBLAS safely.
-- **Decode sidecars**: `gemm.fp8_ssm_proj` (GDN in/out projections),
-  `gemm.nvfp4_lm_head*`, `gemm.fp8_attn_proj` — each default-on or "auto" with a
-  measured quality trade recorded in `docs/GOAL.md`. Don't silently flip one.
+- **Decode sidecars and default-ON levers**: `gemm.nvfp4_smallm` (+
+  `nvfp4_smallm_impl=2`, the batched small-M GEMM, #1766), `gdn.state_bf16`
+  (BF16 recurrent state, +0.21% PPL by design, #1776/#1778),
+  `gemm.fp8_ssm_proj` (GDN in/out projections), `gemm.nvfp4_lm_head*`,
+  `gemm.fp8_attn_proj` - each default-on or "auto" with a measured quality
+  trade recorded. Don't silently flip one.
 - **INT8-IMMA prefill GEMM family** for GGUF. Note dense Q4_K IMMA loses to
   cuBLAS and is off by design; the win is MoE prefill.
 
 **FP8 prefill is DISABLED on sm_120** — cuBLAS FP8 returns `NOT_SUPPORTED` at
 non-aligned M (`src/runtime/engine_init_resolver.cpp`). Any plan quoting
 "+40–60% from FP8×FP8 prefill" is for another chip; prefill levers here are the
-FA2 family.
+FA2 family plus **cross-sequence ragged prefill batching**
+(`runtime.prefill_batch`, default ON, #1780: several requests' chunks in one
+ragged forward, +6.2% aggregate and TTFT p50 4.11 → 2.55 s at 32 streams).
 
 ## Shared-memory budget
 
@@ -157,4 +177,6 @@ phases, hardware FP4 saturation. It does NOT unlock `tcgen05.*` / TMEM /
 - **Repo docs**: `docs/internals/SM120.md` (hardware), `docs/internals/KERNELS.md` (kernel notes), `docs/PERF.md`
   (baselines + methodology), `docs/audit/` (roofline reports).
 - **Hot-path source**: `src/compute/` (attention, gemm, NVFP4), `src/quant/`
-  (dequant), `tools/imp-bench/`
+  (dequant + the smallm v2 GEMM `nvfp4_gemm_smallm_v2.cu` + `nvfp4_pack.cuh`),
+  `src/exec/` (GEMM dispatch `executor_gemm_dispatch.cu`, producer-fused
+  norm/swiglu+quantize), `tools/imp-bench/`

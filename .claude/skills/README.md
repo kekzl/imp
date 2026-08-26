@@ -15,7 +15,8 @@ description states when to fire AND when not to — keep that property when edit
 | [code-graph](code-graph/SKILL.md) | Querying the pre-built symbol/call graph in `.codegraph/` — who calls or launches a symbol, blast radius, dead-code candidates; the three ways its answers mislead | codebase-audit (verify before acting), sm120-cuda-expert |
 | [find-stubs](find-stubs/SKILL.md) | Is a feature actually finished — markers, AST matchers, reachability/kernel census, request fields parsed and never read, tests that assert nothing; every rung with its measured yield on imp | codebase-audit (verify before acting), code-graph |
 | [codebase-audit](codebase-audit/SKILL.md) | Structural-debt / dead-code / god-file / flag audits + the verification discipline that stops fan-out over-flagging; `docs/audit/` convention | building-and-testing, check-degeneration |
-| [docs-sync](docs-sync/SKILL.md) | Keeping architecture.md / README / docs/GOAL.md / supported-models.md / imp.conf.example / CHANGELOG coherent after a change; English-only rule | benchmark-cuda (perf), codebase-audit |
+| [docs-sync](docs-sync/SKILL.md) | Keeping ARCHITECTURE.md / README / GOAL.md / MODELS.md / imp.conf.example / CHANGELOG coherent after a change; English-only rule; the three blocking doc gates | benchmark-cuda (perf), codebase-audit, docs-layers |
+| [docs-layers](docs-layers/SKILL.md) | The four reader layers (L0-L3), frontmatter, [PROV:] provenance, SSoT map, generated perf blocks, docs_lint/citations gate mechanics, plan-doc closure conventions | docs-sync (content sync), shipping-prs (CHANGELOG/release prose) |
 | [shipping-prs](shipping-prs/SKILL.md) | PR/merge/release mechanics — branch off main, no stacking, squash + auto-merge race (`Build` required check, ruleset 14716423), version bump + CHANGELOG + tag flow | building-and-testing, docs-sync (CHANGELOG prose) |
 
 Boundaries (to avoid trigger collisions):
@@ -30,4 +31,8 @@ Audit history: [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md). Content
 dep pins in `cmake/imp-deps.cmake`, C++23/Ubuntu 26.04 toolchain, auto-armed auto-merge
 workflow, spec-ngram default-on bench confound, FA2 hd=256 arc + FP8-tile attention,
 thinking-state reconcile, MXFP4/VRAM-reserve lessons, file-size gate). Descriptions/triggers
-unchanged.
+unchanged. 2026-08-27 (full 13-skill audit against PRs ~#1479-#1786: blocking static gates
+inside `Build` (#1527/#1770/#1783), the batched-decode regime (smallm v2 #1766,
+gdn.state_bf16 #1776/#1778, producer quantize #1771/#1773, ragged prefill #1780),
+engine_scheduler split (#1782), CHANGELOG conflict cycle, ccg-enrich breakage,
+aggregate-throughput methodology; docs-layers row added).

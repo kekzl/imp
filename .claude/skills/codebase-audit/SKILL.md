@@ -47,20 +47,25 @@ written *in this file*. So:
 | "flag/symbol X is dead" | grep across **`src/ tests/ tools/`** — `tools/` IS in scope | `dump_tokens`/`force_bos`/`bench.generate` looked dead in `src/`, but are read in `tools/imp-cli/main.cpp` |
 | "config field never read" | grep the leaf field for a **value-read in a conditional**, excluding decl/parse/copy | a local var sharing the field name hides the read (`fp8_auto_legacy`) |
 | "kernel/function is dead" | trace the **call graph**, not just `<<<` sites — reachable from a live dispatch = live | `q4k_imma` *cache* was dead, but `mmq_q4k_imma_tile`/`_reorder` are LIVE via `q4k_imma_prefill → mmq_q4k_imma_gemm` (called on the fly). Only the ~30-LOC cache struct was dead, not the "~1200 LOC stack" |
-| "this file is a god-file, split it" | **split on conflation, not size**; check if the shared part is already factored | `gdn.cu`/`gemm.cu`/`sampling.cu`/`json_schema.cpp` are each one cohesive domain. The 6 `attention_paged*` variants already share `attention_paged_common.cuh` (online-softmax loop) — only dequant differs |
+| "this file is a god-file, split it" | **split on conflation, not size**; check if the shared part is already factored | `gdn.cu`/`gemm.cu`/`json_schema.cpp` are each one cohesive domain. The 7 `attention_paged*` variants already share `attention_paged_common.cuh` (online-softmax loop) - only dequant differs. Worked split precedent: `engine_scheduler.cpp` 2230 → 1291 LOC + `engine_prefill.cpp` + `engine_decode_pipeline.cpp` (#1782), split on compile-time isolation |
 | "rewrite this into a registry/template" | **no speculative abstraction** — need a concrete bug, not a smell | the `weight_map.cpp` `if (!matched)` ladder works and is readable; a mis-mapped tensor name = garbage output. Risk > cosmetic gain |
 | "imp.conf key is inert" | is it read in `src/` AND `tools/`? Is the live path the **C-API** instead? | `server.prefix_cache` etc. were parsed but unread — live enablement bridges at engine init (PR #636) |
 
 ## Workflow
 
 0. **Read the ledger first** — `docs/audit/SETTLED.md`, plus the running log for the axis
-   you are about to sweep (root `AUDIT.md` for `src/memory/`). Re-derive any brief fact the
-   hypotheses depend on. This step is what makes step 1 cheap.
+   you are about to sweep (root `AUDIT.md` for `src/memory/`;
+   `docs/audit/DEBT_LEDGER_2026_08_21.md` for the latest structural campaign - its section
+   on stale `[allow]` reasons and its "every gate is advisory" finding are the prehistory
+   of the current blocking-gate setup). Re-derive any brief fact the hypotheses depend on.
+   This step is what makes step 1 cheap.
 1. **Fan out** — Explore agents / grep to surface candidates. Breadth is fine, but a
    candidate that contradicts a `SETTLED.md` entry needs that entry's anchor disproven
    before it is worth reporting.
 2. **Verify each** with the recipe above. Demote refuted ones immediately.
-3. **Write it up** — `docs/audit/structural_debt_YYYY_MM_DD.md`, **and append the
+3. **Write it up** - a dated ledger in `docs/audit/` (recent campaigns:
+   `DEBT_LEDGER_2026_08_21.md`, `AUDIT_ARCH_2026_07_29.md`; older
+   `structural_debt_*` live in `docs/archive/`), **and append the
    refutations to `docs/audit/SETTLED.md`** with their anchors — that is what stops the
    next pass re-chasing them, and `scripts/check-release.sh` gates the anchors. Counts are
    evidence, not estimates. Keep a **"Refuted (do not re-chase)"** section so the next pass
@@ -74,13 +79,15 @@ written *in this file*. So:
 
 ## File-size gate (god-file findings go through this, not ad-hoc splits)
 
-`tools/check_filesize.py` (config: `tools/filesize_thresholds.toml`) measures **code LOC** (comments/blanks stripped) per category — kernel `.cu` warn>500/hard>600, normal TU warn>600/hard>800, header warn>500/hard>700. CI job `File size`: advisory warn step + a hard step that fails the job. **That is not the same as blocking a merge** — see the note under `Alloc sites` below. The real cost metric is *recompile blast radius* (one `.cu` = one `ptxas` TU), not line count — split on **compile-time isolation** (kernel def / host wrapper / explicit instantiations), never on size alone. A legitimately monolithic file goes into `[allow]` in the toml **with a reason** (empty reason is rejected). Baseline + per-file rationale: `docs/audit/AUDIT_FILESIZE.md`.
+`tools/check_filesize.py` (config: `tools/filesize_thresholds.toml`) measures **code LOC** (comments/blanks stripped) per category - kernel `.cu` warn>500/hard>600, normal TU warn>600/hard>800, header warn>500/hard>700. It runs BLOCKING inside the required `Build` check (see below). The real cost metric is *recompile blast radius* (one `.cu` = one `ptxas` TU), not line count - split on **compile-time isolation** (kernel def / host wrapper / explicit instantiations), never on size alone. **`[allow]` entries are `{ code_loc = N, reason = "..." }` tables and a TWO-WAY ceiling since #1526**: a listed file that drifts from its pinned `code_loc` in either direction fails; re-pin with `--update`. (Motive: 16 allowlisted files had silently outgrown their own reason, `engine_scheduler.cpp` by 83%, CI green throughout.) Baseline + per-file rationale: `docs/audit/AUDIT_FILESIZE.md`. Note the `filesize` GATE GROUP also runs `check_determinism_sites.py`, `check_dead_inline_accessors.py` and `check_log_fatal.py`; the unlaned-test pin has its own `Test lanes` check since #1770.
 
 ## Allocation-site gate (invariant I1: one module talks to the driver)
 
-`tools/check_alloc_sites.py` counts direct `cudaMalloc*`/`cudaFree*`/`cudaHostAlloc` sites outside `src/memory/` and diffs them against `tools/alloc_allowlist.txt`. CI job `Alloc sites`: advisory `--stats` step + an allowlist gate that fails the job — it fails on a new direct site *and* on a stale entry, so removing a site means updating the allowlist in the same PR.
+`tools/check_alloc_sites.py` counts direct `cudaMalloc*`/`cudaFree*`/`cudaHostAlloc` sites outside `src/memory/` and diffs them against `tools/alloc_allowlist.txt`; the `alloc` gate group also runs `tools/check_alloc_pairs.py` (allocate/free API pairing). It fails on a new direct site *and* on a stale entry, so removing a site means updating the allowlist in the same PR (#1479 tripped exactly that direction: removing the last allocation from `gdn.cu` left its entry behind).
 
-**These gates fail the JOB, not the merge.** `Build` is the only required status check (ruleset `14716423`), and auto-merge squashes the moment it goes green — so a red `Alloc sites` or `File size` lands on `main` unnoticed. It happened twice: 2026-08-17 and again on 2026-08-19, when #1479 *removed* the last allocation from `src/compute/gdn.cu` and left its allowlist entry behind. Note the direction: the failure fires when a PR removes allocations, which is the case an author never expects and reads as an unrelated flake. **Run `python3 tools/check_alloc_sites.py` and `python3 tools/check_filesize.py` locally before pushing** whenever a diff adds or deletes a `cuda*Alloc`/`cuda*Free` call or moves code between files — CI will tell you afterwards, but nothing will stop the merge. Note what it does and does not measure: it counts **source sites**, not executed allocations. A change can remove ~96% of runtime allocation traffic and leave the site count flat (the T2 slot pool did exactly that, keeping the old path as a fallback — `AUDIT.md` B34). For the runtime number, build with `-DIMP_ALLOC_INTERPOSE=ON` and read `steady_state_allocations()`; never benchmark that build (`AUDIT.md` G16).
+**These gates BLOCK the merge since #1527**: the whole static-gate list runs as the first step of the required `Build` check (`scripts/ci_static_gates.sh`), and since #1770/#1783 the same gates run locally in pre-commit and pre-push (~2 s). The paragraph this replaces described the pre-#1527 state, when a red `Alloc sites` landed on `main` twice (2026-08-17, 2026-08-19) - that mechanism gap is CLOSED; keep the history, drop the workflow. What the site gate does and does not measure: **source sites**, not executed allocations. A change can remove ~96% of runtime allocation traffic and leave the site count flat (the T2 slot pool did exactly that, keeping the old path as a fallback - `AUDIT.md` B34). For the runtime number, build with `-DIMP_ALLOC_INTERPOSE=ON` (`make check-alloc-interpose`) and read `steady_state_allocations()`; never benchmark that build (`AUDIT.md` G16).
+
+**An audit that ships a file split must run `python3 scripts/check_doc_citations.py`** - moved line numbers kill `file:line` citations across all living docs (the #1782 split cost a CI roundtrip on a `roadmap.md` citation; #1783 extended the gate). `docs/audit/` itself is excluded from that gate, so audit reports stay ungated.
 
 ## Priors — settled, do NOT re-flag
 
@@ -97,8 +104,9 @@ current verdicts in `docs/archive/housekeeping_2026_06_13.md`):
 - **Audit #5 (2026-07-07, `docs/archive/structural_debt_2026_07_07.md`)**: server layer is
   the dominant debt source → issues #888–#897 filed. Before a new pass, read that
   report's **NOT-flagged list** — re-flagging its verified negatives wastes the sweep.
-  Companion: `docs/archive/vram_audit_2026_07_07.md` (note: a `VramOwned` type does NOT
-  exist — past audits hallucinated it).
+  Companion: `docs/archive/vram_audit_2026_07_07.md`. (A `VramOwned` type was once a
+  hallucinated finding; since #1530 `src/memory/vram_owned.h` EXISTS for real - do not
+  "correct" references to it anymore.)
 - **Memory-subsystem priors (2026-07-29, `AUDIT.md`)**: the "engine teardowns leak
   ~15 GiB" finding is **REFUTED as a leak** — every CUDA-level release works
   (`mempool trim: reserved 8320->0 used 0->0`), but WSL2/WDDM never returns a

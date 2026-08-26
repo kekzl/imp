@@ -7,12 +7,12 @@ description: Use when building imp, running its test suite, checking CI status, 
 
 ## Hard rules (violations cost hours)
 
-1. **The host has NO CUDA toolkit by design.** All build/run/test happens inside Docker (`make build` → image `imp:test`, CUDA 13.3 on Ubuntu 26.04 / GCC 15.2, C++23 for host AND device — `CMAKE_CUDA_STANDARD 23` needs the shim at `CMakeLists.txt:10`). Never apt-install toolchains on the host.
+1. **The host has NO CUDA toolkit by design.** All build/run/test happens inside Docker (`make build` → image `imp:test`, CUDA 13.3 on Ubuntu 26.04 / GCC 15.2, C++23 for host AND device - `CMAKE_CUDA_STANDARD 23` needs the `CMAKE_CUDA23_STANDARD_COMPILE_OPTION` shim near the top of `CMakeLists.txt`). Never apt-install toolchains on the host.
 2. **`build/` is root-owned** (created by the container). Remove via throwaway container, never `sudo` on the host: `docker run --rm -v $PWD:/src -w /src ubuntu rm -rf build`.
 3. **Never use `--mount=type=cache`** in the Dockerfile — it silently invalidates test results.
 4. **`models/` in the repo is a symlink farm** to `$HOME/models`. Most Makefile targets mount `$(PWD)/models`, which works because Docker resolves on access — but for custom `docker run`, mount `$HOME/models:/models` directly so symlink targets resolve.
-5. **Dependency pins are single-sourced in `cmake/imp-deps.cmake`** (current: CUTLASS v4.5.2, GTest v1.17.0, nlohmann/json v3.12.0, httplib v0.48.0). `make build` extracts them and injects Docker `--build-arg`s via `scripts/dep_build_args.sh` — bump ONLY that one file; never re-pin in the Dockerfile or CMakeLists.
-6. **CI has no GPU runner.** The `Test` job is auto-skipped until repo var `HAS_GPU_RUNNER=true` — GPU correctness/perf validation is LOCAL-ONLY (`make verify-fast` before push; `make install-hooks` installs the pre-push hook). CI jobs: **`Build`** (compile + `ctest -L unit`, the only REQUIRED check — renaming it without updating ruleset "Require CI" id 14716423 leaves PRs stuck at `mergeState=BLOCKED`), `clang-tidy` (advisory), `Mock API contract`, `Lint`, `File size` (`tools/check_filesize.py` — the hard-threshold step BLOCKS; see `codebase-audit`), `Alloc sites` (`tools/check_alloc_sites.py` against `tools/alloc_allowlist.txt` — advisory `--stats` step plus a BLOCKING allowlist gate; it fails both on a new direct allocation site and on a stale allowlist entry), `Real API contract` (drives the built server in a CUDA container, gated on `build.outputs.code`), `Docs` (`scripts/sync_docs.py --check` + `scripts/docs_lint.py`), `Release hygiene` (`scripts/check-release.sh` with `SKIP_VERIFY=1`) and `Launch guards` (`tools/check_launch_guards.py`, BLOCKING).
+5. **Dependency pins are single-sourced in `cmake/imp-deps.cmake`** (CUTLASS, GTest, nlohmann/json, httplib; read the CURRENT tags there, never from a doc - they rot). `make build` extracts them and injects Docker `--build-arg`s via `scripts/dep_build_args.sh` - bump ONLY that one file; never re-pin in the Dockerfile or CMakeLists. The `Lint` CI job carries a BLOCKING dep-pin drift check (`scripts/check_dep_pins.sh --online`).
+6. **CI has no GPU runner.** The `Test` job is auto-skipped until repo var `HAS_GPU_RUNNER=true` - GPU correctness/perf validation is LOCAL-ONLY (`make verify-fast` before push; `make install-hooks` installs pre-push AND pre-commit hooks; note the pre-commit one runs the full GPU suite, ~10 min, on staged `src/`/`tests/` changes; `.md`/`.py`-only diffs skip both). **Since #1527 the static gates run as the FIRST step of `Build` and BLOCK the merge**: `bash scripts/ci_static_gates.sh` with no filter = all of filesize, lanes, alloc, launchguards, docs, citations, kernels, hygiene. CI jobs: **`Build`** (static gates, then compile + `ctest -L unit`; the only REQUIRED check - renaming it without updating ruleset "Require CI" id 14716423 leaves PRs stuck at `mergeState=BLOCKED`), `Test lanes` (unlaned-GTest pin, `tools/check_test_lanes.py`, own check name since #1770), `File size` (the `filesize` gate group: `check_filesize.py` + `check_determinism_sites.py` + `check_dead_inline_accessors.py` + `check_log_fatal.py`), `Alloc sites` (`check_alloc_sites.py` + `check_alloc_pairs.py`), `Launch guards`, `Docs` (`sync_docs.py --check` + `docs_lint.py`; the `citations` gate - `check_doc_citations.py` over all living docs - is a separate selection), `Release hygiene`, `PTX fallback`, `Sanitizers` (fuzz targets), plus advisory: `clang-tidy`, `Lint`, `Mock API contract`, `Real API contract (model-less)`.
 
 7. **`main`'s CI status is stale by default — read the PR run, not the branch.** A squash merge performed by AUTO-MERGE does not start a workflow run: it is attributed to `GITHUB_TOKEN` (auto-merge.yml arms it with that token) and GitHub does not trigger further runs from that token. A merge a human clicks does fire. Measured 2026-08-01: `main`'s newest CI run was ten commits old and still displayed seven compiler warnings that `main` no longer had — four of them were reported as live bugs off that page. Coverage is not lost (the PR run builds exactly the tree that gets squashed), but the branch's reported state can be arbitrarily old. Refresh it with `gh workflow run CI --ref main` (`workflow_dispatch`), and when judging whether something is fixed on `main`, check the PR run of the fixing commit or the file itself.
 
@@ -25,9 +25,9 @@ description: Use when building imp, running its test suite, checking CI status, 
 | Build Docker image (tests on) | `make build` | ~3.5 min regardless of diff size |
 | CPU/host unit tests | `make test-unit` | <5 s (NOT the CI lane — see below) |
 | Full GPU suite | `make test-gpu` | ~4–5 min (`test-attention` alone ~241 s) |
-| E2E model tests (real models) | `make test-e2e` | needs Qwen3-4B + Qwen3.5-4B + Gemma-4 GGUFs |
+| E2E model tests (real models) | `make test-e2e` | needs Qwen3-4B + Qwen3.5-4B + Gemma-4 GGUFs, plus `IMP_TEST_MOE_MODEL`, the Modelopt Coder FP4 and the SSM Nemotron model (see `Makefile` for exact paths) |
 | Vision goldens | `make test-vision` | `IMP_VISION_GOLDEN_DUMP=1` to regenerate |
-| Pre-push gate | `make verify-fast` | build + filtered tests + perf gate + peak-VRAM gate + graphs-ON/OFF gate + smoke. **The hook drops the perf gate** (36 s → 18 s) unless the diff touches `src/{compute,exec,quant,runtime,model}/`, a `.cu`/`.cuh`, the build definition or a baseline. Everything else keeps the correctness half, and `check-release.sh` always runs all of it. Manual skips: `IMP_VERIFY_SKIP_PERF` / `_VRAM` / `_GRAPHS=1` |
+| Pre-push gate | `make verify-fast` | build + filtered tests + perf gate + peak-VRAM gate + graphs-ON/OFF gate + smoke. **The hook first runs the static gates** (`ci_static_gates.sh filesize lanes alloc launchguards docs citations`, ~2 s, blocking; `.md`/`.py`-only pushes skip everything), then `require_free_gpu.sh`, and **drops the perf gate** (36 s → 18 s) unless the diff touches `src/{compute,exec,quant,runtime,model}/`, a `.cu`/`.cuh`, the build definition or a baseline. `check-release.sh` always runs all of it. Manual skips: `IMP_VERIFY_SKIP_PERF` / `_VRAM` / `_GRAPHS=1` |
 | Full pre-merge gate | `make verify` | ~5 min |
 | Chunked-prefill gate | `make verify-chunked` | vs `perf_baseline_chunked.json`, 5%/8% |
 | North-star gate | `make verify-north-star` | Qwen3-14B Q6_K vs its own baseline |
@@ -42,7 +42,7 @@ docker run --rm --gpus all -v $HOME/models:/models \
   imp:test imp-tests --gtest_filter="DegenerationTest.*"
 ```
 
-Test binaries in the image: `imp-tests` (full GPU), `imp-tests-unit` (CPU), plus split binaries `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e test-gdn`. Gotcha: `test_ssm.cpp` tests live in **`test-moe-gdn`**, not a binary of their own.
+Test binaries in the image: `imp-tests` (full GPU), `imp-tests-unit` (CPU), plus 8 split binaries `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e` (a `test-gdn` never existed as a target; `tests/test_gdn*.cu` build into `test-moe-gdn`). Gotcha: `tests/test_ssm.cu` tests live in **`test-moe-gdn`**, not a binary of their own.
 
 **Iterate with `make dev`, gate with `make build`.** `make build` recompiles the
 whole tree in a fresh image every time — same ~3.5 min for a one-line edit as for a
@@ -61,22 +61,24 @@ ran first: the gate can pass on code you deleted, or fail on a regression that i
 yours. Read that `SKIP build` line before believing either result — a decode failure
 against a stale image is host drift by construction, since the binary did not change.
 
-**`make test-unit` is NOT the CI lane.** It runs `imp-tests-unit` (~37 tests); CI runs `ctest -L unit` → **`test-core`** (550+) + test-text + an e2e subset. A new CPU test belongs in `test-core`, and the honest no-GPU check is `docker run --rm imp:test test-core` (no `--gpus`). Green in `imp-tests-unit` says nothing about CI.
+**`make test-unit` vs the CI lane:** `imp-tests-unit` is now GENERATED to run the same three binaries as `ctest -L unit` (**`test-core`** ~1290 GTests + `test-text` + the e2e unit filter; lane total ~1575) - the only delta is 5 shell guard tests that run in ctest only. A new CPU test belongs in `test-core`; the honest no-GPU check remains `make dev-test` (`ctest -L unit`) or `docker run --rm imp:test test-core` (no `--gpus`). Counts drift: `python3 tools/check_test_lanes.py --report` prints the current lane census.
 
 Tool binaries in the image: `imp-server`, `imp-cli`, `imp-bench`, and `imp-quantize` (offline BF16/FP16 → NVFP4 conversion, experimental — see `quant-formats`). A new tool needs BOTH a `cp` in the builder stage and a `COPY --from=builder` line in the Dockerfile, or it silently isn't in the image.
 
 ## Determinism & quality caveats
 
 - `--set runtime.deterministic=true` gives full temp=0 reproducibility (covers MoE routing atomics + top-k sampling races + implies `deterministic_gemm`). Default OFF — costs throughput. The engine promotes it process-wide since PR #542.
-- 3 `DISABLED_` tests mark known determinism boundaries (cross-context GDN, FMHA smem) — do not "fix" them by re-enabling.
+- 5 `DISABLED_` tests exist: 2 mark known determinism boundaries (cross-context GDN, FMHA smem) - do not "fix" them by re-enabling; the other 3 are benches/cost probes.
 - Qwen3.6-35B is non-deterministic at temp=0 even with full methodology — never assert exact output for it.
 - Perplexity: `imp-cli --perplexity <textfile>` (teacher-forced, chunk-aware since PR #553 — PPL absolutes from before 2026-06-06 on corpora >2k tokens were wrong; same-corpus A/B deltas remain valid).
-- `imp-cli` logs to **stdout** — strip log lines before hashing output.
-- `make sanitize` (compute-sanitizer) does NOT work on WSL2 (WDDM, no debugger interface) — native-Linux hosts only.
+- `imp-cli` logs to **stdout** - for machine consumption use `--json` (#1715: one JSON document on stdout, all human lines on stderr); only hand-strip log lines on builds predating it.
+- `make sanitize` (compute-sanitizer) does NOT work on WSL2 (WDDM, no debugger interface) - native-Linux hosts only. **`make asan` DOES work on WSL2** (host-side ASan+UBSan over `test-core`/`test-text`, suppressions in `tools/sanitizers/`).
+- `make check-alloc-interpose` builds with `-DIMP_ALLOC_INTERPOSE=ON` into its own `build-interpose/` - a measurement build, never benchmark it (reads ~3% low).
+- **A gitignored `imp.conf` in the repo root used to ride into the Docker build context** and was silently loaded by in-image runs (contaminated an nsys profile with fp8-KV pins). Fixed by `.dockerignore` (#1784) - but keep the class in mind for any new context-sensitive file.
 
 ## When the build fails
 
-- nvcc/arch errors: target is raw gencode `compute_120a/sm_120a` + optional `compute_120f` PTX fallback (`CMakeLists.txt` ~line 31). Don't "fix" by switching to generic `sm_120`/`compute_120` — see `sm120-cuda-expert`.
+- nvcc/arch errors: target is raw gencode `compute_120a/sm_120a` + optional `compute_120f` PTX fallback (`IMP_SM120_FLAGS` in `CMakeLists.txt`). Don't "fix" by switching to generic `sm_120`/`compute_120` - see `sm120-cuda-expert`.
 - `std::sort/find/max_element` etc. "not declared": libstdc++ 15 no longer includes `<algorithm>` transitively (#906) — add the missing include, don't downgrade the toolchain.
 - FetchContent mismatch vs Docker deps-clone → see hard rule 5 (bump `cmake/imp-deps.cmake` only).
 - Out-of-space: Docker images are large; prune old `imp:*` images first.
