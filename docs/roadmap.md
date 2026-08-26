@@ -124,6 +124,15 @@ Ranked by what an agent workload notices first.
    batch; auto=28 sustains full rate under continuous arrival); raising
    slots per GiB is still what the plan's item 6 (recurrent-state paging)
    would buy.
+   UPDATE 2026-08-26: the GDN-scan post itself is PAID - the FP32 scan
+   measured at this box's resident bandwidth ceiling (1527 GB/s isolated),
+   so `gdn.state_bf16` (BF16 state storage, FP32 arithmetic; default ON)
+   halves its bytes: scan 2.04x isolated, aggregate 1210.5 -> 1362.0
+   (+12.5%, KV pinned) and 842.2 -> 906.9 (+7.7%) at pure defaults, PPL
+   +0.21%. Together with the #1765 plan fix (KV no longer collapsible to
+   the one-sequence floor) the measured gap to vLLM stands at ~1.08x
+   pinned. Largest remaining engine-side posts: (d) above, the
+   launch-coupled idle, and the elementwise/gate|up fusion tail.
 
 1. **Scheduling has no per-request priority.** Nothing in the scheduler reads
    one, so a caller cannot say which request matters. `max_concurrent` bounds
