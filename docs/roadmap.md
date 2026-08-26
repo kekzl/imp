@@ -133,6 +133,13 @@ Ranked by what an agent workload notices first.
    the one-sequence floor) the measured gap to vLLM stands at ~1.08x
    pinned. Largest remaining engine-side posts: (d) above, the
    launch-coupled idle, and the elementwise/gate|up fusion tail.
+   UPDATE 2026-08-27: the Qwen3.8 PORT roadmap is CLOSED - every item in
+   docs/plans/2026-08-24-qwen38-port.md is done, answered, or closed with a
+   recorded verdict (final table there). What remains in THIS file for the
+   serving gap is engine scope, not port scope: launch-coupled idle, the
+   smallm in-class residual, recurrent-state paging (the lever for 32-way
+   concurrency at LONG context - the phase-3 criterion itself is met
+   without it), and the elementwise fusion tail.
    UPDATE 2026-08-26 (attention post priced and closed): the fresh profile
    put NVFP4 decode attention at 8.9% of kernel time, ~13x its per-launch
    DRAM floor - but the GQA-tile variant built against it measured -9% e2e
