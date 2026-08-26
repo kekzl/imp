@@ -1034,7 +1034,7 @@ Closed competitive records (kept for the record, not active work):
     | before | 851/2097 = **40.6 %** | 0/24 = **0.0 %** | 354.80, 356.54 tok/s |
     | after | 861/2097 = **41.1 %** | 590/1507, 587/1510 = **39.2 / 38.9 %** | 177.17, 175.12 tok/s |
 
-    The offline counter (`engine_scheduler.cpp:2364-2366`) scores, per eager
+    The offline counter (`engine_scheduler.cpp:1505-1508`) scores, per eager
     decode step, whether the head's depth-1 draft equals the token the main model
     then emits. The serving counter (`engine_spec_ngram.cpp:992-993`, exported
     at `tools/imp-server/metrics_memory.cpp:120-121`) counts, per verify chunk, how many of the K
