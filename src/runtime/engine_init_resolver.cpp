@@ -523,6 +523,23 @@ void Engine::init_resolve_ssm_dtype_() {
         config_.ssm_state_dtype = QType::F16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)", mcfg.ssm_state_size);
     }
+    // gdn.state_bf16: BF16 recurrent state for GDN (halves the state traffic
+    // that dominates batched decode; FP32 arithmetic in registers). Only the
+    // fused scan supports it, and only at HD=SS=128 — the executor drops the
+    // chunkwise route when the pool is BF16; ref_kernel has no BF16 kernel,
+    // so that combo keeps FP32 rather than serving a scan that corrupts.
+    if (has_gdn_for_dtype && runtime_config_.gdn.state_bf16) {
+        const int hd = (mcfg.ssm_dt_rank > 0) ? mcfg.ssm_inner_size / mcfg.ssm_dt_rank : 0;
+        if (runtime_config_.gdn.ref_kernel) {
+            IMP_LOG_WARN("gdn.state_bf16 ignored: gdn.ref_kernel has no BF16-state kernel");
+        } else if (hd != 128 || mcfg.ssm_state_size != 128) {
+            IMP_LOG_WARN("gdn.state_bf16 ignored: no BF16 kernel for HD=%d SS=%d", hd,
+                         mcfg.ssm_state_size);
+        } else {
+            config_.ssm_state_dtype = QType::BF16;
+            IMP_LOG_INFO("SSM state dtype: BF16 (gdn.state_bf16; fused scan route, chunkwise off)");
+        }
+    }
 }
 
 // Auto-detect FP8 prefill. Under runtime.debug_raw or

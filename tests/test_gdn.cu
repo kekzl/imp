@@ -1314,5 +1314,221 @@ TEST(GDNScanTest, PaddedChunkDeviceLength) {
     cudaFree(d_beta);
 }
 
+// ===========================================================================
+// BatchedDecodeScanMicrobench -- per-launch cost and achieved bandwidth of
+// the batched decode scan at Qwen3.8-27B shapes (48 v-heads, HD=SS=128,
+// 16 groups, 32 sequences, n_tokens=1). Cycles through 8 distinct state
+// slabs (~1 GB) so consecutive reps cannot serve the state from L2 — the
+// serving steady state walks 48 different layers' slabs.
+// Set IMP_GDN_MICROBENCH=1 to run.
+// ===========================================================================
+TEST(GDNScanTest, BatchedDecodeScanMicrobench) {
+    if (!std::getenv("IMP_GDN_MICROBENCH")) {
+        GTEST_SKIP() << "Set IMP_GDN_MICROBENCH=1 to run the batched decode scan probe";
+    }
+    constexpr int n_heads = 48, head_dim = 128, state_size = 128, n_groups = 16;
+    constexpr int n_seq = 32, n_tok = 1, n_slabs = 8;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    const size_t state_floats_per_seq = (size_t)n_heads * state_size * head_dim;
+    const size_t slab_floats = state_floats_per_seq * n_seq;
+
+    srand(3);
+    std::vector<float> conv_f32((size_t)n_seq * n_tok * conv_channels);
+    for (auto& v : conv_f32)
+        v = (rand() % 200 - 100) / 100.0f;
+    std::vector<half> h_alpha(n_seq * n_tok * n_heads), h_beta(n_seq * n_tok * n_heads);
+    for (auto& v : h_alpha)
+        v = __float2half((rand() % 200 - 100) / 100.0f);
+    for (auto& v : h_beta)
+        v = __float2half((rand() % 200 - 100) / 100.0f);
+    std::vector<float> h_A(n_heads, -0.5f), h_dt(n_heads, 0.5f);
+    std::vector<int> h_slots(n_seq);
+    for (int i = 0; i < n_seq; i++)
+        h_slots[i] = i;
+
+    float *d_conv, *d_A, *d_dt, *d_state;
+    half *d_alpha, *d_beta, *d_y;
+    int* d_slots;
+    ASSERT_EQ(cudaMalloc(&d_conv, conv_f32.size() * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_A, n_heads * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_dt, n_heads * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_state, (size_t)n_slabs * slab_floats * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_alpha, h_alpha.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_beta, h_beta.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y, (size_t)n_seq * n_tok * inner * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_slots, n_seq * sizeof(int)), cudaSuccess);
+    cudaMemcpy(d_conv, conv_f32.data(), conv_f32.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha.data(), h_alpha.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta.data(), h_beta.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_slots, h_slots.data(), n_seq * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemset(d_state, 0, (size_t)n_slabs * slab_floats * sizeof(float));
+
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+    constexpr int reps = 480;  // 60 "steps" of 8 slabs
+    for (int r = 0; r < 48; r++) {  // warmup one slab cycle x6
+        gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
+                                   d_state + (r % n_slabs) * slab_floats, d_slots,
+                                   (int64_t)state_floats_per_seq, d_y, n_seq, n_tok, n_heads, head_dim,
+                                   state_size, n_groups, nullptr, /*grouped_layout=*/1);
+    }
+    cudaDeviceSynchronize();
+    cudaEventRecord(e0);
+    for (int r = 0; r < reps; r++) {
+        gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
+                                   d_state + (r % n_slabs) * slab_floats, d_slots,
+                                   (int64_t)state_floats_per_seq, d_y, n_seq, n_tok, n_heads, head_dim,
+                                   state_size, n_groups, nullptr, /*grouped_layout=*/1);
+    }
+    cudaEventRecord(e1);
+    cudaEventSynchronize(e1);
+    float ms = 0;
+    cudaEventElapsedTime(&ms, e0, e1);
+    const double us_per_launch = ms * 1000.0 / reps;
+    const double state_bytes = (double)slab_floats * sizeof(float) * 2.0;  // R+W
+    const double conv_bytes = (double)n_seq * conv_channels * sizeof(float);
+    const double gbps = (state_bytes + conv_bytes) / (us_per_launch * 1e-6) / 1e9;
+    std::printf("  batched scan (48h x 32seq, FP32 state): %.2f us/launch, %.0f GB/s effective "
+                "(state R+W %.1f MB + conv %.2f MB), %.1f%% of 1792 GB/s\n",
+                us_per_launch, gbps, state_bytes / 1e6, conv_bytes / 1e6, gbps / 17.92);
+
+    // BF16-state arm: same shapes, half the state bytes.
+    __nv_bfloat16* d_state_bf16;
+    ASSERT_EQ(cudaMalloc(&d_state_bf16, (size_t)n_slabs * slab_floats * sizeof(__nv_bfloat16)),
+              cudaSuccess);
+    cudaMemset(d_state_bf16, 0, (size_t)n_slabs * slab_floats * sizeof(__nv_bfloat16));
+    for (int r = 0; r < 48; r++) {
+        gdn_scan_fused_bf16_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
+                                    d_state_bf16 + (r % n_slabs) * slab_floats, d_slots,
+                                    (int64_t)state_floats_per_seq, d_y, n_seq, n_tok, n_heads, head_dim,
+                                    state_size, n_groups, nullptr, /*grouped_layout=*/1);
+    }
+    cudaDeviceSynchronize();
+    cudaEventRecord(e0);
+    for (int r = 0; r < reps; r++) {
+        gdn_scan_fused_bf16_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
+                                    d_state_bf16 + (r % n_slabs) * slab_floats, d_slots,
+                                    (int64_t)state_floats_per_seq, d_y, n_seq, n_tok, n_heads, head_dim,
+                                    state_size, n_groups, nullptr, /*grouped_layout=*/1);
+    }
+    cudaEventRecord(e1);
+    cudaEventSynchronize(e1);
+    float ms_bf = 0;
+    cudaEventElapsedTime(&ms_bf, e0, e1);
+    const double us_bf = ms_bf * 1000.0 / reps;
+    const double state_bytes_bf = (double)slab_floats * sizeof(__nv_bfloat16) * 2.0;
+    const double gbps_bf = (state_bytes_bf + conv_bytes) / (us_bf * 1e-6) / 1e9;
+    std::printf("  batched scan (48h x 32seq, BF16 state): %.2f us/launch, %.0f GB/s effective "
+                "(state R+W %.1f MB), %.1f%% of 1792 GB/s, speedup vs FP32 %.2fx\n",
+                us_bf, gbps_bf, state_bytes_bf / 1e6, gbps_bf / 17.92, us_per_launch / us_bf);
+    cudaFree(d_state_bf16);
+
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y);
+    cudaFree(d_slots);
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+}
+
+// ===========================================================================
+// BF16StateTracksFP32State -- gdn.state_bf16 correctness: 256 DECODE steps
+// (one launch per token, so the state round-trips through storage at every
+// step — the case where BF16 precision actually bites), FP32-state arm vs
+// BF16-state arm on identical inputs. Asserts the y trajectory stays close
+// and the final states are finite and close. Catches layout/stride bugs
+// (garbage) and runaway error growth; the fine-grained quality gate is the
+// e2e battery (degen + long-context drift).
+// ===========================================================================
+TEST(GDNScanTest, BF16StateTracksFP32State) {
+    constexpr int n_heads = 48, head_dim = 128, state_size = 128, n_groups = 16;
+    constexpr int steps = 256;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    const size_t state_elems = (size_t)n_heads * state_size * head_dim;
+
+    srand(19);
+    std::vector<float> conv_all((size_t)steps * conv_channels);
+    for (auto& v : conv_all)
+        v = 0.5f * ((rand() % 200 - 100) / 100.0f);
+    std::vector<half> h_alpha(steps * n_heads), h_beta(steps * n_heads);
+    for (auto& v : h_alpha)
+        v = __float2half((rand() % 200 - 100) / 100.0f);
+    for (auto& v : h_beta)
+        v = __float2half((rand() % 200 - 100) / 100.0f);
+    std::vector<float> h_A(n_heads, -0.5f), h_dt(n_heads, 0.5f);
+
+    float *d_conv, *d_A, *d_dt, *d_state_f32;
+    __nv_bfloat16* d_state_bf16;
+    half *d_alpha, *d_beta, *d_y_f32arm, *d_y_bf16arm;
+    cudaMalloc(&d_conv, conv_all.size() * sizeof(float));
+    cudaMalloc(&d_A, n_heads * sizeof(float));
+    cudaMalloc(&d_dt, n_heads * sizeof(float));
+    cudaMalloc(&d_state_f32, state_elems * sizeof(float));
+    cudaMalloc(&d_state_bf16, state_elems * sizeof(__nv_bfloat16));
+    cudaMalloc(&d_alpha, h_alpha.size() * sizeof(half));
+    cudaMalloc(&d_beta, h_beta.size() * sizeof(half));
+    cudaMalloc(&d_y_f32arm, (size_t)inner * sizeof(half));
+    cudaMalloc(&d_y_bf16arm, (size_t)inner * sizeof(half));
+    cudaMemcpy(d_conv, conv_all.data(), conv_all.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha.data(), h_alpha.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta.data(), h_beta.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_state_f32, 0, state_elems * sizeof(float));
+    cudaMemset(d_state_bf16, 0, state_elems * sizeof(__nv_bfloat16));
+
+    double worst_rel = 0.0;
+    std::vector<half> ya(inner), yb(inner);
+    for (int t = 0; t < steps; t++) {
+        const float* conv_t = d_conv + (size_t)t * conv_channels;
+        gdn_scan_fused_f32(conv_t, conv_channels, d_alpha + t * n_heads, d_beta + t * n_heads, d_A, d_dt,
+                           d_state_f32, d_y_f32arm, 1, n_heads, head_dim, state_size, n_groups, nullptr,
+                           /*grouped_layout=*/1);
+        gdn_scan_fused_bf16(conv_t, conv_channels, d_alpha + t * n_heads, d_beta + t * n_heads, d_A, d_dt,
+                            d_state_bf16, d_y_bf16arm, 1, n_heads, head_dim, state_size, n_groups, nullptr,
+                            /*grouped_layout=*/1);
+        if (t % 32 == 31 || t == steps - 1) {
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            cudaMemcpy(ya.data(), d_y_f32arm, inner * sizeof(half), cudaMemcpyDeviceToHost);
+            cudaMemcpy(yb.data(), d_y_bf16arm, inner * sizeof(half), cudaMemcpyDeviceToHost);
+            double num = 0, den = 0;
+            for (int i = 0; i < inner; i++) {
+                const double a = __half2float(ya[i]);
+                const double b = __half2float(yb[i]);
+                ASSERT_TRUE(std::isfinite(b)) << "BF16-state y not finite at step " << t;
+                num += (a - b) * (a - b);
+                den += a * a;
+            }
+            const double rel = std::sqrt(num / (den + 1e-30));
+            worst_rel = std::max(worst_rel, rel);
+        }
+    }
+    std::printf("  BF16-state vs FP32-state y: worst relative RMS over %d decode steps = %.4f\n", steps,
+                worst_rel);
+    // BF16 has 8 mantissa bits (~0.4%% relative per round-trip); a healthy
+    // trajectory stays low single-digit %%. Garbage (layout/stride bug) is
+    // orders of magnitude above this.
+    EXPECT_LT(worst_rel, 0.05) << "BF16-state trajectory diverged";
+
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state_f32);
+    cudaFree(d_state_bf16);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y_f32arm);
+    cudaFree(d_y_bf16arm);
+}
+
 }  // namespace
 }  // namespace imp

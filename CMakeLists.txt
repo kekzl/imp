@@ -257,6 +257,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/reduce.cu
     src/compute/ssm.cu
     src/compute/gdn.cu
+    src/compute/gdn_gated_norm.cu
     src/compute/hadamard.cu
     src/compute/mmq_q4k_imma_layout.cu
     src/compute/mmq_q4k_imma_tile.cu
