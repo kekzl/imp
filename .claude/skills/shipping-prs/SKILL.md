@@ -10,10 +10,13 @@ description: Use when opening, merging, or releasing a PR for imp — branching 
 1. **Always branch off `main`; `gh pr create --base main`. NEVER stack PRs.** Squash-merge + stacking caused recovery-PR cascades. Branch from fresh `main` every time. Prefer fewer, **batched** PRs over one-per-fix.
 2. **English only in the repo.** PR title + body, commits, code comments, docs, `.md` files — all English. (Chat to the user stays German; this rule is only for what lands on GitHub.)
 3. **`main` merges are SQUASH** (each PR → one commit `… (#NNN)`). Write the PR title to be the final squash-commit subject.
-4. **The required GitHub check is named exactly `Build`** (branch ruleset id `14716423`, "Require CI"). If a CI job is renamed without updating the ruleset, every PR hangs at `mergeStateStatus=BLOCKED`. CI has **no GPU runner** — `Build` only compiles + runs CPU/mock tests. GPU correctness/perf is **your job locally** (`make verify-fast` before push).
+4. **The required GitHub check is named exactly `Build`** (branch ruleset id `14716423`, "Require CI"). If a CI job is renamed without updating the ruleset, every PR hangs at `mergeStateStatus=BLOCKED`. CI has **no GPU runner** in practice (a `Test` job exists but is skipped unless repo var `HAS_GPU_RUNNER=true`) - `Build` only compiles + runs CPU/mock tests. GPU correctness/perf is **your job locally** (`make verify-fast` before push).
 
-   **`Build` being the only required check cuts both ways: every other job can go red and the PR still merges.** Auto-merge squashes the moment `Build` is green, so `Alloc sites`, `File size`, `Docs`, `Lint` and the contract jobs are advisory *in practice* however blocking their own steps are. That put a red `Alloc sites` on `main` twice (2026-08-17, 2026-08-19). **Check `gh pr checks <n>` after the merge too, not only before** — the merge is not evidence the run was clean.
-5. **Perf- or VRAM-moving change → refresh the baseline IN THE SAME PR and say so.** Regen `tests/perf_baseline.json` via `scripts/gen_perf_baseline.sh` (see `benchmark-cuda`), and state the intended delta in the PR body. The gate is 8% decode / 8% prefill / 10% peak VRAM — the same file pins `metrics.memory_mb.own_peak_mb`, so a change that intentionally raises memory fails `verify-fast` until it is re-pinned.
+   **Since #1527 (2026-08-21) the static gates run as the FIRST step of `Build` and therefore BLOCK the merge**: `scripts/ci_static_gates.sh` (filesize, lanes, alloc, launchguards, docs, citations, kernels, hygiene) fails the required check. The old model - "everything but `Build` is advisory" - put a red `Alloc sites` on `main` twice (2026-08-17, 2026-08-19) and is why the mechanism changed. Genuinely advisory today: `Lint`, `Mock API contract`, `Real API contract (model-less)`, `clang-tidy` (reasons enumerated in `ci_static_gates.sh` header). **Check `gh pr checks <n>` after the merge too, not only before** - the merge is not evidence the run was clean.
+
+   **`Test lanes` is its own check since #1770** - the unlaned-GTest pin (`tools/check_test_lanes.py`) fires when a new GPU test lands in no CI lane. Both 2026-08-25 "File size" reds were actually this pin; read the check name, not the job you expect.
+5. **One PR at a time - every merged PR dirties every open PR via `CHANGELOG.md`** (all entries land at the top of the same `### Fixed`/`### Added` section). The resolution is trivial but the merge commit re-triggers the full pre-push gate; commit the CHANGELOG merge resolution with `git commit --no-verify` (the pre-push hook gates the same tree anyway) and land PRs serially.
+6. **Perf- or VRAM-moving change → refresh the baseline IN THE SAME PR and say so.** Regen `tests/perf_baseline.json` via `scripts/gen_perf_baseline.sh` (see `benchmark-cuda`), and state the intended delta in the PR body. The gate is 8% decode / 8% prefill / 10% peak VRAM - the same file pins `metrics.memory_mb.own_peak_mb`, so a change that intentionally raises memory fails `verify-fast` until it is re-pinned.
 
 ## The auto-merge race (this lost commit `a5403bd5` in #718 — read it)
 
@@ -33,7 +36,7 @@ gh pr merge --disable-auto <PR#|branch|url>   # FIRST, before you even write the
 # … add the change; verify GPU locally …
 make verify-fast
 git commit -am "…"   &&   git push            # land everything on the remote
-gh pr merge --auto --squash                    # re-arm LAST
+gh pr merge --auto --squash --delete-branch    # re-arm LAST (--delete-branch matches what auto-merge.yml does, #1534)
 git log -1 --stat origin/main                  # after merge: confirm your new commit is in the squash
 ```
 
@@ -67,8 +70,12 @@ which become squash subjects.
 git switch main && git pull --ff-only          # always start from fresh main
 git switch -c <topic-branch>                   # never reuse / stack
 # … work; verify GPU locally …
-make verify-fast                               # ~90s pre-push gate (build + filtered tests + perf + smoke)
+make verify-fast                               # pre-push gate (build + filtered tests + perf + smoke)
 git push -u origin <topic-branch>              # push EVERYTHING you intend to ship
+# The pre-push hook (scripts/pre-push.hook) layers its own gates BEFORE the GPU tiers:
+#   .md/.py-only pushes skip everything; then ci_static_gates.sh
+#   "filesize lanes alloc launchguards docs citations" (~2 s, blocking);
+#   then require_free_gpu.sh; the perf gate runs only when the diff matches PERF_RE.
 gh pr create --base main --title "<squash subject>" --body "<what + why + perf note>"
 # auto-merge is armed automatically on open (auto-merge.yml) — no manual step;
 # it squashes as soon as `Build` is green. After merge:
@@ -124,7 +131,7 @@ Single source of truth for the version is **`CMakeLists.txt`** `project(imp … 
 
 1. Bump `project(... VERSION X.Y.Z)` in `CMakeLists.txt`.
 2. `CHANGELOG.md`: rename the `## [Unreleased]` section to `## [X.Y.Z] - YYYY-MM-DD` (Keep-a-Changelog format; Added / Changed / Fixed). Leave a fresh empty `[Unreleased]`.
-3. `docs/BENCHMARKS.md`: update the "current: **vX.Y.Z**" line — tagged releases snapshot a SHA, so published numbers must name the release they were taken on.
+3. `docs/BENCHMARKS.md`: update the `**Toolchain (current: \`vX.Y.Z\`):**` line - `check-release.sh` parses exactly that form. Tagged releases snapshot a SHA, so published numbers must name the release they were taken on.
 4. Merge that PR (squash) as usual, then tag the merged commit on `main`: `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`. Tags are `vX.Y.Z` (e.g. `v0.18.0`). `scripts/check-release.sh` gates release-touching PRs in CI.
 5. **Publish a GitHub Release on that tag — the tag alone is not the release.** Every version back to v0.20.x has one, and it is what a reader actually sees: `gh release create vX.Y.Z --title "vX.Y.Z: <what changed, in words>" --notes-file <file> --verify-tag`. Format below. `check-release.sh` prints only `PASS make verify-fast` and swallows the gate figures, so run `make verify-fast` separately if you need to quote them.
 
@@ -162,6 +169,8 @@ Full detail: CHANGELOG · N PRs since vX.Y.(Z-1).
 | PR stuck `BLOCKED`, `Build` green | Required-check name ≠ `Build` | Realign CI job name or ruleset 14716423 |
 | Recovery-PR cascade | Stacked PRs on a squash repo | One branch per PR, always off fresh `main` |
 | Perf gate red in CI | Intentional perf change, stale baseline | Refresh `perf_baseline.json` in the same PR + note it |
+| `Build` red on a refactor that moved line numbers | `citations` gate: dead `file:line` in a living doc (#1783; the #1782 split cost a CI roundtrip on this) | `python3 scripts/check_doc_citations.py`, fix citations in the same PR |
+| Open PR suddenly conflicted after another PR merged | CHANGELOG conflict cycle (hard rule 5) | Resolve, commit `--no-verify`, land PRs serially |
 | German in PR/commit/docs | Global German default leaked into repo | English only in the repo |
 
 ## Red flags — STOP

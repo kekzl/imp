@@ -17,10 +17,22 @@ paragraph into the wrong layer is the most common defect here, and it is what
 3. **A claim needs a code path; a number needs provenance.** What cannot be
    backed is *deleted*, not softened. "experimental", "partial" and "planned"
    are not rescue words.
-4. **Records are not documentation.** Archives, audit ledgers, the roadmap, the
-   journal, BENCHMARKS: append-only, excluded from the linter, never rewritten.
-   A record is a statement about one dated afternoon.
+4. **Records are not documentation.** Excluded from the linter: `CHANGELOG.md`,
+   `docs/MISSION_JOURNAL.md`, `docs/vram_audit.md`, root `AUDIT.md`,
+   `docs/roadmap.md`, plus the prefixes `docs/archive/`, `docs/audit/`,
+   `docs/plans/`. Append-only, never rewritten; a record is a statement about
+   one dated afternoon. Two nuances: `docs/BENCHMARKS.md` IS linted (it sits on
+   the PROV-header allowlist, not the exclusion list), and `docs/roadmap.md`,
+   though lint-excluded, is drift-gated by `check_doc_citations.py` (#1772)  - 
+   dead `path:line` citations and renamed bare doc names fail there.
 5. **English in the repo.** German only in chat.
+6. **`file:line` citations in ANY living doc are gated** (#1783):
+   `scripts/check_doc_citations.py` covers all 33 living docs (`docs/*.md`,
+   `docs/internals/*.md`, root README/CONTRIBUTING/AGENTS/AUDIT). Cite a path,
+   not a bare basename; after any refactor that moves line numbers, re-run it.
+   It is the `citations` selection in `ci_static_gates.sh` - NOT part of the
+   `docs` selection, so the `Docs` CI job does not run it; `Build`,
+   pre-commit and pre-push do. Records are excluded.
 
 ## The layers
 
@@ -29,7 +41,7 @@ paragraph into the wrong layer is the most common defect here, and it is what
 | L0 | first contact, knows LLMs not CUDA | `README.md` | nothing |
 | L1 | operators: deploy, configure, diagnose | `docs/*.md` | Docker, HTTP, quant basics |
 | L2 | kernel work | `docs/internals/*.md` | PTX, MMA, occupancy, roofline |
-| L3 | AI agents | `CLAUDE.md` per directory | only what the file says |
+| L3 | AI agents | `CLAUDE.md` per directory (+ root `AGENTS.md`, same allowlist) | only what the file says |
 
 **Smell test:** if a paragraph in L0 or L1 uses `mma.sync`, `TMA`, `splitk` or
 "NVFP4 block scaling" without explaining it, it belongs in L2.
@@ -43,12 +55,18 @@ header is for the linter; the reader must not meet it.
 
 ```markdown
 <!--
-layer: L1            # L0 | L1 | L2 | L3
-audience: operators  # newcomers | operators | kernel-devs | agents
-verified: 2026-08-13 # last content verification
-commit: <sha8>       # what it was verified against
+layer: L1            # L0 | L1 | L2 | L3   (hard error if missing/invalid)
+audience: operators  # newcomers | operators | kernel-devs | agents (hard error)
+verified: 2026-08-13 # last content verification (staleness warning only)
+commit: <sha8>       # what it was verified against (hard error if missing)
 -->
 ```
+
+The `commit:` field also powers a drift warning ("edited Nx since the commit it
+says it was verified against", #1683) - **bump `verified:`/`commit:` whenever
+you edit the file's content**, or the lint flags it. The legacy `---` YAML form
+is still ACCEPTED by the linter (so old files are never silently unchecked),
+but new files use the HTML comment.
 
 Do **not** convert `.claude/skills/*/SKILL.md` or `.github/ISSUE_TEMPLATE/*.md`:
 their YAML frontmatter is functional, parsed by the skill loader and by GitHub.
@@ -63,7 +81,7 @@ Nothing outside the owning file states these. Everything else links.
 | what exists, with status | `docs/FEATURES.md` |
 | what does not, or is untested | `docs/LIMITATIONS.md` |
 | what is absent on purpose | `docs/DESIGN_DECISIONS.md` |
-| what `sm_120a` has and lacks | `docs/internals/ARCHITECTURE.md`, **once** |
+| what `sm_120a` has and lacks | `docs/internals/ARCHITECTURE.md` (the linter allowlists the whole `docs/internals/` prefix; the ownership rule is this table's, stricter than the gate) |
 
 The delimitation rule earns its own line: "no tcgen05 / TMEM / wgmma" once stood
 in eight files, and a reader could not tell which was maintained. L2 docs may
@@ -89,8 +107,11 @@ Every throughput figure in L0/L1 carries:
 
 ```
 [PROV: commit=<sha7> date=<YYYY-MM-DD> hw=RTX5090 model=<name> quant=<fmt>
-       cuda=13.3 path=<dispatch> cmd=<command> n=<runs>]
+       cuda=<ver> path=<dispatch> cmd=<command> n=<runs>]
 ```
+
+(The generator emits `unknown` for fields the baseline lacks (#1684) - hand-
+written blocks fill in real values, never copy `unknown`.)
 
 Severity follows the layer, deliberately: **fails** the build in L0/L1, **warns**
 in L2. In L2 a number is usually the result of the experiment the paragraph
@@ -119,14 +140,18 @@ drift apart.
 ## Before you push
 
 ```
-python3 scripts/sync_docs.py --check
-python3 scripts/docs_lint.py
+bash scripts/ci_static_gates.sh docs citations   # what the hooks run (~2 s)
 ```
 
-Both run in CI as the **Docs** job. The seven checks: forbidden tokens,
-unprovenanced numbers, frontmatter, generated drift, dead links, size budgets
-(README ≤ 400 lines, root `CLAUDE.md` ≤ 2000 tokens, per-directory ≤ 800),
-staleness > 180 days (warning → `docs/audit/docs-rewrite/STALE.md`).
+The pre-commit and pre-push hooks run this automatically (#1783). The `Docs` CI
+job runs the `docs` selection; the SAME gates also run unfiltered as the first
+step of the required `Build` check, so a docs-gate failure surfaces as `Build`
+red. The eight lint checks: forbidden tokens, unprovenanced numbers,
+frontmatter, generated drift, dead links, size budgets (README ≤ 400 lines,
+root `CLAUDE.md` ≤ 2000 tokens, per-directory ≤ 800), staleness > 180 days
+(warning → `docs/audit/docs-rewrite/STALE.md`), and refs-generator listing
+(every `tests/refs/gen_*.py` needs a row in `tests/refs/README.md`, #1730).
+The linter respects `.gitignore` (#1698), so scratch dirs do not flood it.
 
 ## Adding a doc
 
@@ -153,7 +178,18 @@ Fixed section order, ≤ 800 tokens:
 ```
 
 **No perf numbers in any `CLAUDE.md`** — only a link to `PERF.md`, or there is a
-second truth nobody maintains.
+second truth nobody maintains. (The gate is softer than the rule: L3 downgrades
+unprovenanced numbers to a warning, and the root `CLAUDE.md` carries one such
+number today - the rule is what you WRITE to, the gate is a floor.)
+
+## Plan docs (`docs/plans/`)
+
+`docs/plans/YYYY-MM-DD-<topic>.md` are lint-exempt RECORDS with no frontmatter.
+Closure convention (#1786): an item in the work table is closed by
+`~~strikethrough~~` plus one of `DONE <date> (#PR)` / `MEASURED` / `ANSWERED` /
+`REFUTED` / `CLOSED <date> (<reason>)`, with the acceptance cell rewritten to
+the standing evidence; a finished plan gets a terminal `## ROADMAP CLOSED
+(<date>)` section. Items are closed, never deleted.
 
 ## The audit trail
 
@@ -171,9 +207,11 @@ reason), `OPEN_QUESTIONS.md`, `ONBOARDING_RUN.md`, `AGENT_EVAL.md`. Append to
 - **Duplication is the signal that an entry is too long.** If you just wrote the
   explanation in `docs/` or a PR body and are writing it again, the second copy
   is wrong-sized, not the first.
-- **A stale code comment outranks nothing.** `engine_init_resolver.cpp:565` says
-  prefill is never graph-captured; the default is `true`. Check the value, not
-  the comment.
+- **A stale code comment outranks nothing.** `engine_init_resolver.cpp` carries
+  a "prefill is never graph-captured" comment while the default is `true`.
+  Check the value, not the comment. (This skill file itself is outside the
+  citation gate's scope - its own `file:line` pointers rot silently, prefer
+  path-only citations here.)
 - **Run the documented command before documenting it.** The onboarding run found
   that `/v1/messages` returns a `thinking` block at `content[0]`, so a client
   reading `content[0].text` sees nothing. No error, no test, and it was missing
