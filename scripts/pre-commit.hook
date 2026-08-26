@@ -18,6 +18,19 @@ set -uo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# Cheap static gates FIRST, before any early exit: an allowlist-pin drift or a
+# dead doc citation used to surface at push time (or in CI), after this hook's
+# ~10-minute Docker build + suite had already run — three amend/rerun cycles
+# on 2026-08-26 alone. Placed BEFORE the buildable-source check on purpose:
+# the #1782 citation red was a docs-only drift, exactly the commit class the
+# early exit below skips. ~2 s, source-independent, so it costs nothing here.
+if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
+    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes alloc launchguards docs citations; then
+        echo "pre-commit: static gates failed (see above) - fix or commit --no-verify" >&2
+        exit 1
+    fi
+fi
+
 # The path prefix says WHERE, not WHETHER: `tools/` and `tests/` also hold
 # Markdown (the CLAUDE.md tree) and Python (the gates and generators), and
 # neither reaches the compiler or the suite - no test in tests/ shells out to a

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Verify `path:line` and bare `*.md` citations in a doc still resolve.
+"""Verify `path:line` and bare `*.md` citations in the LIVING docs resolve.
 
-docs/roadmap.md is deliberately excluded from docs_lint.py (it is a record, and
-stripping it for provenance blocks would destroy that record) — so nothing
-checks it at all. The two drift classes that costs are mechanical:
+Default scope (since 2026-08-26): docs/roadmap.md plus every doc under docs/
+and docs/internals/ and the root docs — records (docs/archive/, docs/plans/,
+docs/audit/) are excluded because their line numbers describe the commit they
+document. The two drift classes that cost are mechanical:
 
   * a `src/foo.cpp:1234` citation whose file has since shrunk, or whose lines
     moved, so the reader lands on unrelated code;
@@ -50,13 +51,39 @@ def check(doc, root):
             bad.append(f"{m.group(1)} — referenced file does not exist")
     return bad, ambiguous
 
+def living_docs(root):
+    """Every doc whose citations must stay live. Records are excluded on
+    purpose: docs/archive/, docs/plans/ and docs/audit/ cite the line numbers
+    of the commit they describe, and rewriting those would destroy the record
+    (same reason docs_lint.py excludes roadmap.md)."""
+    import glob
+    docs = [os.path.join(root, "docs/roadmap.md")]
+    docs += sorted(glob.glob(os.path.join(root, "docs/*.md")))
+    docs += sorted(glob.glob(os.path.join(root, "docs/internals/*.md")))
+    for extra in ("README.md", "CONTRIBUTING.md", "AGENTS.md", "AUDIT.md"):
+        p = os.path.join(root, extra)
+        if os.path.exists(p):
+            docs.append(p)
+    seen, out = set(), []
+    for d in docs:
+        rp = os.path.realpath(d)
+        if rp not in seen:
+            seen.add(rp)
+            out.append(d)
+    return out
+
+
 if __name__ == "__main__":
     root = sys.argv[1] if len(sys.argv) > 1 else "."
-    doc = sys.argv[2] if len(sys.argv) > 2 else os.path.join(root, "docs/roadmap.md")
-    bad, ambiguous = check(doc, root)
-    for b in sorted(set(bad)):
-        print("  DEAD      " + b)
-    for a in sorted(set(ambiguous)):
-        print("  AMBIGUOUS " + a)
-    print(f"{'FAIL' if bad else 'PASS'}: {len(set(bad))} dead citation(s) in docs/roadmap.md")
-    sys.exit(1 if bad else 0)
+    docs = [sys.argv[2]] if len(sys.argv) > 2 else living_docs(root)
+    total_bad = 0
+    for doc in docs:
+        bad, ambiguous = check(doc, root)
+        rel = os.path.relpath(doc, root)
+        for b in sorted(set(bad)):
+            print(f"  DEAD      {rel}: {b}")
+        for a in sorted(set(ambiguous)):
+            print(f"  AMBIGUOUS {rel}: {a}")
+        total_bad += len(set(bad))
+    print(f"{'FAIL' if total_bad else 'PASS'}: {total_bad} dead citation(s) across {len(docs)} living doc(s)")
+    sys.exit(1 if total_bad else 0)

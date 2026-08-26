@@ -91,7 +91,7 @@ rather than from a measurement:
   counter never wraps, so the prompt is 0..511 strictly increasing.
 - Every 6-gram in a strictly increasing sequence of distinct ids is unique.
 - The drafter is prompt-lookup over `input + prediction + output` with
-  `speculative.min_match = 6` (`src/core/dispatch_policy.h:714`).
+  `speculative.min_match = 6` (`src/core/config/speculative.h:169`).
 
 So the prompt contributes **zero** matches by construction, and any draft that
 exists came from the **generation**. Under `ignore_eos` a synthetic counting
@@ -172,7 +172,7 @@ It is a cold-start effect rather than a property of the model. On a single
 1024-token request the same checkpoint accepts **104 of 288, 36.1 %, at 6.78
 tokens per verify**: prompt-lookup has nothing to match against until the
 generation is long enough, and a 128-token bench rep is entirely cold start. The
-economics guard meant to catch this (`engine_spec_ngram.cpp:1200`) cannot: it
+economics guard meant to catch this (`engine_spec_ngram.cpp:175`, the long-context economics guard) cannot: it
 arms on `spec_verifies >= 8` **per request**, and a 128-token request produces
 about one verify.
 

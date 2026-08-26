@@ -150,7 +150,7 @@ four alternating pairs on Qwen3-4B-IQ4_NL, `tg128` tok/s:
 Medians 273.4 off / 280.6 on — the arms are separated by less than the off arm's
 own spread (10.9 %), and `on` wins three pairs of four. So on this shape the
 "slower but reproducible" note above overstates it: **the decode cost is below
-this host's noise floor.** Prefill is deliberately not quoted — `docs/BENCHMARKING.md`
+this host's noise floor.** Prefill is deliberately not quoted — `docs/internals/BENCHMARKING.md`
 rules it out as an A/B signal, and split-k reduction is exactly where a cost
 would be most plausible, so "no measurable cost" is a statement about decode on
 one model, not a general one.

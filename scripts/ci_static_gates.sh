@@ -114,6 +114,16 @@ if want docs; then
     run "doc lint (layers, provenance, links)"  python3 scripts/docs_lint.py
 fi
 
+# Own group: a file:line citation in a living doc dies the moment a TU is
+# split or shrinks, and until 2026-08-26 this surfaced only in CI (the #1782
+# scheduler split cost a full CI roundtrip on a roadmap.md citation the
+# pre-push never checked). Cheap (<0.5 s), hermetic, covers roadmap.md plus
+# every living doc; records (archive/, plans/, audit/) stay excluded.
+if want citations; then
+    echo "== Doc citations =="
+    run "file:line citations in living docs"    python3 scripts/check_doc_citations.py .
+fi
+
 if want hygiene; then
     echo "== Release hygiene =="
     run "check-release.sh without the GPU gate" env SKIP_VERIFY=1 bash scripts/check-release.sh
