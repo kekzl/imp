@@ -133,6 +133,13 @@ Ranked by what an agent workload notices first.
    the one-sequence floor) the measured gap to vLLM stands at ~1.08x
    pinned. Largest remaining engine-side posts: (d) above, the
    launch-coupled idle, and the elementwise/gate|up fusion tail.
+   UPDATE 2026-08-26 (later): (d) is SHIPPED — `runtime.prefill_batch`
+   (default on) runs the prefill chunks of several admitted requests as
+   one ragged forward (GEMM class over concatenated rows, attention +
+   GDN conv per-seq, GDN scan via the #1779 row-offset table). 32-stream
+   burst, 4 waves x 3 alternating trials/arm: aggregate 977.3 -> 1038.2
+   tok/s median (+6.2%, all 12 ON waves above all 12 OFF waves), TTFT
+   p50 4.11 -> 2.55 s, p90 4.18 -> 3.57 s. Details in the plan doc.
 
 1. **Scheduling has no per-request priority.** Nothing in the scheduler reads
    one, so a caller cannot say which request matters. `max_concurrent` bounds

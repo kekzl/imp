@@ -708,6 +708,12 @@ private:
     void bind_mrope_(InferenceState& state, int n_tokens, int32_t*& buf, int& cap, bool fixed,
                      cudaStream_t stream);
     // The prompt's own (t, h, w) rows for one prefill chunk.
+    // Ragged prefill: concatenate the per-request M-RoPE axis rows of K
+    // chunks into one [3, total_rows] device array (engine_qwen3vl.cpp).
+    void bind_mrope_prefill_ragged_(InferenceState& state,
+                                    const std::vector<std::shared_ptr<Request>>& reqs,
+                                    const std::vector<int>& offsets, const std::vector<int>& lens,
+                                    int total_rows, cudaStream_t stream);
     void bind_mrope_prefill_(InferenceState& state, const Request& req, int offset, int chunk_len,
                              cudaStream_t stream);
     // One token per request: its position plus that request's continuation
@@ -1322,6 +1328,21 @@ private:
 
     // Process one prefill request (called from step_prefill).
     void step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk, cudaStream_t stream);
+
+    // ── Cross-sequence ragged prefill (runtime.prefill_batch, roadmap 0(d)) ──
+    // Model/engine-level gate (lazily probes the layer stack once: Mamba2 and
+    // MLA are out of scope, GDN requires the fused batched scan route).
+    bool prefill_ragged_enabled_();
+    // Per-request gate: vision, embeddings, rerank scoring, logprobs and
+    // constrained decoding keep the serial path.
+    bool prefill_ragged_req_ok_(const Request& req) const;
+    // Concatenate the next chunk of each request into one ragged forward
+    // (capped at effective_chunk total rows); requests that do not fit stay in
+    // sched_prefill_batch_ for the next step. Implementation:
+    // engine_prefill_ragged.cpp.
+    void step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, int effective_chunk,
+                              cudaStream_t stream);
+    int prefill_ragged_model_ok_ = -1;  // lazy probe: -1 unknown, 0 no, 1 yes
 
     // Process all decode requests in sched_decode_batch_.
     void step_decode(cudaStream_t stream);

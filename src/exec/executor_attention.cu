@@ -514,7 +514,47 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     }
 
     if (state.is_prefill && !state.chunk_decode_attn) {
+        // Prefill attention for ONE sequence's rows. The body is the
+        // historical inline dispatch block, now parameterized on per-sequence
+        // geometry so the ragged cross-sequence path can loop it: `n` rows
+        // starting at `row_begin` in the shared workspaces, query offset
+        // `q_offset`, and (ragged only) flat per-seq block table + positions
+        // for the KV write. Non-ragged callers pass bt_flat = nullptr, which
+        // keeps write_kv_cache on its historical default path.
+        auto prefill_attend_seq = [&](int n, int q_offset, int row_begin, Tensor qv, Tensor kk,
+                                      Tensor vv, Tensor ao, const int* layer_block_tables,
+                                      const int* bt_flat, const int* bt_swa_flat,
+                                      const int* seq_positions) {
 #include "exec/executor_attention_prefill.cu"
+        };
+        if (state.ragged_prefill()) {
+            // Ragged cross-sequence prefill: loop the per-seq dispatch over
+            // row sub-ranges. QKV projection / QK-norm / RoPE above already
+            // ran row-wise over the concatenation.
+            const size_t es_r = dtype_size(compute_dtype_);
+            for (int s = 0; s < state.n_sequences; ++s) {
+                const int rb = state.h_seq_offsets[s];
+                const int ns = state.h_seq_offsets[s + 1] - rb;
+                if (ns <= 0)
+                    continue;
+                auto seq_view = [&](const Tensor& t, int64_t cols) -> Tensor {
+                    int64_t shape[2] = {static_cast<int64_t>(ns), cols};
+                    char* p = static_cast<char*>(t.data) +
+                              static_cast<size_t>(rb) * cols * es_r;
+                    return Tensor(p, t.qtype, 2, shape, true);
+                };
+                const int* bt_s = state.block_tables + static_cast<size_t>(s) * state.max_blocks_per_seq;
+                prefill_attend_seq(ns, state.h_seq_q_offsets[s], rb,
+                                   seq_view(qv, static_cast<int64_t>(nh) * hd),
+                                   seq_view(kk, static_cast<int64_t>(nkv) * hd),
+                                   seq_view(vv, static_cast<int64_t>(nkv) * hd),
+                                   seq_view(ao, static_cast<int64_t>(nh) * hd), bt_s, bt_s,
+                                   /*bt_swa_flat=*/nullptr, state.positions + rb);
+            }
+        } else {
+            prefill_attend_seq(n, state.prefill_offset, 0, qv, kk, vv, ao, layer_block_tables,
+                               /*bt_flat=*/nullptr, /*bt_swa_flat=*/nullptr, /*seq_positions=*/nullptr);
+        }
     } else {
 #include "exec/executor_attention_decode.cu"
     }

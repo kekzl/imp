@@ -959,7 +959,14 @@ private:
     bool layer_has_dense_ffn(int layer) const;
 
     // Write computed K/V into KV cache blocks
-    void write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream);
+    // Default call (row_begin=0, n_rows=-1, null overrides) is the historical
+    // behavior. The ragged-prefill per-seq loop passes a row range into the
+    // shared k_/v_ workspaces plus FLAT per-seq block tables and a positions
+    // pointer for that range; overrides force single-sequence kernel indexing
+    // (max_blocks_per_seq=0) and skip the residual write-through.
+    void write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream, int row_begin = 0,
+                        int n_rows = -1, const int* bt_flat = nullptr, const int* bt_swa_flat = nullptr,
+                        const int* positions_override = nullptr);
 
     // Create a Tensor view of the first n_tokens rows of a max_tokens buffer.
     Tensor view_tokens(const Tensor& buf, int n_tokens) const;

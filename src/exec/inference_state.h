@@ -100,6 +100,21 @@ struct InferenceState {
     const int* seq_offsets =
         nullptr;  // [n_sequences+1] for ragged prefill token offsets (optional, nullptr for decode)
 
+    // Cross-sequence ragged prefill (roadmap 0(d)): the rows of this forward
+    // are the CONCATENATED prefill chunks of n_sequences requests. Row-wise
+    // work (GEMMs, norms, elementwise, RoPE via per-row positions) runs over
+    // all rows in one launch; attention and the GDN conv drop to a per-seq
+    // loop over [h_seq_offsets[i], h_seq_offsets[i+1]); the GDN scan takes
+    // `seq_offsets` (the device twin of h_seq_offsets) with ssm_seq_slots.
+    // h_seq_offsets != nullptr is the activation condition; the engine only
+    // sets it with n_sequences > 1, is_prefill, and none of the excluded
+    // per-request features (vision, MTP, spec-verify, logprobs, constraints,
+    // ppl capture, SWA sizing, residual KV).
+    const int* h_seq_offsets = nullptr;    // HOST [n_sequences+1] row prefix sums
+    const int* h_seq_q_offsets = nullptr;  // HOST [n_sequences] per-seq prefill_offset
+    const int* h_ssm_slots = nullptr;      // HOST [n_sequences] recurrent-state slots
+    bool ragged_prefill() const { return is_prefill && n_sequences > 1 && h_seq_offsets != nullptr; }
+
     // Mode
     bool is_prefill = true;
     // Absolute position of state.positions[0] within the full sequence.

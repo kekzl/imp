@@ -1,11 +1,14 @@
 // Prefill attention dispatch block for GraphExecutor::run_attention.
 //
-// This is NOT a standalone translation unit — it is textually #include'd inside
-// the body of GraphExecutor::run_attention (executor_attention.cu), inside the
-// `if (state.is_prefill) { ... }` branch. It is therefore omitted from the CMake
-// source list and must not be compiled on its own. The contents are byte-for-
-// byte the original inline block; see executor_attention.cu for surrounding
-// context and local variables in scope (including the `after_attention` label).
+// This is NOT a standalone translation unit — it is textually #include'd as
+// the body of the `prefill_attend_seq` lambda inside
+// GraphExecutor::run_attention (executor_attention.cu). It is therefore
+// omitted from the CMake source list and must not be compiled on its own.
+// Per-sequence geometry (n, q_offset, row_begin, the qv/kk/vv/ao row views,
+// layer_block_tables, bt_flat/bt_swa_flat/seq_positions for the KV write)
+// arrives as lambda parameters; everything else is captured by reference from
+// run_attention. `return` ends this sequence's attention (the lambda call
+// site falls through to the `after_attention` label).
         // Chunked prefill: when prefill_offset > 0, queries from this chunk must
         // attend to past chunks K/V already in the paged cache. Gather past
         // [0, prefill_offset) KV → contiguous, append current chunk, then run
@@ -15,7 +18,6 @@
         // loops". Acknowledged exception — chunked prefill is excluded from CUDA-graph
         // capture (graphs only capture decode), so the alloc is amortised in the
         // memory pool and runs once per chunk per layer, not per token.
-        const int q_offset = state.prefill_offset;
         if (q_offset > 0) {
             KVCache* cache = state.kv_cache;
             QType kvt = cache->qtype();
@@ -131,7 +133,7 @@
             bool paged_kv_written = false;
             if (!cap_replay && kvt == QType::NVFP4 && hd == 128 && shapes_uniform && !attn_sinks &&
                 state.n_sequences == 1 && runtime_config().attention.mxfp4_paged_kv) {
-                write_kv_cache(layer, state, stream);
+                write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
                 paged_kv_written = true;
                 int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
                 int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
@@ -146,7 +148,7 @@
                         kv_bs, ctx_len, nkv, scale, /*causal=*/true, layer_sliding_window,
                         cfg.attn_logit_softcap, stream, q_offset,
                         runtime_config().attention.mxfp4_promote_budget)) {
-                    goto after_attention;
+                    return;
                 }
                 // Declined: the gather below covers only [0, q_offset) and the
                 // fresh-FP16 append fills the current chunk — correct even
@@ -359,8 +361,8 @@
             // Persist current chunk's K/V (same as non-chunked path).
             // Skipped when the paged-FP4 branch already appended it above.
             if (!paged_kv_written)
-                write_kv_cache(layer, state, stream);
-            goto after_attention;
+                write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
+            return;
         }
 
         // Prefill dispatch (post-Phase-2 + Phase-5 Track D):
@@ -464,4 +466,4 @@
         }
 
         // Persist K, V into cache for later decode steps
-        write_kv_cache(layer, state, stream);
+        write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
