@@ -583,8 +583,8 @@ void Engine::step_prefill(cudaStream_t stream) {
     int resolved    = resolve_prefill_chunk_size_();
     int effective_chunk = (resolved > 0) ? resolved : executor_->max_tokens();
     // Hard cap: chunk size must never exceed the executor's max_tokens
-    // (which is itself capped to 256 for SSM/GDN+MoE hybrids and 512 for
-    // dense GDN to bound workspace VRAM). Without this clamp, a server-side
+    // (which is itself capped to 2048 for SSM/GDN hybrids to bound workspace
+    // VRAM — executor_workspace.cu:252). Without this clamp, a server-side
     // prefill_chunk_size default (handlers.cpp) would overflow the
     // workspace and crashes with `n_tokens (X) exceeds max_tokens (Y)` →
     // `terminate: reshape: numel mismatch` on long prompts to e.g. Qwen3.6.
@@ -654,26 +654,43 @@ void Engine::step_prefill(cudaStream_t stream) {
     size_t ran = 0;
     // Cross-sequence ragged prefill (runtime.prefill_batch): eligible requests
     // are collected and run as ONE ragged forward after the loop; ineligible
-    // ones keep the serial path. Selection order, budget charging and the
-    // rotor are identical either way.
+    // ones keep the serial path. Selection order, budget accounting and the
+    // rotor are identical either way, with one pricing difference: the
+    // 256-token launch-cost floor is charged once per FORWARD, so ragged
+    // members charge their real chunk tokens (the group shares one launch
+    // set; a 30-row continuation tail priced at 256 was measured burning a
+    // whole engine step per 2-3 tails on a 32-stream burst). The step's
+    // inserted latency still scales with total rows, which the token budget
+    // continues to bound.
     const bool ragged_mode = prefill_ragged_enabled_();
     std::vector<std::shared_ptr<Request>> ragged_batch;
+    bool ragged_floor_charged = false;
     for (size_t i = 0; i < budget; i++) {
         auto& req = sched_prefill_batch_[(start + i) % n_prefill];
         // Charge from the PRE-call remaining: step_prefill_one advances
         // prefill_offset, so reading it afterwards undercharges any chunk
         // that does not finish the prompt.
         const int remaining = static_cast<int>(req->input_tokens.size()) - req->prefill_offset;
-        const int charge = std::max(kPrefillForwardFloorTokens,
-                                    std::min(std::max(remaining, 0), effective_chunk));
+        const int chunk_tokens = std::min(std::max(remaining, 0), effective_chunk);
+        const bool rides_ragged = ragged_mode && prefill_ragged_req_ok_(*req);
+        int charge;
+        if (rides_ragged) {
+            charge = (ragged_floor_charged || chunk_tokens >= kPrefillForwardFloorTokens)
+                         ? chunk_tokens
+                         : kPrefillForwardFloorTokens;
+        } else {
+            charge = std::max(kPrefillForwardFloorTokens, chunk_tokens);
+        }
         // `budgeted`, not `token_budget > 0`: an exhausted budget must break,
         // not disarm the check (that bug ran the whole batch after charge 4).
         if (budgeted && ran > 0 && charge > token_budget)
             break;
-        if (ragged_mode && prefill_ragged_req_ok_(*req))
+        if (rides_ragged) {
             ragged_batch.push_back(req);
-        else
+            ragged_floor_charged = true;
+        } else {
             step_prefill_one(req, effective_chunk, stream);
+        }
         kv_manager_->touch(req->id);
         ran++;
         sched_prefill_last_id_ = req->id;
