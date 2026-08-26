@@ -356,6 +356,69 @@ TEST(VramBudgetReserve, NativeCacheDemandZeroForNonPrequant) {
     EXPECT_EQ(d.moe_slab_bytes, 0u);
 }
 
+// #1765 regression: the TRANSIENT init headroom folded into the weight-cache
+// estimate (phase3 reserve, max(total/10, floor) + margin) must not be
+// charged against KV in the shadow plan. Fed whole, the plan granted the
+// "optional caches" everything above the one-sequence floor and collapsed
+// the KV pool to 128 blocks while GiBs sat free. The engine now feeds
+// estimate - transient; the old feeding is kept in the test as the contrast
+// arm so the assertion cannot pass vacuously.
+TEST(VramBudgetReserve, TransientReserveDoesNotStarveTheKvPlan) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_prequant_model(m);
+
+    EngineConfig config;
+    config.max_seq_len = 4096;
+    config.max_batch_size = 32;
+    config.use_nvfp4_decode = 2;
+    config.use_cuda_graphs = false;
+    config.kv_cache_dtype = QType::F16;
+
+    // Sized so BOTH demands fit, but residual-minus-floor is SMALLER than
+    // the transient reserve: the pre-fix feeding must visibly starve KV
+    // while the fixed feeding still grants the full want.
+    const size_t free_vram = 8704ull * 1024 * 1024;
+    VRAMBudget live = compute_vram_budget(m, config, /*n_kv_layers=*/8, /*head_dim=*/128, free_vram);
+    ASSERT_GT(live.weight_cache_transient_bytes, 0u)
+        << "native-NVFP4 branch did not fold a transient reserve — the fixture no longer "
+           "exercises the #1765 shape";
+    ASSERT_LT(live.weight_cache_transient_bytes, live.weight_cache_estimate_bytes);
+
+    ShadowPlanProbe probe;
+    probe.distributable_bytes = free_vram;
+    probe.mandatory_cache_bytes = live.mandatory_sf_bytes + live.mandatory_moe_bytes;
+    probe.ssm_state_bytes = live.ssm_footprint_bytes;
+    probe.library_reserve_bytes = kMeasuredLibraryReserveBytes;
+    probe.n_kv_layers = 8;
+    probe.max_batch_size = 32;
+    probe.max_seq_len = 4096;
+    probe.kv_block_size = 16;
+    probe.min_kv_tokens = config.min_kv_tokens;
+    probe.kv_block_bytes_per_layer =
+        kv_block_bytes_per_layer(config.kv_cache_dtype, 16, m.config().n_kv_heads, 128);
+
+    const int want_blocks = ((4096 + 15) / 16) * 32;
+
+    // The engine's feeding since the fix: steady-state demand only.
+    probe.weight_cache_demand = live.weight_cache_estimate_bytes - live.weight_cache_transient_bytes;
+    const PlanResult fixed = plan_memory(shadow_plan_input(probe));
+    ASSERT_TRUE(fixed.ok);
+    EXPECT_EQ(fixed.plan.kv.blocks, want_blocks)
+        << "KV plan collapsed toward the one-sequence floor with " << fixed.plan.kv.blocks
+        << " blocks against a want of " << want_blocks;
+
+    // Contrast arm: the pre-fix feeding reproduces the collapse.
+    probe.weight_cache_demand = live.weight_cache_estimate_bytes;
+    const PlanResult old_way = plan_memory(shadow_plan_input(probe));
+    if (old_way.ok) {
+        EXPECT_LT(old_way.plan.kv.blocks, want_blocks)
+            << "the transient charge no longer starves the plan — if this is deliberate, "
+               "the estimate/transient split may be removable";
+    }
+}
+
 TEST(VramBudgetReserve, PreallocCoversDemandAndFreesKv) {
     SKIP_IF_NO_CUDA();
 

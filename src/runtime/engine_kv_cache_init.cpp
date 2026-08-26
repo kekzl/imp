@@ -244,7 +244,14 @@ bool Engine::init_kv_cache() {
     {
         ShadowPlanProbe probe;
         probe.distributable_bytes = effective_free_vram();
-        probe.weight_cache_demand = vram_budget.weight_cache_estimate_bytes;
+        // Steady-state demand only: the transient init headroom folded into
+        // the estimate is free again by the time the pool is sized, and
+        // charging it here handed the "optional caches" everything down to
+        // the one-sequence floor — 128 KV blocks while GiBs sat free (#1765).
+        probe.weight_cache_demand =
+            vram_budget.weight_cache_estimate_bytes > vram_budget.weight_cache_transient_bytes
+                ? vram_budget.weight_cache_estimate_bytes - vram_budget.weight_cache_transient_bytes
+                : 0;
         probe.mandatory_cache_bytes =
             vram_budget.mandatory_sf_bytes + vram_budget.mandatory_moe_bytes;
         probe.ssm_state_bytes = vram_budget.ssm_footprint_bytes;
