@@ -144,7 +144,7 @@ def main():
     # 1007 -> 1008 (#1769): LayerNormTest.RMSNormRowBlockDecodeShapes, the
     # row-block batched-decode RMSNorm against the CPU reference on three
     # decode shapes - needs a GPU.
-    PINNED = 1013
+    PINNED = 1014
 
     text = CMAKE.read_text()
     mods = module_sources(text)

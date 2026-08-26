@@ -21,12 +21,17 @@ namespace imp {
 // Batched scan over N independent sequences (concurrent decode). Tokens within
 // a sequence stay sequential; sequences parallelise across blockIdx.y. See the
 // launcher comment in gdn.cu for the layout contract.
+// seq_row_offsets (optional): prefix sums [n_seq+1] into CONCATENATED row
+// arrays for a RAGGED batch (cross-sequence prefill batching, roadmap 0(d))
+// - sequence i owns rows [off[i], off[i+1]) and n_tokens is ignored per-seq.
+// d_real_n must be nullptr when ragged (single-sequence contract).
 void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const half* alpha,
                                 const half* beta, const float* A_log, const float* dt_bias,
                                 float* h_state_pool, const int* seq_slots, int64_t h_state_seq_stride,
                                 half* y, int n_seq, int n_tokens, int n_heads, int head_dim_ssm,
                                 int state_size, int n_groups, cudaStream_t stream,
-                                int grouped_layout = 0, const int* d_real_n = nullptr);
+                                int grouped_layout = 0, const int* d_real_n = nullptr,
+                                const int* seq_row_offsets = nullptr);
 
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
@@ -44,7 +49,8 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
                                  __nv_bfloat16* h_state_pool, const int* seq_slots,
                                  int64_t h_state_seq_stride, half* y, int n_seq, int n_tokens, int n_heads,
                                  int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                                 int grouped_layout = 0, const int* d_real_n = nullptr);
+                                 int grouped_layout = 0, const int* d_real_n = nullptr,
+                                 const int* seq_row_offsets = nullptr);
 void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,

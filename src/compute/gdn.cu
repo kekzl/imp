@@ -64,11 +64,22 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     // blockIdx.x. Tokens within one sequence stay sequential, which is the part
     // that genuinely cannot batch.
     const int* __restrict__ seq_slots = nullptr,
-    int64_t h_state_seq_stride = 0) {
+    int64_t h_state_seq_stride = 0,
+    // Ragged batch (cross-sequence prefill batching, roadmap 0(d)): prefix
+    // sums [n_seq+1] into the CONCATENATED row arrays. Sequence `seq` owns
+    // rows [off[seq], off[seq+1]); n_tokens is ignored per-seq. Uniform
+    // batches pass nullptr and keep the seq * n_tokens rebase, byte-for-byte.
+    // d_real_n is a single-sequence contract and must be nullptr when ragged.
+    const int* __restrict__ seq_row_offsets = nullptr) {
     const int h = blockIdx.x;
     if (h >= n_heads)
         return;
     const int seq = blockIdx.y;
+    size_t seq_row0 = static_cast<size_t>(seq) * n_tokens;
+    if (seq_row_offsets) {
+        seq_row0 = static_cast<size_t>(seq_row_offsets[seq]);
+        n_tokens = seq_row_offsets[seq + 1] - seq_row_offsets[seq];
+    }
     // SPLIT partners are ADJACENT lanes (d = tid / SPLIT), so the cross-partner
     // reductions below are a warp shuffle rather than a shared-memory round.
     const int d = (SPLIT == 1) ? static_cast<int>(threadIdx.x) : static_cast<int>(threadIdx.x) / SPLIT;
@@ -96,10 +107,10 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     if (seq_slots) {
         h_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(h_state_seq_stride);
     }
-    conv_f32 += static_cast<size_t>(seq) * n_tokens * conv_channels;
-    alpha_all += static_cast<size_t>(seq) * n_tokens * n_heads;
-    beta_all += static_cast<size_t>(seq) * n_tokens * n_heads;
-    y_out += static_cast<size_t>(seq) * n_tokens * inner;
+    conv_f32 += seq_row0 * conv_channels;
+    alpha_all += seq_row0 * n_heads;
+    beta_all += seq_row0 * n_heads;
+    y_out += seq_row0 * inner;
     const int BC_size = n_groups * SS;
     const float scale = rsqrtf(static_cast<float>(HD));
 
@@ -342,9 +353,12 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
                                 float* h_state_pool, const int* seq_slots, int64_t h_state_seq_stride,
                                 half* y, int n_seq, int n_tokens, int n_heads, int head_dim_ssm,
                                 int state_size, int n_groups, cudaStream_t stream, int grouped_layout,
-                                const int* d_real_n) {
+                                const int* d_real_n, const int* seq_row_offsets) {
     if (n_seq <= 0)
         return;
+    if (seq_row_offsets && d_real_n)
+        throw std::runtime_error(
+            "gdn_scan_fused_f32_batched: d_real_n is a single-sequence contract - nullptr when ragged");
     dim3 grid(n_heads, n_seq);
     if (head_dim_ssm == 128 && state_size == 128) {
         // SPLIT=2: two threads per state column. At SS=128 one-thread-per-column
@@ -371,14 +385,14 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
         gdn_scan_fused_kernel<128, 128, half, SPLIT><<<grid, 128 * SPLIT, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
             conv_channels, grouped_layout, d_real_n, static_cast<float*>(nullptr), nullptr, seq_slots,
-            h_state_seq_stride);
+            h_state_seq_stride, seq_row_offsets);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         const size_t smem = (2 * 64 + 64) * sizeof(float);
         gdn_scan_fused_kernel<64, 64, half><<<grid, 64, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
             conv_channels, grouped_layout, d_real_n, static_cast<float*>(nullptr), nullptr, seq_slots,
-            h_state_seq_stride);
+            h_state_seq_stride, seq_row_offsets);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         IMP_LOG_ERROR("gdn_scan_fused_f32_batched: unsupported head_dim=%d state_size=%d", head_dim_ssm,
@@ -394,9 +408,12 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
                                  __nv_bfloat16* h_state_pool, const int* seq_slots,
                                  int64_t h_state_seq_stride, half* y, int n_seq, int n_tokens, int n_heads,
                                  int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                                 int grouped_layout, const int* d_real_n) {
+                                 int grouped_layout, const int* d_real_n, const int* seq_row_offsets) {
     if (n_seq <= 0)
         return;
+    if (seq_row_offsets && d_real_n)
+        throw std::runtime_error(
+            "gdn_scan_fused_bf16_batched: d_real_n is a single-sequence contract - nullptr when ragged");
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_bf16_batched: no kernel for HD=" +
                                  std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
@@ -406,7 +423,7 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
     gdn_scan_fused_kernel<128, 128, half, SPLIT, __nv_bfloat16><<<grid, 128 * SPLIT, smem, stream>>>(
         conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups, conv_channels,
         grouped_layout, d_real_n, static_cast<__nv_bfloat16*>(nullptr), nullptr, seq_slots,
-        h_state_seq_stride);
+        h_state_seq_stride, seq_row_offsets);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
