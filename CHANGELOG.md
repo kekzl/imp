@@ -13,6 +13,17 @@ there instead of retelling it.
 
 ### Fixed
 
+- **Ragged prefill members no longer pay the 256-token launch floor each.**
+  The prefill token budget charged every request in a ragged group
+  max(256, chunk) although the group shares one launch set; 30-70-row
+  continuation tails burned a whole engine step per 2-3 tails. The floor is
+  now charged once per forward. 32-stream burst at defaults: aggregate
+  975.9 -> 1001.3 tok/s median (+2.6%, 3/3 alternating trial pairs), TTFT
+  p90 -0.2 s. For burst-shaped workloads `prefill_chunk_decode_cap=4096`
+  buys more (measured 1111-1128 tok/s, TTFT p90 2.5-2.6 s) at the cost of
+  the streamer inter-token bound the 1024 default protects; see the
+  config.h note.
+
 - **A 32-stream burst no longer starves its own tail.** Three defects, one
   per layer, found by tracing per-request arrival and first-prefill times:
   the HTTP worker pool was sized to cores (cpp-httplib default max(8,

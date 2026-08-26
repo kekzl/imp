@@ -146,6 +146,14 @@ struct RuntimeConfig {
         // reach this, while the knob that merely CAPS it - the line below - had
         // a key. A CLI value wins over the file.
         int prefill_chunk_size = -1;
+        // Burst-heavy serving note (2026-08-26, Qwen3.8-27B-NVFP4, 32-stream
+        // burst with ragged prefill): this cap paces the post-wave-start
+        // prefill to ~2 prompts per engine step; raising it to 4096 measured
+        // aggregate 1004-1048 -> 1111-1128 tok/s and TTFT p90 3.5-3.7 ->
+        // 2.5-2.6 s (0 = off is equivalent). The default stays 1024 because
+        // it bounds a concurrent STREAMER's inter-token gap during another
+        // session's large ingest (the #1643 measurement) — raise it when the
+        // workload is burst-shaped rather than mixed.
         int prefill_chunk_decode_cap = 1024;
         // Cap the NUMBER of prefill chunk forwards per engine step while other
         // sequences are DECODING (#1643). The size cap above bounds ONE chunk;
