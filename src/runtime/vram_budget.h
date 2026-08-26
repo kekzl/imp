@@ -69,6 +69,15 @@ struct VRAMBudget {
     // exposed so plan_memory() can be fed the SAME demand figure and the two
     // allocation policies compared like for like (A7 step 2b).
     size_t weight_cache_estimate_bytes = 0;
+    // The TRANSIENT slice of the estimate above: init-time headroom the
+    // phase-0..3 builders re-derive for themselves (max(total/10, floor) +
+    // margin) that is free again by the time the KV pool is sized. The live
+    // pass needs it inside the estimate (it protects cache builds from the
+    // KV backstop); the steady-state shadow plan must NOT charge it against
+    // KV — doing so granted the "optional caches" everything down to the
+    // one-sequence floor and collapsed the pool to 128 blocks while GiBs sat
+    // free (#1765).
+    size_t weight_cache_transient_bytes = 0;
     // Batch-shaped SSM/GDN state footprint charged as overhead (0 on
     // non-recurrent models). Same reason as above.
     size_t ssm_footprint_bytes = 0;
