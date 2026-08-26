@@ -103,3 +103,20 @@ These bugs were diagnosed at high cost. The current kernels assume the fix is in
 - **`reinterpret_cast` on Q8_0 blocks.** 34-byte blocks NOT 4-aligned. Use `memcpy()`.
 - **Skipping graph re-bench after a hot-path patch.** Compute speedup alone often shows ~0% in tok/s — the win is graph-replay-mediated. Always re-bench graphs ON.
 - **Increasing SMEM beyond `cudaDeviceProp::sharedMemPerBlockOptin`** assuming H100's 228 KB. RTX 5090 max is ~99 KB.
+
+## NVFP4 paged decode attention: GQA-tile sharing REFUTED (2026-08-26)
+
+The scalar NVFP4 decode kernel re-reads each KV block once per Q head (6x at
+24Q/4KV) and profiles ~13x above its per-launch DRAM floor — which reads like
+the classic GQA-sharing lever, and the FP16/FP8 twins both carry the variant.
+Built for NVFP4 (branch `perf/nvfp4-gqa-decode`, shared-FP16-tile block per
+(seq, kv_head), numerically exact) and measured **-9% e2e** at 32-stream
+serving (9/9 waves below, 3 alternating trials/arm). Mechanism: one layer's
+KV across 32 seqs is ~42 MB against the 96 MB L2 — the re-reads are L2 hits,
+the tile removes traffic that never reached DRAM, and it costs occupancy
+(64 KiB smem = 1 block/SM; grid batch x n_kv_heads = 128 blocks on 170 SMs
+vs the scalar's batch x n_heads = 768). Rule that generalizes: **before
+building a traffic-sharing variant, check whether the shared working set
+already fits L2** — "x-over-DRAM-floor" is not headroom when the traffic is
+L2-served. `kv_cache.bitdecoding_qk` (NVFP4 TC QK) measured -5% on the same
+harness; both defaults stay off by measurement.

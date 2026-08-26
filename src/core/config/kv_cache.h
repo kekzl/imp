@@ -42,7 +42,13 @@ struct KVCache {
     // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
     // Only meaningful with kv_cache.dtype = "nvfp4" + kv_cache.bitdecoding_qk.
     int bitdecoding_residual_tokens = 0;
-    // BitDecoding TC path for NVFP4 paged attention QK.
+    // BitDecoding TC path for NVFP4 paged attention QK. Default off, and
+    // since 2026-08-26 that is a measured verdict, not just caution: on the
+    // 32-stream Qwen3.8-27B-NVFP4 burst (3 alternating trials/arm) the TC
+    // path reads 954-997 tok/s aggregate against the scalar kernel's
+    // 1009-1050 (~-5%). See docs/plans/2026-08-24-qwen38-port.md, "NVFP4
+    // decode attention" - the same section records the refuted GQA-tile
+    // variant (branch perf/nvfp4-gqa-decode).
     bool bitdecoding_qk = false;
     // Growable KV pool: reserve address space for the pool the configuration
     // asked for, commit physical memory for what the card can spare right now,

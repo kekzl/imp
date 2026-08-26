@@ -133,6 +133,14 @@ Ranked by what an agent workload notices first.
    the one-sequence floor) the measured gap to vLLM stands at ~1.08x
    pinned. Largest remaining engine-side posts: (d) above, the
    launch-coupled idle, and the elementwise/gate|up fusion tail.
+   UPDATE 2026-08-26 (attention post priced and closed): the fresh profile
+   put NVFP4 decode attention at 8.9% of kernel time, ~13x its per-launch
+   DRAM floor - but the GQA-tile variant built against it measured -9% e2e
+   (9/9 waves, branch perf/nvfp4-gqa-decode): one layer's KV across 32 seqs
+   (~42 MB) fits the 96 MB L2, so the scalar kernel's per-Q-head re-reads
+   are L2 hits and there is no traffic to save; the kernel is
+   L2-latency-bound at full grid parallelism. bitdecoding_qk measured -5%
+   on the same harness (first recorded verdict). Details in the plan doc.
    UPDATE 2026-08-26 (later): (d) is SHIPPED — `runtime.prefill_batch`
    (default on) runs the prefill chunks of several admitted requests as
    one ragged forward (GEMM class over concatenated rows, attention +
