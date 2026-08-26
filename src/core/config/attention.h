@@ -90,6 +90,19 @@ struct Attention {
     // the keeper). Also gates the FP8-KV deterministic-cuBLAS skip for
     // hd=256 models (engine_init_resolver fa2_serves_attention).
     bool fa2_hd256 = true;
+    // GQA-aware NVFP4 paged decode - MEASURED AND REFUTED 2026-08-26, kept
+    // as an opt-in record. The smem-tile variant (one block per (seq,
+    // kv_head), KV dequantized once for all Q heads) is numerically exact
+    // (pair max_rel 1.5e-5 vs the scalar kernel, oracle envelope held) and
+    // e2e SLOWER: 32-stream burst on Qwen3.8-27B-NVFP4 reads 935-961 tok/s
+    // against the scalar kernel's 1022-1054 (9/9 waves below 9/9, 3
+    // alternating trials/arm, -9%). Mechanism: at serving shapes one
+    // layer's KV across 32 seqs is ~42 MB - it fits the 96 MB L2, so the
+    // scalar kernel's n_q_per_kv re-reads are L2 hits and the "6x DRAM
+    // traffic" the variant removes never reached DRAM; the tile buys
+    // nothing and costs occupancy (64 KiB smem = 1 block/SM, grid
+    // batch x n_kv_heads = 128 blocks on 170 SMs vs the scalar's 768).
+    bool nvfp4_gqa = false;
     // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680). The
     // raw conversion is the #511 quality cliff; scaling Q and K to the
     // full e4m3 range is the numerics class FlashInfer runs. Only

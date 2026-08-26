@@ -67,6 +67,7 @@ void process_diag_set_cublas_fp16_acc(bool v);
 bool process_diag_attention_splitk_pipe();
 bool process_diag_attention_fp8_tile();
 bool process_diag_attention_fp8_tile_gqa();
+bool process_diag_attention_nvfp4_gqa();
 bool process_diag_fa2_f16acc();  // f16-accumulate QK^T in the fp16-qk FA2 kernel (#597)
 bool process_diag_fa2_pv_f16acc();  // f16-accumulate the PV MMA too (#667 follow-up)
 // test hooks (mirror process_diag_set_cublas_fp16_acc)
@@ -81,6 +82,7 @@ void process_diag_set_fp8_qk_scaled(bool v);
 // split-K result without provoking a real cudaErrorInvalidValue. Default off.
 bool process_diag_force_splitk_fallback();
 void process_diag_set_force_splitk_fallback(bool v);
+void process_diag_set_attention_nvfp4_gqa(bool v);  // test hook (GQA-vs-scalar A/B)
 // "auto" | "always" | "never" (default "auto"); attention_mxfp4_available()
 // only enables MXFP4 attention when mode == "always".
 const std::string& process_diag_attention_mxfp4_mode();

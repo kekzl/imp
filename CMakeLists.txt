@@ -219,6 +219,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_int8.cu
     src/compute/attention_paged_int4.cu
     src/compute/attention_paged_nvfp4.cu
+    src/compute/attention_paged_nvfp4_gqa.cu
     src/compute/attention_paged_nvfp4_tc.cu
     # src/compute/attention_paged_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/compute/attention_blackwell.cu

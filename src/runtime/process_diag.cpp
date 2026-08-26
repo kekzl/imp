@@ -36,6 +36,7 @@ struct ProcessDiag {
     bool attention_splitk_pipe = true;
     bool attention_fp8_tile = true;
     bool attention_fp8_tile_gqa = true;
+    bool attention_nvfp4_gqa = false;  // matches the config.h default (measured -9%, see attention.h)
     bool attention_fa2_f16acc = true;     // matches the config.h default
     bool attention_fa2_pv_f16acc = true;  // matches the config.h default
     bool attention_fa2_hd256 = true;  // matches the config.h default (on since #932)
@@ -112,6 +113,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.attention_splitk_pipe = cfg.attention.splitk_pipe;
     d.attention_fp8_tile = cfg.attention.fp8_tile;
     d.attention_fp8_tile_gqa = cfg.attention.fp8_tile_gqa;
+    d.attention_nvfp4_gqa = cfg.attention.nvfp4_gqa;
     d.attention_fa2_f16acc = cfg.attention.fa2_f16acc;
     d.attention_fa2_pv_f16acc = cfg.attention.fa2_pv_f16acc;
     d.attention_fa2_hd256 = cfg.attention.fa2_hd256;
@@ -157,6 +159,7 @@ void process_diag_set_deterministic_gemm(bool v) { slot().deterministic_gemm = v
 bool process_diag_attention_splitk_pipe() { return slot().attention_splitk_pipe; }
 bool process_diag_attention_fp8_tile() { return slot().attention_fp8_tile; }
 bool process_diag_attention_fp8_tile_gqa() { return slot().attention_fp8_tile_gqa; }
+bool process_diag_attention_nvfp4_gqa() { return slot().attention_nvfp4_gqa; }
 bool process_diag_fa2_f16acc() { return slot().attention_fa2_f16acc; }
 bool process_diag_fa2_pv_f16acc() { return slot().attention_fa2_pv_f16acc; }
 void process_diag_set_fa2_f16acc(bool v) { slot().attention_fa2_f16acc = v; }
@@ -167,6 +170,7 @@ bool process_diag_fp8_qk_scaled() { return slot().attention_fp8_qk_scaled; }
 void process_diag_set_fp8_qk_scaled(bool v) { slot().attention_fp8_qk_scaled = v; }
 bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
 void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
+void process_diag_set_attention_nvfp4_gqa(bool v) { slot().attention_nvfp4_gqa = v; }
 const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }
 bool process_diag_mxfp4_blockscale() { return slot().mxfp4_blockscale; }
 bool process_diag_mxfp4_ksmooth() { return slot().mxfp4_ksmooth; }

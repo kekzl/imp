@@ -49,6 +49,19 @@ void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cach
 // GQA-batched tile variant: one block per KV head computes all G Q heads from a
 // shared smem tile (L2 KV traffic /G). Grid.y = n_kv_heads; the launcher's split
 // count should be raised accordingly (see paged_attention_decode_fp8).
+// GQA-aware NVFP4 decode (attention_paged_nvfp4_gqa.cu): one block per
+// (seq, kv_head) dequantizes each KV block into a shared FP16 tile once and
+// serves all Q heads of the group from it (KV traffic / n_q_per_kv).
+// Non-split-K regime only; launch returns false when the smem opt-in fails
+// (caller keeps the per-Q-head kernel).
+bool paged_attention_gqa_nvfp4_supported(int head_dim, int n_heads, int n_kv_heads);
+bool paged_attention_gqa_nvfp4_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
+                                      const uint8_t* K_scales, const uint8_t* V_scales, half* O,
+                                      const int* block_tables, const int* context_lens, int batch_size,
+                                      int n_heads, int n_kv_heads, int head_dim, int block_size, float scale,
+                                      int max_context_len, int max_num_blocks, int sliding_window,
+                                      float softcap, const half* attn_sinks, cudaStream_t stream);
+
 bool paged_attention_splitk_fp8_tile_gqa_supported(int head_dim, int block_size, int n_heads,
                                                    int n_kv_heads);
 int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int n_kv_heads, int head_dim,

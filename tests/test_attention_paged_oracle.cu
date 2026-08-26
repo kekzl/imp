@@ -813,5 +813,92 @@ TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
     cudaStreamDestroy(stream);
 }
 
+
+// ---------------------------------------------------------------------------
+// GQA-aware NVFP4 decode vs the per-Q-head scalar kernel (2026-08-26).
+//
+// attention.nvfp4_gqa dispatches one block per (seq, kv_head) that dequantizes
+// each KV block into a shared FP16 tile once and serves every Q head of the
+// group. Same quant grid, same dequant arithmetic, different reduction order
+// (token round-robin across warps_per_q vs whole-block-per-warp) - the two
+// kernels must agree to rounding, and both must sit inside the frozen NVFP4
+// envelope vs the fp64 reference. Shapes cover the production hot shape
+// (24q/4kv hd=256, Qwen3.8) and the oracle's gqa32x8 hd=128; kv_len 333 is
+// the non-block-aligned partial-tail case.
+// ---------------------------------------------------------------------------
+TEST(PagedNvfp4Gqa, MatchesScalarKernelAndReference) {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    struct Shape { int nh, nkv, hd; };
+    for (Shape s : {Shape{24, 4, 256}, Shape{32, 8, 128}}) {
+        ASSERT_TRUE(paged_attention_gqa_nvfp4_supported(s.hd, s.nh, s.nkv));
+        for (int kv_len : {16, 64, 333, 1024}) {
+            SCOPED_TRACE(::testing::Message() << "nh=" << s.nh << " nkv=" << s.nkv << " hd=" << s.hd
+                                              << " kv_len=" << kv_len);
+            const float scale = 1.0f / std::sqrt((float)s.hd);
+            const int num_blocks = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            const size_t q_elems = (size_t)s.nh * s.hd;
+            const size_t kv_elems = (size_t)kv_len * s.nkv * s.hd;
+
+            const uint32_t seed = 0x60A04u;
+            std::vector<half> Qh(q_elems), Kh(kv_elems), Vh(kv_elems);
+            lcg_fill(Qh, seed + 1, 2.0f);
+            lcg_fill(Kh, seed + 2, 2.0f);
+            lcg_fill(Vh, seed + 3, 1.0f);
+
+            std::vector<double> ref;
+            ref_decode_f64(Qh, Kh, Vh, ref, kv_len, s.nh, s.nkv, s.hd, scale);
+
+            std::vector<int> bt(num_blocks);
+            for (int i = 0; i < num_blocks; i++) bt[i] = i;
+            int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
+            int ctx = kv_len;
+            int* d_ctx = (int*)up(&ctx, sizeof(int));
+            void* d_q = up(Qh.data(), q_elems * sizeof(half));
+            void* d_o = nullptr;
+            cudaMalloc(&d_o, q_elems * sizeof(half));
+
+            PathCtx c{stream, kv_len, s.nh, s.nkv, s.hd, num_blocks, scale, q_elems, &Kh, &Vh, &ref,
+                      f16_tensor(d_q, {1, 1, s.nh, s.hd}), d_o, d_bt, d_ctx};
+
+            process_diag_set_attention_nvfp4_gqa(true);
+            ErrStats e_gqa = PathNVFP4::run(c);
+            std::vector<float> o_gqa = read_o(d_o, q_elems);
+
+            process_diag_set_attention_nvfp4_gqa(false);
+            ErrStats e_scalar = PathNVFP4::run(c);
+            std::vector<float> o_scalar = read_o(d_o, q_elems);
+            process_diag_set_attention_nvfp4_gqa(true);
+
+            EXPECT_EQ(e_gqa.nan_count, 0) << "GQA kernel produced non-finite output";
+            EXPECT_LT(e_gqa.max_rel, PathNVFP4::envelope()) << "GQA vs fp64: " << e_gqa.str();
+            EXPECT_LT(e_scalar.max_rel, PathNVFP4::envelope()) << "scalar vs fp64: " << e_scalar.str();
+
+            float max_rel = 0.0f;
+            for (size_t i = 0; i < q_elems; i++) {
+                float a = o_gqa[i], b = o_scalar[i];
+                float d = std::fabs(a - b) / std::max(1.0f, std::fabs(b));
+                max_rel = std::max(max_rel, d);
+            }
+            EXPECT_LT(max_rel, 5e-3f) << "GQA vs scalar kernel diverged (max_rel " << max_rel << ")";
+            printf("[nvfp4-gqa] nh=%d nkv=%d hd=%d kv=%d: gqa %s | scalar %s | pair max_rel %.3g\n",
+                   s.nh, s.nkv, s.hd, kv_len, e_gqa.str().c_str(), e_scalar.str().c_str(), max_rel);
+
+            cudaFree(d_q);
+            cudaFree(d_o);
+            cudaFree(d_bt);
+            cudaFree(d_ctx);
+        }
+    }
+    cudaStreamDestroy(stream);
+}
+
+TEST(PagedNvfp4Gqa, UnsupportedGeometryDeclines) {
+    EXPECT_FALSE(paged_attention_gqa_nvfp4_supported(128, 8, 8));    // MHA: no sharing to exploit
+    EXPECT_FALSE(paged_attention_gqa_nvfp4_supported(128, 96, 4));   // ratio 24 > kMaxQPerKv
+    EXPECT_FALSE(paged_attention_gqa_nvfp4_supported(1024, 24, 4));  // head_dim over the 512 bound
+    EXPECT_TRUE(paged_attention_gqa_nvfp4_supported(256, 24, 4));    // Qwen3.8 hot shape
+}
+
 }  // namespace
 }  // namespace imp

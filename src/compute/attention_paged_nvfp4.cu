@@ -3,6 +3,7 @@
 #include "compute/attention.h"
 #include "quant/turboquant_fp4.cuh"
 #include "core/logging.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -431,6 +432,20 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
                                       num_splits, stream, sinks_h);
     } else {
+        // GQA-aware variant: dequantize each KV block into a shared tile once
+        // and serve all Q heads of the group (attention.nvfp4_gqa). Falls
+        // through to the per-Q-head kernel on unsupported geometry or a
+        // failed smem opt-in.
+        if (process_diag_attention_nvfp4_gqa() &&
+            paged_attention_gqa_nvfp4_supported(head_dim, n_heads, n_kv_heads) &&
+            paged_attention_gqa_nvfp4_launch(
+                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
+                reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales,
+                reinterpret_cast<half*>(O.data), block_tables, context_lens, batch_size, n_heads,
+                n_kv_heads, head_dim, block_size, scale, max_context_len, max_num_blocks, sliding_window,
+                softcap, sinks_h, stream)) {
+            return;
+        }
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
 
