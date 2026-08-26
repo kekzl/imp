@@ -143,7 +143,7 @@ there instead of retelling it.
 
 ### Added
 
-- **BF16 recurrent state for the GDN scan (`gdn.state_bf16`, opt-in): +12.5%
+- **BF16 recurrent state for the GDN scan (`gdn.state_bf16`, default ON since the follow-up flip): +12.5%
   aggregate at 32 streams.** The FP32 scan sits at this box's resident
   bandwidth ceiling (1527 GB/s measured isolated), so halving the state
   bytes is the whole win: 132.7 -> 64.9 us/launch isolated (2.04x), e2e
@@ -152,9 +152,12 @@ there instead of retelling it.
   4.6356 (+0.21%) over ppl_corpus_45k, degen_suite 50/0, 256-step decode
   trajectory 0.18% relative RMS vs FP32 state. Arithmetic stays FP32 in
   registers; FP16 state remains refuted (subnormal truncation). Not yet the
-  default: an unpinned start trips #1765 (the VRAM plan collapses KV to 128
-  blocks when it formally succeeds) - pin `kv_cache.max_blocks` until that
-  is fixed.
+  default at first: an unpinned start tripped #1765 (the VRAM plan
+  collapsed KV to 128 blocks when it formally succeeded). With that fixed,
+  the default flip measures +7.7% at pure defaults (842.2 -> 906.9 tok/s
+  median at 32 streams, 3/3 pairs, plan applied at the full want of 2628
+  blocks); degen_suite 50/0 on the default config. Opt out via
+  `gdn.state_bf16=false`.
 
 - **Producer-side NVFP4 activation quantize for batched decode (+2.6%
   aggregate at 32 streams).** The fused rmsnorm+quantize and swiglu+quantize

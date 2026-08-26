@@ -502,6 +502,20 @@ project) and cross-sequence prefill batching (`docs/roadmap.md` item
        quant=NVFP4-CT cuda=13.3 path=server-api cmd=bench_conc.py+waves3.py n=3
        flags=max_batch_size=32,max_seq_len=4096]
 
+**Update after the 2026-08-26 pair (producer-quantize fusion #1773, BF16
+GDN state #1776 + plan fix #1777):** the same pinned 32-stream wave reads
+**1362.0 tok/s** median (alternating flag A/B, 3/3 pairs: FP32 state
+1210.5), and pure defaults read 906.9 (from 842.2). Against vLLM's 1477
+profiled the pinned gap stands at **~1.08x**. The scan itself is at the
+bandwidth ceiling in both dtypes (1527/1570 GB/s isolated); what remains
+is the launch-coupled idle, cross-sequence prefill batching and the
+elementwise fusion tail (`docs/roadmap.md` item 0).
+
+[PROV: commit=b516d9a7 date=2026-08-26 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4-CT cuda=13.3 path=server-api cmd=gdn_bf16_ab.sh+gdn_default_ab.sh
+       n=3/arm flags=max_batch_size=32,max_seq_len=4096,kv_cache.max_blocks=2387
+       (pinned arm) / defaults (default arm)]
+
 
 ### The GEMM-class lever, shipped (2026-08-25, night)
 

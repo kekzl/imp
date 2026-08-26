@@ -52,11 +52,15 @@ struct GDN {
     bool chunkwise_scan = true;
     // Store the GDN recurrent state as BF16 instead of FP32 (halves the
     // state traffic that dominates batched decode; arithmetic stays FP32 in
-    // registers). HD=SS=128 models only; forces the fused scan route (the
-    // chunkwise/ref kernels are FP32-state only) — the executor drops
-    // chunkwise when the pool is BF16, the init resolver refuses the
-    // ref_kernel combo. FP16 state stays refuted (subnormal truncation).
-    bool state_bf16 = false;
+    // registers). Default ON since the #1776/#1777 pair: +12.5% aggregate at
+    // 32 streams on Qwen3.8-27B-NVFP4 for +0.21% PPL, and the freed state
+    // bytes go to the KV pool now that the plan no longer starves it.
+    // HD=SS=128 models only; forces the fused scan route (the chunkwise/ref
+    // kernels are FP32-state only) — the executor drops chunkwise when the
+    // pool is BF16, the init resolver refuses the ref_kernel combo and keeps
+    // FP32 on unsupported shapes. FP16 state stays refuted (subnormal
+    // truncation). Opt out via gdn.state_bf16=false.
+    bool state_bf16 = true;
     // Override gated-DeltaNet weight layout.
     std::string layout_override;
 };
