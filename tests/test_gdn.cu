@@ -1530,5 +1530,97 @@ TEST(GDNScanTest, BF16StateTracksFP32State) {
     cudaFree(d_y_bf16arm);
 }
 
+// ===========================================================================
+// RaggedBatchedScanMatchesSequential -- the seq_row_offsets path (prefill
+// batching groundwork): a ragged batch of 3 sequences (lengths 5/1/9) must
+// produce bit-identical y and final states to three sequential single-
+// sequence calls. Same kernel, same order per sequence, so exact equality.
+// ===========================================================================
+TEST(GDNScanTest, RaggedBatchedScanMatchesSequential) {
+    constexpr int n_heads = 8, head_dim = 128, state_size = 128, n_groups = 4;
+    constexpr int n_seq = 3;
+    const int lens[n_seq] = {5, 1, 9};
+    constexpr int total_rows = 15;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    const size_t state_elems = (size_t)n_heads * state_size * head_dim;
+
+    srand(23);
+    std::vector<float> conv((size_t)total_rows * conv_channels);
+    for (auto& v : conv)
+        v = (rand() % 200 - 100) / 100.0f;
+    std::vector<half> h_alpha(total_rows * n_heads), h_beta(total_rows * n_heads);
+    for (auto& v : h_alpha)
+        v = __float2half((rand() % 200 - 100) / 100.0f);
+    for (auto& v : h_beta)
+        v = __float2half((rand() % 200 - 100) / 100.0f);
+    std::vector<float> h_A(n_heads, -0.5f), h_dt(n_heads, 0.5f);
+    int h_off[n_seq + 1] = {0, 5, 6, 15};
+    int h_slots[n_seq] = {0, 1, 2};
+
+    float *d_conv, *d_A, *d_dt, *d_state_seq, *d_state_rag;
+    half *d_alpha, *d_beta, *d_y_seq, *d_y_rag;
+    int *d_off, *d_slots;
+    cudaMalloc(&d_conv, conv.size() * sizeof(float));
+    cudaMalloc(&d_A, n_heads * sizeof(float));
+    cudaMalloc(&d_dt, n_heads * sizeof(float));
+    cudaMalloc(&d_state_seq, n_seq * state_elems * sizeof(float));
+    cudaMalloc(&d_state_rag, n_seq * state_elems * sizeof(float));
+    cudaMalloc(&d_alpha, h_alpha.size() * sizeof(half));
+    cudaMalloc(&d_beta, h_beta.size() * sizeof(half));
+    cudaMalloc(&d_y_seq, (size_t)total_rows * inner * sizeof(half));
+    cudaMalloc(&d_y_rag, (size_t)total_rows * inner * sizeof(half));
+    cudaMalloc(&d_off, (n_seq + 1) * sizeof(int));
+    cudaMalloc(&d_slots, n_seq * sizeof(int));
+    cudaMemcpy(d_conv, conv.data(), conv.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha.data(), h_alpha.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta.data(), h_beta.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_off, h_off, sizeof(h_off), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_slots, h_slots, sizeof(h_slots), cudaMemcpyHostToDevice);
+    cudaMemset(d_state_seq, 0, n_seq * state_elems * sizeof(float));
+    cudaMemset(d_state_rag, 0, n_seq * state_elems * sizeof(float));
+
+    // Reference: three sequential BATCHED calls with n_seq=1 on row
+    // sub-ranges - same SPLIT=2 instantiation as the ragged call (the
+    // single-sequence entry runs SPLIT=1, whose reduce order differs).
+    for (int i = 0; i < n_seq; i++) {
+        gdn_scan_fused_f32_batched(d_conv + (size_t)h_off[i] * conv_channels, conv_channels,
+                                   d_alpha + h_off[i] * n_heads, d_beta + h_off[i] * n_heads, d_A, d_dt,
+                                   d_state_seq + (size_t)i * state_elems, d_slots, /*stride=*/0,
+                                   d_y_seq + (size_t)h_off[i] * inner, /*n_seq=*/1, lens[i], n_heads,
+                                   head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/1);
+    }
+    // Ragged batched call.
+    gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_rag, d_slots,
+                               (int64_t)state_elems, d_y_rag, n_seq, /*n_tokens=*/0, n_heads, head_dim,
+                               state_size, n_groups, nullptr, /*grouped_layout=*/1,
+                               /*d_real_n=*/nullptr, d_off);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    std::vector<uint8_t> a((size_t)total_rows * inner * sizeof(half)), b(a.size());
+    cudaMemcpy(a.data(), d_y_seq, a.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(b.data(), d_y_rag, b.size(), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(0, memcmp(a.data(), b.data(), a.size())) << "ragged y differs from sequential";
+
+    std::vector<uint8_t> sa(n_seq * state_elems * sizeof(float)), sb(sa.size());
+    cudaMemcpy(sa.data(), d_state_seq, sa.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(sb.data(), d_state_rag, sb.size(), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(0, memcmp(sa.data(), sb.data(), sa.size())) << "ragged final states differ";
+
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state_seq);
+    cudaFree(d_state_rag);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y_seq);
+    cudaFree(d_y_rag);
+    cudaFree(d_off);
+    cudaFree(d_slots);
+}
+
 }  // namespace
 }  // namespace imp
