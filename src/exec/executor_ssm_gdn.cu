@@ -274,13 +274,19 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     // 9. Group RMSNorm on y  [AFTER gating, per llama.cpp reference]
     group_rmsnorm(y_buf, ly.ssm_norm_w, y_buf, n_groups, eps, stream);
 
-    // 10. ssm_out projection: [n, inner] @ ssm_out^T -> [n, d_model]
-    Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    gemm_via_handle_(ly.ssm_out_id, y_buf, out_buf, ctx);
-
-    // 11. Residual add: hidden = output + residual
-    elementwise_add(out_buf, r, stream);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+    // 10.+11. ssm_out projection + residual. h still holds the residual (r is
+    // its save and nothing wrote h since), so on the batched-decode NVFP4
+    // path the projection accumulates straight into h (smallm beta=1) —
+    // replacing GEMM-to-scratch + elementwise_add + the copy-back.
+    if (residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h)) {
+        gemm_via_handle_(ly.ssm_out_id, y_buf, h, ctx.with_beta(1.0f));
+    } else {
+        Tensor out_buf = view_tokens(ssm_out_buf_, n);
+        gemm_via_handle_(ly.ssm_out_id, y_buf, out_buf, ctx);
+        elementwise_add(out_buf, r, stream);
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -799,6 +805,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                                                static_cast<__half*>(h.data), total);
         IMP_CUDA_CHECK_LAUNCH();
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
+    } else if (residual_beta1_nvfp4_ok_(ly.ssm_out_id, n, h) && !dump_hidden_dir()) {
+        // Batched-decode NVFP4: h += out_proj(y) via the smallm accumulate
+        // path (h still holds the residual — see run_ssm's twin). The
+        // pre-residual dump hook needs the scratch, so an active dump dir
+        // keeps the old path.
+        gemm_via_handle_(ly.ssm_out_id, y_buf, h, ctx.with_beta(1.0f));
     } else {
         gemm_via_handle_(ly.ssm_out_id, y_buf, out_buf, ctx);
         // Per-element dump: linear_attn_out post-ssm_out GEMM, pre-residual.
