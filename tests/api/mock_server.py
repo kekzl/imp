@@ -91,6 +91,18 @@ class MockHandler(BaseHTTPRequestHandler):
         # Suppress default logging for cleaner test output
         pass
 
+    def end_headers(self):
+        # Mirror the real server's trace propagation (post-routing echo):
+        # a client-sent X-Request-Id comes back on every response, sanitized
+        # to printable ASCII and capped at 128 chars + "..." marker.
+        rid = self.headers.get("X-Request-Id")
+        if rid:
+            out = "".join(c if 0x20 <= ord(c) < 0x7F else "." for c in rid[:128])
+            if len(rid) > 128:
+                out += "..."
+            self.send_header("X-Request-Id", out)
+        super().end_headers()
+
     def _send_json(self, status: int, body: dict):
         data = json.dumps(body).encode()
         self.send_response(status)
