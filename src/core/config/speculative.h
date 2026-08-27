@@ -250,6 +250,15 @@ struct Speculative {
     // drafts and the matcher does not (measured 100 drafts over 50 verifies
     // on Qwen3.8-27B, against 0 before the gate split).
     int mtp_k = 0;
+    // Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next
+    // draft by one row (up to mtp_k), any rejection sheds one row (floor 1).
+    // Draft-poor prompts converge to k=1 verifies instead of paying the
+    // deep-chunk verify cost at low accept (k=2 fixed measured 84.9-145.8
+    // tok/s against 101.6-106.8 at k=1 on the same prompts, 2026-08-27);
+    // draft-rich prompts climb back to the configured mtp_k. The economics
+    // guard prices the average chain depth that actually ran, not the
+    // configured ceiling. Off = fixed chain depth mtp_k (A/B kill switch).
+    bool mtp_adaptive_k = true;
     // Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head
     // decode cache when one exists (#847 lever 3). The chain re-reads the
     // LM head once per drafted token (~2.5 GB FP16 on Qwen3.6-27B's 248k

@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- Adaptive MTP chain depth (`speculative.mtp_adaptive_k`, default on): a fully
+  accepted chain grows the next draft one row (up to `mtp_k`), any rejection
+  sheds one, and the economics guard prices the depth that ran. `mtp_k=2` +
+  `ngram=false` on Qwen3.8-27B-NVFP4 thinking chats: 111.1-113.3 tok/s vs
+  106.3-108.0 at k=1 and 94.9-110.2 at fixed k=2 (3/3 alternating pairs above
+  both); draft-rich prompts keep the deep-chain win (158.1 vs 120.5 at k=1,
+  +31%). Harness: `tools/analysis/mtp_adaptive_ab.sh`.
+
 ### Changed
 
 - MTP draft feed defaults to post-RMSNorm hiddens (`diagnostics.mtp_prenorm_h`

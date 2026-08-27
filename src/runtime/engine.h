@@ -907,6 +907,20 @@ private:
     // when the average can't beat the break-even.
     int mtp_econ_verifies_ = 0;
     long long mtp_econ_emitted_ = 0;
+    // Chain rows actually drafted across those verifies: the economics
+    // break-even (1 + f*k) must price the k that RAN, not the configured
+    // ceiling, once the chain depth adapts.
+    long long mtp_econ_rows_ = 0;
+    // Adaptive chain depth (AIMD): a fully accepted chain steps toward the
+    // configured mtp_spec_k_, any rejection steps toward 1. Draft-poor
+    // prompts converge to k=1 behavior instead of paying deep-chain verify
+    // cost at low accept (k=2 measured 84.9-145.8 tok/s fixed vs 101.6-106.8
+    // at k=1 on the same prompts, 2026-08-27); draft-rich prompts keep the
+    // deep chain. 0 = not bound yet (falls back to mtp_spec_k_).
+    int mtp_k_live_ = 0;
+    int mtp_chain_k_() const noexcept {
+        return std::max(1, mtp_k_live_ > 0 ? mtp_k_live_ : mtp_spec_k_);
+    }
     // Consume the pending MTP chain as the verify draft for req (empty when
     // MTP is off / unbound / stale / KV-cap reached).
     std::vector<int32_t> mtp_take_draft_(const Request& req);
