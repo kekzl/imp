@@ -77,6 +77,34 @@ struct TopkRowArgs {
 void launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k, int vocab_size,
                            cudaStream_t stream = nullptr);
 
+// Row-parallel batched GREEDY argmax — the temperature-0 twin of the top-k
+// stash above: ONE partial launch (grid ARGMAX_NBLOCKS x n_rows) + ONE reduce
+// launch (grid n_rows) replace n serialized <<<64>>> + <<<1>>> pairs (31 rows
+// = 62 eager launches per decode step at 32-stream serving, nsys 2026-08-27).
+// Per-row reduction geometry and slot scratch layout are identical to
+// sample_greedy_async, so tokens are bit-identical for the same logits.
+struct GreedyRowArgs {
+    const float* logits;   // this row's [vocab] logits
+    int32_t* d_result;     // this row's SAMPLE_SCRATCH_BYTES slot
+};
+void launch_greedy_rows(const GreedyRowArgs* d_rows, int n_rows, int vocab_size,
+                        cudaStream_t stream = nullptr);
+
+// Row-parallel batched penalties — same per-thread math as apply_penalties
+// (grid over vocab), one launch for every stashed row of a decode batch.
+// The caller pre-filters: only rows with an active penalty and n_tokens > 0,
+// and pre-applies the repeat_last_n window to token_ids/n_tokens.
+struct PenaltyRowArgs {
+    float* logits;
+    const int32_t* token_ids;  // device history, already windowed
+    int n_tokens;
+    float repetition_penalty;
+    float frequency_penalty;
+    float presence_penalty;
+};
+void launch_penalties_rows(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size,
+                           cudaStream_t stream = nullptr);
+
 // ---------------------------------------------------------------------------
 // Async (device-side) sampling: writes result to device buffer AND mapped
 // pinned memory. No cudaStreamSynchronize — GPU-side token stays on device.

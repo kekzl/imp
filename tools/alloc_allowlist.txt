@@ -29,7 +29,7 @@ src/compute/sampling.cu  # 1
 src/compute/sampling_penalties.cu  # 2
 src/compute/sampling_topk_topp.cu  # 3
 src/core/buffer.cpp  # 2
-src/exec/executor.cu  # 2
+src/exec/executor_sampling.cu  # 2 (banned-token cache; moved verbatim out of executor.cu 2026-08-27)
 src/exec/executor_attention.cu  # 4
 src/exec/executor_attention_decode.cu  # 6
 src/exec/executor_attention_prefill.cu  # 10

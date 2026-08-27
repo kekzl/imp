@@ -71,8 +71,13 @@ __global__ void argmax_kernel(const float* __restrict__ logits, int vocab_size,
 //   int32_t  partial_idxs [ARGMAX_NBLOCKS]
 
 // Phase 1: each block scans its stripe and writes its local max to partials.
-__global__ void argmax_partial_kernel(const float* __restrict__ logits, int vocab_size,
-                                      float* __restrict__ partial_vals, int32_t* __restrict__ partial_idxs) {
+// Shared body — the row-batched kernel below resolves per-row pointers from
+// blockIdx.y and runs the identical stripe walk (gridDim.x is ARGMAX_NBLOCKS
+// in both, so the reduction geometry — and therefore the token — is
+// bit-identical to the per-row launch).
+__device__ __forceinline__ void argmax_partial_body(const float* __restrict__ logits, int vocab_size,
+                                                    float* __restrict__ partial_vals,
+                                                    int32_t* __restrict__ partial_idxs) {
     float local_max = -FLT_MAX;
     int local_idx = 0;
 
@@ -123,10 +128,15 @@ __global__ void argmax_partial_kernel(const float* __restrict__ logits, int voca
     }
 }
 
-// Phase 2: single block reduces ARGMAX_NBLOCKS partial results.
-__global__ void argmax_reduce_kernel(const float* __restrict__ partial_vals,
-                                     const int32_t* __restrict__ partial_idxs, int n_blocks,
-                                     int32_t* __restrict__ d_result) {
+__global__ void argmax_partial_kernel(const float* __restrict__ logits, int vocab_size,
+                                      float* __restrict__ partial_vals, int32_t* __restrict__ partial_idxs) {
+    argmax_partial_body(logits, vocab_size, partial_vals, partial_idxs);
+}
+
+// Phase 2 shared body: reduce ARGMAX_NBLOCKS partial results.
+__device__ __forceinline__ void argmax_reduce_body(const float* __restrict__ partial_vals,
+                                                   const int32_t* __restrict__ partial_idxs, int n_blocks,
+                                                   int32_t* __restrict__ d_result) {
     float local_max = -FLT_MAX;
     int local_idx = 0;
 
@@ -144,6 +154,31 @@ __global__ void argmax_reduce_kernel(const float* __restrict__ partial_vals,
     if (threadIdx.x == 0) {
         d_result[0] = static_cast<int32_t>(local_idx);
     }
+}
+
+__global__ void argmax_reduce_kernel(const float* __restrict__ partial_vals,
+                                     const int32_t* __restrict__ partial_idxs, int n_blocks,
+                                     int32_t* __restrict__ d_result) {
+    argmax_reduce_body(partial_vals, partial_idxs, n_blocks, d_result);
+}
+
+// Row-batched twins: blockIdx.y (partial) / blockIdx.x (reduce) select the
+// row; scratch pointers are carved from each row's slot exactly as
+// sample_greedy_async carves them, so the layout contract is one place.
+__global__ void argmax_partial_rows_kernel(const GreedyRowArgs* __restrict__ rows, int vocab_size) {
+    const GreedyRowArgs r = rows[blockIdx.y];
+    auto* base = reinterpret_cast<char*>(r.d_result);
+    auto* pv = reinterpret_cast<float*>(base + sizeof(int32_t));
+    auto* pi = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
+    argmax_partial_body(r.logits, vocab_size, pv, pi);
+}
+
+__global__ void argmax_reduce_rows_kernel(const GreedyRowArgs* __restrict__ rows) {
+    const GreedyRowArgs r = rows[blockIdx.x];
+    auto* base = reinterpret_cast<char*>(r.d_result);
+    auto* pv = reinterpret_cast<float*>(base + sizeof(int32_t));
+    auto* pi = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
+    argmax_reduce_body(pv, pi, ARGMAX_NBLOCKS, r.d_result);
 }
 
 int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
@@ -227,6 +262,14 @@ void sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t s
 // ===========================================================================
 // Async (device-side) sampling — no host sync
 // ===========================================================================
+
+void launch_greedy_rows(const GreedyRowArgs* d_rows, int n_rows, int vocab_size, cudaStream_t stream) {
+    dim3 grid1(ARGMAX_NBLOCKS, n_rows);
+    argmax_partial_rows_kernel<<<grid1, BLOCK_SIZE, 0, stream>>>(d_rows, vocab_size);
+    IMP_CUDA_CHECK_LAUNCH();
+    argmax_reduce_rows_kernel<<<n_rows, WARP_SIZE, 0, stream>>>(d_rows);
+    IMP_CUDA_CHECK_LAUNCH();
+}
 
 void sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_mapped, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
