@@ -13,6 +13,16 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The StoragePlanner no longer fails its budget check on every native-NVFP4
+  load** (#1765, last open item). It priced prequant weights at full tier
+  bytes although the decode cache borrows the resident source storage
+  (zero-copy) and only the CUTLASS SfAtom sidecar (~n/16) allocates - ~15 GiB
+  of phantom demand on a 27B checkpoint, so "plan failed - vram budget
+  insufficient even at required_floor tiers" fired on every start and a real
+  insufficiency was indistinguishable. Entries are now priced at incremental
+  cost; the vram_budget reserve projection (pre-Phase-0, wire dtypes) is
+  unchanged.
+
 - **`kv_cache.growable` was a no-op on planned loads, and aggregate admission
   pressure never grew the pool.** The growable ceiling was captured after the
   shadow plan's clamp, so ceiling == commit and try_grow_to could never fire;

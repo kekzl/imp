@@ -32,6 +32,32 @@ int64_t bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier) {
     return 0;
 }
 
+// What the plan must budget for is the INCREMENTAL cost of reaching the tier,
+// not the tier's full footprint. A native-NVFP4 source already holds the
+// packed nibbles and per-16 micro-scales on device: Phase 0b registers them in
+// the decode cache zero-copy (`owned = false`), and only the Phase 3b CUTLASS
+// SfAtom repack (~n/16) allocates. Pricing the full tier bytes here projected
+// ~15 GiB of phantom demand on a 27B native checkpoint, so the budget check
+// failed on every load while the caches fit - which made a real insufficiency
+// indistinguishable from the normal case (#1765).
+int64_t incremental_bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier, QType source) {
+    if (source == QType::NVFP4) {
+        if (tier == StorageTier::NVFP4)
+            return 0;  // decode cache borrows the resident source storage
+        if (tier == StorageTier::CUTLASS_NVFP4)
+            return rows * cols / 16;  // SfAtom sidecar; nibbles stay shared
+    }
+    // An F16/F32-source tensor at the FP16 tier is the resident upload itself:
+    // Phase 1 only builds FP16 cache copies for dequantable (or native-FP8)
+    // sources, so nothing new is allocated. Without this the token embedding
+    // alone (2.4 GiB at 248320 x 5120) kept the budget check failing on
+    // native checkpoints after the NVFP4 entries were priced honestly.
+    if ((source == QType::F16 || source == QType::BF16 || source == QType::F32) &&
+        tier == StorageTier::FP16)
+        return 0;
+    return bytes_for_tier(rows, cols, tier);
+}
+
 // Pick the initial (best allowable) tier for a tensor given its (source-qtype-
 // refined) capabilities and the hints. Hints can only push toward a tier that
 // the refined capabilities still list as supported — that's how the Q4_K-
@@ -105,7 +131,7 @@ void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan, TensorID& n
 
     int64_t rows = (t.ndim > 0 ? t.shape[0] : 1);
     int64_t cols = (t.ndim > 1 ? t.shape[1] : 1);
-    int64_t bytes = bytes_for_tier(rows, cols, tier);
+    int64_t bytes = incremental_bytes_for_tier(rows, cols, tier, t.qtype);
 
     plan.entries.push_back({next_id++, kind, t.qtype, tier, bytes, rows, cols, t.data, false});
     total += static_cast<size_t>(bytes);
@@ -187,7 +213,7 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
                 StorageTier next = downgrade_one(e.tier, cap.required_floor, cap);
                 if (next == e.tier)
                     continue;
-                int64_t new_bytes = bytes_for_tier(e.rows, e.cols, next);
+                int64_t new_bytes = incremental_bytes_for_tier(e.rows, e.cols, next, e.source_qtype);
                 int64_t savings = e.bytes - new_bytes;
                 if (savings > best_savings) {
                     best_savings = savings;
@@ -198,7 +224,7 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
                 auto& e = plan.entries[best_idx];
                 const auto cap = effective_capabilities(e.kind, e.source_qtype);
                 StorageTier next = downgrade_one(e.tier, cap.required_floor, cap);
-                int64_t new_bytes = bytes_for_tier(e.rows, e.cols, next);
+                int64_t new_bytes = incremental_bytes_for_tier(e.rows, e.cols, next, e.source_qtype);
                 total -= static_cast<size_t>(e.bytes - new_bytes);
                 e.bytes = new_bytes;
                 e.tier = next;

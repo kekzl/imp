@@ -102,6 +102,55 @@ TEST(StoragePlanner, TinyBudgetReturnsFailure) {
 }
 
 // ---------------------------------------------------------------------------
+// Native-NVFP4 sources are priced at their INCREMENTAL cost (#1765): the
+// decode cache borrows the resident source storage (Phase 0b registers
+// zero-copy), so a plan that routes them to NVFP4 must not charge the full
+// tier bytes. Before the fix, every native-checkpoint load projected the
+// whole model as new demand and the budget check failed on every start,
+// making a real insufficiency indistinguishable from the normal case.
+// ---------------------------------------------------------------------------
+
+TEST(StoragePlanner, NativeNvfp4SourcesCostNothingAtNvfp4Tier) {
+    Model m;
+    m.config_.n_layers = 2;
+
+    for (int i = 0; i < 2; ++i) {
+        TransformerLayer L;
+        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1),
+                                QType::NVFP4);
+        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096,
+                                    static_cast<uintptr_t>(i * 100 + 2), QType::NVFP4);
+        m.layers_.push_back(std::move(L));
+    }
+    // The F16 token embedding is the resident upload itself (Phase 1 builds
+    // FP16 caches only for dequantable sources) - it must not be charged, or
+    // its 2.4 GiB alone re-fails the budget check on the real checkpoint.
+    m.tok_emb_ = make_tensor_stub(TensorKind::TOK_EMBED, 8192, 4096,
+                                  static_cast<uintptr_t>(9001), QType::F16);
+
+    PlanHints hints;
+    hints.prefer_nvfp4_decode = true;
+    // Contrast pin: full-tier pricing of these 4 tensors is ~37.7 MB
+    // (4 * (4096*4096/2 + 4096*4096/16)), far above this budget - the
+    // pre-fix pricing MUST fail here, which TinyBudgetReturnsFailure shows
+    // for allocating (Q6_K) sources. Zero-copy sources must fit.
+    hints.vram_budget_bytes = size_t{1} * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    EXPECT_FALSE(plan.failed) << plan.failure_reason;
+    for (const auto& e : plan.entries) {
+        if (e.kind == TensorKind::TOK_EMBED) {
+            EXPECT_EQ(e.tier, StorageTier::FP16);
+            EXPECT_EQ(e.bytes, 0) << "F16-source embedding at FP16 tier is the resident upload";
+            continue;
+        }
+        EXPECT_EQ(e.tier, StorageTier::NVFP4);
+        EXPECT_EQ(e.bytes, 0) << "NVFP4-source entry at NVFP4 tier must be zero-copy";
+    }
+    EXPECT_EQ(plan.projected_vram_bytes, 0u);
+}
+
+// ---------------------------------------------------------------------------
 // Generous budget: initial tier selection is preserved unchanged
 // ---------------------------------------------------------------------------
 
