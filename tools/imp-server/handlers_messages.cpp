@@ -410,6 +410,8 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
     // request log is a forged identity in the audit trail (#1614).
     std::string log_client_ip = state.rate_limit_key(req.remote_addr,
                                                      req.get_header_value("X-Forwarded-For"));
+    const std::string log_client_request_id =
+        sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
     const std::string log_raw_body = req.body;
 
     // #1607: bound the nesting before any recursive parser sees it.
@@ -485,6 +487,7 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
         ctx.log_skip = false;
         ctx.log_endpoint = log_endpoint;
         ctx.log_client_ip = log_client_ip;
+        ctx.log_client_request_id = log_client_request_id;
         ctx.log_raw_body = log_raw_body;
         ctx.t_log_start = t_log_start;
 
@@ -590,9 +593,14 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
         int completion_t = oai_response.value("usage", json::object()).value("completion_tokens", 0);
         std::string stop_reason = anth_response.value("stop_reason", "");
         std::string req_id = anth_response.value("id", make_completion_id(state));
+        // Trace join (the shim's inner header lands on the discarded
+        // shim_res): client id when sent, this dialect's message id otherwise.
+        res.set_header("X-Request-Id",
+                       log_client_request_id.empty() ? req_id : log_client_request_id);
         log_request_jsonl(state, /*skip=*/false, t_log_start, req_id, log_endpoint, log_client_ip,
                           log_raw_body, ms, prompt_t, completion_t,
-                          stop_reason.empty() ? nullptr : stop_reason.c_str(), anth_response);
+                          stop_reason.empty() ? nullptr : stop_reason.c_str(), anth_response,
+                          log_client_request_id);
     }
 
     // Non-streaming requests are fully assembled above (the want_stream path

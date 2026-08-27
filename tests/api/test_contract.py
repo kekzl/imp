@@ -229,6 +229,42 @@ class TestStreamingSchema:
 
 
 @pytest.mark.nomodel
+class TestRequestIdEcho:
+    """X-Request-Id propagation: a client-sent id comes back on every
+    response (post-routing echo), including refusals, sanitized against
+    header injection."""
+
+    def test_echoed_on_health(self, client):
+        r = client.get("/health", headers={"X-Request-Id": "trace-abc-123"})
+        assert r.headers.get("x-request-id") == "trace-abc-123"
+
+    def test_echoed_on_unknown_endpoint(self, client):
+        r = client.get("/nonexistent", headers={"X-Request-Id": "trace-404"})
+        assert r.status_code == 404
+        assert r.headers.get("x-request-id") == "trace-404"
+
+    def test_echoed_on_chat_route(self, client):
+        # Model-less real server refuses this request, the mock answers it;
+        # the id comes back either way - that is the contract under test.
+        r = client.post(
+            "/v1/chat/completions",
+            json={"model": "none", "messages": [{"role": "user", "content": "x"}]},
+            headers={"X-Request-Id": "trace-chat-1"},
+        )
+        assert r.headers.get("x-request-id") == "trace-chat-1"
+
+    def test_absent_header_adds_nothing_on_health(self, client):
+        r = client.get("/health")
+        assert "x-request-id" not in r.headers
+
+    def test_long_id_is_truncated(self, client):
+        r = client.get("/health", headers={"X-Request-Id": "a" * 300})
+        echoed = r.headers.get("x-request-id", "")
+        # sanitize_for_echo caps at 128 chars + "..." marker
+        assert echoed == "a" * 128 + "..."
+
+
+@pytest.mark.nomodel
 class TestMetricsEndpoint:
     def test_metrics_returns_200(self, client):
         r = client.get("/metrics")

@@ -52,6 +52,7 @@ streaming driver, so a fix in streaming lands in all of them at once.
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
 | `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape. `false` switches off **all three** drafters (n-gram, MTP head, token recycling) since #1639 - it used to reach only the n-gram matcher. `true` enables what the model and config allow; it cannot conjure an MTP head the checkpoint lacks |
 | `"lora": "name"` | ✅ | PEFT adapter hot-swap, works with every quant path |
+| `"priority": int` | ✅ | vLLM-compatible admission priority, **lower value schedules earlier**, default 0. Strictly dominates the scheduler's shortest-first-with-aging order; a caller that sets priorities owns starvation across classes. Accepted on all three dialects |
 
 ### Defaults, and where they differ from OpenAI
 
@@ -289,6 +290,17 @@ Two refusals worth knowing, both deliberate:
   confident description of a picture the model never received.
 
 No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
+
+## Request tracing
+
+Send an `X-Request-Id` header and every response echoes it back - refusals
+and unmatched routes included - sanitized to printable ASCII and capped at
+128 chars. The generation endpoints answer with the server's own completion
+id when no client id was sent, so every generation response carries some id
+a caller can quote. With `--log-requests`, the JSONL record carries the
+client id as `client_request_id` next to the server `req_id`, which is the
+join an agent framework needs to attribute its own latency to this hop.
+There is no OpenTelemetry export; the id propagation here is the wire half.
 
 ## Errors
 

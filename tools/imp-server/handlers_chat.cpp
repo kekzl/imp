@@ -136,6 +136,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
     int seed = body.value("seed", -1);
+    int priority = body.value("priority", 0);  // vLLM-compatible, lower = earlier
     bool stream = body.value("stream", false);
     bool echo = body.value("echo", false);
     float min_p = body.value("min_p", 0.0f);
@@ -217,6 +218,12 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
     // Log request received
     std::string req_id = make_completion_id(state);
+    {
+        // Trace join, same contract as chat/completions (see
+        // parse_chat_request_params): client id echoed, server id otherwise.
+        const std::string cid = sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
+        res.set_header("X-Request-Id", cid.empty() ? req_id : cid);
+    }
     IMP_LOG_INFO("[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f", req_id.c_str(),
                  prompt.size(), stream ? "true" : "false", max_tokens, temperature);
 
@@ -285,6 +292,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->top_p = top_p;
     imp_req->top_k = top_k;
     imp_req->seed = seed;
+    imp_req->priority = priority;
     imp_req->min_p = min_p;
     imp_req->typical_p = typical_p;
     imp_req->repetition_penalty = repetition_penalty;
