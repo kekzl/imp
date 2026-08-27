@@ -1054,6 +1054,17 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     if (draft_from_mtp) {
         mtp_econ_verifies_++;
         mtp_econ_emitted_ += emitted;
+        mtp_econ_rows_ += K;
+        // Adaptive chain depth (AIMD): a fully accepted chain earns one more
+        // row next draft (up to the configured k), any rejection sheds one.
+        // Draft-poor prompts converge to k=1 verifies instead of paying the
+        // deep-chunk cost at low accept; draft-rich prompts climb back.
+        if (runtime_config_.speculative.mtp_adaptive_k) {
+            if (matched >= K)
+                mtp_k_live_ = std::min(mtp_spec_decode_k(), mtp_chain_k_() + 1);
+            else
+                mtp_k_live_ = std::max(1, mtp_chain_k_() - 1);
+        }
         constexpr int kMtpEconSample = 8;  // fair sample before judging
         // Break-even avg emitted/verify is configurable (0 disables): the
         // right value depends on the chain lm_head cost (NVFP4 vs FP16) and
@@ -1068,8 +1079,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // dispatch_policy.h for the derivation and for why permissive at k=3
         // is the deliberate direction.
         constexpr float kMtpEconAccept = 0.40f;
-        const float min_emit =
-            cfg_min < 0.0f ? 1.0f + kMtpEconAccept * static_cast<float>(mtp_spec_decode_k()) : cfg_min;
+        // Price the k that RAN (avg rows/verify), not the configured ceiling:
+        // with the adaptive depth above, a request parked at k_live=1 must be
+        // judged against the k=1 break-even or the deeper config dooms it.
+        const float k_ran = static_cast<float>(mtp_econ_rows_) /
+                            static_cast<float>(mtp_econ_verifies_);
+        const float min_emit = cfg_min < 0.0f ? 1.0f + kMtpEconAccept * k_ran : cfg_min;
         if (min_emit > 0.0f && mtp_econ_verifies_ >= kMtpEconSample &&
             static_cast<float>(mtp_econ_emitted_) <
                 static_cast<float>(mtp_econ_verifies_) * min_emit) {

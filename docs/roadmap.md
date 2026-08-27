@@ -167,7 +167,17 @@ Ranked by what an agent workload notices first.
    them to the smallm kernel, measured +3-6% isolated but +1-2% mixed
    pairs (inside trajectory variance, default off);
    `diagnostics.mtp_prenorm_h=true` lifted accept 70/72 -> 74/78% and
-   won 4/4 pairs (+2-3%). [PROV: commit=a70d7863+wt date=2026-08-27
+   won 4/4 pairs (+2-3%). UPDATE 2026-08-27 (adaptive chain depth SHIPPED):
+   `speculative.mtp_adaptive_k` (default on) walks the chain between 1 and
+   mtp_k per acceptance (AIMD: full accept +1 row, any rejection -1) and the
+   economics guard prices the average depth that ran, not the configured
+   ceiling. mtp_k=2 + ngram=false, 3 alternating rounds/arm: thinking chats
+   111.1-113.3 tok/s vs 106.3-108.0 at k=1 (3/3 above) and 94.9-110.2 at
+   fixed k=2 (bistable; adaptive is the stable arm); draft-rich prompts
+   158.1 median vs 157.6 fixed k=2 (parity) and 120.5 at k=1 (+31%);
+   no-think prose 107.8 vs 105.0 fixed (3/3) and 109.4 at k=1 (-1.5%).
+   k=2 is thereby stabilized; harness tools/analysis/mtp_adaptive_ab.sh.
+   [PROV: commit=a70d7863+wt date=2026-08-27
    hw=RTX5090 model=Qwen3.8-27B-NVFP4 cuda=13.3 path=nsys server
    window 778 steps cmd=`nsys profile ... imp-server` + chat 1024-tok] (d) cross-sequence
    prefill batching: a 32-prompt burst prefills one sequence per forward
@@ -257,7 +267,11 @@ Ranked by what an agent workload notices first.
    of a session and paying for it.
 3. **Speculation does not adapt to the request.** The server exposes
    `speculative` as a bool: one configuration for every prompt, and the depth is
-   a global setting. The chain saturates near 2.5 accepted per verify. vLLM
+   a global setting. *Half closed 2026-08-27:* the MTP chain depth now adapts
+   per request between 1 and `mtp_k` (`speculative.mtp_adaptive_k`, AIMD on
+   acceptance, see the 0-item update above); what remains global is the
+   drafter choice and the ceiling itself. The chain saturates near 2.5
+   accepted per verify. vLLM
    targets an acceptance length above 5 with hybrid and linear drafting, SGLang
    builds "adaptive spec configurations for different requests and batch sizes".
    A speculation **tree** (gap 5 below: no EAGLE, Medusa or multi-candidate

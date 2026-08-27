@@ -1608,7 +1608,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         const bool mtp_synced = ws_gate != nullptr && mtp_bound_req_ == valid_decode[0]->id &&
                                 ws_gate->mtp_pos == cur_pos &&
                                 (ws_gate->max_seq_len <= 0 ||
-                                 ws_gate->mtp_pos + std::max(1, mtp_spec_k_) <
+                                 ws_gate->mtp_pos + mtp_chain_k_() <
                                      ws_gate->max_seq_len);
         Tensor h_view = executor_->view_hidden(1);  // [1, d_model] FP16
         if (h_view.data != nullptr && mtp_synced) {
@@ -1635,7 +1635,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 h_for_mtp = s_h_normed;
             }
 
-            // K-chain draft. K=mtp_spec_k_. For each step k=0..K-1:
+            // K-chain draft. K=mtp_chain_k_() (adaptive, <= mtp_spec_k_).
+            // For each step k=0..K-1:
             //   - input: (prev_token_k, h_prev_k)
             //   - output: prediction_k, ws.d_h_final updated for next iter
             //   - chain: prev_token_{k+1} = prediction_k, h_prev_{k+1} = d_h_final
@@ -1645,7 +1646,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // the main model actually does next). Roll back to mtp_pos_saved
             // after K-1 speculative steps so the real cache stays aligned.
             auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
-            const int K = std::max(1, mtp_spec_k_);
+            const int K = mtp_chain_k_();
             const int mtp_pos_before = ws->mtp_pos;
             int chain_prev_tok = next_token;
             const void* chain_h_prev = h_for_mtp;

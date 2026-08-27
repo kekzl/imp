@@ -118,7 +118,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         body["kv_pool_growable"] = kv_growable;
     }
     // #1537: the checkpoint carries an MTP head this load did not take, because
-    // speculative.mtp_k defaults to 0. That is a documented +17-21% decode
+    // speculative.mtp_k defaults to 0. That is a documented +27-30% decode
     // sitting switched off, and the only notice was one INFO line at startup -
     // which an operator running a container never sees. Reported here so it is
     // discoverable without grepping a log.
@@ -126,9 +126,10 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         body["mtp_head_available"] = true;
         body["mtp_head_hint"] =
             "this checkpoint ships an MTP head that is not loaded "
-            "(speculative.mtp_k=0). --set speculative.mtp_k=1 --set "
-            "speculative.ngram=false measured +17-21% single-stream decode on "
-            "Qwen3.8-27B-NVFP4 (2026-08-27), for the head's VRAM (0.79 GiB).";
+            "(speculative.mtp_k=0). --set speculative.mtp_k=2 --set "
+            "speculative.ngram=false measured +27-30% single-stream decode on "
+            "Qwen3.8-27B-NVFP4 thinking chats (2026-08-27, adaptive chain "
+            "depth), for the head's VRAM (0.79 GiB).";
     }
 
     if (!unservable.empty()) {

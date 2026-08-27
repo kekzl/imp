@@ -68,7 +68,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
         return false;
     const int hidden_dim = model_->config_.d_model;
     const int vocab_size = model_->config_.vocab_size;
-    const int K = std::max(1, mtp_spec_k_);
+    const int K = mtp_chain_k_();
     // MTP KV capacity (kMtpKvCap clamp at enable time): past it the cache
     // addressing is undefined — stop drafting instead.
     if (ws->max_seq_len > 0 && ws->mtp_pos + n_pairs + (chain_after ? K : 0) > ws->max_seq_len)
@@ -256,6 +256,8 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
         mtp_draft_ctx_ = -1;
         mtp_econ_verifies_ = 0;
         mtp_econ_emitted_ = 0;
+        mtp_econ_rows_ = 0;
+        mtp_k_live_ = mtp_spec_k_;
         if (mtp_history_.empty() || ws->mtp_pos == 0) {
             // Nothing usable carried over — restart the cache. Pair 0 needs
             // h_0, so the prompt must actually be forwarded from position 0.
@@ -499,6 +501,8 @@ void Engine::mtp_accuracy_reset() noexcept {
     mtp_draft_ctx_ = -1;
     mtp_econ_verifies_ = 0;
     mtp_econ_emitted_ = 0;
+    mtp_econ_rows_ = 0;
+    mtp_k_live_ = mtp_spec_k_;
     if (mtp_ws_storage_) {
         auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
         imp::mtp_kv_reset(*ws);

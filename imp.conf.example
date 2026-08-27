@@ -657,6 +657,11 @@ hybrid               = true
 # MTP chains fill verify steps where the suffix matcher has no draft.
 # imp-cli equivalent: --mtp-spec-decode <k>.
 mtp_k                = 0
+# Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next draft
+# by one row (up to mtp_k), any rejection sheds one (floor 1). Draft-poor
+# prompts converge to k=1 verifies; draft-rich prompts climb back to mtp_k.
+# false = fixed chain depth mtp_k (A/B kill switch).
+mtp_adaptive_k       = true
 # Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head decode
 # cache when one exists (~4x less HBM traffic per drafted token; the chain
 # re-reads the LM head once per draft). Draft-only precision — verification

@@ -224,6 +224,22 @@ neither.
          cmd=`imp-server --set speculative.mtp_k=1 --set
          speculative.ngram=false` vs defaults; degen:
          `tools/analysis/degen_suite.py` 2x 50 checks]
+
+  *Updated 2026-08-27 (adaptive chain depth):* `speculative.mtp_adaptive_k`
+  (default on) walks the chain between 1 and `mtp_k` on acceptance (full
+  accept +1 row, any rejection -1) and the economics guard prices the depth
+  that actually ran, so a deep `mtp_k` no longer dooms draft-poor requests.
+  The pair to opt into is now **`mtp_k=2` with `ngram=false`**: thinking
+  chats 111.1-113.3 tok/s vs 106.3-108.0 at k=1, 94.9-110.2 at fixed k=2 and
+  86.9-87.7 spec-off (+27-30%), 3/3 alternating rounds each; draft-rich
+  prompts 156.6-158.2 (parity with fixed k=2, +31% over k=1); the one cost
+  is no-think prose at -1.5% median vs k=1. degen suite 50 checks, one
+  bistable think-budget FAIL that re-reads 2x 10/0 in category re-runs.
+
+  [PROV: commit=perf/mtp-adaptive-k date=2026-08-27 hw=RTX5090
+         model=Qwen3.8-27B-NVFP4 quant=NVFP4 cuda=13.3 path=imp-server
+         harness=tools/analysis/mtp_adaptive_ab.sh (3 rounds alternating,
+         THINK=1 arm for the thinking numbers, ARMS=k0 for spec-off)]
 - **MTP is released for one model class, and the class that is left out has a
   measured defect, not a missing feature.** `speculative.mtp_k` stays **0
   everywhere** — nothing below is on by default; the table says what a user opts
