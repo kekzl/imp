@@ -13,6 +13,17 @@ there instead of retelling it.
 
 ### Fixed
 
+- **`kv_cache.growable` was a no-op on planned loads, and aggregate admission
+  pressure never grew the pool.** The growable ceiling was captured after the
+  shadow plan's clamp, so ceiling == commit and try_grow_to could never fire;
+  and the scheduler only grew for a single oversized request, not for many
+  requests that each fit. The ceiling is now the live-pass sizing and admission
+  pressure grows toward it: 32 concurrent 8k-prompt/512-token requests on
+  Qwen3.8-27B-NVFP4 finish in 61.7-71.9 s wall against 84.4-89.1 s fixed
+  (median 65.2 vs 86.0 s, -24%), pool 2046 -> 6483 blocks. Prefill-bound
+  bursts (short completions) are unchanged. Opt-in as before
+  (`kv_cache.growable=true`).
+
 - **Ragged prefill no longer leaks its device metadata on an exception.** The
   six per-step buffers were freed by a manual cleanup call that an exception
   from the forward or the sampling epilogue skipped; they are now owned by an

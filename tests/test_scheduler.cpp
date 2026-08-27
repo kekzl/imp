@@ -198,6 +198,45 @@ TEST(SchedulerTest, AdmissionReservesGeneration) {
     EXPECT_FALSE(sched.has_pending());
 }
 
+// 10d. Aggregate admission pressure grows a growable pool toward its ceiling
+// (2026-08-27). Before the trigger, requests that each fit queued while the
+// pool sat at its initial commit: 32 x 8k concurrent served effectively
+// ~8-wide with 4437 of 6483 ceiling blocks never committed.
+TEST(SchedulerTest, GrowsPoolUnderAggregatePressure) {
+    SKIP_IF_NO_CUDA();
+
+    // 8 committed blocks, 16-block ceiling. Each request reserves 4 blocks
+    // (32-token prompt = 2 blocks, max_tokens=16 = 1 block + spare): two fit
+    // the commit, four fit the ceiling.
+    auto cache = std::make_unique<KVCache>(
+        /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
+        /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/16);
+    if (!cache->growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    KVCache* kvc = cache.get();
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+
+    Scheduler sched(16);
+    sched.set_kv_manager(mgr.get());
+
+    for (int i = 0; i < 5; i++) {
+        auto req = std::make_shared<Request>();
+        req->id = i;
+        req->input_tokens.resize(32, i);
+        req->max_tokens = 16;
+        sched.add_request(req);
+    }
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    // Four admitted (the ceiling's worth), the fifth queued, pool at ceiling.
+    EXPECT_EQ(prefill.size(), 4u);
+    EXPECT_TRUE(sched.has_pending());
+    EXPECT_EQ(kvc->total_blocks(), 16);
+    EXPECT_GE(kvc->growths(), 1u);
+}
+
 // 10c. A pool too small to ever hold prompt + max_tokens degrades to
 // prompt-only admission instead of queueing the request forever (#1635).
 TEST(SchedulerTest, AdmissionClampsReserveToPoolSize) {
