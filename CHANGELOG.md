@@ -13,6 +13,23 @@ there instead of retelling it.
 
 ### Fixed
 
+- **The verify-chunk argmax never applied the banned-token mask.** Every other
+  sampling path masks chat-template delimiters before its argmax; the spec
+  verify (which emits accepted + bonus tokens) did not, so it was the one path
+  that could pick e.g. `<|im_start|>` mid-generation and end a request with
+  empty content. Affects n-gram speculation (default-on) too.
+
+- **MTP drafting survived thinking traffic for the first time.** The
+  think-interior loop burst desynced the MTP cache (no host hiddens, sync gate
+  then skips feeding forever) and the in-think emit trim capped every verify
+  at 1 token, tripping the economics guard on a head accepting 87%. MTP-bound
+  requests now stay eager through think, verify inside the block (budget
+  forcing keeps the eager step), and the trim only fires on crossing a think
+  boundary. Qwen3.8-27B-NVFP4, 1024-token thinking chat:
+  `--set speculative.mtp_k=1 --set speculative.ngram=false` 102.1-105.9 tok/s
+  vs 87.2-87.6 default (+17-21%), degen suite 50/0 twice. Default stays
+  `mtp_k=0`; details and the ngram=false caveat in docs/LIMITATIONS.md.
+
 - **The StoragePlanner no longer fails its budget check on every native-NVFP4
   load** (#1765, last open item). It priced prequant weights at full tier
   bytes although the decode cache borrows the resident source storage

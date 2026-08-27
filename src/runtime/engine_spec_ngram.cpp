@@ -42,6 +42,7 @@
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
 #include "runtime/suffix_draft.h"
+#include "runtime/think_stop_logic.h"
 #include "compute/rowwise_topm.h"
 
 #include <cuda_runtime.h>
@@ -167,9 +168,23 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
         return "constrained_decode";  // verify replicates no FSM masks (#1002)
     // Think budget forces tokens INSIDE the think block (loop/host-side) —
     // verify only outside it; the think interior runs loop bursts, which
-    // handle the budget device-side.
-    if (!ignore_think && req.think_budget > 0.0f && req.in_think_block)
-        return "think_budget_in_block";
+    // handle the budget device-side. Exception: an MTP-bound request already
+    // runs the interior eager (a loop burst would desync the MTP cache for
+    // the rest of the generation, #847), and the eager step owns the budget
+    // forcing - verifies between forcing points are legal and overshoot the
+    // budget by at most k tokens per chunk. Without this the interior pays
+    // the eager tax with no speculation, which on think-heavy chat eats the
+    // MTP win.
+    if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) {
+        if (!(mtp_spec_decode_enabled() && mtp_bound_req_ == req.id))
+            return "think_budget_in_block";
+        // Forcing due: the eager step must run NOW to force </think>; a
+        // verify would emit past the exhausted budget instead.
+        if (think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
+                                                req.output_tokens, think_start_id_,
+                                                req.started_in_think))
+            return "think_budget_in_block";
+    }
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return "not_decoding";
     if (spec_history_too_short_(req)) return "cold_start";  // see speculative.min_history
     // Long-context economics on the DENSE path (#964): the captured chunk
@@ -413,8 +428,13 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
         // Skip the eager probe step entirely when a bounded loop burst can
         // take over right away — the eager path costs ~2x per token and the
-        // burst forwards output.back() itself.
-        if (scfg.miss_burst > 0 && !req->spec_ngram_given_up && spec_burst_launch_ok_(*req) &&
+        // burst forwards output.back() itself. Not while MTP is bound to this
+        // request: a stale chain resyncs on the very next eager step (the
+        // per-step chain feed), while a burst desyncs the MTP cache for the
+        // rest of the generation (#847 sync gate).
+        if (scfg.miss_burst > 0 && !req->spec_ngram_given_up &&
+            !(mtp_spec_decode_enabled() && mtp_bound_req_ == req->id) &&
+            spec_burst_launch_ok_(*req) &&
             try_launch_async_graph_loop(req, req->output_tokens.back(), stream,
                                         spec_effective_miss_burst_(*req))) {
             return true;  // step handled by the burst launch
@@ -797,7 +817,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     executor_->greedy_argmax_all(chunk_len, d_spec_argmax_, stream, d_hist, n_hist,
                                  d_spec_tokens_ + 1, req->repetition_penalty,
                                  req->frequency_penalty, req->presence_penalty,
-                                 recycle_m > 0 ? d_spec_topm_ : nullptr, recycle_m);
+                                 recycle_m > 0 ? d_spec_topm_ : nullptr, recycle_m,
+                                 banned_tokens_device_(stream),
+                                 static_cast<int>(banned_token_ids_.size()));
     // One D2H covers [argmax | topm] (contiguous block, #1055); without the
     // harvest only the argmax prefix is copied.
     const size_t d2h_ints =
@@ -853,6 +875,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int acc_len = mc_on ? static_cast<int>(acc->size()) : K;
     int matched = 0;  // accepted draft tokens (their KV entries are valid)
     int emitted = 0;
+    // Whether this chunk STARTED inside a budgeted think block. Verifies run
+    // inside think for MTP-bound requests (gate exception above); the break
+    // below must fire only on ENTERING the block mid-chunk, or every in-think
+    // verify emits 1 token, reads as avg 1.0 emitted/verify and trips the
+    // economics guard on a head that is accepting fine.
+    const bool think_at_chunk_start = req->in_think_block;
     for (int j = 0; j + mc_row0 < chunk_len; ++j) {
         if (mc_on && j > acc_len) break;  // stay inside the winning group
         const int32_t tokj = h_spec_argmax_.as<int32_t>()[mc_row0 + j];
@@ -872,9 +900,13 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
         if (j >= acc_len || tokj != (*acc)[j]) break;  // bonus reached or draft diverged
         matched++;
-        // Entering a budgeted think block mid-chunk: the budget forcing lives
-        // in the loop/eager path — stop extending; the accepted prefix stays.
-        if (req->think_budget > 0.0f && req->in_think_block) break;
+        // Crossing a think boundary mid-chunk (either direction): stop
+        // extending; the accepted prefix stays. Entering: the budget forcing
+        // lives in the loop/eager path. Leaving: the post-</think> stop/grace
+        // window is the boundary where chunk-argmax noise diverges from the
+        // eager path (empty-content completions in degen_suite) - hand it to
+        // the eager step, which is byte-identical to the pre-MTP behavior.
+        if (req->think_budget > 0.0f && req->in_think_block != think_at_chunk_start) break;
     }
     kv_manager_->touch(req->id);
 
@@ -1040,8 +1072,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             cfg_min < 0.0f ? 1.0f + kMtpEconAccept * static_cast<float>(mtp_spec_decode_k()) : cfg_min;
         if (min_emit > 0.0f && mtp_econ_verifies_ >= kMtpEconSample &&
             static_cast<float>(mtp_econ_emitted_) <
-                static_cast<float>(mtp_econ_verifies_) * min_emit)
+                static_cast<float>(mtp_econ_verifies_) * min_emit) {
+            IMP_LOG_INFO("[mtp-econ] verifies=%d emitted=%d min_emit=%.2f this_emitted=%d matched=%d",
+                         mtp_econ_verifies_, mtp_econ_emitted_, min_emit, emitted, matched);
             mtp_unbind_("uneconomic: avg emitted/verify below break-even");
+        }
     }
     const bool acceptance_poor =
         req->spec_verifies >= 8 &&

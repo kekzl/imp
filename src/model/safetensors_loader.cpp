@@ -1098,10 +1098,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         // make. Costs a name scan, no weight bytes.
         IMP_LOG_INFO(
             "MTP head present in this checkpoint but not loaded (speculative.mtp_k=0). "
-            "Enable with --set speculative.mtp_k=2: measured +15 %% decode on "
-            "Qwen3.8-27B-NVFP4, range +8 to +22 %%, in exchange for the head's VRAM "
-            "(0.79 GiB there) and reproducible output across processes. "
-            "See docs/LIMITATIONS.md");
+            "Enable with --set speculative.mtp_k=1 --set speculative.ngram=false: "
+            "measured +17-21 %% single-stream decode on Qwen3.8-27B-NVFP4 (2026-08-27), "
+            "in exchange for the head's VRAM (0.79 GiB there) and eager-equal greedy "
+            "trajectories. See docs/LIMITATIONS.md");
         mtp_available_unloaded = true;
     }
 
