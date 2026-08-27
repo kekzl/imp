@@ -121,6 +121,17 @@ than the graph-capture workspace cap, so **prefill** graph capture is disabled
 while decode capture stays on. Weights land at 17.9 GiB, leaving room for the KV
 cache on a 32 GB card.
 
+This checkpoint ships a trained MTP head the default load leaves off. Adding
+
+```bash
+  --set speculative.mtp_k=1 --set speculative.ngram=false
+```
+
+buys +17-21 % single-stream decode for 0.79 GiB of VRAM. `GET /health` repeats
+this hint as `mtp_head_hint` whenever the head is present but unloaded; the
+measured numbers, their provenance and the trade are in
+[`LIMITATIONS.md`](LIMITATIONS.md).
+
 ## 3. Ask it something
 
 The `model` field is required, and its value is the file or directory basename.
