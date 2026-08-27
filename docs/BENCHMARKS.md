@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-21
-commit: b2a162c0
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # Benchmarks
@@ -333,9 +333,8 @@ Nemotron-3-Nano is arch-limited — was disproved on 2026-08-12; see note ¹ᶜ.
 
 ## Qwen3.8-27B, the quickstart model (2026-08-16)
 
-Measured because this is the model the [README](../README.md) and
-[`QUICKSTART.md`](QUICKSTART.md) now walk a first-time reader through, and a
-worked example should carry numbers somebody can check.
+The model the [README](../README.md) and [`QUICKSTART.md`](QUICKSTART.md)
+walk a first-time reader through.
 
 2026-08-16, commit `52efa361`, CUDA 13.3, `CUBLAS_WORKSPACE_CONFIG=:4096:8`,
 median of 3 isolated processes × 10 reps, card verified free before each run.
@@ -763,8 +762,6 @@ Llama 3.1 used the `<function=F>` envelope, so a correct call was handed back as
 name matches a tool the request offered). The two llama.cpp cells are its own
 gaps at this budget: `json_object` returned non-JSON, and `tool_choice=auto`
 forced a call on a plain chat turn.
-
-Both engines have holes; this is what measuring instead of asserting looks like.
 
 ### Three families, 8-turn sessions (budget 200, 3 reps)
 

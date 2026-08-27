@@ -1,17 +1,15 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # imp: Systematic Nsight Systems Profiling & Optimization
 
 ## Mission
 
-Conduct a rigorous end-to-end performance audit of `imp` using Nsight Systems (`nsys`) on the RTX 5090 (SM120). Identify the top 5–10 optimization opportunities ranked by expected tok/s impact, and produce a prioritized action list with concrete patches.
-
-This is a **measurement-first** workflow. No speculative optimization. Every claim is backed by a profile.
+End-to-end performance audit of `imp` with Nsight Systems (`nsys`) on the RTX 5090 (SM120). Output: top 5-10 optimization opportunities ranked by expected tok/s impact, prioritized action list with concrete patches. Measurement-first: no speculative optimization, every claim backed by a profile.
 
 ---
 
@@ -21,33 +19,23 @@ This is a **measurement-first** workflow. No speculative optimization. Every cla
    - `nsys --version` (require ≥ 2025.3 for Blackwell support)
    - `nvidia-smi` confirms RTX 5090, driver, CUDA runtime
    - imp built with `-lineinfo` and **NVTX ranges enabled** (`-DIMP_ENABLE_NVTX=ON`)
-   - Release build with `-O3`, but `-g` symbols retained for kernel attribution
-
-2. If NVTX is not yet wired in, **add it first** before profiling. Annotate at minimum:
-   - `imp::Engine::generate()` (top-level)
-   - Prefill vs. decode phases (separate ranges)
-   - Per-layer: attention, FFN/MoE, sampling
-   - KV cache ops (copy, append, evict)
-   - Host-side: tokenization, scheduler, batching
-   - Use `nvtxRangePushA`/`PopA` with descriptive names; categories per subsystem
-
-3. Lock GPU clocks for reproducibility:
+   - Release build with `-O3`, `-g` symbols retained for kernel attribution
+2. If NVTX is not wired in, **add it first**. Annotate at minimum: `imp::Engine::generate()` (top-level); prefill vs decode phases (separate ranges); per-layer attention / FFN-MoE / sampling; KV cache ops (copy, append, evict); host-side tokenization, scheduler, batching. `nvtxRangePushA`/`PopA` with descriptive names; categories per subsystem.
+3. Lock GPU clocks for reproducibility; document chosen frequencies:
    ```
    nvidia-smi -lgc <base_clock>
    nvidia-smi -lmc <mem_clock>
    ```
-   Document chosen frequencies.
 
 ---
 
 ## Phase 1: Baseline Profile Collection
 
-Collect three reference workloads. For each, capture both `nsys` (timeline) and a separate `ncu` summary (per-kernel metrics) so we can cross-reference.
+Three reference workloads; for each capture both `nsys` (timeline) and a separate `ncu` summary (per-kernel metrics) for cross-reference.
 
-**Workloads:**
-- **W1 — Long-context prefill:** single request, 8k input, 64 output tokens. Stresses FMHA prefill, weight loads, scheduler overhead is amortized.
-- **W2 — Decode-heavy:** single request, 256 input, 2048 output. Stresses KV cache, decode-phase FMHA, sampling, host-GPU sync.
-- **W3 — Batched serving:** 16 concurrent requests, mixed lengths. Stresses scheduler, KV layout, MoE expert routing if applicable.
+- **W1 - Long-context prefill:** single request, 8k input, 64 output tokens. Stresses FMHA prefill, weight loads; scheduler overhead amortized.
+- **W2 - Decode-heavy:** single request, 256 input, 2048 output. Stresses KV cache, decode-phase FMHA, sampling, host-GPU sync.
+- **W3 - Batched serving:** 16 concurrent requests, mixed lengths. Stresses scheduler, KV layout, MoE expert routing if applicable.
 
 **Capture command template:**
 ```bash
@@ -63,61 +51,52 @@ nsys profile \
   ./build/imp_server <args>
 ```
 
-Use `cudaProfilerStart()`/`cudaProfilerStop()` in the test harness to skip warmup and exclude shutdown noise. Profile **steady state only**.
-
-For each workload also record:
-- Wall-clock tok/s (prefill tok/s and decode tok/s separately)
-- Peak and average VRAM
-- Power draw (`nvidia-smi dmon -s pucvmet`)
-
-Save raw `.nsys-rep` files; do not delete after analysis.
+`cudaProfilerStart()`/`cudaProfilerStop()` in the harness skips warmup and shutdown noise: profile **steady state only**. Per workload also record wall-clock tok/s (prefill and decode separately), peak and average VRAM, power draw (`nvidia-smi dmon -s pucvmet`). Keep raw `.nsys-rep` files.
 
 ---
 
-## Phase 2: Timeline Analysis — Where Does Time Go?
+## Phase 2: Timeline Analysis - Where Does Time Go?
 
-Open each profile in the Nsight Systems GUI **and** export stats via CLI for grep-able artifacts:
+Open each profile in the GUI **and** export stats for grep-able artifacts:
 
 ```bash
 nsys stats --report cuda_gpu_kern_sum,cuda_gpu_mem_time_sum,cuda_api_sum,nvtx_sum \
   --format csv --output profiles/W<N>_baseline profiles/W<N>_baseline.nsys-rep
 ```
 
-For each workload, produce a structured report answering:
+Per workload, a structured report answering:
 
 ### 2.1 Kernel time breakdown
-- Top 20 kernels by total GPU time. Group by logical phase using NVTX ranges.
-- For each: % of total runtime, invocation count, avg duration, occupancy hint.
-- Flag any kernel that is unexpectedly hot (e.g., a `memset`, a small reduction, a layout transform consuming >2% — these are usually the easy wins).
+- Top 20 kernels by total GPU time, grouped by NVTX phase. Per kernel: % of runtime, invocation count, avg duration, occupancy hint.
+- Flag unexpectedly hot kernels (`memset`, small reduction, layout transform > 2 %): usually the easy wins.
 
 ### 2.2 GPU idle / bubbles
-- What fraction of wall time is the GPU actually executing kernels vs. idle?
-- Where are the largest idle gaps on the timeline? Cross-reference with NVTX to identify the host-side cause (e.g., `cudaMemcpyAsync` on default stream stalling, scheduler decisions, tokenizer on hot path, allocator calls).
-- Are there `cudaStreamSynchronize` / `cudaDeviceSynchronize` calls on the critical path that should not be there?
+- Fraction of wall time executing kernels vs idle; largest idle gaps, cross-referenced with NVTX for the host-side cause (`cudaMemcpyAsync` on default stream, scheduler decisions, tokenizer on hot path, allocator calls).
+- `cudaStreamSynchronize` / `cudaDeviceSynchronize` on the critical path that should not be there?
 
 ### 2.3 Host-GPU concurrency
-- Is the host issuing work fast enough to keep the GPU saturated? Look for "kernel launch latency" gaps (>5–10 µs between kernels with no host work).
-- Are CUDA Graphs being used for the decode loop? If not, this is almost certainly a top-3 finding.
-- Check for malloc/free in the steady-state hot loop (any `cudaMalloc`/`cudaFree` after warmup is a bug). nsys is the wrong instrument for this one — build with `-DIMP_ALLOC_INTERPOSE=ON` and read `[alloc-interpose] steady state`, which attributes every call site. The shipped state is zero (`0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`), so any nonzero count is the finding. **Rebuild with the default OFF before measuring throughput** — the shim costs ~3% decode and has already been mistaken for a regression (`AUDIT.md` G16).
+- Is the host issuing fast enough? Look for kernel-launch-latency gaps (> 5-10 µs between kernels with no host work).
+- CUDA Graphs on the decode loop? If not, almost certainly a top-3 finding.
+- malloc/free in the steady-state hot loop (any `cudaMalloc`/`cudaFree` after warmup is a bug): nsys is the wrong instrument. Build with `-DIMP_ALLOC_INTERPOSE=ON` and read `[alloc-interpose] steady state`, which attributes every call site. Shipped state is zero (`0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`); any nonzero count is the finding. **Rebuild with the default OFF before measuring throughput**: the shim costs ~3 % decode and has been mistaken for a regression (`AUDIT.md` G16).
 
 ### 2.4 Memory subsystem
-- HBM read/write bandwidth utilization (from `--gpu-metrics`). If decode kernels are below 70% of theoretical (1.79 TB/s on RTX 5090), there's headroom.
-- H2D / D2H transfers: any in the hot path? (Tokenization output, sampling output — pinned memory? batched?)
-- KV cache: pattern of writes per token, layout (paged?), fragmentation.
+- HBM read/write bandwidth utilization (from `--gpu-metrics`); decode kernels below 70 % of theoretical (1.79 TB/s on RTX 5090) = headroom.
+- H2D / D2H transfers in the hot path? (Tokenization output, sampling output: pinned memory? batched?)
+- KV cache: writes per token, layout (paged?), fragmentation.
 
 ### 2.5 Stream usage
-- How many CUDA streams? Is there real overlap between compute streams and copy engine, or is everything on stream 0?
-- For batched serving: is per-request work on separate streams to enable kernel overlap? (Probably not worth it for compute-bound kernels, but worth checking for small ops.)
+- How many CUDA streams; real overlap between compute streams and copy engine, or everything on stream 0?
+- Batched serving: per-request work on separate streams? (Probably not worth it for compute-bound kernels; worth checking for small ops.)
 
 ### 2.6 NVFP4 / MXFP4 path verification
-- Confirm the FMHA + GEMM kernels actually being dispatched are the NVFP4/MXFP4 variants, not BF16/FP16 fallbacks. Kernel name in `nsys` should make this obvious; if there's any FP16 GEMM in the hot path on SM120 it's running at half speed and is an immediate bug.
-- For the MXFP4 FMHA: confirm it's the new kernel and not an older path still resident in the binary.
+- Confirm the dispatched FMHA + GEMM kernels are the NVFP4/MXFP4 variants, not BF16/FP16 fallbacks (kernel name in `nsys`). Any FP16 GEMM in the SM120 hot path runs at half speed and is an immediate bug.
+- MXFP4 FMHA: confirm the new kernel, not an older path still resident in the binary.
 
 ---
 
 ## Phase 3: Per-Kernel Deep-Dive (selective)
 
-For the top 5 hottest kernels identified in Phase 2, run `ncu` for detailed metrics. **Only** the top 5 — `ncu` is slow, don't profile everything.
+`ncu` on the top 5 hottest kernels from Phase 2. **Only** the top 5: `ncu` is slow.
 
 ```bash
 ncu --set full \
@@ -128,21 +107,11 @@ ncu --set full \
     ./build/imp_server <args>
 ```
 
-For each kernel, extract:
-- Achieved occupancy vs. theoretical
-- Memory throughput vs. peak (HBM, L2, shared)
-- Tensor core utilization (NVFP4 SM120 path)
-- Register pressure / spills
-- Warp stall reasons (top 3)
-- Roofline position: compute-bound or memory-bound?
-
-Compare against the published peak for SM120 for that precision/op. The gap is the headroom.
+Per kernel extract: achieved vs theoretical occupancy; memory throughput vs peak (HBM, L2, shared); tensor core utilization (NVFP4 SM120 path); register pressure / spills; top-3 warp stall reasons; roofline position. Compare against the published SM120 peak for that precision/op; the gap is the headroom.
 
 ### Register pressure without a GPU
 
-Register pressure is the one item on that list you do not need a device for.
-`cuobjdump -res-usage` reads the **compiled library**, so it works in CI, in a
-container with no card, and against any build:
+`cuobjdump -res-usage` reads the **compiled library**: works in CI, in a container with no card, against any build.
 
 ```
 make kernel-resources         # check the pinned kernels
@@ -156,27 +125,15 @@ make kernel-resources-update  # re-pin, deliberately
 | `STACK` | per-thread local frame in bytes. Non-zero = state in local memory |
 | `LOCAL` | separately declared local memory |
 
-On the current build: **823 kernels, 71 at risk, 6 sitting exactly at 255**
-(`gdn_scan_chunkwise_kernel`, `gdn_scan_fused_kernel`, `fmha_sm120_fa2_kernel`)
-and 70 with a non-zero local frame. `tools/kernel_resource_baseline.txt` pins
-those 71 as a **two-way ratchet**: a kernel that starts spilling fails the gate,
-and so does a pinned kernel that improved, so the list cannot go stale in either
-direction.
+Current build: **823 kernels, 71 at risk, 6 sitting exactly at 255** (`gdn_scan_chunkwise_kernel`, `gdn_scan_fused_kernel`, `fmha_sm120_fa2_kernel`) and 70 with a non-zero local frame. `tools/kernel_resource_baseline.txt` pins those 71 as a **two-way ratchet**: a kernel that starts spilling fails the gate, and so does a pinned kernel that improved, so the list cannot go stale in either direction.
 
-This is the gate the throughput gates cannot be. `verify-fast` compares decode
-and prefill at an 8 % threshold; one kernel dropping over the register cliff
-inside a 48-layer forward is far below that, and would ship silently. It also
-makes the 82 hand-set `__launch_bounds__` auditable - `src/compute/CLAUDE.md`
-says never to add one blind, and until #1549 the measurement that sentence
-demands did not exist in the tree.
+This is the gate the throughput gates cannot be: `verify-fast` compares decode and prefill at an 8 % threshold, and one kernel dropping over the register cliff inside a 48-layer forward is far below that. It also makes the 82 hand-set `__launch_bounds__` auditable (`src/compute/CLAUDE.md` says never add one blind; until #1549 the measurement that sentence demands did not exist in the tree).
 
 ---
 
 ## Phase 4: Findings & Prioritized Action List
 
-Produce `nsys_findings.md` with the following structure:
-
-For each finding (target 8–12 findings):
+Produce `nsys_findings.md`, target 8-12 findings:
 
 ```
 ### Finding N: <short title>
@@ -190,45 +147,47 @@ For each finding (target 8–12 findings):
 **Validation plan:** <which metric must move, by how much>
 ```
 
-Then a summary table sorted by `expected_impact / effort` (ROI), with the top 3 marked as immediate work.
+Then a summary table sorted by `expected_impact / effort` (ROI), top 3 marked as immediate work.
 
-Common findings to specifically check for (do not assume present, but look):
+Common findings to check for (do not assume present):
+
 - Decode loop not using CUDA Graphs → graph capture per batch shape, cache by shape key
-- Sampling kernel launching many small CUB calls per step → fuse, or use `cub::DeviceTopK` (CUDA 13.2)
-- KV append pattern doing layout transforms that could be fused into attention output write
-- Any BF16/FP16 GEMM on SM120 hot path (running at half speed — must move to NVFP4/MXFP4)
+- Sampling kernel launching many small CUB calls per step → fuse, or `cub::DeviceTopK` (CUDA 13.2)
+- KV append doing layout transforms fusable into the attention output write
+- Any BF16/FP16 GEMM on the SM120 hot path (half speed; must move to NVFP4/MXFP4)
 - Host-side scheduler decisions blocking the launch queue
-- `cudaMemcpyAsync` on the default stream when it should be on a copy stream
-- Attention kernel not saturating tensor cores during decode (low arithmetic intensity — can it be merged with adjacent ops?)
+- `cudaMemcpyAsync` on the default stream instead of a copy stream
+- Attention kernel not saturating tensor cores during decode (low arithmetic intensity; mergeable with adjacent ops?)
 - MoE expert dispatch: scatter/gather kernels dominating over expert GEMMs
-- Tokenizer or detokenizer running on the critical path of the response loop instead of overlapped
+- Tokenizer or detokenizer on the response loop's critical path instead of overlapped
 
 ---
 
 ## Phase 5: Iterate
 
-After implementing the top 1–3 fixes:
-1. Re-run the **identical** capture commands from Phase 1.
-2. Diff against baseline using `nsys stats` CSV outputs.
-3. Confirm: did the targeted metric move as predicted? Any regressions elsewhere?
-4. Update the findings doc with actuals vs. predicted.
+After implementing the top 1-3 fixes:
+
+1. Re-run the **identical** Phase 1 capture commands.
+2. Diff against baseline via `nsys stats` CSV outputs.
+3. Confirm the targeted metric moved as predicted; check for regressions elsewhere.
+4. Update the findings doc with actuals vs predicted.
 5. Repeat.
 
-Each iteration must include the `.nsys-rep` files in `profiles/` so improvements are auditable.
+Each iteration includes the `.nsys-rep` files in `profiles/` so improvements are auditable.
 
 ---
 
 ## Deliverables
 
-- `profiles/` — all `.nsys-rep` and `ncu-rep` files (baseline + each iteration)
-- `profiles/*.csv` — exported stats per workload
-- `nsys_findings.md` — prioritized findings as described above
-- `nsys_methodology.md` — exact reproduction steps (clocks, build flags, harness commands)
-- A short PR per implemented fix, each linking to the finding ID and showing before/after numbers
+- `profiles/`: all `.nsys-rep` and `ncu-rep` files (baseline + each iteration)
+- `profiles/*.csv`: exported stats per workload
+- `nsys_findings.md`: prioritized findings as above
+- `nsys_methodology.md`: exact reproduction steps (clocks, build flags, harness commands)
+- A short PR per implemented fix, linking the finding ID with before/after numbers
 
 ## Constraints
 
-- Do not optimize anything that isn't backed by a profile.
+- Do not optimize anything not backed by a profile.
 - Do not change kernel correctness without a numerical equivalence test.
-- Keep all NVTX ranges in the final build — always-on profiling is a feature.
-- If the GUI shows something `nsys stats` doesn't, screenshot it and put it in the findings doc.
+- Keep all NVTX ranges in the final build: always-on profiling is a feature.
+- If the GUI shows something `nsys stats` does not, screenshot it into the findings doc.

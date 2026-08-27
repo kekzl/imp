@@ -1,16 +1,15 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # Deployment
 
-Running imp as a service rather than from a terminal. Read
-[`LIMITATIONS.md`](LIMITATIONS.md) first if you have not: several entries there
-are deployment decisions in disguise, in particular that one GPU holds one model
-and that nothing here is covered by an SLO.
+Running imp as a service. Read [`LIMITATIONS.md`](LIMITATIONS.md) first:
+several entries there are deployment decisions, in particular that one GPU
+holds one model and that nothing is covered by an SLO.
 
 ## Compose
 
@@ -31,9 +30,9 @@ volumes:
   imp-cache:
 ```
 
-The cache volume is not optional in a service context: without it every restart
-re-transforms the weights. It must be writable by the container user; a fresh
-volume owned by root silently disables both the warm weight cache and the
+The cache volume is not optional in a service context: without it every
+restart re-transforms the weights. Must be writable by the container user; a
+fresh volume owned by root silently disables the warm weight cache and the
 library-reserve measurement.
 
 ## Configuration
@@ -44,10 +43,10 @@ Three layers, later wins: `imp.conf` → `--config <file>` → `--set key=value`
 --set runtime.max_seq_len=32768 --set kv_cache.dtype=fp8
 ```
 
-**A `--set` key that does not exist is an error, not a warning.** That is
-deliberate: a typo used to measure the default silently. An unknown key in
-`imp.conf` stays a warning, because a config file may outlive the build that
-understood every key in it.
+**A `--set` key that does not exist is an error, not a warning.** Deliberate:
+a typo used to measure the default silently. An unknown key in `imp.conf`
+stays a warning, because a config file may outlive the build that understood
+every key in it.
 
 Every key, with defaults: `src/runtime/config.h` is the source of truth;
 [`usage.md`](usage.md#configuration--impconf) is the readable version.
@@ -64,7 +63,7 @@ The settings that most often need changing in a deployment:
 
 ## Exit codes
 
-The binaries return the C API's error taxonomy rather than a bare 1 (#1585), so
+The binaries return the C API's error taxonomy rather than a bare 1 (#1585):
 a supervisor can tell a bad argument from a full GPU without parsing prose.
 
 | code | meaning | retry? |
@@ -91,20 +90,19 @@ this; it returns 1 now, with every other invalid argument.
 --trusted-proxy 10.0.0.5      # believe X-Forwarded-For from these peers only
 ```
 
-**There is no default credential and no default refusal.** Without `--api-key`
-every endpoint is open to whoever can reach the port, which is why the shipped
-compose file publishes on `127.0.0.1` and why widening it is a two-part change:
-`IMP_BIND` and `IMP_API_KEY` together (#1619).
+**No default credential, no default refusal.** Without `--api-key` every
+endpoint is open to whoever can reach the port: the shipped compose file
+publishes on `127.0.0.1`, and widening it is a two-part change, `IMP_BIND`
+plus `IMP_API_KEY` together (#1619).
 
-**`--trusted-proxy` is what makes rate limiting work behind a proxy.** Without
-it `X-Forwarded-For` is ignored and every request from the proxy shares one
-bucket; with it, the header is believed from those peers and the limit is
-per-client again. It is not believed from anyone else, because a client that
-can write the header can otherwise vary it per request and bypass the limit
-entirely (#1614).
+**`--trusted-proxy` makes rate limiting work behind a proxy.** Without it
+`X-Forwarded-For` is ignored and every request from the proxy shares one
+bucket; with it the header is believed from those peers only. Believing it
+from anyone else would let a client vary the header per request and bypass
+the limit (#1614).
 
-Per-request work is capped independently of the rate limit, because one request
-can ask for many units of it:
+Per-request work is capped independently of the rate limit (one request can
+ask for many units of it):
 
 | flag | default | bounds |
 |---|---|---|
@@ -116,9 +114,9 @@ can ask for many units of it:
 | `--http-keep-alive-max` | 100 | requests per connection |
 
 **CORS is wide open by design** (`Access-Control-Allow-Origin: *` plus an
-`OPTIONS` catch-all), because the built-in web UI and browser clients call the
-API directly. If imp is reachable from anywhere other than your own network,
-terminate TLS and enforce origin policy at a reverse proxy. imp does not do TLS.
+`OPTIONS` catch-all): the built-in web UI and browser clients call the API
+directly. imp does not do TLS; if reachable beyond your own network,
+terminate TLS and enforce origin policy at a reverse proxy.
 
 A minimal nginx front:
 
@@ -132,9 +130,9 @@ location / {
 }
 ```
 
-`proxy_buffering off` is the line people forget. With it on, streaming responses
-arrive in one lump at the end and every client reports a TTFT equal to the total
-latency.
+`proxy_buffering off` is the line people forget: with buffering on, streaming
+responses arrive in one lump at the end and every client reports TTFT equal
+to total latency.
 
 ## Health, metrics, lifecycle
 
@@ -146,9 +144,8 @@ latency.
 | `POST /admin/suspend` | park the weights in host RAM and free the GPU completely. Inference answers 503 while suspended |
 | `POST /admin/resume` | restore warm, in seconds, without re-reading weights |
 
-Suspend/resume is the answer to "I need the GPU for something else for ten
-minutes" without paying a cold load afterwards. Sessions and KV do not survive
-it; weights do.
+Suspend/resume frees the GPU temporarily without paying a cold load
+afterwards. Sessions and KV do not survive it; weights do.
 
 ### Which series answer which question
 
@@ -162,32 +159,30 @@ it; weights do.
 | did the server break, or refuse | `imp_requests_failed_total` is 5xx. Every refusal this server is designed to make is a **4xx**, and those are `imp_requests_rejected_total` (#1579). Two series because they want different alerts |
 
 `monitoring/grafana/dashboards/imp.json` plots the percentiles from those
-histograms. The `stat` panels beside them show the last value, which is a
-different thing and cannot show a tail.
+histograms. The `stat` panels beside them show the last value only, which
+cannot show a tail.
 
 ## Capacity planning
 
-**Plan capacity, do not discover it.** Two properties of this platform make
-runtime probing unreliable:
+**Plan capacity, do not discover it.** Two platform properties make runtime
+probing unreliable:
 
-- A successful `cudaMalloc` proves nothing about free VRAM. WSL2/WDDM
-  oversubscribes into host memory and returns success. The symptom is a 6.5x
+- A successful `cudaMalloc` proves nothing about free VRAM: WSL2/WDDM
+  oversubscribes into host memory and returns success. Symptom is a 6.5x
   bandwidth cliff, not an error.
-- Free VRAM only ever decreases within a process. The driver never returns a
-  process's peak commitment, however cleanly CUDA released it, so anything sized
-  from `cudaMemGetInfo` is reading a moving floor.
+- Free VRAM only ever decreases within a process: the driver never returns a
+  process's peak commitment, so anything sized from `cudaMemGetInfo` reads a
+  moving floor.
 
-Size the deployment from the model plus the KV pool you intend to serve, and pin
-`runtime.max_seq_len` rather than letting it auto-fit against a moving number.
-The tier model and the invariants behind this are in
-[`internals/MEMORY.md`](internals/MEMORY.md).
+Size the deployment from the model plus the KV pool you intend to serve; pin
+`runtime.max_seq_len` rather than auto-fitting against a moving number. Tier
+model and invariants: [`internals/MEMORY.md`](internals/MEMORY.md).
 
 ## Serving more than one model
 
-One GPU holds one model. `server.model_swap` (default on) lets a request name a
-different model from the models directory: in-flight generations drain first and
-are never cancelled, and a failed load restores the previous model rather than
-leaving the server empty. The requesting call pays the load, which the warm
-weight cache makes cheap on repeats.
+One GPU holds one model. `server.model_swap` (default on): a request naming a
+different model from the models directory swaps to it. In-flight generations
+drain first, never cancelled; a failed load restores the previous model. The
+requesting call pays the load, cheap on repeats via the warm weight cache.
 
-If you need strict single-model semantics, set `server.model_swap=false`.
+Strict single-model semantics: `server.model_swap=false`.

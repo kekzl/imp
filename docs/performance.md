@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # Performance
@@ -31,25 +31,24 @@ duplicated here). Prefill + KV-cache tables below are
 process starts that it is not maintained as a comparison table.
 llama.cpp / vLLM comparison from cross-engine bench 2026-05-24.
 
-**Bench-mode caveat**: `--bench --max-tokens 128` sizes the engine to the bench
-workload, so it does not measure the served regime (`imp-server` defaults to the
-model's full context). Use `imp-cli --prompt` or a real server request for production
-numbers. The old mechanism behind this caveat — bench-mode KV sizing changing what
-was left for the NVFP4 cache — no longer applies: since #1106 the weight caches are
-built *before* the KV pool and the pool takes the measured residual, so the cache
-budget no longer depends on how much KV was allocated first. Two related traps are
-fixed rather than caveated: the double-charged cache reservation (#1100/#1102) and
-the cache-starvation collapse at 0 MiB free (#1103).
+**Bench-mode caveat**: `--bench --max-tokens 128` sizes the engine to the
+bench workload, not the served regime (`imp-server` defaults to the model's
+full context). Use `imp-cli --prompt` or a real server request for production
+numbers. The old mechanism (bench-mode KV sizing changing what was left for
+the NVFP4 cache) no longer applies: since #1106 weight caches are built
+*before* the KV pool and the pool takes the measured residual. Fixed, not
+caveated: double-charged cache reservation (#1100/#1102), cache-starvation
+collapse at 0 MiB free (#1103).
 
 ## Decode Throughput
 
-The per-model decode table is **not duplicated here** — it drifts. The canonical,
-SHA-anchored decode numbers (model · quant · metric · tok/s · commit · CUDA · exact
-command) live in [`BENCHMARKS.md`](BENCHMARKS.md), and the CI gate is
-`tests/perf_baseline.json` (refresh via `scripts/gen_perf_baseline.sh`). Heroes for
-orientation: Q8 tg128 ≈ 268 · 14B-Q6_K north-star ≈ 158 @ctx2048 · NVFP4 MoE
-tg256 in the 250–340 range (e.g. Qwen3-Coder-30B 338, Qwen3.6-35B 320 since the
-#949 FP8 SSM-projection sidecar, was 257).
+The per-model decode table is **not duplicated here** (it drifts). Canonical
+SHA-anchored decode numbers (model · quant · metric · tok/s · commit · CUDA ·
+exact command): [`BENCHMARKS.md`](BENCHMARKS.md). CI gate:
+`tests/perf_baseline.json` (refresh via `scripts/gen_perf_baseline.sh`).
+Heroes for orientation: Q8 tg128 ≈ 268 · 14B-Q6_K north-star ≈ 158 @ctx2048 ·
+NVFP4 MoE tg256 in the 250-340 range (e.g. Qwen3-Coder-30B 338, Qwen3.6-35B
+320 since the #949 FP8 SSM-projection sidecar, was 257).
 
 Decode is measured with CUDA Graphs ON, 10 reps, isolated + clock-warmed. Healthy-host
 sanity check: ~2850 MHz SM / 13801 MHz mem / ~500 W during the bench — decode can read

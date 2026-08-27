@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # Feature matrix
@@ -17,11 +17,11 @@ Legend:
 - ⚪ **not implemented** — deliberately absent, with the reasoning in [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)
 
 **What "verified" means here.** CI has no GPU runner: the `test` job is gated
-behind `vars.HAS_GPU_RUNNER` and the lane that does run executes in under a
-second without launching a single CUDA kernel. For the current case count run
-`python3 tools/check_test_lanes.py --report` - a literal here was 248 low within
-nine days of being written (#1673), because every test PR moves it. For anything GPU-shaped the gate
-is `make verify-fast` run locally before push. No document in this repo should
+behind `vars.HAS_GPU_RUNNER`, and the lane that runs executes in under a
+second without launching a CUDA kernel. Current case count:
+`python3 tools/check_test_lanes.py --report` (a literal here was 248 low
+within nine days, #1673). For anything GPU-shaped the gate is
+`make verify-fast`, locally, before push. No document in this repo should
 claim CI tests the kernels.
 
 ## Model architectures
