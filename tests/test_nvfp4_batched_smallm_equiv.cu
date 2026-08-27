@@ -262,6 +262,102 @@ TEST(SmallMV2Pair, PairMatchesTwoSingleCallsBitExact) {
     imp::free_nvfp4_result(w2);
 }
 
+// DISABLED by default: a measurement, not an assertion. Run with
+//   ./build-dev/test-quant --gtest_also_run_disabled_tests \
+//       --gtest_filter='*M1PipelineVsGemv*'
+// Question it answers: does the v2 producer/consumer pipeline kernel beat the
+// shipped M=1 decode GEMV (gemv_nvfp4_kpar, W4A16, PDL) on the batch=1 decode
+// shapes? The M=1 GEMV's roofline verdict is 66-70% of HBM with a
+// 4-bit-dequant co-limit; the pipeline reached ~79% of the weight floor at
+// M=32, and it can run M=1 (rows >= M are zero-filled). Method per
+// MarginalRowCost above: >1s warmup, paired ALTERNATING in one process.
+// Caveat the timing cannot see: the GEMV is W4A16, the pipeline is W4A4 — a
+// switch would also change batch=1 numerics and needs a PPL A/B on top.
+//
+// VERDICT (2026-08-27, this harness, L2-defeated with the 4-copy ring): NO.
+// GEMV and v2 sit inside each other's round spread on all six shapes (v2
+// marginally ahead only on gdn-in, marginally behind on gate/up, attn-qkv,
+// down). Without the L2 defeat the same run reads >1792 GB/s — every shape's
+// packed weight fits the 96 MB L2, the exact #1785 trap. In-situ a switch
+// would ADD a per-projection activation quantize and the W4A16->W4A4 numerics
+// change, so the isolated tie is decisive: the M=1 GEMV stands. Recorded in
+// sm120-cuda-expert known-issues.
+TEST(SmallMV2Pair, DISABLED_M1PipelineVsGemvBench) {
+    if (!has_sm120())
+        GTEST_SKIP() << "sm_120 required";
+    struct Shape { int n, k; const char* tag; };
+    const Shape shapes[] = {{17408, 5120, "gate/up"}, {10240, 5120, "gdn-in"},
+                            {6144, 5120, "gdn-z"},    {12288, 5120, "attn-qkv"},
+                            {5120, 17408, "down"},    {5120, 6144, "o/gdn-out"}};
+    std::mt19937 rng(11);
+    std::normal_distribution<float> dist(0.0f, 0.05f);
+    // L2 defeat: every shape's packed weight fits the 96 MB L2, so a single
+    // weight replayed 200x measures L2, not DRAM (the #1785 trap). Rotate
+    // kCopies quantized copies so consecutive iterations never re-hit.
+    constexpr int kCopies = 4;
+    for (const auto& sh : shapes) {
+        imp::NvFP4QuantResult wcp[kCopies]{};
+        for (int c = 0; c < kCopies; ++c) {
+            std::vector<half> wh(static_cast<size_t>(sh.n) * sh.k);
+            for (auto& h : wh) h = __float2half(dist(rng));
+            void* d_w = nullptr;
+            ASSERT_EQ(cudaMalloc(&d_w, wh.size() * sizeof(half)), cudaSuccess);
+            ASSERT_EQ(cudaMemcpy(d_w, wh.data(), wh.size() * sizeof(half), cudaMemcpyHostToDevice),
+                      cudaSuccess);
+            int64_t wshape[2] = {sh.n, sh.k};
+            imp::Tensor wt(d_w, imp::QType::F16, 2, wshape, true);
+            imp::quantize_fp16_to_nvfp4(wt, wcp[c], nullptr);
+            cudaDeviceSynchronize();
+            cudaFree(d_w);
+        }
+        const imp::NvFP4QuantResult& w = wcp[0];
+        // Activation: one FP16 row + its quantized twin
+        std::vector<half> xh(sh.k);
+        for (auto& h : xh) h = __float2half(dist(rng));
+        half* d_x = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_x, xh.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_x, xh.data(), xh.size() * sizeof(half), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        int64_t xshape[2] = {1, sh.k};
+        imp::Tensor xt(d_x, imp::QType::F16, 2, xshape, true);
+        imp::NvFP4QuantResult xq{};
+        imp::quantize_fp16_to_nvfp4(xt, xq, nullptr);
+        cudaDeviceSynchronize();
+        half* d_y = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(sh.n) * sizeof(half)), cudaSuccess);
+        // Warmup >1s: alternate both kernels across the copy ring
+        cudaEvent_t t0, t1;
+        cudaEventCreate(&t0); cudaEventCreate(&t1);
+        for (int i = 0; i < 400; ++i) {
+            imp::gemv_nvfp4_kpar(wcp[i % kCopies], d_x, d_y, sh.n, sh.k, nullptr);
+            imp::gemm_nvfp4_smallm_v2_a4(wcp[i % kCopies], xq, d_y, 1, sh.n, sh.k, nullptr, nullptr,
+                                         false);
+        }
+        cudaDeviceSynchronize();
+        const double wbytes = sh.n * (sh.k / 2.0 + sh.k / 16.0);
+        for (int round = 0; round < 3; ++round) {
+            float ms_g = 0, ms_v = 0;
+            cudaEventRecord(t0);
+            for (int i = 0; i < 200; ++i)
+                imp::gemv_nvfp4_kpar(wcp[i % kCopies], d_x, d_y, sh.n, sh.k, nullptr);
+            cudaEventRecord(t1); cudaEventSynchronize(t1); cudaEventElapsedTime(&ms_g, t0, t1);
+            cudaEventRecord(t0);
+            for (int i = 0; i < 200; ++i)
+                imp::gemm_nvfp4_smallm_v2_a4(wcp[i % kCopies], xq, d_y, 1, sh.n, sh.k, nullptr, nullptr,
+                                             false);
+            cudaEventRecord(t1); cudaEventSynchronize(t1); cudaEventElapsedTime(&ms_v, t0, t1);
+            const double us_g = ms_g * 1000.0 / 200.0, us_v = ms_v * 1000.0 / 200.0;
+            printf("%-9s N=%5d K=%5d round%d  gemv %7.2f us (%6.0f GB/s)   v2 %7.2f us (%6.0f GB/s)\n",
+                   sh.tag, sh.n, sh.k, round, us_g, wbytes / us_g / 1e3, us_v, wbytes / us_v / 1e3);
+        }
+        cudaEventDestroy(t0); cudaEventDestroy(t1);
+        cudaFree(d_x); cudaFree(d_y);
+        for (int c = 0; c < kCopies; ++c)
+            imp::free_nvfp4_result(wcp[c]);
+        imp::free_nvfp4_result(xq);
+    }
+}
+
 // The pair entry must refuse the striped regime rather than compute it with
 // stripes silently forced to 1 (a small-N weight would then be produced by a
 // single K-stripe with no reduce — numerically wrong under split-K rounding
