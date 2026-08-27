@@ -168,6 +168,10 @@ struct ChatRequestContext {
     std::chrono::high_resolution_clock::time_point t_start;
     std::chrono::system_clock::time_point t_log_start;
     std::string log_endpoint, log_client_ip, log_raw_body;
+    // Client-sent X-Request-Id (sanitized; empty = none). Echoed on the
+    // response and written to the request JSONL, so an external trace joins
+    // the server's req_id.
+    std::string log_client_request_id;
     bool log_skip = false;
     std::shared_ptr<imp::Request> imp_req;
     std::shared_ptr<ServerRequest> server_req;
@@ -241,11 +245,14 @@ bool validate_content_parts(const json& body, httplib::Response& res);
 // there, or demands a call with no tools).
 bool validate_tool_choice(const json& body, httplib::Response& res);
 
-// Defined in handlers_chat_core.cpp.
+// Defined in handlers_chat_core.cpp. client_request_id: sanitized client
+// X-Request-Id (empty = none sent; written as "client_request_id" so an
+// external trace joins the server req_id).
 void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
                        const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
                        const std::string& raw_body, double latency_ms, int prompt_tokens,
-                       int completion_tokens, const char* finish_reason, const json& response_body);
+                       int completion_tokens, const char* finish_reason, const json& response_body,
+                       const std::string& client_request_id = "");
 bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
                                ChatRequestContext& ctx);
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx);

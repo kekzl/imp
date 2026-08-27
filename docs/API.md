@@ -291,6 +291,17 @@ Two refusals worth knowing, both deliberate:
 
 No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
 
+## Request tracing
+
+Send an `X-Request-Id` header and every response echoes it back - refusals
+and unmatched routes included - sanitized to printable ASCII and capped at
+128 chars. The generation endpoints answer with the server's own completion
+id when no client id was sent, so every generation response carries some id
+a caller can quote. With `--log-requests`, the JSONL record carries the
+client id as `client_request_id` next to the server `req_id`, which is the
+join an agent framework needs to attribute its own latency to this hop.
+There is no OpenTelemetry export; the id propagation here is the wire half.
+
 ## Errors
 
 Every error is a JSON envelope, never a bare status with an empty body, and

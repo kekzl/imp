@@ -13,6 +13,11 @@ there instead of retelling it.
 
 ### Added
 
+- Request tracing, the id half: a client-sent `X-Request-Id` is echoed on
+  every response (refusals included, sanitized, 128-char cap); generation
+  endpoints answer with the server completion id when none was sent;
+  `--log-requests` JSONL carries `client_request_id` next to `req_id`.
+  No OTLP export. See docs/API.md "Request tracing".
 - Per-request admission priority: `"priority": int` body field (vLLM
   semantics, lower schedules earlier, default 0) on chat/completions,
   `/v1/messages` and `/v1/responses`; primary sort key of the pending queue,

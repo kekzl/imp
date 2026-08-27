@@ -654,5 +654,6 @@ void finish_stream_accounting_(ServerState& state, ChatRequestContext& ctx,
     // JSONL `response` field stays null. The request body, token counts,
     // finish reason, and latency still reflect everything the client did.
     log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, req_id, ctx.log_endpoint, ctx.log_client_ip,
-                      ctx.log_raw_body, ms, n_prompt_tokens, out.n_output_tokens, out.finish, json());
+                      ctx.log_raw_body, ms, n_prompt_tokens, out.n_output_tokens, out.finish, json(),
+                      ctx.log_client_request_id);
 }

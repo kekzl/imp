@@ -167,9 +167,12 @@ Ranked by what an agent workload notices first.
 8. **The quantizer refuses 3-D stacked experts.** Gap 1(f) below: needs a
    per-model layout descriptor plus per-expert bias support in loader and MoE
    forward.
-9. **No distributed tracing.** `/metrics` answers single-process questions;
-   no trace id is carried through a request, which is what an agent framework
-   needs to attribute its own latency.
+9. **No distributed tracing - the id half closed 2026-08-28.** Client-sent
+   `X-Request-Id` echoed on every response (refusals included, sanitized,
+   128-char cap); generation endpoints answer with the server completion id
+   when none sent; `--log-requests` JSONL carries `client_request_id` next
+   to `req_id` ([`API.md`](API.md), "Request tracing"). Remaining: no
+   OTLP export, no per-request span timing.
 
 ## Open gaps to the mission (assessed 2026-07-26)
 

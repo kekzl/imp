@@ -49,6 +49,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // Same key the rate limiter uses: an untrusted X-Forwarded-For in the
     // request log is a forged identity in the audit trail (#1614).
     ctx.log_client_ip = state.rate_limit_key(req.remote_addr, req.get_header_value("X-Forwarded-For"));
+    ctx.log_client_request_id = sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
     ctx.log_raw_body = req.body;
     ctx.log_skip = g_in_anthropic_shim;
 
@@ -474,6 +475,12 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
 
     // Log request received (structured)
     ctx.req_id = make_completion_id(state);
+    // Trace join on the wire: the client's id when it sent one, the server's
+    // req_id otherwise — every generation response carries SOME id a caller
+    // can quote back. Set here so both the JSON and the SSE path get it.
+    res.set_header("X-Request-Id", ctx.log_client_request_id.empty()
+                                       ? ctx.req_id
+                                       : ctx.log_client_request_id);
     IMP_LOG_INFO("[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f",
                  ctx.req_id.c_str(), messages.size(), ctx.params.stream ? "true" : "false",
                  ctx.params.max_tokens, ctx.params.temperature);

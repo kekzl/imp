@@ -218,6 +218,12 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
     // Log request received
     std::string req_id = make_completion_id(state);
+    {
+        // Trace join, same contract as chat/completions (see
+        // parse_chat_request_params): client id echoed, server id otherwise.
+        const std::string cid = sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
+        res.set_header("X-Request-Id", cid.empty() ? req_id : cid);
+    }
     IMP_LOG_INFO("[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f", req_id.c_str(),
                  prompt.size(), stream ? "true" : "false", max_tokens, temperature);
 

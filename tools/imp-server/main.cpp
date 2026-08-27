@@ -433,7 +433,19 @@ int main(int argc, char** argv) {
     });
 
     // Track failed requests via post-routing
-    svr.set_post_routing_handler([&state](const httplib::Request&, httplib::Response& res) {
+    svr.set_post_routing_handler([&state](const httplib::Request& req, httplib::Response& res) {
+        // Trace propagation (roadmap "no distributed tracing", the id half):
+        // a client-sent X-Request-Id is echoed on EVERY response, including
+        // refusals, so an agent framework can join its own trace to this
+        // hop. The generation handlers set the header themselves (client id,
+        // or the server req_id when none was sent) - has_header keeps this
+        // from stacking a duplicate. sanitize_for_echo turns CR/LF into '.',
+        // which is the header-injection guard.
+        if (!res.has_header("X-Request-Id")) {
+            const std::string cid = req.get_header_value("X-Request-Id");
+            if (!cid.empty())
+                res.set_header("X-Request-Id", sanitize_for_echo(cid, 128));
+        }
         if (res.status >= 500)
             state.metrics.requests_failed++;
         // 4xx is where this server puts every refusal it is designed to make

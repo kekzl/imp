@@ -344,6 +344,8 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
     std::string log_client_ip = req.get_header_value("X-Forwarded-For");
     if (log_client_ip.empty())
         log_client_ip = req.remote_addr;
+    const std::string log_client_request_id =
+        sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
     const std::string log_raw_body = req.body;
 
     // #1607: bound the nesting before any recursive parser sees it.
@@ -396,6 +398,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         ctx.log_skip = false;
         ctx.log_endpoint = log_endpoint;
         ctx.log_client_ip = log_client_ip;
+        ctx.log_client_request_id = log_client_request_id;
         ctx.log_raw_body = log_raw_body;
         ctx.t_log_start = t_log_start;
 
@@ -465,9 +468,12 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         int completion_t =
             oai_response.value("usage", json::object()).value("completion_tokens", 0);
         std::string status = response.value("status", "");
+        res.set_header("X-Request-Id",
+                       log_client_request_id.empty() ? response_id : log_client_request_id);
         log_request_jsonl(state, /*skip=*/false, t_log_start, response_id, log_endpoint,
                           log_client_ip, log_raw_body, ms, prompt_t, completion_t,
-                          status.empty() ? nullptr : status.c_str(), response);
+                          status.empty() ? nullptr : status.c_str(), response,
+                          log_client_request_id);
     }
 
     res.status = 200;

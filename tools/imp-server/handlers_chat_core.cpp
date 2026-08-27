@@ -53,13 +53,16 @@ thread_local std::string g_shim_stop_sequence;
 void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
                        const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
                        const std::string& raw_body, double latency_ms, int prompt_tokens,
-                       int completion_tokens, const char* finish_reason, const json& response_body) {
+                       int completion_tokens, const char* finish_reason, const json& response_body,
+                       const std::string& client_request_id) {
     if (skip || !state.request_logger.enabled)
         return;
     json record;
     record["ts_ms"] =
         std::chrono::duration_cast<std::chrono::milliseconds>(t_start.time_since_epoch()).count();
     record["req_id"] = req_id;
+    if (!client_request_id.empty())
+        record["client_request_id"] = client_request_id;
     record["endpoint"] = endpoint;
     record["client_ip"] = client_ip;
     record["latency_ms"] = latency_ms;
@@ -1152,7 +1155,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     }
     log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, comp_id, ctx.log_endpoint, ctx.log_client_ip,
                       ctx.log_raw_body, ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish,
-                      response);
+                      response, ctx.log_client_request_id);
 
     res.set_content(dump_safe(response), "application/json");
 }
