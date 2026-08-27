@@ -11,6 +11,12 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- MTP draft feed defaults to post-RMSNorm hiddens (`diagnostics.mtp_prenorm_h`
+  now true): serving accept 70.2/72.2% -> 74.1/78.4% on Qwen3.8-27B-NVFP4,
+  4/4 alternating pairs, +2-3% tok/s. No effect while `mtp_k=0`.
+
 ## [0.31.0] - 2026-08-27
 
 ### Fixed

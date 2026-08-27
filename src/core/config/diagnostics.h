@@ -144,8 +144,13 @@ struct Diagnostics {
     // the result.
     bool mtp_tree_probe = false;
     // MTP: pass main model's post-RMSNorm hidden to draft head (vLLM
-    // variant).
-    bool mtp_prenorm_h = false;
+    // variant). Default ON since 2026-08-27: on Qwen3.8-27B-NVFP4 (mtp_k=1,
+    // ngram=false, 1024-token thinking chats) it lifted serving accept from
+    // 70.2/72.2% to 74.1/78.4% and won 4/4 alternating pairs (+2-3% tok/s).
+    // The head was trained against post-norm hiddens (the upstream
+    // convention); imp's executor hidden_ is the pre-norm residual, so the
+    // feed normalizes every fed pair. false restores the pre-norm feed.
+    bool mtp_prenorm_h = true;
     // Audit NVFP4 weight scales at load time.
     bool audit_nvfp4_scales = false;
     // Per-component VRAM accounting harness (MemAccount): lifecycle
