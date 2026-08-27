@@ -161,6 +161,17 @@ there instead of retelling it.
 
 ### Added
 
+- **Row-batched decode sampling: +2.2% aggregate at 32 streams.** The per-row
+  eager chain after each decode-graph replay (31 rows x argmax partial+reduce
+  plus a vocab-sweep penalty launch each, ~124 launches with host gaps between
+  them - 6.6% of serving wall was that chain and its gaps) now stashes rows
+  like the top-k path and flushes as ONE batched penalty sweep + ONE batched
+  argmax pair. Qwen3.8-27B-NVFP4, two-image alternating A/B, 3 trials:
+  1740.9 -> 1779.4 tok/s aggregate median (pairs +1.7/+2.0/+3.0%). Tokens and
+  logits bit-identical per row (`SamplingTest.{Greedy,Penalty}RowsMatchPerRowLaunch`,
+  two mutants killed); rows with DRY/bans/bias/constraints/min-p/typical-p
+  keep the inline chain. degen_suite 50/0.
+
 - **Sibling-pair small-M GEMM launch (`gemm.nvfp4_smallm_pair`, default ON):
   +1.7% aggregate at 32 streams.** FFN gate|up and GDN in|z each consume the
   same quantized activation; they now run as ONE smallm v2 launch (two weight

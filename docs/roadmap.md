@@ -114,7 +114,11 @@ Ranked by what an agent workload notices first.
    (default ON) runs FFN gate|up and GDN in|z as one sibling-pair smallm
    launch each (112 fewer launches per step), measured +1.7% aggregate at 32
    streams (1713.3 -> 1742.0 median, 3/3 alternating pairs positive).
-   Still open in class: elementwise. (d) cross-sequence
+   UPDATE 2026-08-27 (later): the post-step sampling chain is PAID - the
+   per-row eager argmax/penalty launches between graph replays (~124
+   launches/step, 6.6% of serving wall incl. their host gaps) now batch
+   like the top-k stash; +2.2% aggregate (1740.9 -> 1779.4 median, 3/3
+   pairs). Still open in class: elementwise. (d) cross-sequence
    prefill batching: a 32-prompt burst prefills one sequence per forward
    at ~1700 tok/s effective (launch-bound, 64 layers), so every first
    token waits 2-3.5 s; batching prefill rows the way decode batches

@@ -697,6 +697,21 @@ private:
     int n_pending_topk_rows_ = 0;
     int pending_topk_max_k_ = 0;
     int pending_topk_vocab_ = 0;
+    // Greedy + penalty row staging, same stash/flush contract as top-k above
+    // (2026-08-27: 31 rows/step used to fire 62 serialized argmax pairs plus
+    // 31 vocab-sweep penalty launches eager between graph replays — 6.6% of
+    // serving wall was gaps in that chain). Flush order in the collectors is
+    // penalties -> greedy -> top-k, which preserves each row's own
+    // penalties-before-sampler order on the single stream.
+    void flush_pending_greedy_rows_(cudaStream_t stream);
+    void flush_pending_penalty_rows_(cudaStream_t stream);
+    PinnedBuffer h_greedy_args_;              // pinned, 2 x sample_slots_ (parity halves)
+    GreedyRowArgs* d_greedy_args_ = nullptr;  // device mirror
+    int n_pending_greedy_rows_ = 0;
+    PinnedBuffer h_pen_args_;                 // pinned, 2 x sample_slots_ (parity halves)
+    PenaltyRowArgs* d_pen_args_ = nullptr;    // device mirror
+    int n_pending_pen_rows_ = 0;
+    int pending_sample_vocab_ = 0;
     // Static banned-token list cache (see apply_row_filters_): keyed on the
     // host pointer + count, freed in free_buffers.
     int32_t* d_banned_cache_ = nullptr;

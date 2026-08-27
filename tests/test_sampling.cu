@@ -569,4 +569,107 @@ TEST(SamplerCubPath, EachCallSamplesFromItsOwnLogitsNotThePreviousCalls) {
                               << " — the candidate list came from an earlier call";
 }
 
+// Row-batched greedy (launch_greedy_rows) must be BIT-identical per row to
+// sample_greedy_async — same partial/reduce geometry, same slot scratch.
+// This is the gate for the 2026-08-27 stash that replaced 31 serialized
+// argmax pairs per decode step with one batched pair.
+TEST(SamplingTest, GreedyRowsMatchPerRowLaunch) {
+    constexpr int kVocab = 151936;
+    constexpr int kRows = 7;
+    std::mt19937 rng(31337);
+    std::normal_distribution<float> dist(0.0f, 4.0f);
+
+    std::vector<Tensor> logits(kRows);
+    std::vector<float> host(kVocab);
+    for (int r = 0; r < kRows; ++r) {
+        for (auto& v : host) v = dist(rng);
+        // Force exact ties in some rows so the tie-break (lowest index) is
+        // exercised, not just the plain max.
+        if (r % 2 == 0) { host[123] = 42.5f; host[999] = 42.5f; host[kVocab - 1] = 42.5f; }
+        logits[r] = make_logits(host.data(), kVocab);
+    }
+
+    // Per-row reference and batched run share nothing but the logits.
+    char* d_slots = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_slots, 2 * kRows * SAMPLE_SCRATCH_BYTES), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_slots, 0xDD, 2 * kRows * SAMPLE_SCRATCH_BYTES), cudaSuccess);
+    std::vector<GreedyRowArgs> h_rows(kRows);
+    for (int r = 0; r < kRows; ++r) {
+        auto* ref_slot = reinterpret_cast<int32_t*>(d_slots + (size_t)r * SAMPLE_SCRATCH_BYTES);
+        sample_greedy_async(logits[r], ref_slot, nullptr);
+        h_rows[r].logits = static_cast<const float*>(logits[r].data);
+        h_rows[r].d_result =
+            reinterpret_cast<int32_t*>(d_slots + (size_t)(kRows + r) * SAMPLE_SCRATCH_BYTES);
+    }
+    GreedyRowArgs* d_rows = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_rows, kRows * sizeof(GreedyRowArgs)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_rows, h_rows.data(), kRows * sizeof(GreedyRowArgs), cudaMemcpyHostToDevice),
+              cudaSuccess);
+    launch_greedy_rows(d_rows, kRows, kVocab, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    for (int r = 0; r < kRows; ++r) {
+        int32_t ref = -1, got = -1;
+        cudaMemcpy(&ref, d_slots + (size_t)r * SAMPLE_SCRATCH_BYTES, sizeof(int32_t),
+                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(&got, d_slots + (size_t)(kRows + r) * SAMPLE_SCRATCH_BYTES, sizeof(int32_t),
+                   cudaMemcpyDeviceToHost);
+        EXPECT_EQ(ref, got) << "row " << r;
+    }
+    cudaFree(d_rows);
+    cudaFree(d_slots);
+    for (auto& t : logits) free_gpu_tensor(t);
+}
+
+// Row-batched penalties (launch_penalties_rows) must leave every row's logits
+// BIT-identical to the per-row apply_penalties call with the same args.
+TEST(SamplingTest, PenaltyRowsMatchPerRowLaunch) {
+    constexpr int kVocab = 32000;
+    constexpr int kRows = 5;
+    std::mt19937 rng(77);
+    std::normal_distribution<float> dist(0.0f, 3.0f);
+    std::uniform_int_distribution<int> tok(0, kVocab - 1);
+
+    std::vector<Tensor> ref_logits(kRows), bat_logits(kRows);
+    std::vector<int32_t*> d_hist(kRows);
+    std::vector<int> hist_n(kRows);
+    std::vector<PenaltyRowArgs> h_rows(kRows);
+    std::vector<float> host(kVocab);
+    for (int r = 0; r < kRows; ++r) {
+        for (auto& v : host) v = dist(rng);
+        ref_logits[r] = make_logits(host.data(), kVocab);
+        bat_logits[r] = make_logits(host.data(), kVocab);
+        hist_n[r] = 16 + r * 37;
+        std::vector<int32_t> hist(hist_n[r]);
+        for (auto& t : hist) t = tok(rng);
+        hist[0] = 5;  hist[1] = 5;  // guaranteed repeat: count > 1 path
+        ASSERT_EQ(cudaMalloc(&d_hist[r], hist.size() * sizeof(int32_t)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_hist[r], hist.data(), hist.size() * sizeof(int32_t),
+                             cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        const float rep = 1.05f + 0.01f * r, freq = 0.1f * r, pres = 0.2f;
+        apply_penalties(static_cast<float*>(ref_logits[r].data), kVocab, d_hist[r], hist_n[r], rep,
+                        freq, pres, nullptr);
+        h_rows[r] = {static_cast<float*>(bat_logits[r].data), d_hist[r], hist_n[r], rep, freq, pres};
+    }
+    PenaltyRowArgs* d_rows = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_rows, kRows * sizeof(PenaltyRowArgs)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_rows, h_rows.data(), kRows * sizeof(PenaltyRowArgs),
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    launch_penalties_rows(d_rows, kRows, kVocab, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    std::vector<float> a(kVocab), b(kVocab);
+    for (int r = 0; r < kRows; ++r) {
+        cudaMemcpy(a.data(), ref_logits[r].data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), bat_logits[r].data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        EXPECT_EQ(memcmp(a.data(), b.data(), kVocab * sizeof(float)), 0) << "row " << r;
+        cudaFree(d_hist[r]);
+        free_gpu_tensor(ref_logits[r]);
+        free_gpu_tensor(bat_logits[r]);
+    }
+    cudaFree(d_rows);
+}
+
 }  // namespace imp

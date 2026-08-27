@@ -341,6 +341,7 @@ set(IMP_RUNTIME_SOURCES
 
 set(IMP_EXEC_SOURCES
     src/exec/executor.cu
+    src/exec/executor_sampling.cu
     src/exec/executor_kernels.cu
     src/exec/executor_kv_write_kernels.cu
     src/exec/executor_elementwise.cu

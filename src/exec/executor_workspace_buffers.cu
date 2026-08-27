@@ -251,6 +251,26 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         } else {
             d_row_args_ = reinterpret_cast<TopkRowArgs*>(slab.data());
         }
+        // Greedy + penalty row staging (same tier, same fallback contract:
+        // an empty slab just means those rows launch per-row as before).
+        auto gslab = engine_arena().take_bytes(2 * sizeof(GreedyRowArgs) * sample_slots_);
+        h_greedy_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                               2 * sizeof(GreedyRowArgs) * sample_slots_);
+        if (h_greedy_args_.empty() || gslab.empty()) {
+            h_greedy_args_.reset();
+            d_greedy_args_ = nullptr;
+        } else {
+            d_greedy_args_ = reinterpret_cast<GreedyRowArgs*>(gslab.data());
+        }
+        auto pslab = engine_arena().take_bytes(2 * sizeof(PenaltyRowArgs) * sample_slots_);
+        h_pen_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                            2 * sizeof(PenaltyRowArgs) * sample_slots_);
+        if (h_pen_args_.empty() || pslab.empty()) {
+            h_pen_args_.reset();
+            d_pen_args_ = nullptr;
+        } else {
+            d_pen_args_ = reinterpret_cast<PenaltyRowArgs*>(pslab.data());
+        }
     }
 
     // Per-parity gather-done events for the pipelined split gather/wait.
@@ -1563,6 +1583,12 @@ void GraphExecutor::free_buffers() {
     // hand-written cudaFreeHost pairs are gone (memory/host_pinned.h).
     h_sample_pinned_.reset();
     h_row_args_.reset();
+    h_greedy_args_.reset();
+    h_pen_args_.reset();
+    d_greedy_args_ = nullptr;  // arena-owned, like d_row_args_ below
+    d_pen_args_ = nullptr;
+    n_pending_greedy_rows_ = 0;
+    n_pending_pen_rows_ = 0;
     if (d_banned_cache_) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_banned_cache_));
         d_banned_cache_ = nullptr;

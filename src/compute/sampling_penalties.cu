@@ -19,9 +19,13 @@ namespace imp {
 // Uses atomics to handle tokens appearing multiple times.
 // Strategy: first count occurrences, then apply penalties.
 // For simplicity with small history, we iterate the history per thread.
-__global__ void apply_penalties_kernel(float* __restrict__ logits, const int32_t* __restrict__ token_ids,
-                                       int n_tokens, int vocab_size, float repetition_penalty,
-                                       float frequency_penalty, float presence_penalty) {
+// Shared body — the row-batched kernel below resolves per-row args from
+// blockIdx.y and runs the identical per-vocab-entry math, so the logits are
+// bit-identical to the per-row launch.
+__device__ __forceinline__ void apply_penalties_body(float* __restrict__ logits,
+                                                     const int32_t* __restrict__ token_ids, int n_tokens,
+                                                     int vocab_size, float repetition_penalty,
+                                                     float frequency_penalty, float presence_penalty) {
     // Each thread handles one vocab entry
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= vocab_size)
@@ -53,6 +57,28 @@ __global__ void apply_penalties_kernel(float* __restrict__ logits, const int32_t
     logit -= presence_penalty;
 
     logits[idx] = logit;
+}
+
+__global__ void apply_penalties_kernel(float* __restrict__ logits, const int32_t* __restrict__ token_ids,
+                                       int n_tokens, int vocab_size, float repetition_penalty,
+                                       float frequency_penalty, float presence_penalty) {
+    apply_penalties_body(logits, token_ids, n_tokens, vocab_size, repetition_penalty, frequency_penalty,
+                         presence_penalty);
+}
+
+// Row-batched twin: one launch covers every stashed row of a decode batch
+// (blockIdx.y selects the row). Caller pre-windows token_ids/n_tokens.
+__global__ void apply_penalties_rows_kernel(const PenaltyRowArgs* __restrict__ rows, int vocab_size) {
+    const PenaltyRowArgs r = rows[blockIdx.y];
+    apply_penalties_body(r.logits, r.token_ids, r.n_tokens, vocab_size, r.repetition_penalty,
+                         r.frequency_penalty, r.presence_penalty);
+}
+
+void launch_penalties_rows(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size,
+                           cudaStream_t stream) {
+    dim3 grid((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, n_rows);
+    apply_penalties_rows_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_rows, vocab_size);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Variant: reads n_tokens from a device pointer (for CUDA graph loop where count changes).
