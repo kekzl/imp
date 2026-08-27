@@ -11,6 +11,10 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-08-27
+
+### Fixed
+
 - **The verify-chunk argmax never applied the banned-token mask.** Every other
   sampling path masks chat-template delimiters before its argmax; the spec
   verify (which emits accepted + bonus tokens) did not, so it was the one path
