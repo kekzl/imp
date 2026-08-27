@@ -161,6 +161,16 @@ there instead of retelling it.
 
 ### Added
 
+- **Sibling-pair small-M GEMM launch (`gemm.nvfp4_smallm_pair`, default ON):
+  +1.7% aggregate at 32 streams.** FFN gate|up and GDN in|z each consume the
+  same quantized activation; they now run as ONE smallm v2 launch (two weight
+  sets, per-CTA selection, same CTA body) instead of two - 112 fewer GEMM
+  launches per 64-layer decode step. Qwen3.8-27B-NVFP4, 4 waves x 3
+  alternating trials/arm, mbs=32/seq4096 pinned: 1713.3 -> 1742.0 tok/s
+  aggregate median (pairs +2.0/+1.4/+1.2%). Bit-identical per tensor to the
+  two single launches (`SmallMV2Pair` gate, two mutants killed); M=1 and
+  prefill paths unchanged.
+
 - **Cross-sequence prefill batching (`runtime.prefill_batch`, default ON):
   +6.2% aggregate and TTFT p50 4.11 -> 2.55 s on a 32-stream burst.** The
   prefill chunks of several admitted requests run as ONE ragged forward:

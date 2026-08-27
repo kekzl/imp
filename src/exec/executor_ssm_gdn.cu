@@ -340,6 +340,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     //    GDN: no z-split, no dt — the full projection goes to conv1d.
     int64_t proj_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
     Tensor proj;
+    bool gate_paired = false;
     if (fused_input) {
         // One GEMV produces [proj | gate | alpha | beta] contiguously in
         // gdn_fused_proj_buf_; the views below take offset slices.
@@ -352,7 +353,15 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // Original path: ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only
         // need [n, conv_channels].
         proj = Tensor(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-        gemm_via_handle_(ly.ssm_in_id, no, proj, ctx);
+        // Batched-decode sibling pair: in-projection and gate both consume
+        // `no`, and the gate output buffer (ssm_z_buf_) is untouched until
+        // RMSNormGated after the scan — computing the gate here is a pure
+        // reorder. One smallm v2 launch for both when both route there.
+        int64_t gate_shape_early[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
+        Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
+        gate_paired = try_smallm_pair_dispatch_(ly.ssm_in_id, ly.gdn_gate_id, no, proj, gate_early, ctx);
+        if (!gate_paired)
+            gemm_via_handle_(ly.ssm_in_id, no, proj, ctx);
     }
     dump_tensor_npy("gdn_ssm_in_out", proj, stream, layer, cur_decode_step_);
 
@@ -522,14 +531,18 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         gate_out = Tensor(gate_ptr, compute_dtype_, 2, gate_shape, true);
     } else {
         gate_out = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-        // ssm_in (above) quantized the same normed input into the activation
-        // scratch and no GEMM dispatches in between — mark it shared (the
-        // dispatch verifies against its scratch tag before skipping).
-        GemmContext gate_ctx = ctx;
-        if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n) &&
-            prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n))
-            gate_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
-        gemm_via_handle_(ly.gdn_gate_id, no, gate_out, gate_ctx);
+        // Pair path already produced it in step 2 (one launch with ssm_in).
+        if (!gate_paired) {
+            // ssm_in (above) quantized the same normed input into the
+            // activation scratch and no GEMM dispatches in between — mark it
+            // shared (the dispatch verifies against its scratch tag before
+            // skipping).
+            GemmContext gate_ctx = ctx;
+            if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n) &&
+                prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n))
+                gate_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
+            gemm_via_handle_(ly.gdn_gate_id, no, gate_out, gate_ctx);
+        }
     }
 
     const bool use_fp32_scan = runtime_config().gdn.fp32_scan;

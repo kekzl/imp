@@ -288,6 +288,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.nvfp4_lm_head_cutlass", cfg.gemm.nvfp4_lm_head_cutlass);
     B("gemm.nvfp4_smallm", cfg.gemm.nvfp4_smallm);
     I("gemm.nvfp4_smallm_impl", cfg.gemm.nvfp4_smallm_impl);
+    B("gemm.nvfp4_smallm_pair", cfg.gemm.nvfp4_smallm_pair);
     B("gemm.nvfp4_attn_proj", cfg.gemm.nvfp4_attn_proj);
     B("gemm.fp8_ssm_proj", cfg.gemm.fp8_ssm_proj);
     S("gemm.fp8_attn_proj", cfg.gemm.fp8_attn_proj);
