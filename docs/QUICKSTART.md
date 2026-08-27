@@ -127,10 +127,10 @@ This checkpoint ships a trained MTP head the default load leaves off. Adding
   --set speculative.mtp_k=1 --set speculative.ngram=false
 ```
 
-buys +17-21 % single-stream decode (measured 102.1-105.9 vs 87.2-87.6 tok/s on
-1024-token thinking chats, 2026-08-27) for 0.79 GiB of VRAM. `GET /health`
-repeats this hint as `mtp_head_hint` whenever the head is present but unloaded;
-the trade is documented in [`LIMITATIONS.md`](LIMITATIONS.md).
+buys +17-21 % single-stream decode for 0.79 GiB of VRAM. `GET /health` repeats
+this hint as `mtp_head_hint` whenever the head is present but unloaded; the
+measured numbers, their provenance and the trade are in
+[`LIMITATIONS.md`](LIMITATIONS.md).
 
 ## 3. Ask it something
 
