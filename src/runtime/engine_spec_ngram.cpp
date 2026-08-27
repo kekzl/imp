@@ -1088,7 +1088,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         if (min_emit > 0.0f && mtp_econ_verifies_ >= kMtpEconSample &&
             static_cast<float>(mtp_econ_emitted_) <
                 static_cast<float>(mtp_econ_verifies_) * min_emit) {
-            IMP_LOG_INFO("[mtp-econ] verifies=%d emitted=%d min_emit=%.2f this_emitted=%d matched=%d",
+            IMP_LOG_INFO("[mtp-econ] verifies=%d emitted=%lld min_emit=%.2f this_emitted=%d matched=%d",
                          mtp_econ_verifies_, mtp_econ_emitted_, min_emit, emitted, matched);
             mtp_unbind_("uneconomic: avg emitted/verify below break-even");
         }

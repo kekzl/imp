@@ -134,14 +134,15 @@ Ranked by what an agent workload notices first.
           cmd=`nsys profile ... imp-server` + chat 1024-tok]
    ```
 
-1. **Scheduling has no per-request priority.** Nothing in the scheduler reads
-   one; `max_concurrent` bounds the queue, it does not order it. vLLM and
-   SGLang both name scheduler work this quarter. *Corrected 2026-08-22
-   (#1634):* scheduling never was arrival order - `scheduler.cpp` re-sorts
-   shortest-first on every arrival, which starves long prompts under
-   sustained short traffic; `Scheduler::kAgingRounds` now bounds that
-   (aged requests sort ahead, ties by length). Still missing: a priority a
-   caller can set.
+1. ~~**Scheduling has no per-request priority.**~~ **Closed 2026-08-28:**
+   `"priority"` body field (vLLM semantics, lower first, default 0, all three
+   dialects) is the primary admission sort key in `Scheduler::schedule`;
+   shortest-first-with-aging orders within a class; strict dominance across
+   classes is the documented contract ([`API.md`](API.md)). Admission order
+   only, no preemption. Unit-tested incl. aging-does-not-cross-classes
+   (`tests/test_scheduler.cpp`). *History (#1634):* scheduling never was
+   arrival order - shortest-first on every arrival starved long prompts;
+   `Scheduler::kAgingRounds` bounds that.
 2. **Long context is served by a 2023-era answer.** Only sparsity is
    StreamingLLM sink + sliding window (`attention_paged_common.cuh:71`),
    which drops what falls out. The field keeps the context and reads it

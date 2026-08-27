@@ -851,5 +851,104 @@ TEST(SchedulerTest, ShortestFirstStillHoldsAmongPeers) {
     EXPECT_EQ(prefill[0], short_req) << "same age, so length decides";
 }
 
+// Priority (lower value first) is the primary admission key: a long
+// high-priority request beats a short default-priority one.
+TEST(SchedulerTest, PriorityBeatsShortestFirst) {
+    Scheduler sched(1);
+
+    auto short_default = std::make_shared<Request>();
+    short_default->input_tokens.assign(3, 1);
+    auto long_urgent = std::make_shared<Request>();
+    long_urgent->input_tokens.assign(500, 1);
+    long_urgent->priority = -1;
+    sched.add_request(short_default);
+    sched.add_request(long_urgent);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0], long_urgent) << "lower priority value must admit first";
+}
+
+// Within one priority class the pre-priority order is unchanged:
+// shortest-first among peers.
+TEST(SchedulerTest, EqualPriorityFallsBackToShortestFirst) {
+    Scheduler sched(1);
+
+    auto long_req = std::make_shared<Request>();
+    long_req->input_tokens.assign(500, 1);
+    long_req->priority = 5;
+    auto short_req = std::make_shared<Request>();
+    short_req->input_tokens.assign(3, 1);
+    short_req->priority = 5;
+    sched.add_request(long_req);
+    sched.add_request(short_req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0], short_req);
+}
+
+// Strict dominance: aging never lifts a request over a higher-priority
+// class. The starved low-priority request is admitted only once no
+// higher-priority work is pending - that contract is the caller's to manage
+// (documented in scheduler.cpp).
+TEST(SchedulerTest, AgingDoesNotCrossPriorityClasses) {
+    Scheduler sched(1);
+
+    auto low = std::make_shared<Request>();
+    low->input_tokens.assign(3, 1);
+    low->priority = 1;
+    sched.add_request(low);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+
+    // Sustained higher-priority traffic across the aging boundary: low must
+    // never be picked while a priority-0 request is pending.
+    for (int round = 0; round < Scheduler::kAgingRounds + 4; round++) {
+        auto urgent = std::make_shared<Request>();
+        urgent->input_tokens.assign(3, 1);
+        sched.add_request(urgent);
+
+        sched.schedule(prefill, decode);
+        ASSERT_EQ(prefill.size(), 1u);
+        EXPECT_NE(prefill[0], low) << "aged low-priority overtook class 0 in round " << round;
+        prefill[0]->status = RequestStatus::FINISHED;
+    }
+
+    // Traffic stops: the low-priority request drains.
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0], low);
+}
+
+// Aging still bounds starvation WITHIN a priority class.
+TEST(SchedulerTest, AgingStillBoundsStarvationWithinAClass) {
+    Scheduler sched(1);
+
+    auto long_req = std::make_shared<Request>();
+    long_req->input_tokens.assign(500, 1);
+    long_req->priority = 2;
+    sched.add_request(long_req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    bool long_admitted = false;
+    for (int round = 0; round < Scheduler::kAgingRounds + 4 && !long_admitted; round++) {
+        auto shorty = std::make_shared<Request>();
+        shorty->input_tokens.assign(3, 1);
+        shorty->priority = 2;
+        sched.add_request(shorty);
+
+        sched.schedule(prefill, decode);
+        for (auto& r : prefill) {
+            if (r == long_req)
+                long_admitted = true;
+            r->status = RequestStatus::FINISHED;
+        }
+    }
+    EXPECT_TRUE(long_admitted);
+}
+
 }  // namespace
 }  // namespace imp

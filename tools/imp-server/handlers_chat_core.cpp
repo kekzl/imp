@@ -715,6 +715,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->pin_kv_prefix = ctx.params.cache_prompt;
     req->pin_kv_prefix_tokens = ctx.snap.pin_prefix_tokens;
     req->spec_override = ctx.params.spec_override;
+    req->priority = ctx.params.priority;
     req->prediction_tokens = ctx.snap.prediction_tokens;
     req->min_p = ctx.params.min_p;
     req->typical_p = ctx.params.typical_p;

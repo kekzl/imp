@@ -136,6 +136,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
     int seed = body.value("seed", -1);
+    int priority = body.value("priority", 0);  // vLLM-compatible, lower = earlier
     bool stream = body.value("stream", false);
     bool echo = body.value("echo", false);
     float min_p = body.value("min_p", 0.0f);
@@ -285,6 +286,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->top_p = top_p;
     imp_req->top_k = top_k;
     imp_req->seed = seed;
+    imp_req->priority = priority;
     imp_req->min_p = min_p;
     imp_req->typical_p = typical_p;
     imp_req->repetition_penalty = repetition_penalty;

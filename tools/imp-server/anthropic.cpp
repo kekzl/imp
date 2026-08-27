@@ -356,7 +356,8 @@ json anthropic_to_openai_body(const json& anth) {
     // ways is a trap, and the silence was total: a malformed pattern was not
     // rejected here either, because the admission check never saw the field.
     // Carrying them through fixes both halves at once.
-    for (const char* key : {"guided_regex", "guided_grammar", "grammar", "response_format"})
+    for (const char* key : {"guided_regex", "guided_grammar", "grammar", "response_format",
+                            "priority"})
         if (anth.contains(key))
             oai[key] = anth[key];
 

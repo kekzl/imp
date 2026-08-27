@@ -170,6 +170,13 @@ int main(int argc, char** argv) {
     svr.set_read_timeout(args.read_timeout, 0);
     svr.set_write_timeout(args.write_timeout, 0);
     svr.set_keep_alive_max_count(args.keep_alive_max);
+    // Disable Nagle on accepted sockets (cpp-httplib defaults it OFF). The
+    // streaming path writes one small SSE frame per token; with Nagle a frame
+    // can sit behind the peer's delayed ACK (up to ~40 ms) instead of leaving
+    // immediately, which is inter-token latency a network client observes and
+    // the engine never sees. Loopback clients are unaffected either way;
+    // throughput is unaffected (frames coalesce in flight regardless).
+    svr.set_tcp_nodelay(true);
     // Worker threads must cover the CONCURRENT STREAMS, not the cores: a
     // streamed completion holds its worker for the whole generation, and the
     // library default (max(8, cores-1) = 15 here) silently queued the tail

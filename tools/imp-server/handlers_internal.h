@@ -37,6 +37,10 @@ struct ChatRequestParams {
     int top_k = 40, max_tokens = 0, seed = -1, repeat_last_n = 0;
     int dry_allowed_length = 2, dry_penalty_last_n = 0, mirostat = 0;
     int n_completions = 1, top_logprobs = 0;
+    // Admission priority (vLLM-compatible "priority" body field): lower value
+    // schedules earlier, default 0. Strictly dominates the scheduler's
+    // shortest-first-with-aging order across classes.
+    int priority = 0;
     bool stream = false, json_mode = false, req_logprobs = false, include_usage = false;
     bool top_p_explicit = false, top_k_explicit = false, rep_pen_explicit = false;
     // Pin the prompt's KV blocks against eviction (Anthropic cache_control →

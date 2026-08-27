@@ -108,6 +108,9 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // the server default.
     ctx.params.max_tokens = parse_max_tokens_field(body, state.default_max_tokens);
     ctx.params.seed = body.value("seed", -1);
+    // vLLM-compatible admission priority (lower = earlier). Also reachable
+    // from /v1/messages and /v1/responses via their body translations.
+    ctx.params.priority = body.value("priority", 0);
     ctx.params.stream = body.value("stream", false);
     ctx.params.n_completions = body.value("n", 1);
     if (ctx.params.n_completions < 1)

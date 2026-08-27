@@ -99,6 +99,13 @@ struct Request {
     // enables what the model and the operator config allow; it cannot conjure
     // an MTP head the checkpoint does not carry.
     int spec_override = -1;
+    // Admission priority (vLLM semantics: LOWER value schedules earlier,
+    // default 0). Read by Scheduler::schedule as the primary sort key of the
+    // pending queue; aging and shortest-first order requests WITHIN a
+    // priority class only. Strict dominance is deliberate: a caller that
+    // sets priorities owns starvation across classes, same as vLLM. From the
+    // "priority" body field on all three server dialects.
+    int priority = 0;
     // Scheduler round this request was enqueued in. Only the scheduler writes
     // it; it exists so admission can tell "short" from "short AND recent"
     // (#1634).

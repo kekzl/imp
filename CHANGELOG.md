@@ -13,6 +13,14 @@ there instead of retelling it.
 
 ### Added
 
+- Per-request admission priority: `"priority": int` body field (vLLM
+  semantics, lower schedules earlier, default 0) on chat/completions,
+  `/v1/messages` and `/v1/responses`; primary sort key of the pending queue,
+  shortest-first-with-aging orders within a class. Admission order only, no
+  preemption.
+- `imp-server` sets TCP_NODELAY on accepted sockets: a per-token SSE frame no
+  longer waits behind the peer's delayed ACK (up to ~40 ms inter-token latency
+  for network clients; loopback unaffected).
 - Adaptive MTP chain depth (`speculative.mtp_adaptive_k`, default on): a fully
   accepted chain grows the next draft one row (up to `mtp_k`), any rejection
   sheds one, and the economics guard prices the depth that ran. `mtp_k=2` +

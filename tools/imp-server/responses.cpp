@@ -169,6 +169,8 @@ json responses_to_openai_body(const json& rsp) {
         oai["top_p"] = rsp["top_p"];
     if (rsp.contains("max_output_tokens"))
         oai["max_tokens"] = rsp["max_output_tokens"];
+    if (rsp.contains("priority"))  // imp/vLLM extension, lower = earlier
+        oai["priority"] = rsp["priority"];
 
     // reasoning.effort -> think budget (fraction of max_tokens for the think
     // phase; see --think-budget). minimal/low keep answers snappy.
