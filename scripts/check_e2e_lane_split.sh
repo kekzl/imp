@@ -60,6 +60,7 @@ SchedulerTest.DecodeBatchSizeLimit
 SchedulerTest.EmptyBatch
 SchedulerTest.EmptyScheduler
 SchedulerTest.FullLifecycle
+SchedulerTest.GrowsPoolUnderAggregatePressure
 SchedulerTest.HandlesCancel
 SchedulerTest.MaxBatchSize
 SchedulerTest.MaxBatchSizeLimit
