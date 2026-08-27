@@ -586,7 +586,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // with no way to refuse it. Both shipped tools already pass their own
     // value (`handlers.cpp` from imp.conf, `imp-cli/main.cpp` from its flag
     // OR imp.conf), so nothing that ships loses caching. #1299/#1314.
-    config_.use_green_contexts = config_.use_green_contexts || runtime_config_.server.green_contexts;
+    config_.use_green_contexts = config_.use_green_contexts || runtime_config_.server.green_contexts ||
+                                 runtime_config_.runtime.prefill_overlap;
     if (config_.prefix_pin_budget_pct == 25)  // EngineConfig default untouched → take imp.conf
         config_.prefix_pin_budget_pct = runtime_config_.server.prefix_pin_budget_pct;
     if (config_.mmproj_path.empty())

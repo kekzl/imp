@@ -808,7 +808,13 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 }
             }
 
-            sample_greedy_device(last_logits, executor_->d_sample_result(), h_sample_pinned_.as<int32_t>(),
+            // Under overlap the decode batch owns the parity slots of
+            // d_sample_result_ — the prefill sample gets its own slot
+            // (allocated at warmup whenever overlap is ready; the shared
+            // slot remains the serial-path default).
+            int32_t* sample_slot =
+                d_prefill_sample_ ? d_prefill_sample_ : executor_->d_sample_result();
+            sample_greedy_device(last_logits, sample_slot, h_sample_pinned_.as<int32_t>(),
                                  pf_stream);
 
             if (!prefill_done_)

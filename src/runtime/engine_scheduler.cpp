@@ -116,17 +116,32 @@ bool Engine::step_impl_() {
         return false;
     }
 
+    // Prefill/decode overlap engages only when the in-flight decode runs in
+    // workspace slot 1 (>= 2 rows; the bs==1 regimes carry spec-verify
+    // chunks, which share the CUTLASS activation scratch with prefill).
+    const bool overlap_step = overlap_ready_ && sched_decode_batch_.size() >= 2;
+
     // A pipelined decode step in flight shares workspace 0 with prefill and
     // pins the batch composition — collect it before any prefill work or
-    // when this step has no decode batch to continue it with.
-    if (bd_pipe_.in_flight && (!sched_prefill_batch_.empty() || sched_decode_batch_.empty()))
+    // when this step has no decode batch to continue it with. Under overlap
+    // the decode step lives in slot 1 with its own quant scratches, so the
+    // prefill no longer forces the drain: it enqueues on the low-priority
+    // stream while the decode step is still running.
+    if (bd_pipe_.in_flight &&
+        ((!overlap_step && !sched_prefill_batch_.empty()) || sched_decode_batch_.empty()))
         drain_decode_pipeline();
 
     // Process prefill requests.
     if (s_ot)
         o3 = std::chrono::steady_clock::now();
     if (!sched_prefill_batch_.empty()) {
+        if (overlap_step) {
+            executor_->set_overlap_prefill_active(true);
+            executor_->set_sample_slot_override(d_prefill_sample_);
+        }
         step_prefill(prefill_stream());
+        executor_->set_overlap_prefill_active(false);
+        executor_->set_sample_slot_override(nullptr);
         ensure_prefill_workspace(executor_.get());
     }
 
@@ -1143,8 +1158,17 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             g_step_timing.outside +=
                 std::chrono::duration<double, std::micro>(tp0 - g_step_timing.last_end).count();
     }
-    // Switch workspace for decode
-    if (executor_->has_decode_workspace() && valid_decode.size() == 1) {
+    // Switch workspace for decode. The historical slot-1 path was bs==1 only
+    // (its 2026-03 shape, pre-continuous-batching); under prefill overlap
+    // the batched step runs there too — the warmup sized slot 1 and the
+    // per-slot quant scratches for max_batch, and the workspace choice must
+    // be a pure function of (flags, batch size) so graph captures stay
+    // consistent with replays.
+    const bool slot1 = executor_->has_decode_workspace() &&
+                       (valid_decode.size() == 1 ||
+                        (overlap_ready_ &&
+                         static_cast<int>(valid_decode.size()) <= executor_->decode_max_batch()));
+    if (slot1) {
         executor_->use_workspace(1);
     } else {
         if (executor_->active_workspace() == 1)

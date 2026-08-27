@@ -28,6 +28,7 @@
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/sampling.h"
+#include "memory/engine_arena.h"
 #include "memory/mem_account.h"
 #include "memory/plan.h"       // kMeasuredLibraryReserveBytes
 #include "memory/vram_query.h"
@@ -59,6 +60,37 @@ bool Engine::init_features() {
         if (green_ctx_.is_available() && resolve_prefill_chunk_size_() > 0)
             if (executor_->allocate_decode_workspace(stream_, config_.max_batch_size))
                 IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
+    }
+
+    // Prefill/decode overlap gates (runtime.prefill_overlap; each DECLINE is
+    // logged once, #1755 style — a gate that refuses silently is a gate
+    // nobody can see). The per-step gate (decode batch >= 2, no spec-verify
+    // sharing the CUTLASS activation scratch) lives in step_impl_.
+    if (runtime_config_.runtime.prefill_overlap) {
+        const char* decline = nullptr;
+        if (!green_ctx_.is_available())
+            decline = "no stream pair (green-context init failed entirely)";
+        else if (!executor_->has_decode_workspace() ||
+                 executor_->decode_max_batch() < config_.max_batch_size)
+            decline = "decode workspace not allocated at max_batch";
+        else if (executor_->model_has_moe())
+            decline = "MoE model (expert workspace not per-slot yet — plan phase 2)";
+        else if (executor_->has_gguf_nvfp4_overlay())
+            decline = "GGUF decode overlay (dp4a/dequant scratch shared with prefill)";
+        else if (!executor_->allocate_decode_qscratch(config_.max_batch_size))
+            decline = "per-slot quant scratch allocation failed";
+        if (!decline) {
+            auto slab = engine_arena().take_bytes(SAMPLE_SCRATCH_BYTES);
+            if (slab.empty())
+                decline = "prefill sample slot allocation failed";
+            else
+                d_prefill_sample_ = reinterpret_cast<int32_t*>(slab.data());
+        }
+        overlap_ready_ = (decline == nullptr);
+        if (overlap_ready_)
+            IMP_LOG_INFO("prefill overlap: ENTERED (engages at decode batch >= 2)");
+        else
+            IMP_LOG_INFO("prefill overlap: DECLINED — %s; serial prefill path", decline);
     }
 
     // Chat template

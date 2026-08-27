@@ -423,6 +423,15 @@ private:
     CudaEvent decode_done_;
     int next_request_id_ = 0;
 
+    // Prefill/decode overlap (runtime.prefill_overlap): every static gate
+    // held at warmup — stream pair up, decode workspace + qscratch copies
+    // at max_batch, model class eligible. The per-step gate (decode batch
+    // >= 2) is checked in step_impl_. d_prefill_sample_: dedicated device
+    // slot for the prefill last-chunk greedy sample, so it never aliases
+    // the decode batch's parity slots (arena-owned).
+    bool overlap_ready_ = false;
+    int32_t* d_prefill_sample_ = nullptr;
+
     // ── Decode batching ──────────────────────────────────────────────
     GPUBatchPool decode_batch_pool_;
     BatchBuilder decode_builder_;

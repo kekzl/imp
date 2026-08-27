@@ -350,10 +350,31 @@ public:
     bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1) {
         return ws_.allocate_decode_workspace(stream, max_batch);
     }
-    void use_workspace(int slot) { ws_.use_workspace(slot); }  // 0=prefill, 1=decode
+    // 0=prefill, 1=decode. Also swaps the collision-prone quant-scratch
+    // family (fp8 activation + q8_1) onto the per-slot copies when the
+    // decode set exists — required for prefill/decode overlap, a no-op
+    // otherwise (see allocate_decode_qscratch).
+    void use_workspace(int slot);
     bool has_decode_workspace() const { return ws_.has_decode_workspace(); }
+    int decode_max_batch() const { return ws_.decode_max_batch(); }
     int active_workspace() const { return ws_.active(); }
     int max_tokens() const { return max_tokens_; }
+
+    // Prefill/decode overlap support (docs/plans/2026-08-27-prefill-decode-overlap.md).
+    // allocate_decode_qscratch: per-slot copies of the quant scratches both
+    // paths would otherwise share (fp8_act family + q8_1/d8), sized for
+    // max_batch rows. set_overlap_prefill_active: the engine marks the
+    // prefill forward it enqueues concurrently with an in-flight decode;
+    // the smallm/producer-xq dispatch paths decline for that forward (their
+    // scratch + tags are decode-owned under overlap).
+    bool allocate_decode_qscratch(int max_batch);
+    void set_overlap_prefill_active(bool v) { overlap_prefill_active_ = v; }
+    // The prefill sample must not land in the decode batch's parity slots
+    // while both run concurrently: the engine points the prefill-side
+    // samplers at a dedicated slot for the duration of an overlap prefill.
+    void set_sample_slot_override(int32_t* slot) { sample_slot_override_ = slot; }
+    bool has_gguf_nvfp4_overlay() const;
+    bool model_has_moe() const { return has_moe_; }
 
     // Capacity of the [n_heads, attn_seq, attn_seq] FP16 attn-scores workspace.
     // Engine's chunked-prefill path must clamp chunk_len so n × ctx_len ≤ cap².
@@ -678,6 +699,17 @@ private:
 
     // Quantization scratch buffers (FP8 act, CUTLASS act, dp4a, dequant, split-K)
     QuantScratch qscratch_;
+    // Per-slot decode copies of the shared quant scratches (overlap only;
+    // null when allocate_decode_qscratch never ran). use_workspace swaps the
+    // seven fields between qscratch_ and the saved prefill values.
+    QuantScratch qscratch_decode_;
+    bool qscratch_decode_ready_ = false;
+    struct {
+        void* fp8_act; size_t fp8_act_size; float* d_act_scale; float* d_fp8_block_maxes;
+        float* d_fp8_absmax; int fp8_max_grid; void* q8_1_buf; float* d8_buf; int q8_1_rows;
+    } qscratch_prefill_save_{};
+    bool overlap_prefill_active_ = false;
+    int32_t* sample_slot_override_ = nullptr;
 
     // CUTLASS NVFP4 LM head for batched-decode (n>1) tensor-core GEMM. Borrows
     // the FP4 data from the NVFP4 decode cache; owns only the SfAtom scales.

@@ -83,28 +83,29 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
         Tensor last_logits = flatten_logits(logits.slice(0, 1));
         apply_pre_sample(last_logits, state);
 
+        // Overlap prefill: the parity slots belong to the concurrent decode
+        // batch — the engine points this path at its dedicated slot.
+        int32_t* slot = sample_slot_override_ ? sample_slot_override_ : d_sample_result_;
         if (state.mirostat == 2) {
             unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
-            tokens[0] = d_sample_result_
-                            ? sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,
-                                                 state.mirostat_eta, &state.mirostat_mu, seed,
-                                                 d_sample_result_, stream)
-                            : sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,
-                                                 state.mirostat_eta, &state.mirostat_mu, seed, stream);
+            tokens[0] = slot ? sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,
+                                                  state.mirostat_eta, &state.mirostat_mu, seed, slot,
+                                                  stream)
+                             : sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,
+                                                  state.mirostat_eta, &state.mirostat_mu, seed, stream);
         } else {
             tokens[0] =
                 (state.temperature <= 0.0f || state.top_k == 1)
-                    ? (d_sample_result_ ? sample_greedy(last_logits, d_sample_result_, stream)
-                                        : sample_greedy(last_logits, stream))
-                    : (d_sample_result_
-                           ? sample_topk_topp(last_logits, state.top_k > 0 ? state.top_k : 50,
-                                              state.top_p > 0.0f ? state.top_p : 1.0f, state.temperature,
-                                              state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
-                                              d_sample_result_, stream)
-                           : sample_topk_topp(last_logits, state.top_k > 0 ? state.top_k : 50,
-                                              state.top_p > 0.0f ? state.top_p : 1.0f, state.temperature,
-                                              state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
-                                              stream));
+                    ? (slot ? sample_greedy(last_logits, slot, stream)
+                            : sample_greedy(last_logits, stream))
+                    : (slot ? sample_topk_topp(last_logits, state.top_k > 0 ? state.top_k : 50,
+                                               state.top_p > 0.0f ? state.top_p : 1.0f, state.temperature,
+                                               state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
+                                               slot, stream)
+                            : sample_topk_topp(last_logits, state.top_k > 0 ? state.top_k : 50,
+                                               state.top_p > 0.0f ? state.top_p : 1.0f, state.temperature,
+                                               state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
+                                               stream));
         }
     } else {
         // Batched decode: n_tokens == n_sequences, each row is one sequence's

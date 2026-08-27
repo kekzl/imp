@@ -227,6 +227,31 @@ struct RuntimeConfig {
         // scoring — and Mamba2 / MLA models, MTP, SWA sizing, residual KV,
         // gdn.fp32_scan/ref_kernel — keep the serial path.
         bool prefill_batch = true;
+
+        // Run the paced prefill chunk CONCURRENT with the in-flight batched
+        // decode step (prefill on the low-priority stream, decode in the
+        // dual-workspace slot 1) instead of serially between two decode
+        // steps. Implies the green-context stream pair (which on sm_120
+        // falls back to priority streams + distinct memSyncDomains —
+        // LIMITATIONS.md). Overlap engages only when every gate holds:
+        // decode workspace allocated at max_batch, no MoE, NVFP4-native
+        // model (no GGUF decode overlay), decode batch >= 2 this step
+        // (spec-verify chunks share the CUTLASS activation scratch and only
+        // exist at batch 1). Otherwise the serial path runs unchanged.
+        //
+        // Default OFF, and since 2026-08-27 that is a MEASURED verdict, not
+        // caution: on Qwen3.8-27B-NVFP4 at 32 streams (3 alternating
+        // trials/arm) the overlap is throughput-neutral on short prompts
+        // (1771.3 vs 1777.7 median, pairs -0.0/-0.3/+1.5%) AND under heavy
+        // ingest (~1000-token prompts: 789.7 vs 790.6, TTFT p50 3.70 vs
+        // 3.74 s). Without green-context SM partitioning — dead on sm_120 —
+        // two compute-bound streams displace each other: the "serial
+        // prefill block" is GPU work that takes the same time concurrently
+        // and stretches the decode step by its own duration. Revisit only
+        // on hardware with real SM partitioning.
+        // Design + collision table + ledger:
+        // docs/plans/2026-08-27-prefill-decode-overlap.md
+        bool prefill_overlap = false;
     } runtime;
 
     cfg::KVCache kv_cache;

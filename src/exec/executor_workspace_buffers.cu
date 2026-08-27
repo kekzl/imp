@@ -1879,4 +1879,110 @@ bool GraphExecutor::ensure_chunk_capture_scratch(int ctx_capacity) {
 // use_workspace(), layer_has_*(), view_tokens(), ensure_logits_pinned()
 // are in executor_workspace_config.cu
 
+// ---------------------------------------------------------------------------
+// Prefill/decode overlap: per-slot quant scratches + the slot switch that
+// swaps them (docs/plans/2026-08-27-prefill-decode-overlap.md).
+// ---------------------------------------------------------------------------
+
+bool GraphExecutor::allocate_decode_qscratch(int max_batch) {
+    if (qscratch_decode_ready_)
+        return true;
+    if (max_batch <= 0)
+        return false;
+    // Mirror the prefill-sized originals at decode-batch rows. A null
+    // original means that family is unused on this model — the copy stays
+    // null and its consumers keep declining exactly as they do today.
+    size_t total = 0;
+    if (qscratch_.fp8_act && qscratch_.fp8_act_size > 0 && max_tokens_ > 0) {
+        const size_t per_row = qscratch_.fp8_act_size / static_cast<size_t>(max_tokens_);
+        qscratch_decode_.fp8_act_size = per_row * max_batch;
+        auto sl = engine_arena().take_bytes(qscratch_decode_.fp8_act_size);
+        auto sc = engine_arena().take_bytes(sizeof(float));
+        int max_n = static_cast<int>(qscratch_decode_.fp8_act_size);
+        qscratch_decode_.fp8_max_grid = (((max_n + 3) / 4) + 255) / 256;
+        auto bm = engine_arena().take_bytes(static_cast<size_t>(qscratch_decode_.fp8_max_grid) *
+                                            sizeof(float));
+        auto am = engine_arena().take_bytes(sizeof(float));
+        if (sl.empty() || sc.empty() || bm.empty() || am.empty()) {
+            IMP_LOG_WARN("decode qscratch: fp8 family unavailable from the T2 arena");
+            return false;
+        }
+        qscratch_decode_.fp8_act = sl.data();
+        qscratch_decode_.d_act_scale = reinterpret_cast<float*>(sc.data());
+        qscratch_decode_.d_fp8_block_maxes = reinterpret_cast<float*>(bm.data());
+        qscratch_decode_.d_fp8_absmax = reinterpret_cast<float*>(am.data());
+        total += qscratch_decode_.fp8_act_size;
+    }
+    if (qscratch_.q8_1_buf && qscratch_.q8_1_max_blocks > 0) {
+        qscratch_decode_.q8_1_max_blocks = qscratch_.q8_1_max_blocks;
+        qscratch_decode_.q8_1_rows = max_batch;
+        size_t q8_sz = static_cast<size_t>(qscratch_decode_.q8_1_max_blocks) * max_batch *
+                       sizeof(block_q8_1);
+        size_t d8_sz = static_cast<size_t>(qscratch_decode_.q8_1_max_blocks) * max_batch *
+                       sizeof(float);
+        auto q8 = engine_arena().take_bytes(q8_sz);
+        auto d8 = engine_arena().take_bytes(d8_sz);
+        if (q8.empty() || d8.empty()) {
+            IMP_LOG_WARN("decode qscratch: q8_1 family unavailable from the T2 arena");
+            return false;
+        }
+        qscratch_decode_.q8_1_buf = q8.data();
+        qscratch_decode_.d8_buf = reinterpret_cast<float*>(d8.data());
+        total += q8_sz + d8_sz;
+    }
+    qscratch_decode_ready_ = true;
+    IMP_LOG_INFO("decode qscratch: per-slot fp8/q8 copies, %.1f KiB for max_batch=%d",
+                 total / 1024.0, max_batch);
+    return true;
+}
+
+void GraphExecutor::use_workspace(int slot) {
+    const int prev = ws_.active();
+    ws_.use_workspace(slot);
+    if (!qscratch_decode_ready_ || ws_.active() == prev)
+        return;
+    if (slot == 1) {
+        qscratch_prefill_save_ = {qscratch_.fp8_act,      qscratch_.fp8_act_size,
+                                  qscratch_.d_act_scale,  qscratch_.d_fp8_block_maxes,
+                                  qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                                  qscratch_.q8_1_buf,     qscratch_.d8_buf,
+                                  qscratch_.q8_1_rows};
+        if (qscratch_decode_.fp8_act) {
+            qscratch_.fp8_act = qscratch_decode_.fp8_act;
+            qscratch_.fp8_act_size = qscratch_decode_.fp8_act_size;
+            qscratch_.d_act_scale = qscratch_decode_.d_act_scale;
+            qscratch_.d_fp8_block_maxes = qscratch_decode_.d_fp8_block_maxes;
+            qscratch_.d_fp8_absmax = qscratch_decode_.d_fp8_absmax;
+            qscratch_.fp8_max_grid = qscratch_decode_.fp8_max_grid;
+        }
+        if (qscratch_decode_.q8_1_buf) {
+            qscratch_.q8_1_buf = qscratch_decode_.q8_1_buf;
+            qscratch_.d8_buf = qscratch_decode_.d8_buf;
+            qscratch_.q8_1_rows = qscratch_decode_.q8_1_rows;
+        }
+    } else {
+        qscratch_.fp8_act = qscratch_prefill_save_.fp8_act;
+        qscratch_.fp8_act_size = qscratch_prefill_save_.fp8_act_size;
+        qscratch_.d_act_scale = qscratch_prefill_save_.d_act_scale;
+        qscratch_.d_fp8_block_maxes = qscratch_prefill_save_.d_fp8_block_maxes;
+        qscratch_.d_fp8_absmax = qscratch_prefill_save_.d_fp8_absmax;
+        qscratch_.fp8_max_grid = qscratch_prefill_save_.fp8_max_grid;
+        qscratch_.q8_1_buf = qscratch_prefill_save_.q8_1_buf;
+        qscratch_.d8_buf = qscratch_prefill_save_.d8_buf;
+        qscratch_.q8_1_rows = qscratch_prefill_save_.q8_1_rows;
+    }
+}
+
+bool GraphExecutor::has_gguf_nvfp4_overlay() const {
+    // "GGUF class" for the overlap gate = any registered weight whose SOURCE
+    // is a GPU-dequantable GGUF qtype: those decode through the dp4a/dequant
+    // scratches that prefill shares. (`wcache_.nvfp4` is the wrong predicate —
+    // it is also populated on native-NVFP4 models as the secondary cache,
+    // which is how the first cut of this gate declined Qwen3.8-27B-NVFP4.)
+    for (size_t i = 0; i < registry_.size(); ++i)
+        if (dequant_gpu_supported(registry_.handle(static_cast<TensorID>(i)).source_qtype))
+            return true;
+    return false;
+}
+
 }  // namespace imp
