@@ -376,6 +376,20 @@ public:
     bool has_gguf_nvfp4_overlay() const;
     bool model_has_moe() const { return has_moe_; }
 
+    // Batched-decode residual accumulation eligibility (gemm.nvfp4_residual_beta1):
+    // the o / down / GDN-out projection may run beta=1 straight into the
+    // hidden buffer when it will take the smallm accumulate path. Shared by
+    // the three call sites so the gates cannot drift apart.
+    bool residual_beta1_nvfp4_ok_(TensorID id, int n, const Tensor& h) const {
+        if (!runtime_config().gemm.nvfp4_residual_beta1 || id == kInvalidTensorID)
+            return false;
+        if (n <= 1 || n > 32 || h.qtype != QType::F16)
+            return false;
+        if (cur_spec_verify_ || overlap_prefill_active_ || lora_ != nullptr)
+            return false;
+        return registry_.handle(id).primary_tier == StorageTier::CUTLASS_NVFP4;
+    }
+
     // Capacity of the [n_heads, attn_seq, attn_seq] FP16 attn-scores workspace.
     // Engine's chunked-prefill path must clamp chunk_len so n × ctx_len ≤ cap².
     // Returns 0 if the buffer wasn't allocated (VRAM-constrained / WMMA fallback).

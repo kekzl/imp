@@ -107,8 +107,19 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                          !will_fuse_down_nvfp4 && !will_fuse_down_beta1 && n > 1 &&
                                          qscratch_.dequant != nullptr &&
                                          dequant_gpu_supported(ly.w_down.qtype));
+    // Batched-decode residual accumulation on the CUTLASS_NVFP4 tier
+    // (gemm.nvfp4_residual_beta1): h += down(so) via the smallm accumulate
+    // path — replaces GEMM-to-scratch + elementwise_add_store and skips the
+    // residual save below (see the o-projection twin in executor_attention.cu).
+    bool will_fuse_down_beta1_nvfp4 =
+        (!has_post_ffn_norm && !will_fuse_down_residual && !will_fuse_down_nvfp4 &&
+         !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 && !will_fuse_down_mxfp4 && n > 1 &&
+         n <= 32 && h.qtype == QType::F16 && wd_tier == StorageTier::CUTLASS_NVFP4 &&
+         runtime_config().gemm.nvfp4_residual_beta1 && !cur_spec_verify_ && !overlap_prefill_active_ &&
+         lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_down_residual && !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 &&
-        !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !using_fp32_accum) {
+        !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !will_fuse_down_beta1_nvfp4 &&
+        !using_fp32_accum) {
         device_copy_async(r.data, h.data, h.nbytes(), stream);  // kernel copy — see device_copy_async
     }
 
@@ -464,6 +475,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 Tensor fp8_wd(hwd->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
                 gemm_cublaslt(fp8_so, fp8_wd, h, 1.0f, 1.0f, qscratch_.d_act_scale, hwd->payload.fp8.d_scale,
                               stream);
+            } else if (will_fuse_down_beta1_nvfp4) {
+                // Batched-decode NVFP4: hidden += swiglu_out @ w_down^T via
+                // the smallm accumulate path.
+                gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));
             } else if (will_fuse_down_beta1 && wd_tier == StorageTier::FP16) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
                 gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));

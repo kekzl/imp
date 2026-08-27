@@ -193,8 +193,18 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
                                       !will_fuse_o_beta1 && n > 1 && qscratch_.dequant != nullptr &&
                                       dequant_gpu_supported(ly.wo.qtype));
+    // Batched-decode residual accumulation on the CUTLASS_NVFP4 tier
+    // (gemm.nvfp4_residual_beta1): h += o_proj(ao) via the smallm accumulate
+    // path — replaces GEMM-to-scratch + elementwise_add_store and skips the
+    // residual save below. Small ragged prefill chunks (n <= 32) take it
+    // too, which is correct (same accumulate) and still one launch fewer.
+    bool will_fuse_o_beta1_nvfp4 =
+        (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 && !will_fuse_o_beta1 &&
+         !will_fuse_o_dequant_beta1 && n > 1 && n <= 32 && h.qtype == QType::F16 &&
+         wo_tier == StorageTier::CUTLASS_NVFP4 && runtime_config().gemm.nvfp4_residual_beta1 &&
+         !cur_spec_verify_ && !overlap_prefill_active_ && lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 && !will_fuse_o_nvfp4 &&
-        !using_fp32_accum) {
+        !will_fuse_o_beta1_nvfp4 && !using_fp32_accum) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     }
 
@@ -660,6 +670,11 @@ after_attention:
         quantize_fp16_to_fp8_e4m3(ao, fp8_ao, qscratch_.d_act_scale, stream, qscratch_.d_fp8_block_maxes,
                                   qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
         gemm_cublaslt(fp8_ao, fp8_wo, h, 1.0f, 1.0f, qscratch_.d_act_scale, wo_h.payload.fp8.d_scale, stream);
+    } else if (will_fuse_o_beta1_nvfp4) {
+        // Batched-decode NVFP4: hidden += attn_out @ wo^T via the smallm
+        // accumulate path (falls through to a beta-honouring handler if the
+        // smallm route declines — the cutlass handler refuses beta != 0).
+        gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
     } else if (will_fuse_o_beta1 && wo_tier == StorageTier::FP16) {
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.

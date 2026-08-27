@@ -132,12 +132,22 @@ Ranked by what an agent workload notices first.
    on sm_120) the two streams displace each other, so the paced serial
    prefill was never wasted GPU time. `runtime.prefill_overlap` ships
    default-off with the verdict in its comment; ledger in
-   docs/plans/2026-08-27-prefill-decode-overlap.md. Also recorded: the batch=1
+   docs/plans/2026-08-27-prefill-decode-overlap.md.
+   UPDATE 2026-08-27 (final 0(c) item): the ELEMENTWISE class is CLOSED by
+   measurement - batched residual accumulation (o/down/GDN-out with beta=1
+   into hidden via the smallm accumulate path, `gemm.nvfp4_residual_beta1`)
+   was built and measured -0.9% median, all three alternating pairs
+   negative (1779.0 -> 1763.6, degen 50/0 both arms): the residual adds
+   already overlap the next layer's GEMMs in the captured graph
+   (wall-free), and the accumulate moves their bytes onto the critical
+   GEMM's epilogue. The batch=1 "launch classes overlap away" rule holds
+   for this class at batch 32 too. With that, every 0(c) sub-post is
+   shipped or verdict-closed. Also recorded: the batch=1
    async-loop recapture per ~200-token burst (FRESH captures 128 -> 7
    after parking regardless of spec mode) measures +0.2% throughput -
    an ITL-spike fix, not a decode lever; the 27.8 ms/gap read in the
    nsys profile was CUPTI inflating graph instantiation. Still open in
-   class: elementwise. (d) cross-sequence
+   class: elementwise (CLOSED 2026-08-27 below by measurement). (d) cross-sequence
    prefill batching: a 32-prompt burst prefills one sequence per forward
    at ~1700 tok/s effective (launch-bound, 64 layers), so every first
    token waits 2-3.5 s; batching prefill rows the way decode batches
@@ -159,7 +169,8 @@ Ranked by what an agent workload notices first.
    +0.21%. Together with the #1765 plan fix (KV no longer collapsible to
    the one-sequence floor) the measured gap to vLLM stands at ~1.08x
    pinned. Largest remaining engine-side posts: (d) above, the
-   launch-coupled idle, and the elementwise fusion tail (the gate|up half
+   launch-coupled idle (since attributed and closed), and the elementwise
+   fusion tail (closed by measurement 2026-08-27; the gate|up half
    shipped 2026-08-27 as the sibling-pair launch, see (c)).
    UPDATE 2026-08-27: the Qwen3.8 PORT roadmap is CLOSED - every item in
    docs/plans/2026-08-24-qwen38-port.md is done, answered, or closed with a
@@ -167,7 +178,7 @@ Ranked by what an agent workload notices first.
    serving gap is engine scope, not port scope: launch-coupled idle, the
    smallm in-class residual, recurrent-state paging (the lever for 32-way
    concurrency at LONG context - the phase-3 criterion itself is met
-   without it), and the elementwise fusion tail.
+   without it); the elementwise fusion tail closed by measurement 2026-08-27.
    UPDATE 2026-08-26 (attention post priced and closed): the fresh profile
    put NVFP4 decode attention at 8.9% of kernel time, ~13x its per-launch
    DRAM floor - but the GQA-tile variant built against it measured -9% e2e

@@ -145,6 +145,25 @@ struct GEMM {
     // fixed cost + one tail wave per pair, 112 launches per 64-layer decode
     // step on Qwen3.8-27B. Kill switch for A/B; requires impl 2.
     bool nvfp4_smallm_pair = true;
+    // Batched-decode residual accumulation on the CUTLASS_NVFP4 tier: the
+    // o / down / GDN-out projections at 2..32 rows run with beta=1 straight
+    // into the hidden buffer (the smallm kernel's accumulate path, the same
+    // numerics family the #1055 verify GEMMs use) instead of GEMM-to-scratch
+    // + elementwise add (+ a copy-back on GDN). n==1 keeps its fused
+    // residual GEMVs; prefill(>32), spec-verify, LoRA, post-norm and
+    // fp32-accum layers keep the scratch+add path.
+    //
+    // Default OFF by measurement (2026-08-27, Qwen3.8-27B-NVFP4, 32-stream
+    // burst, 3 alternating trials/arm): 1779.0 -> 1763.6 tok/s median,
+    // ALL THREE pairs negative (-2.7/-0.9/-0.2%), degen 50/0 on both arms.
+    // Mechanism: the elementwise residual adds sit AFTER their GEMM and
+    // overlap the next layer's independent GEMMs in the captured graph —
+    // they are already wall-free — while the accumulate path moves their
+    // bytes into the critical GEMM's epilogue. The batch=1 refutation of
+    // launch-class levers ("they overlap away") holds for THIS class at
+    // batch 32 too, unlike norms/act-quantize which sat on the critical
+    // path. Kept as a kill-switch-style A/B knob only.
+    bool nvfp4_residual_beta1 = false;
     // (gemm.nvfp4_ssm_proj — the 2026-05-30 opt-in that forced GGUF-hybrid
     // GDN projections into the NVFP4 decode cache — was REMOVED 2026-07-11:
     // it had bit-rotted in the tier refactors (measured 71 tok/s vs its
