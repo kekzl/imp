@@ -1007,7 +1007,7 @@ if(IMP_BUILD_TESTS)
     # rename can no longer silently shift a test into the wrong lane (R5/#580).
     # NOTE: scripts/verify.sh carries a literal copy of this filter (container
     # path has no build/ dir) — keep both in sync when changing it.
-    set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
+    set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
     add_test(NAME unit_core       COMMAND test-core)
     add_test(NAME unit_text       COMMAND test-text)
