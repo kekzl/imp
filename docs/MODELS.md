@@ -1,23 +1,34 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # Supported models
 
-The decode column is a per-model figure, not a gate. Each one comes from the
-sweep named below; the gated number that CI defends is a different model and
-lives in [`PERF.md`](PERF.md).
+The decode column is a per-model figure, not a gate; each comes from the
+sweep named below. The gated number CI defends is a different model, in
+[`PERF.md`](PERF.md).
 
 [PROV: commit=2230e1c2 date=2026-07-12 hw=RTX5090 model=per-row quant=per-row
        cuda=13.3 path=per-row cmd=`imp-cli --bench --bench-pp 512 --bench-reps 5`
        n=5x5 note=greedy, spec off, CUDA graphs on; full detail per row in BENCHMARKS.md]
 
-Model families with a known-working code path on `main`. Throughput numbers come from [`performance.md`](performance.md) — see that doc for methodology and the cuBLAS prefill-variance caveat. VRAM figures are model weights only. The KV cache is sized *on top* of that from whatever is left once the weight caches are built, so it scales with free VRAM and the configured context rather than sitting in a fixed band — a dense server default lands around 4.6 GiB, and a small model on an otherwise idle card takes far more. Bound it with `--set runtime.max_seq_len=N` / `kv_cache` settings and read the actual split with `--mem-report`. **`--max-seq-len` is imp-cli only**: `imp-server --max-seq-len N` hits the unknown-argument branch and exits 1 (#1681).
+Model families with a known-working code path on `main`. Throughput numbers:
+[`performance.md`](performance.md) (methodology, cuBLAS prefill-variance
+caveat).
 
-Anything not on this list may still load (the GGUF and SafeTensors paths cover most LLaMA-derived architectures), but it has not been verified end-to-end.
+- VRAM figures are model weights only. The KV cache is sized *on top*, from
+  what is left after the weight caches are built: it scales with free VRAM
+  and the configured context (a dense server default lands around 4.6 GiB; a
+  small model on an idle card takes far more). Bound it with
+  `--set runtime.max_seq_len=N` / `kv_cache` settings; read the actual split
+  with `--mem-report`.
+- **`--max-seq-len` is imp-cli only**: `imp-server --max-seq-len N` hits the
+  unknown-argument branch and exits 1 (#1681).
+- Anything not on this list may still load (the GGUF and SafeTensors paths
+  cover most LLaMA-derived architectures) but is not verified end-to-end.
 
 ## Dense transformers
 
@@ -87,20 +98,20 @@ checkpoint, so there is no second file and no second flag.
 | [Gemma-3-27B-it](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | Q4_K_M | GGUF | largest Gemma-3 |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | GGUF | text + vision via the gemma4v encoder (separate BF16 mmproj), `tg128` 273 — see [`vision_gemma4v_spec.md`](vision_gemma4v_spec.md) |
 
-Several images in one request are supported on this tower — repeat `--image`, or
-send several `image_url` parts — and they are read in prompt order.
+Several images per request are supported on this tower (repeat `--image`, or
+several `image_url` parts), read in prompt order.
 
 `Qwen3VLForConditionalGeneration`, `Qwen3VLMoeForConditionalGeneration`,
-`Qwen3_5MoeForConditionalGeneration` and `Qwen3_5ForConditionalGeneration` are all
-registered; the dense 4B, the Qwen3.6-35B MoE and the dense Qwen3.8-27B are
-validated end to end here. A VL checkpoint also loads
-text-only — the tower is simply never run if no image is passed.
+`Qwen3_5MoeForConditionalGeneration` and `Qwen3_5ForConditionalGeneration`
+are registered; the dense 4B, the Qwen3.6-35B MoE and the dense Qwen3.8-27B
+are validated end to end. A VL checkpoint also loads text-only: the tower is
+never run without an image.
 
-What decides is `vision_config.model_type`, matched against an allowlist
-(`vision_tower_supported()`): `qwen3_vl` and `qwen3_5_moe` both name the same
-tower layout. It is an allowlist rather than a shape fingerprint on purpose — a
+`vision_config.model_type` decides, matched against an allowlist
+(`vision_tower_supported()`): `qwen3_vl` and `qwen3_5_moe` name the same
+tower layout. Allowlist rather than shape fingerprint on purpose: a
 checkpoint that merely *resembles* the layout must keep hitting the loud
-text-only path rather than be parsed on the resemblance.
+text-only path.
 
 ### What cannot see, and how you find out
 
@@ -115,14 +126,15 @@ WARN Multimodal model detected (vision_config present, model_type='…').
      will be skipped.
 ```
 
-and serves the language model alone. Gemma-4 *does* see images, but only through
-the GGUF + `--mmproj` pair in the table, not from its NVFP4 SafeTensors export.
+and serves the language model alone. Gemma-4 *does* see images, but only
+through the GGUF + `--mmproj` pair in the table, not from its NVFP4
+SafeTensors export.
 
-Since #1198 this is also visible from the client rather than only in the server
-log: a request carrying `image_url` parts that the loaded model cannot use is
-refused with **400 `vision_unavailable`** instead of being answered from the text
-alone. That failure mode was the dangerous one — a fluent description of a picture
-the model never received is indistinguishable from a real one.
+Since #1198 this is visible from the client, not only the server log: a
+request carrying `image_url` parts the loaded model cannot use is refused
+with **400 `vision_unavailable`** instead of being answered from the text
+alone (a fluent description of a picture the model never received is
+indistinguishable from a real one).
 
 ```bash
 # Qwen3-VL — one flag, the tower comes with the model

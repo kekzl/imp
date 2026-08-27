@@ -1,21 +1,20 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # API
 
-What the HTTP surface actually accepts, as opposed to what an OpenAI-shaped
-client might assume. Status legend is the one from
+What the HTTP surface actually accepts. Status legend from
 [`FEATURES.md`](FEATURES.md): ✅ code path plus a gated test, 🟡 code path, no
 test.
 
-**Two dialects, both native.** imp is not an OpenAI server with an Anthropic
-shim bolted on, nor the reverse. `/v1/messages` is implemented against the
-Anthropic wire format directly, and all three dialects share one per-token
-streaming driver, so a fix in streaming lands in all of them at once.
+**Two dialects, both native.** `/v1/messages` is implemented against the
+Anthropic wire format directly, no shim in either direction. All three
+dialects share one per-token streaming driver, so a streaming fix lands in
+all of them at once.
 
 ## Endpoints
 
@@ -57,10 +56,9 @@ streaming driver, so a fix in streaming lands in all of them at once.
 ### Defaults, and where they differ from OpenAI
 
 A request that sets no sampling fields is not served with OpenAI's defaults
-(#1596). The values are deliberate - they suit local models better than
-`temperature 1.0` with no truncation - but they change what an identical
-request returns compared to the OpenAI API, so they are stated here rather than
-left in the source.
+(#1596). Deliberate: the values suit local models better than
+`temperature 1.0` with no truncation, but an identical request returns
+different output than against the OpenAI API.
 
 | field | imp | OpenAI | to get OpenAI's behaviour |
 |---|---|---|---|
@@ -69,20 +67,18 @@ left in the source.
 | `top_k` | 40 | (no field) | send `"top_k": 999999` (see below) |
 | `repetition_penalty` | 1.05 | (no field) | send `"repetition_penalty": 1.0` |
 
-Two of these do not switch off the way the field name suggests.
+Two of these do not switch off the way the field name suggests:
 
-**`top_k: 0` is not "off", it is 50.** Every sampling site spells
-`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:193`, `:290`,
-`src/runtime/engine_decode_pipeline.cpp:82`), so zero and "unset" both land on
-50 - a *tighter* truncation than the 40 default. The only way to disable top-k
-is a value at or above the vocabulary size, which the dispatcher clamps to the
-full vocabulary (`engine_decode_pipeline.cpp:83`).
-
-**`repetition_penalty` has no OpenAI field at all**, so a strictly
-spec-compliant client cannot switch it off and gets a mild anti-repetition bias
-it never asked for. Sending the non-OpenAI field with value `1.0` does disable
-it: the engine skips the penalty pass entirely when all three penalties are
-neutral (`src/runtime/engine_sampling_stop.cpp:212`).
+- **`top_k: 0` is not "off", it is 50.** Every sampling site spells
+  `top_k > 0 ? top_k : 50` (`src/exec/executor.cu:193`, `:290`,
+  `src/runtime/engine_decode_pipeline.cpp:82`): zero and "unset" both land on
+  50, a *tighter* truncation than the 40 default. Disabling top-k needs a
+  value at or above the vocabulary size, which the dispatcher clamps to the
+  full vocabulary (`engine_decode_pipeline.cpp:83`).
+- **`repetition_penalty` has no OpenAI field**, so a strictly spec-compliant
+  client cannot switch it off. Sending the non-OpenAI field with value `1.0`
+  disables it: the engine skips the penalty pass when all three penalties are
+  neutral (`src/runtime/engine_sampling_stop.cpp:212`).
 
 ### Metrics for what the server decided
 
@@ -133,10 +129,10 @@ constraint entirely.
 
 ## Tool calling
 
-✅, and gated by real clients rather than by our own idea of correct: `make
-test-agents-external` drives imp with aider over the OpenAI dialect, Claude Code
-over the Anthropic one and the OpenAI Agents SDK over `/v1/responses`, each
-having to land an actual edit in a throwaway repository.
+✅, gated by real clients: `make test-agents-external` drives imp with aider
+over the OpenAI dialect, Claude Code over the Anthropic one and the OpenAI
+Agents SDK over `/v1/responses`, each having to land an actual edit in a
+throwaway repository.
 
 `tool_choice` that contradicts the request is a `400`: naming a function absent
 from `tools`, or `"required"` with no tools.
@@ -172,11 +168,10 @@ not a tag:
 <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Berlin"}<|call|>
 ```
 
-The parser dispatched on family and had no Harmony branch, so the call fell
-through to the ChatML `<tool_call>` scanner, found nothing, and was dropped -
-the response carried an **empty `content` with `finish_reason: "stop"`** while
-the model's own `reasoning_content` said it meant to call. Measured on
-`gpt-oss-20b-mxfp4`, `tool_choice: "auto"`, 10 requests per row:
+Before #1716 the parser had no Harmony branch: the call fell through to the
+ChatML `<tool_call>` scanner and was dropped, an **empty `content` with
+`finish_reason: "stop"`**. Measured on `gpt-oss-20b-mxfp4`,
+`tool_choice: "auto"`, 10 requests per row:
 
 | path | before | after |
 |---|---|---|
@@ -232,22 +227,19 @@ server default (`--think-budget`, 0.5) applies and these fields turn it off -
 | `thinking: {display: "omitted"}` | Anthropic | the model still reasons; the `thinking` block is not returned, on either transport |
 
 `thinking` blocks carry a `signature`, and the stream emits `signature_delta`
-before the block's `content_block_stop`, because the SDKs round-trip the pair.
-It is a deterministic digest of the block text, not an attestation: imp is not
-the model vendor and cannot sign anything. It proves the block came back
-unedited, and nothing more.
+before the block's `content_block_stop` (SDKs round-trip the pair). It is a
+deterministic digest of the block text, not an attestation: it proves the
+block came back unedited, nothing more.
 
-Measured on Qwen3.8-27B with a JSON prompt at `max_tokens: 400`, counting
-`reasoning_content` characters: nothing set 160, `think_budget: 0` alone **0**,
-`enable_thinking: false` alone **0**. The server's toggle test sets both because
-it covers the combination, not because both are required.
+Either field alone suffices. Measured on Qwen3.8-27B, JSON prompt at
+`max_tokens: 400`, `reasoning_content` characters: nothing set 160,
+`think_budget: 0` alone **0**, `enable_thinking: false` alone **0**.
 
-**Why you would.** The answer shares the token budget with the thinking, so a
-small `max_tokens` on a thinking model can be consumed before the reply starts,
-and you get an empty `content` with `finish_reason: stop`. Short structured
-calls (a JSON classifier at `max_tokens: 400`, say) are the usual case: disable
-thinking there rather than raising every budget. See
-[`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
+**Why disable it:** the answer shares the token budget with the thinking, so a
+small `max_tokens` on a thinking model can be consumed before the reply
+starts: empty `content`, `finish_reason: stop`. For short structured calls
+(a JSON classifier at `max_tokens: 400`), disable thinking rather than raising
+every budget. See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 Structured output disables thinking on its own: `json_mode`, `json_schema`,
 `tools`, `regex` and `grammar` all suppress it without either field.
@@ -255,8 +247,8 @@ Structured output disables thinking on its own: `json_mode`, `json_schema`,
 ## Prompt caching
 
 ✅ on by default for the server. Prefix blocks are reused across requests that
-share a prefix, which is what makes a growing agent transcript cheaper per turn
-rather than more expensive.
+share a prefix: a growing agent transcript gets cheaper per turn, not more
+expensive.
 
 `cache_control` is honoured per breakpoint: the **last** marked block bounds the
 pinned region, rather than pinning the whole prompt. Usage reporting carries
@@ -272,22 +264,22 @@ never replayed.
 request are encoded in prompt order.
 
 **A data URI works out of the box; an `http(s)` URL does not.** Fetching one
-makes the server open a connection to a host the caller names, and the caller is
-unauthenticated by default, so it is behind `--allow-remote-images` (#1610).
-With the flag on, the destination is resolved and refused if it is loopback,
-link-local (including the cloud metadata address), RFC1918, CGNAT or ULA;
-redirects are not followed, the body is capped at 32 MiB and the read has a
-10 s timeout. See [`LIMITATIONS.md`](LIMITATIONS.md) for the residual.
+opens a server-side connection to a caller-named host with an unauthenticated
+caller, so it is behind `--allow-remote-images` (#1610). With the flag on, the
+destination is refused if it resolves to loopback, link-local (including the
+cloud metadata address), RFC1918, CGNAT or ULA; redirects are not followed,
+body capped at 32 MiB, 10 s read timeout. Residual:
+[`LIMITATIONS.md`](LIMITATIONS.md).
 
-Two refusals worth knowing, both deliberate:
+Two deliberate refusals:
 
-- An `image_url` that cannot be read is a `400`, not a skipped picture. Dropping
-  one would slide every later image onto the wrong placeholder. The message is
-  the same whatever went wrong, and does not echo the URL, so the endpoint
-  cannot be used to tell an open port from a closed one.
-- A model whose vision tower imp cannot read loads **text-only** and says so; a
-  request that sends it an image gets `400 vision_unavailable` rather than a
-  confident description of a picture the model never received.
+- An `image_url` that cannot be read is a `400`, not a skipped picture:
+  dropping one would slide every later image onto the wrong placeholder. The
+  message is the same whatever went wrong and does not echo the URL, so the
+  endpoint cannot distinguish an open port from a closed one.
+- A model whose vision tower imp cannot read loads **text-only** and says so;
+  an image request to it gets `400 vision_unavailable` rather than a confident
+  description of a picture the model never received.
 
 No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
 
@@ -320,11 +312,10 @@ A stream that ends on a server-side fault emits an `error` SSE event instead of
 to arrive as an ordinary completed turn, indistinguishable from the model
 finishing.
 
-`anthropic-version` and `anthropic-beta` are read and echoed back. Neither is
-enforced: upstream a missing version is a 400 and an unknown beta is refused,
-while imp serves both - a client that works here can therefore fail there. An
-unknown beta is logged once per value, because imp implements no beta surface
-and answering 200 to a beta request is otherwise a silent false accept.
+`anthropic-version` and `anthropic-beta` are read and echoed back, neither
+enforced (upstream: missing version = 400, unknown beta = refused; a client
+that works here can fail there). An unknown beta is logged once per value: imp
+implements no beta surface, and a silent 200 would be a false accept.
 
 Internal engine errors are translated to `ImpError` at the C API boundary
 (`src/api/imp_api.cpp`); this is intentional and is why a load failure surfaces
@@ -332,22 +323,21 @@ as a typed message rather than a crash.
 
 ### `GET /health`, and which 503 is worth retrying
 
-`/health` answers 200 with `status: "ok"` whenever the process can serve. Load,
-queueing and a transient out-of-memory all stay 200 on purpose: the server is
-alive and an orchestrator restarting on them makes things worse.
+`/health` answers 200 with `status: "ok"` whenever the process can serve.
+Load, queueing and a transient out-of-memory stay 200 on purpose: the server
+is alive, and an orchestrator restarting on them makes things worse.
 
-It answers **503 only for states that outlast the request that hit them**, and
-then carries a stable `code` so a client can tell those apart from a retryable
-one:
+**503 only for states that outlast the request that hit them**, with a stable
+`code`:
 
 | `code` | what it means | what a client should do |
 |---|---|---|
 | `kv_pool_floored` | the KV pool fell back to its rescue floor, so it holds a few hundred tokens instead of a context. Sized once at startup, usually because another process still held the card | do **not** retry, the process cannot recover. Restart it on a free card |
 | `engine_faulted` | the engine is wedged | restart |
 
-Whenever a model is loaded the body also carries the pool capacity, healthy or
-not, so a caller can check what it is about to send against what the server can
-hold without scraping `/metrics`:
+Whenever a model is loaded the body carries the pool capacity, healthy or
+not, so a caller can check a prompt against server capacity without scraping
+`/metrics`:
 
 ```json
 {"status": "unhealthy", "code": "kv_pool_floored",
@@ -356,16 +346,14 @@ hold without scraping `/metrics`:
  "kv_ceiling_blocks": 16, "kv_pool_growable": false}
 ```
 
-`kv_ceiling_blocks` is what the pool may still grow to. Equal to
-`kv_blocks_total` means a fixed pool at its final size; greater means it is
-growable and has not got there yet (`kv_cache.growable`). `kv_pool_growable`
-resolves the case where that pair cannot: a fixed pool and a growable one that
-has already reached its ceiling both report ceiling == total, and the two want
-opposite reactions — wait for the card to free, or stop waiting. A pool that is small
-**and** can still grow is not reported as unhealthy at all: it heals as the card
-frees, and a client should wait for the total to climb rather than restart the
-server.
+`kv_ceiling_blocks` is what the pool may still grow to: equal to
+`kv_blocks_total` = fixed pool at final size; greater = growable, not there
+yet (`kv_cache.growable`). `kv_pool_growable` disambiguates the case both
+report ceiling == total (fixed pool vs growable at its ceiling), which want
+opposite reactions: wait for the card to free, or stop waiting. A pool that is
+small **and** can still grow is not reported unhealthy: it heals as the card
+frees; wait for the total to climb rather than restart.
 
-This exists because the quiet version of that state cost an operator an
-afternoon: `/health` said ok, `/v1/models` kept advertising 131 072 tokens, and
-every real prompt came back cancelled with a message about the prompt.
+Before this field existed the state was silent: `/health` said ok,
+`/v1/models` kept advertising 131 072 tokens, every real prompt came back
+cancelled with a message about the prompt.

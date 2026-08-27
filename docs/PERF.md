@@ -1,20 +1,19 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # Performance
 
-**This file is the single source of truth for every number about imp.** The
-README embeds a generated extract of it; nothing else in the tree states a
-throughput figure without linking here.
+**Single source of truth for every number about imp.** The README embeds a
+generated extract; nothing else in the tree states a throughput figure
+without linking here.
 
-Methodology, and what makes a number admissible at all, is in
-[`internals/BENCHMARKING.md`](internals/BENCHMARKING.md). Read that before
-quoting anything below, because two of the figures here are routinely
-misread.
+Methodology and admissibility:
+[`internals/BENCHMARKING.md`](internals/BENCHMARKING.md). Read it before
+quoting anything below; two of the figures here are routinely misread.
 
 ## Read this before the tables
 
@@ -30,13 +29,13 @@ at 3 %: below 8 % it was reporting the host, not the change.
 
 **Prefill varies more than decode, and it is the MoE path that varies, not
 cuBLAS.** Measured across fresh processes on one quiet host: the cuBLAS-FP16
-prefill model spreads **0.6-1.2 %**, while a fully resident NVFP4 MoE model
-spreads **37.6 %** in the same session. Under host-resident MoE experts the same
-arm varies about 15 % between two runs. cuBLAS algo selection is re-timed per
-process and was long blamed for this; its own contribution measured **3.50 %**
-over nine process starts (`docs/audit/AUDIT_ARCH_2026_07_29.md`, answer 5), which
-is inside the gate's own threshold. A single prefill number is not a measurement;
-a paired, alternating A/B is.
+prefill model spreads **0.6-1.2 %**, a fully resident NVFP4 MoE model
+**37.6 %** in the same session. Under host-resident MoE experts the same arm
+varies about 15 % between two runs. cuBLAS algo selection, long blamed,
+contributes **3.50 %** over nine process starts
+(`docs/audit/AUDIT_ARCH_2026_07_29.md`, answer 5), inside the gate's own
+threshold. A single prefill number is not a measurement; a paired,
+alternating A/B is.
 
 [PROV: commit=43e8b663 date=2026-08-14 hw=RTX5090 model=Qwen3-8B-Q8_0+Qwen3-Coder-30B-A3B-NVFP4
        quant=Q8_0+NVFP4 cuda=13.3 path=gguf-dp4a+cutlass-nvfp4
@@ -75,21 +74,20 @@ it is byte-identical across repeat runs, which is why its threshold can stay at
 
 ## Why the prefill pin is lower than the 2026-07-15 one
 
-`pp512` was 14515 before 2026-07-26 and is 12406.87 now. **Nothing regressed.**
-Until #1061, `imp-cli --bench` left prefix caching on, so repeated bench reps
-were partly measuring cache hits on top of prefill. One-shot runs now disable it,
-because a single-generation process never re-sees its own prefix. Confirmed by
-bisect (first differing commit `d8bc45a8`) and by forcing the old behaviour back
-on, which reproduces the old band. The current figure is the honest prefill cost.
+`pp512` was 14515 before 2026-07-26, 12406.87 now. **Nothing regressed.**
+Until #1061 `imp-cli --bench` left prefix caching on, so repeated bench reps
+partly measured cache hits on top of prefill; one-shot runs now disable it (a
+single-generation process never re-sees its own prefix). Confirmed by bisect
+(first differing commit `d8bc45a8`) and by forcing the old behaviour back on,
+which reproduces the old band.
 
-This is the single most misread number in the repo. Anyone comparing against a
-pre-2026-07-26 figure is comparing two different measurements.
+The single most misread number in the repo: a pre-2026-07-26 figure is a
+different measurement.
 
 ## Competitive standing
 
-Per-model numbers, the models each named, live in
-[`BENCHMARKS.md`](BENCHMARKS.md). The one-line summary, current as of the
-2026-07-12 sweep:
+Per-model numbers: [`BENCHMARKS.md`](BENCHMARKS.md). Summary, current as of
+the 2026-07-12 sweep:
 
 - batch=1 decode leads llama.cpp on every hero measured, by 13-48 % on dense GGUF
 - MoE single-sequence prefill leads vLLM
@@ -116,14 +114,13 @@ over.
 
 ## MoE host offload
 
-Only relevant when a MoE model's experts do not fit in VRAM. Both GGUF and NVFP4
-experts have a working host path. NVFP4 was refused at load in #1403 and that
-refusal was replaced by an implementation
-(`src/exec/executor_forward_moe_nvfp4_host.cu`); this paragraph still said
-"refused" until #1670, while `FEATURES.md:102` and `LIMITATIONS.md:108-110`
-already described the shipped path, the latter with a measurement (23.3 tok/s
-against 384.0 resident). A placement the expert cache cannot hold at all is
-still refused - that part of #1403 stands.
+Only relevant when a MoE model's experts do not fit in VRAM. Both GGUF and
+NVFP4 experts have a working host path. NVFP4 was refused at load in #1403;
+the refusal was replaced by an implementation
+(`src/exec/executor_forward_moe_nvfp4_host.cu`, doc corrected in #1670;
+`LIMITATIONS.md:108-110` carries the measurement, 23.3 tok/s against 384.0
+resident). A placement the expert cache cannot hold at all is still refused;
+that part of #1403 stands.
 
 <!-- markdownlint-disable -->
 | arm | decode |
@@ -138,10 +135,10 @@ still refused - that part of #1403 stands.
        note=warm; a cold run of the same build reads 20.99 rather than 49.60]
 
 #1669: the withdrawn row read four different figures across this file and
-`roadmap.md:655` for one measurement; the checkpoint is not on this host to re-run.
+`roadmap.md:655` for one measurement; the checkpoint is not on this host to
+re-run.
 
-**Warm and cold differ by 2.4x on this path**, so a figure from it has to say
+**Warm and cold differ by 2.4x on this path**: a figure from it must say
 which it is. Cache capacity is the lever: `moe.expert_cache_budget_pct` moves
-the same model 10.51 to 51.86 tok/s across 5 % to 50 %. The default stays 15
-because on a model that genuinely does not fit, the same VRAM is what the KV
-pool wants.
+the same model 10.51 to 51.86 tok/s across 5 % to 50 %. Default stays 15: on
+a model that genuinely does not fit, the same VRAM is what the KV pool wants.

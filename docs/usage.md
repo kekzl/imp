@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # imp — Usage & Reference
@@ -54,10 +54,9 @@ in `CMakeLists.txt` (CMake < 3.31 workaround). Don't override
 
 ## Configuration — `imp.conf`
 
-`imp.conf` is the runtime configuration interface (PR #72). It replaces
-~50 former `IMP_*` environment variables with a sectioned TOML-subset file.
-See `imp.conf.example` in the repo root for the full schema with defaults
-and inline comments.
+Runtime configuration (PR #72): a sectioned TOML-subset file replacing ~50
+former `IMP_*` env vars. Full schema with defaults: `imp.conf.example` in the
+repo root.
 
 **Loading precedence** (first non-empty wins):
 
@@ -116,33 +115,33 @@ Format auto-detection: directories containing `model.safetensors` or
 `model.safetensors.index.json` load as SafeTensors. Everything else loads
 as GGUF.
 
-`--max-seq-len` and `--min-kv-tokens` control KV-cache VRAM reservation.
-Auto defaults target ~60% of free VRAM for KV, sized for the actual KV
-dtype after model-specific overrides (e.g. Gemma-4 → FP16 KV via the
-`engine.cpp:547` carve-out). `--min-kv-tokens` overrides the defensive
-80% cap and trades FP16 weight-cache capacity for more context. The
-budget planner's envelope itself is tunable via imp.conf `[vram]`:
-`kv_fraction` (default 0.8 — the KV share of post-reserve VRAM) and
-`reserve_floor_pct` (default 10 — the free-VRAM headroom floor as % of
-total). See `imp.conf.example`.
+KV-cache VRAM reservation:
 
-To serve a context longer than the model's native window, inject RoPE
-scaling at load via imp.conf `[rope]` (or `--set`), e.g. a native-32k
-model at 128k:
+- `--max-seq-len` / `--min-kv-tokens` control the reservation. Auto targets
+  ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific
+  overrides (Gemma-4 -> FP16 KV via the `engine.cpp:547` carve-out).
+- `--min-kv-tokens` overrides the defensive 80% cap: trades FP16 weight-cache
+  capacity for more context.
+- Planner envelope in imp.conf `[vram]`: `kv_fraction` (default 0.8, KV share
+  of post-reserve VRAM), `reserve_floor_pct` (default 10, free-VRAM headroom
+  floor as % of total). See `imp.conf.example`.
+
+RoPE scaling override, for serving past the model's native window (imp.conf
+`[rope]` or `--set`), e.g. a native-32k model at 128k:
 
 ```bash
 imp-server --model model.gguf --set rope.scaling=yarn --set rope.factor=4
 ```
 
-The override mirrors model-declared `rope_scaling` metadata (YaRN or
-linear), raises the detected context window to `factor × orig_ctx`, and
-is refused for LongRoPE/llama3 per-dimension tables, MLA, and NoPE
-models. Quality past the native window is the checkpoint's YaRN
-extrapolation quality — validate on your workload.
+- Mirrors model-declared `rope_scaling` metadata (YaRN or linear); raises the
+  detected window to `factor x orig_ctx`.
+- Refused for LongRoPE/llama3 per-dimension tables, MLA, and NoPE models.
+- Quality past the native window is the checkpoint's YaRN extrapolation
+  quality: validate on your workload.
 
-`--vram-budget <mb>` (also `[runtime] vram_budget_mb` in imp.conf) hard-caps
-this process's VRAM: every sizing decision — weight caches, KV clamp, expert
-offload, workspaces, upload gates — sees a virtual GPU of that size, so
+`--vram-budget <mb>` (also `[runtime] vram_budget_mb`) hard-caps this
+process's VRAM: every sizing decision (weight caches, KV clamp, expert
+offload, workspaces, upload gates) sees a virtual GPU of that size, so
 multiple imp-server processes can share one card:
 
 ```bash
@@ -150,26 +149,20 @@ imp-server --model Qwen3-4B-Instruct-2507-Q8_0.gguf --port 8080 --vram-budget 90
 imp-server --model Llama-3.2-3B-Instruct-Q8_0.gguf  --port 8081 --vram-budget 8000 &
 ```
 
-The cap binds, but it is not exact — and the overshoot is measured rather than
-guessed. Two charges sit outside the sizing
-gates: the CUDA primary context (~1.7 GiB on this host, allocated before imp
-takes its baseline snapshot, so no budget can cover it) and ~1.8 GiB of
-dequant scratch, CUTLASS scale-factor buffers, pinned staging and workspaces
-whose allocation sites don't consult the budget. Measured on Qwen3-8B-Q8_0,
-`--vram-budget 16000` peaks at 19468 MiB — so leave ~3.5 GiB of real headroom
-between the sum of budgets and the card. `--mem-report` prints the peak
-against the cap and marks it `[OVER BUDGET]` when it exceeds it, so the gap is
-visible rather than inferred.
-
-Before #1109 the flag did nothing measurable: every term of the planner's
-reserve is a percentage of the (virtual) card, while the cuBLAS/CUTLASS
-reserve claimed on the first forward pass is a ~3.9 GiB constant, so shrinking
-the budget shrank the reserve and left the constant uncovered. The reserve is
-now floored at that measured charge (tune with `[vram] library_reserve_mb`).
-A model whose weights don't fit the budget fails cleanly at load instead of
-starving the neighbour, and a budget that cannot hold a single `max_seq_len`
-sequence is refused at init — naming the blocks available, the blocks needed
-and the MiB to add — rather than loading and then failing every request.
+- The cap binds but is not exact. Two charges sit outside the sizing gates:
+  the CUDA primary context (~1.7 GiB on this host, allocated before imp's
+  baseline snapshot) and ~1.8 GiB of dequant scratch, CUTLASS scale-factor
+  buffers, pinned staging and workspaces.
+- Measured on Qwen3-8B-Q8_0: `--vram-budget 16000` peaks at 19468 MiB. Leave
+  ~3.5 GiB of real headroom between the sum of budgets and the card.
+- `--mem-report` prints the peak against the cap and marks `[OVER BUDGET]`.
+- Since #1109 the planner's reserve is floored at the measured cuBLAS/CUTLASS
+  first-forward charge (~3.9 GiB constant; tune with `[vram]
+  library_reserve_mb`). Before that, shrinking the budget shrank the reserve
+  and left the constant uncovered.
+- Weights that don't fit the budget fail cleanly at load. A budget that cannot
+  hold a single `max_seq_len` sequence is refused at init, naming the blocks
+  available, the blocks needed and the MiB to add.
 
 <details>
 <summary>Full CLI options</summary>
@@ -255,11 +248,9 @@ Benchmark / eval:
 
 ### Machine-readable output — `--json`
 
-`--json` puts **exactly one JSON document on stdout** and every human line on
-stderr, so a caller pipes it into `jq` instead of regexing a column layout that
-is not a contract (#1583). It works on `imp-cli --bench`, `--perplexity` and
-`--prompt`, and on `imp-bench`; `--interactive` refuses it, because a token
-stream is not one document.
+`--json` puts **exactly one JSON document on stdout**, every human line on
+stderr (#1583). Works on `imp-cli --bench`, `--perplexity`, `--prompt`, and on
+`imp-bench`; `--interactive` refuses it (a token stream is not one document).
 
 ```bash
 $ imp-cli --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tokens 16 --json 2>/dev/null
@@ -278,13 +269,12 @@ $ imp-bench gemm --json 2>/dev/null
 | `generate` | `text`, `prompt_tokens`, `completion_tokens`, `prefill_tps`, `decode_tps`, `prefill_ms`, `decode_ms`, `total_ms` |
 | `bench-suite` | `requested`, `run`, `wall_s`, `benchmarks[].{name,measured,seconds}` |
 
-`text` is what stdout would have shown, not `decode(output_ids)`: the hidden
-stop and think markers stay hidden, so the document and the terminal agree.
+`text` is what stdout would have shown, not `decode(output_ids)`: hidden stop
+and think markers stay hidden.
 
-`imp-bench` reports per-benchmark *timings*, not the tables. The five bench
-entry points return `bool`, and their numbers have no shared shape to
-serialise; the consumer that needed machine-readable throughput is
-`scripts/gen_perf_baseline.sh`, and it reads `imp-cli --bench --json`.
+`imp-bench` reports per-benchmark *timings*, not the tables; machine-readable
+throughput comes from `imp-cli --bench --json` (that is what
+`scripts/gen_perf_baseline.sh` reads).
 
 ## Server — imp-server (OpenAI + Anthropic compatible)
 
@@ -316,47 +306,48 @@ non-streaming), `/tokenize`, `/detokenize`, `/health`, `/props`, `/info`,
 Tool/function calling, streaming usage stats, logprobs, and API-key auth
 (`--api-key`) supported.
 
-**Warm weight cache.** The first cold load of a model writes a cache file
-(`<model-name>-<hash>.impwcache`) into `~/.cache/imp/warm` (override with
-`[warm_cache] dir`) holding the converted weight buffers; subsequent starts
-mmap it and skip the conversion work. Raw quant payloads are never
-duplicated, so the cache is small for raw-served GGUF quants and
-NVFP4-prequant models and ~model-size for BF16-dense checkpoints. On by
-default (`[warm_cache] enabled = false` to opt out); stale caches (changed
-model file) are detected and ignored — delete the directory at any time. In
-containers, mount a persistent volume at the cache dir; if it is not
-writable, loads simply stay cold (INFO log). Delete the cache file at any time — the next
-load is simply cold and rewrites it.
+**Warm weight cache.**
 
-**Suspend to RAM.** `POST /admin/suspend` drains in-flight requests, parks
-the model weights in host RAM, and frees the GPU completely (with
-`[suspend] device_reset` — the default — the CUDA context is reset too, so
-`nvidia-smi` shows ~0 MiB for the process). `POST /admin/resume` restores
-the weights from RAM (no mmap re-read, no requantization) and serves again
-in seconds. Sessions/KV do not survive — only the weights stay warm. While
-suspended, inference endpoints answer 503 and `/health` reports
-`"suspended": true` (HTTP 200 — it is a deliberate operator state, not a
-fault). Capture fails cleanly (507) when host `MemAvailable` is below the
-snapshot size + `[suspend] host_ram_headroom_mb`; models whose device
-weight buffers are transformed in place after upload (native MXFP4 GGUF,
-gpt-oss, Gemma-4 fused-expert split) are refused with 501.
-`/v1/models` lists the model the server is serving (OpenAI semantics: the
-server exposes exactly what it can serve). Requests must name that model —
-any other `model` value gets `404 model_not_found`; inference requests never
-trigger a model load/swap. To switch models, restart the server with a
-different `--model`.
+- First cold load writes `<model-name>-<hash>.impwcache` into
+  `~/.cache/imp/warm` (`[warm_cache] dir` to override) with the converted
+  weight buffers; later starts mmap it and skip the conversion.
+- Raw quant payloads are never duplicated: small cache for raw-served GGUF
+  quants and NVFP4-prequant models, ~model-size for BF16-dense checkpoints.
+- On by default (`[warm_cache] enabled = false` to opt out). Stale caches
+  (changed model file) are detected and ignored; deleting the file/directory
+  just makes the next load cold.
+- Containers: mount a persistent volume at the cache dir. Not writable =
+  loads stay cold (INFO log).
+
+**Suspend to RAM.**
+
+- `POST /admin/suspend`: drains in-flight requests, parks weights in host RAM,
+  frees the GPU. With `[suspend] device_reset` (default) the CUDA context is
+  reset too: `nvidia-smi` shows ~0 MiB for the process.
+- `POST /admin/resume`: restores from RAM (no mmap re-read, no
+  requantization), serves again in seconds. Sessions/KV do not survive; only
+  weights stay warm.
+- While suspended: inference endpoints answer 503, `/health` reports
+  `"suspended": true` at HTTP 200 (deliberate operator state, not a fault).
+- Capture fails cleanly (507) when host `MemAvailable` is below snapshot size
+  + `[suspend] host_ram_headroom_mb`. Models whose device weight buffers are
+  transformed in place after upload (native MXFP4 GGUF, gpt-oss, Gemma-4
+  fused-expert split) are refused with 501.
+
+**Model identity.** `/v1/models` lists the served model (OpenAI semantics).
+Requests must name it; any other `model` value gets `404 model_not_found`,
+and inference requests never trigger a load/swap. To switch models, restart
+with a different `--model`.
 
 **Context-window auto-detection.** The served context length is exposed in
-the three conventions OpenAI-compatible clients already probe, so no
-hard-coded table is needed: `/v1/models` carries vLLM's `max_model_len` and
-llama.cpp's `meta.n_ctx_train` on the model object, `GET /props` returns the
-llama.cpp `n_ctx` (top-level and under `default_generation_settings`), and
+the three conventions clients already probe: `/v1/models` carries vLLM's
+`max_model_len` and llama.cpp's `meta.n_ctx_train`, `GET /props` returns
+llama.cpp's `n_ctx` (top-level and under `default_generation_settings`),
 `GET /info` returns TGI's `max_total_tokens` / `max_input_tokens`. All three
-report the same window, and it is what the KV pool can actually hold: the
-resolver's `max_seq_len` is a plan, the pool is clamped after it, and on a tight
-card the two differ (97204 against 52256 on Qwen3.8-27B-NVFP4). `/health`'s
-`kv_capacity_tokens` has always been the real number; the probes report the
-smaller of the two now (#1542).
+report what the KV pool can actually hold: the resolver's `max_seq_len` is a
+plan, the pool is clamped after it, and on a tight card the two differ (97204
+against 52256 on Qwen3.8-27B-NVFP4). The probes report the smaller of the two
+since #1542; `/health`'s `kv_capacity_tokens` was always the real number.
 
 Server-only flags (not on `imp-cli`):
 
@@ -407,7 +398,7 @@ for chunk in client.chat.completions.create(
 
 ### LoRA adapters (hot-swap)
 
-PEFT adapters are applied as runtime low-rank deltas on the activation path —
+PEFT adapters are applied as runtime low-rank deltas on the activation path,
 no weight patching, so they compose with every quant tier (FP16 cache, NVFP4
 decode cache, raw-GGUF dp4a). Load at startup, select per request:
 
@@ -421,7 +412,7 @@ imp-server --model base.gguf --lora style=/adapters/style --lora med=/adapters/m
 // "lora" absent or "" = base model; unknown names → 400.
 ```
 
-Swapping re-captures decode CUDA graphs on the next request (~100 ms) —
+Swapping re-captures decode CUDA graphs on the next request (~100 ms);
 adapters are engine-global between requests (single-user semantics, imp's
 batch=1 mission). v1 scope: per-layer `q/k/v/o/gate/up/down_proj` adapters on
 standard pre-norm archs; sandwich-norm o/down (Gemma) and MoE-expert targets
@@ -429,12 +420,10 @@ are declined with a log. C API: `imp_lora_load()` / `imp_lora_set()`.
 
 ## C API
 
-> The C API is consumable only from a **source build**: `cmake --install` stages
-> `libimp.a` and the `include/imp/` headers, which you link against. The prebuilt
-> `ghcr.io/kekzl/imp` runtime image ships only the `imp-server` / `imp-cli` /
-> `imp-bench` binaries — not the static library or headers — so embedding the C
-> API means building from source (or copying the lib/headers out of the Docker
-> `builder` stage).
+> Source build only: `cmake --install` stages `libimp.a` and the `include/imp/`
+> headers. The prebuilt `ghcr.io/kekzl/imp` runtime image ships only the
+> `imp-server` / `imp-cli` / `imp-bench` binaries, not the static library or
+> headers (or copy them out of the Docker `builder` stage).
 
 ```c
 #include <imp/imp.h>

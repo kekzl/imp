@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # Determinism
@@ -66,19 +66,17 @@ first-request asymmetry — acceptable for dev/CI, not for evals.
 
 ### Known hole: a prefix-cache hit is not bit-equal to a fresh prefill (#1314)
 
-The guarantee above has one measured exception. A request served from the
-prefix cache prefills only the uncached tail, so the same prompt reaches
-cuBLASLt with a different M dimension than on a fresh prefill — different algo
-pick, possibly a different split-k reduction, and results that agree closely but
-not bitwise. Any greedy decision whose margin is smaller than that drift can
-then land either way, and the first request of a process is the one that runs
+One measured exception. A prefix-cache hit prefills only the uncached tail:
+the same prompt reaches cuBLASLt with a different M dimension than a fresh
+prefill (different algo pick, possibly a different split-k reduction), so
+results agree closely but not bitwise. A greedy decision with a margin
+smaller than that drift lands either way; the first request of a process runs
 fresh, so it is the one that differs.
 
-Measured with two probes, because the first one is too weak to characterise
-this and said so only after the second was run. **Short probe:** whole
-`tests/api/test_chat.py` (a 16-token answer to "What is 2+2?"),
-`Llama-3.2-3B-Instruct-IQ4_XS`, five fresh servers per arm. **Long probe:** the
-three `DetEvalE2ETest` prompts at 96 tokens, three fresh servers per arm.
+Two probes. **Short probe:** whole `tests/api/test_chat.py` (a 16-token
+answer to "What is 2+2?"), `Llama-3.2-3B-Instruct-IQ4_XS`, five fresh servers
+per arm. **Long probe:** the three `DetEvalE2ETest` prompts at 96 tokens,
+three fresh servers per arm.
 
 | arm | short probe | long probe (Qwen3-4B-Q8_0) | long probe (Llama-3.2-3B) |
 |---|---|---|---|
@@ -87,37 +85,32 @@ three `DetEvalE2ETest` prompts at 96 tokens, three fresh servers per arm.
 | `runtime.deterministic = true` | 0/5 | **1 of 3 prompts, 3/3 reps** | — |
 | `server.prefix_cache = false` | 0/5 | **0 of 3, 3/3 reps** | — |
 
-The GEMM knobs move the *particular* near-tie the short probe lands on; they do
-not remove the phenomenon. Over 96 tokens the divergence returns with
+The GEMM knobs move the *particular* near-tie the short probe lands on; they
+do not remove the phenomenon. Over 96 tokens the divergence returns with
 `deterministic = true` still set. **Only turning the prefix cache off removes
 it.**
 
-Scale: the two paths agree to ≤ 5e-3 in logprob at every position and produce
-identical top-5 candidate sets; the flip happened on a 0.018-nat margin between
-`.` and `<|eot_id|>`. So this is a numerical difference between two ways of
-computing the same thing, not the cache serving different content — but it is
-not covered by known limit 1 either, which is about *exactly tied* logits whose
-FP values are bit-identical.
+Scale: the two paths agree to ≤ 5e-3 in logprob at every position with
+identical top-5 candidate sets; the flip happened on a 0.018-nat margin
+between `.` and `<|eot_id|>`. A numerical difference between two ways of
+computing the same thing, not the cache serving different content, and not
+known limit 1 either (that one is about *exactly tied*, bit-identical logits).
 
-**If you need order-independent greedy output today**, set
-`server.prefix_cache = false`. That is the only switch measured to remove it.
-An earlier revision of this section recommended `runtime.deterministic_gemm`
-instead, on the strength of the short probe alone; that recommendation was
-wrong and is retracted here.
+**For order-independent greedy output today: `server.prefix_cache = false`.**
+The only switch measured to remove it. An earlier revision recommended
+`runtime.deterministic_gemm` on the strength of the short probe alone; that
+recommendation was wrong and is retracted.
 
-This also means the `[runtime] deterministic` guarantee in the first section
-does **not** hold on the server path with prefix caching on — which is what
-#1314's title says, and what a 5/5 result on a 16-token answer briefly appeared
-to refute.
+Consequence: the `[runtime] deterministic` guarantee in the first section does
+**not** hold on the server path with prefix caching on (#1314's title).
 
 ### The scope decision, written down: batch invariance is not guaranteed
 
-#1314's other half is the same mechanism reached from the other side: a request
-served alongside 45 unrelated ones can answer differently than the same request
-served alone. Until now the project had neither claimed batch invariance nor
-listed it as out of scope, which the issue correctly called the actual problem.
-It is out of scope, and these are the two properties that replace it — both
-asserted by `ForwardPassTest.DecodeLogitsInvariantToBatchComposition`:
+#1314's other half, same mechanism from the other side: a request served
+alongside 45 unrelated ones can answer differently than the same request
+served alone. Batch invariance is out of scope. These two properties replace
+it, both asserted by
+`ForwardPassTest.DecodeLogitsInvariantToBatchComposition`:
 
 1. **A batch neighbour's content cannot reach another row — bit-exactly.** Two
    batches of identical shape and row lengths, differing only in what the
@@ -131,10 +124,10 @@ asserted by `ForwardPassTest.DecodeLogitsInvariantToBatchComposition`:
    |delta| 3.1e-3 over a logit range of 1.41 (0.22 %), identical greedy argmax.
    The gate allows 1 % of the range.
 
-Property 2 is why the end-to-end symptom exists: on a near-tie, a margin that
-small decides the token, and one flipped token forks the continuation. If you
-need output that does not depend on concurrent traffic, pin batch composition
-(or serve at batch 1); there is no flag that makes batched and solo bit-equal.
+Property 2 is why the end-to-end symptom exists: on a near-tie that margin
+decides the token, and one flipped token forks the continuation. For output
+independent of concurrent traffic: pin batch composition or serve at batch 1.
+No flag makes batched and solo bit-equal.
 
 `deterministic_gemm`'s decode cost, measured the way `bench_gate.sh` measures (discarded warm-up
 run per process, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, `--prefill-chunk-size 0`),
@@ -147,24 +140,22 @@ four alternating pairs on Qwen3-4B-IQ4_NL, `tg128` tok/s:
 | 3 | 278.02 | 281.24 |
 | 4 | 266.91 | 271.08 |
 
-Medians 273.4 off / 280.6 on — the arms are separated by less than the off arm's
-own spread (10.9 %), and `on` wins three pairs of four. So on this shape the
-"slower but reproducible" note above overstates it: **the decode cost is below
-this host's noise floor.** Prefill is deliberately not quoted — `docs/internals/BENCHMARKING.md`
-rules it out as an A/B signal, and split-k reduction is exactly where a cost
-would be most plausible, so "no measurable cost" is a statement about decode on
-one model, not a general one.
+Medians 273.4 off / 280.6 on: the arms are separated by less than the off
+arm's own spread (10.9 %), and `on` wins three pairs of four. **The decode
+cost is below this host's noise floor.** Prefill is deliberately not quoted:
+`docs/internals/BENCHMARKING.md` rules it out as an A/B signal, and split-k
+reduction is where a cost would be most plausible, so "no measurable cost" is
+a statement about decode on one model only.
 
 `PrefixCacheE2ETest.FreshVsPrefixHitTokenEqual` asserts the strong version of
-this property and passes: it uses a long multi-block prompt whose decisions have
-no margin this narrow. The gate is right about what it measures; the promise is
-wider than what the gate can see.
+this property and passes: its long multi-block prompt has no margin this
+narrow. The gate is right about what it measures; the promise is wider than
+what the gate can see.
 
 ## Known limits
 
-These are the documented boundaries of the guarantee. They are deliberate
-(perf or upstream-API constraints), tracked in issue #554, and live here so
-they are not only discoverable as code comments.
+Deliberate boundaries of the guarantee (perf or upstream-API constraints),
+tracked in issue #554.
 
 ### 1. Dense greedy logit ties
 
@@ -208,14 +199,13 @@ for NVFP4 weights and every GGUF quant - reads none of them (#1574).
 | `true` | 1.3113 | 1.3113 | 1.3113 |
 | `false` | 1.3113 | **1.2889** | **1.2889** |
 
-So the mode **does** make an NVFP4 checkpoint reproducible across processes,
-through the sites it does cover. What is missing is the guarantee: nothing in
-the CUTLASS path is pinned, so a future change there is not caught by the flag
-and not caught by the gate.
+The mode **does** make an NVFP4 checkpoint reproducible across processes,
+through the sites it covers. Missing is the guarantee: nothing in the CUTLASS
+path is pinned, so a future change there is caught by neither the flag nor
+the gate.
 
-Greedy bytes cannot see any of this. The same six runs produced one identical
-output in all six - the control and the treatment were byte-identical to each
-other, which is why this file has always said to compare NLL rather than bytes.
+Greedy bytes cannot see any of this: the same six runs produced one identical
+output in all six. Compare NLL, not bytes.
 
 ### 4. Cross-context-in-process
 
@@ -226,30 +216,29 @@ inside the same process* may not reproduce bit-identically. Same-context and
 fresh-process reproducibility ARE guaranteed (see above). For reproducible eval
 sweeps over multiple contexts: one process per context.
 
-This limit used to be written as GDN-only, attributed to VRAM-layout-sensitive
-recurrent-state slots. That is not what the test finds. Measured 2026-08-10 on
-`main`, isolated runs, `deterministic=1`:
+Formerly written as GDN-only (VRAM-layout-sensitive recurrent-state slots);
+not what the test finds. Measured 2026-08-10 on `main`, isolated runs,
+`deterministic=1`:
 
 | model | same context (graphs on / off) | fresh contexts |
 |---|---|---|
 | `gpt-oss-20b-mxfp4` (MoE) | pass 3/3 / pass 3/3 | **fail 2/2** |
 | `Qwen3-4B-Instruct-2507-Q8_0` (dense) | pass 2/2 / pass 2/2 | pass |
 
-So it is the MoE row that carries this limit today, not the GDN one — and the
-same-context guarantee holds on both, which it did not when #1299 was filed.
-#1337 is the identified fix for the dense half; the MoE half was last seen red
-before #1341, whose own rationale names #1299 (decode-loop burst boundaries),
-but that attribution is the code's, not an A/B I ran.
+The MoE row carries this limit today, not the GDN one; the same-context
+guarantee holds on both (it did not when #1299 was filed). #1337 is the
+identified fix for the dense half; the MoE half was last seen red before
+#1341, whose rationale names #1299 (decode-loop burst boundaries), an
+attribution from the code, not from an A/B.
 
 ### 6. The build is part of the envelope
 
 Every CUDA translation unit is compiled with `--use_fast_math`
-(`cmake/CompilerFlags.cmake`), in both shipped configurations. That is a
-deliberate perf choice and it is stable for a given binary - but it means the
-guarantees above are about **one binary**, not about the source tree: a
-different toolchain or a different flag set can move the last bits without any
-of them being wrong (#1576). Pin the image, not just the config, when a result
-has to be reproducible later.
+(`cmake/CompilerFlags.cmake`), in both shipped configurations: a deliberate
+perf choice, stable for a given binary. The guarantees above are therefore
+about **one binary**, not the source tree; a different toolchain or flag set
+can move the last bits (#1576). Pin the image, not just the config, when a
+result has to be reproducible later.
 
 ## Recipe: reproducible evals
 

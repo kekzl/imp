@@ -1,15 +1,15 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-28
+commit: be825e4a
 -->
 
 # Quantization
 
-imp supports both GGUF quantization (loaded directly from llama.cpp-compatible files) and SafeTensors NVFP4 prequant (produced by external calibration tools). This page explains what each format is, where it is used inside the engine, and what the trade-offs are.
-
-For per-model picks see [`supported-models.md`](MODELS.md). For benchmark numbers see [`performance.md`](performance.md).
+imp reads GGUF quantization (llama.cpp-compatible files, loaded directly) and SafeTensors NVFP4
+prequant (external calibration tools). Per-model picks: [`supported-models.md`](MODELS.md).
+Benchmark numbers: [`performance.md`](performance.md).
 
 ## Formats and where they show up
 
@@ -20,38 +20,38 @@ For per-model picks see [`supported-models.md`](MODELS.md). For benchmark number
 | Q5_K_M | 5.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
 | Q4_K_M | 4.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
 | Q4_0 | 4.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
-| IQ4_NL / IQ4_XS | 4.5 / 4.25 | GGUF | dequant→FP16 cache decode + dequant→cuBLAS prefill (no dp4a/MMVQ kernels) |
+| IQ4_NL / IQ4_XS | 4.5 / 4.25 | GGUF | dequant->FP16 cache decode + dequant->cuBLAS prefill (no dp4a/MMVQ kernels) |
 | FP8 E4M3 | 8.0 | runtime | KV cache (opt-in), prefill weight cache |
 | INT8 | 8.0 | runtime | KV cache (opt-in) |
 | INT4 | 4.0 | runtime | KV cache (long-ctx, opt-in) |
 | NVFP4 | 4.0 | SafeTensors | weights (decode + prefill), KV cache |
 | MXFP4 | 4.5 | GGUF | weights (decode + prefill attention) |
 
-GGUF formats are mmap'd from disk and uploaded as-is to GPU; the `*.K` quants store block scales in the format the dp4a kernels expect. NVFP4 prequant arrives in two-byte-per-element packed form with FP8 E4M3 micro-scales (per-16) and an FP32 tensor scale; imp registers these directly into the NVFP4 decode cache and CUTLASS NVFP4 GEMM path with no re-quantization.
+GGUF is mmap'd and uploaded as-is; `*.K` quants store block scales in the format the dp4a kernels
+expect. NVFP4 prequant arrives packed with FP8 E4M3 micro-scales (per-16) and an FP32 tensor scale;
+imp registers it directly into the NVFP4 decode cache and CUTLASS NVFP4 GEMM path, no
+re-quantization.
 
 ## NVFP4 prequant (SafeTensors)
 
-Calibrated per-tensor scales using AWQ or SmoothQuant. Two upstream tools produce compatible files:
+Calibrated per-tensor scales via AWQ or SmoothQuant. Compatible producers:
 
 | Tool | Status |
 |---|---|
-| [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (after PR #88 lit up the CUTLASS NVFP4×NVFP4 prefill cache). |
-| [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads, but several models degenerate past ~30 tokens. See [roadmap](roadmap.md). Prefer Modelopt where available. |
-| `imp-quantize` (in-tree) | **Experimental.** AWQ-calibrated with `--calib`, plain round-to-nearest without. Below a published export either way. See below. |
+| [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (after PR #88 lit up the CUTLASS NVFP4xNVFP4 prefill cache). |
+| [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads; several models degenerate past ~30 tokens. See [roadmap](roadmap.md). Prefer Modelopt. |
+| `imp-quantize` (in-tree) | **Experimental.** AWQ-calibrated with `--calib`, round-to-nearest without. Below a published export either way. |
 
-### imp-quantize — converting a checkpoint yourself (EXPERIMENTAL)
+### imp-quantize: converting a checkpoint yourself (EXPERIMENTAL)
 
-> **Experimental.** The pipeline is verified end to end and `--calib` recovers a
-> measurable part of the quantization loss, but the result still sits below a
-> published Modelopt export. Use it to get a model onto the NVFP4 path for
-> evaluation or performance work — not to produce a checkpoint you ship.
+> **Experimental.** Pipeline verified end to end; `--calib` recovers a measurable part of the
+> quantization loss; the result still sits below a published Modelopt export. For evaluation and
+> perf work, not shipping.
 
-`imp-quantize` turns a dense BF16/FP16 or block-scaled FP8 SafeTensors
-checkpoint into an NVFP4 one without leaving the repo, for models nobody has
-published an export for:
+Turns a dense BF16/FP16 or block-scaled FP8 SafeTensors checkpoint into NVFP4:
 
 ```bash
-# 1. one calibration pass over a corpus — writes per-channel activation stats
+# 1. one calibration pass over a corpus - writes per-channel activation stats
 imp-cli --model ./Qwen3-1.7B --perplexity ./calib_corpus.txt --calibrate ./calib.bin
 
 # 2. quantize using them
@@ -59,21 +59,15 @@ imp-quantize --model ./Qwen3-1.7B --out ./Qwen3-1.7B-nvfp4 --calib ./calib.bin
 imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 ```
 
-Drop `--calib` (and step 1) for plain round-to-nearest; `--dry-run` previews
-what would be quantized without touching the GPU.
-
-It copies the tokenizer and config files, rebuilds the shard index when the
-source is sharded, and leaves embeddings, norms and (unless `--lm-head`) the LM
-head at full precision.
-
-A **block-scaled FP8 source** works too, which is what makes the FP8-only
-release lines reachable (DeepSeek-V3, Qwen3.8's FP8 line): each E4M3 weight is
-paired with its `weight_scale_inv` grid and widened before quantizing. The pair
-is read as one unit, so a weight this tool keeps at full precision is widened as
-well rather than copied: the grid is consumed either way, and raw E4M3 without
-its scales is still valid E4M3 that simply means something else. On
-Qwen3.8-27B-FP8 that is the MTP draft head, whose corruption costs draft
-acceptance and nothing louder, and honesty there costs 350 MiB of output.
+- Drop `--calib` (and step 1) for round-to-nearest; `--dry-run` previews without touching the GPU.
+- Copies tokenizer/config, rebuilds the shard index for sharded sources, leaves embeddings, norms
+  and (unless `--lm-head`) the LM head at full precision.
+- Block-scaled FP8 sources work (reaches the FP8-only release lines: DeepSeek-V3, Qwen3.8's FP8
+  line): each E4M3 weight is widened with its `weight_scale_inv` grid before quantizing. The pair
+  is one unit, so weights kept at full precision are widened too, not copied (raw E4M3 without its
+  scales is valid E4M3 that means something else). On Qwen3.8-27B-FP8 that is the MTP draft head,
+  whose corruption would cost draft acceptance and nothing louder; honesty there costs 350 MiB of
+  output.
 
 #### Which layout it writes (`--format`)
 
@@ -87,43 +81,33 @@ imp-quantize --model ./Qwen3.8-27B --out ./Qwen3.8-27B-nvfp4 --format vllm
 vllm serve ./Qwen3.8-27B-nvfp4      # loads as compressed-tensors NVFP4A16
 ```
 
-The two differ in more than names, and each difference is silent when wrong:
+Three silent-when-wrong differences beyond names:
 
-- **The tensor scale is stored inverted.** compressed-tensors stores a divisor
-  and readers compute `1 / weight_global_scale`; Modelopt stores the multiplier.
-  Writing one convention's number under the other's name leaves every weight
-  scaled by `absmax² / 36` — a checkpoint that loads, generates, and is wrong.
-- **`input_activations` stays null.** This tool quantizes weights only, and vLLM
-  reads that as NVFP4A16. Declaring activation quantization that was never
-  measured would make vLLM quantize activations at runtime against absent scales.
-- **Everything left at source precision is listed in `ignore`.** vLLM builds an
-  unquantized layer for each; a module missing from that list is one it looks for
-  scales for that were never written.
+- **Tensor scale stored inverted.** compressed-tensors stores a divisor (readers compute
+  `1 / weight_global_scale`); Modelopt stores the multiplier. One convention's number under the
+  other's name leaves every weight scaled by `absmax^2 / 36`: loads, generates, wrong.
+- **`input_activations` stays null.** Weights-only tool; vLLM reads that as NVFP4A16. Declaring
+  unmeasured activation quantization would make vLLM quantize activations against absent scales.
+- **Everything left at source precision is listed in `ignore`.** vLLM builds an unquantized layer
+  per entry; a missing module is one it hunts scales for that were never written.
 
 #### Making the checkpoint smaller: what each exclusion costs
 
-A third of the output is weights left at source precision, and `--dry-run`
-breaks it down by reason. Measured on Qwen3.8-27B (BF16 source 51.75 GiB):
+`--dry-run` breaks the full-precision third down by reason. Qwen3.8-27B (BF16 source 51.75 GiB):
 
 | what | size in the output | quantizing it costs | quantizing it is |
 |---|---:|---|---|
-| `lm_head` | 2 425 MiB | nothing **on top of what imp already pays** | `--lm-head`, but see below |
+| `lm_head` | 2 425 MiB | nothing on top of what imp already pays | `--lm-head`, but see below |
 | `embed_tokens` | 2 425 MiB | +0.94 % perplexity | not possible: no NVFP4 lookup |
 | vision tower | 875 MiB | tower loads at source precision only | not possible |
-| MTP draft head | 810 MiB | draft acceptance 81 % → 0 (#1428) | refused |
+| MTP draft head | 810 MiB | draft acceptance 81 % -> 0 (#1428) | refused |
 
-**`--lm-head` costs nothing *extra*, because imp already pays it, and that is
-the part worth understanding.** imp converts a native LM head into an NVFP4
-decode cache at load anyway (`gemm.nvfp4_lm_head`, auto → on for native
-sources), so quantizing it in the checkpoint changes nothing a run can see:
-Qwen3.8-27B reads perplexity **4.6158 either way**, greedy output
-**byte-identical over four prompts**, weights **17 920 → 16 192 MiB**,
-checkpoint 19.15 → 17.44 GiB.
-
-That comparison is NVFP4 against NVFP4, so it says nothing about the default
-itself. The honest question is what the default costs against a real BF16 head
-(`gemm.nvfp4_lm_head=off`), which is how every other engine runs it. Measured on
-Qwen3.8-27B, 248 320-token vocabulary, so the largest head available here:
+**`--lm-head` costs nothing extra because imp already pays it**: a native LM head becomes an NVFP4
+decode cache at load anyway (`gemm.nvfp4_lm_head`, auto -> on for native sources). Qwen3.8-27B:
+perplexity 4.6158 either way, greedy output byte-identical over four prompts, weights
+17 920 -> 16 192 MiB, checkpoint 19.15 -> 17.44 GiB. That is NVFP4 vs NVFP4; the default's cost
+against a real BF16 head (`gemm.nvfp4_lm_head=off`, how every other engine runs it), Qwen3.8-27B,
+248 320-token vocabulary:
 
 | `gemm.nvfp4_lm_head` | perplexity | decode, 128 tokens greedy | ITL @4 | ITL @16 |
 |---|---:|---:|---:|---:|
@@ -138,347 +122,207 @@ Qwen3.8-27B, 248 320-token vocabulary, so the largest head available here:
        perplexity over ppl_corpus_45k.txt with runtime.deterministic_gemm=true]
 ```
 
-Decode is the median of three alternating pairs (a fixed arm order overstates);
-every pair favoured `on`. So the #982 trade holds and is cheaper here than the
-+2.2 % recorded there: a bigger vocabulary moves both sides, and the quality
-side moved less.
-
-**The obvious explanation for why other engines skip this is wrong.** The head is
-read whole once per token, so at batch 1 it is ~11 % of the step (2.43 GiB of
-17.9 GiB weights) and one expects the win to amortise away under concurrency.
-It does not: the advantage shrinks from +25 % to +8 % between 4 and 16 concurrent
-decodes but never inverts. What actually separates imp here is simpler. vLLM's
-`ParallelLMHead` accepts no scales at all, and Modelopt / llm-compressor put
-`lm_head` in `ignore` by convention for W4A4 recipes. Absence of the feature, not
-a verdict on the trade.
-
-**What `--lm-head` really costs is the option.** With a BF16 head in the
-checkpoint the trade stays reversible: `--set gemm.nvfp4_lm_head=off` buys the
-0.99 % back. Quantized in the checkpoint, it cannot. So use it when the model
-would otherwise not fit, not as a default.
-
-vLLM's `ParallelLMHead` takes no scales at all and stops at `no module or
-parameter named lm_head.weight_global_scale`, so the flag belongs with
-`--format modelopt`. The tool warns when the two are combined.
-
-**Embeddings stay at source precision, and the price is now known.** imp's
-embedding lookup handles F32/F16/BF16/Q8_0/Q6_K and not NVFP4, so a quantized
-table cannot be read back; vLLM leaves embeddings unquantized too. Rather than
-write the kernel first, the table was pushed through the exact round trip the
-quantizer would apply and written back at source precision, which measures the
-quality loss without needing a reader: Qwen3-0.6B perplexity **29.4204 →
-29.6982, +0.94 %**, for what would be ~10 % off a 27B checkpoint. So the trade
-is real but modest, and it costs the interoperability the compressed-tensors
-format was added for.
+- Decode: median of three alternating pairs (fixed arm order overstates); every pair favoured
+  `on`. The #982 trade holds, cheaper than the +2.2 % recorded there.
+- Not amortised away by concurrency: the head is read whole once per token (~11 % of the batch-1
+  step, 2.43 GiB of 17.9 GiB weights); the advantage shrinks +25 % -> +8 % between 4 and 16
+  concurrent decodes, never inverts. Other engines lack the feature, not the verdict: vLLM's
+  `ParallelLMHead` accepts no scales (stops at `no module or parameter named
+  lm_head.weight_global_scale`); Modelopt / llm-compressor put `lm_head` in `ignore` for W4A4.
+- What `--lm-head` costs is the option: with a BF16 head in the checkpoint,
+  `--set gemm.nvfp4_lm_head=off` buys the 0.99 % back; quantized in, it cannot. Use it when the
+  model would not otherwise fit. Belongs with `--format modelopt`; the tool warns on `vllm`.
+- **Embeddings stay at source precision; the price is known.** imp's embedding lookup handles
+  F32/F16/BF16/Q8_0/Q6_K, not NVFP4 (vLLM leaves embeddings unquantized too). Measured via the
+  exact quantize round trip written back at source precision: Qwen3-0.6B perplexity
+  29.4204 -> 29.6982, +0.94 %, ~10 % off a 27B checkpoint.
 
 #### Fused layers share one tensor scale
 
-Inference engines merge `q_proj`/`k_proj`/`v_proj` into one linear and
-`gate_proj`/`up_proj` into another (vLLM's `packed_modules_mapping`; imp's GDN
-path merges `in_proj_qkv`/`in_proj_z` and `in_proj_b`/`in_proj_a` the same way).
-A merged layer carries **one** tensor scale, so three independently calibrated
-scales leave two of the three matrices dequantized against the third's. vLLM
-warns and continues; the amax spread inside those groups reaches 3.7× on
-Qwen3-0.6B, so this is not a rounding difference.
-
-`imp-quantize` therefore decides the scale per fused group, in a pass over the
-source before anything is written (group members are not guaranteed to share a
-shard). This is also the better quantization, not merely the compatible one:
-Qwen3-0.6B over `ppl_corpus_45k.txt` with `deterministic_gemm`, round-to-nearest
-both arms, reads **29.42** against **30.40** for per-tensor scales.
-
-One thing that looks like an improvement and is not: scaling by
-`absmax / (6 × 448)` so the FP8 micro-scales fill their range — what published
-exports do — measured **31.05** on the same setup. imp writes `absmax / 6`.
-Readers multiply either convention back out, so the arm that measures better
-wins; do not "fix" it without re-measuring.
+Engines merge `q_proj`/`k_proj`/`v_proj` and `gate_proj`/`up_proj` into single linears (vLLM's
+`packed_modules_mapping`; imp's GDN path merges `in_proj_qkv`/`in_proj_z` and
+`in_proj_b`/`in_proj_a`). A merged layer carries one tensor scale; three independently calibrated
+scales leave two matrices dequantized against the third's. vLLM warns and continues; the amax
+spread inside those groups reaches 3.7x on Qwen3-0.6B. `imp-quantize` decides the scale per fused
+group in a pre-pass over the source (members are not guaranteed to share a shard). Also the better
+quantization: Qwen3-0.6B, `ppl_corpus_45k.txt`, `deterministic_gemm`, round-to-nearest both arms:
+**29.42** vs **30.40** for per-tensor scales. Looks-better-but-is-not: scaling by
+`absmax / (6 x 448)` so the FP8 micro-scales fill their range (what published exports do) measured
+**31.05**; imp writes `absmax / 6`. Readers multiply either convention back out; do not "fix"
+without re-measuring.
 
 #### Roles that stay full precision, and why
 
-Three weight roles are 2-D and K-aligned — every shape check waves them through
-— and must not be quantized anyway. Each was found by measurement, not by
-reasoning about shapes:
+Three roles are 2-D and K-aligned (every shape check waves them through) and must not be quantized;
+each found by measurement:
 
 | role | why | found by |
 |---|---|---|
-| MLA latent projections (`kv_a_proj`, `kv_b_proj`) | the runtime slices and reshapes both | bisection on DeepSeek-V2-Lite: quantizing them gave a checkpoint that loaded and emitted cross-script garbage |
-| MoE router (`.gate.weight`) | FP4 across 16 shared-scale values changes the top-k pick | measured separately, with the MLA pair already excluded |
-| **fused Q+gate `q_proj`** (Qwen3.5 / Qwen3-Next `attn_output_gate`) | reported, **not excluded** — see below | #1273 |
+| MLA latent projections (`kv_a_proj`, `kv_b_proj`) | the runtime slices and reshapes both | bisection on DeepSeek-V2-Lite: quantized, the checkpoint loaded and emitted cross-script garbage |
+| MoE router (`.gate.weight`) | FP4 across 16 shared-scale values changes the top-k pick | measured separately, MLA pair already excluded |
+| **fused Q+gate `q_proj`** (Qwen3.5 / Qwen3-Next `attn_output_gate`) | reported, **not excluded**: see below | #1273 |
 
-The last row is a correction. The gate half feeds a **sigmoid**, and E2M1 is
-coarsest near zero — exactly where a sigmoid is most sensitive — so it is where
-#1273's divergence is created: rounding *only* that half on a healthy GGUF twin
-reproduces the real defect (+0.0169 injected divergence per attention block
-against +0.0156 for the actual NVFP4 checkpoint), while the Q half sits below
-the noise floor. The same half in Q4_K is healthy, so this is specific to E2M1.
-
-**That divergence does not translate into a quality win for excluding it**, and
-this briefly shipped asserting it did. Measured end to end on Qwen3.5-4B (8
-gated layers of 32), perplexity over `ppl_corpus_45k.txt`, three runs each:
+The last row is a correction. The gate half feeds a sigmoid; E2M1 is coarsest near zero, where a
+sigmoid is most sensitive: rounding only that half on a healthy GGUF twin reproduces the #1273
+divergence (+0.0169 injected per attention block vs +0.0156 for the actual NVFP4 checkpoint; the Q
+half below the noise floor; the same half in Q4_K healthy, so E2M1-specific). That divergence is
+NOT a quality win for excluding it, though this doc briefly shipped asserting one. Qwen3.5-4B
+(8 gated layers of 32), `ppl_corpus_45k.txt`, three runs each:
 
 | arm | runs | spread |
 |---|---|---|
 | gate quantized (default) | **14.6665 / 14.6476 / 14.6716** | 0.16% |
 | gate excluded | 14.8672 / 14.9339 / 14.8672 | 0.45% |
-| BF16 reference | 12.6735 | — |
+| BF16 reference | 12.6735 | |
 
-Excluding it is **~1.5% worse**, consistently, with non-overlapping spreads —
-and it costs 1-4% of the checkpoint on top. Divergence measured against a twin
-and quality measured against a corpus are different questions, and only the
-second one decides this.
+Excluding is ~1.5 % worse, non-overlapping spreads, plus 1-4 % of checkpoint size; quality against
+a corpus decides, not divergence against a twin. `--keep-attn-gate` stays, but the reason first
+given ("lower gate share than the worst #1273 offender, 8/32 against 16/64") was wrong: every
+gated checkpoint staged here has share 0.250 (Qwen3.5-4B 8/32, Qwen3.6-27B-Text 16/64,
+Qwen3.6-35B-A3B 10/40, Ornith-1.0-35B 10/40); the flag stays for a model with a genuinely higher
+share. imp cannot exclude half a tensor, so the whole `q_proj` stays. Detection is by shape (a
+gated `q_proj` emits twice what its layer's `o_proj` consumes), not a config flag. Published
+exports (llm-compressor, Modelopt) exclude `linear_attn.*` and quantize this tensor whole: same
+gap.
 
-`--keep-attn-gate` keeps the option available, but not for the reason first
-given here. That reason was that the measured checkpoint has "a lower gate share
-than the worst #1273 offender (8/32 against 16/64)" — it does not. Every gated
-checkpoint staged here carries the same share:
-
-| checkpoint | layers | full-attention | share |
-|---|---|---|---|
-| Qwen3.5-4B | 32 | 8 | 0.250 |
-| Qwen3.6-27B-Text | 64 | 16 | 0.250 |
-| Qwen3.6-35B-A3B | 40 | 10 | 0.250 |
-| Ornith-1.0-35B | 40 | 10 | 0.250 |
-
-8/32 and 16/64 are the same fraction, so the measurement above is *not* limited
-in the way that sentence claimed, and the negative result carries further than
-it was given credit for. The flag stays for a model that genuinely does have a
-higher share. imp cannot exclude half a tensor, so it keeps the whole `q_proj`.
-
-A gated `q_proj` is detected from shapes rather than a config flag: it emits
-twice what its own layer's `o_proj` consumes. Note that **published exports have
-the same gap** — both llm-compressor and Modelopt exclude `linear_attn.*` but
-quantize this tensor whole.
-
-That gap used to be offered here as the reason every hybrid NVFP4 checkpoint
-degrades. **It was not the reason.** #1287 found the real one: the model's final
-RMSNorm was the single norm that did not receive Qwen3.5/3.6's `gamma = 1 + W`
-offset, so a SafeTensors checkpoint scaled the last hidden state by `W` instead
-of `1 + W`. Every layer was correct and only the input to the LM head was wrong,
-which is why the model stayed coherent and merely got much worse.
+That gap was once offered here as why every hybrid NVFP4 checkpoint degrades. **Not the reason**
+(#1287): the final RMSNorm was the single norm without Qwen3.5/3.6's `gamma = 1 + W` offset, so
+SafeTensors checkpoints scaled the last hidden state by `W` instead of `1 + W`. Every layer
+correct, only the LM-head input wrong: coherent but much worse.
 
 | checkpoint | before | after | its GGUF twin |
 |---|---|---|---|
 | Qwen3.6-27B-Text-NVFP4-MTP | 65.1275 | **7.5302** | none staged |
-| Ornith-1.0-35B-NVFP4 | 16.1630 | **7.0702** | 6.4974 (1.09×) |
-| Qwen3.6-35B-A3B-NVFP4 | 13.6486 | **6.8184** | 6.5465 (1.04×) |
+| Ornith-1.0-35B-NVFP4 | 16.1630 | **7.0702** | 6.4974 (1.09x) |
+| Qwen3.6-35B-A3B-NVFP4 | 13.6486 | **6.8184** | 6.5465 (1.04x) |
 
-2.1–2.5× their twins before, 1.04–1.09× after — ordinary NVFP4 cost. Dense and
-GGUF checkpoints are byte-identical either way (Qwen3-14B-NVFP4 10.0301,
-Qwen3-8B-NVFP4 11.6677, ornith Q4_K_M 6.4974).
-
-**What made it findable, after a dozen candidates had been ruled out:** the
-degradation was still there at **BF16**, where nothing is quantised, and the
-per-layer hidden states matched an HF `transformers` reference to within 0.4%
-across all 32 layers while perplexity was 41% off. States right, output wrong,
-localises to what happens after the last layer.
-
-**The lesson worth keeping is about the twin comparison.** Every degraded
-checkpoint in #1273 was a hybrid read from SafeTensors, and every healthy twin
-it was measured against was a GGUF. Format and load path were confounded in
-every row of that table, and the conclusion followed the format.
+2.1-2.5x their twins before, 1.04-1.09x after: ordinary NVFP4 cost. Dense and GGUF checkpoints
+byte-identical either way (Qwen3-14B-NVFP4 10.0301, Qwen3-8B-NVFP4 11.6677, ornith Q4_K_M 6.4974).
+Found because the degradation persisted at BF16 while per-layer hidden states matched an HF
+`transformers` reference within 0.4 % across all 32 layers at 41 % perplexity off: states right,
+output wrong, after the last layer. Method note: every degraded #1273 checkpoint was SafeTensors,
+every healthy twin GGUF; format and load path confounded, and the conclusion followed the format.
 
 #### What `--calib` does
 
-NVFP4's error scales with the magnitude of what it quantizes, so multiplying an
-input channel's weights *up* before quantizing buys that channel precision at
-the others' expense — provided something divides the activation back *down*.
-Which channels deserve it is not visible in the weights; it takes a forward
-pass. That is the whole reason a calibration step exists.
+NVFP4 error scales with the magnitude quantized; scaling an input channel's weights up buys it
+precision at the others' expense, provided something divides the activation back down. Which
+channels deserve it takes a forward pass; hence calibration. The transform is exact before
+quantization, `y = x W^T = (x/s)(W diag(s))^T`; imp picks `s` by measurement (per candidate
+exponent it quantizes with the real kernel and keeps the winner; `alpha = 0`, plain
+round-to-nearest, is always in the grid). The compensating `1/s` folds into the producer (plain
+NVFP4 checkpoint, no runtime support): four groups per layer, q/k/v and gate/up into the preceding
+RMSNorm weight, `o_proj` into `v_proj`'s output rows (GQA-tied), `down_proj` into `up_proj`'s.
 
-The transform is exact before quantization, `y = x Wᵀ = (x/s)(W·diag(s))ᵀ`, so
-the only open question is which `s` minimises the error *after* quantizing
-`W·diag(s)`. imp answers it by measurement rather than a closed form: for each
-candidate exponent it quantizes with the real kernel and keeps the winner.
-`alpha = 0` (plain round-to-nearest) is always in the grid, so a group where
-scaling does not pay keeps its untransformed weights.
-
-The compensating `1/s` is folded into the producer, which keeps the output a
-plain NVFP4 checkpoint needing no runtime support — four groups per layer:
-q/k/v and gate/up fold into their preceding RMSNorm weight, `o_proj` into
-`v_proj`'s output rows (GQA-tied), `down_proj` into `up_proj`'s. Because the
-norm fold assumes a plain multiplicative RMSNorm, `--calib` **refuses**
-architectures whose norm applies `(1 + g)` (Gemma-class) rather than silently
-producing a different model.
-
-**A norm can only be folded when every consumer of it is scaled.** Dividing a
-norm's weight by `s` divides its output by `s` for *every* reader, and each
-reader only stays correct if its own columns were multiplied by the same `s`.
-Two roles are deliberately excluded from quantization (MLA latent projections,
-the MoE router) and so never receive that compensation — and the router reads
-exactly the norm the gate/up group folds into. `--calib` therefore checks the
-consumers of each norm and **refuses the fold** when an unscaled one exists,
-naming it. On DeepSeek-V2-Lite that leaves 2 of 108 groups scaled (layer 0's
-dense MLP, the only layer with no router) and prints a line per refusal.
-
-**`--calib` does not calibrate MoE experts yet.** The planner groups the dense
-FFN by name (`mlp.gate_proj` / `mlp.up_proj` / `mlp.down_proj`); a MoE
-checkpoint's weight lives in `mlp.experts.<e>.*`, which it does not model. On a
-MoE model the attention groups still calibrate and the experts — the bulk of the
-model — stay at round-to-nearest. That is now stated per layer in the output
-rather than folded into a `skipped` count.
-
-**Calibrate on a different corpus than you score on.** `tools/analysis/`
-`fetch_calib_corpus.sh` assembles general public-domain prose for exactly this
-reason; scoring happens on `ppl_corpus_45k.txt` (imp's own architecture doc).
-Calibrating and scoring on one text reports a gain that exists only on it.
-
-**`--calibrate` forces `runtime.deterministic_gemm`,** and that is not a
-formality. Without it, two runs of the identical command differed on **94% of
-the recorded floats** (up to 0.5% each) — imp's forward has run-to-run variance
-on this config — and that carried straight through: three checkpoints built
-from three such calibration files scored PPL 28.84, 28.94 and 28.48, a 1.6%
-spread from nothing but which run happened to produce the file. With
-determinism forced the calibration file is bit-identical run to run, and so is
-the checkpoint.
+- The norm fold assumes plain multiplicative RMSNorm, so `--calib` **refuses** `(1 + g)`
+  architectures (Gemma-class) rather than silently producing a different model.
+- A norm can only be folded when every consumer is scaled: the two excluded roles (MLA latent
+  projections, MoE router) never receive compensation, and the router reads exactly the norm the
+  gate/up group folds into. `--calib` checks each norm's consumers and refuses the fold when an
+  unscaled one exists, naming it. On DeepSeek-V2-Lite that leaves 2 of 108 groups scaled (layer
+  0's dense MLP, the only routerless layer), one line per refusal.
+- `--calib` does not calibrate MoE experts yet: the planner groups the dense FFN by name
+  (`mlp.gate_proj` / `mlp.up_proj` / `mlp.down_proj`), not `mlp.experts.<e>.*`. Attention groups
+  still calibrate; experts stay at round-to-nearest, stated per layer in the output.
+- Calibrate on a different corpus than you score on: `tools/analysis/fetch_calib_corpus.sh`
+  assembles general public-domain prose; scoring happens on `ppl_corpus_45k.txt`. One text for
+  both reports a gain that exists only on it.
+- `--calibrate` forces `runtime.deterministic_gemm`, not a formality: without it, two runs of the
+  identical command differed on 94 % of recorded floats (up to 0.5 % each), and three checkpoints
+  built from three such calibration files scored PPL 28.84, 28.94 and 28.48, a 1.6 % spread from
+  which run produced the file. Forced, calibration file and checkpoint are bit-identical run to
+  run.
 
 #### Quality, measured
 
-`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens),
-calibration over 36 058 tokens of general prose. Full chain reproducible with
-`tools/analysis/awq_ppl_ab.sh`:
+`imp-cli --perplexity` over `tools/analysis/ppl_corpus_45k.txt` (13 537 tokens), calibration over
+36 058 tokens of general prose; chain reproducible with `tools/analysis/awq_ppl_ab.sh`:
 
 | Model | BF16 | NVFP4 RTN | NVFP4 `--calib` | AWQ gain | gap to BF16 |
 |---|---:|---:|---:|---:|---|
-| Qwen3-0.6B | 24.08 | 29.42 | **27.60** | −6.2% | +22.2% → **+14.6%** |
-| Qwen3-1.7B (2 shards) | 17.22 | 20.39 | **18.71** | −8.2% | +18.4% → **+8.7%** |
+| Qwen3-0.6B | 24.08 | 29.42 | **27.60** | -6.2% | +22.2% -> **+14.6%** |
+| Qwen3-1.7B (2 shards) | 17.22 | 20.39 | **18.71** | -8.2% | +18.4% -> **+8.7%** |
 
-Re-measured 2026-08-17, after fused layers started sharing a tensor scale. Both
-arms moved: the same table read 30.10 / 28.48 and 20.43 / 19.21 before that
-change, so sharing the scale helps the calibrated path as much as the
-round-to-nearest one, and `--calib` still recovers roughly a third to a half of
-the remaining gap to BF16 on these two sizes.
+- Re-measured 2026-08-17 after fused layers started sharing a tensor scale; both arms moved
+  (previously 30.10 / 28.48 and 20.43 / 19.21), so sharing helps calibrated and RTN alike.
+  `--calib` recovers about a quarter of the gap on the 0.6B and nearly two fifths on the 1.7B; it
+  does not close it against BF16.
+- `degen_suite.py` reads 45/45 on every checkpoint in the table (AWQ ones re-run three and two
+  times). Checkpoints from the earlier non-deterministic calibration files each flipped exactly
+  one of the 45 probes, a different one each time (stream-vs-non-stream whitespace, think-leak,
+  adherence returning empty content); calibration determinism removed that.
+- Refuted hypothesis: folding `o_proj`'s scale into `v_proj` (the tensor the KV cache stores;
+  default KV dtype here resolves to FP8_E4M3) looked like it should cost more in the cache than
+  the scale wins. The FP8-vs-FP16-KV penalty is 0.300 PPL calibrated vs 0.595 round-to-nearest
+  (28.478/28.178 vs 30.098/29.503); the scaled `v_proj` is if anything friendlier to FP8 KV.
+- Not established: per-group contribution. Norm-folds-only and no-`o_proj` variants measured 29.40
+  and 29.25, but each from a different pre-determinism calibration file, and the 1.6 % spread is
+  the size of the gaps; attribution needs one fixed calibration file.
 
-`degen_suite.py` reads 45/45 on every checkpoint in that table (the AWQ ones
-re-run three and two times respectively). `--calib` closes about a quarter of
-the quantization gap on the 0.6B and nearly two fifths on the 1.7B — it does
-not close it against BF16 — but see the head-to-head below before assuming a
-published export is automatically better.
-
-**The battery is worth a note, because it did not always read 45/45.**
-Checkpoints built from the earlier, non-deterministic calibration files each
-flipped exactly one of the 45 probes — and a *different* one each time (a
-stream-vs-non-stream whitespace check, a think-leak check, an adherence probe
-returning empty content). Forcing calibration determinism removed that too.
-Treat it as one more reason the calibration pass has to be reproducible, not as
-a coherence property that happens to hold.
-
-**One hypothesis measured and refuted.** Folding `o_proj`'s scale into `v_proj`
-writes into the tensor the KV cache stores, and imp's default KV dtype here
-resolves to FP8_E4M3 — so widening v's per-channel range looked like it should
-cost more in the cache than the scale wins in the weight. It does not. The
-FP8-vs-FP16-KV penalty is **0.300 PPL on the calibrated checkpoint and 0.595
-on the round-to-nearest one** (28.478/28.178 vs 30.098/29.503). The scaled
-`v_proj` is, if anything, friendlier to FP8 KV than the unscaled one.
-
-**Not established: the per-group contribution.** Norm-folds-only and
-no-`o_proj` variants were measured at 29.40 and 29.25, which would suggest an
-ordering — but each was built from a different (pre-determinism) calibration
-file, and the 1.6% spread above is the same size as the gaps. Attributing the
-gain to individual groups needs a re-run against one fixed calibration file;
-what the table above measures is the shipped configuration against
-round-to-nearest, where the gap is far larger than that spread.
-
-> **Measure this on the 45k corpus, not `ppl_corpus.txt`.** The 199-token corpus
-> reads wildly different numbers and inverts the model-size trend — an artifact
-> of too few tokens, not a property of the quantizer.
+> **Measure this on the 45k corpus, not `ppl_corpus.txt`.** The 199-token corpus reads wildly
+> different numbers and inverts the model-size trend: too few tokens, not a quantizer property.
 
 #### Head-to-head against a Modelopt export
 
-The standing advice here was "prefer a published Modelopt checkpoint when one
-exists". Measured 2026-07-31, it does not hold on the one model that can be
-compared locally.
-
-`Qwen3-14B-NVFP4` is a genuine Modelopt export (`producer: modelopt`), and its
-untouched tensors are **bit-identical** to the `Qwen/Qwen3-14B` BF16 source —
-`model.norm.weight`, every `input_layernorm`, and the 1.5 GB embedding table all
-hash the same, so both quantizers started from exactly the same weights. Both
-quantize the same **280 tensors** and both exclude `lm_head`. Same corpus, same
-engine, same `deterministic_gemm`; each number reproduced to four decimals:
+"Prefer a published Modelopt checkpoint" does not hold on the one locally comparable model
+(measured 2026-07-31). `Qwen3-14B-NVFP4` is a genuine Modelopt export (`producer: modelopt`);
+its untouched tensors (`model.norm.weight`, every `input_layernorm`, the 1.5 GB embedding table)
+hash identical to the `Qwen/Qwen3-14B` BF16 source; both quantizers quantize the same 280 tensors
+and exclude `lm_head`. Same corpus, engine, `deterministic_gemm`; each number reproduced to four
+decimals:
 
 | NVFP4 checkpoint | PPL (`ppl_corpus_45k.txt`) |
 |---|---:|
 | Modelopt export | 10.0301 |
 | `imp-quantize`, no `--calib` | **9.9252** |
 
-The *uncalibrated* in-tree quantizer comes out 1.05% ahead. That is not a claim
-that imp-quantize is the better quantizer — it is one model on one corpus — but
-it does retire the blanket "a published export will beat this".
-
-**The mechanism, one half confirmed and one half inferred.** The Modelopt export
-ships 280 `input_scale` and 40 `k_scale`/`v_scale` tensors alongside the weights
-— it was produced for a recipe that quantizes activations and the KV cache too.
-imp **does not apply them**: `input_scale` is loaded for diagnostics and read by
-no GEMM kernel (`weight_upload.cu`, and it is only uploaded at all under audit).
-So imp runs W4A16 against weights rounded for W4A4-with-quantized-KV. That is
-confirmed. What stays inferred is that this is *why* the export loses here —
-the alternative explanation, that Modelopt's calibration corpus (general text)
-simply sits further from this one (technical English) than round-to-nearest's
-absence of any calibration does, would need a second corpus to separate.
-
-Note the direction: applying `input_scale` would not fix it. Those scales exist
-to quantize activations *down*; imp already keeps them at higher precision. The
-export is simply not rounded for the runtime it is being run on.
-
-**The BF16 baseline for this model still cannot be measured** — 27.5 GiB of
-weights plus the allocator's 5% headroom does not fit in 32 GiB (the upload dies
-partway through the layer stack), and there is nowhere to spill to. But
-`--calib` on it turned out not to need that, and what it showed is the section
-below.
+The uncalibrated in-tree quantizer is 1.05 % ahead: one model on one corpus, not a better-quantizer
+claim, but it retires "a published export will beat this". Confirmed mechanism half: the export
+ships 280 `input_scale` and 40 `k_scale`/`v_scale` tensors (a recipe quantizing activations and KV
+too); imp does not apply them (`input_scale` loaded for diagnostics, read by no GEMM kernel,
+`weight_upload.cu`, uploaded only under audit), so imp runs W4A16 against weights rounded for
+W4A4-with-quantized-KV. Inferred half: that this is why the export loses (the alternative, a
+calibration-corpus mismatch, needs a second corpus to separate). Applying `input_scale` would not
+fix it: those scales quantize activations down, which imp keeps at higher precision anyway. The
+BF16 baseline cannot be measured: 27.5 GiB weights plus the allocator's 5 % headroom does not fit
+32 GiB.
 
 #### Calibrating a model that will not fit, and what it exposed
 
-A calibration file is keyed by **(layer index, tensor kind)** — not by tensor
-name, not by dtype — and the recording hook sits *before* the tier switch in
-`gemm_via_handle_`, so the statistic is the activation a weight consumes rather
-than whatever a particular tier's kernel materialises. Nothing in that ties a
-calibration file to the checkpoint it was collected from. So the statistics for
-a model too large to run can be collected from **any quantization of the same
-model**, and the BF16 source quantized with them.
-
-Measured 2026-08-01, `ppl_corpus_45k.txt`, 13 537 tokens, deterministic:
+A calibration file is keyed by (layer index, tensor kind), not tensor name or dtype, and the
+recording hook sits before the tier switch in `gemm_via_handle_`, so nothing ties the file to the
+checkpoint it came from: stats for a model too large to run can be collected from any quantization
+of the same model, and the BF16 source quantized with them. Measured 2026-08-01,
+`ppl_corpus_45k.txt`, 13 537 tokens, deterministic:
 
 | Model | round-to-nearest | AWQ, stats from the BF16 source | AWQ, stats from a quantized twin |
 |---|---:|---:|---:|
 | Qwen3-0.6B | 30.0979 | **28.4782** | **28.8868** |
-| Qwen3-14B | 9.9252 | *(impossible — will not fit)* | **12.6016** / **12.2853** |
+| Qwen3-14B | 9.9252 | *(impossible: will not fit)* | **12.6016** / **12.2853** |
 
-**The detour itself is sound.** On Qwen3-0.6B, where both routes are possible,
-stats collected from imp's own round-to-nearest checkpoint recover three
-quarters of the gain the BF16-source stats give (1.21 of 1.62 PPL). Note what
-that twin is: a checkpoint 25% worse than the BF16 source it was made from. Its
-statistics still work, so twin *fidelity* is not the sensitive part.
+The detour is sound: on the 0.6B, stats from imp's own RTN checkpoint recover three quarters of the
+BF16-source gain (1.21 of 1.62 PPL), and that twin is 25 % worse than its source, so twin fidelity
+is not the sensitive part. Exposed: **`--calib` hurts at 14B.** The two 14B figures come from two
+independent twins (imp's RTN 12.6016, NVIDIA's Modelopt export 12.2853) that agree with each other
+and disagree with RTN by 24-27 % in the wrong direction; the quantizers share no code, so the
+calibration source is not the variable. (Re-scored same day: RTN 9.9225, calibrated 12.5371.)
+Ruled out: incomplete plan (both runs scaled 160 groups, 4 per layer across all 40), degenerate
+statistics (280 entries, no zero or non-finite channel), a magnitude effect (the search normalises
+by the group mean), the FP8 KV path (`fp8_e4m3` and `fp16` identical to four decimals). What
+remains is the scale search's objective, a local proxy: it minimises per-group
+weight-reconstruction error and improved on every group of the 14B run; better-reconstructed
+weights can still be a worse model, and at 40 layers are.
 
-**What it exposed is that `--calib` hurts at 14B.** The two 14B figures come
-from two independently produced twins — imp's own round-to-nearest checkpoint
-(12.6016) and NVIDIA's Modelopt export (12.2853) — which agree with each other
-and disagree with round-to-nearest by 24-27% in the wrong direction. Since the
-two quantizers share no code, the calibration *source* is not the variable:
-AWQ calibration makes this model worse. (Re-scored later the same day, the
-round-to-nearest checkpoint read 9.9225 and the calibrated one 12.5371 — the
-residual spread is far below the gap.) Ruled out along the way: an incomplete
-plan (both runs scaled 160 groups, which is 4 per layer across all 40, so none
-were skipped), degenerate
-statistics (280 entries over all 40 layers, no zero or non-finite channel), a
-magnitude effect (the search normalises by the group mean, so it is
-scale-invariant, and the floor is relative), and the FP8 KV path (`fp8_e4m3`
-and `fp16` score identically to four decimals).
-
-That leaves the scale search's objective, which is a **local proxy**: it
-minimises per-group weight-reconstruction error, and it improved on every group
-of the 14B run. A checkpoint whose weights are each reconstructed better can
-still be a worse model, and at 40 layers apparently is.
-
-**Why it flips between 1.7B and 14B — measured 2026-08-05.** The planner has four
-groups per layer (`awq_plan.cpp`), and `--calib-groups` runs any subset of them, so
-the result can be attributed instead of guessed. Scored the same way as everything
-above, against each model's own round-to-nearest baseline:
+**Why it flips between 1.7B and 14B (measured 2026-08-05).** Four groups per layer
+(`awq_plan.cpp`); `--calib-groups` runs any subset, so the result is attributed, not guessed.
+Deltas against each model's own RTN baseline:
 
 | subset | Qwen3-14B (`n_rep=5`) | Qwen3-0.6B (`n_rep=2`) |
 |---|---|---|
-| **B+D — the two FFN groups** | **−0.1330** *(best)* | — |
-| B+C+D | −0.0825 | — |
-| C — o_proj | +0.0159 | **−0.6115** |
-| A — q,k,v | +0.6522 | +0.2751 |
+| **B+D, the two FFN groups** | **−0.1330** *(best)* | |
+| B+C+D | −0.0825 | |
+| C: o_proj | +0.0159 | **−0.6115** |
+| A: q,k,v | +0.6522 | +0.2751 |
 | A+B+D (C off) | +0.7641 | −0.6475 |
 | A+C | +2.0326 | −0.1276 |
 | ABCD | **+2.6764** | **−1.2111** *(best)* |
@@ -487,129 +331,85 @@ Interactions, same baselines:
 
 | | Qwen3-14B | Qwen3-0.6B |
 |---|---|---|
-| A × C | **+1.3645** | +0.2088 |
-| A × BD | +0.2449 | — |
-| **BD × C** | **+0.0346** | — |
-| C × ABD | **+1.8964** | **+0.0479** |
+| A x C | **+1.3645** | +0.2088 |
+| A x BD | +0.2449 | |
+| **BD x C** | **+0.0346** | |
+| C x ABD | **+1.8964** | **+0.0479** |
 
-**The split is attention versus FFN, and the groups stop being independent only on
-the attention side.** The two FFN groups are clean at both sizes: on the 14B `BD`
-is the *best measured configuration of all* at **−0.1330, beating round-to-nearest**,
-and it barely interacts with C (+0.03). Everything harmful involves **A**, whose
-interaction with C is +1.36 — and C × ABD reaches +1.90, i.e. **71 % of ABCD's total
-damage is interaction, not the sum of parts**. At `n_rep=2` the same C × ABD
-interaction is +0.05, forty times smaller, so there the effects simply add and the
-full set wins.
+The split is attention vs FFN; groups stop being independent only on the attention side. FFN is
+clean at both sizes: on the 14B, `BD` is the best measured configuration of all at −0.1330,
+beating round-to-nearest, and barely interacts with C (+0.03). Everything harmful involves A
+(A x C +1.36; C x ABD +1.90, i.e. 71 % of ABCD's damage is interaction, not sum of parts); at
+`n_rep=2` the same C x ABD interaction is +0.05, forty times smaller, so effects simply add and
+the full set wins. No single group is broken (C alone +0.016 on the 14B, neutral); the attention
+pair fails once GQA gets wide. Mechanism: C and D run first (their folds rewrite `v_proj` and
+`up_proj`, members of groups A and B), so A searches its scale on a `v_proj` C already divided,
+`search_group_scale` summing one objective over q, k, v. The `n_rep` dependence is C's statistic:
+tied across query heads sharing a KV head (`awq_plan.cpp:302-313`) via `max`, inflating a
+channel's weight in the error term by a median factor of 1.346 at `n_rep=5` vs 1.000 at `n_rep=2`
+(20.5 % of channels inflated >=2x vs 8.3 %); `a_j` is the weight in the objective
+(`err += (a_j/s_j)^2 * (...)^2`), so a distorted `a_j` makes the search optimise the wrong thing.
 
-So no single group is "broken": C alone is +0.016 on the 14B, essentially neutral,
-and blaming it — the obvious reading of the GQA tie — would have been wrong. What
-fails is the *attention* pair once GQA gets wide.
-
-The mechanism the numbers point at is in the ordering. C and D run first because
-their folds rewrite `v_proj` and `up_proj` — and those two tensors are *members* of
-groups A and B. A therefore searches its scale on a `v_proj` that C has already
-divided, with `search_group_scale` summing one objective over q, k and v together.
-What makes it `n_rep`-dependent is C's own statistic: it must be tied across the
-query heads sharing a KV head (`awq_plan.cpp:302-313`), and that tie is a `max`, so
-it inflates a channel's weight in the error term by a median factor of 1.346 at
-`n_rep=5` against 1.000 at `n_rep=2` — 20.5 % of channels inflated ≥2x versus 8.3 %.
-Since `a_j` is the *weight* in the objective (`err += (a_j/s_j)^2 * (...)^2`), a
-distorted `a_j` makes the search optimise the wrong thing, faithfully.
-
-**The obvious fix for that follows directly, was built, and is REFUTED — do not
-re-try it.** The tie serves two roles at once: it shapes `s` (a genuine constraint,
-since C's fold writes `s` into `v_proj`'s rows and those rows are shared per KV
-head) *and* it weights the error (a measurement, which nothing constrains). Splitting
-them — tied statistic for the scale, recorded statistic for the weight — is a
-15-line change to `search_group_scale`. Measured 2026-08-05:
+**The obvious fix was built and is REFUTED; do not re-try.** The tie serves two roles: it shapes
+`s` (genuine constraint: C's fold writes `s` into `v_proj`'s shared rows) and weights the error (a
+measurement). Splitting them (tied statistic for the scale, recorded statistic for the weight) is
+a 15-line change to `search_group_scale`. Measured 2026-08-05:
 
 | | before | with the split |
 |---|---|---|
-| 14B `BD` *(control: C not involved)* | 9.7922 | **9.7922** — bit-identical |
+| 14B `BD` *(control: C not involved)* | 9.7922 | **9.7922**, bit-identical |
 | 14B `C` | 9.9411 | **10.0098** *(worse)* |
 | 14B `ABCD` | 12.6016 | 12.4794 *(still +2.55 over RTN)* |
 | **0.6B `ABCD`** | **28.8868** | **29.5937** *(worse by 0.71)* |
 
-It does not rescue the 14B and it **damages the configuration that worked**, giving
-back more than half of the 0.6B's −1.21 gain. The reason is that the split is not
-actually more correct: when `s` is forced constant across a KV group, the search can
-only pick *one* value for that whole group, so weighting the error by individual
-channels it cannot steer separately makes the objective inconsistent with its own
-constraint. The `max` tie is a conservative aggregation that matches what the search
-can control — a real coupling, not a bug. Whatever fixes the attention half will have
-to change the *constraint* (how the fold works), not the weighting.
+It does not rescue the 14B and damages the working configuration, giving back more than half of
+the 0.6B's −1.21 gain. The split is not more correct: with `s` forced constant across a KV group,
+weighting the error by channels the search cannot steer separately is inconsistent with the
+constraint. The `max` tie is a real coupling, not a bug; a fix must change the constraint (how the
+fold works), not the weighting.
 
-**The second variant of the same idea is now measured too, and it is REFUTED for the
-same reason** (2026-08-10). Where the split above kept `max` and changed *which*
-statistic weights the error, this one keeps the single role and changes the
-*aggregation*: `mean` over the `n_rep` query-head channels instead of `max` — the
-weight that minimises their summed error rather than the loudest of them. Same
-harness, RTN re-measured in the same pipeline rather than quoted:
+**The second variant is measured and REFUTED for the same reason (2026-08-10):** keep the single
+role, change the aggregation to `mean` over the `n_rep` query-head channels. Same harness, RTN
+re-measured in-pipeline:
 
 | | RTN | `ABCD` with `max` | `ABCD` with `mean` | mean − max |
 |---|---|---|---|---|
 | 14B (`n_rep=5`) | 9.9766 | 18.0223 | 17.7464 | **−0.276** |
 | 0.6B (`n_rep=2`) | 30.3977 | 27.4846 | 27.5326 | +0.048 |
 
-The tie behaves exactly as the mechanism predicts — the effect is ~6x larger on the
-wide-GQA model and reverses sign on the narrow one, which is the `n_rep` dependence
-the `max` was accused of causing. **And it is worth 0.276 of an 8.05 problem, i.e.
-3 %.** So the aggregation is a real but minor consequence of the coupling, not its
-cause; the paragraph above is right that only the constraint can fix this. The flag
-that produced these numbers was removed again rather than shipped — a knob buying
-3 % would invite exactly the re-try this section warns against.
+The tie behaves as the mechanism predicts (~6x larger on wide GQA, sign reverses on narrow), and
+is worth 0.276 of an 8.05 problem, 3 %: a minor consequence of the coupling, not its cause; only
+the constraint can fix this. Flag removed rather than shipped (a knob buying 3 % invites the
+re-try this section warns against). Caveat: `ABCD` costs +8.05 over RTN here vs +2.68 above, on a
+run whose RTN reproduces (9.9766 vs 9.9252); the setup difference is the calibration corpus (this
+run calibrated on `ppl_corpus_45k.txt`, the scoring text; the earlier numbers on general prose).
+Same sign, 3x magnitude, unexplained: a free lead for the attention half.
 
-One caveat on the magnitudes: `ABCD` costs **+8.05** over RTN here against the
-+2.68 recorded above, on a run whose RTN reproduces (9.9766 vs 9.9252). The
-difference between the two setups is the calibration corpus — this run calibrated on
-`ppl_corpus_45k.txt`, the same text it scored on, where the numbers above deliberately
-calibrated on general prose that is *not* the scoring corpus. Same sign, 3x the
-magnitude, and unexplained; if anyone chases the attention half, that is a free lead.
+Two standalone findings: **group A hurts both models** (+0.28 / +0.65), independent of `n_rep`,
+previously unknown. And **`--calib` is not what fails at 14B; its attention half is**:
+`--calib-groups BD` scores 9.7922 against round-to-nearest's 9.9252, so calibration pays at this
+size with attention left out. `--calib-groups` is therefore a production switch: **`BD` on
+wide-GQA models, default `ABCD` on narrow-GQA ones** (0.6B: ABCD −1.21, clearly best there). The
+−0.133 is well outside reproduction noise (RTN re-scores 9.9225-9.9252, 0.03 % spread, vs a
+1.34 % gain). It also explains why the single-cause eliminations found nothing: an effect that is
+71 % interaction between two individually harmless steps is invisible to all of them.
 
-Two findings worth keeping separately. **Group A hurts both models** (+0.28 / +0.65),
-which has nothing to do with `n_rep` and was not previously known. And **`--calib`
-is not the thing that fails at 14B — the attention half of it is.** `--calib-groups
-BD` scores 9.7922 against round-to-nearest's 9.9252, so calibration *does* pay at
-this size once the attention groups are left out. That makes `--calib-groups` a
-production switch and not only a diagnostic: **use `BD` on wide-GQA models, and the
-default `ABCD` on narrow-GQA ones** (0.6B: ABCD −1.21, clearly the best there).
-The −0.133 is well outside reproduction noise — the round-to-nearest checkpoint
-re-scores to 9.9225-9.9252, a spread of 0.03 %, against a 1.34 % gain.
-
-This also explains why the earlier eliminations found nothing: an incomplete plan,
-degenerate statistics, a magnitude effect, the FP8 KV path and the calibration
-source are all tests for a **single** cause. An effect that is 71 % interaction
-between two individually harmless steps is invisible to every one of them.
-
-So: `imp-quantize --calib` is validated on Qwen3-0.6B and Qwen3-1.7B and
-measured harmful on Qwen3-14B. The tool now says so, and the rule is to score
-the calibrated checkpoint against the uncalibrated one before using it.
-
-**For anything larger, calibrate the FFN only (`--calib-groups BD`), or use
-round-to-nearest.** `n_rep` is 8 on most 70B-class checkpoints, i.e. further along
-the axis that breaks the attention groups, while the FFN groups showed no such
-dependence. Both routes are safe against the failure above; `BD` is the one that
-also gains something, and `ABCD` at that size is the one to avoid. Round-to-nearest
-remains a solid floor — on the 14B it beat a genuine Modelopt export (9.9252 vs
-10.0301). Whether `BD` still pays at 70B is untested; score it before trusting it.
-
-Neither route has a VRAM ceiling, because **the quantizer never resides the model.**
-`search_group_scale` uploads one group and `main.cpp` quantizes one tensor at a
-time, so demand scales with the largest single weight matrix — roughly 0.7 GiB for a
-14B and 1.8 GiB for a 70B — not with the checkpoint. Only *calibration* and
-*scoring* have to run the model, which is what the twin recipe above is for, and
-what bounds the calibrated route at roughly 40-50B on a 32 GiB card.
+Verdict: `imp-quantize --calib` is validated on Qwen3-0.6B and Qwen3-1.7B, measured harmful on
+Qwen3-14B; the tool says so; score the calibrated checkpoint against the uncalibrated one before
+use. Larger models: `--calib-groups BD` or round-to-nearest (`n_rep` is 8 on most 70B-class
+checkpoints, further along the axis that breaks attention; FFN showed no such dependence; `BD` at
+70B untested, score before trusting; RTN is a solid floor, it beat the Modelopt export on the 14B,
+9.9252 vs 10.0301). No VRAM ceiling on quantizing: the quantizer never resides the model
+(`search_group_scale` uploads one group, `main.cpp` quantizes one tensor at a time; ~0.7 GiB for a
+14B, 1.8 GiB for a 70B). Only calibration and scoring run the model (the twin recipe above),
+bounding the calibrated route at roughly 40-50B on a 32 GiB card.
 
 #### MoE, and two roles that must stay full precision
 
-"MoE is not supported" was too broad, and it was wrong in the dangerous
-direction. Checkpoints that store experts the HF-standard way — one 2-D tensor
-per expert — were never skipped; they were quantized and **silently produced a
-broken checkpoint**. Measured on DeepSeek-V2-Lite (MLA + 64 routed experts,
-2026-07-31): quantizing everything gave a model that loaded and then emitted
-cross-script repetition garbage, while the BF16 source answered normally.
-
-Bisection named the two culprits, and neither is the experts:
+"MoE is not supported" was too broad, and wrong in the dangerous direction: HF-standard per-expert
+2-D tensors were never skipped, they were quantized and silently produced a broken checkpoint.
+DeepSeek-V2-Lite (MLA + 64 routed experts, 2026-07-31): quantizing everything gave cross-script
+repetition garbage; the BF16 source answered normally. Bisection:
 
 | Quantized | Result |
 |---|---|
@@ -619,24 +419,14 @@ Bisection named the two culprits, and neither is the experts:
 | everything except **both** | **coherent** |
 | MLP + all 4992 expert tensors, attention left BF16 | coherent |
 
-So **expert quantization works**; what breaks is the MLA latent projections
-(the runtime slices `kv_a_proj_with_mqa` into latent+RoPE and reshapes
-`kv_b_proj` into per-head nope/v halves) and the MoE router (FP4 across 16
-shared-scale values changes the top-k expert pick). Both are now refused, at a
-cost of a handful of small matrices per layer.
-
-With them excluded, DeepSeek-V2-Lite quantizes 29.26 GiB → 8.91 GiB (3.28×) in
-~70 s and `degen_suite.py` reads **3 FAIL / 32** against the BF16 source's
-**5 FAIL / 32** — the quantized model's failures are a strict *subset*, so the
-quantization introduces none of them. (This model is weak at instruction
-following either way; the residual failures are the model's, not the
-quantizer's.)
-
-Still unsupported: expert weights stored as one 3-D `[n_experts, N, K]` **stack**
-(gpt-oss-style). Those are reported and left unquantized.
-
-Remaining open work: a head-to-head against a Modelopt export of the same model,
-which needs one staged locally in both precisions.
+Expert quantization works; the culprits are the MLA latent projections (the runtime slices
+`kv_a_proj_with_mqa` into latent+RoPE and reshapes `kv_b_proj` into per-head nope/v halves) and
+the MoE router (FP4 across 16 shared-scale values changes the top-k pick). Both refused, costing a
+handful of small matrices per layer. With them excluded: 29.26 GiB -> 8.91 GiB (3.28x) in ~70 s;
+`degen_suite.py` 3 FAIL / 32 vs the BF16 source's 5 FAIL / 32, a strict subset, so quantization
+introduces none. Still unsupported: expert weights as one 3-D `[n_experts, N, K]` stack
+(gpt-oss-style); reported and left unquantized. Open: a head-to-head against a Modelopt export of
+the same model (needs one staged locally in both precisions).
 
 Workflow with Modelopt:
 
@@ -683,17 +473,22 @@ SafeTensors per-expert weights
   → CUDA Graphs capture cleanly via the decode fast-path
 ```
 
-Without `cache_moe_native_nvfp4` the legacy FP16 dequant + cuBLAS sm_80 WMMA fallback fires per layer per token, killing CUDA Graphs and dropping decode 5–17×.
-
-NVFP4 KV cache (`--kv-nvfp4`) supports chunked prefill since PR #149 — past chunks' K/V are gathered from the paged cache via `paged_kv_gather_nvfp4_to_fp16` (PTX `cvt.rn.f16x2.e2m1x2` inner loop + UE4M3 scale fold) and concatenated with the current chunk before rectangular cuBLAS attention. Hybrid GDN+MoE / Mamba2+MoE archs (Qwen3.5/3.6, Nemotron-H) are in scope since PR #156.
+Without `cache_moe_native_nvfp4` the legacy FP16 dequant + cuBLAS sm_80 WMMA fallback fires per
+layer per token, killing CUDA Graphs and dropping decode 5-17x. NVFP4 KV cache (`--kv-nvfp4`)
+supports chunked prefill since PR #149: past chunks' K/V are gathered from the paged cache via
+`paged_kv_gather_nvfp4_to_fp16` (PTX `cvt.rn.f16x2.e2m1x2` inner loop + UE4M3 scale fold) and
+concatenated with the current chunk before rectangular cuBLAS attention. Hybrid GDN+MoE /
+Mamba2+MoE archs (Qwen3.5/3.6, Nemotron-H) in scope since PR #156.
 
 ## MXFP4 (GGUF)
 
-MXFP4 uses the same FP4 E2M1 nibble layout as NVFP4 but with UE8M0 micro-scales (per 32 elements) and no separate tensor scale. This matches the format the Blackwell tensor cores expect natively, so MXFP4 prefill goes through CUTLASS at full FP4 throughput.
-
-imp ships MXFP4 inside GGUF using a proprietary tensor-type code (31). llama.cpp reads this as the removed `Q4_0_4_4` format, so cross-tool perplexity comparison is not possible without a standard MXFP4 export.
-
-Round-to-nearest MXFP4 is +5–15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B wikitext-2). MR-GPTQ calibration would close this gap; it is on the [roadmap](roadmap.md).
+- Same FP4 E2M1 nibble layout as NVFP4, UE8M0 micro-scales (per 32 elements), no separate tensor
+  scale; the format Blackwell tensor cores expect natively, so MXFP4 prefill goes through CUTLASS
+  at full FP4 throughput.
+- Shipped inside GGUF under a proprietary tensor-type code (31); llama.cpp reads that as the
+  removed `Q4_0_4_4`, so cross-tool perplexity comparison needs a standard MXFP4 export.
+- Round-to-nearest MXFP4 is +5-15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B
+  wikitext-2). MR-GPTQ calibration would close the gap; on the [roadmap](roadmap.md).
 
 ## KV cache element type
 
@@ -704,39 +499,45 @@ Set via `--kv-fp8` / `--kv-int8` / `--kv-int4` / `--kv-nvfp4` / `--kv-mxfp4`, or
 dtype = "auto"  # auto (default) | fp16 | fp8 | int8 | int4 | nvfp4 | mxfp4
 ```
 
-`dtype = "auto"` (the default) keeps FP16 but upgrades to FP8 E4M3 for models whose author declares `kv_cache_quant_algo=FP8` (Modelopt NVFP4 checkpoints) **and** whose arch family has passed the long-context FP8-KV quality gate (`kv_fp8_hint_default_safe` in `src/model/model.cpp`). Currently allowlisted: **Qwen3 dense + Qwen3 MoE** — measured on a 3.9k-token context, FP8 vs FP16 KV: Qwen3-14B PPL 13.95→14.10 (+1.07%), Qwen3-30B-A3B ~16.20→~15.99 (neutral), both coherent, ~768 MiB KV VRAM saved. Other hint-declaring families (Phi-4, Nemotron-H, Qwen3.5/3.6, Gemma-4) stay FP16 until measured; pass `--kv-fp8` to force, or `dtype = "fp16"` to opt out.
-
-The default flipped to FP16 in PR #51 — FP8 had been silently breaking Llama, Mistral, and DeepSeek at first decode. Beyond the `auto` allowlist, FP8 stays opt-in; it is verified coherent on Qwen3 dense, Qwen3.5 / 3.6 GDN, Llama-3.2, and Gemma-4 (FP8 KV warmup-calibration bug fixed in PR #89; Gemma-4 dual-head_dim carve-out removed in PR #91).
-
-INT4 KV is for VRAM-pressure cases only — coherent but ~22% decode regression at 20K context. NVFP4-KV (`--kv-nvfp4`) and MXFP4-KV (`--kv-mxfp4`, PR #249) both store FP4 at 25% of FP16 — NVFP4 uses E4M3 micro-scales, MXFP4 uses UE8M0; both ship chunked prefill via `paged_kv_gather_*_to_fp16`. (TurboQuant was retired in PR #251; its deprecated `--kv-turboquant{,-lite}` alias flags were removed 2026-07-07.)
+- `auto` keeps FP16 but upgrades to FP8 E4M3 for models declaring `kv_cache_quant_algo=FP8`
+  (Modelopt NVFP4 checkpoints) whose arch family passed the long-context FP8-KV quality gate
+  (`kv_fp8_hint_default_safe` in `src/model/model.cpp`). Allowlisted: Qwen3 dense + Qwen3 MoE;
+  measured on a 3.9k-token context, FP8 vs FP16 KV: Qwen3-14B PPL 13.95 -> 14.10 (+1.07%),
+  Qwen3-30B-A3B ~16.20 -> ~15.99 (neutral), both coherent, ~768 MiB KV VRAM saved. Other
+  hint-declaring families (Phi-4, Nemotron-H, Qwen3.5/3.6, Gemma-4) stay FP16 until measured;
+  `--kv-fp8` forces, `dtype = "fp16"` opts out.
+- The default flipped to FP16 in PR #51 (FP8 silently broke Llama, Mistral, DeepSeek at first
+  decode). Beyond the `auto` allowlist FP8 is opt-in; verified coherent on Qwen3 dense,
+  Qwen3.5 / 3.6 GDN, Llama-3.2, Gemma-4 (FP8 KV warmup-calibration bug fixed in PR #89; Gemma-4
+  dual-head_dim carve-out removed in PR #91).
+- INT4 KV is for VRAM pressure only: coherent, ~22% decode regression at 20K context.
+- NVFP4-KV (`--kv-nvfp4`) and MXFP4-KV (`--kv-mxfp4`, PR #249) store FP4 at 25% of FP16 (E4M3 vs
+  UE8M0 micro-scales), both with chunked prefill via `paged_kv_gather_*_to_fp16`. (TurboQuant
+  retired in PR #251; its deprecated `--kv-turboquant{,-lite}` alias flags removed 2026-07-07.)
 
 ## Choosing a quant
 
 Quick guidance, not a benchmark:
 
-- **Q8_0** is the cleanest baseline. Use it when output quality matters and VRAM allows.
-- **Q4_K_M** is the most VRAM-efficient GGUF. Sufficient for most chat; can degenerate on long code-gen on Gemma-4 — use Q5_K_M or Q8_0 there.
-- **Q6_K** sits in between. Good MoE pick on Qwen3-Coder-30B.
-- **IQ4_NL / IQ4_XS** (i-quants) load and run since #556 via the dequant path (FP16-cache decode like Q4_K, dequant→cuBLAS prefill). Supported for community-quant compatibility — at equal VRAM prefer Q4_K_M, which has dedicated dp4a/MMVQ kernels. The IQ1/IQ2/IQ3 families remain unsupported.
-- **NVFP4** (SafeTensors prequant) gives the highest decode throughput on prequant-aware models (current per-model numbers in [`BENCHMARKS.md`](BENCHMARKS.md)). Requires AWQ/SmoothQuant calibration; only Modelopt is fully tested.
-- **MXFP4** is GGUF-native FP4. Smallest footprint (Qwen3-4B at 2.8 GB), but quality lags Q4_K_M without MR-GPTQ calibration.
+- **Q8_0**: cleanest baseline; use when quality matters and VRAM allows.
+- **Q4_K_M**: most VRAM-efficient GGUF; sufficient for most chat; can degenerate on long code-gen
+  on Gemma-4 (use Q5_K_M or Q8_0 there).
+- **Q6_K**: in between; good MoE pick on Qwen3-Coder-30B.
+- **IQ4_NL / IQ4_XS**: load and run since #556 via the dequant path (FP16-cache decode like Q4_K,
+  dequant->cuBLAS prefill); for community-quant compatibility. At equal VRAM prefer Q4_K_M
+  (dedicated dp4a/MMVQ kernels). IQ1/IQ2/IQ3 families unsupported.
+- **NVFP4** (SafeTensors prequant): highest decode throughput on prequant-aware models (per-model
+  numbers: [`BENCHMARKS.md`](BENCHMARKS.md)). Requires AWQ/SmoothQuant calibration; only Modelopt
+  fully tested.
+- **MXFP4**: GGUF-native FP4, smallest footprint (Qwen3-4B at 2.8 GB); quality lags Q4_K_M without
+  MR-GPTQ calibration.
 
 #### Refuted: micro-scale search (2026-07-26)
 
-Before reaching for calibration, the cheap hypothesis was tested and **does not
-pay**: choosing each micro-scale by minimizing the block's reconstruction error
-(searching FP8 candidates around `absmax` instead of taking it) moved
-Qwen3-0.6B from PPL 30.10 to **29.88** — 0.7%, for ~6x the quantization cost.
-Reverted; do not re-attempt.
-
-Why it cannot help much: the micro-block is only **16** values. Clipping the
-scale pays when one outlier spoils a large group (64-128), but across 16 values
-`absmax` is already near-optimal. The dominant error is the FP4 grid itself —
-eight magnitudes (0, 0.5, 1, 1.5, 2, 3, 4, 6) — which no choice of scale
-improves.
-
-That is why the open work is **AWQ / GPTQ class**, not better scales: they do
-not shrink the error, they move it. AWQ uses calibration activations to protect
-the channels that carry the most signal; GPTQ compensates each column's error in
-the columns still to be quantized. Both need infrastructure imp does not have
-yet (activation statistics hooks / a Hessian pass).
+Choosing each micro-scale by minimizing block reconstruction error (searching FP8 candidates
+around `absmax`) moved Qwen3-0.6B from PPL 30.10 to 29.88: 0.7%, for ~6x the quantization cost.
+Reverted; do not re-attempt. The micro-block is 16 values, where `absmax` is already near-optimal
+(clipping pays when one outlier spoils a 64-128 group), and the dominant error is the FP4 grid
+itself, eight magnitudes (0, 0.5, 1, 1.5, 2, 3, 4, 6), which no scale choice improves. That is why
+the follow-up work was AWQ/GPTQ class (calibration moves the error rather than shrinking it): see
+`--calib` above.
