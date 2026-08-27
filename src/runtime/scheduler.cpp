@@ -95,6 +95,22 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 const int admit_blocks = std::min(blocks_needed + decode_blocks,
                                                   std::max(blocks_needed, pool_blocks));
 
+                // Aggregate-pressure growth (2026-08-27): requests that each
+                // fit used to queue while the pool sat at its initial commit:
+                // 32 x 8k-token concurrent measured effectively ~7-way with
+                // 4437 of the 6483 ceiling blocks never committed (45.2 s
+                // wall). The old rule "ordinary contention is left to queue so
+                // growth never competes with the weight caches" is stricter
+                // than its own reason: the ceiling IS the post-weight residual
+                // the planner clamped at init (vram_budget "KV clamped ... to
+                // fit post-weight VRAM"), so growing up to it competes with
+                // nothing. Coarse steps, same as the decode-side trigger.
+                if (!kv_manager_->can_allocate(admit_blocks)) {
+                    auto* kvc = kv_manager_->kv_cache();
+                    const int total_now = kvc->total_blocks();
+                    if (kvc->ceiling_blocks() > total_now)
+                        kvc->try_grow_to(total_now + std::max(admit_blocks, total_now / 4));
+                }
                 if (!kv_manager_->can_allocate(admit_blocks)) {
                     // If the request needs more blocks than the KV cache can
                     // ever hold, no eviction will free enough — leaving the

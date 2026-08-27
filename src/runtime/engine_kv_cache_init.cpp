@@ -388,9 +388,15 @@ bool Engine::init_kv_cache() {
     const size_t per_block_total_bytes =
         static_cast<size_t>(n_kv_layers) *
         kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
-    // What the configuration asked for, kept across the clamp below: it is the
-    // ceiling a growable pool reserves for.
-    const int kv_blocks_planned = max_blocks;
+    // The ceiling a growable pool reserves for. The live pass sized what the
+    // device could hold (vram_budget.kv_max_blocks); the shadow plan above may
+    // have committed less because it charges conservative reserves (the 3900
+    // MiB library constant, unmodelled forward scratch). A growable pool starts
+    // at the plan's commit and may grow back toward the live figure under
+    // admission pressure - without this max() the plan's clamp was also the
+    // ceiling and kv_cache.growable was a no-op on planned loads (measured:
+    // 32x8k stuck at 2046 blocks with a 6483-block live sizing and ~6 GB idle).
+    const int kv_blocks_planned = std::max(max_blocks, vram_budget.kv_max_blocks);
     if (per_block_total_bytes > 0) {
         size_t free_now = 0, total_now = 0;
         vram_budget_mem_get_info(&free_now, &total_now);

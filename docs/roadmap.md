@@ -194,6 +194,21 @@ Ranked by what an agent workload notices first.
    burst, 4 waves x 3 alternating trials/arm: aggregate 977.3 -> 1038.2
    tok/s median (+6.2%, all 12 ON waves above all 12 OFF waves), TTFT
    p50 4.11 -> 2.55 s, p90 4.18 -> 3.57 s. Details in the plan doc.
+   UPDATE 2026-08-27 (long-context concurrency: the first-order limiter
+   was the KV commit, not recurrent state): at 32 x 8k the pool sat at
+   the shadow plan's 2046-block commit while the live pass had sized
+   6483 and ~6 GB idled - `kv_cache.growable` could not reach it (the
+   ceiling was captured after the plan's clamp, so ceiling == commit),
+   and the scheduler only grew for a single oversized request. Both
+   fixed: the ceiling is the live-pass sizing, and aggregate admission
+   pressure grows toward it in coarse steps. 32 x 8k-prompt/512-token,
+   2 trials/arm alternating: wall 84.4-89.1 s fixed vs 61.7-71.9 s
+   growable (median 86.0 -> 65.2, -24%), all ON walls below all OFF
+   walls; pool 2046 -> 6483 blocks (65k -> 207k tokens). Short-completion
+   bursts are prefill-bound and unchanged (~45 s both arms). Opt-in
+   (`kv_cache.growable=true`). Recurrent-state paging (the 2544 MiB
+   fixed GDN pool) remains the lever only BEYOND 32 slots or for
+   freeing that pool for KV; at 32 it is not the limiter.
 
 1. **Scheduling has no per-request priority.** Nothing in the scheduler reads
    one, so a caller cannot say which request matters. `max_concurrent` bounds

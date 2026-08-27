@@ -60,6 +60,14 @@ struct KVCache {
     // cancelling every prompt past a few hundred tokens while reporting a
     // successful load. With this, that server heals instead.
     //
+    // Second use case (2026-08-27): long-context concurrency. The shadow plan
+    // commits conservatively (it charges the library-reserve constant and
+    // leaves forward scratch unmodelled), and the difference to the live-pass
+    // sizing becomes growth headroom the scheduler commits under aggregate
+    // admission pressure. Measured on Qwen3.8-27B-NVFP4, 32 concurrent
+    // 8k-prompt/512-token requests: wall 86.0 -> 65.2 s median (-24%), pool
+    // 2046 -> 6483 blocks. Prefill-bound bursts see no change.
+    //
     // Needs CUDA virtual memory management on the device; where that is absent
     // the pool is fixed and everything behaves exactly as before. Growth costs
     // one driver mapping call per layer (measured 1.18 ms per 256 MiB) and
