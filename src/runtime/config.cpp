@@ -379,6 +379,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("speculative.shallow_draft_ctx", cfg.speculative.shallow_draft_ctx);
     B("speculative.verify_decode_attn", cfg.speculative.verify_decode_attn);
     B("speculative.verify_nvfp4_gemm", cfg.speculative.verify_nvfp4_gemm);
+    B("speculative.verify_smallm", cfg.speculative.verify_smallm);
     B("speculative.verify_row_parity", cfg.speculative.verify_row_parity);
     I("speculative.min_history", cfg.speculative.min_history);
     B("speculative.moe", cfg.speculative.moe);

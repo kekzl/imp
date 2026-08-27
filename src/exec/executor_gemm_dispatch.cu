@@ -319,7 +319,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // NVFP4 kernels in executor_ffn.cu serve them there. Measured on
         // Qwen3.8-27B-NVFP4: a speculative arm does not reproduce the
         // non-speculative greedy output, see docs/LIMITATIONS.md.
-        if (ctx.spec_verify_small_m && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
+        if (ctx.spec_verify_small_m && !runtime_config().speculative.verify_smallm &&
+            (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 &&
             h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.source_data != nullptr &&
             h.source_scales != nullptr && !dequant_gpu_supported(h.source_qtype)) {
@@ -347,7 +348,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // dequant+HMMA kernel for A/B. Both read quantized activations
         // (same numerics family as the CUTLASS path). Spec-verify chunks
         // keep their documented paths (argmax parity, #1055).
-        if (runtime_config().gemm.nvfp4_smallm && !ctx.spec_verify_small_m &&
+        if (runtime_config().gemm.nvfp4_smallm &&
+            (!ctx.spec_verify_small_m || runtime_config().speculative.verify_smallm) &&
             !overlap_prefill_active_ && M <= 32 &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && input.qtype == QType::F16 &&
             output.qtype == QType::F16 && h.primary_tier == StorageTier::CUTLASS_NVFP4 &&

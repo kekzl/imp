@@ -84,6 +84,22 @@ struct Speculative {
     // with the decode path (same weights). Real prefills are never
     // affected. Kill switch for A/B.
     bool verify_nvfp4_gemm = true;
+    // Route the verify chunk's native-NVFP4 GEMMs through the small-M
+    // mxf4nvf4 pipeline kernel (gemm.nvfp4_smallm) instead of the batched
+    // multi-row GEMV. The GEMV reads the weight sweep at ~1300 GB/s at M=3
+    // (70% of verify kernel time, profiled 2026-08-27); the smallm kernel
+    // reads the same weights at the decode-class ~1600. Argmax parity is not
+    // the objection: the batched-GEMV path already documents that a
+    // speculative arm does not reproduce the non-speculative greedy output.
+    //
+    // Measured 2026-08-27 (Qwen3.8-27B-NVFP4, mtp_k=1 + ngram=false,
+    // 1024-token thinking chats): +3-6% in an isolated smoke (107.7/106.6 vs
+    // 100.6-104.6), but only +1-2% with mixed pairs in a 2-round alternating
+    // A/B (BASE 104.5-107.7 vs COMBO 104.9-109.6, accept unchanged ~73%) -
+    // inside the greedy-trajectory variance of this measurement. Default off
+    // until a cleaner harness can resolve it; the mechanism is real, the
+    // e2e effect is smaller than the kernel share suggests.
+    bool verify_smallm = false;
     // Make the speculative verify chunk's NVFP4 GEMV reduce K exactly the way
     // the M=1 decode GEMV does, so the two paths agree bit for bit. Both
     // compute the same products; decode groups them into 32 partial sums (one

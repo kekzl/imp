@@ -147,7 +147,29 @@ Ranked by what an agent workload notices first.
    after parking regardless of spec mode) measures +0.2% throughput -
    an ITL-spike fix, not a decode lever; the 27.8 ms/gap read in the
    nsys profile was CUPTI inflating graph instantiation. Still open in
-   class: elementwise (CLOSED 2026-08-27 below by measurement). (d) cross-sequence
+   class: elementwise (CLOSED 2026-08-27 below by measurement).
+   UPDATE 2026-08-27 (batch=1 roofline re-derived from a graphs-ON nsys
+   window): the box reads 1628 GB/s resident today (8 GiB sweep, not the
+   stale 1530), so the spec-off ceiling on Qwen3.8-27B-NVFP4 is ~112
+   tok/s (14.5 GB/token) and 87.4 measured = 78%. The decode graph is
+   STRICTLY serial (kernel-interval union == sum, factor 1.000, 718k
+   intervals) - the "launch classes overlap away" rule does NOT hold on
+   this model at M=1. Step anatomy: GEMV classes 9.69 ms at ~1496 GB/s
+   avg (gate_up 1613, lm_head 1655 prove the ceiling; kpar 1450 /
+   multirow 1490 / residual 1528 carry ~0.4 ms of class headroom), tail
+   2.66 ms = attention 0.48 (latency-bound at short ctx, both split
+   directions refuted), 96 FP16 alpha/beta GEMVs 0.37, norms 0.30, GDN
+   scan+conv 0.32, host/idle 0.44. The way PAST the roofline is the MTP
+   verify (weights read once per k+1 rows): 102-110 shipped (#1796),
+   k=2 reaches 145.8 on draft-rich prompts but loses on draft-poor ones
+   and k=3 dooms on economics; verify-chunk GEMMs run at 1300 GB/s
+   (70% of verify kernel time) - `speculative.verify_smallm` routes
+   them to the smallm kernel, measured +3-6% isolated but +1-2% mixed
+   pairs (inside trajectory variance, default off);
+   `diagnostics.mtp_prenorm_h=true` lifted accept 70/72 -> 74/78% and
+   won 4/4 pairs (+2-3%). [PROV: commit=a70d7863+wt date=2026-08-27
+   hw=RTX5090 model=Qwen3.8-27B-NVFP4 cuda=13.3 path=nsys server
+   window 778 steps cmd=`nsys profile ... imp-server` + chat 1024-tok] (d) cross-sequence
    prefill batching: a 32-prompt burst prefills one sequence per forward
    at ~1700 tok/s effective (launch-bound, 64 layers), so every first
    token waits 2-3.5 s; batching prefill rows the way decode batches
