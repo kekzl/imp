@@ -20,6 +20,7 @@
 
 #include "exec/executor.h"
 #include "exec/executor_gemv_helpers.h"
+#include "exec/executor_sampling_internal.h"
 #include "compute/gemm.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
@@ -429,7 +430,8 @@ void GraphExecutor::prewarm_verify_scratch() {
 void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
                                       const int32_t* d_hist, int n_hist, const int32_t* d_draft,
                                       float rep_pen, float freq_pen, float pres_pen,
-                                      int32_t* d_topm, int topm) {
+                                      int32_t* d_topm, int topm, const int32_t* d_banned,
+                                      int n_banned) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr) {
         return;
     }
@@ -461,6 +463,17 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
                 static_cast<float*>(lg.data), row0, V, verify_pen_counts_, d_draft, rep_pen,
                 freq_pen, pres_pen);
             IMP_CUDA_CHECK_LAUNCH();
+        }
+        // Banned special tokens (chat-template delimiters): every OTHER path
+        // masks them before its argmax (forward(), sample_from_logits - see
+        // the comment there), and this argmax EMITS tokens (accepted rows +
+        // the bonus). Without the mask the verify chunk was the one path that
+        // could pick e.g. <|im_start|> mid-think, ending the request with
+        // empty content (deterministic on some prompts, degen_suite [stream]).
+        if (d_banned != nullptr && n_banned > 0) {
+            for (int r = 0; r < csz; ++r)
+                launch_ban_logits(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V,
+                                  d_banned, n_banned, V, stream);
         }
         dim3 grid(csz, kArgmaxSplits);
         rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(

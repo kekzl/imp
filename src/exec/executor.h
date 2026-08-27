@@ -162,7 +162,8 @@ public:
                            const int32_t* d_hist = nullptr, int n_hist = 0,
                            const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
                            float freq_pen = 0.0f, float pres_pen = 0.0f,
-                           int32_t* d_topm = nullptr, int topm = 0);
+                           int32_t* d_topm = nullptr, int topm = 0,
+                           const int32_t* d_banned = nullptr, int n_banned = 0);
 
     // Materialize the LM-head projection of hidden_[0..n_rows) into d_out
     // ([n_rows, vocab_size] fp32) — same batched re-projection as

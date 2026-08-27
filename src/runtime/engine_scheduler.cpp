@@ -632,6 +632,15 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             if (try_launch_async_graph_loop(sreq, sreq->output_tokens.back(), dec_stream, lim))
                 return;
         } else if (decode_batch[0]->think_budget > 0.0f && decode_batch[0]->in_think_block &&
+                   // An MTP-bound request must stay on the eager path: the
+                   // per-step chain feed below needs host hiddens for every
+                   // token, and one device-side burst desyncs the MTP cache
+                   // for the rest of the generation (the sync gate then skips
+                   // feeding forever, #847). This think-burst was the one loop
+                   // site without the MTP exclusion the process_outputs launch
+                   // has - measured on Qwen3.8-27B-NVFP4: drafted_total 1 vs
+                   // 436 over a 768-token essay, 84.7 vs 104.3 tok/s.
+                   !(mtp_spec_decode_enabled() && mtp_bound_req_ == decode_batch[0]->id) &&
                    spec_verify_gates_ok_(*decode_batch[0], /*ignore_think=*/true) &&
                    spec_burst_launch_ok_(*decode_batch[0]) &&
                    // Budget exhausted → the EAGER step must run: it forces

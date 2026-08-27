@@ -202,6 +202,28 @@ neither.
   since `ea547a53` — `speculative.mtp_k=1` measured +21.3 % — but **only at k=1**:
   an extra chunk row still costs half a decode step, so k=3 buys 2 %. Numbers and
   the profile that localises that cost: [`roadmap.md`](roadmap.md).
+
+  *Updated 2026-08-27:* until that date MTP was effectively dead on thinking
+  traffic - the think-interior loop burst desynced the MTP cache and the head
+  drafted ~once per generation (drafted_total 1 over a 768-token essay). Three
+  fixes (burst-site exclusions for MTP-bound requests, verify inside the think
+  block, the in-think emit trim) plus the verify-argmax banned-token mask make
+  it pay: **`mtp_k=1` with `speculative.ngram=false` measures 102.1-105.9 tok/s
+  against 87.2-87.6 default on a 1024-token thinking chat (+17-21 %, all six
+  MTP runs above all six default runs), degen suite 50/0 twice.** Keep `ngram=false` in the pair: with the matcher ON the
+  mixed chunk shapes reproducibly derail one trivial prompt into an
+  empty-content completion (the model stops inside think; greedy trajectories
+  under chunk-shaped forwards are not the eager trajectories), and k=2 shows
+  the same class. The default stays `mtp_k=0`: the head costs 0.79 GiB and
+  chunk-greedy != eager-greedy remains a real trade.
+
+  [PROV: commit=3ce0c326+mtp-fixes date=2026-08-27 hw=RTX5090
+         model=Qwen3.8-27B-NVFP4 quant=NVFP4 cuda=13.3 path=imp-server
+         n=3 runs/arm, /v1/chat/completions, 1024-token thinking answer,
+         temperature=0
+         cmd=`imp-server --set speculative.mtp_k=1 --set
+         speculative.ngram=false` vs defaults; degen:
+         `tools/analysis/degen_suite.py` 2x 50 checks]
 - **MTP is released for one model class, and the class that is left out has a
   measured defect, not a missing feature.** `speculative.mtp_k` stays **0
   everywhere** — nothing below is on by default; the table says what a user opts
