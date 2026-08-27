@@ -347,7 +347,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // dequant+HMMA kernel for A/B. Both read quantized activations
         // (same numerics family as the CUTLASS path). Spec-verify chunks
         // keep their documented paths (argmax parity, #1055).
-        if (runtime_config().gemm.nvfp4_smallm && !ctx.spec_verify_small_m && M <= 32 &&
+        if (runtime_config().gemm.nvfp4_smallm && !ctx.spec_verify_small_m &&
+            !overlap_prefill_active_ && M <= 32 &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && input.qtype == QType::F16 &&
             output.qtype == QType::F16 && h.primary_tier == StorageTier::CUTLASS_NVFP4 &&
             h.source_data != nullptr && h.source_scales != nullptr &&
@@ -679,7 +680,7 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
 
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                             uint8_t** scales_out) {
-    if (!runtime_config().gemm.nvfp4_smallm || cur_spec_verify_)
+    if (!runtime_config().gemm.nvfp4_smallm || cur_spec_verify_ || overlap_prefill_active_)
         return nullptr;
     if (M < 2 || M > 32 || K <= 0 || (K & 255) != 0)
         return nullptr;
@@ -745,9 +746,9 @@ bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, cons
     // outputs only. Every decline is a plain `false` — the caller issues the
     // two single dispatches it would have issued anyway.
     if (!runtime_config().gemm.nvfp4_smallm || runtime_config().gemm.nvfp4_smallm_impl != 2 ||
-        !runtime_config().gemm.nvfp4_smallm_pair || ctx.spec_verify_small_m || ctx.beta != 0.0f)
-        return false;
-    if (id_a == kInvalidTensorID || id_b == kInvalidTensorID)
+        !runtime_config().gemm.nvfp4_smallm_pair || ctx.spec_verify_small_m ||
+        overlap_prefill_active_ || ctx.beta != 0.0f || id_a == kInvalidTensorID ||
+        id_b == kInvalidTensorID)
         return false;
     const int M = static_cast<int>(input.shape[0]);
     // M==1 stays on the fused decode GEMVs; M>32 is prefill.

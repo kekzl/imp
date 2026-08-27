@@ -73,6 +73,7 @@ public:
     int shared_max_tokens() const { return shared_workspace_max_tokens_; }
     int active() const { return active_workspace_; }
     bool has_decode_workspace() const { return decode_workspace_ != nullptr; }
+    int decode_max_batch() const { return decode_max_batch_; }
     // Bumped whenever shared_workspace_ is (re)allocated or freed — consumers
     // holding raw pointers into the arena (captured verify graphs, #847) use
     // this to detect that their baked addresses died.

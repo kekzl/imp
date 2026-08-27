@@ -125,10 +125,14 @@ Ranked by what an agent workload notices first.
    prefill-block is 0.8-1.0 ms; with no pending ingest the turnaround is
    34 us. So the between-steps time IS the paced serial prefill
    (`prefill_chunk_decode_cap`, the documented ITL-protection trade),
-   not hidden host work. The lever that remains there is running prefill
-   CONCURRENT with decode (second workspace + stream ordering on the KV
-   write - VRAM-priced, not measured; distinct from the #1755
-   decode-pipeline-on-hybrids refutation). Also recorded: the batch=1
+   not hidden host work. UPDATE 2026-08-27 (later): prefill CONCURRENT
+   with decode was BUILT and measured NEUTRAL on both workload shapes
+   (short prompts 1771.3 vs 1777.7; ~1000-token heavy ingest 789.7 vs
+   790.6, TTFT unchanged) - without green-context SM partitioning (dead
+   on sm_120) the two streams displace each other, so the paced serial
+   prefill was never wasted GPU time. `runtime.prefill_overlap` ships
+   default-off with the verdict in its comment; ledger in
+   docs/plans/2026-08-27-prefill-decode-overlap.md. Also recorded: the batch=1
    async-loop recapture per ~200-token burst (FRESH captures 128 -> 7
    after parking regardless of spec mode) measures +0.2% throughput -
    an ITL-spike fix, not a decode lever; the 27.8 ms/gap read in the
