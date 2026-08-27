@@ -11,8 +11,6 @@ there instead of retelling it.
 
 ## [Unreleased]
 
-### Fixed
-
 - **The verify-chunk argmax never applied the banned-token mask.** Every other
   sampling path masks chat-template delimiters before its argmax; the spec
   verify (which emits accepted + bonus tokens) did not, so it was the one path
@@ -198,6 +196,14 @@ there instead of retelling it.
   reasoning-effort preamble. `is not undefined` added alongside.
 
 ### Added
+
+- **`speculative.verify_smallm`** (default off): route the verify chunk's
+  native-NVFP4 GEMMs through the small-M mxf4nvf4 kernel instead of the
+  batched multi-row GEMV (1300 GB/s at M=3, 70% of verify kernel time).
+  Measured +3-6% isolated, +1-2% with mixed pairs - inside greedy-trajectory
+  variance, hence off; verdict in the config comment. Same session re-derived
+  the batch=1 roofline (1628 GB/s resident today, spec-off ceiling ~112 tok/s,
+  measured 87.4 = 78%, decode graph strictly serial) - docs/roadmap.md.
 
 - **Row-batched decode sampling: +2.2% aggregate at 32 streams.** The per-row
   eager chain after each decode-graph replay (31 rows x argmax partial+reduce
