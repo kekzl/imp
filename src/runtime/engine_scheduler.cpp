@@ -290,11 +290,16 @@ int Engine::step_async_graph_resume() {
 
         auto saved_req = async_graph_req_;
 
-        // Burst-hybrid speculation: keep the captured graph + block-table
-        // buffer parked so the next burst of this request rearms instead of
-        // recapturing (~10-20 ms per capture). Fully torn down on request
-        // finish or when a different request launches.
-        const bool park = saved_req && spec_ngram_enabled_(*saved_req) && !generation_done;
+        // Keep the captured graph + block-table buffer parked so the next
+        // burst of this request rearms instead of recapturing (~10-20 ms per
+        // capture). Fully torn down on request finish or when a different
+        // request launches (the FRESH path cleans a foreign park). This used
+        // to be gated on spec_ngram_enabled_ — the burst-hybrid path was the
+        // frequent relauncher — but the KV reservation clamps every burst to
+        // ~128 steps (#1636), so a spec-OFF generation relaunched just as
+        // often and paid a full recapture each time: 78 rebuilds x 27.8 ms in
+        // a 116 s batch=1 bench window (nsys 2026-08-27), ~1.9% of wall.
+        const bool park = saved_req && !generation_done;
         if (park) {
             async_parked_req_id_ = saved_req->id;
         } else {

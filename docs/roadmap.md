@@ -118,7 +118,22 @@ Ranked by what an agent workload notices first.
    per-row eager argmax/penalty launches between graph replays (~124
    launches/step, 6.6% of serving wall incl. their host gaps) now batch
    like the top-k stash; +2.2% aggregate (1740.9 -> 1779.4 median, 3/3
-   pairs). Still open in class: elementwise. (d) cross-sequence
+   pairs). UPDATE 2026-08-27 (host turnaround attributed and CLOSED as a
+   defect class): diagnostics.step_timing at 32 streams reads, per step,
+   build 63-82 us / fwd-enqueue 34-47 / distribute 7 (the #1758 deferral
+   holds) / schedule 1-2 - and outside-step 1.2-1.5 ms of which
+   prefill-block is 0.8-1.0 ms; with no pending ingest the turnaround is
+   34 us. So the between-steps time IS the paced serial prefill
+   (`prefill_chunk_decode_cap`, the documented ITL-protection trade),
+   not hidden host work. The lever that remains there is running prefill
+   CONCURRENT with decode (second workspace + stream ordering on the KV
+   write - VRAM-priced, not measured; distinct from the #1755
+   decode-pipeline-on-hybrids refutation). Also recorded: the batch=1
+   async-loop recapture per ~200-token burst (FRESH captures 128 -> 7
+   after parking regardless of spec mode) measures +0.2% throughput -
+   an ITL-spike fix, not a decode lever; the 27.8 ms/gap read in the
+   nsys profile was CUPTI inflating graph instantiation. Still open in
+   class: elementwise. (d) cross-sequence
    prefill batching: a 32-prompt burst prefills one sequence per forward
    at ~1700 tok/s effective (launch-bound, 64 layers), so every first
    token waits 2-3.5 s; batching prefill rows the way decode batches
