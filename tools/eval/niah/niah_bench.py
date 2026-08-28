@@ -24,8 +24,10 @@ import dataclasses
 import itertools
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -126,15 +128,24 @@ def run_prompt(prompt: Prompt, model_path: str, host_models_dir: str) -> Result:
     docker_env = []
     for k, v in env_extra.items():
         docker_env += ["-e", f"{k}={v}"]
+    # The prompt travels as a FILE, not an argv: a single exec argument is
+    # capped at ~128 KiB (MAX_ARG_STRLEN), which a 32k-token context exceeds.
+    # World-readable dir+file so the container user can traverse /tmp into it.
+    pdir = Path(tempfile.mkdtemp(prefix="niah_prompt_"))
+    pdir.chmod(0o755)
+    pfile = pdir / "prompt.txt"
+    pfile.write_text(prompt.text, encoding="utf-8")
+    pfile.chmod(0o644)
     cmd = [
         "docker", "run", "--rm", "--gpus", "all",
         "-v", f"{host_models_dir}:/m",
+        "-v", f"{pdir}:/pf:ro",
         *docker_env,
         DOCKER_IMAGE,
         "imp-cli",
         "--model", model_path,
         *flags,
-        "--prompt", prompt.text,
+        "--prompt-file", "/pf/prompt.txt",
         "--max-tokens", str(MAX_GEN_TOKENS),
         "--temperature", "0",
         "--seed", "42",
@@ -142,11 +153,14 @@ def run_prompt(prompt: Prompt, model_path: str, host_models_dir: str) -> Result:
     ]
     t0 = time.time()
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=PER_PROMPT_TIMEOUT_S, check=False,
-            errors="replace",  # MXFP4-KV degenerate output can emit invalid UTF-8 bytes
-        )
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=PER_PROMPT_TIMEOUT_S, check=False,
+                errors="replace",  # MXFP4-KV degenerate output can emit invalid UTF-8 bytes
+            )
+        finally:
+            shutil.rmtree(pdir, ignore_errors=True)
         wall = time.time() - t0
         # imp-cli --prompt mode does NOT echo the prompt to stdout — only
         # the model's generation (with some interleaved log lines). The
@@ -222,6 +236,7 @@ def write_summary(results: list[Result], out_path: Path) -> None:
 
 
 def main() -> int:
+    global MAX_GEN_TOKENS
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--host-models-dir", default=DEFAULT_HOST_MODELS_DIR)
@@ -234,7 +249,13 @@ def main() -> int:
     ap.add_argument("--seed", type=int, action="append", default=None)
     ap.add_argument("--smoke", action="store_true",
                     help="Run 1 prompt (mxfp4_kv, 4K, depth=0.5, seed=0)")
+    ap.add_argument("--max-gen-tokens", type=int, default=MAX_GEN_TOKENS,
+                    help="Generation budget per prompt (default 384). Qwen3 spends think "
+                         "AND answer from it; a cell that exhausts it prints no answer and "
+                         "scores 0 even when the needle was retrieved - raise to 768 to "
+                         "separate retrieval failures from budget exhaustion.")
     args = ap.parse_args()
+    MAX_GEN_TOKENS = args.max_gen_tokens
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)

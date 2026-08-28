@@ -13,6 +13,10 @@ there instead of retelling it.
 
 ### Added
 
+- `imp-cli --prompt-file <path>`: read the prompt from a file (whole content,
+  verbatim; mutually exclusive with `--prompt`). A bare argv caps at ~128 KiB
+  (~32k tokens) per exec argument; the NIAH harness now uses it, which
+  unblocks 32k-context retrieval runs (`--ctx 32768`, new `--max-gen-tokens`).
 - Sparse decode attention (`attention.sparse_topk_tokens`, default off):
   Quest-class top-k page selection - decode reads only the top-scoring KV
   blocks (per-block key min/max bound vs the query), device-side and

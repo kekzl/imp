@@ -14,6 +14,7 @@ struct CliArgs : CommonArgs {
     // applies on top of the loaded config. See imp.conf.example for keys.
 
     std::string prompt;
+    std::string prompt_file;  // --prompt-file: read the prompt from this path
     std::string perplexity_file;  // --perplexity <file>: teacher-forced PPL over the file's text
     // --calibrate <out>: collect per-channel activation magnitudes during the
     // --perplexity pass and write them for imp-quantize --calib.

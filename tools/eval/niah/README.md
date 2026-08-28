@@ -24,6 +24,10 @@ tools/eval/niah/niah_bench.py
 # Smoke test (1 prompt):
 tools/eval/niah/niah_bench.py --smoke
 
+# Long contexts: prompts are passed via --prompt-file (a bind-mounted temp
+# file), so --ctx 32768 and above work; a bare argv caps at ~128 KiB
+# (~32k tokens) per exec argument.
+
 # Subset (e.g. only the FP4 KV configs, only 4K context):
 tools/eval/niah/niah_bench.py --config nvfp4 --config mxfp4_kv --ctx 4096
 ```
