@@ -13,6 +13,14 @@ there instead of retelling it.
 
 ### Added
 
+- Sparse decode attention (`attention.sparse_topk_tokens`, default off):
+  Quest-class top-k page selection - decode reads only the top-scoring KV
+  blocks (per-block key min/max bound vs the query), device-side and
+  CUDA-graph-safe; contexts below `attention.sparse_min_ctx` (12288) stay
+  bit-identical dense. Qwen3-8B-Q8_0 fp8-KV decode at 32k ctx 160.3 -> 199.5
+  tok/s (+24.5%), 16k +4.9%; short-ctx overhead -2.6..-2.9%. F16/FP8 KV,
+  uniform-geometry non-MLA models. Design + gates:
+  docs/plans/2026-08-28-sparse-decode-attention.md.
 - Request tracing, the id half: a client-sent `X-Request-Id` is echoed on
   every response (refusals included, sanitized, 128-char cap); generation
   endpoints answer with the server completion id when none was sent;

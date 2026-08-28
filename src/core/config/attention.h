@@ -169,5 +169,23 @@ struct Attention {
     // cap which dropped it to FMHA at ~1824). Only allocates what the
     // model's max_tokens×heads needs (capped here); +128 MiB vs 256 at most.
     int attn_scores_mib = 384;
+    // Sparse decode attention (Quest-class top-k page selection). 0 = off.
+    // When > 0, decode attention on full-attention layers reads only the
+    // top-scoring KV blocks (per-block key min/max bound against the query),
+    // up to this many tokens per sequence, selected device-side per step.
+    // Contexts at or below the budget run bit-identical to dense. v1 gates:
+    // F16/FP8 KV, uniform KV geometry, non-growable pool, non-MLA; SWA /
+    // StreamingLLM layers and spec verify chunks keep full attention.
+    // See docs/plans/2026-08-28-sparse-decode-attention.md.
+    int sparse_topk_tokens = 0;
+    // Below this context length decode stays dense even when the budget is
+    // exceeded: the selection's win only outgrows its overhead past ~12k on
+    // the measured dense model (8k measured -7%, 16k +6%, 32k +25%).
+    int sparse_min_ctx = 12288;
+    // Blocks covering the first sparse_sink_tokens positions are always kept.
+    int sparse_sink_tokens = 16;
+    // Blocks covering the last sparse_recent_tokens positions are always kept
+    // (includes the partially filled tail block).
+    int sparse_recent_tokens = 256;
 };
 }  // namespace imp::cfg

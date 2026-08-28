@@ -449,6 +449,68 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
+    // Sparse decode attention scratch (attention.sparse_topk_tokens).
+    // Scores row capacity is the max-context block count so a captured graph
+    // stays in-bounds while the context grows during replay.
+    {
+        const auto& acfg = runtime_config().attention;
+        if (acfg.sparse_topk_tokens > 0) {
+            // Scores row capacity must cover the MAX CONTEXT, not max_tokens_
+            // (the per-forward chunk cap, 4096) - sizing from max_tokens_
+            // silently disabled the whole feature past 4k context (the
+            // dispatch gate checks max_blocks_per_seq against this capacity).
+            // mla_absorb_max_seq_ carries the engine's effective max_seq_len
+            // for every model (executor_workspace.cu).
+            const int max_ctx_tokens = (mla_absorb_max_seq_ > 0) ? mla_absorb_max_seq_ : max_tokens_;
+            const int max_ctx_blocks = (max_ctx_tokens + kKVBlockSize - 1) / kKVBlockSize;
+            const int sink_blocks =
+                (std::max(acfg.sparse_sink_tokens, 0) + kKVBlockSize - 1) / kKVBlockSize;
+            // The recent window always covers at least the partial tail block.
+            const int recent_blocks =
+                std::max(1, (std::max(acfg.sparse_recent_tokens, 0) + kKVBlockSize - 1) / kKVBlockSize);
+            int budget_blocks = (acfg.sparse_topk_tokens + kKVBlockSize - 1) / kKVBlockSize;
+            if (budget_blocks <= sink_blocks + recent_blocks) {
+                budget_blocks = sink_blocks + recent_blocks + 1;
+                IMP_LOG_WARN("attention.sparse_topk_tokens: budget below sink+recent, raised to %d "
+                             "blocks (%d tokens)",
+                             budget_blocks, budget_blocks * kKVBlockSize);
+            }
+            // Identity below sparse_min_ctx (the selection's win only outgrows
+            // its overhead past ~12k measured); the table rows must hold an
+            // identity copy up to that length.
+            const int engage_blocks = std::min(
+                max_ctx_blocks,
+                std::max(budget_blocks, (acfg.sparse_min_ctx + kKVBlockSize - 1) / kKVBlockSize));
+            const int table_blocks = engage_blocks;
+            const int max_batch = max_logit_tokens_;
+            const size_t scores_sz = (size_t)max_batch * max_ctx_blocks * sizeof(float);
+            const size_t bt_sz = (size_t)max_batch * table_blocks * sizeof(int);
+            const size_t ctx_sz = (size_t)max_batch * sizeof(int);
+            auto scores_slab = engine_arena().take_bytes(scores_sz);
+            auto bt_slab = engine_arena().take_bytes(bt_sz);
+            auto ctx_slab = engine_arena().take_bytes(ctx_sz);
+            if (scores_slab.empty() || bt_slab.empty() || ctx_slab.empty()) {
+                IMP_LOG_WARN("sparse decode attention scratch unavailable from the T2 arena "
+                             "(%.1f KiB) - feature disabled",
+                             (scores_sz + bt_sz + ctx_sz) / 1024.0);
+            } else {
+                qscratch_.sparse_scores = reinterpret_cast<float*>(scores_slab.data());
+                qscratch_.sparse_block_tables = reinterpret_cast<int*>(bt_slab.data());
+                qscratch_.sparse_context_lens = reinterpret_cast<int*>(ctx_slab.data());
+                qscratch_.sparse_budget_blocks = budget_blocks;
+                qscratch_.sparse_sink_blocks = sink_blocks;
+                qscratch_.sparse_recent_blocks = recent_blocks;
+                qscratch_.sparse_engage_blocks = engage_blocks;
+                qscratch_.sparse_table_blocks = table_blocks;
+                qscratch_.sparse_max_ctx_blocks = max_ctx_blocks;
+                IMP_LOG_INFO("Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
+                             "recent %d blocks, engage above %d tokens, scratch %.1f KiB",
+                             budget_blocks, budget_blocks * kKVBlockSize, sink_blocks, recent_blocks,
+                             engage_blocks * kKVBlockSize, (scores_sz + bt_sz + ctx_sz) / 1024.0);
+            }
+        }
+    }
+
     // cuBLAS attention S-matrix workspace: [n_heads, attn_seq, attn_seq] FP16.
     // Only the materialized cuBLAS prefill fallback consumes this. On uniform-
     // shape models without learned sinks whose head_dim FA2 covers (128 always,

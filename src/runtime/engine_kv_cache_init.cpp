@@ -674,6 +674,34 @@ bool Engine::init_kv_cache() {
         }
     }
 
+    // Sparse decode attention (attention.sparse_topk_tokens): enable the
+    // per-block key min/max metadata pool. v1 gates - F16/FP8 KV (metadata
+    // reads keys back from the cache), non-MLA, token_recycling off
+    // (copy_blocks_device does not copy metadata); enable_key_minmax itself
+    // refuses per-layer geometry and growable pools. A refused gate disables
+    // the feature loudly and changes nothing else.
+    if (runtime_config_.attention.sparse_topk_tokens > 0) {
+        const QType kvt = config_.kv_cache_dtype;
+        const char* refuse = nullptr;
+        if (kvt != QType::F16 && kvt != QType::FP8_E4M3)
+            refuse = "KV dtype (needs f16 or fp8)";
+        else if (mcfg.is_mla())
+            refuse = "MLA model";
+        else if (runtime_config_.speculative.token_recycling)
+            refuse = "speculative.token_recycling";
+        else if (!config_.prefix_cache_path.empty())
+            refuse = "persistent prefix cache (disk-restored blocks bypass the KV write path and "
+                     "would carry empty metadata)";
+        if (refuse) {
+            IMP_LOG_WARN("attention.sparse_topk_tokens=%d ignored: %s",
+                         runtime_config_.attention.sparse_topk_tokens, refuse);
+        } else if (!kv_cache_raw_->enable_key_minmax()) {
+            IMP_LOG_WARN("attention.sparse_topk_tokens=%d ignored: metadata pool unavailable "
+                         "(per-layer KV geometry, growable pool, or allocation failure)",
+                         runtime_config_.attention.sparse_topk_tokens);
+        }
+    }
+
     if (config_.use_prefix_caching) {
         kv_manager_->set_prefix_caching_enabled(true);
         // cache_control/cache_prompt pin budget: percent of the pool,

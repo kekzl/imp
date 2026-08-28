@@ -51,6 +51,7 @@ numbers below carry over unchanged.
 | 2026-06-09 | `ec9145b3` | 13.3 | Gemma-4-26B-A4B | Q4_K_M | tg128 | 273 | `imp-cli --model gemma-4-26B-A4B-it-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 128` |
 | 2026-07-11 | `6946a6cd` | 13.3 | Qwen3.6-35B-A3B (hybrid) | Q4_K_M | tg256 | 213 | `imp-cli --model Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --bench --bench-pp 16 --bench-reps 10 --max-tokens 256` — legacy path; superseded by the row below |
 | 2026-07-11 | fp8-ssm-gguf | 13.3 | Qwen3.6-35B-A3B (hybrid) | Q4_K_M | tg256 | **272** | same command — `gemm.fp8_ssm_proj` now also covers the Q8_0-kept GDN projections of UD quants (dequant→FP8 sidecar at init): 224.4 → 272.0 defaults (+21%), 219.2 → 265.9 spec-off, same session. PPL 4.215 → 4.289 (+1.8%, 201-token corpus) — documented trade like `nvfp4_lm_head_gdn`; degen_suite 33/33 PASS. Now ahead of llama.cpp (~229) |
+| 2026-08-28 | `899301c6` | 13.3 | Qwen3-8B | Q8_0 (fp8 KV) | tg136 @32k ctx | **199.5** | `imp-cli --model Qwen3-8B-Q8_0.gguf --kv-fp8 --bench --bench-pp 32768 --bench-reps 1 --max-tokens 136 --max-seq-len 40960 --set speculative.ngram=false --set attention.sparse_topk_tokens=4096` — sparse decode attention; dense same command without the last flag: 160.3 (+24.5%, 3/3 alternating rounds). 16k: 212.0 vs 202.1 (+4.9%) |
 
 > Canonical gated decode number = `perf_baseline.json` Qwen3-8B-Q8_0 tg128 =
 > 269.5 (cold-median, 5 trials × 5 reps, 2026-06-12, clocks verified healthy

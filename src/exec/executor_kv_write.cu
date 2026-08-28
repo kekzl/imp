@@ -4,6 +4,7 @@
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
+#include "exec/sparse_attn_select.h"
 #include "quant/fp8_quant.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
@@ -224,6 +225,18 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size, n,
             wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
+    }
+
+    // Sparse decode attention: maintain per-block key min/max after a PREFILL
+    // KV write (reads the written K rows back from the cache, dtype-exact).
+    // Decode steps batch all layers into one launch at the end of the forward
+    // (run_forward) instead - 1 launch vs n_layers. SWA layers keep full
+    // window attention and carry no metadata. The init gate
+    // (engine_kv_cache_init) only enables the pool for F16/FP8 caches.
+    if (state.is_prefill && !layer_swa && cache->key_minmax_enabled()) {
+        sparse_update_key_minmax(cache->qtype(), cache->k_ptr(kv_layer, 0),
+                                 cache->key_minmax_ptr(kv_layer, 0), positions, block_tables, nkv, hd,
+                                 kv_block_size, n, wr_max_blocks, wr_n_seq, stream);
     }
 
     // ─── Phase 3c: BitDecoding residual write-through (decode only) ────────

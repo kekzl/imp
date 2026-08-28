@@ -229,6 +229,10 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("attention.fp8_tile", cfg.attention.fp8_tile);
     B("attention.fp8_tile_gqa", cfg.attention.fp8_tile_gqa);
     B("attention.gate_concat", cfg.attention.gate_concat);
+    I("attention.sparse_topk_tokens", cfg.attention.sparse_topk_tokens);
+    I("attention.sparse_min_ctx", cfg.attention.sparse_min_ctx);
+    I("attention.sparse_sink_tokens", cfg.attention.sparse_sink_tokens);
+    I("attention.sparse_recent_tokens", cfg.attention.sparse_recent_tokens);
 
     // [moe]
     I("moe.expert_overhead_pct", cfg.moe.expert_overhead_pct);

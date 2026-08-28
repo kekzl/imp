@@ -58,6 +58,10 @@
                 state.max_blocks_per_seq, state.n_sequences, nkv, hd, layer_rope_theta, inv_scaling, pairs,
                 cfg.rope_neox, longrope_freqs);
             IMP_CUDA_CHECK_LAUNCH();
+            // Sparse decode attention metadata is updated for ALL layers in
+            // one batched launch at the end of the forward (run_forward) -
+            // selection force-includes the recent blocks, so the one-step lag
+            // is harmless.
         } else {
             write_kv_cache(layer, state, stream);
         }
@@ -158,6 +162,43 @@
         // L2 persistence hint: keep this layer's KV cache in L2 during attention.
         // RTX 5090 has 96 MB L2 — enough for ~3K tokens of KV at FP8.
         set_l2_persist_kv(stream, k_c.data, k_c.nbytes() + v_c.nbytes());
+
+        // Sparse decode attention (attention.sparse_topk_tokens): score all
+        // context blocks against the current queries and swap in a compacted
+        // block table + context lens. The paged kernels below are unmodified;
+        // contexts at or below the budget pass through bit-identically. Only
+        // plain decode on full-attention layers (spec verify chunks and
+        // SWA/streaming layers keep full attention; the init gate limits the
+        // metadata pool to F16/FP8 caches, non-MLA, uniform geometry).
+        const int* attn_bt = layer_block_tables;
+        const int* attn_ctx_lens = state.context_lens;
+        int attn_max_blocks = state.max_blocks_per_seq;
+        if (qscratch_.sparse_budget_blocks > 0 && cache->key_minmax_enabled() &&
+            layer_sliding_window <= 0 && layer_n_sinks <= 0 && !state.chunk_decode_attn &&
+            n == n_seq && attn_max_blocks > 0 &&
+            attn_max_blocks <= qscratch_.sparse_max_ctx_blocks && nh / nkv <= 16) {
+            // Proof-of-activity for A/B arms: the selection itself is decided
+            // device-side, but max_context_len is a host value - once it
+            // exceeds the budget, at least one sequence is actually sparse.
+            static bool logged_sparse_active = false;
+            if (!logged_sparse_active &&
+                state.max_context_len > qscratch_.sparse_budget_blocks * kv_bs) {
+                logged_sparse_active = true;
+                IMP_LOG_INFO("sparse decode attention ACTIVE: ctx %d > budget %d tokens",
+                             state.max_context_len, qscratch_.sparse_budget_blocks * kv_bs);
+            }
+            sparse_select_blocks(static_cast<const half*>(q4.data),
+                                 cache->key_minmax_ptr(kv_layer, 0), layer_block_tables,
+                                 state.context_lens, n_seq, nh, nkv, hd, kv_bs,
+                                 state.max_blocks_per_seq, qscratch_.sparse_budget_blocks,
+                                 qscratch_.sparse_sink_blocks, qscratch_.sparse_recent_blocks,
+                                 qscratch_.sparse_engage_blocks, qscratch_.sparse_table_blocks,
+                                 qscratch_.sparse_scores, qscratch_.sparse_block_tables,
+                                 qscratch_.sparse_context_lens, stream);
+            attn_bt = qscratch_.sparse_block_tables;
+            attn_ctx_lens = qscratch_.sparse_context_lens;
+            attn_max_blocks = qscratch_.sparse_table_blocks;
+        }
 
         if (cache_dtype == QType::INT4) {
             dispatch_record::set_attn_decode(AttnDecodePath::INT4);
@@ -291,16 +332,16 @@
                                  ? kv_scales_[kv_layer]
                                  : 1.0f;
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            paged_attention_decode_fp8(q4, k_c, v_c, o4, layer_block_tables, state.context_lens, kv_bs, scale,
+            paged_attention_decode_fp8(q4, k_c, v_c, o4, attn_bt, attn_ctx_lens, kv_bs, scale,
                                        kv_scale, state.max_context_len, layer_sliding_window,
-                                       cfg.attn_logit_softcap, stream, state.max_blocks_per_seq,
+                                       cfg.attn_logit_softcap, stream, attn_max_blocks,
                                        layer_n_sinks, attn_sinks);
         } else {
             dispatch_record::set_attn_decode(AttnDecodePath::FP16);
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            paged_attention_decode(q4, k_c, v_c, o4, layer_block_tables, state.context_lens, kv_bs, scale,
+            paged_attention_decode(q4, k_c, v_c, o4, attn_bt, attn_ctx_lens, kv_bs, scale,
                                    state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                   stream, state.max_blocks_per_seq, layer_n_sinks, attn_sinks, vhd);
+                                   stream, attn_max_blocks, layer_n_sinks, attn_sinks, vhd);
         }
         if (attn_sinks && !paged_attention_applies_sinks(cache_dtype)) {
             static bool warned_sinks_kv = false;
