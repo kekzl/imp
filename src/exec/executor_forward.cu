@@ -35,6 +35,7 @@
 #include "compute/hadamard.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
+#include "exec/sparse_attn_select.h"
 #include "runtime/pdl.h"
 
 #include <cuda_runtime.h>
@@ -581,6 +582,26 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         }
     }
     cur_layer_ = -1;  // past the layers: the LM head is not a calibration target
+
+    // Sparse decode attention: batched key min/max update, all KV layers in
+    // one launch, decode only (prefill updates per layer in write_kv_cache).
+    // Inside the captured graph like everything above; the one-step lag is
+    // covered by the selection's forced recent blocks.
+    if (!state.is_prefill && state.kv_cache != nullptr && state.kv_cache->key_minmax_enabled() &&
+        state.block_tables != nullptr && state.n_tokens > 0) {
+        KVCache* kvc = state.kv_cache;
+        const int n_kv = kvc->n_layers();
+        const int64_t k_stride =
+            (n_kv > 1) ? static_cast<char*>(kvc->k_ptr(1, 0)) - static_cast<char*>(kvc->k_ptr(0, 0)) : 0;
+        const int64_t mm_stride = (n_kv > 1) ? static_cast<char*>(kvc->key_minmax_ptr(1, 0)) -
+                                                   static_cast<char*>(kvc->key_minmax_ptr(0, 0))
+                                             : 0;
+        sparse_update_key_minmax_all_layers(kvc->qtype(), kvc->k_ptr(0, 0), k_stride,
+                                            kvc->key_minmax_ptr(0, 0), mm_stride, state.positions,
+                                            state.block_tables, n_kv, kvc->n_kv_heads(), kvc->head_dim(),
+                                            kvc->block_size(), state.n_tokens, state.max_blocks_per_seq,
+                                            state.n_sequences, stream);
+    }
 
     // BitDecoding Phase 3: advance the residual ring state once per decode
     // step. Has to happen INSIDE the captured graph (otherwise replays would

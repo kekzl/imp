@@ -58,16 +58,10 @@
                 state.max_blocks_per_seq, state.n_sequences, nkv, hd, layer_rope_theta, inv_scaling, pairs,
                 cfg.rope_neox, longrope_freqs);
             IMP_CUDA_CHECK_LAUNCH();
-            // Sparse decode attention: maintain per-block key min/max (reads
-            // the post-RoPE K rows back from the cache). Gate on the layer's
-            // STATIC window so a runtime StreamingLLM override cannot leave
-            // holes in the metadata of a full-attention layer.
-            if (cache->key_minmax_enabled() && layer_swa_window(cfg, prof, layer) <= 0) {
-                sparse_update_key_minmax(cache->qtype(), cache->k_ptr(kv_layer, 0),
-                                         cache->key_minmax_ptr(kv_layer, 0), state.positions,
-                                         layer_block_tables, nkv, hd, kv_block_size_d, n,
-                                         state.max_blocks_per_seq, state.n_sequences, stream);
-            }
+            // Sparse decode attention metadata is updated for ALL layers in
+            // one batched launch at the end of the forward (run_forward) -
+            // selection force-includes the recent blocks, so the one-step lag
+            // is harmless.
         } else {
             write_kv_cache(layer, state, stream);
         }
@@ -198,11 +192,12 @@
                                  state.context_lens, n_seq, nh, nkv, hd, kv_bs,
                                  state.max_blocks_per_seq, qscratch_.sparse_budget_blocks,
                                  qscratch_.sparse_sink_blocks, qscratch_.sparse_recent_blocks,
+                                 qscratch_.sparse_engage_blocks, qscratch_.sparse_table_blocks,
                                  qscratch_.sparse_scores, qscratch_.sparse_block_tables,
                                  qscratch_.sparse_context_lens, stream);
             attn_bt = qscratch_.sparse_block_tables;
             attn_ctx_lens = qscratch_.sparse_context_lens;
-            attn_max_blocks = qscratch_.sparse_budget_blocks;
+            attn_max_blocks = qscratch_.sparse_table_blocks;
         }
 
         if (cache_dtype == QType::INT4) {

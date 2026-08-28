@@ -475,9 +475,16 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              "blocks (%d tokens)",
                              budget_blocks, budget_blocks * kKVBlockSize);
             }
+            // Identity below sparse_min_ctx (the selection's win only outgrows
+            // its overhead past ~12k measured); the table rows must hold an
+            // identity copy up to that length.
+            const int engage_blocks = std::min(
+                max_ctx_blocks,
+                std::max(budget_blocks, (acfg.sparse_min_ctx + kKVBlockSize - 1) / kKVBlockSize));
+            const int table_blocks = engage_blocks;
             const int max_batch = max_logit_tokens_;
             const size_t scores_sz = (size_t)max_batch * max_ctx_blocks * sizeof(float);
-            const size_t bt_sz = (size_t)max_batch * budget_blocks * sizeof(int);
+            const size_t bt_sz = (size_t)max_batch * table_blocks * sizeof(int);
             const size_t ctx_sz = (size_t)max_batch * sizeof(int);
             auto scores_slab = engine_arena().take_bytes(scores_sz);
             auto bt_slab = engine_arena().take_bytes(bt_sz);
@@ -493,11 +500,13 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.sparse_budget_blocks = budget_blocks;
                 qscratch_.sparse_sink_blocks = sink_blocks;
                 qscratch_.sparse_recent_blocks = recent_blocks;
+                qscratch_.sparse_engage_blocks = engage_blocks;
+                qscratch_.sparse_table_blocks = table_blocks;
                 qscratch_.sparse_max_ctx_blocks = max_ctx_blocks;
                 IMP_LOG_INFO("Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
-                             "recent %d blocks, scratch %.1f KiB",
+                             "recent %d blocks, engage above %d tokens, scratch %.1f KiB",
                              budget_blocks, budget_blocks * kKVBlockSize, sink_blocks, recent_blocks,
-                             (scores_sz + bt_sz + ctx_sz) / 1024.0);
+                             engage_blocks * kKVBlockSize, (scores_sz + bt_sz + ctx_sz) / 1024.0);
             }
         }
     }

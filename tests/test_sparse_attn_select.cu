@@ -251,8 +251,12 @@ protected:
     // Build metadata where block b's bound for every head is `weight[b]`:
     // min = max = weight[b] on dim 0 of each kv head, 0 elsewhere, and
     // q = 1 on dim 0 of each head -> score(b) == weight[b] exactly.
+    // engage_blocks defaults to budget_blocks (sparse_min_ctx off).
     void run_select(const std::vector<float>& weight, int ctx_len, int budget_blocks, int sink_blocks,
-                    int recent_blocks, std::vector<int>& out_bt, int& out_ctx) {
+                    int recent_blocks, std::vector<int>& out_bt, int& out_ctx, int engage_blocks = 0) {
+        if (engage_blocks <= 0)
+            engage_blocks = budget_blocks;
+        const int table_blocks = std::max(budget_blocks, engage_blocks);
         const int n_blocks = (ctx_len + kBS - 1) / kBS;
         ASSERT_LE(n_blocks, static_cast<int>(weight.size()));
         const int mbps = static_cast<int>(weight.size());
@@ -282,14 +286,15 @@ protected:
         int* d_ctx = dmalloc<int>(1);
         dcopy(d_ctx, ctx_h);
         float* d_scores = dmalloc<float>(mbps);
-        int* d_sbt = dmalloc<int>(budget_blocks);
+        int* d_sbt = dmalloc<int>(table_blocks);
         int* d_sctx = dmalloc<int>(1);
-        cudaMemset(d_sbt, 0xFF, budget_blocks * sizeof(int));
+        cudaMemset(d_sbt, 0xFF, table_blocks * sizeof(int));
 
         sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/1, nh, nkv, hd, kBS, mbps, budget_blocks,
-                             sink_blocks, recent_blocks, d_scores, d_sbt, d_sctx, nullptr);
+                             sink_blocks, recent_blocks, engage_blocks, table_blocks, d_scores, d_sbt,
+                             d_sctx, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-        out_bt = dread(d_sbt, budget_blocks);
+        out_bt = dread(d_sbt, table_blocks);
         out_ctx = dread(d_sctx, 1)[0];
         cudaFree(d_mm);
         cudaFree(d_q);
@@ -308,6 +313,18 @@ TEST_F(SparseSelectTest, IdentityPassThrough) {
     run_select(w, /*ctx_len=*/85, /*budget=*/8, /*sink=*/1, /*recent=*/1, out, ctx);
     EXPECT_EQ(ctx, 85);
     for (int b = 0; b < 6; b++)
+        EXPECT_EQ(out[b], 100 + b) << "identity table row";
+}
+
+TEST_F(SparseSelectTest, EngageThresholdKeepsIdentity) {
+    // 12 blocks > budget 6, but engage 16 -> identity (sparse_min_ctx regime).
+    std::vector<float> w(12, 0.f);
+    std::vector<int> out;
+    int ctx = 0;
+    run_select(w, /*ctx_len=*/190, /*budget=*/6, /*sink=*/1, /*recent=*/2, out, ctx,
+               /*engage_blocks=*/16);
+    EXPECT_EQ(ctx, 190);
+    for (int b = 0; b < 12; b++)
         EXPECT_EQ(out[b], 100 + b) << "identity table row";
 }
 
@@ -396,8 +413,8 @@ TEST(SparseAttnE2E, IdentityTableBitIdentical) {
     float* d_scores = dmalloc<float>(8);
     int* d_sbt = dmalloc<int>(8);
     int* d_sctx = dmalloc<int>(1);
-    sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, 1, nh, nkv, hd, kBS, 6, /*budget=*/8, 1, 1, d_scores,
-                         d_sbt, d_sctx, nullptr);
+    sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, 1, nh, nkv, hd, kBS, 6, /*budget=*/8, 1, 1,
+                         /*engage=*/8, /*table=*/8, d_scores, d_sbt, d_sctx, nullptr);
     paged_attention_decode(Q, K, V, O2, d_sbt, d_sctx, kBS, scale, ctx_len, 0, 0.0f, nullptr, 8);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 

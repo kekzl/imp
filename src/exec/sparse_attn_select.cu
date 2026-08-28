@@ -87,6 +87,66 @@ __global__ void sparse_update_key_minmax_kernel(const CacheT* __restrict__ k_cac
     }
 }
 
+// All-layers batched variant for decode: one launch covers every KV layer
+// (grid.y). The per-layer form cost 36 launches x ~2.4-5.9 us per decode
+// step; batching is legal because decode selection force-includes the recent
+// blocks, so metadata may lag the current step's write by one step without
+// affecting which blocks the bound can exclude.
+template <typename CacheT>
+__global__ void sparse_update_key_minmax_layers_kernel(
+    const CacheT* __restrict__ k_base, int64_t k_layer_stride,  // elems
+    __half2* __restrict__ mm_base, int64_t mm_layer_stride,     // half2 elems
+    const int* __restrict__ positions, const int* __restrict__ block_tables, int row_elems,
+    int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
+    const int token_idx = blockIdx.x;
+    const int layer = blockIdx.y;
+    if (token_idx >= n_tokens)
+        return;
+    const int pos = positions[token_idx];
+    int slot;
+    const int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq,
+                                         n_sequences, slot);
+    if (block_id < 0)
+        return;
+    if (token_idx > 0) {
+        int prev_slot;
+        const int prev_block = kv_resolve_slot(block_tables, positions[token_idx - 1], block_size,
+                                               token_idx - 1, max_blocks_per_seq, n_sequences, prev_slot);
+        if (prev_block == block_id)
+            return;
+    }
+    int span = 1;
+    while (token_idx + span < n_tokens && span < block_size) {
+        int s2;
+        const int b2 = kv_resolve_slot(block_tables, positions[token_idx + span], block_size,
+                                       token_idx + span, max_blocks_per_seq, n_sequences, s2);
+        if (b2 != block_id)
+            break;
+        span++;
+    }
+    const CacheT* blk =
+        k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems;
+    __half2* mm = mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems;
+    const bool init = (slot == 0);
+    for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
+        float mn, mx;
+        if (init) {
+            mn = FLT_MAX;
+            mx = -FLT_MAX;
+        } else {
+            const __half2 cur = mm[e];
+            mn = __low2float(cur);
+            mx = __high2float(cur);
+        }
+        for (int j = 0; j < span; j++) {
+            const float v = cache_val_to_float(blk[(int64_t)(slot + j) * row_elems + e]);
+            mn = fminf(mn, v);
+            mx = fmaxf(mx, v);
+        }
+        mm[e] = __floats2half2_rn(mn, mx);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Block scoring. One warp per block, grid-stride over blocks (grid shape is
 // context-independent - capture-safe while ctx grows during replay).
@@ -104,10 +164,15 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
                                            const int* __restrict__ context_lens,
                                            float* __restrict__ scores, int n_heads, int n_kv_heads,
                                            int head_dim, int block_size, int max_blocks_per_seq,
-                                           int scores_stride) {
+                                           int scores_stride, int engage_blocks) {
     const int seq = blockIdx.y;
     const int ctx_len = context_lens[seq];
     const int n_blocks = (ctx_len + block_size - 1) / block_size;
+    // Identity regime (selection copies the table verbatim) or a CTA past the
+    // work: exit before the q smem staging - at short contexts the staging
+    // dominated the launch (256 CTAs x 8 KiB of dead q traffic).
+    if (n_blocks <= engage_blocks || blockIdx.x * kScoreWarps >= n_blocks)
+        return;
     const int q_elems = n_heads * head_dim;
     extern __shared__ half q_smem[];
     const half* q_seq = q + (int64_t)seq * q_elems;
@@ -212,14 +277,15 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
                                           const int* __restrict__ context_lens,
                                           int* __restrict__ sparse_bt, int* __restrict__ sparse_ctx,
                                           int block_size, int max_blocks_per_seq, int scores_stride,
-                                          int budget_blocks, int sink_blocks, int recent_blocks) {
+                                          int budget_blocks, int sink_blocks, int recent_blocks,
+                                          int engage_blocks, int table_blocks) {
     const int seq = blockIdx.x;
     const int ctx_len = context_lens[seq];
     const int n_blocks = (ctx_len + block_size - 1) / block_size;
     const int* bt = block_tables + (int64_t)seq * max_blocks_per_seq;
-    int* out = sparse_bt + (int64_t)seq * budget_blocks;
+    int* out = sparse_bt + (int64_t)seq * table_blocks;
 
-    if (n_blocks <= budget_blocks) {
+    if (n_blocks <= engage_blocks) {
         // Identity: attention over this table is bit-identical to dense.
         for (int i = threadIdx.x; i < n_blocks; i += blockDim.x)
             out[i] = bt[i];
@@ -397,11 +463,37 @@ void sparse_update_key_minmax(QType cache_dtype, const void* k_cache_base, void*
     }
 }
 
+void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
+                                         void* minmax_base, int64_t mm_layer_stride_bytes,
+                                         const int* positions, const int* block_tables, int n_layers,
+                                         int n_kv_heads, int head_dim, int block_size, int n_tokens,
+                                         int max_blocks_per_seq, int n_sequences, cudaStream_t stream) {
+    if (n_tokens <= 0 || n_layers <= 0)
+        return;
+    const int row_elems = n_kv_heads * head_dim;
+    const int threads = 128;
+    const dim3 grid(n_tokens, n_layers);
+    const int64_t mm_stride = mm_layer_stride_bytes / (int64_t)sizeof(__half2);
+    if (cache_dtype == QType::FP8_E4M3) {
+        sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3><<<grid, threads, 0, stream>>>(
+            static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
+            static_cast<__half2*>(minmax_base), mm_stride, positions, block_tables, row_elems, block_size,
+            n_tokens, max_blocks_per_seq, n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
+        sparse_update_key_minmax_layers_kernel<half><<<grid, threads, 0, stream>>>(
+            static_cast<const half*>(k_base), k_layer_stride_bytes / (int64_t)sizeof(half),
+            static_cast<__half2*>(minmax_base), mm_stride, positions, block_tables, row_elems, block_size,
+            n_tokens, max_blocks_per_seq, n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+}
+
 void sparse_select_blocks(const half* q, const void* minmax_base, const int* block_tables,
                           const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
                           int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
-                          int recent_blocks, float* scores_scratch, int* sparse_block_tables,
-                          int* sparse_context_lens, cudaStream_t stream) {
+                          int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
+                          int* sparse_block_tables, int* sparse_context_lens, cudaStream_t stream) {
     // Fixed grid.x: work distribution adapts device-side via grid-stride, so a
     // captured graph stays correct while the context grows during replay.
     // 256 CTAs: 32 left the kernel latency-bound (151 us at 32k ctx, 19% of
@@ -411,7 +503,7 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);
     sparse_score_blocks_kernel<<<score_grid, kScoreThreads, q_smem, stream>>>(
         q, static_cast<const __half2*>(minmax_base), block_tables, context_lens, scores_scratch, n_heads,
-        n_kv_heads, head_dim, block_size, max_blocks_per_seq, max_blocks_per_seq);
+        n_kv_heads, head_dim, block_size, max_blocks_per_seq, max_blocks_per_seq, engage_blocks);
     IMP_CUDA_CHECK_LAUNCH();
 
     const int n_words = (max_blocks_per_seq + 31) / 32;
@@ -426,7 +518,8 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     }
     sparse_select_topk_kernel<<<n_seq, kSelectThreads, sel_smem, stream>>>(
         scores_scratch, block_tables, context_lens, sparse_block_tables, sparse_context_lens, block_size,
-        max_blocks_per_seq, max_blocks_per_seq, budget_blocks, sink_blocks, recent_blocks);
+        max_blocks_per_seq, max_blocks_per_seq, budget_blocks, sink_blocks, recent_blocks, engage_blocks,
+        table_blocks);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

@@ -178,6 +178,10 @@ struct Attention {
     // StreamingLLM layers and spec verify chunks keep full attention.
     // See docs/plans/2026-08-28-sparse-decode-attention.md.
     int sparse_topk_tokens = 0;
+    // Below this context length decode stays dense even when the budget is
+    // exceeded: the selection's win only outgrows its overhead past ~12k on
+    // the measured dense model (8k measured -7%, 16k +6%, 32k +25%).
+    int sparse_min_ctx = 12288;
     // Blocks covering the first sparse_sink_tokens positions are always kept.
     int sparse_sink_tokens = 16;
     // Blocks covering the last sparse_recent_tokens positions are always kept
