@@ -1,9 +1,38 @@
 # Sparse decode attention: Quest-class top-k page selection
 
-Status: in progress (2026-08-28). Roadmap Open item 2 (long context served by a
-2023-era answer). Mechanism trigger per the BitDecoding shelf note: paged
+Status: SHIPPED opt-in (2026-08-28). Roadmap Open item 2 (long context served
+by a 2023-era answer). Mechanism trigger per the BitDecoding shelf note: paged
 attention is 19.9%/43.9% of the dense decode window at 8k/32k and 29.1%/50.6%
 on MoE (ceiling 1.76-2.0x at 32k if attention were free).
+
+## Measured (Qwen3-8B-Q8_0, fp8 KV, budget 4096, 3/3 alternating rounds)
+
+| ctx | dense tok/s | sparse tok/s | delta | regime |
+|---|---:|---:|---:|---|
+| 32768 | 160.3 | 199.5 | +24.5% | selection |
+| 16384 | 202.1 | 212.0 | +4.9% | selection |
+| 8192 | 230.4 | 223.8 | -2.9% | identity (`sparse_min_ctx`) |
+| 2048 | 258.1 | 251.5 | -2.6% | identity |
+
+```
+[PROV: commit=899301c6 date=2026-08-28 hw=RTX5090 model=Qwen3-8B-Q8_0
+       quant=Q8_0 (fp8 KV) cuda=13.3 path=imp-cli n=3 alternating rounds,
+       fresh process per arm, make-build image
+       cmd=`imp-cli --kv-fp8 --bench --bench-pp 32768|16384|8192|2048
+       --bench-reps 1 --max-tokens 136 --max-seq-len 40960
+       --set speculative.ngram=false [--set attention.sparse_topk_tokens=4096]`]
+```
+
+Kernel budget per layer per step at 32k (nsys, dev build, same code): score
+14.7 us + select 11.7 + batched minmax update (amortized) + paged attention
+11.6 vs dense attention 74.4. Two build-out lessons, measured: sizing the
+scores row from `max_tokens_` (the 4k per-forward chunk cap) silently disabled
+the gate past 4k ctx - the first NIAH/perf pass measured dense vs dense; and
+the identity regime cost -11..-14% before the score kernel exited ahead of its
+q-smem staging and the per-layer metadata updates were batched into one
+launch. Under CUDA graphs a host-side "feature active" log line can never fire
+(dispatch code runs at capture, kernels at replay) - activity proof is nsys
+kernel presence, not logs.
 
 ## Mechanism
 
@@ -72,10 +101,21 @@ short ctx: +3 graph-replayed launches per attention layer per step
   `attention.sparse_topk_tokens|sparse_sink_tokens|sparse_recent_tokens`
 - `src/runtime/engine_kv_cache_init.cpp` - eligibility + pool pricing
 
-## Measurement plan
+## Quality (NIAH, Qwen3-8B-Q8_0 fp8 KV, 16k ctx, 5 depths x 3 seeds)
+
+| arm | pass | note |
+|---|---:|---|
+| dense (`fp8_ng`) | 15/15 | |
+| sparse budget 4096 | 12/15 | 3/3 repeat rounds fail the IDENTICAL 3 cells; all 3 retrieve the needle VERBATIM at `--max-tokens 768` - the harness's 384-token cap is think-budget exhaustion (Qwen3 shares think+answer budget), not a retrieval miss |
+| sparse budget 2048 | 15/15 | 8x page sparsity |
+
+`speculative.ngram=false` in every arm: prompt-lookup would draft the answer
+straight from the needle and verify it with FULL attention, masking a broken
+selection. 32k NIAH is blocked by the harness passing the prompt as one argv
+(ARG_MAX 128k/arg); needs a prompt-file path in imp-cli.
+
+## Measurement plan (done, results above)
 
 - Identity: budget >= n_blocks output bit-identical vs dense (unit + e2e).
-- Quality: `tools/eval/niah/niah_bench.py` at 8k-32k, budget 4096, vs dense;
-  degen suite.
-- Perf: decode A/B at 8k/32k prefill on a dense model, alternating arms,
-  `make build` image.
+- Quality: `tools/eval/niah/niah_bench.py` at 16k, budgets 4096/2048 vs dense.
+- Perf: decode A/B at 2k/8k/16k/32k, alternating arms, `make build` image.

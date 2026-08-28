@@ -143,11 +143,21 @@ Ranked by what an agent workload notices first.
    (`tests/test_scheduler.cpp`). *History (#1634):* scheduling never was
    arrival order - shortest-first on every arrival starved long prompts;
    `Scheduler::kAgingRounds` bounds that.
-2. **Long context is served by a 2023-era answer.** Only sparsity is
-   StreamingLLM sink + sliding window (`attention_paged_common.cuh:71`),
-   which drops what falls out. The field keeps the context and reads it
-   sparsely (HiSparse: 5x on long-context workloads). At 100k-token agent
-   sessions on 32 GB that is forgetting the middle vs paying for it.
+2. **Long context is served by a 2023-era answer - half closed 2026-08-28.**
+   Shipped: Quest-class top-k page selection for decode
+   (`attention.sparse_topk_tokens`, opt-in) - keeps the whole KV, reads the
+   top-scoring blocks per step (per-block key min/max bound, device-side,
+   graph-safe, dense-identical below `sparse_min_ctx`). Qwen3-8B-Q8_0 fp8-KV
+   decode, 3/3 alternating rounds, `make build` image: 32k ctx 160.3 ->
+   199.5 tok/s (+24.5%), 16k +4.9%, identity regime -2.6..-2.9%. NIAH 16k:
+   dense 15/15, budget-2048 15/15, budget-4096 12/15 where all 3 "fails"
+   are think-budget exhaustion at the harness's 384-token cap (needle
+   retrieved verbatim at 768). Detail + gates in
+   [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md).
+   Remaining: v1 gates (F16/FP8 KV, non-MLA, uniform geometry, plain decode
+   only - spec verify chunks keep full attention), no prefill sparsity, and
+   StreamingLLM eviction (`attention_paged_common.cuh:71`) is still the only
+   answer under KV-pool pressure.
 3. **Speculation does not adapt to the request.** `speculative` is a
    per-request bool and the drafter choice is global. *Half closed
    2026-08-27:* the MTP chain depth now adapts per request between 1 and
