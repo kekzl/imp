@@ -37,6 +37,7 @@
 #include "compute/hadamard.h"
 #include "compute/mla_kv_assemble.h"
 #include "compute/mla_absorb.h"
+#include "exec/sparse_attn_select.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"

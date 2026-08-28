@@ -68,6 +68,16 @@ struct QuantScratch {
     void* splitk = nullptr;
     size_t splitk_size = 0;
 
+    // --- Sparse decode attention scratch (attention.sparse_topk_tokens) ---
+    // budget_blocks == 0 means the feature is inactive for this engine.
+    float* sparse_scores = nullptr;      // [max_batch, max_ctx_blocks] block scores
+    int* sparse_block_tables = nullptr;  // [max_batch, sparse_budget_blocks]
+    int* sparse_context_lens = nullptr;  // [max_batch]
+    int sparse_budget_blocks = 0;
+    int sparse_sink_blocks = 0;
+    int sparse_recent_blocks = 0;
+    int sparse_max_ctx_blocks = 0;  // capacity of a sparse_scores row
+
     // Free all buffers.
     void free(VRAMAllocator* alloc);
 };

@@ -345,6 +345,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_gemm_smallm.cu
     src/exec/executor_kernels.cu
     src/exec/executor_kv_write_kernels.cu
+    src/exec/sparse_attn_select.cu
     src/exec/executor_elementwise.cu
     src/exec/decode_pipeline_advance.cu
     src/exec/pre_dequant_phase3_fp8.cu
@@ -882,6 +883,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_paged_nvfp4_tc.cu
         tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
+        tests/test_sparse_attn_select.cu
     )
 
     imp_add_test_module(test-quant SOURCES

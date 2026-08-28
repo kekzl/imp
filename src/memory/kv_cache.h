@@ -110,6 +110,15 @@ public:
     void* k_ptr(int layer, int block_id);
     void* v_ptr(int layer, int block_id);
 
+    // Sparse decode attention (attention.sparse_topk_tokens): optional per-block
+    // key min/max metadata pool. Layout per (layer, block): n_kv_heads * head_dim
+    // half2 pairs, (min, max) interleaved. Scalar-geometry pools only (the
+    // per-layer ctor refuses). Returns false when ineligible or the allocation
+    // fails; every other behaviour is then unchanged.
+    bool enable_key_minmax();
+    bool key_minmax_enabled() const { return minmax_pool_ != nullptr; }
+    void* key_minmax_ptr(int layer, int block_id);
+
     // INT8/INT4/NVFP4/MXFP4_KV per-head scale access (nullptr if not applicable).
     // NVFP4/MXFP4_KV: 1 scale byte per kNVFP4Group=16 FP4 elems along head_dim.
     void* k_scale_ptr(int layer, int block_id);
@@ -213,6 +222,10 @@ private:
     // Layout: 2x blocks per layer (K scales region + V scales region).
     void* scale_pool_ = nullptr;
     size_t scale_block_bytes_ = 0;  // block_size * n_kv_heads * sizeof(half)
+
+    // Sparse decode attention key min/max metadata (see enable_key_minmax).
+    void* minmax_pool_ = nullptr;
+    size_t minmax_block_bytes_ = 0;  // n_kv_heads * head_dim * 2 * sizeof(half)
 
     // copy_blocks_device per-layer offset table (lazy device upload):
     // 6 size_t per layer {k_off, v_off, block_bytes, k_scale_off,
