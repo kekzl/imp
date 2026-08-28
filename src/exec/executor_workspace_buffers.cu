@@ -455,7 +455,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     {
         const auto& acfg = runtime_config().attention;
         if (acfg.sparse_topk_tokens > 0) {
-            const int max_ctx_blocks = (max_tokens_ + kKVBlockSize - 1) / kKVBlockSize;
+            // Scores row capacity must cover the MAX CONTEXT, not max_tokens_
+            // (the per-forward chunk cap, 4096) - sizing from max_tokens_
+            // silently disabled the whole feature past 4k context (the
+            // dispatch gate checks max_blocks_per_seq against this capacity).
+            // mla_absorb_max_seq_ carries the engine's effective max_seq_len
+            // for every model (executor_workspace.cu).
+            const int max_ctx_tokens = (mla_absorb_max_seq_ > 0) ? mla_absorb_max_seq_ : max_tokens_;
+            const int max_ctx_blocks = (max_ctx_tokens + kKVBlockSize - 1) / kKVBlockSize;
             const int sink_blocks =
                 (std::max(acfg.sparse_sink_tokens, 0) + kKVBlockSize - 1) / kKVBlockSize;
             // The recent window always covers at least the partial tail block.

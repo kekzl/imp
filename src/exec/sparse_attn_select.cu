@@ -131,23 +131,49 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
         }
         const __half2* mm = minmax_base + (int64_t)block_id * row_elems;
         float best = -FLT_MAX;
+        // 16-byte metadata loads (4 (min,max) pairs per lane per step) with a
+        // one-ahead prefetch across kv heads: the scalar form issued 8-byte
+        // dependent loads and was latency-bound at 151 us/launch (measured
+        // 2026-08-28, 32k ctx). head_dim is a multiple of 16 (kNVFP4Group),
+        // so head_dim*4B is 16B-aligned and lane*4 stays in-bounds per
+        // 128-dim sweep.
+        const int d_first = lane * 4;
+        const bool lane_live = d_first < head_dim;
+        float4 raw_next{};
+        if (lane_live)
+            raw_next = *reinterpret_cast<const float4*>(&mm[d_first]);
         for (int kvh = 0; kvh < n_kv_heads; kvh++) {
             float part[kMaxGroup];
 #pragma unroll
             for (int h = 0; h < kMaxGroup; h++)
                 part[h] = 0.0f;
-            for (int d = lane; d < head_dim; d += kWarpSize) {
-                const __half2 v = mm[kvh * head_dim + d];
-                const float mn = __low2float(v);
-                const float mx = __high2float(v);
+            for (int d0 = d_first; d0 < head_dim; d0 += 4 * kWarpSize) {
+                const float4 raw = (d0 == d_first)
+                                       ? raw_next
+                                       : *reinterpret_cast<const float4*>(&mm[kvh * head_dim + d0]);
+                if (d0 == d_first && kvh + 1 < n_kv_heads && lane_live)
+                    raw_next = *reinterpret_cast<const float4*>(&mm[(kvh + 1) * head_dim + d_first]);
+                const __half2 m01[2] = {*reinterpret_cast<const __half2*>(&raw.x),
+                                        *reinterpret_cast<const __half2*>(&raw.y)};
+                const __half2 m23[2] = {*reinterpret_cast<const __half2*>(&raw.z),
+                                        *reinterpret_cast<const __half2*>(&raw.w)};
                 // Full unroll with a guard keeps part[] register-resident (a
                 // runtime trip count would spill it to a local frame).
 #pragma unroll
                 for (int h = 0; h < kMaxGroup; h++) {
                     if (h >= g)
                         break;
-                    const float qv = __half2float(q_smem[(kvh * g + h) * head_dim + d]);
-                    part[h] += fmaxf(qv * mn, qv * mx);
+                    const half* qp = &q_smem[(kvh * g + h) * head_dim + d0];
+                    const __half2 q01 = *reinterpret_cast<const __half2*>(qp);
+                    const __half2 q23 = *reinterpret_cast<const __half2*>(qp + 2);
+                    float acc = 0.0f;
+                    const float q0 = __low2float(q01), q1 = __high2float(q01);
+                    const float q2 = __low2float(q23), q3 = __high2float(q23);
+                    acc += fmaxf(q0 * __low2float(m01[0]), q0 * __high2float(m01[0]));
+                    acc += fmaxf(q1 * __low2float(m01[1]), q1 * __high2float(m01[1]));
+                    acc += fmaxf(q2 * __low2float(m23[0]), q2 * __high2float(m23[0]));
+                    acc += fmaxf(q3 * __low2float(m23[1]), q3 * __high2float(m23[1]));
+                    part[h] += acc;
                 }
             }
 #pragma unroll
@@ -207,65 +233,119 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
     const int k = budget_blocks - sink_blocks - recent_blocks;
     const float* sc = scores + (int64_t)seq * scores_stride;
 
-    // Dynamic smem: hist[256] | bitmap words | word ranks
+    // Dynamic smem: hist[256] | bitmap words | word ranks | cached score keys.
+    // The radix passes iterate the middle keys 8 times; reading the float
+    // scores from global every pass made the single-CTA kernel latency-bound
+    // (20.9 us/launch measured 2026-08-28) - one global read into smem, then
+    // every pass runs over smem.
     extern __shared__ uint32_t sel_smem[];
     uint32_t* hist = sel_smem;                       // 256
     const int n_words = (max_blocks_per_seq + 31) / 32;
     uint32_t* bitmap = hist + 256;                   // n_words
     uint32_t* word_rank = bitmap + n_words;          // n_words
-    __shared__ uint64_t s_prefix;
+    uint32_t* tie_bm = word_rank + n_words;          // n_words
+    uint32_t* tie_rank = tie_bm + n_words;           // n_words
+    uint32_t* keys = tie_rank + n_words;             // max_blocks_per_seq
+    __shared__ uint32_t s_prefix;
     __shared__ int s_k_rem;
+    __shared__ int s_bin;
 
     if (threadIdx.x == 0) {
         s_prefix = 0;
         s_k_rem = k;
     }
+    for (int b = mid_lo + threadIdx.x; b < mid_hi; b += blockDim.x)
+        keys[b] = score_key(sc[b]);
 
-    // 8 MSB-first radix passes over the middle blocks' 64-bit keys.
-    for (int level = 7; level >= 0; level--) {
+    // 4 MSB-first radix passes over the 32-bit score keys (multiplicity kept;
+    // ties resolve by ascending block index in the bitmap phase below). The
+    // per-pass threshold bin comes from a parallel suffix scan of the
+    // histogram - the earlier serial thread-0 scan over 8 passes made this
+    // single-CTA kernel latency-bound (~20 us at 32k ctx, 2026-08-28).
+    for (int level = 3; level >= 0; level--) {
         for (int i = threadIdx.x; i < 256; i += blockDim.x)
             hist[i] = 0;
         __syncthreads();
-        const uint64_t prefix = s_prefix;
+        const uint32_t prefix = s_prefix;
         const int shift = level * 8;
         for (int b = mid_lo + threadIdx.x; b < mid_hi; b += blockDim.x) {
-            const uint64_t key = ((uint64_t)score_key(sc[b]) << 32) | (uint32_t)~b;
-            if (level == 7 || (key >> (shift + 8)) == prefix)
+            const uint32_t key = keys[b];
+            if (level == 3 || (key >> (shift + 8)) == prefix)
                 atomicAdd(&hist[(key >> shift) & 0xFF], 1u);
         }
         __syncthreads();
+        // Inclusive suffix scan of hist in place (Hillis-Steele).
+        const int t = threadIdx.x;
+        for (int off = 1; off < 256; off <<= 1) {
+            uint32_t add = 0;
+            if (t < 256 && t + off < 256)
+                add = hist[t + off];
+            __syncthreads();
+            if (t < 256)
+                hist[t] += add;
+            __syncthreads();
+        }
+        // hist[t] = candidates with byte >= t. The threshold byte is the
+        // unique t with hist[t+1] < k_rem <= hist[t].
+        const int k_rem = s_k_rem;
+        if (t < 256) {
+            const uint32_t at = hist[t];
+            const uint32_t above = (t < 255) ? hist[t + 1] : 0;
+            if ((int)above < k_rem && k_rem <= (int)at)
+                s_bin = t;
+        }
+        __syncthreads();
         if (threadIdx.x == 0) {
-            int rem = s_k_rem;
-            int bin = 255;
-            for (; bin >= 0; bin--) {
-                const int c = (int)hist[bin];
-                if (rem <= c)
-                    break;
-                rem -= c;
-            }
-            // bin >= 0 always: k middle keys exist below the threshold search.
-            s_prefix = (s_prefix << 8) | (uint32_t)bin;
-            s_k_rem = rem;
+            const uint32_t above = (s_bin < 255) ? hist[s_bin + 1] : 0;
+            s_prefix = (s_prefix << 8) | (uint32_t)s_bin;
+            s_k_rem = k_rem - (int)above;
         }
         __syncthreads();
     }
-    // Keys are unique, so after 8 passes s_prefix IS the k-th largest key:
-    // select every middle key >= it, exactly k of them.
-    const uint64_t threshold = s_prefix;
+    // T32 = the k-th largest score key (with multiplicity); k_rem = how many
+    // keys EQUAL to it still belong in the top k, taken by ascending index.
+    const uint32_t threshold = s_prefix;
+    const int tie_take = s_k_rem;
 
-    for (int i = threadIdx.x; i < n_words; i += blockDim.x)
+    for (int i = threadIdx.x; i < n_words; i += blockDim.x) {
         bitmap[i] = 0;
+        tie_bm[i] = 0;
+    }
     __syncthreads();
     // Forced sinks + recents.
     for (int b = threadIdx.x; b < mid_lo; b += blockDim.x)
         atomicOr(&bitmap[b >> 5], 1u << (b & 31));
     for (int b = mid_hi + threadIdx.x; b < n_blocks; b += blockDim.x)
         atomicOr(&bitmap[b >> 5], 1u << (b & 31));
-    // Selected middles.
+    // Middles: strictly-above selected outright, ties marked for rank-capped
+    // resolution.
     for (int b = mid_lo + threadIdx.x; b < mid_hi; b += blockDim.x) {
-        const uint64_t key = ((uint64_t)score_key(sc[b]) << 32) | (uint32_t)~b;
-        if (key >= threshold)
+        const uint32_t key = keys[b];
+        if (key > threshold)
             atomicOr(&bitmap[b >> 5], 1u << (b & 31));
+        else if (key == threshold)
+            atomicOr(&tie_bm[b >> 5], 1u << (b & 31));
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        uint32_t run = 0;
+        for (int w = 0; w < n_words; w++) {
+            tie_rank[w] = run;
+            run += __popc(tie_bm[w]);
+        }
+    }
+    __syncthreads();
+    // Take the tie_take lowest-index ties into the selection.
+    for (int w = threadIdx.x; w < n_words; w += blockDim.x) {
+        uint32_t bits = tie_bm[w];
+        uint32_t rank = tie_rank[w];
+        while (bits) {
+            const int bit = __ffs(bits) - 1;
+            if ((int)rank < tie_take)
+                atomicOr(&bitmap[w], 1u << bit);
+            rank++;
+            bits &= bits - 1;
+        }
     }
     __syncthreads();
     // Exclusive scan of per-word popcounts (word count <= 256: one serial
@@ -324,7 +404,10 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           int* sparse_context_lens, cudaStream_t stream) {
     // Fixed grid.x: work distribution adapts device-side via grid-stride, so a
     // captured graph stays correct while the context grows during replay.
-    dim3 score_grid(32, n_seq);
+    // 256 CTAs: 32 left the kernel latency-bound (151 us at 32k ctx, 19% of
+    // the SMs; 128 measured 25 us); the grid-stride loop makes the extra CTAs
+    // free at short ctx.
+    dim3 score_grid(256, n_seq);
     const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);
     sparse_score_blocks_kernel<<<score_grid, kScoreThreads, q_smem, stream>>>(
         q, static_cast<const __half2*>(minmax_base), block_tables, context_lens, scores_scratch, n_heads,
@@ -332,7 +415,15 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     IMP_CUDA_CHECK_LAUNCH();
 
     const int n_words = (max_blocks_per_seq + 31) / 32;
-    const size_t sel_smem = (256 + 2 * (size_t)n_words) * sizeof(uint32_t);
+    const size_t sel_smem =
+        (256 + 4 * (size_t)n_words + (size_t)max_blocks_per_seq) * sizeof(uint32_t);
+    // 128k-context tables need ~35 KiB; opt in past the 48 KiB default once.
+    static size_t sel_smem_granted = 0;
+    if (sel_smem > sel_smem_granted) {
+        cudaFuncSetAttribute(sparse_select_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             (int)sel_smem);
+        sel_smem_granted = sel_smem;
+    }
     sparse_select_topk_kernel<<<n_seq, kSelectThreads, sel_smem, stream>>>(
         scores_scratch, block_tables, context_lens, sparse_block_tables, sparse_context_lens, block_size,
         max_blocks_per_seq, max_blocks_per_seq, budget_blocks, sink_blocks, recent_blocks);
