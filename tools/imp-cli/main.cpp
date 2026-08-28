@@ -741,7 +741,7 @@ int main(int argc, char** argv) {
     } else {
         // Single-shot mode with timing
         if (args.prompt.empty()) {
-            fprintf(stderr, "No prompt provided. Use --prompt or --interactive\n");
+            fprintf(stderr, "No prompt provided. Use --prompt, --prompt-file or --interactive\n");
         } else {
             // Load images if specified. The first replaces whatever was
             // pending, the rest append, so repeating --image builds a prompt

@@ -111,8 +111,12 @@ short ctx: +3 graph-replayed launches per attention layer per step
 
 `speculative.ngram=false` in every arm: prompt-lookup would draft the answer
 straight from the needle and verify it with FULL attention, masking a broken
-selection. 32k NIAH is blocked by the harness passing the prompt as one argv
-(ARG_MAX 128k/arg); needs a prompt-file path in imp-cli.
+selection.
+
+32k follow-up (2026-08-28, after `imp-cli --prompt-file` unblocked long
+prompts): dense, budget-4096 (8x sparsity) and budget-2048 (16x) all 15/15 at
+`--max-gen-tokens 768` (the budget that separates retrieval failure from
+think-budget exhaustion).
 
 ## Measurement plan (done, results above)
 

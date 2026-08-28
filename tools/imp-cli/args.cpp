@@ -20,6 +20,9 @@ void print_usage(const char* prog) {
             "  --set <sec.key=val>   Override one imp.conf key (repeatable; an\n"
             "                        unknown key is an error, not a warning)\n"
             "  --prompt <text>       Input prompt for generation\n"
+            "  --prompt-file <path>  Read the prompt from a file (whole content, verbatim).\n"
+            "                        Long prompts exceed the OS argv limit (~128 KiB per\n"
+            "                        argument, so ~32k tokens); mutually exclusive with --prompt\n"
             "  --max-tokens <n>      Maximum tokens to generate (default: 256)\n"
             "  --max-seq-len <n>     KV context ceiling in tokens (default: auto from VRAM)\n"
             "  --json                One JSON document on stdout, every human line on\n"
@@ -119,6 +122,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.calibrate_out = argv[++i];
         } else if (std::strcmp(arg, "--prompt") == 0 && i + 1 < argc) {
             args.prompt = argv[++i];
+        } else if (std::strcmp(arg, "--prompt-file") == 0 && i + 1 < argc) {
+            args.prompt_file = argv[++i];
         } else if (std::strcmp(arg, "--max-seq-len") == 0 && i + 1 < argc) {
             args.max_seq_len = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--temperature") == 0 && i + 1 < argc) {
@@ -197,6 +202,41 @@ CliArgs parse_args(int argc, char** argv) {
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_usage(argv[0]);
+            std::exit(1);
+        }
+    }
+
+    // --prompt-file resolves here so the rest of the tool only ever sees
+    // args.prompt. A missing/unreadable file is an error, not an empty prompt
+    // (an empty prompt would silently fall through to "No prompt provided").
+    if (!args.prompt_file.empty()) {
+        if (!args.prompt.empty()) {
+            fprintf(stderr, "--prompt and --prompt-file are mutually exclusive\n");
+            std::exit(1);
+        }
+        FILE* f = std::fopen(args.prompt_file.c_str(), "rb");
+        if (!f) {
+            fprintf(stderr, "--prompt-file: cannot open '%s'\n", args.prompt_file.c_str());
+            std::exit(1);
+        }
+        std::fseek(f, 0, SEEK_END);
+        const long sz = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        if (sz < 0) {
+            fprintf(stderr, "--prompt-file: cannot size '%s'\n", args.prompt_file.c_str());
+            std::fclose(f);
+            std::exit(1);
+        }
+        args.prompt.resize(static_cast<size_t>(sz));
+        const size_t got = sz > 0 ? std::fread(args.prompt.data(), 1, static_cast<size_t>(sz), f) : 0;
+        std::fclose(f);
+        if (got != static_cast<size_t>(sz)) {
+            fprintf(stderr, "--prompt-file: short read on '%s' (%zu of %ld bytes)\n",
+                    args.prompt_file.c_str(), got, sz);
+            std::exit(1);
+        }
+        if (args.prompt.empty()) {
+            fprintf(stderr, "--prompt-file: '%s' is empty\n", args.prompt_file.c_str());
             std::exit(1);
         }
     }
