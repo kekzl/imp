@@ -689,6 +689,9 @@ bool Engine::init_kv_cache() {
             refuse = "MLA model";
         else if (runtime_config_.speculative.token_recycling)
             refuse = "speculative.token_recycling";
+        else if (!config_.prefix_cache_path.empty())
+            refuse = "persistent prefix cache (disk-restored blocks bypass the KV write path and "
+                     "would carry empty metadata)";
         if (refuse) {
             IMP_LOG_WARN("attention.sparse_topk_tokens=%d ignored: %s",
                          runtime_config_.attention.sparse_topk_tokens, refuse);

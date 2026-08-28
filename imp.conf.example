@@ -365,6 +365,20 @@ gate_concat          = false
 # Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix; caps how
 # long prefill stays on the fast cuBLAS path before falling back to FMHA.
 attn_scores_mib      = 384
+# Sparse decode attention (Quest-class top-k page selection): decode reads
+# only the top-scoring KV blocks (per-block key min/max bound vs the query),
+# up to this many tokens per sequence, selected device-side per step.
+# 0 = off (default). Contexts at or below the budget are bit-identical to
+# dense. F16/FP8 KV, uniform geometry, non-growable pool, non-MLA; SWA /
+# StreamingLLM layers and spec verify chunks keep full attention. Costs a
+# metadata pool of ~12.5% (FP8 KV) / ~6.25% (F16 KV) of the K+V pool bytes.
+# Design + gates: docs/plans/2026-08-28-sparse-decode-attention.md.
+sparse_topk_tokens   = 0
+# Blocks covering the first N positions are always kept (attention sinks).
+sparse_sink_tokens   = 16
+# Blocks covering the last N positions are always kept (local context;
+# includes the partially filled tail block).
+sparse_recent_tokens = 256
 
 [moe]
 # Expected per-expert overhead (% of expert size) before deciding to upload

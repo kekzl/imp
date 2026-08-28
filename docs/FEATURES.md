@@ -99,6 +99,7 @@ Source: `src/core/qtype.h`.
 | FlashAttention-2 style prefill, hd=128 and hd=256 | ✅ | default since #930 |
 | Paged KV cache | ✅ | default block `n=16`; the geometry is per-configuration |
 | Growable KV pool | ✅ opt-in | `kv_cache.growable`: reserves address space for the planned pool, commits what the card can spare, grows on demand. Needs CUDA virtual memory management |
+| Sparse decode attention (top-k page selection) | ✅ opt-in | `attention.sparse_topk_tokens`: decode reads only the top-scoring KV blocks (Quest-class min/max bound), bit-identical at ctx <= budget. F16/FP8 KV; gates in [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md) |
 | CUDA graphs, decode | ✅ | gate asserts ≥1.3x, measured 2.28x |
 | CUDA graphs, prefill | ✅ | default on; disabled per-model when one NVFP4 weight exceeds the dequant-workspace cap |
 | continuous batching, concurrent decode | ✅ | |

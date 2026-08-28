@@ -45,6 +45,16 @@ CONFIGS = {
     "fp8":          (["--kv-fp8"],                           {}),
     "nvfp4":        (["--kv-nvfp4"],                         {}),
     "mxfp4_kv":     (["--kv-mxfp4"],                         {}),
+    # Sparse decode attention (attention.sparse_topk_tokens): retrieval must
+    # survive the top-k page selection - decode attends at most N tokens.
+    # ngram=false in BOTH arms: prompt-lookup would draft the answer straight
+    # from the needle and verify it with FULL attention (spec verify chunks
+    # bypass the sparse path), masking a broken selection.
+    "fp8_ng":       (["--kv-fp8", "--set", "speculative.ngram=false"], {}),
+    "fp8_sparse4k": (["--kv-fp8", "--set", "speculative.ngram=false",
+                      "--set", "attention.sparse_topk_tokens=4096"], {}),
+    "fp8_sparse2k": (["--kv-fp8", "--set", "speculative.ngram=false",
+                      "--set", "attention.sparse_topk_tokens=2048"], {}),
     # tq_qjl_on / tq_qjl_off removed: TurboQuant retired Phase 5 (2026-05-17)
 }
 DEFAULT_CTX     = [4096, 16384]

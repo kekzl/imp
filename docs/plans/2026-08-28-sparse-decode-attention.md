@@ -33,6 +33,7 @@ copy of the table: bit-identical to dense attention.
 | `kv_cache.growable=false` | metadata pool sized once at init |
 | not MLA | absorbed decode has its own latent cache |
 | `speculative.token_recycling=false` | copy_blocks_device does not copy metadata |
+| no persistent prefix cache (`prefix_cache_path` empty) | disk-restored blocks bypass the KV write path and would carry empty metadata. In-memory prefix reuse is fine: metadata lives per block and the reused blocks were written normally; the full-hit last-token re-write is idempotent |
 | per layer (dispatch time): `sliding_window == 0 && n_sinks == 0` | SWA/StreamingLLM layers are already bounded |
 | per step (dispatch time): plain decode only (`!chunk_decode_attn`, n == n_sequences) | verify chunks keep full attention; metadata is still maintained for their writes |
 

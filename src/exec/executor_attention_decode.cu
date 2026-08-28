@@ -183,6 +183,16 @@
             layer_sliding_window <= 0 && layer_n_sinks <= 0 && !state.chunk_decode_attn &&
             n == n_seq && attn_max_blocks > 0 &&
             attn_max_blocks <= qscratch_.sparse_max_ctx_blocks && nh / nkv <= 16) {
+            // Proof-of-activity for A/B arms: the selection itself is decided
+            // device-side, but max_context_len is a host value - once it
+            // exceeds the budget, at least one sequence is actually sparse.
+            static bool logged_sparse_active = false;
+            if (!logged_sparse_active &&
+                state.max_context_len > qscratch_.sparse_budget_blocks * kv_bs) {
+                logged_sparse_active = true;
+                IMP_LOG_INFO("sparse decode attention ACTIVE: ctx %d > budget %d tokens",
+                             state.max_context_len, qscratch_.sparse_budget_blocks * kv_bs);
+            }
             sparse_select_blocks(static_cast<const half*>(q4.data),
                                  cache->key_minmax_ptr(kv_layer, 0), layer_block_tables,
                                  state.context_lens, n_seq, nh, nkv, hd, kv_bs,
