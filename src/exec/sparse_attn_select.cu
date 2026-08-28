@@ -96,8 +96,8 @@ template <typename CacheT>
 __global__ void sparse_update_key_minmax_layers_kernel(
     const CacheT* __restrict__ k_base, int64_t k_layer_stride,  // elems
     __half2* __restrict__ mm_base, int64_t mm_layer_stride,     // half2 elems
-    const int* __restrict__ positions, const int* __restrict__ block_tables, int row_elems,
-    int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
+    const int* __restrict__ positions, const int* __restrict__ block_tables, int row_elems, int block_size,
+    int n_tokens, int max_blocks_per_seq, int n_sequences) {
     const int token_idx = blockIdx.x;
     const int layer = blockIdx.y;
     if (token_idx >= n_tokens)
@@ -124,8 +124,7 @@ __global__ void sparse_update_key_minmax_layers_kernel(
             break;
         span++;
     }
-    const CacheT* blk =
-        k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems;
+    const CacheT* blk = k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems;
     __half2* mm = mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems;
     const bool init = (slot == 0);
     for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
@@ -161,10 +160,9 @@ constexpr int kMaxGroup = 16;  // n_heads / n_kv_heads ceiling (host-gated)
 __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
                                            const __half2* __restrict__ minmax_base,
                                            const int* __restrict__ block_tables,
-                                           const int* __restrict__ context_lens,
-                                           float* __restrict__ scores, int n_heads, int n_kv_heads,
-                                           int head_dim, int block_size, int max_blocks_per_seq,
-                                           int scores_stride, int engage_blocks) {
+                                           const int* __restrict__ context_lens, float* __restrict__ scores,
+                                           int n_heads, int n_kv_heads, int head_dim, int block_size,
+                                           int max_blocks_per_seq, int scores_stride, int engage_blocks) {
     const int seq = blockIdx.y;
     const int ctx_len = context_lens[seq];
     const int n_blocks = (ctx_len + block_size - 1) / block_size;
@@ -274,11 +272,11 @@ __device__ __forceinline__ uint32_t score_key(float s) {
 
 __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
                                           const int* __restrict__ block_tables,
-                                          const int* __restrict__ context_lens,
-                                          int* __restrict__ sparse_bt, int* __restrict__ sparse_ctx,
-                                          int block_size, int max_blocks_per_seq, int scores_stride,
-                                          int budget_blocks, int sink_blocks, int recent_blocks,
-                                          int engage_blocks, int table_blocks) {
+                                          const int* __restrict__ context_lens, int* __restrict__ sparse_bt,
+                                          int* __restrict__ sparse_ctx, int block_size,
+                                          int max_blocks_per_seq, int scores_stride, int budget_blocks,
+                                          int sink_blocks, int recent_blocks, int engage_blocks,
+                                          int table_blocks) {
     const int seq = blockIdx.x;
     const int ctx_len = context_lens[seq];
     const int n_blocks = (ctx_len + block_size - 1) / block_size;
@@ -305,13 +303,13 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
     // (20.9 us/launch measured 2026-08-28) - one global read into smem, then
     // every pass runs over smem.
     extern __shared__ uint32_t sel_smem[];
-    uint32_t* hist = sel_smem;                       // 256
+    uint32_t* hist = sel_smem;  // 256
     const int n_words = (max_blocks_per_seq + 31) / 32;
-    uint32_t* bitmap = hist + 256;                   // n_words
-    uint32_t* word_rank = bitmap + n_words;          // n_words
-    uint32_t* tie_bm = word_rank + n_words;          // n_words
-    uint32_t* tie_rank = tie_bm + n_words;           // n_words
-    uint32_t* keys = tie_rank + n_words;             // max_blocks_per_seq
+    uint32_t* bitmap = hist + 256;           // n_words
+    uint32_t* word_rank = bitmap + n_words;  // n_words
+    uint32_t* tie_bm = word_rank + n_words;  // n_words
+    uint32_t* tie_rank = tie_bm + n_words;   // n_words
+    uint32_t* keys = tie_rank + n_words;     // max_blocks_per_seq
     __shared__ uint32_t s_prefix;
     __shared__ int s_k_rem;
     __shared__ int s_bin;
@@ -451,14 +449,18 @@ void sparse_update_key_minmax(QType cache_dtype, const void* k_cache_base, void*
     const int row_elems = n_kv_heads * head_dim;
     const int threads = 128;
     if (cache_dtype == QType::FP8_E4M3) {
-        sparse_update_key_minmax_kernel<__nv_fp8_e4m3><<<n_tokens, threads, 0, stream>>>(
-            static_cast<const __nv_fp8_e4m3*>(k_cache_base), static_cast<__half2*>(minmax_base), positions,
-            block_tables, row_elems, block_size, n_tokens, max_blocks_per_seq, n_sequences);
+        sparse_update_key_minmax_kernel<__nv_fp8_e4m3>
+            <<<n_tokens, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_cache_base),
+                                               static_cast<__half2*>(minmax_base), positions, block_tables,
+                                               row_elems, block_size, n_tokens, max_blocks_per_seq,
+                                               n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        sparse_update_key_minmax_kernel<half><<<n_tokens, threads, 0, stream>>>(
-            static_cast<const half*>(k_cache_base), static_cast<__half2*>(minmax_base), positions,
-            block_tables, row_elems, block_size, n_tokens, max_blocks_per_seq, n_sequences);
+        sparse_update_key_minmax_kernel<half>
+            <<<n_tokens, threads, 0, stream>>>(static_cast<const half*>(k_cache_base),
+                                               static_cast<__half2*>(minmax_base), positions, block_tables,
+                                               row_elems, block_size, n_tokens, max_blocks_per_seq,
+                                               n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     }
 }
@@ -475,16 +477,19 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
     const dim3 grid(n_tokens, n_layers);
     const int64_t mm_stride = mm_layer_stride_bytes / (int64_t)sizeof(__half2);
     if (cache_dtype == QType::FP8_E4M3) {
-        sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3><<<grid, threads, 0, stream>>>(
-            static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
-            static_cast<__half2*>(minmax_base), mm_stride, positions, block_tables, row_elems, block_size,
-            n_tokens, max_blocks_per_seq, n_sequences);
+        sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3>
+            <<<grid, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
+                                           static_cast<__half2*>(minmax_base), mm_stride, positions,
+                                           block_tables, row_elems, block_size, n_tokens, max_blocks_per_seq,
+                                           n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        sparse_update_key_minmax_layers_kernel<half><<<grid, threads, 0, stream>>>(
-            static_cast<const half*>(k_base), k_layer_stride_bytes / (int64_t)sizeof(half),
-            static_cast<__half2*>(minmax_base), mm_stride, positions, block_tables, row_elems, block_size,
-            n_tokens, max_blocks_per_seq, n_sequences);
+        sparse_update_key_minmax_layers_kernel<half>
+            <<<grid, threads, 0, stream>>>(static_cast<const half*>(k_base),
+                                           k_layer_stride_bytes / (int64_t)sizeof(half),
+                                           static_cast<__half2*>(minmax_base), mm_stride, positions,
+                                           block_tables, row_elems, block_size, n_tokens, max_blocks_per_seq,
+                                           n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     }
 }
@@ -507,8 +512,7 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     IMP_CUDA_CHECK_LAUNCH();
 
     const int n_words = (max_blocks_per_seq + 31) / 32;
-    const size_t sel_smem =
-        (256 + 4 * (size_t)n_words + (size_t)max_blocks_per_seq) * sizeof(uint32_t);
+    const size_t sel_smem = (256 + 4 * (size_t)n_words + (size_t)max_blocks_per_seq) * sizeof(uint32_t);
     // 128k-context tables need ~35 KiB; opt in past the 48 KiB default once.
     static size_t sel_smem_granted = 0;
     if (sel_smem > sel_smem_granted) {

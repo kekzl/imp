@@ -58,8 +58,8 @@ static void ref_minmax(const std::vector<half>& k_cache, int block_id, int row_e
     mx.assign(row_elems, -FLT_MAX);
     for (int s = 0; s < slots; s++) {
         for (int e = 0; e < row_elems; e++) {
-            const float v =
-                __half2float(k_cache[static_cast<size_t>(block_id) * kBS * row_elems + s * row_elems + e]);
+            const float v = __half2float(
+                k_cache[static_cast<size_t>(block_id) * kBS * row_elems + s * row_elems + e]);
             mn[e] = std::min(mn[e], v);
             mx[e] = std::max(mx[e], v);
         }
@@ -87,8 +87,8 @@ protected:
 
     void write_row(int block_id, int slot, int pos) {
         for (int e = 0; e < row_elems; e++)
-            k_cache_h[static_cast<size_t>(block_id) * kBS * row_elems + slot * row_elems + e] =
-                __float2half(fill_val(pos, e));
+            k_cache_h[static_cast<size_t>(block_id) * kBS * row_elems + slot * row_elems + e] = __float2half(
+                fill_val(pos, e));
     }
 
     void check_block(int block_id, int slots, const char* what) {
@@ -174,11 +174,11 @@ TEST_F(SparseMinMaxTest, MultiSeqDecodeTwoTokens) {
     std::vector<int> bt_h = {4, 0, 5, 0};  // [2, mbps=2]
     int* d_bt = dmalloc<int>(bt_h.size());
     dcopy(d_bt, bt_h);
-    write_row(4, 3, 100);   // seq 0 at pos 3
-    write_row(4, 0, 55);    // pre-existing rows in the block (simulate earlier writes)
+    write_row(4, 3, 100);  // seq 0 at pos 3
+    write_row(4, 0, 55);   // pre-existing rows in the block (simulate earlier writes)
     write_row(4, 1, 56);
     write_row(4, 2, 57);
-    write_row(5, 0, 200);   // seq 1 at pos 0 (slot 0 -> init)
+    write_row(5, 0, 200);  // seq 1 at pos 0 (slot 0 -> init)
     dcopy(d_k, k_cache_h);
     // Seed block 4's metadata with the first three rows (slots 0..2).
     {
@@ -209,8 +209,7 @@ TEST_F(SparseMinMaxTest, Fp8RawScaleOneDequant) {
     std::vector<__nv_fp8_e4m3> k8(static_cast<size_t>(n_blocks_pool) * kBS * row_elems);
     for (int s = 0; s < 5; s++)
         for (int e = 0; e < row_elems; e++)
-            k8[static_cast<size_t>(0) * kBS * row_elems + s * row_elems + e] =
-                __nv_fp8_e4m3(fill_val(s, e));
+            k8[static_cast<size_t>(0) * kBS * row_elems + s * row_elems + e] = __nv_fp8_e4m3(fill_val(s, e));
     __nv_fp8_e4m3* d_k8 = dmalloc<__nv_fp8_e4m3>(k8.size());
     dcopy(d_k8, k8);
     std::vector<int> bt_h = {0};
@@ -269,8 +268,8 @@ protected:
                                      __floats2half2_rn(0.f, 0.f));
         for (int b = 0; b < mbps; b++)
             for (int kvh = 0; kvh < nkv; kvh++)
-                mm_phys[static_cast<size_t>(100 + b) * row_elems + kvh * hd] =
-                    __floats2half2_rn(weight[b], weight[b]);
+                mm_phys[static_cast<size_t>(100 + b) * row_elems + kvh * hd] = __floats2half2_rn(weight[b],
+                                                                                                 weight[b]);
 
         std::vector<half> q_h(static_cast<size_t>(nh) * hd, __float2half(0.f));
         for (int h = 0; h < nh; h++)
@@ -291,8 +290,8 @@ protected:
         cudaMemset(d_sbt, 0xFF, table_blocks * sizeof(int));
 
         sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/1, nh, nkv, hd, kBS, mbps, budget_blocks,
-                             sink_blocks, recent_blocks, engage_blocks, table_blocks, d_scores, d_sbt,
-                             d_sctx, nullptr);
+                             sink_blocks, recent_blocks, engage_blocks, table_blocks, d_scores, d_sbt, d_sctx,
+                             nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         out_bt = dread(d_sbt, table_blocks);
         out_ctx = dread(d_sctx, 1)[0];
@@ -372,10 +371,10 @@ TEST(SparseAttnE2E, IdentityTableBitIdentical) {
     std::vector<half> k_h(cache_elems, __float2half(0.f)), v_h(cache_elems, __float2half(0.f));
     for (int p = 0; p < ctx_len; p++)
         for (int e = 0; e < nkv * hd; e++) {
-            k_h[static_cast<size_t>(p / kBS) * kBS * nkv * hd + (p % kBS) * nkv * hd + e] =
-                __float2half(fill_val(p, e) * 0.05f);
-            v_h[static_cast<size_t>(p / kBS) * kBS * nkv * hd + (p % kBS) * nkv * hd + e] =
-                __float2half(fill_val(p + 7, e) * 0.05f);
+            k_h[static_cast<size_t>(p / kBS) * kBS * nkv * hd + (p % kBS) * nkv * hd + e] = __float2half(
+                fill_val(p, e) * 0.05f);
+            v_h[static_cast<size_t>(p / kBS) * kBS * nkv * hd + (p % kBS) * nkv * hd + e] = __float2half(
+                fill_val(p + 7, e) * 0.05f);
         }
     std::vector<half> q_h(static_cast<size_t>(nh) * hd);
     for (size_t i = 0; i < q_h.size(); i++)
