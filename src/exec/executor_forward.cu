@@ -584,11 +584,13 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     cur_layer_ = -1;  // past the layers: the LM head is not a calibration target
 
     // Sparse decode attention: batched key min/max update, all KV layers in
-    // one launch, decode only (prefill updates per layer in write_kv_cache).
-    // Inside the captured graph like everything above; the one-step lag is
-    // covered by the selection's forced recent blocks.
-    if (!state.is_prefill && state.kv_cache != nullptr && state.kv_cache->key_minmax_enabled() &&
-        state.block_tables != nullptr && state.n_tokens > 0) {
+    // one launch, for every forward whose KV write ran in the decode branch -
+    // plain decode AND spec verify chunks (is_prefill=true, chunk_decode_attn
+    // set); plain prefill updates per layer in write_kv_cache. Inside the
+    // captured graph like everything above; the one-step lag is covered by
+    // the selection's forced recent blocks (chunk tokens sit in the tail).
+    if ((!state.is_prefill || state.chunk_decode_attn) && state.kv_cache != nullptr &&
+        state.kv_cache->key_minmax_enabled() && state.block_tables != nullptr && state.n_tokens > 0) {
         KVCache* kvc = state.kv_cache;
         const int n_kv = kvc->n_layers();
         const int64_t k_stride =

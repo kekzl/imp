@@ -57,6 +57,9 @@ CONFIGS = {
                       "--set", "attention.sparse_topk_tokens=4096"], {}),
     "fp8_sparse2k": (["--kv-fp8", "--set", "speculative.ngram=false",
                       "--set", "attention.sparse_topk_tokens=2048"], {}),
+    # Speculation ON (defaults): verify chunks ride the sparse table too -
+    # this arm tests retrieval THROUGH the sparse verify path.
+    "fp8_sparse4k_spec": (["--kv-fp8", "--set", "attention.sparse_topk_tokens=4096"], {}),
     # tq_qjl_on / tq_qjl_off removed: TurboQuant retired Phase 5 (2026-05-17)
 }
 DEFAULT_CTX     = [4096, 16384]

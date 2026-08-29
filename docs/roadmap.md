@@ -154,10 +154,12 @@ Ranked by what an agent workload notices first.
    are think-budget exhaustion at the harness's 384-token cap (needle
    retrieved verbatim at 768). Detail + gates in
    [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md).
-   Remaining: v1 gates (F16/FP8 KV, non-MLA, uniform geometry, plain decode
-   only - spec verify chunks keep full attention), no prefill sparsity, and
-   StreamingLLM eviction (`attention_paged_common.cuh:71`) is still the only
-   answer under KV-pool pressure.
+   Spec verify chunks ride the sparse table since 2026-08-29: speculation-on
+   32k decode 137.4 -> 176.1 tok/s (+28.2%), ms/verify 233 -> 133, NIAH 32k
+   spec-on 15/15 both arms. Remaining: v1 gates (F16/FP8 KV, non-MLA,
+   uniform geometry), no prefill sparsity, and StreamingLLM eviction
+   (`attention_paged_common.cuh:71`) is still the only answer under KV-pool
+   pressure.
 3. **Speculation does not adapt to the request.** `speculative` is a
    per-request bool and the drafter choice is global. *Half closed
    2026-08-27:* the MTP chain depth now adapts per request between 1 and

@@ -166,16 +166,19 @@
         // Sparse decode attention (attention.sparse_topk_tokens): score all
         // context blocks against the current queries and swap in a compacted
         // block table + context lens. The paged kernels below are unmodified;
-        // contexts at or below the budget pass through bit-identically. Only
-        // plain decode on full-attention layers (spec verify chunks and
-        // SWA/streaming layers keep full attention; the init gate limits the
-        // metadata pool to F16/FP8 caches, non-MLA, uniform geometry).
+        // contexts at or below the budget pass through bit-identically.
+        // Covers plain decode AND spec verify chunks (chunk rows are already
+        // presented as per-row "sequences" with their own context lens and
+        // replicated tables - exactly the shape the selection kernels take;
+        // pad rows attend 1 token and ride the identity path). SWA/streaming
+        // layers keep full attention; the init gate limits the metadata pool
+        // to F16/FP8 caches, non-MLA, uniform geometry.
         const int* attn_bt = layer_block_tables;
         const int* attn_ctx_lens = state.context_lens;
         int attn_max_blocks = state.max_blocks_per_seq;
         if (qscratch_.sparse_budget_blocks > 0 && cache->key_minmax_enabled() &&
-            layer_sliding_window <= 0 && layer_n_sinks <= 0 && !state.chunk_decode_attn &&
-            n == n_seq && attn_max_blocks > 0 &&
+            layer_sliding_window <= 0 && layer_n_sinks <= 0 &&
+            n == n_seq && n_seq <= qscratch_.sparse_max_rows && attn_max_blocks > 0 &&
             attn_max_blocks <= qscratch_.sparse_max_ctx_blocks && nh / nkv <= 16) {
             // Proof-of-activity for A/B arms: the selection itself is decided
             // device-side, but max_context_len is a host value - once it
