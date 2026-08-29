@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-08-29
+commit: a1148fbd
 -->
 
 # Benchmarking methodology
@@ -38,6 +38,31 @@ A and B are docker images or build directories. Two rules it encodes:
 - **Spec-OFF.** n-gram speculation puts **14-17%** spread on short-context points, enough to hide a 1% effect and to make a −11% median look real. The script passes `speculative.ngram=false`, matching the gate.
 
 The script refuses to run on a busy GPU, alternates the arms so host drift hits both equally, and marks any delta smaller than the larger spread as `(within spread)` rather than reporting it as a result.
+
+### Long-context arms: four ways to measure something else
+
+Chasing "more context at good speed" on Qwen3.8-27B-NVFP4 produced four
+confident numbers before it produced a true one (2026-08-29, full ledger in
+[`plans/2026-08-29-qwen38-long-context-posture.md`](../plans/2026-08-29-qwen38-long-context-posture.md)):
+
+- **State the KV dtype, do not inherit it.** `kv_cache.dtype=auto` resolves
+  NVFP4 on QWEN35 and FP8 or FP16 elsewhere, so the same `--kv-fp8` halves KV
+  bytes on most families and doubles them there. An inherited pin read as a
+  batch-size effect for a whole sweep.
+- **Long-context claims need long-context arms.** A tok/s table taken at a few
+  hundred prompt tokens cannot show a KV-dtype difference at all; per-step KV
+  traffic is negligible there. It reported "costs nothing" and the real cost was
+  11%.
+- **KV block counts compare only within one library-reserve state.** A `--rm`
+  container plans with the 3900 MiB constant, a deployment with a mounted
+  `/home/imp/.cache/imp` plans with its measurement: 716 blocks apart on this
+  model, +4389 MiB of reserve difference on Qwen3-8B-Q8_0.
+- **Speculation makes the arms diverge, then compares texts.** Different KV
+  precision gives different logits; the n-gram matcher drafts from the request's
+  own emitted tokens, so which arm it fires on follows the generated text. The
+  same reproducer on the same box gave "NVFP4 +20%" in one session and "FP8
+  +13%" in another, with `drafted=0` on the other arm each time. Spec off, and
+  reject a pair whose generated token counts differ.
 
 ## The gate
 
