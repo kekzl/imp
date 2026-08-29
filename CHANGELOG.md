@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- `speculative.mtp_k=auto` read the raw `--max-batch` flag instead of the
+  resolved batch size, so a single-stream server configured through
+  `runtime.max_batch_size=1` (imp.conf or `--set`) declined the MTP head and
+  left a measured +33% on the table (88.1 -> 117.2 tok/s single-stream
+  Qwen3.8-27B-NVFP4 thinking, peer conformance run). `/health` reported
+  "this server takes concurrent requests" for the same reason. Both now use
+  one `resolve_max_batch_size()` (flag > imp.conf > per-load override).
+
 ## [0.32.0] - 2026-08-29
 
 ### Added

@@ -126,7 +126,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
     if (state.model && state.model->model && state.model->model->mtp_head_available_unloaded_) {
         body["mtp_head_available"] = true;
         body["mtp_head_hint"] =
-            state.runtime_config.speculative.mtp_k == 0 && state.default_args.max_batch_size != 1
+            state.runtime_config.speculative.mtp_k == 0 && state.resolved_max_batch_size != 1
                 ? "this checkpoint ships an MTP head; speculative.mtp_k=auto left it unloaded "
                   "because this server takes concurrent requests (MTP drafts for one request at "
                   "a time, and the head's 0.79 GiB comes out of the batch slot budget). "
@@ -555,6 +555,13 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
     return false;
 }
 
+int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
+                           const nlohmann::json& overrides) {
+    const int cli_or_conf =
+        args.max_batch_size > 0 ? args.max_batch_size : runtime_cfg.runtime.max_batch_size;
+    return overrides.value("max_batch_size", cli_or_conf);
+}
+
 // Build ImpConfig from default args + optional JSON overrides.
 // Engine auto-detects max_seq_len, max_batch_size, KV dtype, FP8 prefill, NVFP4 decode.
 ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
@@ -573,9 +580,7 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     // `[runtime] max_batch_size` silently affected nothing but the decode cap.
     if (overrides.contains("max_seq_len"))
         config.max_seq_len = overrides.value("max_seq_len", 0);
-    int batch_cli_or_conf =
-        args.max_batch_size > 0 ? args.max_batch_size : runtime_cfg.runtime.max_batch_size;
-    config.max_batch_size = overrides.value("max_batch_size", batch_cli_or_conf);
+    config.max_batch_size = resolve_max_batch_size(args, runtime_cfg, overrides);
 
     // Hard per-process VRAM cap for multi-server-per-GPU deployments.
     // Precedence: --vram-budget CLI flag > [runtime] vram_budget_mb from
@@ -678,8 +683,14 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
     // speculative.mtp_k is a tri-state (-1 auto, 0 off, >0 fixed). Auto only
     // engages for a server pinned to a single stream: with concurrent decode
     // the head binds one request and its VRAM comes out of the batch's slots.
-    int mtp_k =
-        imp::tools::mtp_auto_request_k(state.runtime_config, state.default_args.max_batch_size);
+    // The RESOLVED batch, not the raw CLI flag: `runtime.max_batch_size=1` from
+    // imp.conf or a `--set` is just as much a single-stream server as
+    // `--max-batch 1`, and reading only the flag left auto declining on it
+    // (found by a peer conformance run, 2026-08-29: 88.1 -> 117.2 tok/s left
+    // on the table for exactly that configuration).
+    state.resolved_max_batch_size =
+        resolve_max_batch_size(state.default_args, state.runtime_config, config_overrides);
+    int mtp_k = imp::tools::mtp_auto_request_k(state.runtime_config, state.resolved_max_batch_size);
     ImpError err = imp_model_load_ex(path.c_str(), format, /*load_mtp_head=*/mtp_k > 0 ? 1 : 0,
                                      &state.model);
     if (err != IMP_SUCCESS) {
