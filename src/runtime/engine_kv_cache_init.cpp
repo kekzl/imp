@@ -317,6 +317,46 @@ bool Engine::init_kv_cache() {
         }
     }
 
+    // Sparse decode attention prices its key min/max pool INTO the block
+    // count: the pool is a fixed fraction of the K+V bytes (nkv*hd*4 bytes
+    // per block per layer) and is allocated AFTER this sizing — unpriced it
+    // is a silent 6-12% overcommit, and on WSL2/WDDM that does not fail, it
+    // SPILLS (the #1103 cliff; measured 2026-08-29 at 689 MiB "free": every
+    // prefill kernel uniformly +11%).
+    if (runtime_config_.attention.sparse_topk_tokens > 0) {
+        const QType kvt = config_.kv_cache_dtype;
+        const bool eligible = (kvt == QType::F16 || kvt == QType::FP8_E4M3) && !mcfg.is_mla() &&
+                              !runtime_config_.speculative.token_recycling &&
+                              config_.prefix_cache_path.empty() && mcfg.head_dim_per_layer.empty() &&
+                              !swa_sizing_active_;
+        if (eligible) {
+            const size_t kv_per_block =
+                static_cast<size_t>(n_kv_layers) *
+                kv_block_bytes_per_layer(kvt, kv_bs, mcfg.n_kv_heads, head_dim);
+            const size_t mm_per_block = static_cast<size_t>(n_kv_layers) * mcfg.n_kv_heads *
+                                        static_cast<size_t>(head_dim) * 4;  // (min,max) halves
+            if (config_.kv_cache_max_blocks > 0) {
+                IMP_LOG_WARN("attention.sparse_topk_tokens: the key min/max pool adds %.1f MiB ON TOP "
+                             "of the pinned kv_cache.max_blocks pool — pin with that headroom or "
+                             "WSL2/WDDM spills silently",
+                             static_cast<double>(mm_per_block) * max_blocks / (1024.0 * 1024.0));
+            } else {
+                // Auto-sized pools: the metadata is charged post-plan like the
+                // BitDecoding residual buffer - deflating the block count here
+                // broke the admission guarantee (a 32k request was cancelled
+                // against a demand-floored pool), and the sizing figures do
+                // not distinguish demand-bound from VRAM-bound (the shadow
+                // plan charges conservative reserves either way). Pricing it
+                // INSIDE plan_memory is the open follow-up; until then the
+                // size is named so a tight configuration can be re-pinned.
+                IMP_LOG_INFO("sparse decode attention: key min/max pool adds %.1f MiB after the KV "
+                             "sizing (%.2f%% of the K+V pool)",
+                             static_cast<double>(mm_per_block) * max_blocks / (1024.0 * 1024.0),
+                             kv_per_block > 0 ? 100.0 * mm_per_block / kv_per_block : 0.0);
+            }
+        }
+    }
+
     // ── Weight caches are built BEFORE the KV pool (A7 step 6.4) ──────
     // Measured on gpt-oss-20b-mxfp4 at server defaults: sizing KV first from
     // an ESTIMATE of the cache demand left the card at exactly 0 MiB free —

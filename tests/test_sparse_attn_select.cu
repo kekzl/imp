@@ -25,6 +25,16 @@ namespace {
 
 constexpr int kBS = 16;  // kKVBlockSize
 
+// The production entry point is the batched all-layer launcher; this wrapper
+// keeps the single-layer call shape the metadata tests were written against
+// (n_layers=1, zero layer strides, no ragged offsets).
+static void sparse_update_key_minmax(QType t, const void* k, void* mm, const int* pos, const int* bt,
+                                     int nkv, int hd, int bs, int n, int mbps, int nseq,
+                                     cudaStream_t stream, const int* seq_offsets = nullptr) {
+    sparse_update_key_minmax_all_layers(t, k, 0, mm, 0, pos, bt, seq_offsets, /*n_layers=*/1, nkv, hd, bs,
+                                        n, mbps, nseq, stream);
+}
+
 // Deterministic value fill: distinct, sign-mixed, exactly f16-representable.
 static float fill_val(int pos, int e) {
     const int v = ((pos * 131 + e * 17) % 255) - 127;
@@ -231,6 +241,40 @@ TEST_F(SparseMinMaxTest, RepeatedPositionPadRows) {
     check_block(6, 6, "repeated-position span clamp");
     cudaFree(d_bt);
     cudaFree(d_pos);
+}
+
+TEST_F(SparseMinMaxTest, RaggedSeqOffsetsMapping) {
+    // Ragged prefill shape: one launch over the CONCATENATED rows of two
+    // sequences; seq_offsets maps token -> block-table ROW (token_idx does
+    // not equal seq). Seq 0: 20 tokens from pos 0 (blocks 0,1 of row 0);
+    // seq 1: 5 tokens from pos 16 (block 3 of row 1, slot 0 -> init).
+    std::vector<int> bt_h = {0, 1, /*row1:*/ 2, 3};  // [2, mbps=2]
+    int* d_bt = dmalloc<int>(bt_h.size());
+    dcopy(d_bt, bt_h);
+    std::vector<int> pos_h(25);
+    for (int i = 0; i < 20; i++) {
+        pos_h[i] = i;
+        write_row(i / kBS, i % kBS, i);
+    }
+    for (int i = 0; i < 5; i++) {
+        pos_h[20 + i] = 16 + i;
+        write_row(3, i, 300 + i);
+    }
+    int* d_pos = dmalloc<int>(pos_h.size());
+    dcopy(d_pos, pos_h);
+    std::vector<int> soff_h = {0, 20, 25};
+    int* d_soff = dmalloc<int>(soff_h.size());
+    dcopy(d_soff, soff_h);
+    dcopy(d_k, k_cache_h);
+    sparse_update_key_minmax(QType::F16, d_k, d_mm, d_pos, d_bt, nkv, hd, kBS, 25,
+                             /*max_blocks_per_seq=*/2, /*n_sequences=*/2, nullptr, d_soff);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    check_block(0, kBS, "ragged seq0 blk0");
+    check_block(1, 4, "ragged seq0 tail");
+    check_block(3, 5, "ragged seq1 blk");
+    cudaFree(d_bt);
+    cudaFree(d_pos);
+    cudaFree(d_soff);
 }
 
 TEST_F(SparseMinMaxTest, Fp8RawScaleOneDequant) {

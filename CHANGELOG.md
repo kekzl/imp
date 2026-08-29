@@ -13,6 +13,15 @@ there instead of retelling it.
 
 ### Added
 
+- Sparse decode attention measured at concurrent long-context serving:
+  3 streams x 25k ctx on Qwen3-8B-Q8_0 fp8-KV, aggregate decode 155.6 ->
+  197.7 tok/s (+27%, tg8/tg520 differential, 3 alternating trials). The key
+  min/max metadata pool must stay VRAM-resident: a `kv_cache.max_blocks` pin
+  without its headroom put the card at 689 MiB free and WDDM-spilled every
+  prefill kernel +11% (the pinned path now warns with the exact MiB).
+  Metadata updates are one batched launch per forward now (prefill chunks
+  included, ragged mapping via seq_offsets). Harness:
+  tools/analysis/serving_sparse_ab.sh.
 - Sparse decode attention now covers spec verify chunks: with speculation on
   at 32k ctx (echo-heavy workload) Qwen3-8B-Q8_0 fp8-KV decodes 137.4 ->
   176.1 tok/s (+28.2% over the plain-decode-only form, +41% over dense),

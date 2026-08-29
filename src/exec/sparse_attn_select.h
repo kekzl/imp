@@ -12,28 +12,21 @@
 
 namespace imp {
 
-// Update per-block key min/max metadata after a paged KV write. Reads the
-// just-written K rows back from the cache (dtype-exact, post-RoPE). FP8
-// metadata stores the raw scale-1 dequant: the per-layer KV scale is one
-// positive factor per score and cannot change the block ranking.
-// Supported cache dtypes: F16, FP8_E4M3 (callers gate at init).
-// Parameter contract mirrors the write_kv_cache_* kernels (same
-// positions/block_tables/max_blocks_per_seq/n_sequences semantics).
-void sparse_update_key_minmax(QType cache_dtype, const void* k_cache_base, void* minmax_base,
-                              const int* positions, const int* block_tables, int n_kv_heads, int head_dim,
-                              int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences,
-                              cudaStream_t stream);
-
-// Decode form: ONE launch updates every KV layer (grid.y) at the end of the
-// forward. Legal because selection force-includes the recent blocks, so
-// metadata may lag the current step's write. Layer strides in BYTES between
-// consecutive layers' block-0 pointers (uniform scalar geometry only - the
-// init gate guarantees it).
+// Batched form: ONE launch updates every KV layer (grid.y) at the end of a
+// forward - decode steps, spec verify chunks AND prefill chunks (the inline
+// per-layer form cost the multi-stream serving prefill ~12%, 2026-08-29).
+// Selection only runs at decode time, so prefill metadata is complete before
+// the first decode step; decode lag is covered by the forced recent blocks.
+// seq_offsets: the ragged prefill's [n_seq+1] device offsets (nullptr
+// otherwise) - it is the token->table-row mapping ragged forwards need.
+// Layer strides in BYTES between consecutive layers' block-0 pointers
+// (uniform scalar geometry only - the init gate guarantees it).
 void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
                                          void* minmax_base, int64_t mm_layer_stride_bytes,
-                                         const int* positions, const int* block_tables, int n_layers,
-                                         int n_kv_heads, int head_dim, int block_size, int n_tokens,
-                                         int max_blocks_per_seq, int n_sequences, cudaStream_t stream);
+                                         const int* positions, const int* block_tables,
+                                         const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
+                                         int block_size, int n_tokens, int max_blocks_per_seq,
+                                         int n_sequences, cudaStream_t stream);
 
 // Score every context block of every sequence against the current queries and
 // build a compacted block table (ascending block order, at most budget_blocks

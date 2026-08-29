@@ -126,6 +126,40 @@ proved it):
   (`table_cap = ctx_blocks + 16`); the scores-row capacity gate compared
   against the unslacked ceiling and failed every chunk.
 
+## Serving regime (2026-08-29)
+
+Concurrent long-context serving, Qwen3-8B-Q8_0 fp8 KV, imp-server, decode
+rate via the tg8/tg520 differential (per-arm prefill wall cancels), fresh
+server per arm, 3 alternating trials
+(`tools/analysis/serving_sparse_ab.sh`):
+
+| geometry | dense (median, spread) | sparse budget 4096 | delta |
+|---|---:|---:|---:|
+| 3 streams x 25k ctx, resident | 155.6 (150.3-173.8) | 197.7 (194.4-198.2) | **+27%** |
+| 3 streams x 30k / 6 x 15.5k, ON arm at 689 MiB free | numbers invalid | numbers invalid | WDDM spill |
+
+Findings that gate the numbers:
+
+- **The metadata pool is the #1103 spill trap at serving scale.** 928 MiB at
+  6600 blocks; an operator `kv_cache.max_blocks` pin that does not include it
+  ran the ON arm at 689 MiB "free" - cudaMalloc still succeeds, WDDM spills,
+  and EVERY prefill kernel ran uniformly +11% (launch counts identical; the
+  per-kernel inflation and its disappearance under `cuda_graphs=never` -
+  which frees enough VRAM to fit - were the fingerprints). The pinned-pool
+  path now WARNS with the exact MiB; auto-sized pools log the size (pricing
+  it inside `plan_memory` is the open follow-up - a post-sizing deflation
+  broke the admission guarantee and was reverted).
+- Serving decode variance is one-sided: the dense arm spans 150-174 tok/s
+  across fresh servers, the sparse arm holds 194-198.
+- KV capacity, not the selection, binds stream count at long context:
+  73.7 KB/token (fp8, this model) means 3 x 25k+gen is what ~5000 blocks
+  hold; a 32-stream x 16k experiment does not fit this card with this model.
+
+Per-forward batched metadata update (one launch per prefill chunk / decode
+step, ragged mapping via `seq_offsets`) replaced the per-(seq, chunk, layer)
+inline launches while chasing the spill; it was not the mechanism, but it is
+the cheaper shape and the ragged mapping is now unit-tested.
+
 ## Quality (NIAH, Qwen3-8B-Q8_0 fp8 KV, 16k ctx, 5 depths x 3 seeds)
 
 | arm | pass | note |
