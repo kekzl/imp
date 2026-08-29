@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-08-29
+
 ### Added
 
 - Sparse decode attention measured at concurrent long-context serving:
