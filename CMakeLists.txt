@@ -477,6 +477,7 @@ if(IMP_BUILD_TOOLS)
     add_executable(imp-cli
         tools/imp-cli/main.cpp
     tools/common/args_common.cpp
+    tools/common/mtp_auto.cpp
     tools/imp-cli/args.cpp
     tools/imp-cli/json_report.cpp
     tools/imp-cli/mode_perplexity.cpp
@@ -551,6 +552,7 @@ if(IMP_BUILD_SERVER)
         ${IMP_WEBUI_HEADER}
         tools/imp-server/main.cpp
     tools/common/args_common.cpp
+    tools/common/mtp_auto.cpp
     tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
         tools/imp-server/rate_limit.cpp
@@ -655,6 +657,10 @@ if(IMP_BUILD_TESTS)
         tests/test_qwen3vl_vision_grid.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
+        tests/test_mtp_auto.cpp
+        # apply_config_pins: the bench pins guard tests/perf_baseline.json's
+        # raw-decode semantics, so they get a test rather than a smoke run.
+        tools/imp-cli/args.cpp
         # RuntimeConfig → process_diag snapshot (#1205). CPU-only by design:
         # process_diag exists so leaf kernels can read config without carrying
         # one, so the coupling is testable with no CUDA, Model or Engine.
@@ -774,6 +780,7 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/tool_call_gemma.cpp
         tools/common/args_common.cpp
+    tools/common/mtp_auto.cpp
     tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp

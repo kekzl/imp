@@ -412,6 +412,11 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.capture", cfg.speculative.capture);
     I("speculative.capture_ctx_cap", cfg.speculative.capture_ctx_cap);
 
+    // Record what the operator actually chose. An "auto" default that resolves
+    // into several keys reads this to leave an explicit setting alone (see
+    // RuntimeConfig::was_set).
+    if (matched && value_ok_local)
+        cfg.explicit_keys.push_back(dotted_key);
     if (value_ok)
         *value_ok = value_ok_local;
     return matched;

@@ -164,7 +164,13 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
   | three fixes (burst-site exclusions for MTP-bound requests, verify inside the think block, in-think emit trim) + verify-argmax banned-token mask | SHIPPED | `mtp_k=1` + `speculative.ngram=false`: 102.1-105.9 tok/s vs 87.2-87.6 default on a 1024-token thinking chat (+17-21 %, all six MTP runs above all six default runs); degen suite 50/0 twice |
   | `ngram=false` must stay in the pair | keep | matcher ON reproducibly derails one trivial prompt into an empty-content completion (model stops inside think; greedy under chunk-shaped forwards is not the eager trajectory); k=2 shows the same class |
 
-  Default stays `mtp_k=0`: head costs 0.79 GiB, chunk-greedy != eager-greedy.
+  **Default since 2026-08-29: `mtp_k=-1` (auto).** Auto engages the pair
+  (`mtp_k=2`, `ngram=false`) on a single-stream run whose checkpoint ships a
+  head - 95.8 -> 141.6 tok/s on the thinking prompt above, degen 50/0 - and
+  declines for concurrent serving (the head binds one request and costs batch
+  slots) and under `runtime.deterministic` (chunk-greedy != eager-greedy, so
+  the reproducibility promise outranks the speedup). `speculative.mtp_k=0`
+  opts out; an explicitly set `ngram` is never overruled.
 
   [PROV: commit=3ce0c326+mtp-fixes date=2026-08-27 hw=RTX5090
          model=Qwen3.8-27B-NVFP4 quant=NVFP4 cuda=13.3 path=imp-server

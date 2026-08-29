@@ -62,6 +62,17 @@ there instead of retelling it.
 
 ### Changed
 
+- `speculative.mtp_k` is a tri-state and defaults to `-1` (auto): a
+  single-stream run (`max_batch_size=1`, i.e. imp-cli or a server pinned to
+  one stream) on a checkpoint that ships an MTP head now drafts with it
+  (`mtp_k=2`, `ngram=false`) instead of leaving a measured speedup switched
+  off. Qwen3.8-27B-NVFP4, thinking prompt, 3 alternating rounds: 95.8 ->
+  141.6 tok/s (+48%); degen suite 50 checks / 0 fail. Auto declines for
+  concurrent serving (MTP drafts for one request at a time and the head's
+  0.79 GiB comes out of the batch slot budget - the auto batch stays 28) and
+  under `runtime.deterministic`. `speculative.mtp_k=0` opts out; an
+  explicitly configured `speculative.ngram` is never overruled.
+
 - MTP draft feed defaults to post-RMSNorm hiddens (`diagnostics.mtp_prenorm_h`
   now true): serving accept 70.2/72.2% -> 74.1/78.4% on Qwen3.8-27B-NVFP4,
   4/4 alternating pairs, +2-3% tok/s. No effect while `mtp_k=0`.

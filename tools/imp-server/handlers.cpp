@@ -6,6 +6,7 @@
 #include "stream_pipeline.h"
 
 #include "api/imp_internal.h"
+#include "common/mtp_auto.h"
 #include "vision/image_processor.h"
 #include "runtime/request.h"
 #include "memory/kv_cache.h"
@@ -117,19 +118,25 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         // caller to derive it from a pair that cannot express it.
         body["kv_pool_growable"] = kv_growable;
     }
-    // #1537: the checkpoint carries an MTP head this load did not take, because
-    // speculative.mtp_k defaults to 0. That is a documented +27-30% decode
-    // sitting switched off, and the only notice was one INFO line at startup -
-    // which an operator running a container never sees. Reported here so it is
-    // discoverable without grepping a log.
+    // #1537: the checkpoint carries an MTP head this load did not take. Since
+    // the mtp_k auto default that is normally a REGIME decision (a serving
+    // server drafts for one request at a time while the head's VRAM comes out
+    // of every slot's budget), so name the reason - an operator running a
+    // container never sees the startup log.
     if (state.model && state.model->model && state.model->model->mtp_head_available_unloaded_) {
         body["mtp_head_available"] = true;
         body["mtp_head_hint"] =
-            "this checkpoint ships an MTP head that is not loaded "
-            "(speculative.mtp_k=0). --set speculative.mtp_k=2 --set "
-            "speculative.ngram=false measured +27-30% single-stream decode on "
-            "Qwen3.8-27B-NVFP4 thinking chats (2026-08-27, adaptive chain "
-            "depth), for the head's VRAM (0.79 GiB).";
+            state.runtime_config.speculative.mtp_k == 0 && state.default_args.max_batch_size != 1
+                ? "this checkpoint ships an MTP head; speculative.mtp_k=auto left it unloaded "
+                  "because this server takes concurrent requests (MTP drafts for one request at "
+                  "a time, and the head's 0.79 GiB comes out of the batch slot budget). "
+                  "--set speculative.mtp_k=2 --set speculative.ngram=false forces it: measured "
+                  "+27-30% single-stream decode on Qwen3.8-27B-NVFP4 thinking chats (2026-08-27)."
+                : "this checkpoint ships an MTP head that is not loaded "
+                  "(speculative.mtp_k=0). --set speculative.mtp_k=2 --set "
+                  "speculative.ngram=false measured +27-30% single-stream decode on "
+                  "Qwen3.8-27B-NVFP4 thinking chats (2026-08-27, adaptive chain "
+                  "depth), for the head's VRAM (0.79 GiB).";
     }
 
     if (!unservable.empty()) {
@@ -668,7 +675,11 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
     // Load model. speculative.mtp_k > 0 opts into loading the MTP draft-head
     // sidecar (~1.6 GiB VRAM; SafeTensors models shipping
     // model_mtp.safetensors) so MTP drafting can be enabled below.
-    const int mtp_k = state.runtime_config.speculative.mtp_k;
+    // speculative.mtp_k is a tri-state (-1 auto, 0 off, >0 fixed). Auto only
+    // engages for a server pinned to a single stream: with concurrent decode
+    // the head binds one request and its VRAM comes out of the batch's slots.
+    int mtp_k =
+        imp::tools::mtp_auto_request_k(state.runtime_config, state.default_args.max_batch_size);
     ImpError err = imp_model_load_ex(path.c_str(), format, /*load_mtp_head=*/mtp_k > 0 ? 1 : 0,
                                      &state.model);
     if (err != IMP_SUCCESS) {
@@ -676,6 +687,13 @@ std::string load_model_into_state(ServerState& state, const std::string& path, c
         state.model = nullptr;
         return msg;
     }
+    // Resolve the pair against what the load produced, BEFORE the pending
+    // config is stashed for Engine::init below.
+    imp::tools::mtp_auto_finalize(state.runtime_config, mtp_k,
+                                  state.model->model->mtp_.has_value() &&
+                                      state.model->model->mtp_->loaded);
+    // The enable call below takes the RESOLVED depth, not the requested one.
+    mtp_k = state.runtime_config.speculative.mtp_k;
 
     // Create context (engine auto-detects config from model metadata).
     // Re-stash the runtime config so Engine::init's take_pending_runtime_config()

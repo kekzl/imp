@@ -1,5 +1,6 @@
 #include "api/imp_internal.h"
 #include "common/exit_codes.h"
+#include "common/mtp_auto.h"
 #include "common/json_out.h"
 #include "json_report.h"
 #include "modes.h"
@@ -53,78 +54,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "See imp.conf.example for the key names.\n");
         return 1;
     }
-    // Benchmark mode measures raw engine decode: MoE speculation would fold
-    // draft-acceptance luck + grouped-GEMM restart variance into the gated
-    // tg signal (dense spec stays as-is — measured neutral on the bench
-    // prompt). An explicit --set speculative.moe=… still wins.
-    if (args.bench) {
-        bool user_set = false;
-        for (const auto& ov : args.config_overrides)
-            if (ov.rfind("speculative.moe", 0) == 0)
-                user_set = true;
-        if (!user_set)
-            runtime_cfg.speculative.moe = false;
-        // The suffix drafter is decidedly NOT bench-neutral (frequency-voted
-        // adaptive drafts hit +170% tg128 on the bench prompt) — pin it to
-        // the legacy scan so tests/perf_baseline.json keeps its raw-decode
-        // semantics. An explicit --set speculative.suffix=… still wins.
-        bool suffix_set = false;
-        for (const auto& ov : args.config_overrides)
-            if (ov.rfind("speculative.suffix=", 0) == 0)
-                suffix_set = true;
-        if (!suffix_set)
-            runtime_cfg.speculative.suffix = false;
-        // Recurrent snapshots (hybrid prefix caching) are dead weight in the
-        // single-shot bench but their eager buffers shift the MoE expert
-        // offload budget — pin them off so hybrid GGUF baselines are
-        // unaffected. An explicit --set server.recurrent_snapshot_mb=… wins.
-        bool snap_set = false;
-        for (const auto& ov : args.config_overrides)
-            if (ov.rfind("server.recurrent_snapshot_mb", 0) == 0)
-                snap_set = true;
-        if (!snap_set)
-            runtime_cfg.server.recurrent_snapshot_mb = 0;
-        // Hybrid (GDN/SSM) verify would fold draft-acceptance luck into the
-        // gated tg signal exactly like the moe pin above — keep the
-        // canonical baseline raw-decode. An explicit --set wins.
-        bool hybrid_set = false;
-        for (const auto& ov : args.config_overrides)
-            if (ov.rfind("speculative.hybrid", 0) == 0)
-                hybrid_set = true;
-        if (!hybrid_set)
-            runtime_cfg.speculative.hybrid = false;
-        // Graph-captured verify (#847) changes verify-step timing (and pads
-        // chunks) — keep the canonical baseline on the eager verify path.
-        // An explicit --set speculative.capture=… still wins.
-        bool capture_set = false;
-        for (const auto& ov : args.config_overrides)
-            if (ov.rfind("speculative.capture", 0) == 0)
-                capture_set = true;
-        if (!capture_set)
-            runtime_cfg.speculative.capture = false;
-        // SWA-aware KV sizing changes the KV layout and forces spec verify
-        // eager on SWA models — keep the canonical baseline on full-length
-        // KV. An explicit --set kv_cache.swa_sizing=… still wins.
-        bool swa_set = false;
-        for (const auto& ov : args.config_overrides)
-            if (ov.rfind("kv_cache.swa_sizing", 0) == 0)
-                swa_set = true;
-        if (!swa_set)
-            runtime_cfg.kv_cache.swa_sizing = "off";
-    }
-    // One-shot runs (--prompt / --bench) never re-see a prefix: the process
-    // exits after a single generation, so prefix caching only costs hashing
-    // and blocks the swa_sizing=auto KV savings on SWA models. Interactive
-    // mode keeps it (turn N+1 reuses turn N's prefix). --prefix-caching or
-    // an explicit --set server.prefix_cache=… still wins.
-    if (!args.interactive && !args.prefix_caching) {
-        bool pc_set = false;
-        for (const auto& ov : args.config_overrides)
-            if (ov.rfind("server.prefix_cache", 0) == 0)
-                pc_set = true;
-        if (!pc_set)
-            runtime_cfg.server.prefix_cache = false;
-    }
+    apply_config_pins(runtime_cfg, args);
     // `[calibration] out_path` is the fallback when --calibrate carries no path.
     // The key was parsed and documented and read by nothing, so an operator who
     // set it in imp.conf got no file and no warning (debt ledger item 7).
@@ -208,13 +138,23 @@ int main(int argc, char** argv) {
     // actually requested MTP spec-decode. Otherwise it is dead VRAM.
     // Both spellings count: the startup hint recommends --set
     // speculative.mtp_k=2, and until this line the CLI silently ignored it.
-    const int mtp_k = args.mtp_spec_decode_k > 0 ? args.mtp_spec_decode_k : runtime_cfg.speculative.mtp_k;
+    // speculative.mtp_k is a tri-state: -1 auto, 0 off, >0 fixed. The CLI is
+    // always single-stream (config.max_batch_size = 1 below), so auto engages
+    // here whenever the checkpoint ships a head; --mtp-spec-decode still wins.
+    int mtp_k = args.mtp_spec_decode_k > 0
+                    ? args.mtp_spec_decode_k
+                    : imp::tools::mtp_auto_request_k(runtime_cfg, /*configured_batch=*/1);
     ImpError err = imp_model_load_ex(resolved_model.c_str(), format,
                                      /*load_mtp_head=*/mtp_k > 0, &model);
     if (err != IMP_SUCCESS) {
         fprintf(stderr, "Error loading model: %s\n", imp_error_string(err));
         return imp::tools::exit_code_for(err);
     }
+    // What the load produced decides the pair: a checkpoint without a head must
+    // not end up with ngram off and nothing drafting (mtp_auto_after_load).
+    mtp_k = imp::tools::mtp_auto_after_load(
+        runtime_cfg, mtp_k, model->model->mtp_.has_value() && model->model->mtp_->loaded,
+        args.mtp_spec_decode_k);
 
     ImpConfig config = imp_config_default();
 
