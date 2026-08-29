@@ -169,6 +169,13 @@ struct ServerState {
     std::timed_mutex mtx;
     int default_max_tokens = 8192;
     int max_seq_len = 0;
+    // The batch size the CURRENT load resolved to (flag > imp.conf > per-load
+    // override > 0 = engine auto). Recorded because two decisions outside
+    // build_config need it - whether speculative.mtp_k=auto engages, and what
+    // /health reports as the reason it did not - and both read the raw CLI
+    // flag before 2026-08-29, which made `runtime.max_batch_size=1` from
+    // imp.conf a single-stream server that auto still declined.
+    int resolved_max_batch_size = 0;
     std::atomic<int> next_id{0};
     std::atomic<int> next_tool_call_id{0};
     ServerArgs default_args;
@@ -263,6 +270,12 @@ int64_t unix_timestamp();
 
 std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::string& dir);
 std::string find_model_path(const ServerState& state, const std::string& name);
+
+// Max batch size for one load: --max-batch > [runtime] max_batch_size from
+// imp.conf > the per-load JSON override > 0 (engine auto-sizes). One place,
+// because build_config is not the only caller that has to agree with it.
+int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
+                           const nlohmann::json& overrides);
 
 ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
                        const std::string& model_path = {}, const json& overrides = json::object());
