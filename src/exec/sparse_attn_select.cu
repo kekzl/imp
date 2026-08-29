@@ -32,94 +32,59 @@ __device__ __forceinline__ float cache_val_to_float(__nv_fp8_e4m3 v) { return st
 // Metadata layout per (layer, block): row_elems half2, (min, max) per
 // (kv_head, dim) element, element index e = kv_head * head_dim + d.
 // ---------------------------------------------------------------------------
-template <typename CacheT>
-__global__ void sparse_update_key_minmax_kernel(const CacheT* __restrict__ k_cache_base,
-                                                __half2* __restrict__ minmax_base,
-                                                const int* __restrict__ positions,
-                                                const int* __restrict__ block_tables, int row_elems,
-                                                int block_size, int n_tokens, int max_blocks_per_seq,
-                                                int n_sequences) {
-    const int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens)
-        return;
-    const int pos = positions[token_idx];
-    int slot;
-    const int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq,
-                                         n_sequences, slot);
-    if (block_id < 0)
-        return;
-    if (token_idx > 0) {
-        int prev_slot;
-        const int prev_block = kv_resolve_slot(block_tables, positions[token_idx - 1], block_size,
-                                               token_idx - 1, max_blocks_per_seq, n_sequences, prev_slot);
-        if (prev_block == block_id)
-            return;  // not the owner of this block's span
-    }
-    // Forward span of same-block tokens in this launch (at most block_size).
-    int span = 1;
-    while (token_idx + span < n_tokens && span < block_size) {
-        int s2;
-        const int b2 = kv_resolve_slot(block_tables, positions[token_idx + span], block_size,
-                                       token_idx + span, max_blocks_per_seq, n_sequences, s2);
-        if (b2 != block_id || s2 != slot + span)
-            break;  // consecutive slots only - the read below walks slot+j
-        span++;
-    }
-    const CacheT* blk = k_cache_base + (int64_t)block_id * block_size * row_elems;
-    __half2* mm = minmax_base + (int64_t)block_id * row_elems;
-    const bool init = (slot == 0);
-    for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
-        float mn, mx;
-        if (init) {
-            mn = FLT_MAX;
-            mx = -FLT_MAX;
-        } else {
-            const __half2 cur = mm[e];
-            mn = __low2float(cur);
-            mx = __high2float(cur);
-        }
-        for (int j = 0; j < span; j++) {
-            const float v = cache_val_to_float(blk[(int64_t)(slot + j) * row_elems + e]);
-            mn = fminf(mn, v);
-            mx = fmaxf(mx, v);
-        }
-        mm[e] = __floats2half2_rn(mn, mx);
-    }
-}
-
 // All-layers batched variant for decode: one launch covers every KV layer
 // (grid.y). The per-layer form cost 36 launches x ~2.4-5.9 us per decode
 // step; batching is legal because decode selection force-includes the recent
 // blocks, so metadata may lag the current step's write by one step without
 // affecting which blocks the bound can exclude.
+// Ragged token->block-table-row mapping: with seq_offsets ([n_seq+1], the
+// ragged prefill's device twin of h_seq_offsets), token i belongs to the seq
+// whose offset range contains i, and THAT is the block-table row. Without it
+// (nullptr) the plain kv_resolve_slot semantics apply (decode: token == seq;
+// single-seq: flat table).
+__device__ __forceinline__ int sparse_resolve_block(const int* block_tables, const int* positions,
+                                                    const int* seq_offsets, int token_idx, int block_size,
+                                                    int max_blocks_per_seq, int n_sequences, int& slot) {
+    if (seq_offsets != nullptr && max_blocks_per_seq > 0) {
+        int seq = 0;
+        while (seq + 1 < n_sequences && token_idx >= seq_offsets[seq + 1])
+            seq++;
+        const int pos = positions[token_idx];
+        slot = pos % block_size;
+        return block_tables[(int64_t)seq * max_blocks_per_seq + pos / block_size];
+    }
+    return kv_resolve_slot(block_tables, positions[token_idx], block_size, token_idx, max_blocks_per_seq,
+                           n_sequences, slot);
+}
+
 template <typename CacheT>
 __global__ void sparse_update_key_minmax_layers_kernel(
     const CacheT* __restrict__ k_base, int64_t k_layer_stride,  // elems
     __half2* __restrict__ mm_base, int64_t mm_layer_stride,     // half2 elems
-    const int* __restrict__ positions, const int* __restrict__ block_tables, int row_elems, int block_size,
-    int n_tokens, int max_blocks_per_seq, int n_sequences) {
+    const int* __restrict__ positions, const int* __restrict__ block_tables,
+    const int* __restrict__ seq_offsets, int row_elems, int block_size, int n_tokens,
+    int max_blocks_per_seq, int n_sequences) {
     const int token_idx = blockIdx.x;
     const int layer = blockIdx.y;
     if (token_idx >= n_tokens)
         return;
-    const int pos = positions[token_idx];
     int slot;
-    const int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq,
-                                         n_sequences, slot);
+    const int block_id = sparse_resolve_block(block_tables, positions, seq_offsets, token_idx, block_size,
+                                              max_blocks_per_seq, n_sequences, slot);
     if (block_id < 0)
         return;
     if (token_idx > 0) {
         int prev_slot;
-        const int prev_block = kv_resolve_slot(block_tables, positions[token_idx - 1], block_size,
-                                               token_idx - 1, max_blocks_per_seq, n_sequences, prev_slot);
+        const int prev_block = sparse_resolve_block(block_tables, positions, seq_offsets, token_idx - 1,
+                                                    block_size, max_blocks_per_seq, n_sequences, prev_slot);
         if (prev_block == block_id)
             return;
     }
     int span = 1;
     while (token_idx + span < n_tokens && span < block_size) {
         int s2;
-        const int b2 = kv_resolve_slot(block_tables, positions[token_idx + span], block_size,
-                                       token_idx + span, max_blocks_per_seq, n_sequences, s2);
+        const int b2 = sparse_resolve_block(block_tables, positions, seq_offsets, token_idx + span,
+                                            block_size, max_blocks_per_seq, n_sequences, s2);
         if (b2 != block_id || s2 != slot + span)
             break;  // consecutive slots only - the read below walks slot+j
         span++;
@@ -440,36 +405,12 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
 
 }  // namespace
 
-void sparse_update_key_minmax(QType cache_dtype, const void* k_cache_base, void* minmax_base,
-                              const int* positions, const int* block_tables, int n_kv_heads, int head_dim,
-                              int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences,
-                              cudaStream_t stream) {
-    if (n_tokens <= 0)
-        return;
-    const int row_elems = n_kv_heads * head_dim;
-    const int threads = 128;
-    if (cache_dtype == QType::FP8_E4M3) {
-        sparse_update_key_minmax_kernel<__nv_fp8_e4m3>
-            <<<n_tokens, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_cache_base),
-                                               static_cast<__half2*>(minmax_base), positions, block_tables,
-                                               row_elems, block_size, n_tokens, max_blocks_per_seq,
-                                               n_sequences);
-        IMP_CUDA_CHECK_LAUNCH();
-    } else {
-        sparse_update_key_minmax_kernel<half>
-            <<<n_tokens, threads, 0, stream>>>(static_cast<const half*>(k_cache_base),
-                                               static_cast<__half2*>(minmax_base), positions, block_tables,
-                                               row_elems, block_size, n_tokens, max_blocks_per_seq,
-                                               n_sequences);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-}
-
 void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
                                          void* minmax_base, int64_t mm_layer_stride_bytes,
-                                         const int* positions, const int* block_tables, int n_layers,
-                                         int n_kv_heads, int head_dim, int block_size, int n_tokens,
-                                         int max_blocks_per_seq, int n_sequences, cudaStream_t stream) {
+                                         const int* positions, const int* block_tables,
+                                         const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
+                                         int block_size, int n_tokens, int max_blocks_per_seq,
+                                         int n_sequences, cudaStream_t stream) {
     if (n_tokens <= 0 || n_layers <= 0)
         return;
     const int row_elems = n_kv_heads * head_dim;
@@ -480,16 +421,16 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
         sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3>
             <<<grid, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
                                            static_cast<__half2*>(minmax_base), mm_stride, positions,
-                                           block_tables, row_elems, block_size, n_tokens, max_blocks_per_seq,
-                                           n_sequences);
+                                           block_tables, seq_offsets, row_elems, block_size, n_tokens,
+                                           max_blocks_per_seq, n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         sparse_update_key_minmax_layers_kernel<half>
             <<<grid, threads, 0, stream>>>(static_cast<const half*>(k_base),
                                            k_layer_stride_bytes / (int64_t)sizeof(half),
                                            static_cast<__half2*>(minmax_base), mm_stride, positions,
-                                           block_tables, row_elems, block_size, n_tokens, max_blocks_per_seq,
-                                           n_sequences);
+                                           block_tables, seq_offsets, row_elems, block_size, n_tokens,
+                                           max_blocks_per_seq, n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     }
 }
@@ -513,8 +454,11 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
 
     const int n_words = (max_blocks_per_seq + 31) / 32;
     const size_t sel_smem = (256 + 4 * (size_t)n_words + (size_t)max_blocks_per_seq) * sizeof(uint32_t);
-    // 128k-context tables need ~35 KiB; opt in past the 48 KiB default once.
-    static size_t sel_smem_granted = 0;
+    // 128k-context tables need ~35 KiB; opt in past the 48 KiB default ONLY
+    // when actually exceeded - the attribute sticks to the function and can
+    // shift the L1/SMEM carveout the driver picks around it.
+    constexpr size_t kSmemDefault = 48 * 1024;
+    static size_t sel_smem_granted = kSmemDefault;
     if (sel_smem > sel_smem_granted) {
         cudaFuncSetAttribute(sparse_select_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              (int)sel_smem);
