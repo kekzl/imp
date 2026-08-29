@@ -19,6 +19,7 @@
 // Per-run overrides come on top via apply_overrides({"section.field=value"}).
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace imp {
@@ -496,6 +497,19 @@ struct RuntimeConfig {
     // leave it null and they are only logged.
     static RuntimeConfig load(const std::string& explicit_path, const std::vector<std::string>& overrides,
                               std::vector<std::string>* rejected = nullptr);
+
+    // Dotted keys this configuration actually took from a file or a `--set`,
+    // in application order. An "auto" default that resolves into a pair of
+    // keys has to know which half the operator chose themselves, or it
+    // silently overrides an explicit setting (speculative.mtp_k=-1 pairing
+    // ngram off is the first such resolution).
+    std::vector<std::string> explicit_keys;
+    [[nodiscard]] bool was_set(std::string_view dotted_key) const {
+        for (const auto& k : explicit_keys)
+            if (k == dotted_key)
+                return true;
+        return false;
+    }
 };
 
 // ---- Pending-config handoff (tool-main → Engine) -----------------------

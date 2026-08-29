@@ -249,7 +249,26 @@ struct Speculative {
     // Independent of `ngram` above: with ngram=false and mtp_k=2 the head
     // drafts and the matcher does not (measured 100 drafts over 50 verifies
     // on Qwen3.8-27B, against 0 before the gate split).
-    int mtp_k = 0;
+    // -1 = auto (default), 0 = off, >0 = fixed chain depth.
+    //
+    // AUTO engages the pair this repo measured, and only in the regime it
+    // measured it in: a SINGLE-STREAM run (max_batch_size == 1, which is what
+    // imp-cli configures and what a server pinned to one stream asks for)
+    // whose checkpoint carries a loadable head gets mtp_k=2 with ngram=false
+    // - +27-30% on thinking chats, +17-21% plain single-stream decode on
+    // Qwen3.8-27B-NVFP4 (2026-08-27, adaptive chain depth). Auto leaves an
+    // explicitly configured `ngram` alone (RuntimeConfig::was_set).
+    //
+    // Auto stays OFF for concurrent serving: MTP binds to one request at a
+    // time (mtp_bound_req_), while the head's VRAM comes out of the batch's
+    // slot budget - on the Qwen3.8-27B hybrid the auto batch drops 28 -> 12,
+    // which costs far more aggregate throughput than one stream's drafts buy
+    // (#1766-era serving figures). It also stays off under
+    // runtime.deterministic: MTP greedy trajectories are not eager-equal
+    // (docs/LIMITATIONS.md), and the determinism promise outranks the speedup.
+    // Resolution lives in tools/common/mtp_auto.* because BOTH tools decide
+    // whether to load the head before an engine exists.
+    int mtp_k = -1;
     // Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next
     // draft by one row (up to mtp_k), any rejection sheds one row (floor 1).
     // Draft-poor prompts converge to k=1 verifies instead of paying the

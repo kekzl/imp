@@ -1,5 +1,7 @@
 #pragma once
 
+#include "runtime/config.h"
+
 #include "common/args_common.h"
 
 #include <string>
@@ -62,4 +64,7 @@ struct CliArgs : CommonArgs {
 };
 
 CliArgs parse_args(int argc, char** argv);
+
+// Bench / one-shot pins applied on top of the loaded config (see args.cpp).
+void apply_config_pins(imp::RuntimeConfig& runtime_cfg, const CliArgs& args);
 void print_usage(const char* prog);

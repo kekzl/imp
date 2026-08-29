@@ -1093,15 +1093,16 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     } else if (probe_mtp_head(model_dir)) {
         // The caller asked for no head and this checkpoint has one. Say so
-        // once, with the trade, because speculative.mtp_k defaults to 0 and an
-        // option nobody is told about is not a choice the operator gets to
-        // make. Costs a name scan, no weight bytes.
+        // once, with the trade: speculative.mtp_k=auto declines the head
+        // outside a single-stream run, and an option nobody is told about is
+        // not a choice the operator gets to make. Costs a name scan, no bytes.
         IMP_LOG_INFO(
-            "MTP head present in this checkpoint but not loaded (speculative.mtp_k=0). "
-            "Enable with --set speculative.mtp_k=1 --set speculative.ngram=false: "
-            "measured +17-21 %% single-stream decode on Qwen3.8-27B-NVFP4 (2026-08-27), "
-            "in exchange for the head's VRAM (0.79 GiB there) and eager-equal greedy "
-            "trajectories. See docs/LIMITATIONS.md");
+            "MTP head present in this checkpoint but not loaded. speculative.mtp_k=auto takes it "
+            "only on a single-stream run (max_batch_size=1) with runtime.deterministic off; "
+            "force it with --set speculative.mtp_k=2 --set speculative.ngram=false: measured "
+            "+17-21 %% plain and +27-30 %% thinking single-stream decode on Qwen3.8-27B-NVFP4 "
+            "(2026-08-27), in exchange for the head's VRAM (0.79 GiB there) and eager-equal "
+            "greedy trajectories. See docs/LIMITATIONS.md");
         mtp_available_unloaded = true;
     }
 

@@ -666,11 +666,21 @@ burst_rearm          = true
 # is snapshotted around the verify chunk; a partial acceptance restores it and
 # re-forwards the accepted prefix. imp-cli --bench pins this false.
 hybrid               = true
-# MTP-head chain-draft length (models shipping model_mtp.safetensors, e.g.
-# Qwen3.6). 0 = off. When > 0 the server loads the head (~1.6 GiB VRAM) and
-# MTP chains fill verify steps where the suffix matcher has no draft.
-# imp-cli equivalent: --mtp-spec-decode <k>.
-mtp_k                = 0
+# MTP-head chain-draft length (models shipping an mtp.* head, e.g. Qwen3.6 /
+# Qwen3.8). -1 = auto (default), 0 = off, > 0 = fixed depth. When it engages,
+# the head is loaded (0.79 GiB on Qwen3.8-27B) and MTP chains fill verify
+# steps where the suffix matcher has no draft. imp-cli: --mtp-spec-decode <k>.
+#
+# AUTO engages the measured pair (mtp_k=2 with ngram=false) only on a
+# SINGLE-STREAM run - max_batch_size = 1, i.e. imp-cli or a server pinned to
+# one stream - and only with runtime.deterministic off. Measured on
+# Qwen3.8-27B-NVFP4 (2026-08-29, 3 alternating rounds): 95.8 -> 141.6 tok/s
+# on a thinking prompt (+48 %), degen suite 50 checks / 0 fail. It stays off
+# for concurrent serving (MTP drafts for one request at a time, and the
+# head's VRAM comes out of every batch slot's budget) and under determinism
+# (chunk-greedy is not the eager trajectory). An explicitly set `ngram` is
+# never overruled by auto.
+mtp_k                = -1
 # Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next draft
 # by one row (up to mtp_k), any rejection sheds one (floor 1). Draft-poor
 # prompts converge to k=1 verifies; draft-rich prompts climb back to mtp_k.

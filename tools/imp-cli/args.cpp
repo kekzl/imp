@@ -1,4 +1,5 @@
 #include "args.h"
+#include "runtime/config.h"
 #include "common/args_common.h"
 
 #include <cstdio>
@@ -242,4 +243,96 @@ CliArgs parse_args(int argc, char** argv) {
     }
 
     return args;
+}
+
+// Bench / one-shot configuration pins, lifted out of main() (2026-08-29: the
+// file sat exactly on the file-size gate's 800-line ceiling). Pure move - the
+// policy and its rationale are unchanged, including that only an explicit
+// `--set` wins over a pin: a stray imp.conf must not quietly redefine what
+// tests/perf_baseline.json measures.
+void apply_config_pins(imp::RuntimeConfig& runtime_cfg, const CliArgs& args) {
+// Benchmark mode measures raw engine decode: MoE speculation would fold
+// draft-acceptance luck + grouped-GEMM restart variance into the gated
+// tg signal (dense spec stays as-is — measured neutral on the bench
+// prompt). An explicit --set speculative.moe=… still wins.
+if (args.bench) {
+    bool user_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("speculative.moe", 0) == 0)
+            user_set = true;
+    if (!user_set)
+        runtime_cfg.speculative.moe = false;
+    // The suffix drafter is decidedly NOT bench-neutral (frequency-voted
+    // adaptive drafts hit +170% tg128 on the bench prompt) — pin it to
+    // the legacy scan so tests/perf_baseline.json keeps its raw-decode
+    // semantics. An explicit --set speculative.suffix=… still wins.
+    bool suffix_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("speculative.suffix=", 0) == 0)
+            suffix_set = true;
+    if (!suffix_set)
+        runtime_cfg.speculative.suffix = false;
+    // Recurrent snapshots (hybrid prefix caching) are dead weight in the
+    // single-shot bench but their eager buffers shift the MoE expert
+    // offload budget — pin them off so hybrid GGUF baselines are
+    // unaffected. An explicit --set server.recurrent_snapshot_mb=… wins.
+    bool snap_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("server.recurrent_snapshot_mb", 0) == 0)
+            snap_set = true;
+    if (!snap_set)
+        runtime_cfg.server.recurrent_snapshot_mb = 0;
+    // Hybrid (GDN/SSM) verify would fold draft-acceptance luck into the
+    // gated tg signal exactly like the moe pin above — keep the
+    // canonical baseline raw-decode. An explicit --set wins.
+    bool hybrid_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("speculative.hybrid", 0) == 0)
+            hybrid_set = true;
+    if (!hybrid_set)
+        runtime_cfg.speculative.hybrid = false;
+    // MTP auto (speculative.mtp_k=-1) would draft during the gated bench on
+    // any checkpoint that ships a head - the same "speculation folded into the
+    // raw-decode signal" the pins above exist to prevent, and
+    // tests/perf_baseline.json is what it would silently redefine (measured:
+    // Qwen3.8-27B-NVFP4 --bench engaged the head before this pin). An explicit
+    // --set speculative.mtp_k=... still wins.
+    bool mtp_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("speculative.mtp_k", 0) == 0)
+            mtp_set = true;
+    if (!mtp_set && runtime_cfg.speculative.mtp_k < 0)
+        runtime_cfg.speculative.mtp_k = 0;
+    // Graph-captured verify (#847) changes verify-step timing (and pads
+    // chunks) — keep the canonical baseline on the eager verify path.
+    // An explicit --set speculative.capture=… still wins.
+    bool capture_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("speculative.capture", 0) == 0)
+            capture_set = true;
+    if (!capture_set)
+        runtime_cfg.speculative.capture = false;
+    // SWA-aware KV sizing changes the KV layout and forces spec verify
+    // eager on SWA models — keep the canonical baseline on full-length
+    // KV. An explicit --set kv_cache.swa_sizing=… still wins.
+    bool swa_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("kv_cache.swa_sizing", 0) == 0)
+            swa_set = true;
+    if (!swa_set)
+        runtime_cfg.kv_cache.swa_sizing = "off";
+}
+// One-shot runs (--prompt / --bench) never re-see a prefix: the process
+// exits after a single generation, so prefix caching only costs hashing
+// and blocks the swa_sizing=auto KV savings on SWA models. Interactive
+// mode keeps it (turn N+1 reuses turn N's prefix). --prefix-caching or
+// an explicit --set server.prefix_cache=… still wins.
+if (!args.interactive && !args.prefix_caching) {
+    bool pc_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("server.prefix_cache", 0) == 0)
+            pc_set = true;
+    if (!pc_set)
+        runtime_cfg.server.prefix_cache = false;
+}
 }
