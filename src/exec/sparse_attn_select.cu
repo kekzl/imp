@@ -61,8 +61,8 @@ __global__ void sparse_update_key_minmax_kernel(const CacheT* __restrict__ k_cac
         int s2;
         const int b2 = kv_resolve_slot(block_tables, positions[token_idx + span], block_size,
                                        token_idx + span, max_blocks_per_seq, n_sequences, s2);
-        if (b2 != block_id)
-            break;
+        if (b2 != block_id || s2 != slot + span)
+            break;  // consecutive slots only - the read below walks slot+j
         span++;
     }
     const CacheT* blk = k_cache_base + (int64_t)block_id * block_size * row_elems;
@@ -120,8 +120,8 @@ __global__ void sparse_update_key_minmax_layers_kernel(
         int s2;
         const int b2 = kv_resolve_slot(block_tables, positions[token_idx + span], block_size,
                                        token_idx + span, max_blocks_per_seq, n_sequences, s2);
-        if (b2 != block_id)
-            break;
+        if (b2 != block_id || s2 != slot + span)
+            break;  // consecutive slots only - the read below walks slot+j
         span++;
     }
     const CacheT* blk = k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems;

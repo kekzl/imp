@@ -13,6 +13,11 @@ there instead of retelling it.
 
 ### Added
 
+- Sparse decode attention now covers spec verify chunks: with speculation on
+  at 32k ctx (echo-heavy workload) Qwen3-8B-Q8_0 fp8-KV decodes 137.4 ->
+  176.1 tok/s (+28.2% over the plain-decode-only form, +41% over dense),
+  ms/verify 233 -> 133; NIAH 32k with speculation on 15/15 both arms.
+  Detail: docs/plans/2026-08-28-sparse-decode-attention.md.
 - `imp-cli --prompt-file <path>`: read the prompt from a file (whole content,
   verbatim; mutually exclusive with `--prompt`). A bare argv caps at ~128 KiB
   (~32k tokens) per exec argument; the NIAH harness now uses it, which

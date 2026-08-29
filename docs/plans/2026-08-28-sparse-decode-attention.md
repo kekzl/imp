@@ -64,7 +64,7 @@ copy of the table: bit-identical to dense attention.
 | `speculative.token_recycling=false` | copy_blocks_device does not copy metadata |
 | no persistent prefix cache (`prefix_cache_path` empty) | disk-restored blocks bypass the KV write path and would carry empty metadata. In-memory prefix reuse is fine: metadata lives per block and the reused blocks were written normally; the full-hit last-token re-write is idempotent |
 | per layer (dispatch time): `sliding_window == 0 && n_sinks == 0` | SWA/StreamingLLM layers are already bounded |
-| per step (dispatch time): plain decode only (`!chunk_decode_attn`, n == n_sequences) | verify chunks keep full attention; metadata is still maintained for their writes |
+| ~~per step: plain decode only~~ closed 2026-08-29 | spec verify chunks ride the sparse table too: chunk rows are already per-row "sequences" with own context lens and replicated tables - the exact shape the selection kernels take. Pad rows attend 1 token (identity path); repeated pad positions are handled by the consecutive-slot span clamp |
 
 Rollback/overwrite after rejected speculation only loosens the bound (min/max
 over a superset), never tightens it: selection quality degrades marginally,
@@ -100,6 +100,31 @@ short ctx: +3 graph-replayed launches per attention layer per step
 - `src/core/config/attention.h`, `src/runtime/config.cpp` -
   `attention.sparse_topk_tokens|sparse_sink_tokens|sparse_recent_tokens`
 - `src/runtime/engine_kv_cache_init.cpp` - eligibility + pool pricing
+
+## Verify chunks on the sparse table (2026-08-29)
+
+Speculation ON (n-gram default) at 32k on the NIAH-filler workload (echo-heavy,
+5.25-5.67 tok/verify), 3/3 alternating rounds, make-build images:
+
+| arm | tok/s | ms/verify |
+|---|---:|---:|
+| all dense | 124.5 | - |
+| sparse, chunks dense (#1805 = main) | 137.4 | 233 |
+| sparse incl. verify chunks | 176.1 | 133 |
+
++28.2% over #1805, +41.4% over dense; NIAH 32k with spec ON: dense 15/15,
+sparse 15/15 (`fp8_sparse4k_spec` config, --max-gen-tokens 768).
+
+Two gate traps that made the first two B-vs-C measurements read NEUTRAL
+(the change was silently inactive both times - launch counts, not logs,
+proved it):
+
+- scratch rows were sized from max_batch (8 at M=1); chunk rows present as
+  n_sequences up to the 33-row chunk cap (`engine_spec_capture.cpp`) - a
+  17-row chunk failed the row gate.
+- spec verify row tables carry 16 slack blocks past the context ceiling
+  (`table_cap = ctx_blocks + 16`); the scores-row capacity gate compared
+  against the unslacked ceiling and failed every chunk.
 
 ## Quality (NIAH, Qwen3-8B-Q8_0 fp8 KV, 16k ctx, 5 depths x 3 seeds)
 

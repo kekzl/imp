@@ -462,7 +462,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // mla_absorb_max_seq_ carries the engine's effective max_seq_len
             // for every model (executor_workspace.cu).
             const int max_ctx_tokens = (mla_absorb_max_seq_ > 0) ? mla_absorb_max_seq_ : max_tokens_;
-            const int max_ctx_blocks = (max_ctx_tokens + kKVBlockSize - 1) / kKVBlockSize;
+            // +16: the spec verify row tables carry 16 slack blocks past the
+            // context ceiling (engine_spec_capture.cpp table_cap "+ 16"); the
+            // dispatch gate compares the incoming table stride against this
+            // capacity, and without the margin every verify chunk failed it.
+            const int max_ctx_blocks = (max_ctx_tokens + kKVBlockSize - 1) / kKVBlockSize + 16;
             const int sink_blocks =
                 (std::max(acfg.sparse_sink_tokens, 0) + kKVBlockSize - 1) / kKVBlockSize;
             // The recent window always covers at least the partial tail block.
@@ -482,7 +486,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 max_ctx_blocks,
                 std::max(budget_blocks, (acfg.sparse_min_ctx + kKVBlockSize - 1) / kKVBlockSize));
             const int table_blocks = engage_blocks;
-            const int max_batch = max_logit_tokens_;
+            // Row capacity covers batched decode AND spec verify chunks: chunk
+            // rows are presented as sequences, up to the 33-row chunk cap
+            // (engine_spec_capture.cpp chunk_cap = max(bucket_max, k+1, 33)).
+            // Sizing from max_batch alone left the gate dead for every chunk
+            // wider than the batch (n_seq=17 measured vs 8 rows, 2026-08-29).
+            const int max_batch = std::max(max_logit_tokens_, 33);
             const size_t scores_sz = (size_t)max_batch * max_ctx_blocks * sizeof(float);
             const size_t bt_sz = (size_t)max_batch * table_blocks * sizeof(int);
             const size_t ctx_sz = (size_t)max_batch * sizeof(int);
@@ -503,6 +512,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.sparse_engage_blocks = engage_blocks;
                 qscratch_.sparse_table_blocks = table_blocks;
                 qscratch_.sparse_max_ctx_blocks = max_ctx_blocks;
+                qscratch_.sparse_max_rows = max_batch;
                 IMP_LOG_INFO("Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
                              "recent %d blocks, engage above %d tokens, scratch %.1f KiB",
                              budget_blocks, budget_blocks * kKVBlockSize, sink_blocks, recent_blocks,

@@ -204,6 +204,35 @@ TEST_F(SparseMinMaxTest, MultiSeqDecodeTwoTokens) {
     cudaFree(d_pos);
 }
 
+TEST_F(SparseMinMaxTest, RepeatedPositionPadRows) {
+    // Spec-chunk pad rows can repeat a position. The owner's forward span
+    // must only cover CONSECUTIVE slots - a repeated position must not make
+    // it read slots that were never written (slot+j walk).
+    std::vector<int> bt_h = {6};
+    int* d_bt = dmalloc<int>(1);
+    dcopy(d_bt, bt_h);
+    // Written content: slots 0..5 only. Poison the rest of the block region
+    // so an over-long span read would drag garbage into the metadata.
+    for (int s = 0; s <= 5; s++)
+        write_row(6, s, 60 + s);
+    for (int s = 6; s < kBS; s++)
+        for (int e = 0; e < row_elems; e++)
+            k_cache_h[static_cast<size_t>(6) * kBS * row_elems + s * row_elems + e] =
+                __float2half(9999.0f);
+    dcopy(d_k, k_cache_h);
+    // Launch shape: pads repeat position 5 (slot 5) after the real rows 0..5.
+    std::vector<int> pos_h = {0, 1, 2, 3, 4, 5, 5, 5};
+    int* d_pos = dmalloc<int>(pos_h.size());
+    dcopy(d_pos, pos_h);
+    sparse_update_key_minmax(QType::F16, d_k, d_mm, d_pos, d_bt, nkv, hd, kBS,
+                             static_cast<int>(pos_h.size()), 0, 1, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    // Reference over slots 0..5 only: 9999 poison must NOT appear.
+    check_block(6, 6, "repeated-position span clamp");
+    cudaFree(d_bt);
+    cudaFree(d_pos);
+}
+
 TEST_F(SparseMinMaxTest, Fp8RawScaleOneDequant) {
     // FP8 cache: metadata must equal min/max of the RAW (scale-1) dequant.
     std::vector<__nv_fp8_e4m3> k8(static_cast<size_t>(n_blocks_pool) * kBS * row_elems);
@@ -356,6 +385,64 @@ TEST_F(SparseSelectTest, NegativeScoresStillSelect) {
     for (int i = 0; i < 5; i++)
         EXPECT_EQ(out[i], expect[i]) << "slot " << i;
     EXPECT_EQ(ctx, 5 * kBS);
+}
+
+TEST_F(SparseSelectTest, ChunkRowsSharedTablePerRowCtx) {
+    // Spec verify chunk shape: rows are "sequences" sharing ONE replicated
+    // physical table, each with its own context length. Row 0: 12 blocks
+    // (selection engages), row 1: 2 blocks (pad-like, identity).
+    const int mbps = 12;
+    const int budget = 6, sink = 1, recent = 2;
+    std::vector<float> w = {0.f, 1.f, 5.f, 4.f, 0.5f, 9.f, 0.25f, 8.f, 0.75f, 1.5f, 0.f, 0.f};
+    std::vector<__half2> mm_phys(static_cast<size_t>(mbps + 100) * row_elems,
+                                 __floats2half2_rn(0.f, 0.f));
+    std::vector<int> bt_h(2 * mbps);
+    for (int b = 0; b < mbps; b++) {
+        bt_h[b] = 100 + b;
+        bt_h[mbps + b] = 100 + b;  // row-replicated
+        for (int kvh = 0; kvh < nkv; kvh++)
+            mm_phys[static_cast<size_t>(100 + b) * row_elems + kvh * hd] =
+                __floats2half2_rn(w[b], w[b]);
+    }
+    std::vector<half> q_h(static_cast<size_t>(2) * nh * hd, __float2half(0.f));
+    for (int r = 0; r < 2; r++)
+        for (int h = 0; h < nh; h++)
+            q_h[(static_cast<size_t>(r) * nh + h) * hd] = __float2half(1.f);
+    __half2* d_mm = dmalloc<__half2>(mm_phys.size());
+    dcopy(d_mm, mm_phys);
+    half* d_q = dmalloc<half>(q_h.size());
+    dcopy(d_q, q_h);
+    int* d_bt = dmalloc<int>(bt_h.size());
+    dcopy(d_bt, bt_h);
+    std::vector<int> ctx_h = {12 * kBS - 2, 2 * kBS};  // row 0 partial tail, row 1 tiny
+    int* d_ctx = dmalloc<int>(2);
+    dcopy(d_ctx, ctx_h);
+    float* d_scores = dmalloc<float>(static_cast<size_t>(2) * mbps);
+    int* d_sbt = dmalloc<int>(static_cast<size_t>(2) * budget);
+    int* d_sctx = dmalloc<int>(2);
+    cudaMemset(d_sbt, 0xFF, 2 * budget * sizeof(int));
+
+    sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, /*n_seq=*/2, nh, nkv, hd, kBS, mbps, budget, sink,
+                         recent, /*engage=*/budget, /*table=*/budget, d_scores, d_sbt, d_sctx, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto out = dread(d_sbt, static_cast<size_t>(2) * budget);
+    auto ctx = dread(d_sctx, 2);
+    // Row 0: sink 0, middles top-3 of blocks 1..9 -> {5, 7, 2}, recents 10, 11.
+    std::vector<int> expect0 = {100, 102, 105, 107, 110, 111};
+    for (int i = 0; i < budget; i++)
+        EXPECT_EQ(out[i], expect0[i]) << "row0 slot " << i;
+    EXPECT_EQ(ctx[0], 5 * kBS + (kBS - 2));
+    // Row 1: 2 blocks <= budget -> identity, ctx unchanged.
+    EXPECT_EQ(out[budget + 0], 100);
+    EXPECT_EQ(out[budget + 1], 101);
+    EXPECT_EQ(ctx[1], 2 * kBS);
+    cudaFree(d_mm);
+    cudaFree(d_q);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+    cudaFree(d_scores);
+    cudaFree(d_sbt);
+    cudaFree(d_sctx);
 }
 
 // ---------------------------------------------------------------------------

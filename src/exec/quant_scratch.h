@@ -79,6 +79,7 @@ struct QuantScratch {
     int sparse_engage_blocks = 0;   // identity below this many ctx blocks (sparse_min_ctx)
     int sparse_table_blocks = 0;    // row capacity of sparse_block_tables (= engage blocks)
     int sparse_max_ctx_blocks = 0;  // capacity of a sparse_scores row
+    int sparse_max_rows = 0;        // row count of the scratch buffers (batch / chunk rows)
 
     // Free all buffers.
     void free(VRAMAllocator* alloc);
