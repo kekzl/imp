@@ -1,8 +1,10 @@
-# Qwen3.8-27B long-context posture: KV dtype, batch, and four ways to measure it wrong
+# Qwen3.8-27B long-context posture: KV dtype, batch, and five ways to measure it wrong
 
-Status: settled for the configuration questions, one item open (2026-08-29).
+Status: closed (2026-08-30). The configuration questions settled on 2026-08-29;
+the decode cost that was left open turned out to be a kernel defect and is fixed
+in #1817, which reverses the one recommendation that had a trade in it.
 Trigger: an operator asked whether more context is available at good speed on
-Qwen3.8-27B-NVFP4. It is, and the first four answers were all measurement
+Qwen3.8-27B-NVFP4. It is, and the first five answers were all measurement
 artefacts. Two sessions measured against each other on the same RTX 5090; the
 peer numbers are marked, both hosts idle-checked over five samples.
 
@@ -12,7 +14,12 @@ peer numbers are marked, both hosts idle-checked over five samples.
 |---|---|---|
 | single user, long context | do NOT pin the KV dtype; pin `runtime.max_batch_size` (8 measured) | auto resolves NVFP4 on QWEN35; a pinned small batch frees recurrent-state VRAM into the KV pool |
 | concurrent serving | leave the batch on auto, still do not pin the KV dtype | auto batch converts freed VRAM into slots, so the context gain is split, not lost |
-| decode latency matters more than context | keep FP8 | NVFP4 costs 13.5% decode on real prose at 77k (forced-length pair) |
+| decode latency matters more than context | still do not pin | since #1817 NVFP4 decodes 74.1 vs FP8's 72.4 tok/s in the same shape; the dtype pin now costs on both axes |
+
+**Superseded 2026-08-30.** The third row used to read "keep FP8, NVFP4 costs
+13.5% decode". That cost was a load-width defect in the NVFP4 decode kernel, not
+a property of 4-bit KV, and it is fixed in #1817. There is no longer a
+deployment shape in which pinning FP8 on this family is the better choice.
 
 `attention.sparse_topk_tokens` does not apply here: its v1 gates require F16 or
 FP8 KV, so the NVFP4 default excludes it.
@@ -94,7 +101,21 @@ instead of assumed:
 This is the number to quote; the 15.8% and 11.5% above are the same finding
 measured with weaker controls.
 
-## Why the 4-bit cache is the slower one
+**Closed 2026-08-30 by #1817.** The gap was a defect, and fixing it reverses the
+sign. Same harness, two images built from the same tree, arms alternating, all
+18 runs emitting exactly 125 chunks:
+
+| arm | dispatch line | decode (3 trials) | spread |
+|---|---|---:|---:|
+| NVFP4 before | `attn_decode=paged_nvfp4` | 64.1 / 64.1 / 64.0 | 0.1-0.5% |
+| NVFP4 after | `attn_decode=paged_nvfp4` | 74.2 / 74.2 / 74.0 | 0.3-0.6% |
+| FP8, both images | `attn_decode=paged_fp8` | 72.3 / 72.4 | 0.4-0.5% |
+
+**+15.7% on NVFP4; FP8 unchanged**, which is also the control: an accidentally
+shared arm would have moved both. NVFP4 now decodes 2.3% faster than FP8 and
+still holds +45.6% context.
+
+## Why the 4-bit cache used to be the slower one
 
 Counter-intuitive on bytes (16 384 vs 32 768 B/tok), and the bytes are not what
 decides it. Two candidate explanations died on the source:
@@ -109,14 +130,23 @@ What is left is how the two kernels that DO run are built:
 | | FP8 `splitk_fp8_pipeline_kernel` | NVFP4 `splitk_nvfp4_kernel` |
 |---|---|---|
 | KV staging | 4 `cp_async` sites, double-buffered | **none** |
-| load width | staged byte groups per thread | byte-wise `k_bytes[i]` in the inner loop |
+| load width | `uint32_t` per 4 bytes | byte-wise `k_bytes[i]` in the inner loop |
 | per token | - | two dependent scale-byte loads before any compute |
 | per element | one convert | nibble unpack + UE4M3 scale + FMA |
 
-A kernel that issues dependent loads with no prefetch is latency-bound, and
-halving its footprint cannot help a kernel that never saturates bandwidth; the
-unpack work is charged on top. Consistent with #1785, which refuted a GQA-tile
-NVFP4 variant on the grounds that the kernel is L2-latency-bound.
+**Row two was the whole cost; #1817 fixed it and rows one and three were red
+herrings.** SASS at HD=256 before: 20 `LDG.E.U8` and 7 wide loads. `uint8_t*`
+carries no provable alignment, so ptxas cannot merge four adjacent byte reads,
+while the FP8 twin had been reading `uint32_t` since it was written. Reading the
+same bytes one word at a time, and issuing K and V before the warp reduction
+rather than V after it, leaves 2 `LDG.E.U8` (the two scale bytes) at 56
+registers and zero spills, unchanged from before.
+
+The staging row is a genuine dead end, separately measured: a double-buffered
+smem variant regressed 3% on 2026-05-08 (147.0 → 142.7 tok/s) and the note in
+`attention_paged_nvfp4.cu` still says don't re-attempt it. Same for #1785's
+GQA-tile variant at -9%. Both were traffic-sharing levers on a kernel whose
+traffic is L2-served; the instruction count was the thing nobody had counted.
 
 The asymmetry is historical: FP8 has five decode kernels from two optimisation
 rounds (#899/#900 added the tile and GQA-tile variants), NVFP4 has two. An
@@ -125,13 +155,13 @@ path was dead code on the model it examined, because KV-FP8 is the auto default
 there - so it never came under optimisation pressure. On QWEN35 it is the
 default.
 
-**Open, and worth a kernel PR**: port the FP8 pipeline kernel's `cp_async`
-staging (and vectorised loads) to `attention_paged_nvfp4.cu`. If that lands,
-NVFP4 wins on both axes here instead of trading 13.5% decode for the context.
-Not yet confirmed by a profile: two attempts were void (one in a shape where
-speculation masked everything, one against the stray config below).
+Closed by #1817: the vectorised half of that plan shipped and NVFP4 now wins on
+both axes. The `cp_async` half was not built and should not be, for the reason
+above. No nsys profile was needed in the end - `cuobjdump -sass` answered it,
+and the two void profile attempts (one shape where speculation masked
+everything, one against the stray config below) never had to be repeated.
 
-## Four ways this was measured wrong first
+## Five ways this was measured wrong first
 
 Each one produced a confident number that a report would have carried:
 

@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-29
-commit: a1148fbd
+verified: 2026-08-30
+commit: e3e91b9f
 -->
 
 # Benchmarking methodology
@@ -69,7 +69,8 @@ confident numbers before it produced a true one (2026-08-29, full ledger in
   both arms are cut off at the same number. Three pairs on 2026-08-30 were
   compared on counts that merely happened to match; the pair that did not match
   read the opposite sign, and the forced-length repeat settled it (FP8 13.5%
-  ahead, 0.3% spread per arm).
+  ahead on that day's kernel, 0.3% spread per arm; #1817 then removed the gap
+  itself, which is why the protocol is the durable part and the number is not).
 - **Record which config file was loaded, not just the flags.** A dev build with
   the repo as its working directory reads `./imp.conf`; a release image does not.
   A stray gitignored `imp.conf` made both arms of two profiling runs the same

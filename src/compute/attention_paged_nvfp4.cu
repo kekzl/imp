@@ -68,6 +68,38 @@ __device__ __forceinline__ half2 fp4_byte_to_half2(uint32_t byte_val) {
     return *reinterpret_cast<half2*>(&fp16x2);
 }
 
+// Load a lane's PACK packed-FP4 bytes in as few global loads as the alignment
+// allows. Every stride in the KV layout is a multiple of HEAD_DIM/2 and the
+// lane's byte offset is lane_id * PACK, so the pointer carries PACK-byte
+// alignment: HD=256 loads 4 bytes as one word instead of four LDG.E.U8.
+// __ldg, not __ldcs: the GQA-tile refutation (#1785) established that the
+// cross-head re-reads of this cache are L2 hits worth keeping.
+template <int PACK>
+__device__ __forceinline__ void load_packed_fp4(const uint8_t* __restrict__ src, uint8_t (&out)[PACK]) {
+    if constexpr (PACK % 4 == 0) {
+        const uint32_t* p = reinterpret_cast<const uint32_t*>(src);
+#pragma unroll
+        for (int i = 0; i < PACK / 4; i++) {
+            uint32_t w = __ldg(&p[i]);
+#pragma unroll
+            for (int b = 0; b < 4; b++)
+                out[4 * i + b] = static_cast<uint8_t>((w >> (8 * b)) & 0xFF);
+        }
+    } else if constexpr (PACK % 2 == 0) {
+        const ushort* p = reinterpret_cast<const ushort*>(src);
+#pragma unroll
+        for (int i = 0; i < PACK / 2; i++) {
+            ushort w = __ldg(&p[i]);
+            out[2 * i] = static_cast<uint8_t>(w & 0xFF);
+            out[2 * i + 1] = static_cast<uint8_t>(w >> 8);
+        }
+    } else {
+#pragma unroll
+        for (int i = 0; i < PACK; i++)
+            out[i] = __ldg(&src[i]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Non-Split-K NVFP4 decode kernel
 // ---------------------------------------------------------------------------
@@ -169,18 +201,26 @@ __global__ void paged_attention_decode_nvfp4_kernel(
             const half2 k_scale_h2 = __float2half2_rn(k_scale);
             const half2 v_scale_h2 = __float2half2_rn(v_scale);
 
+            // V is loaded here, not after the softmax: its bytes do not depend
+            // on the weight, so issuing both loads up front puts the warp
+            // reduction and the two expf of online_softmax_step between issue
+            // and use. This is not the 2026-05 smem pipeline (see note below) -
+            // no prefetch across tokens, no shared memory, no extra registers
+            // beyond one PACK-byte buffer.
+            uint8_t k_bytes[ELEMS / 2];
+            uint8_t v_bytes[ELEMS / 2];
+            load_packed_fp4<ELEMS / 2>(K_tok + lane_offset / 2, k_bytes);
+            load_packed_fp4<ELEMS / 2>(V_tok + lane_offset / 2, v_bytes);
+
             // Q.K dot — HW FP4 decode (cvt.rn.f16x2.e2m1x2) + half2 scale fold
             float dot = 0.0f;
-            {
-                const uint8_t* k_bytes = K_tok + lane_offset / 2;
 #pragma unroll
-                for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 kh2 = fp4_byte_to_half2(k_bytes[i]);
-                    kh2 = __hmul2(kh2, k_scale_h2);
-                    float2 kf = __half22float2(kh2);
-                    dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
-                    dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
-                }
+            for (int i = 0; i < ELEMS / 2; i++) {
+                half2 kh2 = fp4_byte_to_half2(k_bytes[i]);
+                kh2 = __hmul2(kh2, k_scale_h2);
+                float2 kf = __half22float2(kh2);
+                dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
+                dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
@@ -189,17 +229,13 @@ __global__ void paged_attention_decode_nvfp4_kernel(
             float rescale, w_new;
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
-            // V accumulation
-            {
-                const uint8_t* v_bytes = V_tok + lane_offset / 2;
 #pragma unroll
-                for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
-                    vh2 = __hmul2(vh2, v_scale_h2);
-                    float2 vf = __half22float2(vh2);
-                    o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
-                    o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
-                }
+            for (int i = 0; i < ELEMS / 2; i++) {
+                half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
+                vh2 = __hmul2(vh2, v_scale_h2);
+                float2 vf = __half22float2(vh2);
+                o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
+                o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
             }
         }
     }
@@ -319,17 +355,20 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
             const half2 k_scale_h2 = __float2half2_rn(k_scale);
             const half2 v_scale_h2 = __float2half2_rn(v_scale);
 
+            // Both loads issued before the reduction - see the twin above.
+            uint8_t k_bytes[ELEMS / 2];
+            uint8_t v_bytes[ELEMS / 2];
+            load_packed_fp4<ELEMS / 2>(K_tok + lane_offset / 2, k_bytes);
+            load_packed_fp4<ELEMS / 2>(V_tok + lane_offset / 2, v_bytes);
+
             float dot = 0.0f;
-            {
-                const uint8_t* k_bytes = K_tok + lane_offset / 2;
 #pragma unroll
-                for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 kh2 = fp4_byte_to_half2(k_bytes[i]);
-                    kh2 = __hmul2(kh2, k_scale_h2);
-                    float2 kf = __half22float2(kh2);
-                    dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
-                    dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
-                }
+            for (int i = 0; i < ELEMS / 2; i++) {
+                half2 kh2 = fp4_byte_to_half2(k_bytes[i]);
+                kh2 = __hmul2(kh2, k_scale_h2);
+                float2 kf = __half22float2(kh2);
+                dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
+                dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
@@ -338,16 +377,13 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
             float rescale, w_new;
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
-            {
-                const uint8_t* v_bytes = V_tok + lane_offset / 2;
 #pragma unroll
-                for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
-                    vh2 = __hmul2(vh2, v_scale_h2);
-                    float2 vf = __half22float2(vh2);
-                    o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
-                    o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
-                }
+            for (int i = 0; i < ELEMS / 2; i++) {
+                half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
+                vh2 = __hmul2(vh2, v_scale_h2);
+                float2 vf = __half22float2(vh2);
+                o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
+                o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
             }
         }
     }
@@ -367,6 +403,14 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
 // works because INT4 dequant is heavier (8-entry LUT + sign branch). Don't
 // re-attempt without first profiling to confirm the kernel is back to
 // memory-bound (e.g. once block_size grows past 16 or HD>512 lands).
+//
+// That verdict still stands and it is not the one above. The cost was never
+// the number of BYTES in flight, it was the number of LOAD INSTRUCTIONS: at
+// HD=256 this kernel issued 8 separate LDG.E.U8 per token because a uint8_t*
+// carries no provable alignment. `load_packed_fp4` reads the same bytes as
+// one word per operand, and both operands are issued before the reduction
+// (2026-08-30, #1817): 64.0 → 74.1 tok/s on Qwen3.8-27B-NVFP4 at 77k context,
+// 20 → 2 LDG.E.U8 in SASS, 56 registers and zero spills before and after.
 
 // ---------------------------------------------------------------------------
 // Host launcher

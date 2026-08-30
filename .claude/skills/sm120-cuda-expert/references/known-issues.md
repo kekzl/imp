@@ -122,6 +122,31 @@ These bugs were diagnosed at high cost. The current kernels assume the fix is in
 - **Skipping graph re-bench after a hot-path patch.** Compute speedup alone often shows ~0% in tok/s — the win is graph-replay-mediated. Always re-bench graphs ON.
 - **Increasing SMEM beyond `cudaDeviceProp::sharedMemPerBlockOptin`** assuming H100's 228 KB. RTX 5090 max is ~99 KB.
 
+## NVFP4 paged decode attention: the lever was LOAD WIDTH, not traffic (2026-08-30, #1817)
+
+Two traffic-sharing variants were built for this kernel and both lost (GQA tile
+-9%, entry below; smem double-buffer -3%, 2026-05-08, note in
+`attention_paged_nvfp4.cu`). Neither had counted its load INSTRUCTIONS. At
+HD=256 the inner loop read `k_bytes[i]` one byte at a time, and a `uint8_t*`
+carries no provable alignment, so ptxas cannot merge adjacent byte reads:
+`cuobjdump -sass` showed **20 `LDG.E.U8` per unrolled iteration** while the FP8
+twin had been reading `uint32_t` since it was written. Reading the same bytes
+one word per operand, plus issuing K and V before the warp reduction instead of
+V after it, left **2** `LDG.E.U8` (the scale bytes), at 56 registers and zero
+spills before and after: **64.0 -> 74.1 tok/s (+15.7%)** on Qwen3.8-27B-NVFP4
+at 77k context, with the FP8 arm unchanged at 72.3/72.4 as the control.
+
+Rules that generalize:
+- **On a latency-bound kernel, count instructions before moving bytes.** Both
+  refuted variants attacked traffic on a kernel whose traffic is L2-served.
+- **Byte-pointer inner loops are a standing defect class here.** Any
+  `const uint8_t*` walked element-wise in a hot loop is N loads until someone
+  proves the alignment to the compiler; the quantised KV paths are where they
+  hide.
+- **`cuobjdump -sass` answered what two nsys attempts could not.** The
+  known-issues rule "SASS-diff before any perf-neutral claim" has a converse:
+  SASS also finds the lever.
+
 ## NVFP4 paged decode attention: GQA-tile sharing REFUTED (2026-08-26)
 
 The scalar NVFP4 decode kernel re-reads each KV block once per Q head (6x at
