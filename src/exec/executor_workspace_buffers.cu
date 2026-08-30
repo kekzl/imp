@@ -19,6 +19,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
+#include "exec/sparse_attn_geometry.h"
 #include "memory/kv_cache.h"
 #include "memory/vram_allocator.h"
 #include "memory/engine_arena.h"
@@ -466,25 +467,30 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // context ceiling (engine_spec_capture.cpp table_cap "+ 16"); the
             // dispatch gate compares the incoming table stride against this
             // capacity, and without the margin every verify chunk failed it.
-            const int max_ctx_blocks = (max_ctx_tokens + kKVBlockSize - 1) / kKVBlockSize + 16;
-            const int sink_blocks =
-                (std::max(acfg.sparse_sink_tokens, 0) + kKVBlockSize - 1) / kKVBlockSize;
-            // The recent window always covers at least the partial tail block.
-            const int recent_blocks =
-                std::max(1, (std::max(acfg.sparse_recent_tokens, 0) + kKVBlockSize - 1) / kKVBlockSize);
-            int budget_blocks = (acfg.sparse_topk_tokens + kKVBlockSize - 1) / kKVBlockSize;
-            if (budget_blocks <= sink_blocks + recent_blocks) {
-                budget_blocks = sink_blocks + recent_blocks + 1;
+            // Every token->block conversion uses the cache's REAL block size.
+            // It was kKVBlockSize (16) until #1819, so a model with
+            // n_kv_heads <= 4 (block size 32) got double the requested budget,
+            // engaged sparse at twice sparse_min_ctx, and doubled sink/recent -
+            // the startup line reported the 16-based arithmetic while the
+            // per-step ACTIVE line reported the real one. The arithmetic is a
+            // pure function so a CPU test can pin it at both block sizes.
+            const int kv_bs = kv_block_size_;
+            const SparseGeometry geo =
+                sparse_geometry(acfg.sparse_topk_tokens, acfg.sparse_sink_tokens,
+                                acfg.sparse_recent_tokens, acfg.sparse_min_ctx, max_ctx_tokens, kv_bs);
+            const int max_ctx_blocks = geo.max_ctx_blocks;
+            const int sink_blocks = geo.sink_blocks;
+            const int recent_blocks = geo.recent_blocks;
+            const int budget_blocks = geo.budget_blocks;
+            if (geo.budget_raised) {
                 IMP_LOG_WARN("attention.sparse_topk_tokens: budget below sink+recent, raised to %d "
                              "blocks (%d tokens)",
-                             budget_blocks, budget_blocks * kKVBlockSize);
+                             budget_blocks, budget_blocks * kv_bs);
             }
             // Identity below sparse_min_ctx (the selection's win only outgrows
             // its overhead past ~12k measured); the table rows must hold an
             // identity copy up to that length.
-            const int engage_blocks = std::min(
-                max_ctx_blocks,
-                std::max(budget_blocks, (acfg.sparse_min_ctx + kKVBlockSize - 1) / kKVBlockSize));
+            const int engage_blocks = geo.engage_blocks;
             const int table_blocks = engage_blocks;
             // Row capacity covers batched decode AND spec verify chunks: chunk
             // rows are presented as sequences, up to the 33-row chunk cap
@@ -515,8 +521,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.sparse_max_rows = max_batch;
                 IMP_LOG_INFO("Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
                              "recent %d blocks, engage above %d tokens, scratch %.1f KiB",
-                             budget_blocks, budget_blocks * kKVBlockSize, sink_blocks, recent_blocks,
-                             engage_blocks * kKVBlockSize, (scores_sz + bt_sz + ctx_sz) / 1024.0);
+                             budget_blocks, budget_blocks * kv_bs, sink_blocks, recent_blocks,
+                             engage_blocks * kv_bs, (scores_sz + bt_sz + ctx_sz) / 1024.0);
             }
         }
     }

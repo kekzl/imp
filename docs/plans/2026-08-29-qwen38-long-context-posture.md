@@ -139,14 +139,26 @@ they thin out monotonically as the budget grows:
 | 32 768 tokens | 89.4 | 9/10 |
 | 8 192 tokens | 100.2 | 8/10 |
 
-**Budgets here are EFFECTIVE tokens, not the configured value.** `budget_blocks`
-is computed with the compile-time `kKVBlockSize` (16), while a model with
-`n_kv_heads <= 4` runs `block_size = 32` (`engine_kv_cache_init.cpp:101`), so
-`sparse_topk_tokens=N` delivers 2N tokens of budget and `sparse_min_ctx` engages
-at twice its stated length. The startup line reports the 16-based arithmetic and
-the ACTIVE line the real one, which is why the two disagree. Pre-existing, not
-introduced by #1818, and it applies to FP8 models on the same geometry - fixing
-it changes what the knob means for existing deployments, so it is its own change.
+**Budgets in the tables above are EFFECTIVE tokens.** Until #1819 the configured
+value was not: every token-to-block conversion used the compile-time block size
+(16) while this model runs 32-token blocks, so `sparse_topk_tokens=N` bought 2N,
+`sparse_min_ctx` engaged at twice its stated length, and the startup line
+disagreed with the per-step ACTIVE line. The root cause was ordering, not a
+typo: `init_weights()` sizes the workspaces before `init_kv_cache()` resolves
+the block size, so the sizing had nothing but the constant to use. #1819 moved
+the resolution into a resolver step ahead of `executor_->init()`.
+
+Since #1819 the configured value IS the effective one, which moves the operating
+point of any existing `sparse_topk_tokens` setting on this geometry:
+
+| configured | before #1819 | since #1819 |
+|---|---|---|
+| 4096 | 8192 effective: 100.2 tok/s, NIAH 8/10 | 4096 effective: 102.9 tok/s, NIAH 5/10 |
+| 8192 | 16384 effective | 8192 effective: 100.2 tok/s, NIAH 8/10 |
+
+Retrieval is what pays for the smaller budget, and it pays steeply below 8192
+here: 5/10 at 4096 against 8/10 at 8192 for 2.7% more decode. On this model the
+budget worth configuring is at least 8192.
 
 ## Why the 4-bit cache used to be the slower one
 

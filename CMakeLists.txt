@@ -636,6 +636,7 @@ if(IMP_BUILD_TESTS)
     set(IMP_FUZZ_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fuzz)
 
     imp_add_test_module(test-core SOURCES
+        tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
         tests/test_tensor_kind_matcher.cpp

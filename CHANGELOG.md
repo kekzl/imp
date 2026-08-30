@@ -11,6 +11,22 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- `attention.sparse_topk_tokens` delivered twice its configured budget on
+  models with `n_kv_heads <= 4`. Every token-to-block conversion in the sparse
+  sizing used the compile-time block size (16) while those models run 32-token
+  blocks, so `sparse_min_ctx` also engaged at twice its stated length and
+  sink/recent covered twice their windows. The KV block size is now resolved
+  before the executor sizes its workspaces (it used to be decided inside
+  `init_kv_cache`, which runs after) and the startup line agrees with the
+  per-step ACTIVE line instead of contradicting it.
+  **If you set `sparse_topk_tokens=N` on such a model, you were getting 2N and
+  must now configure 2N to keep that operating point.** On
+  Qwen3.8-27B-NVFP4 the difference is real: at a true 4096 the decode is
+  102.9 tok/s and NIAH reads 5/10, at 8192 it is 100.2 and 8/10. The feature is
+  default-off, so nothing changes unless you had opted in. (#1819)
+
 ### Added
 
 - Sparse decode attention (`attention.sparse_topk_tokens`, still default off)

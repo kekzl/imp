@@ -17,6 +17,7 @@
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "memory/vram_query.h"
+#include "memory/kv_cache.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -783,6 +784,23 @@ void Engine::init_resolve_quant_flags_() {
 // declares MORE than 128K needs an explicit `--max-seq-len` / runtime.max_seq_len
 // override to exceed the auto cap (documented in imp.conf.example); the manual
 // path bypasses the auto resolver entirely (short-circuit below).
+// The KV block size used to be resolved inside init_kv_cache(), which runs
+// AFTER init_weights() -> allocate_workspaces(). Anything sized before then had
+// to guess, and the sparse decode attention budget guessed kKVBlockSize: on a
+// model with n_kv_heads <= 4 (block size 32) `attention.sparse_topk_tokens=N`
+// bought 2N tokens of budget and `sparse_min_ctx` engaged at twice its stated
+// length, while the startup line reported the 16-based arithmetic and the
+// per-step ACTIVE line the real one. Same shape as the FP8-prefill disable a
+// few functions up: a decision that lived in init_kv_cache and was needed
+// earlier. Resolving here makes init_kv_cache a reader.
+void Engine::init_resolve_kv_block_size_() {
+    if (config_.kv_block_size > 0)
+        return;  // explicit imp.conf / --set value wins
+    const auto& mcfg = model_->config();
+    config_.kv_block_size = (mcfg.n_kv_heads <= 4 && mcfg.n_kv_heads > 0) ? 32 : kKVBlockSize;
+    IMP_LOG_INFO("KV block size: auto -> %d (n_kv_heads=%d)", config_.kv_block_size, mcfg.n_kv_heads);
+}
+
 void Engine::init_compute_max_seq_len_() {
     const auto& mcfg = model_->config();
     if (int v = runtime_config_.runtime.max_seq_len; v > 0) {
