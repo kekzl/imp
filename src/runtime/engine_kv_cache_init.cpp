@@ -96,11 +96,12 @@ bool Engine::init_kv_cache() {
     int n_kv_layers = n_attn_layers;
     IMP_LOG_INFO("KV cache layers: %d attention out of %d total", n_kv_layers, mcfg.n_layers);
 
-    // Auto-select block size
-    if (config_.kv_block_size <= 0) {
+    // Resolved in init_resolve_kv_block_size_(), which runs before the
+    // executor sizes its workspaces - anything sized there needs the real
+    // value, not kKVBlockSize. The fallback keeps this function correct if it
+    // is ever reached on a path that skipped the resolver.
+    if (config_.kv_block_size <= 0)
         config_.kv_block_size = (mcfg.n_kv_heads <= 4 && mcfg.n_kv_heads > 0) ? 32 : kKVBlockSize;
-        IMP_LOG_INFO("KV block size: auto → %d (n_kv_heads=%d)", config_.kv_block_size, mcfg.n_kv_heads);
-    }
     const int kv_bs = config_.kv_block_size;
     int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
 

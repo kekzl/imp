@@ -73,6 +73,9 @@ bool Engine::init_weights() {
     dispatch_policy_.ffn = runtime_config_.ffn;
     dispatch_policy_.diagnostics = runtime_config_.diagnostics;
     executor_->set_runtime_config(dispatch_policy_);
+    // Before init(): allocate_workspaces() sizes the sparse decode budget in
+    // BLOCKS, and the conversion from a token count needs the real block size.
+    executor_->set_kv_block_size(config_.kv_block_size);
     {
         int eff_batch = config_.max_batch_size;
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, config_.max_seq_len,

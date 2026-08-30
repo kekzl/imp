@@ -490,6 +490,10 @@ public:
     // first access". Tests that build a bare GraphExecutor without an
     // owning Engine must wire a RuntimeConfig themselves.
     void set_runtime_config(const DispatchPolicy& p) noexcept { runtime_config_ = &p; }
+    // The KV cache's real block size, resolved by the engine before init().
+    // Workspace sizing that converts a token count into a block count needs
+    // this and not kKVBlockSize - the two differ on n_kv_heads <= 4 models.
+    void set_kv_block_size(int n) noexcept { kv_block_size_ = n > 0 ? n : kKVBlockSize; }
 
     // Activation calibration ([calibration] enabled): collect per-input-channel
     // activation magnitudes off gemm_via_handle_ for an offline quantizer.
@@ -556,6 +560,7 @@ private:
     size_t lora_scratch_sz_ = 0;
     void lora_delta_(const LoraWeights& w, const void* x, void* y, int n, cudaStream_t stream);
     int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max(max_batch_size, 8))
+    int kv_block_size_ = kKVBlockSize;  // real KV block size (set_kv_block_size)
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn
     int cur_layer_ = -1;           // set by forward_logits; keys calibration entries
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging

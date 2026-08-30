@@ -669,6 +669,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     init_resolve_ssm_dtype_();
     init_resolve_fp8_prefill_();
     init_resolve_quant_flags_();
+    init_resolve_kv_block_size_();
 
     init_compute_max_seq_len_();
 
