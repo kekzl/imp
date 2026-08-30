@@ -144,7 +144,10 @@ def main():
     # 1007 -> 1008 (#1769): LayerNormTest.RMSNormRowBlockDecodeShapes, the
     # row-block batched-decode RMSNorm against the CPU reference on three
     # decode shapes - needs a GPU.
-    PINNED = 1020
+    # 1020 -> 1021 (#1818): SparseMinMaxTest.Nvfp4NibblesAndGroupScales, the
+    # NVFP4 arm of the sparse key min/max metadata kernel against a host
+    # quantize/dequantize reference - runs a CUDA kernel, GPU-only.
+    PINNED = 1021
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -715,16 +715,17 @@ bool Engine::init_kv_cache() {
     }
 
     // Sparse decode attention (attention.sparse_topk_tokens): enable the
-    // per-block key min/max metadata pool. v1 gates - F16/FP8 KV (metadata
-    // reads keys back from the cache), non-MLA, token_recycling off
+    // per-block key min/max metadata pool. Gates - F16/FP8/NVFP4 KV (metadata
+    // reads keys back from the cache; NVFP4 unpacks the nibbles and applies
+    // the UE4M3 group scale, #1818), non-MLA, token_recycling off
     // (copy_blocks_device does not copy metadata); enable_key_minmax itself
     // refuses per-layer geometry and growable pools. A refused gate disables
     // the feature loudly and changes nothing else.
     if (runtime_config_.attention.sparse_topk_tokens > 0) {
         const QType kvt = config_.kv_cache_dtype;
         const char* refuse = nullptr;
-        if (kvt != QType::F16 && kvt != QType::FP8_E4M3)
-            refuse = "KV dtype (needs f16 or fp8)";
+        if (kvt != QType::F16 && kvt != QType::FP8_E4M3 && kvt != QType::NVFP4)
+            refuse = "KV dtype (needs f16, fp8 or nvfp4)";
         else if (mcfg.is_mla())
             refuse = "MLA model";
         else if (runtime_config_.speculative.token_recycling)

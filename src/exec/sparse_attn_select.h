@@ -21,7 +21,11 @@ namespace imp {
 // otherwise) - it is the token->table-row mapping ragged forwards need.
 // Layer strides in BYTES between consecutive layers' block-0 pointers
 // (uniform scalar geometry only - the init gate guarantees it).
+// k_scale_base/sc_layer_stride_bytes carry the NVFP4 UE4M3 group scales
+// (nullptr/0 for F16 and FP8) - the packed nibbles alone do not define a key
+// value, so the metadata bound needs both regions.
 void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
+                                         const void* k_scale_base, int64_t sc_layer_stride_bytes,
                                          void* minmax_base, int64_t mm_layer_stride_bytes,
                                          const int* positions, const int* block_tables,
                                          const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,

@@ -600,7 +600,15 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         const int64_t mm_stride = (n_kv > 1) ? static_cast<char*>(kvc->key_minmax_ptr(1, 0)) -
                                                    static_cast<char*>(kvc->key_minmax_ptr(0, 0))
                                              : 0;
-        sparse_update_key_minmax_all_layers(kvc->qtype(), kvc->k_ptr(0, 0), k_stride,
+        // NVFP4 keys are packed nibbles plus a parallel UE4M3 group-scale
+        // region; both are needed to reconstruct a key value. Null for the
+        // other dtypes, which carry no scale pool.
+        void* const k_sc = kvc->k_scale_ptr(0, 0);
+        const int64_t sc_stride =
+            (k_sc != nullptr && n_kv > 1)
+                ? static_cast<char*>(kvc->k_scale_ptr(1, 0)) - static_cast<char*>(k_sc)
+                : 0;
+        sparse_update_key_minmax_all_layers(kvc->qtype(), kvc->k_ptr(0, 0), k_stride, k_sc, sc_stride,
                                             kvc->key_minmax_ptr(0, 0), mm_stride, state.positions,
                                             state.block_tables, state.seq_offsets, n_kv,
                                             kvc->n_kv_heads(), kvc->head_dim(), kvc->block_size(),
