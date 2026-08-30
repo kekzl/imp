@@ -52,7 +52,8 @@ confident numbers before it produced a true one (2026-08-29, full ledger in
 - **Long-context claims need long-context arms.** A tok/s table taken at a few
   hundred prompt tokens cannot show a KV-dtype difference at all; per-step KV
   traffic is negligible there. It reported "costs nothing" and the real cost was
-  11%.
+  16% (measured on real prose; a synthetic filler with a fixed sentence skeleton
+  understated it as 11%).
 - **KV block counts compare only within one library-reserve state.** A `--rm`
   container plans with the 3900 MiB constant, a deployment with a mounted
   `/home/imp/.cache/imp` plans with its measurement: 716 blocks apart on this
