@@ -193,6 +193,10 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // families verified safe for long-context FP8 KV (kv_fp8_hint_default_safe — the
     // measured PPL/coherence gate). Explicit "fp16" opts out; explicit
     // fp8/int8/int4/nvfp4/mxfp4 force that dtype.
+    // Captured before the block resolves anything: != F16 here means a CLI flag
+    // (--kv-fp8 and friends) already pinned the dtype and this whole resolver is
+    // a no-op for it.
+    const QType kv_cli_pin = config_.kv_cache_dtype;
     if (config_.kv_cache_dtype == QType::F16) {
         const std::string& kv_str = runtime_config_.kv_cache.dtype;
         if (kv_str == "fp8") {
@@ -241,6 +245,24 @@ void Engine::init_resolve_kv_dtype_policy_() {
                          "long-context FP8 KV without a checkpoint hint; "
                          "set kv_cache.dtype=fp16 to opt out)",
                          model_arch_name(mcfg.arch));
+        }
+    }
+
+    // An explicit pin that costs context on this family gets one line saying so.
+    // A pin can invert without being touched: `IMP_KV_FP8=1` left in a compose
+    // file was correct when `auto` meant FP16 and now DOUBLES the bytes per
+    // token here. Neither half logged anything - the CLI flag skips the block
+    // above entirely, and the config-file arm only logs the branches it takes.
+    // Evaluated here rather than after the head_dim/sink fallbacks below, so
+    // this reports the user's choice and not a fallback's.
+    if (kv_dtype_is_explicit_pin(kv_cli_pin, runtime_config_.kv_cache.dtype)) {
+        const int factor = kv_pin_context_cost_factor(mcfg.arch, config_.kv_cache_dtype);
+        if (factor > 1) {
+            IMP_LOG_WARN(
+                "KV cache dtype pinned to %s on %s: %dx the bytes per token of this "
+                "family's auto default (NVFP4), so roughly %dx less context fits. "
+                "Drop the pin (kv_cache.dtype=auto) to get it back.",
+                qtype_name(config_.kv_cache_dtype), model_arch_name(mcfg.arch), factor, factor);
         }
     }
 

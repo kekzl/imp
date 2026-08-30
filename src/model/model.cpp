@@ -321,6 +321,33 @@ bool kv_nvfp4_default_safe(ModelArch arch) {
     }
 }
 
+int kv_pin_context_cost_factor(ModelArch arch, QType pinned) {
+    // Only the NVFP4-default families have anything to lose: on every other
+    // arch `auto` lands on FP8 or FP16 already.
+    if (!kv_nvfp4_default_safe(arch))
+        return 0;
+    switch (pinned) {
+        case QType::F16:
+        case QType::BF16:
+            return 4;  // 16 bit per element against NVFP4's 4
+        case QType::FP8_E4M3:
+        case QType::FP8_E5M2:
+        case QType::INT8:
+            return 2;
+        default:
+            return 0;  // NVFP4 / MXFP4_KV / INT4 - same width or narrower
+    }
+}
+
+bool kv_dtype_is_explicit_pin(QType cli_dtype, const std::string& conf_dtype) {
+    if (cli_dtype != QType::F16)
+        return true;  // the resolver only ever runs while this is still F16
+    // Every value the resolver accepts as a choice. "auto" is not one, and an
+    // unrecognised string is not either - that one already warns on its own.
+    return conf_dtype == "fp16" || conf_dtype == "fp8" || conf_dtype == "int8" || conf_dtype == "int4" ||
+           conf_dtype == "nvfp4" || conf_dtype == "mxfp4";
+}
+
 int model_arch_c_api_id(ModelArch arch) { return lookup_arch(arch).c_api_id; }
 
 void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top_p, int& top_k) {

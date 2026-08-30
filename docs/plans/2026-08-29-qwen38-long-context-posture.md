@@ -249,6 +249,33 @@ Each one produced a confident number that a report would have carried:
 - ~~The decode cost is measured on structured text only.~~ Closed 2026-08-30:
   on real prose the gap is larger (15.8%, above), and the matcher fires in
   neither arm.
-- The entrypoint env surface (19 names) outlives #879's "29 legacy reads -> 2"
+- ~~The entrypoint env surface (19 names) outlives #879's "29 legacy reads -> 2"
   in the engine. Deliberate compatibility or drift is undecided; at least one
-  name (`IMP_KV_FP8`) now has an inverted effect on one family.
+  name (`IMP_KV_FP8`) now has an inverted effect on one family.~~
+  **ANSWERED 2026-08-31: drift, and the names were the smaller half.** Evidence
+  that it was never a maintained compatibility surface: the 19 names appear in
+  exactly two files (`docker-entrypoint.sh`, `docker-compose.yml`) and in no
+  `.md` at all, while `docs/DEPLOYMENT.md` describes the configuration surface
+  as `imp.conf -> --config -> --set` and its own compose example bypasses the
+  env vars with `command:`. Neither `--config` nor `--set` was bridged, so a
+  compose deployment could reach no config key that had not been given a
+  hand-written name - which is every key added since the config system landed
+  (sparse attention, growable KV, adaptive MTP depth, the GDN state dtype, the
+  batching knobs). Nothing executed the script either: it had no test.
+
+  Decision: keep the 19 (they sit in deployed compose files) and freeze them;
+  bridge `IMP_CONFIG` / `IMP_SET` so a new key needs no new name;
+  `tests/test_entrypoint.sh` runs the real script against a stub binary and is
+  wired into `ci_static_gates.sh` (group `entrypoint`), so the required `Build`
+  check covers it.
+
+  The inverted name is fixed on both surfaces it can be wrong on. The engine
+  warns when an explicit pin costs context against the family's auto default
+  (`kv_pin_context_cost_factor` + `kv_dtype_is_explicit_pin` in `model.cpp`,
+  called from `Engine::init_resolve_kv_dtype_policy_`); until now `--kv-fp8`
+  set the enum ahead of the resolver and logged nothing at all. The entrypoint
+  warns when a legacy KV name and a `kv_cache.dtype` in `IMP_SET` are both set,
+  because the legacy name wins in either order for the same reason. Both
+  predicates are unit-tested in `tests/test_config.cpp` and were confirmed
+  against mutants; the resolver call site itself is unexercised - it needs a
+  loaded model, so no CPU lane reaches it.
