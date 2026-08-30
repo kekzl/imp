@@ -744,6 +744,33 @@ TYPED_TEST(PagedOracle, HD128_Sweep) {
     }
 }
 
+// head_dim 256 was uncovered until 2026-08-30 while being the shipped shape of
+// the Qwen3.5/3.8 GDN family (24q/4kv), and the lane byte count HEAD_DIM/64
+// selects a different load path per head_dim in the quantised kernels: HD128
+// exercises none of what HD256 runs. Envelopes are shared with HD128_Sweep;
+// every HD256 max_rel stays under the ceiling frozen from HD128, so no new
+// envelope is introduced. MEASURED 2026-08-30, worst of the two configs:
+//
+//   kv_len:        16       333      1024     ceiling (shared)
+//   F16        2.43e-4   2.07e-4   5.25e-5   1e-2 (STRICT, no quant)
+//   FP8         0.0135    0.0038    0.0025   0.035
+//   INT8        0.0032    0.0010    0.0004   0.007
+//   INT4        0.0530    0.0195    0.0099   0.10
+//   NVFP4       0.0577    0.0114    0.0088   0.11
+//   NVFP4-TC    0.0574    0.0114    0.0088   0.11
+//   MXFP4-KV    0.0862    0.0201    0.0167   0.12
+//
+// Scalar NVFP4 and NVFP4-TC agree to 4 digits at kv_len=1024 (0.008828 both),
+// which is what makes this suite a check on the scalar kernel's load path: the
+// TC kernel reads the same bytes through unrelated code.
+TYPED_TEST(PagedOracle, HD256_Sweep) {
+    for (int kv_len : {16, 333, 1024}) {
+        // GQA 24q/4kv, the Qwen3.8-27B decode shape.
+        this->run_shape("gqa24x4", kv_len, 24, 4, 256);
+        this->run_shape("mha4x4", kv_len, 4, 4, 256);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Split-K → single-split fallback (the F1 robustness fix). When the split-K
 // Phase-1 launch fails (a kernel whose dynamic smem exceeds the 48 KiB default

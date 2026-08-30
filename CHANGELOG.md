@@ -11,6 +11,22 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- NVFP4 paged decode attention loads each lane's packed bytes as one word
+  instead of one `LDG.E.U8` per byte, and issues K and V before the warp
+  reduction: Qwen3.8-27B-NVFP4 decode 64.0 -> 74.1 tok/s at 77k context
+  (+15.7%, forced-equal emitted tokens). 4-bit KV now decodes 2.3% faster than
+  8-bit instead of 13.5% slower, so `kv_cache.dtype=auto` is the right setting
+  on both context and speed for this family. (#1817)
+
+### Added
+
+- `PagedOracle` sweeps head_dim 256 as well as 128, covering the shipped
+  Qwen3.5/3.8 decode shape (24q/4kv) across all seven KV dtypes. A byte-order
+  mutant in the new load path passes the HD128 sweep and fails this one.
+  (#1817)
+
 ## [0.32.1] - 2026-08-29
 
 ### Fixed
