@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-30
+commit: 83cb5178
 -->
 
 <p align="center">
@@ -108,7 +108,48 @@ the transformed weights (Qwen3-14B-NVFP4 init 7.9 s → 2.1 s).
 Or open <http://localhost:8080> for a small built-in chat UI that streams the
 answer and plots inter-token latency as it is written.
 
-## Numbers
+## How fast is it, really
+
+Same card, same GGUF, same flags, decode tok/s. imp v0.33.0 against llama.cpp
+(image pinned by digest, `ghcr.io/ggml-org/llama.cpp@sha256:c49f4d48…`),
+measured 2026-08-30 on one RTX 5090:
+
+| model | imp | llama.cpp | |
+|---|---:|---:|---:|
+| Qwen3-8B Q8_0 | **385.4** | 160.1 | **+141 %** |
+| Qwen3-14B Q6_K | **162.5** | 114.8 | **+42 %** |
+| Qwen3.6-35B-A3B UD-Q4_K_M | **287.9** | 235.8 | **+22 %** |
+| gpt-oss-20b MXFP4 | **382.7** | 335.9 | **+14 %** |
+| Qwen3-30B-A3B Q4_K_M | 305.5 | 295.7 | +3 % |
+
+[PROV: commit=83cb5178 date=2026-08-30 hw=RTX5090 model=six-model-sweep
+       quant=per-row cuda=13.3 path=gguf cmd=`make bench-competitive` n=6x2
+       note2=sixth row Gemma-4-26B-A4B UD-Q4_K_M 245.0 vs 214.4, +14 %, omitted here for length
+       note=imp defaults vs llama.cpp defaults, full offload, flash attention on]
+
+The last row is the honest bottom of the range, not an outlier we forgot to
+delete: on a MoE that is already bandwidth-bound at batch 1 there is little left
+to win. imp's default enables n-gram speculation, which is most of the Qwen3-8B
+figure; with it off that row reads 284.6, still +78 %.
+
+**The 32 GB is the other half of the story.** NVFP4 KV means a 27B model holds
+**126 432 tokens of context** on this card, where 8-bit KV stops at 86 848. At a
+77k prompt it decodes 74.3 tok/s, or 100.2 with sparse decode switched on.
+
+[PROV: commit=3921547d date=2026-08-30 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+       quant=NVFP4 cuda=13.3 path=nvfp4-kv cmd=`imp-server --max-batch 8` + a
+       client that caps max_tokens so both arms emit the same count n=3x3
+       note=sparse arm adds `--set attention.sparse_topk_tokens=8192`; it trades
+       retrieval accuracy for the speed, see docs/MODELS.md]
+
+Per-model history with dates, commits and exact commands:
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Methodology and what counts as a
+number at all: [`docs/PERF.md`](docs/PERF.md).
+
+### What CI defends
+
+The table above is a sweep. The number the regression gate pins on every push is
+a different one, on one model:
 
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
@@ -123,15 +164,10 @@ answer and plots inter-token latency as it is written.
        cuda=unknown path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
-**Read the caveat before quoting these.** Decode on this host moves several
-percent between sessions with nothing changed: the same tree read 287.63 one day
-and 276.92 the next at healthy clocks. Prefill moves more, because cuBLAS
-re-times its algo selection per process. That is why the regression thresholds
-are 8 % and not 3 %.
-
-Competitive figures per model, each with its date, commit and command, are in
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Methodology and what counts as a
-number at all: [`docs/PERF.md`](docs/PERF.md).
+Decode on this host moves several percent between sessions with nothing changed
+(the same tree read 287.63 one day and 276.92 the next at healthy clocks), and
+prefill moves more because cuBLAS re-times its algo selection per process. That
+is why the thresholds are 8 % and not 3 %.
 
 ## What works today
 
