@@ -62,8 +62,19 @@ confident numbers before it produced a true one (2026-08-29, full ledger in
   precision gives different logits; the n-gram matcher drafts from the request's
   own emitted tokens, so which arm it fires on follows the generated text. The
   same reproducer on the same box gave "NVFP4 +20%" in one session and "FP8
-  +13%" in another, with `drafted=0` on the other arm each time. Spec off, and
-  reject a pair whose generated token counts differ.
+  +13%" in another, with `drafted=0` on the other arm each time.
+- **Force equal emitted-token counts, do not observe them.** Spec off is not
+  enough: the forward is not bit-deterministic, so the same arm can stop at
+  different lengths across runs. Set `max_tokens` BELOW what the task needs, so
+  both arms are cut off at the same number. Three pairs on 2026-08-30 were
+  compared on counts that merely happened to match; the pair that did not match
+  read the opposite sign, and the forced-length repeat settled it (FP8 13.5%
+  ahead, 0.3% spread per arm).
+- **Record which config file was loaded, not just the flags.** A dev build with
+  the repo as its working directory reads `./imp.conf`; a release image does not.
+  A stray gitignored `imp.conf` made both arms of two profiling runs the same
+  arm - identical kernel lists to within 3 ms per row. imp logs `imp.conf loaded
+  from <path>`; keep that line in the measurement record.
 
 ## The gate
 
