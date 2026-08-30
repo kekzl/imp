@@ -659,6 +659,14 @@ if(IMP_BUILD_TESTS)
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
         tests/test_mtp_auto.cpp
+        # Both of these define symbols the two tests above and args.cpp call,
+        # and neither pulls nlohmann or httplib. They lived in the
+        # IMP_BUILD_SERVER block until this change, which made test-core unlinkable
+        # in every -DIMP_BUILD_SERVER=OFF configuration - that is what the
+        # Sanitizers lane and `make asan` configure, so both had been failing
+        # to link since #1809 while `Build` stayed green.
+        tools/common/mtp_auto.cpp
+        tools/common/args_common.cpp
         # apply_config_pins: the bench pins guard tests/perf_baseline.json's
         # raw-decode semantics, so they get a test rather than a smoke run.
         tools/imp-cli/args.cpp
@@ -780,9 +788,7 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/tool_call.cpp
             tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/tool_call_gemma.cpp
-        tools/common/args_common.cpp
-    tools/common/mtp_auto.cpp
-    tools/imp-server/args.cpp
+            tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
             tests/test_sse_stream_utils.cpp

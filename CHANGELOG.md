@@ -11,6 +11,15 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- The `Sanitizers` CI lane and `make asan` could not link `test-core`:
+  `tests/test_mtp_auto.cpp` and `tools/imp-cli/args.cpp` are compiled
+  unconditionally while the sources defining the symbols they call
+  (`tools/common/mtp_auto.cpp`, `tools/common/args_common.cpp`) sat inside the
+  `IMP_BUILD_SERVER` block, which those configurations turn off. Broken since
+  #1809; `Build` is a different configuration and stayed green throughout.
+
 ## [0.33.0] - 2026-08-30
 
 ### Fixed
