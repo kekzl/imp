@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-08-30
+
 ### Fixed
 
 - `attention.sparse_topk_tokens` delivered twice its configured budget on
