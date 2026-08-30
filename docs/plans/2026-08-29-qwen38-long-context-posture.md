@@ -12,7 +12,7 @@ peer numbers are marked, both hosts idle-checked over five samples.
 |---|---|---|
 | single user, long context | do NOT pin the KV dtype; pin `runtime.max_batch_size` (8 measured) | auto resolves NVFP4 on QWEN35; a pinned small batch frees recurrent-state VRAM into the KV pool |
 | concurrent serving | leave the batch on auto, still do not pin the KV dtype | auto batch converts freed VRAM into slots, so the context gain is split, not lost |
-| decode latency matters more than context | keep FP8 | NVFP4 costs ~11% decode at 78k, spec off |
+| decode latency matters more than context | keep FP8 | NVFP4 costs ~16% decode on real prose at 77k |
 
 `attention.sparse_topk_tokens` does not apply here: its v1 gates require F16 or
 FP8 KV, so the NVFP4 default excludes it.
@@ -62,9 +62,22 @@ Retrieval only. It does not say long-chain reasoning holds at that length.
 
 ## Speed, and what it is not
 
-Spec OFF is the only comparable pair (peer, 78 733 tokens, streaming, decode
-between first and last token): **FP8 89.5 tok/s (1.2%) vs NVFP4 79.2 (2.0%)** —
-NVFP4 is 11.5% SLOWER. Its win is capacity, not throughput.
+Measured on REAL prose (2.0 MB of repo text: README, docs, Python sources;
+most frequent 8-gram appears 20x), 76 705 `prompt_tokens`, batch 8, v0.32.1,
+both arms emitting the same 111 tokens - so this compares configurations, not
+trajectories:
+
+| arm | decode | spread | speculation |
+|---|---:|---:|---|
+| NVFP4 | 80.5 tok/s | 0.7% | `drafted=0` |
+| FP8 | **93.2 tok/s** | 0.0% | `drafted=0` |
+
+**FP8 is 15.8% faster**, and the n-gram matcher never fires in either arm. Two
+consequences: the whole speculation axis is inert at this operating point (every
+spec-on number in this ledger describes an effect real traffic does not see), and
+the earlier structured-text pair (peer, spec off, 78 733 tokens: FP8 89.5 vs
+NVFP4 79.2, 11.5%) UNDERSTATED the gap. The trade is +45.6% context for ~16%
+decode.
 
 Spec ON is not comparable, and the evidence is a mirror flip of the same script
 on the same box:
@@ -108,9 +121,9 @@ Each one produced a confident number that a report would have carried:
 
 ## Open
 
-- The ~11% decode cost is measured on text with an identical sentence skeleton
-  (numbers and nouns rotate, structure repeats). Real agent traffic is less
-  structured; whether the gap holds there is unmeasured.
+- ~~The decode cost is measured on structured text only.~~ Closed 2026-08-30:
+  on real prose the gap is larger (15.8%, above), and the matcher fires in
+  neither arm.
 - The entrypoint env surface (19 names) outlives #879's "29 legacy reads -> 2"
   in the engine. Deliberate compatibility or drift is undecided; at least one
   name (`IMP_KV_FP8`) now has an inverted effect on one family.
