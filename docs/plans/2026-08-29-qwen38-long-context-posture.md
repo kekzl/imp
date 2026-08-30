@@ -12,7 +12,7 @@ peer numbers are marked, both hosts idle-checked over five samples.
 |---|---|---|
 | single user, long context | do NOT pin the KV dtype; pin `runtime.max_batch_size` (8 measured) | auto resolves NVFP4 on QWEN35; a pinned small batch frees recurrent-state VRAM into the KV pool |
 | concurrent serving | leave the batch on auto, still do not pin the KV dtype | auto batch converts freed VRAM into slots, so the context gain is split, not lost |
-| decode latency matters more than context | keep FP8 | NVFP4 costs ~16% decode on real prose at 77k |
+| decode latency matters more than context | keep FP8 | NVFP4 costs 13.5% decode on real prose at 77k (forced-length pair) |
 
 `attention.sparse_topk_tokens` does not apply here: its v1 gates require F16 or
 FP8 KV, so the NVFP4 default excludes it.
@@ -76,22 +76,60 @@ trajectories:
 consequences: the whole speculation axis is inert at this operating point (every
 spec-on number in this ledger describes an effect real traffic does not see), and
 the earlier structured-text pair (peer, spec off, 78 733 tokens: FP8 89.5 vs
-NVFP4 79.2, 11.5%) UNDERSTATED the gap. The trade is +45.6% context for ~16%
-decode.
+NVFP4 79.2, 11.5%) UNDERSTATED the gap.
 
-Spec ON is not comparable, and the evidence is a mirror flip of the same script
-on the same box:
+**Superseded 2026-08-30 by a stricter protocol.** Both runs above got equal
+emitted-token counts by luck, not by construction; a third run of the same pair
+read the opposite sign purely because one arm emitted 120 tokens and the other
+111. With `max_tokens` set BELOW what the task needs, both arms are cut off at
+the same number, and the configuration is read back from the startup line
+instead of assumed:
 
-| run | NVFP4 | FP8 |
+| arm | startup line | decode | spread |
+|---|---|---:|---:|
+| NVFP4 | `dtype=NVFP4  attn_decode=paged_nvfp4` | 63.9 tok/s | 0.3% |
+| FP8 | `dtype=FP8_E4M3  attn_decode=paged_fp8` | **72.5 tok/s** | 0.3% |
+
+**FP8 is 13.5% faster.** Release image, no repo mount, 3 rounds, forced length.
+This is the number to quote; the 15.8% and 11.5% above are the same finding
+measured with weaker controls.
+
+## Why the 4-bit cache is the slower one
+
+Counter-intuitive on bytes (16 384 vs 32 768 B/tok), and the bytes are not what
+decides it. Two candidate explanations died on the source:
+
+- The GQA-batched tile kernel that makes FP8 fast elsewhere needs
+  `head_dim == kTileHeadDim == 128`; this model has 256, so it never runs here.
+- Both paths map `grid.y = n_heads` (24 Q heads over 4 KV heads), so neither
+  re-reads KV more often than the other.
+
+What is left is how the two kernels that DO run are built:
+
+| | FP8 `splitk_fp8_pipeline_kernel` | NVFP4 `splitk_nvfp4_kernel` |
 |---|---|---|
-| peer | 95.1 tok/s, speculation pays +20% | 89.5, speculation pays 0% |
-| this session, same reproducer and shape | 88.0, `drafted=0` | 101.5, `drafted=384, accept 32.3%` |
+| KV staging | 4 `cp_async` sites, double-buffered | **none** |
+| load width | staged byte groups per thread | byte-wise `k_bytes[i]` in the inner loop |
+| per token | - | two dependent scale-byte loads before any compute |
+| per element | one convert | nibble unpack + UE4M3 scale + FMA |
 
-The arms emitted different token counts (131 vs 155 at the same `max_tokens`).
-Different KV precision gives different logits, greedy trajectories diverge, and
-the n-gram matcher drafts from the request's own emitted text — so whether it
-fires is a property of the generated TEXT, not of the KV path. Both the "+20% for
-NVFP4" and the "+13% for FP8" readings are trajectory luck.
+A kernel that issues dependent loads with no prefetch is latency-bound, and
+halving its footprint cannot help a kernel that never saturates bandwidth; the
+unpack work is charged on top. Consistent with #1785, which refuted a GQA-tile
+NVFP4 variant on the grounds that the kernel is L2-latency-bound.
+
+The asymmetry is historical: FP8 has five decode kernels from two optimisation
+rounds (#899/#900 added the tile and GQA-tile variants), NVFP4 has two. An
+earlier investigation (`docs/audit/PERF_LOG.md`, P1) found the NVFP4 attention
+path was dead code on the model it examined, because KV-FP8 is the auto default
+there - so it never came under optimisation pressure. On QWEN35 it is the
+default.
+
+**Open, and worth a kernel PR**: port the FP8 pipeline kernel's `cp_async`
+staging (and vectorised loads) to `attention_paged_nvfp4.cu`. If that lands,
+NVFP4 wins on both axes here instead of trading 13.5% decode for the context.
+Not yet confirmed by a profile: two attempts were void (one in a shape where
+speculation masked everything, one against the stray config below).
 
 ## Four ways this was measured wrong first
 
@@ -115,9 +153,21 @@ Each one produced a confident number that a report would have carried:
    the run). Block counts are only comparable within the same reserve state, and
    the gap is larger than most effects being hunted. On Qwen3-8B-Q8_0 the same
    mismatch line reads +4389 MiB.
-4. **Diverging trajectories with speculation on.** See the mirror flip above.
-   Compare KV configurations with `speculative.ngram=false`, and reject any pair
-   whose generated token counts differ.
+4. **Diverging trajectories.** See the mirror flip above. Different KV precision
+   gives different logits, and imp's forward is not bit-deterministic either, so
+   two runs of the SAME arm can stop at different lengths. Equal counts must be
+   FORCED (a `max_tokens` below what the task needs), not observed: three of the
+   pairs here were compared on counts that happened to match, and the one that
+   did not match read the opposite sign.
+5. **Config identity.** A dev build run with the repo mounted as its working
+   directory reads `./imp.conf`; the release image does not. A stray, gitignored
+   `imp.conf` in this repo (`kv_cache.dtype = "fp8"`, `server.prefix_cache =
+   true`) therefore made both arms of two profiling runs the SAME arm - identical
+   kernel lists, 12 169 vs 12 143 ms total, every row within 3 ms. The tell was
+   the FP8 attention kernel appearing in the NVFP4 arm's profile, not the
+   timings, which looked plausible. imp prints `imp.conf loaded from <path>` at
+   startup; the failure was filtering it out of the log. Record that line with
+   the measurement.
 
 ## Open
 
