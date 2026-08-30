@@ -21,8 +21,9 @@ peer numbers are marked, both hosts idle-checked over five samples.
 a property of 4-bit KV, and it is fixed in #1817. There is no longer a
 deployment shape in which pinning FP8 on this family is the better choice.
 
-`attention.sparse_topk_tokens` does not apply here: its v1 gates require F16 or
-FP8 KV, so the NVFP4 default excludes it.
+`attention.sparse_topk_tokens` applies here since #1818 (the v1 gates required
+F16 or FP8 KV; the metadata kernel now has an NVFP4 arm). It stays default-off
+and buys speed for retrieval accuracy - the table under "Sparse decode" below.
 
 ## What the configuration is worth
 
@@ -114,6 +115,38 @@ sign. Same harness, two images built from the same tree, arms alternating, all
 **+15.7% on NVFP4; FP8 unchanged**, which is also the control: an accidentally
 shared arm would have moved both. NVFP4 now decodes 2.3% faster than FP8 and
 still holds +45.6% context.
+
+## Sparse decode on this KV dtype (#1818)
+
+One binary, alternating arms, 77k prompt tokens, forced-equal emitted tokens,
+`sparse decode attention ACTIVE` present in every sparse arm and absent in every
+dense one (the positive control - a null result on a feature that never engaged
+is the failure mode this guards):
+
+| KV dtype | dense | sparse | NIAH (5 depths x 2 lengths) |
+|---|---:|---:|---|
+| FP8 | 72.4 | 96.8 | 5/5 at 81 908; cannot serve 126 908 |
+| NVFP4 | 74.3 | **100.2** | dense 10/10, sparse 8/10 |
+
+NVFP4 with sparse is the fastest arm and keeps the context advantage. The cost
+is retrieval accuracy, and it is a budget curve, not a defect - the failures are
+digit garbles of the right needle ("ZEBRA-1550-25" for "ZEBRA-155000-25"), and
+they thin out monotonically as the budget grows:
+
+| effective budget | decode | NIAH |
+|---|---:|---|
+| dense | 74.3 | 10/10 |
+| 32 768 tokens | 89.4 | 9/10 |
+| 8 192 tokens | 100.2 | 8/10 |
+
+**Budgets here are EFFECTIVE tokens, not the configured value.** `budget_blocks`
+is computed with the compile-time `kKVBlockSize` (16), while a model with
+`n_kv_heads <= 4` runs `block_size = 32` (`engine_kv_cache_init.cpp:101`), so
+`sparse_topk_tokens=N` delivers 2N tokens of budget and `sparse_min_ctx` engages
+at twice its stated length. The startup line reports the 16-based arithmetic and
+the ACTIVE line the real one, which is why the two disagree. Pre-existing, not
+introduced by #1818, and it applies to FP8 models on the same geometry - fixing
+it changes what the knob means for existing deployments, so it is its own change.
 
 ## Why the 4-bit cache used to be the slower one
 

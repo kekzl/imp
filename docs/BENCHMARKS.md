@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-08-30
-commit: e3e91b9f
+commit: 10a11704
 -->
 
 # Benchmarks
@@ -55,6 +55,7 @@ numbers below carry over unchanged.
 | 2026-08-29 | sparse-serving | 13.3 | Qwen3-8B | Q8_0 (fp8 KV) | serving decode, 3 streams x 25k ctx | **197.7** | `tools/analysis/serving_sparse_ab.sh` (KVBLOCKS=5000 CONC=3 TARGET_CHARS=100000 SEQLEN=26624), tg8/tg520 differential, fresh server per arm, 3 alternating trials — dense median 155.6 (spread 150.3-173.8), sparse 197.7 (194.4-198.2), +27%. Both arms VRAM-resident; at 689 MiB free the ON arm WDDM-spills and every prefill kernel runs +11% (invalid numbers, #1103 class) |
 | 2026-08-29 | sparse-verify-chunks | 13.3 | Qwen3-8B | Q8_0 (fp8 KV) | tg @32k ctx, spec on | **176.1** | `imp-cli --model Qwen3-8B-Q8_0.gguf --kv-fp8 --prompt-file <32k NIAH prompt> --max-tokens 384 --temperature 0 --seed 42 --max-seq-len 33800 --set attention.sparse_topk_tokens=4096` — verify chunks on the sparse table; same command on `cefd5e81` (chunks dense): 137.4; all-dense: 124.5 (3/3 alternating rounds, n-gram spec default-on, 5.25-5.67 tok/verify) |
 | 2026-08-30 | `nvfp4-loadwidth` | 13.3 | Qwen3.8-27B | NVFP4 (nvfp4 KV) | server decode @77k ctx, batch 8 | **74.1** | Two images from the same tree, arms alternating, `imp-server --model Qwen3.8-27B-NVFP4 --max-batch 8` + forced-length client (`max_tokens=100`, 3 rounds): baseline `paged_nvfp4` 64.1/64.1/64.0, patched 74.2/74.2/74.0 (+15.7%), all 18 runs at exactly 125 chunks. Control: `--kv-fp8` reads 72.3 and 72.4 on the two images, so the NVFP4-only move is not a shared-arm artefact. NVFP4 now leads FP8 by 2.3% and keeps +45.6% context |
+| 2026-08-30 | `nvfp4-sparse` | 13.3 | Qwen3.8-27B | NVFP4 (nvfp4 KV) | server decode @77k ctx, batch 8, sparse on | **100.2** | `imp-server --model Qwen3.8-27B-NVFP4 --max-batch 8 --set attention.sparse_topk_tokens=4096` (8192 EFFECTIVE tokens: budget_blocks uses kKVBlockSize=16 while this model runs block_size=32) + forced-length client, 3 alternating trials: dense 74.3/74.1/74.5, sparse 98.4/100.2/100.3. `sparse decode attention ACTIVE` in every sparse arm, absent in every dense one. Same command with `--kv-fp8`: 72.4 dense, 96.8 sparse. Accuracy trade, NIAH 5 depths x 2 lengths: dense 10/10, sparse 8/10 at this budget, 9/10 at 32768 effective (89.4 tok/s) |
 
 > Canonical gated decode number = `perf_baseline.json` Qwen3-8B-Q8_0 tg128 =
 > 269.5 (cold-median, 5 trials × 5 reps, 2026-06-12, clocks verified healthy

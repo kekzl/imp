@@ -10,6 +10,7 @@
 #include "exec/executor_kernels_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "quant/turboquant_fp4.cuh"
 #include <cuda_fp8.h>
 #include <float.h>
 
@@ -19,6 +20,39 @@ namespace {
 
 __device__ __forceinline__ float cache_val_to_float(half v) { return __half2float(v); }
 __device__ __forceinline__ float cache_val_to_float(__nv_fp8_e4m3 v) { return static_cast<float>(v); }
+
+// Key element access per KV dtype. The owner-CTA/span logic below is identical
+// for every dtype; only "read key element e of slot s in this block" differs,
+// so it lives here and the race-relevant part stays single-sourced.
+template <typename CacheT>
+struct KeyReaderPlain {
+    const CacheT* __restrict__ blk;
+    int row_elems;
+    __device__ __forceinline__ float get(int s, int e) const {
+        return cache_val_to_float(blk[(int64_t)s * row_elems + e]);
+    }
+};
+
+// NVFP4: two elements per byte (low nibble = even), UE4M3 group scale per 16
+// contiguous elements in a parallel array. head_dim is a multiple of 16 on
+// this path, and heads are contiguous within a row, so the flat group index
+// over the row is exactly e/16 - no head_dim needed here.
+struct KeyReaderNvfp4 {
+    const uint8_t* __restrict__ blk;
+    const uint8_t* __restrict__ sc;
+    int row_bytes;  // row_elems / 2
+    int sc_row;     // row_elems / 16
+    __device__ __forceinline__ float get(int s, int e) const {
+        const uint8_t byte = blk[(int64_t)s * row_bytes + (e >> 1)];
+        const uint32_t code = (e & 1) ? (byte >> 4) : (byte & 0xF);
+        const float mag = kTQFP4DequantLUT[code & 0x7];
+        const float v = (code & 0x8) ? -mag : mag;
+        __nv_fp8_e4m3 sbits;
+        const uint8_t raw = sc[(int64_t)s * sc_row + (e >> 4)];
+        memcpy(&sbits, &raw, 1);
+        return v * static_cast<float>(sbits);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Metadata maintenance. Owner-CTA scheme, race-free without atomics: CTA i is
@@ -57,30 +91,24 @@ __device__ __forceinline__ int sparse_resolve_block(const int* block_tables, con
                            n_sequences, slot);
 }
 
-template <typename CacheT>
-__global__ void sparse_update_key_minmax_layers_kernel(
-    const CacheT* __restrict__ k_base, int64_t k_layer_stride,  // elems
-    __half2* __restrict__ mm_base, int64_t mm_layer_stride,     // half2 elems
-    const int* __restrict__ positions, const int* __restrict__ block_tables,
-    const int* __restrict__ seq_offsets, int row_elems, int block_size, int n_tokens,
-    int max_blocks_per_seq, int n_sequences) {
-    const int token_idx = blockIdx.x;
-    const int layer = blockIdx.y;
-    if (token_idx >= n_tokens)
-        return;
-    int slot;
+// Owner resolution: returns the physical block this CTA owns, or -1 when
+// another CTA owns it (or there is nothing to do). Sets slot and span.
+__device__ __forceinline__ int sparse_owner_block(const int* block_tables, const int* positions,
+                                                  const int* seq_offsets, int token_idx, int block_size,
+                                                  int n_tokens, int max_blocks_per_seq, int n_sequences,
+                                                  int& slot, int& span) {
     const int block_id = sparse_resolve_block(block_tables, positions, seq_offsets, token_idx, block_size,
                                               max_blocks_per_seq, n_sequences, slot);
     if (block_id < 0)
-        return;
+        return -1;
     if (token_idx > 0) {
         int prev_slot;
         const int prev_block = sparse_resolve_block(block_tables, positions, seq_offsets, token_idx - 1,
                                                     block_size, max_blocks_per_seq, n_sequences, prev_slot);
         if (prev_block == block_id)
-            return;
+            return -1;
     }
-    int span = 1;
+    span = 1;
     while (token_idx + span < n_tokens && span < block_size) {
         int s2;
         const int b2 = sparse_resolve_block(block_tables, positions, seq_offsets, token_idx + span,
@@ -89,8 +117,12 @@ __global__ void sparse_update_key_minmax_layers_kernel(
             break;  // consecutive slots only - the read below walks slot+j
         span++;
     }
-    const CacheT* blk = k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems;
-    __half2* mm = mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems;
+    return block_id;
+}
+
+template <typename Reader>
+__device__ __forceinline__ void sparse_merge_block_minmax(Reader rd, __half2* __restrict__ mm, int slot,
+                                                          int span, int row_elems) {
     const bool init = (slot == 0);
     for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
         float mn, mx;
@@ -103,12 +135,60 @@ __global__ void sparse_update_key_minmax_layers_kernel(
             mx = __high2float(cur);
         }
         for (int j = 0; j < span; j++) {
-            const float v = cache_val_to_float(blk[(int64_t)(slot + j) * row_elems + e]);
+            const float v = rd.get(slot + j, e);
             mn = fminf(mn, v);
             mx = fmaxf(mx, v);
         }
         mm[e] = __floats2half2_rn(mn, mx);
     }
+}
+
+template <typename CacheT>
+__global__ void sparse_update_key_minmax_layers_kernel(
+    const CacheT* __restrict__ k_base, int64_t k_layer_stride,  // elems
+    __half2* __restrict__ mm_base, int64_t mm_layer_stride,     // half2 elems
+    const int* __restrict__ positions, const int* __restrict__ block_tables,
+    const int* __restrict__ seq_offsets, int row_elems, int block_size, int n_tokens,
+    int max_blocks_per_seq, int n_sequences) {
+    const int token_idx = blockIdx.x;
+    const int layer = blockIdx.y;
+    if (token_idx >= n_tokens)
+        return;
+    int slot, span;
+    const int block_id = sparse_owner_block(block_tables, positions, seq_offsets, token_idx, block_size,
+                                            n_tokens, max_blocks_per_seq, n_sequences, slot, span);
+    if (block_id < 0)
+        return;
+    KeyReaderPlain<CacheT> rd{k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems,
+                              row_elems};
+    sparse_merge_block_minmax(rd, mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems, slot,
+                              span, row_elems);
+}
+
+// NVFP4 twin: same owner scheme, two base pointers (packed nibbles + UE4M3
+// group scales). Strides are in bytes because both regions are byte arrays.
+__global__ void sparse_update_key_minmax_layers_nvfp4_kernel(
+    const uint8_t* __restrict__ k_base, int64_t k_layer_stride_bytes,
+    const uint8_t* __restrict__ sc_base, int64_t sc_layer_stride_bytes,
+    __half2* __restrict__ mm_base, int64_t mm_layer_stride, const int* __restrict__ positions,
+    const int* __restrict__ block_tables, const int* __restrict__ seq_offsets, int row_elems,
+    int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
+    const int token_idx = blockIdx.x;
+    const int layer = blockIdx.y;
+    if (token_idx >= n_tokens)
+        return;
+    int slot, span;
+    const int block_id = sparse_owner_block(block_tables, positions, seq_offsets, token_idx, block_size,
+                                            n_tokens, max_blocks_per_seq, n_sequences, slot, span);
+    if (block_id < 0)
+        return;
+    const int row_bytes = row_elems / 2;
+    const int sc_row = row_elems / 16;
+    KeyReaderNvfp4 rd{k_base + layer * k_layer_stride_bytes + (int64_t)block_id * block_size * row_bytes,
+                      sc_base + layer * sc_layer_stride_bytes + (int64_t)block_id * block_size * sc_row,
+                      row_bytes, sc_row};
+    sparse_merge_block_minmax(rd, mm_base + layer * mm_layer_stride + (int64_t)block_id * row_elems, slot,
+                              span, row_elems);
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +486,7 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
 }  // namespace
 
 void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
+                                         const void* k_scale_base, int64_t sc_layer_stride_bytes,
                                          void* minmax_base, int64_t mm_layer_stride_bytes,
                                          const int* positions, const int* block_tables,
                                          const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
@@ -417,7 +498,21 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
     const int threads = 128;
     const dim3 grid(n_tokens, n_layers);
     const int64_t mm_stride = mm_layer_stride_bytes / (int64_t)sizeof(__half2);
-    if (cache_dtype == QType::FP8_E4M3) {
+    if (cache_dtype == QType::NVFP4) {
+        // The init gate refuses NVFP4 without a scale pool, so a null here
+        // would be a wiring bug, not a configuration: fail loud rather than
+        // write metadata from garbage.
+        if (k_scale_base == nullptr) {
+            IMP_LOG_ERROR("sparse_update_key_minmax: NVFP4 cache without a scale pool");
+            return;
+        }
+        sparse_update_key_minmax_layers_nvfp4_kernel<<<grid, threads, 0, stream>>>(
+            static_cast<const uint8_t*>(k_base), k_layer_stride_bytes,
+            static_cast<const uint8_t*>(k_scale_base), sc_layer_stride_bytes,
+            static_cast<__half2*>(minmax_base), mm_stride, positions, block_tables, seq_offsets, row_elems,
+            block_size, n_tokens, max_blocks_per_seq, n_sequences);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else if (cache_dtype == QType::FP8_E4M3) {
         sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3>
             <<<grid, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
                                            static_cast<__half2*>(minmax_base), mm_stride, positions,

@@ -30,9 +30,10 @@ constexpr int kBS = 16;  // kKVBlockSize
 // (n_layers=1, zero layer strides, no ragged offsets).
 static void sparse_update_key_minmax(QType t, const void* k, void* mm, const int* pos, const int* bt,
                                      int nkv, int hd, int bs, int n, int mbps, int nseq,
-                                     cudaStream_t stream, const int* seq_offsets = nullptr) {
-    sparse_update_key_minmax_all_layers(t, k, 0, mm, 0, pos, bt, seq_offsets, /*n_layers=*/1, nkv, hd, bs,
-                                        n, mbps, nseq, stream);
+                                     cudaStream_t stream, const int* seq_offsets = nullptr,
+                                     const void* k_scales = nullptr) {
+    sparse_update_key_minmax_all_layers(t, k, 0, k_scales, 0, mm, 0, pos, bt, seq_offsets, /*n_layers=*/1,
+                                        nkv, hd, bs, n, mbps, nseq, stream);
 }
 
 // Deterministic value fill: distinct, sign-mixed, exactly f16-representable.
@@ -305,6 +306,76 @@ TEST_F(SparseMinMaxTest, Fp8RawScaleOneDequant) {
         ASSERT_FLOAT_EQ(__high2float(mm[e]), mx) << "fp8 max e " << e;
     }
     cudaFree(d_k8);
+    cudaFree(d_bt);
+    cudaFree(d_pos);
+}
+
+// NVFP4 metadata: the packed nibbles alone do not define a key value, so this
+// is the one dtype where the bound depends on a second region. The reference
+// below quantizes on the host and dequantizes independently of the kernel, so
+// a wrong nibble order, a wrong group stride or a dropped scale all show up as
+// a wrong bound rather than as a plausible one.
+TEST_F(SparseMinMaxTest, Nvfp4NibblesAndGroupScales) {
+    static constexpr int kGroup = 16;
+    ASSERT_EQ(row_elems % kGroup, 0);
+    const int row_bytes = row_elems / 2;
+    const int sc_row = row_elems / kGroup;
+    const int slots = 5;
+
+    // E2M1 codes 0..15 (bit 3 = sign, 0..7 = magnitude index) and UE4M3
+    // group scales, both chosen per (slot, group) so no two groups share one.
+    static const float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    std::vector<uint8_t> k4(static_cast<size_t>(n_blocks_pool) * kBS * row_bytes, 0);
+    std::vector<uint8_t> sc(static_cast<size_t>(n_blocks_pool) * kBS * sc_row, 0);
+    std::vector<float> want(static_cast<size_t>(slots) * row_elems);
+    for (int s = 0; s < slots; s++) {
+        for (int g = 0; g < sc_row; g++) {
+            const float scale_f = 0.25f * static_cast<float>(1 + ((s * 7 + g) % 6));
+            const __nv_fp8_e4m3 sf(scale_f);
+            uint8_t raw;
+            memcpy(&raw, &sf, 1);
+            sc[static_cast<size_t>(s) * sc_row + g] = raw;
+            for (int j = 0; j < kGroup; j++) {
+                const int e = g * kGroup + j;
+                const int code = (s * 13 + e * 5) % 16;
+                const size_t byte_idx = static_cast<size_t>(s) * row_bytes + e / 2;
+                if (e % 2 == 0)
+                    k4[byte_idx] = static_cast<uint8_t>((k4[byte_idx] & 0xF0) | code);
+                else
+                    k4[byte_idx] = static_cast<uint8_t>((k4[byte_idx] & 0x0F) | (code << 4));
+                const float mag = kMag[code & 0x7];
+                want[static_cast<size_t>(s) * row_elems + e] =
+                    ((code & 0x8) ? -mag : mag) * static_cast<float>(sf);
+            }
+        }
+    }
+    uint8_t* d_k4 = dmalloc<uint8_t>(k4.size());
+    dcopy(d_k4, k4);
+    uint8_t* d_sc = dmalloc<uint8_t>(sc.size());
+    dcopy(d_sc, sc);
+    std::vector<int> bt_h = {0};
+    int* d_bt = dmalloc<int>(1);
+    dcopy(d_bt, bt_h);
+    std::vector<int> pos_h = {0, 1, 2, 3, 4};
+    int* d_pos = dmalloc<int>(pos_h.size());
+    dcopy(d_pos, pos_h);
+
+    sparse_update_key_minmax(QType::NVFP4, d_k4, d_mm, d_pos, d_bt, nkv, hd, kBS, slots, 0, 1, nullptr,
+                             nullptr, d_sc);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto mm = dread(d_mm, static_cast<size_t>(n_blocks_pool) * row_elems);
+    for (int e = 0; e < row_elems; e++) {
+        float mn = FLT_MAX, mx = -FLT_MAX;
+        for (int s = 0; s < slots; s++) {
+            const float v = want[static_cast<size_t>(s) * row_elems + e];
+            mn = std::min(mn, v);
+            mx = std::max(mx, v);
+        }
+        ASSERT_NEAR(__low2float(mm[e]), mn, 1e-2f) << "nvfp4 min e " << e;
+        ASSERT_NEAR(__high2float(mm[e]), mx, 1e-2f) << "nvfp4 max e " << e;
+    }
+    cudaFree(d_k4);
+    cudaFree(d_sc);
     cudaFree(d_bt);
     cudaFree(d_pos);
 }
