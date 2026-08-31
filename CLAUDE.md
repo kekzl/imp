@@ -7,7 +7,7 @@ commit: 81ffa573
 
 # imp — Project Instructions
 
-From-scratch C++23/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. ~135k LOC (src/ + include/; ~220k with tests/). See [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md) (canonical narrative) and [`docs/internals/SM120.md`](docs/internals/SM120.md).
+From-scratch C++23/CUDA LLM inference engine targeting **exactly one chip: NVIDIA Blackwell `sm_120a`** (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. See [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md) (canonical narrative) and [`docs/internals/SM120.md`](docs/internals/SM120.md).
 
 **This file is the router, not the manual.** It holds what applies to every task; the playbooks live in the skills below and are loaded on demand. If something here is also in a skill, the skill is the copy that gets maintained.
 
@@ -60,9 +60,9 @@ Canonical references: `docs/internals/ARCHITECTURE.md` (narrative), `docs/intern
 The host has **no CUDA toolkit** by design — build inside Docker. `build/` and `build-dev/` are root-owned by the container; remove them via `make dev-clean` or a throwaway container, never `sudo`.
 
 ```
-make dev / make dev-test   # incremental (2-14 s) + the real CI lane — iterate here
-make build                 # full image (~3.5 min) — the gate, benchmarks, pre-push
-make verify-fast           # pre-push gate: build + 37 s script (#1587)   make verify   # full
+make dev / make dev-test   # incremental (seconds) + the real CI lane - iterate here
+make build                 # full image (minutes) - the gate, benchmarks, pre-push
+make verify-fast           # pre-push gate (#1587)             make verify   # full
 ```
 
 `make build` for anything you *measure* or push; `make dev` for everything else. `make test-unit` is a different binary from the CI lane — green there is not green in CI. Details, target list and CI job names: skill **building-and-testing**.

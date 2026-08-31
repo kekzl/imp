@@ -17,6 +17,18 @@ paragraph into the wrong layer is the most common defect here, and it is what
 3. **A claim needs a code path; a number needs provenance.** What cannot be
    backed is *deleted*, not softened. "experimental", "partial" and "planned"
    are not rescue words.
+3b. **A number also needs something that FAILS when it goes wrong** - otherwise
+   it is a maintenance bill with no reader, and it will be wrong. Three kinds
+   qualify: gate thresholds (8%/8%/10%, `verify.sh` enforces exactly those),
+   hardware constants (32 GB, 1792 GB/s - they cannot drift), and dated
+   measurements, which are findings rather than inventory and are true of the
+   afternoon they name. Counts of files, LOC or test cases and exact
+   build/test runtimes qualify for none of it: **write the command that prints
+   the number**, or the magnitude that changes a decision ("seconds" vs
+   "minutes"), and stop. Restating a gated number in prose does not inherit its
+   gate - the pin in `check_test_lanes.py` guards the tool's constant, not a
+   copy of it in a doc. Applied in bulk 2026-08-31; `tests/CLAUDE.md` had lost
+   this argument twice by then (#1673, then all four of its literals again).
 4. **Records are not documentation.** Excluded from the linter: `CHANGELOG.md`,
    `docs/MISSION_JOURNAL.md`, `docs/vram_audit.md`, root `AUDIT.md`,
    `docs/roadmap.md`, plus the prefixes `docs/archive/`, `docs/audit/`,
