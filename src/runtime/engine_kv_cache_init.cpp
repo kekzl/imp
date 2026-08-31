@@ -806,7 +806,10 @@ bool Engine::init_kv_cache() {
                     d_ssm_seq_slots_ = nullptr;
                 } else {
                     cudaMemset(d_ssm_seq_slots_, 0, bytes);
-                    h_ssm_seq_slots_.assign(static_cast<size_t>(config_.max_batch_size), 0);
+                    h_ssm_seq_slots_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
+                    h_ssm_seq_slots_n_ = h_ssm_seq_slots_.empty() ? 0 : config_.max_batch_size;
+                    if (h_ssm_seq_slots_n_)
+                        memset(h_ssm_seq_slots_.data(), 0, bytes);
                 }
             }
         }

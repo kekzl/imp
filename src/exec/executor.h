@@ -210,7 +210,7 @@ public:
     // kernel reads sampled tokens strided by SAMPLE_SCRATCH_BYTES from here).
     const int32_t* sample_slot_base(int parity) const;
     bool sample_pipeline_ready() const {
-        return d_sample_result_ && !h_sample_pinned_.empty() && !h_row_args_.empty() && d_row_args_ &&
+        return d_sample_result_ && !h_sample_pinned_.empty() && d_sample_args_ != nullptr &&
                sample_gather_evt_[0] && sample_gather_evt_[1];
     }
     int32_t sample_single_from_logits(const Tensor& logits, const InferenceState& state,
@@ -745,8 +745,39 @@ private:
     // eligible rows here instead of launching; collect_sampled_tokens uploads
     // the args (one pinned H2D) and fires ONE partial + ONE finalize launch
     // for the whole batch. Greedy rows launch immediately (2 cheap kernels).
-    PinnedBuffer h_row_args_;            // pinned, 2 x sample_slots_ entries (parity halves, T5b)
-    TopkRowArgs* d_row_args_ = nullptr;  // device mirror (same layout)
+    // All three row-arg arrays live in ONE pinned slab and ONE device slab,
+    // grouped BY PARITY ([pen | greedy | topk] per parity half), so the
+    // per-step flush is a single H2D of the active parity's region instead
+    // of three (~35-62 us of host gap per extra launch, 2026-08-31 idle
+    // attribution). Accessors below give the typed views.
+    PinnedBuffer h_sample_args_;
+    char* d_sample_args_ = nullptr;          // device slab, 2 x sample_args_parity_bytes_
+    size_t sample_args_parity_bytes_ = 0;
+    size_t sample_args_off_greedy_ = 0;      // byte offsets inside a parity block
+    size_t sample_args_off_topk_ = 0;
+    PenaltyRowArgs* h_pen_rows_(int par) const {
+        return reinterpret_cast<PenaltyRowArgs*>(static_cast<char*>(h_sample_args_.data()) +
+                                                 par * sample_args_parity_bytes_);
+    }
+    GreedyRowArgs* h_greedy_rows_(int par) const {
+        return reinterpret_cast<GreedyRowArgs*>(static_cast<char*>(h_sample_args_.data()) +
+                                                par * sample_args_parity_bytes_ + sample_args_off_greedy_);
+    }
+    TopkRowArgs* h_topk_rows_(int par) const {
+        return reinterpret_cast<TopkRowArgs*>(static_cast<char*>(h_sample_args_.data()) +
+                                              par * sample_args_parity_bytes_ + sample_args_off_topk_);
+    }
+    PenaltyRowArgs* d_pen_rows_(int par) const {
+        return reinterpret_cast<PenaltyRowArgs*>(d_sample_args_ + par * sample_args_parity_bytes_);
+    }
+    GreedyRowArgs* d_greedy_rows_(int par) const {
+        return reinterpret_cast<GreedyRowArgs*>(d_sample_args_ + par * sample_args_parity_bytes_ +
+                                                sample_args_off_greedy_);
+    }
+    TopkRowArgs* d_topk_rows_(int par) const {
+        return reinterpret_cast<TopkRowArgs*>(d_sample_args_ + par * sample_args_parity_bytes_ +
+                                              sample_args_off_topk_);
+    }
     int n_pending_topk_rows_ = 0;
     int pending_topk_max_k_ = 0;
     int pending_topk_vocab_ = 0;
@@ -757,12 +788,10 @@ private:
     // penalties -> greedy -> top-k, which preserves each row's own
     // penalties-before-sampler order on the single stream.
     void flush_pending_greedy_rows_(cudaStream_t stream);
+    void flush_sample_args_(cudaStream_t stream);
     void flush_pending_penalty_rows_(cudaStream_t stream);
-    PinnedBuffer h_greedy_args_;              // pinned, 2 x sample_slots_ (parity halves)
-    GreedyRowArgs* d_greedy_args_ = nullptr;  // device mirror
+
     int n_pending_greedy_rows_ = 0;
-    PinnedBuffer h_pen_args_;                 // pinned, 2 x sample_slots_ (parity halves)
-    PenaltyRowArgs* d_pen_args_ = nullptr;    // device mirror
     int n_pending_pen_rows_ = 0;
     int pending_sample_vocab_ = 0;
     // Static banned-token list cache (see apply_row_filters_): keyed on the

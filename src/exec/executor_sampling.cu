@@ -349,10 +349,10 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     // immediately (top_k > SAMPLE_MAX_TOP_K) would read logits before the
     // stashed penalty sweep — keep that row's chain inline.
     const bool sampler_batches =
-        greedy ? (d_greedy_args_ && !h_greedy_args_.empty())
-               : (h_row_args_.as<TopkRowArgs>() && d_row_args_ && eff_top_k <= SAMPLE_MAX_TOP_K);
+        greedy ? (d_sample_args_ != nullptr)
+               : (d_sample_args_ != nullptr && eff_top_k <= SAMPLE_MAX_TOP_K);
     bool stashed_filters = false;
-    if (tail_empty && sampler_batches && d_pen_args_ && !h_pen_args_.empty()) {
+    if (tail_empty && sampler_batches && d_sample_args_ != nullptr) {
         if (pen_active || d_ban != nullptr) {
             const int32_t* pen_ptr = state.penalty_tokens;
             int pen_n = pen_active ? state.n_penalty_tokens : 0;
@@ -360,8 +360,7 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
                 pen_ptr += (pen_n - state.repeat_last_n);
                 pen_n = state.repeat_last_n;
             }
-            PenaltyRowArgs& p =
-                h_pen_args_.as<PenaltyRowArgs>()[sample_parity_ * sample_slots_ + n_pending_pen_rows_++];
+            PenaltyRowArgs& p = h_pen_rows_(sample_parity_)[n_pending_pen_rows_++];
             p.logits = lp;
             p.token_ids = pen_ptr;
             p.n_tokens = pen_n;
@@ -388,10 +387,8 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
         // Greedy stash: the argmax always runs LAST for its row, so it is
         // batchable whether the filters were stashed or ran inline (single
         // stream, and the flush happens after every row is enqueued).
-        if (d_greedy_args_ && !h_greedy_args_.empty()) {
-            GreedyRowArgs& g =
-                h_greedy_args_.as<GreedyRowArgs>()[sample_parity_ * sample_slots_ +
-                                                   n_pending_greedy_rows_++];
+        if (d_sample_args_ != nullptr) {
+            GreedyRowArgs& g = h_greedy_rows_(sample_parity_)[n_pending_greedy_rows_++];
             g.logits = lp;
             g.d_result = slot;
             return true;
@@ -401,11 +398,11 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     }
     unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
     float temperature = state.temperature <= 0.0f ? 1.0f : state.temperature;
-    if (h_row_args_.as<TopkRowArgs>() && d_row_args_ && eff_top_k <= SAMPLE_MAX_TOP_K) {
+    if (d_sample_args_ != nullptr && eff_top_k <= SAMPLE_MAX_TOP_K) {
         // STASH the row for the row-parallel batched launch in
         // collect_sampled_tokens — n serialized <<<64>>>+<<<1>>> launch pairs
         // become ONE partial + ONE finalize launch for the whole batch.
-        TopkRowArgs& a = h_row_args_.as<TopkRowArgs>()[sample_parity_ * sample_slots_ + n_pending_topk_rows_++];
+        TopkRowArgs& a = h_topk_rows_(sample_parity_)[n_pending_topk_rows_++];
         a.logits = lp;
         a.d_result = slot;
         a.inv_temperature = 1.0f / temperature;
@@ -422,17 +419,35 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     return true;
 }
 
-// Flush the stashed penalty rows of the ACTIVE parity half: one pinned H2D +
-// one batched vocab sweep. Must run BEFORE the greedy/top-k flushes (each
-// row's penalties precede its sampler on the stream).
+// The three flushes below launch from the device slab; the ONE H2D that
+// carries all three arrays' active-parity regions is flush_sample_args_()
+// (must run first - and the penalty sweep before the greedy/top-k flushes,
+// each row's penalties precede its sampler on the stream).
+void GraphExecutor::flush_sample_args_(cudaStream_t stream) {
+    const size_t used_pen = sizeof(PenaltyRowArgs) * n_pending_pen_rows_;
+    const size_t used_greedy = sizeof(GreedyRowArgs) * n_pending_greedy_rows_;
+    const size_t used_topk = sizeof(TopkRowArgs) * n_pending_topk_rows_;
+    if (used_pen + used_greedy + used_topk == 0 || d_sample_args_ == nullptr)
+        return;
+    // One copy spanning from the parity block's start through the last used
+    // array (the arrays are laid out pen | greedy | topk, so the span is
+    // contiguous; unused gaps in between are dead bytes, cheaper than a
+    // second launch).
+    size_t end = used_pen;
+    if (used_greedy)
+        end = sample_args_off_greedy_ + used_greedy;
+    if (used_topk)
+        end = sample_args_off_topk_ + used_topk;
+    const size_t off = static_cast<size_t>(sample_parity_) * sample_args_parity_bytes_;
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_sample_args_ + off,
+                                       static_cast<char*>(h_sample_args_.data()) + off, end,
+                                       cudaMemcpyHostToDevice, stream));
+}
+
 void GraphExecutor::flush_pending_penalty_rows_(cudaStream_t stream) {
     if (n_pending_pen_rows_ <= 0)
         return;
-    PenaltyRowArgs* h_base = h_pen_args_.as<PenaltyRowArgs>() + sample_parity_ * sample_slots_;
-    PenaltyRowArgs* d_base = d_pen_args_ + sample_parity_ * sample_slots_;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(PenaltyRowArgs) * n_pending_pen_rows_,
-                                       cudaMemcpyHostToDevice, stream));
-    launch_penalties_rows(d_base, n_pending_pen_rows_, pending_sample_vocab_, stream);
+    launch_penalties_rows(d_pen_rows_(sample_parity_), n_pending_pen_rows_, pending_sample_vocab_, stream);
     n_pending_pen_rows_ = 0;
 }
 
@@ -442,11 +457,8 @@ void GraphExecutor::flush_pending_penalty_rows_(cudaStream_t stream) {
 void GraphExecutor::flush_pending_greedy_rows_(cudaStream_t stream) {
     if (n_pending_greedy_rows_ <= 0)
         return;
-    GreedyRowArgs* h_base = h_greedy_args_.as<GreedyRowArgs>() + sample_parity_ * sample_slots_;
-    GreedyRowArgs* d_base = d_greedy_args_ + sample_parity_ * sample_slots_;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(GreedyRowArgs) * n_pending_greedy_rows_,
-                                       cudaMemcpyHostToDevice, stream));
-    launch_greedy_rows(d_base, n_pending_greedy_rows_, pending_sample_vocab_, stream);
+    launch_greedy_rows(d_greedy_rows_(sample_parity_), n_pending_greedy_rows_, pending_sample_vocab_,
+                       stream);
     n_pending_greedy_rows_ = 0;
 }
 
@@ -455,12 +467,8 @@ void GraphExecutor::flush_pending_greedy_rows_(cudaStream_t stream) {
 void GraphExecutor::flush_pending_topk_rows_(cudaStream_t stream) {
     if (n_pending_topk_rows_ <= 0)
         return;
-    TopkRowArgs* h_base = h_row_args_.as<TopkRowArgs>() + sample_parity_ * sample_slots_;
-    TopkRowArgs* d_base = d_row_args_ + sample_parity_ * sample_slots_;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(TopkRowArgs) * n_pending_topk_rows_,
-                                       cudaMemcpyHostToDevice, stream));
-    launch_topk_topp_rows(d_base, n_pending_topk_rows_, pending_topk_max_k_, pending_topk_vocab_,
-                          stream);
+    launch_topk_topp_rows(d_topk_rows_(sample_parity_), n_pending_topk_rows_, pending_topk_max_k_,
+                          pending_topk_vocab_, stream);
     n_pending_topk_rows_ = 0;
     pending_topk_max_k_ = 0;
 }
@@ -483,6 +491,7 @@ const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t s
         n_pending_pen_rows_ = 0;
         return nullptr;
     }
+    flush_sample_args_(stream);
     flush_pending_penalty_rows_(stream);
     flush_pending_greedy_rows_(stream);
     flush_pending_topk_rows_(stream);
@@ -510,6 +519,7 @@ bool GraphExecutor::gather_sampled_tokens_async(int n_slots, cudaStream_t stream
         n_pending_pen_rows_ = 0;
         return false;
     }
+    flush_sample_args_(stream);
     flush_pending_penalty_rows_(stream);
     flush_pending_greedy_rows_(stream);
     flush_pending_topk_rows_(stream);

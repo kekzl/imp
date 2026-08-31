@@ -233,6 +233,14 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, bool wit
     d_context_lens_ = reinterpret_cast<int*>(ptr);
     ptr += ctx_lens_sz;
     d_sample_result_ = reinterpret_cast<int32_t*>(ptr);
+
+    // Pinned mirror of everything up to (excluding) the sample result.
+    h_used_bytes_ = pool_size_ - align256(sizeof(int32_t));
+    h_pool_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), h_used_bytes_);
+    if (h_pool_.empty())
+        IMP_LOG_WARN("decode batch pool: pinned mirror alloc failed (%zu bytes) - "
+                     "per-step uploads stay per-buffer",
+                     h_used_bytes_);
 }
 
 GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream) {
@@ -253,6 +261,39 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
         (!batch.block_tables_swa.empty() && d_block_tables_swa_) ? d_block_tables_swa_ : nullptr;
     gpu.d_context_lens = d_context_lens_;
 
+    // One consolidated H2D at batch > 1: the vectors are memcpy'd into the
+    // pinned mirror at the same offsets the device pool uses, then a single
+    // async copy covers token ids .. ctx lens (block-table dedupe only pays
+    // at n == 1, where the old path below still runs).
+    if (batch.n_sequences > 1 && !h_pool_.empty()) {
+        char* hb = static_cast<char*>(h_pool_.data());
+        char* db = static_cast<char*>(pool_);
+        auto put = [&](const void* src, size_t bytes, const void* dst) {
+            memcpy(hb + (static_cast<const char*>(dst) - db), src, bytes);
+        };
+        put(batch.token_ids.data(), batch.total_tokens * sizeof(int32_t), d_token_ids_);
+        put(batch.positions.data(), batch.total_tokens * sizeof(int), d_positions_);
+        put(batch.context_lens.data(), batch.n_sequences * sizeof(int), d_context_lens_);
+        if (!batch.seq_offsets.empty())
+            put(batch.seq_offsets.data(), (batch.n_sequences + 1) * sizeof(int), d_seq_offsets_);
+        if (batch.max_blocks_per_seq > 0 && !batch.block_tables.empty())
+            put(batch.block_tables.data(),
+                static_cast<size_t>(batch.n_sequences) * batch.max_blocks_per_seq * sizeof(int),
+                d_block_tables_);
+        if (gpu.d_block_tables_swa && !batch.block_tables_swa.empty())
+            put(batch.block_tables_swa.data(),
+                static_cast<size_t>(batch.n_sequences) * batch.max_blocks_per_seq * sizeof(int),
+                d_block_tables_swa_);
+        // Span: from the pool base through the end of ctx lens (the layout
+        // puts ctx lens after both block-table regions - see allocate()).
+        const size_t span = static_cast<const char*>(static_cast<const void*>(d_context_lens_)) - db +
+                            align256(static_cast<size_t>(max_batch_size_) * sizeof(int));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(pool_, hb, std::min(span, h_used_bytes_),
+                                           cudaMemcpyHostToDevice, stream));
+        last_upload_block_tables_.clear();
+        last_upload_block_tables_swa_.clear();
+        return gpu;
+    }
     // Async copy data into pool
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_ids_, batch.token_ids.data(),
                                        batch.total_tokens * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
@@ -307,6 +348,8 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
 // An arena slice: released wholesale when the arena closes, so this only drops
 // pointers. allocate() runs once per engine, so nothing is leaked by not freeing.
 void GPUBatchPool::free_pool() {
+    h_pool_.reset();
+    h_used_bytes_ = 0;
     pool_ = nullptr;
     pool_size_ = 0;
     d_token_ids_ = nullptr;

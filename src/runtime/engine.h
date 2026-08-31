@@ -629,7 +629,8 @@ private:
     // the old design serialise them (engine_scheduler.cpp: rotation cost
     // ~10-20 ms of re-capture, so it ran one sequence per step instead).
     int* d_ssm_seq_slots_ = nullptr;
-    std::vector<int> h_ssm_seq_slots_;
+    PinnedBuffer h_ssm_seq_slots_;  // pinned: uploaded every batched step
+    int h_ssm_seq_slots_n_ = 0;
     bool recurrent_slots_initialized_ = false;
     // Recurrent-state snapshots (hybrid prefix caching): LRU store of
     // per-sequence SSM/GDN state slabs keyed by the chained KV block hash of

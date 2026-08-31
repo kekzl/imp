@@ -990,7 +990,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     state.ssm_n_seq = 1;
     if (ssm_state_ && d_ssm_seq_slots_ && gpu_batch.n_sequences > 1 &&
         gpu_batch.total_tokens == gpu_batch.n_sequences &&
-        static_cast<size_t>(gpu_batch.n_sequences) <= h_ssm_seq_slots_.size()) {
+        gpu_batch.n_sequences <= h_ssm_seq_slots_n_) {
         bool all_known = true;
         for (int i = 0; i < gpu_batch.n_sequences; ++i) {
             auto it = recurrent_slot_of_.find(valid_decode[static_cast<size_t>(i)]->id);
@@ -998,7 +998,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
                 all_known = false;
                 break;
             }
-            h_ssm_seq_slots_[static_cast<size_t>(i)] = it->second;
+            h_ssm_seq_slots_.as<int>()[i] = it->second;
         }
         // A request without a slot would read another sequence's state, so the
         // whole step falls back rather than guessing one.

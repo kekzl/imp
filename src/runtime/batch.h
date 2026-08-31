@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "memory/host_pinned.h"
 #include <span>
 #include <vector>
 #include <cstdint>
@@ -97,6 +98,13 @@ private:
     int* d_block_tables_swa_ = nullptr;
     int* d_context_lens_ = nullptr;
     int32_t* d_sample_result_ = nullptr;
+    // Pinned host mirror of the pool layout (token ids .. ctx lens): at
+    // batch > 1 the five per-step uploads collapse into ONE H2D of the used
+    // span. Each cudaMemcpyAsync from pageable memory stages through a
+    // driver buffer on WSL2 (~14 us inter-launch gap measured at 32 streams,
+    // 2026-08-31 idle attribution); empty = the old per-buffer path.
+    PinnedBuffer h_pool_;
+    size_t h_used_bytes_ = 0;
 
     int max_batch_size_ = 0;
     int max_blocks_per_seq_ = 0;

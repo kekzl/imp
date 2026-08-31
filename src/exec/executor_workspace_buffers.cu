@@ -229,48 +229,27 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // Row-batched sampler args: pinned staging + device mirror (one H2D per
     // decode step for the whole batch).
-    if (h_row_args_.empty() && d_sample_result_ && sample_slots_ > 0) {
-        // The device mirror is engine-persistent (T2): sized once from
-        // max_logit_tokens_ and reused every decode step, ~115 KiB. Taken from
-        // the arena with NO direct-allocation fallback, because the caller
-        // already has a real one — it falls back to per-row sampling, which is
-        // exactly what "the arena is closed" should mean here. Keeping a
-        // cudaMalloc for that case would leave the site on the I1 allowlist for
-        // a path that only runs without an engine (AUDIT B47, A7 step 4b.2).
-        //
-        // A re-configure (teardown frees h_row_args_, then a larger batch takes
-        // again) strands the superseded slab in the bump arena. Bounded and
-        // one-time per reconfigure, which is the same trade the MMVQ tenant
-        // makes — and 115 KiB against 120 MiB of arena slack.
-        auto slab = engine_arena().take_bytes(2 * sizeof(TopkRowArgs) * sample_slots_);
-        h_row_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
-                                            2 * sizeof(TopkRowArgs) * sample_slots_);
-        if (h_row_args_.empty() || slab.empty()) {
+    if (h_sample_args_.empty() && d_sample_result_ && sample_slots_ > 0) {
+        // One slab for the three row-arg arrays, grouped by parity (see the
+        // members in executor.h). Same tier and fallback contract as the old
+        // three slabs: an empty take just means per-row sampling.
+        auto a16 = [](size_t x) { return (x + 15) & ~size_t(15); };
+        const size_t pen_b = a16(sizeof(PenaltyRowArgs) * sample_slots_);
+        const size_t greedy_b = a16(sizeof(GreedyRowArgs) * sample_slots_);
+        const size_t topk_b = a16(sizeof(TopkRowArgs) * sample_slots_);
+        sample_args_parity_bytes_ = pen_b + greedy_b + topk_b;
+        sample_args_off_greedy_ = pen_b;
+        sample_args_off_topk_ = pen_b + greedy_b;
+        auto slab = engine_arena().take_bytes(2 * sample_args_parity_bytes_);
+        h_sample_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                               2 * sample_args_parity_bytes_);
+        if (h_sample_args_.empty() || slab.empty()) {
             IMP_LOG_WARN("row-batched sampler args alloc failed — falling back to per-row sampling");
-            h_row_args_.reset();
-            d_row_args_ = nullptr;
+            h_sample_args_.reset();
+            d_sample_args_ = nullptr;
+            sample_args_parity_bytes_ = 0;
         } else {
-            d_row_args_ = reinterpret_cast<TopkRowArgs*>(slab.data());
-        }
-        // Greedy + penalty row staging (same tier, same fallback contract:
-        // an empty slab just means those rows launch per-row as before).
-        auto gslab = engine_arena().take_bytes(2 * sizeof(GreedyRowArgs) * sample_slots_);
-        h_greedy_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
-                                               2 * sizeof(GreedyRowArgs) * sample_slots_);
-        if (h_greedy_args_.empty() || gslab.empty()) {
-            h_greedy_args_.reset();
-            d_greedy_args_ = nullptr;
-        } else {
-            d_greedy_args_ = reinterpret_cast<GreedyRowArgs*>(gslab.data());
-        }
-        auto pslab = engine_arena().take_bytes(2 * sizeof(PenaltyRowArgs) * sample_slots_);
-        h_pen_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
-                                            2 * sizeof(PenaltyRowArgs) * sample_slots_);
-        if (h_pen_args_.empty() || pslab.empty()) {
-            h_pen_args_.reset();
-            d_pen_args_ = nullptr;
-        } else {
-            d_pen_args_ = reinterpret_cast<PenaltyRowArgs*>(pslab.data());
+            d_sample_args_ = reinterpret_cast<char*>(slab.data());
         }
     }
 
@@ -1660,11 +1639,9 @@ void GraphExecutor::free_buffers() {
     // T5b owners: reset() releases, and doing it twice is a no-op — the
     // hand-written cudaFreeHost pairs are gone (memory/host_pinned.h).
     h_sample_pinned_.reset();
-    h_row_args_.reset();
-    h_greedy_args_.reset();
-    h_pen_args_.reset();
-    d_greedy_args_ = nullptr;  // arena-owned, like d_row_args_ below
-    d_pen_args_ = nullptr;
+    h_sample_args_.reset();
+    d_sample_args_ = nullptr;
+    sample_args_parity_bytes_ = 0;
     n_pending_greedy_rows_ = 0;
     n_pending_pen_rows_ = 0;
     if (d_banned_cache_) {
@@ -1674,11 +1651,7 @@ void GraphExecutor::free_buffers() {
         banned_cache_n_ = 0;
         banned_cache_capacity_ = 0;
     }
-    if (d_row_args_) {
-        // Arena-owned since A7 step 4b.2 — no free here. The arena is closed by
-        // ~Engine, after every executor teardown.
-        d_row_args_ = nullptr;
-    }
+    // d_sample_args_ is arena-owned (A7 step 4b.2) — nulled above, no free.
     for (int p = 0; p < 2; ++p) {
         if (sample_gather_evt_[p]) {
             IMP_CUDA_CHECK_LOG(cudaEventDestroy(sample_gather_evt_[p]));
