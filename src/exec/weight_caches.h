@@ -68,6 +68,10 @@ struct WeightCaches {
     // (measured: 963.8 MiB double-counted on Qwen3.6-35B-A3B-NVFP4).
     size_t fp8_sidecar_bytes = 0;
     bool use_fp8 = false;
+    // Device 1.0f used as the per-tensor B scale for sidecar (per-row-scaled)
+    // FP8 prefill GEMMs: gemm_cublaslt's cached opDesc keeps the last non-null
+    // scale pointer, so passing nullptr would leave a stale scale armed.
+    float* fp8_unit_scale = nullptr;
 
     // Bulk-allocated buffers for FP16→FP8 migration
     float* fp8_migrated_scales = nullptr;

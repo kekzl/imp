@@ -384,6 +384,31 @@ void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
+// ---- scale_cols_fp16 -------------------------------------------------------
+// y[m][n] *= col_scales[n] on a row-major FP16 [M, N] matrix. One extra
+// memory pass over the GEMM output (~6 us at pp512 shapes), applied by the
+// gemm.fp8_ssm_prefill path to fold the sidecar's per-row weight scales back
+// into the FP8 GEMM result.
+
+__global__ void scale_cols_fp16_kernel(half* __restrict__ y, const float* __restrict__ col_scales,
+                                       int64_t total, int N) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= total)
+        return;
+    int n = static_cast<int>(i % N);
+    y[i] = __float2half(__half2float(y[i]) * col_scales[n]);
+}
+
+void scale_cols_fp16(void* y, const float* col_scales, int M, int N, cudaStream_t stream) {
+    if (!y || !col_scales || M <= 0 || N <= 0)
+        return;
+    int64_t total = static_cast<int64_t>(M) * N;
+    int64_t blocks = (total + 255) / 256;
+    scale_cols_fp16_kernel<<<static_cast<unsigned>(blocks), 256, 0, stream>>>(
+        static_cast<half*>(y), col_scales, total, N);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 // ---- quantize_fp16_to_fp8_e4m3 (Tensor API) ------------------------------
 
 void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_scale_out, cudaStream_t stream,

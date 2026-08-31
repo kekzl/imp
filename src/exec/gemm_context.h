@@ -40,6 +40,8 @@ struct GemmContext {
     bool gemm_no_mmvq = false;
     bool gemm_no_mmvq_q8_0 = false;
     bool gemm_no_dp4a_gemv = false;
+    // FP8 prefill for the GDN/SSM in/out projections (gemm.fp8_ssm_prefill).
+    bool fp8_ssm_prefill = false;
 
     // Spec-verify chunk forward (#998): small-M GEMMs (M <= largest capture
     // bucket) prefer the NVFP4 decode overlay over the M>1 prefill dequant
@@ -70,6 +72,7 @@ struct GemmContext {
         ctx.gemm_no_mmvq = rcfg.gemm.no_mmvq;
         ctx.gemm_no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;
         ctx.gemm_no_dp4a_gemv = rcfg.gemm.no_dp4a_gemv;
+        ctx.fp8_ssm_prefill = rcfg.gemm.fp8_ssm_prefill;
         ctx.spec_verify_small_m = spec_verify && rcfg.speculative.verify_nvfp4_gemm;
         return ctx;
     }

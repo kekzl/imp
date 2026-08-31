@@ -1066,8 +1066,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // FP8 activation scratch buffers (for FP8 prefill weight cache)
-    if (wcache_.use_fp8) {
+    // FP8 activation scratch buffers (for FP8 prefill weight cache, and for
+    // the gemm.fp8_ssm_prefill sidecar path which needs them without the
+    // full FP8 prefill cache)
+    if (wcache_.use_fp8 || runtime_config().gemm.fp8_ssm_prefill) {
         int max_dim = cfg.d_model;
         if (cfg.d_ff > 0)
             max_dim = std::max(max_dim, cfg.d_ff);
@@ -1616,6 +1618,10 @@ void GraphExecutor::free_buffers() {
             vram_free(vram_alloc_, wcache_.fp8_ssm_sidecar_data);
             wcache_.fp8_ssm_sidecar_data = nullptr;
             wcache_.fp8_ssm_sidecar_data_size = 0;
+        }
+        if (wcache_.fp8_unit_scale) {
+            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_unit_scale));
+            wcache_.fp8_unit_scale = nullptr;
         }
         if (wcache_.fp8_ssm_sidecar_row_scales) {
             IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_ssm_sidecar_row_scales));

@@ -214,6 +214,175 @@ TEST_F(FP8GemmTest, GemvFP8NonzeroMatchesReference) {
 // row_absmax/448) plus accumulation order, so a wrong block layout, scale
 // application, or row indexing shows up as O(1) error against the ~1e-2-class
 // rounding floor.
+// gemm.fp8_ssm_prefill building blocks: per-row weight quant + per-tensor
+// act quant + FP8xFP8 cuBLASLt + column rescale must reproduce the FP16
+// GEMM within E4M3 tolerance. Rows carry deliberately different magnitudes
+// so a per-tensor-only scale (or a dropped column rescale) fails loudly.
+void ssm_prefill_fp8_case(cudaStream_t stream_, int M, int N, int K);
+
+TEST_F(FP8GemmTest, SsmPrefillFp8RowscaleMatchesFp16) {
+    ssm_prefill_fp8_case(stream_, 48, 64, 128);      // small
+    ssm_prefill_fp8_case(stream_, 15, 2048, 4096);   // odd-M short prompt
+    ssm_prefill_fp8_case(stream_, 200, 2048, 4096);  // ppl-corpus M, GDN ssm_out shape
+}
+
+void ssm_prefill_fp8_case(cudaStream_t stream_, int M, int N, int K) {
+    std::vector<half> h_a(M * K), h_w(N * K);
+    // LCG-random values: periodic patterns (i % 17 style) repeat the same
+    // quantized value, so E4M3 rounding errors add coherently instead of
+    // averaging out and the tolerance triples for test-vector reasons.
+    uint32_t lcg = 12345;
+    auto frand = [&lcg]() {
+        lcg = lcg * 1664525u + 1013904223u;
+        return (static_cast<float>(lcg >> 8) / 16777216.0f) - 0.5f;
+    };
+    for (int i = 0; i < M * K; i++)
+        h_a[i] = __float2half(0.3f * frand());
+    for (int r = 0; r < N; r++) {
+        float row_mag = 0.4f * (1.0f + 0.15f * r);  // heterogeneous rows
+        for (int k = 0; k < K; k++)
+            h_w[r * K + k] = __float2half(row_mag * frand());
+    }
+    void *d_a, *d_w, *d_w8, *d_a8, *d_c, *d_cref;
+    float *d_row_scales, *d_act_scale, *d_unit;
+    ASSERT_EQ(cudaMalloc(&d_a, M * K * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w, N * K * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w8, (size_t)N * K), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_a8, (size_t)M * K), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_c, M * N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_cref, M * N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_row_scales, N * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_act_scale, sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_unit, sizeof(float)), cudaSuccess);
+    float one = 1.0f;
+    cudaMemcpy(d_unit, &one, sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_a, h_a.data(), M * K * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w, h_w.data(), N * K * sizeof(half), cudaMemcpyHostToDevice);
+
+    int64_t a_shape[] = {M, K}, w_shape[] = {N, K}, c_shape[] = {M, N};
+    Tensor A(d_a, QType::F16, 2, a_shape, true);
+    Tensor W(d_w, QType::F16, 2, w_shape, true);
+    Tensor C(d_c, QType::F16, 2, c_shape, true);
+    Tensor Cref(d_cref, QType::F16, 2, c_shape, true);
+
+    // FP16 reference
+    gemm_cublaslt(A, W, Cref, 1.0f, 0.0f, nullptr, nullptr, stream_);
+
+    // FP8 path: row-quant W, per-tensor act quant, FP8 GEMM, column rescale
+    quantize_fp8_rows_async(d_w, d_w8, N, K, d_row_scales, stream_);
+    Tensor A8(d_a8, QType::FP8_E4M3, 2, a_shape, true);
+    // Use the ASYNC ext-buffer path — the one the engine dispatch uses.
+    int max_grid = ((M * K + 3) / 4 + 255) / 256;
+    float *d_bm, *d_am;
+    ASSERT_EQ(cudaMalloc(&d_bm, (size_t)max_grid * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_am, sizeof(float)), cudaSuccess);
+    quantize_fp16_to_fp8_e4m3(A, A8, d_act_scale, stream_, d_bm, d_am, max_grid);
+    Tensor W8(d_w8, QType::FP8_E4M3, 2, w_shape, true);
+    gemm_cublaslt(A8, W8, C, 1.0f, 0.0f, d_act_scale, d_unit, stream_);
+    scale_cols_fp16(d_c, d_row_scales, M, N, stream_);
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+
+    std::vector<half> h_c(M * N), h_cref(M * N);
+    cudaMemcpy(h_c.data(), d_c, M * N * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_cref.data(), d_cref, M * N * sizeof(half), cudaMemcpyDeviceToHost);
+    // Normalize by the reference RMS (same convention as the rowscale-GEMV
+    // test below): dot products cancel to near zero, so per-element relative
+    // error is unbounded there while the absolute error stays E4M3-sized.
+    double ref_sq = 0.0;
+    for (int i = 0; i < M * N; i++) {
+        double ref = __half2float(h_cref[i]);
+        ref_sq += ref * ref;
+    }
+    double ref_rms = std::sqrt(ref_sq / (M * N));
+    ASSERT_GT(ref_rms, 0.1);  // the reference itself is non-trivial
+    double max_err = 0.0, se = 0.0;
+    for (int i = 0; i < M * N; i++) {
+        double ref = __half2float(h_cref[i]);
+        double got = __half2float(h_c[i]);
+        double err = std::fabs(got - ref);
+        max_err = std::max(max_err, err);
+        se += err * err;
+        ASSERT_LT(err, 0.35 * ref_rms) << "i=" << i << " ref=" << ref << " got=" << got;
+    }
+    double rms_rel = std::sqrt(se / ref_sq);
+    printf("[fp8 ssm prefill] M=%d N=%d K=%d max_err=%.3e rms_rel=%.3e ref_rms=%.4f\n", M, N, K,
+           max_err, rms_rel, ref_rms);
+    // Aggregate quality bar: a dropped column rescale or a transposed
+    // operand lands far above it (>100% RMS).
+    EXPECT_LT(rms_rel, 0.06);
+    EXPECT_GT(max_err, 0.0);  // the path ran and produced non-identical FP8 results
+
+    cudaFree(d_a); cudaFree(d_w); cudaFree(d_w8); cudaFree(d_a8);
+    cudaFree(d_c); cudaFree(d_cref); cudaFree(d_row_scales);
+    cudaFree(d_act_scale); cudaFree(d_unit); cudaFree(d_bm); cudaFree(d_am);
+}
+
+// Negative-result pin for the gemm.fp8_ssm_prefill scoping: the SSM_IN arm
+// of the FP8 prefill produced uniform logits in the engine (PPL 4.09 ->
+// 248320 on Qwen3.6-35B), and the obvious hypothesis was activation channel
+// outliers collapsing the per-tensor E4M3 act scale. This test REFUTES that
+// hypothesis: a 400x single-channel outlier still reproduces FP16 within
+// ~3.5% RMS through the same pipeline. The engine failure has a different,
+// unisolated root cause - which is why the feature covers SSM_OUT only.
+TEST_F(FP8GemmTest, PerTensorActQuantSurvivesChannelOutlier) {
+    const int M = 64, N = 128, K = 1024;
+    std::vector<half> h_a(M * K), h_w(N * K);
+    uint32_t lcg = 99;
+    auto frand = [&lcg]() {
+        lcg = lcg * 1664525u + 1013904223u;
+        return (static_cast<float>(lcg >> 8) / 16777216.0f) - 0.5f;
+    };
+    for (int m = 0; m < M; m++)
+        for (int k = 0; k < K; k++)
+            h_a[m * K + k] = __float2half(0.3f * frand() * (k == 100 ? 400.0f : 1.0f));
+    for (int i = 0; i < N * K; i++)
+        h_w[i] = __float2half(0.4f * frand());
+    void *d_a, *d_w, *d_w8, *d_a8, *d_c, *d_cref;
+    float *d_row_scales, *d_act_scale, *d_unit;
+    ASSERT_EQ(cudaMalloc(&d_a, M * K * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w, N * K * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w8, (size_t)N * K), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_a8, (size_t)M * K), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_c, M * N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_cref, M * N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_row_scales, N * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_act_scale, sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_unit, sizeof(float)), cudaSuccess);
+    float one = 1.0f;
+    cudaMemcpy(d_unit, &one, sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_a, h_a.data(), M * K * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w, h_w.data(), N * K * sizeof(half), cudaMemcpyHostToDevice);
+    int64_t a_shape[] = {M, K}, w_shape[] = {N, K}, c_shape[] = {M, N};
+    Tensor A(d_a, QType::F16, 2, a_shape, true);
+    Tensor W(d_w, QType::F16, 2, w_shape, true);
+    Tensor C(d_c, QType::F16, 2, c_shape, true);
+    Tensor Cref(d_cref, QType::F16, 2, c_shape, true);
+    gemm_cublaslt(A, W, Cref, 1.0f, 0.0f, nullptr, nullptr, stream_);
+    quantize_fp8_rows_async(d_w, d_w8, N, K, d_row_scales, stream_);
+    Tensor A8(d_a8, QType::FP8_E4M3, 2, a_shape, true);
+    quantize_fp16_to_fp8_e4m3(A, A8, d_act_scale, stream_);
+    Tensor W8(d_w8, QType::FP8_E4M3, 2, w_shape, true);
+    gemm_cublaslt(A8, W8, C, 1.0f, 0.0f, d_act_scale, d_unit, stream_);
+    scale_cols_fp16(d_c, d_row_scales, M, N, stream_);
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    std::vector<half> h_c(M * N), h_cref(M * N);
+    cudaMemcpy(h_c.data(), d_c, M * N * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_cref.data(), d_cref, M * N * sizeof(half), cudaMemcpyDeviceToHost);
+    double se = 0.0, ref_sq = 0.0;
+    for (int i = 0; i < M * N; i++) {
+        double ref = __half2float(h_cref[i]);
+        double got = __half2float(h_c[i]);
+        se += (got - ref) * (got - ref);
+        ref_sq += ref * ref;
+    }
+    double rms_rel = std::sqrt(se / ref_sq);
+    printf("[fp8 act outlier] M=%d N=%d K=%d rms_rel=%.3f (healthy inputs: 0.036)\n", M, N, K, rms_rel);
+    EXPECT_LT(rms_rel, 0.06);  // the outlier does NOT break it
+    cudaFree(d_a); cudaFree(d_w); cudaFree(d_w8); cudaFree(d_a8);
+    cudaFree(d_c); cudaFree(d_cref); cudaFree(d_row_scales);
+    cudaFree(d_act_scale); cudaFree(d_unit);
+}
+
 TEST_F(FP8GemmTest, RowscaleGemvFromQ8SourceMatchesReference) {
     const int M = 192, K = 2048;  // K % 32 == 0 (Q8_0 blocks), K % 16 == 0 (sidecar gate)
     constexpr int kQ8BlockBytes = 34;  // [ d:f16 | qs:int8[32] ]

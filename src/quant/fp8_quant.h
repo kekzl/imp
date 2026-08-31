@@ -24,6 +24,12 @@ void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8, 
 
 // Per-row (output-channel) E4M3 quantize: writes scale[row] = row_absmax/448
 // to d_row_scales and the quantized rows to output_fp8. Async, init-time.
+// Scale each column n of a row-major FP16 [M, N] matrix by col_scales[n].
+// Epilogue for the FP8-rowscale prefill GEMM (gemm.fp8_ssm_prefill): the
+// per-row weight scales map to output COLUMNS, and cuBLASLt applies only
+// per-tensor scales in-GEMM.
+void scale_cols_fp16(void* y, const float* col_scales, int M, int N, cudaStream_t stream);
+
 void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows, int K,
                              float* d_row_scales, cudaStream_t stream = nullptr);
 

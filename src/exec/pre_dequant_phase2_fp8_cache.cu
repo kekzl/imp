@@ -400,6 +400,14 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     wcache_->fp8_ssm_sidecar_data_size = total_bytes;
     wcache_->fp8_ssm_sidecar_row_scales = d_row_scales;
 
+    if (runtime_config().gemm.fp8_ssm_prefill && !wcache_->fp8_unit_scale) {
+        float one = 1.0f;
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&wcache_->fp8_unit_scale, sizeof(float)));
+        if (wcache_->fp8_unit_scale)
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(wcache_->fp8_unit_scale, &one, sizeof(float),
+                                               cudaMemcpyHostToDevice, stream));
+    }
+
     IMP_LOG_INFO("fp8 decode sidecar: %zu projections%s%s (%.1f MiB, %zu per-row scales; "
                  "full-precision source retained for prefill)",
                  entries.size(), ssm_on ? " [ssm]" : "", attn_on ? " [attn]" : "",

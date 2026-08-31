@@ -37,6 +37,20 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
+// Capture guard for the FP8 SSM prefill hook: spec-verify chunks and batched
+// decode share this dispatch and ARE graph-captured; a first-call cuBLASLt
+// algo benchmark (events + sync) inside a capture is illegal, and captured
+// paths must keep their FP16 numerics. Cheap host query (~1 us), prefill
+// calls it ~once per GDN layer.
+static bool stream_is_capturing_(cudaStream_t stream) {
+    cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &st) != cudaSuccess) {
+        cudaGetLastError();
+        return true;  // unknown -> treat as capturing, take the FP16 path
+    }
+    return st != cudaStreamCaptureStatusNone;
+}
+
 // ---------------------------------------------------------------------------
 // Uncached fallback: safety net for weights without a WeightHandle
 // (kInvalidTensorID, budget-exhausted) and for M=1 beta!=0 residual-add.
@@ -486,6 +500,38 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         }
 
         if (prefill == StorageTier::FP16) {
+            // gemm.fp8_ssm_prefill: serve the GDN/SSM OUT-projection
+            // prefill from the fp8_ssm_proj sidecar bytes instead of the
+            // FP16 cuBLAS path (cuBLASLt FP8 measured 2.0x+ at these shapes,
+            // 2026-08-31 microbench). Per-tensor act quant + FP8xFP8
+            // cuBLASLt + column rescale by the sidecar's per-row weight
+            // scales. beta==0 only: a residual add would be rescaled too.
+            // SSM_OUT ONLY. The SSM_IN arm measured PPL 4.09 -> 248320
+            // (uniform logits) on Qwen3.6-35B and is closed; the naive
+            // explanation (channel outliers collapsing the per-tensor act
+            // quant) is REFUTED by PerTensorActQuantSurvivesChannelOutlier,
+            // so the root cause is unisolated - do not re-enable SSM_IN
+            // without finding it.
+            if (ctx.fp8_ssm_prefill && ctx.beta == 0.0f && h.kind == TensorKind::SSM_OUT &&
+                input.qtype == QType::F16 && (input.shape[1] % 16) == 0 &&
+                !stream_is_capturing_(ctx.stream)) {
+                auto f8 = wcache_.fp8.find(h.source_data);
+                const auto* qs = ctx.qscratch;
+                if (f8 != wcache_.fp8.end() && f8->second.d_row_scales &&
+                    f8->second.weight.shape[0] == h.shape[0] && qs && qs->fp8_act &&
+                    qs->d_act_scale && wcache_.fp8_unit_scale &&
+                    static_cast<size_t>(M) * input.shape[1] <= qs->fp8_act_size) {
+                    Tensor fp8_act(qs->fp8_act, QType::FP8_E4M3, 2, input.shape, true);
+                    quantize_fp16_to_fp8_e4m3(input, fp8_act, qs->d_act_scale, ctx.stream,
+                                              qs->d_fp8_block_maxes, qs->d_fp8_absmax,
+                                              qs->fp8_max_grid);
+                    gemm_cublaslt(fp8_act, f8->second.weight, output, 1.0f, 0.0f, qs->d_act_scale,
+                                  wcache_.fp8_unit_scale, ctx.stream);
+                    scale_cols_fp16(output.data, f8->second.d_row_scales, M,
+                                    static_cast<int>(h.shape[0]), ctx.stream);
+                    return;
+                }
+            }
             auto fp16_it = wcache_.fp16.find(h.source_data);
             if (fp16_it != wcache_.fp16.end()) {
                 gemm(input, fp16_it->second, output, 1.0f, ctx.beta, ctx.stream);

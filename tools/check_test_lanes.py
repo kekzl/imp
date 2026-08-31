@@ -157,7 +157,11 @@ def main():
     # 1024 -> 1025: GdnBatchedScanTest.GroupedConvCommitsPerSlotAndSnapshotsGroupZero,
     # the slot-table form of the fused prefill conv (same chunk geometry)
     # against the single-sequence launcher - GPU-only.
-    PINNED = 1025
+    # 1025 -> 1026: FP8GemmTest.SsmPrefillFp8RowscaleMatchesFp16 (gemm.fp8_ssm_prefill
+    # building blocks; GPU-only like the rest of test_fp8_gemm.cu).
+    # 1026 -> 1027: FP8GemmTest.PerTensorActQuantSurvivesChannelOutlier (refutes the
+    # act-outlier hypothesis behind the fp8_ssm_prefill SSM_OUT scoping; GPU-only).
+    PINNED = 1027
 
     text = CMAKE.read_text()
     mods = module_sources(text)

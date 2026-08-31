@@ -218,6 +218,17 @@ struct GEMM {
     // accepted trade like nvfp4_lm_head_gdn, set false to revert),
     // degen_suite 33/33. Default ON.
     bool fp8_ssm_proj = true;
+    // FP8 PREFILL for the GDN/SSM OUT-projection (part of the FP16 GDN
+    // prefill tax on BF16-recipe hybrids: gemm_cublas class 24.8% roofline
+    // at 21.5% of the pp512 window, roofline run 1d5b9230). Reuses the
+    // fp8_ssm_proj sidecar bytes (per-row scales): per-tensor E4M3 act
+    // quant, cuBLASLt FP8xFP8 (2.0x+ vs the FP16 path, 2026-08-31
+    // microbench), output columns rescaled by the weight row scales.
+    // OUT-projection only: the in-projection arm produced uniform logits
+    // (PPL 4.09 -> 248320 on Qwen3.6-35B, root cause unisolated - the
+    // act-outlier hypothesis is refuted by unit test). Requires
+    // fp8_ssm_proj. Default OFF.
+    bool fp8_ssm_prefill = false;
     // FP8 decode sidecar for FULL-PRECISION attention projections
     // (wq/wk/wv/wo), same per-row-scale mechanism as fp8_ssm_proj:
     // decode-only (M=1 GEMV), prefill keeps the full-precision source.
