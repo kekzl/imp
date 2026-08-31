@@ -349,10 +349,36 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // (78-94% depth-1 accept on Qwen3.6, PR #804). Subject to the economics
     // guard below: high accept alone does not pay for the eager chunk +
     // chain lm_head GEMVs + hybrid replay.
+    std::vector<std::vector<int32_t>> mc;  // multi-candidate rows (route a)
+    int mc_depth = 0;
     bool draft_from_mtp = false;
     if (draft.empty() && mtp_spec_decode_enabled()) {
-        draft = mtp_take_draft_(*req);
-        draft_from_mtp = !draft.empty();
+        // Multi-candidate MTP (speculative.mtp_tree_width > 1): the head's W
+        // chains verify as one grouped chunk — the branch at position 1
+        // hedges the chain's weakest link. v1 shares the TR route's
+        // preconditions (the hybrid one falls in Stage 3 of
+        // docs/plans/2026-08-31-mtp-multicandidate-hybrid.md, which is where
+        // every MTP-bearing checkpoint actually lives); the old blanket
+        // "!mtp_spec_decode_enabled()" mc exclusion was the row-consumer
+        // offset, fixed by the winner harvest (mtp_post_verify_update_ row0).
+        const bool mtp_pen = req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
+                             req->presence_penalty != 0.0f;
+        const bool mtp_mc_ok = scfg.verify_decode_attn && ssm_state_ == nullptr &&
+                               !model_->profile().is_moe && !model_->config().is_mla() &&
+                               !swa_sizing_active_ && !mtp_pen;
+        if (runtime_config_.speculative.mtp_tree_width > 1 && mtp_mc_ok) {
+            auto chains = mtp_take_chains_(*req);
+            if (chains.size() > 1) {
+                mc = std::move(chains);
+                for (const auto& c : mc)
+                    mc_depth = std::max(mc_depth, static_cast<int>(c.size()));
+                draft_from_mtp = true;
+            }
+        }
+        if (mc.empty()) {
+            draft = mtp_take_draft_(*req);
+            draft_from_mtp = !draft.empty();
+        }
     }
     // Token-Recycling fallback: adjacency draft from the last emitted token.
     // Fires on unigram context — exactly the fresh reasoning/agentic prose
@@ -364,9 +390,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // to the linear chain when the decode-attn route (or its gates) is
     // unavailable. Same shallow-depth economics as above for the linear
     // form: at long context a depth-1 chain does not pay for the verify.
-    std::vector<std::vector<int32_t>> mc;  // multi-candidate rows (route a)
-    int mc_depth = 0;
-    if (runtime_config_.speculative.token_recycling) {
+    if (runtime_config_.speculative.token_recycling && mc.empty()) {
         spec_recycle_feed_(*req);
         const bool penalties_active = req->repetition_penalty != 1.0f ||
                                       req->frequency_penalty != 0.0f ||
@@ -961,7 +985,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // MTP bookkeeping runs BEFORE the hybrid re-forward below — it consumes
     // this chunk's hidden rows, which the re-forward overwrites.
     if (mtp_spec_decode_enabled())
-        mtp_post_verify_update_(*req, emitted);
+        mtp_post_verify_update_(*req, emitted, mc_on ? mc_row0 : 0);
 
     // Drop KV for rejected draft positions: keep t0 + matched drafts.
     kv_manager_->rollback(req->id, p0 + 1 + matched);

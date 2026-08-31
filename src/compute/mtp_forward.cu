@@ -86,51 +86,6 @@ __global__ void mtp_argmax_kernel(const T* __restrict__ logits, int vocab_size,
     if (tid == 0) *out_idx = s_idx[0];
 }
 
-// Top-W over an FP16/FP32 vector [vocab_size]. Single CTA; top_w (≤ kMtpMaxTopW)
-// sequential argmax passes, masking previously selected indices. Writes the W
-// descending-logit indices to out_idx[0..top_w). W is tiny relative to the
-// lm_head GEMM that produced the logits, so the extra passes are cheap.
-template <typename T>
-__global__ void mtp_topk_kernel(const T* __restrict__ logits, int vocab_size,
-                                int top_w, int* __restrict__ out_idx) {
-    constexpr int kThreads = 256;
-    __shared__ float s_val[kThreads];
-    __shared__ int   s_idx[kThreads];
-    __shared__ int   s_found[kMtpMaxTopW];
-
-    int tid = threadIdx.x;
-    for (int w = 0; w < top_w; ++w) {
-        float best_val = -1.0e38f;
-        int   best_idx = 0;
-        for (int i = tid; i < vocab_size; i += kThreads) {
-            bool taken = false;
-            for (int f = 0; f < w; ++f) {
-                if (s_found[f] == i) { taken = true; break; }
-            }
-            if (taken) continue;
-            float v = mtp_logit_to_float(logits[i]);
-            if (v > best_val) { best_val = v; best_idx = i; }
-        }
-        s_val[tid] = best_val;
-        s_idx[tid] = best_idx;
-        __syncthreads();
-        for (int off = kThreads / 2; off > 0; off >>= 1) {
-            if (tid < off) {
-                if (s_val[tid + off] > s_val[tid]) {
-                    s_val[tid] = s_val[tid + off];
-                    s_idx[tid] = s_idx[tid + off];
-                }
-            }
-            __syncthreads();
-        }
-        if (tid == 0) {
-            s_found[w]  = s_idx[0];
-            out_idx[w]  = s_idx[0];
-        }
-        __syncthreads();
-    }
-}
-
 // ---------------------------------------------------------------------------
 // MoE residual + shared-expert combine kernel
 // ---------------------------------------------------------------------------
@@ -444,14 +399,17 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     bool ok = true;
     // Phase 2.1 buffers (always allocated)
     ok &= alloc(&ws.d_emb_norm,   hidden_dim * sizeof(__half));
-    ok &= alloc(&ws.d_h_norm,     hidden_dim * sizeof(__half));
-    ok &= alloc(&ws.d_fc_in,      2 * hidden_dim * sizeof(__half));
-    ok &= alloc(&ws.d_fc_out,     hidden_dim * sizeof(__half));
-    ok &= alloc(&ws.d_h_final,    hidden_dim * sizeof(__half));
-    ok &= alloc(&ws.d_logits,     vocab_size * sizeof(__half));
+    ok &= alloc(&ws.d_h_norm, hidden_dim * sizeof(__half));
+    ok &= alloc(&ws.d_fc_in, 2 * hidden_dim * sizeof(__half));
+    ok &= alloc(&ws.d_fc_out, hidden_dim * sizeof(__half));
+    ok &= alloc(&ws.d_h_final, hidden_dim * sizeof(__half));
+    ok &= alloc(&ws.d_logits, vocab_size * sizeof(__half));
     ok &= alloc(&ws.d_logits_f32, vocab_size * sizeof(float));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens), kMtpMaxChainK * sizeof(int32_t));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_val), kMtpTopWBlocks * kMtpMaxTopW * sizeof(float));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_idx), kMtpTopWBlocks * kMtpMaxTopW * sizeof(int));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens), kMtpMaxTopW * kMtpMaxChainK * sizeof(int32_t));
+    ok &= alloc(&ws.d_h_final_snap, hidden_dim * sizeof(__half));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_argmax), sizeof(int));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_tok), sizeof(int32_t));
 
@@ -567,9 +525,27 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_h_final);
     frfn(ws.d_logits);
     frfn(ws.d_logits_f32);
-    if (ws.d_topk) { cudaFree(ws.d_topk); ws.d_topk = nullptr; }
-    if (ws.d_chain_tokens) { cudaFree(ws.d_chain_tokens); ws.d_chain_tokens = nullptr; }
-    if (ws.d_argmax) { cudaFree(ws.d_argmax); ws.d_argmax = nullptr; }
+    if (ws.d_topk) {
+        cudaFree(ws.d_topk);
+        ws.d_topk = nullptr;
+    }
+    if (ws.d_topk_part_val) {
+        cudaFree(ws.d_topk_part_val);
+        ws.d_topk_part_val = nullptr;
+    }
+    if (ws.d_topk_part_idx) {
+        cudaFree(ws.d_topk_part_idx);
+        ws.d_topk_part_idx = nullptr;
+    }
+    if (ws.d_chain_tokens) {
+        cudaFree(ws.d_chain_tokens);
+        ws.d_chain_tokens = nullptr;
+    }
+    frfn(ws.d_h_final_snap);
+    if (ws.d_argmax) {
+        cudaFree(ws.d_argmax);
+        ws.d_argmax = nullptr;
+    }
     if (ws.d_tok) {
         cudaFree(ws.d_tok);
         ws.d_tok = nullptr;
@@ -1205,7 +1181,21 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
 
     // Step 8 (device chain): argmax straight into the caller's device slot —
     // no D2H, no sync; the caller drains the chain in one copy at the end.
+    // With top_w > 0 (multi-candidate branch seed) the fast top-W kernel
+    // fills ws.d_topk instead and rank 0 lands in the caller's slot — still
+    // no D2H, no sync. Rank 0 selection can differ from the argmax kernel on
+    // EXACT logit ties (pass structure); drafts are lossless either way.
     if (d_out_token != nullptr) {
+        if (top_w > 0) {
+            const int w = std::min(top_w, kMtpMaxTopW);
+            const void* lg = nvfp4_lm ? ws.d_logits_f32 : ws.d_logits;
+            if (!mtp_topw_fast(lg, nvfp4_lm, vocab_size, w, ws, stream))
+                return false;
+            if (cudaMemcpyAsync(d_out_token, ws.d_topk, sizeof(int32_t), cudaMemcpyDeviceToDevice, stream) !=
+                cudaSuccess)
+                return false;
+            return true;
+        }
         if (nvfp4_lm) {
             mtp_argmax_kernel<<<1, 256, 0, stream>>>(
                 static_cast<const float*>(ws.d_logits_f32), vocab_size, d_out_token);
@@ -1228,15 +1218,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
             IMP_LOG_ERROR("mtp_draft_step: top-W requested but ws.d_topk not allocated");
             return false;
         }
-        if (nvfp4_lm) {
-            mtp_topk_kernel<<<1, 256, 0, stream>>>(
-                static_cast<const float*>(ws.d_logits_f32), vocab_size, w, ws.d_topk);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else {
-            mtp_topk_kernel<<<1, 256, 0, stream>>>(
-                static_cast<const __half*>(ws.d_logits), vocab_size, w, ws.d_topk);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
+        const void* lg = nvfp4_lm ? ws.d_logits_f32 : ws.d_logits;
+        if (!mtp_topw_reference(lg, nvfp4_lm, vocab_size, w, ws, stream))
+            return false;
         if (cudaMemcpyAsync(out_topk_ids, ws.d_topk, w * sizeof(int),
                             cudaMemcpyDeviceToHost, stream) != cudaSuccess)
             return false;

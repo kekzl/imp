@@ -34,9 +34,13 @@ struct NvFP4QuantResult;
 // measurement, Stage 0). The draft argmax is top-0.
 constexpr int kMtpMaxTopW = 8;
 
-// Max device-side chain length (capacity of MtpDraftWorkspace::d_chain_tokens).
-// Longer speculative.mtp_k values fall back to the host chain loop.
+// Max device-side chain length (per-chain stride of
+// MtpDraftWorkspace::d_chain_tokens). Longer speculative.mtp_k values fall
+// back to the host chain loop.
 constexpr int kMtpMaxChainK = 16;
+
+// Blocks in pass 1 of the two-pass serving top-W kernel.
+constexpr int kMtpTopWBlocks = 64;
 
 // Workspace tensors needed for one draft step. Caller pre-allocates these so
 // the draft step is graph-safe (no cudaMalloc inside captured graph).
@@ -57,12 +61,28 @@ struct MtpDraftWorkspace {
     // [vocab_size] FP32 — draft logits when the lm_head GEMV runs through the
     // NVFP4 decode cache (gemv_nvfp4_kpar_fp32 writes FP32). ~1 MiB.
     void* d_logits_f32 = nullptr;
-    // [kMtpMaxTopW] int — top-W candidate ids (Stage 0 tree-ceiling probe).
+    // [kMtpMaxTopW] int — top-W candidate ids (Stage 0 tree-ceiling probe,
+    // and the multi-candidate branch seed: chains 1..W-1 start from ranks
+    // 1..W-1 here).
     int*  d_topk = nullptr;
-    // [kMtpMaxChainK] int — device-side chain slots: step i's argmax lands in
-    // d_chain_tokens[i] and feeds step i+1's embedding lookup without a host
-    // round-trip; one D2H of the whole chain at the end.
+    // [kMtpTopWBlocks * kMtpMaxTopW] float / int — partial per-block top-W
+    // (value, id) pairs for the two-pass serving top-W kernel. The probe's
+    // single-CTA kernel scans the whole vocabulary once per width (713 us on
+    // a 248k vocab — measurement-grade); serving cannot pay that per verify,
+    // so pass 1 splits the vocab across blocks and pass 2 merges.
+    float* d_topk_part_val = nullptr;
+    int* d_topk_part_idx = nullptr;
+    // [kMtpMaxTopW * kMtpMaxChainK] int — device-side chain slots, chain c at
+    // [c * kMtpMaxChainK]: step i's argmax lands in slot i and feeds step
+    // i+1's embedding lookup without a host round-trip; one D2H drains all
+    // chains at the end. The linear path is chain 0, byte-compatible with the
+    // old single-chain layout.
     int32_t* d_chain_tokens = nullptr;
+    // [hidden_dim] FP16 — h_final of the last FEED pair, snapshotted before
+    // chain 0's first continuation overwrites d_h_final. Chains 1..W-1 branch
+    // at the first position, so their first continuation forward needs
+    // exactly this hidden.
+    void* d_h_final_snap = nullptr;
     // [1] int — persistent argmax scratch for the host-path draft step
     // (replaces a per-draft cudaMallocAsync/cudaFreeAsync pair).
     int*  d_argmax = nullptr;
@@ -228,9 +248,12 @@ constexpr int kMtpFeedRows = 256;
 //                       then ignored, pass -1). No H2D upload, no host
 //                       bounds check (validate the chain once after D2H).
 //   - d_out_token     : device-chain output — write the argmax to this device
-//                       int; NO D2H copy, NO stream sync (out_token_id and
-//                       the top-W path are ignored). The caller drains the
-//                       whole chain with a single D2H + sync.
+//                       int; NO D2H copy, NO stream sync (out_token_id is
+//                       ignored). With top_w > 0 the fast top-W kernel fills
+//                       ws.d_topk (device-only, still no sync) and rank 0
+//                       lands in d_out_token — the multi-candidate branch
+//                       seed. The caller drains the whole chain with a
+//                       single D2H + sync.
 //
 // Returns false on any precondition violation (mtp not loaded, null buffers).
 bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
@@ -257,6 +280,20 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev,
 bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows,
                     const MtpHead& mtp, const Tensor& main_tok_emb,
                     MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream);
+
+// Top-W over a device logits vector into ws.d_topk (descending-logit order),
+// no D2H, no sync. `fast` is the two-pass serving kernel (pass 1: per-block
+// top-W over a vocab slice into ws.d_topk_part_*, pass 2: single-block
+// merge); `reference` is the probe's single-CTA kernel behind a launcher so
+// the GPU test can compare the two on the same input. Both break exact-value
+// ties by lowest index within a pass, but the fast kernel's pass structure
+// can order EQUAL-valued entries differently across slice boundaries — the
+// test must use distinct values. logits are FP32 when fp32_logits (the NVFP4
+// lm_head cache path), FP16 otherwise.
+bool mtp_topw_fast(const void* d_logits, bool fp32_logits, int vocab_size, int top_w, MtpDraftWorkspace& ws,
+                   cudaStream_t stream);
+bool mtp_topw_reference(const void* d_logits, bool fp32_logits, int vocab_size, int top_w,
+                        MtpDraftWorkspace& ws, cudaStream_t stream);
 
 // Apply the YaRN-aware mrope rotation to a single MTP step's Q [n_heads, head_dim]
 // and K [n_kv_heads, head_dim] (FP16) in place at position `pos`. Mirrors the main

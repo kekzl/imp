@@ -23,7 +23,7 @@ src/compute/mmq_q4k_imma_tile.cu  # 6
 src/compute/mmq_q8_imma.cu  # 3
 src/compute/mmq_q8_imma_scratch.cu  # 4
 src/compute/moe_routing.cu  # 12
-src/compute/mtp_forward.cu  # 12
+src/compute/mtp_forward.cu  # 14 (+2 2026-08-31: top-W pass-1 partial (val,idx) pair for the multi-candidate draft — same workspace-allocate pattern as the rest)
 src/compute/quantize_fp16_nvfp4_moe_native.cu  # 6
 src/compute/sampling.cu  # 1
 src/compute/sampling_penalties.cu  # 2

@@ -43,6 +43,7 @@ void Engine::mtp_unbind_(const char* why) {
     }
     mtp_bound_req_ = -1;
     mtp_pending_draft_.clear();
+    mtp_pending_chains_.clear();
     mtp_draft_ctx_ = -1;
 }
 
@@ -54,6 +55,14 @@ std::vector<int32_t> Engine::mtp_take_draft_(const Request& req) {
     if (mtp_draft_ctx_ != req.context_len())
         return {};
     return mtp_pending_draft_;
+}
+
+std::vector<std::vector<int32_t>> Engine::mtp_take_chains_(const Request& req) {
+    if (mtp_bound_req_ != req.id || mtp_pending_chains_.size() < 2)
+        return {};
+    if (mtp_draft_ctx_ != req.context_len())
+        return {};
+    return mtp_pending_chains_;
 }
 
 // Feed n_pairs (token, hidden-row) pairs into the MTP KV cache, then
@@ -130,12 +139,25 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
             j0 += m;
         }
     }
+    // Multi-candidate width (speculative.mtp_tree_width): W > 1 drafts W
+    // chains — chain 0 is the linear path, chains 1..W-1 branch at the first
+    // position on the head's top-W ids. Device-chain only: the host path
+    // would pay a top-W sync per verify, the very stall the device chain
+    // exists to remove. MoE heads (no device chain) silently keep W = 1.
+    const int cfg_w = runtime_config_.speculative.mtp_tree_width;
+    const int W = (chain_after && device_chain && cfg_w > 1 && ws->d_topk != nullptr &&
+                   ws->d_h_final_snap != nullptr)
+                      ? std::min(cfg_w, imp::kMtpMaxTopW)
+                      : 1;
     for (int j = j0; j < n_pairs; ++j) {
         const void* h_j = base + static_cast<size_t>(j) * hidden_dim * sizeof(__half);
         const bool last = (j == n_pairs - 1);
         if (chain_after && last && device_chain) {
-            if (!mtp_draft_one(tokens[j], h_j, hidden_dim, vocab_size, nullptr,
-                               nullptr, 0, nullptr, /*d_out_token=*/ws->d_chain_tokens))
+            // W > 1: the same launch also fills ws->d_topk (fast top-W, no
+            // sync) — rank 0 lands in the chain-0 slot either way.
+            if (!mtp_draft_one(tokens[j], h_j, hidden_dim, vocab_size, nullptr, nullptr, W > 1 ? W : 0,
+                               nullptr,
+                               /*d_out_token=*/ws->d_chain_tokens))
                 return false;
         } else {
             int* out = (chain_after && last) ? &pred : nullptr;
@@ -148,29 +170,62 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
         return true;
 
     // Chain: continue on the head's own h_final. The chained KV appends are
-    // speculative — roll the cache back so only the real pairs persist.
+    // speculative — roll the cache back so only the real pairs persist; with
+    // W > 1 the rollback also runs BETWEEN chains, so each chain's draft
+    // steps attend only its own speculative prefix (successive chains
+    // overwrite the same cache slots — stream order makes that safe).
     const int pos_after = ws->mtp_pos;
     std::vector<int32_t> chain;
     chain.reserve(K);
     if (device_chain) {
-        int launched = 1;  // d_chain_tokens[0] came from the last feed pair
+        cudaStream_t stream = decode_stream();
+        constexpr int kStride = imp::kMtpMaxChainK;
+        int launched[imp::kMtpMaxTopW] = {};
+        launched[0] = 1;  // d_chain_tokens[0] came from the last feed pair
+        // Chains 1..W-1 branch at position 1: their first continuation
+        // forward consumes the last FEED pair's h_final, which chain 0's
+        // first continuation is about to overwrite — snapshot it.
+        if (W > 1 && cudaMemcpyAsync(ws->d_h_final_snap, ws->d_h_final,
+                                     static_cast<size_t>(hidden_dim) * sizeof(__half),
+                                     cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
+            ws->mtp_pos = pos_after;
+            return false;
+        }
         for (int k = 1; k < K; ++k) {
-            if (!mtp_draft_one(-1, ws->d_h_final, hidden_dim, vocab_size, nullptr,
-                               nullptr, 0, /*d_prev_token=*/ws->d_chain_tokens + k - 1,
+            if (!mtp_draft_one(-1, ws->d_h_final, hidden_dim, vocab_size, nullptr, nullptr, 0,
+                               /*d_prev_token=*/ws->d_chain_tokens + k - 1,
                                /*d_out_token=*/ws->d_chain_tokens + k))
                 break;
-            launched++;
+            launched[0]++;
         }
-        int32_t h_chain[imp::kMtpMaxChainK];
-        cudaStream_t stream = decode_stream();
-        if (cudaMemcpyAsync(h_chain, ws->d_chain_tokens,
-                            static_cast<size_t>(launched) * sizeof(int32_t),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+        for (int c = 1; c < W; ++c) {
+            ws->mtp_pos = pos_after;  // drop the previous chain's appends
+            int32_t* slots = ws->d_chain_tokens + static_cast<size_t>(c) * kStride;
+            // Token 0 of chain c is the head's rank-c candidate — known, not
+            // drafted.
+            if (cudaMemcpyAsync(slots, ws->d_topk + c, sizeof(int32_t), cudaMemcpyDeviceToDevice, stream) !=
+                cudaSuccess)
+                break;
+            launched[c] = 1;
+            for (int k = 1; k < K; ++k) {
+                const bool first = (k == 1);
+                if (!mtp_draft_one(-1, first ? ws->d_h_final_snap : ws->d_h_final, hidden_dim, vocab_size,
+                                   nullptr, nullptr, 0,
+                                   /*d_prev_token=*/slots + k - 1,
+                                   /*d_out_token=*/slots + k))
+                    break;
+                launched[c]++;
+            }
+        }
+        int32_t h_chain[imp::kMtpMaxTopW * imp::kMtpMaxChainK];
+        const size_t drain = (W > 1 ? static_cast<size_t>(W) * kStride : static_cast<size_t>(launched[0]));
+        if (cudaMemcpyAsync(h_chain, ws->d_chain_tokens, drain * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                            stream) != cudaSuccess) {
             ws->mtp_pos = pos_after;
             return false;
         }
         cudaStreamSynchronize(stream);
-        for (int k = 0; k < launched; ++k) {
+        for (int k = 0; k < launched[0]; ++k) {
             if (h_chain[k] < 0 || h_chain[k] >= vocab_size)
                 break;  // NaN-logits guard — keep the valid prefix
             chain.push_back(h_chain[k]);
@@ -179,7 +234,28 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
             ws->mtp_pos = pos_after;
             return false;
         }
+        mtp_pending_chains_.clear();
+        if (W > 1) {
+            mtp_pending_chains_.push_back(chain);
+            for (int c = 1; c < W; ++c) {
+                std::vector<int32_t> alt;
+                for (int k = 0; k < launched[c]; ++k) {
+                    const int32_t t = h_chain[static_cast<size_t>(c) * kStride + k];
+                    if (t < 0 || t >= vocab_size)
+                        break;
+                    alt.push_back(t);
+                }
+                // A branch whose seed duplicates the primary's first token is
+                // a wasted candidate row, not a second path (top-W ids are
+                // distinct by construction; this guards a degenerate drain).
+                if (!alt.empty() && alt[0] != chain[0])
+                    mtp_pending_chains_.push_back(std::move(alt));
+            }
+            if (mtp_pending_chains_.size() < 2)
+                mtp_pending_chains_.clear();
+        }
     } else {
+        mtp_pending_chains_.clear();  // host chain drafts the linear path only
         if (pred < 0 || pred >= vocab_size) {
             ws->mtp_pos = pos_after;
             return false;
@@ -202,7 +278,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     return true;
 }
 
-void Engine::mtp_post_verify_update_(const Request& req, int emitted) {
+void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) {
     if (mtp_bound_req_ != req.id || emitted <= 0)
         return;
     auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
@@ -215,16 +291,20 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted) {
         mtp_unbind_("desync before verify feed");
         return;
     }
-    // Row j of this verify chunk produced emitted token j — the (token,
-    // hidden) pairs are exactly (emitted_j, h_row_j). Must run before the
-    // hybrid partial-accept re-forward overwrites the hidden buffer.
-    Tensor h = executor_->view_hidden(emitted);
+    // Row row0+j of this verify chunk produced emitted token j (row0 = the
+    // winning candidate's first row in a multi-candidate chunk, 0 linear) —
+    // the (token, hidden) pairs are exactly (emitted_j, h_row_{row0+j}).
+    // Must run before the hybrid partial-accept re-forward overwrites the
+    // hidden buffer.
+    Tensor h = executor_->view_hidden(row0 + emitted);
     if (h.data == nullptr) {
         mtp_unbind_("no hidden view after verify");
         return;
     }
+    const void* rows = static_cast<const char*>(h.data) +
+                       static_cast<size_t>(row0) * model_->config_.d_model * sizeof(__half);
     const int32_t* toks = req.output_tokens.data() + req.output_tokens.size() - emitted;
-    if (!mtp_feed_pairs_(toks, h.data, emitted, /*chain_after=*/req.status == RequestStatus::DECODING))
+    if (!mtp_feed_pairs_(toks, rows, emitted, /*chain_after=*/req.status == RequestStatus::DECODING))
         mtp_unbind_("verify feed failed (kv cap or forward error)");
 }
 
@@ -253,6 +333,7 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
         mtp_bound_req_ = req.id;
         mtp_stale_logged_ = false;
         mtp_pending_draft_.clear();
+        mtp_pending_chains_.clear();
         mtp_draft_ctx_ = -1;
         mtp_econ_verifies_ = 0;
         mtp_econ_emitted_ = 0;

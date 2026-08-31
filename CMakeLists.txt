@@ -336,6 +336,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/presets.cpp
     src/runtime/storage_planner.cpp
     src/compute/mtp_forward.cu
+    src/compute/mtp_topw.cu
     src/compute/encoder_forward.cu
 )
 
@@ -961,6 +962,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
         tests/test_mtp_feed_batch.cu
+        tests/test_mtp_topw.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
         tests/test_schema_constrain.cu

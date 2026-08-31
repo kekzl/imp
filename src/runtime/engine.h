@@ -894,6 +894,12 @@ private:
     int mtp_bound_req_ = -1;
     std::vector<int32_t> mtp_history_;
     std::vector<int32_t> mtp_pending_draft_;  // chain drafted for mtp_draft_ctx_
+    // Multi-candidate chains (speculative.mtp_tree_width > 1): [0] is the
+    // primary chain (== mtp_pending_draft_), [1..] branch at the first
+    // position on the head's top-W ids. Same ctx/staleness contract as the
+    // linear draft; empty whenever W == 1 or the device chain was
+    // unavailable.
+    std::vector<std::vector<int32_t>> mtp_pending_chains_;
     int mtp_draft_ctx_ = -1;                  // context_len the draft targets
     // True when the request's context advanced without MTP pairs (async-loop
     // burst, chunked-prefill gap) — drafting stays off for the request.
@@ -924,11 +930,19 @@ private:
     // Consume the pending MTP chain as the verify draft for req (empty when
     // MTP is off / unbound / stale / KV-cap reached).
     std::vector<int32_t> mtp_take_draft_(const Request& req);
+    // Multi-candidate form: all pending chains ([0] primary), or empty under
+    // exactly the conditions mtp_take_draft_ returns empty — plus when fewer
+    // than two chains were drafted (a 1-chain "tree" is the linear path).
+    std::vector<std::vector<int32_t>> mtp_take_chains_(const Request& req);
     // After a verify step: feed the emitted tokens' (token, hidden-row)
     // pairs, then chain-draft the next mtp_spec_k_ tokens for the next
     // verify step. Must run BEFORE the hybrid partial-accept re-forward
     // (it reads this chunk's hidden rows).
-    void mtp_post_verify_update_(const Request& req, int emitted);
+    // row0: hidden-buffer row offset of the rows that produced the emitted
+    // tokens — 0 for the linear chunk, the winning candidate's first row for
+    // a multi-candidate chunk (the "MTP row consumer" incompatibility that
+    // used to exclude MTP from the mc route was exactly this offset).
+    void mtp_post_verify_update_(const Request& req, int emitted, int row0 = 0);
     // Shared helper: run pair catch-up + chain draft from host token list.
     bool mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows,
                          int n_pairs, bool chain_after);

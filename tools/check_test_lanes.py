@@ -147,7 +147,10 @@ def main():
     # 1020 -> 1021 (#1818): SparseMinMaxTest.Nvfp4NibblesAndGroupScales, the
     # NVFP4 arm of the sparse key min/max metadata kernel against a host
     # quantize/dequantize reference - runs a CUDA kernel, GPU-only.
-    PINNED = 1021
+    # 1021 -> 1023: MtpTopWTest.{MatchesReferenceAndHostFp16,Fp32}, the
+    # two-pass serving top-W kernel (mtp_tree_width) against the probe's
+    # single-CTA kernel AND a host partial_sort - runs CUDA kernels, GPU-only.
+    PINNED = 1023
 
     text = CMAKE.read_text()
     mods = module_sources(text)
