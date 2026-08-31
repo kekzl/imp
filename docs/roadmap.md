@@ -163,8 +163,16 @@ Ranked by what an agent workload notices first.
    Past the roofline only through the MTP verify (weights read once per k+1
    rows): 102-110 tok/s at k=1 (#1796), k=2 stable via adaptive depth
    (#1801), default since #1809; k=3 uneconomic; `speculative.verify_smallm`
-   +3-6% isolated, +1-2% mixed, default off; `diagnostics.mtp_prenorm_h`
-   lifts accept 70/72 -> 74/78%.
+   +3-6% isolated, +1-2% mixed, default off.
+
+   The acceptance gap vs the published 83% reference is CLOSED (2026-08-31,
+   Qwen3.8-27B-NVFP4-vllm, k=1 greedy, 4 prompt classes): teacher-forced
+   p1 91.2/76.4/78.0/88.2 = 83.5% avg (`scripts/mtp_accuracy_bench.sh`),
+   verify-path on the same prompts 92.4/78.9/81.4/85.3 = 84.5% - both
+   paths agree AND sit on the reference. The earlier 74-78% figures were
+   think-workload accept (76-79% here too): acceptance is a property of
+   the workload, not an implementation gap; the external 87% p1 belongs
+   to the Qwen3-Next-80B head, a different model.
 
    ```
    [PROV: commit=a70d7863+wt date=2026-08-27 hw=RTX5090
