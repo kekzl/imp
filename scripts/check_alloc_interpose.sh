@@ -15,7 +15,7 @@ set -uo pipefail
 
 BIN=${BIN:-build-interpose/imp-server}
 IMG=${DEV_IMG:-imp:toolchain}
-MODEL=${INTERPOSE_MODEL:-/models/Qwen3.8-27B-NVFP4}
+MODEL=${INTERPOSE_MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 PORT=8099
 LOG=$(mktemp /tmp/interpose.XXXXXX.log)

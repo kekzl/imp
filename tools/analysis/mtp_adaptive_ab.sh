@@ -18,7 +18,7 @@
 # usage.completion_tokens, counters from /metrics.
 set -uo pipefail
 IMG=${IMP_IMAGE:-imp:test}
-MODEL=${MTP_MODEL:-/models/Qwen3.8-27B-NVFP4}
+MODEL=${MTP_MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
 PORT=8099
 ROUNDS=${ROUNDS:-3}
 ARMS=${ARMS:-"k1 k2fix k2ad"}

@@ -11,7 +11,7 @@
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
-MODEL=${MODEL:-/models/Qwen3.8-27B-NVFP4}
+MODEL=${MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
 PORT=${PORT:-8094}
 CONC=${CONC:-32}
 WAVES=${WAVES:-3}
