@@ -1,13 +1,13 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-31
+commit: 01799405
 -->
 
 # src/compute — CUDA kernels
 
-Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. 144 files, `sm_120a` only.
+Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. 147 files, `sm_120a` only.
 This is the hot path.
 
 ## Invariants
@@ -41,7 +41,7 @@ calls); this directory holds the kernels it selects between. The prefill gate is
 make dev          # incremental, 2-14 s — iterate here
 make dev-test     # the CI lane (ctest -L unit)
 make build        # builds image imp:test + build/ binaries; required to MEASURE
-make verify-fast  # ~90 s gate, the only thing running a kernel against a check
+make verify-fast  # ~45 s gate (37 s script), the only kernel-vs-check run
 ```
 
 **Scoped to this directory:** after `make build`, the per-module binaries in

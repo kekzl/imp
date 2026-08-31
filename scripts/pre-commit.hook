@@ -25,7 +25,7 @@ cd "$ROOT"
 # the #1782 citation red was a docs-only drift, exactly the commit class the
 # early exit below skips. ~2 s, source-independent, so it costs nothing here.
 if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
-    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes alloc launchguards docs citations; then
+    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes entrypoint alloc launchguards docs citations; then
         echo "pre-commit: static gates failed (see above) - fix or commit --no-verify" >&2
         exit 1
     fi
@@ -42,7 +42,7 @@ fi
 # read reference corpora from tests/refs at runtime.
 CHANGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
           | grep -E '^(src/|include/|tools/|tests/|CMakeLists\.txt|cmake/|.*\.cmake$)' \
-          | grep -vE '\.(md|py)$' \
+          | grep -vE '\.(md|py|hook)$' \
           || true)
 
 if [ -z "$CHANGED" ]; then
