@@ -7,11 +7,10 @@ commit: 01799405
 
 # tests — lanes, and which one actually gates
 
-**1021 of 2636 GTest macros run in no CI lane** - they need a GPU, and there is
-no GPU runner. Trust that split and no other count here: `check_test_lanes.py`
-pins it and fails when it moves, while the four hand-written literals this file
-carried until 2026-08-31 had every one drifted. Re-derive with
-`python3 tools/check_test_lanes.py --report`.
+**Most GTest macros in this tree run in no CI lane at all** - they need a GPU,
+and there is no GPU runner. `python3 tools/check_test_lanes.py --report` prints
+the split and pins it; this file does not repeat it, because a copy here is a
+second number nothing checks.
 
 ## Invariants
 
@@ -37,8 +36,8 @@ carried until 2026-08-31 had every one drifted. Re-derive with
 ## Build & test
 
 ```
-make dev-test        # the CI lane, 7.6 s, no CUDA kernel runs
-make test-gpu        # the GPU suite; start it correctly or it silently skips 63
+make dev-test        # the CI lane, no CUDA kernel runs
+make test-gpu        # the GPU suite; start it wrong and it silently skips most
 make verify-fast     # the only gate that runs a kernel against a check
 ```
 
