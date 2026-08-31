@@ -51,25 +51,28 @@ Everything runs in Docker. You do not need a CUDA toolkit on the host. The
 worked example is **Qwen3.8-27B**: a 27B multimodal model, quantized to NVFP4 so
 it fits a single 5090 with room for a real context.
 
-**Get the weights** (19.2 GiB, download only, nothing to convert). `make build`
+**Get the weights** (19.2 GiB, download only, nothing to convert). The
+checkpoint is [kekzle/Qwen3.8-27B-NVFP4-vllm](https://huggingface.co/kekzle/Qwen3.8-27B-NVFP4-vllm),
+an `imp-quantize --format vllm` export: the same directory also loads in
+vLLM (verified on 0.27.1). `make build`
 first: the script needs the `imp:test` image and exits 1 without it, even on
 this download-only path (#1682). `docker compose build imp-server` produces
 `imp:latest`, which is a different tag.
 
 ```bash
 make build                                     # ~3.5 min, produces imp:test
-scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4 ~/models/Qwen3.8-27B-NVFP4
+scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm
 ```
 
 **Serve it and ask.** This is the 60 seconds:
 
 ```bash
 docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
-  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
+  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm
 
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"Qwen3.8-27B-NVFP4","messages":[{"role":"user","content":"Why is the sky blue?"}],"max_tokens":64}'
+  -d '{"model":"Qwen3.8-27B-NVFP4-vllm","messages":[{"role":"user","content":"Why is the sky blue?"}],"max_tokens":64}'
 ```
 
 Expected: a JSON completion object whose `choices[0].message.content` explains
@@ -77,12 +80,12 @@ Rayleigh scattering. The model id is the file or directory basename,
 `GET /v1/models` lists it, and the field is required. A GGUF file works the same
 way: swap the path.
 
-The weights take 17.9 GiB on the card and answer at **~85 tok/s**, leaving
-~7.7 GiB for the KV cache on a 32 GB 5090.
+The weights take 18.3 GiB on the card and answer at **~102 tok/s**, leaving
+~7 GiB for the KV cache on a 32 GB 5090.
 
-[PROV: commit=8f2568c8 date=2026-08-16 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4
+[PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
        cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
-       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0`]
+       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
 
 ### Bringing your own model
 

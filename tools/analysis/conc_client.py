@@ -21,7 +21,7 @@ def one(i, wave, out):
     prompt = (f"[{TAG}-w{wave}-r{i}] Explain topic {i * 7 + wave}: how a {i}-way set-associative "
               f"CPU cache interacts with a TLB during a page-crossing load.")
     body = json.dumps({
-        "model": "Qwen3.8-27B-NVFP4",
+        "model": "Qwen3.8-27B-NVFP4-vllm",
         "prompt": prompt,
         "max_tokens": GEN,
         "temperature": 0,

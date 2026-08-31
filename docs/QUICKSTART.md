@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-08-31
+commit: f243179c
 -->
 
 # Quickstart
@@ -39,11 +39,12 @@ the download-only path (#1682). `make build` is what produces that tag;
 
 ```bash
 make build                                     # ~3.5 min, produces imp:test
-scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4 ~/models/Qwen3.8-27B-NVFP4
+scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm
 ```
 
-19.2 GiB, download only: that repo is already NVFP4, so the script fetches it
-and stops. imp reads two formats, no conversion step for either:
+19.2 GiB, download only: that repo is already NVFP4 (an `imp-quantize
+--format vllm` export - the same directory also loads in vLLM, verified on
+0.27.1), so the script fetches it and stops. imp reads two formats, no conversion step for either:
 
 - a **GGUF file** (`Qwen3-8B-Q8_0.gguf`)
 - a **SafeTensors directory** with NVFP4 weights, as exported by NVIDIA Model
@@ -82,7 +83,7 @@ docker run --gpus all \
   -v ~/models:/models \
   -v imp-cache:/home/imp/.cache/imp \
   -p 127.0.0.1:8080:8080 \
-  ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4
+  ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm
 ```
 
 Mount the cache volume. It holds two things; the second costs VRAM rather
@@ -105,7 +106,7 @@ Watch for these lines (the engine picked the fast paths). On Qwen3.8-27B:
 ```
 CUTLASS sm_120 NVFP4 weight cache: 401 tensors, 1525.78 MiB
 NVFP4 LM head: quantized FP16 [248320 x 5120] -> NVFP4 (682.0 MiB), decode GEMV fast path
-Resolved dispatch: attn_prefill=fa2_fp16qk attn_decode=paged_fp16 moe_prefill=n/a (dense) graphs=1
+Resolved dispatch: attn_prefill=fa2_fp16qk attn_decode=paged_nvfp4 moe_prefill=n/a (dense) graphs=1
 ```
 
 `graphs=1` is the one that matters: at `graphs=0` decode runs several times
@@ -115,7 +116,7 @@ should read `FULL`.
 
 One warning is expected on this model, not a fault: the LM head exceeds the
 graph-capture workspace cap, so **prefill** graph capture is disabled while
-decode capture stays on. Weights land at 17.9 GiB, leaving room for the KV
+decode capture stays on. Weights land at 18.3 GiB, leaving room for the KV
 cache on a 32 GB card.
 
 This checkpoint ships a trained MTP head the default load leaves off. Adding
@@ -136,22 +137,23 @@ The `model` field is required, and its value is the file or directory basename.
 
 ```bash
 curl -s http://localhost:8080/v1/models | jq -r '.data[].id'
-# Qwen3.8-27B-NVFP4
+# Qwen3.8-27B-NVFP4-vllm
 
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "Qwen3.8-27B-NVFP4",
+        "model": "Qwen3.8-27B-NVFP4-vllm",
         "messages": [{"role": "user", "content": "Why is the sky blue?"}],
         "max_tokens": 64
       }' | jq -r '.choices[0].message.content'
 ```
 
-Expected: an explanation of Rayleigh scattering, written at about 85 tok/s.
+Expected: an explanation of Rayleigh scattering, written at about 102 tok/s
+(the embedded MTP head is taken automatically on a single-stream run).
 
-[PROV: commit=8118d14d date=2026-08-16 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4
+[PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
        cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
-       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0`]
+       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
 
 ## 4. Or use the other surfaces
 

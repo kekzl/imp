@@ -23,7 +23,7 @@ set -euo pipefail
 # Qwen3.6-35B-A3B-NVFP4, which is also on this box and also released, but the
 # number this harness produces belongs beside the +21.3 % decode figure, and
 # that figure is Qwen3.8-27B's.
-MODEL=${MTP_MODEL:-$HOME/models/Qwen3.8-27B-NVFP4}
+MODEL=${MTP_MODEL:-$HOME/models/Qwen3.8-27B-NVFP4-vllm}
 MAX_TOKENS=${MTP_MAX_TOKENS:-128}
 K=${MTP_K:-1}
 

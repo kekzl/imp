@@ -7,7 +7,7 @@
 # invocation and the disk arithmetic before seeing a single token. For a model
 # with no usable published export that is a long way from "try it".
 #
-#   scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/Qwen3.8-27B-NVFP4
+#   scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4
 #
 # curl and jq only, no Python and no huggingface-cli: this runs on the host,
 # which by policy has neither.

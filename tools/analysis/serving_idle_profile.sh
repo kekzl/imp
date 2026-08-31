@@ -16,7 +16,7 @@ OUT=${1:-/tmp/serving_idle}
 CONC=${2:-32}
 WAVES=${3:-3}
 PORT=${PORT:-8093}
-MODEL=/models/Qwen3.8-27B-NVFP4
+MODEL=/models/Qwen3.8-27B-NVFP4-vllm
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 EXTRA=${EXTRA:-}
 mkdir -p "$OUT"
