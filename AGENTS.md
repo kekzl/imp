@@ -26,7 +26,7 @@ global rules below; each role then narrows scope and lists explicit **MAY NOT** 
   active compute process. A busy GPU corrupts numbers and can OOM.
 - **Iterate with `make dev`, gate with `make build`.** `make dev` is an incremental
   compile against a persistent `build-dev/` (seconds); `make build` recompiles the whole
-  tree in a fresh image (~3.5 min) regardless of how little changed. Use `make dev` /
+  tree in a fresh image regardless of how little changed. Use `make dev` /
   `make dev-test` (= CI's `ctest -L unit`) for the edit-compile loop. **Benchmarks, the
   perf gate and anything pushed must be built by `make build`** — an incremental tree is
   where a stale object hides, and this repo re-pins baselines off measured numbers.
