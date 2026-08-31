@@ -71,7 +71,7 @@ Retractions, kept so they are not re-derived:
 
 k=0 reproduces to 0.02% across rounds. Blocker at the time was correctness
 (2/6 prompts ended after ~40 tokens re-stating the question,
-deterministically; detail in [`LIMITATIONS.md`](LIMITATIONS.md)) - and the
+deterministically; detail in [`LIMITATIONS.md`](../LIMITATIONS.md)) - and the
 control that isolated the head (`ngram=false`) is also what HID that defect;
 `deterministic_gemm` pins a degenerate answer stable, not absent.
 
@@ -131,7 +131,7 @@ Buried, so they are not re-run:
 
 - Six drafter-accuracy hypotheses (draft lm_head precision, quantised head,
   gamma=1+W offset, hidden-state convention, RoPE, uninitialised MTP KV):
-  all measured dead ([`LIMITATIONS.md`](LIMITATIONS.md)).
+  all measured dead ([`LIMITATIONS.md`](../LIMITATIONS.md)).
 - MoE draft head: this checkpoint's head has no experts/router.
 - Unfused verify chunk: per-launch flat at 32.5 us across 2-3 rows.
 - Repair forward as main cost: unreachable at k=1, ~21% of verifies at k=2.
@@ -150,7 +150,7 @@ Buried, so they are not re-run:
 - Cross-process spec reproducibility at temp 0: does not hold (8/9 processes
   agree at k=2, the two k=1 processes disagree with each other) - why #1457
   and #1467 both "saw" contradictory things. Documented in
-  [`LIMITATIONS.md`](LIMITATIONS.md).
+  [`LIMITATIONS.md`](../LIMITATIONS.md).
 - Economics guard constant: right guard, coarse constant - 4.0 was derived
   on the eager verify; measured break-even 2.42 (now the k-aware default,
   see `speculative.mtp_econ_min_emit`).
@@ -233,7 +233,7 @@ is. Reproduce: `tools/analysis/expert_cache_offload_sweep.sh` (MODE=ab),
   (`speculative.mtp_tree_margin`). Rows are the cost (M<=4 batched GEMV vs
   CUTLASS tile, LM head per MR=4 rows, serial alternate-chain drafting).
   Default W=1; levers and tables in
-  [`plans/2026-08-31-mtp-multicandidate-hybrid.md`](plans/2026-08-31-mtp-multicandidate-hybrid.md).
+  [`plans/2026-08-31-mtp-multicandidate-hybrid.md`](2026-08-31-mtp-multicandidate-hybrid.md).
   "No trained draft head" retired 2026-08-19: the MTP head pays +21.3% at
   k=1. `token_recycling` re-measured 2026-08-19 on the fixed build: **-0.27%,
   neutral** (was -7.0% on 2026-07-27; same cause as the MTP flip -
@@ -273,7 +273,7 @@ is. Reproduce: `tools/analysis/expert_cache_offload_sweep.sh` (MODE=ab),
   decode knows only the next block ~3.5 ms ahead. Revisit on: a pool clamped
   below request, a shallower H2D cliff, or workloads past the 128K ceiling.
 - **(7) Agentic quality vs competitors** - `tools/analysis/agentic_compare.py`
-  published in [`BENCHMARKS.md`](BENCHMARKS.md) (3 families, 4 budgets,
+  published in [`BENCHMARKS.md`](../BENCHMARKS.md) (3 families, 4 budgets,
   8-turn sessions). Headline is a defaults difference: at 200-token budget
   imp keeps every contract, llama.cpp needs ~800. Found a real imp bug on
   first run (Llama-3.2 bare-JSON tool calls dropped, #1088). vLLM/SGLang
@@ -396,4 +396,4 @@ mirostat, typical_p, logit_bias).
   load (Nemotron-3.5 MIXED_PRECISION: 5935 NVFP4 expert tensors + 46 FP8
   Mamba projections; sm_120 has no FP8 prefill GEMM, raw bytes used to reach
   cuBLAS as `CUDA_R_8F_E4M3` = status 15). Costs 1698 MiB FP16 cache; init
-  24.4/32.6 GB. See [`MODELS.md`](MODELS.md).
+  24.4/32.6 GB. See [`MODELS.md`](../MODELS.md).
