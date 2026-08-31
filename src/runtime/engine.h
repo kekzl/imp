@@ -900,6 +900,11 @@ private:
     // linear draft; empty whenever W == 1 or the device chain was
     // unavailable.
     std::vector<std::vector<int32_t>> mtp_pending_chains_;
+    // Margin gate tallies (W > 1 only): drafts that verified as a
+    // multi-candidate chunk vs. as the linear chunk (head margin above
+    // speculative.mtp_tree_margin). Logged with the spec stats.
+    long long mtp_tree_branched_ = 0;
+    long long mtp_tree_linear_ = 0;
     int mtp_draft_ctx_ = -1;                  // context_len the draft targets
     // True when the request's context advanced without MTP pairs (async-loop
     // burst, chunked-prefill gap) — drafting stays off for the request.

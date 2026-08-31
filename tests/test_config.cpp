@@ -125,6 +125,18 @@ TEST(RuntimeConfigTest, MtpTreeWidthDefaultAndBinding) {
     EXPECT_EQ(cfg.speculative.mtp_tree_width, 4);
 }
 
+// speculative.mtp_tree_margin: the branch gate. Positive by default (a W>1
+// run branches only where the head is unsure); 0 must bind and mean "always
+// branch", which is the shape the width A/B measured before the gate existed.
+TEST(RuntimeConfigTest, MtpTreeMarginDefaultAndBinding) {
+    RuntimeConfig cfg;
+    EXPECT_GT(cfg.speculative.mtp_tree_margin, 0.0f);
+    set_(cfg, {"speculative.mtp_tree_margin=0"});
+    EXPECT_EQ(cfg.speculative.mtp_tree_margin, 0.0f);
+    set_(cfg, {"speculative.mtp_tree_margin=3.5"});
+    EXPECT_FLOAT_EQ(cfg.speculative.mtp_tree_margin, 3.5f);
+}
+
 // What an EXPLICIT dtype pin costs against the auto default. The pin that
 // motivates this is `IMP_KV_FP8=1`: correct when `auto` meant FP16, and since
 // the NVFP4 default it doubles the bytes per token on QWEN35 (max_model_len

@@ -408,6 +408,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_val), kMtpTopWBlocks * kMtpMaxTopW * sizeof(float));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_idx), kMtpTopWBlocks * kMtpMaxTopW * sizeof(int));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_val), kMtpMaxTopW * sizeof(float));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens), kMtpMaxTopW * kMtpMaxChainK * sizeof(int32_t));
     ok &= alloc(&ws.d_h_final_snap, hidden_dim * sizeof(__half));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_argmax), sizeof(int));
@@ -536,6 +537,10 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     if (ws.d_topk_part_idx) {
         cudaFree(ws.d_topk_part_idx);
         ws.d_topk_part_idx = nullptr;
+    }
+    if (ws.d_topk_val) {
+        cudaFree(ws.d_topk_val);
+        ws.d_topk_val = nullptr;
     }
     if (ws.d_chain_tokens) {
         cudaFree(ws.d_chain_tokens);

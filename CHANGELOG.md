@@ -26,6 +26,11 @@ there instead of retelling it.
   `diagnostics.mtp_tree_probe` is now measurement-only (it used to be
   consumed by the verify and scored nothing). Design, gates and numbers:
   `docs/plans/2026-08-31-mtp-multicandidate-hybrid.md`.
+- `speculative.mtp_tree_margin` (default 2.0, only with `mtp_tree_width` > 1):
+  branch only when the MTP head's top-1/top-2 logit margin is below it; the
+  serving top-W kernel returns the values. Think traffic W=2 goes from
+  -6.4/-6.9% to -0.8/-5.8% against linear adaptive-k (still not a win, W
+  stays 1). Tallies in the spec stats log line.
 
 - Container deployments reach every `imp.conf` key: `IMP_CONFIG` becomes
   `--config`, `IMP_SET` becomes one `--set` per whitespace-separated

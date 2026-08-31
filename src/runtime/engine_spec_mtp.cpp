@@ -224,6 +224,13 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
             ws->mtp_pos = pos_after;
             return false;
         }
+        // The head's top-1/top-2 logit margin rides the same sync (W floats)
+        // - the branch gate below reads it.
+        float h_topv[imp::kMtpMaxTopW] = {};
+        bool have_topv = false;
+        if (W > 1 && ws->d_topk_val != nullptr)
+            have_topv = cudaMemcpyAsync(h_topv, ws->d_topk_val, static_cast<size_t>(W) * sizeof(float),
+                                        cudaMemcpyDeviceToHost, stream) == cudaSuccess;
         cudaStreamSynchronize(stream);
         for (int k = 0; k < launched[0]; ++k) {
             if (h_chain[k] < 0 || h_chain[k] >= vocab_size)
@@ -235,7 +242,20 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
             return false;
         }
         mtp_pending_chains_.clear();
+        // Margin gate (speculative.mtp_tree_margin): a confident head keeps
+        // the linear chunk - the second candidate wins almost only where the
+        // top-1/top-2 margin is small, and every extra candidate is rows in
+        // the verify. The alternate chains were still drafted (that cost is
+        // paid either way); only the verify shape changes.
+        const float margin_cfg = runtime_config_.speculative.mtp_tree_margin;
+        const bool branch = W > 1 && !(margin_cfg > 0.0f && have_topv && (h_topv[0] - h_topv[1]) > margin_cfg);
         if (W > 1) {
+            if (branch)
+                mtp_tree_branched_++;
+            else
+                mtp_tree_linear_++;
+        }
+        if (branch) {
             mtp_pending_chains_.push_back(chain);
             for (int c = 1; c < W; ++c) {
                 std::vector<int32_t> alt;

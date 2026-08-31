@@ -183,6 +183,16 @@ struct Speculative {
     // path. Design + measurement gates:
     // docs/plans/2026-08-31-mtp-multicandidate-hybrid.md.
     int mtp_tree_width = 1;
+    // Branch only when the head is unsure: with mtp_tree_width > 1 the
+    // extra chains are drafted every step (they cost (W-1)(k-1) head
+    // forwards) but VERIFIED only when the head's top-1/top-2 logit margin
+    // is below this; otherwise the step runs the linear chunk. Rows are the
+    // verify cost (a W=2 chunk is 2x the rows of the linear one), and the
+    // second candidate wins almost only where the margin is small: on a
+    // 44-verify trace a true-model margin < 1 covered 4 of the 7 candidate-1
+    // wins in 8 of 44 verifies. 0 = always branch. Measured value:
+    // docs/plans/2026-08-31-mtp-multicandidate-hybrid.md.
+    float mtp_tree_margin = 2.0f;
     // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
     // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
     // backward scan per verify step) with frequency-voted continuations

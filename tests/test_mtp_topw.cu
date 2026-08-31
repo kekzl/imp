@@ -69,6 +69,8 @@ void run_pair(int vocab, int top_w, bool fp32, unsigned seed) {
     ASSERT_EQ(cudaMalloc(reinterpret_cast<void**>(&ws.d_topk_part_idx),
                          kMtpTopWBlocks * kMtpMaxTopW * sizeof(int)),
               cudaSuccess);
+    ASSERT_EQ(cudaMalloc(reinterpret_cast<void**>(&ws.d_topk_val), kMtpMaxTopW * sizeof(float)),
+              cudaSuccess);
 
     const std::vector<float> host = distinct_values(vocab, top_w, fp32, seed);
     void* d_logits = nullptr;
@@ -88,8 +90,15 @@ void run_pair(int vocab, int top_w, bool fp32, unsigned seed) {
 
     ASSERT_TRUE(mtp_topw_fast(d_logits, fp32, vocab, top_w, ws, nullptr));
     std::vector<int> fast(top_w);
+    std::vector<float> fast_val(top_w);
     ASSERT_EQ(cudaMemcpy(fast.data(), ws.d_topk, top_w * sizeof(int), cudaMemcpyDeviceToHost),
               cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(fast_val.data(), ws.d_topk_val, top_w * sizeof(float), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    // The values are the selected logits in rank order (the margin gate reads
+    // val[0] - val[1]); the planted values are half-exact, so exact equality.
+    for (int w = 0; w < top_w; ++w)
+        EXPECT_EQ(fast_val[w], host[fast[w]]) << "value at rank " << w;
 
     ASSERT_TRUE(mtp_topw_reference(d_logits, fp32, vocab, top_w, ws, nullptr));
     std::vector<int> ref(top_w);
@@ -113,6 +122,7 @@ void run_pair(int vocab, int top_w, bool fp32, unsigned seed) {
     cudaFree(ws.d_topk);
     cudaFree(ws.d_topk_part_val);
     cudaFree(ws.d_topk_part_idx);
+    cudaFree(ws.d_topk_val);
 }
 
 TEST_F(MtpTopWTest, MatchesReferenceAndHostFp16) {

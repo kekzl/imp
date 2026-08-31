@@ -255,3 +255,37 @@ Next levers, in order of expected yield (none implemented):
    already prints the margin per row; most verifies would then run the
    3-row linear chunk.
 
+## Lever 3 - margin-gated width (`speculative.mtp_tree_margin`, 2026-08-31)
+
+Branch only when the head's top-1/top-2 logit margin (serving top-W kernel
+now returns the values) is below the threshold; otherwise the step verifies
+the linear chunk. The alternate chains are still drafted every step.
+
+CLI, 600 tokens, greedy, k=2 fixed, `verify_smallm=true`; r1 = train prompt,
+r2 = merge-intervals prompt:
+
+| arm | r1 tok/s | r1 emitted | r1 ms/verify | r1 branched | r2 tok/s | r2 emitted | r2 ms/verify | r2 branched |
+|---|---|---|---|---|---|---|---|---|
+| linear | 135.1 | 2.60 | 19.25 | - | 133.5 | 2.62 | 19.57 | - |
+| W=2, margin 0 | 125.1 | 2.77 | 22.15 | 216/216 | 109.6 | 2.53 | 23.03 | 237/237 |
+| W=2, margin 1 | 135.3 | 2.81 | 20.76 | 19/213 | 113.3 | 2.47 | 21.74 | 72/243 |
+| W=2, margin 2 | 140.7 | 2.85 | 20.25 | 37/210 | 103.6 | 2.41 | 23.20 | 115/128 |
+| W=2, margin 4 | 132.3 | 2.80 | 21.12 | 84/214 | 106.6 | 2.63 | 24.49 | 136/228 |
+
+Think traffic, server harness, `ARMS="k2ad w2ad"` (w2ad = W=2 at the default
+margin 2.0), 2 rounds alternated:
+
+| arm | round | tokens | ms | tok/s | drafted | accepted | verifies |
+|---|---|---|---|---|---|---|---|
+| k2ad | 1 | 3072 | 27505 | 111.69 | 2343 | 1641 | 1428 |
+| w2ad | 1 | 3072 | 27714 | 110.85 | 2315 | 1684 | 1385 |
+| w2ad | 2 | 3072 | 28953 | 106.10 | 2362 | 1621 | 1448 |
+| k2ad | 2 | 2986 | 26515 | 112.62 | 2279 | 1599 | 1387 |
+
+W=2 with the gate: -0.8% / -5.8% against linear adaptive-k (was -6.4% /
+-6.9% ungated). The gate removes most of the row cost but not the drafting
+cost (the W-1 alternate chains are (K-1) serial head forwards per step,
+paid whether or not the step branches), and on the code prompt the head
+branches far more often (115 of 128 drafts at margin 2 vs 37 of 210 on the
+reasoning prompt) without an accept gain. Gate not met; W stays 1.
+

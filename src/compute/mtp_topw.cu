@@ -3,7 +3,8 @@
 // =============================================================================
 //
 // Two implementations behind one contract (ids in descending-logit order into
-// ws.d_topk, device-only, no sync):
+// ws.d_topk, device-only, no sync; the serving kernel also leaves the values
+// in ws.d_topk_val when allocated):
 //
 //   - mtp_topw_reference: the Stage 0 probe's single-CTA kernel — one scan of
 //     the whole vocabulary per width (713 us on a 248k vocab, measured on
@@ -139,7 +140,8 @@ __global__ void mtp_topw_pass1_kernel(const T* __restrict__ logits, int vocab_si
 // hundred entries) with the same masked argmax selection; a slice shorter
 // than top_w yields -1 ids with -1e38 values, which never win.
 __global__ void mtp_topw_pass2_kernel(const float* __restrict__ part_val, const int* __restrict__ part_idx,
-                                      int n_blocks, int top_w, int* __restrict__ out_idx) {
+                                      int n_blocks, int top_w, int* __restrict__ out_idx,
+                                      float* __restrict__ out_val) {
     constexpr int kThreads = 256;
     __shared__ float s_val[kThreads];
     __shared__ int s_idx[kThreads];
@@ -186,6 +188,8 @@ __global__ void mtp_topw_pass2_kernel(const float* __restrict__ part_val, const 
         if (tid == 0) {
             s_found[w] = s_idx[0];
             out_idx[w] = s_idx[0];
+            if (out_val)
+                out_val[w] = s_val[0];
         }
         __syncthreads();
     }
@@ -208,7 +212,7 @@ bool mtp_topw_fast(const void* d_logits, bool fp32_logits, int vocab_size, int t
         IMP_CUDA_CHECK_LAUNCH();
     }
     mtp_topw_pass2_kernel<<<1, 256, 0, stream>>>(ws.d_topk_part_val, ws.d_topk_part_idx, kMtpTopWBlocks,
-                                                 top_w, ws.d_topk);
+                                                 top_w, ws.d_topk, ws.d_topk_val);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }
