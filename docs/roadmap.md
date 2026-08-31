@@ -10,6 +10,20 @@ or one table row each. The investigation behind a verdict lives in
 records what was measured and what stands. Entries are closed, corrected or
 superseded in place, never silently deleted.
 
+**Keeping this file honest.** `scripts/check_doc_citations.py` gates the
+`path:line` citations here, and it reaches less far than it looks:
+
+- It checks that the line **exists**, not that it says what the sentence
+  claims. `weight_map.cpp:369` pointed at the audio-skip branch until
+  2026-08-31; the branch had moved to :380 and the gate was always green,
+  because line 369 exists either way. Only reading the file finds that.
+- A bare basename resolving to more than one file is reported `AMBIGUOUS` and
+  **passes**. Verified by aiming a citation at line 99999 of a 1447-line file:
+  path-qualified it fails, bare-basename it does not. Cite the path.
+- Duplicate copies of the tree make every basename ambiguous at once. Three
+  stale `git worktree` checkouts under `.claude/worktrees/` were doing exactly
+  that: removing them took the doc set from 79 unchecked citations to 0.
+
 ## Direction: local inference for AI agents
 
 Goal: fastest local engine for AI agent workloads on consumer Blackwell.
@@ -48,6 +62,7 @@ llama.cpp publishes no 2026 roadmap.
 | Per-request adapter selection | `lora` body field, empty means the base model |
 | Latency observability, not just counters | `imp_ttft_seconds`, `imp_inter_token_seconds`, `imp_request_duration_seconds` histograms, plus `imp_queue_depth` and `imp_tokens_cached_total` |
 | Auth, rate limiting, backpressure | `--api-key`, per-key rate limit, `max_concurrent`, 429 |
+| Every setting reachable from a container, without a name per setting | `IMP_CONFIG` / `IMP_SET` bridge `--config` / `--set`, so a new config key needs no new env name; the 19 hand-written `IMP_*` names are frozen compatibility (#1823) |
 | Continuous batching over a paged KV cache | default block n=16, geometry per configuration |
 | Chunked prefill and graph-captured decode | CUDA graphs on both paths; gate asserts decode >= 1.3x, measures 2.28x |
 | Speculative decoding that pays | n-gram, suffix index and a trained MTP head (+21.3 % at `mtp_k=1`) |
@@ -100,6 +115,9 @@ Ranked by what an agent workload notices first.
    | auto max_batch_size on hybrids | FIXED | resolver priced hybrid KV 4x too high (224 -> 630 @32); `max_seq_len: auto` was VRAM-blind on packed-4-bit KV | 2026-08-25 |
    | burst serving fixes | SHIPPED | HTTP pool sized to streams, token-charged prefill budget, id-based rotor; 4-wave bench 1047-1073 tok/s every wave | #1762, #1758 (deferred delivery +4-5%) |
    | adaptive MTP chain depth (M=1) | SHIPPED default-on | AIMD 1..mtp_k on acceptance, econ guard prices the depth that ran; mtp_k=2+ngram=false: think chats 111.1-113.3 vs 106.3-108.0 (k=1) and 94.9-110.2 (fixed k=2, bistable); draft-rich 158.1 (parity with fixed, +31% vs k=1); no-think prose 107.8 vs 105.0 fixed / 109.4 k=1. Harness `tools/analysis/mtp_adaptive_ab.sh` | `speculative.mtp_adaptive_k`, #1801 |
+   | `mtp_k=auto` as the default (M=1) | SHIPPED default-on | single-stream on a checkpoint with an MTP head drafts with it: 95.8 -> 141.6 tok/s (+48%), Qwen3.8-27B-NVFP4 thinking, 3 alternating rounds, degen 50/0. Declines for concurrent serving | `speculative.mtp_k=-1`, #1809 (+ #1811, it read the raw flag not the resolved batch) |
+   | NVFP4 paged-decode load width (M=1) | SHIPPED | one word per lane instead of one `LDG.E.U8` per byte, K and V issued before the warp reduction: 64.0 -> 74.1 tok/s @77k (+15.7%, forced-equal emissions). 4-bit KV went from 13.5% SLOWER than 8-bit to 2.3% faster, which is what makes `dtype=auto` right on both axes here | #1817 |
+   | sparse decode at concurrent long context | SHIPPED opt-in | 3 streams x 25k, Qwen3-8B-Q8_0 fp8-KV: 155.6 -> 197.7 tok/s (+27%, 3 alternating trials); metadata now one batched launch per forward. Harness `tools/analysis/serving_sparse_ab.sh` | `attention.sparse_topk_tokens`, #1808 |
 
    Standing state: measured gap to vLLM **~1.08x pinned** (after #1778 +
    #1765-fix). The auto=28-vs-pinned=32 delta (630 vs 936) is NOT a rotation
@@ -122,7 +140,8 @@ Ranked by what an agent workload notices first.
    both split directions refuted), 96 FP16 alpha/beta GEMVs 0.37, norms 0.30,
    GDN scan+conv 0.32, host/idle 0.44. The way PAST the roofline is the MTP
    verify (weights read once per k+1 rows): 102-110 tok/s at k=1 (#1796),
-   k=2 stabilized by the adaptive depth (#1801, ledger row above); k=3
+   k=2 stabilized by the adaptive depth (#1801, ledger row above) and taken by
+   default since #1809; k=3
    doomed on economics; verify-chunk GEMMs run at 1300 GB/s = 70% of verify
    kernel time (`speculative.verify_smallm` +3-6% isolated, +1-2% mixed
    pairs, default off); `diagnostics.mtp_prenorm_h=true` lifts accept 70/72
@@ -156,21 +175,47 @@ Ranked by what an agent workload notices first.
    [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md).
    Spec verify chunks ride the sparse table since 2026-08-29: speculation-on
    32k decode 137.4 -> 176.1 tok/s (+28.2%), ms/verify 233 -> 133, NIAH 32k
-   spec-on 15/15 both arms. Remaining: v1 gates (F16/FP8 KV, non-MLA,
-   uniform geometry), no prefill sparsity, and StreamingLLM eviction
-   (`attention_paged_common.cuh:71`) is still the only answer under KV-pool
-   pressure.
+   spec-on 15/15 both arms.
+
+   Three things landed after that assessment:
+
+   | | |
+   |---|---|
+   | concurrent serving, not just batch=1 (#1808) | 3 streams x 25k on Qwen3-8B-Q8_0 fp8-KV: aggregate decode 155.6 -> 197.7 tok/s (+27%, 3 alternating trials). Metadata updates are one batched launch per forward, ragged mapping included |
+   | the KV-dtype gate is gone (#1818) | the metadata kernel has an NVFP4 arm and the NVFP4 decode branches consume the compacted block table they used to ignore. Qwen3.8-27B-NVFP4 @77k: 74.3 -> 100.2 tok/s, against 96.8 for FP8 in the same shape |
+   | the configured budget was not the effective one (#1819) | every token-to-block conversion used the compile-time block size (16) while this family runs 32-token blocks, so `sparse_topk_tokens=N` bought 2N and `sparse_min_ctx` engaged at twice its stated length. **An existing opt-in setting moved operating point**: configure 2N to keep it |
+
+   The metadata pool must stay VRAM-resident: a `kv_cache.max_blocks` pin
+   without its headroom left 689 MiB free and WDDM-spilled every prefill
+   kernel by 11% (the pinned path now warns with the exact MiB). Retrieval is
+   what pays for a small budget, and it pays steeply: on Qwen3.8-27B-NVFP4
+   NIAH reads 10/10 dense, 8/10 at 8192 effective, 5/10 at 4096 - at 8192 the
+   budget is worth configuring, below it is not.
+
+   Remaining: gated to non-MLA models of uniform geometry, no prefill
+   sparsity, and StreamingLLM eviction (`src/compute/attention_paged_common.cuh:71`)
+   is still the only answer under KV-pool pressure.
 3. **Speculation does not adapt to the request.** `speculative` is a
    per-request bool and the drafter choice is global. *Half closed
-   2026-08-27:* the MTP chain depth now adapts per request between 1 and
-   `mtp_k` (`speculative.mtp_adaptive_k`, AIMD on acceptance - ledger row in
-   item 0). The chain saturates near 2.5 accepted/verify. vLLM targets
-   acceptance length >5 (hybrid + linear drafting), SGLang builds adaptive
-   per-request spec configs. A speculation tree (gap 5) raises the same
-   ceiling from the other side.
+   2026-08-27, and the default moved 2026-08-29:* the MTP chain depth adapts
+   per request between 1 and `mtp_k` (`speculative.mtp_adaptive_k`, AIMD on
+   acceptance - ledger row in item 0), and `speculative.mtp_k` now defaults to
+   `auto`: a single-stream run on a checkpoint that ships an MTP head drafts
+   with it instead of leaving the speedup switched off (Qwen3.8-27B-NVFP4
+   thinking, 3 alternating rounds, 95.8 -> 141.6 tok/s, +48%; degen 50/0).
+   Auto declines for concurrent serving. The resolver read the raw
+   `--max-batch` flag rather than the resolved batch size for one release, so
+   a server pinned to one stream through `imp.conf` declined the head and left
+   +33% unclaimed (#1811). The chain saturates near 2.5 accepted/verify. vLLM
+   targets acceptance length >5 (hybrid + linear drafting), SGLang builds
+   adaptive per-request spec configs. A speculation tree (gap 5) raises the
+   same ceiling from the other side.
 4. **No audio; a checkpoint that has it loses it quietly.** Gemma-4 ships
-   `model.embed_audio.*`; `weight_map.cpp:369` counts those tensors as
-   skipped, so an omni checkpoint loads as text+vision.
+   `model.embed_audio.*`; `src/model/weight_map.cpp:380` folds those tensors
+   into the aggregate `skipped` count, so an omni checkpoint loads as
+   text+vision and says so nowhere. (The citation read `:369` until
+   2026-08-31, eleven lines off and green the whole time - see "Keeping this
+   file honest" for why the gate cannot see that class.)
 5. **No video.** Gap 2 below; the Qwen3-VL tower does images only.
 6. **No KV tier below VRAM.** Gap 6 below - shelved on measurement (6.5x
    bandwidth cliff), not on size.
