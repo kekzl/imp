@@ -13,6 +13,25 @@ there instead of retelling it.
 
 ### Added
 
+- Serving idle attribution tooling: `tools/analysis/serving_idle_profile.sh`
+  (imp-server under nsys node-trace at N streams) +
+  `tools/analysis/nsys_gap_attribution.py` (busy/idle share, gap histogram,
+  largest gaps with neighbouring kernels, sub-100-us gap pairs) and
+  `tools/analysis/two_image_conc_ab.sh` (alternating two-image aggregate A/B
+  for code changes). Qwen3.8-27B-NVFP4 at 32 streams, steady window: idle
+  14.9%, of which the >1 ms gaps (45%) are CUPTI-inflated graph captures at
+  the wave ramp; real idle ~8% = launch density 6.3% + host turnaround 1.9%.
+
+### Changed
+
+- Batched decode sampling: a row whose filter chain is penalties + the
+  engine-static banned-token list now joins the batched penalty sweep (the
+  ban rides in `PenaltyRowArgs`, applied by the thread that owns the entry)
+  instead of 2 inline launches per row per step. With the server default
+  `repetition_penalty` 1.05 every row was inline. 32-stream aggregate on
+  Qwen3.8-27B-NVFP4: 1766.9 -> 1774.9 tok/s median, 3/3 alternating pairs
+  positive (+0.1..+1.4%); steady-window idle 14.9% -> 13.6% in the profile.
+
 - `speculative.mtp_tree_width` (default 1 = unchanged): W > 1 drafts W MTP
   chains per verify step (chain 0 = today's top-1 chain, chains 1..W-1 branch
   at the first position on the head's top-W ids) and verifies them as one

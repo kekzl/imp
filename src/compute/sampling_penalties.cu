@@ -70,6 +70,17 @@ __global__ void apply_penalties_kernel(float* __restrict__ logits, const int32_t
 // (blockIdx.y selects the row). Caller pre-windows token_ids/n_tokens.
 __global__ void apply_penalties_rows_kernel(const PenaltyRowArgs* __restrict__ rows, int vocab_size) {
     const PenaltyRowArgs r = rows[blockIdx.y];
+    if (r.n_banned > 0) {
+        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= vocab_size)
+            return;
+        for (int i = 0; i < r.n_banned; i++) {
+            if (r.banned[i] == idx) {
+                r.logits[idx] = -1e30f;  // same value ban_logits_kernel writes
+                return;
+            }
+        }
+    }
     apply_penalties_body(r.logits, r.token_ids, r.n_tokens, vocab_size, r.repetition_penalty,
                          r.frequency_penalty, r.presence_penalty);
 }

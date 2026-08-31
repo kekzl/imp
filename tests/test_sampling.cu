@@ -652,6 +652,27 @@ TEST(SamplingTest, PenaltyRowsMatchPerRowLaunch) {
                         freq, pres, nullptr);
         h_rows[r] = {static_cast<float*>(bat_logits[r].data), d_hist[r], hist_n[r], rep, freq, pres};
     }
+    // Rows 1 and 3 also carry a ban list in the same sweep (the serving
+    // default: repetition_penalty 1.05 + the engine's banned special tokens).
+    // Id 5 is both banned AND repeated in the history - the ban must win,
+    // written once by the thread that owns the entry. Row 4 bans without
+    // any penalty history (n_tokens = 0).
+    const std::vector<int32_t> h_ban{7, 5, kVocab - 1};
+    int32_t* d_ban = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_ban, h_ban.size() * sizeof(int32_t)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_ban, h_ban.data(), h_ban.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
+              cudaSuccess);
+    for (int r : {1, 3, 4}) {
+        h_rows[r].banned = d_ban;
+        h_rows[r].n_banned = static_cast<int>(h_ban.size());
+        if (r == 4) {
+            h_rows[r].n_tokens = 0;
+            // Reference row 4: no penalty at all - reset it to the raw logits.
+            std::vector<float> raw(kVocab);
+            cudaMemcpy(raw.data(), bat_logits[r].data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(ref_logits[r].data, raw.data(), kVocab * sizeof(float), cudaMemcpyHostToDevice);
+        }
+    }
     PenaltyRowArgs* d_rows = nullptr;
     ASSERT_EQ(cudaMalloc(&d_rows, kRows * sizeof(PenaltyRowArgs)), cudaSuccess);
     ASSERT_EQ(cudaMemcpy(d_rows, h_rows.data(), kRows * sizeof(PenaltyRowArgs),
@@ -664,12 +685,15 @@ TEST(SamplingTest, PenaltyRowsMatchPerRowLaunch) {
     for (int r = 0; r < kRows; ++r) {
         cudaMemcpy(a.data(), ref_logits[r].data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
         cudaMemcpy(b.data(), bat_logits[r].data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        if (r == 1 || r == 3 || r == 4)
+            for (int32_t id : h_ban) a[id] = -1e30f;  // what ban_logits_kernel writes
         EXPECT_EQ(memcmp(a.data(), b.data(), kVocab * sizeof(float)), 0) << "row " << r;
         cudaFree(d_hist[r]);
         free_gpu_tensor(ref_logits[r]);
         free_gpu_tensor(bat_logits[r]);
     }
     cudaFree(d_rows);
+    cudaFree(d_ban);
 }
 
 }  // namespace imp

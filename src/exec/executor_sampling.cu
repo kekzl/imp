@@ -181,6 +181,37 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
     return tokens;
 }
 
+// Device copy of the engine-static banned-token list (same host array every
+// step): uploaded once per list identity, then served from the cache for
+// every row of every step. nullptr when the list is empty or the device copy
+// could not be taken.
+const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStream_t stream) {
+    if (state.banned_tokens == nullptr || state.n_banned_tokens <= 0)
+        return nullptr;
+    const bool cache_hit = d_banned_cache_ != nullptr && banned_cache_src_ == state.banned_tokens &&
+                           banned_cache_n_ == state.n_banned_tokens;
+    if (!cache_hit) {
+        size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
+        if (banned_cache_capacity_ < static_cast<size_t>(state.n_banned_tokens)) {
+            if (d_banned_cache_)
+                IMP_CUDA_CHECK_LOG(cudaFree(d_banned_cache_));
+            d_banned_cache_ = nullptr;
+            if (cudaMalloc(&d_banned_cache_, ban_bytes) != cudaSuccess) {
+                d_banned_cache_ = nullptr;
+                banned_cache_capacity_ = 0;
+            }
+            banned_cache_capacity_ = d_banned_cache_ ? state.n_banned_tokens : 0;
+        }
+        if (d_banned_cache_) {
+            cudaMemcpyAsync(d_banned_cache_, state.banned_tokens, ban_bytes, cudaMemcpyHostToDevice,
+                            stream);
+            banned_cache_src_ = state.banned_tokens;
+            banned_cache_n_ = state.n_banned_tokens;
+        }
+    }
+    return d_banned_cache_;
+}
+
 // Shared per-row logits filter chain (penalties, DRY, token bans, logit
 // bias, forced token, schema/json masks, min-p, typical-p) — used by both
 // the synchronous sample_single_from_logits and the enqueue-only
@@ -207,31 +238,8 @@ void GraphExecutor::apply_row_filters_(float* lp, int vocab, const InferenceStat
     // it per row per step — at n=16 that was 16 cudaMallocAsync/H2D/FreeAsync
     // triplets per decode step for identical bytes.
     if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
-        const bool cache_hit = d_banned_cache_ != nullptr &&
-                               banned_cache_src_ == state.banned_tokens &&
-                               banned_cache_n_ == state.n_banned_tokens;
-        if (!cache_hit) {
-            size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
-            if (banned_cache_capacity_ < static_cast<size_t>(state.n_banned_tokens)) {
-                if (d_banned_cache_)
-                    IMP_CUDA_CHECK_LOG(cudaFree(d_banned_cache_));
-                d_banned_cache_ = nullptr;
-                if (cudaMalloc(&d_banned_cache_, ban_bytes) != cudaSuccess) {
-                    d_banned_cache_ = nullptr;
-                    banned_cache_capacity_ = 0;
-                }
-                banned_cache_capacity_ = d_banned_cache_ ? state.n_banned_tokens : 0;
-            }
-            if (d_banned_cache_) {
-                cudaMemcpyAsync(d_banned_cache_, state.banned_tokens, ban_bytes,
-                                cudaMemcpyHostToDevice, stream);
-                banned_cache_src_ = state.banned_tokens;
-                banned_cache_n_ = state.n_banned_tokens;
-            }
-        }
-        if (d_banned_cache_) {
-            launch_ban_logits(lp, d_banned_cache_, state.n_banned_tokens, vocab, stream);
-        }
+        if (const int32_t* d_ban = banned_cache_(state, stream))
+            launch_ban_logits(lp, d_ban, state.n_banned_tokens, vocab, stream);
     }
     // Apply logit bias
     if (state.n_logit_bias > 0 && state.logit_bias != nullptr)
@@ -313,15 +321,23 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     const int top_k = state.top_k > 0 ? state.top_k : 50;
     const int eff_top_k = (top_k <= 0 || top_k > vocab) ? vocab : top_k;
     // Penalty stash: when the row's filter chain is EMPTY past the penalties
-    // (no DRY / bans / bias / forced token / constrainer / min-p / typical-p),
-    // the penalty launch is order-free against every other stashed row and
-    // joins one batched vocab sweep at flush. Any active later stage keeps the
-    // whole chain inline — the per-row order (penalties first) must hold, and
-    // the flush runs after this call returns.
+    // and the engine-static ban list (no DRY / bias / forced token /
+    // constrainer / min-p / typical-p), the penalty launch is order-free
+    // against every other stashed row and joins one batched vocab sweep at
+    // flush; the ban rides in the same sweep (PenaltyRowArgs::banned - order
+    // against the penalties is immaterial, -1e30 stays -1e30). Any active
+    // later stage keeps the whole chain inline — the per-row order (penalties
+    // first) must hold, and the flush runs after this call returns. Measured
+    // reason (2026-08-31, 32-stream serving on Qwen3.8-27B-NVFP4, nsys
+    // node-trace): the server's default repetition_penalty 1.05 plus the
+    // 19 banned special tokens put every row on the inline chain - 2
+    // launches per row per step with ~4 us gaps, ~0.45 ms of a 17 ms step.
+    const bool ban_present = state.banned_tokens != nullptr && state.n_banned_tokens > 0;
+    const int32_t* d_ban = ban_present ? banned_cache_(state, stream) : nullptr;
     const bool tail_empty =
         !(state.dry_multiplier > 0.0f && state.host_penalty_tokens != nullptr &&
           state.n_penalty_tokens > 0) &&
-        !(state.banned_tokens != nullptr && state.n_banned_tokens > 0) && state.force_token < 0 &&
+        (!ban_present || d_ban != nullptr) && state.force_token < 0 &&
         state.grammar_constrainer == nullptr && state.regex_constrainer == nullptr &&
         state.schema_constrainer == nullptr && state.json_constrainer == nullptr &&
         state.min_p <= 0.0f && !(state.typical_p > 0.0f && state.typical_p < 1.0f);
@@ -337,10 +353,10 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
                : (h_row_args_.as<TopkRowArgs>() && d_row_args_ && eff_top_k <= SAMPLE_MAX_TOP_K);
     bool stashed_filters = false;
     if (tail_empty && sampler_batches && d_pen_args_ && !h_pen_args_.empty()) {
-        if (pen_active) {
+        if (pen_active || d_ban != nullptr) {
             const int32_t* pen_ptr = state.penalty_tokens;
-            int pen_n = state.n_penalty_tokens;
-            if (state.repeat_last_n > 0 && pen_n > state.repeat_last_n) {
+            int pen_n = pen_active ? state.n_penalty_tokens : 0;
+            if (pen_active && state.repeat_last_n > 0 && pen_n > state.repeat_last_n) {
                 pen_ptr += (pen_n - state.repeat_last_n);
                 pen_n = state.repeat_last_n;
             }
@@ -352,8 +368,10 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
             p.repetition_penalty = state.repetition_penalty;
             p.frequency_penalty = state.frequency_penalty;
             p.presence_penalty = state.presence_penalty;
+            p.banned = d_ban;
+            p.n_banned = d_ban ? state.n_banned_tokens : 0;
         }
-        stashed_filters = true;  // chain past penalties is empty: nothing to enqueue
+        stashed_filters = true;  // chain past penalties (+ban) is empty: nothing to enqueue
     }
     // No blanket CUB-regime refusal any more (#1654): sample_topk_topp_async
     // enqueues that regime now. Only the ROW-PARALLEL stash below is still
