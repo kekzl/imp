@@ -112,9 +112,14 @@ int apply_pdl_edges(cudaGraph_t graph) {
     };
 
     // 4. Replace default kernel→kernel edges with PDL edges, but ONLY when the
-    //    source kernel has ProgrammaticStreamSerialization enabled.  Non-PDL
-    //    kernels use the default port (programmatic == default for them), so
-    //    converting their edges just adds driver bookkeeping overhead.
+    //    CONSUMER kernel is PDL-registered. A programmatic edge lets the
+    //    consumer launch before the producer completes, so the consumer must
+    //    be a kernel that calls pdl_wait() before touching global memory
+    //    (compute/pdl_device.cuh contract); registration is that promise.
+    //    Until 2026-08-31 the check was on the SOURCE, which was harmless only
+    //    because no kernel triggered early - with producers now calling
+    //    pdl_trigger(), an unregistered consumer on a programmatic edge would
+    //    read stale data.
     cudaGraphEdgeData pdl_edge{};
     pdl_edge.from_port = cudaGraphKernelNodePortProgrammatic;
     pdl_edge.to_port = 0;
@@ -140,7 +145,7 @@ int apply_pdl_edges(cudaGraph_t graph) {
         // pass (which used to log every request as
         // "Cleared stale error before forward: invalid device function").
         cudaKernelNodeParams kparams{};
-        cudaError_t kerr = cudaGraphKernelNodeGetParams(from[i], &kparams);
+        cudaError_t kerr = cudaGraphKernelNodeGetParams(to[i], &kparams);
         if (kerr != cudaSuccess || !kparams.func || !pdl::is_enabled(kparams.func)) {
             (void)cudaGetLastError();  // swallow the per-edge "invalid device function"
             skipped_non_pdl++;
@@ -171,7 +176,7 @@ int apply_pdl_edges(cudaGraph_t graph) {
     }
 
     if (skipped_non_pdl > 0)
-        IMP_LOG_DEBUG("apply_pdl_edges: skipped %d edges (source kernel not PDL-enabled)", skipped_non_pdl);
+        IMP_LOG_DEBUG("apply_pdl_edges: skipped %d edges (consumer kernel not PDL-registered)", skipped_non_pdl);
 
     return converted;
 }

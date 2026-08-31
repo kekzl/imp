@@ -317,8 +317,12 @@ void nvfp4_gemv_pdl_register() {
     NVFP4_REGISTER(gemv_nvfp4_geglu_residual_kernel);
     NVFP4_REGISTER(gemv_nvfp4_geglu_residual_mr_kernel<NR>);
     // MoE GEMV kernels
-    NVFP4_REGISTER(gemv_nvfp4_moe_decode_kernel);
-    NVFP4_REGISTER(gemv_nvfp4_moe_gate_up_fused_kernel);
+    // MoE decode GEMVs are not instrumented (no pdl_wait) and stay
+    // unregistered: registration is the promise that the kernel waits.
+    cudaFuncSetAttribute(gemv_nvfp4_moe_decode_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
+                         cudaSharedmemCarveoutMaxL1);
+    cudaFuncSetAttribute(gemv_nvfp4_moe_gate_up_fused_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
+                         cudaSharedmemCarveoutMaxL1);
 
 #undef NVFP4_REGISTER
 }

@@ -151,7 +151,11 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
     // benchmark-cuda skill applies to L2-served isolated benches.
     const double bytes = (double)N * K / 2 + (double)N * K / 16;  // packed + scales
     const double floor_us = bytes / 1792e9 * 1e6;
-    const double bar = 0.30 * 1792.0;
+    // 0.25, not 0.30: under full-suite load the healthy reading itself
+    // drifts ~15% (529/513 GB/s where an isolated run reads 580-620), and
+    // 537.6 sat inside that drift - the bar's job is to catch the starved
+    // CUTLASS mode (253 GB/s, a 2x regression), not suite-load noise.
+    const double bar = 0.25 * 1792.0;
     double best_gbs = 0.0;
     for (int attempt = 0; attempt < 3 && best_gbs < bar; ++attempt) {
         void *d_x = nullptr, *d_y = nullptr, *d_ws = nullptr;
@@ -208,8 +212,8 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
         cudaStreamDestroy(bench_stream);
         cudaFree(d_x); cudaFree(d_y); cudaFree(d_ws);
     }
-    // Regression bar, not a target: 30% of the floor is ~2x the starved
-    // CUTLASS baseline this kernel replaces.
+    // Regression bar, not a target: ~2x the starved CUTLASS baseline this
+    // kernel replaces.
     EXPECT_GT(best_gbs, bar);
 }
 

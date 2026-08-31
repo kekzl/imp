@@ -179,6 +179,19 @@ workload is found where the changed rounding does not move the token stream.
 
 ## PDL is wired without its device half, and stays that way
 
+**Superseded 2026-08-31.** The device half exists now
+(`src/compute/pdl_device.cuh`): registered decode kernels call
+`griddepcontrol.wait` before their first global access and
+`launch_dependents` after their last input read, and `cuda_graph.cu`
+converts an edge only when the CONSUMER is registered (the promise that it
+waits; a kernel that does not wait is never registered - the old blanket
+list raced greedy determinism once producers triggered). Measured on
+Qwen3.8-27B-NVFP4 (final build): M=1 spec-off +1.7% median, 32-stream
+aggregate +1.3% median with 3/3 alternating pairs positive in every series,
+steady-window GPU idle 13.6% -> 10.8%. `runtime.no_pdl=true` is the control
+arm and disables both halves. The entry below is kept as the record of why
+the host half alone measured nothing.
+
 **Decision:** the 34 `pdl::launch` sites and the graph-edge rewrite stay, the
 device half is not added, and nothing is deleted. #1655 offered both; this is
 the third answer.

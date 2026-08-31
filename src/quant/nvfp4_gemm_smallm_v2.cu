@@ -33,6 +33,8 @@
 #include "core/logging.h"
 
 #include <cuda_fp16.h>
+#include "compute/pdl_device.cuh"
+#include "runtime/pdl.h"
 
 namespace imp {
 namespace {
@@ -147,6 +149,9 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         }
     }
     __syncthreads();
+    // PDL: everything above is smem/index work; the first global read (the
+    // producer warp's cp.async of W and Xq) is below.
+    pdl_wait();
 
     // Stripe of K-tiles owned by this CTA.
     const int k_tiles = K / kKT;
@@ -266,6 +271,9 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     if (warp == 4)
         __syncthreads();  // producer joins the consumers' staging barrier
     __syncthreads();
+    // PDL: all global reads are done (ring drained); the dependent grid may
+    // be scheduled while this CTA writes its epilogue.
+    pdl_trigger();
 
     const float* s_out = reinterpret_cast<const float*>(smem);
     if (stripes == 1) {
@@ -341,12 +349,14 @@ __global__ void smallm_v2_reduce_kernel(const float* __restrict__ ws_partials, h
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= M * N_out)
         return;
+    pdl_wait();
     const int m = i / N_out, n = i % N_out;
     float acc = 0.0f;
     for (int sp = 0; sp < stripes; ++sp)
         acc += __ldcs(
             &ws_partials[static_cast<size_t>(sp) * kSmM * N_out + static_cast<int64_t>(m) * N_out + n]);
     const int64_t o = static_cast<int64_t>(m) * N_out + n;
+    pdl_trigger();
     y[o] = __float2half(ts * acc + (kAcc ? __half2float(y[o]) : 0.0f));
 }
 
@@ -393,7 +403,8 @@ bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, hal
         return false;
     const dim3 grid(N_out / kNR, stripes);
     const float ts = W.tensor_scale * Xq.tensor_scale;
-    gemm_nvfp4_smallm_v2_kernel<kStages><<<grid, kThreads, kStages * kStageBytes, stream>>>(
+    pdl::enable_kernel(gemm_nvfp4_smallm_v2_kernel<kStages>);
+    pdl::launch(gemm_nvfp4_smallm_v2_kernel<kStages>, grid, dim3(kThreads), kStages * kStageBytes, stream,
         reinterpret_cast<const uint8_t*>(W.packed_data), reinterpret_cast<const uint8_t*>(W.micro_scales),
         reinterpret_cast<const uint8_t*>(Xq.packed_data), reinterpret_cast<const uint8_t*>(Xq.micro_scales),
         static_cast<float*>(d_workspace), y, ts, accumulate ? 1 : 0, M, N_out, K, stripes);
@@ -402,14 +413,14 @@ bool launch_smallm_v2(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, hal
         return true;
     const int total = M * N_out;
     if (accumulate) {
-        smallm_v2_reduce_kernel<true>
-            <<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const float*>(d_workspace), y, M, N_out,
-                                                      stripes, ts);
+        pdl::enable_kernel(smallm_v2_reduce_kernel<true>);
+        pdl::launch(smallm_v2_reduce_kernel<true>, dim3((total + 255) / 256), dim3(256), size_t(0), stream,
+                    static_cast<const float*>(d_workspace), y, M, N_out, stripes, ts);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        smallm_v2_reduce_kernel<false>
-            <<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const float*>(d_workspace), y, M, N_out,
-                                                      stripes, ts);
+        pdl::enable_kernel(smallm_v2_reduce_kernel<false>);
+        pdl::launch(smallm_v2_reduce_kernel<false>, dim3((total + 255) / 256), dim3(256), size_t(0), stream,
+                    static_cast<const float*>(d_workspace), y, M, N_out, stripes, ts);
         IMP_CUDA_CHECK_LAUNCH();
     }
     return true;
@@ -456,7 +467,9 @@ bool gemm_nvfp4_smallm_v2_pair_a4(const NvFP4QuantResult& W1, const NvFP4QuantRe
         return false;
     const int n_tiles1 = N1 / kNR;
     const dim3 grid(n_tiles1 + N2 / kNR);
-    gemm_nvfp4_smallm_v2_pair_kernel<kDefaultStages><<<grid, kThreads, kDefaultStages * kStageBytes, stream>>>(
+    pdl::enable_kernel(gemm_nvfp4_smallm_v2_pair_kernel<kDefaultStages>);
+    pdl::launch(gemm_nvfp4_smallm_v2_pair_kernel<kDefaultStages>, grid, dim3(kThreads),
+                kDefaultStages * kStageBytes, stream,
         reinterpret_cast<const uint8_t*>(W1.packed_data), reinterpret_cast<const uint8_t*>(W1.micro_scales),
         y1, W1.tensor_scale * Xq.tensor_scale, n_tiles1, N1,
         reinterpret_cast<const uint8_t*>(W2.packed_data), reinterpret_cast<const uint8_t*>(W2.micro_scales),

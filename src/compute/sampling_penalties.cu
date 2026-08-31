@@ -8,6 +8,8 @@
 #include <cfloat>
 #include <algorithm>
 #include <vector>
+#include "compute/pdl_device.cuh"
+#include "runtime/pdl.h"
 
 namespace imp {
 
@@ -69,6 +71,7 @@ __global__ void apply_penalties_kernel(float* __restrict__ logits, const int32_t
 // Row-batched twin: one launch covers every stashed row of a decode batch
 // (blockIdx.y selects the row). Caller pre-windows token_ids/n_tokens.
 __global__ void apply_penalties_rows_kernel(const PenaltyRowArgs* __restrict__ rows, int vocab_size) {
+    pdl_wait();
     const PenaltyRowArgs r = rows[blockIdx.y];
     if (r.n_banned > 0) {
         const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -88,7 +91,8 @@ __global__ void apply_penalties_rows_kernel(const PenaltyRowArgs* __restrict__ r
 void launch_penalties_rows(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size,
                            cudaStream_t stream) {
     dim3 grid((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, n_rows);
-    apply_penalties_rows_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_rows, vocab_size);
+    pdl::enable_kernel(apply_penalties_rows_kernel);
+    pdl::launch(apply_penalties_rows_kernel, grid, dim3(BLOCK_SIZE), size_t(0), stream, d_rows, vocab_size);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

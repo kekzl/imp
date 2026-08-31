@@ -24,6 +24,17 @@ there instead of retelling it.
 
 ### Changed
 
+- Programmatic Dependent Launch has its device half: registered decode
+  kernels (NVFP4 GEMV family, small-M v2 GEMM, row-block RMSNorm,
+  elementwise add/copy, GDN scan and conv, gated norm, sampling rows, KV
+  write, embedding) call `griddepcontrol.wait` before their first global
+  access and `launch_dependents` after their last input read; the graph
+  edge rewrite now keys on the registered consumer; kernels that do not
+  wait are no longer registered (the old blanket list raced greedy
+  determinism). Qwen3.8-27B-NVFP4: M=1 spec-off +1.7% median (pairs
+  +1.7/+6.5/-0.3% on a drifting host at healthy clocks), 32 streams +1.3%
+  median (3/3 pairs positive in every series measured), steady-window GPU
+  idle 13.6% -> 10.8%. `runtime.no_pdl=true` turns both halves off.
 - Batched decode sampling: a row whose filter chain is penalties + the
   engine-static banned-token list now joins the batched penalty sweep (the
   ban rides in `PenaltyRowArgs`, applied by the thread that owns the entry)

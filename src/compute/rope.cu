@@ -7,6 +7,7 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cmath>
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 
@@ -220,6 +221,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
     float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
     const float* __restrict__ longrope_inv_freqs, MRopeParams mrope) {
     const int head_idx = blockIdx.x;
+    pdl_wait();  // positions and Q/K are the previous kernels' outputs
     const int pos_text = positions[0];
 
     extern __shared__ float smem[];
@@ -288,6 +290,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
     }
 
     __syncthreads();
+    pdl_trigger();  // scheduling only: the KV write that follows waits for this grid to complete
 
     // --- Process K head ---
     if (head_idx < n_kv_heads) {
@@ -400,8 +403,7 @@ void rope_yarn_corr_dims(int n_dims, int n_ctx_orig, float freq_base, float beta
 // PDL registration
 // --------------------------------------------------------------------------
 void rope_pdl_register() {
-    pdl::enable(reinterpret_cast<const void*>(&rope_forward_kernel<__half>));
-    pdl::enable(reinterpret_cast<const void*>(&rope_forward_kernel<float>));
+    // Only kernels that call pdl_wait() may be registered (compute/pdl_device.cuh).
     pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_fused_fp16_kernel));
 }
 

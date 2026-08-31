@@ -7,6 +7,7 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <float.h>
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 
@@ -241,6 +242,7 @@ __global__ void paged_attention_decode_nvfp4_kernel(
     }
 
     extern __shared__ char smem_nvfp4[];
+    pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_nvfp4), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
