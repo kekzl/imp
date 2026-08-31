@@ -93,7 +93,12 @@ __global__ void __launch_bounds__(HD * SPLIT, 1) gdn_scan_fused_kernel(
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
     // Second commit row for the speculative verify: the state as of snap_n
     // rows, written alongside the one at real_n. 0 disables it.
-    const int snap_n = (h_snap && d_snap_n) ? min(n_tokens, __ldg(d_snap_n)) : 0;
+    // One slab, not one per sequence: a multi-candidate verify chunk (W
+    // sequences, every candidate's row 0 the same token from the same
+    // committed state) takes it from sequence 0 only — the other sequences
+    // would write identical bits, but only one writer keeps the contract
+    // "the state after the chunk's first row" free of a race on the slab.
+    const int snap_n = (h_snap && d_snap_n && seq == 0) ? min(n_tokens, __ldg(d_snap_n)) : 0;
 
     // Head-to-K-group mapping. GGUF stores heads in tiled layout where head h's
     // group is `h % n_groups`. HF SafeTensors (Qwen3.5/3.6) stores heads in
@@ -353,12 +358,16 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
                                 float* h_state_pool, const int* seq_slots, int64_t h_state_seq_stride,
                                 half* y, int n_seq, int n_tokens, int n_heads, int head_dim_ssm,
                                 int state_size, int n_groups, cudaStream_t stream, int grouped_layout,
-                                const int* d_real_n, const int* seq_row_offsets) {
+                                const int* d_real_n, const int* seq_row_offsets, float* h_snap,
+                                const int* d_snap_n) {
     if (n_seq <= 0)
         return;
     if (seq_row_offsets && d_real_n)
         throw std::runtime_error(
             "gdn_scan_fused_f32_batched: d_real_n is a single-sequence contract - nullptr when ragged");
+    if (seq_row_offsets && h_snap)
+        throw std::runtime_error(
+            "gdn_scan_fused_f32_batched: h_snap is a uniform-batch contract - nullptr when ragged");
     dim3 grid(n_heads, n_seq);
     if (head_dim_ssm == 128 && state_size == 128) {
         // SPLIT=2: two threads per state column. At SS=128 one-thread-per-column
@@ -384,15 +393,15 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
         const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
         gdn_scan_fused_kernel<128, 128, half, SPLIT><<<grid, 128 * SPLIT, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
-            conv_channels, grouped_layout, d_real_n, static_cast<float*>(nullptr), nullptr, seq_slots,
-            h_state_seq_stride, seq_row_offsets);
+            conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride,
+            seq_row_offsets);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (head_dim_ssm == 64 && state_size == 64) {
         const size_t smem = (2 * 64 + 64) * sizeof(float);
         gdn_scan_fused_kernel<64, 64, half><<<grid, 64, smem, stream>>>(
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
-            conv_channels, grouped_layout, d_real_n, static_cast<float*>(nullptr), nullptr, seq_slots,
-            h_state_seq_stride, seq_row_offsets);
+            conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride,
+            seq_row_offsets);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         IMP_LOG_ERROR("gdn_scan_fused_f32_batched: unsupported head_dim=%d state_size=%d", head_dim_ssm,
@@ -408,12 +417,16 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
                                  __nv_bfloat16* h_state_pool, const int* seq_slots,
                                  int64_t h_state_seq_stride, half* y, int n_seq, int n_tokens, int n_heads,
                                  int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                                 int grouped_layout, const int* d_real_n, const int* seq_row_offsets) {
+                                 int grouped_layout, const int* d_real_n, const int* seq_row_offsets,
+                                 __nv_bfloat16* h_snap, const int* d_snap_n) {
     if (n_seq <= 0)
         return;
     if (seq_row_offsets && d_real_n)
         throw std::runtime_error(
             "gdn_scan_fused_bf16_batched: d_real_n is a single-sequence contract - nullptr when ragged");
+    if (seq_row_offsets && h_snap)
+        throw std::runtime_error(
+            "gdn_scan_fused_bf16_batched: h_snap is a uniform-batch contract - nullptr when ragged");
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_bf16_batched: no kernel for HD=" +
                                  std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
@@ -422,8 +435,7 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
     const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
     gdn_scan_fused_kernel<128, 128, half, SPLIT, __nv_bfloat16><<<grid, 128 * SPLIT, smem, stream>>>(
         conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups, conv_channels,
-        grouped_layout, d_real_n, static_cast<__nv_bfloat16*>(nullptr), nullptr, seq_slots,
-        h_state_seq_stride, seq_row_offsets);
+        grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride, seq_row_offsets);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

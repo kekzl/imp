@@ -112,6 +112,19 @@ TEST(RuntimeConfigTest, KvNvfp4DefaultSafeAllowlist) {
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::GENERIC));
 }
 
+// speculative.mtp_tree_width: 1 (the default) must mean EXACTLY the linear
+// MTP path — the multi-candidate machinery keys every branch on width > 1,
+// so a default that drifted above 1 would silently change drafting for every
+// MTP run. The binder must also reach the key (a typo here would measure the
+// default, which is the failure class apply_overrides' error contract exists
+// for).
+TEST(RuntimeConfigTest, MtpTreeWidthDefaultAndBinding) {
+    RuntimeConfig cfg;
+    EXPECT_EQ(cfg.speculative.mtp_tree_width, 1);
+    set_(cfg, {"speculative.mtp_tree_width=4"});
+    EXPECT_EQ(cfg.speculative.mtp_tree_width, 4);
+}
+
 // What an EXPLICIT dtype pin costs against the auto default. The pin that
 // motivates this is `IMP_KV_FP8=1`: correct when `auto` meant FP16, and since
 // the NVFP4 default it doubles the bytes per token on QWEN35 (max_model_len

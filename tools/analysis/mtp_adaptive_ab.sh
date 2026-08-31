@@ -6,6 +6,7 @@
 # Usage: bash tools/analysis/mtp_adaptive_ab.sh              # 3 rounds
 #        ROUNDS=2 CLASSES="poor" bash tools/analysis/mtp_adaptive_ab.sh
 #        THINK=1 CLASSES="poor" bash tools/analysis/mtp_adaptive_ab.sh
+#        ARMS="k2ad w2ad" THINK=1 bash tools/analysis/mtp_adaptive_ab.sh   # width axis
 # THINK=1 keeps the model's thinking on (drops --think-budget 0) and raises
 # max_tokens to 1024 - the think-traffic regime where a spec config must also
 # be judged (#1796: numbers praising a spec config need a think arm).
@@ -37,6 +38,10 @@ arm_flags(){ # arm -> --set flags
     k1)    echo "--set speculative.mtp_k=1" ;;
     k2fix) echo "--set speculative.mtp_k=2 --set speculative.mtp_adaptive_k=false" ;;
     k2ad)  echo "--set speculative.mtp_k=2" ;;
+    # Width axis (roadmap gap 5): W=2 multi-candidate chains on top of the
+    # fixed / adaptive depth-2 arms.
+    w2fix) echo "--set speculative.mtp_k=2 --set speculative.mtp_adaptive_k=false --set speculative.mtp_tree_width=2" ;;
+    w2ad)  echo "--set speculative.mtp_k=2 --set speculative.mtp_tree_width=2" ;;
   esac
 }
 

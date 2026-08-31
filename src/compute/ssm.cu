@@ -318,14 +318,29 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weig
 // Fused conv1d + SiLU + FP32 output for prefill.
 // Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one.
 // ---------------------------------------------------------------------------
+// seq_slots / slot_stride (grouped verify chunk, blockIdx.z = sequence): the
+// rows are gridDim.z groups of n_tokens each, group z reading and committing
+// the conv window of pool slot seq_slots[z] (stride in floats). nullptr =
+// the single-sequence launch (gridDim.z == 1, every rebase +0). The snapshot
+// is written from group 0 only - every group's row 0 is the same token from
+// the same committed window.
 __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     float* __restrict__ conv_state, const half* __restrict__ x_in, const half* __restrict__ weight,
     const half* __restrict__ bias, float* __restrict__ x_out_f32, int n_tokens, int channels, int kernel_size,
     const int* __restrict__ d_real_n, float* __restrict__ conv_snap, const int* __restrict__ d_snap_n,
-    const float* __restrict__ conv_prev) {
+    const float* __restrict__ conv_prev, const int* __restrict__ seq_slots = nullptr,
+    int64_t slot_stride = 0) {
     int token = blockIdx.x;
     if (token >= n_tokens)
         return;
+    const int seq = blockIdx.z;
+    if (seq_slots) {
+        conv_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(slot_stride);
+        x_in += static_cast<size_t>(seq) * n_tokens * channels;
+        x_out_f32 += static_cast<size_t>(seq) * n_tokens * channels;
+        if (seq != 0)
+            conv_snap = nullptr;
+    }
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
     // Second commit row for the speculative verify (see the h_state snapshot in
     // gdn.cu): the conv window as of snap_n rows. 0 disables it.
@@ -412,6 +427,26 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         x_out_f32, n_tokens, channels, conv_kernel, d_real_n, static_cast<float*>(conv_snap), d_snap_n,
         static_cast<const float*>(conv_prev));
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_slots, int64_t slot_stride,
+                                         int n_seq, const Tensor& x_in, const Tensor& weight,
+                                         const Tensor& bias, float* x_out_f32, int conv_kernel,
+                                         cudaStream_t stream, const int* d_real_n, void* conv_snap,
+                                         const int* d_snap_n, const void* conv_prev) {
+    if (n_seq <= 0)
+        return;
+    // x_in is [n_seq * n_tokens, channels]; the kernel rebases per group.
+    const int n_tokens = static_cast<int>(x_in.shape[0]) / n_seq;
+    const int channels = static_cast<int>(x_in.shape[1]);
+    constexpr int kThreads = 256;
+    dim3 grid(n_tokens, (channels + kThreads - 1) / kThreads, n_seq);
+    ssm_conv1d_prefill_f32_silu_kernel<<<grid, kThreads, 0, stream>>>(
+        static_cast<float*>(conv_state_pool), static_cast<const half*>(x_in.data),
+        static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
+        x_out_f32, n_tokens, channels, conv_kernel, d_real_n, static_cast<float*>(conv_snap), d_snap_n,
+        static_cast<const float*>(conv_prev), seq_slots, slot_stride);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

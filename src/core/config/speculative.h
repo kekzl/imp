@@ -168,6 +168,21 @@ struct Speculative {
     // pay for the 2x-costlier chunk; linear bucket-4 chunks ride the
     // single-sweep batched GEMV instead.
     int recycle_width = 1;
+    // MTP multi-candidate width (roadmap gap 5, route (a) over the trained
+    // head): W > 1 drafts W chains per verify step — chain 0 continues the
+    // head's top-1 as today, chains 1..W-1 branch at the FIRST position on
+    // the head's top-W ids and continue top-1 from there. The chains verify
+    // as one multi-candidate chunk (private KV blocks per candidate, longest
+    // matching prefix wins), which hedges the chain's weakest link: one
+    // rejected first token no longer kills the whole draft. Chain accept at
+    // depth 1 measures 74-78% top-1; the whole bet is the top-2..W coverage
+    // above that (diagnostics.mtp_tree_probe measures it — run the probe
+    // before raising this). Drafting stays device-side (no per-step host
+    // sync); width is capped so W * mtp_k fits the device chain buffer
+    // (kMtpMaxChainK) and W <= kMtpMaxTopW. Default 1 = exactly the linear
+    // path. Design + measurement gates:
+    // docs/plans/2026-08-31-mtp-multicandidate-hybrid.md.
+    int mtp_tree_width = 1;
     // SuffixDecoding-style indexed drafting (arXiv 2411.04975):
     // hash-indexed suffix matching (O(1) amortized vs the legacy O(n)
     // backward scan per verify step) with frequency-voted continuations

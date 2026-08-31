@@ -412,6 +412,48 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                             /*conv_snap=*/nullptr, /*d_snap_n=*/nullptr,
                                             /*conv_prev=*/nullptr);
             }
+        } else if (state.ssm_grouped_chunk()) {
+            // Multi-candidate verify chunk: ssm_n_seq candidate groups of
+            // ssm_seq_tokens rows, group c on the conv window of slot
+            // ssm_seq_slots[c] - the slot table is DEVICE data (like the
+            // scan's), so a partial-accept replay can swap the winner onto
+            // the live slot without re-capturing the graph. d_chunk_len is
+            // the per-group real row count; the snapshot (state after row 0)
+            // comes from group 0 only - every group's row 0 is the same token
+            // from the same committed state.
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpyAsync(xBC_out.data, xBC_in.data,
+                                static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
+                                cudaMemcpyDeviceToDevice, stream));
+            const int T = state.ssm_seq_tokens;
+            void* conv_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
+                                  ? state.ssm_state->conv_state_in(state.spec_snap_slab, ssm_idx)
+                                  : nullptr;
+            const void* conv_prev = (conv_snap && state.spec_prev_slab)
+                                        ? state.ssm_state->conv_state_in(state.spec_prev_slab, ssm_idx)
+                                        : nullptr;
+            int64_t grp_shape[2] = {static_cast<int64_t>(state.ssm_n_seq) * T,
+                                    static_cast<int64_t>(conv_channels)};
+            Tensor xBC_g(xBC_out.data, compute_dtype_, 2, grp_shape, true);
+            ssm_conv1d_prefill_f32_silu_grouped(
+                state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
+                static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)), state.ssm_n_seq,
+                xBC_g, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32, conv_kernel, stream, state.d_chunk_len,
+                conv_prev ? conv_snap : nullptr, conv_prev ? state.d_snap_n : nullptr, conv_prev);
+            // Bucket pad rows past the last group belong to no sequence: no
+            // conv ran for them, and the scan below writes no y for them.
+            // Zero both so the rows that feed the (discarded) pad outputs are
+            // finite rather than whatever the buffers held last.
+            const int grouped_rows = state.ssm_n_seq * T;
+            if (grouped_rows < n) {
+                const size_t pad_rows = static_cast<size_t>(n - grouped_rows);
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(conv_f32 + static_cast<size_t>(grouped_rows) * conv_channels,
+                                                   0, pad_rows * conv_channels * sizeof(float), stream));
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(
+                    static_cast<char*>(ssm_y_buf_.data) +
+                        static_cast<size_t>(grouped_rows) * n_heads * head_dim_ssm * dtype_size(compute_dtype_),
+                    0, pad_rows * n_heads * head_dim_ssm * dtype_size(compute_dtype_), stream));
+            }
         } else if (state.is_prefill) {
             // Fused: conv1d + SiLU + FP32 output in one kernel (saves 2 launches).
             // Copy FP16 input to xBC_out first to avoid aliasing (conv_f32 = ssm_proj_buf_ = xBC_in).
@@ -617,6 +659,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         if (state.ragged_prefill() && (use_fp32_scan || use_ref))
             throw std::runtime_error(
                 "run_gdn: ragged prefill incompatible with gdn.fp32_scan/gdn.ref_kernel");
+        // Same for the grouped verify chunk: only the fused batched scan has
+        // the per-sequence slot form (the engine's route gate refuses these
+        // configs before staging; this is the in-executor check).
+        if (state.ssm_grouped_chunk() && (use_fp32_scan || use_ref))
+            throw std::runtime_error(
+                "run_gdn: grouped verify chunk incompatible with gdn.fp32_scan/gdn.ref_kernel");
         if (use_fp32_scan) {
             // Layout in conv_f32 tail:
             //   [n*conv_channels)                : conv_f32 (done)
@@ -688,12 +736,20 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             //     and n_tokens is ignored per the gdn.h ragged contract.
             // The chunkwise path is a single-sequence prefill optimisation and
             // does not apply to either.
+            //   - grouped verify chunk (multi-candidate speculation on a
+            //     hybrid): ssm_n_seq candidates of ssm_seq_tokens rows each,
+            //     uniform seq * n_tokens rebase, the committed row bounded by
+            //     d_chunk_len (per group) and the row-0 snapshot from group 0.
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             const bool ragged = state.ragged_prefill();
+            const bool grouped = state.ssm_grouped_chunk();
             const int* row_offs = ragged ? state.seq_offsets : nullptr;
             if (ragged && !state.seq_offsets)
                 throw std::runtime_error("run_gdn: ragged prefill without device seq_offsets");
-            const int scan_n_tokens = 1;  // ignored when row_offs != nullptr
+            const int scan_n_tokens = grouped ? state.ssm_seq_tokens : 1;  // ignored when row_offs != nullptr
+            const int* real_n = grouped ? state.d_chunk_len : nullptr;
+            void* snap = grouped ? h_snap : nullptr;
+            const int* snap_n = snap ? state.d_snap_n : nullptr;
             if (state_bf16) {
                 gdn_scan_fused_bf16_batched(
                     conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
@@ -702,7 +758,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<__nv_bfloat16*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
                     static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(__nv_bfloat16)),
                     static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                    ssize, n_groups, stream, gl, /*d_real_n=*/nullptr, row_offs);
+                    ssize, n_groups, stream, gl, real_n, row_offs, static_cast<__nv_bfloat16*>(snap), snap_n);
             } else {
                 gdn_scan_fused_f32_batched(
                     conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
@@ -711,7 +767,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
                     static_cast<int64_t>(state.ssm_state->per_seq_bytes() / sizeof(float)),
                     static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                    ssize, n_groups, stream, gl, /*d_real_n=*/nullptr, row_offs);
+                    ssize, n_groups, stream, gl, real_n, row_offs, static_cast<float*>(snap), snap_n);
             }
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;

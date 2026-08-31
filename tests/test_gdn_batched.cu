@@ -413,5 +413,239 @@ TEST_F(GdnBatchedScanTest, Conv1dDecodeBatchedMatchesPerSequence) {
     cudaFree(d_pool); cudaFree(d_out); cudaFree(d_w); cudaFree(d_b); cudaFree(d_x); cudaFree(d_slots);
 }
 
+// ---------------------------------------------------------------------------
+// The grouped verify chunk (multi-candidate speculation on a hybrid): W
+// candidates as W uniform sequences of T rows each, every group committing
+// its state at d_real_n rows (the pads past it only define discarded y), and
+// the row-0 snapshot written from group 0 only. The reference is the shipped
+// single-sequence launcher run on the first real_n rows of each group.
+// ---------------------------------------------------------------------------
+
+TEST_F(GdnBatchedScanTest, GroupedChunkCommitsAtRealRowAndSnapshotsGroupZero) {
+    const ScanShape s{/*n_seq=*/3, /*n_tokens=*/5};
+    const std::vector<int> slots{4, 1, 2};
+    const int real_n = 3, snap_rows = 1;
+    const int conv_channels = 2 * s.n_groups * s.state_size + s.n_heads * s.head_dim;
+    const int inner = s.n_heads * s.head_dim;
+    const size_t rows = static_cast<size_t>(s.n_seq) * s.n_tokens;
+    const size_t state_elems = static_cast<size_t>(s.n_heads) * s.state_size * s.head_dim;
+    const int max_slot = *std::max_element(slots.begin(), slots.end());
+    const size_t pool_elems = static_cast<size_t>(max_slot + 1) * state_elems;
+
+    std::vector<float> h_conv(rows * conv_channels), h_alpha_f(rows * s.n_heads), h_beta_f(rows * s.n_heads);
+    std::vector<float> h_Alog(s.n_heads), h_dtb(s.n_heads), h_pool_init(pool_elems);
+    fill(h_conv, 4321);
+    fill(h_alpha_f, 8765, -2.0f, 2.0f);
+    fill(h_beta_f, 2109, -2.0f, 2.0f);
+    fill(h_Alog, 6543, -4.0f, -0.5f);
+    fill(h_dtb, 987, -1.0f, 1.0f);
+    fill(h_pool_init, 1357, -0.5f, 0.5f);
+    std::vector<half> h_alpha(h_alpha_f.size()), h_beta(h_beta_f.size());
+    for (size_t i = 0; i < h_alpha_f.size(); i++) h_alpha[i] = __float2half(h_alpha_f[i]);
+    for (size_t i = 0; i < h_beta_f.size(); i++) h_beta[i] = __float2half(h_beta_f[i]);
+
+    float *d_conv = nullptr, *d_Alog = nullptr, *d_dtb = nullptr, *d_pool = nullptr, *d_snap = nullptr;
+    half *d_alpha = nullptr, *d_beta = nullptr, *d_y = nullptr;
+    int *d_slots = nullptr, *d_lens = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_conv, h_conv.size() * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_alpha, h_alpha.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_beta, h_beta.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_Alog, h_Alog.size() * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_dtb, h_dtb.size() * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_pool, pool_elems * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_snap, state_elems * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y, rows * inner * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_slots, slots.size() * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_lens, 2 * sizeof(int)), cudaSuccess);
+    cudaMemcpy(d_conv, h_conv.data(), h_conv.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha.data(), h_alpha.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta.data(), h_beta.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Alog, h_Alog.data(), h_Alog.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dtb, h_dtb.data(), h_dtb.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_slots, slots.data(), slots.size() * sizeof(int), cudaMemcpyHostToDevice);
+    const int lens[2] = {real_n, snap_rows};
+    cudaMemcpy(d_lens, lens, sizeof(lens), cudaMemcpyHostToDevice);
+
+    auto seq_ptr = [&](int i, size_t per_row) { return static_cast<size_t>(i) * s.n_tokens * per_row; };
+
+    // ---- reference: per group, the single launcher over its first real_n rows
+    cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    for (int i = 0; i < s.n_seq; i++) {
+        gdn_scan_fused_f32(d_conv + seq_ptr(i, conv_channels), conv_channels, d_alpha + seq_ptr(i, s.n_heads),
+                           d_beta + seq_ptr(i, s.n_heads), d_Alog, d_dtb,
+                           d_pool + static_cast<size_t>(slots[i]) * state_elems, d_y + seq_ptr(i, inner),
+                           real_n, s.n_heads, s.head_dim, s.state_size, s.n_groups, nullptr,
+                           /*grouped_layout=*/1);
+    }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> pool_ref(pool_elems);
+    cudaMemcpy(pool_ref.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    // ... and group 0 after one row: the snapshot's reference.
+    cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb,
+                       d_pool + static_cast<size_t>(slots[0]) * state_elems, d_y, snap_rows, s.n_heads,
+                       s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> snap_ref(state_elems);
+    cudaMemcpy(snap_ref.data(), d_pool + static_cast<size_t>(slots[0]) * state_elems,
+               state_elems * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // ---- grouped: one launch over all n_tokens rows, committed at real_n
+    cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_snap, 0, state_elems * sizeof(float));
+    cudaMemset(d_y, 0, rows * inner * sizeof(half));
+    gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_slots,
+                               static_cast<int64_t>(state_elems), d_y, s.n_seq, s.n_tokens, s.n_heads,
+                               s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1,
+                               /*d_real_n=*/d_lens, /*seq_row_offsets=*/nullptr, d_snap, d_lens + 1);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> pool_grp(pool_elems), snap_grp(state_elems);
+    std::vector<half> y_grp(rows * inner);
+    cudaMemcpy(pool_grp.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(snap_grp.data(), d_snap, state_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y_grp.data(), d_y, y_grp.size() * sizeof(half), cudaMemcpyDeviceToHost);
+
+    auto rms = [](const std::vector<float>& v) {
+        double ss = 0.0;
+        for (float x : v) ss += double(x) * double(x);
+        return std::max(1e-9, std::sqrt(ss / static_cast<double>(v.size())));
+    };
+    auto worst = [](const std::vector<float>& a, const std::vector<float>& b, size_t off, size_t n) {
+        double w = 0.0;
+        for (size_t i = off; i < off + n; i++) w = std::max(w, std::abs(double(a[i]) - double(b[i])));
+        return w;
+    };
+    const double scale = rms(pool_ref);
+    // Every group's committed state is the state after real_n rows - the pads
+    // advanced nothing (SPLIT=2 rounding tolerance, see the header comment).
+    for (int i = 0; i < s.n_seq; i++) {
+        const size_t off = static_cast<size_t>(slots[i]) * state_elems;
+        EXPECT_LT(worst(pool_ref, pool_grp, off, state_elems) / scale, 1e-3)
+            << "group " << i << " (slot " << slots[i] << ") did not commit at real_n=" << real_n;
+    }
+    // Slots no group owns are untouched.
+    for (int sl = 0; sl <= max_slot; sl++) {
+        if (std::find(slots.begin(), slots.end(), sl) != slots.end()) continue;
+        EXPECT_EQ(worst(h_pool_init, pool_grp, static_cast<size_t>(sl) * state_elems, state_elems), 0.0)
+            << "unowned slot " << sl << " was written";
+    }
+    // The snapshot is group 0 after snap_rows rows - and it moved.
+    EXPECT_LT(worst(snap_ref, snap_grp, 0, state_elems) / scale, 1e-3) << "snapshot is not group 0's row-0 state";
+    size_t snap_nonzero = 0;
+    for (float x : snap_grp) if (x != 0.0f) snap_nonzero++;
+    EXPECT_GT(snap_nonzero, state_elems / 4) << "snapshot slab was not written";
+    // Pad rows still get a finite y (their output is discarded, not read as NaN).
+    size_t y_nonfinite = 0;
+    for (const half& v : y_grp) if (!std::isfinite(__half2float(v))) y_nonfinite++;
+    EXPECT_EQ(y_nonfinite, 0u);
+
+    cudaFree(d_conv); cudaFree(d_alpha); cudaFree(d_beta); cudaFree(d_Alog); cudaFree(d_dtb);
+    cudaFree(d_pool); cudaFree(d_snap); cudaFree(d_y); cudaFree(d_slots); cudaFree(d_lens);
+}
+
+TEST_F(GdnBatchedScanTest, GroupedConvCommitsPerSlotAndSnapshotsGroupZero) {
+    // The conv half of the grouped verify chunk: n_seq groups of n_tokens
+    // rows, each on the window of slot seq_slots[z], committed at real_n rows;
+    // the snapshot (window after snap_rows rows, leading values from the
+    // PRE-chunk copy) from group 0 only. Reference: the single-sequence
+    // prefill conv per group over its first real_n rows.
+    const int n_seq = 3, n_tokens = 5, real_n = 3, snap_rows = 1, channels = 2048, ksize = 4;
+    const std::vector<int> slots{4, 1, 2};
+    const int max_slot = 4;
+    const size_t win = static_cast<size_t>(channels) * ksize;
+    const size_t pool_elems = static_cast<size_t>(max_slot + 1) * win;
+    const size_t rows = static_cast<size_t>(n_seq) * n_tokens;
+
+    std::vector<float> h_pool_init(pool_elems), h_w(win), h_b(channels), h_xf(rows * channels);
+    fill(h_pool_init, 101, -1.0f, 1.0f);
+    fill(h_w, 202, -0.5f, 0.5f);
+    fill(h_b, 303, -0.2f, 0.2f);
+    fill(h_xf, 404, -2.0f, 2.0f);
+    std::vector<half> h_wh(win), h_bh(channels), h_x(h_xf.size());
+    for (size_t i = 0; i < win; i++) h_wh[i] = __float2half(h_w[i]);
+    for (int i = 0; i < channels; i++) h_bh[i] = __float2half(h_b[i]);
+    for (size_t i = 0; i < h_xf.size(); i++) h_x[i] = __float2half(h_xf[i]);
+
+    float *d_pool = nullptr, *d_out = nullptr, *d_snap = nullptr, *d_prev = nullptr;
+    half *d_w = nullptr, *d_b = nullptr, *d_x = nullptr;
+    int *d_slots = nullptr, *d_lens = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_pool, pool_elems * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, rows * channels * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_snap, win * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_prev, win * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w, win * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_b, channels * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, h_x.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_slots, n_seq * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_lens, 2 * sizeof(int)), cudaSuccess);
+    cudaMemcpy(d_w, h_wh.data(), win * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_bh.data(), channels * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_slots, slots.data(), n_seq * sizeof(int), cudaMemcpyHostToDevice);
+    const int lens[2] = {real_n, snap_rows};
+    cudaMemcpy(d_lens, lens, sizeof(lens), cudaMemcpyHostToDevice);
+    // The pre-chunk copy of group 0's window (the engine's spec_state_scratch_).
+    cudaMemcpy(d_prev, h_pool_init.data() + static_cast<size_t>(slots[0]) * win, win * sizeof(float),
+               cudaMemcpyHostToDevice);
+
+    Tensor w{}; w.data = d_w; w.ndim = 2; w.shape[0] = channels; w.shape[1] = ksize; w.qtype = QType::F16;
+    Tensor b{}; b.data = d_b; b.ndim = 1; b.shape[0] = channels; b.qtype = QType::F16;
+
+    // reference: per group, first real_n rows, snapshot from group 0
+    cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_out, 0, rows * channels * sizeof(float));
+    cudaMemset(d_snap, 0, win * sizeof(float));
+    for (int i = 0; i < n_seq; i++) {
+        Tensor xs{}; xs.data = d_x + static_cast<size_t>(i) * n_tokens * channels; xs.ndim = 2;
+        xs.shape[0] = real_n; xs.shape[1] = channels; xs.qtype = QType::F16;
+        ssm_conv1d_prefill_f32_silu(d_pool + static_cast<size_t>(slots[i]) * win, xs, w, b,
+                                    d_out + static_cast<size_t>(i) * n_tokens * channels, ksize, nullptr,
+                                    /*d_real_n=*/nullptr, i == 0 ? d_snap : nullptr,
+                                    i == 0 ? d_lens + 1 : nullptr, i == 0 ? d_prev : nullptr);
+    }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> pool_a(pool_elems), out_a(rows * channels), snap_a(win);
+    cudaMemcpy(pool_a.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_a.data(), d_out, out_a.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(snap_a.data(), d_snap, win * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // grouped: one launch over all n_tokens rows per group
+    cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_out, 0, rows * channels * sizeof(float));
+    cudaMemset(d_snap, 0, win * sizeof(float));
+    Tensor xg{}; xg.data = d_x; xg.ndim = 2; xg.shape[0] = static_cast<int64_t>(rows); xg.shape[1] = channels;
+    xg.qtype = QType::F16;
+    ssm_conv1d_prefill_f32_silu_grouped(d_pool, d_slots, static_cast<int64_t>(win), n_seq, xg, w, b, d_out,
+                                        ksize, nullptr, d_lens, d_snap, d_lens + 1, d_prev);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> pool_b(pool_elems), out_b(rows * channels), snap_b(win);
+    cudaMemcpy(pool_b.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_b.data(), d_out, out_b.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(snap_b.data(), d_snap, win * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Same arithmetic per element - bit-compare. Windows: every slot (owned
+    // ones committed at real_n, unowned ones untouched); outputs: the first
+    // real_n rows of every group; snapshot: group 0's.
+    size_t sd = 0, od = 0, snd = 0, pad_nonfinite = 0;
+    for (size_t i = 0; i < pool_elems; i++) if (pool_a[i] != pool_b[i]) sd++;
+    for (int g = 0; g < n_seq; g++)
+        for (size_t i = 0; i < static_cast<size_t>(real_n) * channels; i++) {
+            const size_t k = static_cast<size_t>(g) * n_tokens * channels + i;
+            if (out_a[k] != out_b[k]) od++;
+        }
+    for (size_t i = 0; i < win; i++) if (snap_a[i] != snap_b[i]) snd++;
+    for (size_t i = 0; i < out_b.size(); i++) if (!std::isfinite(out_b[i])) pad_nonfinite++;
+    EXPECT_EQ(sd, 0u) << "conv windows differ in " << sd << " of " << pool_elems;
+    EXPECT_EQ(od, 0u) << "conv outputs differ in " << od << " real-row elements";
+    EXPECT_EQ(snd, 0u) << "group-0 snapshot differs in " << snd << " of " << win;
+    EXPECT_EQ(pad_nonfinite, 0u);
+    size_t snap_moved = 0;
+    for (size_t i = 0; i < win; i++) if (snap_b[i] != h_pool_init[static_cast<size_t>(slots[0]) * win + i]) snap_moved++;
+    EXPECT_GT(snap_moved, 0u) << "snapshot window did not move";
+
+    cudaFree(d_pool); cudaFree(d_out); cudaFree(d_snap); cudaFree(d_prev); cudaFree(d_w); cudaFree(d_b);
+    cudaFree(d_x); cudaFree(d_slots); cudaFree(d_lens);
+}
+
 }  // namespace
 }  // namespace imp

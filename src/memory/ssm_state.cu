@@ -1,4 +1,6 @@
 #include "memory/ssm_state.h"
+
+#include <algorithm>
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -16,9 +18,10 @@ SSMState::~SSMState() {
 }
 
 bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel, int n_heads,
-                    int head_dim_ssm, int state_size, QType h_dtype, VRAMAllocator* alloc) {
+                    int head_dim_ssm, int state_size, QType h_dtype, VRAMAllocator* alloc, int n_reserved) {
     n_ssm_layers_ = n_ssm_layers;
     max_sequences_ = max_sequences;
+    n_reserved_ = std::max(0, n_reserved);
     h_dtype_ = h_dtype;
     alloc_ = alloc;
 
@@ -34,7 +37,7 @@ bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int 
 
     per_layer_bytes_ = conv_bytes_ + h_bytes_;
     per_seq_bytes_ = per_layer_bytes_ * n_ssm_layers_;
-    total_bytes_ = per_seq_bytes_ * max_sequences_;
+    total_bytes_ = per_seq_bytes_ * static_cast<size_t>(max_sequences_ + n_reserved_);
 
     if (alloc_) {
         pool_ = alloc_->allocate(total_bytes_, "ssm_state");
@@ -82,7 +85,7 @@ void* SSMState::h_state(int seq_id, int ssm_layer_idx) {
 }
 
 void SSMState::reset_sequence(int seq_id, cudaStream_t stream) {
-    if (!pool_ || seq_id < 0 || seq_id >= max_sequences_)
+    if (!pool_ || seq_id < 0 || seq_id >= max_sequences_ + n_reserved_)
         return;
     char* base = static_cast<char*>(pool_) + seq_id * per_seq_bytes_;
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(base, 0, per_seq_bytes_, stream));
