@@ -7,6 +7,7 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cmath>
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 
@@ -80,6 +81,7 @@ __global__ void rmsnorm_fp16_kernel(const __half* __restrict__ x, const __half* 
 
     // Pass 1: vectorized sum-of-squares
     float sum_sq = 0.0f;
+    pdl_wait();
     for (int i = threadIdx.x; i < d_vec; i += blockDim.x) {
         float4 v = x_vec[i];
         half2 h0 = *reinterpret_cast<half2*>(&v.x);
@@ -98,6 +100,7 @@ __global__ void rmsnorm_fp16_kernel(const __half* __restrict__ x, const __half* 
         s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
     }
     __syncthreads();
+    pdl_trigger();
     const float inv_rms = s_inv_rms;
 
     // Pass 2: vectorized normalize + scale (x re-read hits L1 cache)
@@ -161,6 +164,7 @@ __global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
     float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(row) * d_model);
 
     float sum_sq = 0.0f;
+    pdl_wait();
     for (int i = lane; i < d_vec; i += 32) {
         float4 v = x_vec[i];
         half2 h0 = *reinterpret_cast<half2*>(&v.x);
@@ -176,6 +180,7 @@ __global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
     for (int off = 16; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFFu, sum_sq, off);
     const float inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+    pdl_trigger();
 
     for (int i = lane; i < d_vec; i += 32) {
         float4 xv = x_vec[i];
@@ -259,6 +264,7 @@ __global__ void rmsnorm_residual_fp16_kernel(__half* __restrict__ x, const __hal
     float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(row) * d_model);
 
     float sum_sq = 0.0f;
+    pdl_wait();
     for (int i = threadIdx.x; i < d_vec; i += blockDim.x) {
         float4 xv = x_vec[i];
         float4 rv = r_vec[i];
@@ -301,6 +307,7 @@ __global__ void rmsnorm_residual_fp16_kernel(__half* __restrict__ x, const __hal
         s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
     }
     __syncthreads();
+    pdl_trigger();
     const float inv_rms = s_inv_rms;
 
     for (int i = threadIdx.x; i < d_vec; i += blockDim.x) {
@@ -505,10 +512,10 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual, const Tensor& wei
 // PDL registration
 // --------------------------------------------------------------------------
 void layernorm_pdl_register() {
+    // Only kernels that call pdl_wait() may be registered (compute/pdl_device.cuh).
     pdl::enable(reinterpret_cast<const void*>(&rmsnorm_fp16_kernel));
-    pdl::enable(reinterpret_cast<const void*>(&rmsnorm_fp32_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&rmsnorm_fp16_warp_kernel));
     pdl::enable(reinterpret_cast<const void*>(&rmsnorm_residual_fp16_kernel));
-    pdl::enable(reinterpret_cast<const void*>(&rmsnorm_residual_fp32_kernel));
 }
 
 // --------------------------------------------------------------------------

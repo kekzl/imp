@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 
@@ -23,6 +24,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_qkv_fused_kernel(
     const uint8_t* __restrict__ packed_v, const uint8_t* __restrict__ ms_v, float ts_v,
     const half* __restrict__ x, half* __restrict__ yq, half* __restrict__ yk, half* __restrict__ yv,
     int q_rows, int k_rows, int v_rows, int K) {
+    pdl_wait();
     const int bid = blockIdx.x;
     const int tid = threadIdx.x;
     const int K_half = K / 2;
@@ -57,6 +59,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_qkv_fused_kernel(
     }
 
     float acc = gemv_nvfp4_row(row_packed, row_ms, ts, x, n_mb, tid);
+    pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
         out[local_row] = __float2half(total);
@@ -70,6 +73,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_gate_up_fused_ker
     const uint8_t* __restrict__ packed_g, const uint8_t* __restrict__ ms_g, float ts_g,
     const uint8_t* __restrict__ packed_u, const uint8_t* __restrict__ ms_u, float ts_u,
     const half* __restrict__ x, half* __restrict__ yg, half* __restrict__ yu, int rows, int K) {
+    pdl_wait();
     const int bid = blockIdx.x;
     const int tid = threadIdx.x;
     const int K_half = K / 2;
@@ -98,6 +102,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_gate_up_fused_ker
     }
 
     float acc = gemv_nvfp4_row(row_packed, row_ms, ts, x, n_mb, tid);
+    pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
         out[local_row] = __float2half(total);
@@ -123,6 +128,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_qkv_fused_mr_kernel(
     const int total_rows = q_rows + k_rows + v_rows;
     if (global_row >= total_rows || warp_id >= NR)
         return;
+    pdl_wait();
 
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
@@ -157,6 +163,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_qkv_fused_mr_kernel(
         return dot_micro_block(pb, x, off);
     });
 
+    pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
         out[local_row] = __float2half(acc);
@@ -174,6 +181,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gate_up_fused_mr_kernel
     const int total_rows = 2 * rows;
     if (global_row >= total_rows || warp_id >= NR)
         return;
+    pdl_wait();
 
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
@@ -202,6 +210,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gate_up_fused_mr_kernel
         return dot_micro_block(pb, x, off);
     });
 
+    pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
         out[local_row] = __float2half(acc);

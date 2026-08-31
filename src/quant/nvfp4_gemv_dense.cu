@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 
@@ -22,6 +23,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_kpar_kernel(
     const int row = blockIdx.x;
     if (row >= M)
         return;
+    pdl_wait();
 
     const int tid = threadIdx.x;
     const int K_half = K / 2;
@@ -32,6 +34,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_kpar_kernel(
     float acc = gemv_nvfp4_row(packed_data + (int64_t)row * K_half, micro_scales + (int64_t)row * n_mb,
                                tensor_scale, x, n_mb, tid);
 
+    pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
         y[row] = __float2half(total);
@@ -44,6 +47,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_kpar_fp32_kernel(
     const int row = blockIdx.x;
     if (row >= M)
         return;
+    pdl_wait();
 
     const int tid = threadIdx.x;
     const int n_mb = K / kMicroBlockSize;
@@ -53,6 +57,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_kpar_fp32_kernel(
     float acc = gemv_nvfp4_row(packed_data + (int64_t)row * (K / 2), micro_scales + (int64_t)row * n_mb,
                                tensor_scale, x, n_mb, tid);
 
+    pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
         y[row] = total;
@@ -78,6 +83,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_kernel(
     const int row = block_row_base + warp_id;
     if (row >= M || warp_id >= NR)
         return;
+    pdl_wait();
 
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
@@ -87,6 +93,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_kernel(
                             [&]
                             __device__(const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
 
+    pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
         y[row] = __float2half(acc);
@@ -107,6 +114,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_fp32_kernel(
     const int row = block_row_base + warp_id;
     if (row >= M || warp_id >= NR)
         return;
+    pdl_wait();
 
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
@@ -115,6 +123,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_fp32_kernel(
                             [&]
                             __device__(const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
 
+    pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
         y[row] = acc;
@@ -129,6 +138,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_residual_kernel(
     const int row = blockIdx.x;
     if (row >= M)
         return;
+    pdl_wait();
 
     const int tid = threadIdx.x;
     const int K_half = K / 2;
@@ -139,6 +149,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_residual_kernel(
     float acc = gemv_nvfp4_row(packed_data + (int64_t)row * K_half, micro_scales + (int64_t)row * n_mb,
                                tensor_scale, x, n_mb, tid);
 
+    pdl_trigger();
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
         y[row] = __float2half(total + __half2float(residual[row]));
@@ -157,6 +168,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_swiglu_residual_k
     const int row = blockIdx.x;
     if (row >= M)
         return;
+    pdl_wait();
 
     const int tid = threadIdx.x;
     const int K_half = K / 2;
@@ -170,6 +182,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_swiglu_residual_k
     float acc = gemv_nvfp4_row_swiglu(packed_data + (int64_t)row * K_half, micro_scales + (int64_t)row * n_mb,
                                       tensor_scale, gate, up, n_mb, tid, s_lut);
 
+    pdl_trigger();
     float total = reduce_kpar(acc, tid, warp_sums);
     if (tid == 0)
         y[row] = __float2half(total + __half2float(residual[row]));
@@ -185,6 +198,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_geglu_residual_ke
     const int row = blockIdx.x;
     if (row >= M)
         return;
+    pdl_wait();
 
     const int tid = threadIdx.x;
     const int K_half = K / 2;
@@ -208,6 +222,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_geglu_residual_ke
         acc = __fmaf_rn(local_dot, cs, acc);
     }
 
+    pdl_trigger();
     float total = reduce_kpar(acc, tid, warp_sums);
     if (tid == 0)
         y[row] = __float2half(total + __half2float(residual[row]));
@@ -223,6 +238,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_residual_mr_kernel(
     const int row = blockIdx.x * NR + warp_id;
     if (row >= M || warp_id >= NR)
         return;
+    pdl_wait();
 
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
@@ -234,6 +250,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_residual_mr_kernel(
                             [&]
                             __device__(const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
 
+    pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
         y[row] = __float2half(acc + __half2float(residual[row]));
@@ -250,6 +267,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_swiglu_residual_mr_kern
     const int row = blockIdx.x * NR + warp_id;
     if (row >= M || warp_id >= NR)
         return;
+    pdl_wait();
 
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
@@ -266,6 +284,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_swiglu_residual_mr_kern
                                 return dot_micro_block_swiglu(pb, gate, up, off, s_lut);
                             });
 
+    pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
         y[row] = __float2half(acc + __half2float(residual[row]));
@@ -282,6 +301,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_geglu_residual_mr_kerne
     const int row = blockIdx.x * NR + warp_id;
     if (row >= M || warp_id >= NR)
         return;
+    pdl_wait();
 
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
@@ -298,6 +318,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_geglu_residual_mr_kerne
                                 return dot_micro_block_geglu(pb, gate, up, off, s_lut);
                             });
 
+    pdl_trigger();
     acc = warp_reduce(acc);
     if (lane == 0)
         y[row] = __float2half(acc + __half2float(residual[row]));

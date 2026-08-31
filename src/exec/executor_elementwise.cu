@@ -5,6 +5,7 @@
 
 #include <cuda_bf16.h>
 #include <algorithm>
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 
@@ -44,6 +45,8 @@ __global__ __launch_bounds__(256) void elementwise_add_fp16_kernel(half* __restr
                                                                    const half* __restrict__ b, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t n2 = n / 2;
+    pdl_wait();
+    pdl_trigger();  // one load + one store per thread: let the next grid in now
     if (idx < n2) {
         half2* a2 = reinterpret_cast<half2*>(a);
         const half2* b2 = reinterpret_cast<const half2*>(b);
@@ -392,6 +395,8 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
 // path is the norm).
 __global__ void device_copy_v4_kernel(const uint4* __restrict__ src, uint4* __restrict__ dst, size_t n4) {
     size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    pdl_wait();
+    pdl_trigger();
     if (i < n4)
         dst[i] = src[i];
 }
@@ -407,7 +412,8 @@ void device_copy_async(void* dst, const void* src, size_t bytes, cudaStream_t st
         size_t n4 = bytes / 16;
         int threads = 256;
         int blocks = static_cast<int>((n4 + threads - 1) / threads);
-        device_copy_v4_kernel<<<blocks, threads, 0, stream>>>(static_cast<const uint4*>(src),
+        pdl::enable_kernel(device_copy_v4_kernel);
+        pdl::launch(device_copy_v4_kernel, dim3(blocks), dim3(threads), size_t(0), stream,static_cast<const uint4*>(src),
                                                               static_cast<uint4*>(dst), n4);
         IMP_CUDA_CHECK_LAUNCH();
         return;

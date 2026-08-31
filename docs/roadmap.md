@@ -110,10 +110,20 @@ Ranked by what an agent workload notices first.
    | adaptive MTP chain depth (M=1) | SHIPPED default-on | AIMD 1..mtp_k on acceptance, econ guard prices the depth that ran; mtp_k=2+ngram=false: think chats 111.1-113.3 vs 106.3-108.0 (k=1) and 94.9-110.2 (fixed k=2, bistable); draft-rich 158.1 (parity with fixed, +31% vs k=1); no-think prose 107.8 vs 105.0 fixed / 109.4 k=1. Harness `tools/analysis/mtp_adaptive_ab.sh` | `speculative.mtp_adaptive_k`, #1801 |
    | `mtp_k=auto` as the default (M=1) | SHIPPED default-on | single-stream on a checkpoint with an MTP head drafts with it: 95.8 -> 141.6 tok/s (+48%), Qwen3.8-27B-NVFP4 thinking, 3 alternating rounds, degen 50/0. Declines for concurrent serving | `speculative.mtp_k=-1`, #1809 (+ #1811, it read the raw flag not the resolved batch) |
    | NVFP4 paged-decode load width (M=1) | SHIPPED | one word per lane instead of one `LDG.E.U8` per byte, K and V issued before the warp reduction: 64.0 -> 74.1 tok/s @77k (+15.7%, forced-equal emissions). 4-bit KV went from 13.5% SLOWER than 8-bit to 2.3% faster, which is what makes `dtype=auto` right on both axes here | #1817 |
+   | PDL device half (`griddepcontrol.wait`/`launch_dependents` in the decode kernels, consumer-keyed graph edges) | SHIPPED default-on | final build: M=1 spec-off pairs 83.88 -> 85.31, 83.78 -> 89.23, 83.91 -> 83.63 tok/s (+1.7% median; host level drifted 84-89 at healthy clocks, pairs only); @32 pairs 1705.4 -> 1709.5, 1688.1 -> 1730.3, 1723.5 -> 1728.0 (3/3 positive, +1.3% median; every @32 series today 3/3); idle 13.6% -> 10.8%, merged device intervals 1.27M -> 0.86M gaps. Kernels without a wait stay unregistered (the blanket list raced greedy determinism). Control `runtime.no_pdl=true` | 2026-08-31 |
    | batched ban + penalty sweep (serving default `repetition_penalty` 1.05 + 19 banned ids put every row on the inline chain) | SHIPPED | 1766.9 -> 1774.9 tok/s @32 medians; pairs (base -> new) 1747.7 -> 1772.8 (+1.4%), 1772.4 -> 1774.9 (+0.1%), 1766.9 -> 1782.2 (+0.9%), 3/3 positive; 2 launches per row per step -> 1 sweep per step; re-profiled: steady-window idle 14.9% -> 13.6%, sub-100-us gaps 1127 -> 898 ms per 18 s window, the per-row pair gone from the gap table. Harness `tools/analysis/two_image_conc_ab.sh` | 2026-08-31 |
    | serving idle re-attributed on the current build (nsys node-trace, steady window) | MEASURED | idle 14.9% of wall; >1 ms gaps (45% of idle) are CUPTI-inflated graph captures at the wave ramp (waves with and without them run 5.57 vs 5.51 s); real idle ~8%: launch density 6.3% (~1350 gaps/step, 0.4 us avg inside the replay; 16.7k gaps of 10-100 us = per-row sampling chain + 8 pageable H2Ds/step at ~14 us), host turnaround 1.9% (~2 gaps/step of ~200 us). Harness: `tools/analysis/serving_idle_profile.sh` | 2026-08-31 |
    | sparse decode at concurrent long context | SHIPPED opt-in | 3 streams x 25k, Qwen3-8B-Q8_0 fp8-KV: 155.6 -> 197.7 tok/s (+27%, 3 alternating trials); metadata now one batched launch per forward. Harness `tools/analysis/serving_sparse_ab.sh` | `attention.sparse_topk_tokens`, #1808 |
 
+   ```
+   [PROV: commit=a65200b3+pdl date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4
+          quant=NVFP4 cuda=13.3 path=imp-cli --bench --bench-pp 512 --bench-reps 3
+          --set speculative.ngram=false --set speculative.mtp_k=0 --set
+          runtime.no_pdl=true|false, 3 alternating rounds, dev build; @32:
+          tools/analysis/two_image_conc_ab.sh imp:ab-base (a65200b3) vs imp:test
+          (pdl), 3 alternating trials, median of 3 waves; idle:
+          tools/analysis/serving_idle_profile.sh window 14-32 s]
+   ```
    ```
    [PROV: commit=f0c57e64 date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4
           quant=NVFP4 cuda=13.3 path=imp-server 32 streams x 3 waves x 300 greedy

@@ -9,6 +9,8 @@
 #include <cuda_bf16.h>
 #include <cstdio>
 #include <cstring>
+#include "compute/pdl_device.cuh"
+#include "runtime/pdl.h"
 
 namespace imp {
 
@@ -140,6 +142,7 @@ __global__ void gemv_fp16_kernel(const half* __restrict__ A, const half* __restr
 
     if (row >= M)
         return;
+    pdl_wait();
 
     const half* A_row = A + (int64_t)row * K;
 
@@ -312,7 +315,8 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
                 const half* A_ptr = static_cast<const half*>(A.data);
                 const half* x_ptr = static_cast<const half*>(x.data) + (int64_t)b * K;
                 half* y_ptr = static_cast<half*>(y.data) + (int64_t)b * M;
-                gemv_fp16_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
+                pdl::enable_kernel(gemv_fp16_kernel);
+                pdl::launch(gemv_fp16_kernel, dim3(blocks), dim3(kGemvThreads), size_t(0), stream, A_ptr, x_ptr, y_ptr, M, K);
                 IMP_CUDA_CHECK_LAUNCH();
                 break;
             }

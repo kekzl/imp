@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 
@@ -36,6 +37,7 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
 
     float4 v[kVecs];
     float sum_sq = 0.0f;
+    pdl_wait();  // first global read follows
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
         const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
@@ -69,6 +71,7 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
     }
     __syncthreads();
     const float inv_rms = s_inv;
+    pdl_trigger();  // inputs are in registers; only the weight read + stores remain
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
         const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
@@ -115,6 +118,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
 
     float4 v[kVecs];
     float sum_sq = 0.0f;
+    pdl_wait();  // first global read follows
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
         const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
@@ -148,6 +152,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
     }
     __syncthreads();
     const float inv_rms = s_inv;
+    pdl_trigger();  // inputs are in registers; only the weight read + stores remain
 
     const int64_t packed_row = static_cast<int64_t>(blockIdx.x) * (d_model >> 1);
     const int64_t scales_row = static_cast<int64_t>(blockIdx.x) * (d_model >> 4);
@@ -202,14 +207,17 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
 // --------------------------------------------------------------------------
 void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, int rows, int d_model,
                            float eps, cudaStream_t stream, float weight_offset) {
-    if ((d_model >> 3) <= 512)
+    if ((d_model >> 3) <= 512) {
+        pdl::enable_kernel(rmsnorm_fp16_rowblock_kernel<1>);
         pdl::launch(rmsnorm_fp16_rowblock_kernel<1>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
                     static_cast<__half*>(out.data), d_model, eps, weight_offset);
-    else
+    } else {
+        pdl::enable_kernel(rmsnorm_fp16_rowblock_kernel<2>);
         pdl::launch(rmsnorm_fp16_rowblock_kernel<2>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
                     static_cast<__half*>(out.data), d_model, eps, weight_offset);
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -225,14 +233,17 @@ bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* 
     if (x.qtype != QType::F16 || rows < 2 || rows > 64 || (d_model & 255) != 0 ||
         (d_model >> 3) > 1024)
         return false;
-    if ((d_model >> 3) <= 512)
+    if ((d_model >> 3) <= 512) {
+        pdl::enable_kernel(rmsnorm_fp16_rowblock_nvfp4_kernel<1>);
         pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<1>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
                     static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset);
-    else
+    } else {
+        pdl::enable_kernel(rmsnorm_fp16_rowblock_nvfp4_kernel<2>);
         pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<2>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
                     static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset);
+    }
     return true;
 }
 

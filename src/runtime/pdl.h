@@ -31,20 +31,17 @@ void enable_kernel(KernelFunc func) {
 // kernel.  Falls back to standard <<<>>> launch when PDL is not
 // enabled/available.
 //
-// THIS DOES NOT PRODUCE TAIL/HEAD OVERLAP TODAY, and this comment used to say
-// that it did (#1655). Programmatic dependent launch is two halves: the host
-// attribute here, and a device half in the kernels themselves. No kernel in
-// src/ calls cudaTriggerProgrammaticLaunchCompletion() or
-// cudaGridDependencySynchronize(), so a producer's completion event fires only
-// after its last block exits, which is exactly when the default dependency
-// would have released the consumer. Same schedule, extra machinery.
-//
-// Measured before deciding to keep it (Qwen3-8B-Q8_0, RTX 5090, 3 alternating
-// rounds of `imp-cli --bench --bench-pp 512 --bench-reps 3`): runtime.no_pdl
-// true against false is 12508 vs 12455 tok/s prefill and 385.8 vs 382.3 tok/s
-// decode, both inside their own arms' spread. It costs nothing measurable and
-// buys nothing measurable. docs/DESIGN_DECISIONS.md says why it is still here
-// rather than deleted.
+// Device half (2026-08-31, compute/pdl_device.cuh): a registered kernel calls
+// pdl_wait() before its first global access and pdl_trigger() after its last
+// input read, so a programmatic edge really lets the consumer's blocks land
+// on the SMs during the producer's tail. Registration is the promise that
+// the kernel waits (cuda_graph.cu converts an edge only when the CONSUMER is
+// registered); a kernel without pdl_wait() must never be registered. The
+// launch sites register themselves (pdl::enable_kernel right before
+// pdl::launch) so every template instantiation that runs is covered.
+// Before the device half, this attribute was inert (#1655 measured
+// runtime.no_pdl true vs false inside noise); runtime.no_pdl=true remains
+// the control arm and turns both halves off.
 //
 // Usage:
 //   pdl::launch(my_kernel, grid, block, smem, stream, arg1, arg2, ...);

@@ -5,6 +5,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include "compute/pdl_device.cuh"
+#include "runtime/pdl.h"
 
 namespace imp {
 
@@ -60,6 +62,8 @@ __global__ void embedding_lookup_vec_kernel(const T* __restrict__ table,
 
     const int token = blockIdx.x;
     const int tid = threadIdx.x;
+    pdl_wait();     // token_ids is the previous step's sampled slot
+    pdl_trigger();  // one row copy: let the norm that follows in now
     const int row = token_ids[token];
     const int vec_d = d_model / 4;  // number of vector elements per row
 
@@ -193,9 +197,10 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
         }
         case QType::F16: {
             if (d_model % 4 == 0) {
-                embedding_lookup_vec_kernel<__half>
-                    <<<n_tokens, block, 0, stream>>>(static_cast<const __half*>(table.data), token_ids,
-                                                     static_cast<__half*>(out.data), d_model);
+                pdl::enable_kernel(embedding_lookup_vec_kernel<__half>);
+                pdl::launch(embedding_lookup_vec_kernel<__half>, dim3(n_tokens), dim3(block), size_t(0), stream,
+                            static_cast<const __half*>(table.data), token_ids,
+                            static_cast<__half*>(out.data), d_model);
                 IMP_CUDA_CHECK_LAUNCH();
             } else {
                 embedding_lookup_scalar_kernel<__half>

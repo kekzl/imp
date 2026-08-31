@@ -3,6 +3,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
+#include "compute/pdl_device.cuh"
+#include "runtime/pdl.h"
 
 namespace imp {
 
@@ -156,6 +158,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= channels)
         return;
+    pdl_wait();
     const int seq = blockIdx.y;
     if (seq_slots)
         conv_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(conv_state_seq_stride);
@@ -172,6 +175,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
         sum += state[k] * __half2float(weight[ch * kernel_size + k]);
     if (bias)
         sum += __half2float(bias[ch]);
+    pdl_trigger();
 
     // Fused SiLU: x / (1 + exp(-x))
     x_out[ch] = sum / (1.0f + expf(-sum));
@@ -188,7 +192,8 @@ void ssm_conv1d_decode_f32_silu_batched(void* conv_state_pool, const int* seq_sl
         return;
     int threads = 256;
     dim3 blocks((channels + threads - 1) / threads, n_seq);
-    ssm_conv1d_decode_f32_silu_kernel<<<blocks, threads, 0, stream>>>(
+    pdl::enable_kernel(ssm_conv1d_decode_f32_silu_kernel);
+    pdl::launch(ssm_conv1d_decode_f32_silu_kernel, dim3(blocks), dim3(threads), size_t(0), stream,
         static_cast<float*>(conv_state_pool), x_in, static_cast<const half*>(weight.data),
         bias.data ? static_cast<const half*>(bias.data) : nullptr, x_out_f32, channels, conv_kernel,
         seq_slots, conv_state_seq_stride);
@@ -200,10 +205,11 @@ void ssm_conv1d_decode_f32_silu(void* conv_state, const Tensor& x_in, const Tens
     int channels = static_cast<int>(x_in.shape[x_in.ndim - 1]);
     int threads = 256;
     int blocks = (channels + threads - 1) / threads;
-    ssm_conv1d_decode_f32_silu_kernel<<<blocks, threads, 0, stream>>>(
+    pdl::enable_kernel(ssm_conv1d_decode_f32_silu_kernel);
+    pdl::launch(ssm_conv1d_decode_f32_silu_kernel, dim3(blocks), dim3(threads), size_t(0), stream,
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
-        x_out_f32, channels, conv_kernel);
+        x_out_f32, channels, conv_kernel, static_cast<const int*>(nullptr), int64_t(0));
     IMP_CUDA_CHECK_LAUNCH();
 }
 

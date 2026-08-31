@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <vector>
+#include "runtime/pdl.h"
 
 namespace imp {
 
@@ -91,7 +92,8 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         int nvfp4_block_stride = kv_block_size * nkv * hd / 2;            // bytes
         int nvfp4_scale_block_stride = kv_block_size * nkv * (hd / 16);   // bytes (UE4M3)
         dim3 grid_nvfp4(n, 2);
-        write_kv_cache_nvfp4_kernel<<<grid_nvfp4, 256, 0, stream>>>(
+        pdl::enable_kernel(write_kv_cache_nvfp4_kernel);
+        pdl::launch(write_kv_cache_nvfp4_kernel, grid_nvfp4, dim3(256), size_t(0), stream,
             static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
             block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),

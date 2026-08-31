@@ -2,6 +2,7 @@
 #include "exec/executor_kernels_internal.cuh"
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 
@@ -265,6 +266,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     const int token_idx = blockIdx.x;
     if (token_idx >= n_tokens)
         return;
+    pdl_wait();
 
     const int pos = positions[token_idx];
     int slot_in_block;

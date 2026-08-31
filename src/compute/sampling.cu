@@ -6,6 +6,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
+#include "compute/pdl_device.cuh"
+#include "runtime/pdl.h"
 
 namespace imp {
 
@@ -166,6 +168,7 @@ __global__ void argmax_reduce_kernel(const float* __restrict__ partial_vals,
 // row; scratch pointers are carved from each row's slot exactly as
 // sample_greedy_async carves them, so the layout contract is one place.
 __global__ void argmax_partial_rows_kernel(const GreedyRowArgs* __restrict__ rows, int vocab_size) {
+    pdl_wait();
     const GreedyRowArgs r = rows[blockIdx.y];
     auto* base = reinterpret_cast<char*>(r.d_result);
     auto* pv = reinterpret_cast<float*>(base + sizeof(int32_t));
@@ -174,6 +177,7 @@ __global__ void argmax_partial_rows_kernel(const GreedyRowArgs* __restrict__ row
 }
 
 __global__ void argmax_reduce_rows_kernel(const GreedyRowArgs* __restrict__ rows) {
+    pdl_wait();
     const GreedyRowArgs r = rows[blockIdx.x];
     auto* base = reinterpret_cast<char*>(r.d_result);
     auto* pv = reinterpret_cast<float*>(base + sizeof(int32_t));
@@ -265,9 +269,11 @@ void sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t s
 
 void launch_greedy_rows(const GreedyRowArgs* d_rows, int n_rows, int vocab_size, cudaStream_t stream) {
     dim3 grid1(ARGMAX_NBLOCKS, n_rows);
-    argmax_partial_rows_kernel<<<grid1, BLOCK_SIZE, 0, stream>>>(d_rows, vocab_size);
+    pdl::enable_kernel(argmax_partial_rows_kernel);
+    pdl::launch(argmax_partial_rows_kernel, grid1, dim3(BLOCK_SIZE), size_t(0), stream, d_rows, vocab_size);
     IMP_CUDA_CHECK_LAUNCH();
-    argmax_reduce_rows_kernel<<<n_rows, WARP_SIZE, 0, stream>>>(d_rows);
+    pdl::enable_kernel(argmax_reduce_rows_kernel);
+    pdl::launch(argmax_reduce_rows_kernel, dim3(n_rows), dim3(WARP_SIZE), size_t(0), stream, d_rows);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -300,6 +306,7 @@ __global__ void penalty_hist_append_kernel(const char* __restrict__ sample_base,
     const int i = threadIdx.x;
     if (i >= args.n)
         return;
+    pdl_wait();
     const int off = args.offs[i];
     if (off < 0 || off >= args.cap)
         return;
@@ -313,8 +320,9 @@ void penalty_hist_append(const void* d_sample_base, size_t slot_stride_bytes,
     if (args.n <= 0 || args.n > PenaltyAppendArgs::kMaxRows || d_sample_base == nullptr ||
         d_hist == nullptr)
         return;
-    penalty_hist_append_kernel<<<1, PenaltyAppendArgs::kMaxRows, 0, stream>>>(
-        static_cast<const char*>(d_sample_base), slot_stride_bytes, args, d_hist);
+    pdl::enable_kernel(penalty_hist_append_kernel);
+    pdl::launch(penalty_hist_append_kernel, dim3(1), dim3(PenaltyAppendArgs::kMaxRows), size_t(0), stream,
+                static_cast<const char*>(d_sample_base), slot_stride_bytes, args, d_hist);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

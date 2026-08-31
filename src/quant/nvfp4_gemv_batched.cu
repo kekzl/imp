@@ -18,6 +18,7 @@
 #include "runtime/pdl.h"
 
 #include <cuda_fp16.h>
+#include "compute/pdl_device.cuh"
 
 namespace imp {
 namespace {
@@ -39,6 +40,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     const int n = blockIdx.x;
     if (n >= N_out)
         return;
+    pdl_wait();
     const int tid = threadIdx.x;
     const int n_mb = K / kMicroBlockSize;
     const uint8_t* row_packed = packed_data + (int64_t)n * (K / 2);
@@ -87,6 +89,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
         }
     }
 
+    pdl_trigger();
     __shared__ float warp_sums[kKparWarps];
 #pragma unroll
     for (int m = 0; m < MR; ++m) {
@@ -141,6 +144,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
     const int row = blockIdx.x * NR + warp_id;
     if (row >= N_out || warp_id >= NR)
         return;
+    pdl_wait();
 
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
@@ -164,6 +168,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
             acc[m] = __fmaf_rn(dot_micro_block(pb, x + (int64_t)m * K, byte_off * 2), cs, acc[m]);
     }
 
+    pdl_trigger();
 #pragma unroll
     for (int m = 0; m < MR; ++m) {
         const float total = warp_reduce(acc[m]);
@@ -185,6 +190,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
     const int n = blockIdx.x;
     if (n >= N_out)
         return;
+    pdl_wait();
     const int tid = threadIdx.x;
     const int n_mb = K / kMicroBlockSize;
     const uint8_t* row_packed = packed_data + (int64_t)n * (K / 2);
@@ -231,6 +237,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
         }
     }
 
+    pdl_trigger();
     __shared__ float warp_sums[kKparWarps];
 #pragma unroll
     for (int m = 0; m < MR; ++m) {

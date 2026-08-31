@@ -325,21 +325,22 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     }
 
 
-    // Enable Programmatic Dependent Launch on custom kernels if requested.
+    // Programmatic Dependent Launch registration. Registration is the
+    // promise that the kernel calls pdl_wait() before its first global
+    // access (compute/pdl_device.cuh): a registered kernel may be scheduled
+    // while its producer still runs. Only instrumented kernels are registered
+    // here; the other launch sites register themselves next to their
+    // pdl::launch. The former blanket list (fp32 add, fused KV writes,
+    // fp16<->fp32 converts, fp32 norms, plain rope, activation/dp4a families) is gone:
+    // those kernels do not wait yet, and registering them raced
+    // (DegenerationTest.GreedyDeterminism failed on the first instrumented
+    // build, 2026-08-31).
     if (use_pdl_ && pdl::is_available()) {
         pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp16_kernel));
-        pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp32_kernel));
-        pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_fused_kernel));
-        pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_rope_fused_kernel));
-        pdl::enable(reinterpret_cast<const void*>(&fp16_to_fp32_kernel));
-        pdl::enable(reinterpret_cast<const void*>(&fp32_to_fp16_kernel));
-        // Register compute kernels for PDL overlap (run between GEMMs in hot path)
-        layernorm_pdl_register();
-        rope_pdl_register();
-        activation_pdl_register();
-        gemv_pdl_register();
         nvfp4_gemv_pdl_register();
-        IMP_LOG_INFO("PDL enabled on executor + compute + GEMV kernels");
+        layernorm_pdl_register();  // fp16 block / warp / residual variants (instrumented)
+        rope_pdl_register();       // fused qk-norm + rope (instrumented)
+        IMP_LOG_INFO("PDL registered on the instrumented decode kernels (elementwise add + NVFP4 GEMV family)");
     } else if (use_pdl_) {
         IMP_LOG_WARN("PDL requested but not available on this device/CUDA version");
         use_pdl_ = false;

@@ -5,6 +5,8 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include "compute/pdl_device.cuh"
+#include "runtime/pdl.h"
 
 namespace imp {
 
@@ -30,6 +32,7 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
     const int base = t * inner + h * head_dim;
 
     // Load y value
+    pdl_wait();
     float val = __half2float(y[base + d]);
 
     // Parallel sum-of-squares for RMSNorm
@@ -49,6 +52,7 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
     // SiLU on gate and multiply
     float g = __half2float(gate[base + d]);
     float silu_g = g / (1.0f + expf(-g));
+    pdl_trigger();
 
     y[base + d] = __float2half(normed * silu_g);
 }
@@ -150,7 +154,8 @@ void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float
                             int n_heads, int head_dim, cudaStream_t stream) {
     size_t smem = head_dim * sizeof(float);
     dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_kernel<<<grid, head_dim, smem, stream>>>(y, gate, weight, eps, n_heads, head_dim);
+    pdl::enable_kernel(gdn_rmsnorm_gated_silu_kernel);
+    pdl::launch(gdn_rmsnorm_gated_silu_kernel, grid, dim3(head_dim), smem, stream, y, gate, weight, eps, n_heads, head_dim);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
