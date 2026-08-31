@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-08-31
+commit: 01799405
 -->
 
 # src/runtime — engine, scheduler, config, KV
@@ -48,8 +48,13 @@ the CI lane; green there is not green in CI.
 
 - Changing KV or graph code without `make verify-fast` is how a wedge ships: CI
   cannot see it.
-- Prefill graph capture is default-**on** (`prefill_graph = true`). A comment at
-  `engine_init_resolver.cpp:565` still claims the opposite; it is stale.
+- Prefill graph capture is default-**on** (`config.h`, `runtime.prefill_graph`,
+  flipped 2026-05-17). A comment at `src/runtime/engine_init_resolver.cpp:731`
+  still says "prefill is never graph-captured"; it predates the flip. Read the
+  value, not the comment - and note this pointer is itself unguarded, since the
+  citation gate covers `docs/` and the root docs, not the `CLAUDE.md` tree (it
+  read `:565` from 2026-08-13 until 2026-08-31 while the comment sat 166 lines
+  further down).
 - `kv_cache.swa_snapshot_mb` below one snapshot size disables prefix caching
   entirely, which is worse than zero.
 - Anything sized off free VRAM must pin `runtime.max_batch_size` for an A/B, or

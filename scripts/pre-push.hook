@@ -55,7 +55,13 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     # gate or the smoke prompts. tools/ and tests/ are full of it — the gate
     # scripts and the API contract suite — and SOURCE_RE matches those
     # directories by prefix. Same reasoning as the pre-commit filter (#1723).
-    FILES=$(echo "$FILES" | grep -vE '\.(md|py)$' || true)
+    #
+    # .hook joined them 2026-08-31 on the same check: these two files are read
+    # by `make install-hooks` and by nothing else - not verify.sh, not the
+    # build, not a test. Editing THIS file used to demand the full GPU gate,
+    # which then reports the host rather than the change; what actually guards
+    # the pair is guard_precommit_filter / guard_verify_filter in the CPU lane.
+    FILES=$(echo "$FILES" | grep -vE '\.(md|py|hook)$' || true)
     [ -z "$FILES" ] && continue
     echo "$FILES" | grep -qE "$SOURCE_RE" && NEEDS_VERIFY=1
     echo "$FILES" | grep -qE "$PERF_RE"   && NEEDS_PERF=1
@@ -75,7 +81,7 @@ fi
 # citations via check-release.sh and runs the full release checklist) stay
 # CI-side.
 if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
-    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes alloc launchguards docs citations; then
+    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes entrypoint alloc launchguards docs citations; then
         echo "pre-push: static gates failed (see above) - fix or push --no-verify"
         exit 1
     fi
