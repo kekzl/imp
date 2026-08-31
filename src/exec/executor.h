@@ -739,6 +739,7 @@ private:
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     void apply_row_filters_(float* lp, int vocab, const InferenceState& state, cudaStream_t stream);
+    const int32_t* banned_cache_(const InferenceState& state, cudaStream_t stream);
     void flush_pending_topk_rows_(cudaStream_t stream);
     // Row-batched top-k/top-p staging: sample_single_from_logits_async STASHES
     // eligible rows here instead of launching; collect_sampled_tokens uploads

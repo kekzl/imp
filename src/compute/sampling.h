@@ -101,6 +101,13 @@ struct PenaltyRowArgs {
     float repetition_penalty;
     float frequency_penalty;
     float presence_penalty;
+    // Banned ids for this row (device list, may be nullptr): applied in the
+    // same sweep, by the thread that owns the vocab entry, so a banned id
+    // that also sits in the history is written exactly once (-1e30). Lets a
+    // row whose filter chain is penalties + the engine-static ban list join
+    // the batched sweep instead of running 2 launches per row per step.
+    const int32_t* banned = nullptr;
+    int n_banned = 0;
 };
 void launch_penalties_rows(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size,
                            cudaStream_t stream = nullptr);
