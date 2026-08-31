@@ -112,6 +112,57 @@ TEST(RuntimeConfigTest, KvNvfp4DefaultSafeAllowlist) {
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::GENERIC));
 }
 
+// What an EXPLICIT dtype pin costs against the auto default. The pin that
+// motivates this is `IMP_KV_FP8=1`: correct when `auto` meant FP16, and since
+// the NVFP4 default it doubles the bytes per token on QWEN35 (max_model_len
+// 90 528 instead of 126 432) while logging nothing, because --kv-fp8 sets the
+// enum directly and skips the resolver branch that would have said so.
+TEST(RuntimeConfigTest, KvPinContextCostFactor) {
+    // On the NVFP4-default family, a wider pin is a context forfeit.
+    EXPECT_EQ(2, kv_pin_context_cost_factor(ModelArch::QWEN35, QType::FP8_E4M3));
+    EXPECT_EQ(2, kv_pin_context_cost_factor(ModelArch::QWEN35, QType::INT8));
+    EXPECT_EQ(4, kv_pin_context_cost_factor(ModelArch::QWEN35, QType::F16));
+    // Same width or narrower costs nothing - pinning the default is not a warning.
+    EXPECT_EQ(0, kv_pin_context_cost_factor(ModelArch::QWEN35, QType::NVFP4));
+    EXPECT_EQ(0, kv_pin_context_cost_factor(ModelArch::QWEN35, QType::MXFP4_KV));
+    EXPECT_EQ(0, kv_pin_context_cost_factor(ModelArch::QWEN35, QType::INT4));
+    // Everywhere else `auto` already lands on FP8 or FP16, so the same pin is
+    // not a downgrade and must stay silent. This is the half that keeps the
+    // warning from firing on every deployment that ever passed --kv-fp8.
+    EXPECT_EQ(0, kv_pin_context_cost_factor(ModelArch::QWEN3, QType::FP8_E4M3));
+    EXPECT_EQ(0, kv_pin_context_cost_factor(ModelArch::QWEN35_MOE, QType::FP8_E4M3));
+    EXPECT_EQ(0, kv_pin_context_cost_factor(ModelArch::LLAMA, QType::F16));
+    EXPECT_EQ(0, kv_pin_context_cost_factor(ModelArch::GENERIC, QType::F16));
+    // Tied to the allowlist rather than to a second copy of it: whatever
+    // kv_nvfp4_default_safe says is what can lose context.
+    for (auto arch : {ModelArch::QWEN35, ModelArch::QWEN3, ModelArch::LLAMA, ModelArch::GEMMA4,
+                      ModelArch::GPT_OSS, ModelArch::NEMOTRON_H_MOE}) {
+        EXPECT_EQ(kv_nvfp4_default_safe(arch), kv_pin_context_cost_factor(arch, QType::FP8_E4M3) > 0)
+            << "arch " << model_arch_name(arch);
+    }
+}
+
+// The other half of the pin warning: did the operator choose this dtype at all.
+// Split out of the resolver so both halves of the decision are decidable without
+// a GPU - what is left at the call site is the log line.
+TEST(RuntimeConfigTest, KvDtypeIsExplicitPin) {
+    // CLI surface: --kv-fp8 and friends set the enum before the resolver runs,
+    // which is exactly why they log nothing on their own.
+    EXPECT_TRUE(kv_dtype_is_explicit_pin(QType::FP8_E4M3, "auto"));
+    EXPECT_TRUE(kv_dtype_is_explicit_pin(QType::NVFP4, "auto"));
+    // Config surface: every value the resolver accepts as a choice.
+    EXPECT_TRUE(kv_dtype_is_explicit_pin(QType::F16, "fp8"));
+    EXPECT_TRUE(kv_dtype_is_explicit_pin(QType::F16, "int8"));
+    EXPECT_TRUE(kv_dtype_is_explicit_pin(QType::F16, "fp16"));
+    EXPECT_TRUE(kv_dtype_is_explicit_pin(QType::F16, "nvfp4"));
+    // Not a choice: the default, and a typo (which the resolver already warns
+    // about separately - one bad value must not also claim to be a pin).
+    EXPECT_FALSE(kv_dtype_is_explicit_pin(QType::F16, "auto"));
+    EXPECT_FALSE(kv_dtype_is_explicit_pin(QType::F16, ""));
+    EXPECT_FALSE(kv_dtype_is_explicit_pin(QType::F16, "mxfp4_kv"));
+    EXPECT_FALSE(kv_dtype_is_explicit_pin(QType::F16, "FP8"));
+}
+
 // The NO-HINT FP8-KV gate (kv_cache.dtype=auto on checkpoints without a
 // kv_cache_quant_algo hint — i.e. every GGUF). Stricter bar than the hint list:
 // the family must gate ~PPL-neutral at 16k context. See model.cpp for the

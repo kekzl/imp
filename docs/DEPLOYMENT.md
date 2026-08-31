@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-08-31
+commit: a81792d8
 -->
 
 # Deployment
@@ -51,12 +51,48 @@ every key in it.
 Every key, with defaults: `src/runtime/config.h` is the source of truth;
 [`usage.md`](usage.md#configuration--impconf) is the readable version.
 
+### From a container
+
+The image entrypoint turns `IMP_*` environment variables into flags, so a
+compose file needs no `command:`. Two of them reach the whole surface above:
+
+| variable | becomes |
+|---|---|
+| `IMP_CONFIG` | `--config <path>` |
+| `IMP_SET` | one `--set` per whitespace- or newline-separated `key=value` |
+
+```yaml
+environment:
+  - IMP_MODEL=/models/your-model.gguf
+  - IMP_SET=attention.sparse_topk_tokens=8192 kv_cache.growable=true
+```
+
+A value containing a space cannot be written in `IMP_SET`; pass that one in
+`command:` instead.
+
+The rest - `IMP_MODEL`, `IMP_HOST`, `IMP_PORT`, `IMP_API_KEY`,
+`IMP_TRUSTED_PROXY`, `IMP_MODELS_DIR`, `IMP_MAX_TOKENS`, `IMP_GPU_LAYERS`,
+`IMP_DEVICE`, `IMP_CHAT_TEMPLATE`, `IMP_MMPROJ`, `IMP_PREFILL_CHUNK_SIZE`,
+`IMP_THINK_BUDGET`, `IMP_KV_FP8`, `IMP_KV_INT8`, `IMP_DECODE_NVFP4`,
+`IMP_DECODE_NVFP4_ONLY`, `IMP_NO_NVFP4`, `IMP_NO_CUDA_GRAPHS`, `IMP_SSM_FP16`
+- is one hand-written name per setting, and that list is frozen. Anything added
+since arrives through `IMP_SET`.
+
+**A pin can invert without being edited.** `IMP_KV_FP8=1` saves KV memory on
+most families and costs it on one, because `auto` resolves NVFP4 where that has
+been measured safe and FP8 is the wider type there. The engine now says so at
+startup instead of leaving it to be discovered
+([`plans/2026-08-29-qwen38-long-context-posture.md`](plans/2026-08-29-qwen38-long-context-posture.md)).
+The legacy KV names also outrank a `kv_cache.dtype` from `IMP_SET` in either
+order - `--kv-fp8` sets the dtype directly, ahead of the config file - so the
+entrypoint warns when both are set.
+
 The settings that most often need changing in a deployment:
 
 | key | why you would touch it |
 |---|---|
 | `runtime.max_seq_len` | context ceiling. Auto-caps at 128K, VRAM- and model-bounded |
-| `kv_cache.dtype` | `auto` honours the model's own FP8 hint where the quality gate passed. `fp8` halves KV memory |
+| `kv_cache.dtype` | `auto` takes the widest saving measured safe for the family - the model author's FP8 hint, or NVFP4. An explicit `fp8` is not always a saving: where the default is NVFP4, FP8 is the wider type |
 | `runtime.max_batch_size` | 0 = auto from post-load headroom. Pin it for any A/B measurement |
 | `server.model_swap` | default on: a request naming another model in the directory swaps to it |
 | `moe.expert_cache_budget_pct` | only relevant when MoE experts do not fit; see [`PERF.md`](PERF.md) |

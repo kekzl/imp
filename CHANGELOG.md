@@ -11,7 +11,29 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- Container deployments reach every `imp.conf` key: `IMP_CONFIG` becomes
+  `--config`, `IMP_SET` becomes one `--set` per whitespace-separated
+  `key=value`. The entrypoint's other 19 `IMP_*` names are one hand-written
+  name per setting and are now frozen, so nothing added since the config system
+  landed (sparse attention, growable KV, adaptive MTP depth, the GDN state
+  dtype) was reachable from a compose file at all. See `docs/DEPLOYMENT.md`,
+  "From a container".
+
 ### Fixed
+
+- An explicit KV dtype pin that costs context now says so at startup.
+  `--kv-fp8` sets the dtype ahead of the resolver and logged nothing, so
+  `IMP_KV_FP8=1` left in a compose file kept doubling the KV bytes per token on
+  families whose `auto` resolves NVFP4 - correct when `auto` meant FP16, an
+  inverted pin since. The entrypoint additionally warns when a legacy KV name
+  and a `kv_cache.dtype` in `IMP_SET` are both set, because the legacy name
+  wins in either order.
+- `docker-entrypoint.sh` ran in no test and no CI lane. `tests/test_entrypoint.sh`
+  drives the real script against a stub binary (25 assertions, no Docker, no
+  GPU, no build) as the `entrypoint` group of `scripts/ci_static_gates.sh`,
+  which the required `Build` check runs.
 
 - The `Sanitizers` CI lane and `make asan` could not link `test-core`:
   `tests/test_mtp_auto.cpp` and `tools/imp-cli/args.cpp` are compiled

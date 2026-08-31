@@ -42,6 +42,11 @@ services:
       - IMP_MMPROJ=${IMP_MMPROJ:-}
       - IMP_PREFILL_CHUNK_SIZE=${IMP_PREFILL_CHUNK_SIZE:-}
       - IMP_THINK_BUDGET=${IMP_THINK_BUDGET:-}
+      # Everything above is one hand-written name per setting and is frozen at
+      # that list. These two reach every imp.conf key instead:
+      # IMP_SET="attention.sparse_topk_tokens=8192 kv_cache.growable=true"
+      - IMP_CONFIG=${IMP_CONFIG:-}
+      - IMP_SET=${IMP_SET:-}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     healthcheck:

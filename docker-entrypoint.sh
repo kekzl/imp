@@ -140,4 +140,41 @@ elif [ "$CMD" = "imp-server" ] && [ -d "/models" ]; then
     args+=(--models-dir "/models")
 fi
 
+# The maintained configuration surface, bridged generically. Every name above is
+# hand-written and frozen, so until this existed a compose deployment could not
+# reach any imp.conf key that had not been given one - which is every key added
+# since the config system landed (sparse attention, growable KV, MTP depth, the
+# GDN state dtype, the batching knobs). Two names instead of one per key.
+if [ -n "$IMP_CONFIG" ]; then
+    args+=(--config "$IMP_CONFIG")
+fi
+
+# One `section.key=value` per whitespace or newline, so a compose YAML block
+# scalar works. A value containing a space is not expressible here; pass that
+# one in `command:` instead.
+#
+# `set -f` because the unquoted expansion is wanted for the word splitting and
+# NOT for globbing: without it a value holding `*`, `?` or `[` expands against
+# the container's working directory, so `--set` would carry filenames.
+if [ -n "$IMP_SET" ]; then
+    set -f
+    for kv in $IMP_SET; do
+        args+=(--set "$kv")
+    done
+    set +f
+fi
+
+# The legacy KV names do not lose to IMP_SET, they outrank it in either order:
+# --kv-fp8 sets the dtype enum directly and the engine consults kv_cache.dtype
+# only while that enum is still FP16. Silent precedence is what makes a stale
+# name expensive, so say it rather than let the IMP_SET line look applied.
+case "$IMP_SET" in
+    *kv_cache.dtype=*)
+        if is_true "$IMP_KV_FP8" || is_true "$IMP_KV_INT8"; then
+            echo "imp: IMP_KV_FP8/IMP_KV_INT8 override kv_cache.dtype from IMP_SET;" \
+                 "unset the legacy name for IMP_SET to take effect" >&2
+        fi
+        ;;
+esac
+
 exec "$CMD" "${args[@]}" "$@"

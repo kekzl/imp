@@ -79,6 +79,14 @@ if want lanes; then
     run "tests that run in no CI lane"          python3 tools/check_test_lanes.py --report
 fi
 
+# The container env -> argv translation. Belongs here on this file's own terms:
+# no build, no Docker, no network, ~0.2 s. It ran nowhere at all until
+# 2026-08-31, which is how IMP_KV_FP8 kept a name whose meaning had inverted.
+if want entrypoint; then
+    echo "== Entrypoint =="
+    run "docker-entrypoint.sh env -> argv"      bash tests/test_entrypoint.sh
+fi
+
 if want alloc; then
     echo "== Alloc sites =="
     run "I1 allowlist gate"                     python3 tools/check_alloc_sites.py
