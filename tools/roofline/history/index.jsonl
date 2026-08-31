@@ -11,3 +11,4 @@
 {"cells": ["q8-dense|tg256"], "commit": "dca16b71", "config_version": 5, "dirty": false, "note": "", "run_id": "dca16b71_20260806_041710", "timestamp": "20260806_041710"}
 {"cells": ["q8-dense|tg256_ctx8k"], "commit": "dca16b71", "config_version": 5, "dirty": true, "note": "", "run_id": "dca16b71-dirty_20260806_042150", "timestamp": "20260806_042150"}
 {"cells": ["q8-dense|tg256_ctx8k"], "commit": "120bc0d7", "config_version": 5, "dirty": false, "note": "", "run_id": "120bc0d7_20260807_091356", "timestamp": "20260807_091356"}
+{"cells": ["nvfp4-dense|pp4096", "nvfp4-dense|pp512", "nvfp4-hybrid|pp4096", "nvfp4-hybrid|pp512"], "commit": "1d5b9230", "config_version": 5, "dirty": false, "note": "", "run_id": "1d5b9230_20260831_180644", "timestamp": "20260831_180644"}
