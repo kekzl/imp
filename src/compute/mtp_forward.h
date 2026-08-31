@@ -72,6 +72,11 @@ struct MtpDraftWorkspace {
     // so pass 1 splits the vocab across blocks and pass 2 merges.
     float* d_topk_part_val = nullptr;
     int* d_topk_part_idx = nullptr;
+    // [kMtpMaxTopW] float — the top-W logit values in rank order (serving
+    // kernel only). d_topk_val[0] - d_topk_val[1] is the head's own top-1/
+    // top-2 margin, the signal speculative.mtp_tree_margin gates the branch
+    // on: a confident head does not pay for a second candidate.
+    float* d_topk_val = nullptr;
     // [kMtpMaxTopW * kMtpMaxChainK] int — device-side chain slots, chain c at
     // [c * kMtpMaxChainK]: step i's argmax lands in slot i and feeds step
     // i+1's embedding lookup without a host round-trip; one D2H drains all

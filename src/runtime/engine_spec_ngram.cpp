@@ -70,6 +70,9 @@ void Engine::log_spec_stats_() const {
                      : 0.0,
                  spec_stats_.verify_steps ? spec_stats_.verify_wall_ms / spec_stats_.verify_steps
                                           : 0.0);
+    if (mtp_tree_branched_ + mtp_tree_linear_ > 0)
+        IMP_LOG_INFO("[spec-ngram] mtp tree: branched=%lld linear=%lld (margin gate %.2f)",
+                     mtp_tree_branched_, mtp_tree_linear_, runtime_config_.speculative.mtp_tree_margin);
 }
 
 
