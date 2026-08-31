@@ -58,6 +58,20 @@ struct InferenceState {
     // of sequences does not force a re-capture.
     const int* ssm_seq_slots = nullptr;
     int ssm_n_seq = 1;
+    // Multi-candidate verify chunk on a hybrid (roadmap gap 5, Stage 3): the
+    // chunk rows are ssm_n_seq candidate groups of ssm_seq_tokens rows each,
+    // group c owning rows [c * ssm_seq_tokens, (c + 1) * ssm_seq_tokens) and
+    // recurrent slot ssm_seq_slots[c] (device data for conv AND scan, so a
+    // replay can re-point a group at another slot under a captured graph;
+    // the primary candidate binds the request's live slot, the others
+    // spec-reserved pool slots seeded from it). Rows past ssm_n_seq * ssm_seq_tokens are capture-bucket
+    // pads outside every group. d_chunk_len then carries the per-GROUP real
+    // row count (uniform), not the whole chunk's. 0 = not a grouped chunk
+    // (batched decode keeps one row per sequence).
+    int ssm_seq_tokens = 0;
+    bool ssm_grouped_chunk() const {
+        return is_prefill && ssm_seq_slots != nullptr && ssm_n_seq > 1 && ssm_seq_tokens > 0;
+    }
 
     // BitDecoding Phase 3 residual KV cache.
     //

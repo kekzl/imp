@@ -502,6 +502,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
                         2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
                     fit -= static_cast<int>((mtp_cost + per_slot_state - 1) / per_slot_state);
                 }
+                // Slots the multi-candidate verify reserves past the batch
+                // (SSMState n_reserved) hold state at the same price and
+                // are not sequences.
+                if (per_slot_state > 0)
+                    fit -= spec_mc_reserved_slots_();
                 auto_batch = std::clamp(std::max(tier, fit), 1, kMaxAutoBatch);
             }
         }

@@ -1,5 +1,7 @@
 #include "runtime/spec_trace.h"
 
+#include <algorithm>
+
 #include "exec/executor.h"
 #include "core/logging.h"
 
@@ -39,9 +41,15 @@ void spec_trace_emit_verify(int p0, int t0, const std::vector<int32_t>* draft, i
                             std::vector<float>& h_logits, int vocab, cudaStream_t stream) {
     std::string s = "[verify] p0=" + std::to_string(p0) + " t0=" + std::to_string(t0) +
                     (mc_cands ? " mc_cands=" + std::to_string(mc_cands) : "") + " draft=[";
-    if (draft) {
-        for (size_t j = 0; j < draft->size(); ++j)
-            s += std::to_string((*draft)[j]) + (j + 1 < draft->size() ? "," : "");
+    // mc: `draft` is the first of mc_cands contiguous candidate vectors; print
+    // every candidate ('|'-separated) - the argmax rows below are grouped the
+    // same way, (1 + depth) rows per candidate.
+    const int n_cands = std::max(1, mc_cands);
+    for (int c = 0; draft && c < n_cands; ++c) {
+        const auto& d = draft[c];
+        if (c) s += "|";
+        for (size_t j = 0; j < d.size(); ++j)
+            s += std::to_string(d[j]) + (j + 1 < d.size() ? "," : "");
     }
     s += "] argmax=[";
     for (int j = 0; j < chunk_len; ++j)

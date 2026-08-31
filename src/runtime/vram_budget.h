@@ -101,9 +101,13 @@ struct VRAMBudget {
 //
 // native_demand: precomputed NativeCacheDemand (Engine's cached scan) to
 // skip the tensor rescan; nullptr computes it locally (tests, standalone).
+// ssm_reserved_slots: recurrent-state slots past max_batch_size that the
+// multi-candidate speculative verify reserves (SSMState::init n_reserved);
+// priced with the pool so the plan sees the slab it will hold.
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens = 0, int n_swa_layers = 0,
-                               const NativeCacheDemand* native_demand = nullptr);
+                               const NativeCacheDemand* native_demand = nullptr,
+                               int ssm_reserved_slots = 0);
 
 // Split of the post-reserve VRAM budget across the pre-dequant phases.
 struct PreDequantBudget {

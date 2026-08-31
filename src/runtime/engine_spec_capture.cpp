@@ -126,7 +126,9 @@ int Engine::spec_capture_bucket_(int chunk_len) const {
     // baked split geometry close to the real chunk; pad rows attend 1 token.
     // 4 = the token-recycling depth-3 chunk (#1055): exactly one batched-GEMV
     // weight sweep (MR=4); padding it into 5 pays a second sweep.
-    for (int b : {3, 4, 5, 9, 17, 33}) {
+    // 6 / 8 = the W=2 multi-candidate chunk at depth 2 / 3 (W * (1 + depth)
+    // rows); rounding those to 9 padded a third of the rows for nothing.
+    for (int b : {3, 4, 5, 6, 8, 9, 17, 33}) {
         if (chunk_len <= b && b <= cap)
             return b;
     }
@@ -190,7 +192,8 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
     // Hybrids bake the recurrent-slab pointers (seq_base(slot)) into the
     // graph — key it on the slot so a slot change gets its own graph.
     const int rec_slot = state.ssm_state ? state.ssm_seq_id : -1;
-    auto& slot = spec_graphs_[{state.n_tokens, state.ctx_capacity, rec_slot}];
+    const int grouped_rows = state.ssm_grouped_chunk() ? state.ssm_seq_tokens : 0;
+    auto& slot = spec_graphs_[{state.n_tokens, state.ctx_capacity, rec_slot, grouped_rows}];
     if (slot.exec) {
         // diagnostics.spec_capture_fidelity: a cached graph must compute the same
         // thing an eager forward of the same state computes. Run eager, restore

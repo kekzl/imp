@@ -1,7 +1,10 @@
 # MTP multi-candidate speculation on the GDN hybrid (roadmap gap 5)
 
-Status: DESIGN + Stage 1-2 in progress (2026-08-31). Stage 0 measurement
-blocked on the GPU (nina-imp-server-1 holds the card).
+Status (2026-08-31): Stage 1-3 implemented, flag-gated default-off
+(`speculative.mtp_tree_width`, default 1). Stage 0 passed its kill bar
+(+6..+10 points top-2 over top-1 at depth 1), the E2E gate did not
+(+5-8% emitted/verify for +11-20% verify time): see the measurement
+section at the end, including the next levers.
 
 ## Why this is the open ceiling
 
@@ -82,6 +85,19 @@ measurement mode); serving uses the new one.
 
 ## Stage 3 - hybrid mc verify (the hard core)
 
+Implemented as designed below, with these concrete choices:
+
+| piece | implementation |
+|---|---|
+| state slots | `SSMState::init(n_reserved = W-1)`: slots past `max_batch_size`, `reserved_slot(i)`; priced in `compute_vram_budget` and the auto-batch resolver |
+| geometry | `InferenceState::ssm_seq_tokens` (+ `ssm_grouped_chunk()`), `ssm_seq_slots` = spec-stage slot table, `d_chunk_len` = per-GROUP real rows |
+| conv | per-candidate loop in `run_gdn` (the #1780 ragged loop as template), snapshot from group 0 only |
+| scan | `gdn_scan_fused_{f32,bf16}_batched` with `n_tokens = 1 + depth`, `d_real_n`, and new `h_snap/d_snap_n` (kernel writes it from `blockIdx.y == 0`) |
+| pads | rows past the last group: conv/scan rows zeroed in `run_gdn` |
+| accept | winner 0 full: in place; winner c full: one slab copy from slot c; zero accept: row-0 snapshot; partial: restore + swap winner's slot onto the live one + replay through the SAME captured graph (slot table and real-row count are device data), BEFORE the KV rollback (the replay's KV writes alias the private blocks) |
+| capture key | `spec_graphs_` gains the grouped row count (0 linear) |
+| gate | `spec_mc_hybrid_ok_`: reserved slots present, no `gdn.fp32_scan`/`ref_kernel`, GDN layers only (no Mamba2 grouped path) |
+
 Present the W candidates to the RECURRENT path as W uniform sequences, and to
 the ATTENTION path as chunk_pad row-sequences (the existing mc trick):
 
@@ -139,3 +155,103 @@ data.
   record rather than shipping a lossy speculator.
 - E2E: W=2 must beat linear adaptive-k by >=3% tok/s on think traffic to earn
   default-on consideration; below that it ships default-off with the numbers.
+
+## Measurements (2026-08-31, Qwen3.8-27B-NVFP4, greedy, dev build)
+
+### Stage 0 - tree ceiling (`diagnostics.mtp_tree_probe`, `miss_burst=0`, 900 tokens/prompt)
+
+The probe is measurement-only since this branch: with the verify consuming
+the chain there was no eager step to score it on (262 verifies, 0 eager
+steps, empty table on the first attempt), and with miss bursts on, 8 of every
+9 tokens bypassed the scorer (n=63 of 700).
+
+| prompt | depth-1 top-1 | top-2 | top-3 | depth-2 top-1 | top-2 | top-3 | E[accept] top-1 | top-2 | top-3 |
+|---|---|---|---|---|---|---|---|---|---|
+| train meet (reasoning) | 90.5 | 98.4 | 98.4 | 80.6 | 88.7 | 90.3 | 1.634 | 1.857 | 1.873 |
+| merge intervals (code) | 85.7 | 95.2 | 98.4 | 64.5 | 82.3 | 87.1 | 1.410 | 1.736 | 1.841 |
+| spec-vs-batch (prose) | 92.1 | 98.4 | 98.4 | 87.1 | 90.3 | 91.9 | 1.722 | 1.873 | 1.889 |
+
+n = 63 per depth per prompt (n_predict 900, the probe scores one chain per
+eager step). top-2 minus top-1 at depth 1 = +7.9 / +9.5 / +6.3 points: above
+the 4-point kill bar on every prompt. Expected accepted length top-2 vs
+linear: +0.22 / +0.33 / +0.15 draft tokens per verify.
+
+### Stage 3 - W=2 verify on the hybrid, same state (`diagnostics.spec_trace`, 44 verifies)
+
+Both candidates' row 0 (t0) produce the same argmax in all 44 verifies
+(candidate isolation holds). Scored on the traced argmax rows: the winner
+rule emits 2.705 tokens/verify against 2.409 for chain 0 alone (+12.3%);
+candidate 1 wins 7 of 44. Output coherent (correct answer to the train
+problem).
+
+### Cost, 400 tokens (dev build, verify_smallm default off)
+
+| arm | tok/s | accept | emitted/verify | ms/verify |
+|---|---|---|---|---|
+| spec off | 88.4 | - | - | - |
+| W=1, k=2 fixed | 135.4 | 85.7% | 2.71 | 19.87 |
+| W=2, k=2 fixed | 91.2 | 84.8% | 2.70 | 29.46 |
+
+The mc chunk is 6 real rows padded to the 9-row bucket; on native ST-NVFP4 a
+verify chunk with M <= 4 takes `gemm_nvfp4_batched` (one weight sweep) and
+anything larger the CUTLASS prefill tile (~51% of sweep bandwidth at tiny M,
+per executor_gemm_dispatch.cu), so the width buys +12% accepted length for
++48% verify time. `speculative.verify_smallm=true` routes both through the
+mxf4nvf4 small-M v2 kernel (M <= 32); see the next table.
+
+### Cost with `speculative.verify_smallm=true`, 600 tokens, same prompt (dev build)
+
+| arm | rows (bucket) | tok/s | accept | emitted/verify | ms/verify |
+|---|---|---|---|---|---|
+| W=1, k=2 fixed | 3 (3) | 130.3 / 135.0 | 77.4% / 84.9% | 2.55 / 2.70 | 19.54 / 19.95 |
+| W=2, k=2 fixed | 6 (9) | 127.9 | 91.3% | 2.83 | 22.07 |
+| W=2, k=2 fixed | 6 (6, new bucket) | 126.4 | 87.4% | 2.75 | 21.72 |
+| W=1, k=3 fixed | 4 (4) | 139.0 / 138.4 | 74.0% / 73.4% | 3.22 / 3.20 | 23.14 / 23.11 |
+| W=2, k=3 fixed | 8 (8, new bucket) | 121.1 | 78.8% | 3.37 | 27.76 |
+| W=2, k=1 fixed | 4 (4) | 122.9 | 97.7% | 1.98 | 16.06 |
+
+Two entries per linear arm = two runs (greedy trajectories diverge, the
+forward is not bit-deterministic); the spread is the noise floor for the
+single-prompt numbers.
+
+**Verdict (E2E gate, "W=2 must beat linear by >= 3% tok/s"): not met.** The
+width buys +5-8% emitted/verify at k=2 and +4.7% at k=3, for +11% / +20%
+verify time. Ships default-off (`mtp_tree_width=1`).
+
+### Think traffic, server, `tools/analysis/mtp_adaptive_ab.sh` (imp:test image)
+
+`THINK=1 ROUNDS=2 CLASSES=poor ARMS="k2ad w2ad" EXTRA="--set speculative.verify_smallm=true"`:
+3 reasoning prompts, max_tokens 1024, greedy, fresh process per arm, arms
+alternated across rounds, ngram off, prefix cache off.
+
+| arm | round | tokens | ms | tok/s | drafted | accepted | verifies |
+|---|---|---|---|---|---|---|---|
+| k2ad (linear, adaptive k=2) | 1 | 3072 | 27325 | 112.42 | 2367 | 1623 | 1449 |
+| w2ad (W=2, adaptive k=2) | 1 | 2518 | 23898 | 105.36 | 1948 | 1306 | 1212 |
+| w2ad | 2 | 2862 | 26831 | 106.67 | 2207 | 1500 | 1360 |
+| k2ad | 2 | 3072 | 26820 | 114.54 | 2323 | 1667 | 1403 |
+
+W=2: -6.4% / -6.9% tok/s against linear adaptive-k on think traffic. Gate
+not met; default stays 1.
+
+Where the verify time goes (rows are the currency, not candidates):
+- LM head: `gemv_nvfp4_kpar_batched_fp32` reads the 0.64 GB head once per
+  MR=4 rows - 6 rows = 2 passes where 3 rows = 1 (+~0.45 ms), 8 vs 4 the same.
+- Drafting: chains 1..W-1 cost (K-1) extra head forwards each, serial at
+  M=1 (+~0.5 ms per forward: lm_head GEMV over 248k vocab).
+- Layer GEMMs: 6/8 rows on the small-M v2 kernel vs 3/4 - not separated
+  from the above without an nsys node trace.
+
+Next levers, in order of expected yield (none implemented):
+1. Batch the chain drafting: chains 0..W-1 as one M=W head forward per
+   depth (same weight sweep) instead of W serial M=1 forwards - removes the
+   (W-1)(K-1) x 0.5 ms drafting term.
+2. Tree-shaped chunk sharing row 0 (t0 forwarded once): W(1+k) -> 1+Wk
+   rows; needs candidate 1's row to read t0's KV from candidate 0's private
+   block and the scan to start group 1 from the row-0 state (an in-kernel
+   dependency the batched scan does not have today).
+3. Uncertainty-gated width (branch only when the head's top-1/top-2 logit
+   margin is small): the probe's `gap=` column in `diagnostics.spec_trace`
+   already prints the margin per row; most verifies would then run the
+   3-row linear chunk.
+

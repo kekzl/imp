@@ -5,10 +5,10 @@
 // multi-candidate draft path (speculative.mtp_tree_width > 1). A wrong top-W
 // cannot corrupt output — the verify accept is lossless — but it silently
 // turns the branch candidates into noise, which reads as "the tree does not
-// pay" instead of "the kernel is broken". Values are drawn DISTINCT: both
-// kernels break exact-value ties by scan order, and the fast kernel's slice
-// structure orders equal values differently — set equality on distinct inputs
-// is the meaningful contract.
+// pay" instead of "the kernel is broken". The top-W values are drawn DISTINCT
+// (see distinct_values): both kernels break exact-value ties by scan order,
+// and the fast kernel's slice structure orders equal values differently, so
+// only a unique top-W is a meaningful contract.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -32,15 +32,29 @@ class MtpTopWTest : public ::testing::Test {
     }
 };
 
-// Distinct pseudo-random FP16-representable values over a given vocab size.
-std::vector<float> distinct_values(int vocab, unsigned seed) {
-    // Base grid of strictly increasing values, then shuffle: distinctness by
-    // construction, and FP16-exact so the FP16 arm loses nothing to rounding.
+// Logits with a well-defined ordered top-W. FP32: a strictly increasing grid,
+// shuffled - every value distinct. FP16 cannot do that (there are ~63k finite
+// half values, a 248k vocab must tie), so the FP16 arm draws the bulk from a
+// coarse half-exact grid below -50 (ties allowed, none of them can win) and
+// plants top_w distinct half-exact values above it at random positions: the
+// ordered top-W is unique, everything below it is noise the kernels may
+// order however they like.
+std::vector<float> distinct_values(int vocab, int top_w, bool fp32, unsigned seed) {
     std::vector<float> v(vocab);
-    for (int i = 0; i < vocab; ++i)
-        v[i] = -100.0f + 0.001f * static_cast<float>(i);
     std::mt19937 rng(seed);
-    std::shuffle(v.begin(), v.end(), rng);
+    if (fp32) {
+        for (int i = 0; i < vocab; ++i)
+            v[i] = -100.0f + 0.001f * static_cast<float>(i);
+        std::shuffle(v.begin(), v.end(), rng);
+        return v;
+    }
+    for (int i = 0; i < vocab; ++i)
+        v[i] = -100.0f + 0.0625f * static_cast<float>(i % 512);  // half-exact, ties
+    std::vector<int> pos(vocab);
+    for (int i = 0; i < vocab; ++i) pos[i] = i;
+    std::shuffle(pos.begin(), pos.end(), rng);
+    for (int k = 0; k < top_w; ++k)
+        v[pos[k]] = -40.0f + 0.5f * static_cast<float>(k);  // half-exact, distinct, above the bulk
     return v;
 }
 
@@ -56,7 +70,7 @@ void run_pair(int vocab, int top_w, bool fp32, unsigned seed) {
                          kMtpTopWBlocks * kMtpMaxTopW * sizeof(int)),
               cudaSuccess);
 
-    const std::vector<float> host = distinct_values(vocab, seed);
+    const std::vector<float> host = distinct_values(vocab, top_w, fp32, seed);
     void* d_logits = nullptr;
     if (fp32) {
         ASSERT_EQ(cudaMalloc(&d_logits, vocab * sizeof(float)), cudaSuccess);
@@ -82,7 +96,7 @@ void run_pair(int vocab, int top_w, bool fp32, unsigned seed) {
     ASSERT_EQ(cudaMemcpy(ref.data(), ws.d_topk, top_w * sizeof(int), cudaMemcpyDeviceToHost),
               cudaSuccess);
 
-    // Distinct values => the ORDERED sequences must agree exactly.
+    // Distinct top values => the ORDERED sequences must agree exactly.
     EXPECT_EQ(fast, ref) << "vocab=" << vocab << " w=" << top_w << " fp32=" << fp32
                          << " seed=" << seed;
 

@@ -229,9 +229,10 @@ bool Engine::init_kv_cache() {
         }
     }
 
+    const int ssm_reserved_slots = spec_mc_reserved_slots_();
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
                                            effective_free_vram(), swa_live_tokens, n_swa_layers,
-                                           &native_cache_demand());
+                                           &native_cache_demand(), ssm_reserved_slots);
     // A7 step 2 — APPLIED. The KV block count now comes from plan_memory(), not
     // from the live-free-derived pass. What made that safe is three changes, in
     // this order: the balloon stopped hiding bytes from the live read (B62), the
@@ -784,9 +785,16 @@ bool Engine::init_kv_cache() {
             int hd = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_state_ = std::make_unique<SSMState>();
             if (!ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd,
-                                  mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_)) {
+                                  mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_,
+                                  ssm_reserved_slots)) {
                 IMP_LOG_WARN("Failed to init SSM state, continuing without it");
                 ssm_state_.reset();
+            } else if (ssm_reserved_slots > 0) {
+                IMP_LOG_INFO("SSM state: %d slot(s) reserved past max_batch_size=%d for the "
+                             "multi-candidate verify (speculative.mtp_tree_width=%d, %.1f MiB each)",
+                             ssm_reserved_slots, config_.max_batch_size,
+                             runtime_config_.speculative.mtp_tree_width,
+                             ssm_state_->per_seq_bytes() / (1024.0 * 1024.0));
             }
             // Slot table for batched GDN decode. Allocated once and kept at a
             // stable address so a captured decode graph does not have to be

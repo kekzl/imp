@@ -981,7 +981,10 @@ private:
     // the recurrent-slab pointers (SSMState::seq_base(slot)) into the graph,
     // so each slot keys its own graphs (-1 for dense models); slot count is
     // bounded by SSMState::max_sequences and verify is batch-1-gated.
-    std::map<std::tuple<int, int, int>, SpecVerifyGraph> spec_graphs_;
+    // Fourth key: the grouped recurrent geometry (rows per candidate group
+    // of a multi-candidate chunk on a hybrid, 0 linear) — the scan bakes
+    // gridDim.y = W and the per-group row count.
+    std::map<std::tuple<int, int, int, int>, SpecVerifyGraph> spec_graphs_;
     int spec_capture_ctx_tier_(int ctx_padded) const;
     int* d_spec_past_len_ = nullptr;   // device int: p0 (cached-prefix length)
     int* d_spec_chunk_len_ = nullptr;  // device int: real (unpadded) chunk length
@@ -1162,6 +1165,26 @@ private:
     size_t spec_state_scratch_bytes_ = 0;
     bool ensure_spec_state_scratch_();
     int recurrent_slot_for_(int req_id) const;
+    // ── Multi-candidate verify on a hybrid (roadmap gap 5, Stage 3) ──
+    // W candidates run as W recurrent sequences: candidate 0 on the
+    // request's live slot (in place, like the linear chunk), candidates
+    // 1..W-1 on pool slots reserved past max_batch_size at init
+    // (SSMState::reserved_slot), seeded from the committed state per verify.
+    // Slot ids stage through the consolidated spec block (device twin
+    // d_spec_mc_slots_, host order = candidate order) — the captured graph
+    // bakes the pointer, the host refills the values, so a partial accept
+    // replays the winner through the SAME graph by swapping its slot onto
+    // the live one.
+    // Reserved slot count for this process (0 = the mc hybrid route is
+    // unavailable): W-1 when mtp_tree_width > 1 on a recurrent model with
+    // an MTP head and MTP not disabled. Resolved before SSMState::init and
+    // priced into the plan.
+    int spec_mc_reserved_slots_() const;
+    // Route gate for the grouped hybrid chunk (needs the reserved slots and
+    // the fused batched scan: no fp32_scan/ref_kernel, GDN layers only).
+    bool spec_mc_hybrid_ok_(int width) const;
+    std::vector<int> h_spec_mc_slots_;
+    int* d_spec_mc_slots_ = nullptr;  // sub-pointer into d_spec_stage_ (kMtpMaxTopW ints)
     // Session telemetry (logged when a request finishes).
     SpecStats spec_stats_{};
 

@@ -43,6 +43,7 @@
 #include "runtime/request.h"
 #include "runtime/suffix_draft.h"
 #include "runtime/think_stop_logic.h"
+#include "compute/mtp_forward.h"
 #include "compute/rowwise_topm.h"
 
 #include <cuda_runtime.h>
@@ -352,7 +353,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     std::vector<std::vector<int32_t>> mc;  // multi-candidate rows (route a)
     int mc_depth = 0;
     bool draft_from_mtp = false;
-    if (draft.empty() && mtp_spec_decode_enabled()) {
+    // diagnostics.mtp_tree_probe is measurement-only: the chain is scored
+    // against the eager decode path (engine_scheduler.cpp), so it must never
+    // be consumed as a verify draft - a verified chain leaves no eager step
+    // to score it on (measured 2026-08-31: 262 verifies, 0 eager steps, an
+    // empty table).
+    if (draft.empty() && mtp_spec_decode_enabled() && !runtime_config_.diagnostics.mtp_tree_probe) {
         // Multi-candidate MTP (speculative.mtp_tree_width > 1): the head's W
         // chains verify as one grouped chunk — the branch at position 1
         // hedges the chain's weakest link. v1 shares the TR route's
@@ -363,10 +369,15 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // offset, fixed by the winner harvest (mtp_post_verify_update_ row0).
         const bool mtp_pen = req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
                              req->presence_penalty != 0.0f;
-        const bool mtp_mc_ok = scfg.verify_decode_attn && ssm_state_ == nullptr &&
+        // Hybrids take the route through the grouped recurrent chunk (Stage
+        // 3): W candidates as W scan sequences on W slots, see the hybrid
+        // block below and spec_mc_hybrid_ok_ for what it needs.
+        const int mtp_w = runtime_config_.speculative.mtp_tree_width;
+        const bool mtp_mc_ok = scfg.verify_decode_attn &&
+                               (ssm_state_ == nullptr || spec_mc_hybrid_ok_(mtp_w)) &&
                                !model_->profile().is_moe && !model_->config().is_mla() &&
                                !swa_sizing_active_ && !mtp_pen;
-        if (runtime_config_.speculative.mtp_tree_width > 1 && mtp_mc_ok) {
+        if (mtp_w > 1 && mtp_mc_ok) {
             auto chains = mtp_take_chains_(*req);
             if (chains.size() > 1) {
                 mc = std::move(chains);
@@ -520,8 +531,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // still swallows the ~200 eager launches per verify step. MoE/hybrid keep
     // the FA2 chunk path (deep drafts amortize it; the hybrid scan needs the
     // chunk-forward semantics).
+    // The multi-candidate chunk on a hybrid is the one hybrid case that takes
+    // the decode-attention route: its recurrent layers run the grouped
+    // geometry (W scan sequences), and its attention layers need the per-row
+    // tables exactly like the dense mc chunk. mc_on implies the mc gate
+    // above passed (spec_mc_hybrid_ok_ when ssm_state_ != nullptr).
+    const bool hybrid_mc = mc_on && ssm_state_ != nullptr;
     const bool decode_attn_route = runtime_config_.speculative.verify_decode_attn &&
-                                   ssm_state_ == nullptr && !model_->profile().is_moe &&
+                                   (ssm_state_ == nullptr || hybrid_mc) && !model_->profile().is_moe &&
                                    !model_->config().is_mla() && !swa_sizing_active_;
     const bool capture_on =
         !swa_sizing_active_ && spec_capture_ready_(p0 + spec_capture_bucket_(chunk_len));
@@ -602,9 +619,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     int32_t* h_tokens = h_stage;
     int32_t* h_positions = h_stage + cap;
     int32_t* h_row_lens = h_stage + 2ull * cap;
+    // Pad rows sit at positions AFTER every real row in both shapes: the
+    // rollback drops them. (mc pads used to sit at p0 on the canonical
+    // table, which the winner's block copy had to repair - and the hybrid
+    // mc partial-accept replay re-forwards the chunk AFTER that copy, so a
+    // pad writing canonical p0 would clobber the kept row.)
     for (int i = 0; i < chunk_pad; ++i) {
         h_tokens[i] = t0;
-        h_positions[i] = mc_on ? p0 : p0 + i;
+        h_positions[i] = p0 + i;
         h_row_lens[i] = 1;
     }
     if (mc_on) {
@@ -624,7 +646,24 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     }
     h_stage[3ull * cap] = ctx_len;
     h_stage[3ull * cap + 1] = p0;
-    h_stage[3ull * cap + 2] = chunk_len;
+    // Hybrid mc: the recurrent kernels read the per-GROUP real row count here
+    // (InferenceState::d_chunk_len under ssm_grouped_chunk), not the whole
+    // chunk's - every candidate commits its state at its own last row.
+    h_stage[3ull * cap + 2] = hybrid_mc ? mc_rows_per_cand : chunk_len;
+    h_stage[3ull * cap + 3] = 1;  // snapshot row (refreshed below on hybrids)
+    // Per-candidate recurrent slots (hybrid mc): candidate 0 on the request's
+    // live slot, the rest on the reserved pool slots. Staged with the chunk
+    // so the one H2D carries them; the values are what a partial-accept
+    // replay swaps.
+    int rec_slot = -1;
+    if (hybrid_mc) {
+        rec_slot = recurrent_slot_for_(req->id);
+        h_spec_mc_slots_.assign(static_cast<size_t>(kMtpMaxTopW), 0);
+        h_spec_mc_slots_[0] = rec_slot;
+        for (size_t c = 1; c < mc.size(); ++c)
+            h_spec_mc_slots_[c] = ssm_state_->reserved_slot(static_cast<int>(c) - 1);
+        std::copy(h_spec_mc_slots_.begin(), h_spec_mc_slots_.end(), h_stage + 3ull * cap + 4);
+    }
 
     auto check = [&](cudaError_t err, const char* op) {
         if (err != cudaSuccess) {
@@ -634,7 +673,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         return true;
     };
     if (!check(cudaMemcpyAsync(d_spec_stage_, h_spec_stage_.as<int32_t>(),
-                               (3ull * cap + 3) * sizeof(int32_t), cudaMemcpyHostToDevice,
+                               (3ull * cap + 4 + kMtpMaxTopW) * sizeof(int32_t), cudaMemcpyHostToDevice,
                                stream), "stage H2D") ||
         !check(cudaMemcpyAsync(d_spec_block_table_, block_table.data(), n_blocks * sizeof(int),
                                cudaMemcpyHostToDevice, stream), "block table H2D") ||
@@ -754,7 +793,6 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // Hybrid (SSM/GDN): bind the recurrent state and preserve the committed
     // slab — the chunk forward advances it through rejected draft positions.
     const bool hybrid = ssm_state_ != nullptr;
-    int rec_slot = -1;
     if (hybrid) {
         if (!ensure_spec_state_scratch_()) {
             kv_manager_->rollback(req->id, p0);
@@ -770,6 +808,28 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             return false;
         }
         fill_recurrent_state(*req, state, /*reset=*/false, stream);
+        if (hybrid_mc) {
+            // Grouped recurrent chunk: candidate c is scan sequence c on slot
+            // h_spec_mc_slots_[c]. Seed the reserved slots from the committed
+            // state (candidate 0 runs in place on the live slot, exactly like
+            // the linear chunk). The pad rows past the last group belong to
+            // no sequence (run_gdn zeroes their conv/scan rows).
+            bool seeded = true;
+            for (size_t c = 1; c < mc.size() && seeded; ++c)
+                seeded = check(cudaMemcpyAsync(ssm_state_->seq_base(h_spec_mc_slots_[c]),
+                                               spec_state_scratch_, ssm_state_->per_seq_bytes(),
+                                               cudaMemcpyDeviceToDevice, stream),
+                               "mc slot seed D2D");
+            if (!seeded) {
+                kv_manager_->rollback(req->id, p0);
+                spec_stats_.miss_steps++;
+                return false;
+            }
+            state.ssm_seq_slots = d_spec_mc_slots_;
+            state.ssm_n_seq = static_cast<int>(mc.size());
+            state.ssm_seq_tokens = mc_rows_per_cand;
+            state.d_chunk_len = d_spec_chunk_len_;  // per-group real rows (staged above)
+        }
         // Snapshot the state as of the chunk's FIRST row: that row is the last
         // real token, so it is the state a fully rejected draft needs.
         if (spec_state_snap_ != nullptr && d_spec_snap_n_ != nullptr) {
@@ -987,6 +1047,63 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     if (mtp_spec_decode_enabled())
         mtp_post_verify_update_(*req, emitted, mc_on ? mc_row0 : 0);
 
+    // Hybrid mc: land the winner's recurrent state on the live slot. Runs
+    // BEFORE the rollback because the partial-accept replay below re-forwards
+    // the chunk through the same grouped geometry, whose row tables alias
+    // the candidates' private blocks - they must still be this request's.
+    //   full accept, winner 0   : in place already (the dominant case).
+    //   full accept, winner c>0 : one slab copy from candidate c's slot.
+    //   nothing accepted        : adopt the row-0 snapshot (below, shared
+    //                             with the linear path).
+    //   partial                 : restore committed, swap the winner's slot
+    //                             onto the live one, replay real_rows =
+    //                             matched + 1 through the captured graph (or
+    //                             eager): every group re-runs, only the
+    //                             winner's group now advances the live slot.
+    if (hybrid_mc && req->status != RequestStatus::FINISHED) {
+        const int mc_best_c = mc_row0 / mc_rows_per_cand;
+        if (matched >= K && mc_best_c != 0) {
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot),
+                                               ssm_state_->seq_base(h_spec_mc_slots_[mc_best_c]),
+                                               ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice,
+                                               stream));
+        } else if (matched < K && (matched > 0 || state.spec_snap_slab == nullptr)) {
+            // (matched == 0 without a snapshot slab: replay one row rather
+            // than leave the live slot at the primary group's last row.)
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
+                                               ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice,
+                                               stream));
+            std::swap(h_spec_mc_slots_[0], h_spec_mc_slots_[mc_best_c]);
+            const int real_rows = matched + 1;
+            const bool restaged =
+                check(cudaMemcpyAsync(d_spec_mc_slots_, h_spec_mc_slots_.data(),
+                                      static_cast<size_t>(kMtpMaxTopW) * sizeof(int32_t),
+                                      cudaMemcpyHostToDevice, stream),
+                      "mc replay slots H2D") &&
+                check(cudaMemcpyAsync(d_spec_chunk_len_, &real_rows, sizeof(int), cudaMemcpyHostToDevice,
+                                      stream),
+                      "mc replay rows H2D");
+            // The graph reads the group's real row count and the slot table
+            // from device, so the recording that verified the chunk serves
+            // the replay unchanged (no re-capture per accepted length).
+            Tensor replay_logits;
+            bool replayed = false;
+            if (restaged && capture_on && !spec_capture_doomed_)
+                replayed = spec_captured_forward_(state, replay_logits, stream);
+            if (restaged && !replayed) {
+                if (spec_capture_doomed_) {
+                    state.ctx_capacity = 0;
+                    state.d_past_len = nullptr;
+                }
+                executor_->forward_logits(state, replay_logits, stream);
+            }
+            if (!restaged)
+                IMP_LOG_WARN("spec-mc: hybrid replay staging failed - recurrent state left at the "
+                             "chunk's first row (draft tail re-verified next step)");
+            std::swap(h_spec_mc_slots_[0], h_spec_mc_slots_[mc_best_c]);
+        }
+    }
+
     // Drop KV for rejected draft positions: keep t0 + matched drafts.
     kv_manager_->rollback(req->id, p0 + 1 + matched);
 
@@ -1005,7 +1122,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // acceptance that landed further along.
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), state.spec_snap_slab,
                                            ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
-    } else if (hybrid && matched < K && req->status != RequestStatus::FINISHED) {
+    } else if (hybrid && !hybrid_mc && matched < K && req->status != RequestStatus::FINISHED) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
                                            ssm_state_->per_seq_bytes(),
                                            cudaMemcpyDeviceToDevice, stream));

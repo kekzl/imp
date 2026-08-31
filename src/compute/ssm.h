@@ -62,6 +62,18 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
                                  const int* d_real_n = nullptr, void* conv_snap = nullptr,
                                  const int* d_snap_n = nullptr, const void* conv_prev = nullptr);
 
+// Grouped form (multi-candidate verify chunk on a hybrid): x_in holds n_seq
+// groups of n_tokens rows; group z reads and commits the conv window of pool
+// slot seq_slots[z] (device ints; slot_stride in FLOATS, = per_seq_bytes/4).
+// d_real_n bounds every group's commit row; the snapshot (conv_snap/d_snap_n/
+// conv_prev, same contract as above) is written from group 0 only.
+void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_slots, int64_t slot_stride,
+                                         int n_seq, const Tensor& x_in, const Tensor& weight,
+                                         const Tensor& bias, float* x_out_f32, int conv_kernel,
+                                         cudaStream_t stream, const int* d_real_n = nullptr,
+                                         void* conv_snap = nullptr, const int* d_snap_n = nullptr,
+                                         const void* conv_prev = nullptr);
+
 // Mamba2 SSM scan decode (single step per sequence).
 // x:        [inner_size] compute_dtype — input after conv + SiLU
 // B:        [n_groups * state_size] compute_dtype

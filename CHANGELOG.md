@@ -13,6 +13,20 @@ there instead of retelling it.
 
 ### Added
 
+- `speculative.mtp_tree_width` (default 1 = unchanged): W > 1 drafts W MTP
+  chains per verify step (chain 0 = today's top-1 chain, chains 1..W-1 branch
+  at the first position on the head's top-W ids) and verifies them as one
+  multi-candidate chunk, on dense models through the token-recycling route
+  and on GDN hybrids through a grouped recurrent chunk (W candidates as W scan
+  sequences on W-1 reserved state slots, partial accepts replay the winner
+  through the same captured graph). Serving top-W kernel replaces the probe's
+  713 us single-CTA scan. Measured on Qwen3.8-27B-NVFP4: +5-8% emitted per
+  verify for +11-20% verify time, so it stays off (the tree ceiling itself
+  passed: top-2 covers +6..+10 points over top-1 at depth 1).
+  `diagnostics.mtp_tree_probe` is now measurement-only (it used to be
+  consumed by the verify and scored nothing). Design, gates and numbers:
+  `docs/plans/2026-08-31-mtp-multicandidate-hybrid.md`.
+
 - Container deployments reach every `imp.conf` key: `IMP_CONFIG` becomes
   `--config`, `IMP_SET` becomes one `--set` per whitespace-separated
   `key=value`. The entrypoint's other 19 `IMP_*` names are one hand-written

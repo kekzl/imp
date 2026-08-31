@@ -22,9 +22,14 @@ public:
 
     // Allocate state for the given configuration.
     // h_dtype: QType::F32 (default) or QType::F16 for h_state storage.
+    // n_reserved: extra slots past max_sequences that the scheduler never
+    // hands out — scratch for the multi-candidate speculative verify, which
+    // runs W candidates as W sequences and needs W-1 slots inside the pool
+    // (the batched scan addresses state by slot id, not by pointer). Reached
+    // through reserved_slot(i); same slab layout, priced with the pool.
     [[nodiscard]] bool init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel,
                             int n_heads, int head_dim_ssm, int state_size, QType h_dtype = QType::F32,
-                            VRAMAllocator* alloc = nullptr);
+                            VRAMAllocator* alloc = nullptr, int n_reserved = 0);
 
     // Get pointers into the state pool for a given sequence and SSM layer index.
     void* conv_state(int seq_id, int ssm_layer_idx);
@@ -51,7 +56,11 @@ public:
         return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_ + conv_bytes_;
     }
 
+    // Live slots [0, max_sequences()): the scheduler's pool. Reserved slots
+    // sit past them; reserved_slot(i) is -1 when i is out of range.
     int max_sequences() const { return max_sequences_; }
+    int n_reserved() const { return n_reserved_; }
+    int reserved_slot(int i) const { return (i >= 0 && i < n_reserved_) ? max_sequences_ + i : -1; }
     int n_ssm_layers() const { return n_ssm_layers_; }
     QType h_dtype() const { return h_dtype_; }
     // Bytes of the recurrent h state per (sequence, layer). Read by the
@@ -64,6 +73,7 @@ private:
     void* pool_ = nullptr;
     int n_ssm_layers_ = 0;
     int max_sequences_ = 0;
+    int n_reserved_ = 0;
     QType h_dtype_ = QType::F32;
     size_t conv_bytes_ = 0;       // per (seq, layer) conv state
     size_t h_bytes_ = 0;          // per (seq, layer) h state

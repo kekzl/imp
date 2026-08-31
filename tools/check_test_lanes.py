@@ -150,7 +150,14 @@ def main():
     # 1021 -> 1023: MtpTopWTest.{MatchesReferenceAndHostFp16,Fp32}, the
     # two-pass serving top-W kernel (mtp_tree_width) against the probe's
     # single-CTA kernel AND a host partial_sort - runs CUDA kernels, GPU-only.
-    PINNED = 1023
+    # 1023 -> 1024: GdnBatchedScanTest.GroupedChunkCommitsAtRealRowAndSnapshotsGroupZero,
+    # the grouped verify chunk (W candidates as W scan sequences, per-group
+    # commit row, row-0 snapshot from group 0) against the single-sequence
+    # launcher - runs CUDA kernels, GPU-only.
+    # 1024 -> 1025: GdnBatchedScanTest.GroupedConvCommitsPerSlotAndSnapshotsGroupZero,
+    # the slot-table form of the fused prefill conv (same chunk geometry)
+    # against the single-sequence launcher - GPU-only.
+    PINNED = 1025
 
     text = CMAKE.read_text()
     mods = module_sources(text)

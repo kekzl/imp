@@ -10,6 +10,7 @@
 // Pure move: every function below is byte-identical to its previous form.
 
 #include "compute/json_constrain.h"
+#include "compute/mtp_forward.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
@@ -37,7 +38,9 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     // The captured graphs bake the sub-pointers; the block is allocated once
     // per capacity, so they stay stable. Same trick for argmax+topm D2H.
     // [tokens | positions | row_ctx_lens | ctx_len, past_len, chunk_len, snap_n]
-    const size_t stage_ints = 3ull * chunk_cap + 4;
+    // + kMtpMaxTopW: the multi-candidate hybrid chunk's per-candidate
+    // recurrent slot ids ride the same H2D.
+    const size_t stage_ints = 3ull * chunk_cap + 4 + kMtpMaxTopW;
     const size_t out_ints = static_cast<size_t>(chunk_cap) * (1 + kRowwiseTopMMax);
     // T5b for the pinned twins (memory/host_pinned.h). Wrapped in a lambda so the
     // && chain still SHORT-CIRCUITS: acquiring them up front would allocate host
@@ -75,6 +78,7 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     d_spec_past_len_ = d_spec_context_len_ + 1;
     d_spec_chunk_len_ = d_spec_context_len_ + 2;
     d_spec_snap_n_ = d_spec_context_len_ + 3;
+    d_spec_mc_slots_ = d_spec_context_len_ + 4;
     d_spec_topm_ = d_spec_argmax_ + chunk_cap;
     h_spec_topm_ = h_spec_argmax_.as<int32_t>() + chunk_cap;
     spec_chunk_cap_ = chunk_cap;
@@ -142,6 +146,38 @@ bool Engine::ensure_spec_state_scratch_() {
                 "spec-hybrid: snapshot slab alloc failed (%zu bytes) — partial acceptances "
                 "will re-forward instead of adopting the snapshot",
                 bytes);
+    }
+    return true;
+}
+
+int Engine::spec_mc_reserved_slots_() const {
+    const auto& scfg = runtime_config_.speculative;
+    if (scfg.mtp_tree_width <= 1 || scfg.mtp_k == 0)
+        return 0;
+    if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded)
+        return 0;
+    if (model_->config().ssm_inner_size <= 0)
+        return 0;
+    return std::min(scfg.mtp_tree_width, kMtpMaxTopW) - 1;
+}
+
+bool Engine::spec_mc_hybrid_ok_(int width) const {
+    if (!ssm_state_ || width <= 1)
+        return false;
+    if (ssm_state_->n_reserved() < width - 1)
+        return false;
+    // The grouped chunk exists for the fused batched GDN scan only (the
+    // fp32out/ref routes have no slot form), and run_ssm (Mamba2) has no
+    // grouped path at all.
+    const auto& gcfg = runtime_config_.gdn;
+    if (gcfg.fp32_scan || gcfg.ref_kernel)
+        return false;
+    if (!model_ || model_->config().ssm_dt_rank <= 0)
+        return false;
+    for (int i = 0; i < model_->config().n_layers; ++i) {
+        const auto& ly = model_->layer(i);
+        if (ly.ssm_in.data != nullptr && ly.gdn_gate.data == nullptr)
+            return false;  // a Mamba2 layer (GraphExecutor::layer_has_gdn is gdn_gate) — run_ssm route
     }
     return true;
 }

@@ -103,7 +103,8 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
 
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens, int n_swa_layers,
-                               const NativeCacheDemand* native_demand) {
+                               const NativeCacheDemand* native_demand,
+                               int ssm_reserved_slots) {
     VRAMBudget budget;
     const auto& mcfg = model.config();
 
@@ -196,7 +197,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             int conv_ch = mcfg.ssm_conv_channels();
             int n_heads = mcfg.ssm_dt_rank;
             int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
-            ssm_footprint = static_cast<size_t>(n_ssm) * config.max_batch_size *
+            ssm_footprint = static_cast<size_t>(n_ssm) *
+                            static_cast<size_t>(config.max_batch_size + std::max(0, ssm_reserved_slots)) *
                             (static_cast<unsigned long>(conv_ch) * std::max(mcfg.ssm_conv_kernel - 1, 0) *
                                  sizeof(float) +
                              static_cast<size_t>(n_heads) * hd_ssm * mcfg.ssm_state_size *
