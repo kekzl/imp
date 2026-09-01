@@ -117,6 +117,53 @@ flag no-ops (verified: no sidecar log line, output unchanged).
 - degen_suite: skipped - nothing ships that changes execution
   (flag stays default-off on a refuted, unmerged branch).
 
+## SSM_IN root cause ISOLATED (2026-09-01)
+
+Reproduced on a 850-token slice of `ppl_corpus_45k.txt` (Qwen3.6-35B,
+`--max-seq-len 1280`, `speculative.mtp_k=0`, deterministic): off 7.6968,
+SSM_OUT 7.7156, SSM_IN 248320. Layer-0 tensor dumps
+(`diagnostics.dump_hidden_dir`, off vs SSM_IN arm): `A_pre_attn` identical,
+`gdn_ssm_in_out` already `-inf` (row 0, column 1250), everything after it
+NaN. Mechanism: the FP8 GEMM ran with the activation's per-tensor scale and
+a unit weight scale into an FP16 output, and the sidecar's per-row weight
+scales were folded in afterwards - so the intermediate is
+`out / row_scale = out * 448 / absmax(row)`, which passes 65504 on every
+weight row with a small absmax as soon as the activation is coherent (the
+RMSNorm output has a mean direction). ssm_out survived because its rows
+have larger absmax and its outputs are small; the unit test used uniform
+random rows, which cannot make `out / absmax(row)` large. Pinned by
+`FP8GemmTest.SsmPrefillFp8TinyRowsStayFinite` (coherent activation against
+0.01-magnitude rows: the FP16-intermediate form turns all 16384 outputs
+non-finite).
+
+Fix: `gemm_fp8_rowscaled` runs cuBLASLt into an FP32 chunk of 512 rows and
+one fused pass folds the row scales in while writing FP16 (tiny and big
+rows both at 1.0e-3 relative RMS vs FP16). cuBLASLt's
+`CUBLASLT_MATMUL_MATRIX_SCALE_OUTER_VEC_32F` was probed first as the
+pass-free form: on sm_120 / CUDA 13.3 it applied `scale[n & ~1]` to column
+n (odd columns got the even neighbour's scale, ratio exactly 0.0100), with
+the B operand scalar and with both operands in vector mode alike - not
+usable. `scale_cols_fp16` is retired; one flag covers SSM_IN and SSM_OUT.
+
+With the fix, both projections on (`gemm.fp8_ssm_prefill=true`, branch
+`perf/fp8-ssm-prefill-v2`), Qwen3.6-35B-A3B-NVFP4, deterministic 850-token
+slice: off 7.7582 -> on 7.5950 (sane; layer-0 `gdn_ssm_in_out` 1.4% relative
+RMS from FP8, layer-1 3.4%). E2E (`tools/analysis/prefill_kernel_ab.sh`,
+total kernel time under nsys, alternating pairs):
+
+| pair | pp512 total kernel ms | pp tok/s |
+|---|---|---|
+| 1 | 598.6 -> 587.2 (-1.9%) | 9959 -> 9756 |
+| 2 | 572.1 -> 649.8 (+13.6%) | 10915 -> 10058 |
+| 3 | 590.1 -> 611.4 (+3.6%) | 10665 -> 10662 |
+| pp4096 pair 1 | 2487.6 -> 4862.8 (2.0x, the WSL2 VRAM-spill class: the 35B leaves <900 MiB) | 12783 -> 6159 |
+| pp4096 pair 2 | 2454.9 -> 2456.9 (flat) | 12781 -> 12750 |
+
+The ON arm adds 7-14k launches per run (act-quant reduction pair + quantize +
+FP32-chunk rescale per projection per chunk). **VERDICT stands: REFUTED e2e.**
+The bug is fixed and pinned; the lever still needs an act-quant scheme cheaper
+than per-chunk per-tensor E4M3 plus a VRAM budget that survives on the 35B.
+
 ## ROADMAP CLOSED (2026-08-31)
 
 Closed unmerged per the #1774 convention; branch `perf/fp8-ssm-prefill`

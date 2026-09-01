@@ -38,6 +38,19 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.0f, float
 void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.0f, float beta = 0.0f,
                    const float* aScale = nullptr, const float* bScale = nullptr,
                    cudaStream_t stream = nullptr);
+// FP8 x FP8 with a per-tensor activation scale (d_act_scale) and PER-ROW
+// weight scales (one FP32 per output channel, B.shape[0] of them). The GEMM
+// runs into an FP32 workspace in 512-row chunks and one fused pass folds the
+// row scales in while writing FP16 C: an FP16 GEMM output would hold
+// out / row_scale, which overflows on every weight row with a small absmax
+// (the gemm.fp8_ssm_prefill SSM_IN "uniform logits" failure, 2026-09-01).
+// d_unit_scale: device 1.0f (cuBLASLt needs a non-null B scale pointer).
+// Workspace: gemm_fp8_rowscaled_workspace_bytes(N). Returns false (nothing
+// written) when the workspace is short or the dtypes do not fit.
+size_t gemm_fp8_rowscaled_workspace_bytes(int N);
+bool gemm_fp8_rowscaled(const Tensor& A, const Tensor& B, Tensor& C, const float* d_act_scale,
+                        const float* d_w_row_scales, const float* d_unit_scale, void* f32_workspace,
+                        size_t f32_workspace_bytes, cudaStream_t stream);
 
 // Probe whether cuBLASLt supports FP8 E4M3 GEMM on this GPU/driver.
 // Runs a tiny 8×64×8 FP8 matmul and returns true if cublasLtMatmul succeeds.

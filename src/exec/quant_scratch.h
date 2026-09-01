@@ -23,6 +23,8 @@ struct QuantScratch {
     void* fp8_act = nullptr;  // max_tokens * max_dim bytes
     size_t fp8_act_size = 0;
     float* d_act_scale = nullptr;        // 1 float on device
+    void* fp8_out_f32 = nullptr;         // gemm_fp8_rowscaled chunk workspace (512 x max_dim floats)
+    size_t fp8_out_f32_size = 0;
     float* d_fp8_block_maxes = nullptr;  // pre-allocated reduction buffer
     float* d_fp8_absmax = nullptr;       // pre-allocated absmax scalar
     int fp8_max_grid = 0;                // max grid size for reduction

@@ -1066,8 +1066,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // FP8 activation scratch buffers (for FP8 prefill weight cache)
-    if (wcache_.use_fp8) {
+    // FP8 activation scratch buffers (for FP8 prefill weight cache, and for
+    // the gemm.fp8_ssm_prefill sidecar path which needs them without the
+    // full FP8 prefill cache)
+    if (wcache_.use_fp8 || runtime_config().gemm.fp8_ssm_prefill) {
         int max_dim = cfg.d_model;
         if (cfg.d_ff > 0)
             max_dim = std::max(max_dim, cfg.d_ff);
@@ -1084,6 +1086,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
         qscratch_.fp8_act_size = static_cast<size_t>(max_tokens_) * max_dim;
         qscratch_.fp8_act = vram_alloc(vram_alloc_, qscratch_.fp8_act_size, "fp8_activation");
+        if (runtime_config().gemm.fp8_ssm_prefill) {
+            // FP32 chunk output of the row-scaled FP8 prefill GEMM (512 rows x
+            // the widest projection); freed with fp8_act below.
+            qscratch_.fp8_out_f32_size = gemm_fp8_rowscaled_workspace_bytes(max_dim);
+            qscratch_.fp8_out_f32 =
+                vram_alloc(vram_alloc_, qscratch_.fp8_out_f32_size, "fp8_rowscaled_out_f32");
+            if (!qscratch_.fp8_out_f32)
+                qscratch_.fp8_out_f32_size = 0;
+        }
         if (!qscratch_.fp8_act) {
             IMP_LOG_WARN("Failed to allocate FP8 activation buffer (%.1f MiB)",
                          qscratch_.fp8_act_size / (1024.0 * 1024.0));
@@ -1616,6 +1627,10 @@ void GraphExecutor::free_buffers() {
             vram_free(vram_alloc_, wcache_.fp8_ssm_sidecar_data);
             wcache_.fp8_ssm_sidecar_data = nullptr;
             wcache_.fp8_ssm_sidecar_data_size = 0;
+        }
+        if (wcache_.fp8_unit_scale) {
+            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_unit_scale));
+            wcache_.fp8_unit_scale = nullptr;
         }
         if (wcache_.fp8_ssm_sidecar_row_scales) {
             IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_ssm_sidecar_row_scales));

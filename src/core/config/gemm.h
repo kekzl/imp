@@ -226,6 +226,14 @@ struct GEMM {
     // accepted trade like nvfp4_lm_head_gdn, set false to revert),
     // degen_suite 33/33. Default ON.
     bool fp8_ssm_proj = true;
+    // FP8 prefill for the GDN/SSM in/out projections through the fp8_ssm_proj
+    // sidecar bytes (cuBLASLt FP8xFP8 into an FP32 chunk, per-row weight
+    // scales folded in on the way to FP16). The 2026-08-31 SSM_IN "uniform
+    // logits" failure was the FP16 GEMM output holding out / row_scale
+    // (inf on every weight row with a small absmax); isolated 2026-09-01
+    // via layer-0 tensor dumps and pinned by SsmPrefillFp8TinyRowsStayFinite.
+    // Requires fp8_ssm_proj. Default per the e2e A/B in docs/roadmap.md.
+    bool fp8_ssm_prefill = false;
     // FP8 decode sidecar for FULL-PRECISION attention projections
     // (wq/wk/wv/wo), same per-row-scale mechanism as fp8_ssm_proj:
     // decode-only (M=1 GEMV), prefill keeps the full-precision source.

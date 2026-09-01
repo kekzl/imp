@@ -1018,7 +1018,6 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
 
             create_gemm_descriptors(new_entry, CUBLAS_COMPUTE_32F, CUDA_R_32F, cuda_dtype_A, cuda_dtype_B,
                                     cuda_dtype_C, (int)K, (int)M, (int)N);
-
             set_gemm_scale_pointers(new_entry.opDesc, aScale, bScale);
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
@@ -1117,5 +1116,51 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
 // The MoE gate/decode/gate-up-fused GEMV kernels live in gemm_moe_gemv.cu.
 // gemm_kv_batched / gemm_pair_batched / gemm_cublaslt_fp8_probe live in
 // gemm_batched.cu.
+
+
+// FP8 x FP8 with per-tensor activation scale and PER-ROW weight scales.
+// Runs cuBLASLt into an FP32 chunk of kFp8RowChunk rows (the scalar-scaled
+// output is out / row_scale, which overflows an FP16 output on every weight
+// row with a small absmax - the gemm.fp8_ssm_prefill SSM_IN failure), then
+// one fused pass folds the row scales in and writes FP16. cuBLASLt's
+// outer-vector A scale was probed first and applied scale[n & ~1] on
+// sm_120 / CUDA 13.3 (both operands in vector mode too), so it stays out.
+static constexpr int kFp8RowChunk = 512;
+
+__global__ void scale_cols_f32_to_fp16_kernel(const float* __restrict__ src, half* __restrict__ dst,
+                                              const float* __restrict__ col_scales, int64_t total, int N) {
+    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= total)
+        return;
+    dst[i] = __float2half(src[i] * col_scales[static_cast<int>(i % N)]);
+}
+
+size_t gemm_fp8_rowscaled_workspace_bytes(int N) {
+    return static_cast<size_t>(kFp8RowChunk) * static_cast<size_t>(N) * sizeof(float);
+}
+
+bool gemm_fp8_rowscaled(const Tensor& A, const Tensor& B, Tensor& C, const float* d_act_scale,
+                        const float* d_w_row_scales, const float* d_unit_scale, void* f32_workspace,
+                        size_t f32_workspace_bytes, cudaStream_t stream) {
+    const int64_t M = A.shape[0], K = A.shape[1], N = B.shape[0];
+    if (!f32_workspace || f32_workspace_bytes < gemm_fp8_rowscaled_workspace_bytes(static_cast<int>(N)))
+        return false;
+    if (C.qtype != QType::F16 || A.qtype != QType::FP8_E4M3 || B.qtype != QType::FP8_E4M3)
+        return false;
+    for (int64_t m0 = 0; m0 < M; m0 += kFp8RowChunk) {
+        const int64_t mc = std::min<int64_t>(kFp8RowChunk, M - m0);
+        int64_t a_shape[2] = {mc, K}, c_shape[2] = {mc, N};
+        Tensor a_chunk(static_cast<char*>(A.data) + m0 * K, QType::FP8_E4M3, 2, a_shape, true);
+        Tensor c32(f32_workspace, QType::F32, 2, c_shape, true);
+        gemm_cublaslt(a_chunk, B, c32, 1.0f, 0.0f, d_act_scale, d_unit_scale, stream);
+        const int64_t total = mc * N;
+        const int64_t blocks = (total + 255) / 256;
+        scale_cols_f32_to_fp16_kernel<<<static_cast<unsigned>(blocks), 256, 0, stream>>>(
+            static_cast<const float*>(f32_workspace), static_cast<half*>(C.data) + m0 * N, d_w_row_scales,
+            total, static_cast<int>(N));
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    return true;
+}
 
 }  // namespace imp

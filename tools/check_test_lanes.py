@@ -170,7 +170,14 @@ def main():
     # 1046 -> 1051: FmhaFA2Dense2CtaTest.* (the Bq=128 TWOSLOT FA2 instance at
     # two CTAs per SM: 1024-row causal/odd/sliding-window/chunked/magnitude) -
     # launches the FA2 kernel, GPU-only.
-    PINNED = 1051
+    # 1051 -> 1052: FP8GemmTest.SsmPrefillFp8RowscaleMatchesFp16 (gemm.fp8_ssm_prefill
+    # building blocks; GPU-only like the rest of test_fp8_gemm.cu).
+    # 1052 -> 1053: FP8GemmTest.PerTensorActQuantSurvivesChannelOutlier (refutes the
+    # act-outlier hypothesis behind the fp8_ssm_prefill SSM_OUT scoping; GPU-only).
+    # 1053 -> 1054: FP8GemmTest.SsmPrefillFp8TinyRowsStayFinite, the FP16-intermediate
+    # overflow behind the fp8_ssm_prefill SSM_IN failure and its FP32-chunk fix
+    # (runs cuBLASLt FP8, GPU-only).
+    PINNED = 1054
 
     text = CMAKE.read_text()
     mods = module_sources(text)

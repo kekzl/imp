@@ -314,12 +314,16 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
         const Tensor* gate_side =
             (ssm_on && !L.gdn_input_packed.data) ? &L.gdn_gate : nullptr;
         const Tensor* ssm_out_side = ssm_on ? &L.ssm_out : nullptr;
+        // gemm.fp8_ssm_prefill: the prefill dispatches ssm_in itself (the pack
+        // above is decode-only), so it needs its own sidecar entry.
+        const Tensor* ssm_in_prefill_side =
+            (ssm_on && runtime_config().gemm.fp8_ssm_prefill && L.gdn_input_packed.data) ? &L.ssm_in : nullptr;
         const Tensor* q_side = attn_qo ? &L.wq : nullptr;
         const Tensor* k_side = attn_kv ? &L.wk : nullptr;
         const Tensor* v_side = attn_kv ? &L.wv : nullptr;
         const Tensor* o_side = attn_qo ? &L.wo : nullptr;
         for (const Tensor* w :
-             {in_side, gate_side, ssm_out_side, q_side, k_side, v_side, o_side}) {
+             {in_side, gate_side, ssm_out_side, ssm_in_prefill_side, q_side, k_side, v_side, o_side}) {
             if (!w || !w->data || !w->on_device)
                 continue;
             // F16 (native residents; BF16 checkpoints are converted at
@@ -399,6 +403,14 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     wcache_->fp8_ssm_sidecar_data = d_bulk;
     wcache_->fp8_ssm_sidecar_data_size = total_bytes;
     wcache_->fp8_ssm_sidecar_row_scales = d_row_scales;
+
+    if (runtime_config().gemm.fp8_ssm_prefill && !wcache_->fp8_unit_scale) {
+        float one = 1.0f;
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&wcache_->fp8_unit_scale, sizeof(float)));
+        if (wcache_->fp8_unit_scale)
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(wcache_->fp8_unit_scale, &one, sizeof(float),
+                                               cudaMemcpyHostToDevice, stream));
+    }
 
     IMP_LOG_INFO("fp8 decode sidecar: %zu projections%s%s (%.1f MiB, %zu per-row scales; "
                  "full-precision source retained for prefill)",
