@@ -150,15 +150,18 @@ void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, con
 // (gdn_scan_chunkpar_workspace_bytes(n_heads) bytes, 256 B aligned). No
 // d_real_n / snapshot contract — padded verify chunks stay on the fused
 // kernel. StateT float or BF16; the state rounds to BF16 once, at commit.
+// strip_chunks = 64-token chunks per strip (gdn.chunkpar_strip): 0 = auto
+// (fullest kernel-1 wave for this n_heads), else clamped to [1, 16].
 size_t gdn_scan_chunkpar_workspace_bytes(int n_heads);
 void gdn_scan_chunkpar_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                            int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                           int grouped_layout, float* ws, size_t ws_bytes);
+                           int grouped_layout, float* ws, size_t ws_bytes, int strip_chunks = 0);
 void gdn_scan_chunkpar_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int grouped_layout, float* ws, size_t ws_bytes);
+                            cudaStream_t stream, int grouped_layout, float* ws, size_t ws_bytes,
+                            int strip_chunks = 0);
 
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.

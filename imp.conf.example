@@ -454,6 +454,9 @@ chunkwise_scan       = true
 # plus a cheap sequential state pass, instead of 32 CTAs walking every token.
 # Single-sequence prefill (n >= 128), HD=SS=128, either state dtype.
 chunkpar_scan        = true
+# Chunks (64 tokens) per chunk-parallel strip: 0 = auto (fullest kernel-1
+# wave for the model's head count on this GPU), 1..16 pins it.
+chunkpar_strip       = 0
 # Override gated-DeltaNet weight layout (diagnostic; "" = auto).
 layout_override      = ""
 

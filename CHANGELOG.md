@@ -13,6 +13,15 @@ there instead of retelling it.
 
 ### Added
 
+- GDN chunk-parallel scan, state pass at 8 warps with register-pipelined
+  factor staging, strip sized per head count under an L2 cap
+  (`gdn.chunkpar_strip`, 0 = auto), XOR-swizzled kernel-1 shared tiles;
+  kernel 2 split into `gdn_scan_chunkpar_pass.cu`. pp4096 vs #1850
+  (alternating pairs): Qwen3.8-27B state pass 483/493 -> 337/336 ms, factor
+  kernel 370/377 -> 324/323 ms, e2e 10002/10008 -> 10962/10813 tok/s;
+  Qwen3.6-35B 152 -> 103 / 152 -> 133 ms, 27073/26701 -> 28513/27655 tok/s;
+  deterministic PPL 4.6273 unchanged; ledger row in `docs/roadmap.md`
+
 - GDN chunk-parallel scan, blockwise triangular solve: 16-row diagonal
   blocks per thread in registers, off-diagonal updates as 3xTF32 `mma.sync`,
   8 barriers per chunk instead of 128. Qwen3.6-35B scan kernel class -71%

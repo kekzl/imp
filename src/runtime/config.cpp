@@ -267,6 +267,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gdn.vhead_reorder", cfg.gdn.vhead_reorder);
     B("gdn.chunkwise_scan", cfg.gdn.chunkwise_scan);
     B("gdn.chunkpar_scan", cfg.gdn.chunkpar_scan);
+    I("gdn.chunkpar_strip", cfg.gdn.chunkpar_strip);
     B("gdn.state_bf16", cfg.gdn.state_bf16);
 
     // [gemm]
