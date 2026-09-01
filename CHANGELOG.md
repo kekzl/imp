@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Added
 
+- GDN chunk-parallel scan, blockwise triangular solve: 16-row diagonal
+  blocks per thread in registers, off-diagonal updates as 3xTF32 `mma.sync`,
+  8 barriers per chunk instead of 128. Qwen3.6-35B scan kernel class -71%
+  pp512 / -79% pp4096 vs the fused scan (-19% / -23% vs #1849), e2e pp4096
+  12.9k -> 27.0k tok/s; Qwen3.8-27B deterministic PPL 4.6273 (fused
+  4.6283); ledger row in `docs/roadmap.md` (#1850)
+
 - GDN chunk-parallel scan, factor kernel on tensor cores: Gram matrices and
   the P@W / P@U_A products as 3xTF32 `mma.sync`, float4 row loads, parallel
   decay/beta. Qwen3.6-35B scan kernel class -64% pp512 / -74% pp4096 vs the
