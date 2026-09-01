@@ -24,6 +24,18 @@ there instead of retelling it.
 
 ### Changed
 
+- `attention.fa2_hd256_bkv=32` (opt-in, default 64): the HD=256 FA2 prefill
+  instance at two CTAs per SM. The Bkv=64 TWOSLOT tile is 67.6 KB of the
+  100 KB SM budget (one 4-warp CTA per SM, 8.3% occupancy) although the
+  registers allow two. Qwen3.8-27B-NVFP4 pp4096: FA2 kernel sum 138.2 ->
+  122.5 ms (-11.2%, 3/3 pairs), pp 6719 -> 6745 tok/s, PPL 4.6283 -> 4.6529
+  (+0.53%, twice the f16 O rescales) - not a default-on trade. Verdict and
+  harness (`tools/analysis/fa2_hd256_bkv_ab.sh`) in `docs/roadmap.md`.
+- Roofline aggregation drops launches measured under `ncu.clock_floor_ghz`
+  (1.2) and counts them as `n_launches_dropped_clock`: run 1d5b9230 carried
+  one launch at 0.31 GHz (998 us for a 99-us kernel) that the report showed
+  as 99.7% of roofline. The roadmap's "255 registers" for the dense FA2
+  instance was the device attribute; the kernel allocates 144.
 - Programmatic Dependent Launch has its device half: registered decode
   kernels (NVFP4 GEMV family, small-M v2 GEMM, row-block RMSNorm,
   elementwise add/copy, GDN scan and conv, gated norm, sampling rows, KV

@@ -19,6 +19,8 @@ void imp::gdn_scan_chunkwise_kernel<128, 128, 64, __half>	sm_120a	255	80	0
 void imp::gdn_scan_chunkwise_kernel<128, 128, 64, float>	sm_120a	255	80	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 64, true, false, false>	sm_120a	255	32	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, false, false>	sm_120a	255	0	0
+void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	254	0	0
+void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	253	0	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	243	32	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<64, 2>	sm_120a	156	32	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	101	160	0

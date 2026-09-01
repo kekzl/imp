@@ -58,6 +58,7 @@ RuntimeConfig make_non_default() {
     c.attention.fa2_f16acc = false;
     c.attention.fa2_pv_f16acc = false;
     c.attention.fa2_hd256 = false;
+    c.attention.fa2_hd256_bkv = 32;
     c.attention.fp8_qk_scaled = true;
     c.attention.mxfp4 = "always";
     c.attention.mxfp4_blockscale = true;
@@ -122,6 +123,7 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
     EXPECT_FALSE(process_diag_fa2_f16acc());
     EXPECT_FALSE(process_diag_fa2_pv_f16acc());
     EXPECT_FALSE(process_diag_fa2_hd256());
+    EXPECT_EQ(process_diag_fa2_hd256_bkv(), 32);
     EXPECT_TRUE(process_diag_fp8_qk_scaled());
     EXPECT_EQ(process_diag_attention_mxfp4_mode(), "always");
     EXPECT_TRUE(process_diag_mxfp4_blockscale());
@@ -161,6 +163,7 @@ TEST(ProcessDiag, DefaultConfigMatchesBuiltInDefaults) {
     EXPECT_EQ(process_diag_fa2_f16acc(), d.attention.fa2_f16acc);
     EXPECT_EQ(process_diag_fa2_pv_f16acc(), d.attention.fa2_pv_f16acc);
     EXPECT_EQ(process_diag_fa2_hd256(), d.attention.fa2_hd256);
+    EXPECT_EQ(process_diag_fa2_hd256_bkv(), d.attention.fa2_hd256_bkv);
     EXPECT_EQ(process_diag_fp8_qk_scaled(), d.attention.fp8_qk_scaled);
     EXPECT_EQ(process_diag_attention_mxfp4_mode(), d.attention.mxfp4);
     EXPECT_EQ(process_diag_ffn_sparsity_probe(), d.ffn.sparsity_probe);

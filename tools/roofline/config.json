@@ -23,6 +23,8 @@
   "ncu": {
     "binary": "/opt/nvidia/nsight-compute/2026.2.1/ncu",
     "clock_control": "base",
+    "clock_floor_ghz": 1.2,
+    "clock_floor_comment": "Launches measured under this SM clock are dropped from the per-kernel aggregate (rl_measure.aggregate_by_kernel) and counted as n_launches_dropped_clock. --clock-control base does not stop the card idling between ncu replays; healthy launches in run 1d5b9230 read 1.52-2.01 GHz, the two artefacts 0.31 and 0.93 GHz.",
     "launch_count": 120,
     "skip_fraction": 0.45,
     "replay_comment": "Multi-pass kernel replay needs a device-memory backup, and on this WSL2 consumer driver that dies with a driver-resource error the moment a TMA-using kernel (cuBLAS nvjet_*, CUTLASS sm120) is profiled. Application replay is no alternative for prefill: cuBLAS re-autotunes per process, kernel sequences differ across passes -> ncu 'Skipped'. BOTH phases therefore run several SINGLE-PASS ncu invocations per cell (metric_groups; max ~6 plain counters per pass, only ONE sm__ops_path_* per pass). Decode used to be exempt on the assumption that it has no TMA kernels in the hot path \u2014 WRONG: the nvfp4-hybrid decode cell wedged indefinitely on 2026-07-25 (GPU idle at 3%, container unhealthy, killed by hand) because CUTLASS grouped GEMM runs there too. dense/moe survived, which is why the assumption held for so long.",
