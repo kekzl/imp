@@ -13,6 +13,12 @@ there instead of retelling it.
 
 ### Added
 
+- Chunk-parallel GDN prefill scan (`gdn.chunkpar_scan`, default on): the
+  recurrent scan ran 32 CTAs sequentially over all tokens and was 42% of the
+  hybrid pp512 wall. Qwen3.6-35B: scan kernel class -32% pp512 / -47% pp4096,
+  e2e +15/+21% pp512 and +45% pp4096 (12.9k -> 18.9k tok/s), deterministic
+  PPL +0.03%; ledger row in `docs/roadmap.md` (#1847)
+
 - Serving idle attribution tooling: `tools/analysis/serving_idle_profile.sh`
   (imp-server under nsys node-trace at N streams) +
   `tools/analysis/nsys_gap_attribution.py` (busy/idle share, gap histogram,

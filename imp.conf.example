@@ -450,6 +450,10 @@ vhead_reorder        = false
 # Chunkwise SSD scan (chunk-cached K/Q in smem) instead of the per-token
 # loop. Default ON since 2026-05-29 (+16.7% on the GDN scan kernel).
 chunkwise_scan       = true
+# Chunk-PARALLEL prefill scan: WY per-chunk factors on grid (chunks x heads)
+# plus a cheap sequential state pass, instead of 32 CTAs walking every token.
+# Single-sequence prefill (n >= 128), HD=SS=128, either state dtype.
+chunkpar_scan        = true
 # Override gated-DeltaNet weight layout (diagnostic; "" = auto).
 layout_override      = ""
 

@@ -10,6 +10,7 @@
 #include "exec/executor_helpers.h"
 #include "exec/gemm_scratch.h"  // prewarm_mmvq_scratch
 #include "exec/nvfp4_expert_offload.h"
+#include "compute/gdn.h"        // gdn_scan_chunkpar_workspace_bytes
 #include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -1066,6 +1067,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
+    // Chunk-parallel GDN prefill scan workspace (gdn.chunkpar_scan): the five
+    // per-(chunk, head) strip arrays + the FP32 inter-strip state. ~42 MiB at
+    // 32 value heads. Engine lifetime; on failure the route degrades to the
+    // fused scan (the dispatch checks for nullptr).
+    if (has_gdn_ && runtime_config().gdn.chunkpar_scan && cfg.ssm_dt_rank > 0) {
+        gdn_chunkpar_ws_bytes_ = gdn_scan_chunkpar_workspace_bytes(cfg.ssm_dt_rank);
+        gdn_chunkpar_ws_ = vram_alloc(vram_alloc_, gdn_chunkpar_ws_bytes_, "gdn_chunkpar_ws");
+        if (!gdn_chunkpar_ws_) {
+            IMP_LOG_WARN("gdn_chunkpar workspace unavailable (%.1f MiB) — fused scan route",
+                         gdn_chunkpar_ws_bytes_ / (1024.0 * 1024.0));
+            gdn_chunkpar_ws_bytes_ = 0;
+        }
+    }
+
     // FP8 activation scratch buffers (for FP8 prefill weight cache)
     if (wcache_.use_fp8) {
         int max_dim = cfg.d_model;
@@ -1468,6 +1483,9 @@ void GraphExecutor::free_buffers() {
             p = nullptr;
         }
     };
+
+    vfree(gdn_chunkpar_ws_);
+    gdn_chunkpar_ws_bytes_ = 0;
 
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) {
