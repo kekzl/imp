@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Added
 
+- GDN chunk-parallel scan, factor kernel on tensor cores: Gram matrices and
+  the P@W / P@U_A products as 3xTF32 `mma.sync`, float4 row loads, parallel
+  decay/beta. Qwen3.6-35B scan kernel class -64% pp512 / -74% pp4096 vs the
+  fused scan (-24% / -27% vs #1848), e2e pp4096 12.7k -> 24.9k tok/s;
+  Qwen3.8-27B deterministic PPL 4.6283 -> 4.6148; ledger row in
+  `docs/roadmap.md` (#1849)
+
 - GDN chunk-parallel scan, state pass on tensor cores: the three per-chunk
   GEMMs run as `mma.sync` tf32 (3xTF32 on the two that feed the carried
   state). Qwen3.6-35B scan kernel class -53% pp512 / -65% pp4096 vs the

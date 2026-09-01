@@ -64,9 +64,16 @@ namespace imp {
 //     the two GEMMs that feed the carried state (u_eff, H update) and plain
 //     tf32 on y: 90 us, PPL 6.8122, FP32 state 8.9e-7 vs the fused kernel.
 //     Class pp512 145 -> 67/69 ms (-53%), pp4096 1530/1574 -> 546/542 ms
-//     (-65%), e2e pp4096 12.5k -> 21.5k tok/s. K1 (201 us) is now 69% of
-//     the scan: Gram + Qeff/Y_A are 64x64x128 matmuls (MMA-able), the
-//     triangular solve stays scalar or goes blockwise.
+//     (-65%), e2e pp4096 12.5k -> 21.5k tok/s (#1848).
+//   - K1 phases per CTA (ncu, test geometry): A 54 us (64 serial row loads +
+//     the scalar Gram), B 45 (solve), C 33 (Qeff/Y_A). Now: float4-per-lane
+//     row loads, per-token decay/beta in parallel, Gram as 3xTF32 mma, P@W /
+//     P@U_A as 3xTF32 mma -> 75 us per CTA, 201 -> 128 us per strip in situ.
+//     Plain tf32 on P@W is NOT safe: Qeff = D q~ - P W is a difference of
+//     O(1) terms. The 35B PPL is no judge below ~0.5% (MoE routing flips
+//     between fp32-equivalent kernels: 6.8122..6.8493 across variants with
+//     state diffs of 1e-6); Qwen3.8-27B (deterministic) reads fused 4.6283
+//     -> 4.6148. The solve (45 us, 128 barriers) is now 60% of K1.
 //
 // Numerics: identical formulas to gdn_scan_chunkwise_wy_kernel (log-space
 // cumulative decay, the same softplus/sigmoid/L2-norm forms), reassociated
@@ -121,6 +128,49 @@ __host__ __device__ inline ChunkparWs chunkpar_ws_layout(float* base, int n_head
     return w;
 }
 
+// mma.sync m16n8k8 tf32 helpers, shared by both kernels.
+__device__ __forceinline__ uint32_t f32_to_tf32(float f) {
+    uint32_t r;
+    asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(f));
+    return r;
+}
+
+__device__ __forceinline__ void mma_tf32_16x8x8(float* c, const uint32_t* a, const uint32_t* b) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+        "{%0,%1,%2,%3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
+// Fragment MMA on FP32 operands. X3 = the 3xTF32 error-compensated form
+// (a = a_hi + a_lo, three MMAs: a_lo*b_hi + a_hi*b_lo + a_hi*b_hi), ~FP32
+// accuracy on the products; plain tf32 otherwise. Plain tf32 on all three
+// chunk GEMMs read PPL +0.13% on Qwen3.6-35B (6.8216 -> 6.8304): the state
+// path compounds the 10-bit operand rounding across chunks.
+template <bool X3>
+__device__ __forceinline__ void mma_frag(float* c, const float* a, const float* b) {
+    uint32_t ah[4], bh[2];
+#pragma unroll
+    for (int i = 0; i < 4; i++)
+        ah[i] = f32_to_tf32(a[i]);
+#pragma unroll
+    for (int i = 0; i < 2; i++)
+        bh[i] = f32_to_tf32(b[i]);
+    if constexpr (X3) {
+        uint32_t al[4], bl[2];
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+            al[i] = f32_to_tf32(a[i] - __uint_as_float(ah[i]));
+#pragma unroll
+        for (int i = 0; i < 2; i++)
+            bl[i] = f32_to_tf32(b[i] - __uint_as_float(bh[i]));
+        mma_tf32_16x8x8(c, al, bh);
+        mma_tf32_16x8x8(c, ah, bl);
+    }
+    mma_tf32_16x8x8(c, ah, bh);
+}
+
 // ---------------------------------------------------------------------------
 // Kernel 1 — per-(chunk, head) state-independent factors.
 // Grid (n_chunks, n_heads), block HD threads.
@@ -129,8 +179,12 @@ __host__ __device__ inline ChunkparWs chunkpar_ws_layout(float* base, int n_head
 //   region 1 [2*kChunk*SS]: phase A = k~ | q~ staging; phase B/C = the solve
 //                           histories U_A | W (k~/q~ are already folded into
 //                           the Gram matrices and the global RHS copies).
-//   region 2 [2*kChunk*kChunk]: KK | QK Gram matrices (whole kernel).
+//   region 2: KK [kChunk*kChunk] (phase B) | QK, padded stride kChunk+4,
+//             overwritten in place by P for the phase-C mma (whole kernel).
 //   region 3: beta[kChunk], logD[kChunk+1], row scratch[kChunk].
+// Phase A: float4-per-lane row loads, parallel per-token decay/beta, Gram
+// matrices as 3xTF32 mma. Phase B: scalar forward substitution (one column
+// per thread, smem histories). Phase C: P @ W and P @ U_A as tf32 mma.
 // ---------------------------------------------------------------------------
 // 2*HD threads: the solve has 2*HD independent columns (HD of U_A + HD of W),
 // one per thread — 8 warps hide the smem/global latency that 4 could not
@@ -165,46 +219,51 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     float* QE_s = ws.QE + slot * kChunk * SS;
     float* YA_s = ws.YA + slot * kChunk * HD;
 
+    constexpr int SQ = kChunk + 4;  // padded stride of QK/P: the phase-C mma A operand
     extern __shared__ float smem[];
-    float* s_k = smem;                       // [kChunk * SS]  phase A
-    float* s_q = s_k + kChunk * SS;          // [kChunk * SS]  phase A
-    float* s_u = s_k;                        // [kChunk * HD]  phase B/C alias
-    float* s_w = s_q;                        // [kChunk * SS]  phase B/C alias
-    float* s_kk = s_q + kChunk * SS;         // [kChunk * kChunk]
-    float* s_qk = s_kk + kChunk * kChunk;    // [kChunk * kChunk]
-    float* s_beta = s_qk + kChunk * kChunk;  // [kChunk]
-    float* s_logD = s_beta + kChunk;         // [kChunk + 1]
-    float* s_row = s_logD + kChunk + 1;      // [kChunk] T/P row scratch
+    float* s_k = smem;                     // [kChunk * SS]  phase A
+    float* s_q = s_k + kChunk * SS;        // [kChunk * SS]  phase A
+    float* s_u = s_k;                      // [kChunk * HD]  phase B/C alias
+    float* s_w = s_q;                      // [kChunk * SS]  phase B/C alias
+    float* s_kk = s_q + kChunk * SS;       // [kChunk * kChunk]   KK, stride kChunk
+    float* s_qk = s_kk + kChunk * kChunk;  // [kChunk * SQ]       QK, then P in place
+    float* s_beta = s_qk + kChunk * SQ;    // [kChunk]
+    float* s_logD = s_beta + kChunk;       // [kChunk + 1]
+    float* s_row = s_logD + kChunk + 1;    // [kChunk] T row scratch (phase B)
+    const int warp = tid / 32, lane = tid % 32;
+    const int g = lane / 4, tg = lane % 4;  // mma fragment coordinates
 
-    // ---- phase A: load raw K, Q (half the threads each) ----
-    for (int t = 0; t < L; t++) {
+    // ---- phase A: load raw K, Q — a warp per row, one float4 per lane ----
+    // (64 serial per-thread row loads used to be the biggest single item of
+    // this phase: one exposed L2/DRAM round-trip per token.)
+    static_assert(SS == 128, "float4-per-lane row load assumes SS == 128");
+    for (int t = warp; t < L; t += 2 * HD / 32) {
         const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
-        if (w_half)
-            s_q[t * SS + col] = row[g_idx * SS + col];
-        else
-            s_k[t * SS + col] = row[BC_size + g_idx * SS + col];
+        *reinterpret_cast<float4*>(&s_q[t * SS + lane * 4]) =
+            *reinterpret_cast<const float4*>(row + g_idx * SS + lane * 4);
+        *reinterpret_cast<float4*>(&s_k[t * SS + lane * 4]) =
+            *reinterpret_cast<const float4*>(row + BC_size + g_idx * SS + lane * 4);
+    }
+    // Per-token decay / learning rate — same formulas as gdn_scan_fused_kernel:
+    // the transcendental part per token in parallel, the prefix sum (same
+    // sequential order as before) on thread 0 after the barrier.
+    if (tid < L) {
+        float alpha_h = __half2float(alpha_all[static_cast<size_t>(t0 + tid) * n_heads + h]);
+        float dt_val = alpha_h + dtb_h;
+        dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
+        s_logD[tid + 1] = fmaxf(A_h * dt_val, -20.0f);
+        float beta_h = __half2float(beta_all[static_cast<size_t>(t0 + tid) * n_heads + h]);
+        s_beta[tid] = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
     }
     __syncthreads();
-
-    // Per-token decay / learning rate (thread 0, L small) — same formulas as
-    // gdn_scan_fused_kernel.
     if (tid == 0) {
-        float log_D = 0.0f;
         s_logD[0] = 0.0f;
-        for (int t = 0; t < L; t++) {
-            float alpha_h = __half2float(alpha_all[static_cast<size_t>(t0 + t) * n_heads + h]);
-            float dt_val = alpha_h + dtb_h;
-            dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
-            log_D += fmaxf(A_h * dt_val, -20.0f);
-            s_logD[t + 1] = log_D;
-            float beta_h = __half2float(beta_all[static_cast<size_t>(t0 + t) * n_heads + h]);
-            s_beta[t] = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
-        }
+        for (int t = 0; t < L; t++)
+            s_logD[t + 1] += s_logD[t];
     }
 
     // Per-token L2 norm, one warp per token: rsqrtf(max(sum_sq, 1e-12)).
     {
-        const int warp = tid / 32, lane = tid % 32;
         for (int t = warp; t < L; t += 2 * HD / 32) {
             float k_sq = 0.0f, q_sq = 0.0f;
 #pragma unroll
@@ -244,23 +303,43 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     if (tid == 0)
         ws.D0L[slot] = expf(logD_L);
 
-    // Gram matrices (lower triangle incl. diagonal).
-    for (int idx = tid; idx < kChunk * kChunk; idx += 2 * HD) {
-        const int i = idx / kChunk, j = idx % kChunk;
-        if (j > i || i >= L) {
-            s_kk[idx] = 0.0f;
-            s_qk[idx] = 0.0f;
-            continue;
+    // Gram matrices KK = K~ K~^T and QK = Q~ K~^T (lower triangle incl. the
+    // diagonal, zero elsewhere) as 3xTF32 mma: warp w takes matrix w/4 and
+    // m-tile w%4 across all 8 n-tiles. Both feed the state (T and P
+    // coefficients), hence the compensated form.
+    {
+        const bool is_qk = warp >= 4;
+        const float* A = is_qk ? s_q : s_k;
+        const int m0 = (warp % 4) * 16;
+        float acc[kChunk / 8][4];
+#pragma unroll
+        for (int nt = 0; nt < kChunk / 8; nt++)
+            acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
+        for (int k0 = 0; k0 < SS; k0 += 8) {
+            float a[4];
+            a[0] = A[(m0 + g) * SS + k0 + tg];
+            a[1] = A[(m0 + g + 8) * SS + k0 + tg];
+            a[2] = A[(m0 + g) * SS + k0 + tg + 4];
+            a[3] = A[(m0 + g + 8) * SS + k0 + tg + 4];
+#pragma unroll
+            for (int nt = 0; nt < kChunk / 8; nt++) {
+                float b[2];  // B[k][n] = K~[n][k]
+                b[0] = s_k[(nt * 8 + g) * SS + k0 + tg];
+                b[1] = s_k[(nt * 8 + g) * SS + k0 + tg + 4];
+                mma_frag<true>(acc[nt], a, b);
+            }
         }
-        float kk = 0.0f, qk = 0.0f;
-#pragma unroll 8
-        for (int s = 0; s < SS; s++) {
-            const float k_js = s_k[j * SS + s];
-            kk += s_k[i * SS + s] * k_js;
-            qk += s_q[i * SS + s] * k_js;
+        float* dst = is_qk ? s_qk : s_kk;
+        const int ds = is_qk ? SQ : kChunk;
+        const int i0 = m0 + g, i1 = i0 + 8;
+#pragma unroll
+        for (int nt = 0; nt < kChunk / 8; nt++) {
+            const int j = nt * 8 + 2 * tg;
+            dst[i0 * ds + j] = (j <= i0 && i0 < L) ? acc[nt][0] : 0.0f;
+            dst[i0 * ds + j + 1] = (j + 1 <= i0 && i0 < L) ? acc[nt][1] : 0.0f;
+            dst[i1 * ds + j] = (j <= i1 && i1 < L) ? acc[nt][2] : 0.0f;
+            dst[i1 * ds + j + 1] = (j + 1 <= i1 && i1 < L) ? acc[nt][3] : 0.0f;
         }
-        s_kk[idx] = kk;
-        s_qk[idx] = qk;
     }
     __syncthreads();  // region 1 is dead as k~/q~ from here on
 
@@ -315,34 +394,77 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
         }
     }
 
-    // ---- phase C: Qeff (in place on QE, W half) and Y_A (U_A half) ----
-    // P[t,j] = exp(logD[t+1]-logD[j+1]) * QK[t,j] for j <= t.
-    for (int t = 0; t < L; t++) {
-        float pre = 0.0f;
-        if (w_half)
-            pre = QE_s[t * SS + col];  // D[0..t+1] q~ from phase A, prefetched
-        if (tid <= t)
-            s_row[tid] = expf(s_logD[t + 1] - s_logD[tid + 1]) * s_qk[t * kChunk + tid];
-        __syncthreads();
-        {
-            const float* h2 = w_half ? s_w : s_u;
-            float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
-            int j = 0;
-            for (; j + 3 <= t; j += 4) {
-                a0 += s_row[j] * h2[j * HD + col];
-                a1 += s_row[j + 1] * h2[(j + 1) * HD + col];
-                a2 += s_row[j + 2] * h2[(j + 2) * HD + col];
-                a3 += s_row[j + 3] * h2[(j + 3) * HD + col];
-            }
-            for (; j <= t; j++)
-                a0 += s_row[j] * h2[j * HD + col];
-            const float sum = (a0 + a1) + (a2 + a3);
-            if (w_half)
-                QE_s[t * SS + col] = pre - sum;
-            else
-                YA_s[t * HD + col] = sum;
+    // ---- phase C: Qeff (in place on QE) and Y_A on tensor cores ----
+    // P[t][j] = D[j+1..t+1] QK[t][j] (j <= t) materialised in place, then
+    //   Qeff = D q~ - P @ W      Y_A = P @ U_A
+    // as two [L x 128] GEMMs over K = j. Output terms, but NOT tf32-safe:
+    // Qeff is the difference of two O(1) terms (D q~ and P W cancel), so the
+    // 10-bit operand rounding on P W becomes an O(1e-2) relative error on
+    // Qeff - measured PPL 6.8122 -> 6.8845 (+0.9%) with plain tf32 here.
+    // 3xTF32 on both.
+    const int kmax = (L + 7) & ~7;
+    if (L < kmax)  // K rows [L, kmax) of the histories must be finite (P there is zero)
+        for (int idx = tid; idx < (kmax - L) * HD; idx += 2 * HD) {
+            s_u[(L + idx / HD) * HD + idx % HD] = 0.0f;
+            s_w[(L + idx / HD) * HD + idx % HD] = 0.0f;
         }
-        __syncthreads();
+    for (int idx = tid; idx < kChunk * kChunk; idx += 2 * HD) {
+        const int i = idx / kChunk, j = idx % kChunk;
+        if (j <= i && i < L)
+            s_qk[i * SQ + j] *= expf(s_logD[i + 1] - s_logD[j + 1]);
+    }
+    __syncthreads();
+    {
+        const int m0 = (warp % 4) * 16;           // t rows of this warp
+        const int nbase = (warp / 4) * (HD / 2);  // its 64 output columns
+        if (m0 < L) {
+            const int r0 = m0 + g, r1 = r0 + 8;
+#pragma unroll 1
+            for (int which = 0; which < 2; which++) {  // 0: P @ W -> Qeff, 1: P @ U_A -> Y_A
+                const float* B = which ? s_u : s_w;
+                float acc[HD / 16][4];
+#pragma unroll
+                for (int nt = 0; nt < HD / 16; nt++)
+                    acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
+                for (int k0 = 0; k0 < kmax; k0 += 8) {
+                    float a[4];
+                    a[0] = s_qk[(m0 + g) * SQ + k0 + tg];
+                    a[1] = s_qk[(m0 + g + 8) * SQ + k0 + tg];
+                    a[2] = s_qk[(m0 + g) * SQ + k0 + tg + 4];
+                    a[3] = s_qk[(m0 + g + 8) * SQ + k0 + tg + 4];
+#pragma unroll
+                    for (int nt = 0; nt < HD / 16; nt++) {
+                        float b[2];
+                        b[0] = B[(k0 + tg) * HD + nbase + nt * 8 + g];
+                        b[1] = B[(k0 + tg + 4) * HD + nbase + nt * 8 + g];
+                        mma_frag<true>(acc[nt], a, b);
+                    }
+                }
+#pragma unroll
+                for (int nt = 0; nt < HD / 16; nt++) {
+                    const int cb = nbase + nt * 8 + 2 * tg;
+                    if (which == 0) {
+                        if (r0 < L) {
+                            float2* q = reinterpret_cast<float2*>(&QE_s[r0 * SS + cb]);
+                            const float2 v = *q;
+                            *q = make_float2(v.x - acc[nt][0], v.y - acc[nt][1]);
+                        }
+                        if (r1 < L) {
+                            float2* q = reinterpret_cast<float2*>(&QE_s[r1 * SS + cb]);
+                            const float2 v = *q;
+                            *q = make_float2(v.x - acc[nt][2], v.y - acc[nt][3]);
+                        }
+                    } else {
+                        if (r0 < L)
+                            *reinterpret_cast<float2*>(&YA_s[r0 * HD + cb]) =
+                                make_float2(acc[nt][0], acc[nt][1]);
+                        if (r1 < L)
+                            *reinterpret_cast<float2*>(&YA_s[r1 * HD + cb]) =
+                                make_float2(acc[nt][2], acc[nt][3]);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -365,48 +487,6 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
 // Shared strides are padded so the fragment loads are bank-conflict free
 // (SA = SS + 4 for the [row][k] staging, SH = COLS + 8 for the [k][n] tiles).
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ uint32_t f32_to_tf32(float f) {
-    uint32_t r;
-    asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(f));
-    return r;
-}
-
-__device__ __forceinline__ void mma_tf32_16x8x8(float* c, const uint32_t* a, const uint32_t* b) {
-    asm volatile(
-        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-        "{%0,%1,%2,%3};\n"
-        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
-        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
-}
-
-// Fragment MMA on FP32 operands. X3 = the 3xTF32 error-compensated form
-// (a = a_hi + a_lo, three MMAs: a_lo*b_hi + a_hi*b_lo + a_hi*b_hi), ~FP32
-// accuracy on the products; plain tf32 otherwise. Plain tf32 on all three
-// chunk GEMMs read PPL +0.13% on Qwen3.6-35B (6.8216 -> 6.8304): the state
-// path compounds the 10-bit operand rounding across chunks.
-template <bool X3>
-__device__ __forceinline__ void mma_frag(float* c, const float* a, const float* b) {
-    uint32_t ah[4], bh[2];
-#pragma unroll
-    for (int i = 0; i < 4; i++)
-        ah[i] = f32_to_tf32(a[i]);
-#pragma unroll
-    for (int i = 0; i < 2; i++)
-        bh[i] = f32_to_tf32(b[i]);
-    if constexpr (X3) {
-        uint32_t al[4], bl[2];
-#pragma unroll
-        for (int i = 0; i < 4; i++)
-            al[i] = f32_to_tf32(a[i] - __uint_as_float(ah[i]));
-#pragma unroll
-        for (int i = 0; i < 2; i++)
-            bl[i] = f32_to_tf32(b[i] - __uint_as_float(bh[i]));
-        mma_tf32_16x8x8(c, al, bh);
-        mma_tf32_16x8x8(c, ah, bl);
-    }
-    mma_tf32_16x8x8(c, ah, bh);
-}
-
 // C[16 x NTILE*8] = s_a[m0.., 0..SS) @ H[0..SS, 0..NTILE*8) for one warp's
 // 16-row strip, mma C layout. (A free function: nvcc 13.3 segfaults on a
 // generic lambda carrying the X3 tag inside the kernel.)
@@ -610,8 +690,9 @@ template <int HD, int SS, typename StateT>
 void chunkpar_launch(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                      const float* A_log, const float* dt_bias, StateT* h_state, half* y, int n_tokens,
                      int n_heads, int n_groups, cudaStream_t stream, int grouped_layout, float* ws_base) {
-    const size_t smem1 =
-        (2 * kChunk * SS + 2 * kChunk * kChunk + kChunk + (kChunk + 1) + kChunk) * sizeof(float);
+    const size_t smem1 = (2 * kChunk * SS + kChunk * kChunk + kChunk * (kChunk + 4) + kChunk +
+                          (kChunk + 1) + kChunk) *
+                         sizeof(float);
     const size_t smem2 =
         (kChunk * (SS + 4) + SS * (HD / kColSplit + 8) + kChunk * (HD / kColSplit + 8)) * sizeof(float);
     static std::once_flag attr_once;
