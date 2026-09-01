@@ -454,7 +454,6 @@ TEST_F(FmhaFA2Dense2CtaTest, Chunked) {
     run_pv(1, 1024, 2048, 24, 4, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/1024);
 }
 TEST_F(FmhaFA2Dense2CtaTest, RealisticMagnitude) { run_pv(1, 1024, 1024, 24, 4, 128, true, 0, 0.0f, 80.0f); }
-
 TEST_F(FmhaFA2PvF16Test, CausalSeq64) { run_pv(1, 64, 64, 4, 4, 128, true); }
 TEST_F(FmhaFA2PvF16Test, CausalShortSeq24_GQA32_8) { run_pv(1, 24, 24, 32, 8, 128, true); }
 TEST_F(FmhaFA2PvF16Test, CausalOddSeq51) { run_pv(1, 51, 51, 4, 4, 128, true); }

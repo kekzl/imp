@@ -24,6 +24,14 @@ there instead of retelling it.
 
 ### Changed
 
+- FA2 prefill softmax: the score scale rides inside the exp FMA and interior
+  KV tiles skip the per-element causal/window/range masking (ncu: the 2-CTA
+  instance spent 5.5 scalar ALU instructions per MMA there). Qwen3-14B-NVFP4
+  pp4096: FA2 kernel sum 244.3/243.6 -> 225.6/226.1 ms (-7.5%), pp 24396 ->
+  24718 tok/s, deterministic PPL 10.0277 -> 10.0229; Qwen3.8-27B-NVFP4 (hd=256)
+  137.6 -> 118.1 ms (-14%), PPL 4.6283 both arms. The exp2/scale-in-Q forms
+  measured the same speed but +0.35% PPL and stay out.
+
 - The dense (hd=128, Bq=128) FA2 prefill kernel runs two CTAs per SM
   (`attention.fa2_dense_2cta`, default on): TWOSLOT tile (35 KB) plus
   `__launch_bounds__(256, 2)`, which pins the kernel to 128 registers (137
