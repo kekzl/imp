@@ -74,6 +74,8 @@ void process_diag_set_fa2_f16acc(bool v);
 void process_diag_set_fa2_pv_f16acc(bool v);
 bool process_diag_fa2_hd256();  // HD=256 FA2 port (attention.fa2_hd256, default on since #932)
 void process_diag_set_fa2_hd256(bool v);
+bool process_diag_fa2_dense_2cta();  // dense Bq=128 FA2 at 2 CTAs/SM (attention.fa2_dense_2cta)
+void process_diag_set_fa2_dense_2cta(bool v);
 int process_diag_fa2_hd256_bkv();  // KV tile rows of the HD=256 instance (attention.fa2_hd256_bkv)
 void process_diag_set_fa2_hd256_bkv(int v);
 bool process_diag_fp8_qk_scaled();  // amax-scaled e4m3 fp8-QK (#680)

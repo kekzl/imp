@@ -1329,14 +1329,21 @@ __device__ __forceinline__ void prefetch_v_tile(half* V_dst, const half* V_ptr, 
 // convert as x*(448/amax) (full e4m3 range, no saturation/mantissa cliff) and
 // the score scale absorbs (amax_q*amax_k/448^2). d_amax = device floats
 // {amax_q, amax_k} produced by fa2_amax_fp16_kernel just before launch.
+// The kernel body is a device function so two __global__ wrappers can share
+// it: the shipped one carries no launch bounds (ptxas allocates freely, 137
+// registers at Bq=128; even a min-blocks of 1 moved it to 180 and changed the
+// SASS), the attention.fa2_dense_2cta probe pins __launch_bounds__(256, 2) on
+// the Bq=128 TWOSLOT instance so two 8-warp CTAs fit an SM (<= 128 registers
+// plus the 35 KB TWOSLOT tile; the 70 KB double buffer alone pins one CTA).
 template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false,
           bool PVF16 = false, bool FP8SCALED = false>
-__global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
-                                      const half* __restrict__ V, half* __restrict__ O, int batch_size,
-                                      int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
-                                      bool causal, int sliding_window, float softcap, int q_offset,
-                                      const float* __restrict__ d_amax = nullptr,
-                                      const int* __restrict__ d_kv_len = nullptr) {
+__device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, const half* __restrict__ K,
+                                                    const half* __restrict__ V, half* __restrict__ O,
+                                                    int batch_size, int seq_q, int seq_kv, int n_heads,
+                                                    int n_kv_heads, float scale, bool causal,
+                                                    int sliding_window, float softcap, int q_offset,
+                                                    const float* __restrict__ d_amax,
+                                                    const int* __restrict__ d_kv_len) {
     constexpr int Bkv = BKV;
     static_assert(BKV % 16 == 0 && (BKV / 8) % 2 == 0, "QK n-pair loop and PV K-groups need BKV % 16 == 0");
     constexpr int head_dim = HD;
@@ -1863,6 +1870,35 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
     }
 }
 
+template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false,
+          bool PVF16 = false, bool FP8SCALED = false>
+__global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
+                                      const half* __restrict__ V, half* __restrict__ O, int batch_size,
+                                      int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
+                                      bool causal, int sliding_window, float softcap, int q_offset,
+                                      const float* __restrict__ d_amax = nullptr,
+                                      const int* __restrict__ d_kv_len = nullptr) {
+    fmha_sm120_fa2_body<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>(Q, K, V, O, batch_size, seq_q,
+                                                                                seq_kv, n_heads, n_kv_heads,
+                                                                                scale, causal, sliding_window,
+                                                                                softcap, q_offset, d_amax,
+                                                                                d_kv_len);
+}
+
+// attention.fa2_dense_2cta: the Bq=128 TWOSLOT instance at two CTAs per SM.
+template <int Bq, int HD, bool FP16QK, bool F16ACC, int BKV, bool TWOSLOT, bool PVF16, bool FP8SCALED>
+__global__ void __launch_bounds__(Bq / 16 * 32, 2) fmha_sm120_fa2_kernel_2cta(
+    const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
+    int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
+    int sliding_window, float softcap, int q_offset, const float* __restrict__ d_amax = nullptr,
+    const int* __restrict__ d_kv_len = nullptr) {
+    fmha_sm120_fa2_body<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>(Q, K, V, O, batch_size, seq_q,
+                                                                                seq_kv, n_heads, n_kv_heads,
+                                                                                scale, causal, sliding_window,
+                                                                                softcap, q_offset, d_amax,
+                                                                                d_kv_len);
+}
+
 static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool twoslot = false) {
     const size_t kvstride = head_dim + FA2_KV_PAD;  // halfs (bank-conflict pad)
     // Q tile: fp8 mode stages e4m3 bytes (FA2_Q_PAD); fp16 mode keeps Q in
@@ -1980,7 +2016,12 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     } else if (fp16_qk) {
         if (blocks_128 >= (long)sm_count) {
             Bq = 128, Bkv = 64;
-            kern = pv_f16   ? fmha_sm120_fa2_kernel<128, 128, true, true, 64, false, true>
+            // attention.fa2_dense_2cta: TWOSLOT at Bq=128 (35 KB smem) with the
+            // kernel pinned to <= 128 registers, so two 8-warp CTAs share an SM.
+            const bool two_cta = pv_f16 && imp::process_diag_fa2_dense_2cta();
+            twoslot = two_cta;
+            kern = two_cta  ? fmha_sm120_fa2_kernel_2cta<128, 128, true, true, 64, true, true, false>
+                   : pv_f16 ? fmha_sm120_fa2_kernel<128, 128, true, true, 64, false, true>
                    : f16acc ? fmha_sm120_fa2_kernel<128, 128, true, true, 64>
                             : fmha_sm120_fa2_kernel<128, 128, true, false, 64>;
         } else if (blocks_128 >= (long)(sm_count / 2)) {
