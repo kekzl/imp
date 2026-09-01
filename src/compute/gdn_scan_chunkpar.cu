@@ -2,6 +2,7 @@
 #include "core/logging.h"
 
 #include <cuda_bf16.h>
+#include <cstdint>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -53,11 +54,19 @@ namespace imp {
 //     K2 loops measured WORSE (242 -> 295/309 us: register growth vs the
 //     2-CTA residency); the simple single-chain float4 form ships. The K1
 //     solve keeps 4 partial accumulators — there they pay.
-//   - Shipped state (2026-09-01, Qwen3.6-35B class kernel sums): pp512
-//     144.5 -> 98.5 ms (-32%), pp4096 1485 -> 786 ms (-47%); K1 196 us, K2
-//     242 us per 512-token strip. Still ~4x over the compute floor: ncu says
-//     short_scoreboard 2.4 + barrier 2.1 stalls/issue in K1 — the remaining
-//     lever is an MMA form of the three chunk matmuls, not more scalar ILP.
+//   - #1847 shipped state (Qwen3.6-35B class kernel sums): pp512 144.5 ->
+//     98.5 ms (-32%), pp4096 1485 -> 786 ms (-47%); K1 196 us, K2 242 us per
+//     512-token strip, both ~4x over the compute floor (ncu: short_scoreboard
+//     2.4 + barrier 2.1 stalls/issue in K1).
+//   - K2 on tensor cores (mma.sync m16n8k8 tf32, this file): 242 -> 65 us
+//     with plain tf32 on all three GEMMs, but PPL 6.8216 -> 6.8304 (+0.13%,
+//     the state path compounds the 10-bit operand rounding); with 3xTF32 on
+//     the two GEMMs that feed the carried state (u_eff, H update) and plain
+//     tf32 on y: 90 us, PPL 6.8122, FP32 state 8.9e-7 vs the fused kernel.
+//     Class pp512 145 -> 67/69 ms (-53%), pp4096 1530/1574 -> 546/542 ms
+//     (-65%), e2e pp4096 12.5k -> 21.5k tok/s. K1 (201 us) is now 69% of
+//     the scan: Gram + Qeff/Y_A are 64x64x128 matmuls (MMA-able), the
+//     triangular solve stays scalar or goes blockwise.
 //
 // Numerics: identical formulas to gdn_scan_chunkwise_wy_kernel (log-space
 // cumulative decay, the same softplus/sigmoid/L2-norm forms), reassociated
@@ -77,7 +86,7 @@ namespace {
 
 constexpr int kChunk = 64;       // tokens per chunk (WY tile)
 constexpr int kStripChunks = 8;  // chunks per strip => 512 tokens per strip
-constexpr int kColSplit = 2;     // K2 CTAs per head (state columns split)
+constexpr int kColSplit = 4;     // K2 CTAs per head (state columns split): 32 columns each
 
 // Workspace float layout, per strip slot (slot = c * n_heads + h):
 //   W    [slots][kChunk*SS]   phase A: solve RHS; phase B: solved W
@@ -338,139 +347,262 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 2 — sequential inter-chunk state pass + outputs.
-// Grid (n_heads, kColSplit): blockIdx.y owns HD/kColSplit state columns —
-// u_eff, y and the state update are all column-local, so the split only
-// re-stages the (read-only) W / Qeff / K_d rows per CTA. Block 2*HD/kColSplit
-// threads, adjacent lanes share a column (SPLIT=2, like the fused kernel).
+// Kernel 2 — sequential inter-chunk state pass + outputs, on tensor cores.
+// Grid (n_heads, kColSplit): blockIdx.y owns COLS = HD/kColSplit state columns;
+// u_eff, y and the state update are column-local, so the split only re-stages
+// the (read-only) W / Qeff / K_d rows per CTA. 128 threads = 4 warps.
+//
+// Per chunk, three GEMMs as mma.sync m16n8k8 tf32 with FP32 accumulate:
+//   u_eff [L x COLS]  = U_A - W    [L x SS] @ H [SS x COLS]
+//   y     [L x COLS]  = (Y_A + Qeff [L x SS] @ H) * scale
+//   H'    [SS x COLS] = D0L * H + K_d^T [SS x L] @ u_eff [L x COLS]
+// H lives in shared memory (FP32): the B operand of the first two GEMMs and
+// the C-init / D of the third. The carried state itself is never rounded —
+// D0L*H enters the accumulator in FP32 — only the per-chunk increments see
+// the tf32 operand rounding (10-bit mantissa). The scalar float4 form of this
+// kernel ran 242 us per 512-token strip at 6.6 TFLOPS; the three GEMMs are
+// 1.6 GFLOP per strip and head-set.
+// Shared strides are padded so the fragment loads are bank-conflict free
+// (SA = SS + 4 for the [row][k] staging, SH = COLS + 8 for the [k][n] tiles).
 // ---------------------------------------------------------------------------
+__device__ __forceinline__ uint32_t f32_to_tf32(float f) {
+    uint32_t r;
+    asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(f));
+    return r;
+}
+
+__device__ __forceinline__ void mma_tf32_16x8x8(float* c, const uint32_t* a, const uint32_t* b) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+        "{%0,%1,%2,%3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
+// Fragment MMA on FP32 operands. X3 = the 3xTF32 error-compensated form
+// (a = a_hi + a_lo, three MMAs: a_lo*b_hi + a_hi*b_lo + a_hi*b_hi), ~FP32
+// accuracy on the products; plain tf32 otherwise. Plain tf32 on all three
+// chunk GEMMs read PPL +0.13% on Qwen3.6-35B (6.8216 -> 6.8304): the state
+// path compounds the 10-bit operand rounding across chunks.
+template <bool X3>
+__device__ __forceinline__ void mma_frag(float* c, const float* a, const float* b) {
+    uint32_t ah[4], bh[2];
+#pragma unroll
+    for (int i = 0; i < 4; i++)
+        ah[i] = f32_to_tf32(a[i]);
+#pragma unroll
+    for (int i = 0; i < 2; i++)
+        bh[i] = f32_to_tf32(b[i]);
+    if constexpr (X3) {
+        uint32_t al[4], bl[2];
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+            al[i] = f32_to_tf32(a[i] - __uint_as_float(ah[i]));
+#pragma unroll
+        for (int i = 0; i < 2; i++)
+            bl[i] = f32_to_tf32(b[i] - __uint_as_float(bh[i]));
+        mma_tf32_16x8x8(c, al, bh);
+        mma_tf32_16x8x8(c, ah, bl);
+    }
+    mma_tf32_16x8x8(c, ah, bh);
+}
+
+// C[16 x NTILE*8] = s_a[m0.., 0..SS) @ H[0..SS, 0..NTILE*8) for one warp's
+// 16-row strip, mma C layout. (A free function: nvcc 13.3 segfaults on a
+// generic lambda carrying the X3 tag inside the kernel.)
+template <int SS, int SA, int SH, int NTILE, bool X3>
+__device__ __forceinline__ void gemm_rows_x_h(const float* __restrict__ s_a, const float* __restrict__ s_h,
+                                              int m0, int g, int tg, float (&acc)[NTILE][4]) {
+#pragma unroll
+    for (int nt = 0; nt < NTILE; nt++)
+        acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
+    for (int k0 = 0; k0 < SS; k0 += 8) {
+        float a[4];
+        a[0] = s_a[(m0 + g) * SA + k0 + tg];
+        a[1] = s_a[(m0 + g + 8) * SA + k0 + tg];
+        a[2] = s_a[(m0 + g) * SA + k0 + tg + 4];
+        a[3] = s_a[(m0 + g + 8) * SA + k0 + tg + 4];
+#pragma unroll
+        for (int nt = 0; nt < NTILE; nt++) {
+            float b[2];
+            b[0] = s_h[(k0 + tg) * SH + nt * 8 + g];
+            b[1] = s_h[(k0 + tg + 4) * SH + nt * 8 + g];
+            mma_frag<X3>(acc[nt], a, b);
+        }
+    }
+}
+
 template <int HD, int SS, typename StateT>
-__global__ void __launch_bounds__(2 * HD / kColSplit, kColSplit) gdn_chunkpar_pass_kernel(
+__global__ void __launch_bounds__(128, 1) gdn_chunkpar_pass_kernel(
     float* __restrict__ ws_base, StateT* __restrict__ h_state, half* __restrict__ y_out,
     int strip_t0, int strip_tokens, int n_chunks, int n_heads, int load_statet, int store_statet) {
-    constexpr int COLS = HD / kColSplit;  // d-columns this CTA owns
+    constexpr int COLS = HD / kColSplit;  // state columns this CTA owns
+    constexpr int SA = SS + 4;            // padded stride of the staged [row][k] block
+    constexpr int SH = COLS + 8;          // padded stride of H [k][n] and u_eff [k][n]
+    constexpr int NT = 128;
+    constexpr int NTILE = COLS / 8;       // n-tiles per row strip
+    static_assert(COLS % 8 == 0 && SS % 64 == 0 && kChunk % 16 == 0, "mma tiling");
     const int h = blockIdx.x;
     const int d_base = blockIdx.y * COLS;
-    const int dl = threadIdx.x / 2;  // local column
-    const int d = d_base + dl;
-    const int part = threadIdx.x % 2;
-    constexpr int SS_PER = SS / 2;
-    const int s_base = part * SS_PER;
+    const int tid = threadIdx.x;
+    const int warp = tid / 32, lane = tid % 32;
+    const int g = lane / 4, tg = lane % 4;  // mma fragment coordinates (groupID, thread-in-group)
     const float scale = rsqrtf(static_cast<float>(HD));
     const int inner = n_heads * HD;
 
     const ChunkparWs ws = chunkpar_ws_layout<HD, SS>(ws_base, n_heads);
     float* H32_h = ws.H32 + static_cast<size_t>(h) * SS * HD;
 
-    // This CTA's slice of the state, FP32, one half-column per thread.
-    float H_reg[SS_PER];
-    if (load_statet) {
-        const StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
-#pragma unroll
-        for (int s = 0; s < SS_PER; s++)
-            H_reg[s] = static_cast<float>(H_col[(s_base + s) * HD]);
-    } else {
-#pragma unroll
-        for (int s = 0; s < SS_PER; s++)
-            H_reg[s] = H32_h[(s_base + s) * HD + d];
-    }
-
     extern __shared__ float smem[];
-    float* s_a = smem;                // [kChunk * SS] staging (W, then Qeff, then K_d)
-    float* s_ue = s_a + kChunk * SS;  // [kChunk * COLS] u_eff, local columns only
-    constexpr int NT = 2 * COLS;
+    float* s_a = smem;               // [kChunk][SA]  staging: W, then Qeff, then K_d
+    float* s_h = s_a + kChunk * SA;  // [SS][SH]      state slice, FP32
+    float* s_ue = s_h + SS * SH;     // [kChunk][SH]  u_eff
+
+    // This CTA's state slice: H[s][d_base + dl].
+    for (int idx = tid; idx < SS * COLS; idx += NT) {
+        const int s = idx / COLS, dl = idx % COLS;
+        const size_t gi = static_cast<size_t>(s) * HD + d_base + dl;
+        s_h[s * SH + dl] = load_statet
+                               ? static_cast<float>(h_state[static_cast<size_t>(h) * SS * HD + gi])
+                               : H32_h[gi];
+    }
+    __syncthreads();
+
+    // rows [0, L) of a [kChunk x SS] row-major global block -> s_a (padded stride)
+    auto stage = [&](const float* src_rows, int L) {
+        constexpr int F4_PER_ROW = SS / 4;
+        const float4* src = reinterpret_cast<const float4*>(src_rows);
+        for (int idx = tid; idx < L * F4_PER_ROW; idx += NT) {
+            const int r = idx / F4_PER_ROW, c4 = idx % F4_PER_ROW;
+            *reinterpret_cast<float4*>(&s_a[r * SA + c4 * 4]) = src[idx];
+        }
+    };
 
     for (int c = 0; c < n_chunks; c++) {
         const int L = min(kChunk, strip_tokens - c * kChunk);
         const size_t slot = static_cast<size_t>(c) * n_heads + h;
         const float* UA_s = ws.UA + slot * kChunk * HD;
-
-        // -- stage W (float4), compute u_eff = U_A - W @ H_0 --
-        {
-            const float4* src = reinterpret_cast<const float4*>(ws.W + slot * kChunk * SS);
-            float4* dst = reinterpret_cast<float4*>(s_a);
-            for (int idx = threadIdx.x; idx < L * SS / 4; idx += NT)
-                dst[idx] = src[idx];
-        }
-        __syncthreads();
-        for (int t = 0; t < L; t++) {
-            float wh = 0.0f;
-            const float4* a4 = reinterpret_cast<const float4*>(&s_a[t * SS + s_base]);
-#pragma unroll
-            for (int ii = 0; ii < SS_PER / 4; ii++) {
-                const float4 a = a4[ii];
-                wh += a.x * H_reg[4 * ii] + a.y * H_reg[4 * ii + 1] + a.z * H_reg[4 * ii + 2] +
-                      a.w * H_reg[4 * ii + 3];
-            }
-            wh += __shfl_xor_sync(0xffffffffu, wh, 1);
-            if (part == 0)
-                s_ue[t * COLS + dl] = UA_s[t * HD + d] - wh;
-        }
-        __syncthreads();
-
-        // -- stage Qeff, emit y from the PRE-update state --
-        {
-            const float4* src = reinterpret_cast<const float4*>(ws.QE + slot * kChunk * SS);
-            float4* dst = reinterpret_cast<float4*>(s_a);
-            for (int idx = threadIdx.x; idx < L * SS / 4; idx += NT)
-                dst[idx] = src[idx];
-        }
-        __syncthreads();
         const float* YA_s = ws.YA + slot * kChunk * HD;
-        for (int t = 0; t < L; t++) {
-            float qeh = 0.0f;
-            const float4* a4 = reinterpret_cast<const float4*>(&s_a[t * SS + s_base]);
+        const int m0 = warp * 16;
+
+        // -- u_eff = U_A - W @ H --
+        stage(ws.W + slot * kChunk * SS, L);
+        if (L < kChunk)  // tail rows are K operands of the state update: zero them
+            for (int idx = tid; idx < (kChunk - L) * COLS; idx += NT)
+                s_ue[(L + idx / COLS) * SH + idx % COLS] = 0.0f;
+        __syncthreads();
+        if (m0 < L) {
+            float acc[NTILE][4];
+            gemm_rows_x_h<SS, SA, SH, NTILE, true>(s_a, s_h, m0, g, tg, acc);  // feeds the state: 3xTF32
+            const int r0 = m0 + g, r1 = r0 + 8;
 #pragma unroll
-            for (int ii = 0; ii < SS_PER / 4; ii++) {
-                const float4 a = a4[ii];
-                qeh += a.x * H_reg[4 * ii] + a.y * H_reg[4 * ii + 1] + a.z * H_reg[4 * ii + 2] +
-                       a.w * H_reg[4 * ii + 3];
-            }
-            qeh += __shfl_xor_sync(0xffffffffu, qeh, 1);
-            if (part == 0) {
-                const size_t t_glob = static_cast<size_t>(strip_t0) + c * kChunk + t;
-                y_out[t_glob * inner + h * HD + d] = __float2half((YA_s[t * HD + d] + qeh) * scale);
+            for (int nt = 0; nt < NTILE; nt++) {
+                const int col = nt * 8 + 2 * tg;
+                if (r0 < L) {
+                    const float2 u = *reinterpret_cast<const float2*>(&UA_s[r0 * HD + d_base + col]);
+                    s_ue[r0 * SH + col] = u.x - acc[nt][0];
+                    s_ue[r0 * SH + col + 1] = u.y - acc[nt][1];
+                }
+                if (r1 < L) {
+                    const float2 u = *reinterpret_cast<const float2*>(&UA_s[r1 * HD + d_base + col]);
+                    s_ue[r1 * SH + col] = u.x - acc[nt][2];
+                    s_ue[r1 * SH + col + 1] = u.y - acc[nt][3];
+                }
             }
         }
         __syncthreads();
 
-        // -- stage K_d, advance the state: H = D0L*H + K_d^T u_eff --
-        {
-            const float4* src = reinterpret_cast<const float4*>(ws.KD + slot * kChunk * SS);
-            float4* dst = reinterpret_cast<float4*>(s_a);
-            for (int idx = threadIdx.x; idx < L * SS / 4; idx += NT)
-                dst[idx] = src[idx];
+        // -- y = (Y_A + Qeff @ H) * scale, from the PRE-update state --
+        stage(ws.QE + slot * kChunk * SS, L);
+        __syncthreads();
+        if (m0 < L) {
+            float acc[NTILE][4];
+            gemm_rows_x_h<SS, SA, SH, NTILE, false>(s_a, s_h, m0, g, tg, acc);  // output only: tf32
+            const size_t t_base = static_cast<size_t>(strip_t0) + c * kChunk;
+            const int r0 = m0 + g, r1 = r0 + 8;
+#pragma unroll
+            for (int nt = 0; nt < NTILE; nt++) {
+                const int col = nt * 8 + 2 * tg;
+                if (r0 < L) {
+                    const float2 ya = *reinterpret_cast<const float2*>(&YA_s[r0 * HD + d_base + col]);
+                    *reinterpret_cast<__half2*>(&y_out[(t_base + r0) * inner + h * HD + d_base + col]) =
+                        __floats2half2_rn((ya.x + acc[nt][0]) * scale, (ya.y + acc[nt][1]) * scale);
+                }
+                if (r1 < L) {
+                    const float2 ya = *reinterpret_cast<const float2*>(&YA_s[r1 * HD + d_base + col]);
+                    *reinterpret_cast<__half2*>(&y_out[(t_base + r1) * inner + h * HD + d_base + col]) =
+                        __floats2half2_rn((ya.x + acc[nt][2]) * scale, (ya.y + acc[nt][3]) * scale);
+                }
+            }
         }
         __syncthreads();
-        const float d0l = ws.D0L[slot];
+
+        // -- H = D0L * H + K_d^T @ u_eff --
+        stage(ws.KD + slot * kChunk * SS, L);
+        const int kmax = (L + 7) & ~7;
+        if (L < kmax)  // the partial k-block: its K_d rows must be finite (u_eff rows are zero)
+            for (int idx = tid; idx < (kmax - L) * SS; idx += NT)
+                s_a[(L + idx / SS) * SA + idx % SS] = 0.0f;
+        __syncthreads();
+        {
+            const float d0l = ws.D0L[slot];
+            constexpr int MT = SS / 16 / 4;  // m-tiles (16 state rows each) per warp
+            const int mbase = warp * MT * 16;
+            float acc[MT][NTILE][4];
 #pragma unroll
-        for (int ib = 0; ib < SS_PER / 4; ib++) {
-            float4 acc = {0.0f, 0.0f, 0.0f, 0.0f};
-            for (int t = 0; t < L; t++) {
-                const float ue = s_ue[t * COLS + dl];
-                const float4 a = *reinterpret_cast<const float4*>(&s_a[t * SS + s_base + 4 * ib]);
-                acc.x += a.x * ue;
-                acc.y += a.y * ue;
-                acc.z += a.z * ue;
-                acc.w += a.w * ue;
+            for (int mt = 0; mt < MT; mt++)
+#pragma unroll
+                for (int nt = 0; nt < NTILE; nt++) {
+                    const int r0 = mbase + mt * 16 + g, col = nt * 8 + 2 * tg;
+                    acc[mt][nt][0] = d0l * s_h[r0 * SH + col];
+                    acc[mt][nt][1] = d0l * s_h[r0 * SH + col + 1];
+                    acc[mt][nt][2] = d0l * s_h[(r0 + 8) * SH + col];
+                    acc[mt][nt][3] = d0l * s_h[(r0 + 8) * SH + col + 1];
+                }
+            for (int k0 = 0; k0 < kmax; k0 += 8) {
+                float b[NTILE][2];
+#pragma unroll
+                for (int nt = 0; nt < NTILE; nt++) {
+                    b[nt][0] = s_ue[(k0 + tg) * SH + nt * 8 + g];
+                    b[nt][1] = s_ue[(k0 + tg + 4) * SH + nt * 8 + g];
+                }
+#pragma unroll
+                for (int mt = 0; mt < MT; mt++) {
+                    // A[m = s][k = t] = K_d[t][s], staged row-major as [t][s]
+                    const int r = mbase + mt * 16 + g;
+                    float a[4];
+                    a[0] = s_a[(k0 + tg) * SA + r];
+                    a[1] = s_a[(k0 + tg) * SA + r + 8];
+                    a[2] = s_a[(k0 + tg + 4) * SA + r];
+                    a[3] = s_a[(k0 + tg + 4) * SA + r + 8];
+#pragma unroll
+                    for (int nt = 0; nt < NTILE; nt++)
+                        mma_frag<true>(acc[mt][nt], a, b[nt]);  // state update: 3xTF32
+                }
             }
-            H_reg[4 * ib] = d0l * H_reg[4 * ib] + acc.x;
-            H_reg[4 * ib + 1] = d0l * H_reg[4 * ib + 1] + acc.y;
-            H_reg[4 * ib + 2] = d0l * H_reg[4 * ib + 2] + acc.z;
-            H_reg[4 * ib + 3] = d0l * H_reg[4 * ib + 3] + acc.w;
+            // Each warp owns its 32 state rows: no cross-warp hazard before the barrier.
+#pragma unroll
+            for (int mt = 0; mt < MT; mt++)
+#pragma unroll
+                for (int nt = 0; nt < NTILE; nt++) {
+                    const int r0 = mbase + mt * 16 + g, col = nt * 8 + 2 * tg;
+                    s_h[r0 * SH + col] = acc[mt][nt][0];
+                    s_h[r0 * SH + col + 1] = acc[mt][nt][1];
+                    s_h[(r0 + 8) * SH + col] = acc[mt][nt][2];
+                    s_h[(r0 + 8) * SH + col + 1] = acc[mt][nt][3];
+                }
         }
         __syncthreads();
     }
 
-    if (store_statet) {
-        StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
-#pragma unroll
-        for (int s = 0; s < SS_PER; s++)
-            H_col[(s_base + s) * HD] = static_cast<StateT>(H_reg[s]);
-    } else {
-#pragma unroll
-        for (int s = 0; s < SS_PER; s++)
-            H32_h[(s_base + s) * HD + d] = H_reg[s];
+    for (int idx = tid; idx < SS * COLS; idx += NT) {
+        const int s = idx / COLS, dl = idx % COLS;
+        const size_t gi = static_cast<size_t>(s) * HD + d_base + dl;
+        const float v = s_h[s * SH + dl];
+        if (store_statet)
+            h_state[static_cast<size_t>(h) * SS * HD + gi] = static_cast<StateT>(v);
+        else
+            H32_h[gi] = v;
     }
 }
 
@@ -480,7 +612,8 @@ void chunkpar_launch(const float* conv_f32, int conv_channels, const half* alpha
                      int n_heads, int n_groups, cudaStream_t stream, int grouped_layout, float* ws_base) {
     const size_t smem1 =
         (2 * kChunk * SS + 2 * kChunk * kChunk + kChunk + (kChunk + 1) + kChunk) * sizeof(float);
-    const size_t smem2 = (kChunk * SS + kChunk * (HD / kColSplit)) * sizeof(float);
+    const size_t smem2 =
+        (kChunk * (SS + 4) + SS * (HD / kColSplit + 8) + kChunk * (HD / kColSplit + 8)) * sizeof(float);
     static std::once_flag attr_once;
     std::call_once(attr_once, [&] {
         cudaFuncSetAttribute(reinterpret_cast<const void*>(&gdn_chunkpar_intra_kernel<HD, SS>),
@@ -499,8 +632,7 @@ void chunkpar_launch(const float* conv_f32, int conv_channels, const half* alpha
             conv_f32, alpha, beta, A_log, dt_bias, ws_base, t0, strip_tokens, n_heads, n_groups,
             conv_channels, grouped_layout);
         IMP_CUDA_CHECK_LAUNCH();
-        gdn_chunkpar_pass_kernel<HD, SS, StateT>
-            <<<dim3(n_heads, kColSplit), 2 * HD / kColSplit, smem2, stream>>>(
+        gdn_chunkpar_pass_kernel<HD, SS, StateT><<<dim3(n_heads, kColSplit), 128, smem2, stream>>>(
                 ws_base, h_state, y, t0, strip_tokens, n_chunks, n_heads,
                 /*load_statet=*/si == 0 ? 1 : 0, /*store_statet=*/si == n_strips - 1 ? 1 : 0);
         IMP_CUDA_CHECK_LAUNCH();
