@@ -73,7 +73,13 @@ namespace imp {
 //     O(1) terms. The 35B PPL is no judge below ~0.5% (MoE routing flips
 //     between fp32-equivalent kernels: 6.8122..6.8493 across variants with
 //     state diffs of 1e-6); Qwen3.8-27B (deterministic) reads fused 4.6283
-//     -> 4.6148. The solve (45 us, 128 barriers) is now 60% of K1.
+//     -> 4.6148. The solve (45 us, 128 barriers) was then 60% of K1.
+//   - Blockwise solve (this file): T built once in place of KK, RHS staged
+//     into the histories, per 16-row block an off-diagonal 3xTF32 mma update
+//     + a register-resident diagonal block per thread; 8 barriers instead of
+//     128. K1 per CTA 75 -> 49.5 us, in situ 128 -> 82 us per strip (K2 91).
+//     Class pp512 144 -> 42.5/42.3 ms (-71%), pp4096 1497/1489 -> 307/308 ms
+//     (-79%), e2e pp4096 12.9k -> 27.0k tok/s; Qwen3.8 PPL 4.6273.
 //
 // Numerics: identical formulas to gdn_scan_chunkwise_wy_kernel (log-space
 // cumulative decay, the same softplus/sigmoid/L2-norm forms), reassociated
@@ -179,12 +185,13 @@ __device__ __forceinline__ void mma_frag(float* c, const float* a, const float* 
 //   region 1 [2*kChunk*SS]: phase A = k~ | q~ staging; phase B/C = the solve
 //                           histories U_A | W (k~/q~ are already folded into
 //                           the Gram matrices and the global RHS copies).
-//   region 2: KK [kChunk*kChunk] (phase B) | QK, padded stride kChunk+4,
-//             overwritten in place by P for the phase-C mma (whole kernel).
-//   region 3: beta[kChunk], logD[kChunk+1], row scratch[kChunk].
+//   region 2: KK -> T in place (phase B mma A operand) | QK -> P in place
+//             (phase C mma A operand), both padded stride kChunk+4.
+//   region 3: beta[kChunk], logD[kChunk+1].
 // Phase A: float4-per-lane row loads, parallel per-token decay/beta, Gram
-// matrices as 3xTF32 mma. Phase B: scalar forward substitution (one column
-// per thread, smem histories). Phase C: P @ W and P @ U_A as tf32 mma.
+// matrices as 3xTF32 mma. Phase B: blockwise forward substitution (16-row
+// diagonal blocks per thread in registers, off-diagonal updates as 3xTF32
+// mma). Phase C: P @ W and P @ U_A as 3xTF32 mma.
 // ---------------------------------------------------------------------------
 // 2*HD threads: the solve has 2*HD independent columns (HD of U_A + HD of W),
 // one per thread — 8 warps hide the smem/global latency that 4 could not
@@ -225,11 +232,10 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     float* s_q = s_k + kChunk * SS;        // [kChunk * SS]  phase A
     float* s_u = s_k;                      // [kChunk * HD]  phase B/C alias
     float* s_w = s_q;                      // [kChunk * SS]  phase B/C alias
-    float* s_kk = s_q + kChunk * SS;       // [kChunk * kChunk]   KK, stride kChunk
-    float* s_qk = s_kk + kChunk * kChunk;  // [kChunk * SQ]       QK, then P in place
+    float* s_kk = s_q + kChunk * SS;       // [kChunk * SQ]  KK, then T in place (phase-B mma A operand)
+    float* s_qk = s_kk + kChunk * SQ;      // [kChunk * SQ]  QK, then P in place (phase-C mma A operand)
     float* s_beta = s_qk + kChunk * SQ;    // [kChunk]
     float* s_logD = s_beta + kChunk;       // [kChunk + 1]
-    float* s_row = s_logD + kChunk + 1;    // [kChunk] T row scratch (phase B)
     const int warp = tid / 32, lane = tid % 32;
     const int g = lane / 4, tg = lane % 4;  // mma fragment coordinates
 
@@ -330,7 +336,7 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
             }
         }
         float* dst = is_qk ? s_qk : s_kk;
-        const int ds = is_qk ? SQ : kChunk;
+        constexpr int ds = SQ;
         const int i0 = m0 + g, i1 = i0 + 8;
 #pragma unroll
         for (int nt = 0; nt < kChunk / 8; nt++) {
@@ -343,41 +349,100 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     }
     __syncthreads();  // region 1 is dead as k~/q~ from here on
 
-    // ---- phase B: forward triangular solve for U_A and W ----
-    // T[t,j] = beta_t * exp(logD[t+1]-logD[j+1]) * KK[t,j]. One column per
-    // thread (U_A half / W half); histories in shared memory (region 1). The
-    // per-step global reads (v, the W RHS) are issued BEFORE the row barrier
-    // so their latency overlaps the row build; the global copies of the
-    // solutions are written once, batched, after the loop.
-    float* const hist = w_half ? s_w : s_u;
-    for (int t = 0; t < L; t++) {
-        float rhs;
-        if (w_half) {
-            rhs = W_s[t * SS + col];  // RHS from phase A
-        } else {
-            const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
-            rhs = s_beta[t] * row[2 * BC_size + h * HD + col];
-        }
-        if (tid < t)
-            s_row[tid] = s_beta[t] * expf(s_logD[t + 1] - s_logD[tid + 1]) * s_kk[t * kChunk + tid];
-        __syncthreads();
-        // Four partial accumulators: a single chain serializes one 4-cycle
-        // FMA on a shared-memory operand per term (ncu: short_scoreboard
-        // 2.45 + barrier 2.12 stalls per issue on the fused-chain form).
-        {
-            float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
-            int j = 0;
-            for (; j + 3 < t; j += 4) {
-                a0 += s_row[j] * hist[j * HD + col];
-                a1 += s_row[j + 1] * hist[(j + 1) * HD + col];
-                a2 += s_row[j + 2] * hist[(j + 2) * HD + col];
-                a3 += s_row[j + 3] * hist[(j + 3) * HD + col];
+    // ---- phase B: blockwise forward triangular solve for U_A and W ----
+    // T[t][j] = beta_t D[j+1..t+1] KK[t][j] (j < t) is built once, in place
+    // of KK, and P = D QK (independent of the solve) alongside it. The RHS of
+    // both systems is staged into the histories (rows >= L zero). Then per
+    // 16-row block: the off-diagonal update hist[b] -= T[b, <b] @ hist[<b] as
+    // 3xTF32 mma (it feeds the state), one barrier, the 16x16 diagonal block
+    // per thread in registers (its own column; the T reads are warp-broadcast),
+    // one barrier. 8 barriers instead of 128, and the up-to-63-term serial
+    // j-chain of the row-at-a-time form (45 us per CTA, 60% of this kernel)
+    // becomes a tensor-core product.
+    {
+        constexpr int F4_PER_ROW = HD / 4;
+        for (int idx = tid; idx < kChunk * F4_PER_ROW; idx += 2 * HD) {
+            const int t = idx / F4_PER_ROW, c4 = (idx % F4_PER_ROW) * 4;
+            float4 u = make_float4(0.0f, 0.0f, 0.0f, 0.0f), w = u;
+            if (t < L) {
+                const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
+                u = *reinterpret_cast<const float4*>(row + 2 * BC_size + h * HD + c4);
+                const float bt = s_beta[t];
+                u.x *= bt;
+                u.y *= bt;
+                u.z *= bt;
+                u.w *= bt;
+                w = *reinterpret_cast<const float4*>(&W_s[t * SS + c4]);  // RHS from phase A
             }
-            for (; j < t; j++)
-                a0 += s_row[j] * hist[j * HD + col];
-            rhs -= (a0 + a1) + (a2 + a3);
+            *reinterpret_cast<float4*>(&s_u[t * HD + c4]) = u;
+            *reinterpret_cast<float4*>(&s_w[t * HD + c4]) = w;
         }
-        hist[t * HD + col] = rhs;
+        for (int idx = tid; idx < kChunk * kChunk; idx += 2 * HD) {
+            const int i = idx / kChunk, j = idx % kChunk;
+            float* kk = &s_kk[i * SQ + j];
+            *kk = (j < i && i < L) ? s_beta[i] * expf(s_logD[i + 1] - s_logD[j + 1]) * *kk : 0.0f;
+            if (j <= i && i < L)
+                s_qk[i * SQ + j] *= expf(s_logD[i + 1] - s_logD[j + 1]);
+        }
+    }
+    __syncthreads();
+    float* const hist = w_half ? s_w : s_u;
+    constexpr int BS = 16;
+    static_assert(kChunk % BS == 0 && BS == 16, "diagonal block = one mma m-tile");
+    for (int b = 0; b < kChunk / BS; b++) {
+        const int r0b = b * BS;
+        if (r0b >= L)
+            break;
+        if (b > 0) {
+            // hist[r0b..r0b+16) -= T[r0b.., 0..r0b) @ hist[0..r0b): warp w takes
+            // history w/4 (0 = U_A, 1 = W) and columns (w%4)*32 .. +32.
+            float* H = (warp < 4) ? s_u : s_w;
+            const int nbase = (warp % 4) * 32;
+            float acc[4][4];
+#pragma unroll
+            for (int nt = 0; nt < 4; nt++)
+                acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
+            for (int k0 = 0; k0 < r0b; k0 += 8) {
+                float a[4];
+                a[0] = s_kk[(r0b + g) * SQ + k0 + tg];
+                a[1] = s_kk[(r0b + g + 8) * SQ + k0 + tg];
+                a[2] = s_kk[(r0b + g) * SQ + k0 + tg + 4];
+                a[3] = s_kk[(r0b + g + 8) * SQ + k0 + tg + 4];
+#pragma unroll
+                for (int nt = 0; nt < 4; nt++) {
+                    float bb[2];
+                    bb[0] = H[(k0 + tg) * HD + nbase + nt * 8 + g];
+                    bb[1] = H[(k0 + tg + 4) * HD + nbase + nt * 8 + g];
+                    mma_frag<true>(acc[nt], a, bb);
+                }
+            }
+#pragma unroll
+            for (int nt = 0; nt < 4; nt++) {
+                const int cb = nbase + nt * 8 + 2 * tg;
+                float2* p0 = reinterpret_cast<float2*>(&H[(r0b + g) * HD + cb]);
+                float2* p1 = reinterpret_cast<float2*>(&H[(r0b + g + 8) * HD + cb]);
+                const float2 v0 = *p0, v1 = *p1;
+                *p0 = make_float2(v0.x - acc[nt][0], v0.y - acc[nt][1]);
+                *p1 = make_float2(v1.x - acc[nt][2], v1.y - acc[nt][3]);
+            }
+            __syncthreads();
+        }
+        {
+            float x[BS];
+#pragma unroll
+            for (int i = 0; i < BS; i++)
+                x[i] = hist[(r0b + i) * HD + col];
+#pragma unroll
+            for (int i = 1; i < BS; i++) {
+                const float* Ti = &s_kk[(r0b + i) * SQ + r0b];
+#pragma unroll
+                for (int j = 0; j < i; j++)
+                    x[i] -= Ti[j] * x[j];
+            }
+#pragma unroll
+            for (int i = 0; i < BS; i++)
+                hist[(r0b + i) * HD + col] = x[i];
+        }
         __syncthreads();
     }
     {
@@ -395,25 +460,16 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     }
 
     // ---- phase C: Qeff (in place on QE) and Y_A on tensor cores ----
-    // P[t][j] = D[j+1..t+1] QK[t][j] (j <= t) materialised in place, then
+    // P[t][j] = D[j+1..t+1] QK[t][j] (j <= t, built with T above), then
     //   Qeff = D q~ - P @ W      Y_A = P @ U_A
     // as two [L x 128] GEMMs over K = j. Output terms, but NOT tf32-safe:
     // Qeff is the difference of two O(1) terms (D q~ and P W cancel), so the
     // 10-bit operand rounding on P W becomes an O(1e-2) relative error on
     // Qeff - measured PPL 6.8122 -> 6.8845 (+0.9%) with plain tf32 here.
-    // 3xTF32 on both.
+    // 3xTF32 on both. History rows [L, kChunk) are zero from the staging, so
+    // the K range may run to the next multiple of 8; the solve loop ended
+    // with a barrier.
     const int kmax = (L + 7) & ~7;
-    if (L < kmax)  // K rows [L, kmax) of the histories must be finite (P there is zero)
-        for (int idx = tid; idx < (kmax - L) * HD; idx += 2 * HD) {
-            s_u[(L + idx / HD) * HD + idx % HD] = 0.0f;
-            s_w[(L + idx / HD) * HD + idx % HD] = 0.0f;
-        }
-    for (int idx = tid; idx < kChunk * kChunk; idx += 2 * HD) {
-        const int i = idx / kChunk, j = idx % kChunk;
-        if (j <= i && i < L)
-            s_qk[i * SQ + j] *= expf(s_logD[i + 1] - s_logD[j + 1]);
-    }
-    __syncthreads();
     {
         const int m0 = (warp % 4) * 16;           // t rows of this warp
         const int nbase = (warp / 4) * (HD / 2);  // its 64 output columns
@@ -690,9 +746,8 @@ template <int HD, int SS, typename StateT>
 void chunkpar_launch(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                      const float* A_log, const float* dt_bias, StateT* h_state, half* y, int n_tokens,
                      int n_heads, int n_groups, cudaStream_t stream, int grouped_layout, float* ws_base) {
-    const size_t smem1 = (2 * kChunk * SS + kChunk * kChunk + kChunk * (kChunk + 4) + kChunk +
-                          (kChunk + 1) + kChunk) *
-                         sizeof(float);
+    const size_t smem1 =
+        (2 * kChunk * SS + 2 * kChunk * (kChunk + 4) + kChunk + (kChunk + 1)) * sizeof(float);
     const size_t smem2 =
         (kChunk * (SS + 4) + SS * (HD / kColSplit + 8) + kChunk * (HD / kColSplit + 8)) * sizeof(float);
     static std::once_flag attr_once;
