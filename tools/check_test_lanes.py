@@ -157,7 +157,11 @@ def main():
     # 1024 -> 1025: GdnBatchedScanTest.GroupedConvCommitsPerSlotAndSnapshotsGroupZero,
     # the slot-table form of the fused prefill conv (same chunk geometry)
     # against the single-sequence launcher - GPU-only.
-    PINNED = 1025
+    # 1025 -> 1043: FmhaFA2Hd256Bkv32Test.* (14 tile-boundary cases of the
+    # HD=256 FA2 instance at Bkv=32) plus the two BenchVsWmma_Qwen38Shape
+    # variants, the Bkv32 Qwen3.6 bench and the Bkv32 pv-f32 bench - all
+    # launch the FA2 kernel, GPU-only.
+    PINNED = 1043
 
     text = CMAKE.read_text()
     mods = module_sources(text)

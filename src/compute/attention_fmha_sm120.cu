@@ -1308,8 +1308,10 @@ __device__ __forceinline__ void prefetch_v_tile(half* V_dst, const half* V_ptr, 
 // the short-sequence variant that replaces the materialized cuBLAS+softmax
 // path below fmha_prefill_threshold without the e4m3 quality risk.
 // Softmax, masking and PV are shared — one grammar of truth for the math.
-// BKV=32 halves the KV double-buffer (~70 KB → ~35 KB smem) so 2 CTAs/SM fit —
-// the occupancy "smem surgery" lever from #597 for the grid-underfill band.
+// BKV=32 halves the KV tile. At HD=128 TWOSLOT superseded it (#597); at
+// HD=256 it is the live lever: the TWOSLOT Bkv=64 tile is 67.6 KB of the
+// 100 KB SM budget (one 4-warp CTA/SM) while the registers allow two, and
+// Bkv=32 (33.8 KB) seats the second CTA - attention.fa2_hd256_bkv.
 // TWOSLOT (#597 second cut): keeps the FULL Bkv=64 tile at the same ~35 KB by
 // replacing the K/V double-buffer with a two-slot rotation — one K slot, one
 // V slot. K and V of a tile load in different phases (V_j under QK_j's MMAs,
@@ -1956,10 +1958,25 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
         // HD=128 profile (a_frag 32→64 regs, O f32 64→128 / pv-f16 32→64), so
         // pv_f16 is strongly preferred; the f32-acc variant exists for A/B
         // but is expected to spill.
-        Bq = 64, Bkv = 64, twoslot = true;
-        kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, true>
-               : f16acc ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true>
-                        : fmha_sm120_fa2_kernel<64, 256, true, false, 64, true>;
+        // Bkv=32 (attention.fa2_hd256_bkv, opt-in): the Bkv=64 TWOSLOT tile
+        // is 67.6 KB of the 100 KB SM budget, so one CTA (4 warps, 8.3%
+        // occupancy) per SM although 232 regs x 128 threads leave room for
+        // two; halving the tile to 33.8 KB seats 2 CTAs/SM. Measured
+        // 2026-09-01 (docs/roadmap.md): kernel -11% at pp4096 on
+        // Qwen3.8-27B, e2e +0.1..0.4%, PPL +0.53% (twice the f16 O rescales;
+        // the f32-PV twin holds PPL but runs at the Bkv=64 time). Stays
+        // opt-in on that trade.
+        Bq = 64, twoslot = true;
+        Bkv = imp::process_diag_fa2_hd256_bkv() == 32 ? 32 : 64;
+        if (Bkv == 32) {
+            kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, true>
+                   : f16acc ? fmha_sm120_fa2_kernel<64, 256, true, true, 32, true>
+                            : fmha_sm120_fa2_kernel<64, 256, true, false, 32, true>;
+        } else {
+            kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, true>
+                   : f16acc ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true>
+                            : fmha_sm120_fa2_kernel<64, 256, true, false, 64, true>;
+        }
     } else if (fp16_qk) {
         if (blocks_128 >= (long)sm_count) {
             Bq = 128, Bkv = 64;
@@ -1969,9 +1986,9 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
         } else if (blocks_128 >= (long)(sm_count / 2)) {
             // Underfill band (#597): Bq=64 doubles the grid and TWOSLOT halves
             // the KV smem (~70 KB → ~35 KB) at the FULL Bkv=64 tile, so 2
-            // CTAs/SM become resident. Supersedes the Bkv=32 double-buffer
-            // (same residency, but half the online-softmax rescales and fewer
-            // barriers per KV row).
+            // CTAs/SM become resident. Supersedes the Bkv=32 double-buffer at
+            // HD=128 (same residency, but half the online-softmax rescales and
+            // fewer barriers per KV row); HD=256 combines TWOSLOT with Bkv=32.
             Bq = 64, Bkv = 64, twoslot = true;
             kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, true, true>
                    : f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, true>

@@ -90,6 +90,13 @@ struct Attention {
     // the keeper). Also gates the FP8-KV deterministic-cuBLAS skip for
     // hd=256 models (engine_init_resolver fa2_serves_attention).
     bool fa2_hd256 = true;
+    // KV tile rows of the HD=256 FA2 instance, 64 or 32. At Bkv=64 the
+    // TWOSLOT tile is 67.6 KB of the 100 KB SM budget, so one 4-warp CTA
+    // per SM (8.3% occupancy, ncu 2026-08-31) although the 232 registers
+    // allow two; Bkv=32 halves the tile and seats 2 CTAs/SM: FA2 kernel
+    // -11% at pp4096 on Qwen3.8-27B, e2e +0.1..0.4%, PPL +0.53% (2026-09-01,
+    // docs/roadmap.md). Opt-in on that trade.
+    int fa2_hd256_bkv = 64;
     // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680). The
     // raw conversion is the #511 quality cliff; scaling Q and K to the
     // full e4m3 range is the numerics class FlashInfer runs. Only

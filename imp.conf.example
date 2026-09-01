@@ -315,6 +315,10 @@ fa2_pv_f16acc        = true
 # of the SMEM-tiled WMMA FMHA / cuBLAS. Default on since stage 3; also lifts
 # the FP8-KV deterministic-cuBLAS forcing for hd=256 models.
 fa2_hd256            = true
+# KV tile rows of that HD=256 instance, 64 or 32. Bkv=64 keeps one 4-warp
+# CTA per SM (67.6 KB smem of 100 KB); Bkv=32 seats two (33.8 KB each):
+# FA2 kernel -11% at pp4096, e2e +0.1..0.4%, PPL +0.53%. Opt-in.
+fa2_hd256_bkv        = 64
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).

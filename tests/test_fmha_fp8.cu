@@ -484,9 +484,11 @@ protected:
     void SetUp() override {
         FmhaFA2Test::SetUp();
         process_diag_set_fa2_hd256(true);
+        process_diag_set_fa2_hd256_bkv(64);
     }
     void TearDown() override {
         process_diag_set_fa2_hd256(false);
+        process_diag_set_fa2_hd256_bkv(64);
         process_diag_set_fa2_f16acc(false);
         process_diag_set_fa2_pv_f16acc(false);
         FmhaFA2Test::TearDown();
@@ -517,6 +519,47 @@ TEST_F(FmhaFA2Hd256Test, PvF16_Chunked) {
     run_pv256(1, 51, 371, 8, 2, true, 0, 0.0f, 1.0f, /*q_offset=*/320);
 }
 TEST_F(FmhaFA2Hd256Test, PvF16_LongCtx1536) { run_pv256(1, 1536, 1536, 8, 2, true); }
+
+// Bkv=32 instance (attention.fa2_hd256_bkv=32): the same kernel with half
+// the KV tile, so every tile-boundary case above is re-run on the 32-row
+// grid (odd lengths, sliding window, chunk offsets not multiple of 32).
+class FmhaFA2Hd256Bkv32Test : public FmhaFA2Hd256Test {
+protected:
+    void SetUp() override {
+        FmhaFA2Hd256Test::SetUp();
+        process_diag_set_fa2_hd256_bkv(32);
+    }
+    void TearDown() override {
+        process_diag_set_fa2_hd256_bkv(64);
+        FmhaFA2Hd256Test::TearDown();
+    }
+};
+
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_CausalSeq64_GQA8_2) { run_pv256(1, 64, 64, 8, 2, true); }
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_CausalMultiTile) { run_pv256(1, 256, 256, 8, 2, true); }
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_OddSeq51) { run_pv256(1, 51, 51, 8, 2, true); }
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_OddSeq200_GQA16_4) { run_pv256(1, 200, 200, 16, 4, true); }
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_NonCausal) { run_pv256(1, 32, 64, 8, 2, false); }
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_RealisticMagnitude) {
+    run_pv256(1, 64, 64, 8, 2, true, 0, 0.0f, /*amplitude=*/80.0f);
+}
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_SlidingWindow) { run_pv256(1, 128, 128, 8, 2, true, /*sw=*/64); }
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_SlidingWindow40) { run_pv256(1, 200, 200, 8, 2, true, /*sw=*/40); }
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_Softcap) { run_pv256(1, 64, 64, 8, 2, true, 0, /*softcap=*/50.0f); }
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_Chunked) {
+    run_pv256(1, 51, 371, 8, 2, true, 0, 0.0f, 1.0f, /*q_offset=*/320);
+}
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_ChunkedOffset333) {
+    run_pv256(1, 77, 410, 8, 2, true, 0, 0.0f, 1.0f, /*q_offset=*/333);
+}
+TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_LongCtx1536) { run_pv256(1, 1536, 1536, 8, 2, true); }
+TEST_F(FmhaFA2Hd256Bkv32Test, F32Acc_CausalSeq64) {
+    run_fa2(1, 64, 64, 8, 2, 256, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
+}
+TEST_F(FmhaFA2Hd256Bkv32Test, F16Acc_CausalMultiTile) {
+    process_diag_set_fa2_f16acc(true);
+    run_fa2(1, 200, 200, 8, 2, 256, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
+}
 
 // f32-acc and f16-acc-QK variants: correctness must hold even where the
 // register footprint spills (they are A/B references, not the fast path).
@@ -550,13 +593,13 @@ TEST_F(FmhaFA2Hd256Test, Fp8QkStillDeclines) {
 // Qwen3.6-35B prefill shape (8 Q heads / 2 KV heads, hd=256, 2048 tokens).
 // Reports per-kernel ms + cross-path max relative error. Not a perf gate —
 // the stage-1 decision data (see PR body).
-TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen36Shape) {
+static void hd256_bench_vs_wmma(cudaStream_t stream_, int NH, int NKV, const char* tag, bool pv_f16 = true) {
     for (int sweep_sq : {512, 1024, 2048, 4096}) {
-    const int B = 1, Sq = sweep_sq, Skv = sweep_sq, NH = 8, NKV = 2, HD = 256;
+    const int B = 1, Sq = sweep_sq, Skv = sweep_sq, HD = 256;
     const bool causal = true;
     const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     process_diag_set_fa2_f16acc(true);
-    process_diag_set_fa2_pv_f16acc(true);
+    process_diag_set_fa2_pv_f16acc(pv_f16);
 
     size_t q_elems = (size_t)B * Sq * NH * HD;
     size_t kv_elems = (size_t)B * Skv * NKV * HD;
@@ -634,9 +677,9 @@ TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen36Shape) {
     float wmma_ms = time_kernel([&] {
         fmha_sm120_prefill(Qt, Kt, Vt, O_wmma, scale, causal, 0, 0.0f, stream_, 0);
     });
-    printf("[hd256-bench] Qwen3.6 shape (Sq=%d NH=%d NKV=%d): FA2=%.3f ms  WMMA=%.3f ms  "
+    printf("[hd256-bench] %s (Sq=%d NH=%d NKV=%d): FA2=%.3f ms  WMMA=%.3f ms  "
            "(FA2/WMMA = %.2fx)\n",
-           Sq, NH, NKV, fa2_ms, wmma_ms, fa2_ms / wmma_ms);
+           tag, Sq, NH, NKV, fa2_ms, wmma_ms, fa2_ms / wmma_ms);
 
     cudaFree(d_q);
     cudaFree(d_k);
@@ -644,6 +687,18 @@ TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen36Shape) {
     cudaFree(d_o_fa2);
     cudaFree(d_o_wmma);
     }  // sweep_sq
+}
+
+TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen36Shape) { hd256_bench_vs_wmma(stream_, 8, 2, "bkv64 Qwen3.6"); }
+TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen38Shape) { hd256_bench_vs_wmma(stream_, 24, 4, "bkv64 Qwen3.8"); }
+TEST_F(FmhaFA2Hd256Bkv32Test, BenchVsWmma_Qwen36Shape) {
+    hd256_bench_vs_wmma(stream_, 8, 2, "bkv32 Qwen3.6");
+}
+TEST_F(FmhaFA2Hd256Bkv32Test, BenchVsWmma_Qwen38Shape) {
+    hd256_bench_vs_wmma(stream_, 24, 4, "bkv32 Qwen3.8");
+}
+TEST_F(FmhaFA2Hd256Bkv32Test, BenchVsWmma_Qwen38Shape_PvF32) {
+    hd256_bench_vs_wmma(stream_, 24, 4, "bkv32 pv-f32 Qwen3.8", /*pv_f16=*/false);
 }
 
 }  // namespace

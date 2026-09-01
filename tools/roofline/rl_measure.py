@@ -165,7 +165,8 @@ def measure_cell(cfg, classify, raw_dir, model_key, shape_key, restart, dry_run=
         cell["ncu_groups"][gname] = {
             "csv": os.path.basename(csv_gz),
             "wall_s": round(dt, 1),
-            "kernels": aggregate_by_kernel(classify, launches),
+            "kernels": aggregate_by_kernel(classify, launches,
+                                           cfg["ncu"].get("clock_floor_ghz", 0.0) * 1e9),
         }
     if not cell["ncu_groups"].get("base") and not cell["ncu_groups"].get("full"):
         cell["error"] = "ncu base group failed: " + \
@@ -173,9 +174,21 @@ def measure_cell(cfg, classify, raw_dir, model_key, shape_key, restart, dry_run=
     return cell
 
 
-def aggregate_by_kernel(classify, launches):
+def aggregate_by_kernel(classify, launches, clock_floor_hz=0.0):
+    """Per-kernel aggregate over the captured launches. A launch whose measured
+    SM clock sits under clock_floor_hz is dropped and counted: with
+    --clock-control base the card still idles between ncu replays, and a
+    launch caught in that state (run 1d5b9230, launch 118: 0.31 GHz, 998 us
+    for a kernel that takes 99 us at 1.55 GHz in the same window) would
+    otherwise both inflate the time share and, because the compute peak is
+    normalised to the measured clock, read as 99.7% of roofline."""
     by_kernel = {}
+    dropped = {}
     for l in launches:
+        clk = l.get("gpc__cycles_elapsed.avg.per_second")
+        if clock_floor_hz and clk is not None and clk < clock_floor_hz:
+            dropped[l["kernel_name"]] = dropped.get(l["kernel_name"], 0) + 1
+            continue
         by_kernel.setdefault(l["kernel_name"], []).append(l)
     out = {}
     for name, ls in by_kernel.items():
@@ -183,6 +196,8 @@ def aggregate_by_kernel(classify, launches):
         rec = aggregate_metrics(ls)
         rec["class"] = kcls
         rec["group"] = group
+        if dropped.get(name):
+            rec["n_launches_dropped_clock"] = dropped[name]
         out[name] = rec
     return out
 
