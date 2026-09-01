@@ -771,7 +771,36 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             }
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
-            if (use_chunkwise) {
+            // Chunk-parallel prefill scan (gdn.chunkpar_scan): per-chunk WY
+            // factors on grid (chunks x heads) + a cheap sequential state
+            // pass, instead of 32 CTAs walking every token. Single-sequence
+            // prefill only; padded verify chunks (d_chunk_len) and short
+            // inputs stay on the routes below. Works for both state dtypes.
+            const bool use_chunkpar = runtime_config().gdn.chunkpar_scan && !use_ref && n >= 128 &&
+                                      state.d_chunk_len == nullptr && gdn_chunkpar_ws_ != nullptr &&
+                                      head_dim_ssm == 128 && ssize == 128;
+            if (use_chunkpar) {
+                if (state_bf16) {
+                    gdn_scan_chunkpar_bf16(conv_f32, conv_channels,
+                                           static_cast<const half*>(alpha_proj_out.data),
+                                           static_cast<const half*>(beta_proj_out.data),
+                                           static_cast<const float*>(ly.ssm_a.data),
+                                           static_cast<const float*>(ly.ssm_dt_b.data),
+                                           static_cast<__nv_bfloat16*>(h_st),
+                                           static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm,
+                                           ssize, n_groups, stream, gl,
+                                           static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_);
+                } else {
+                    gdn_scan_chunkpar_f32(conv_f32, conv_channels,
+                                          static_cast<const half*>(alpha_proj_out.data),
+                                          static_cast<const half*>(beta_proj_out.data),
+                                          static_cast<const float*>(ly.ssm_a.data),
+                                          static_cast<const float*>(ly.ssm_dt_b.data),
+                                          static_cast<float*>(h_st), static_cast<half*>(y_buf.data), n,
+                                          n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
+                                          static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_);
+                }
+            } else if (use_chunkwise) {
                 gdn_scan_chunkwise_f32(conv_f32, conv_channels,
                                        static_cast<const half*>(alpha_proj_out.data),
                                        static_cast<const half*>(beta_proj_out.data),

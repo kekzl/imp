@@ -143,6 +143,23 @@ void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, con
                                    int state_size, int n_groups, cudaStream_t stream,
                                    int grouped_layout = 0);
 
+// Chunk-PARALLEL prefill scan (gdn.chunkpar_scan). Same numerics as the WY
+// kernels, but the per-chunk factors are computed with grid (chunks x heads)
+// and only a cheap matmul chain stays sequential — see gdn_scan_chunkpar.cu.
+// HD=SS=128 only; caller guards the shape and supplies the workspace
+// (gdn_scan_chunkpar_workspace_bytes(n_heads) bytes, 256 B aligned). No
+// d_real_n / snapshot contract — padded verify chunks stay on the fused
+// kernel. StateT float or BF16; the state rounds to BF16 once, at commit.
+size_t gdn_scan_chunkpar_workspace_bytes(int n_heads);
+void gdn_scan_chunkpar_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                           const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
+                           int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                           int grouped_layout, float* ws, size_t ws_bytes);
+void gdn_scan_chunkpar_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                            const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
+                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                            cudaStream_t stream, int grouped_layout, float* ws, size_t ws_bytes);
+
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,

@@ -719,6 +719,147 @@ TEST(GDNScanTest, ChunkwiseWyMatchesFused) {
 }
 
 // =========================================================================
+// Test 3e.2: chunk-PARALLEL scan matches the sequential fused scan.
+// -------------------------------------------------------------------------
+// Validates `gdn_scan_chunkpar_{f32,bf16}` (gdn.chunkpar_scan): per-chunk WY
+// factors on grid (chunks x heads) + a sequential state pass. Nonzero initial
+// state (the state-linearity split u = u_A - W H_0 is the novel part), 1200
+// tokens = 2 full strips + a tail strip with a partial chunk, asymmetric
+// heads (n_groups=2), both state dtypes.
+// =========================================================================
+TEST(GDNScanTest, ChunkparMatchesFused) {
+    constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 2;
+    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    constexpr int conv_channels = 2 * BC_size + inner;
+    constexpr int n_tok = 1200;  // 2 strips of 512 + tail 176 (2 chunks + 48-token tail)
+
+    srand(23);
+    std::vector<float> conv_f32(static_cast<size_t>(n_tok) * conv_channels);
+    std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
+    // Half the heads decay mildly (D over a 64-token chunk ~0.7), half hard
+    // (~e-16). With hard decay everywhere the cross-chunk state coupling
+    // term (u = u_A - W H_0) is ~1e-7 and a mutant that drops W passes the
+    // tolerances — the mild heads are what make that mutant visible.
+    std::vector<float> h_A_log(n_heads), h_dt_bias(n_heads, 0.5f);
+    for (int hh = 0; hh < n_heads; hh++)
+        h_A_log[hh] = (hh % 2 == 0) ? -0.005f : -0.5f;
+    std::vector<float> h_state0(n_heads * state_size * head_dim);
+    for (auto& v : conv_f32)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_alpha)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_beta)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : h_state0)
+        v = (rand() % 200 - 100) / 500.0f;  // nonzero initial state
+
+    std::vector<half> h_alpha_h(n_tok * n_heads), h_beta_h(n_tok * n_heads);
+    for (int i = 0; i < n_tok * n_heads; i++) {
+        h_alpha_h[i] = __float2half(all_alpha[i]);
+        h_beta_h[i] = __float2half(all_beta[i]);
+    }
+
+    const int state_floats = n_heads * state_size * head_dim;
+    float *d_conv, *d_A, *d_dt, *d_state_ref, *d_state_cp, *d_ws;
+    half *d_alpha, *d_beta, *d_y_ref, *d_y_cp;
+    const size_t ws_bytes = gdn_scan_chunkpar_workspace_bytes(n_heads);
+    ASSERT_EQ(cudaMalloc(&d_conv, conv_f32.size() * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_A, n_heads * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_dt, n_heads * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_state_ref, state_floats * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_state_cp, state_floats * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_ws, ws_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_alpha, h_alpha_h.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_beta, h_beta_h.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y_ref, static_cast<size_t>(n_tok) * inner * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y_cp, static_cast<size_t>(n_tok) * inner * sizeof(half)), cudaSuccess);
+
+    cudaMemcpy(d_conv, conv_f32.data(), conv_f32.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A_log.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dt, h_dt_bias.data(), n_heads * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, h_alpha_h.data(), h_alpha_h.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, h_beta_h.data(), h_beta_h.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_state_ref, h_state0.data(), state_floats * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_state_cp, h_state0.data(), state_floats * sizeof(float), cudaMemcpyHostToDevice);
+
+    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_ref, d_y_ref, n_tok,
+                       n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_chunkpar_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_cp, d_y_cp, n_tok,
+                          n_heads, head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0, d_ws,
+                          ws_bytes);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    std::vector<half> y_ref(static_cast<size_t>(n_tok) * inner), y_cp(y_ref.size());
+    std::vector<float> state_ref(state_floats), state_cp(state_floats);
+    cudaMemcpy(y_ref.data(), d_y_ref, y_ref.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(y_cp.data(), d_y_cp, y_cp.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_ref.data(), d_state_ref, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(state_cp.data(), d_state_cp, state_floats * sizeof(float), cudaMemcpyDeviceToHost);
+
+    float max_diff_y = 0, max_diff_state = 0;
+    for (size_t i = 0; i < y_ref.size(); i++)
+        max_diff_y =
+            std::max(max_diff_y, std::abs(__half2float(y_ref[i]) - __half2float(y_cp[i])));
+    for (int i = 0; i < state_floats; i++)
+        max_diff_state = std::max(max_diff_state, std::abs(state_ref[i] - state_cp[i]));
+    std::printf("\n  Chunkpar: max_diff Y = %.6e\n", max_diff_y);
+    std::printf("  Chunkpar: max_diff state = %.6e\n", max_diff_state);
+    EXPECT_LT(max_diff_y, 1e-3f);
+    EXPECT_LT(max_diff_state, 1e-4f);
+
+    // BF16-state twin vs the fused BF16 kernel (both load BF16, keep FP32 in
+    // flight, and round to BF16 exactly once at the final commit).
+    {
+        std::vector<__nv_bfloat16> h_state0_bf(state_floats);
+        for (int i = 0; i < state_floats; i++)
+            h_state0_bf[i] = __float2bfloat16(h_state0[i]);
+        __nv_bfloat16 *d_sref, *d_scp;
+        ASSERT_EQ(cudaMalloc(&d_sref, state_floats * sizeof(__nv_bfloat16)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_scp, state_floats * sizeof(__nv_bfloat16)), cudaSuccess);
+        cudaMemcpy(d_sref, h_state0_bf.data(), state_floats * sizeof(__nv_bfloat16),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_scp, h_state0_bf.data(), state_floats * sizeof(__nv_bfloat16),
+                   cudaMemcpyHostToDevice);
+        gdn_scan_fused_bf16(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_sref, d_y_ref, n_tok,
+                            n_heads, head_dim, state_size, n_groups, nullptr);
+        gdn_scan_chunkpar_bf16(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_scp, d_y_cp, n_tok,
+                               n_heads, head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0,
+                               d_ws, ws_bytes);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cudaMemcpy(y_ref.data(), d_y_ref, y_ref.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        cudaMemcpy(y_cp.data(), d_y_cp, y_cp.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        std::vector<__nv_bfloat16> sref(state_floats), scp(state_floats);
+        cudaMemcpy(sref.data(), d_sref, state_floats * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+        cudaMemcpy(scp.data(), d_scp, state_floats * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+        float mdy = 0, mds = 0;
+        for (size_t i = 0; i < y_ref.size(); i++)
+            mdy = std::max(mdy, std::abs(__half2float(y_ref[i]) - __half2float(y_cp[i])));
+        for (int i = 0; i < state_floats; i++)
+            mds = std::max(mds, std::abs(__bfloat162float(sref[i]) - __bfloat162float(scp[i])));
+        std::printf("  Chunkpar BF16: max_diff Y = %.6e, max_diff state = %.6e\n", mdy, mds);
+        EXPECT_LT(mdy, 1e-3f);
+        // Both arms round to BF16 once at commit; a ~1e-6 FP32 difference can
+        // still flip the rounding, so the floor is one BF16 ulp at the state
+        // magnitude (~2e-3 at |H|~0.5 after 1200 mild-decay tokens). The W
+        // mutant this test exists for reads 3.9e-1.
+        EXPECT_LT(mds, 4e-3f);
+        cudaFree(d_sref);
+        cudaFree(d_scp);
+    }
+
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state_ref);
+    cudaFree(d_state_cp);
+    cudaFree(d_ws);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y_ref);
+    cudaFree(d_y_cp);
+}
+
+// =========================================================================
 // Test 3f: Phase 2b Tensor-Core WY-rep prototype matches sequential
 // -------------------------------------------------------------------------
 // Validates `gdn_scan_chunkwise_wy_tc_f32` — Phase 2a's WY-rep math with

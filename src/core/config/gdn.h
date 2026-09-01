@@ -50,6 +50,15 @@ struct GDN {
     // exhaustively benched, Phase 1b.1 remains the fastest chunkwise
     // path on sm_120 — the WY-rep + TC-MMA variants all stay behind it.
     bool chunkwise_scan = true;
+    // Chunk-PARALLEL prefill scan: the WY per-chunk factors are computed with
+    // grid (chunks x heads) — full-device parallel — and only a cheap matmul
+    // chain per head stays sequential. Every earlier scan route (fused,
+    // chunkwise, WY/TC) launches 32 CTAs on 170 SMs and was 42% of the
+    // Qwen3.6-35B pp512 wall (658 us/layer). Applies to single-sequence
+    // prefill (n >= 128) on HD=SS=128 with either state dtype; every other
+    // shape/route keeps the dispatch below. Falls back silently when the
+    // workspace was not allocated.
+    bool chunkpar_scan = true;
     // Store the GDN recurrent state as BF16 instead of FP32 (halves the
     // state traffic that dominates batched decode; arithmetic stays FP32 in
     // registers). Default ON since the #1776/#1777 pair: +12.5% aggregate at

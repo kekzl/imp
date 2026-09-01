@@ -645,6 +645,13 @@ private:
                                  // of the fused GDN input GEMV when ly.gdn_input_packed is
                                  // built; sized only for has_gdn_ models.
 
+    // Chunk-parallel GDN prefill scan workspace (gdn.chunkpar_scan): five
+    // per-(chunk, head) strip arrays + the FP32 inter-strip state. Engine
+    // lifetime, allocated in allocate_workspace_buffers when the model has
+    // GDN layers; nullptr degrades the route to the fused scan.
+    void* gdn_chunkpar_ws_ = nullptr;
+    size_t gdn_chunkpar_ws_bytes_ = 0;
+
     // --- Separately allocated buffers (not part of unified workspace) ---
 
     // LRU cache for host-resident expert weights on GPU.

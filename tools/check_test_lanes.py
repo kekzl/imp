@@ -170,7 +170,7 @@ def main():
     # 1046 -> 1051: FmhaFA2Dense2CtaTest.* (the Bq=128 TWOSLOT FA2 instance at
     # two CTAs per SM: 1024-row causal/odd/sliding-window/chunked/magnitude) -
     # launches the FA2 kernel, GPU-only.
-    PINNED = 1051
+    PINNED = 1052
 
     text = CMAKE.read_text()
     mods = module_sources(text)
