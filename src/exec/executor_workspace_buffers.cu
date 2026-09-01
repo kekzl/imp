@@ -942,6 +942,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             size_t sf_sz = cutlass_nvfp4_sf_size(max_expanded + 128 * cfg.n_experts, max_K);
             moe_.cutlass3x_packed = vram_alloc(vram_alloc_, packed_sz, "moe_3x_packed");
             moe_.cutlass3x_sf = vram_alloc(vram_alloc_, sf_sz, "moe_3x_sf");
+            // plain scale rows for the v2 grouped small-M kernel: 1/16 of packed
+            moe_.cutlass3x_sf_plain =
+                vram_alloc(vram_alloc_, static_cast<size_t>(max_expanded) * max_K / 16, "moe_3x_sf_plain");
+            moe_.smallm_v2_work = vram_alloc(
+                vram_alloc_,
+                static_cast<size_t>(gemm_nvfp4_smallm_v2_grouped_work_cap(max_expanded, cfg.n_experts)) *
+                    sizeof(int2),
+                "moe_smallm_v2_work");
             if (moe_.cutlass3x_packed && moe_.cutlass3x_sf) {
                 moe_.cutlass3x_packed_size = packed_sz;
                 moe_.cutlass3x_sf_size = sf_sz;
@@ -969,6 +977,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 if (moe_.cutlass3x_sf) {
                     vram_free(vram_alloc_, moe_.cutlass3x_sf);
                     moe_.cutlass3x_sf = nullptr;
+                }
+                if (moe_.cutlass3x_sf_plain) {
+                    vram_free(vram_alloc_, moe_.cutlass3x_sf_plain);
+                    moe_.cutlass3x_sf_plain = nullptr;
+                }
+                if (moe_.smallm_v2_work) {
+                    vram_free(vram_alloc_, moe_.smallm_v2_work);
+                    moe_.smallm_v2_work = nullptr;
                 }
             }
         }

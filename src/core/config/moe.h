@@ -116,6 +116,17 @@ struct MoE {
     bool nvfp4_device_args = true;
     // Opt-in smallM kernel branch for NVFP4 MoE prefill.
     bool nvfp4_smallM = false;
+    // Gate/up of the device-args NVFP4 MoE prefill through the v2 small-M
+    // grouped kernel (nvfp4_gemm_smallm_v2.cu) instead of the CUTLASS 128x128
+    // grouped tile: the pp512 expert has ~16 rows, the CUTLASS tile pads it to
+    // 128 and holds one CTA per SM (57-62% of the weight floor, no tile shape
+    // helps: tests/test_cutlass_grouped_tile_bench.cu). Isolated on the
+    // Qwen3.6-35B-A3B geometry: gate/up 123 -> 104 us (-12.7%); down (K=512,
+    // two pipeline stages) +3..+8%, stays on CUTLASS. Native NVFP4 experts
+    // only (plain scales), K % 256 == 0, N % 64 == 0.
+    bool nvfp4_prefill_smallm_v2 = false;
+    // Activation rows per CTA tile of that kernel: 0 = auto, 32, 64, 128.
+    int nvfp4_prefill_smallm_v2_rows = 0;
     // Threshold M for smallM kernel (clamped to [0,128]).
     int nvfp4_smallM_threshold = 64;
     // Rows-per-block (NR) for multi-row NVFP4 MoE decode kernels

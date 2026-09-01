@@ -5,14 +5,13 @@
 // per SM; roofline run 1d5b9230 reads the class at 55% of DRAM bandwidth.
 // Local instantiations below try smaller N tiles, a deeper K tile and the
 // pingpong schedule against the production entry point (the builder rejects
-// M=64 tiles: the SF atom is 128 rows). The 32-row-tile v2 grouped kernel
-// measured here too lives on branch perf/moe-smallm-v2-grouped (refuted in
-// situ by the routing skew, docs/roadmap.md). Weights total 134 MB per launch, so every launch reads DRAM.
+// M=64 tiles: the SF atom is 128 rows). Weights total 134 MB per launch, so every launch reads DRAM.
 // GPU required - skips without one. Decision data, not a gate.
 
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
+#include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
 #include "scoped_engine_arena.h"
 
@@ -185,6 +184,16 @@ struct Experts {
     std::vector<float> alpha;
     std::vector<int> M;
     half* d_out = nullptr;
+    // plain-layout twins for the v2 grouped kernel: expert slab + scales
+    imp::NvFP4QuantResult xq_plain{};
+    uint8_t* d_w_slab = nullptr;
+    uint8_t* d_s_slab = nullptr;
+    size_t w_stride = 0, s_stride = 0;
+    float* d_w_ts = nullptr;
+    int* d_offsets = nullptr;
+    int2* d_work = nullptr;
+    int work_cap = 0;
+
     void build(int ne_, int N_, int K_, int m_per, cudaStream_t stream) {
         ne = ne_, N = N_, K = K_;
         q.resize(ne), w.resize(ne);
@@ -226,9 +235,48 @@ struct Experts {
             pD.push_back(d_out + (size_t)e * m_per * N);
         }
         cudaStreamSynchronize(stream);
+        // plain twins: one activation matrix [ne*m_per, K] (rows expert-sorted)
+        {
+            std::vector<half> h_all((size_t)ne * m_per * K);
+            for (int e = 0; e < ne; ++e)
+                std::copy(h_x.begin(), h_x.end(), h_all.begin() + (size_t)e * m_per * K);
+            half* d_all = nullptr;
+            cudaMalloc(&d_all, h_all.size() * sizeof(half));
+            cudaMemcpy(d_all, h_all.data(), h_all.size() * sizeof(half), cudaMemcpyHostToDevice);
+            int64_t shp[2] = {(int64_t)ne * m_per, K};
+            imp::Tensor t(d_all, imp::QType::F16, 2, shp, true);
+            imp::quantize_fp16_to_nvfp4(t, xq_plain, stream);
+            cudaStreamSynchronize(stream);
+            cudaFree(d_all);
+            std::vector<float> ts(ne);
+            std::vector<int> off(ne + 1);
+            w_stride = (size_t)N * K / 2;
+            s_stride = (size_t)N * K / 16;
+            cudaMalloc(reinterpret_cast<void**>(&d_w_slab), w_stride * ne);
+            cudaMalloc(reinterpret_cast<void**>(&d_s_slab), s_stride * ne);
+            for (int e = 0; e < ne; ++e) {
+                cudaMemcpy(d_w_slab + e * w_stride, q[e].packed_data, w_stride, cudaMemcpyDeviceToDevice);
+                cudaMemcpy(d_s_slab + e * s_stride, q[e].micro_scales, s_stride, cudaMemcpyDeviceToDevice);
+                ts[e] = q[e].tensor_scale;
+                off[e] = e * m_per;
+            }
+            off[ne] = ne * m_per;
+            cudaMalloc(reinterpret_cast<void**>(&d_w_ts), ne * sizeof(float));
+            cudaMalloc(reinterpret_cast<void**>(&d_offsets), (ne + 1) * sizeof(int));
+            work_cap = imp::gemm_nvfp4_smallm_v2_grouped_work_cap(ne * m_per, ne);
+            cudaMalloc(reinterpret_cast<void**>(&d_work), work_cap * sizeof(int2));
+            cudaMemcpy(d_w_ts, ts.data(), ne * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_offsets, off.data(), (ne + 1) * sizeof(int), cudaMemcpyHostToDevice);
+        }
         cudaFree(d_x);
     }
     void release() {
+        imp::free_nvfp4_result(xq_plain);
+        cudaFree(d_w_slab);
+        cudaFree(d_s_slab);
+        cudaFree(d_w_ts);
+        cudaFree(d_offsets);
+        cudaFree(d_work);
         for (int e = 0; e < ne; ++e) {
             imp::free_cutlass_nvfp4_weight(w[e]);
             imp::free_nvfp4_result(q[e]);
@@ -366,6 +414,49 @@ TEST_F(GroupedTileBench, Qwen36MoeShapes) {
         arm("128x64 ping", v128x64ping);
         arm("128x128x256", v128k256);
         arm("128x128 ping", v128ping);
+        for (int mt : {32, 64, 128}) {
+            // v2 grouped: plain layouts, per-tensor activation scale, so the
+            // output differs from the CUTLASS arm by the activation quant
+            // (per-expert SfAtom, tensor scale 1); the dense v2 kernel on the
+            // same operands is the exact reference.
+            char tag[32];
+            snprintf(tag, sizeof(tag), "v2 grouped mt%d", mt);
+            bool ok = imp::gemm_nvfp4_smallm_v2_grouped(ne, ex.d_w_slab, ex.w_stride, ex.d_s_slab, ex.s_stride,
+                                                        ex.d_w_ts, ex.xq_plain.packed_data,
+                                                        ex.xq_plain.micro_scales, ex.xq_plain.tensor_scale,
+                                                        ex.d_offsets, ex.d_work, ex.work_cap, ex.d_out, s.N,
+                                                        s.K, mt, stream_);
+            cudaStreamSynchronize(stream_);
+            if (!ok || cudaGetLastError() != cudaSuccess) {
+                printf("[grouped-tile] %-16s %-16s: DECLINED\n", s.name, tag);
+                continue;
+            }
+            float t = time_us([&] {
+                imp::gemm_nvfp4_smallm_v2_grouped(ne, ex.d_w_slab, ex.w_stride, ex.d_s_slab, ex.s_stride,
+                                                  ex.d_w_ts, ex.xq_plain.packed_data, ex.xq_plain.micro_scales,
+                                                  ex.xq_plain.tensor_scale, ex.d_offsets, ex.d_work,
+                                                  ex.work_cap, ex.d_out, s.N, s.K, mt, stream_);
+            });
+            cudaStreamSynchronize(stream_);
+            half* y_dense = nullptr;
+            cudaMalloc(reinterpret_cast<void**>(&y_dense), out_n * sizeof(half));
+            cudaMemset(y_dense, 0, out_n * sizeof(half));
+            for (int e = 0; e < ne; ++e) {
+                imp::NvFP4QuantResult xv = ex.xq_plain;  // view: rows of expert e
+                xv.packed_data = static_cast<uint8_t*>(ex.xq_plain.packed_data) + (size_t)e * s.m_per * s.K / 2;
+                xv.micro_scales = static_cast<uint8_t*>(ex.xq_plain.micro_scales) + (size_t)e * s.m_per * s.K / 16;
+                ASSERT_TRUE(imp::gemm_nvfp4_smallm_v2_a4_tuned(ex.q[e], xv, y_dense + (size_t)e * s.m_per * s.N,
+                                                               s.m_per, s.N, s.K, nullptr, stream_,
+                                                               /*accumulate=*/false, /*stages=*/6,
+                                                               /*stripes=*/1));
+            }
+            cudaStreamSynchronize(stream_);
+            float rel_dense = max_abs_diff(ex.d_out, y_dense, out_n);
+            cudaFree(y_dense);
+            printf("[grouped-tile] %-16s %-16s: %.1f us (prod 128x128x128 %.1f us, %+.1f%%)  vs dense v2=%.2e\n",
+                   s.name, tag, t, t_prod, 100.f * (t - t_prod) / t_prod, rel_dense);
+            EXPECT_LT(rel_dense, 1e-3f) << tag << " differs from the dense v2 kernel on the same operands";
+        }
         cudaFree(ref);
         ex.release();
     }

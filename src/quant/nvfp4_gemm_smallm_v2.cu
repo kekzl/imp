@@ -52,11 +52,21 @@ constexpr int kThreads = 160;  // 4 consumer warps + 1 producer warp
 constexpr int kNibStride = 144;
 constexpr int kSfStride = 16;
 
-constexpr int kWNibBytes = kNR * kNibStride;                                  // 9216
-constexpr int kXNibBytes = kSmM * kNibStride;                                 // 4608
-constexpr int kWSfBytes = kNR * kSfStride;                                    // 1024
-constexpr int kXSfBytes = kSmM * kSfStride;                                   // 512
-constexpr int kStageBytes = kWNibBytes + kXNibBytes + kWSfBytes + kXSfBytes;  // 15360
+constexpr int kWNibBytes = kNR * kNibStride;  // 9216
+constexpr int kWSfBytes = kNR * kSfStride;    // 1024
+// Activation rows per CTA tile (MT): 32 for the dense decode kernels, 32/64/128
+// for the grouped MoE prefill kernel, where one CTA streams its expert's
+// weight rows ONCE across all MT activation rows (a 32-row tile per CTA
+// re-streamed the weights per tile and lost to the routing skew, 2026-09-01).
+template <int MT>
+struct SmemTile {
+    static constexpr int x_nib = MT * kNibStride;
+    static constexpr int x_sf = MT * kSfStride;
+    static constexpr int stage = kWNibBytes + x_nib + kWSfBytes + x_sf;
+};
+constexpr int kXNibBytes = SmemTile<kSmM>::x_nib;  // 4608
+constexpr int kXSfBytes = SmemTile<kSmM>::x_sf;    // 512
+constexpr int kStageBytes = SmemTile<kSmM>::stage;  // 15360
 constexpr int kDefaultStages = 6;  // smem ring depth; 6 measured best at stripes=1 (sweep 2026-08-25)
 
 // ---- mbarrier / cp.async primitives -----------------------------------------
@@ -131,7 +141,7 @@ __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], 
 // n_base); the single-tensor and pair kernels differ only in how they resolve
 // them from blockIdx. Everything from barrier init through the epilogue is
 // identical to the shipped single-tensor kernel.
-template <int kStages>
+template <int kStages, int MT = kSmM>
 __device__ __forceinline__ void smallm_v2_cta_body(
     const uint8_t* __restrict__ w_packed, const uint8_t* __restrict__ w_scales,
     const uint8_t* __restrict__ xq_packed, const uint8_t* __restrict__ xq_scales,
@@ -160,7 +170,10 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     const int kt1 = min(k_tiles, kt0 + per_stripe);
     const int iters = kt1 - kt0;
 
-    auto stage_base = [&](int s) { return smem + s * kStageBytes; };
+    using Tile = SmemTile<MT>;
+    static_assert(MT % 32 == 0 && MT >= 32 && MT <= 128, "MT is 32, 64 or 128 activation rows");
+    constexpr int kMSub = MT / 32;  // 32-row sub-tiles per CTA; each warp owns 16 rows of every one
+    auto stage_base = [&](int s) { return smem + s * Tile::stage; };
 
     if (warp == 4) {
         // ---- producer warp: fill the ring, never compute ----
@@ -179,7 +192,7 @@ __device__ __forceinline__ void smallm_v2_cta_body(
             uint8_t* base = stage_base(s);
             uint8_t* s_wn = base;
             uint8_t* s_xn = base + kWNibBytes;
-            uint8_t* s_wsf = base + kWNibBytes + kXNibBytes;
+            uint8_t* s_wsf = base + kWNibBytes + Tile::x_nib;
             uint8_t* s_xsf = s_wsf + kWSfBytes;
             const int kt = kt0 + i;
             const int64_t k_nib_off = static_cast<int64_t>(kt) * (kKT / 2);
@@ -192,7 +205,7 @@ __device__ __forceinline__ void smallm_v2_cta_body(
                            w_packed + (n_base + r) * w_row_bytes + k_nib_off + j * 16, 16);
             }
 #pragma unroll
-            for (int v = 0; v < 8; ++v) {
+            for (int v = 0; v < MT / 4; ++v) {
                 const int c = lane + v * 32;
                 const int r = c / 8, j = c % 8;
                 cp_async16(s_xn + r * kNibStride + j * 16, xq_packed + r * w_row_bytes + k_nib_off + j * 16,
@@ -203,8 +216,11 @@ __device__ __forceinline__ void smallm_v2_cta_body(
                 const int r = lane + v * 32;
                 cp_async16(s_wsf + r * kSfStride, w_scales + (n_base + r) * sf_row_bytes + k_sf_off, 16);
             }
-            cp_async16(s_xsf + lane * kSfStride, xq_scales + lane * sf_row_bytes + k_sf_off,
-                       lane < M ? 16 : 0);
+#pragma unroll
+            for (int v = 0; v < MT / 32; ++v) {
+                const int r = lane + v * 32;
+                cp_async16(s_xsf + r * kSfStride, xq_scales + r * sf_row_bytes + k_sf_off, r < M ? 16 : 0);
+            }
             cp_async_mbar_arrive(&bar_full[s]);
         }
     } else {
@@ -214,14 +230,16 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         const int warp_n = warp >> 1;
         const int T0 = lane & 3;
         const int T1 = lane >> 2;
-        const int a_row = warp_m * 16 + T1;  // A fragment row (V1=0)
+        const int a_row = warp_m * 16 + T1;  // A fragment row (V1=0) within a 32-row sub-tile
         const int sfa_row = warp_m * 16 + (lane & 1) * 8 + (lane >> 2);
-        float acc[4][4];
+        float acc[kMSub][4][4];
 #pragma unroll
-        for (int nf = 0; nf < 4; ++nf)
+        for (int ms = 0; ms < kMSub; ++ms)
 #pragma unroll
-            for (int r = 0; r < 4; ++r)
-                acc[nf][r] = 0.0f;
+            for (int nf = 0; nf < 4; ++nf)
+#pragma unroll
+                for (int r = 0; r < 4; ++r)
+                    acc[ms][nf][r] = 0.0f;
 
         for (int i = 0; i < iters; ++i) {
             const int s = i % kStages;
@@ -230,17 +248,23 @@ __device__ __forceinline__ void smallm_v2_cta_body(
             const uint8_t* base = stage_base(s);
             const uint8_t* s_wn = base;
             const uint8_t* s_xn = base + kWNibBytes;
-            const uint8_t* s_wsf = base + kWNibBytes + kXNibBytes;
+            const uint8_t* s_wsf = base + kWNibBytes + Tile::x_nib;
             const uint8_t* s_xsf = s_wsf + kWSfBytes;
 #pragma unroll
             for (int c = 0; c < kKT / 64; ++c) {
-                uint32_t a[4];
-                const uint8_t* xr = s_xn + a_row * kNibStride + T0 * 4 + c * 32;
-                a[0] = *reinterpret_cast<const uint32_t*>(xr);
-                a[1] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride);
-                a[2] = *reinterpret_cast<const uint32_t*>(xr + 16);
-                a[3] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride + 16);
-                const uint32_t sfa = *reinterpret_cast<const uint32_t*>(s_xsf + sfa_row * kSfStride + c * 4);
+                uint32_t a[kMSub][4];
+                uint32_t sfa[kMSub];
+#pragma unroll
+                for (int ms = 0; ms < kMSub; ++ms) {
+                    const uint8_t* xr = s_xn + (ms * 32 + a_row) * kNibStride + T0 * 4 + c * 32;
+                    a[ms][0] = *reinterpret_cast<const uint32_t*>(xr);
+                    a[ms][1] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride);
+                    a[ms][2] = *reinterpret_cast<const uint32_t*>(xr + 16);
+                    a[ms][3] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride + 16);
+                    sfa[ms] = *reinterpret_cast<const uint32_t*>(s_xsf + (ms * 32 + sfa_row) * kSfStride +
+                                                                 c * 4);
+                }
+                // one weight fragment per (c, nf), reused across the MT/32 sub-tiles
 #pragma unroll
                 for (int nf = 0; nf < 4; ++nf) {
                     const int n_row = warp_n * 32 + nf * 8 + T1;
@@ -249,7 +273,9 @@ __device__ __forceinline__ void smallm_v2_cta_body(
                     const uint32_t b1 = *reinterpret_cast<const uint32_t*>(wr + 16);
                     const uint32_t sfb = *reinterpret_cast<const uint32_t*>(s_wsf + n_row * kSfStride +
                                                                             c * 4);
-                    mma_mxf4nvf4(acc[nf], a, b0, b1, sfa, sfb);
+#pragma unroll
+                    for (int ms = 0; ms < kMSub; ++ms)
+                        mma_mxf4nvf4(acc[ms][nf], a[ms], b0, b1, sfa[ms], sfb);
                 }
             }
             mbar_arrive(&bar_empty[s]);
@@ -258,15 +284,18 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         // Stage the FP32 accumulators for coalesced plane stores. Ring smem
         // is dead after the loop; the __syncthreads below fences the reuse.
         __syncthreads();
-        float* s_out = reinterpret_cast<float*>(smem);  // [kSmM][kNR]
+        float* s_out = reinterpret_cast<float*>(smem);  // [MT][kNR]
 #pragma unroll
-        for (int nf = 0; nf < 4; ++nf) {
-            const int n0 = warp_n * 32 + nf * 8 + T0 * 2;
-            s_out[(warp_m * 16 + T1) * kNR + n0] = acc[nf][0];
-            s_out[(warp_m * 16 + T1) * kNR + n0 + 1] = acc[nf][1];
-            s_out[(warp_m * 16 + T1 + 8) * kNR + n0] = acc[nf][2];
-            s_out[(warp_m * 16 + T1 + 8) * kNR + n0 + 1] = acc[nf][3];
-        }
+        for (int ms = 0; ms < kMSub; ++ms)
+#pragma unroll
+            for (int nf = 0; nf < 4; ++nf) {
+                const int n0 = warp_n * 32 + nf * 8 + T0 * 2;
+                const int r0 = ms * 32 + warp_m * 16 + T1;
+                s_out[r0 * kNR + n0] = acc[ms][nf][0];
+                s_out[r0 * kNR + n0 + 1] = acc[ms][nf][1];
+                s_out[(r0 + 8) * kNR + n0] = acc[ms][nf][2];
+                s_out[(r0 + 8) * kNR + n0 + 1] = acc[ms][nf][3];
+            }
     }
     if (warp == 4)
         __syncthreads();  // producer joins the consumers' staging barrier
@@ -279,7 +308,7 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     if (stripes == 1) {
         // Single stripe owns the full K range: write FP16 y directly, tensor
         // scale applied — no reduce launch, no partial-plane round-trip.
-        for (int i = tid; i < kSmM * kNR; i += kThreads) {
+        for (int i = tid; i < MT * kNR; i += kThreads) {
             const int m = i / kNR;
             if (m >= M)
                 continue;
@@ -292,8 +321,8 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     // Streaming stores: each partial is written once and read once by the
     // reduce kernel (v1 lesson — un-hinted partials knocked L2 sets out from
     // under the weight stream).
-    float* plane = ws_partials + static_cast<size_t>(stripe) * kSmM * N_out;
-    for (int i = tid; i < kSmM * kNR; i += kThreads) {
+    float* plane = ws_partials + static_cast<size_t>(stripe) * MT * N_out;
+    for (int i = tid; i < MT * kNR; i += kThreads) {
         const int m = i / kNR;
         const int n = i % kNR;
         __stcs(&plane[static_cast<int64_t>(m) * N_out + n_base + n], s_out[i]);
@@ -339,6 +368,67 @@ __global__ void gemm_nvfp4_smallm_v2_pair_kernel(
                                 /*acc_flag=*/0, M, second ? N2 : N1, K, /*stripes=*/1,
                                 (second ? nt - n_tiles1 : nt) * kNR, /*stripe=*/0, smem, bar_full,
                                 bar_empty);
+}
+
+// Grouped (MoE prefill) variant. One CTA = one (32-row tile of one expert,
+// 64-column n-tile). The tile list is built on device from the expert row
+// offsets (graph-capturable, no host max): work[i] = {expert, first row} for
+// every 32-row tile of every expert, -1 past the end. grid = (N/kNR, cap),
+// cap = expanded/32 + n_experts >= the tile count, so the empties at the tail
+// exit before touching memory. A first cut looped the tiles of one expert
+// inside one CTA (grid.y = expert); the real routing is skewed, the busiest
+// expert's 7 tiles ran serially on one SM and the launch read +18% e2e
+// against the persistent CUTLASS scheduler that balances them.
+__global__ void smallm_v2_grouped_worklist_kernel(const int* __restrict__ offsets, int n_experts, int cap,
+                                                  int mt, int2* __restrict__ work) {
+    // one block of 256 threads, one expert per thread, block-wide inclusive
+    // scan of the per-expert tile counts (a thread-0 serial scan cost ~10 us
+    // and ate the kernel's gain)
+    __shared__ int s_scan[256];
+    const int e = threadIdx.x;
+    const int rows = (e < n_experts) ? offsets[e + 1] - offsets[e] : 0;
+    const int tiles = (rows + mt - 1) / mt;
+    int v = tiles;
+    s_scan[e] = v;
+    __syncthreads();
+#pragma unroll
+    for (int d = 1; d < 256; d <<= 1) {
+        const int add = (e >= d) ? s_scan[e - d] : 0;
+        __syncthreads();
+        v += add;
+        s_scan[e] = v;
+        __syncthreads();
+    }
+    const int total = s_scan[255];
+    const int base = v - tiles;
+    for (int t = 0; t < tiles; ++t)
+        if (base + t < cap)
+            work[base + t] = make_int2(e, offsets[e] + t * mt);
+    for (int i = total + e; i < cap; i += 256)
+        work[i] = make_int2(-1, 0);
+}
+
+template <int kStages, int MT>
+__global__ void gemm_nvfp4_smallm_v2_grouped_kernel(
+    const uint8_t* __restrict__ w_base, size_t w_stride, const uint8_t* __restrict__ s_base, size_t s_stride,
+    const float* __restrict__ w_ts, const uint8_t* __restrict__ xq_packed,
+    const uint8_t* __restrict__ xq_scales, float x_ts, const int* __restrict__ offsets,
+    const int2* __restrict__ work, half* __restrict__ y, int N_out, int K) {
+    extern __shared__ uint8_t smem[];
+    __shared__ uint64_t bar_full[kStages];
+    __shared__ uint64_t bar_empty[kStages];
+    const int2 item = work[blockIdx.y];
+    const int e = item.x;
+    if (e < 0)
+        return;
+    const int row0 = item.y;
+    const int rows = offsets[e + 1] - row0;
+    const int64_t xrow = row0;
+    smallm_v2_cta_body<kStages, MT>(w_base + static_cast<size_t>(e) * w_stride,
+                                    s_base + static_cast<size_t>(e) * s_stride, xq_packed + xrow * (K / 2),
+                                    xq_scales + xrow * (K / kMicroBlockSize), /*ws_partials=*/nullptr,
+                                    y + xrow * N_out, w_ts[e] * x_ts, /*acc_flag=*/0, min(rows, MT), N_out, K,
+                                    /*stripes=*/1, blockIdx.x * kNR, /*stripe=*/0, smem, bar_full, bar_empty);
 }
 
 // Reduce the stripe partial planes into FP16 y, applying the combined tensor
@@ -437,6 +527,68 @@ bool smallm_v2_args_ok(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, in
 }
 
 }  // namespace
+
+int gemm_nvfp4_smallm_v2_grouped_work_cap(int expanded, int n_experts) {
+    return expanded / kSmM + n_experts;  // the MT=32 bound is the largest of the three
+}
+
+bool gemm_nvfp4_smallm_v2_grouped_eligible(const NvFP4MoEQuantResult* W, int N_out, int K) {
+    return W && W->packed_data && W->micro_scales && W->tensor_scales && W->N == N_out && W->K == K &&
+           (K % kKT) == 0 && (N_out % kNR) == 0 && W->n_experts <= 256;
+}
+
+namespace {
+template <int kStages, int MT>
+bool launch_smallm_v2_grouped(int n_experts, const void* w_base, size_t w_stride, const void* s_base,
+                              size_t s_stride, const float* d_w_ts, const void* xq_packed, const void* xq_scales,
+                              float x_ts, const int* d_offsets, int2* d_work, int work_cap, half* y, int N_out,
+                              int K, cudaStream_t stream) {
+    constexpr int kSmem = kStages * SmemTile<MT>::stage;
+    static const bool smem_ok = [] {
+        return cudaFuncSetAttribute(gemm_nvfp4_smallm_v2_grouped_kernel<kStages, MT>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem) == cudaSuccess;
+    }();
+    if (!smem_ok)
+        return false;
+    smallm_v2_grouped_worklist_kernel<<<1, 256, 0, stream>>>(d_offsets, n_experts, work_cap, MT, d_work);
+    IMP_CUDA_CHECK_LAUNCH();
+    const dim3 grid(N_out / kNR, work_cap);
+    gemm_nvfp4_smallm_v2_grouped_kernel<kStages, MT><<<grid, dim3(kThreads), kSmem, stream>>>(
+        static_cast<const uint8_t*>(w_base), w_stride, static_cast<const uint8_t*>(s_base), s_stride, d_w_ts,
+        static_cast<const uint8_t*>(xq_packed), static_cast<const uint8_t*>(xq_scales), x_ts, d_offsets, d_work,
+        y, N_out, K);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+}  // namespace
+
+bool gemm_nvfp4_smallm_v2_grouped(int n_experts, const void* w_base, size_t w_stride, const void* s_base,
+                                  size_t s_stride, const float* d_w_ts, const void* xq_packed,
+                                  const void* xq_scales, float x_ts, const int* d_offsets, int2* d_work,
+                                  int work_cap, half* y, int N_out, int K, int mt, cudaStream_t stream) {
+    if (n_experts <= 0 || n_experts > 256 || (K % kKT) != 0 || (N_out % kNR) != 0 || work_cap <= 0)
+        return false;
+    if (!w_base || !s_base || !d_w_ts || !d_offsets || !xq_packed || !xq_scales || !d_work || !y)
+        return false;
+    // Ring depth per tile height under the 100 KB smem budget: 6 x 15 KB,
+    // 4 x 20 KB, 3 x 30 KB.
+    switch (mt) {
+        case 32:
+            return launch_smallm_v2_grouped<6, 32>(n_experts, w_base, w_stride, s_base, s_stride, d_w_ts,
+                                                   xq_packed, xq_scales, x_ts, d_offsets, d_work, work_cap, y,
+                                                   N_out, K, stream);
+        case 64:
+            return launch_smallm_v2_grouped<4, 64>(n_experts, w_base, w_stride, s_base, s_stride, d_w_ts,
+                                                   xq_packed, xq_scales, x_ts, d_offsets, d_work, work_cap, y,
+                                                   N_out, K, stream);
+        case 128:
+            return launch_smallm_v2_grouped<3, 128>(n_experts, w_base, w_stride, s_base, s_stride, d_w_ts,
+                                                    xq_packed, xq_scales, x_ts, d_offsets, d_work, work_cap, y,
+                                                    N_out, K, stream);
+        default:
+            return false;
+    }
+}
 
 bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M, int N_out,
                              int K, void* d_workspace, cudaStream_t stream, bool accumulate) {

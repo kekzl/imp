@@ -10,7 +10,8 @@
 #
 # Runs build-dev/imp-cli inside imp:toolchain (the only image with nsys, same
 # recipe as serving_idle_profile.sh); the .qdstrm import and `nsys stats` run
-# on the host nsys. Env: MODEL (default Qwen3-14B-NVFP4), MODELS_DIR, OUT.
+# on the host nsys. Env: MODEL (default Qwen3-14B-NVFP4), MODELS_DIR, OUT,
+# EXTRA_SET (extra `--set k=v` args applied to BOTH arms).
 set -euo pipefail
 KEY="$1"; VAL_A="$2"; VAL_B="$3"; KREGEX="$4"
 PP="${5:-512}"
@@ -33,7 +34,7 @@ run_arm() {  # $1 = value, $2 = pair index
         /src/build-dev/imp-cli --model "/models/$MODEL" --bench --bench-pp "$PP" --bench-reps 3 \
             --max-tokens 8 --temperature 0 --seed 42 \
             --set speculative.ngram=false --set speculative.mtp_k=0 \
-            --set "$KEY=$val" > "$OUT/$tag.log" 2>&1 || true
+            --set "$KEY=$val" ${EXTRA_SET:-} > "$OUT/$tag.log" 2>&1 || true
     if [ ! -f "$OUT/$tag.nsys-rep" ] && [ -f "$OUT/$tag.qdstrm" ] && [ -n "$IMPORTER" ]; then
         "$IMPORTER" -i "$OUT/$tag.qdstrm" -o "$OUT/$tag.nsys-rep" >/dev/null 2>&1
     fi

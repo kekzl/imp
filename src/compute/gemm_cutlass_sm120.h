@@ -98,7 +98,7 @@ void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
                                                void* dst_packed,
                                                uint8_t* const* d_sfa_bases,
                                                const int* d_offsets, int expanded, int K, int ne,
-                                               cudaStream_t stream);
+                                               cudaStream_t stream, void* plain_sf = nullptr);
 
 // Fused activation + NVFP4 CUTLASS quantize for the MoE down-projection input.
 // Replaces apply_expert_activation(gate, up -> swiglu) + quantize_fp16_to_nvfp4_cutlass_moe(swiglu).

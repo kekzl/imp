@@ -75,6 +75,24 @@ bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantRe
 bool gemm_nvfp4_smallm_v2_pair_a4(const NvFP4QuantResult& W1, const NvFP4QuantResult& W2,
                                   const NvFP4QuantResult& Xq, half* y1, half* y2, int M, int N1, int N2,
                                   int K, cudaStream_t stream);
+// Grouped (MoE prefill) variant of the v2 kernel: expert weight slab (plain
+// packed [ne, N, K/2] + plain scales [ne, N, K/16], byte strides per expert,
+// per-expert tensor scales on device - the NvFP4MoEQuantResult layout), one
+// plain-quantized expert-sorted activation (packed rows [rows, K/2], scale
+// rows [rows, K/16], one tensor scale) with [n_experts+1] row offsets on
+// device, FP16 out rows in the same order. A device-built tile list (d_work,
+// work_cap = gemm_nvfp4_smallm_v2_grouped_work_cap(expanded, n_experts)
+// entries) spreads every 32-row tile over its own CTA; grid = (N/64, cap).
+// K % 256 == 0, N % 64 == 0, n_experts <= 256.
+struct NvFP4MoEQuantResult;
+int gemm_nvfp4_smallm_v2_grouped_work_cap(int expanded, int n_experts);
+bool gemm_nvfp4_smallm_v2_grouped_eligible(const NvFP4MoEQuantResult* W, int N_out, int K);
+// mt: activation rows per CTA tile (32, 64, 128); one CTA streams its expert's
+// weight rows once across all mt rows.
+bool gemm_nvfp4_smallm_v2_grouped(int n_experts, const void* w_base, size_t w_stride, const void* s_base,
+                                  size_t s_stride, const float* d_w_ts, const void* xq_packed,
+                                  const void* xq_scales, float x_ts, const int* d_offsets, int2* d_work,
+                                  int work_cap, half* y, int N_out, int K, int mt, cudaStream_t stream);
 
 void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
                         int n_act, cudaStream_t stream);
