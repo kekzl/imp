@@ -59,6 +59,12 @@ struct GDN {
     // shape/route keeps the dispatch below. Falls back silently when the
     // workspace was not allocated.
     bool chunkpar_scan = true;
+    // Chunks (64 tokens each) per chunk-parallel strip: kernel 1 launches
+    // strip x n_heads CTAs at one CTA per SM, so the strip sets the wave
+    // quantisation (48 heads x 8 = 384 CTAs = 2.26 waves on 170 SMs). 0 =
+    // auto (the strip in [4, 16] with the fullest last wave, larger on ties);
+    // 1..16 pins it. The workspace is sized for 16.
+    int chunkpar_strip = 0;
     // Store the GDN recurrent state as BF16 instead of FP32 (halves the
     // state traffic that dominates batched decode; arithmetic stays FP32 in
     // registers). Default ON since the #1776/#1777 pair: +12.5% aggregate at

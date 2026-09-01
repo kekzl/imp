@@ -789,7 +789,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                            static_cast<__nv_bfloat16*>(h_st),
                                            static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm,
                                            ssize, n_groups, stream, gl,
-                                           static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_);
+                                           static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_,
+                                           runtime_config().gdn.chunkpar_strip);
                 } else {
                     gdn_scan_chunkpar_f32(conv_f32, conv_channels,
                                           static_cast<const half*>(alpha_proj_out.data),
@@ -798,7 +799,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                           static_cast<const float*>(ly.ssm_dt_b.data),
                                           static_cast<float*>(h_st), static_cast<half*>(y_buf.data), n,
                                           n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
-                                          static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_);
+                                          static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_,
+                                          runtime_config().gdn.chunkpar_strip);
                 }
             } else if (use_chunkwise) {
                 gdn_scan_chunkwise_f32(conv_f32, conv_channels,
