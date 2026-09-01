@@ -431,6 +431,11 @@ nvfp4_device_args    = true
 # Opt-in smallM kernel branch for NVFP4 MoE prefill + its M threshold.
 nvfp4_smallM         = false
 nvfp4_smallM_threshold = 64
+# Gate/up of the NVFP4 MoE prefill through the v2 small-M grouped kernel
+# (32-row tiles) instead of the CUTLASS 128x128 grouped tile: gate/up kernel
+# -12.7% isolated on Qwen3.6-35B-A3B (down stays on CUTLASS). Native NVFP4
+# experts only.
+nvfp4_prefill_smallm_v2 = true
 # Rows-per-block for multi-row NVFP4 MoE decode GEMV (4|8|16|32).
 mr_nr                = 8
 

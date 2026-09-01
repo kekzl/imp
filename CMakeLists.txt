@@ -917,6 +917,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemm_graph_capture.cu
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
         tests/test_cutlass_grouped_3x_nvfp4.cu
+        tests/test_cutlass_grouped_tile_bench.cu
         tests/test_cutlass_grouped_ref.cu
         tests/test_cutlass_nvfp4_alpha.cu
         tests/test_cutlass_nvfp4_streamk.cu
@@ -941,6 +942,15 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_hmma.cu
         tests/test_weight_dispatch.cu
     )
+    if(IMP_USE_CUTLASS)
+        # test_cutlass_grouped_tile_bench.cu instantiates CUTLASS grouped GEMMs
+        # of its own (tile-shape A/B against the shipped kernel).
+        target_include_directories(test-quant PRIVATE
+            ${cutlass_SOURCE_DIR}/include
+            ${cutlass_SOURCE_DIR}/tools/util/include
+        )
+        target_compile_definitions(test-quant PRIVATE IMP_USE_CUTLASS=1)
+    endif()
 
     imp_add_test_module(test-kv SOURCES
         tests/test_fp8_kv_cache.cu

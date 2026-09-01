@@ -308,6 +308,21 @@ bool device_args_done = false;
         // (the moe_gather write still happens upstream; conditional
         // skip-gather is a follow-up that needs a will-device-args
         // pre-check + lazy-gather in the legacy fallback).
+        // v2 grouped small-M kernel for gate/up (moe.nvfp4_prefill_smallm_v2):
+        // reads the same packed activation rows with plain scale rows, the
+        // native expert slab (plain packed + scales + device tensor scales).
+        const bool v2_gate_up = runtime_config().moe.nvfp4_prefill_smallm_v2 && !staged_covers &&
+                                !non_gated_experts && moe_.cutlass3x_sf_plain && moe_.smallm_v2_work &&
+                                imp::gemm_nvfp4_smallm_v2_grouped_eligible(ly.nvfp4_moe_gate_ptr, eff, d) &&
+                                imp::gemm_nvfp4_smallm_v2_grouped_eligible(ly.nvfp4_moe_up_ptr, eff, d);
+        auto dispatch_v2 = [&](const NvFP4MoEQuantResult* W, char* c_base) -> bool {
+            return imp::gemm_nvfp4_smallm_v2_grouped(
+                ne, W->packed_data, W->expert_stride_packed, W->micro_scales, W->expert_stride_ms,
+                W->tensor_scales, moe_.cutlass3x_packed, moe_.cutlass3x_sf_plain, /*x_ts=*/1.0f,
+                static_cast<const int*>(routing.expert_offsets.data), static_cast<int2*>(moe_.smallm_v2_work),
+                imp::gemm_nvfp4_smallm_v2_grouped_work_cap(expanded, ne), reinterpret_cast<half*>(c_base), eff,
+                d, stream);
+        };
         prep_sfa(d);
         imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
             ctx.no.data,
@@ -315,19 +330,28 @@ bool device_args_done = false;
             moe_.cutlass3x_packed,
             reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
             static_cast<const int*>(routing.expert_offsets.data),
-            expanded, d, ne, stream);
+            expanded, d, ne, stream, v2_gate_up ? moe_.cutlass3x_sf_plain : nullptr);
         bool ok = true;
-        if (!non_gated_experts)
-            ok = ok && dispatch_device(ly.expert_gate_ids,
-                                       da_cache.d_gate_B_ptrs,
-                                       da_cache.d_gate_SFB_ptrs,
-                                       da_cache.d_gate_alpha,
-                                       expert_gate_base, d, eff);
-        ok = ok && dispatch_device(ly.expert_up_ids,
-                                   da_cache.d_up_B_ptrs,
-                                   da_cache.d_up_SFB_ptrs,
-                                   da_cache.d_up_alpha,
-                                   expert_up_base, d, eff);
+        if (v2_gate_up) {
+            static std::atomic<bool> s_v2_logged{false};
+            if (layer == 0 && !s_v2_logged.exchange(true))
+                IMP_LOG_INFO("MoE prefill: gate/up on the v2 grouped small-M kernel "
+                             "(moe.nvfp4_prefill_smallm_v2)");
+            ok = dispatch_v2(ly.nvfp4_moe_gate_ptr, expert_gate_base) &&
+                 dispatch_v2(ly.nvfp4_moe_up_ptr, expert_up_base);
+        } else {
+            if (!non_gated_experts)
+                ok = ok && dispatch_device(ly.expert_gate_ids,
+                                           da_cache.d_gate_B_ptrs,
+                                           da_cache.d_gate_SFB_ptrs,
+                                           da_cache.d_gate_alpha,
+                                           expert_gate_base, d, eff);
+            ok = ok && dispatch_device(ly.expert_up_ids,
+                                       da_cache.d_up_B_ptrs,
+                                       da_cache.d_up_SFB_ptrs,
+                                       da_cache.d_up_alpha,
+                                       expert_up_base, d, eff);
+        }
         if (ok) {
             // Fused: activation (SwiGLU/GeGLU/ReLU²) + NVFP4 quant
             // for the down-projection input. Saves one HBM

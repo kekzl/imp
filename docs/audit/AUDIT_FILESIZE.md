@@ -95,6 +95,7 @@ _102 files · code LOC p50=323 p90=906 max=1575 · raw LOC p50=439 p90=1214 max=
 | 1047 | 1507 | **HARD** | (a) host attention dispatch: bundles prefill+decode+splitk launch paths — split candidate | `src/exec/executor_attention.cu` |
 | 906 | 1163 | **HARD** | (c) one concern: executor scratch/workspace sizing+allocation (host-only) | `src/exec/executor_workspace_buffers.cu` |
 | 872 | 1051 | **HARD** | (c) one path: batched-MoE forward dispatch (host-only) | `src/exec/executor_forward_moe_batch.cu` |
+| 621 | 875 | **HARD** | (c) one path: NVFP4 MoE prefill dispatch chain (device-args, v2 grouped gate/up, legacy, smallM) sharing one staging + fallback ladder | `src/exec/executor_forward_moe_cutlass.cu` |
 | 845 | 1214 | **HARD** | (c) NVFP4 tensor-core paged-attn family (decode/splitk/reduce) — shared TC path | `src/compute/attention_paged_nvfp4_tc.cu` |
 | 820 | 1157 | **HARD** | (a) 11+ kernels: topk gating, gather/scatter (+deterministic), permute, weighted-sum residual — split candidate | `src/compute/moe_routing.cu` |
 | 810 | 1075 | **HARD** | (c) single MXFP4 FA2 attention kernel family | `src/compute/attention_fmha_mxfp4_sm120.cu` |

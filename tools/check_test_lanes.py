@@ -164,7 +164,10 @@ def main():
     # 1043 -> 1045: CutlassNvfp4StreamKTest.{MatchesDataParallel,BenchPp512Shapes},
     # the stream-K tile scheduler of the CUTLASS NVFP4 prefill GEMM against the
     # data-parallel tile - launches CUTLASS kernels, GPU-only.
-    PINNED = 1045
+    # 1045 -> 1046: GroupedTileBench.Qwen36MoeShapes, tile-shape and v2-grouped
+    # bench of the CUTLASS NVFP4 grouped GEMM on the MoE prefill geometry -
+    # launches CUTLASS + mxf4nvf4 kernels, GPU-only.
+    PINNED = 1046
 
     text = CMAKE.read_text()
     mods = module_sources(text)

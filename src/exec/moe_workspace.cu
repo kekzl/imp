@@ -89,6 +89,8 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
     cutlass3x_packed_size = 0;
     vfree(cutlass3x_sf);
     cutlass3x_sf_size = 0;
+    vfree(cutlass3x_sf_plain);
+    vfree(smallm_v2_work);
     if (cutlass3x_sfa_ptrs) {
         cutlass3x_sfa_ptrs = nullptr;
         cutlass3x_sfa_ptrs_count = 0;

@@ -201,6 +201,12 @@ struct MoEWorkspace {
     size_t cutlass3x_packed_size = 0;
     void* cutlass3x_sf = nullptr;
     size_t cutlass3x_sf_size = 0;
+    // Row-major twin of the activation scales ([max_expanded, max_K/16]) that
+    // the gather-quantize writes alongside the SfAtom slabs, for the v2 grouped
+    // small-M kernel (moe.nvfp4_prefill_smallm_v2).
+    void* cutlass3x_sf_plain = nullptr;
+    // Tile list of the v2 grouped kernel: [max_expanded/32 + ne] int2, device.
+    void* smallm_v2_work = nullptr;  // int2[]
     uint8_t** cutlass3x_sfa_ptrs = nullptr;  // device [ne] uint8_t* array
     int cutlass3x_sfa_ptrs_count = 0;
 

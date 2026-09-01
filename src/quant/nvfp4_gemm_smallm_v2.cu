@@ -341,6 +341,67 @@ __global__ void gemm_nvfp4_smallm_v2_pair_kernel(
                                 bar_empty);
 }
 
+// Grouped (MoE prefill) variant. One CTA = one (32-row tile of one expert,
+// 64-column n-tile). The tile list is built on device from the expert row
+// offsets (graph-capturable, no host max): work[i] = {expert, first row} for
+// every 32-row tile of every expert, -1 past the end. grid = (N/kNR, cap),
+// cap = expanded/32 + n_experts >= the tile count, so the empties at the tail
+// exit before touching memory. A first cut looped the tiles of one expert
+// inside one CTA (grid.y = expert); the real routing is skewed, the busiest
+// expert's 7 tiles ran serially on one SM and the launch read +18% e2e
+// against the persistent CUTLASS scheduler that balances them.
+__global__ void smallm_v2_grouped_worklist_kernel(const int* __restrict__ offsets, int n_experts, int cap,
+                                                  int2* __restrict__ work) {
+    // one block of 256 threads, one expert per thread, block-wide inclusive
+    // scan of the per-expert tile counts (a thread-0 serial scan cost ~10 us
+    // and ate the kernel's gain)
+    __shared__ int s_scan[256];
+    const int e = threadIdx.x;
+    const int rows = (e < n_experts) ? offsets[e + 1] - offsets[e] : 0;
+    const int tiles = (rows + kSmM - 1) / kSmM;
+    int v = tiles;
+    s_scan[e] = v;
+    __syncthreads();
+#pragma unroll
+    for (int d = 1; d < 256; d <<= 1) {
+        const int add = (e >= d) ? s_scan[e - d] : 0;
+        __syncthreads();
+        v += add;
+        s_scan[e] = v;
+        __syncthreads();
+    }
+    const int total = s_scan[255];
+    const int base = v - tiles;
+    for (int t = 0; t < tiles; ++t)
+        if (base + t < cap)
+            work[base + t] = make_int2(e, offsets[e] + t * kSmM);
+    for (int i = total + e; i < cap; i += 256)
+        work[i] = make_int2(-1, 0);
+}
+
+template <int kStages>
+__global__ void gemm_nvfp4_smallm_v2_grouped_kernel(
+    const uint8_t* __restrict__ w_base, size_t w_stride, const uint8_t* __restrict__ s_base, size_t s_stride,
+    const float* __restrict__ w_ts, const uint8_t* __restrict__ xq_packed,
+    const uint8_t* __restrict__ xq_scales, float x_ts, const int* __restrict__ offsets,
+    const int2* __restrict__ work, half* __restrict__ y, int N_out, int K) {
+    extern __shared__ uint8_t smem[];
+    __shared__ uint64_t bar_full[kStages];
+    __shared__ uint64_t bar_empty[kStages];
+    const int2 item = work[blockIdx.y];
+    const int e = item.x;
+    if (e < 0)
+        return;
+    const int row0 = item.y;
+    const int rows = offsets[e + 1] - row0;
+    const int64_t xrow = row0;
+    smallm_v2_cta_body<kStages>(w_base + static_cast<size_t>(e) * w_stride, s_base + static_cast<size_t>(e) * s_stride,
+                                xq_packed + xrow * (K / 2), xq_scales + xrow * (K / kMicroBlockSize),
+                                /*ws_partials=*/nullptr, y + xrow * N_out, w_ts[e] * x_ts, /*acc_flag=*/0,
+                                min(rows, kSmM), N_out, K, /*stripes=*/1, blockIdx.x * kNR, /*stripe=*/0, smem,
+                                bar_full, bar_empty);
+}
+
 // Reduce the stripe partial planes into FP16 y, applying the combined tensor
 // scale. kAcc adds onto the existing y (o/down residual call sites, beta=1).
 template <bool kAcc>
@@ -437,6 +498,42 @@ bool smallm_v2_args_ok(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, in
 }
 
 }  // namespace
+
+int gemm_nvfp4_smallm_v2_grouped_work_cap(int expanded, int n_experts) {
+    return expanded / kSmM + n_experts;
+}
+
+bool gemm_nvfp4_smallm_v2_grouped_eligible(const NvFP4MoEQuantResult* W, int N_out, int K) {
+    return W && W->packed_data && W->micro_scales && W->tensor_scales && W->N == N_out && W->K == K &&
+           (K % kKT) == 0 && (N_out % kNR) == 0 && W->n_experts <= 256;
+}
+
+bool gemm_nvfp4_smallm_v2_grouped(int n_experts, const void* w_base, size_t w_stride, const void* s_base,
+                                  size_t s_stride, const float* d_w_ts, const void* xq_packed,
+                                  const void* xq_scales, float x_ts, const int* d_offsets, int2* d_work,
+                                  int work_cap, half* y, int N_out, int K, cudaStream_t stream) {
+    if (n_experts <= 0 || n_experts > 256 || (K % kKT) != 0 || (N_out % kNR) != 0 || work_cap <= 0)
+        return false;
+    if (!w_base || !s_base || !d_w_ts || !d_offsets || !xq_packed || !xq_scales || !d_work || !y)
+        return false;
+    constexpr int kStages = kDefaultStages;
+    static const bool smem_ok = [] {
+        return cudaFuncSetAttribute(gemm_nvfp4_smallm_v2_grouped_kernel<kStages>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    kStages * kStageBytes) == cudaSuccess;
+    }();
+    if (!smem_ok)
+        return false;
+    smallm_v2_grouped_worklist_kernel<<<1, 256, 0, stream>>>(d_offsets, n_experts, work_cap, d_work);
+    IMP_CUDA_CHECK_LAUNCH();
+    const dim3 grid(N_out / kNR, work_cap);
+    gemm_nvfp4_smallm_v2_grouped_kernel<kStages><<<grid, dim3(kThreads), kStages * kStageBytes, stream>>>(
+        static_cast<const uint8_t*>(w_base), w_stride, static_cast<const uint8_t*>(s_base), s_stride, d_w_ts,
+        static_cast<const uint8_t*>(xq_packed), static_cast<const uint8_t*>(xq_scales), x_ts, d_offsets, d_work,
+        y, N_out, K);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
 
 bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M, int N_out,
                              int K, void* d_workspace, cudaStream_t stream, bool accumulate) {
