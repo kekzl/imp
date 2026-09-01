@@ -78,6 +78,8 @@ int process_diag_fa2_hd256_bkv();  // KV tile rows of the HD=256 instance (atten
 void process_diag_set_fa2_hd256_bkv(int v);
 bool process_diag_fp8_qk_scaled();  // amax-scaled e4m3 fp8-QK (#680)
 void process_diag_set_fp8_qk_scaled(bool v);
+int process_diag_nvfp4_cutlass_streamk();  // gemm.nvfp4_cutlass_streamk: 0 off, 1 sub-2-wave grids, 2 forced
+void process_diag_set_nvfp4_cutlass_streamk(int v);
 // test hook: force the paged-decode split-K path onto its single-split GQA/MHA
 // fallback even on a clean launch, so the fallback can be verified against the
 // split-K result without provoking a real cudaErrorInvalidValue. Default off.

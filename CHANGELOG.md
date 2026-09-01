@@ -24,6 +24,13 @@ there instead of retelling it.
 
 ### Changed
 
+- CUTLASS NVFP4 prefill GEMM runs the stream-K tile scheduler on grids that
+  leave a short tail wave (`gemm.nvfp4_cutlass_streamk`, default 1): the
+  M=512 gate/up grid (544 CTAs, 3.2 waves) drops 98.3 -> 85.2 us isolated,
+  the 160-CTA pp512 projections (0.94 waves, no tail) stay data-parallel
+  because the split costs +11% there. Qwen3-14B-NVFP4 pp512: CUTLASS kernel
+  sum 101.1/103.6/102.1 -> 97.1/97.1/97.3 ms (3/3 pairs), pp4096 flat,
+  output bit-identical. Harness `tools/analysis/prefill_kernel_ab.sh`.
 - `attention.fa2_hd256_bkv=32` (opt-in, default 64): the HD=256 FA2 prefill
   instance at two CTAs per SM. The Bkv=64 TWOSLOT tile is 67.6 KB of the
   100 KB SM budget (one 4-warp CTA per SM, 8.3% occupancy) although the

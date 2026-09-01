@@ -919,6 +919,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cutlass_grouped_3x_nvfp4.cu
         tests/test_cutlass_grouped_ref.cu
         tests/test_cutlass_nvfp4_alpha.cu
+        tests/test_cutlass_nvfp4_streamk.cu
         tests/test_nvfp4_smallm.cu
         tests/test_nvfp4_smallm_v2.cu
         tests/test_smallm_dense_bench.cu

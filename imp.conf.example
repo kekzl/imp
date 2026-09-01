@@ -471,6 +471,11 @@ nvfp4_lm_head        = "auto"
 # Same for GDN/SSM-hybrid models (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
 # set false for maximum coherence). Default ON since PR #483.
 nvfp4_lm_head_gdn    = true
+# Stream-K tile scheduler for the CUTLASS NVFP4 prefill GEMM (N > 2048):
+# 0 = off, 1 = on the 128x128 grids that leave a short tail wave (CUTLASS
+# kernel sum -5% at pp512 on Qwen3-14B-NVFP4, pp4096 flat, output
+# bit-identical), 2 = forced at every shape (A/B).
+nvfp4_cutlass_streamk = 1
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
 # forces NVFP4 activations on the final logits. +8% aggregate concurrent decode
