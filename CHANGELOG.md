@@ -13,6 +13,12 @@ there instead of retelling it.
 
 ### Added
 
+- GDN chunk-parallel scan, state pass on tensor cores: the three per-chunk
+  GEMMs run as `mma.sync` tf32 (3xTF32 on the two that feed the carried
+  state). Qwen3.6-35B scan kernel class -53% pp512 / -65% pp4096 vs the
+  fused scan (-31% / -31% vs #1847), e2e pp4096 12.5k -> 21.5k tok/s,
+  deterministic PPL 6.8216 -> 6.8122; ledger row in `docs/roadmap.md` (#1848)
+
 - Chunk-parallel GDN prefill scan (`gdn.chunkpar_scan`, default on): the
   recurrent scan ran 32 CTAs sequentially over all tokens and was 42% of the
   hybrid pp512 wall. Qwen3.6-35B: scan kernel class -32% pp512 / -47% pp4096,

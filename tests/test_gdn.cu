@@ -804,6 +804,10 @@ TEST(GDNScanTest, ChunkparMatchesFused) {
         max_diff_state = std::max(max_diff_state, std::abs(state_ref[i] - state_cp[i]));
     std::printf("\n  Chunkpar: max_diff Y = %.6e\n", max_diff_y);
     std::printf("  Chunkpar: max_diff state = %.6e\n", max_diff_state);
+    // The state pass runs its three chunk GEMMs on tensor cores: the y GEMM as
+    // plain tf32 (Y 6.1e-5 here; the scalar form read 3.1e-5), the two GEMMs
+    // that feed the carried state as 3xTF32 (FP32 state 8.9e-7; plain tf32
+    // there read 3.4e-4 and PPL +0.13%). The W mutant reads 3.7e-2 / 3.9e-1.
     EXPECT_LT(max_diff_y, 1e-3f);
     EXPECT_LT(max_diff_state, 1e-4f);
 
@@ -842,7 +846,7 @@ TEST(GDNScanTest, ChunkparMatchesFused) {
         // still flip the rounding, so the floor is one BF16 ulp at the state
         // magnitude (~2e-3 at |H|~0.5 after 1200 mild-decay tokens). The W
         // mutant this test exists for reads 3.9e-1.
-        EXPECT_LT(mds, 4e-3f);
+        EXPECT_LT(mds, 4e-3f);  // 9.8e-4 measured with the 3xTF32 state path (1 ulp at |H|~0.5)
         cudaFree(d_sref);
         cudaFree(d_scp);
     }
