@@ -97,6 +97,13 @@ struct Attention {
     // -11% at pp4096 on Qwen3.8-27B, e2e +0.1..0.4%, PPL +0.53% (2026-09-01,
     // docs/roadmap.md). Opt-in on that trade.
     int fa2_hd256_bkv = 64;
+    // The dense (hd=128, Bq=128) FA2 instance at two CTAs per SM: TWOSLOT
+    // tile (35 KB) plus __launch_bounds__(256, 2) pinning the kernel to 128
+    // registers (137 unconstrained, 24 B of spill). Qwen3-14B-NVFP4 pp4096,
+    // 3 alternating pairs under nsys: FA2 kernel sum 271.7/267.8/289.9 ->
+    // 244.2/244.8/252.2 ms (-10%), pp 23722/23661/22509 -> 24176/24097/24057
+    // tok/s; output bit-identical (2026-09-01, docs/roadmap.md). Default on.
+    bool fa2_dense_2cta = true;
     // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680). The
     // raw conversion is the #511 quality cliff; scaling Q and K to the
     // full e4m3 range is the numerics class FlashInfer runs. Only

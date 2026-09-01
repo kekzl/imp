@@ -167,7 +167,10 @@ def main():
     # 1045 -> 1046: GroupedTileBench.Qwen36MoeShapes, tile-shape bench of the
     # CUTLASS NVFP4 grouped GEMM on the MoE prefill geometry - launches CUTLASS
     # kernels, GPU-only.
-    PINNED = 1046
+    # 1046 -> 1051: FmhaFA2Dense2CtaTest.* (the Bq=128 TWOSLOT FA2 instance at
+    # two CTAs per SM: 1024-row causal/odd/sliding-window/chunked/magnitude) -
+    # launches the FA2 kernel, GPU-only.
+    PINNED = 1051
 
     text = CMAKE.read_text()
     mods = module_sources(text)

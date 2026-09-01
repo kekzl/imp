@@ -23,6 +23,7 @@ void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	253	0	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	243	32	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<64, 2>	sm_120a	156	32	0
+void imp::fmha_sm120_fa2_kernel_2cta<128, 128, true, true, 64, true, true, false>	sm_120a	128	24	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	101	160	0
 void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	94	32	0
 void imp::paged_attention_splitk_fp8_tile_gqa_kernel<128>	sm_120a	80	32	0

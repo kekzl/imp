@@ -24,6 +24,13 @@ there instead of retelling it.
 
 ### Changed
 
+- The dense (hd=128, Bq=128) FA2 prefill kernel runs two CTAs per SM
+  (`attention.fa2_dense_2cta`, default on): TWOSLOT tile (35 KB) plus
+  `__launch_bounds__(256, 2)`, which pins the kernel to 128 registers (137
+  unconstrained, 24 B spill). Qwen3-14B-NVFP4 pp4096: FA2 kernel sum 271.7 ->
+  244.2 ms (-10%, 3/3 pairs), pp 23722 -> 24176 tok/s, output bit-identical.
+  The shipped single-CTA instance keeps byte-identical SASS.
+
 - CUTLASS NVFP4 prefill GEMM runs the stream-K tile scheduler on grids that
   leave a short tail wave (`gemm.nvfp4_cutlass_streamk`, default 1): the
   M=512 gate/up grid (544 CTAs, 3.2 waves) drops 98.3 -> 85.2 us isolated,
