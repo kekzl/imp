@@ -1501,6 +1501,17 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, 
             a_frag[k][3] = v1 ? *reinterpret_cast<const uint32_t*>(q1 + d + 8) : 0u;
         }
     }
+    // Scores stay raw dot products (the QK^T accumulate is untouched); the
+    // softmax applies the scale inside one FMA feeding __expf, so the
+    // per-element `v *= scale` pass leaves the loop that ncu showed
+    // issue-bound on scalar ALU/FMA (5.5 ALU per MMA on the 2-CTA instance,
+    // 2026-09-01). softcap (Gemma) works in the natural domain and writes the
+    // capped score back in raw units, so the FMA below stays the single
+    // scale point.
+    float s_eff = scale;  // the fp8-scaled path folds its operand amax factors in
+    if constexpr (FP8SCALED)
+        s_eff *= fp8_sq * fp8_sk;
+    const float inv_scale = 1.0f / scale;
 
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int slot = TWOSLOT ? 0 : ((j - first_kv_tile) & 1);
@@ -1687,35 +1698,54 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, 
             }
         }
 
-        // ---- scale + softcap + causal/SWA mask (per register) ----
+        // ---- softcap + causal/SWA mask (per register) ----
+        // CTA-uniform tile predicate: an interior tile (every row and column
+        // in range, no causal or window edge inside it) skips the 4 compares
+        // and 2 selects per element; only the diagonal / edge tiles pay them.
+        const int gq_lo = q_offset + q_start;
+        const int gq_hi = q_offset + q_start + Bq - 1;
+        const bool tile_masked = (kv_start + Bkv > seq_kv) || (q_start + Bq > seq_q) ||
+                                 (causal && (kv_start + Bkv - 1) > gq_lo) ||
+                                 (sliding_window > 0 && (gq_hi - kv_start) >= sliding_window);
+        if (FP16QK && !tile_masked) {
+            if (softcap > 0.0f) {
 #pragma unroll
-        for (int n = 0; n < N_S; n++) {
-            int colb = kv_start + n * 8 + cl;
-            int gqA = q_offset + q_start + warp_id * 16 + rl;
-            int gqB = gqA + 8;
-            int lqA = q_start + warp_id * 16 + rl;
+                for (int n = 0; n < N_S; n++)
 #pragma unroll
-            for (int e = 0; e < 4; e++) {
-                int row16 = (e < 2) ? rl : (rl + 8);
-                int col = colb + (e & 1);
-                int gq = (e < 2) ? gqA : gqB;
-                int lq = lqA + ((e < 2) ? 0 : 8);
-                float v = S[n][e];
-                if (lq < seq_q && col < seq_kv) {
-                    if constexpr (FP8SCALED)
-                        v *= fp8_sq * fp8_sk;
-                    v *= scale;
-                    if (softcap > 0.0f)
-                        v = softcap * tanhf(v / softcap);
-                    if (causal && gq < col)
+                    for (int e = 0; e < 4; e++)
+                        S[n][e] = softcap * tanhf(S[n][e] * scale / softcap) * inv_scale;
+            }
+        } else {
+#pragma unroll
+            for (int n = 0; n < N_S; n++) {
+                int colb = kv_start + n * 8 + cl;
+                int gqA = q_offset + q_start + warp_id * 16 + rl;
+                int gqB = gqA + 8;
+                int lqA = q_start + warp_id * 16 + rl;
+#pragma unroll
+                for (int e = 0; e < 4; e++) {
+                    int col = colb + (e & 1);
+                    int gq = (e < 2) ? gqA : gqB;
+                    int lq = lqA + ((e < 2) ? 0 : 8);
+                    float v = S[n][e];
+                    if (lq < seq_q && col < seq_kv) {
+                        if (softcap > 0.0f) {
+                            float v_nat = v * scale;
+                            if constexpr (FP8SCALED)
+                                v_nat *= fp8_sq * fp8_sk;
+                            v = softcap * tanhf(v_nat / softcap) * inv_scale;
+                            if constexpr (FP8SCALED)
+                                v /= fp8_sq * fp8_sk;
+                        }
+                        if (causal && gq < col)
+                            v = -FLT_MAX;
+                        if (sliding_window > 0 && (gq - col) >= sliding_window)
+                            v = -FLT_MAX;
+                    } else {
                         v = -FLT_MAX;
-                    if (sliding_window > 0 && (gq - col) >= sliding_window)
-                        v = -FLT_MAX;
-                } else {
-                    v = -FLT_MAX;
+                    }
+                    S[n][e] = v;
                 }
-                S[n][e] = v;
-                (void)row16;
             }
         }
 
@@ -1728,21 +1758,44 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, 
         }
         float mijA = quad_max(mlA), mijB = quad_max(mlB);
         float mnA = fmaxf(mA, mijA), mnB = fmaxf(mB, mijB);
-        float alphaA = __expf(mA - mnA), alphaB = __expf(mB - mnB);
+        // p = exp(scale * (s - m)) as one FMA feeding __expf. An exp2 form with
+        // scale*log2e folded into the FMA (or into the Q fragments) read -8%
+        // too but moved PPL +0.35% on Qwen3-14B (deterministic runs); this
+        // form keeps the old numerics (10.0229 vs 10.0277) and drops the
+        // separate `v *= scale` pass. The interior tile needs no -FLT_MAX
+        // guard: every score finite, so is the row max.
+        const float alphaA = __expf((mA - mnA) * s_eff), alphaB = __expf((mB - mnB) * s_eff);
+        const float mlA2 = -mnA * s_eff, mlB2 = -mnB * s_eff;
 
         float psA = 0.f, psB = 0.f;
+        if (FP16QK && !tile_masked) {
 #pragma unroll
-        for (int n = 0; n < N_S; n++) {
-            float p0 = (S[n][0] <= -FLT_MAX * 0.5f) ? 0.f : __expf(S[n][0] - mnA);
-            float p1 = (S[n][1] <= -FLT_MAX * 0.5f) ? 0.f : __expf(S[n][1] - mnA);
-            float p2 = (S[n][2] <= -FLT_MAX * 0.5f) ? 0.f : __expf(S[n][2] - mnB);
-            float p3 = (S[n][3] <= -FLT_MAX * 0.5f) ? 0.f : __expf(S[n][3] - mnB);
-            S[n][0] = p0;
-            S[n][1] = p1;
-            S[n][2] = p2;
-            S[n][3] = p3;
-            psA += p0 + p1;
-            psB += p2 + p3;
+            for (int n = 0; n < N_S; n++) {
+                float p0 = __expf(fmaf(S[n][0], s_eff, mlA2));
+                float p1 = __expf(fmaf(S[n][1], s_eff, mlA2));
+                float p2 = __expf(fmaf(S[n][2], s_eff, mlB2));
+                float p3 = __expf(fmaf(S[n][3], s_eff, mlB2));
+                S[n][0] = p0;
+                S[n][1] = p1;
+                S[n][2] = p2;
+                S[n][3] = p3;
+                psA += p0 + p1;
+                psB += p2 + p3;
+            }
+        } else {
+#pragma unroll
+            for (int n = 0; n < N_S; n++) {
+                float p0 = (S[n][0] <= -FLT_MAX * 0.5f) ? 0.f : __expf(fmaf(S[n][0], s_eff, mlA2));
+                float p1 = (S[n][1] <= -FLT_MAX * 0.5f) ? 0.f : __expf(fmaf(S[n][1], s_eff, mlA2));
+                float p2 = (S[n][2] <= -FLT_MAX * 0.5f) ? 0.f : __expf(fmaf(S[n][2], s_eff, mlB2));
+                float p3 = (S[n][3] <= -FLT_MAX * 0.5f) ? 0.f : __expf(fmaf(S[n][3], s_eff, mlB2));
+                S[n][0] = p0;
+                S[n][1] = p1;
+                S[n][2] = p2;
+                S[n][3] = p3;
+                psA += p0 + p1;
+                psB += p2 + p3;
+            }
         }
         psA = quad_sum(psA);
         psB = quad_sum(psB);
