@@ -161,7 +161,10 @@ def main():
     # HD=256 FA2 instance at Bkv=32) plus the two BenchVsWmma_Qwen38Shape
     # variants, the Bkv32 Qwen3.6 bench and the Bkv32 pv-f32 bench - all
     # launch the FA2 kernel, GPU-only.
-    PINNED = 1043
+    # 1043 -> 1045: CutlassNvfp4StreamKTest.{MatchesDataParallel,BenchPp512Shapes},
+    # the stream-K tile scheduler of the CUTLASS NVFP4 prefill GEMM against the
+    # data-parallel tile - launches CUTLASS kernels, GPU-only.
+    PINNED = 1045
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -134,6 +134,14 @@ struct GEMM {
     // M=32 N=5120 K=5120: 10.4 us vs CUTLASS 41.4 in-situ (weight floor
     // 8.2). degen_suite 50/0 ON. Default ON since the v2 A/B.
     bool nvfp4_smallm = true;
+    // Stream-K tile scheduler for the CUTLASS NVFP4 prefill GEMM (cooperative
+    // 128x128 tile, N > 2048): 0 = off, 1 = the scheduler's heuristic on the
+    // grids that leave a short tail wave (>= 1 wave, last wave <= half full),
+    // 2 = forced at every shape (A/B). Qwen3-14B-NVFP4 pp512, 3 alternating
+    // pairs under nsys: CUTLASS kernel sum 101.1/103.6/102.1 -> 97.1/97.1/97.3
+    // ms (-5%, the M=512 gate/up 544-CTA grid is 3.2 waves); pp4096 flat
+    // (no shape qualifies). Output bit-identical (2026-09-01, docs/roadmap.md).
+    int nvfp4_cutlass_streamk = 1;
     // Which small-M implementation the gate above dispatches: 1 = the W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = the native mxf4nvf4
     // producer/consumer pipeline (nvfp4_gemm_smallm_v2.cu; isolated 10.4 us
