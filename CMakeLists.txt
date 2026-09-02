@@ -578,6 +578,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_rerank.cpp
         tools/imp-server/handlers_admin.cpp
         tools/imp-server/batching_engine.cpp
+        tools/imp-server/tracing.cpp
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
     if(IMP_ALLOC_INTERPOSE)
@@ -803,6 +804,8 @@ if(IMP_BUILD_TESTS)
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
             tools/imp-server/rate_limit.cpp
+            tools/imp-server/tracing.cpp
+            tests/test_tracing.cpp
             tests/test_server_request_limits.cpp
             # Admission-time rejection of unenforceable constraints (#1256). The
             # alias coverage is the part that rots: a new spelling in the

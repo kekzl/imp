@@ -371,7 +371,7 @@ struct RuntimeConfig {
         // by design) and accounted in the expert-offload reserve. imp-cli
         // --bench pins this to 0 (baseline semantics unchanged).
         // 0 disables snapshots AND hybrid prefix caching (dense unaffected).
-                int recurrent_snapshot_mb = 256;
+                        int recurrent_snapshot_mb = 256;
         // Pinned host memory for recurrent snapshots evicted from the device
         // tier (hybrid prefix caching beyond recurrent_snapshot_mb / slab
         // slots): more concurrent multi-turn sessions keep their tail-only
@@ -380,7 +380,13 @@ struct RuntimeConfig {
         // Green Contexts / prefill-decode overlap streams in the server engine.
         // OFF by default (suspected memSyncDomain race on sm_120 fallback
         // streams — gemma-3-12b IMA); opt in via [server] green_contexts = true.
-        bool green_contexts = false;
+                bool green_contexts = false;
+        // OpenTelemetry span export (OTLP/HTTP, JSON): the full traces URL,
+        // e.g. http://localhost:4318/v1/traces; "" = off. One SERVER span
+        // per generation request (queue / prefill / decode children), joined
+        // to the client's trace when it sends a W3C `traceparent` header.
+        std::string otlp_endpoint;
+        std::string otlp_service_name = "imp-server";
     } server;
 
     struct WarmCache {

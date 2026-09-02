@@ -308,6 +308,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                 // Queue time is known once the worker has admitted the request,
                 // which is guaranteed by the time a token comes back (#1580).
                 const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                ctx.trace.queue_ms = q;  // the span's `queue` child
                 if (q >= 0.0)
                     state.metrics.queue_time.observe(q / 1000.0);
             } else {
@@ -653,7 +654,11 @@ void finish_stream_accounting_(ServerState& state, ChatRequestContext& ctx,
     // Streaming response content is not accumulated across SSE chunks, so the
     // JSONL `response` field stays null. The request body, token counts,
     // finish reason, and latency still reflect everything the client did.
+        ctx.trace.model = ctx.snap.model_name;
+    ctx.trace.stream = true;
+    ctx.trace.ttft_ms = out.n_output_tokens > 0 ? out.ttft_ms : -1.0;
+    ctx.trace.cached_tokens = cached;
     log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, req_id, ctx.log_endpoint, ctx.log_client_ip,
                       ctx.log_raw_body, ms, n_prompt_tokens, out.n_output_tokens, out.finish, json(),
-                      ctx.log_client_request_id);
+                      ctx.log_client_request_id, &ctx.trace);
 }

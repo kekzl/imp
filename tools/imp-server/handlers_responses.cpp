@@ -470,10 +470,13 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         std::string status = response.value("status", "");
         res.set_header("X-Request-Id",
                        log_client_request_id.empty() ? response_id : log_client_request_id);
+                RequestSpan trace;
+        trace.traceparent = req.get_header_value("traceparent");
+        trace.model = req_model;
         log_request_jsonl(state, /*skip=*/false, t_log_start, response_id, log_endpoint,
                           log_client_ip, log_raw_body, ms, prompt_t, completion_t,
                           status.empty() ? nullptr : status.c_str(), response,
-                          log_client_request_id);
+                          log_client_request_id, &trace);
     }
 
     res.status = 200;

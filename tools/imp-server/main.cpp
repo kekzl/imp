@@ -69,28 +69,30 @@ int main(int argc, char** argv) {
         fprintf(stderr, "See imp.conf.example for the key names.\n");
         return 1;
     }
-    imp::process_diag_install(state.runtime_config);
-    imp::set_pending_runtime_config(state.runtime_config);
+        imp::process_diag_install(state.runtime_config);
+        state.tracer.init(state.runtime_config.server.otlp_endpoint,
+                          state.runtime_config.server.otlp_service_name, imp_version());
+        imp::set_pending_runtime_config(state.runtime_config);
 
-    // --model is optional (it has always been documented that way in --help).
-    // Without it the server starts model-less: the request-validation surface,
-    // /health, /v1/models and /metrics all answer, and the first request that
-    // names a model in --models-dir auto-loads it (ensure_model_loaded). A
-    // request that cannot resolve a model gets 503 — never a silent success.
-    // This is also what lets CI run the shipping binary on a GPU-less runner
-    // instead of a Python stand-in (#1302).
-    ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
-    std::string resolved_model;
-    if (!args.model_path.empty()) {
-        resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
-        if (resolved_model.empty()) {
-            fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
-            return 1;
-        }
-        if (resolved_model != args.model_path) {
-            printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(), resolved_model.c_str(),
-                   resolved_format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
-        }
+        // --model is optional (it has always been documented that way in --help).
+        // Without it the server starts model-less: the request-validation surface,
+        // /health, /v1/models and /metrics all answer, and the first request that
+        // names a model in --models-dir auto-loads it (ensure_model_loaded). A
+        // request that cannot resolve a model gets 503 — never a silent success.
+        // This is also what lets CI run the shipping binary on a GPU-less runner
+        // instead of a Python stand-in (#1302).
+        ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
+        std::string resolved_model;
+        if (!args.model_path.empty()) {
+            resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
+            if (resolved_model.empty()) {
+                fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
+                return 1;
+            }
+            if (resolved_model != args.model_path) {
+                printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(), resolved_model.c_str(),
+                       resolved_format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
+            }
     }
 
     // Models directory: explicit --models-dir overrides, else the resolved model's parent.

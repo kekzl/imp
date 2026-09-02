@@ -323,7 +323,9 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("server.model_swap", cfg.server.model_swap);
     I("server.model_swap_drain_ms", cfg.server.model_swap_drain_ms);
         I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
-    I("server.recurrent_snapshot_host_mb", cfg.server.recurrent_snapshot_host_mb);
+        I("server.recurrent_snapshot_host_mb", cfg.server.recurrent_snapshot_host_mb);
+    S("server.otlp_endpoint", cfg.server.otlp_endpoint);
+    S("server.otlp_service_name", cfg.server.otlp_service_name);
     B("server.green_contexts", cfg.server.green_contexts);
 
     // [warm_cache]
