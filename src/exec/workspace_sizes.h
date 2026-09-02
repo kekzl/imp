@@ -45,6 +45,7 @@ struct ExecShape {
     // NOT the context length — I mistook it for that once and wrongly ruled the
     // sampling scratch out as ~115 MiB when it is ~1 MiB (AUDIT B52/B53).
     int max_batch_size = 1;
+    int vocab_size = 0;  // penalty count scratch (sampling_penalties.cu)
     // Shape inputs for the FP8 activation reduction scratch. Mirrors the
     // max_dim ladder in executor_workspace_buffers.cu — replicated rather than
     // approximated, for the same reason exec_max_tokens replicates the as-built
@@ -126,6 +127,9 @@ struct ExecT2Demand {
     size_t mmvq_scratch = 0;
     // Sampling result scratch: 2 (parity) * max_logit_tokens * SAMPLE_SCRATCH.
     size_t sample_scratch = 0;
+    // Per-row 16-bit token counts of the history-sized penalty kernels:
+    // max_logit_tokens * vocab halves (sampling_preallocate_penalty_counts).
+    size_t penalty_counts = 0;
     // FP8 activation reduction scratch: the per-block absmax array plus two
     // scalars. Charged only when FP8 prefill is on.
     size_t fp8_reduction = 0;
@@ -170,7 +174,7 @@ struct ExecT2Demand {
     size_t chunk_capture = 0;
 
     size_t total() const {
-        return mmvq_scratch + nvfp4_dequant + sample_scratch + moe_arrays + fp8_reduction + quant_scratch +
+        return mmvq_scratch + nvfp4_dequant + sample_scratch + penalty_counts + moe_arrays + fp8_reduction + quant_scratch +
                splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x + imma_scratch;
     }
 

@@ -180,11 +180,14 @@ def main():
     # tests that need a pool moved to test-kv (test_kv_cache_gpu.cpp), the 8
     # model-file tests and the growable-pool scheduler test to test-e2e outside
     # the unit filter. Nothing changed hands: they never ran in CI before either.
-    # 1074 -> 1077 (#this): FmhaFA2HeavyFirstTest, three byte-identity tests of
+    # 1074 -> 1077 (#1865): FmhaFA2HeavyFirstTest, three byte-identity tests of
     # the causal FA2 CTA order (natural vs heavy-first) - launch the kernel, GPU-only.
-    # 1077 -> 1078 (#this): SSMConv1dTest.DecodeVectorisedBitExact, the vectorised
+    # 1077 -> 1078 (#1866): SSMConv1dTest.DecodeVectorisedBitExact, the vectorised
     # conv1d decode path against a CPU fmaf reference - launches the kernel, GPU-only.
-    PINNED = 1078
+    # 1078 -> 1080 (#this): SamplingTest.PenaltyHistoryMatchesVocabSweep and
+    # PenaltyHistoryTiming, the history-sized penalty kernels vs the vocab sweep,
+    # GPU-only.
+    PINNED = 1080
 
     text = CMAKE.read_text()
     mods = module_sources(text)

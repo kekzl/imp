@@ -111,6 +111,25 @@ struct PenaltyRowArgs {
 };
 void launch_penalties_rows(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size,
                            cudaStream_t stream = nullptr);
+// The vocab-sweep form of the three penalty launchers: O(vocab x history),
+// the reference the history-sized kernels are held bit-identical to (tests).
+void launch_penalties_rows_sweep(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size,
+                                 cudaStream_t stream = nullptr);
+void apply_penalties_sweep(float* logits, int vocab_size, const int32_t* token_ids, int n_tokens,
+                           float repetition_penalty, float frequency_penalty, float presence_penalty,
+                           cudaStream_t stream = nullptr);
+void apply_penalties_device_count_sweep(float* logits, int vocab_size, const int32_t* token_ids,
+                                        const int* d_n_tokens, int repeat_last_n, float repetition_penalty,
+                                        float frequency_penalty, float presence_penalty,
+                                        cudaStream_t stream = nullptr);
+// Per-row 16-bit token counts for the history-sized penalty kernels: rows x
+// vocab halves from the T2 arena, once per engine (charged as
+// ExecT2Demand::penalty_counts). False leaves the penalties on the sweep.
+bool sampling_preallocate_penalty_counts(int rows, int vocab_size);
+// Forget the count scratch (engine teardown, test arenas): the arena that
+// backed it is gone, the launchers fall back to the sweep until the next
+// sampling_preallocate_penalty_counts.
+void sampling_reset_penalty_counts();
 
 // ---------------------------------------------------------------------------
 // Async (device-side) sampling: writes result to device buffer AND mapped

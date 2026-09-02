@@ -221,6 +221,9 @@ bool Engine::init_features() {
     // Pre-allocate DRY penalty buffers to avoid cudaStreamSynchronize on first
     // use during inference (the lazy-alloc path blocks the decode stream).
     sampling_preallocate_dry(config_.max_seq_len, decode_stream());
+    // History-sized penalties (sampling_penalties.cu): per-row token counts,
+    // sized like the sampling scratch (max_logit_tokens = max(batch, 8)).
+    sampling_preallocate_penalty_counts(std::max(config_.max_batch_size, 8), model_->config().vocab_size);
     // 4096 slots is 32 KiB and four times the server's own --max-logit-bias
     // default, so the fallback path in apply_logit_bias stays unreachable for
     // any request the server accepts (#1617).
