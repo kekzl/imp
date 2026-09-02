@@ -1,111 +1,114 @@
 ---
 name: server-api
-description: Use when working on or testing imp-server and its HTTP APIs — OpenAI/Anthropic endpoints, /v1/chat/completions, /v1/messages, SSE streaming, tool calling, json_schema/constrained decoding, thinking/reasoning_content, cache_control/prefix cache, model loading semantics, "server returns 404/garbage", API compliance. Do NOT use for CLI-only inference (imp-cli), kernel work (sm120-cuda-expert), or pure output-quality checks (check-degeneration).
+description: Use when working on or testing imp-server and its HTTP APIs - OpenAI/Anthropic endpoints, /v1/chat/completions, /v1/messages, /v1/responses, SSE streaming, tool calling, json_schema/regex/GBNF constrained decoding, thinking/reasoning_content, cache_control/prefix cache, model loading and swapping, request priority, X-Request-Id, OTLP tracing / traceparent / Jaeger, /metrics, container env (IMP_SET), "server returns 404/garbage", API compliance. Do NOT use for CLI-only inference (imp-cli), kernel work (sm120-cuda-expert), or pure output-quality checks (check-degeneration).
 ---
 
-# Server & API — imp-server
+# Server & API - imp-server
 
-Source: `tools/imp-server/` - `main.cpp` (routes) · `args.cpp` (CLI flags + `--help` text) · `handlers_chat_core.cpp`/`handlers_chat.cpp`/`handlers_chat_stream.cpp` (OpenAI chat: params→render→stream) · `handlers_chat_params.cpp` (request-param parsing) · `stream_driver.cpp` (shared per-token SSE loop; the three streaming handlers are thin dialect adapters over it) · `handlers_messages.cpp`+`anthropic.cpp` (Anthropic dialect) · `responses.cpp`/`handlers_responses.cpp` (Responses API) · `handlers_rerank.cpp` (`/v1/rerank`) · `handlers_admin.cpp` (suspend/resume) · `reasoning_split.h` (think/content channel split) · `tool_call.cpp`/`tool_stream_filter.h` (tool calling) · `batching_engine.cpp` (scheduler + the #1758 deferred-delivery notifier thread, `batching_engine.h` "Deferred delivery").
+## Source map (`tools/imp-server/`)
 
-## Start the server
+| File | Owns |
+|---|---|
+| `main.cpp` | routes, `post_routing` (X-Request-Id echo) |
+| `args.cpp` | server flags + `--help`; shared flags in `tools/common/args_common.cpp`; `tools/common/mtp_auto.cpp` decides the MTP head before an engine exists |
+| `handlers_chat_core.cpp`, `handlers_chat.cpp`, `handlers_chat_stream.cpp`, `handlers_chat_params.cpp` | OpenAI chat: params -> render -> stream; `handlers_internal.h` holds `ChatRequestParams` |
+| `stream_driver.cpp`, `stream_pipeline.h` | shared per-token SSE loop; the three dialect handlers are thin adapters |
+| `handlers_messages.cpp` + `anthropic.cpp` | Anthropic dialect |
+| `responses.cpp`, `handlers_responses.cpp` | Responses API shim |
+| `handlers_rerank.cpp`, `handlers_admin.cpp`, `handlers_misc.cpp` | `/v1/rerank`, suspend/resume, tokenize/health/props |
+| `reasoning_split.h`, `tool_call.cpp`, `tool_call_gemma.cpp`, `tool_stream_filter.h` | think/content split, tool calling |
+| `constraint_validation.cpp` | uncompilable constraint = 400 |
+| `batching_engine.cpp/.h` | scheduler + the deferred-delivery notifier thread (#1758, "Deferred delivery") |
+| `tracing.cpp/.h` | W3C `traceparent`, OTLP/HTTP JSON exporter (background thread, 1 s batches); emission in `log_request_jsonl`, once per request |
+| `rate_limit.cpp`, `image_fetch.cpp`, `metrics_memory.cpp` | per-key rate limit, remote images, memory surface of `/metrics` |
+
+## Start
 
 ```bash
 docker run --rm --gpus all -p 8080:8080 -v $HOME/models:/models imp:test \
-  imp-server --host 0.0.0.0 --model /models/<MODEL> [--set server.prefix_cache=true]
+  imp-server --host 0.0.0.0 --model /models/<MODEL> [--set key=value ...]
+# dev binary: docker run --gpus all -v $PWD:/src -w /src -v $HOME/models:/models imp:toolchain build-dev/imp-server ...
 ```
 
-Key flags (`imp-server --help` for all): `--port` (8080) · `--chat-template auto|none|chatml|llama2|llama3|nemotron|gemma` · `--lora NAME=PATH` (repeatable, select per request via `"lora"`) · `--kv-fp8|--kv-int8|--kv-int4|--kv-nvfp4` · `--think-budget <frac>` (default 0.5 of max_tokens) · `--api-key` · `--max-concurrent` (64; since #1762 it ALSO sizes the HTTP worker pool to `max_concurrent + 8` - a streamed completion holds its worker for the whole generation, so lowering this throttles HTTP admission too) · `--log-requests <jsonl>` · `--mmproj` (vision) · `--vram-budget <mb>` (per-process cap; binds only since #1109, and still overshoots by the CUDA context ~1.7 GiB plus ~1.8 GiB of un-migrated tenants - leave headroom) · `--mem-report` (VRAM attribution table at init: lifecycle checkpoints, per-pool notes, named charges, and `own_peak` vs the cap with an `[OVER BUDGET]` marker) · `--set section.key=value` for any `RuntimeConfig` override.
+Flags (`imp-server --help`): `--port` 8080, `--models-dir`, `--chat-template auto|none|chatml|llama2|llama3|nemotron|gemma`, `--lora NAME=PATH` (repeatable, per request `"lora"`), `--kv-fp8|--kv-int8|--kv-int4|--kv-nvfp4|--kv-mxfp4`, `--think-budget` 0.5, `--reasoning-format`, `--api-key`, `--rate-limit`, `--metrics-require-auth`, `--trusted-proxy`, `--max-concurrent` 64 (also sizes the HTTP worker pool to `max_concurrent + 8` since #1762; a streamed completion holds its worker), `--max-batch`, `--max-batch-items`, `--max-input-tokens`, `--max-n`, `--max-logit-bias`, `--request-timeout`, `--http-read-timeout|--http-write-timeout|--http-keep-alive-max`, `--log-requests <jsonl>`, `--mmproj`, `--allow-remote-images`, `--vram-budget <mb>` (binds since #1109; overshoots by the CUDA context ~1.7 GiB plus ~1.8 GiB of un-migrated tenants), `--mem-report`, `--prefix-cache`, `--config`, `--set section.key=value`.
+
+Container: only `IMP_CONFIG` (-> `--config`) and `IMP_SET` (-> one `--set` per whitespace-separated `key=value`) reach every config key (#1823); the 19 legacy `IMP_*` names in `docker-entrypoint.sh` are frozen. `IMP_KV_FP8=1` on a Qwen3.5-family model (Qwen3.5/3.6/3.8 dense hybrids, e.g. Qwen3.8-27B-NVFP4-vllm) DOUBLES KV bytes (auto = NVFP4 there since #1750) and now logs the pin (#1823). `docs/DEPLOYMENT.md` "From a container".
 
 ## Endpoints
 
 | Route | Dialect | Notes |
 |---|---|---|
-| `POST /v1/chat/completions` | OpenAI | SSE streaming, tools, json_schema |
+| `POST /v1/chat/completions` | OpenAI | SSE, tools, json_schema, `priority` |
 | `POST /v1/completions` | OpenAI legacy | raw text |
-| `POST /v1/responses` | OpenAI Responses | Agents SDK / Codex dialect; stateless shim over the chat path (`responses.cpp`); native SSE events incl. incremental `function_call_arguments.delta` |
-| `POST /v1/messages` | **Anthropic** | thinking, tool use, `cache_control`, **real per-token SSE** (old "synthetic replay" info is obsolete) |
-| `POST /v1/embeddings` | OpenAI | embedding vectors |
-| `POST /v1/rerank`, `/rerank` | Cohere/Jina/vLLM | joint query+document scoring via causal-LM cross-encoder; ship gate `make test-rerank` |
-| `POST /v1/messages/count_tokens` | Anthropic | token counting without generation |
-| `POST /admin/suspend`, `/admin/resume` | imp | drain in-flight work, release/re-acquire the GPU |
-| `GET /v1/models`, `/v1/models/{id}` | both | Lists the loaded model (`loaded: true`, with vLLM `max_model_len` + llama.cpp `meta.n_ctx_train`) **plus the rest of the models directory** (`loaded: false`) since #1080 - a harness cannot request what it cannot see. |
-| `GET /` | imp | Single-page web UI, embedded into the binary at build time (`cmake/embed_webui.cmake`, source `tools/imp-server/webui/index.html`). Editing the page requires a rebuild. |
-| `GET /props` | llama.cpp | context-window probe: `n_ctx` (top-level + `default_generation_settings.n_ctx`) |
-| `GET /info` | TGI | context-window probe: `max_total_tokens` / `max_input_tokens` |
+| `POST /v1/responses` | OpenAI Responses | stateless shim over chat (`responses.cpp`); native SSE incl. `function_call_arguments.delta` |
+| `POST /v1/messages` | Anthropic | thinking (opt-in since #1560/#1743), tool use, `cache_control`, real per-token SSE |
+| `POST /v1/embeddings`, `/v1/rerank`, `/rerank` | OpenAI / Cohere-Jina-vLLM | rerank = causal-LM cross-encoder, gate `make test-rerank` |
+| `POST /v1/messages/count_tokens` | Anthropic | |
+| `POST /admin/suspend`, `/admin/resume` | imp | drain, release/re-acquire the GPU |
+| `GET /v1/models`, `/v1/models/{id}` | both | loaded model (`loaded: true`, vLLM `max_model_len`, llama.cpp `meta.n_ctx_train`) + the rest of the models dir (`loaded: false`, #1080) |
+| `GET /` | imp | web UI embedded at build (`cmake/embed_webui.cmake`, `tools/imp-server/webui/index.html`); rebuild to change |
+| `GET /props`, `/info` | llama.cpp / TGI | context probes (`n_ctx`, `max_total_tokens`) |
 | `POST /tokenize`, `/detokenize` | imp | |
-| `GET /health`, `/metrics` | imp | healthcheck / Prometheus. `/metrics` carries request counters + TTFT/ITL histograms **and** the memory surface: per-tier `imp_memory_reserved_bytes` / `imp_memory_live_bytes` (capacity vs occupancy — a pool 90% full and one 90% reserved and empty are different incidents), `imp_kv_blocks_total` / `imp_kv_blocks_used`, and `imp_vram_budget_bytes` / `imp_vram_own_bytes` / `imp_vram_own_peak_bytes`. |
+| `GET /health` | imp | `kv_blocks_total` vs `kv_ceiling_blocks`, "this server takes concurrent requests" (why MTP auto declined) |
+| `GET /metrics` | Prometheus | request counters, TTFT/ITL/duration histograms, `imp_queue_depth`, `imp_tokens_cached_total`, `imp_spec_drafted_total`, per-tier `imp_memory_reserved_bytes`/`imp_memory_live_bytes`, `imp_kv_blocks_total`/`_used`, `imp_vram_budget_bytes`/`_own_bytes`/`_own_peak_bytes`, `imp_otlp_*` |
 
 ## Semantics that bite
 
-- **Thinking**: default-ON for think-capable models in plain chat (json/tools requests excluded). Reasoning splits into `reasoning_content` vs `content`; gpt-oss uses Harmony channels (analysis/final) mapped the same way. Think-budget guarantees answer headroom — the `started_in_think` edge cases were a three-bug chain, so tread carefully there.
-- **Thinking intent vs. rendered prompt — the prompt tail is ground truth.** Pipeline: request intent → Jinja render → `reconcile_thinking_with_prompt_tail`. A template may default `enable_thinking` to a **closed** `<think></think>` block; treating that as "model is thinking" lands the answer in `reasoning_content` with empty `content`. Explicit `enable_thinking:true` is honored via `force_thinking` (stamps it into the render). Don't re-tighten `mentions_thinking()` — deliberately rejected; the shortcut is load-bearing for spontaneous-`<think>` models.
-- **Regex-constrained decoding**: `response_format: {"type":"regex","regex":"..."}` or vLLM's top-level `guided_regex`. The whole reply must match; EOS is only allowed from an accepting state. Engine is `RegexNfa` (`compute/json_schema.h`), shared with JSON-Schema `pattern`; the decode-time wrapper is `RegexConstrainer`. Unsupported constructs (lookaround, anchors, `\b`, backrefs) are refused, not silently mis-enforced — note `RegexNfa` itself PARSES some of them, so the refusal lives in the constrainer.
-- **GBNF grammar-constrained decoding**: `response_format: {"type":"grammar","grammar":"root ::= ..."}`, llama.cpp's top-level `grammar`, or vLLM's `guided_grammar`. The whole reply must derive from `root`; EOS is gated on a complete derivation. Engine is a pushdown simulator (`compute/gbnf_grammar.{h,cpp}` + `gbnf_parser.cpp`), wrapper `GrammarConstrainer` — this is the one constrainer a regex could not have been, since a stack is what balances brackets. Grammars it cannot enforce (left recursion incl. indirect and star-over-nullable, undefined rules, no `root`, absurd repetition bounds) are refused at compile time, and the request then decodes unconstrained rather than under a wrong grammar. Perf note: a cold mask costs a 151k-token vocabulary walk, so the per-state mask cache and the interned-stack successor memo are load-bearing, not polish.
-- **Adding a constrainer? Every bypass path must be closed, or the mask silently does nothing.** The checklist, learned the hard way (paths post-#1782 scheduler split): the `InferenceState` sites in `engine_decode_pipeline.cpp` AND `engine_scheduler.cpp`, plus the constrained-pipeline state in `engine_graph_decode.cpp`; the mask application in `src/exec/executor.cu` - now ONE `apply_constraint_mask` helper (it used to be four copies, and two were easy to miss; keep it that way); the spec-ngram and graph-loop eligibility gates (`engine_spec_ngram.cpp`, `engine_graph_decode.cpp`) which otherwise route around the FSM; the request-field gates in `Engine::ensure_constraints_` and `pipeline_row_eligible_` (`engine_decode_pipeline.cpp`); the thinking default in `handlers_chat_core.cpp` (structured output must suppress it, or the model spends the budget reasoning); and `ConstraintManager`'s active_* flags plus any per-constrainer cache - the manager is POOLED, so stale state leaks into the next request. That last one bit GBNF too: the grammar's stack arena was cleared on recompile but its memoised transitions were not, so a second grammar would have decoded with the first one's.
-- **Constrained decoding** (`response_format: json_schema`): the per-token FSM simulator `sim_advance` is the SINGLE grammar source (`src/compute/schema_constrain.{h,cu}`, schema parsing in `json_schema.h`). Supports `$ref`/`$defs`; termination is exact-JSON, so the server returns exactly the object.
-- **Constrained-decode perf**: category prefilter + in-string shortcut on the schema mask, then `ConstrainedPipeline` enqueues forward N+1 *before* the host FSM advances (json_schema ~102→235 tok/s). In-pipeline: greedy/top-k/top-p, rep/freq/presence penalties, banned tokens, think-budget — deliberately, so the server's own defaults don't disqualify it. **Falls back to eager** (slow) for logprobs, min_p, typical_p, mirostat, DRY, logit_bias, MTP, batch>1 — when measuring constrained perf, verify none are set or you are benchmarking the eager path.
-- **`cache_control` / prefix cache**: Anthropic `cache_control` pins prompt-KV blocks (budget `server.prefix_pin_budget_pct`, FIFO) and reports `cache_read`/`cache_creation_input_tokens`. The LAST marked system/message block bounds the pin; a marker on tools pins the whole prompt; TTL tiers are accepted but not modeled. `PrefixCacheE2ETest` is the ship gate.
-- **Speculative decoding** (n-gram prompt-lookup, greedy/batch-1): default-ON for dense, gated off for MoE; disable with `--set speculative.ngram=false`. Knobs in `config.h` → `struct Speculative`. Output stays token-identical to plain greedy. Bench confound: a dense `--bench` hits ~99.9% accept, from the *generation* looping on the synthetic counting prompt rather than from the prompt repeating; see `benchmark-cuda` before A/B-ing decode kernels.
-- **Model swapping** (`server.model_swap`, default ON): a request naming another model in the models directory swaps to it instead of 404; unknown names still 404, so a typo cannot trigger a load. It is safe only because both failure modes that killed the first auto-swap are closed — in-flight generations **drain** (`batching->pause`, the `/admin/suspend` contract, never cancelled) and a failed load **restores** the previous model. Keep both if you touch this path. **Third hazard, unclosable in software:** WSL2/WDDM never returns a process's peak VRAM commitment, so each in-process swap permanently costs the previous model's footprint (measured: free VRAM 30927 → 23113 MiB after one load/generate/free cycle, then stable). Every CUDA-level release succeeds — the memory is gone at the platform layer. A long-lived server that swaps repeatedly walks itself into host-spill territory; restart it rather than debugging the allocator.
-- **Streaming must never cut inside a character.** A BPE token can end mid-character and each delta is serialized alone, so a raw byte cut becomes U+FFFD in the client (`größer` → `gr??ßer`). Two guards exist: `Utf8Stitch` holds partial bytes at detokenization — *before* any consumer, since the think splitter and tool filter match raw bytes too — and `holdback_decision` pulls its byte-offset cut back to a codepoint boundary. A new streaming sink must not reintroduce one.
-- **Config keys** (`config.h` → `struct Server`): `prefix_cache`, `prefix_pin_budget_pct`, `green_contexts`, `model_swap`, `model_swap_drain_ms`, `recurrent_snapshot_mb` (default 256 - hybrid models need the recurrent snapshot store for prefix caching).
-- **Stop handling**: the server stops on turn markers at high temperature — don't remove that guard.
-- **Serving loop (#1758/#1761/#1762/#1780, the burst-serving stack):**
-  - *Deferred token delivery* (#1758): the engine worker stages a step's delivery events; a dedicated notifier thread drains them in one batch (per-request FIFO kept). A new streaming sink must NOT assume `push_token` wakes the SSE handler inline - that reserialises handler work into the GPU driver loop. Diagnose with `diagnostics.step_timing` (#1759 host-phase attribution).
-  - *Ragged prefill batching* (#1780): `runtime.prefill_batch` (default ON) runs several admitted requests' prefill chunks as ONE ragged forward (`src/runtime/engine_prefill_ragged.cpp`). Serial fallback per request for: vision, constraints, logprobs, embeddings, rerank; path disabled for Mamba2, MLA, MTP. Verify which path a benchmark hits before quoting TTFT.
-  - *Prefill pacing*: token-charged budget with a 256-token launch floor, charged once per ragged forward (#1781); `prefill_chunk_decode_cap=1024` default bounds a concurrent streamer's inter-token gap - burst-shaped deployments should set 4096 (+~10% aggregate, TTFT p90 3.6→2.6 s). Round-robin rotates by last-served request id, not list index (#1762 - the index drifted and starved a moving cohort).
-  - *Graph prewarm* (#1761): `runtime.graph_prewarm` (default ON) captures all decode-graph sizes at init (~2.3 s) - explains a slow `/health`-ready; buys wave-1 p50 -3-12%, NOT aggregate throughput.
-  - *Hybrid decode pipeline*: measured and deliberately kept OFF (#1755) - don't re-propose.
+| Topic | Fact |
+|---|---|
+| Thinking | default ON for think-capable models in plain chat (json/tools excluded); `reasoning_content` vs `content`; gpt-oss Harmony channels map the same way. Think budget guarantees answer headroom (`started_in_think` was a three-bug chain). |
+| Thinking vs rendered prompt | pipeline: intent -> Jinja -> `reconcile_thinking_with_prompt_tail`; the prompt tail is ground truth. A closed `<think></think>` template block treated as "thinking" puts the answer in `reasoning_content`. `enable_thinking:true` honored via `force_thinking`. Do not re-tighten `mentions_thinking()` (load-bearing for spontaneous-`<think>` models). |
+| `reasoning_effort` | threaded through `ChatTemplate::apply*`/`render_jinja` + server snapshot (#1750); identical prompt-token counts across efforts = it is not reaching the template |
+| Regex constraints | `response_format: {"type":"regex"}` or `guided_regex`; `RegexNfa` (`src/compute/json_schema.h`) + `RegexConstrainer`; lookaround, anchors, `\b`, backrefs refused in the constrainer (the NFA parses some of them) |
+| GBNF constraints | `{"type":"grammar"}`, top-level `grammar`, `guided_grammar`; pushdown simulator `src/compute/gbnf_grammar.{h,cpp}` + `gbnf_parser.cpp`, `GrammarConstrainer`; left recursion, undefined rules, no `root`, absurd bounds refused at compile time (400); cold mask = 151k-vocab walk, so the per-state mask cache and interned-stack memo are load-bearing |
+| JSON schema | `sim_advance` in `src/compute/schema_constrain.{h,cu}` is the single grammar source; `$ref`/`$defs`; exact-JSON termination |
+| Adding a constrainer | close every bypass: `InferenceState` sites in `engine_decode_pipeline.cpp` AND `engine_scheduler.cpp`, constrained-pipeline state in `engine_graph_decode.cpp`; the ONE `apply_constraint_mask` helper in `src/exec/executor.cu`; spec-ngram and graph-loop eligibility (`engine_spec_ngram.cpp`, `engine_graph_decode.cpp`); `Engine::ensure_constraints_` and `pipeline_row_eligible_`; the thinking default in `handlers_chat_core.cpp`; `ConstraintManager` is POOLED (active flags + per-constrainer caches must reset; GBNF's memoised transitions once leaked into the next grammar) |
+| Tool calling | tool-arg enforcement is FSM-backed since #1002 (forced/required, `strict:true`, `parallel_tool_calls` on ChatML-JSON; forced on Llama3); the Qwen-Coder/Qwen3.6 XML dialect (`<function=`/`<parameter=` raw-text bodies) gets the XML grammar, never the JSON body FSM (which would mask raw newlines in code args); degen_suite `constrained` covers forced `tool_choice` |
+| Constrained perf | category prefilter + in-string shortcut; `ConstrainedPipeline` enqueues forward N+1 before the host FSM advances (~102 -> 235 tok/s). Falls back to eager for logprobs, min_p, typical_p, mirostat, DRY, logit_bias, MTP, batch>1 |
+| `cache_control` / prefix cache | pins prompt-KV blocks (`server.prefix_pin_budget_pct` 25, FIFO); reports `cache_read`/`cache_creation_input_tokens`; last marked block bounds the pin; TTL accepted, not modeled; `PrefixCacheE2ETest` is the gate. Hybrids need `server.recurrent_snapshot_mb` (256 = 3 slabs of 79.5 MiB on the 27B) + host tier `server.recurrent_snapshot_host_mb` (2048 = 25 slabs; 8 interleaved sessions x 3 turns: turn-2 TTFT 324 -> 163 ms, #1854) |
+| Speculation | `speculative.mtp_k=-1` auto (#1809): single-stream (`max_batch_size=1`) + head + not deterministic -> `mtp_k=2, ngram=false`; concurrent serving declines (head 0.79 GiB per batch slot); reads the RESOLVED batch size (`resolve_max_batch_size()`: flag > imp.conf > per-load, #1811). Manual few-stream serving: `--set speculative.mtp_k=2 --set speculative.ngram=false` as a PAIR. Adaptive depth `speculative.mtp_adaptive_k` on. n-gram default ON dense, off MoE. `imp_spec_drafted_total` = 1 after an essay = dead |
+| Long context | `attention.sparse_topk_tokens` (off; 4096-8192 for long-ctx serving, floor 8192 on Qwen3.8 for NIAH 8/10), `sparse_min_ctx` 12288; the key min/max pool must stay VRAM-resident (a `kv_cache.max_blocks` pin without headroom spilled every prefill kernel +11%). `kv_cache.growable` opt-in (#1794: 32x8k+512 wall -24%). `--prompt-file` for 32k prompts |
+| Priority | `"priority": int` body field (vLLM semantics, lower = earlier, default 0), primary sort key, aging within a class, admission only (#1803). Smoke needs a 400-token occupier or the slot frees before the high-prio request lands |
+| Request ids | client `X-Request-Id` echoed on every response (sanitized, 128 chars); server completion id otherwise; JSONL `client_request_id` |
+| OTLP tracing | `server.otlp_endpoint=http://host:4318/v1/traces` (off by default), `server.otlp_service_name`; one SERVER span per generation with queue/prefill/decode children, joined to the caller's `traceparent`; unsampled (`-00`) not exported; rejected requests (4xx/429/503) emit no span; no `traceresponse` header. Test: `tests/test_server_tracing.py` (in `make test-server`; its collector binds 4318, use `IMP_OTLP_PORT=4319` beside Jaeger). Jaeger recipe: `--add-host=host.docker.internal:host-gateway`, read back `GET :16686/api/traces/<id>`; Jaeger storage is in-memory. Compare span attributes against the response `usage` (that is what found `imp.cached_tokens` = 0, #1856) |
+| Model swapping | `server.model_swap` on: another model name in the models dir swaps (drain, never cancel; failed load restores the previous). WSL2/WDDM never returns a process's peak VRAM: each swap costs the previous footprint (30927 -> 23113 MiB free after one cycle); restart a long-lived swapping server |
+| Streaming UTF-8 | `Utf8Stitch` holds partial bytes before any consumer; `holdback_decision` cuts at codepoint boundaries; a new sink must not reintroduce a byte cut |
+| TCP | `TCP_NODELAY` on accepted sockets (#1803; delayed ACK cost up to ~40 ms ITL for network clients) |
+| Serving loop | deferred token delivery (#1758; `push_token` does not wake the SSE handler inline; diagnose with `diagnostics.step_timing`, #1759, whose `sample` phase includes the GPU sync), ragged prefill batching (`runtime.prefill_batch`, `src/runtime/engine_prefill_ragged.cpp`, #1780; serial for vision, constraints, logprobs, embeddings, rerank; off for Mamba2, MLA, MTP), prefill pacing (256-token floor charged once per ragged forward, #1781; `runtime.prefill_chunk_decode_cap` 1024, 4096 for bursts = +~10%), id-based rotor (#1762), graph prewarm (`runtime.graph_prewarm`, #1761, ~2.3 s at init), scheduler TUs split in #1782 (`engine_prefill.cpp`, `engine_prefill_ragged.cpp`, `engine_decode_pipeline.cpp`), hybrid decode pipeline and prefill||decode overlap both measured NEUTRAL and kept off (#1755, #1792) |
+| Stop handling | the server stops on turn markers at high temperature; keep the guard |
+| Config keys (`struct Server`) | `server.prefix_cache`, `prefix_pin_budget_pct`, `green_contexts` (off, sm_120 race), `model_swap`, `model_swap_drain_ms`, `recurrent_snapshot_mb`, `recurrent_snapshot_host_mb`, `otlp_endpoint`, `otlp_service_name` |
 
-## Validation (run before claiming server work done)
+## Validation (before claiming server work done)
 
 ```bash
-# 1. Degeneration/think-leak/adherence battery against the running server
-python3 tools/analysis/degen_suite.py --url http://localhost:8080   # --skip-deterministic for Qwen3.6
-
-# 2. API contract suite (mock server, no GPU)
-pytest tests/api/        # or tests/api/run_mock_tests.sh
-
-# 3. SafeTensors model-level validation battery
+python3 tools/analysis/degen_suite.py --url http://localhost:8080   # --skip-deterministic for Qwen3.6-35B
+pytest tests/api/            # mock contract, no GPU (tests/api/run_mock_tests.sh)
 python3 scripts/validate_safetensors.py --help
-
-# 4. Make gates: test-server is the ONLY place handlers.cpp/batching_engine run
-#    end-to-end; the others per surface
-make test-server        # real server e2e
-make test-rerank        # /v1/rerank vs llama.cpp
-make test-agents-external  # aider + Claude Code + OpenAI Agents SDK drive imp
+make test-server             # the only end-to-end run of handlers + batching_engine (+ degen_suite, tracing)
+make test-rerank; make test-agents; make test-agents-external   # aider, Claude Code, OpenAI Agents SDK drive imp
 ```
 
-**Testing the web UI (or anything browser-driven) on this host**: the Playwright
-MCP tool does NOT work — there is no Chrome, and installing Node/Chrome on the
-host violates the clean-host rule. Drive a browser from a container instead:
-
-```bash
-docker run --rm --network host -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 -e HOME=/sp \
-  -v "$PWD":/work:ro -v /tmp/<scratch>:/sp -v /tmp/<scratch>/shots:/out \
-  -w /sp mcr.microsoft.com/playwright:v1.56.0-noble \
-  sh -c 'npm i --silent playwright@1.56.0 && node /sp/script.mjs'
-```
-
-Playwright is NOT preinstalled in that image (only the browsers), hence the
-`npm i`; `--network host` reaches `localhost:8080`; write screenshots to `/out`
-and read them back. Assert on the DOM, not on screenshots alone.
-
-**degen_suite `constrained` category** covers json_object, json_schema validity under three sampler states (greedy / temp=1.3 / min_p — the last forces the eager path, so it guards constrained-pipeline↔eager parity), and forced-`tool_choice` tool-call emission + argument JSON validity. Tool-arg *enforcement* is FSM-backed since #1002 (forced/required + `strict:true` + `parallel_tool_calls` on ChatML-JSON, forced on Llama3) and covers the Qwen-Coder/Qwen3.6 XML dialect (`<function=`/`<parameter=` raw-text bodies — templates teaching that format get the XML grammar, never the JSON body FSM, which would mask raw newlines and mangle multi-line code args). Categories now: repetition, think-leak, special-tokens, adherence, long-context, multi-turn, stream, **constrained**, anthropic-thinking. For deeper constrained-decoding changes also run `tests/api/` schema cases.
+- The mock lane runs the nomodel tests too: a new contract test must be lane-agnostic AND `tests/api/mock_server.py` must mirror the contract (X-Request-Id echo cost a red `Mock API contract` on #1803).
+- `--log-requests`: bind-mount a DIRECTORY (`-v dir:/out`); a single-file bind mount stays at 0 bytes.
+- `imp-cli --version` does not exist (usage, rc=1): a control arm on it distinguishes nothing; bare `imp-cli` validates `--set` keys before the load (`no such key`).
+- Browser-driven checks: no Chrome on the host; `docker run --rm --network host -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 -e HOME=/sp -v "$PWD":/work:ro -v /tmp/<scratch>:/sp -v /tmp/<scratch>/shots:/out -w /sp mcr.microsoft.com/playwright:v1.56.0-noble sh -c 'npm i --silent playwright@1.56.0 && node /sp/script.mjs'`; assert on the DOM.
 
 ## Diagnostic fingerprints
 
 | Symptom | Likely cause |
 |---|---|
-| CLI output fine, server output broken | `step()` path or NVFP4 cache divergence — not the model |
-| Think text leaking into `content` | template-injected `<think>` without `</think>` (non-stream spill) — degen_suite catches this |
-| Empty `content`, `reasoning_content` holds the **finished answer** (no `</think>` needed, reads like a reply) | channel mis-routing: imp's thinking state disagrees with the rendered prompt tail (closed-`<think>`-block template) — see the reconcile bullet above |
-| Empty `content`, `reasoning_content` is **genuine but truncated reasoning** (cut off mid-thought) | think-budget eaten (`--think-budget 1.0` footgun) — discriminator vs the row above: is the reasoning text an answer or an unfinished chain of thought? |
-| 404 `model_not_found` | the name did not resolve in the models directory (or `server.model_swap=false`) — not a bug. Check the models dir and `GET /v1/models`. |
-| 503 "model swap … failed" | the requested model could not load; the previous one was restored and the server keeps serving. Usually VRAM or a bad file. |
+| CLI fine, server broken | `step()` path or NVFP4 cache divergence, not the model |
+| Think text in `content` | template `<think>` without `</think>` (non-stream spill); degen_suite catches it |
+| Empty `content`, `reasoning_content` holds a finished answer | channel mis-routing (closed `<think>` template block): reconcile bullet |
+| Empty `content`, `reasoning_content` truncated mid-thought | think budget eaten (`--think-budget 1.0`) or `max_tokens < ~400` on Qwen3.8 |
+| Empty `content`, exit 0, speculation on | fixed #1796 (verify argmax ignored the banned mask); pair `mtp_k` with `ngram=false` |
+| 404 `model_not_found` | name not in the models dir or `server.model_swap=false` |
+| 503 "model swap ... failed" | load failed, previous model restored (VRAM or bad file) |
+| `/health` reports a batch you did not configure | `runtime.max_batch_size` from imp.conf vs `--max-batch` flag: flag wins |
+| Span attributes disagree with `usage` | dead context fields on the non-stream path (class of #1856): assert span vs body in the test |
 
-After any server-side inference change, run the `check-degeneration` skill battery (section 0 targets exactly this layer).
+After any server-side inference change run the **check-degeneration** battery (section 0).
 
-## Known structural debt (don't re-discover)
+## Known structural debt
 
-The 2026-07-07 structural audit (`docs/archive/structural_debt_2026_07_07.md`) flagged the server layer as the main debt source — open issues #888–#897 (p1: admission-control bypass, `/health` lock contention, SSE-loop drift). Check those issues before filing "new" findings in this layer.
+Server layer flagged in `docs/archive/structural_debt_2026_07_07.md`: issues #888-#897 (admission-control bypass, `/health` lock contention, SSE-loop drift). Check them before filing new findings.

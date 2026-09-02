@@ -1,51 +1,61 @@
 ---
 name: add-model-arch
-description: Use when adding support for a new model architecture to imp, porting a model family, or debugging a model that loads but produces wrong output — "add support for <model>", "new arch", loader detection, chat template, RoPE variant, "outputs garbage", "prompt-blind", "digits scrambled", "NaN logits". Do NOT use for kernel performance (sm120-cuda-expert) or quant-format questions (quant-formats).
+description: Use when adding support for a new model architecture to imp, porting a model family, or debugging a model that loads but produces wrong output - "add support for <model>", "new arch", loader detection, chat template, tokenizer parity, RoPE variant, "outputs garbage", "prompt-blind", "digits scrambled", "NaN logits", "describes a different picture", "does it fit in VRAM". Do NOT use for kernel performance (sm120-cuda-expert) or quant-format questions (quant-formats).
 ---
 
-# Adding a Model Architecture — imp
+# Adding a Model Architecture - imp
 
-## Integration checklist (gpt-oss PR #572 is the reference example)
+## First: is it a new arch at all?
 
-1. **Enum + registry**: add to `ModelArch` in `src/model/model_arch.h`; wire `parse_model_arch` (GGUF `general.architecture`, `gguf_loader.cpp`) and/or HF detection (`hf_config_loader.cpp` - `architectures` array, `model_type` fallback), `model_arch_name`, `apply_arch_defaults`, sampling defaults in `src/model/model.cpp` (registry + `parse_model_arch`/`apply_arch_defaults` live there; `src/model/model_arch.h` holds the enum + decls). **Then register the arch's traits in `ModelProfile`** (`src/model/model_profile.h`/`.cpp` - single source of truth since PRs #622/#623; `AttnVariant` is now `{STANDARD, GEMMA4_SWA, GPTOSS_SWA, NOPE, MLA}`). Never add new `cfg.arch == X` checks in hot-path code - the profile is what dispatch reads. **And add the arch to the KV-dtype safety lists** declared in `model_arch.h` (`kv_nvfp4_default_safe`, `kv_fp8_hint_default_safe`, `kv_fp8_no_hint_default_safe`, evidence per family in `model.cpp`) - a missing entry silently gets FP16 KV, which on a GDN hybrid gates context length. First check whether it is a new arch AT ALL: Qwen3.8 shipped with zero enum members added (loads as `QWEN35`; diff `config.json` before estimating).
-2. **Loader**: tensor-name mapping in `src/model/tensor_kind_matcher.cpp` / `weight_map.cpp`; SafeTensors path in `safetensors_loader.cpp` (NVFP4 prequant via `llm_compressor_loader.cpp` if applicable).
-3. **Arch config**: RoPE variant (NeoX vs GPT-J pair layout! see traps), YaRN/`rope_freq_scale`, SWA layer pattern, attention quirks (NoPE, sinks, softcap), norm placement, MoE router type — in `model_config.h` + `apply_arch_defaults`.
-4. **Chat template**: family registration in `src/model/chat_template_families.cpp` (`ChatTemplateFamily` enum in `chat_template.h`), rendering in `chat_template.cpp` (+ `jinja.cpp` if templated); think/reasoning channel handling if applicable. **A new family needs a golden pin** (#1721 pinned nine families and exposed two silent Jinja gaps; #1701 fixed three more - Jinja fails SILENTLY, so a render that "works" is not evidence). If the model reads `reasoning_effort`, thread it through `ChatTemplate::apply`/`apply_with_tools`/`apply_with_image`/`render_jinja` + the server snapshot; the symptom of missing it is identical prompt-token counts across efforts (#1750: 67/67 before, 41/11/53 after).
-5. **Kernels** only if genuinely new ops (sinks, new gating) — check `src/exec/` + `src/compute/` for an existing path first.
-6. **Verify** (in order): loads → coherent greedy output (run `check-degeneration` battery) → **perplexity vs HF reference** (`imp-cli --perplexity`; expect within ~10-20% of HF — often much closer, e.g. gpt-oss imp 4.68 vs HF bf16 4.607, #663: the residual elevation is model-intrinsic) → decode/prefill sanity (`benchmark-cuda`).
-7. **Docs**: row in `docs/MODELS.md` (+ docs/BENCHMARKS.md if hero-class); what is known NOT to work goes to `docs/LIMITATIONS.md`; perf baseline entry if it becomes a gated model.
+Diff `config.json` against a supported sibling before estimating. Qwen3.8 shipped with zero enum members (loads as `QWEN35`); the work was tokenizer parity, template goldens, KV dtype default and MTP head (#1750). HF reference values come from `curl`, never from memory.
 
-A new-arch checkpoint is UNTRUSTED INPUT: the SafeTensors/tokenizer.json parsers were hardened against OOB and attacker-sized allocations (#1660, #1694) - don't add parsing shortcuts that bypass the bounds checks, and fuzz targets exist under `fuzz/` for new parser surface.
+## Integration checklist (gpt-oss #572 is the reference PR)
 
-## Diagnostic fingerprints (wrong-output triage)
-
-| Symptom | Root-cause class | Historical case |
+| Step | Where | Notes |
 |---|---|---|
-| Fluent text but ignores the prompt ("prompt-blind") | **RoPE pair layout** — HF SafeTensors need `rope_neox=true`; GGUF pre-permutes Q/K | whole SafeTensors Llama/Mistral family, PR #503 |
-| Words fine, digits/numbers scrambled | Position encoding bug (NoPE layer treated as RoPE, or vice versa) | Nemotron-H `rope_attn_disabled`, PR #518 |
-| Argmax always token 0 | NaN logits upstream (residual overflow, bad scale) | gpt-oss FP16 residual overflow |
-| Coherent until ~1k ctx, then garbage | YaRN/`rope_freq_scale` inverted or fused-rope path missing YaRN | gpt-oss: inverted scale = 1024× error, PR #572 |
-| Long-context wrong only with chunked prefill | continuation-chunk path | PR #553 |
-| Wrong language / valid-but-wrong tokens | weight upload / dequant layout, not the arch code (MoE: check `weight_upload.cu` expert promotion first) | Qwen3.6-35B NVFP4, PR #925 |
-| Garbage from token 0 (`!!!…`) | silent VRAM-alloc failure in a decode fallback, not arch code | MXFP4 GDN hybrids, PR #935 |
-| Multimodal: describes a DIFFERENT picture, no crash | M-RoPE per-token (t,h,w) position layout wrong - `src/model/mrope_positions.cpp` (its header states this fingerprint verbatim) | Qwen3-VL port |
-| Correct output that drifts only at very long positions | YaRN float-precision trap: `__sinf/__cosf` on an unreduced argument; long-context tests run `ext_factor=0` (linear branch) and cannot see it | #1704 |
-| CLI fine, server broken | not an arch bug — see `server-api` skill |
+| 1. Enum + registry | `ModelArch` in `src/model/model_arch.h`; `parse_model_arch` (GGUF `general.architecture` in `gguf_loader.cpp`, HF `architectures`/`model_type` in `hf_config_loader.cpp`), `model_arch_name`, `apply_arch_defaults`, sampling defaults in `src/model/model.cpp` | then `ModelProfile` (`src/model/model_profile.h/.cpp`, SSoT since #622/#623; `AttnVariant { STANDARD, GEMMA4_SWA, GPTOSS_SWA, NOPE, MLA }`). No new `cfg.arch == X` in hot paths. Add the arch to the KV-dtype lists `kv_nvfp4_default_safe`, `kv_fp8_hint_default_safe`, `kv_fp8_no_hint_default_safe` (evidence per family in `model.cpp`): a missing entry silently gets FP16 KV, which on a GDN hybrid gates context |
+| 2. Loader | `src/model/tensor_kind_matcher.cpp`, `weight_map.cpp`; SafeTensors `safetensors_loader.cpp`; NVFP4 via `llm_compressor_loader.cpp` (compressed-tensors) or Modelopt (`hf_quant_config.json`) | the two NVFP4 layouts have RECIPROCAL tensor scales (quant-formats) |
+| 3. Arch config | `model_config.h` + `apply_arch_defaults` | RoPE pair layout (NeoX vs GPT-J), YaRN/`rope_freq_scale`, SWA layer pattern, NoPE, sinks, softcap, norm placement, MoE router |
+| 4. Chat template | family in `src/model/chat_template_families.cpp` (`ChatTemplateFamily` in `chat_template.h`), rendering in `chat_template.cpp` (+ `jinja.cpp`) | a new family needs a golden pin (`make chat-goldens`, `tests/refs/chat_template_goldens.h`, nine families since #1721, three more Jinja gaps fixed in #1701; Jinja fails SILENTLY). `reasoning_effort` must reach `ChatTemplate::apply*`/`render_jinja` + the server snapshot: identical prompt-token counts across efforts = not threaded (#1750: 67/67 before, 41/11/53 after) |
+| 5. Tokenizer parity | template `tests/test_tokenizer_qwen38.cpp` (32/32 encode+decode vs HF), `tests/test_qwen38_chat_template.cpp` | BERT-family GGUFs use SPM, not WordPiece |
+| 6. Kernels | only for genuinely new ops; check `src/exec/` + `src/compute/` first | new RoPE variants go into `src/compute/rope_yarn.cuh` (shared with MTP heads, #913) |
+| 7. Verify | loads -> greedy coherent (check-degeneration) -> `imp-cli --perplexity` vs HF (within ~10-20%, often closer: gpt-oss 4.68 vs bf16 4.607, #663) -> decode/prefill sanity (benchmark-cuda) | PPL with `runtime.deterministic=true`, `speculative.mtp_k=0`, `ppl_corpus_45k.txt` |
+| 8. Docs | `docs/MODELS.md` row (+ `docs/BENCHMARKS.md` if hero); known gaps to `docs/LIMITATIONS.md`; perf baseline entry if gated | |
 
-## Known traps (each cost a debugging session)
+A new checkpoint is UNTRUSTED INPUT: SafeTensors/`tokenizer.json` parsers are hardened (#1660, #1694); fuzz targets under `fuzz/`; no parsing shortcuts around the bounds checks.
 
-- **`rope_neox`**: GGUF converters pre-permute Q/K; HF SafeTensors do NOT. Llama-family SafeTensors without `rope_neox=true` = prompt-blind.
-- **SWA layer masks**: the `swa_layers` pattern was Gemma-only hardcoded once — verify per-layer attention type for any interleaved-SWA arch.
-- **Fused-rope-KV vs YaRN**: the fused rope+KV-write kernel must apply the same YaRN scaling as the standalone path.
-- **Banned-token list vs channel tokens**: arch-specific control tokens (Harmony channels) must not land on the banned list.
-- **Per-layer rope_freqs** (Gemma-4): non-SWA layers need their own freqs, `n_rot=hd`.
-- **h_state precision** (GDN/hybrid): FP16 state NaNs at depth (subnormal truncation). BF16 storage with FP32 arithmetic is the shipped default (`gdn.state_bf16`, #1776/#1778); the old "must be FP32" note was a layout bug, not numerics - see sm120-cuda-expert known-issues.
-- **HF tensor-name prefixes**: multimodal checkpoints wrap the LM under e.g. `model.language_model.*` (Qwen3.5-VL, PR #647) — strip the prefix in the loader or every tensor "is missing".
-- **MLA/YaRN `rope_mscale`** (#880): the mscale ratio applied to the wrong base inflated RoPE by 1.261× — coherent-ish output that drifts vs HF. When comparing against a transformers oracle, PIN the transformers version (4.44.2 was the validated MLA oracle).
-- **Draft/MTP heads must share the main model's exact RoPE math** — an MTP head computing plain NeoX while the target uses YaRN drifts the drafter (accept rate collapses, output stays correct). Shared impl: `src/compute/rope_yarn.cuh` (PR #913). Any new RoPE variant goes there, not into per-kernel copies.
-- **Encoder/embedding archs are supported** (nomic-bert, PR #867 — cosine 0.999 vs HF). Gotcha: BERT-family GGUFs use an SPM tokenizer, not WordPiece-as-expected.
-- Model too big? Do the arithmetic instead of trusting a remembered ceiling: the card is 32 607 MiB, the CUDA primary context takes ~1680 MiB before imp allocates anything, and the library reserve (cuBLAS/CUTLASS) is a **per-model measured value cached in `src/memory/library_reserve_cache.h`** since #1119 - the `kMeasuredLibraryReserveBytes` ~3900 MiB constant in `src/memory/plan.h` is only the first-run fallback and is wrong in both directions (measured 0 MiB on Qwen3-4B-IQ4_NL, 7460 on Qwen3-8B-Q8_0; accounting 82.5% with the constant vs 98.3% measured). Override: `library_reserve_mb`. So "~26 GiB for weights" holds only for the FIRST start on an unseen model. Numbers and measured per-config peaks: `docs/internals/MEMORY.md`.
+## Wrong-output fingerprints
+
+| Symptom | Root-cause class | Case |
+|---|---|---|
+| Fluent but ignores the prompt ("prompt-blind") | RoPE pair layout: HF SafeTensors need `rope_neox=true`, GGUF pre-permutes Q/K | SafeTensors Llama/Mistral, #503 |
+| Words fine, digits scrambled | position encoding (NoPE layer as RoPE or vice versa) | Nemotron-H `rope_attn_disabled`, #518 |
+| Argmax always token 0 | NaN logits upstream (residual overflow, bad scale) | gpt-oss FP16 residual |
+| Coherent to ~1k ctx, then garbage | YaRN/`rope_freq_scale` inverted or fused-rope path without YaRN | gpt-oss 1024x error, #572 |
+| Wrong only with chunked prefill at long ctx | continuation-chunk path | #553 |
+| Wrong language / valid-but-wrong tokens | weight upload / dequant layout (MoE: `weight_upload.cu` expert promotion first) | Qwen3.6-35B NVFP4, #925 |
+| Garbage from token 0 (`!!!`) | silent VRAM-alloc failure in a decode fallback | MXFP4 GDN hybrids, #935 |
+| Multimodal: describes a DIFFERENT picture | M-RoPE per-token (t,h,w) layout, `src/model/mrope_positions.cpp` | Qwen3-VL |
+| Vision fluent but generic | tower loaded partly or embeddings never reach the sequence: `tools/analysis/vision_sight_check.py` | |
+| Drift only at very long positions | YaRN float trap: `__sinf/__cosf` on an unreduced argument; long-ctx tests run `ext_factor=0` and cannot see it | #1704 |
+| Coherent-ish, drifts vs HF | MLA/YaRN `rope_mscale` on the wrong base (1.261x); pin the transformers oracle (4.44.2 for MLA) | #880 |
+| Draft accept collapses, output correct | MTP head RoPE differs from the target (NeoX vs YaRN) | #913 |
+| CLI fine, server broken | not arch: server-api | |
+| Which block diverges | `diagnostics.dump_hidden_dir` + `tools/analysis/layer_diff.py` (vs llama.cpp `llama-eval-callback`) or `layer_ab_diff.py` (two imp runs); `dump_gdn_state_dir`, `dump_logits_dir` | 0 non-finite GDN states over a 46579-token prefill on Qwen3.8 |
+
+## Known traps
+
+- `rope_neox`: GGUF converters pre-permute Q/K; HF SafeTensors do not.
+- `swa_layers` was Gemma-only hardcoded once; verify per-layer attention type on any interleaved-SWA arch.
+- The fused rope+KV-write kernel must apply the same YaRN scaling as the standalone path.
+- Arch control tokens (Harmony channels) must not land on the banned list; the spec-verify argmax applies the mask since #1796.
+- Gemma-4: per-layer `rope_freqs` for non-SWA layers, `n_rot=hd`.
+- GDN/hybrid state: BF16 storage + FP32 arithmetic is the default (`gdn.state_bf16`, #1776/#1778); FP16 state NaNs at depth; the old "must be FP32" was a layout bug.
+- Multimodal checkpoints wrap the LM under `model.language_model.*` (Qwen3.5-VL, #647): strip in the loader or every tensor "is missing".
+- Encoder/embedding archs are supported (nomic-bert #867, cosine 0.999 vs HF).
+- VRAM arithmetic: card 32 607 MiB; CUDA primary context ~1680 MiB; library reserve is a per-model MEASURED value cached in `src/memory/library_reserve_cache.h` (#1119; `vram.library_reserve_cache`, override `vram.library_reserve_mb`); the `kMeasuredLibraryReserveBytes` ~3900 MiB constant in `src/memory/plan.h` is the first-run fallback (measured 0 MiB on Qwen3-4B-IQ4_NL, 7460 on Qwen3-8B-Q8_0). An MTP head adds ~0.79 GiB when `speculative.mtp_k` auto takes it. Peaks per config: `docs/internals/MEMORY.md`.
+- Getting a checkpoint onto the NVFP4 path: `scripts/stage-model.sh` (download + `imp-quantize` in one command; imp fetches nothing itself).
 
 ## After it works
 
-Re-run `make verify-fast`, add the model to local model notes, and consider a `DegenerationTest`-compatible probe prompt. New archs with think-channels: validate via `tools/analysis/degen_suite.py` against a running server (think-leak category).
+`make verify-fast`; a `DegenerationTest`-compatible probe prompt; think-channel archs through `tools/analysis/degen_suite.py` (think-leak); vision through `vision_sight_check.py` and `make test-vision`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ncu-basic.sh — canonical Nsight Compute metric set for imp kernels on sm_120.
+# ncu-basic.sh - canonical Nsight Compute metric set for imp kernels on sm_120.
 #
 # Usage:
 #   ./ncu-basic.sh "<kernel-regex>" <binary> [<binary-args>...]

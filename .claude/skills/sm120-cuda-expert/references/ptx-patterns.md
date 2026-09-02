@@ -1,14 +1,14 @@
 # sm_120a PTX Inline Assembly Patterns
 
-Heavy reference for the `sm120-cuda-expert` skill. Templates verified on RTX 5090 / GB202 under CUDA 13.2.1, `compute_120a / sm_120a` — re-verified unchanged on CUDA 13.3 (PTX ISA 9.3: 0 of 247 instructions flipped, see known-issues.md).
+Heavy reference for the `sm120-cuda-expert` skill. Templates verified on RTX 5090 / GB202 under CUDA 13.2.1, `compute_120a / sm_120a` - re-verified unchanged on CUDA 13.3 (PTX ISA 9.3: 0 of 247 instructions flipped, see known-issues.md).
 
 Guard all sm_120 code: `#if __CUDA_ARCH__ >= 1200`.
 
 ---
 
-## NVFP4 block-scaled MMA — `kind::mxf4nvf4` (peak path)
+## NVFP4 block-scaled MMA - `kind::mxf4nvf4` (peak path)
 
-The peak NVFP4 path on consumer Blackwell. `mma.sync.aligned.kind::mxf4nvf4.block_scale` with FP32 accumulator in registers (FA2-style + block-scaling). Hardware applies the per-16-element UE4M3 scale **inside** the MMA — no manual scale-apply. K=64 per MMA (vs k=32 for f8f6f4) → half the MMA count for the same tile. Raw MMA speedup measured **2.60×** on RTX 5090 (`mxf4nvf4_mma_bench`); end-to-end attention gain expected 1.5–2.5× post softmax + P·V.
+The peak NVFP4 path on consumer Blackwell. `mma.sync.aligned.kind::mxf4nvf4.block_scale` with FP32 accumulator in registers (FA2-style + block-scaling). Hardware applies the per-16-element UE4M3 scale **inside** the MMA - no manual scale-apply. K=64 per MMA (vs k=32 for f8f6f4) → half the MMA count for the same tile. Raw MMA speedup measured **2.60×** on RTX 5090 (`mxf4nvf4_mma_bench`); end-to-end attention gain expected 1.5-2.5× post softmax + P·V.
 
 ```cuda
 // scale_vec::4X.m16n8k64, e2m1 inputs, e2m1 inputs, f32 accumulator, ue4m3 scales
@@ -29,15 +29,15 @@ asm volatile(
       "r"(sfb_in), "h"(bidB), "h"(tidB));
 ```
 
-**Requires `compute_120a`** (NOT `compute_120` / `compute_120f` — `block_scale` modifier and TMA-WS-grouped-GEMM are gated on the `a` arch suffix).
+**Requires `compute_120a`** (NOT `compute_120` / `compute_120f` - `block_scale` modifier and TMA-WS-grouped-GEMM are gated on the `a` arch suffix).
 
 References in repo:
-- `tests/bench/attention_mxf4nvf4_probe.cu` — canned-input probe
-- `src/compute/attention_fmha_mxfp4_sm120.h` — FMHA upgrade target
+- `tests/bench/attention_mxf4nvf4_probe.cu` - canned-input probe
+- `src/compute/attention_fmha_mxfp4_sm120.h` - FMHA upgrade target
 
 ---
 
-## FP8 MMA — `kind::f8f6f4` (legacy / fallback)
+## FP8 MMA - `kind::f8f6f4` (legacy / fallback)
 
 Used when block-scaled NVFP4 isn't applicable (FP8 weights, FP8 KV).
 
@@ -96,7 +96,7 @@ asm volatile("prmt.b32 %0, %1, %2, %3;\n"
 asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n" :: "r"(smem), "l"(glob));
 asm volatile("cp.async.commit_group;\n");
 asm volatile("cp.async.wait_group 0;\n");
-__syncthreads();  // REQUIRED before reading smem — race on SMEM otherwise
+__syncthreads();  // REQUIRED before reading smem - race on SMEM otherwise
 ```
 
 ---
@@ -115,10 +115,10 @@ for (int o = 16; o >= 1; o >>= 1)
 
 ## KV cache streaming load (`__ldcs`, bypass L1)
 
-KV reads are one-shot per generated token — caching them in L1 evicts useful weights. `__ldcs` issues a streaming load that bypasses L1 and uses evict-first L2.
+KV reads are one-shot per generated token - caching them in L1 evicts useful weights. `__ldcs` issues a streaming load that bypasses L1 and uses evict-first L2.
 
 ```cuda
 const float4 kv = __ldcs(reinterpret_cast<const float4*>(kv_ptr));
 ```
 
-**KV only.** Do NOT use on weights — weights are reused across batches and benefit from L1 caching.
+**KV only.** Do NOT use on weights - weights are reused across batches and benefit from L1 caching.
