@@ -20,8 +20,9 @@ pins, by name, what the lane starts and then skips (`guard_unit_skips`).
 - **New CPU tests go to test-core**, and must be added to the explicit source
   list in `CMakeLists.txt`.
 - **Bookkeeping tests must not build a pool.** `KVCache::for_accounting()`
-  (KV manager, scheduler admission) runs in CI. A test that still skips there
-  is a line in `tools/unit_lane_skips.txt` with its reason: `guard_unit_skips`
+  (uniform or per-layer/SWA shape; KV manager, SWA table, scheduler admission)
+  runs in CI. A test that still skips there is a line in
+  `tools/unit_lane_skips.txt` with its reason: `guard_unit_skips`
   fails on an unlisted skip and on a listed test that ran. A config-only test
   gets an embedded fixture (`tests/refs/deepseek_v2_lite_config.h`).
 - **A green test proves nothing until it has been mutation-validated.** Break the

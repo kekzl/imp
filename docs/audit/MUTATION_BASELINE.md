@@ -184,9 +184,11 @@ it is gated now: the three lane commands write GTest JSON reports and
 `guard_unit_skips` (inside `ctest -L unit`) compares the skipped set with
 `tools/unit_lane_skips.txt` by name. Five scheduler admission tests (accounting
 cache) and the four `MLAConfig` config tests (embedded DeepSeek-V2-Lite
-`config.json`) left the set the same day: **without a GPU the lane skips
-test-core 15 of 1325, test-text 5 of 242, the e2e subset 1 of 62**, every one a
-line with its reason.
+`config.json`) left the set the same day, then the per-layer/SWA accounting
+form took the SWA id-space, the SWA trailing-free table and the per-layer NVFP4
+scale geometry out of it (2 pointer-only GPU tests remain): **without a GPU
+the lane skips test-core 14 of 1327, test-text 5 of 242, the e2e subset 1 of
+62**, every one a line with its reason.
 
 ## Method notes that changed a result
 
