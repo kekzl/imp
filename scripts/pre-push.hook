@@ -61,7 +61,7 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     # build, not a test. Editing THIS file used to demand the full GPU gate,
     # which then reports the host rather than the change; what actually guards
     # the pair is guard_precommit_filter / guard_verify_filter in the CPU lane.
-    FILES=$(echo "$FILES" | grep -vE '\.(md|py|hook)$' || true)
+    FILES=$(echo "$FILES" | grep -vE '\.(md|py|hook)$|^tools/mutation/' || true)
     # Same reasoning one level down for scripts/*.sh: `^scripts/` in SOURCE_RE
     # is right for verify.sh and the guard scripts CMake registers as ctests,
     # and wrong for the 17 that verify.sh's path never reaches (ci_static_gates,

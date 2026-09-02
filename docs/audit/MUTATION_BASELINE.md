@@ -114,6 +114,45 @@ and why `run.py` discounts every failure that was already present in the
 baseline — without that, all 38 capacity-induced `test-e2e` failures would have
 "killed" every mutant.
 
+## 2026-09-02 recheck: four anchors had gone dead, and the CI lane measured
+
+Two questions, run against `339ce7c7` with the harness's two new modes.
+
+**`--verify-anchors` (no injection, checks every `find` still matches once):
+4 of 56 had drifted**, so those mutants had silently stopped testing anything
+and were nevertheless in the denominator of the 87.8% above.
+
+| Mutant | Why it died |
+|---|---|
+| M22 | its site moved with the `executor_sampling.cu` split |
+| M50 | the `stop_reason` mapping became a function returning a literal |
+| M54 | the number-completeness check moved into `schema_constrain.cu` |
+| M56 | a third depth-cap site appeared, so the anchor matched twice |
+
+All four repaired. M50, injectable again, is killed immediately by
+`AnthropicResponse.FinishReasonMapping` - a test that existed the whole time
+and had nothing to catch.
+
+**`--ci-only` (the three lanes `ctest -L unit` runs, no GPU) over the 21
+host-side mutants: 15 killed, 5 survived = 75.0%.** Every survivor is in
+`src/memory/kv_cache_manager.cpp`:
+
+| Mutant | What passes the merge gate |
+|---|---|
+| M25 | stale `block->hash` entries never dropped (equivalent mutant, see above) |
+| M35 | `content_salt` ignored: two prompts with identical token ids but different images share KV |
+| M36 | prefix reuse no longer contiguous: uncomputed KV inside a "skipped" range |
+| M38 | the probe reports a cached prefix one block longer than the chain reaches |
+| M40 | reclaiming a cached block leaves its prefix-hash entry pointing at a free block |
+
+They are not missing tests: `test-kv` catches all five. They are unreachable
+from CI for one mechanical reason - every one needs `KVCacheManager` state, and
+`KVCache`'s constructor allocates VRAM and throws without a device, so each of
+those tests opens with `SKIP_IF_NO_CUDA()`. The hash function itself is static
+and CPU-testable, which is exactly why M23 and M24 ARE caught in CI. Making the
+block-accounting testable without a pool would move this class into the merge
+gate; it is the only lever here that does not need a GPU runner.
+
 ## Method notes that changed a result
 
 * **Cheap-first, full-before-survival.** A mutant is KILLED as soon as any lane
@@ -138,6 +177,8 @@ baseline — without that, all 38 capacity-induced `test-e2e` failures would hav
 tools/mutation/run.py --list
 tools/mutation/run.py --catalogue tools/mutation/catalogue.json
 tools/mutation/run.py --only M20,M21                      # one or a few
+tools/mutation/run.py --verify-anchors                    # do all 56 still match their source
+tools/mutation/run.py --ci-only --only M23,M35            # what `ctest -L unit` would catch
 tools/mutation/recheck.sh M25 test-e2e 'PrefixCacheE2ETest.*' 3   # isolated oracle, N runs
 ```
 

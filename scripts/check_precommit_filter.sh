@@ -88,7 +88,8 @@ if [ -f "$PUSH" ]; then
         echo "check_precommit_filter: could not read the extension filter out of $PUSH" >&2
         exit 1
     fi
-    for f in tests/CLAUDE.md tools/kernel_resources.py tests/api/test_chat.py; do
+    for f in tests/CLAUDE.md tools/kernel_resources.py tests/api/test_chat.py \
+             tools/mutation/catalogue.json; do
         if printf '%s\n' "$f" | grep -qE "$PDROP"; then :; else
             echo "check_precommit_filter: pre-push would gate '$f' (docs/scripts cannot move a number)" >&2
             exit 1
