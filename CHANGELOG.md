@@ -13,6 +13,13 @@ there instead of retelling it.
 
 ### Added
 
+- OpenTelemetry trace export for imp-server (`server.otlp_endpoint`, OTLP/HTTP
+  JSON, off by default): one SERVER span per generation request with queue /
+  prefill / decode children and request ids, model and token counts as
+  attributes, joined to the caller's W3C `traceparent`; the request JSONL
+  carries the same `trace_id`. Closes roadmap gap 8; `tests/test_server_tracing.py`
+  is the collector-side gate in `make test-server`
+
 - Recurrent-snapshot host tier for hybrid prefix caching
   (`server.recurrent_snapshot_host_mb`, default 2048): snapshots evicted from
   the device slots move to pinned host memory and restore from there, so

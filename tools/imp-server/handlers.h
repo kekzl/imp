@@ -1,4 +1,5 @@
 #pragma once
+#include "tracing.h"
 
 #include <map>
 
@@ -152,6 +153,8 @@ struct ServerMetrics {
 
 struct ServerState {
     ImpModel model = nullptr;
+    // OTLP span exporter (server.otlp_endpoint); one span set per request.
+    Tracer tracer;
     ImpContext ctx = nullptr;
     // LoRA adapters loaded at startup (--lora NAME=PATH): name -> C-API id.
     // Selected per request via the "lora" body field; empty/absent = base.

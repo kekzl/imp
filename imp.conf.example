@@ -581,6 +581,15 @@ recurrent_snapshot_mb = 256
 # (one H2D of one slab). Sessions beyond the device slot count keep their
 # tail-only prefill. 0 = off.
 recurrent_snapshot_host_mb = 2048
+# OpenTelemetry trace export (OTLP/HTTP, JSON encoding): the full traces
+# URL of a collector, e.g. http://localhost:4318/v1/traces; "" = off. Every
+# generation request becomes one SERVER span (queue / prefill / decode
+# children; model, token counts, finish reason, request ids as attributes),
+# joined to the caller's trace when the request carries a W3C traceparent
+# header. Export runs on a background thread; a dead collector costs one
+# warning, never latency. http:// only.
+otlp_endpoint = ""
+otlp_service_name = "imp-server"
 # Green Contexts / prefill-decode overlap streams in the server engine.
 # Opt-in (off by default): suspected memSyncDomain race on sm_120 fallback
 # streams (gemma-3-12b IMA). Set true to enable.

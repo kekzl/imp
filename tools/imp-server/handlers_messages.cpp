@@ -597,10 +597,13 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
         // shim_res): client id when sent, this dialect's message id otherwise.
         res.set_header("X-Request-Id",
                        log_client_request_id.empty() ? req_id : log_client_request_id);
+                RequestSpan trace;
+        trace.traceparent = req.get_header_value("traceparent");
+        trace.model = anth_response.value("model", std::string());
         log_request_jsonl(state, /*skip=*/false, t_log_start, req_id, log_endpoint, log_client_ip,
                           log_raw_body, ms, prompt_t, completion_t,
                           stop_reason.empty() ? nullptr : stop_reason.c_str(), anth_response,
-                          log_client_request_id);
+                          log_client_request_id, &trace);
     }
 
     // Non-streaming requests are fully assembled above (the want_stream path

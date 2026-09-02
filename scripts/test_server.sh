@@ -62,8 +62,10 @@ fi
 echo "== launch imp-server ($MODEL) =="
 docker rm -f "$CTR" >/dev/null 2>&1 || true
 docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models -p "$PORT":"$PORT" "$IMG" \
+    --add-host=host.docker.internal:host-gateway \
     imp-server --model "/models/$MODEL" --host 0.0.0.0 --port "$PORT" \
-    --max-concurrent 8 --rate-limit 100000 --max-input-tokens 100000 >/dev/null
+    --max-concurrent 8 --rate-limit 100000 --max-input-tokens 100000 \
+    --set server.otlp_endpoint=http://host.docker.internal:4318/v1/traces >/dev/null
 
 ok=0
 for i in $(seq 1 90); do
@@ -96,6 +98,7 @@ run "robustness (#712)"   python3 tests/test_server_robustness.py
 run "logprobs"            python3 tests/test_server_logprobs.py
 run "messages stream"     python3 tests/test_server_messages_stream.py
 run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
+run "tracing (OTLP spans)" python3 tests/test_server_tracing.py
 run "vision refusal + utf8 (#1197/#1198)" python3 tests/test_server_vision_and_utf8.py
 run "embed/chat interleave" bash tests/test_server_embed_chat_interleave.sh 15
 run "0-token battery (#710)" env N=8 LOAD=80 FAIL_THRESHOLD=0.10 python3 tests/test_server_0token_battery.py

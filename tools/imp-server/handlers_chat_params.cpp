@@ -49,7 +49,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // Same key the rate limiter uses: an untrusted X-Forwarded-For in the
     // request log is a forged identity in the audit trail (#1614).
     ctx.log_client_ip = state.rate_limit_key(req.remote_addr, req.get_header_value("X-Forwarded-For"));
-    ctx.log_client_request_id = sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
+        ctx.log_client_request_id = sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
+    ctx.trace.traceparent = req.get_header_value("traceparent");
     ctx.log_raw_body = req.body;
     ctx.log_skip = g_in_anthropic_shim;
 

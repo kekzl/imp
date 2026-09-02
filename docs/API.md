@@ -292,7 +292,21 @@ id when no client id was sent, so every generation response carries some id
 a caller can quote. With `--log-requests`, the JSONL record carries the
 client id as `client_request_id` next to the server `req_id`, which is the
 join an agent framework needs to attribute its own latency to this hop.
-There is no OpenTelemetry export; the id propagation here is the wire half.
+With `server.otlp_endpoint` set (the full traces URL of an OTLP/HTTP
+collector, JSON encoding, `http://` only), every generation request is also
+exported as an OpenTelemetry span: a SERVER span named after the endpoint
+(`/v1/chat/completions`, `/v1/messages`, ...) with `imp.request_id`,
+`imp.client_request_id`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`
+/ `output_tokens`, `imp.cached_tokens`, `gen_ai.response.finish_reasons`,
+`imp.stream`, `imp.queue_ms` and `imp.ttft_ms` as attributes, plus `queue`,
+`prefill` and `decode` child spans on the request's timeline (the last two
+for streaming requests, where the first token is observed). A W3C
+`traceparent` request header puts the hop inside the caller's trace (its
+trace id, the caller's span as parent); without one a trace id is minted.
+The JSONL record carries the same `trace_id` / `span_id`. Export runs on a
+background thread in one-second batches; an unreachable collector costs one
+warning and dropped batches, never request latency. Service name:
+`server.otlp_service_name` (default `imp-server`).
 
 ## Errors
 

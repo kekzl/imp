@@ -7,6 +7,8 @@
 
 #include "handlers.h"
 #include "handlers_internal.h"
+
+#include <tuple>
 #include "model/image_placeholders.h"
 #include "utils.h"
 #include "tool_call.h"
@@ -53,11 +55,31 @@ thread_local std::string g_shim_stop_sequence;
 void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_clock::time_point& t_start,
                        const std::string& req_id, const std::string& endpoint, const std::string& client_ip,
                        const std::string& raw_body, double latency_ms, int prompt_tokens,
-                       int completion_tokens, const char* finish_reason, const json& response_body,
-                       const std::string& client_request_id) {
-    if (skip || !state.request_logger.enabled)
+                                              int completion_tokens, const char* finish_reason, const json& response_body,
+                       const std::string& client_request_id, const RequestSpan* trace) {
+    if (skip)
+        return;
+    // The span first: it does not depend on the JSONL being on.
+    std::string trace_id, span_id;
+    if (state.tracer.enabled()) {
+        RequestSpan sp = trace ? *trace : RequestSpan{};
+        sp.endpoint = endpoint;
+        sp.req_id = req_id;
+        sp.client_request_id = client_request_id;
+        sp.t_start = t_start;
+        sp.latency_ms = latency_ms;
+        sp.prompt_tokens = prompt_tokens;
+        sp.completion_tokens = completion_tokens;
+        sp.finish_reason = finish_reason ? finish_reason : "";
+        std::tie(trace_id, span_id) = state.tracer.record(sp);
+    }
+    if (!state.request_logger.enabled)
         return;
     json record;
+    if (!trace_id.empty()) {
+        record["trace_id"] = trace_id;
+        record["span_id"] = span_id;
+    }
     record["ts_ms"] =
         std::chrono::duration_cast<std::chrono::milliseconds>(t_start.time_since_epoch()).count();
     record["req_id"] = req_id;
@@ -1153,9 +1175,15 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     if (!choices.empty() && choices[0].contains("finish_reason") && choices[0]["finish_reason"].is_string()) {
         nonstream_finish = choices[0]["finish_reason"].get_ref<const std::string&>().c_str();
     }
+        ctx.trace.model = ctx.snap.model_name;
+    ctx.trace.stream = false;
+    if (ctx.server_req)
+        ctx.trace.queue_ms = ctx.server_req->queue_ms.load(std::memory_order_relaxed);
+    if (ctx.imp_req && ctx.imp_req->cached_tokens > 0)
+        ctx.trace.cached_tokens = ctx.imp_req->cached_tokens;
     log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, comp_id, ctx.log_endpoint, ctx.log_client_ip,
                       ctx.log_raw_body, ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish,
-                      response, ctx.log_client_request_id);
+                      response, ctx.log_client_request_id, &ctx.trace);
 
     res.set_content(dump_safe(response), "application/json");
 }
