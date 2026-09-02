@@ -1,182 +1,120 @@
 ---
 name: sm120-cuda-expert
-description: Use when writing, reviewing, or optimizing CUDA kernels targeting sm_120a (RTX 5090 / Consumer Blackwell, GB202) in the imp inference engine. Triggers on CUDA/PTX kernel code, shared-memory layout, tensor-core MMA, GEMV/GEMM/attention/quantization kernels, decode tok/s under expected, kernel emitting HMMA instead of mxf4nvf4, occupancy or register-pressure questions. Pair with `benchmark-cuda` for measurement and `check-degeneration` after hot-path changes.
+description: Use when writing, reviewing, or optimizing CUDA kernels targeting sm_120a (RTX 5090 / Consumer Blackwell, GB202) in the imp inference engine. Triggers on CUDA/PTX kernel code, shared-memory layout, bank conflicts, tensor-core MMA (mxf4nvf4, tf32, 3xTF32/3xFP16), GEMV/GEMM/attention/quantization/GDN-scan kernels, decode tok/s under expected, kernel emitting HMMA instead of mxf4nvf4, occupancy, register pressure, __launch_bounds__, spills, PDL. Pair with `benchmark-cuda` for measurement and `check-degeneration` after hot-path changes.
 ---
 
-# sm_120 CUDA Kernel Expert — imp Inference Engine
+# sm_120 CUDA Kernel Expert - imp
 
-Optimal-kernel reference for RTX 5090 (GB202, **sm_120a** — consumer Blackwell).
-PTX inline-assembly templates → `references/ptx-patterns.md`. Dead ends,
-version-dependent gotchas, root-cause fixes → `references/known-issues.md`.
+PTX templates: `references/ptx-patterns.md`. Dead ends, version gotchas, load-bearing fixes: `references/known-issues.md` (read BEFORE proposing a lever on a mature path).
 
-## Architecture quick reference
+## Architecture
 
 | Spec | Value |
-|------|-------|
-| SMs · CUDA cores · TC | 170 · 21,760 · 680 (4/SM, 5th gen) |
-| L1/SMEM per SM | 128 KB configurable (~99 KB opt-in shared, query `cudaDeviceProp::sharedMemPerBlockOptin`) |
-| L2 cache | 96 MB unified |
-| VRAM | 32 GB GDDR7, 1,792 GB/s |
-| Boost clock | 2,407 MHz |
-| Native MMA shapes | FP16 `m16n8k16`, FP8 `m16n8k32`, FP4 block-scaled `m16n8k64` |
+|---|---|
+| SMs / CUDA cores / TC | 170 / 21,760 / 680 (4 per SM, 5th gen) |
+| L1+SMEM per SM | 128 KB; opt-in shared ~99 KB per block (`cudaDeviceProp::sharedMemPerBlockOptin`), not H100's 228 KB |
+| L2 | 96 MB (every single Qwen3.8 weight fits: isolated benches read L2) |
+| VRAM | 32 GB GDDR7, 1792 GB/s datasheet; 1628 GB/s measured resident, ~237 spilled |
+| MMA shapes | FP16 `m16n8k16`, TF32 `m16n8k8`, FP8 `m16n8k32`, FP4 block-scaled `m16n8k64` |
+| Measured TC rates | FP4 `mma.sync` 2019 TOPS (~1/2 datasheet); f32-accumulate 1/4 rate; GeForce TF32 = 1/2 the FP16-fp32acc rate (253 TFLOPS) |
+| Registers | 255 per thread is the DEVICE attribute; a kernel "at 255" must be read from ptxas (`make kernel-resources`), the dense FA2 instance allocates 144 |
 
-**sm_120 has NO `tcgen05` / TMEM / `wgmma` / 2-CTA cluster MMA** — those are
-SM100 (B200) only. The peak path is register-based `mma.sync` with
-block-scaling, FA2-style. Ignore B200 kernel designs unless porting.
-
-**Use measured TC rates for roofline math, not datasheet TOPS.** FP4 `mma.sync`
-reaches ≈**2,019 TOPS (~½ datasheet)**, and **f32-accumulate runs at ¼ rate** —
-accumulate in f16 wherever PPL allows. Against datasheet numbers every FP4
-kernel looks falsely bad.
-
-**Calibrate %-of-roofline expectations against the measured baseline, not
-theory** — `tools/roofline/history/BASELINE` plus the newest report in
-`docs/archive/roofline_*.md` (note: the pinned BASELINE predates the 08-25/26
-batched-decode kernel wave). Readings that change decisions: the dense NVFP4
-decode GEMV class sits at its structural ceiling **at M=1** (multiple levers
-refuted - see known-issues), while the M<=32 GEMM class moved 613 → 388.9
-us/token via the native smallm v2 kernel (#1766) with a perfect-floor bound of
-~237 still open (per-shape 68-86% of floor, not reachable through grid
-geometry). Paged decode attention shows single-digit %-roofline that is
-*latency/L2-bound*, so the mechanical "target 70%" there is not real headroom
-(the GQA-tile variant built against it measured -9% e2e, #1785).
+No `tcgen05` / TMEM / `wgmma` / 2-CTA cluster MMA (SM100 only). Peak path = register `mma.sync` with block scaling, FA2-style. Toolkit bumps add nothing: CUDA 13.3 flipped 0 of 247 probed instructions.
 
 ## The three laws
 
-1. **Decode at batch=1 is launch-overhead-bound first, memory-bound second.**
-   With ~80–120 launches per layer, per-launch µs dominate once GEMM is fast.
-   Order: (a) make per-launch GEMM fast - at M=1..32 that is the native
-   `mxf4nvf4` smallm v2 kernel (`gemm.nvfp4_smallm`, default ON, #1766) with
-   CUTLASS as the large-M path, never the `gemm_nvfp4` dequant→cuBLAS
-   fallback; (b) capture decode in a CUDA Graph
-   (`CudaGraphConditionalRunner`, `src/runtime/cuda_graph.h`); (c) only then
-   chase memory traffic. A faster kernel alone shows little tok/s gain — it
-   *enables* the graph win. Always re-bench graphs-ON after a hot-path patch.
-   **Corollary: any per-token host round-trip drops a path out of the
-   conditional loop and costs −27–45% decode.** When adding a feature to the
-   decode path, check it does not force a host sync (logprobs still does one —
-   an open lever).
+1. **Batch=1 decode is at its ceiling; batched decode (M<=32) is its own regime.** Order at batch=1: fast per-launch GEMM (native `mxf4nvf4` smallm v2 for M<=32, `gemm.nvfp4_smallm`, #1766; CUTLASS at large M; never the `gemm_nvfp4` dequant->cuBLAS fallback), then CUDA-graph capture (`CudaGraphConditionalRunner`, `src/runtime/cuda_graph.h`), then bytes. Qwen3.8 M=1 spec-off: 95.8% busy, no single lever >=1% left (#1789); the decode graph is strictly serial there (union == sum). A per-token host round-trip drops a path out of the conditional loop (-27..-45%). At 32 streams grid-shape and launch levers PAID: row-block RMSNorm +6.8% (#1769), shared act-quantize +4.6% (#1771), producer quantize +2.6% (#1773), BF16 GDN state +12.5% (#1776/#1778), smallm sibling pairs +1.7% (#1788), row-batched sampling +2.2% (#1790), PDL device half +0.5-1.3% (#1833); residual-accumulate LOST -0.9% (#1793: the adds overlap with the next layer's GEMMs). Measure the regime with a 32-stream two-image A/B (benchmark-cuda).
+2. **Occupancy is for reaching the roofline, not passing it.** <=48 regs for 100% occupancy on GEMV paths. `__launch_bounds__(T, N)` forces N blocks by SPILLING: `(128,12)` on the MR GEMV went 14.5 -> 26.8 us at MR=4; `(256,1)` on the shipped dense FA2 instance moved ptxas 137 -> 180 regs. What shipped: `(256,2)` on a SEPARATE wrapper kernel (TWOSLOT 35 KB, 137 -> 128 regs, 24 B spill, FA2 -10% at pp4096, #1843) with the production instance byte-identical in SASS. Read `--ptxas-options=-v` per template instance; the CI `kernels` gate (`tools/kernel_resource_baseline.txt`, REG >= 240 or any local frame) ratchets it. Two CTAs/SM on a tensor-pipe-bound kernel is flat (chunkpar K2: 333 vs 331 ms) or worse under latency binding (+8%: barriers double, half the work per MMA phase).
+3. **Quantization type determines kernel strategy.** Q8_0: bandwidth-bound, row-parallel + smem activations. Q6_K: K-parallel + warp division. NVFP4 large M: `StorageTier::CUTLASS_NVFP4` (SfAtom layout); M<=32: smallm v2 on the PLAIN packed bytes (`h.source_data`/`h.source_scales`). Plain `StorageTier::NVFP4` at large M = slow `gemm_nvfp4`.
 
-   **Batched decode (M<=32, the serving regime) is its own regime.** Levers
-   refuted at batch=1 pay there: grid-shape work (row-block RMSNorm +6.8%,
-   #1769), launch-count fusion (shared act-quantize +4.6% #1771, producer-side
-   quantize fusion +2.6% #1773), and byte shrink on state (gdn.state_bf16
-   +12.5%, #1776). Measure such levers with a 32-stream aggregate A/B
-   (`benchmark-cuda`), never with batch=1 tok/s.
+## Numerics rules for tensor-core rewrites
 
-2. **Occupancy is king — for reaching the roofline, not passing it.** Keep
-   registers ≤48/thread for 100% occupancy. **Don't add `__launch_bounds__`**
-   on regular GEMV/attention paths (costs −4.5% to −20%); two correct
-   exceptions exist (HD=128 GDN miscompile workaround, and SMEM-limited FMHA
-   at `(256,1)`). On a path already at its measured ceiling, occupancy work is
-   refuted — check the roofline baseline before spending time there.
+- A recurrent state path needs error compensation on EVERY link: plain tf32 on the GDN state GEMMs = state diff 3.4e-4, PPL +0.13%; on P@W it cancels (Qeff = D q - P W). 3xTF32 (a_hi + a_lo) costs +25 us; 3xFP16 `m16n8k16` (a_hi + a_lo in fp16) runs 2x the TF32 rate and shipped on all state-feeding GEMMs (#1852; K1 -22%, K2 -18%). Output-only terms (Y_A, y) stay plain tf32/fp16.
+- Judge: unit-test state diff vs the fused kernel (~1e-6 = fp32-equivalent; 1e-4 fails), deterministic PPL on Qwen3.8-27B-NVFP4-vllm (fused 4.6283), `tools/analysis/layer_ab_diff.py` added divergence of the changed blocks ~0. Qwen3.6-35B PPL moves +-0.2..0.5% between fp32-equivalent kernels: no verdict there.
+- Online-softmax tile levers cost precision per extra rescale: HD=256 FA2 at Bkv=32 = kernel -11%, PPL +0.53%, opt-in only (`attention.fa2_hd256_bkv=32`, #1840). Scale inside the exp FMA is free (#1844, PPL 4.6283 both arms); `exp2f` forms and scale-in-Q are +0.35% PPL for the same speed.
+- FP16 intermediates on `out / row_scale` overflow to inf on small-absmax rows (FP8 SSM_IN, 2026-09-01); keep the rescale in FP32 or fuse it. Uniform-random unit-test rows cannot reach this.
 
-   **The min-blocks argument is the dangerous half.** `__launch_bounds__(T)`
-   caps threads; `__launch_bounds__(T, N)` also orders ptxas to fit N blocks per
-   SM, and it obeys by *spilling to local memory* — which is DRAM. Measured
-   2026-08-19 on the batched spec-verify GEMV: pinning `(128, 12)` bought the
-   nominal 12 blocks/SM by spilling 40 bytes at MR=4 and cost **14.5 → 26.8 µs**,
-   far outside the −20% this table quotes. Read `--ptxas-options=-v` for `spill
-   stores`/`spill loads` on **every** template instance before and after — an
-   instance that spills has already lost more than any occupancy it gained.
+## GDN chunk-parallel scan (#1847-#1852, `gdn.chunkpar_scan` default on)
 
-3. **Quantization type determines kernel strategy.** Q8_0 (simple dequant) →
-   bandwidth-bound → row-parallel + smem-cached activations. Q6_K (complex
-   dequant) → compute-influenced → K-parallel + warp-level division. NVFP4
-   prequant → must reach `StorageTier::CUTLASS_NVFP4` for the large-M fast
-   path (SfAtom layout); the M<=32 smallm v2 kernel instead reads the PLAIN
-   packed bytes (`h.source_data`/`h.source_scales`) directly, so "SfAtom is
-   the fast path" only describes large M. Plain `StorageTier::NVFP4` at large
-   M falls through to slow `gemm_nvfp4`. There is no universal best GEMV.
+`src/compute/gdn_scan_chunkpar.cu` (K1 factor kernel + launcher), `gdn_scan_chunkpar_pass.cu` (K2 state pass), `.cuh` shared. Grid (chunks x heads) for factors, (heads, 2) for the state pass; 42-126 MiB workspace (null degrades to the fused route); single-sequence prefill n >= 128, HD=SS=128. Qwen3.6-35B pp4096 e2e 12.9k -> 31.0k tok/s vs the 32-CTA fused scan (42% of the hybrid pp512 wall before).
 
-## Paths that must stay active (verify before optimizing anything else)
+| Lever | Measured |
+|---|---|
+| Solve histories in GLOBAL memory | K1 379 us; in smem (aliased over dead K/Q staging) + 256 threads: 196 us |
+| K2 scalar FMA from smem | 628 us (= the sequential scan); float4 staging + column split: 242 us |
+| Accumulator splits / 2-t unroll in K2 | REGRESS 242 -> 295/309 us (registers cost the 2-CTA residency); in K1 four partial accumulators pay |
+| Blockwise triangular solve (16-row diagonal blocks in registers, off-diagonal 3xTF32) | 128 -> 8 barriers per chunk, K1 75 -> 49.5 us/CTA (#1850) |
+| K2 8 warps + register-pipelined staging | K2 -30% (#1851) |
+| Strip per head count under an L2 cap (`gdn.chunkpar_strip=0` auto: factor set <= 2/3 L2) | strip 14-16 wins K1 -21% but K2 +11..13% (126 MB factor set > 96 MB L2 reads DRAM); net 0 |
+| XOR swizzle on stride-128 float4 tiles `chunk ^ ((row & 7) << 1)` | K1 bank conflicts 64% -> 25%; k16 fragment rows (2tg/2tg+1) need swz128 staging + `SH = COLS + 4` |
+| K2 half staging (RS=32, 2 CTAs/SM) | flat under TF32 binding, +8% under FP16 binding: refuted twice |
 
-A "slow kernel" is usually a path that fell back, not a kernel that needs work:
+Traps: `gdn_scan_chunkpar.cu` sat at exactly 600 code LOC (kernel hard threshold) after #1850, hence the split; nvcc 13.3 segfaults on a generic lambda with a `std::true_type` tag inside a kernel (use a free template function); dumps for `layer_ab_diff.py` are 3.6 GB per arm at 300 tokens.
 
-- **CUTLASS NVFP4 weight cache** — check the `cutlass_nvfp4 weight cache` line
-  at init. Without it decode runs the dequant→cuBLAS slowpath.
-- **CUDA-graph decode loop** — the single biggest decode multiplier; requires
-  the CUTLASS fast path first.
-- **FA2 prefill family** (`attention.fmha_fa2`, `fa2_hd256`, `fa2_fp16qk`, all
-  default-on) — the prefill attention path on this chip. Other head dims decline
-  to cuBLAS safely.
-- **Decode sidecars and default-ON levers**: `gemm.nvfp4_smallm` (+
-  `nvfp4_smallm_impl=2`, the batched small-M GEMM, #1766), `gdn.state_bf16`
-  (BF16 recurrent state, +0.21% PPL by design, #1776/#1778),
-  `gemm.fp8_ssm_proj` (GDN in/out projections), `gemm.nvfp4_lm_head*`,
-  `gemm.fp8_attn_proj` - each default-on or "auto" with a measured quality
-  trade recorded. Don't silently flip one.
-- **INT8-IMMA prefill GEMM family** for GGUF. Note dense Q4_K IMMA loses to
-  cuBLAS and is off by design; the win is MoE prefill.
+## Paths that must stay active (check before optimizing)
 
-**FP8 prefill is DISABLED on sm_120** — cuBLAS FP8 returns `NOT_SUPPORTED` at
-non-aligned M (`src/runtime/engine_init_resolver.cpp`). Any plan quoting
-"+40–60% from FP8×FP8 prefill" is for another chip; prefill levers here are the
-FA2 family plus **cross-sequence ragged prefill batching**
-(`runtime.prefill_batch`, default ON, #1780: several requests' chunks in one
-ragged forward, +6.2% aggregate and TTFT p50 4.11 → 2.55 s at 32 streams).
+| Path | Evidence at init / config |
+|---|---|
+| CUTLASS NVFP4 weight cache | `cutlass_nvfp4 weight cache` log line; without it decode runs dequant->cuBLAS |
+| CUDA-graph decode loop, graph prewarm | `runtime.cuda_graphs`, `runtime.graph_prewarm` (32/32 captures in 2.3 s) |
+| PDL both halves | `runtime.no_pdl=false`; registered kernels call `griddepcontrol.wait` before the first global access (`src/compute/pdl_device.cuh`); registered = waits, blanket registrations without a wait RACED (`GreedyDeterminism`) |
+| FA2 prefill family | `attention.fmha_fa2`, `fa2_hd256`, `fa2_fp16qk`, `fa2_dense_2cta` (all on); `fa2_hd256_bkv` 64 |
+| Stream-K on the CUTLASS prefill GEMM | `gemm.nvfp4_cutlass_streamk=1`: N > 2048, >= 1 wave, last wave <= half full; workspace sized as the max over every 128-tile grid (~22 MB), a 0 B workspace refuses EVERY launch (22k -> 4.2k tok/s); the SK-typed kernel in data-parallel mode is slower (109 vs 100 us) so shapes outside the rule keep the plain kernel |
+| Batched-decode sidecars | `gemm.nvfp4_smallm` + `_impl=2` + `_pair`, `gdn.state_bf16` (+0.21% PPL by design), `gemm.fp8_ssm_proj`, `gemm.nvfp4_lm_head*`, `gemm.fp8_attn_proj` |
+| Chunk-parallel GDN prefill | `gdn.chunkpar_scan`, `gdn.chunkpar_strip` |
+| INT8-IMMA prefill for GGUF MoE | dense Q4_K IMMA loses to cuBLAS and is off by design |
 
-## Shared-memory budget
+FP8 prefill stays DISABLED on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M, `src/runtime/engine_init_resolver.cpp`); FP8 GDN-projection prefill re-measured 2026-09-01: class is 12-13% of the steady-state sum, ceiling +5%, inside the cuBLAS band, REFUTED (record `docs/plans/2026-08-31-fp8-ssm-prefill.md`). Prefill levers here: FA2 family, ragged prefill batching (`runtime.prefill_batch`, #1780), chunk-parallel scan.
 
-Max opt-in: **~99 KB per block** (NOT H100's 228 KB — query
-`cudaDeviceProp::sharedMemPerBlockOptin`).
+## Closed classes (do not reopen without a new mechanism)
 
-| head_dim | Bq | SMEM | Notes |
-|----|----|----|-------|
-| 64 | 128 | ~89 KB | Double-buffer KV +16 KB |
-| 128 | 64 | ~81 KB | Standard |
-| 256 | 32 | ~88 KB | Qwen3.5 GDN partial-RoPE |
+| Class | Verdict |
+|---|---|
+| M=1 NVFP4 decode GEMV | structural ceiling; occupancy raise, KPAR->MR, v2 pipeline at M=1 (#1789) all refuted |
+| MoE grouped GEMM (NVFP4 prefill) | ~60% of weight floor; CUTLASS tile sweep, 32-row v2 grouped (-12.5% isolated, +3.5..+15% in situ), multi-tile CTA mt32/64/128 all refuted on real routing; the sm120 block-scaled builder rejects M=64 tiles (SF atom 128 rows) |
+| FA2 occupancy at hd=128 | 16 warps/SM shipped (#1843); split-D warp pairing refuted; remaining path = in-CTA pipelining, and the kernel spent 5.5 scalar ALU per MMA in the softmax loop before #1844 |
+| NVFP4 decode attention traffic sharing | GQA tile -9% (#1785), smem double buffer -3%; the lever was LOAD WIDTH (#1817: 20 `LDG.E.U8` per iteration -> word loads, +15.7%) |
+| FP4-precision attention | closed 2026-07-04 (three refutations) |
+| Batch=1 launch-class fusion | 0% e2e; split-K cap -21..-35%; raising split-K -2.9..-4.7% |
 
-```cuda
-cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-```
+## Shared memory budget
+
+| head_dim | Bq | SMEM |
+|---|---|---|
+| 64 | 128 | ~89 KB |
+| 128 | 64 / 128 (TWOSLOT 2-CTA) | ~81 KB / 35 KB |
+| 256 | 32 (Bkv=64) / Bkv=32 | ~68 KB / 35 KB |
+
+`cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`. Padding two access patterns at once may not fit (chunkpar histories at stride 132 next to T/P padding did not fit 99 KB); swizzle instead.
 
 ## Compile flags
 
-**Target `sm_120a`** — the `a` suffix is a superset of `120f` adding
-`mma.sync.kind::mxf4nvf4.block_scale` and TMA-WS-Grouped-GEMM, both required
-for the CUTLASS NVFP4 fast path on Mamba2 shapes. Do NOT target `sm_120` /
-`sm_120f`, and do NOT add a generic `compute_120` PTX fallback (lacks FP8 MMA +
-block-scale).
-
-```cmake
-set(IMP_SM120_FLAGS "--generate-code=arch=compute_120a,code=sm_120a")
---expt-relaxed-constexpr --extended-lambda      # also
-# Release: -O3 --use_fast_math
-```
-
-`compute_120a` unlocks `mma.sync.aligned.kind::mxf4nvf4.block_scale`, extended
-`cp.async.bulk.tensor` (TMA Multicast), Cluster-Launch + CLC, extended mbarrier
-phases, hardware FP4 saturation. It does NOT unlock `tcgen05.*` / TMEM /
-`wgmma`. Guard device code with `#if __CUDA_ARCH__ >= 1200`.
+`--generate-code=arch=compute_120a,code=sm_120a` (`IMP_SM120_FLAGS`), `--expt-relaxed-constexpr --extended-lambda`, release `-O3 --use_fast_math`. `compute_120a` unlocks `mma.sync.aligned.kind::mxf4nvf4.block_scale`, TMA-WS grouped GEMM, cluster launch, extended mbarrier, FP4 saturation. Never `sm_120`/`sm_120f`/generic `compute_120` (no block-scale, no FP8 MMA). Guard with `#if __CUDA_ARCH__ >= 1200`.
 
 ## Common mistakes
 
 | Mistake | Fix |
-|---------|-----|
-| Targeting `sm_120` / `sm_120f` instead of `sm_120a` | `compute_120a/sm_120a`. `120f` blocks `mxf4nvf4.block_scale` → forces GDN/Mamba2 onto slow `gemm_nvfp4`. |
-| Routing decode through slow `gemm_nvfp4` | Promote the weight to `StorageTier::CUTLASS_NVFP4`; verify the init log line. |
-| Forgetting the graphs-ON re-bench after a kernel speedup | Compute speedup alone doesn't show in tok/s. |
-| Assuming H100 SMEM (228 KB) | 99 KB opt-in here. Query the device property. |
-| `__launch_bounds__` on regular paths | −4.5% to −20%. Only the two documented exceptions. |
-| `__launch_bounds__(T, min_blocks)` to force occupancy | ptxas obeys by spilling to DRAM: measured −46% to −64% on one kernel. Check `spill stores` per template instance. |
-| `reinterpret_cast` on Q8_0 blocks | 34-byte blocks are not 4-aligned — `memcpy()`. |
-| `__noinline__` on device helpers | Spills to local memory (DRAM). Use `__forceinline__`. |
-| Missing `__syncthreads()` after `cp.async wait` | Race on SMEM reads. |
-| Pointer advance without `sizeof(T)` | Cost a real bug — see known-issues. |
-| Registers > 48/thread | `--ptxas-options=-v`, then refactor. |
-| Claiming a source tweak is "perf-neutral" without a SASS diff | `cuobjdump -sass` — byte-identical SASS is proof, a bench is not. |
+|---|---|
+| Targeting `sm_120` / `sm_120f` | `compute_120a/sm_120a` |
+| Decode routed through `gemm_nvfp4` | promote to `StorageTier::CUTLASS_NVFP4`; check the init line |
+| No graphs-ON re-bench after a kernel win | the tok/s win is graph-mediated |
+| H100 SMEM assumptions | 99 KB opt-in |
+| `__launch_bounds__` on regular GEMV/attention paths | -4.5..-20%; min-blocks spills to DRAM; only wrapper-kernel bounds with a SASS-identical production instance |
+| Byte-pointer inner loops (`const uint8_t*` walked element-wise) | ptxas cannot merge; count `LDG.*` forms in `cuobjdump -sass` first |
+| `reinterpret_cast` on Q8_0 blocks (34 B, unaligned) | `memcpy()` |
+| `__noinline__` device helpers | spill to local; `__forceinline__` |
+| Missing `__syncthreads()` after `cp.async wait` | race |
+| Pointer advance without `sizeof(T)` | known-issues (FP8 FMHA S_tile) |
+| PDL registration without `griddepcontrol.wait` | race on the producer's output; `pdl::launch` has no default args, register at the launch site (`pdl::enable_kernel`) |
+| Isolated bench without an L2-defeating ring | reads L2; rotate >= 4 x 100 MB slabs, warm per shape |
+| "perf-neutral" without a SASS diff | `cuobjdump -sass`; byte-identical = proof |
+| tf32 on a recurrent state path checked only by MoE PPL | unit-test state diff + Qwen3.8 deterministic PPL |
 
-## Where to look next
+## Where to look
 
-- **PTX templates** (mxf4nvf4, f8f6f4, cp.async, prmt LUT, FP16→FP8 cvt, warp
-  shuffle, `__ldcs`) → `references/ptx-patterns.md`
-- **Dead ends, version-dependent retries, load-bearing fixes** →
-  `references/known-issues.md` — read this BEFORE proposing a lever; most
-  obvious ideas on the mature paths have been measured and refuted.
-- **Repo docs**: `docs/internals/SM120.md` (hardware), `docs/internals/KERNELS.md` (kernel notes), `docs/PERF.md`
-  (baselines + methodology), `docs/audit/` (roofline reports).
-- **Hot-path source**: `src/compute/` (attention, gemm, NVFP4), `src/quant/`
-  (dequant + the smallm v2 GEMM `nvfp4_gemm_smallm_v2.cu` + `nvfp4_pack.cuh`),
-  `src/exec/` (GEMM dispatch `executor_gemm_dispatch.cu`, producer-fused
-  norm/swiglu+quantize), `tools/imp-bench/`
+- `src/compute/`: attention (`attention_fmha_*`, `attention_paged_nvfp4.cu`), GDN (`gdn_scan_chunkpar*.cu`, `gdn_scan_tc.cu`), `pdl_device.cuh`, sparse attention kernels.
+- `src/quant/`: dequant, `nvfp4_gemm_smallm_v2.cu`, `nvfp4_pack.cuh`.
+- `src/exec/`: `executor_gemm_dispatch.cu`, `executor_gemm_smallm.cu`, `executor_sampling.cu`, `executor_attention_decode.cu`, producer-fused norm/swiglu+quantize, `sparse_attn_geometry.h`.
+- `src/runtime/`: `cuda_graph.h`, `pdl.h`, `engine_init_resolver.cpp`.
+- Gates: `make kernel-resources` (`tools/kernel_resources.py`), `tools/check_launch_guards.py`, `tools/check_filesize.py` (kernel `.cu` hard 600 code LOC; split kernel / launcher / instantiations).
+- Docs: `docs/internals/SM120.md`, `docs/internals/KERNELS.md`, `docs/internals/PROFILING.md`, `docs/PERF.md`, `docs/roadmap.md` (verdict ledgers), `tools/roofline/history/BASELINE`.

@@ -1,230 +1,186 @@
 ---
 name: benchmark-cuda
-description: Use when benchmarking, profiling, or A/B-testing CUDA kernels or end-to-end perf in the imp inference engine on RTX 5090 (sm_120), including refreshing tests/perf_baseline.json or publishing numbers to docs/BENCHMARKS.md and the README. Triggers on "benchmark kernel", "profile cuda", "ncu", "nsys", "kernel timing", "occupancy", "bandwidth bound", "compute bound", "roofline", "perf baseline", "is this regression real", "decode dropped". Do NOT use for writing/optimizing kernel code (sm120-cuda-expert) or output-quality checks (check-degeneration).
+description: Use when benchmarking, profiling, or A/B-testing CUDA kernels or end-to-end perf in the imp inference engine on RTX 5090 (sm_120), including refreshing tests/perf_baseline.json or publishing numbers to docs/BENCHMARKS.md and the README. Triggers on "benchmark kernel", "profile cuda", "ncu", "nsys", "kernel timing", "kernel sum", "occupancy", "bandwidth bound", "compute bound", "roofline", "perf baseline", "is this regression real", "decode dropped", "aggregate throughput", "two-image A/B", "prefill kernel A/B". Do NOT use for writing/optimizing kernel code (sm120-cuda-expert) or output-quality checks (check-degeneration).
 ---
 
-# CUDA Kernel Benchmarking — imp / sm_120 / RTX 5090
+# CUDA Benchmarking - imp / sm_120 / RTX 5090
 
-Pair with `sm120-cuda-expert` for optimization decisions.
+Pair with `sm120-cuda-expert` (levers) and `docs/internals/BENCHMARKING.md` (measurement contract).
 
-## STOP — what is a real signal on this box
+## STOP: what is a real signal on this box
 
-1. **Decode is the only reliable A/B signal.** Prefill (`pp512`) spread across process starts is a property of the MODEL, not of cuBLAS: measured on one quiet host, 3 fresh processes per arm, **0.6-1.2 % on Qwen3-8B Q8_0** (the cuBLAS-FP16 prefill model) against **37.6 % on a fully resident NVFP4 MoE model**. cuBLAS algo re-selection on its own measures 3.50 % over nine starts. (The "2.6×" this line used to quote was a carried-forward citation, retracted 2026-08-03.) Never gate on prefill alone; resolve it with a paired, alternating A/B, not with more reps. For prefill-*kernel* A/Bs ≤5%, end-to-end pp cannot resolve the delta at all — compare **nsys per-kernel time sums** instead. Metric keys: the gate uses **`tg128`**, ad-hoc runs usually print `tg256` — compare like with like.
-2. **The GPU is water-cooled and never throttles** (idles ~30 °C). Do NOT add temperature cooldowns. The 15 s cooldown in `gen_perf_baseline.sh` resets **cuBLAS algo state**, not temperature.
-3. **Idle downclock is the dominant cold-start artifact.** Clocks need ~1 s to ramp, so the first second reads LOW — once producing a spurious −42% that re-measured +20% clean. Precede timed reps with a discarded warmup >1 s; imp's built-in `Warmup...` is too short.
-4. **Decode can read 8–15% low for a whole day** (host/driver state on this WSL2 box, issue #526). Sample clocks DURING the bench: healthy load ≈ **2850 MHz SM / 13801 MHz mem / ~500 W**. Lower mem clock or power = depressed host → don't trust cross-day deltas or refresh baselines that day.
-5. **Back-to-back sweeps read 6–10% low** vs isolated runs. One model per process.
-6. **n-gram speculation is default-ON for dense models, and a dense `--bench` mostly measures the batched *verify* path** (~99.9% draft accept). The prompt is **not** why, though this line said so for months: `imp-cli --bench` builds it as `tokens[i] = i % vocab_size` (`tools/imp-cli/main.cpp`), so at `--bench-pp 512` it is 512 *distinct* ids and every 6-gram in it is unique. With `speculative.min_match = 6` the prompt cannot supply one draft. The drafts come from the **generation**: the drafter matches against `input + prediction + output`, and a synthetic counting prompt under `ignore_eos` sends some models into a periodic continuation that prompt-lookup then predicts exactly. So the confound is "this checkpoint degenerates on nonsense input", not "the prompt repeats" - and it turns on the **quantisation**, not the model: Qwen3-14B NVFP4 accepts 504 of 504 where the same model at Q6_K accepts 6 of 96 (and `drafted=0` on one of three fresh processes, so that arm is bistable too). Qwen3-8B Q8_0: 504 of 504. For decode-kernel/GEMV A/Bs pass `--set speculative.ngram=false` **to both arms**: a real +2 to 3% GEMV win is otherwise invisible.
-7. **A number is only comparable to a run with the same flags.** Before calling a delta a regression, check what the measurement changed: prefix caching (`--bench` disables it since #1061; older pins measured cache hits — `--set server.prefix_cache=true` restores the old behaviour), context (`tg128_at_ctx_2048` needs `--bench-pp 2048`; pp16/pp512 read ~+13%/+10% on the same build and look like north-star gains), and trial count (`verify-fast` runs fewer than `gen-perf-baseline`, so it reads lower).
-8. **No-graphs profiles OVERSTATE tiny-kernel classes - validate any launch/latency-class lever with a graphs-ON e2e A/B BEFORE building it.** The roofline pipeline profiles with `--no-cuda-graphs`, but under the shipped graphs+PDL loop those launches overlap away (the no-graphs kernel-time sum is ~1.8× the real step). Two refutations: a fused gate-GEMV+top-k kernel with bit-identical output and 2 fewer launches/layer moved e2e **0%**; capping decode split-K REGRESSED −21…−35%. A decode lever must hold real bytes or critical-path math - grid-(1,1,1) classes (moe_routing, rmsnorm, rope, kv_write, elementwise) are not levers **at batch=1. At batched decode (32 streams) this rule INVERTS**: row-block RMSNorm +6.8% (#1769), shared act-quantize +4.6% (#1771), producer quantize fusion +2.6% (#1773) all paid; measure that regime with the aggregate A/B below, never with batch=1 tok/s.
-9. **Isolated kernel benches measure L2, not DRAM.** A "13x over its DRAM floor" reading can be entirely L2-served: the NVFP4 GQA-tile decode attention was built on that misread and measured **-9% e2e** (one layer's KV across 32 seqs ≈ 42 MB vs 96 MB L2, #1785). Counter-technique: rotate ≥8 x 100-MB input slabs to defeat L2 before quoting isolated GB/s. Corollary: isolated optimum ≠ step optimum (GDN v1: 23.9 us isolated / 45.8 in-situ) - but when the in-situ sweep DOES rank like the isolated one, record that too (smallm v2 stage/stripe retune, #1768).
+| # | Fact | Consequence |
+|---|---|---|
+| 1 | pp512 spread across process starts is a property of the MODEL: 0.6-1.2% on Qwen3-8B Q8_0, 37.6% on a resident NVFP4 MoE; cuBLAS algo re-selection alone 3.50% over nine starts | Decode is the A/B signal. Prefill-kernel deltas <=5% resolve ONLY in nsys per-kernel sums (`tools/analysis/prefill_kernel_ab.sh`), never in e2e pp. Gate key is `tg128`; ad-hoc runs print `tg256` |
+| 2 | The GPU is water-cooled, idles ~30 C, never throttles | No temperature cooldowns. The 15 s cooldown in `gen_perf_baseline.sh` resets cuBLAS algo state |
+| 3 | Idle downclock: clocks ramp ~1 s; between bench shapes they fall to 210 MHz | Discard >1 s warmup before timing; warm per shape in isolated benches. A cold shot once read -42% that re-measured +20% |
+| 4 | Decode reads 8-15% low for a whole day (host/driver state, #526) | Sample clocks DURING the bench: healthy 2850 MHz SM / 13801 MHz mem / ~500 W. Never refresh a baseline or trust a cross-day delta without them |
+| 5 | Back-to-back sweeps read 6-10% low | One model per process |
+| 6 | `--bench` prompt is `tokens[i] = i % vocab` (512 distinct ids, `tools/imp-cli/main.cpp`; no 6-gram repeats at `speculative.min_match=6`); n-gram drafts come from the GENERATION looping on it, quantisation-dependent: Qwen3-14B NVFP4 accepts 504/504, Q6_K 6/96 and bistable | Decode-kernel A/Bs on dense models: `--set speculative.ngram=false` in BOTH arms, or a real +2-3% GEMV win is invisible |
+| 7 | `imp-cli --bench` pins `speculative.moe=false`, `speculative.suffix=false`, `speculative.hybrid=false`, `speculative.mtp_k=0`, `server.recurrent_snapshot_mb=0` (`tools/imp-cli/args.cpp`, `apply_config_pins`); an explicit `--set` wins | Every new auto-default needs a bench pin or `gen_perf_baseline.sh` bakes speculation into the gate (mtp auto engaged the head before its pin, 71.7 vs 86.8 tok/s) |
+| 8 | A number is comparable only to a run with the same flags | `--bench` disables prefix caching since #1061 (`--set server.prefix_cache=true` restores the old band); `tg128_at_ctx_2048` needs `--bench-pp 2048`; pp16/pp512 read ~+13%/+10% on the same build; `verify-fast` runs fewer trials than `gen-perf-baseline`. Log the `imp.conf loaded from`, `dtype=`, `attn_decode=` lines per arm (a stray repo-root `imp.conf` made two profile arms identical before #1784) |
+| 9 | No-graphs profiles overstate tiny-kernel classes ~1.8x at batch=1 on MoE; on Qwen3.8 M=1 the decode graph is strictly serial (union == sum, #1797) | A batch=1 lever must hold bytes or critical-path math. At 32 streams the class pays (RMSNorm +6.8% #1769, act-quantize +4.6% #1771, producer fusion +2.6% #1773) but residual-accumulate lost -0.9% (#1793). Measure the regime you claim |
+| 10 | Isolated kernel benches measure L2: every single Qwen3.8 weight fits the 96 MB L2 (>1792 GB/s = self-disqualified; the GQA-tile decode kernel built on that misread measured -9% e2e, #1785); balanced per-expert inputs flip the sign vs real routing (grouped GEMM mt32 -8.7% isolated, +4% in situ) | Rotate >=4-8 x 100 MB slabs; sub-wave shapes are bistable 1.6x between runs; verdicts from in-process nsys kernel sums; when the in-situ sweep ranks like the isolated one, record that too (#1768) |
+| 11 | Capture costs under nsys are CUPTI-inflated (27.8 ms gaps; >1 ms gaps at the wave ramp = graph captures) | Never price graph capture from a profile |
+| 12 | "Neutral" on a gate-based feature is usually a dead path | Prove activity by kernel launch counts (stream-K workspace refused every launch: 1960 -> 1400 CUTLASS launches, 22k -> 4.2k tok/s; sparse needs the `sparse decode attention ACTIVE` line in one arm only) |
+| 13 | Batch=1 roofline: 1628 GB/s resident (8 GiB sweep, #1797), spilled ~237 GB/s; Qwen3.8 spec-off ceiling ~112 tok/s, measured 87.4 | Re-measure the sweep before quoting bandwidth; the old 1530 pin is stale |
 
 ## Methodology (every A/B)
 
-`CUBLAS_WORKSPACE_CONFIG=:4096:8` · 10 reps · 3+ trials · one model per process · `make check-gpu` first (no concurrent GPU consumers) · warm clocks >1 s before timing.
-
-**Before any GPU job: no FOREIGN GPU consumer.** For single-process benches `docker ps -q | wc -l` must be 0 - detached/`nohup` containers survive session ends and silently depress every number (cost a v0.10.0 re-bench). Server-based concurrency A/Bs necessarily run their own `imp-server` container; there the rule is "nothing BESIDES the harness's server", checked per arm via `~/.claude/skills/gpu-stats/gpu-busy-check.sh` (as `tools/analysis/smallm_v2_conc_ab.sh` does). `make check-gpu` (now `scripts/require_free_gpu.sh`, memory.used-based) helps but doesn't see a container that isn't currently on the GPU.
-
-The host has **no CUDA toolkit** — all binaries run inside Docker (`imp:test`, models mounted from `$HOME/models`, NOT the repo's `models/` symlinks). `imp-cli` has no `--ctx` flag — the context ceiling is `--max-seq-len`.
+- `CUBLAS_WORKSPACE_CONFIG=:4096:8`, 10 reps, 3+ trials, one model per process, warm >1 s.
+- GPU free first: `make check-gpu` (`scripts/require_free_gpu.sh`) or `~/.claude/skills/gpu-stats/gpu-busy-check.sh` (utilisation + memory; a Windows tenant is invisible to `docker ps` and `--query-compute-apps`). `gpu-busy-check && (nohup ...) ; echo launched` prints "launched" on BUSY too; test the exit code.
+- Server A/Bs: nothing besides the harness's own server (`docker ps -q | wc -l` = 0 before single-process benches).
+- Everything runs in Docker (`imp:test`, models from `$HOME/models`). `imp-cli` has no `--ctx`; the ceiling is `--max-seq-len`. 32k prompts via `--prompt-file` (argv caps at ~128 KiB).
+- Bench from binary COPIES (`-v dir:/bin_arm`): `make dev` rebuilds `build-dev/` under a running chain.
+- dtype/KV A/Bs: force emitted tokens equal (`max_tokens` below need); library-reserve state equal in both arms (a `--rm` container plans with the 3900 MiB constant, a mounted `/home/imp/.cache/imp` with its measurement: 716 blocks apart on Qwen3.8).
+- PPL verdicts: `--set runtime.deterministic=true` both arms (0.35% run-to-run otherwise), `tools/analysis/ppl_corpus_45k.txt`, `--set speculative.mtp_k=0` (auto loads the head, +0.79 GiB). Qwen3.6-35B PPL moves +-0.2..0.5% between fp32-equivalent kernels (routing flips): numerics judge is Qwen3.8-27B-NVFP4-vllm (fused GDN 4.6283) plus the unit-test state diff and `tools/analysis/layer_ab_diff.py` added divergence.
+- Every verdict ships its harness in `tools/analysis/` or its md5 in the PROV block (`scripts/bench_competitive.sh` re-execs from a `mktemp` copy and prints `harness: md5=`).
+- Check ad-hoc `grep`/`awk` against a known case first (`grep -c 'hero$'` also matched `nonhero`).
 
 ## Pick the right tool
 
-| Goal | Tool | Notes |
-|------|------|-------|
-| End-to-end engine perf | `make bench` | `imp-cli --bench --bench-pp 512 --bench-reps 5` sweep across baseline models |
-| Single model quick check | `make test-perf` | Qwen3-8B Q8_0 only |
-| Per-config sweep MBU/MFU/TTFT/TBT | `bench/bench.py` | CSV output, optional llama.cpp compare |
-| Refresh perf baseline | `make gen-perf-baseline [MODEL=/models/…]` | cold-median: 5 trials × 15 s cooldown; writes `tests/perf_baseline.json`, including the `own_peak_mb` VRAM pin (extra `--mem-report` run) |
-| Regression gate | `make verify-fast` | 8% decode / 8% prefill / 10% peak VRAM (`own_peak`) |
-| VRAM attribution for one run | `imp-cli --mem-report` | lifecycle checkpoints, per-pool notes, named charges (context / library reserve / engine arena), `own_peak` vs any `--vram-budget`, residual; the gate parses `own_peak=` from it |
-| North-star gate (Qwen3-14B Q6_K) | `make verify-north-star` | vs `tests/perf_baseline_north_star.json` |
-| Single kernel — wall-clock A/B | `cudaEvent` in launcher | see Step 1 |
-| Single kernel — metrics, stalls | `ncu` | see Step 2 |
-| Timeline / launch overhead / graphs | `nsys` | see Step 3 |
-| Full roofline sweep (ncu+nsys pipeline) | `make roofline-measure` | `tools/roofline/` (see its README); classifies kernels, attributes nsys time shares |
-| Pin roofline run as regression baseline | `make roofline-pin` / `roofline-regress` | baseline ref in `tools/roofline/history/BASELINE` |
-| Compare imp vs llama.cpp | `make bench-competitive` (`scripts/bench_competitive.sh`) | same models, apples-to-apples; re-execs from a frozen copy, prints `harness: md5=` |
-| ncu wrapper for imp-bench | `bench/profile.sh` | Nsight Compute profile → `bench/results/imp_profile.ncu-rep` (NOT the llama.cpp comparator) |
-| **32-stream aggregate A/B (serving regime)** | `tools/analysis/conc_client.py` + `tools/analysis/smallm_v2_conc_ab.sh` | see "Aggregate throughput" below |
+| Goal | Tool |
+|---|---|
+| End-to-end engine perf | `make bench` (`imp-cli --bench --bench-pp 512 --bench-reps 5`) |
+| Single model quick check | `make test-perf` (Qwen3-8B Q8_0) |
+| Refresh perf baseline | `make gen-perf-baseline [MODEL=/models/...]`: 5 trials x 5 reps, 15 s cooldown, median; writes `tests/perf_baseline.json` incl. `own_peak_mb` |
+| Guarded re-pin (refuses top-range / volatile days) | `scripts/repin_baselines_if_median.sh` |
+| Regression gate | `make verify-fast` (`scripts/verify.sh`): 8% decode / 8% prefill / 10% peak VRAM |
+| VRAM attribution | `imp-cli --mem-report` (`own_peak=` is what the gate parses) |
+| North-star gate | `make verify-north-star` (`tests/perf_baseline_north_star.json`) |
+| Long-context decode A/B | `scripts/bench_longctx_ab.sh`; capacity vs decode `tools/analysis/ctx_capacity_decode_sweep.sh` |
+| Prefill-kernel A/B for one config key (nsys kernel sum per arm) | `tools/analysis/prefill_kernel_ab.sh`; FA2 hd=256 variant `fa2_hd256_bkv_ab.sh` |
+| 32-stream aggregate A/B, config key | `tools/analysis/smallm_v2_conc_ab.sh` + `tools/analysis/conc_client.py` |
+| 32-stream aggregate A/B, CODE change | `tools/analysis/two_image_conc_ab.sh` (two prebuilt images, alternating) |
+| Long-context serving A/B (tg8/tg520 differential) | `tools/analysis/serving_sparse_ab.sh` + `longctx_conc_client.py` |
+| Serving idle attribution | `tools/analysis/serving_idle_profile.sh` + `nsys_gap_attribution.py` |
+| MTP / speculation | `tools/analysis/mtp_adaptive_ab.sh`, `mtp_k_sweep.sh`, `token_recycling_ab.sh`, `scripts/mtp_accuracy_bench.sh` |
+| Decoder ITL under concurrent ingest | `scripts/bench_prefill_latency.py` |
+| Per-config sweep MBU/MFU/TTFT/TBT | `bench/bench.py` |
+| Single kernel wall-clock | `cudaEvent` in the launcher (below) |
+| Per-kernel metrics, stalls | `ncu` (below); wrapper `bench/profile.sh` |
+| Timeline, launch gaps, graphs | `nsys` (below) |
+| Full roofline sweep | `make roofline-measure` (`tools/roofline/`, README there); pin `make roofline-pin`, `roofline-regress`; history `tools/roofline/history/` |
+| imp vs llama.cpp | `make bench-competitive` (`scripts/bench_competitive.sh`, writes `/tmp/bench_competitive.tsv`) |
+| Hero scoreboard | `bash scripts/scoreboard.sh` |
 
-Known phantom: **gemma-3-12b `--bench` prints bogus tok/s** (issue #514 reopened; the model is no longer in any bench target) - trust perplexity only, never its bench numbers.
+Phantom: gemma-3-12b `--bench` prints bogus tok/s (#514); trust its PPL only.
 
-## Aggregate throughput (the serving regime - how #1750-#1786 was measured)
+## Aggregate throughput (the serving regime)
 
-Method: N-stream burst against a fresh `imp-server` per arm, aggregate = Σ
-`completion_tokens` / wall per wave, **median over waves, 3+ alternating
-trials per arm** ("two-image A/B": both arms prebuilt as images, arms
-interleaved, all pairs must agree in sign). Harness: `tools/analysis/conc_client.py`
-(N threads → `/v1/completions`, 300-tok greedy) driven by
-`tools/analysis/smallm_v2_conc_ab.sh` (adapt; it pins config and checks the GPU per arm).
+- N-stream burst vs a fresh `imp-server` per arm; aggregate = sum `completion_tokens` / wall per wave; median over waves, 3+ alternating trials, all pairs same sign.
+- `conc_client.py PORT CONC WAVES [TAG]`: unique prompts per stream, 300-token greedy. Harness baseline ~1714-1780 tok/s on 40-token prompts vs ~1030-1050 published on 130-token prompts; never mix.
+- Pin `runtime.max_batch_size`, `runtime.max_seq_len`, `kv_cache.max_blocks` in BOTH arms (free-VRAM swing ~1.6 GB re-resolves auto batch: 5 -> 28 once moved 224.68 -> 630.19 tok/s with no code change).
+- `MEDIAN 0.0` = broken client (exceptions become `(0, elapsed)`, model name hardcoded), not a regression. Read stderr and per-wave token counts.
+- Discard wave 1 (graph captures + ramp: 629 vs 954-991 steady).
+- Default-ON knobs that define "same flags": `runtime.prefill_batch`, `gdn.state_bf16`, `gemm.nvfp4_smallm` (+`_impl=2`, `_pair`), `speculative.mtp_adaptive_k`, `runtime.prefill_chunk_decode_cap` (1024; 4096 = +~10% burst lever), `runtime.graph_prewarm`.
+- Profile the right binary: `make build` tags only `imp:test`; `imp:builder` can be days old.
+- Method behind #1750-#1793: two-image A/B, all pairs same sign. Prefill-bound bursts cannot see KV capacity (32x8k with 60-token completions: identical walls while the pool grew 3.2x); capacity levers need `max_tokens >= 512`.
+- Per-kernel time inside replayed decode graphs: `nsys --cuda-graph-trace=node` (#856). On a server: no `--delay`/`--duration` (flush hangs on `cudaProfilerStop`, SIGKILL loses all); capture fully, `docker stop` gracefully, filter the window by timestamp.
 
-- **Pin `runtime.max_batch_size`, `runtime.max_seq_len`, `kv_cache.max_blocks` in BOTH arms.** Free-VRAM swing (~1.6 GB) re-resolves the auto batch size and KV pool between arms; auto 5→28 once moved defaults 224.68→630.19 tok/s with zero code change.
-- **`MEDIAN 0.0` (or a depressed median) = broken client, not a regression.** `conc_client.py` swallows exceptions into `(0, elapsed)` and only prints `ERR` to stderr, and it hardcodes the model name - a name mismatch yields 32 zero-token "successes". Read stderr and per-wave token counts first.
-- **Prompts must be unique per stream** (the harness tags each with wave+index). Identical prompts change the shape via prefix cache: 32x identical short = 9.8 s / 3 stragglers vs 32x unique short = 8.3 s / 1.
-- **Discard wave 1 / report steady-state waves.** The wave-1 ramp (graph captures + serving-loop effects) read 629 vs 954-991 steady before the burst fixes; it is not clock warmup.
-- **Default-ON knobs that define "same flags" in this regime** (STOP #7): `runtime.prefill_batch`, `gdn.state_bf16`, `gemm.nvfp4_smallm`(+`_impl=2`), `runtime.prefill_chunk_decode_cap` (1024 default; 4096 is a measured +~10% burst lever).
-- **Profile the right binary.** `make build` tags only `imp:test` - a stale `imp:builder` tag once profiled a day-old engine. And a stray repo-root `imp.conf` used to ride into the build context and silently load (fp8-KV pins in a July profile) - fixed by #1784, but check what config the server actually printed.
-- For per-kernel time inside the replayed decode graph: `nsys --cuda-graph-trace=node` is the STANDARD for server-side concurrency profiling, not an edge case.
-- Every verdict needs its harness in-tree or its md5 in the PROV block - several published PROV blocks cite scratchpad harnesses that no longer exist; don't add more.
-
-## Step 1: cudaEvent in-code (quick A/B)
+## Step 1: cudaEvent (quick A/B)
 
 ```cpp
 cudaEvent_t start, stop;
 cudaEventCreate(&start); cudaEventCreate(&stop);
-
-// Warmup — >=3 iterations AND >1s total busy time (clock ramp, see STOP #3)
-for (int i = 0; i < 3; i++) kernel<<<...>>>(...);
+for (int i = 0; i < 3; i++) kernel<<<...>>>(...);   // plus >1 s busy warmup (STOP #3)
 cudaDeviceSynchronize();
-
 cudaEventRecord(start);
 for (int i = 0; i < N_ITER; i++) kernel<<<...>>>(...);
 cudaEventRecord(stop);
 cudaEventSynchronize(stop);
-
-float ms;
-cudaEventElapsedTime(&ms, start, stop);
+float ms; cudaEventElapsedTime(&ms, start, stop);
 float avg_us = (ms / N_ITER) * 1000.0f;
 ```
 
-Rules: N_ITER ≥100 for kernels <100 µs, check stddev not just mean, kill concurrent GPU consumers, sample clocks during the run (STOP #4).
+N_ITER >= 100 for kernels <100 us; report stddev; allocate outside the loop; sample clocks during the run.
 
-## Step 2: Nsight Compute (ncu) — per-kernel metrics
+## Step 2: ncu
 
-ncu is NOT in the runtime image. Use the **host** install mounted into the container, and call the real binary (not the cuda symlink wrapper):
+ncu is not in the runtime image; mount the host install (`/opt/nvidia/nsight-compute/2026.2.1`, also 2026.2.0, 2025.4.0) or build `tools/Dockerfile.ncu`:
 
 ```bash
 docker run --rm --gpus all -v $HOME/models:/models \
-  -v /opt/nvidia/nsight-compute/2026.2.0:/ncu -v /tmp/out:/out --user root \
+  -v /opt/nvidia/nsight-compute/2026.2.1:/ncu -v /tmp/out:/out --user root \
   imp:test /ncu/ncu --kernel-name "regex:my_kernel.*" --launch-skip 3 --launch-count 10 \
-  -o /out/profile ./build/imp-bench …   # chmod 777 /tmp/out first
+  -o /out/profile imp-bench ...      # chmod 777 /tmp/out first
 ```
 
-Canonical metric set: `./.claude/skills/benchmark-cuda/ncu-basic.sh "<kernel-regex>" <binary> [args]`. Key metrics:
+Canonical metric set: `.claude/skills/benchmark-cuda/ncu-basic.sh "<kernel-regex>" <binary> [args]`.
 
 | Metric | Meaning | Target |
-|--------|---------|--------|
+|---|---|---|
 | `sm__throughput.avg.pct_of_peak_sustained_elapsed` | SM utilization | >70% compute-bound |
-| `dram__throughput.avg.pct_of_peak_sustained_elapsed` | HBM bandwidth | >70% memory-bound |
-| `sm__warps_active.avg.pct_of_peak_sustained_active` | Achieved occupancy | context-dependent |
-| `smsp__inst_executed_pipe_tensor_op_*` | TC activity | non-zero if TC kernel |
-| `l1tex__t_sector_hit_rate` | L1 hit rate | >90% for cached |
-| `stall_*` | Where warps stall | lowest = bottleneck |
+| `dram__throughput.avg.pct_of_peak_sustained_elapsed` | DRAM bandwidth | >70% memory-bound |
+| `sm__warps_active.avg.pct_of_peak_sustained_active` | achieved occupancy | context |
+| `smsp__inst_executed_pipe_tensor_op_*` | TC activity | non-zero for TC kernels |
+| `smsp__average_warps_issue_stalled_*` | stall reasons | lowest = bottleneck |
 
-Always `--launch-skip 3 --launch-count N`. Compile with `-lineinfo` for source-correlated stalls (`--set detailed --import-source yes`).
+ncu traps: `--launch-skip` above the launch count waits forever; ncu + CUDA graphs hangs in the async graph loop (always `--no-cuda-graphs`, as the roofline harness does); the "Available Kernels" list shows base names, template regexes do not match; `--clock-control base` does NOT stop idle downclock between replays (a launch at 0.31 GHz read 99.7% of roofline; `tools/roofline/config.json` `ncu.clock_floor_ghz=1.2` now drops such launches as `n_launches_dropped_clock`); multi-pass replay dies on TMA kernels on this WSL2 driver (the roofline runs single-pass metric groups). A low memory-stall ratio next to low bandwidth means "not bandwidth-bound", not "too few warps".
 
-## Step 3: Nsight Systems (nsys) — timeline
-
-When you suspect: launch overhead, H2D/D2H stalls, stream serialization, CUDA Graph behavior.
-
-**WSL2 needs sampling disabled** or nsys hangs/errors:
+## Step 3: nsys
 
 ```bash
 nsys profile --sample=none --cpuctxsw=none --backtrace=none -t cuda,nvtx \
-    --stats=true --cuda-memory-usage=true -o timeline --force-overwrite=true \
-    ./build/imp-bench …
+    --stats=true --cuda-memory-usage=true -o timeline --force-overwrite=true imp-bench ...
 nsys stats timeline.nsys-rep
 ```
 
-**CUDA Graphs hide captured kernels** — profile with imp's `--no-cuda-graphs` flag to see the true decode kernel mix. If you must profile WITH graphs ON (e.g. capture-only paths like graph-captured spec verify), add `--cuda-graph-trace=node` so nsys attributes per-kernel times inside the replayed graph (PR #856 lesson).
+- WSL2 needs sampling off or nsys hangs.
+- Graphs hide captured kernels: `--no-cuda-graphs` for the mix, `--cuda-graph-trace=node` when graphs must stay on.
+- In `imp:toolchain` the qdstrm -> nsys-rep conversion fails silently (`libcap.so.2`, `libdw.so.1` missing): `apt-get install libcap2 libdw1t64`, then `/opt/nvidia/nsight-compute/*/host/*/QdstrmImporter -i x.qdstrm -o x.nsys-rep`.
+- nsys prints template args as `<(int)64, (int)256, ...>`; grep accordingly.
+- Class maps come from the nsys steady-state sum (n >= 100 launches, decode vs prefill split by per-launch duration from the sqlite), never from the roofline's 120-launch ncu window: that window showed no GDN scan class while the scan was 42% of the hybrid pp512 wall.
+- On Qwen3.6-35B `total_kernel_ms` scatters 1203-1255 (MoE routing); judge by class sums plus pp.
+- `.nsys-rep`/`.sqlite` and `diagnostics.dump_hidden_dir` dumps (3.6 GB per arm at 300 tokens) fill the 40 GB tmpfs; delete after reading.
+- compute-sanitizer (`make sanitize`) does not work on WSL2 (WDDM).
 
-Red flags: gaps between launches >10 µs (CPU-bound) · H2D/D2H during compute without overlap · graph not collapsing launches (silent fallback — see `check-degeneration`).
+## Step 4: roofline
 
-**compute-sanitizer does NOT work on WSL2** (WDDM exposes no debugger interface). `make sanitize` is documented for native-Linux hosts only.
-
-## Step 4: Roofline (one-liner)
-
-`AI = total_flops / total_bytes_moved` (matmul FLOPs = `2·M·N·K`; bytes from `dram__bytes.sum` in ncu). Peaks: HBM 1,792 GB/s · FP16 838 TFLOPS · FP8 1,677 · FP4 3,354 TOPS (datasheet) · L2 96 MB. **Calibrated reality (2026-06-07): FP4 `mma.sync` reaches ≈2,019 TOPS (~½ datasheet), f32-accumulate ¼ rate** — use the measured peak for "% of roofline" claims or every FP4 kernel looks falsely bad. Ridge points (datasheet): FP16=468, FP8=936, FP4=1873 FLOP/byte. AI < ridge → memory-bound. For full sweeps use `make roofline-measure` instead of hand math.
+`AI = FLOPs / bytes` (matmul `2*M*N*K`; bytes from `dram__bytes.sum`). Peaks: 1792 GB/s DRAM, FP16 838 TFLOPS, FP8 1677, FP4 3354 (datasheet), L2 96 MB. Measured FP4 `mma.sync` = 2019 TOPS (~1/2 datasheet), f32-accumulate 1/4 rate; GeForce TF32 = 1/2 the FP16-fp32acc rate. Use measured peaks or every FP4 kernel reads falsely bad. Roofline cells (`tools/roofline/config.json`): `q8-dense` Qwen3-8B-Q8_0, `nvfp4-dense` Qwen3-14B-NVFP4, `nvfp4-moe` Qwen3-30B-A3B-NVFP4, `q4k-moe`, `q4k-dense-hd256` gemma-3-12b, `nvfp4-hybrid` = Qwen3.6-35B (NOT Qwen3.8-27B). Pinned baseline `tools/roofline/history/BASELINE` (run 1d5b9230 pinned #1835).
 
 ## Report template
 
 ```
 Kernel: <name>, config: <block=X, grid=Y, smem=Z>
-  Wall:        <us> µs (N=<iters>, warmup >1s)
+  Wall:        <us> us (N=<iters>, warmup >1s)
   DRAM:        <pct>% of 1792 GB/s
   SM:          <pct>% of peak
   Occup:       <pct>%
   TC util:     <pct>%
   Clocks live: <MHz SM>/<MHz mem>/<W>   (healthy: 2850/13801/~500)
   Bound by:    <memory|compute|latency|stalls>  reason: <top stall>
-  vs baseline: <±X%> on tg (decode)
+  vs baseline: <+-X%> on tg (decode), pairs <n/n same sign>
 ```
 
-## Publishing numbers (keep docs from going stale)
+## Publishing numbers
 
-- **A harness that runs longer than an edit window must run from a frozen copy, and its
-  hash belongs in the PROV block.** Bash reads a script incrementally from the file, so an
-  edit landing mid-run is executed by the process that started on the old text, and the
-  output carries nothing that says which version produced it. This happened on 2026-08-21
-  to `bench_competitive.sh` and cost a full re-run. `scripts/bench_competitive.sh` now
-  re-execs itself from a `mktemp` copy and prints `harness: <path> md5=<hash>`; put that
-  hash beside the commit: `[PROV: commit=... harness_md5=af3f719c...]`. "Which tree" and
-  "which script" are different questions and a commit only answers the first.
-- **Before a one-off query's output goes into a document or a pass line, run it against a
-  case whose answer you already know.** The gates in this repo are unit-tested; the ad-hoc
-  `grep`/`awk` used to *check* the gates are written once and trusted immediately, and that
-  is now the least-tested layer. Two instances in one hour on 2026-08-21, both patterns
-  that matched more than they claimed: `grep -c 'hero$'` also matches `nonhero` and
-  reported 6 heroes where there are 5; `grep -E "^\| [0-9]+ \|"` over a ledger also matched
-  a second table and reported four open items where there were two.
-
-- **`tests/perf_baseline.json` is the canonical gate, read the current values there, never from this skill** (a number copied into a doc is a number that will be wrong). It pins two gates, not one: throughput (`metrics.prefill_tps` / `decode_tps`, 8%/8% since #1400) and **peak VRAM** (`metrics.memory_mb.own_peak_mb` against `thresholds.vram_increase_pct`, evaluated by `scripts/verify.sh`). The file carries its own `_note` explaining any pin that is not comparable to older ones. Refresh ONLY when a change *intentionally* moves perf **or peak VRAM**: `make gen-perf-baseline`, on a healthy-host day (STOP #4), and say so in the PR. **The gate measures spec-OFF decode** (`--set speculative.ngram=false`): with speculation ON a dense bench run measures the batched spec-verify GEMMs (~99.9% accept, see STOP #6 for where that comes from), which are restart-volatile and ungateable at 3%.
-- **Refreshing on the wrong day bakes in the wrong bar, in both directions.** A baseline sampled on a peak day put its then-3% threshold inside the normal range, so ordinary days failed spuriously. A baseline sampled while another process holds the GPU pins a floor that hides real regressions. Before refreshing: no other compute process, healthy clocks, and a second cold-median run that agrees.
-- **When a gate fails, rule out the cheap causes before bisecting**, in this order: (0) is this process still VRAM-resident — at ~0 MiB free, WSL2/WDDM oversubscribes into host memory and every allocation keeps succeeding while bandwidth falls off a cliff (~1530 GB/s resident vs ~237 GB/s spilled). That is #1103: 55 tok/s at server defaults on a model that benches far higher. `--mem-report` prints free VRAM at init; **a successful `cudaMalloc` is not evidence of room** (28 GiB succeeds with 22.6 GiB reported free) — measure bandwidth or read the free figure. (1) is anything else on the GPU — **read `nvidia-smi --query-gpu=memory.used`, not the process list**: `--query-compute-apps` returns an EMPTY table on WSL2 even while VRAM is held, and `docker ps` misses it too once the holder is gone. Measured 2026-08-11: 16.4 GiB held against a ~1.3-1.6 GiB WSLg baseline, no container running, `--query-compute-apps` blank — decode read −5.5% at healthy clocks (2895 MHz / 13801 MHz / 490 W) and a paired A/B found no code effect, so it looked exactly like a #526 depressed-host day. It was not: when the driver reclaimed the memory the same build measured −1.24% and passed. A `docker run` killed mid-flight (a `timeout` around a bench) can leave the commitment behind for tens of minutes. A forgotten server container reads ~−12%; (2) can the diff even reach the measured code (`git diff --stat main -- src/ include/ tools/imp-cli/` empty ⇒ a decode regression is impossible); (3) does a cold-median run reproduce the verify-fast number.
-- **`docs/BENCHMARKS.md`** is SHA-anchored (method, date, commit, command, tok/s). Update it — and the README numbers — in the same commit as the perf change. `scripts/check-release.sh` gates release-touching PRs.
-- `bash scripts/scoreboard.sh` tallies hero-model status vs llama.cpp.
+- `tests/perf_baseline.json` is the gate: read values THERE, never from a skill. Two gates: throughput (8%/8% since #1400) and peak VRAM (`metrics.memory_mb.own_peak_mb`, 10%). Refresh only for an intentional perf or VRAM move: `make gen-perf-baseline` on a healthy day (STOP #4), second cold-median run agreeing, and say so in the PR. The gate measures spec-OFF decode.
+- Before bisecting a red gate: (0) VRAM-resident? At ~0 MiB free WDDM spills into host memory and every `cudaMalloc` still succeeds (28 GiB succeeds at 22.6 GiB reported free); bandwidth is the discriminator (#1103: 55 vs 391 tok/s). (1) Anything else on the GPU? Read `nvidia-smi --query-gpu=memory.used,utilization.gpu`, not the process list (16.4 GiB held with a blank `--query-compute-apps` read -5.5%; a forgotten server ~-12%; a killed `docker run` keeps its commitment for tens of minutes). (2) Can the diff reach the measured code (`git diff --stat main -- src/ include/ tools/imp-cli/`)? (3) Does a cold-median run reproduce it?
+- `docs/BENCHMARKS.md` rows are SHA-anchored; update them and the README block in the same commit; `scripts/check-release.sh` gates release PRs. `docs/PERF.md` owns every number (docs-sync).
 
 ## A published verdict expires when its path is fixed
 
-**Three times in two days a documented verdict priced a build that no longer
-existed**, and each time the fix was younger than the verdict by weeks, not
-months:
-
-| verdict, as written | re-measured | what sat between |
+| Verdict as written | Re-measured | Between |
 |---|---|---|
-| "MTP loses: 84.7-85.8 vs ~88 tok/s" | **+21.3 %** at k=1 (#1481) | `ea547a53`, 3 weeks |
-| "`token_recycling` still net-negative, −7 %" | **−0.27 %**, neutral (#1483) | the same commit |
-| "the marginal row cost is unattributed" | register pressure, both fixes refuted (#1482) | — |
+| "MTP loses: 84.7-85.8 vs ~88 tok/s" | +21.3% at k=1 (#1481) | `ea547a53`, 3 weeks |
+| "`token_recycling` net-negative, -7%" | -0.27%, neutral (#1483) | same commit |
+| "+21.3% at k=1" (LIMITATIONS) and "+15% k=2" (/health) | measured without template/think; on think traffic MTP was dead (#1796) | spec verdicts need a think arm |
+| "GDN scan: `must be FP32`" | layout bug; BF16 +12.5% (#1776) | - |
 
-The pattern is not "old numbers drift". It is that **a fix to the measured path
-retires every verdict that ran through it**, immediately and completely, while
-the document keeps reading like a current finding. `token_recycling` and MTP
-share one line of code — `greedy_argmax_all` on the verify chunk — so one commit
-invalidated both, and nothing in either entry pointed at the other.
+1. `git log --oneline <PROV commit>..HEAD -- <files of the measured path>` (all provenance blocks have perf-path commits behind them; only THIS path matters). Renamed TUs: `engine_scheduler.cpp` split into `engine_prefill.cpp`, `engine_prefill_ragged.cpp`, `engine_decode_pipeline.cpp` (#1782).
+2. Re-run the harness instead of reasoning about the delta.
+3. Check the level, not only the delta (`token_recycling` re-read at 156 tok/s where the original said 99.37; #1102 sat between). A verdict can also be right for the wrong mechanism: the MR row cost was register pressure, both obvious fixes refuted (#1482).
 
-So, when you read a verdict before acting on it:
+## Red flags
 
-1. `git log --oneline <PROV commit>..HEAD -- <the files the measured path lives in>`.
-   Not the whole tree: on this repo *every* provenance block has perf-path
-   commits behind it (all 20, checked 2026-08-19), so "commits happened" ranks
-   nothing. The question is whether one of them touched **this** path.
-   Path names rot too: `engine_scheduler.cpp` split into `engine_prefill.cpp`
-   + `engine_prefill_ragged.cpp` + `engine_decode_pipeline.cpp` (#1782), so a
-   verdict citing the old TU needs the new names in the log filter.
-2. Prefer re-running the harness over reasoning about the delta. The re-runs
-   above cost minutes each because the harnesses are in `tools/analysis/`
-   (`mtp_k_sweep.sh`, `token_recycling_ab.sh`) — ship one with every verdict.
-3. Check the **level**, not only the delta: `token_recycling` re-measured at
-   156 tok/s where the original read 99.37, because an unrelated fix (#1102)
-   sits between. An absolute number weeks old is not a baseline.
-
-An automated staleness gate was tried and is not worth building: keyed on
-perf-path commits it fires on 100 % of blocks, which is the failure mode skill
-`find-stubs` exists to warn about — a check without a baseline reads normal as a
-finding.
-
-## Red flags — STOP and re-run
-
-- Reporting `pp512` delta without a decode delta → on a MoE model that spread is ~38 % across process starts, you're seeing noise
-- Reading `nvidia-smi` as "the GPU is free" on WSL2 → load from the **Windows side** is invisible here: `--query-compute-apps` stays blank and `docker ps` shows nothing, while `memory.used` and `utilization.gpu` do report it. Guard on those two, not on the process list (observed 2026-08-14: 12.9 GiB held at 96 % util, no container, no visible process)
-- Trusting a cold single-shot number → first ~1 s runs at idle clocks (NOT heat — this box never throttles)
-- Cross-day decode delta without sampling clocks during the bench → host drift is 8–15%
-- Refreshing the baseline on a depressed-host day → bakes a low bar in
-- Including `cudaMalloc/Free` in timing → allocate once outside the loop
-- Measuring after a build with non-default CMake options → `verify-fast` does NOT rebuild, so the last image stands in as the baseline. An `IMP_ALLOC_INTERPOSE=ON` image reads ~3% low and reproduced to 0.3% across four re-measurements before anyone doubted the binary (`AUDIT.md` G16). Reproducibility says nothing about which binary you hold.
-- Trusting `ncu` wall-clock → ncu serializes/replays; use `nsys` or `cudaEvent` for real time
-- Comparing against wrong peak → FP16 ≠ FP8 ≠ FP4; pick the kernel's dtype
-- A/B without graphs both ON and OFF → graph replay can hide silent fallback (see `check-degeneration`)
-- Back-to-back multi-model sweep deltas → isolate per process, one model each
-- Decode-kernel A/B on a dense model without `--set speculative.ngram=false` → you measured the spec-verify path (STOP #6)
-- Claiming a compiler/source tweak is "perf-neutral" without a SASS diff → byte-identical SASS is *provably* inert; diff `cuobjdump -sass` before wasting bench trials (`[[assume]]` lesson, 2026-07-08)
+- pp512 delta without a decode delta (MoE spread ~38% across starts).
+- `nvidia-smi` process list as "GPU free" (Windows-side load invisible; 12.9 GiB at 96% util with no container, 2026-08-14).
+- Cold single shot; cross-day delta without live clocks; baseline refresh on a depressed day.
+- `cudaMalloc/Free` inside the timed loop.
+- Measuring after a non-default CMake build (`verify-fast` does not rebuild; an `IMP_ALLOC_INTERPOSE=ON` image reproduced -3% four times).
+- ncu wall-clock as real time (ncu serializes; use nsys or cudaEvent).
+- Wrong peak dtype; A/B with graphs ON only; multi-model back-to-back sweeps.
+- Dense decode-kernel A/B without `speculative.ngram=false` (STOP #6).
+- "perf-neutral" without a SASS diff (`cuobjdump -sass`; byte-identical SASS is proof, a bench is not).
+- Gate figures typed into a PR body from memory: capture the output first, paste second.

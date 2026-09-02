@@ -1,38 +1,37 @@
-# imp Agent Skills — Index
+# imp Agent Skills - Index
 
-Project-scoped skills for agentic work on imp (`.claude/skills/*/SKILL.md`). Each
-description states when to fire AND when not to — keep that property when editing.
+Project-scoped skills for agentic work on imp (`.claude/skills/*/SKILL.md`). Each description states when to fire AND when not to; keep that property when editing. Form rule for every skill: fact, number, path, decision; tables over paragraphs; no em dashes; a count or runtime only next to the command that prints it.
 
 | Skill | Covers | Pairs with |
 |---|---|---|
-| [building-and-testing](building-and-testing/SKILL.md) | Docker build, test suite, verify gates, CI reality (no GPU runner), determinism/PPL caveats, PR conventions | benchmark-cuda (perf), check-degeneration (quality) |
-| [benchmark-cuda](benchmark-cuda/SKILL.md) | Benchmarking & profiling (cudaEvent/ncu/nsys/roofline), measurement artifacts on this box (clock ramp, host drift), baseline refresh + publishing numbers | sm120-cuda-expert |
-| [sm120-cuda-expert](sm120-cuda-expert/SKILL.md) | Writing/optimizing CUDA kernels for sm_120a; PTX templates + dead-ends ledgers in `references/` | benchmark-cuda, check-degeneration |
-| [check-degeneration](check-degeneration/SKILL.md) | Output-coherence battery after hot-path changes (degen_suite, GTest battery, graphs parity) | — |
-| [server-api](server-api/SKILL.md) | imp-server endpoints (OpenAI + Anthropic), streaming, json_schema, tool calling, cache_control, validation tools | check-degeneration |
-| [add-model-arch](add-model-arch/SKILL.md) | New-architecture integration checklist + wrong-output diagnostic fingerprints | quant-formats, check-degeneration |
-| [quant-formats](quant-formats/SKILL.md) | GGUF/NVFP4/FP8 formats, StorageTier dispatch contract, decode cache, KV dtypes | sm120-cuda-expert |
-| [code-graph](code-graph/SKILL.md) | Querying the pre-built symbol/call graph in `.codegraph/` — who calls or launches a symbol, blast radius, dead-code candidates; the three ways its answers mislead | codebase-audit (verify before acting), sm120-cuda-expert |
-| [find-stubs](find-stubs/SKILL.md) | Is a feature actually finished — markers, AST matchers, reachability/kernel census, request fields parsed and never read, tests that assert nothing; every rung with its measured yield on imp | codebase-audit (verify before acting), code-graph |
-| [codebase-audit](codebase-audit/SKILL.md) | Structural-debt / dead-code / god-file / flag audits + the verification discipline that stops fan-out over-flagging; `docs/audit/` convention | building-and-testing, check-degeneration |
-| [docs-sync](docs-sync/SKILL.md) | Keeping ARCHITECTURE.md / README / GOAL.md / MODELS.md / imp.conf.example / CHANGELOG coherent after a change; English-only rule; the three blocking doc gates | benchmark-cuda (perf), codebase-audit, docs-layers |
-| [docs-layers](docs-layers/SKILL.md) | The four reader layers (L0-L3), frontmatter, [PROV:] provenance, SSoT map, generated perf blocks, docs_lint/citations gate mechanics, plan-doc closure conventions | docs-sync (content sync), shipping-prs (CHANGELOG/release prose) |
-| [shipping-prs](shipping-prs/SKILL.md) | PR/merge/release mechanics — branch off main, no stacking, squash + auto-merge race (`Build` required check, ruleset 14716423), version bump + CHANGELOG + tag flow | building-and-testing, docs-sync (CHANGELOG prose) |
+| [building-and-testing](building-and-testing/SKILL.md) | Docker build, test binaries and lanes, the gate groups and hooks, CI reality (no GPU runner), stale-object and container-env traps, determinism/PPL caveats | benchmark-cuda (perf), check-degeneration (quality), shipping-prs (merge flow) |
+| [benchmark-cuda](benchmark-cuda/SKILL.md) | The 13 STOP facts of this box, methodology, harness table (`tools/analysis/*`), ncu/nsys recipes and traps, roofline cells, aggregate-throughput method, baseline refresh, verdict expiry | sm120-cuda-expert |
+| [sm120-cuda-expert](sm120-cuda-expert/SKILL.md) | sm_120a laws, numerics rules for tensor-core rewrites, chunk-parallel GDN scan ledger, paths that must stay active, closed classes; PTX templates + dead-end ledger in `references/` | benchmark-cuda, check-degeneration |
+| [check-degeneration](check-degeneration/SKILL.md) | Failure-mode table, server suite, GTest equivalence gates, parity arms (graphs, ragged, chunkpar, sparse), NIAH, PPL judge rules | server-api |
+| [server-api](server-api/SKILL.md) | Source map, flags, endpoints, semantics (thinking, constraints, prefix cache, speculation, long context, priority, request ids, OTLP tracing, model swap), validation, fingerprints | check-degeneration |
+| [add-model-arch](add-model-arch/SKILL.md) | "Is it a new arch" check, integration checklist, wrong-output fingerprints, VRAM arithmetic | quant-formats, check-degeneration |
+| [quant-formats](quant-formats/SKILL.md) | GGUF vs NVFP4 worlds, StorageTier contract, KV dtypes (NVFP4 default on Qwen3.5 family), quality judging, the two NVFP4 layouts, imp-quantize | sm120-cuda-expert |
+| [code-graph](code-graph/SKILL.md) | `codegraph` commands, sync and control-symbol rules, the missing `launches` edges, three traps | codebase-audit, sm120-cuda-expert |
+| [find-stubs](find-stubs/SKILL.md) | Six rungs with current baselines, gate-based features that silently no-op, accepted-but-ignored fields, tests that assert nothing | codebase-audit, code-graph |
+| [codebase-audit](codebase-audit/SKILL.md) | Verification recipes, ledger-first workflow, the static gates that shape findings, settled priors | building-and-testing, check-degeneration |
+| [docs-sync](docs-sync/SKILL.md) | Doc ownership table, what to sync per change class, env-var rule, roadmap ledger rows | benchmark-cuda, docs-layers, shipping-prs |
+| [docs-layers](docs-layers/SKILL.md) | Reader layers L0-L3, metadata header, which numbers may appear, PROV, SSoT map, generated blocks, plan closure, `STALE.md` | docs-sync, shipping-prs |
+| [shipping-prs](shipping-prs/SKILL.md) | Branch/merge/release mechanics, auto-merge race, PR body and CHANGELOG form, triage table, release cut and notes | building-and-testing, docs-sync |
 
-Boundaries (to avoid trigger collisions):
+Boundaries:
 
-- *Measure* perf → benchmark-cuda · *write* the kernel → sm120-cuda-expert · *is the output still sane* → check-degeneration.
-- *Build/test mechanics & CI* → building-and-testing · *model output via HTTP* → server-api · *model loads but is wrong* → add-model-arch · *bytes/scales/tiers* → quant-formats.
-- *Who calls / launches this, what would a change reach* → code-graph (one query) · *is this code dead / should we refactor* → codebase-audit (code-graph produces the candidate, codebase-audit decides whether it is real and worth shipping — a "no callers" answer is a hypothesis, not a finding) · *keep the docs consistent with the code* → docs-sync. Perf-number measurement + `perf_baseline.json` refresh stay with benchmark-cuda (docs-sync only reconciles the surrounding prose).
-- *Open/merge/release a PR, auto-merge, tag a version* → shipping-prs · *build/test mechanics behind that PR* → building-and-testing (it cross-refs shipping-prs for the merge flow).
+- Measure perf: benchmark-cuda. Write the kernel: sm120-cuda-expert. Is the output still sane: check-degeneration.
+- Build/test/CI: building-and-testing. Model output via HTTP: server-api. Model loads but is wrong: add-model-arch. Bytes/scales/tiers/KV dtypes: quant-formats.
+- Who calls this: code-graph (one query). Is it dead / worth refactoring: codebase-audit (the graph produces the candidate, the audit decides). Docs consistent with code: docs-sync; layer/lint/provenance: docs-layers.
+- Open/merge/release: shipping-prs; the build behind it: building-and-testing.
 
-Audit history: [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md). Content refreshes:
-2026-06-10 (post-audit sprint, PRs #608–#651); 2026-07-09 (PRs #652–#939 — single-sourced
-dep pins in `cmake/imp-deps.cmake`, C++23/Ubuntu 26.04 toolchain, auto-armed auto-merge
-workflow, spec-ngram default-on bench confound, FA2 hd=256 arc + FP8-tile attention,
-thinking-state reconcile, MXFP4/VRAM-reserve lessons, file-size gate). Descriptions/triggers
-unchanged. 2026-08-27 (full 13-skill audit against PRs ~#1479-#1786: blocking static gates
-inside `Build` (#1527/#1770/#1783), the batched-decode regime (smallm v2 #1766,
-gdn.state_bf16 #1776/#1778, producer quantize #1771/#1773, ragged prefill #1780),
-engine_scheduler split (#1782), CHANGELOG conflict cycle, ccg-enrich breakage,
-aggregate-throughput methodology; docs-layers row added).
+## Audit and refresh history
+
+| Date | Scope | Record |
+|---|---|---|
+| 2026-06-07 | audit of 3 skills, 4 created, README added | [AUDIT_skills_2026_06_07.md](AUDIT_skills_2026_06_07.md) |
+| 2026-06-10 | post-audit sprint, PRs #608-#651 | descriptions unchanged |
+| 2026-07-09 | PRs #652-#939: dep pins in `cmake/imp-deps.cmake`, C++23/Ubuntu 26.04, auto-armed auto-merge, spec-ngram bench confound, FA2 hd=256, thinking reconcile, file-size gate | descriptions unchanged |
+| 2026-08-27 | full 13-skill audit vs PRs #1479-#1786 (#1787): blocking static gates, batched-decode regime, scheduler split, CHANGELOG cycle, ccg enrich breakage, aggregate methodology; docs-layers added | descriptions unchanged |
+| 2026-08-31 | building-and-testing, docs-layers: hook filter, numbers rule 3b (#1825, #1827, #1828) | |
+| 2026-09-02 | all 13 skills rewritten to the no-prose form (every paragraph carries a number, path or decision), refreshed vs PRs #1787-#1856: mtp auto default + bench pins, sparse decode attention, NVFP4 KV default and word loads, chunk-parallel GDN scan (3xTF32/3xFP16 rules), FA2 2-CTA + softmax, stream-K, PDL device half, OTLP tracing, priority/X-Request-Id, recurrent snapshot host tier, container `IMP_SET`, `entrypoint`/`kernels` gate groups, stale-object rebuild trap; find-stubs baselines re-measured at `c3d9689e`; every cited path, config key, make target and flag checked against the tree (`pathcheck.py`, 0 real misses); anchor diff old vs new per skill (0 facts dropped) | this table |

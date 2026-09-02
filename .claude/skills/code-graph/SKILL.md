@@ -1,108 +1,37 @@
 ---
 name: code-graph
-description: Use when a question is about *structure* rather than text — who calls or launches a symbol, where it is defined, what a change would reach, whether something is dead, how a request gets from the API to a kernel. Triggers on "who calls", "who launches this kernel", "where is X defined", "what breaks if I change", "is this still used", "is this dead", "trace the path from X to Y", "blast radius", "what depends on this header". Do NOT use for free-text search (`rg` is better and cheaper) or to open a file whose path you already know.
+description: Use when a question is about *structure* rather than text - who calls or launches a symbol, where it is defined, what a change would reach, whether something is dead, how a request gets from the API to a kernel. Triggers on "who calls", "who launches this kernel", "where is X defined", "what breaks if I change", "is this still used", "is this dead", "trace the path from X to Y", "blast radius", "what depends on this header". Do NOT use for free-text search (`rg` is better and cheaper) or to open a file whose path you already know.
 ---
 
-# code-graph — ask the index, don't grep the tree
+# code-graph - ask the index, then verify
 
-imp has a pre-built symbol and call graph in `.codegraph/` (CodeGraph v1.5.0). It answers
-reverse and scope-resolving questions that a text search structurally cannot: **which
-function** launches a kernel, who reaches a symbol transitively, what a header change
-touches.
+imp has a symbol and call graph in `.codegraph/codegraph.db` (CodeGraph v1.5.0, `codegraph` on PATH). It answers reverse and scope-resolving questions a text search cannot: which function calls a symbol, who reaches it transitively, what a header change touches.
 
 ## Hard rules
 
-0. **Sync before you trust it — it does not sync itself.** This file used to claim the
-   index auto-syncs on save. Measured 2026-08-19: the DB was **16 days and 236 commits
-   behind**, and it answered *nothing at all* for every symbol added in that window
-   (`kv_pool_floored`, shipped in v0.28.0, returned an empty result). That is trap 1 one
-   level up: absence is silent, and an empty answer reads like "does not exist" rather
-   than "not indexed". `codegraph sync` cost **2.8 s** for 279 changed files, so there is
-   no reason to skip it:
-
-   ```bash
-   codegraph status                 # Files/Nodes/Edges - and it LIES about freshness:
-                                    # prints "✓ Index is up to date" on a 5-day/106-commit-stale DB
-   codegraph sync                   # 2.8 s after a 16-day gap (1.7 s for 76 files); keeps CUDA launch edges
-   codegraph query <a symbol you just touched>   # the only freshness check that means anything
-   ```
-
-   **Control-symbol discipline for negatives:** before trusting any "no callers" /
-   "no results" answer, run the same query against a symbol you know is live
-   (e.g. `codegraph callers write_kv_cache`). If the control also comes back
-   empty, the DB is stale or the edge kind is missing - the empty answer is not
-   evidence (`docs/audit/SETTLED.md`, "control symbol").
-
-1. **Reverse question → graph first.** "Who calls / who launches / what would break" costs ~30
-   tokens through the graph and 500-2500 through `rg` + reading the file to find the enclosing
-   function. Measured on this repo.
-2. **Text question → `rg`.** "Where is this string", "which files mention X" — grep wins, and
-   the graph's richer output costs more than it returns. Don't route everything here.
-3. **Check the name in the answer matches the name you asked.** See trap 1.
-4. **After a full `codegraph index`, re-run `ccg enrich`** or CUDA launch edges silently
-   disappear. Incremental `codegraph sync` keeps them, so day-to-day editing is fine.
-   **KNOWN BROKEN (2026-08-21, `docs/audit/DEBT_LEDGER_2026_08_21.md`):** `ccg enrich`
-   currently aborts on `sqlite3.IntegrityError: UNIQUE constraint failed: idx_edges_identity`
-   against this DB - there are NO `launches` edges, so every `__global__` kernel reads as
-   uncalled. Until fixed: graph for host-side structure, **mandatory `rg` for any
-   kernel-launch or destructor question**, and treat every enrich-derived figure below as
-   unverifiable.
+| # | Rule | Evidence |
+|---|---|---|
+| 0 | `codegraph sync` before you trust it; it does NOT sync itself and `codegraph status` prints "up to date" on a stale DB | 2026-08-19: 16 days / 236 commits behind, empty answer for every symbol added in that window; sync cost 2.8 s (279 files). 2026-09-02: DB dated 2026-08-21, `codegraph query gdn_scan_chunkpar` = "No results" |
+| 1 | Control symbol before believing a negative | run the same query on a live symbol (`codegraph callers write_kv_cache` -> 2); if the control is empty too, the DB or the edge kind is missing (`docs/audit/SETTLED.md`, "control symbol") |
+| 2 | Reverse question -> graph; text question -> `rg` | "who calls / what breaks" ~30 tokens via the graph vs 500-2500 via `rg` + reading; "which files mention X" is grep territory |
+| 3 | The name in the answer must be the name you asked | trap 1 below |
+| 4 | Kernel-launch and destructor questions are `rg` questions right now | the DB has edge kinds `calls contains extends imports instantiates references` and NO `launches` edges (checked 2026-09-02); `ccg enrich`, which materialises them, aborts with `sqlite3.IntegrityError: UNIQUE constraint failed: idx_edges_identity` (`docs/audit/DEBT_LEDGER_2026_08_21.md`). Every `__global__` kernel reads as uncalled |
 
 ## Commands
 
 ```bash
-codegraph query   <name>     # where is it
-codegraph callers <symbol>   # who calls / launches it
-codegraph callees <symbol>   # what it calls
-codegraph node    <symbol>   # source + immediate callers and callees
-                             # (on a FILE arg its --help promises dependents; it does not print them - see trap 3)
-codegraph impact  <symbol>   # what a change reaches
-codegraph explore "<topic>"  # relevant symbols + call paths in one shot
+codegraph sync                    # first
+codegraph query   <name>          # where is it
+codegraph callers <symbol>        # who calls it
+codegraph callees <symbol>        # what it calls
+codegraph node    <symbol>        # source + immediate callers/callees (on a FILE arg: prints the file, NOT dependents)
+codegraph impact  <symbol>        # what a change reaches
+codegraph explore "<topic>"       # symbols + call paths in one shot
 ```
 
-`ccg` lives at `~/github.com/kekzl/cplusplus-cuda-graph/ccg`:
-`ccg enrich` (restore CUDA launch edges - currently broken, see hard rule 4),
-`ccg coverage` (which kernels are dark - ONE-LEVEL, not reachability: a kernel with a
-launcher still counts as covered when the launcher itself is dead, `docs/audit/SETTLED.md`),
-`ccg kernels` (list every `__global__`), `ccg revert`.
+`ccg` = `~/github.com/kekzl/cplusplus-cuda-graph/ccg`: `ccg enrich` (CUDA launch edges + implicit destructor calls + macro-generated symbols; BROKEN, rule 4), `ccg coverage` (one-level: a kernel with a dead launcher still counts as covered), `ccg kernels`, `ccg revert`.
 
-## Three traps, all confirmed on this repo
-
-**1. A symbol the graph lacks is answered about as though it had it — silently.**
-
-`gemv_q6k_q8_1` is generated by token pasting (`IMP_DP4A_QUANT_TYPES(IMP_DEFINE_GEMV_DP4A)`,
-`src/compute/gemm_dp4a.cu`) and exists as text nowhere. Before `ccg enrich` the query for it
-returned `dispatch_gemv_fp32` — which actually calls `gemv_q6k_q8_1_fp32`, a different function —
-with no "nearest match" warning.
-
-`ccg enrich` now materialises those 21 generated symbols, so this particular case is correct
-(`gemv_q6k_q8_1` → `dispatch_dp4a_gemv`, `src/exec/executor_kernels.cu:38`). **The behaviour
-itself is unchanged**: any other symbol the graph happens to lack — a second level of macro
-nesting, something from a generated header — will mislead the same way. **If the symbol name in
-the answer isn't the one you asked about, stop and `rg`.**
-
-**2. "No callers found" ≠ dead.** Measured 2026-08-03: 99% of the then-423 `__global__` kernels
-(468 by 2026-08-27) had a resolved launcher after `ccg enrich` (74% without it); the remainder
-are reached through a function-pointer struct field. Re-run `ccg coverage` rather than trusting
-the ratio - and remember coverage is one-level: `gemv_q4k_ggml_compat_kernel` counted as covered
-while its launcher was itself dead (`docs/audit/SETTLED.md`). Real reachability is a BFS over
-`calls`/`references`/`instantiates` edges from roots in `tools/`, `tests/`, `src/api/`; known
-blind-spot families that must NOT be re-flagged as dead: `src/exec/gemm_kernel_*.cu` (registry
-table binding), `src/core/logging.cpp` (`IMP_LOG_*` macros), `src/memory/alloc_interpose.cpp`
-(default-OFF flag), `src/quant/turboquant_fp4.cuh` (device inline), destructors generally.
-Before calling anything dead, confirm with `rg -n '\bname\b' src/ tools/ tests/ include/` -
-this is the same discipline **codebase-audit** requires, and the graph does not replace it.
-
-*The residue after that check is worth reading, though: it is how the two dead kernels removed
-in #1220 were found — a kernel whose only occurrences are its declaration in a header and its
-definition is genuinely unused. Name no candidate as dead until the grep confirms it.*
-
-**3. `codegraph node <file>` prints the file, not its dependents.** For "what depends on this
-header" the include edges are exact, but only reachable by SQL. **Re-derive the count before you
-quote it** - the figure this section carried has now rotted TWICE: 48 (22 in `src/exec/`) at
-first writing, 23/0 after F-10 moved dispatch keys into `src/core/dispatch_policy.h`, and
-32/1 by 2026-08-27 after the config surface split again into `src/core/config/*.h`. A number
-in a skill ages exactly like a number in a doc:
+## Header dependents (SQL only)
 
 ```bash
 docker run --rm -v "$PWD/.codegraph:/db:ro" python:3.12-slim python -c "
@@ -111,28 +40,20 @@ for (p,) in c.execute(\"select n.file_path from edges e join nodes n on n.id=e.s
     \"where e.target='file:src/runtime/config.h' and e.kind='imports'\"): print(p)"
 ```
 
+Re-derive the count every time (`config.h` importers: 48 -> 23 -> 32 -> 28 across four measurements as `src/core/dispatch_policy.h` and `src/core/config/*.h` split the surface).
+
+## Three traps, all confirmed on this repo
+
+1. **A symbol the graph lacks is answered as if it had it.** `gemv_q6k_q8_1` is token-pasted (`IMP_DP4A_QUANT_TYPES(IMP_DEFINE_GEMV_DP4A)`, `src/compute/gemm_dp4a.cu`); the query returned `dispatch_gemv_fp32` (caller of the DIFFERENT `gemv_q6k_q8_1_fp32`) with no nearest-match warning. Enrich materialised those 21 symbols once (`gemv_q6k_q8_1` -> `dispatch_dp4a_gemv`, `src/exec/executor_kernels.cu`); any other macro level or generated header misleads the same way. Name mismatch = stop and `rg`.
+2. **"No callers found" != dead.** With enrich, 99% of 423 kernels (468 by 2026-08-27) had a launcher; 74% without; the rest are reached through function-pointer struct fields. Real reachability = BFS over `calls`/`references`/`instantiates` from roots in `tools/`, `tests/`, `src/api/`. Never re-flag: `src/exec/gemm_kernel_*.cu` (registry table binding), `src/core/logging.cpp` (`IMP_LOG_*`), `src/memory/alloc_interpose.cpp` (default-OFF flag), `src/quant/turboquant_fp4.cuh` (device inline), destructors. Confirm with `rg -n '\bname\b' src/ tools/ tests/ include/` (the residue after that grep found the two dead kernels removed in #1220).
+3. **`codegraph node <file>` prints the file, not its dependents.** Use the SQL above.
+
 ## Destructors
 
-Implicit destructor calls are recovered by `ccg enrich` (measured 2026-08: 85% of the then-71
-destructors - ~65 today - had a caller; **0% without it**), so "what runs when this scope
-exits" and "who destroys this" are answerable **only while enrich works** (hard rule 4 - it is
-currently broken, so these queries return nothing right now):
-
-```bash
-codegraph callers "~PinnedBuffer"    # every scope that holds one (18 when last verified)
-```
-
-Covered: locals, `struct Guard {...} g;`, `std::unique_ptr<T>`/`vector<T>` members, class
-members and bases. Not covered: destruction through a base pointer (`delete base_ptr` on a
-virtual destructor) — `~HostPinnedAllocator` and `~HostRegistrar` still show no caller for that
-reason, and are **not** dead.
+Implicit destructor calls exist only through `ccg enrich` (85% of ~65-71 destructors had a caller with it, 0% without). With enrich broken, `codegraph callers "~PinnedBuffer"` returns nothing; `rg` for holders instead. Destruction through a base pointer is never covered (`~HostPinnedAllocator`, `~HostRegistrar` show no caller and are live).
 
 ## What it cannot know
 
-No preprocessor: macro-generated functions are absent, template instantiations collapse to the
-primary template. No runtime: which branch of a `try_*` dispatch chain actually fires is not a
-static property — `src/compute/dispatch_paths.h` enumerates the candidates, and
-`src/compute/dispatch_record.h` records what really ran.
+No preprocessor (macro-generated functions absent, template instantiations collapse to the primary), no runtime (which `try_*` dispatch candidate fires: `src/compute/dispatch_paths.h` lists candidates, `src/compute/dispatch_record.h` records what ran).
 
-Pairs with **codebase-audit** (verify every finding before acting) and **sm120-cuda-expert**
-(once you know which kernel, go work on it).
+Pairs with **codebase-audit** (verify before acting) and **sm120-cuda-expert** (once you know the kernel).
