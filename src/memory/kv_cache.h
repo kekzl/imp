@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <atomic>
+#include <memory>
 #include <vector>
 
 namespace imp {
@@ -20,6 +21,9 @@ static constexpr int kNVFP4Group = 16;
 
 class KVCache {
 public:
+    // Tag for the accounting-only constructor, see for_accounting() below.
+    struct AccountingOnly {};
+
     // `ceiling_blocks` > `max_blocks` asks for a GROWABLE pool: address space
     // is reserved for the ceiling, physical memory is committed for
     // `max_blocks`, and try_grow_to() commits more later. Address space costs
@@ -53,6 +57,31 @@ public:
             VRAMAllocator* alloc, const std::vector<char>& layer_is_swa = {}, int swa_max_blocks = 0,
             int ceiling_blocks = 0);
     ~KVCache();
+
+    // Accounting-only cache: block ids, ref counts and geometry, NO VRAM.
+    //
+    // Everything that does not touch bytes behaves identically - the id space,
+    // the free list, ref counts, block_size/block_bytes arithmetic - so the
+    // whole prefix-cache and LRU layer above it is exercisable. Every data
+    // pointer (k_ptr, v_ptr, the scale and minmax pointers) aborts instead of
+    // returning an offset into a pool that does not exist.
+    //
+    // It exists because CI has no GPU runner: the block-accounting tests were
+    // written against a real pool, so every one of them opens with
+    // SKIP_IF_NO_CUDA() and the merge gate never ran them. Mutation testing on
+    // 2026-09-02 put a number on that - `content_salt` ignored, prefix reuse no
+    // longer contiguous, the probe overreporting by a block, reclaim leaving a
+    // hash entry pointing at a free block: four real faults, all caught by
+    // test-kv, none reachable from `ctest -L unit`.
+    //
+    // NOT for production: a model cannot run on it, and it says so by aborting
+    // on the first pointer request.
+    static std::unique_ptr<KVCache> for_accounting(int n_layers, int n_kv_heads, int head_dim, QType dtype,
+                                                   int max_blocks, int block_size = kKVBlockSize);
+
+    // True when this cache holds no memory. Production code has no reason to
+    // ask; it is here so a test can assert what it built.
+    bool accounting_only() const { return accounting_only_; }
 
     // How many blocks this pool could grow to. Equals total_blocks() unless it
     // was built growable and has not reached its ceiling.
@@ -165,7 +194,14 @@ public:
     int head_dim() const;
     QType qtype() const;
 
+    // Accounting-only constructor. Public only because make_unique needs it;
+    // build one through for_accounting().
+    KVCache(AccountingOnly, int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks,
+            int block_size);
+
 private:
+    bool accounting_only_ = false;
+
     int n_layers_;
     int n_kv_heads_;
     int head_dim_;

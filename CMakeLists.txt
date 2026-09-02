@@ -646,6 +646,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor_kind_matcher.cpp
         tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
+        tests/test_kv_accounting.cpp
         tests/test_json_out.cpp
         tests/test_gguf_loader.cpp
         tests/test_gguf_fault_injection.cpp
