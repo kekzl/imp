@@ -149,9 +149,24 @@ They are not missing tests: `test-kv` catches all five. They are unreachable
 from CI for one mechanical reason - every one needs `KVCacheManager` state, and
 `KVCache`'s constructor allocates VRAM and throws without a device, so each of
 those tests opens with `SKIP_IF_NO_CUDA()`. The hash function itself is static
-and CPU-testable, which is exactly why M23 and M24 ARE caught in CI. Making the
-block-accounting testable without a pool would move this class into the merge
-gate; it is the only lever here that does not need a GPU runner.
+and CPU-testable, which is exactly why M23 and M24 ARE caught in CI.
+
+**Closed the same day.** `KVCache::for_accounting()` builds the id space, free
+list, ref counts and geometry with no pool (`BlockPool::open_slots` was already
+the mode where "the caller owns the memory"), and every data pointer aborts on
+such a cache. `tests/test_kv_accounting.cpp` adds five tests to `test-core`,
+one per fault:
+
+| Mutant | Killed by |
+|---|---|
+| M35 | `KVAccounting.SaltSeedsTheChainOnLookupToo` |
+| M36 | `KVAccounting.ReuseStopsAtTheFirstMiss` |
+| M38 | `KVAccounting.ProbeCountsTheCachedChainExactly` |
+| M40 | `KVAccounting.ReclaimDropsTheHashEntryWithTheBlock` |
+
+**CI-lane score on the 21 host-side mutants: 15/20 -> 20/21 = 95.2%.** The only
+survivor left is M25, the equivalent mutant. `ctest -L unit` went 1624 -> 1629
+macros; the unlaned pin (1054) is unchanged.
 
 ## Method notes that changed a result
 
