@@ -750,7 +750,76 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             const int* real_n = grouped ? state.d_chunk_len : nullptr;
             void* snap = grouped ? h_snap : nullptr;
             const int* snap_n = snap ? state.d_snap_n : nullptr;
-            if (state_bf16) {
+            // Ragged prefill on the chunk-parallel scan, one member at a time
+            // (gdn.chunkpar_scan): the fused batched kernel walks every token
+            // of every member serially on n_heads x n_seq CTAs, so a packed
+            // 3-4-sequence 1024-row forward paid more scan time than the
+            // single-sequence forwards it replaced (2026-09-02, the budget
+            // fix that packs continuation tails with the next prompt read
+            // neutral until this). Members below the chunk-parallel minimum
+            // take the fused single-sequence kernel on their own rows.
+            // Only when the forward is a few big chunks plus a few tails: a
+            // burst's first forward packs 32 short prompts of ~40 rows each,
+            // and 32 per-member launches of the fused kernel per layer read
+            // -1.5% aggregate and +112 ms TTFT at 32 x 38-token prompts
+            // against the one batched launch (2026-09-03).
+            bool ragged_chunkpar = ragged && !grouped && runtime_config().gdn.chunkpar_scan &&
+                                   state.h_seq_offsets != nullptr && state.h_ssm_slots != nullptr &&
+                                   gdn_chunkpar_ws_ != nullptr && head_dim_ssm == 128 && ssize == 128;
+            if (ragged_chunkpar) {
+                int n_small = 0, n_big = 0;
+                for (int sq = 0; sq < state.ssm_n_seq; ++sq) {
+                    const int rows = state.h_seq_offsets[sq + 1] - state.h_seq_offsets[sq];
+                    if (rows >= 128)
+                        n_big++;
+                    else if (rows > 0)
+                        n_small++;
+                }
+                ragged_chunkpar = n_big >= 1 && n_small <= 4;
+            }
+            if (ragged_chunkpar) {
+                const size_t inner = static_cast<size_t>(n_heads) * head_dim_ssm;
+                const auto* A_log = static_cast<const float*>(ly.ssm_a.data);
+                const auto* dt_b = static_cast<const float*>(ly.ssm_dt_b.data);
+                for (int sq = 0; sq < state.ssm_n_seq; ++sq) {
+                    const int r0 = state.h_seq_offsets[sq];
+                    const int rows = state.h_seq_offsets[sq + 1] - r0;
+                    if (rows <= 0)
+                        continue;
+                    const float* conv_s = conv_f32 + static_cast<size_t>(r0) * conv_channels;
+                    const half* alpha_s = static_cast<const half*>(alpha_proj_out.data) +
+                                          static_cast<size_t>(r0) * n_heads;
+                    const half* beta_s = static_cast<const half*>(beta_proj_out.data) +
+                                         static_cast<size_t>(r0) * n_heads;
+                    half* y_s = static_cast<half*>(y_buf.data) + static_cast<size_t>(r0) * inner;
+                    void* h_s = state.ssm_state->h_state(state.h_ssm_slots[sq], ssm_idx);
+                    if (rows >= 128) {
+                        if (state_bf16) {
+                            gdn_scan_chunkpar_bf16(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
+                                                   static_cast<__nv_bfloat16*>(h_s), y_s, rows, n_heads,
+                                                   head_dim_ssm, ssize, n_groups, stream, gl,
+                                                   static_cast<float*>(gdn_chunkpar_ws_),
+                                                   gdn_chunkpar_ws_bytes_,
+                                                   runtime_config().gdn.chunkpar_strip);
+                        } else {
+                            gdn_scan_chunkpar_f32(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
+                                                  static_cast<float*>(h_s), y_s, rows, n_heads, head_dim_ssm,
+                                                  ssize, n_groups, stream, gl,
+                                                  static_cast<float*>(gdn_chunkpar_ws_),
+                                                  gdn_chunkpar_ws_bytes_,
+                                                  runtime_config().gdn.chunkpar_strip);
+                        }
+                    } else if (state_bf16) {
+                        gdn_scan_fused_bf16(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
+                                            static_cast<__nv_bfloat16*>(h_s), y_s, rows, n_heads,
+                                            head_dim_ssm, ssize, n_groups, stream, gl, nullptr);
+                    } else {
+                        gdn_scan_fused_f32(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
+                                           static_cast<float*>(h_s), y_s, rows, n_heads, head_dim_ssm, ssize,
+                                           n_groups, stream, gl, nullptr);
+                    }
+                }
+            } else if (state_bf16) {
                 gdn_scan_fused_bf16_batched(
                     conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                     static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),

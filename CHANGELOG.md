@@ -33,6 +33,23 @@ there instead of retelling it.
   -> 163/145 ms, set wall 15.9/15.8 -> 13.5/13.1 s; ledger row in
   `docs/roadmap.md`
 
+- Long-prompt bursts on the GDN hybrid: the prefill token budget charged a
+  ragged member its full chunk, so the snapshot tail of one prompt ran alone
+  in its own step, and the packed multi-sequence forwards that replaced it
+  ran the fused batched GDN scan. The budget now charges the rows the ragged
+  forward takes (launch floor once per group, `prefill_batch_decode_cap`
+  counts forwards) and the ragged forward runs the chunk-parallel scan per
+  member when it is a few big chunks plus a few tails (a 32-short-prompt
+  forward stays on the batched kernel). 32 x 1094-token prompts at 32 streams (Qwen3.8-27B-NVFP4-vllm, two-image
+  A/B, 3/3 pairs): 943.7 -> 1058.0 tok/s (+12.1%), TTFT p90 5027 -> 3854 ms,
+  ITL p95 46.2 -> 19.9 ms; 982-token prompts 1040.5 -> 1128.3 tok/s (+8.4%, 3/3), TTFT p90 4104 -> 3353 ms; 38-token prompts neutral (1846.7 -> 1843.4, -0.2%). Ledger row in `docs/roadmap.md`
+- `ignore_eos` (vLLM-compatible) on `/v1/completions` and `/v1/chat/completions`:
+  the request runs to `max_tokens` (EOS and stop tokens counted without text,
+  the think-model implicit `\nHuman` stop not injected, user `stop` strings
+  still apply), for benchmark clients that need equal token counts per arm;
+  `tests/test_server_ignore_eos.py` in `make test-server`.
+  `tools/analysis/burst_stream_client.py` (TTFT / ITL / gaps per wave) and
+  `tools/analysis/prefill_cap_conc_ab.sh` (config or two-image A/B with it)
 - Cross-engine serving harness `tools/analysis/vllm_conc_ab.sh` (imp vs vLLM,
   alternating fresh servers, one client) and a prompt-length knob on
   `conc_client.py`. Roadmap item 0 closes on it: Qwen3.8-27B-NVFP4-vllm, imp

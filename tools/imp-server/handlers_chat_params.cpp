@@ -167,6 +167,10 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     for (const auto& s : ctx.params.stop_sequences)
         ctx.params.max_stop_len = std::max(ctx.params.max_stop_len, s.size());
 
+    // vLLM-compatible `ignore_eos`: emit exactly max_tokens (benchmark clients
+    // that need equal token counts across arms). EOS and stop tokens are
+    // ignored, `max_tokens` still ends the request.
+    ctx.params.ignore_eos = body.value("ignore_eos", false);
     // Parse logprobs parameters
     ctx.params.req_logprobs = body.value("logprobs", false);
     ctx.params.top_logprobs = body.value("top_logprobs", 0);
