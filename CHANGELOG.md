@@ -13,6 +13,19 @@ there instead of retelling it.
 
 ### Added
 
+- GDN chunk-parallel scan, state-feeding GEMMs on 3xFP16 `mma.sync`
+  m16n8k16 instead of 3xTF32 (both kernels), Y_A on plain tf32, operand
+  splits hoisted out of the n-tile loops, kernel 2 staging as a swizzled
+  tile. pp4096 vs #1851 (alternating pairs): Qwen3.8-27B factor kernel
+  312/311 -> 244/248 ms, state pass 329/328 -> 268/268 ms, e2e 11187/11179
+  -> 11730/11740 tok/s; Qwen3.6-35B 132/132 -> 105/104 and 102/102 -> 83/82
+  ms, 29487/29394 -> 30990/30403 tok/s. Unit-test state diff vs the fused
+  kernel 9.5e-7 -> 1.3e-6; the divergence the GDN blocks add on a real prompt
+  is median 0 (`layer_ab_diff.py`), the same class as fused -> #1851.
+  Refuted on the way (ncu: both kernels were TF32-rate bound): kernel 2 at
+  two CTAs per SM (flat), u_eff on plain tf32 (state diff 1e-4); ledger row
+  in `docs/roadmap.md`
+
 - GDN chunk-parallel scan, state pass at 8 warps with register-pipelined
   factor staging, strip sized per head count under an L2 cap
   (`gdn.chunkpar_strip`, 0 = auto), XOR-swizzled kernel-1 shared tiles;
