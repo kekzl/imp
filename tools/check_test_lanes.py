@@ -182,7 +182,9 @@ def main():
     # the unit filter. Nothing changed hands: they never ran in CI before either.
     # 1074 -> 1077 (#this): FmhaFA2HeavyFirstTest, three byte-identity tests of
     # the causal FA2 CTA order (natural vs heavy-first) - launch the kernel, GPU-only.
-    PINNED = 1077
+    # 1077 -> 1078 (#this): SSMConv1dTest.DecodeVectorisedBitExact, the vectorised
+    # conv1d decode path against a CPU fmaf reference - launches the kernel, GPU-only.
+    PINNED = 1078
 
     text = CMAKE.read_text()
     mods = module_sources(text)

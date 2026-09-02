@@ -6,6 +6,7 @@
 
 #include <vector>
 #include <cmath>
+#include <random>
 
 #include "test_cuda_skip.h"
 
@@ -131,6 +132,60 @@ TEST(SSMConv1dTest, DecodeShiftAndConvolve) {
     free_tensor(d_out);
 }
 
+
+// ===========================================================================
+// Decode kernel, vectorised path (kernel_size == 4): float4 state, uint2
+// weights, explicit fmaf chain. Bit-exact against a CPU reference that runs
+// the same fmaf order on the same half-rounded operands, at a real channel
+// count and with a real (non-uniform) state.
+// ===========================================================================
+TEST(SSMConv1dTest, DecodeVectorisedBitExact) {
+    SKIP_IF_NO_CUDA();
+    constexpr int channels = 6144;
+    constexpr int kernel_size = 4;
+    std::mt19937 rng(4242);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    std::vector<float> h_state(channels * kernel_size), h_weight(channels * kernel_size), h_x(channels),
+        h_bias(channels);
+    for (auto& v : h_state) v = dist(rng);
+    for (auto& v : h_weight) v = 0.3f * dist(rng);
+    for (auto& v : h_x) v = dist(rng);
+    for (auto& v : h_bias) v = 0.1f * dist(rng);
+    float* d_state;
+    cudaMalloc(&d_state, channels * kernel_size * sizeof(float));
+    cudaMemcpy(d_state, h_state.data(), channels * kernel_size * sizeof(float), cudaMemcpyHostToDevice);
+    Tensor d_x = make_fp16_gpu(h_x.data(), {channels});
+    Tensor d_w = make_fp16_gpu(h_weight.data(), {channels, kernel_size});
+    Tensor d_b = make_fp16_gpu(h_bias.data(), {channels});
+    Tensor d_out = alloc_fp16_gpu({channels});
+    ssm_conv1d_decode(d_state, d_x, d_w, d_b, d_out, kernel_size, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto out = read_fp16(d_out);
+    std::vector<float> new_state(channels * kernel_size);
+    cudaMemcpy(new_state.data(), d_state, channels * kernel_size * sizeof(float), cudaMemcpyDeviceToHost);
+    // Operands as the kernel sees them: x, w and bias are half-rounded.
+    auto h = [](float v) { return __half2float(__float2half(v)); };
+    int mismatches = 0, state_mismatches = 0;
+    for (int ch = 0; ch < channels; ch++) {
+        const float s0 = h_state[ch * 4 + 1], s1 = h_state[ch * 4 + 2], s2 = h_state[ch * 4 + 3], s3 = h(h_x[ch]);
+        const float w0 = h(h_weight[ch * 4 + 0]), w1 = h(h_weight[ch * 4 + 1]), w2 = h(h_weight[ch * 4 + 2]),
+                    w3 = h(h_weight[ch * 4 + 3]);
+        float sum = std::fmaf(s3, w3, std::fmaf(s2, w2, std::fmaf(s1, w1, s0 * w0)));
+        sum += h(h_bias[ch]);
+        const float expected = h(sum);
+        if (out[ch] != expected) mismatches++;
+        if (new_state[ch * 4 + 0] != s0 || new_state[ch * 4 + 1] != s1 || new_state[ch * 4 + 2] != s2 ||
+            new_state[ch * 4 + 3] != s3)
+            state_mismatches++;
+    }
+    EXPECT_EQ(mismatches, 0) << "conv output differs from the fmaf-chain reference";
+    EXPECT_EQ(state_mismatches, 0) << "shifted state differs";
+    cudaFree(d_state);
+    free_tensor(d_x);
+    free_tensor(d_w);
+    free_tensor(d_b);
+    free_tensor(d_out);
+}
 // ===========================================================================
 // Test 2: Conv1d prefill — causal (no future leakage)
 // ===========================================================================

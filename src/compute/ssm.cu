@@ -121,19 +121,27 @@ __global__ void ssm_conv1d_decode_kernel(
         return;
 
     float* state = conv_state + ch * kernel_size;
-
-    // Shift state left by 1
-    for (int k = 0; k < kernel_size - 1; k++) {
-        state[k] = state[k + 1];
-    }
-    // Insert new value
-    state[kernel_size - 1] = __half2float(x_in[ch]);
-
-    // Compute conv: sum(state[k] * weight[ch, k]) + bias
-    // Weight layout: [channels, kernel_size] — kernel_size is contiguous per channel
-    float sum = 0.0f;
-    for (int k = 0; k < kernel_size; k++) {
-        sum += state[k] * __half2float(weight[ch * kernel_size + k]);
+    float sum;
+    if (kernel_size == 4) {
+        // One 16 B read and one 16 B write per channel instead of the shift
+        // loop's three loads and four stores: the decode kernel was at 64% of
+        // bandwidth on its instruction count (9.4 us per launch at 32 rows,
+        // nsys 2026-09-02). Explicit fmaf chain = the contracted loop below.
+        float4 s = *reinterpret_cast<const float4*>(state);
+        s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
+        *reinterpret_cast<float4*>(state) = s;
+        const uint2 wraw = *reinterpret_cast<const uint2*>(weight + ch * 4);
+        const half2 w01 = *reinterpret_cast<const half2*>(&wraw.x);
+        const half2 w23 = *reinterpret_cast<const half2*>(&wraw.y);
+        sum = fmaf(s.w, __high2float(w23),
+                   fmaf(s.z, __low2float(w23), fmaf(s.y, __high2float(w01), s.x * __low2float(w01))));
+    } else {
+        for (int k = 0; k < kernel_size - 1; k++)
+            state[k] = state[k + 1];
+        state[kernel_size - 1] = __half2float(x_in[ch]);
+        sum = 0.0f;
+        for (int k = 0; k < kernel_size; k++)
+            sum = fmaf(state[k], __half2float(weight[ch * kernel_size + k]), sum);
     }
     if (bias) {
         sum += __half2float(bias[ch]);
@@ -166,13 +174,29 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     x_out += static_cast<size_t>(seq) * channels;
 
     float* state = conv_state + ch * kernel_size;
-    for (int k = 0; k < kernel_size - 1; k++)
-        state[k] = state[k + 1];
-    state[kernel_size - 1] = __half2float(x_in[ch]);
+    float sum;
+    if (kernel_size == 4) {
+        // One 16 B read and one 16 B write per channel instead of the shift
+        // loop's three loads and four stores: the decode kernel was at 64% of
+        // bandwidth on its instruction count (9.4 us per launch at 32 rows,
+        // nsys 2026-09-02). Explicit fmaf chain = the contracted loop below.
+        float4 s = *reinterpret_cast<const float4*>(state);
+        s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
+        *reinterpret_cast<float4*>(state) = s;
+        const uint2 wraw = *reinterpret_cast<const uint2*>(weight + ch * 4);
+        const half2 w01 = *reinterpret_cast<const half2*>(&wraw.x);
+        const half2 w23 = *reinterpret_cast<const half2*>(&wraw.y);
+        sum = fmaf(s.w, __high2float(w23),
+                   fmaf(s.z, __low2float(w23), fmaf(s.y, __high2float(w01), s.x * __low2float(w01))));
+    } else {
+        for (int k = 0; k < kernel_size - 1; k++)
+            state[k] = state[k + 1];
+        state[kernel_size - 1] = __half2float(x_in[ch]);
+        sum = 0.0f;
+        for (int k = 0; k < kernel_size; k++)
+            sum = fmaf(state[k], __half2float(weight[ch * kernel_size + k]), sum);
+    }
 
-    float sum = 0.0f;
-    for (int k = 0; k < kernel_size; k++)
-        sum += state[k] * __half2float(weight[ch * kernel_size + k]);
     if (bias)
         sum += __half2float(bias[ch]);
     pdl_trigger();
