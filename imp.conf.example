@@ -576,6 +576,11 @@ model_swap_drain_ms  = 60000
 # at engine init. imp-cli --bench pins this to 0. 0 disables snapshots and
 # with them hybrid prefix caching (dense models unaffected).
 recurrent_snapshot_mb = 256
+# Host tier for those snapshots: entries evicted from the device slots are
+# copied to pinned host memory instead of dropped and restored from there
+# (one H2D of one slab). Sessions beyond the device slot count keep their
+# tail-only prefill. 0 = off.
+recurrent_snapshot_host_mb = 2048
 # Green Contexts / prefill-decode overlap streams in the server engine.
 # Opt-in (off by default): suspected memSyncDomain race on sm_120 fallback
 # streams (gemma-3-12b IMA). Set true to enable.
