@@ -8,6 +8,7 @@ document. The two drift classes that cost are mechanical:
 
   * a `src/foo.cpp:1234` citation whose file has since shrunk, or whose lines
     moved, so the reader lands on unrelated code;
+  * a `src/foo.cpp:12` citation whose file was renamed or split away entirely;
   * a bare `docs/<name>.md` reference that was renamed, which the markdown-link
     checker never sees because it is not a link.
 
@@ -34,11 +35,18 @@ def check(doc, root):
         full = os.path.join(root, path)
         if not os.path.exists(full):
             hits = index.get(basename, [])
-            if len(hits) != 1:
-                # Not a dead citation — the doc cites a basename that exists in
-                # several places (or none). Worth reporting as "cite the path",
-                # but it must not be conflated with a line that points past EOF.
-                ambiguous.append(f"{path}:{line} — {len(hits)} files share that name; cite the path")
+            if not hits:
+                # No file of that name anywhere: the citation is dead, and this
+                # is the commoner drift of the two (a rename or a split, e.g.
+                # the #1782 scheduler split). It read as AMBIGUOUS and passed
+                # until 2026-09-02, so a citation to a file that no longer
+                # exists was the one shape this gate did not catch.
+                bad.append(f"{path}:{line} - no file of that name in the tree")
+                continue
+            if len(hits) > 1:
+                # Genuinely ambiguous: the basename exists in several places, so
+                # the line number cannot be checked. Report, do not fail.
+                ambiguous.append(f"{path}:{line} - {len(hits)} files share that name; cite the path")
                 continue
             full = hits[0]
         n = sum(1 for _ in open(full, encoding="utf-8", errors="replace"))

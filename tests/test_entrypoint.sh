@@ -142,5 +142,31 @@ run IMP_MODEL=/models/m.gguf IMP_SET="a.b=1" -- echo hello
 check "foreign command is not rewritten" 'hello' present "$OUT"
 check "foreign command gets no flags"    '--set' absent  "$OUT"
 
+# --- compose surface vs translation ----------------------------------------
+#
+# The 27 cases above check the names the entrypoint DOES translate. #1619 was
+# the other shape: docker-compose.yml offered IMP_API_KEY, the entrypoint had no
+# branch for it, and a compose deployment could not turn authentication on at
+# all. Nothing noticed, because every existing case passed. So compare the two
+# surfaces instead of enumerating one of them.
+COMPOSE="$PWD/docker-compose.yml"
+if [ -f "$COMPOSE" ]; then
+    # IMP_* names offered in the imp-server environment block, minus the two
+    # the entrypoint deliberately ignores (IMP_BIND is the host side of the port
+    # publication, read by compose itself; IMP_MODELS_DIR names the bind mount).
+    offered=$(sed -n '/^  imp-server:/,/^  [a-z]/p' "$COMPOSE" \
+              | grep -oE '\bIMP_[A-Z0-9_]+' | sort -u \
+              | grep -vE '^(IMP_BIND|IMP_MODELS_DIR)$')
+    for v in $offered; do
+        if grep -q "\$$v" "$ENTRYPOINT"; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: docker-compose.yml offers $v and docker-entrypoint.sh never reads it;" >&2
+            echo "      setting it in compose would do nothing (the #1619 shape)" >&2
+            FAIL=$((FAIL + 1))
+        fi
+    done
+fi
+
 echo "entrypoint: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
