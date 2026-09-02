@@ -185,10 +185,18 @@ exception — `typical_p` is not part of the temp=0 eval surface.
 
 ### 5. The CUTLASS NVFP4 GEMM is not gated
 
-`runtime.deterministic` reaches four kernel sites, all through
-`process_diag_deterministic_gemm()`: `gemm.cu` (cuBLASLt), `sampling_topk_topp.cu`,
-and two in the MoE routing pair. `gemm_cutlass_grouped_3x.cu` - the primary GEMM
-for NVFP4 weights and every GGUF quant - reads none of them (#1574).
+`runtime.deterministic` reaches four files and six reads, all through
+`process_diag_deterministic_gemm()`: `gemm.cu` (cuBLASLt, 2), `sampling_topk_topp.cu`
+(1), `moe_routing.cu` (2) and `moe_routing_permute.cu` (1).
+`gemm_cutlass_grouped_3x.cu` - the primary GEMM for NVFP4 weights and every GGUF
+quant - reads none of them (#1574).
+
+`tools/check_determinism_sites.py` pins that table. It scans all of `src/` with
+comments stripped and pins the per-file read COUNT, both since 2026-09-02: it
+used to scan `src/compute/` only, so a reader added in `src/exec/` (where the
+MoE CUTLASS dispatch lives) was invisible, and it pinned files only, so one of
+`gemm.cu`'s two branches could stop reading the flag unnoticed.
+`--selftest` plants all eight drifts and is part of the `docs` gate group.
 
 **What that does and does not mean.** Measured 2026-08-23 on
 `Qwen3.8-27B-NVFP4`, three fresh processes per arm, teacher-forced NLL over
