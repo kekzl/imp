@@ -23,15 +23,36 @@ namespace {
 // ============================================================================
 
 // 7. KVCacheConstruction
-TEST(KVCacheTest, KVCacheConstruction) {
-    SKIP_IF_NO_CUDA();
+// Manager over an accounting-only cache: block ids, free list, ref counts and
+// geometry, no VRAM (KVCache::for_accounting). Everything the manager tests
+// assert - allocation, eviction, the prefix hash table, pinning, rollback - is
+// that bookkeeping, and it was gated on a device only because the cache
+// allocated a pool. Mutation testing on 2026-09-02 priced that: four real
+// faults in this exact layer were caught by test-kv and invisible to
+// `ctest -L unit`, the only suite CI runs.
+static std::unique_ptr<KVCacheManager> MakeManager(int max_blocks, int n_layers = 2, int n_kv_heads = 4,
+                                                   int head_dim = 64, QType dtype = QType::F16) {
+    auto cache = KVCache::for_accounting(n_layers, n_kv_heads, head_dim, dtype, max_blocks);
+    return std::make_unique<KVCacheManager>(std::move(cache));
+}
 
+// Manager over a real pool, for tests that read or write KV bytes, drive the
+// SWA groups, or persist the cache. Those keep SKIP_IF_NO_CUDA().
+static std::unique_ptr<KVCacheManager> MakeManagerWithMemory(int max_blocks, int n_layers = 2,
+                                                             int n_kv_heads = 4, int head_dim = 64,
+                                                             QType dtype = QType::F16) {
+    auto cache = std::make_unique<KVCache>(n_layers, n_kv_heads, head_dim, dtype, max_blocks);
+    return std::make_unique<KVCacheManager>(std::move(cache));
+}
+
+TEST(KVCacheTest, KVCacheConstruction) {
     const int n_layers = 2;
     const int n_kv_heads = 4;
     const int head_dim = 64;
     const int max_blocks = 8;
 
-    KVCache cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks);
+    auto cache_owner = KVCache::for_accounting(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks);
+    KVCache& cache = *cache_owner;
 
     EXPECT_EQ(cache.n_layers(), n_layers);
     EXPECT_EQ(cache.n_kv_heads(), n_kv_heads);
@@ -50,10 +71,9 @@ TEST(KVCacheTest, KVCacheConstruction) {
 
 // 8. KVCacheBlockAllocation
 TEST(KVCacheTest, KVCacheBlockAllocation) {
-    SKIP_IF_NO_CUDA();
-
     const int max_blocks = 8;
-    KVCache cache(2, 4, 64, QType::F16, max_blocks);
+    auto cache_owner = KVCache::for_accounting(2, 4, 64, QType::F16, max_blocks);
+    KVCache& cache = *cache_owner;
 
     // Allocate all 8 blocks and verify IDs are 0..7 in order.
     std::vector<int> ids;
@@ -75,10 +95,9 @@ TEST(KVCacheTest, KVCacheBlockAllocation) {
 
 // 9. KVCacheBlockFree
 TEST(KVCacheTest, KVCacheBlockFree) {
-    SKIP_IF_NO_CUDA();
-
     const int max_blocks = 8;
-    KVCache cache(2, 4, 64, QType::F16, max_blocks);
+    auto cache_owner = KVCache::for_accounting(2, 4, 64, QType::F16, max_blocks);
+    KVCache& cache = *cache_owner;
 
     // Allocate 4 blocks.
     std::vector<int> ids;
@@ -100,10 +119,9 @@ TEST(KVCacheTest, KVCacheBlockFree) {
 
 // 10. KVCacheRefCounting
 TEST(KVCacheTest, KVCacheRefCounting) {
-    SKIP_IF_NO_CUDA();
-
     const int max_blocks = 8;
-    KVCache cache(2, 4, 64, QType::F16, max_blocks);
+    auto cache_owner = KVCache::for_accounting(2, 4, 64, QType::F16, max_blocks);
+    KVCache& cache = *cache_owner;
 
     int block = cache.allocate_block();
     ASSERT_GE(block, 0);
@@ -307,8 +325,8 @@ TEST(KVCacheTest, KVCacheNVFP4Layout) {
 
 // 13b. NVFP4 head_dim that is not a multiple of 16 must fail with a clear error.
 TEST(KVCacheTest, KVCacheNVFP4HeadDimReject) {
-    SKIP_IF_NO_CUDA();
-    EXPECT_THROW({ KVCache cache(1, 4, 24, QType::NVFP4, 2); }, std::runtime_error);
+    EXPECT_THROW({ (void)KVCache::for_accounting(1, 4, 24, QType::NVFP4, 2); },
+                 std::runtime_error);
 }
 
 // 13c. NVFP4 per-layer constructor (Gemma 4 dual head_dim 256 SWA / 512 global).
@@ -338,17 +356,9 @@ TEST(KVCacheTest, KVCacheNVFP4PerLayer) {
     }
 }
 
-// Helper to create a KVCacheManager wrapping a fresh KVCache.
-static std::unique_ptr<KVCacheManager> MakeManager(int max_blocks, int n_layers = 2, int n_kv_heads = 4,
-                                                   int head_dim = 64, QType dtype = QType::F16) {
-    auto cache = std::make_unique<KVCache>(n_layers, n_kv_heads, head_dim, dtype, max_blocks);
-    return std::make_unique<KVCacheManager>(std::move(cache));
-}
 
 // 13. ManagerAllocateBlocks
 TEST(KVCacheManagerTest, ManagerAllocateBlocks) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
 
     bool ok = mgr->allocate_blocks(/*seq_id=*/0, /*num_blocks=*/4);
@@ -363,8 +373,6 @@ TEST(KVCacheManagerTest, ManagerAllocateBlocks) {
 
 // 14. ManagerAllocateRollback
 TEST(KVCacheManagerTest, ManagerAllocateRollback) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
 
     // First sequence takes 10 blocks -- should succeed.
@@ -391,8 +399,6 @@ TEST(KVCacheManagerTest, ManagerAllocateRollback) {
 
 // 15. ManagerAppendBlock
 TEST(KVCacheManagerTest, ManagerAppendBlock) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
 
     (void)mgr->allocate_blocks(0, 2);
@@ -408,8 +414,6 @@ TEST(KVCacheManagerTest, ManagerAppendBlock) {
 
 // 16. ManagerFreeSequence
 TEST(KVCacheManagerTest, ManagerFreeSequence) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
 
     (void)mgr->allocate_blocks(0, 4);
@@ -424,8 +428,6 @@ TEST(KVCacheManagerTest, ManagerFreeSequence) {
 
 // 17. ManagerLRUEviction
 TEST(KVCacheManagerTest, ManagerLRUEviction) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
 
     // Fill the entire pool across three sequences.
@@ -458,8 +460,6 @@ TEST(KVCacheManagerTest, ManagerLRUEviction) {
 // only, then fail — the engine reject-newests on that failure rather than
 // preempting a live sequence. This locks the invariant the fix depends on.
 TEST(KVCacheManagerTest, AllocationNeverEvictsLiveSequenceUnderPressure) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
     (void)mgr->allocate_blocks(0, 5);  // seq 0: 5 live blocks
     (void)mgr->allocate_blocks(1, 3);  // seq 1: 3 live blocks -> pool full
@@ -485,8 +485,6 @@ TEST(KVCacheManagerTest, AllocationNeverEvictsLiveSequenceUnderPressure) {
 // KV corrupts it. So this test used to assert that a full pool could still
 // allocate 8 more blocks.
 TEST(KVCacheManagerTest, ManagerCanAllocate) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
 
     (void)mgr->allocate_blocks(0, 4);
@@ -509,8 +507,6 @@ TEST(KVCacheManagerTest, ManagerCanAllocate) {
 
 // 18b. A reservation is subtracted until the blocks are actually written.
 TEST(KVCacheManagerTest, DecodeReservationHoldsUnwrittenBlocks) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
 
     ASSERT_TRUE(mgr->allocate_blocks(0, 2));
@@ -597,8 +593,6 @@ TEST(KVCacheManagerTest, BlockHashDiscriminatesEveryTokenPosition) {
 
 // 22. ContentAddressedPrefixCaching
 TEST(KVCacheManagerTest, ContentAddressedPrefixCaching) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(32);
     mgr->set_prefix_caching_enabled(true);
     EXPECT_TRUE(mgr->prefix_caching_enabled());
@@ -648,7 +642,7 @@ TEST(KVCacheManagerTest, PersistedCacheFingerprintGate) {
 
     // Produce 3 cached blocks and persist them under fingerprint A.
     {
-        auto mgr = MakeManager(32);
+        auto mgr = MakeManagerWithMemory(32);
         mgr->set_prefix_caching_enabled(true);
         std::vector<int32_t> tokens(48);
         std::iota(tokens.begin(), tokens.end(), 100);
@@ -661,14 +655,14 @@ TEST(KVCacheManagerTest, PersistedCacheFingerprintGate) {
 
     // Matching fingerprint → blocks restored.
     {
-        auto mgr = MakeManager(32);
+        auto mgr = MakeManagerWithMemory(32);
         mgr->set_prefix_caching_enabled(true);
         EXPECT_EQ(mgr->load_prefix_cache(path, kFpA), 3);
     }
 
     // Mismatched fingerprint (identical geometry) → rejected, nothing restored.
     {
-        auto mgr = MakeManager(32);
+        auto mgr = MakeManagerWithMemory(32);
         mgr->set_prefix_caching_enabled(true);
         EXPECT_LT(mgr->load_prefix_cache(path, kFpB), 0);
         EXPECT_EQ(mgr->num_cached_blocks(), 0);
@@ -679,8 +673,6 @@ TEST(KVCacheManagerTest, PersistedCacheFingerprintGate) {
 
 // 23. PrefixCachingPartialMatch
 TEST(KVCacheManagerTest, PrefixCachingPartialMatch) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(32);
     mgr->set_prefix_caching_enabled(true);
 
@@ -714,8 +706,6 @@ TEST(KVCacheManagerTest, PrefixCachingPartialMatch) {
 
 // 24. CachedBlockEviction
 TEST(KVCacheManagerTest, CachedBlockEviction) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);  // Small pool to force eviction.
     mgr->set_prefix_caching_enabled(true);
 
@@ -745,8 +735,6 @@ TEST(KVCacheManagerTest, CachedBlockEviction) {
 
 // 25. PrefixCachingDisabled
 TEST(KVCacheManagerTest, PrefixCachingDisabled) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     EXPECT_FALSE(mgr->prefix_caching_enabled());  // Off by default.
 
@@ -767,8 +755,6 @@ TEST(KVCacheManagerTest, PrefixCachingDisabled) {
 
 // 26. PrefixCachingWithPartialLastBlock
 TEST(KVCacheManagerTest, PrefixCachingWithPartialLastBlock) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
 
@@ -801,8 +787,6 @@ TEST(KVCacheManagerTest, PrefixCachingWithPartialLastBlock) {
 
 // 27. PinnedBlocksSurviveEviction
 TEST(KVCacheManagerTest, PinnedBlocksSurviveEviction) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
 
     // Seq 0: 3 blocks, seq 1: 3 blocks, seq 2: 2 blocks.
@@ -839,8 +823,6 @@ TEST(KVCacheManagerTest, PinnedBlocksSurviveEviction) {
 
 // 28. PinnedBlocksSurviveFreeSequence
 TEST(KVCacheManagerTest, PinnedBlocksSurviveFreeSequence) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
 
     (void)mgr->allocate_blocks(0, 4);
@@ -872,8 +854,6 @@ TEST(KVCacheManagerTest, PinnedBlocksSurviveFreeSequence) {
 
 // 29. UnpinAllowsEviction
 TEST(KVCacheManagerTest, UnpinAllowsEviction) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
     mgr->set_prefix_caching_enabled(true);
 
@@ -908,8 +888,6 @@ TEST(KVCacheManagerTest, UnpinAllowsEviction) {
 
 // 30. PinPrefixCanAllocateAccuracy
 TEST(KVCacheManagerTest, PinPrefixCanAllocateAccuracy) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
 
     (void)mgr->allocate_blocks(0, 4);
@@ -967,8 +945,6 @@ TEST(KVCacheManagerTest, HashChainingDistinguishesPosition) {
 
 // 33. Cached block LRU eviction order: earlier-freed blocks evicted first
 TEST(KVCacheManagerTest, CachedBlockLRUEvictionOrder) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(6);  // 6 blocks total
     mgr->set_prefix_caching_enabled(true);
 
@@ -1008,8 +984,6 @@ TEST(KVCacheManagerTest, CachedBlockLRUEvictionOrder) {
 
 // 34. Three sequences with overlapping prefixes of different lengths
 TEST(KVCacheManagerTest, ThreeSequencesOverlappingPrefixes) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
 
@@ -1048,8 +1022,6 @@ TEST(KVCacheManagerTest, ThreeSequencesOverlappingPrefixes) {
 
 // 35. Pool exhaustion during allocate_blocks_with_prefix
 TEST(KVCacheManagerTest, PrefixAllocPoolExhaustion) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(3);  // Only 3 blocks total
     mgr->set_prefix_caching_enabled(true);
 
@@ -1067,8 +1039,6 @@ TEST(KVCacheManagerTest, PrefixAllocPoolExhaustion) {
 
 // 36. Rollback then re-prefill reuses cached prefix
 TEST(KVCacheManagerTest, RollbackThenReusePrefix) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
 
@@ -1098,8 +1068,6 @@ TEST(KVCacheManagerTest, RollbackThenReusePrefix) {
 
 // 37. Re-registering block hashes for same sequence is idempotent
 TEST(KVCacheManagerTest, DoubleRegisterBlockHashes) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
 
@@ -1124,8 +1092,6 @@ TEST(KVCacheManagerTest, DoubleRegisterBlockHashes) {
 
 // 38. Evict all cached blocks then verify pool is fully free
 TEST(KVCacheManagerTest, EvictAllCachedBlocksPoolIntegrity) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
     mgr->set_prefix_caching_enabled(true);
 
@@ -1160,8 +1126,6 @@ TEST(KVCacheManagerTest, EvictAllCachedBlocksPoolIntegrity) {
 // baseline — any monotonic drift in free/cached/reclaimable/active counters is
 // a leak or double-free in the block bookkeeping.
 TEST(KVCacheManagerTest, LeakUnderSustainedChurn) {
-    SKIP_IF_NO_CUDA();
-
     constexpr int kPoolBlocks = 32;
     constexpr int kCycles = 200;
     auto mgr = MakeManager(kPoolBlocks);
@@ -1211,8 +1175,6 @@ TEST(KVCacheManagerTest, LeakUnderSustainedChurn) {
 
 // 39. AllocateAtCapacity — exhaust the pool, verify next allocate returns false
 TEST(KVCacheManagerTest, AllocateAtCapacity) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
 
     // Fill the entire pool.
@@ -1233,8 +1195,6 @@ TEST(KVCacheManagerTest, AllocateAtCapacity) {
 
 // 40. AllocateFreeAllocate — fill pool, free, reallocate (block recycling)
 TEST(KVCacheManagerTest, AllocateFreeAllocate) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
 
     // Fill the pool entirely.
@@ -1257,8 +1217,6 @@ TEST(KVCacheManagerTest, AllocateFreeAllocate) {
 
 // 41. EvictionUnderPressure — third sequence triggers eviction of oldest unused
 TEST(KVCacheManagerTest, EvictionUnderPressure) {
-    SKIP_IF_NO_CUDA();
-
     // Pool fits only 2 sequences worth of blocks (4 + 4 = 8).
     auto mgr = MakeManager(8);
 
@@ -1288,8 +1246,6 @@ TEST(KVCacheManagerTest, EvictionUnderPressure) {
 
 // 42. ZeroBlocks — allocating 0 blocks is a no-op, no crash
 TEST(KVCacheManagerTest, ZeroBlocks) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(8);
 
     bool ok = mgr->allocate_blocks(0, 0);
@@ -1300,8 +1256,6 @@ TEST(KVCacheManagerTest, ZeroBlocks) {
 
 // 43. SequenceIdReuse — free seq id=0, then reuse id=0 with fresh state
 TEST(KVCacheManagerTest, SequenceIdReuse) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
 
     // Allocate seq 0 with 4 blocks.
@@ -1326,8 +1280,6 @@ TEST(KVCacheManagerTest, SequenceIdReuse) {
 
 // 44. EvictMiddleBlocksKeepsSinksAndWindow — StreamingLLM smart KV cache.
 TEST(KVCacheManagerTest, EvictMiddleBlocksKeepsSinksAndWindow) {
-    SKIP_IF_NO_CUDA();
-
     // 32 total blocks, default block_size = 16 tokens => 512-token capacity.
     auto mgr = MakeManager(32);
 
@@ -1374,8 +1326,6 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksKeepsSinksAndWindow) {
 
 // 45. EvictMiddleBlocksNoOpWhenSinksExceedSequence — short sequences untouched.
 TEST(KVCacheManagerTest, EvictMiddleBlocksNoOpWhenShort) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     ASSERT_TRUE(mgr->allocate_blocks(0, 3));  // only 48 tokens
     int free_before = mgr->num_free_blocks();
@@ -1392,8 +1342,6 @@ TEST(KVCacheManagerTest, EvictMiddleBlocksNoOpWhenShort) {
 
 // 46. EvictMiddleBlocksRejectsZeroOrNegativeArgs.
 TEST(KVCacheManagerTest, EvictMiddleBlocksZeroArgsAreNoOp) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     ASSERT_TRUE(mgr->allocate_blocks(0, 8));
 
@@ -1429,8 +1377,6 @@ static void MakePinnedFreedSeq(KVCacheManager* mgr, int seq_id, int n_full_block
 // path reconstructed pinned_blocks_ from seq_blocks_, which free_sequence
 // erases — so every freed owner's pins silently vanished.)
 TEST(KVCacheManagerTest, UnpinFreedSeqKeepsOtherFreedSeqPins) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
 
@@ -1453,8 +1399,6 @@ TEST(KVCacheManagerTest, UnpinFreedSeqKeepsOtherFreedSeqPins) {
 // oldest owner first; its blocks degrade to normal (reclaimable) cached
 // blocks instead of leaking pinned VRAM.
 TEST(KVCacheManagerTest, PinBudgetEvictsOldestPinFifo) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
     mgr->set_pin_budget_blocks(4);
@@ -1477,8 +1421,6 @@ TEST(KVCacheManagerTest, PinBudgetEvictsOldestPinFifo) {
 // 49. PinLargerThanBudgetIsCappedAndEvictsAll — a single pin larger than the
 // whole budget caps to the budget after evicting every older pin.
 TEST(KVCacheManagerTest, PinLargerThanBudgetIsCapped) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
     mgr->set_pin_budget_blocks(3);
@@ -1494,8 +1436,6 @@ TEST(KVCacheManagerTest, PinLargerThanBudgetIsCapped) {
 // 50. RePinSameSeqReplaces — re-pinning the same owner replaces its pin set
 // (no accumulation); one unpin releases everything.
 TEST(KVCacheManagerTest, RePinSameSeqReplaces) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
 
@@ -1518,8 +1458,6 @@ TEST(KVCacheManagerTest, RePinSameSeqReplaces) {
 // physical prefix blocks (cache-hit reuse): unpinning one owner must keep
 // the shared blocks pinned for the other.
 TEST(KVCacheManagerTest, SharedPinnedBlockSurvivesUnpinOfOneOwner) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(16);
     mgr->set_prefix_caching_enabled(true);
 
@@ -1552,7 +1490,7 @@ TEST(KVCacheManagerTest, SharedPinnedBlockSurvivesUnpinOfOneOwner) {
 TEST(KVCacheManagerTest, CacheHitOnCachedBlockKeepsReclaimableCountExact) {
     SKIP_IF_NO_CUDA();
 
-    auto mgr = MakeManager(4);
+    auto mgr = MakeManagerWithMemory(4);
     mgr->set_prefix_caching_enabled(true);
 
     // Seq 0: 2 full blocks, cached on free (2 reclaimable).
@@ -1858,8 +1796,6 @@ TEST(KVCacheManagerTest, SwaSnapshotRestoreExhaustionRollsBack) {
 // illegal memory access on a full-VRAM card, silent garbage attention
 // otherwise). The eviction must keep one extra boundary block.
 TEST(KVCacheManagerTest, EvictMiddleBlocksRetainsKernelWindowStart) {
-    SKIP_IF_NO_CUDA();
-
     auto mgr = MakeManager(64);
     const int bs = mgr->kv_cache()->block_size();
     const int n_sinks = 4;            // < bs → sinks live in block 0
