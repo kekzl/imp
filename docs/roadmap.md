@@ -71,10 +71,17 @@ llama.cpp publishes no 2026 roadmap.
 
 Ranked by what an agent workload notices first.
 
-0. **Concurrency scaling on the GDN hybrid vs vLLM: 1.58x gap at 32 streams,
-   attributed per component and driven to ~1.08x** (nsys on both engines, same
-   checkpoint, same 32-stream wave; full attribution table with PROV in
-   [`BENCHMARKS.md`](BENCHMARKS.md)).
+0. ~~**Concurrency scaling on the GDN hybrid vs vLLM: 1.58x gap at 32 streams,
+   attributed per component and driven to ~1.08x**~~ CLOSED 2026-09-02, imp
+   leads: one client for both engines (`tools/analysis/vllm_conc_ab.sh`, 3
+   alternating trials, same checkpoint), 32 streams imp 1807.9 vs vLLM 0.27.1
+   1447.8 tok/s (+24.9%, 3/3) and 1833.8 vs vLLM 0.28.0 1410.7 (+30.0%, 3/3),
+   8 streams 573.0 vs 495.8 (+15.6%, 3/3), 32 streams x 1082-token prompts
+   873.4 vs 497.8 (+75.5%, 3/3); the "~1.08x" was an imp number from
+   this client against a vLLM number from a 200-token-gen client. Table with
+   PROV in [`BENCHMARKS.md`](BENCHMARKS.md) "re-measured on one client".
+   The attribution below is the record of how the 1.58x was closed (nsys on
+   both engines, same checkpoint, same 32-stream wave).
 
    Attribution of the 422 us/token wall delta (2026-08-24):
 
@@ -156,7 +163,10 @@ Ranked by what an agent workload notices first.
           imp:test, 3 alternating trials, median of 3 waves]
    ```
 
-   Standing state: gap to vLLM **~1.08x pinned**. auto=28 vs pinned=32
+   Standing state: **imp ahead of vLLM on one client** (2026-09-02, +24.9%
+   at 32 / +15.6% at 8 / +75.5% at 32 with 1082-token prompts, table at the
+   top of this item); the "~1.08x pinned" of 2026-08-26 was a cross-client
+   figure. auto=28 vs pinned=32
    (630 vs 936) is admission, not rotation: 28 sustain full rate under
    continuous arrival. Remaining engine-side posts: launch-coupled idle,
    recurrent-state paging (the lever for 32-way concurrency at LONG context;

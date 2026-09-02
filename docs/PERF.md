@@ -91,6 +91,8 @@ the 2026-07-12 sweep:
 
 - batch=1 decode leads llama.cpp on every hero measured, by 13-48 % on dense GGUF
 - MoE single-sequence prefill leads vLLM
+- 8- and 32-stream serving on Qwen3.8-27B-NVFP4 leads vLLM 0.27.1 / 0.28.0 on
+  one client (2026-09-02, [`BENCHMARKS.md`](BENCHMARKS.md))
 - cross-engine perplexity parity has been measured, not assumed
 
 Where imp loses is in [`LIMITATIONS.md`](LIMITATIONS.md), and it is in the README
