@@ -62,6 +62,17 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     # which then reports the host rather than the change; what actually guards
     # the pair is guard_precommit_filter / guard_verify_filter in the CPU lane.
     FILES=$(echo "$FILES" | grep -vE '\.(md|py|hook)$' || true)
+    # Same reasoning one level down for scripts/*.sh: `^scripts/` in SOURCE_RE
+    # is right for verify.sh and the guard scripts CMake registers as ctests,
+    # and wrong for the 17 that verify.sh's path never reaches (ci_static_gates,
+    # check-release, the bench harnesses). The membership test lives in
+    # verify_touches.sh so the hook and its guard read one source.
+    FILES=$(echo "$FILES" | while read -r f; do
+        case "$f" in
+            scripts/*.sh) "$ROOT/scripts/verify_touches.sh" "$f" >/dev/null 2>&1 && echo "$f" ;;
+            *) echo "$f" ;;
+        esac
+    done)
     [ -z "$FILES" ] && continue
     echo "$FILES" | grep -qE "$SOURCE_RE" && NEEDS_VERIFY=1
     echo "$FILES" | grep -qE "$PERF_RE"   && NEEDS_PERF=1

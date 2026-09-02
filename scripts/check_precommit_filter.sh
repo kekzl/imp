@@ -99,6 +99,28 @@ if [ -f "$PUSH" ]; then
     done
 fi
 
+# --- scripts/*.sh: only the ones verify.sh can reach may gate ---------------
+# The hook delegates that question to verify_touches.sh; this checks both sides
+# of it against the tree rather than against a copied list.
+TOUCHES="$ROOT/scripts/verify_touches.sh"
+if [ -x "$TOUCHES" ]; then
+    for f in scripts/verify.sh scripts/check_det_suite_filter.sh \
+             scripts/check_e2e_lane_split.sh scripts/smoke_test.sh; do
+        if ! "$TOUCHES" "$f" >/dev/null 2>&1; then
+            echo "check_precommit_filter: pre-push would SKIP '$f' - verify.sh or a" >&2
+            echo "  registered ctest runs it, so an edit there can change the gate's own outcome" >&2
+            exit 1
+        fi
+    done
+    for f in scripts/ci_static_gates.sh scripts/check-release.sh scripts/bench_gate.sh; do
+        if "$TOUCHES" "$f" >/dev/null 2>&1; then
+            echo "check_precommit_filter: pre-push would gate '$f' on the GPU, but verify.sh" >&2
+            echo "  never runs it. Either a call was added (then say so here) or the test is wrong." >&2
+            exit 1
+        fi
+    done
+fi
+
 # --- the INSTALLED hook is a copy -----------------------------------------
 # `make install-hooks` copies scripts/pre-commit.hook into .git/hooks/. Editing
 # the repo copy changes nothing until that runs again, so a shipped hook fix can
@@ -119,5 +141,5 @@ for h in pre-commit pre-push; do
     fi
 done
 
-echo "check_precommit_filter: $(echo "$cases" | wc -l) pre-commit case(s), 5 pre-push case(s), installed hooks current"
+echo "check_precommit_filter: $(echo "$cases" | wc -l) pre-commit case(s), 5 pre-push case(s), 7 scripts/*.sh case(s), installed hooks current"
 exit 0
