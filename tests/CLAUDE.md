@@ -19,6 +19,13 @@ second number nothing checks.
   there is not green in CI.
 - **New CPU tests go to test-core**, and must be added to the explicit source
   list in `CMakeLists.txt`.
+- **A test that only needs bookkeeping must not build a pool.** `MakeManager()`
+  in `test_kv_cache.cpp` uses `KVCache::for_accounting()` (block ids, free list,
+  ref counts, geometry, no VRAM) so it runs in the CI lane;
+  `MakeManagerWithMemory()` is for the 12 that read or write KV bytes, drive the
+  SWA groups or persist the cache, and those keep `SKIP_IF_NO_CUDA()`. A data
+  pointer on an accounting cache aborts, so a test that needs bytes says so
+  loudly instead of reading a null offset.
 - **A green test proves nothing until it has been mutation-validated.** Break the
   code the test claims to cover and confirm the test fails. This is the standard
   here, not an extra.

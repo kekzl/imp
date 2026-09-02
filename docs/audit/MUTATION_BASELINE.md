@@ -168,6 +168,19 @@ one per fault:
 survivor left is M25, the equivalent mutant. `ctest -L unit` went 1624 -> 1629
 macros; the unlaned pin (1054) is unchanged.
 
+The same day the rest of the class followed: `MakeManager()` in
+`test_kv_cache.cpp` builds an accounting cache, so 43 more tests execute in the
+CI lane instead of skipping. **test-core without a GPU: 62 skipped -> 19**, and
+the surviving skips are exactly the tests that read or write KV bytes, drive the
+SWA groups or persist the cache. Four kvcache mutants are now caught by the
+tests written for them rather than by a neighbour: M37 and M39 by
+`PrefixCachingWithPartialLastBlock`, M41 and M42 by
+`EvictMiddleBlocksKeepsSinksAndWindow`.
+
+Note for the next reader: `check_test_lanes.py` counts MACROS per binary, not
+executions, so a test that skips at runtime still reads as "in a CI lane". The
+skip count above is the honest figure for what the merge gate exercises.
+
 ## Method notes that changed a result
 
 * **Cheap-first, full-before-survival.** A mutant is KILLED as soon as any lane
