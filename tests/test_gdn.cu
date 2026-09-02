@@ -727,10 +727,13 @@ TEST(GDNScanTest, ChunkwiseWyMatchesFused) {
 // tokens = 2 full strips + a tail strip with a partial chunk, asymmetric
 // heads (n_groups=2), both state dtypes.
 // =========================================================================
-TEST(GDNScanTest, ChunkparMatchesFused) {
-    constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 2;
-    constexpr int inner = n_heads * head_dim, BC_size = n_groups * state_size;
-    constexpr int conv_channels = 2 * BC_size + inner;
+// Shared body: n_heads = 4 keeps the state pass on its whole-block staging
+// (16 CTAs), n_heads = 48 puts it on the half-block two-CTAs-per-SM form
+// (192 CTAs > SM count), the Qwen3.8-27B geometry.
+static void chunkpar_matches_fused(const int n_heads) {
+    constexpr int head_dim = 128, state_size = 128, n_groups = 2;
+    const int inner = n_heads * head_dim, BC_size = n_groups * state_size;
+    const int conv_channels = 2 * BC_size + inner;
     constexpr int n_tok = 1200;  // 2 strips of 512 + tail 176 (2 chunks + 48-token tail)
 
     srand(23);
@@ -874,6 +877,10 @@ TEST(GDNScanTest, ChunkparMatchesFused) {
 // on K̃/Q̃ (each ~3-4 mantissa bits lost vs FP32) and the cumulative
 // effect on the rank-L state update.
 // =========================================================================
+
+TEST(GDNScanTest, ChunkparMatchesFused) { chunkpar_matches_fused(4); }
+
+TEST(GDNScanTest, ChunkparMatchesFused48Heads) { chunkpar_matches_fused(48); }
 
 TEST(GDNScanTest, ChunkwiseWyTcMatchesFused) {
     constexpr int n_heads = 4, head_dim = 128, state_size = 128, n_groups = 4;

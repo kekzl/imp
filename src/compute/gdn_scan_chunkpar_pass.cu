@@ -28,33 +28,68 @@ namespace {
 // H lives in shared memory (FP32): the B operand of the first two GEMMs and
 // the C-init / D of the third. The carried state itself is never rounded —
 // D0L*H enters the accumulator in FP32 — only the per-chunk increments see
-// the tf32 operand rounding (10-bit mantissa). The scalar float4 form of this
+// the operand rounding. The two GEMMs that feed the state (u_eff, H update)
+// run as 3xFP16 m16n8k16 (a = a_hi + a_lo in fp16, 22 significant bits like
+// 3xTF32, at the FP16/FP32-accumulate rate = 2x TF32 on GeForce Blackwell
+// and k = 16 per instruction): after #1851 ncu read the tensor pipe 67%
+// active with math_pipe_throttle the top stall, i.e. the TF32 rate was the
+// limit; 3xFP16 reads K2 -15% on both hybrids (27B 328 -> 279 ms, 35B 102 ->
+// 87 per pp4096) with the unit-test state diff at 1.3e-6 (3xTF32: 9.5e-7).
+// Plain tf32 on u_eff is out (state diff 8.5e-5..1.1e-4); the y GEMM is an
+// output term and runs plain fp16 (the tf32 precision class). The k16
+// fragment pattern (rows 2tg / 2tg+1, A as float2 at column 2tg) collided on
+// the padded strides (SA = 132 cannot serve both the row-GEMM float2 rows
+// and the K_d^T rows 2tg; SH = 40 puts rows 0/4 on one bank group): ncu read
+// bank conflicts 28% of the shared wavefronts, mio_throttle 1.3. The staged
+// block is a swz128 tile and the [k][n] tiles use stride COLS + 4 now:
+// conflicts 13%, K2 another -5% (27B 280 -> 266 ms, 35B 87 -> 83), 41% tensor
+// pipe active, the rest wait / scoreboard stalls at 8 warps and 1 CTA/SM. The scalar float4 form of this
 // kernel ran 242 us per 512-token strip at 6.6 TFLOPS; the three GEMMs are
 // 1.6 GFLOP per strip and head-set.
-// Shared strides are padded so the fragment loads are bank-conflict free
-// (SA = SS + 4 for the [row][k] staging, SH = COLS + 8 for the [k][n] tiles).
+// The staged [row][k] block is a swz128 tile (both fragment patterns land on
+// distinct bank groups), the [k][n] tiles use stride COLS + 4.
 // ---------------------------------------------------------------------------
 // C[16 x NTILE*8] = s_a[m0.., 0..SS) @ H[0..SS, 0..NTILE*8) for one warp's
 // 16-row strip, mma C layout. (A free function: nvcc 13.3 segfaults on a
 // generic lambda carrying the X3 tag inside the kernel.)
-template <int SS, int SA, int SH, int NTILE, bool X3>
+// C[16 x NTILE*8] = s_a[m0.., 0..SS) @ H[0..SS, 0..NTILE*8) for one warp's
+// 16-row strip, mma C layout, k16 fp16 fragments: X3 = 3xFP16 (state-feeding
+// terms), else plain fp16 (output-only terms). s_a is a swz128 [64 x 128]
+// tile, s_h a [k][n] tile of stride SH. (A free function: nvcc 13.3
+// segfaults on a generic lambda carrying the X3 tag inside the kernel.)
+template <int SS, int SH, int NTILE, bool X3>
 __device__ __forceinline__ void gemm_rows_x_h(const float* __restrict__ s_a, const float* __restrict__ s_h,
                                               int m0, int g, int tg, float (&acc)[NTILE][4]) {
 #pragma unroll
     for (int nt = 0; nt < NTILE; nt++)
         acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
-    for (int k0 = 0; k0 < SS; k0 += 8) {
-        float a[4];
-        a[0] = s_a[(m0 + g) * SA + k0 + tg];
-        a[1] = s_a[(m0 + g + 8) * SA + k0 + tg];
-        a[2] = s_a[(m0 + g) * SA + k0 + tg + 4];
-        a[3] = s_a[(m0 + g + 8) * SA + k0 + tg + 4];
+    for (int k0 = 0; k0 < SS; k0 += 16) {
+        float a[8];
+        const float2 p0 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g, k0 + 2 * tg)]);
+        const float2 p1 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g + 8, k0 + 2 * tg)]);
+        const float2 p2 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g, k0 + 2 * tg + 8)]);
+        const float2 p3 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g + 8, k0 + 2 * tg + 8)]);
+        a[0] = p0.x;
+        a[1] = p0.y;
+        a[2] = p1.x;
+        a[3] = p1.y;
+        a[4] = p2.x;
+        a[5] = p2.y;
+        a[6] = p3.x;
+        a[7] = p3.y;
+        const F16A af = f16_split_a(a);
 #pragma unroll
         for (int nt = 0; nt < NTILE; nt++) {
-            float b[2];
-            b[0] = s_h[(k0 + tg) * SH + nt * 8 + g];
-            b[1] = s_h[(k0 + tg + 4) * SH + nt * 8 + g];
-            mma_frag<X3>(acc[nt], a, b);
+            float b[4];
+            b[0] = s_h[(k0 + 2 * tg) * SH + nt * 8 + g];
+            b[1] = s_h[(k0 + 2 * tg + 1) * SH + nt * 8 + g];
+            b[2] = s_h[(k0 + 2 * tg + 8) * SH + nt * 8 + g];
+            b[3] = s_h[(k0 + 2 * tg + 9) * SH + nt * 8 + g];
+            const F16B bf = f16_split_b(b);
+            if constexpr (X3)
+                mma_f16x3(acc[nt], af, bf);
+            else
+                mma_f16x1(acc[nt], af, bf);
         }
     }
 }
@@ -66,8 +101,8 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
     float* __restrict__ ws_base, StateT* __restrict__ h_state, half* __restrict__ y_out,
     int strip_t0, int strip_tokens, int n_chunks, int n_heads, int load_statet, int store_statet) {
     constexpr int COLS = HD / kColSplit;  // state columns this CTA owns
-    constexpr int SA = SS + 4;            // padded stride of the staged [row][k] block
-    constexpr int SH = COLS + 8;          // padded stride of H [k][n] and u_eff [k][n]
+    constexpr int SH = COLS + 4;          // stride of H [k][n] and u_eff [k][n]: 4 mod 32 puts the k16
+                                          // fragment rows (2tg, 2tg+1) on distinct bank groups
     constexpr int NT = kPassThreads;
     constexpr int NW = NT / 32;           // warps per CTA
     constexpr int NTILE = COLS / 8;       // n-tiles across the CTA's columns
@@ -88,8 +123,8 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
     float* H32_h = ws.H32 + static_cast<size_t>(h) * SS * HD;
 
     extern __shared__ float smem[];
-    float* s_a = smem;               // [kChunk][SA]  staging: W, then Qeff, then K_d
-    float* s_h = s_a + kChunk * SA;  // [SS][SH]      state slice, FP32
+    float* s_a = smem;               // [kChunk][SS] swz128  staging: W, then Qeff, then K_d
+    float* s_h = s_a + kChunk * SS;  // [SS][SH]             state slice, FP32
     float* s_ue = s_h + SS * SH;     // [kChunk][SH]  u_eff
 
     // This CTA's state slice: H[s][d_base + dl].
@@ -126,7 +161,7 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
 #pragma unroll
         for (int i = 0; i < F4T; i++) {
             const int idx = tid + i * NT;
-            *reinterpret_cast<float4*>(&s_a[(idx / F4_PER_ROW) * SA + (idx % F4_PER_ROW) * 4]) = pf[i];
+            *reinterpret_cast<float4*>(&s_a[swz128(idx / F4_PER_ROW, (idx % F4_PER_ROW) * 4)]) = pf[i];
         }
     };
 
@@ -160,7 +195,7 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
                                      : make_float2(0.0f, 0.0f);
             }
             float acc[NTW][4];
-            gemm_rows_x_h<SS, SA, SH, NTW, true>(s_a, s_h + n0, m0, g, tg, acc);  // feeds the state: 3xTF32
+            gemm_rows_x_h<SS, SH, NTW, true>(s_a, s_h + n0, m0, g, tg, acc);  // feeds the state: 3xFP16
 #pragma unroll
             for (int nt = 0; nt < NTW; nt++) {
                 const int col = n0 + nt * 8 + 2 * tg;
@@ -191,7 +226,7 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
                                      : make_float2(0.0f, 0.0f);
             }
             float acc[NTW][4];
-            gemm_rows_x_h<SS, SA, SH, NTW, false>(s_a, s_h + n0, m0, g, tg, acc);  // output only: tf32
+            gemm_rows_x_h<SS, SH, NTW, false>(s_a, s_h + n0, m0, g, tg, acc);  // output only: plain fp16
             const size_t t_base = static_cast<size_t>(strip_t0) + c * kChunk;
 #pragma unroll
             for (int nt = 0; nt < NTW; nt++) {
@@ -214,7 +249,6 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
             prefetch(ws.W + (slot + n_heads) * kChunk * SS, min(kChunk, strip_tokens - (c + 1) * kChunk));
         __syncthreads();
         {
-            const int kmax = (L + 7) & ~7;
             constexpr int MT = SS / 16 / NW;  // m-tiles (16 state rows each) per warp
             static_assert(MT >= 1, "state-update warp tiling");
             const int mbase = warp * MT * 16;
@@ -229,25 +263,35 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
                     acc[mt][nt][2] = d0l * s_h[(r + 8) * SH + col];
                     acc[mt][nt][3] = d0l * s_h[(r + 8) * SH + col + 1];
                 }
-            for (int k0 = 0; k0 < kmax; k0 += 8) {
-                float b[NTILE][2];
+            const int kmax16 = (L + 15) & ~15;  // rows [L, kmax16) of K_d and u_eff are zero
+            for (int k0 = 0; k0 < kmax16; k0 += 16) {
+                F16B bf[NTILE];
 #pragma unroll
                 for (int nt = 0; nt < NTILE; nt++) {
-                    b[nt][0] = s_ue[(k0 + tg) * SH + nt * 8 + g];
-                    b[nt][1] = s_ue[(k0 + tg + 4) * SH + nt * 8 + g];
+                    float b[4];
+                    b[0] = s_ue[(k0 + 2 * tg) * SH + nt * 8 + g];
+                    b[1] = s_ue[(k0 + 2 * tg + 1) * SH + nt * 8 + g];
+                    b[2] = s_ue[(k0 + 2 * tg + 8) * SH + nt * 8 + g];
+                    b[3] = s_ue[(k0 + 2 * tg + 9) * SH + nt * 8 + g];
+                    bf[nt] = f16_split_b(b);
                 }
 #pragma unroll
                 for (int mt = 0; mt < MT; mt++) {
                     // A[m = s][k = t] = K_d[t][s], staged row-major as [t][s]
                     const int r = mbase + mt * 16 + g;
-                    float a[4];
-                    a[0] = s_a[(k0 + tg) * SA + r];
-                    a[1] = s_a[(k0 + tg) * SA + r + 8];
-                    a[2] = s_a[(k0 + tg + 4) * SA + r];
-                    a[3] = s_a[(k0 + tg + 4) * SA + r + 8];
+                    float a[8];
+                    a[0] = s_a[swz128(k0 + 2 * tg, r)];
+                    a[1] = s_a[swz128(k0 + 2 * tg + 1, r)];
+                    a[2] = s_a[swz128(k0 + 2 * tg, r + 8)];
+                    a[3] = s_a[swz128(k0 + 2 * tg + 1, r + 8)];
+                    a[4] = s_a[swz128(k0 + 2 * tg + 8, r)];
+                    a[5] = s_a[swz128(k0 + 2 * tg + 9, r)];
+                    a[6] = s_a[swz128(k0 + 2 * tg + 8, r + 8)];
+                    a[7] = s_a[swz128(k0 + 2 * tg + 9, r + 8)];
+                    const F16A af = f16_split_a(a);
 #pragma unroll
                     for (int nt = 0; nt < NTILE; nt++)
-                        mma_frag<true>(acc[mt][nt], a, b[nt]);  // state update: 3xTF32
+                        mma_f16x3(acc[mt][nt], af, bf[nt]);  // state update: 3xFP16
                 }
             }
             // Each warp owns its 16 state rows: no cross-warp hazard before the barrier.
@@ -282,8 +326,8 @@ template <typename StateT>
 void chunkpar_pass_128(float* ws_base, StateT* h_state, half* y, int strip_t0, int strip_tokens,
                        int n_chunks, int n_heads, int load_statet, int store_statet, cudaStream_t stream) {
     constexpr int HD = 128, SS = 128;
-    constexpr size_t smem =
-        (kChunk * (SS + 4) + SS * (HD / kColSplit + 8) + kChunk * (HD / kColSplit + 8)) * sizeof(float);
+    constexpr size_t smem = (kChunk * SS + SS * (HD / kColSplit + 4) + kChunk * (HD / kColSplit + 4)) *
+                            sizeof(float);
     static std::once_flag attr_once;
     std::call_once(attr_once, [] {
         cudaFuncSetAttribute(reinterpret_cast<const void*>(&gdn_chunkpar_pass_kernel<HD, SS, StateT>),

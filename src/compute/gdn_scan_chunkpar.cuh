@@ -1,5 +1,5 @@
 // Internal header of the chunk-parallel GDN prefill scan: the pieces both
-// kernel TUs share (workspace layout, tf32 mma helpers, shared-tile swizzle)
+// kernel TUs share (workspace layout, fp16 mma helpers, shared-tile swizzles)
 // and the per-kernel launch wrappers. The narrative lives in
 // gdn_scan_chunkpar.cu; kernel 2 is gdn_scan_chunkpar_pass.cu.
 #pragma once
@@ -51,7 +51,7 @@ __host__ __device__ inline ChunkparWs chunkpar_ws_layout(float* base, int n_head
     return w;
 }
 
-// mma.sync m16n8k8 tf32 helpers, shared by both kernels.
+// mma.sync m16n8k8 tf32 with FP32 accumulate (kernel 1's output-only Y_A GEMM).
 __device__ __forceinline__ uint32_t f32_to_tf32(float f) {
     uint32_t r;
     asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(f));
@@ -66,32 +66,77 @@ __device__ __forceinline__ void mma_tf32_16x8x8(float* c, const uint32_t* a, con
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
-// Fragment MMA on FP32 operands. X3 = the 3xTF32 error-compensated form
-// (a = a_hi + a_lo, three MMAs: a_lo*b_hi + a_hi*b_lo + a_hi*b_hi), ~FP32
-// accuracy on the products; plain tf32 otherwise. Plain tf32 on all three
-// chunk GEMMs read PPL +0.13% on Qwen3.6-35B (6.8216 -> 6.8304): the state
-// path compounds the 10-bit operand rounding across chunks.
-template <bool X3>
-__device__ __forceinline__ void mma_frag(float* c, const float* a, const float* b) {
-    uint32_t ah[4], bh[2];
+struct Tf32A {
+    uint32_t v[4];
+};
+struct Tf32B {
+    uint32_t v[2];
+};
+__device__ __forceinline__ Tf32A tf32_a(const float* a) {
+    Tf32A r;
 #pragma unroll
     for (int i = 0; i < 4; i++)
-        ah[i] = f32_to_tf32(a[i]);
+        r.v[i] = f32_to_tf32(a[i]);
+    return r;
+}
+__device__ __forceinline__ Tf32B tf32_b(const float* b) {
+    Tf32B r;
 #pragma unroll
     for (int i = 0; i < 2; i++)
-        bh[i] = f32_to_tf32(b[i]);
-    if constexpr (X3) {
-        uint32_t al[4], bl[2];
+        r.v[i] = f32_to_tf32(b[i]);
+    return r;
+}
+__device__ __forceinline__ void mma_tf32(float* c, const Tf32A& a, const Tf32B& b) {
+    mma_tf32_16x8x8(c, a.v, b.v);
+}
+
+// mma.sync m16n8k16 f16 with FP32 accumulate: a[4] = packed half2 A fragment,
+// b[2] = packed half2 B fragment (PTX ISA fragment layouts for .m16n8k16).
+__device__ __forceinline__ void mma_f16_16x8x16(float* c, const uint32_t* a, const uint32_t* b) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+        "{%0,%1,%2,%3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
+__device__ __forceinline__ void split_f16x2(float x0, float x1, uint32_t& hi, uint32_t& lo) {
+    const __half h0 = __float2half_rn(x0), h1 = __float2half_rn(x1);
+    const __half l0 = __float2half_rn(x0 - __half2float(h0)), l1 = __float2half_rn(x1 - __half2float(h1));
+    hi = static_cast<uint32_t>(__half_as_ushort(h0)) | (static_cast<uint32_t>(__half_as_ushort(h1)) << 16);
+    lo = static_cast<uint32_t>(__half_as_ushort(l0)) | (static_cast<uint32_t>(__half_as_ushort(l1)) << 16);
+}
+
+// Operand forms split once per k-step and reused across the n-tiles that
+// share the fragment.
+struct F16A {
+    uint32_t hi[4], lo[4];
+};
+struct F16B {
+    uint32_t hi[2], lo[2];
+};
+__device__ __forceinline__ F16A f16_split_a(const float* a8) {
+    F16A r;
 #pragma unroll
-        for (int i = 0; i < 4; i++)
-            al[i] = f32_to_tf32(a[i] - __uint_as_float(ah[i]));
+    for (int i = 0; i < 4; i++)
+        split_f16x2(a8[2 * i], a8[2 * i + 1], r.hi[i], r.lo[i]);
+    return r;
+}
+__device__ __forceinline__ F16B f16_split_b(const float* b4) {
+    F16B r;
 #pragma unroll
-        for (int i = 0; i < 2; i++)
-            bl[i] = f32_to_tf32(b[i] - __uint_as_float(bh[i]));
-        mma_tf32_16x8x8(c, al, bh);
-        mma_tf32_16x8x8(c, ah, bl);
-    }
-    mma_tf32_16x8x8(c, ah, bh);
+    for (int i = 0; i < 2; i++)
+        split_f16x2(b4[2 * i], b4[2 * i + 1], r.hi[i], r.lo[i]);
+    return r;
+}
+__device__ __forceinline__ void mma_f16x3(float* c, const F16A& a, const F16B& b) {
+    mma_f16_16x8x16(c, a.lo, b.hi);
+    mma_f16_16x8x16(c, a.hi, b.lo);
+    mma_f16_16x8x16(c, a.hi, b.hi);
+}
+// Plain fp16 (11-bit products, the tf32 class) for output-only terms.
+__device__ __forceinline__ void mma_f16x1(float* c, const F16A& a, const F16B& b) {
+    mma_f16_16x8x16(c, a.hi, b.hi);
 }
 
 // Element offset in a [64 x 128] FP32 shared tile with an XOR swizzle on the

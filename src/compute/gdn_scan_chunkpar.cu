@@ -97,6 +97,25 @@ namespace imp {
 //     got the XOR swizzle (swz128): ncu bank conflicts 11.1M -> 0.56M on
 //     17.3M -> 3.7M wavefronts, but K1 only -1..-1.5% (4/4 pairs): with the
 //     conflicts gone the top stall is math_pipe_throttle 2.9 (3xTF32 issue).
+//   - After #1851 (ncu, 35B pp512): K2 tensor pipe 67% active, K1 50%,
+//     math_pipe_throttle the top stall in both - the TF32 mma.sync rate is
+//     the limit. Refuted on that basis: K2 at two CTAs per SM (32-row
+//     staging passes, 47.6 KB): 27B K2 333/330 vs 331/335 ms, flat (two CTAs
+//     share one tensor pipe); u_eff on plain tf32: FP32 state diff 9.5e-7 ->
+//     8.5e-5..1.1e-4. Shipped instead: the state-feeding GEMMs (Gram, solve
+//     off-diagonal, P@W here; u_eff and the H update in K2) as 3xFP16
+//     m16n8k16 (22-bit products at the FP16/FP32-accumulate rate, 2x TF32),
+//     Y_A = P@U_A (output term only, like K2's y GEMM) plain tf32 k8, and
+//     the operand splits hoisted out of the n-tile loops (K1 -1%). K1 3xTF32
+//     -> 3xFP16: 27B 297 -> 244 ms, 35B 126 -> 104 (-18/-17%, pp4096). ncu
+//     after: tensor pipe 30%, bank conflicts 25% of the shared wavefronts,
+//     long_scoreboard 2.1 / short_scoreboard 1.3 / wait 1.35 - latency now.
+//     Tried and refuted on that: T/P tiles as a swizzled [64 x 64] (stride
+//     64, XOR by row) instead of the stride-68 padding: conflicts unchanged
+//     (they are not on the T/P loads) and the diagonal-block reads lose their
+//     linear pointer, K1 +10%; Y_A on fp16 k16 sharing the Qeff loop's split
+//     fragments: K1 +5% (the x1 path pays the hi+lo split it does not use).
+//     Unit-test state diff 1.3e-6 / 1.5e-6 (4 / 48 heads), Y 6.1e-5 unchanged.
 //
 // Numerics: identical formulas to gdn_scan_chunkwise_wy_kernel (log-space
 // cumulative decay, the same softplus/sigmoid/L2-norm forms), reassociated
@@ -164,12 +183,12 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     float* QE_s = ws.QE + slot * kChunk * SS;
     float* YA_s = ws.YA + slot * kChunk * HD;
 
-    constexpr int SQ = kChunk + 4;  // padded stride of QK/P: the phase-C mma A operand
     extern __shared__ float smem[];
     float* s_k = smem;                     // [kChunk * SS]  phase A
     float* s_q = s_k + kChunk * SS;        // [kChunk * SS]  phase A
     float* s_u = s_k;                      // [kChunk * HD]  phase B/C alias
     float* s_w = s_q;                      // [kChunk * SS]  phase B/C alias
+    constexpr int SQ = kChunk + 4;         // padded stride of KK/T and QK/P (the mma A operands)
     float* s_kk = s_q + kChunk * SS;       // [kChunk * SQ]  KK, then T in place (phase-B mma A operand)
     float* s_qk = s_kk + kChunk * SQ;      // [kChunk * SQ]  QK, then P in place (phase-C mma A operand)
     float* s_beta = s_qk + kChunk * SQ;    // [kChunk]
@@ -249,7 +268,7 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
         ws.D0L[slot] = expf(logD_L);
 
     // Gram matrices KK = K~ K~^T and QK = Q~ K~^T (lower triangle incl. the
-    // diagonal, zero elsewhere) as 3xTF32 mma: warp w takes matrix w/4 and
+    // diagonal, zero elsewhere) as 3xFP16 mma: warp w takes matrix w/4 and
     // m-tile w%4 across all 8 n-tiles. Both feed the state (T and P
     // coefficients), hence the compensated form.
     {
@@ -260,30 +279,36 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
 #pragma unroll
         for (int nt = 0; nt < kChunk / 8; nt++)
             acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
-        for (int k0 = 0; k0 < SS; k0 += 8) {
-            float a[4];
-            a[0] = A[swz128(m0 + g, k0 + tg)];
-            a[1] = A[swz128(m0 + g + 8, k0 + tg)];
-            a[2] = A[swz128(m0 + g, k0 + tg + 4)];
-            a[3] = A[swz128(m0 + g + 8, k0 + tg + 4)];
+        for (int k0 = 0; k0 < SS; k0 += 16) {
+            float a[8];
+            a[0] = A[swz128(m0 + g, k0 + 2 * tg)];
+            a[1] = A[swz128(m0 + g, k0 + 2 * tg + 1)];
+            a[2] = A[swz128(m0 + g + 8, k0 + 2 * tg)];
+            a[3] = A[swz128(m0 + g + 8, k0 + 2 * tg + 1)];
+            a[4] = A[swz128(m0 + g, k0 + 2 * tg + 8)];
+            a[5] = A[swz128(m0 + g, k0 + 2 * tg + 9)];
+            a[6] = A[swz128(m0 + g + 8, k0 + 2 * tg + 8)];
+            a[7] = A[swz128(m0 + g + 8, k0 + 2 * tg + 9)];
+            const F16A af = f16_split_a(a);
 #pragma unroll
             for (int nt = 0; nt < kChunk / 8; nt++) {
-                float b[2];  // B[k][n] = K~[n][k]
-                b[0] = s_k[swz128(nt * 8 + g, k0 + tg)];
-                b[1] = s_k[swz128(nt * 8 + g, k0 + tg + 4)];
-                mma_frag<true>(acc[nt], a, b);
+                float b[4];  // B[k][n] = K~[n][k]
+                b[0] = s_k[swz128(nt * 8 + g, k0 + 2 * tg)];
+                b[1] = s_k[swz128(nt * 8 + g, k0 + 2 * tg + 1)];
+                b[2] = s_k[swz128(nt * 8 + g, k0 + 2 * tg + 8)];
+                b[3] = s_k[swz128(nt * 8 + g, k0 + 2 * tg + 9)];
+                mma_f16x3(acc[nt], af, f16_split_b(b));
             }
         }
         float* dst = is_qk ? s_qk : s_kk;
-        constexpr int ds = SQ;
         const int i0 = m0 + g, i1 = i0 + 8;
 #pragma unroll
         for (int nt = 0; nt < kChunk / 8; nt++) {
             const int j = nt * 8 + 2 * tg;
-            dst[i0 * ds + j] = (j <= i0 && i0 < L) ? acc[nt][0] : 0.0f;
-            dst[i0 * ds + j + 1] = (j + 1 <= i0 && i0 < L) ? acc[nt][1] : 0.0f;
-            dst[i1 * ds + j] = (j <= i1 && i1 < L) ? acc[nt][2] : 0.0f;
-            dst[i1 * ds + j + 1] = (j + 1 <= i1 && i1 < L) ? acc[nt][3] : 0.0f;
+            dst[i0 * SQ + j] = (j <= i0 && i0 < L) ? acc[nt][0] : 0.0f;
+            dst[i0 * SQ + j + 1] = (j + 1 <= i0 && i0 < L) ? acc[nt][1] : 0.0f;
+            dst[i1 * SQ + j] = (j <= i1 && i1 < L) ? acc[nt][2] : 0.0f;
+            dst[i1 * SQ + j + 1] = (j + 1 <= i1 && i1 < L) ? acc[nt][3] : 0.0f;
         }
     }
     __syncthreads();  // region 1 is dead as k~/q~ from here on
@@ -341,18 +366,30 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
 #pragma unroll
             for (int nt = 0; nt < 4; nt++)
                 acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
-            for (int k0 = 0; k0 < r0b; k0 += 8) {
-                float a[4];
-                a[0] = s_kk[(r0b + g) * SQ + k0 + tg];
-                a[1] = s_kk[(r0b + g + 8) * SQ + k0 + tg];
-                a[2] = s_kk[(r0b + g) * SQ + k0 + tg + 4];
-                a[3] = s_kk[(r0b + g + 8) * SQ + k0 + tg + 4];
+            for (int k0 = 0; k0 < r0b; k0 += 16) {
+                float a[8];
+                const float2 p0 = *reinterpret_cast<const float2*>(&s_kk[(r0b + g) * SQ + k0 + 2 * tg]);
+                const float2 p1 = *reinterpret_cast<const float2*>(&s_kk[(r0b + g + 8) * SQ + k0 + 2 * tg]);
+                const float2 p2 = *reinterpret_cast<const float2*>(&s_kk[(r0b + g) * SQ + k0 + 2 * tg + 8]);
+                const float2 p3 = *reinterpret_cast<const float2*>(
+                    &s_kk[(r0b + g + 8) * SQ + k0 + 2 * tg + 8]);
+                a[0] = p0.x;
+                a[1] = p0.y;
+                a[2] = p1.x;
+                a[3] = p1.y;
+                a[4] = p2.x;
+                a[5] = p2.y;
+                a[6] = p3.x;
+                a[7] = p3.y;
+                const F16A af = f16_split_a(a);
 #pragma unroll
                 for (int nt = 0; nt < 4; nt++) {
-                    float bb[2];
-                    bb[0] = H[swz128(k0 + tg, nbase + nt * 8 + g)];
-                    bb[1] = H[swz128(k0 + tg + 4, nbase + nt * 8 + g)];
-                    mma_frag<true>(acc[nt], a, bb);
+                    float bb[4];
+                    bb[0] = H[swz128(k0 + 2 * tg, nbase + nt * 8 + g)];
+                    bb[1] = H[swz128(k0 + 2 * tg + 1, nbase + nt * 8 + g)];
+                    bb[2] = H[swz128(k0 + 2 * tg + 8, nbase + nt * 8 + g)];
+                    bb[3] = H[swz128(k0 + 2 * tg + 9, nbase + nt * 8 + g)];
+                    mma_f16x3(acc[nt], af, f16_split_b(bb));
                 }
             }
 #pragma unroll
@@ -373,7 +410,7 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
                 x[i] = hist[swz128(r0b + i, col)];
 #pragma unroll
             for (int i = 1; i < BS; i++) {
-                const float* Ti = &s_kk[(r0b + i) * SQ + r0b];
+                const float* Ti = &s_kk[(r0b + i) * SQ + r0b];  // warp-broadcast reads
 #pragma unroll
                 for (int j = 0; j < i; j++)
                     x[i] -= Ti[j] * x[j];
@@ -411,7 +448,6 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     // 3xTF32 on both. History rows [L, kChunk) are zero from the staging, so
     // the K range may run to the next multiple of 8; the solve loop ended
     // with a barrier.
-    const int kmax = (L + 7) & ~7;
     {
         const int m0 = (warp % 4) * 16;           // t rows of this warp
         const int nbase = (warp / 4) * (HD / 2);  // its 64 output columns
@@ -424,18 +460,58 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
 #pragma unroll
                 for (int nt = 0; nt < HD / 16; nt++)
                     acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
-                for (int k0 = 0; k0 < kmax; k0 += 8) {
-                    float a[4];
-                    a[0] = s_qk[(m0 + g) * SQ + k0 + tg];
-                    a[1] = s_qk[(m0 + g + 8) * SQ + k0 + tg];
-                    a[2] = s_qk[(m0 + g) * SQ + k0 + tg + 4];
-                    a[3] = s_qk[(m0 + g + 8) * SQ + k0 + tg + 4];
+                if (which == 0) {
+                    // Qeff = D q~ - P W cancels: 3xFP16 (22-bit products), k16;
+                    // P columns and history rows >= L are zero.
+                    const int kmax16 = (L + 15) & ~15;
+                    for (int k0 = 0; k0 < kmax16; k0 += 16) {
+                        float a[8];
+                        const float2 p0 = *reinterpret_cast<const float2*>(
+                            &s_qk[(m0 + g) * SQ + k0 + 2 * tg]);
+                        const float2 p1 = *reinterpret_cast<const float2*>(
+                            &s_qk[(m0 + g + 8) * SQ + k0 + 2 * tg]);
+                        const float2 p2 = *reinterpret_cast<const float2*>(
+                            &s_qk[(m0 + g) * SQ + k0 + 2 * tg + 8]);
+                        const float2 p3 = *reinterpret_cast<const float2*>(
+                            &s_qk[(m0 + g + 8) * SQ + k0 + 2 * tg + 8]);
+                        a[0] = p0.x;
+                        a[1] = p0.y;
+                        a[2] = p1.x;
+                        a[3] = p1.y;
+                        a[4] = p2.x;
+                        a[5] = p2.y;
+                        a[6] = p3.x;
+                        a[7] = p3.y;
+                        const F16A af = f16_split_a(a);
 #pragma unroll
-                    for (int nt = 0; nt < HD / 16; nt++) {
-                        float b[2];
-                        b[0] = B[swz128(k0 + tg, nbase + nt * 8 + g)];
-                        b[1] = B[swz128(k0 + tg + 4, nbase + nt * 8 + g)];
-                        mma_frag<true>(acc[nt], a, b);
+                        for (int nt = 0; nt < HD / 16; nt++) {
+                            float b[4];
+                            b[0] = B[swz128(k0 + 2 * tg, nbase + nt * 8 + g)];
+                            b[1] = B[swz128(k0 + 2 * tg + 1, nbase + nt * 8 + g)];
+                            b[2] = B[swz128(k0 + 2 * tg + 8, nbase + nt * 8 + g)];
+                            b[3] = B[swz128(k0 + 2 * tg + 9, nbase + nt * 8 + g)];
+                            mma_f16x3(acc[nt], af, f16_split_b(b));
+                        }
+                    }
+                } else {
+                    // Y_A = P U_A: an output term (like kernel 2's y GEMM), plain
+                    // tf32 k8 - measured cheaper than sharing the fp16 k16 loop
+                    // above (K1 +5% that way, the split work is not needed here).
+                    const int kmax = (L + 7) & ~7;
+                    for (int k0 = 0; k0 < kmax; k0 += 8) {
+                        float a[4];
+                        a[0] = s_qk[(m0 + g) * SQ + k0 + tg];
+                        a[1] = s_qk[(m0 + g + 8) * SQ + k0 + tg];
+                        a[2] = s_qk[(m0 + g) * SQ + k0 + tg + 4];
+                        a[3] = s_qk[(m0 + g + 8) * SQ + k0 + tg + 4];
+                        const Tf32A af = tf32_a(a);
+#pragma unroll
+                        for (int nt = 0; nt < HD / 16; nt++) {
+                            float b[2];
+                            b[0] = B[swz128(k0 + tg, nbase + nt * 8 + g)];
+                            b[1] = B[swz128(k0 + tg + 4, nbase + nt * 8 + g)];
+                            mma_tf32(acc[nt], af, tf32_b(b));
+                        }
                     }
                 }
 #pragma unroll

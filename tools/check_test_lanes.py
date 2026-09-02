@@ -170,7 +170,10 @@ def main():
     # 1046 -> 1051: FmhaFA2Dense2CtaTest.* (the Bq=128 TWOSLOT FA2 instance at
     # two CTAs per SM: 1024-row causal/odd/sliding-window/chunked/magnitude) -
     # launches the FA2 kernel, GPU-only.
-    PINNED = 1052
+    # 1052 -> 1053: GDNScanTest.ChunkparMatchesFused48Heads, the chunk-parallel
+    # scan at the Qwen3.8-27B head count (192 state-pass CTAs) - launches the
+    # scan kernels, GPU-only.
+    PINNED = 1053
 
     text = CMAKE.read_text()
     mods = module_sources(text)
