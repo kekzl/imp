@@ -96,6 +96,14 @@ there instead of retelling it.
 
 ### Changed
 
+- The GDN/SSM conv1d decode kernels read and write the 4-tap conv state as one
+  float4 and the taps as one 8-byte load (`src/compute/ssm.cu`, kernel_size 4;
+  other sizes keep the loop): the shift loop was three loads and four stores
+  per channel and the batched kernel ran at 9.4 us per launch at 32 rows on
+  Qwen3.8-27B (nsys, 2026-09-02). In situ (`tools/analysis/serving_idle_profile.sh`, 32 streams, steady window): 9.61 -> 4.97 us per launch, 273.4 -> 144.2 ms of a 10.4 s window. Two-image A/B @32 (Qwen3.8-27B-NVFP4-vllm, 3 alternating trials x 3 waves, median tok/s): 1833.9/1766.1/1811.1 -> 1844.2/1853.0/1825.6, 3/3 pairs positive. Explicit fmaf chain in the
+  contracted loop's order; `SSMConv1dTest.DecodeVectorisedBitExact` holds the
+  output and the shifted state bit-exact against a CPU fmaf reference.
+
 - FA2 prefill softmax: the score scale rides inside the exp FMA and interior
   KV tiles skip the per-element causal/window/range masking (ncu: the 2-CTA
   instance spent 5.5 scalar ALU instructions per MMA there). Qwen3-14B-NVFP4
