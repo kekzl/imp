@@ -123,15 +123,3 @@ TEST(MtpProbe, StaysQuietWithoutAHead) {
     EXPECT_FALSE(imp::probe_mtp_head(f.p.string()));
     EXPECT_FALSE(imp::probe_mtp_head(""));
 }
-
-// The synthetic cases above pin the rule; this one pins it against a real
-// checkpoint, because a hand-written weight_map is a statement about what I
-// think checkpoints look like. Reads the index only, no GPU, no weights.
-// Skipped where the model is absent, which includes CI.
-TEST(MtpProbe, FindsTheHeadInARealCheckpoint) {
-    const char* env = std::getenv("IMP_MTP_MODEL");
-    std::string path = env ? env : "/models/Qwen3.8-27B-NVFP4";
-    if (!fs::exists(path))
-        GTEST_SKIP() << "checkpoint not present: " << path;
-    EXPECT_TRUE(imp::probe_mtp_head(path)) << "known to carry mtp.fc.weight (15 tensors)";
-}

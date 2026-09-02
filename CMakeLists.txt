@@ -615,6 +615,9 @@ if(IMP_BUILD_TESTS)
         endif()
         add_executable(${target} ${_sources})
         target_link_libraries(${target} PRIVATE imp GTest::gtest GTest::gtest_main imp_warnings)
+        # Fixture files under tests/fixtures/, by absolute path: ctest and the image
+        # run the binaries from different working directories.
+        target_compile_definitions(${target} PRIVATE IMP_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
         target_include_directories(${target} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/tests
@@ -644,7 +647,6 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
         tests/test_tensor_kind_matcher.cpp
-        tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
         tests/test_kv_accounting.cpp
         tests/test_json_out.cpp
@@ -853,8 +855,6 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-text SOURCES
         tests/test_tokenizer.cpp
         tests/test_tokenizer_robustness.cpp
-        tests/test_tokenizer_compat.cpp
-        tests/test_tokenizer_qwen38.cpp
         tests/test_chat_template.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_qwen38_chat_template.cpp
@@ -967,6 +967,7 @@ if(IMP_BUILD_TESTS)
         tests/test_green_ctx.cu
         tests/test_capture_abort.cu
         tests/test_prefix_cache_equiv.cpp
+        tests/test_kv_cache_gpu.cpp
         tests/test_recurrent_snapshot_store.cpp
         tests/test_vram_query.cpp
         tests/test_mtp_upload_budget.cpp
@@ -996,6 +997,10 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_greedy_lock.cpp
         tests/test_continuous_batching.cpp
         tests/test_scheduler.cpp
+        tests/test_tensor_kind_coverage.cpp
+        tests/test_tokenizer_compat.cpp
+        tests/test_tokenizer_qwen38.cpp
+        tests/test_real_checkpoints.cpp
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp
         tests/test_weight_registry_preservation.cpp
@@ -1044,10 +1049,11 @@ if(IMP_BUILD_TESTS)
     # path has no build/ dir) — keep both in sync when changing it.
     set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
-    # Each lane command writes a GTest JSON report so guard_unit_skips (below)
-    # can pin, by name, which of its tests skip at runtime. check_test_lanes.py
-    # counts macros and cannot see that: 62 test-core cases sat in this lane
-    # green without ever running until #1860/#1861.
+    # Each lane command writes a GTest JSON report; guard_unit_skips (below)
+    # fails on any skipped test in it. The unit lane has no skips: a test that
+    # needs a GPU or a model file lives in test-kv or in test-e2e outside the
+    # filter above. check_test_lanes.py counts macros and cannot see a skip
+    # (62 test-core cases sat here green without ever running, #1860).
     set(_gtest_reports "${CMAKE_CURRENT_BINARY_DIR}/gtest-reports")
     add_test(NAME unit_core       COMMAND test-core "--gtest_output=json:${_gtest_reports}/unit_core.json")
     add_test(NAME unit_text       COMMAND test-text "--gtest_output=json:${_gtest_reports}/unit_text.json")
@@ -1092,12 +1098,10 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_precommit_filter.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
-    # The skipped set of the three lanes above, pinned by name in
-    # tools/unit_lane_skips.txt. DEPENDS only orders: a lane that crashed
-    # leaves its previous report behind, and is red on its own then anyway.
+    # No skipped test in the three lanes above. DEPENDS only orders: a lane
+    # that crashed leaves its previous report behind, and is red on its own.
     add_test(NAME guard_unit_skips
-        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_unit_skips.py ${_gtest_reports}
-                --allowlist ${CMAKE_CURRENT_SOURCE_DIR}/tools/unit_lane_skips.txt)
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_unit_skips.py ${_gtest_reports})
     set_tests_properties(guard_unit_skips PROPERTIES DEPENDS "unit_core;unit_text;unit_e2e_subset")
 
     set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split

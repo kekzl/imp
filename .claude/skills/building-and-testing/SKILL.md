@@ -61,14 +61,14 @@ docker run --rm --gpus all -v $HOME/models:/models \
 | `imp:test` image | `imp-server`, `imp-cli`, `imp-bench`, `imp-quantize`, `imp-tests` (full GPU), `imp-tests-unit` (generated wrapper = `ctest -L unit`: test-core + test-text + e2e unit filter), modules `test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e` |
 | `build-dev/` (host, from `make dev`) | same binaries; run them inside `imp:toolchain` with `-v $PWD:/src -w /src` (that mount hides the image's own `/src`) |
 
-`tests/test_ssm.cu` -> `test-moe-gdn`. `SamplingTest` -> `test-compute`. A new CPU test belongs in `test-core`. Lane census: `python3 tools/check_test_lanes.py --report` (the `Test lanes` check pins the no-lane count; a new GPU test in no lane fails it, raise `PINNED` with a reason). A test that skips inside the lane is a line in `tools/unit_lane_skips.txt` with its reason (`guard_unit_skips`, in `ctest -L unit`, fails on an unlisted skip and on a listed test that ran); `python3 tools/check_unit_skips.py build-dev/gtest-reports --report` lists them after `make dev-test`. A new tool binary needs a `cp` in the builder stage AND a `COPY --from=builder` line in the Dockerfile.
+`tests/test_ssm.cu` -> `test-moe-gdn`. `SamplingTest` -> `test-compute`. A new CPU test belongs in `test-core`. Lane census: `python3 tools/check_test_lanes.py --report` (the `Test lanes` check pins the no-lane count; a new GPU test in no lane fails it, raise `PINNED` with a reason). The unit lane has no skips (`guard_unit_skips` in `ctest -L unit` fails on any): a test that needs a GPU or a model file goes to `test-kv` or to `test-e2e` outside `_unit_e2e_filter`; fixture files live in `tests/fixtures/` (`IMP_TEST_FIXTURES_DIR`). A new tool binary needs a `cp` in the builder stage AND a `COPY --from=builder` line in the Dockerfile.
 
 ## Gates and hooks
 
 | Gate group | Runs where | Content |
 |---|---|---|
 | `filesize` | Build, hooks | `check_filesize.py` (two-way `[allow]` ceiling), `check_determinism_sites.py`, `check_dead_inline_accessors.py`, `check_log_fatal.py` |
-| `lanes` | Build, hooks, own check `Test lanes` (#1770) | `check_test_lanes.py --report` (macros per lane); `guard_unit_skips` inside `ctest -L unit` pins the lane's runtime skips by name (`tools/unit_lane_skips.txt`) |
+| `lanes` | Build, hooks, own check `Test lanes` (#1770) | `check_test_lanes.py --report` (macros per lane); `guard_unit_skips` inside `ctest -L unit` fails on any runtime skip |
 | `entrypoint` | Build, hooks | `tests/test_entrypoint.sh` drives `docker-entrypoint.sh` against a stub (25 assertions) |
 | `alloc` | Build, hooks | `check_alloc_sites.py` + `check_alloc_pairs.py` (allowlist is two-way: removing a site needs the allowlist edit) |
 | `kernels` | Build only (needs artifact) | `make kernel-resources` vs `tools/kernel_resource_baseline.txt` (REG >= 240 or non-zero local frame) |

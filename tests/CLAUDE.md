@@ -9,8 +9,8 @@ commit: 69456e47
 
 **Most GTest macros in this tree run in no CI lane at all** - they need a GPU,
 and there is no GPU runner. `python3 tools/check_test_lanes.py --report` prints
-the split and pins it (macros, not executions); `tools/unit_lane_skips.txt`
-pins, by name, what the lane starts and then skips (`guard_unit_skips`).
+the split and pins it (macros, not executions); `guard_unit_skips` fails the
+lane on any test that skips at runtime.
 
 ## Invariants
 
@@ -19,12 +19,12 @@ pins, by name, what the lane starts and then skips (`guard_unit_skips`).
   there is not green in CI.
 - **New CPU tests go to test-core**, and must be added to the explicit source
   list in `CMakeLists.txt`.
-- **Bookkeeping tests must not build a pool.** `KVCache::for_accounting()`
-  (uniform or per-layer/SWA shape; KV manager, SWA table, scheduler admission)
-  runs in CI. A test that still skips there is a line in
-  `tools/unit_lane_skips.txt` with its reason: `guard_unit_skips`
-  fails on an unlisted skip and on a listed test that ran. A config-only test
-  gets an embedded fixture (`tests/refs/deepseek_v2_lite_config.h`).
+- **The unit lane has no skips.** A test that needs a GPU or a model file
+  lives in a GPU-lane binary: `test-kv` (`test_kv_cache_gpu.cpp`), or `test-e2e`
+  outside `_unit_e2e_filter` (`test_real_checkpoints.cpp`, the tokenizer parity
+  files). Bookkeeping tests build `KVCache::for_accounting()` (uniform or
+  per-layer/SWA shape), config-only tests read `tests/fixtures/`
+  (`IMP_TEST_FIXTURES_DIR`).
 - **A green test proves nothing until it has been mutation-validated.** Break the
   code the test claims to cover and confirm the test fails.
 - **A test whose input cannot reach the defect is worthless even when correct.**

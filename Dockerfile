@@ -128,6 +128,9 @@ COPY --from=builder /tmp/test-moe-gd[n] /usr/local/bin/
 COPY --from=builder /tmp/test-e2[e] /usr/local/bin/
 COPY --from=builder /tmp/imp-benc[h] /usr/local/bin/
 COPY --from=builder /tmp/test-gd[n] /usr/local/bin/
+# Fixture files the test binaries read by absolute path (IMP_TEST_FIXTURES_DIR,
+# CMakeLists.txt): the builder tree is /src, so the same path here.
+COPY --from=builder /src/tests/fixtures /src/tests/fixtures
 
 # Copy entrypoint
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

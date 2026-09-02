@@ -245,43 +245,5 @@ TEST(SentencePieceLoader, NegativePadIdRoundtrips) {
     EXPECT_EQ(m.pad_id, -1);
 }
 
-// Optional integration test: parse a real spiece.model from the HF cache.
-// Skipped when the file is not present (the test runner box may differ).
-TEST(SentencePieceLoader, RealHfCacheSpieceModelLoadsCleanly) {
-    namespace fs = std::filesystem;
-    const char* home = std::getenv("HOME");
-    std::vector<std::string> candidates = {
-        // Container path (when -v $HOME/.cache/huggingface:/hf_cache is bound)
-        "/hf_cache/hub/models--facebook--musicgen-small/"
-        "snapshots/4c8334b02c6ec4e8664a91979669a501ec497792/spiece.model",
-    };
-    if (home) {
-        candidates.push_back(std::string(home) +
-            "/.cache/huggingface/hub/models--facebook--musicgen-small/"
-            "snapshots/4c8334b02c6ec4e8664a91979669a501ec497792/spiece.model");
-    }
-
-    std::string found;
-    for (const auto& p : candidates) {
-        if (fs::exists(p)) {
-            found = p;
-            break;
-        }
-    }
-    if (found.empty()) {
-        GTEST_SKIP() << "no real spiece.model fixture present";
-    }
-
-    SentencePieceModel m = load_sentencepiece_model_file(found);
-    EXPECT_FALSE(m.empty());
-    EXPECT_GT(m.pieces.size(), 100u) << "expected a non-trivial vocabulary";
-    // T5 vocab has <pad>, </s>, <unk> as ids 0, 1, 2.
-    EXPECT_EQ(m.pieces[0], "<pad>");
-    EXPECT_EQ(m.pieces[1], "</s>");
-    EXPECT_EQ(m.pieces[2], "<unk>");
-    EXPECT_EQ(m.pieces.size(), m.scores.size());
-    EXPECT_EQ(m.pieces.size(), m.types.size());
-}
-
 }  // namespace
 }  // namespace imp
