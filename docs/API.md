@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-03
+commit: 707be72f
 -->
 
 # API
@@ -47,6 +47,7 @@ all of them at once.
 | `stream` | ✅ | per token, all three dialects |
 | `n` | ✅ | documented and tested as `[1,4]` |
 | `logprobs` | ✅ | `tests/test_server_logprobs.py` in `make test-server`, plus `tests/test_logprobs_shapes.cpp` in the CPU lane. Streaming emitted none whenever a `stop` sequence was set until #1588; `/v1/completions` returned the Chat shape until #1589 |
+| `ignore_eos` | ✅ | vLLM-compatible extension on chat and completions: EOS and stop tokens are counted as output tokens without text, the think-model implicit `\nHuman` stop is not injected, user `stop` strings still apply, the request ends at `max_tokens` with `finish_reason: "length"`; for benchmark clients that need equal token counts across arms (`tools/analysis/burst_stream_client.py` with `IGNORE_EOS=1`). `tests/test_server_ignore_eos.py` in `make test-server` |
 | `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
 | `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape. `false` switches off **all three** drafters (n-gram, MTP head, token recycling) since #1639 - it used to reach only the n-gram matcher. `true` enables what the model and config allow; it cannot conjure an MTP head the checkpoint lacks |
@@ -292,7 +293,31 @@ id when no client id was sent, so every generation response carries some id
 a caller can quote. With `--log-requests`, the JSONL record carries the
 client id as `client_request_id` next to the server `req_id`, which is the
 join an agent framework needs to attribute its own latency to this hop.
-There is no OpenTelemetry export; the id propagation here is the wire half.
+With `server.otlp_endpoint` set (the full traces URL of an OTLP/HTTP
+collector, JSON encoding, `http://` only), every generation request is also
+exported as an OpenTelemetry span: a SERVER span named after the endpoint
+(`/v1/chat/completions`, `/v1/messages`, ...) with `imp.request_id`,
+`imp.client_request_id`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`
+/ `output_tokens`, `imp.cached_tokens`, `gen_ai.response.finish_reasons`,
+`imp.stream`, `imp.queue_ms` and `imp.ttft_ms` as attributes, plus `queue`,
+`prefill` and `decode` child spans on the request's timeline (the last two
+for streaming requests, where the first token is observed). A W3C
+`traceparent` request header puts the hop inside the caller's trace (its
+trace id, the caller's span as parent); without one a trace id is minted.
+A header with the sampled flag clear (`...-00`) is honoured the way a
+parent-based sampler would: ids are minted, nothing is exported. The JSONL
+record carries the same `trace_id` / `span_id` either way. Only requests
+that reach generation are traced; a request refused before it (4xx, 429,
+503) emits no span. Export runs on a background thread in one-second
+batches; an unreachable collector costs one warning and dropped batches,
+never request latency (measured 2026-09-02 on Qwen3.8-27B: median request
+latency 113.6 ms with the collector up, 111.5 ms with it stopped). `/metrics`
+counts `imp_otlp_spans_exported_total`, `imp_otlp_export_failures_total`
+and `imp_otlp_unsampled_requests_total`. Service name:
+`server.otlp_service_name` (default `imp-server`). Verified against Jaeger
+v2.20 (OTLP/HTTP receiver, GenAI view) with an OpenTelemetry-SDK client:
+the hop lands under the client's span with `queue` / `prefill` / `decode`
+children on its timeline.
 
 ## Errors
 

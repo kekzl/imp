@@ -13,6 +13,216 @@ there instead of retelling it.
 
 ### Added
 
+- OpenTelemetry trace export for imp-server (`server.otlp_endpoint`, OTLP/HTTP
+  JSON, off by default): one SERVER span per generation request with queue /
+  prefill / decode children and request ids, model and token counts as
+  attributes, joined to the caller's W3C `traceparent`; the request JSONL
+  carries the same `trace_id`. Closes roadmap gap 8; `tests/test_server_tracing.py`
+  is the collector-side gate in `make test-server`. Jaeger trial follow-ups:
+  non-streaming spans now carry `imp.queue_ms` / `imp.cached_tokens` (they read
+  fields nothing assigned), an unsampled `traceparent` (flags `00`) is not
+  exported, `gen_ai.operation.name` / `gen_ai.provider.name` / `http.route`
+  added and `gen_ai.response.finish_reasons` is a string array per semconv,
+  `/metrics` gains `imp_otlp_*` counters
+
+- Recurrent-snapshot host tier for hybrid prefix caching
+  (`server.recurrent_snapshot_host_mb`, default 2048): snapshots evicted from
+  the device slots move to pinned host memory and restore from there, so
+  multi-turn sessions beyond the slot count keep their tail-only prefill.
+  Qwen3.8-27B-NVFP4, 8 interleaved sessions x 3 turns: turn-2 TTFT 324/322
+  -> 163/145 ms, set wall 15.9/15.8 -> 13.5/13.1 s; ledger row in
+  `docs/roadmap.md`
+
+- Long-prompt bursts on the GDN hybrid: the prefill token budget charged a
+  ragged member its full chunk, so the snapshot tail of one prompt ran alone
+  in its own step, and the packed multi-sequence forwards that replaced it
+  ran the fused batched GDN scan. The budget now charges the rows the ragged
+  forward takes (launch floor once per group, `prefill_batch_decode_cap`
+  counts forwards) and the ragged forward runs the chunk-parallel scan per
+  member when it is a few big chunks plus a few tails (a 32-short-prompt
+  forward stays on the batched kernel). 32 x 1094-token prompts at 32 streams
+  (Qwen3.8-27B-NVFP4-vllm, two-image A/B, 3/3 pairs): 943.7 -> 1058.0 tok/s
+  (+12.1%), TTFT p90 5027 -> 3854 ms, ITL p95 46.2 -> 19.9 ms; 982-token
+  prompts 1040.5 -> 1128.3 tok/s (+8.4%, 3/3), TTFT p90 4104 -> 3353 ms;
+  38-token prompts neutral (1846.7 -> 1843.4, -0.2%). Ledger row in
+  `docs/roadmap.md`
+- `ignore_eos` (vLLM-compatible) on `/v1/completions` and `/v1/chat/completions`:
+  the request runs to `max_tokens` (EOS and stop tokens counted without text,
+  the think-model implicit `\nHuman` stop not injected, user `stop` strings
+  still apply), for benchmark clients that need equal token counts per arm;
+  `tests/test_server_ignore_eos.py` in `make test-server`.
+  `tools/analysis/burst_stream_client.py` (TTFT / ITL / gaps per wave) and
+  `tools/analysis/prefill_cap_conc_ab.sh` (config or two-image A/B with it)
+- Cross-engine serving harness `tools/analysis/vllm_conc_ab.sh` (imp vs vLLM,
+  alternating fresh servers, one client) and a prompt-length knob on
+  `conc_client.py`. Roadmap item 0 closes on it: Qwen3.8-27B-NVFP4-vllm, imp
+  leads vLLM 0.27.1 by +24.9% at 32 streams, +15.6% at 8 and +75.5% at 32
+  with 1082-token prompts (3/3 pairs each), vLLM 0.28.0 by +30.0% at 32; the
+  earlier "~1.08x" mixed two clients.
+  Table with PROV in `docs/BENCHMARKS.md`
+
+## [0.34.0] - 2026-09-02
+
+### Added
+
+- GDN chunk-parallel scan, state-feeding GEMMs on 3xFP16 `mma.sync`
+  m16n8k16 instead of 3xTF32 (both kernels), Y_A on plain tf32, operand
+  splits hoisted out of the n-tile loops, kernel 2 staging as a swizzled
+  tile. pp4096 vs #1851 (alternating pairs): Qwen3.8-27B factor kernel
+  312/311 -> 244/248 ms, state pass 329/328 -> 268/268 ms, e2e 11187/11179
+  -> 11730/11740 tok/s; Qwen3.6-35B 132/132 -> 105/104 and 102/102 -> 83/82
+  ms, 29487/29394 -> 30990/30403 tok/s. Unit-test state diff vs the fused
+  kernel 9.5e-7 -> 1.3e-6; the divergence the GDN blocks add on a real prompt
+  is median 0 (`layer_ab_diff.py`), the same class as fused -> #1851.
+  Refuted on the way (ncu: both kernels were TF32-rate bound): kernel 2 at
+  two CTAs per SM (flat), u_eff on plain tf32 (state diff 1e-4); ledger row
+  in `docs/roadmap.md`
+
+- GDN chunk-parallel scan, state pass at 8 warps with register-pipelined
+  factor staging, strip sized per head count under an L2 cap
+  (`gdn.chunkpar_strip`, 0 = auto), XOR-swizzled kernel-1 shared tiles;
+  kernel 2 split into `gdn_scan_chunkpar_pass.cu`. pp4096 vs #1850
+  (alternating pairs): Qwen3.8-27B state pass 483/493 -> 337/336 ms, factor
+  kernel 370/377 -> 324/323 ms, e2e 10002/10008 -> 10962/10813 tok/s;
+  Qwen3.6-35B 152 -> 103 / 152 -> 133 ms, 27073/26701 -> 28513/27655 tok/s;
+  deterministic PPL 4.6273 unchanged; ledger row in `docs/roadmap.md`
+
+- GDN chunk-parallel scan, blockwise triangular solve: 16-row diagonal
+  blocks per thread in registers, off-diagonal updates as 3xTF32 `mma.sync`,
+  8 barriers per chunk instead of 128. Qwen3.6-35B scan kernel class -71%
+  pp512 / -79% pp4096 vs the fused scan (-19% / -23% vs #1849), e2e pp4096
+  12.9k -> 27.0k tok/s; Qwen3.8-27B deterministic PPL 4.6273 (fused
+  4.6283); ledger row in `docs/roadmap.md` (#1850)
+
+- GDN chunk-parallel scan, factor kernel on tensor cores: Gram matrices and
+  the P@W / P@U_A products as 3xTF32 `mma.sync`, float4 row loads, parallel
+  decay/beta. Qwen3.6-35B scan kernel class -64% pp512 / -74% pp4096 vs the
+  fused scan (-24% / -27% vs #1848), e2e pp4096 12.7k -> 24.9k tok/s;
+  Qwen3.8-27B deterministic PPL 4.6283 -> 4.6148; ledger row in
+  `docs/roadmap.md` (#1849)
+
+- GDN chunk-parallel scan, state pass on tensor cores: the three per-chunk
+  GEMMs run as `mma.sync` tf32 (3xTF32 on the two that feed the carried
+  state). Qwen3.6-35B scan kernel class -53% pp512 / -65% pp4096 vs the
+  fused scan (-31% / -31% vs #1847), e2e pp4096 12.5k -> 21.5k tok/s,
+  deterministic PPL 6.8216 -> 6.8122; ledger row in `docs/roadmap.md` (#1848)
+
+- Chunk-parallel GDN prefill scan (`gdn.chunkpar_scan`, default on): the
+  recurrent scan ran 32 CTAs sequentially over all tokens and was 42% of the
+  hybrid pp512 wall. Qwen3.6-35B: scan kernel class -32% pp512 / -47% pp4096,
+  e2e +15/+21% pp512 and +45% pp4096 (12.9k -> 18.9k tok/s), deterministic
+  PPL +0.03%; ledger row in `docs/roadmap.md` (#1847)
+
+- Serving idle attribution tooling: `tools/analysis/serving_idle_profile.sh`
+  (imp-server under nsys node-trace at N streams) +
+  `tools/analysis/nsys_gap_attribution.py` (busy/idle share, gap histogram,
+  largest gaps with neighbouring kernels, sub-100-us gap pairs) and
+  `tools/analysis/two_image_conc_ab.sh` (alternating two-image aggregate A/B
+  for code changes). Qwen3.8-27B-NVFP4 at 32 streams, steady window: idle
+  14.9%, of which the >1 ms gaps (45%) are CUPTI-inflated graph captures at
+  the wave ramp; real idle ~8% = launch density 6.3% + host turnaround 1.9%.
+
+### Changed
+
+- The GDN/SSM conv1d decode kernels read and write the 4-tap conv state as one
+  float4 and the taps as one 8-byte load (`src/compute/ssm.cu`, kernel_size 4;
+  other sizes keep the loop): the shift loop was three loads and four stores
+  per channel and the batched kernel ran at 9.4 us per launch at 32 rows on
+  Qwen3.8-27B (nsys, 2026-09-02). In situ (`tools/analysis/serving_idle_profile.sh`, 32 streams, steady window): 9.61 -> 4.97 us per launch, 273.4 -> 144.2 ms of a 10.4 s window. Two-image A/B @32 (Qwen3.8-27B-NVFP4-vllm, 3 alternating trials x 3 waves, median tok/s): 1833.9/1766.1/1811.1 -> 1844.2/1853.0/1825.6, 3/3 pairs positive. Explicit fmaf chain in the
+  contracted loop's order; `SSMConv1dTest.DecodeVectorisedBitExact` holds the
+  output and the shifted state bit-exact against a CPU fmaf reference.
+
+- Repetition / frequency / presence penalties walk the history instead of the
+  vocabulary (`sampling_penalties.cu`, one block per row, 16-bit token counts
+  in the T2 arena, charged as `ExecT2Demand::penalty_counts`, 9.3 MiB at 32
+  rows on a 151936 vocab): the sweep cost every vocab entry a pass over the
+  history, 197 us per decode step at 32 rows and 300 tokens of history and
+  2659 us at 4096. History form: 10.7-23.3 us and 18.6-34.3 us (cudaEvent, 50
+  launches, `SamplingTest.PenaltyHistoryTiming`). Logits bit-identical to the
+  sweep, bans included (`SamplingTest.PenaltyHistoryMatchesVocabSweep`); the
+  M=1 launchers and the graph-loop device-count form take the same path.
+  Serving @32 (Qwen3.8-27B-NVFP4-vllm, two-image A/B, 3 alternating trials):
+  1748.1/1824.6/1794.8 -> 1835.8/1833.4/1850.4 tok/s, 3/3 pairs positive.
+
+- FA2 prefill softmax: the score scale rides inside the exp FMA and interior
+  KV tiles skip the per-element causal/window/range masking (ncu: the 2-CTA
+  instance spent 5.5 scalar ALU instructions per MMA there). Qwen3-14B-NVFP4
+  pp4096: FA2 kernel sum 244.3/243.6 -> 225.6/226.1 ms (-7.5%), pp 24396 ->
+  24718 tok/s, deterministic PPL 10.0277 -> 10.0229; Qwen3.8-27B-NVFP4 (hd=256)
+  137.6 -> 118.1 ms (-14%), PPL 4.6283 both arms. The exp2/scale-in-Q forms
+  measured the same speed but +0.35% PPL and stay out.
+
+- The dense (hd=128, Bq=128) FA2 prefill kernel runs two CTAs per SM
+  (`attention.fa2_dense_2cta`, default on): TWOSLOT tile (35 KB) plus
+  `__launch_bounds__(256, 2)`, which pins the kernel to 128 registers (137
+  unconstrained, 24 B spill). Qwen3-14B-NVFP4 pp4096: FA2 kernel sum 271.7 ->
+  244.2 ms (-10%, 3/3 pairs), pp 23722 -> 24176 tok/s, output bit-identical.
+  The shipped single-CTA instance keeps byte-identical SASS.
+
+- Causal FA2 prefill CTAs run heaviest q-tile first (`attention.fa2_heavy_first`,
+  default on): a causal q-tile attends 2..32 KV tiles at 4096 tokens and the
+  natural blockIdx order started the heaviest last. FA2 kernel sum pp4096, nsys,
+  3 alternating pairs each: Qwen3-14B-NVFP4 223.532/224.010/223.556 -> 220.748/221.213/221.309 ms (-1.2%),
+  Qwen3.8-27B-NVFP4 120.737/120.594/120.523 -> 117.782/117.953/117.956 ms (-2.2%); pp +0.1..0.2%,
+  output byte-identical (`FmhaFA2HeavyFirstTest`).
+
+- CUTLASS NVFP4 prefill GEMM runs the stream-K tile scheduler on grids that
+  leave a short tail wave (`gemm.nvfp4_cutlass_streamk`, default 1): the
+  M=512 gate/up grid (544 CTAs, 3.2 waves) drops 98.3 -> 85.2 us isolated,
+  the 160-CTA pp512 projections (0.94 waves, no tail) stay data-parallel
+  because the split costs +11% there. Qwen3-14B-NVFP4 pp512: CUTLASS kernel
+  sum 101.1/103.6/102.1 -> 97.1/97.1/97.3 ms (3/3 pairs), pp4096 flat,
+  output bit-identical. Harness `tools/analysis/prefill_kernel_ab.sh`.
+- `attention.fa2_hd256_bkv=32` (opt-in, default 64): the HD=256 FA2 prefill
+  instance at two CTAs per SM. The Bkv=64 TWOSLOT tile is 67.6 KB of the
+  100 KB SM budget (one 4-warp CTA per SM, 8.3% occupancy) although the
+  registers allow two. Qwen3.8-27B-NVFP4 pp4096: FA2 kernel sum 138.2 ->
+  122.5 ms (-11.2%, 3/3 pairs), pp 6719 -> 6745 tok/s, PPL 4.6283 -> 4.6529
+  (+0.53%, twice the f16 O rescales) - not a default-on trade. Verdict and
+  harness (`tools/analysis/fa2_hd256_bkv_ab.sh`) in `docs/roadmap.md`.
+- Roofline aggregation drops launches measured under `ncu.clock_floor_ghz`
+  (1.2) and counts them as `n_launches_dropped_clock`: run 1d5b9230 carried
+  one launch at 0.31 GHz (998 us for a 99-us kernel) that the report showed
+  as 99.7% of roofline. The roadmap's "255 registers" for the dense FA2
+  instance was the device attribute; the kernel allocates 144.
+- Programmatic Dependent Launch has its device half: registered decode
+  kernels (NVFP4 GEMV family, small-M v2 GEMM, row-block RMSNorm,
+  elementwise add/copy, GDN scan and conv, gated norm, sampling rows, KV
+  write, embedding) call `griddepcontrol.wait` before their first global
+  access and `launch_dependents` after their last input read; the graph
+  edge rewrite now keys on the registered consumer; kernels that do not
+  wait are no longer registered (the old blanket list raced greedy
+  determinism). Qwen3.8-27B-NVFP4: M=1 spec-off +1.7% median (pairs
+  +1.7/+6.5/-0.3% on a drifting host at healthy clocks), 32 streams +1.3%
+  median (3/3 pairs positive in every series measured), steady-window GPU
+  idle 13.6% -> 10.8%. `runtime.no_pdl=true` turns both halves off.
+- Batched decode sampling: a row whose filter chain is penalties + the
+  engine-static banned-token list now joins the batched penalty sweep (the
+  ban rides in `PenaltyRowArgs`, applied by the thread that owns the entry)
+  instead of 2 inline launches per row per step. With the server default
+  `repetition_penalty` 1.05 every row was inline. 32-stream aggregate on
+  Qwen3.8-27B-NVFP4: 1766.9 -> 1774.9 tok/s median, 3/3 alternating pairs
+  positive (+0.1..+1.4%); steady-window idle 14.9% -> 13.6% in the profile.
+
+- `speculative.mtp_tree_width` (default 1 = unchanged): W > 1 drafts W MTP
+  chains per verify step (chain 0 = today's top-1 chain, chains 1..W-1 branch
+  at the first position on the head's top-W ids) and verifies them as one
+  multi-candidate chunk, on dense models through the token-recycling route
+  and on GDN hybrids through a grouped recurrent chunk (W candidates as W scan
+  sequences on W-1 reserved state slots, partial accepts replay the winner
+  through the same captured graph). Serving top-W kernel replaces the probe's
+  713 us single-CTA scan. Measured on Qwen3.8-27B-NVFP4: +5-8% emitted per
+  verify for +11-20% verify time, so it stays off (the tree ceiling itself
+  passed: top-2 covers +6..+10 points over top-1 at depth 1).
+  `diagnostics.mtp_tree_probe` is now measurement-only (it used to be
+  consumed by the verify and scored nothing). Design, gates and numbers:
+  `docs/plans/2026-08-31-mtp-multicandidate-hybrid.md`.
+- `speculative.mtp_tree_margin` (default 2.0, only with `mtp_tree_width` > 1):
+  branch only when the MTP head's top-1/top-2 logit margin is below it; the
+  serving top-W kernel returns the values. Think traffic W=2 goes from
+  -6.4/-6.9% to -0.8/-5.8% against linear adaptive-k (still not a win, W
+  stays 1). Tallies in the spec stats log line.
+
 - Container deployments reach every `imp.conf` key: `IMP_CONFIG` becomes
   `--config`, `IMP_SET` becomes one `--set` per whitespace-separated
   `key=value`. The entrypoint's other 19 `IMP_*` names are one hand-written
