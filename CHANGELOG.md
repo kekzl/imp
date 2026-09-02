@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-02
+
 ### Added
 
 - GDN chunk-parallel scan, state-feeding GEMMs on 3xFP16 `mma.sync`
