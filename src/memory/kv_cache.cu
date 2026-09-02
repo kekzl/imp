@@ -129,6 +129,22 @@ KVCache::KVCache(AccountingOnly, int n_layers, int n_kv_heads, int head_dim, QTy
                        ? (static_cast<size_t>(block_size) * n_kv_heads * head_dim / 2)
                        : (static_cast<size_t>(block_size) * n_kv_heads * head_dim * dtype_size(dtype))),
       accounting_only_(true) {
+    // Geometry, including the checks: scale_block_bytes_ is arithmetic on the
+    // shape and the manager reads it, and the NVFP4 head_dim rule is a
+    // constraint on the shape rather than on the allocation. Leaving either out
+    // would make this cache disagree with a real one about what it is.
+    const bool needs_scales = (dtype == QType::INT8 || dtype == QType::INT4 ||
+                               dtype == QType::NVFP4 || dtype == QType::MXFP4_KV);
+    if (needs_scales) {
+        if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV) {
+            if (head_dim % kNVFP4Group != 0)
+                throw std::runtime_error("KVCache NVFP4: head_dim must be a multiple of 16");
+            scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * (head_dim / kNVFP4Group);
+        } else {
+            scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
+        }
+    }
+
     // Same two lines the memory-backed constructor ends with, and nothing else:
     // open_slots() is documented as the mode where the caller owns the memory,
     // so the id space and refcounts are already independent of the pool.

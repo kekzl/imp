@@ -9,8 +9,7 @@ commit: 01799405
 
 **Most GTest macros in this tree run in no CI lane at all** - they need a GPU,
 and there is no GPU runner. `python3 tools/check_test_lanes.py --report` prints
-the split and pins it; this file does not repeat it, because a copy here is a
-second number nothing checks.
+the split and pins it (macros, not executions).
 
 ## Invariants
 
@@ -19,6 +18,9 @@ second number nothing checks.
   there is not green in CI.
 - **New CPU tests go to test-core**, and must be added to the explicit source
   list in `CMakeLists.txt`.
+- **Bookkeeping tests must not build a pool.** `MakeManager()` is
+  accounting-only and runs in CI; `MakeManagerWithMemory()` is for the 12 that
+  touch bytes, SWA or persistence.
 - **A green test proves nothing until it has been mutation-validated.** Break the
   code the test claims to cover and confirm the test fails. This is the standard
   here, not an extra.
