@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- Recurrent-snapshot host tier for hybrid prefix caching
+  (`server.recurrent_snapshot_host_mb`, default 2048): snapshots evicted from
+  the device slots move to pinned host memory and restore from there, so
+  multi-turn sessions beyond the slot count keep their tail-only prefill.
+  Qwen3.8-27B-NVFP4, 8 interleaved sessions x 3 turns: turn-2 TTFT 324/322
+  -> 163/145 ms, set wall 15.9/15.8 -> 13.5/13.1 s; ledger row in
+  `docs/roadmap.md`
+
 ## [0.34.0] - 2026-09-02
 
 ### Added

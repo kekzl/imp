@@ -184,7 +184,7 @@ Lifetime classes use the A2 taxonomy. "Graph" = the buffer's address is baked in
 | `memory/kv_cache.cu` | paged KV block pool | `kv_max_blocks × kv_block_bytes_per_layer(dtype,bs,kv_heads,hd) × n_kv_layers` | engine-persistent | ✓ | note |
 | `memory/kv_cache_manager` | residual FP16 ring | `max_seqs × n_layers × 2 × residual_n × kv_heads × hd × 2 B` | engine-persistent | ✓ | via `VRAMAllocator` |
 | `memory/ssm_state.cu` | SSM/GDN conv + h state | `n_ssm × max_batch × (conv_ch·(k−1)·4 + heads·hd·state·dtype)` | engine-persistent | ✓ | via `VRAMAllocator` |
-| `memory/recurrent_snapshot_store` | hybrid prefix snapshots | `entries × ssm_slab_bytes` (LRU-bounded) | engine-persistent | ✗ | ✗ |
+| `memory/recurrent_snapshot_store` | hybrid prefix snapshots | `entries × ssm_slab_bytes` (LRU-bounded, `server.recurrent_snapshot_mb`); evicted entries move to a pinned host tier (`server.recurrent_snapshot_host_mb`, not VRAM) | engine-persistent | ✗ | ✗ |
 | `exec/executor_workspace*` | persistent workspace | `max_tokens·d_model·2 B·3 + max_tokens·vocab·4 B` | engine-persistent | ✓ | via `VRAMAllocator` |
 | `exec/executor_workspace*` | shared workspace | `max(attn, ffn, moe, ssm)` shared sizes at `max_tokens` | engine-persistent | ✓ | via `VRAMAllocator` |
 | `exec/executor_workspace*` | decode workspace (2nd copy) | same, at `max_batch` | engine-persistent | ✓ | via `VRAMAllocator` |

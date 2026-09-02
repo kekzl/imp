@@ -33,8 +33,64 @@ struct DeviceSrc {
 
 static std::vector<uint8_t> ReadEntry(const RecurrentSnapshotEntry& e) {
     std::vector<uint8_t> h(kEntryBytes);
-    EXPECT_EQ(cudaMemcpy(h.data(), e.data, kEntryBytes, cudaMemcpyDeviceToHost), cudaSuccess);
+    // cudaMemcpyDefault: device slab or pinned host memory (host-tier entry).
+    EXPECT_EQ(cudaMemcpy(h.data(), e.data, kEntryBytes, cudaMemcpyDefault), cudaSuccess);
     return h;
+}
+
+// Host tier: a device eviction moves the entry to pinned host memory instead
+// of dropping it; find() serves it with on_host, byte-exact; the host tier
+// has its own LRU; a held host entry stays valid after its own eviction.
+TEST(RecurrentSnapshotStoreTest, EvictedEntriesMoveToHostTierAndRestore) {
+    SKIP_IF_NO_CUDA();
+    RecurrentSnapshotStore store;
+    store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/2 * kEntryBytes);
+    ASSERT_EQ(store.capacity(), 1);
+    ASSERT_EQ(store.host_capacity(), 2);
+    DeviceSrc a(0x11), b(0x22), c(0x33), d(0x44);
+    ASSERT_TRUE(store.save(1, 32, a.d, nullptr));
+    ASSERT_TRUE(store.save(2, 64, b.d, nullptr));  // evicts 1 -> host
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(store.size(), 1);
+    EXPECT_EQ(store.host_size(), 1);
+    auto e1 = store.find(1);
+    ASSERT_NE(e1, nullptr);
+    EXPECT_TRUE(e1->on_host);
+    EXPECT_EQ(e1->n_tokens, 32);
+    EXPECT_EQ(ReadEntry(*e1), std::vector<uint8_t>(kEntryBytes, 0x11));
+    auto e2 = store.find(2);
+    ASSERT_NE(e2, nullptr);
+    EXPECT_FALSE(e2->on_host);
+    e2.reset();
+    ASSERT_TRUE(store.save(3, 96, c.d, nullptr));  // evicts 2 -> host (host: 1, 2)
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(store.host_size(), 2);
+    // Evicting 3 needs a host buffer: host LRU head 1 is HELD (e1), so its
+    // buffer does not come back and the tier keeps evicting - 2 recycles.
+    ASSERT_TRUE(store.save(4, 128, d.d, nullptr));
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(store.host_size(), 1);
+    EXPECT_EQ(store.find(1), nullptr) << "host tier LRU must evict the oldest host entry";
+    EXPECT_EQ(store.find(2), nullptr) << "a held head releases no buffer, the next entry goes too";
+    auto e3 = store.find(3);
+    ASSERT_NE(e3, nullptr);
+    EXPECT_TRUE(e3->on_host);
+    EXPECT_EQ(ReadEntry(*e3), std::vector<uint8_t>(kEntryBytes, 0x33));
+    // The held host entry e1 stays byte-valid after its eviction from the tier.
+    EXPECT_EQ(ReadEntry(*e1), std::vector<uint8_t>(kEntryBytes, 0x11));
+    e1.reset();                                     // its pinned buffer recycles now
+    ASSERT_TRUE(store.save(5, 160, a.d, nullptr));  // evicts 4 -> host without touching 3
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(store.host_size(), 2);
+    EXPECT_NE(store.find(3), nullptr);
+    EXPECT_NE(store.find(4), nullptr);
+    // Duplicate key already in the host tier: no-op success, not a second copy.
+    EXPECT_TRUE(store.save(3, 96, a.d, nullptr));
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(ReadEntry(*store.find(3)), std::vector<uint8_t>(kEntryBytes, 0x33));
+    store.clear();
+    EXPECT_EQ(store.size(), 0);
+    EXPECT_EQ(store.host_size(), 0);
 }
 
 TEST(RecurrentSnapshotStoreTest, SaveFindRoundTrip) {

@@ -245,8 +245,10 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
 
 - **On a recurrent model, a sampled request can differ depending on prior traffic; hybrid prefix
   caching is the carrier.** GDN recurrent state is cumulative, so KV-block reuse alone cannot skip
-  prefill; imp saves the state at block boundaries in a `RecurrentSnapshotStore` and restores it
-  on a prefix hit, overwriting the state slab (`src/runtime/engine_sampling_stop.cpp:297`). Lookup
+  prefill; imp saves the state at block boundaries in a `RecurrentSnapshotStore` (a few device
+  slots, evicted entries kept in a pinned host tier, `server.recurrent_snapshot_host_mb`) and
+  restores it on a prefix hit, overwriting the state slab
+  (`src/runtime/engine_sampling_stop.cpp:297`). Lookup
   keys on the KV prefix hash, but every chat request begins with the same chat-template header, so
   the first block matches across unrelated prompts, and the restored state was produced under
   different chunk boundaries on a non-bit-reproducible forward. Measured (Qwen3.8-27B-NVFP4,

@@ -173,7 +173,10 @@ def main():
     # 1052 -> 1053: GDNScanTest.ChunkparMatchesFused48Heads, the chunk-parallel
     # scan at the Qwen3.8-27B head count (192 state-pass CTAs) - launches the
     # scan kernels, GPU-only.
-    PINNED = 1053
+    # 1053 -> 1054: RecurrentSnapshotStoreTest.EvictedEntriesMoveToHostTierAndRestore,
+    # the pinned host tier of the recurrent snapshot store - cudaHostAlloc +
+    # async copies, GPU-only.
+    PINNED = 1054
 
     text = CMAKE.read_text()
     mods = module_sources(text)

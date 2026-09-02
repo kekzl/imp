@@ -371,7 +371,12 @@ struct RuntimeConfig {
         // by design) and accounted in the expert-offload reserve. imp-cli
         // --bench pins this to 0 (baseline semantics unchanged).
         // 0 disables snapshots AND hybrid prefix caching (dense unaffected).
-        int recurrent_snapshot_mb = 256;
+                int recurrent_snapshot_mb = 256;
+        // Pinned host memory for recurrent snapshots evicted from the device
+        // tier (hybrid prefix caching beyond recurrent_snapshot_mb / slab
+        // slots): more concurrent multi-turn sessions keep their tail-only
+        // prefill. 0 = off.
+        int recurrent_snapshot_host_mb = 2048;
         // Green Contexts / prefill-decode overlap streams in the server engine.
         // OFF by default (suspected memSyncDomain race on sm_120 fallback
         // streams — gemma-3-12b IMA); opt in via [server] green_contexts = true.

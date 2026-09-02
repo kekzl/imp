@@ -297,11 +297,14 @@ void Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
             if (req.recurrent_restore && req.recurrent_restore->data &&
                 recurrent_snapshots_ &&
                 recurrent_snapshots_->entry_bytes() == ssm_state_->per_seq_bytes()) {
+                                // cudaMemcpyDefault: the entry is a device slab or, from the
+                // store's host tier, pinned host memory (H2D on the stream).
                 IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
                     ssm_state_->seq_base(slot), req.recurrent_restore->data,
-                    ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
-                IMP_LOG_DEBUG("RecurrentSnapshot: restored %d-token state for req %d (slot %d)",
-                              req.recurrent_restore->n_tokens, req.id, slot);
+                    ssm_state_->per_seq_bytes(), cudaMemcpyDefault, stream));
+                IMP_LOG_DEBUG("RecurrentSnapshot: restored %d-token state for req %d (slot %d, %s)",
+                              req.recurrent_restore->n_tokens, req.id, slot,
+                              req.recurrent_restore->on_host ? "host tier" : "device");
             } else {
                 ssm_state_->reset_sequence(slot, stream);
             }

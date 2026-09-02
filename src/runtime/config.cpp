@@ -322,7 +322,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("server.prefix_pin_budget_pct", cfg.server.prefix_pin_budget_pct);
     B("server.model_swap", cfg.server.model_swap);
     I("server.model_swap_drain_ms", cfg.server.model_swap_drain_ms);
-    I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
+        I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
+    I("server.recurrent_snapshot_host_mb", cfg.server.recurrent_snapshot_host_mb);
     B("server.green_contexts", cfg.server.green_contexts);
 
     // [warm_cache]
