@@ -586,8 +586,9 @@ recurrent_snapshot_host_mb = 2048
 # generation request becomes one SERVER span (queue / prefill / decode
 # children; model, token counts, finish reason, request ids as attributes),
 # joined to the caller's trace when the request carries a W3C traceparent
-# header. Export runs on a background thread; a dead collector costs one
-# warning, never latency. http:// only.
+# header (sampled flag clear = not exported). Export runs on a background
+# thread; a dead collector costs one warning, never latency. http:// only.
+# Counters: /metrics imp_otlp_*.
 otlp_endpoint = ""
 otlp_service_name = "imp-server"
 # Green Contexts / prefill-decode overlap streams in the server engine.
