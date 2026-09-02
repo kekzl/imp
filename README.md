@@ -54,7 +54,7 @@ it fits a single 5090 with room for a real context.
 **Get the weights** (19.2 GiB, download only, nothing to convert). The
 checkpoint is [kekzle/Qwen3.8-27B-NVFP4-vllm](https://huggingface.co/kekzle/Qwen3.8-27B-NVFP4-vllm),
 an `imp-quantize --format vllm` export: the same directory also loads in
-vLLM (verified on 0.27.1). `make build`
+vLLM (verified on 0.27.1 and 0.28.0). `make build`
 first: the script needs the `imp:test` image and exits 1 without it, even on
 this download-only path (#1682). `docker compose build imp-server` produces
 `imp:latest`, which is a different tag.

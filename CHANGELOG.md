@@ -33,6 +33,14 @@ there instead of retelling it.
   -> 163/145 ms, set wall 15.9/15.8 -> 13.5/13.1 s; ledger row in
   `docs/roadmap.md`
 
+- Cross-engine serving harness `tools/analysis/vllm_conc_ab.sh` (imp vs vLLM,
+  alternating fresh servers, one client) and a prompt-length knob on
+  `conc_client.py`. Roadmap item 0 closes on it: Qwen3.8-27B-NVFP4-vllm, imp
+  leads vLLM 0.27.1 by +24.9% at 32 streams, +15.6% at 8 and +75.5% at 32
+  with 1082-token prompts (3/3 pairs each), vLLM 0.28.0 by +30.0% at 32; the
+  earlier "~1.08x" mixed two clients.
+  Table with PROV in `docs/BENCHMARKS.md`
+
 ## [0.34.0] - 2026-09-02
 
 ### Added

@@ -550,6 +550,55 @@ wave-2 method above; the like-for-like end-to-end number is the alternating
 A/B: 992.5 -> 1151.7 tok/s aggregate at 32 streams (+16.0%), 363.8 -> 494.6
 at 8 (+36.0%), 3 trials/arm, `tools/analysis/smallm_v2_conc_ab.sh`.
 
+### The gap, re-measured on one client (2026-09-02): imp leads at 8 and 32 streams
+
+The "~1.08x" above compared an imp number from `conc_client.py` (300-token
+gens) with a vLLM number from a different client (200-token gens). This table
+is like for like: same checkpoint, same client for both engines
+(`tools/analysis/conc_client.py`: unique prompts per stream and wave, 300-token
+greedy gens, `/v1/completions`, aggregate = completion tokens / wall, median of
+3 waves), fresh server per arm, 3 alternating trials, imp pinned as above (mbs
+32, seq 4096, kv blocks 2387), vLLM with the 2026-08-25 flags. Harness
+`tools/analysis/vllm_conc_ab.sh`.
+
+[PROV: commit=a44298cb date=2026-09-02 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm
+       quant=NVFP4-CT cuda=13.3 path=server-api cmd=tools/analysis/vllm_conc_ab.sh
+       n=3 trials x 3 waves per arm, alternating; vllm=v0.27.1 / v0.28.0
+       flags=--gpu-memory-utilization 0.90 --max-model-len 16384 --max-num-seqs CONC,
+       VLLM_WSL2_ENABLE_PIN_MEMORY=1; imp=imp:test a44298cb --max-concurrent CONC
+       --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096
+       --set kv_cache.max_blocks=2387]
+
+| run | shape | imp tok/s (trials, median) | vLLM tok/s (trials, median) | imp vs vLLM | pairs imp ahead |
+|---|---|---:|---:|---:|---|
+| 1 | 32 streams, 38-tok prompts, vLLM 0.27.1 | 1792.2 / 1850.6 / 1807.9 (**1807.9**) | 1447.8 / 1452.9 / 1438.9 (**1447.8**) | **+24.9%** | 3/3 |
+| 2 | 32 streams, 38-tok prompts, vLLM 0.28.0 | 1833.8 / 1808.3 / 1834.5 (**1833.8**) | 1392.4 / 1410.7 / 1412.7 (**1410.7**) | **+30.0%** | 3/3 |
+| 3 | 8 streams, 36-tok prompts, vLLM 0.27.1 | 575.7 / 573.0 / 571.3 (**573.0**) | 489.2 / 495.8 / 508.2 (**495.8**) | **+15.6%** | 3/3 |
+| 4 | 32 streams, 1082-tok prompts, vLLM 0.27.1 | 873.4 / 889.5 / 831.2 (**873.4**) | 499.1 / 227.8 / 497.8 (**497.8**) | **+75.5%** | 3/3 |
+
+- vLLM's first wave on a fresh server reads 383-389 tok/s at 32 streams
+  (24.6-25.1 s wall) and 103.5-104.2 at 8 on every trial: JIT / autotune
+  warm-up on the first real batch (`enable_flashinfer_autotune`,
+  `enable_cutedsl_warmup`, `enable_jit_warmup` in its kernel config). The
+  wave median excludes it, as it excludes imp's wave-1 graph captures.
+- vLLM 0.27.1 reads the same as on 2026-08-25 (1447.8 here vs 1475.2 on the
+  older client); imp moved 935.7 -> 1807.9 at 32 and 358.4 -> 573.0 at 8 on
+  the levers in the roadmap ledger. vLLM 0.28.0 is 2.6% below 0.27.1 on this
+  shape.
+- Run 4 is prefill-heavy (32 x 1082 prompt tokens per wave, chunked prefill
+  in both engines): vLLM's per-wave wall goes 6.6 -> 19.2 s, imp's 5.3 ->
+  10.3 s. vLLM's trial 2 emitted 1826 / 3022 / 5713 tokens (early EOS on
+  most streams, no client errors; trials 1 and 3 are token-identical at
+  7507 / 9600 / 9600) and stays in the table as measured. imp's per-wave
+  token counts vary 7200-9600 across trials (its forward is not
+  bit-reproducible across processes; the aggregate counts emitted tokens).
+- vLLM flag check on run 4's shape: `--max-num-batched-tokens 8192` (larger
+  prefill chunks than the 2048 its compile range shows) reads 356.7 tok/s
+  (169.1 / 356.7 / 362.1, one trial) against 497.8 at the default; the
+  bigger chunk starves the decode batch, so the 2026-08-25 flags stand as
+  vLLM's better configuration here. imp in the same trial: 877.2.
+- Run logs: `vllm_conc_ab_<CONC>_p<PLEN>.log` under `$TMPDIR`.
+
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
 First tracked long-context table (the GOAL benchmarking discipline asks for

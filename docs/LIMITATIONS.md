@@ -594,11 +594,11 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
        cuda_gpu_kern_sum, both from the SAME arm]
 ```
 
-  Not a cross-engine comparison: vLLM 0.27.1 was measured on this box only for MTP acceptance,
-  59.7 % against imp's 58-64 % (parity; retired the drafter as a suspect); its throughput was not
-  measured in a trustworthy form, so no imp-vs-vLLM speed claim exists in either direction. Cost
-  of learning this: six dead drafter-accuracy hypotheses and days chasing a published 87 % target
-  that described an unpinned regime; acceptance was never the problem.
+  Not a cross-engine comparison: vLLM 0.27.1 was measured here only for MTP acceptance,
+  59.7 % against imp's 58-64 % (parity; retired the drafter as a suspect). The cross-engine
+  throughput comparison lives in [`BENCHMARKS.md`](BENCHMARKS.md) ("re-measured on one client",
+  2026-09-02). Cost of learning this: six dead drafter-accuracy hypotheses and days chasing a
+  published 87 % target that described an unpinned regime; acceptance was never the problem.
 
   **MTP stays off by default; a decision, not an omission.** `speculative.mtp_k` remains 0;
   enable with `--set speculative.mtp_k=2`. Measured on Qwen3.8-27B-NVFP4 after the launch fixes:
