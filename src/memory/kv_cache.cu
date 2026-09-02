@@ -114,6 +114,36 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
 }
 
 // ---------------------------------------------------------------------------
+// Accounting-only cache (no VRAM). See the header for why this exists.
+// ---------------------------------------------------------------------------
+KVCache::KVCache(AccountingOnly, int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks,
+                 int block_size)
+    : n_layers_(n_layers),
+      n_kv_heads_(n_kv_heads),
+      head_dim_(head_dim),
+      max_blocks_(max_blocks),
+      block_size_(block_size),
+      dtype_(dtype),
+      alloc_(nullptr),
+      block_bytes_((dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV)
+                       ? (static_cast<size_t>(block_size) * n_kv_heads * head_dim / 2)
+                       : (static_cast<size_t>(block_size) * n_kv_heads * head_dim * dtype_size(dtype))),
+      accounting_only_(true) {
+    // Same two lines the memory-backed constructor ends with, and nothing else:
+    // open_slots() is documented as the mode where the caller owns the memory,
+    // so the id space and refcounts are already independent of the pool.
+    if (blocks_.open_slots(max_blocks) != MemError::Ok)
+        throw std::runtime_error("KVCache: block id space init failed");
+    usable_blocks_.store(max_blocks, std::memory_order_relaxed);
+}
+
+std::unique_ptr<KVCache> KVCache::for_accounting(int n_layers, int n_kv_heads, int head_dim, QType dtype,
+                                                 int max_blocks, int block_size) {
+    return std::make_unique<KVCache>(AccountingOnly{}, n_layers, n_kv_heads, head_dim, dtype, max_blocks,
+                                     block_size);
+}
+
+// ---------------------------------------------------------------------------
 // Per-layer shape constructor (Gemma 4 dual attention geometry)
 // ---------------------------------------------------------------------------
 KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
@@ -336,6 +366,9 @@ bool KVCache::enable_key_minmax() {
 }
 
 void* KVCache::key_minmax_ptr(int layer, int block_id) {
+    IMP_CHECK(!accounting_only_,
+              "KVCache::key_minmax_ptr on an accounting-only cache: it holds no memory. "
+              "Build it with the normal constructor if the test needs bytes.");
     if (!minmax_pool_)
         return nullptr;
     size_t offset = (static_cast<size_t>(layer) * max_blocks_ + static_cast<size_t>(block_id)) *
@@ -609,6 +642,9 @@ void KVCache::inc_ref(int block_id) { blocks_.acquire_raw(block_id); }
 // ---------------------------------------------------------------------------
 
 void* KVCache::k_ptr(int layer, int block_id) {
+    IMP_CHECK(!accounting_only_,
+              "KVCache::k_ptr on an accounting-only cache: it holds no memory. "
+              "Build it with the normal constructor if the test needs bytes.");
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
         IMP_LOG_ERROR("KV cache k_ptr bounds violation: layer=%d/%d, block=%d/%d", layer, n_layers_, block_id,
@@ -627,6 +663,9 @@ void* KVCache::k_ptr(int layer, int block_id) {
 }
 
 void* KVCache::v_ptr(int layer, int block_id) {
+    IMP_CHECK(!accounting_only_,
+              "KVCache::v_ptr on an accounting-only cache: it holds no memory. "
+              "Build it with the normal constructor if the test needs bytes.");
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
         IMP_LOG_ERROR("KV cache v_ptr bounds violation: layer=%d/%d, block=%d/%d", layer, n_layers_, block_id,
@@ -675,6 +714,9 @@ QType KVCache::qtype() const { return dtype_; }
 // ---------------------------------------------------------------------------
 
 void* KVCache::k_scale_ptr(int layer, int block_id) {
+    IMP_CHECK(!accounting_only_,
+              "KVCache::k_scale_ptr on an accounting-only cache: it holds no memory. "
+              "Build it with the normal constructor if the test needs bytes.");
     if (!scale_pool_)
         return nullptr;
 #ifdef IMP_DEBUG
@@ -696,6 +738,9 @@ void* KVCache::k_scale_ptr(int layer, int block_id) {
 }
 
 void* KVCache::v_scale_ptr(int layer, int block_id) {
+    IMP_CHECK(!accounting_only_,
+              "KVCache::v_scale_ptr on an accounting-only cache: it holds no memory. "
+              "Build it with the normal constructor if the test needs bytes.");
     if (!scale_pool_)
         return nullptr;
 #ifdef IMP_DEBUG
