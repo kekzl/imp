@@ -1,15 +1,16 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-31
-commit: 01799405
+verified: 2026-09-02
+commit: 69456e47
 -->
 
 # tests — lanes, and which one actually gates
 
 **Most GTest macros in this tree run in no CI lane at all** - they need a GPU,
 and there is no GPU runner. `python3 tools/check_test_lanes.py --report` prints
-the split and pins it (macros, not executions).
+the split and pins it (macros, not executions); `tools/unit_lane_skips.txt`
+pins, by name, what the lane starts and then skips (`guard_unit_skips`).
 
 ## Invariants
 
@@ -18,14 +19,14 @@ the split and pins it (macros, not executions).
   there is not green in CI.
 - **New CPU tests go to test-core**, and must be added to the explicit source
   list in `CMakeLists.txt`.
-- **Bookkeeping tests must not build a pool.** `MakeManager()` is
-  accounting-only and runs in CI; `MakeManagerWithMemory()` is for the 12 that
-  touch bytes, SWA or persistence.
+- **Bookkeeping tests must not build a pool.** `KVCache::for_accounting()`
+  (KV manager, scheduler admission) runs in CI. A test that still skips there
+  is a line in `tools/unit_lane_skips.txt` with its reason: `guard_unit_skips`
+  fails on an unlisted skip and on a listed test that ran. A config-only test
+  gets an embedded fixture (`tests/refs/deepseek_v2_lite_config.h`).
 - **A green test proves nothing until it has been mutation-validated.** Break the
-  code the test claims to cover and confirm the test fails. This is the standard
-  here, not an extra.
+  code the test claims to cover and confirm the test fails.
 - **A test whose input cannot reach the defect is worthless even when correct.**
-  The most common escape class in this repo is exactly that.
 
 ## Entry points
 
@@ -47,20 +48,17 @@ make verify-fast     # the only gate that runs a kernel against a check
 
 - **`--gtest_filter` on a `TEST_P` or `TYPED_TEST` suite without wildcards
   matches zero tests and reports `PASSED`.** `DetEvalE2ETest.*` matches nothing;
-  `*DetEvalE2ETest*` is correct. A CPU-lane guard now asserts this.
-- **A surviving mutant is only a test hole if it is not equivalent.** Three
-  mutants here were redundant guards over load-bearing ones; treating survival as
-  proof would have filed three false issues.
+  `*DetEvalE2ETest*` is correct. A CPU-lane guard asserts this.
+- **A surviving mutant is only a test hole if it is not equivalent.** Three here
+  were redundant guards.
 - A mutation run that times out leaves the mutation in the tree. Back the file up
   to the scratchpad first, and never `git checkout` to undo it.
 - Test-model env vars pointing at a wrong path skip whole batteries silently.
-- **A chat-template test that only greps for a marker cannot see a wrong turn
-  order, a missing generation prompt or leaked indentation.** The goldens compare
-  the whole rendered prompt against the upstream template; that is what caught
-  the missing `trim_blocks`/`lstrip_blocks` (#1572).
+- **A chat-template test that greps for a marker sees no wrong turn order and no
+  leaked indentation.** The goldens compare the whole rendered prompt; that
+  caught the missing `trim_blocks`/`lstrip_blocks` (#1572).
 - **Model name does not give the template family.** Nemotron-3-Nano and
-  Phi-4-reasoning both ship ChatML. `ChatTemplate::detect_family()` decides, and
-  the goldens assert what it returns.
+  Phi-4-reasoning both ship ChatML; `ChatTemplate::detect_family()` decides.
 
 ## Do not touch
 
