@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-02
+commit: 56e41f29
 -->
 
 # Feature matrix
@@ -34,7 +34,7 @@ Source: `src/model/model_arch.h`, `src/model/model.cpp`.
 | Phi-4 | 🟡 | **an alias onto the LLaMA path** (`model.cpp:316`), not a separate loader. No checkpoint of its own in any gate (#1680) |
 | DeepSeek, incl. V2 multi-head latent attention | ✅ | validated on DeepSeek-V2-Lite; latent-KV decode is opt-in |
 | Qwen3, Qwen3-MoE | ✅ | the pinned gate model is Qwen3-8B-Q8_0 |
-| Qwen3.5, Qwen3.5-MoE | ✅ | Gated DeltaNet family |
+| Qwen3.5, Qwen3.5-MoE (Qwen3.6-27B and Qwen3.8-27B run on the same `qwen3_5` architecture path) | ✅ | Gated DeltaNet family; Qwen3.8-27B is the README worked example |
 | Qwen3.6-MoE | ✅ | |
 | gpt-oss | ✅ | MXFP4 experts, learned attention sinks |
 | Gemma-3 (text + SigLIP vision) | ✅ | |

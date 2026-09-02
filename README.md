@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-08-30
-commit: 83cb5178
+verified: 2026-09-02
+commit: 56e41f29
 -->
 
 <p align="center">
@@ -36,14 +36,17 @@ commit: 83cb5178
 | Yes, if | No, if |
 |---|---|
 | you run an RTX 5090 / 5080 / 5070 Ti / PRO 6000 | you have anything else, including datacenter Blackwell ([why](docs/internals/ARCHITECTURE.md)) |
-| you have one GPU and one user, or an agent loop | you serve high-concurrency batched traffic |
+| you have one GPU: one user, an agent loop, or a few dozen concurrent streams | you need more than one GPU, or a fleet of them |
 | you want NVFP4 weights served natively, without dequant | you need a portable engine across a fleet |
 | you want an Anthropic-compatible endpoint without a proxy | you need SLOs, a support contract or a security response process |
 
 If more than one cell on the right applies to you, use
 [llama.cpp](https://github.com/ggerganov/llama.cpp) for breadth or
-[vLLM](https://github.com/vllm-project/vllm) for scale. Both are better at those
-jobs than imp is, and imp does not try to be.
+[vLLM](https://github.com/vllm-project/vllm) for scale-out across GPUs and
+machines. Both are better at those jobs than imp is, and imp does not try to
+be. On one 5090 the picture is the other way round: at 32 concurrent streams
+imp leads vLLM by 25 % on the same checkpoint and client, and by 16 % at 8
+(table with provenance in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), "re-measured on one client").
 
 ## 60-second quickstart
 
@@ -145,6 +148,23 @@ figure; with it off that row reads 284.6, still +78 %.
        note=sparse arm adds `--set attention.sparse_topk_tokens=8192`; it trades
        retrieval accuracy for the speed, see docs/MODELS.md]
 
+**Serving on one card.** The same Qwen3.8-27B checkpoint served by imp and by
+vLLM (0.27.1, Marlin NVFP4) to one client, fresh server per arm, three
+alternating trials, aggregate tok/s as the median of three waves:
+
+| streams | prompt | imp | vLLM 0.27.1 | |
+|---|---|---:|---:|---|
+| 32 | 38 tokens | **1807.9** | 1447.8 | +25 % |
+| 8 | 36 tokens | **573.0** | 495.8 | +16 % |
+| 32 | 1082 tokens | **873.4** | 497.8 | +75 % |
+
+[PROV: commit=a44298cb date=2026-09-02 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm
+       quant=NVFP4 cuda=13.3 path=server-api cmd=`tools/analysis/vllm_conc_ab.sh`
+       n=3 trials x 3 waves per arm, alternating; vLLM v0.27.1 with
+       --gpu-memory-utilization 0.90 --max-model-len 16384 --max-num-seqs N;
+       imp --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096
+       --set kv_cache.max_blocks=2387; vLLM 0.28.0 reads 1410.7 at 32 streams]
+
 Per-model history with dates, commits and exact commands:
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Methodology and what counts as a
 number at all: [`docs/PERF.md`](docs/PERF.md).
@@ -179,7 +199,7 @@ Full matrix with per-item status: [`docs/FEATURES.md`](docs/FEATURES.md).
 
 | area | |
 |---|---|
-| **Models** | ✅ Qwen3 / 3.5 / 3.6 (dense + MoE), LLaMA, Mistral, Mixtral, DeepSeek incl. V2 latent attention, Gemma-3 and Gemma-4, gpt-oss, Nemotron-H, nomic-bert embeddings. 🟡 Llama-4 |
+| **Models** | ✅ Qwen3 / 3.5 / 3.6 / 3.8 (dense, MoE and the Gated-DeltaNet hybrids), LLaMA, Mistral, Mixtral, DeepSeek incl. V2 latent attention, Gemma-3 and Gemma-4, gpt-oss, Nemotron-H, nomic-bert embeddings. 🟡 Llama-4 |
 | **Vision** | ✅ Qwen3-VL and Qwen3.6-35B-A3B (tower in the checkpoint), Gemma-3/4 via `--mmproj`. No video |
 | **Quantisation** | ✅ NVFP4 (native, the primary path), MXFP4, GGUF Q2_K–Q8_0, IQ4_NL/XS, FP8 E4M3 weights and KV, INT8/INT4 KV |
 | **APIs** | ✅ OpenAI chat/completions/responses/embeddings, Anthropic `/v1/messages`, `/v1/rerank`, per-token SSE on all three dialects, tool calling, JSON-Schema / regex / GBNF constrained decoding, prefix caching with `cache_control` |
