@@ -4,6 +4,8 @@
 #include "core/tensor.h"
 
 #include <vector>
+#include <cstring>
+#include <cstdio>
 #include <cmath>
 #include <algorithm>
 #include <numeric>
@@ -696,4 +698,166 @@ TEST(SamplingTest, PenaltyRowsMatchPerRowLaunch) {
     cudaFree(d_ban);
 }
 
+
+// The history-sized penalty kernels (one block per row, token counts in the
+// T2 arena) must leave every row's logits BIT-identical to the vocab sweep:
+// long histories over a narrow token range (counts well above 1), bans that
+// overlap the history, an empty-history row, and the two M=1 launchers with
+// the repeat_last_n window applied on the device side.
+TEST(SamplingTest, PenaltyHistoryMatchesVocabSweep) {
+    constexpr int kVocab = 151936;
+    constexpr int kRows = 6;
+    ScopedEngineArena arena(32ull << 20);
+    ASSERT_TRUE(sampling_preallocate_penalty_counts(kRows, kVocab)) << "count scratch from the T2 arena";
+    std::mt19937 rng(91);
+    std::normal_distribution<float> dist(0.0f, 3.0f);
+    std::uniform_int_distribution<int> narrow(0, 299), wide(0, kVocab - 1);
+    std::vector<Tensor> ref_logits(kRows), hist_logits(kRows);
+    std::vector<int32_t*> d_hist(kRows);
+    std::vector<PenaltyRowArgs> h_ref(kRows), h_hist(kRows);
+    std::vector<float> host(kVocab);
+    const int hist_n[kRows] = {4096, 1, 300, 0, 2048, 17};
+    for (int r = 0; r < kRows; ++r) {
+        for (auto& v : host) v = dist(rng);
+        ref_logits[r] = make_logits(host.data(), kVocab);
+        hist_logits[r] = make_logits(host.data(), kVocab);
+        std::vector<int32_t> hist(std::max(hist_n[r], 1));
+        for (auto& t : hist) t = (r % 2 == 0) ? narrow(rng) : wide(rng);
+        hist[0] = kVocab - 1;  // the last vocab entry (odd id: high half-word)
+        ASSERT_EQ(cudaMalloc(&d_hist[r], hist.size() * sizeof(int32_t)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_hist[r], hist.data(), hist.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        const float rep = 1.05f + 0.01f * r, freq = 0.05f * r, pres = (r == 2) ? 0.0f : 0.2f;
+        h_ref[r] = {static_cast<float*>(ref_logits[r].data), d_hist[r], hist_n[r], rep, freq, pres};
+        h_hist[r] = {static_cast<float*>(hist_logits[r].data), d_hist[r], hist_n[r], rep, freq, pres};
+    }
+    // Bans on rows 0 and 3: id 7 sits in the narrow histories, kVocab-1 in all.
+    const std::vector<int32_t> h_ban{7, kVocab - 1, 12345};
+    int32_t* d_ban = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_ban, h_ban.size() * sizeof(int32_t)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_ban, h_ban.data(), h_ban.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
+              cudaSuccess);
+    for (int r : {0, 3}) {
+        h_ref[r].banned = h_hist[r].banned = d_ban;
+        h_ref[r].n_banned = h_hist[r].n_banned = static_cast<int>(h_ban.size());
+    }
+    PenaltyRowArgs* d_ref = nullptr;
+    PenaltyRowArgs* d_rows = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_ref, kRows * sizeof(PenaltyRowArgs)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_rows, kRows * sizeof(PenaltyRowArgs)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_ref, h_ref.data(), kRows * sizeof(PenaltyRowArgs), cudaMemcpyHostToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_rows, h_hist.data(), kRows * sizeof(PenaltyRowArgs), cudaMemcpyHostToDevice),
+              cudaSuccess);
+    launch_penalties_rows_sweep(d_ref, kRows, kVocab, nullptr);
+    launch_penalties_rows(d_rows, kRows, kVocab, nullptr);
+    // Run the history form twice more on row 4: the counts must be back at
+    // zero after every launch, or the second pass penalises twice.
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> a(kVocab), b(kVocab);
+    for (int r = 0; r < kRows; ++r) {
+        cudaMemcpy(a.data(), ref_logits[r].data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), hist_logits[r].data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        EXPECT_EQ(memcmp(a.data(), b.data(), kVocab * sizeof(float)), 0) << "row " << r;
+    }
+    // Repeat on fresh copies of row 4's logits: identical again (counts were reset).
+    {
+        for (auto& v : host) v = dist(rng);
+        Tensor ref2 = make_logits(host.data(), kVocab), hist2 = make_logits(host.data(), kVocab);
+        apply_penalties_sweep(static_cast<float*>(ref2.data), kVocab, d_hist[4], hist_n[4], 1.1f, 0.3f, 0.1f, nullptr);
+        apply_penalties(static_cast<float*>(hist2.data), kVocab, d_hist[4], hist_n[4], 1.1f, 0.3f, 0.1f, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cudaMemcpy(a.data(), ref2.data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), hist2.data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        EXPECT_EQ(memcmp(a.data(), b.data(), kVocab * sizeof(float)), 0) << "M=1 apply_penalties";
+        free_gpu_tensor(ref2);
+        free_gpu_tensor(hist2);
+    }
+    // Device-count form with a repeat_last_n window shorter than the history.
+    {
+        int* d_n = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_n, sizeof(int)), cudaSuccess);
+        const int n = hist_n[0];
+        ASSERT_EQ(cudaMemcpy(d_n, &n, sizeof(int), cudaMemcpyHostToDevice), cudaSuccess);
+        for (auto& v : host) v = dist(rng);
+        Tensor ref3 = make_logits(host.data(), kVocab), hist3 = make_logits(host.data(), kVocab);
+        apply_penalties_device_count_sweep(static_cast<float*>(ref3.data), kVocab, d_hist[0], d_n, 1000, 1.2f,
+                                           0.0f, 0.5f, nullptr);
+        apply_penalties_device_count(static_cast<float*>(hist3.data), kVocab, d_hist[0], d_n, 1000, 1.2f, 0.0f,
+                                     0.5f, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cudaMemcpy(a.data(), ref3.data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), hist3.data, kVocab * sizeof(float), cudaMemcpyDeviceToHost);
+        EXPECT_EQ(memcmp(a.data(), b.data(), kVocab * sizeof(float)), 0) << "device-count window";
+        free_gpu_tensor(ref3);
+        free_gpu_tensor(hist3);
+        cudaFree(d_n);
+    }
+    for (int r = 0; r < kRows; ++r) {
+        cudaFree(d_hist[r]);
+        free_gpu_tensor(ref_logits[r]);
+        free_gpu_tensor(hist_logits[r]);
+    }
+    cudaFree(d_ref);
+    cudaFree(d_rows);
+    cudaFree(d_ban);
+    sampling_reset_penalty_counts();
+}
+
+// Kernel time of the two forms at the serving shape (32 rows, Qwen3 vocab),
+// short and long histories. Printed, not asserted: the numbers go to the PR.
+TEST(SamplingTest, PenaltyHistoryTiming) {
+    constexpr int kVocab = 151936;
+    constexpr int kRows = 32;
+    ScopedEngineArena arena(32ull << 20);
+    ASSERT_TRUE(sampling_preallocate_penalty_counts(kRows, kVocab));
+    std::mt19937 rng(5);
+    std::uniform_int_distribution<int> tok(0, kVocab - 1);
+    std::vector<float> host(kVocab, 0.5f);
+    std::vector<Tensor> logits(kRows);
+    std::vector<int32_t*> d_hist(kRows);
+    for (int r = 0; r < kRows; ++r) {
+        logits[r] = make_logits(host.data(), kVocab);
+        std::vector<int32_t> hist(4096);
+        for (auto& t : hist) t = tok(rng);
+        ASSERT_EQ(cudaMalloc(&d_hist[r], hist.size() * sizeof(int32_t)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_hist[r], hist.data(), hist.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+    }
+    PenaltyRowArgs* d_rows = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_rows, kRows * sizeof(PenaltyRowArgs)), cudaSuccess);
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+    for (int n_tokens : {300, 4096}) {
+        std::vector<PenaltyRowArgs> h_rows(kRows);
+        for (int r = 0; r < kRows; ++r)
+            h_rows[r] = {static_cast<float*>(logits[r].data), d_hist[r], n_tokens, 1.05f, 0.0f, 0.0f};
+        ASSERT_EQ(cudaMemcpy(d_rows, h_rows.data(), kRows * sizeof(PenaltyRowArgs), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        for (int form = 0; form < 2; ++form) {
+            auto run = [&]() {
+                if (form == 0) launch_penalties_rows_sweep(d_rows, kRows, kVocab, nullptr);
+                else launch_penalties_rows(d_rows, kRows, kVocab, nullptr);
+            };
+            for (int i = 0; i < 5; ++i) run();
+            cudaEventRecord(e0);
+            for (int i = 0; i < 50; ++i) run();
+            cudaEventRecord(e1);
+            ASSERT_EQ(cudaEventSynchronize(e1), cudaSuccess);
+            float ms = 0.0f;
+            cudaEventElapsedTime(&ms, e0, e1);
+            printf("penalties %s rows=%d history=%d: %.1f us per launch\n", form == 0 ? "vocab-sweep" : "history   ",
+                   kRows, n_tokens, ms * 1000.0f / 50.0f);
+        }
+    }
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+    for (int r = 0; r < kRows; ++r) {
+        cudaFree(d_hist[r]);
+        free_gpu_tensor(logits[r]);
+    }
+    cudaFree(d_rows);
+    sampling_reset_penalty_counts();
+}
 }  // namespace imp

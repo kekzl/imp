@@ -235,6 +235,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/rowwise_topm.cu
     src/compute/sampling_topk_topp.cu
     src/compute/sampling_penalties.cu
+    src/compute/sampling_penalties_history.cu
     src/compute/sampling_filters.cu
     src/compute/gdn_scan.cu
     src/compute/gdn_scan_chunkpar.cu

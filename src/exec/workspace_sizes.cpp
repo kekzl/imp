@@ -61,9 +61,9 @@ std::string ExecT2Demand::describe() const {
     constexpr double kMiB = 1024.0 * 1024.0;
     char buf[448];
     std::snprintf(buf, sizeof(buf),
-                  "mmvq %.1f + nvfp4 %.1f + sample %.1f + moe %.2f + fp8red %.2f + quant %.2f "
+                  "mmvq %.1f + nvfp4 %.1f + sample %.1f + pen %.1f + moe %.2f + fp8red %.2f + quant %.2f "
                   "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f + chunkcap %.1f MiB",
-                  mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, moe_arrays / kMiB,
+                  mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, penalty_counts / kMiB, moe_arrays / kMiB,
                   fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB, mla_scratch / kMiB,
                   dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB, imma_scratch / kMiB, chunk_capture / kMiB);
     return buf;
@@ -82,6 +82,7 @@ ExecShape exec_shape_of(const Model& model) {
     s.expert_d_ff = cfg.expert_d_ff;
     s.d_ff = cfg.d_ff;
     s.d_model = cfg.d_model;
+    s.vocab_size = cfg.vocab_size;
     s.n_heads = cfg.n_heads;
     s.head_dim = cfg.head_dim;
     s.ssm_inner_size = cfg.ssm_inner_size;
@@ -287,6 +288,10 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
     const int logit_tokens = std::max(shape.max_batch_size, 8);
     out.sample_scratch = 2ull * static_cast<size_t>(logit_tokens) * kSampleScratchBytes;
+    // History-sized penalties: one 16-bit count per vocab entry per row
+    // (sampling_preallocate_penalty_counts), 9.3 MiB at 32 rows x 151936.
+    if (shape.vocab_size > 0)
+        out.penalty_counts = static_cast<size_t>(logit_tokens) * ((shape.vocab_size + 1) / 2) * sizeof(uint32_t);
 
     // Batched-MoE pointer/scale arrays (executor_workspace_buffers.cu): work
     // pointers 3*ne void*, fp8 scales ne float, M_per ne int32, alpha_compact ne

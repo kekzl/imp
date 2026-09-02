@@ -104,6 +104,18 @@ there instead of retelling it.
   contracted loop's order; `SSMConv1dTest.DecodeVectorisedBitExact` holds the
   output and the shifted state bit-exact against a CPU fmaf reference.
 
+- Repetition / frequency / presence penalties walk the history instead of the
+  vocabulary (`sampling_penalties.cu`, one block per row, 16-bit token counts
+  in the T2 arena, charged as `ExecT2Demand::penalty_counts`, 9.3 MiB at 32
+  rows on a 151936 vocab): the sweep cost every vocab entry a pass over the
+  history, 197 us per decode step at 32 rows and 300 tokens of history and
+  2659 us at 4096. History form: 10.7-23.3 us and 18.6-34.3 us (cudaEvent, 50
+  launches, `SamplingTest.PenaltyHistoryTiming`). Logits bit-identical to the
+  sweep, bans included (`SamplingTest.PenaltyHistoryMatchesVocabSweep`); the
+  M=1 launchers and the graph-loop device-count form take the same path.
+  Serving @32 (Qwen3.8-27B-NVFP4-vllm, two-image A/B, 3 alternating trials):
+  1748.1/1824.6/1794.8 -> 1835.8/1833.4/1850.4 tok/s, 3/3 pairs positive.
+
 - FA2 prefill softmax: the score scale rides inside the exp FMA and interior
   KV tiles skip the per-element causal/window/range masking (ncu: the 2-CTA
   instance spent 5.5 scalar ALU instructions per MMA there). Qwen3-14B-NVFP4

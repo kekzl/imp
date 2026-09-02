@@ -88,8 +88,8 @@ __global__ void apply_penalties_rows_kernel(const PenaltyRowArgs* __restrict__ r
                          r.frequency_penalty, r.presence_penalty);
 }
 
-void launch_penalties_rows(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size,
-                           cudaStream_t stream) {
+void launch_penalties_rows_sweep(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size,
+                                 cudaStream_t stream) {
     dim3 grid((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, n_rows);
     pdl::enable_kernel(apply_penalties_rows_kernel);
     pdl::launch(apply_penalties_rows_kernel, grid, dim3(BLOCK_SIZE), size_t(0), stream, d_rows, vocab_size);
@@ -155,9 +155,9 @@ void force_single_token(float* logits, int vocab_size, int32_t keep_token, cudaS
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void apply_penalties(float* logits, int vocab_size, const int32_t* token_ids, int n_tokens,
-                     float repetition_penalty, float frequency_penalty, float presence_penalty,
-                     cudaStream_t stream) {
+void apply_penalties_sweep(float* logits, int vocab_size, const int32_t* token_ids, int n_tokens,
+                           float repetition_penalty, float frequency_penalty, float presence_penalty,
+                           cudaStream_t stream) {
     if (n_tokens == 0)
         return;
     if (repetition_penalty == 1.0f && frequency_penalty == 0.0f && presence_penalty == 0.0f)
@@ -170,9 +170,10 @@ void apply_penalties(float* logits, int vocab_size, const int32_t* token_ids, in
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void apply_penalties_device_count(float* logits, int vocab_size, const int32_t* token_ids,
-                                  const int* d_n_tokens, int repeat_last_n, float repetition_penalty,
-                                  float frequency_penalty, float presence_penalty, cudaStream_t stream) {
+void apply_penalties_device_count_sweep(float* logits, int vocab_size, const int32_t* token_ids,
+                                        const int* d_n_tokens, int repeat_last_n, float repetition_penalty,
+                                        float frequency_penalty, float presence_penalty,
+                                        cudaStream_t stream) {
     if (repetition_penalty == 1.0f && frequency_penalty == 0.0f && presence_penalty == 0.0f)
         return;
 
