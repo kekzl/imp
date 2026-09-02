@@ -176,7 +176,11 @@ def main():
     # 1053 -> 1054: RecurrentSnapshotStoreTest.EvictedEntriesMoveToHostTierAndRestore,
     # the pinned host tier of the recurrent snapshot store - cudaHostAlloc +
     # async copies, GPU-only.
-    PINNED = 1054
+    # 1054 -> 1074 (#this): the unit lane has no skips any more. 11 KVCache
+    # tests that need a pool moved to test-kv (test_kv_cache_gpu.cpp), the 8
+    # model-file tests and the growable-pool scheduler test to test-e2e outside
+    # the unit filter. Nothing changed hands: they never ran in CI before either.
+    PINNED = 1074
 
     text = CMAKE.read_text()
     mods = module_sources(text)

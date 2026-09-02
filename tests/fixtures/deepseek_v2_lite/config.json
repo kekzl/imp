@@ -1,15 +1,4 @@
-// Verbatim copy of deepseek-ai/DeepSeek-V2-Lite config.json (HF `main`,
-// sha256 f346286b0f1c8b044252fd54cb4fa78b9fab6472a6e8bebb9edfe03d414ea03d; check:
-// curl -sL https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/raw/main/config.json | sha256sum).
-// The string is the file byte-for-byte, so the same command over what the test
-// writes to disk gives the same hash. Embedded so the MLAConfig tests are
-// hermetic: they read only config.json, and before this they skipped in every
-// run without /models/DeepSeek-V2-Lite, which is all of CI.
-#pragma once
-#include <string>
-namespace imp {
-namespace deepseek_v2_lite_golden {
-inline const std::string k_config_json = R"IMPJSON({
+{
   "architectures": [
     "DeepseekV2ForCausalLM"
   ],
@@ -68,6 +57,3 @@ inline const std::string k_config_json = R"IMPJSON({
   "v_head_dim": 128,
   "vocab_size": 102400
 }
-)IMPJSON";
-}  // namespace deepseek_v2_lite_golden
-}  // namespace imp

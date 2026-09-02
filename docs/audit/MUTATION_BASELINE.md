@@ -179,16 +179,12 @@ tests written for them rather than by a neighbour: M37 and M39 by
 
 Note for the next reader: `check_test_lanes.py` counts MACROS per binary, not
 executions, so a test that skips at runtime still reads as "in a CI lane". The
-skip count above is the honest figure for what the merge gate exercises, and
-it is gated now: the three lane commands write GTest JSON reports and
-`guard_unit_skips` (inside `ctest -L unit`) compares the skipped set with
-`tools/unit_lane_skips.txt` by name. Five scheduler admission tests (accounting
-cache) and the four `MLAConfig` config tests (embedded DeepSeek-V2-Lite
-`config.json`) left the set the same day, then the per-layer/SWA accounting
-form took the SWA id-space, the SWA trailing-free table and the per-layer NVFP4
-scale geometry out of it (2 pointer-only GPU tests remain): **without a GPU
-the lane skips test-core 14 of 1327, test-text 5 of 242, the e2e subset 1 of
-62**, every one a line with its reason.
+skip count above was the honest figure for what the merge gate exercised. Since
+#1862 the three lane commands write GTest JSON reports and `guard_unit_skips`
+(inside `ctest -L unit`) fails on any skipped test; the unit lane has no skips:
+a test that needs a GPU or a model file lives in a GPU-lane binary (`test-kv`,
+or `test-e2e` outside the unit filter). Measured on the tree that made the rule:
+**`unit-skips: 0 skipped of 1611`**.
 
 ## Method notes that changed a result
 

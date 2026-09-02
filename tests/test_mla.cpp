@@ -9,11 +9,9 @@
 // to verify DeepSeek-V2 MoE tensor name routing without loading the 30 GB
 // model. Seam: WeightMap(ModelArch) + map_name(std::string) (weight_map.h).
 //
-// The config tests read only config.json, so they run against a verbatim copy
-// of DeepSeek-V2-Lite's (tests/refs/deepseek_v2_lite_config.h) written to a
-// temp dir, and against a real checkpoint when IMP_TEST_MODEL_DEEPSEEK is set.
-// Before the fixture they skipped in every run without /models, which is all
-// of CI.
+// The config tests read only config.json: tests/fixtures/deepseek_v2_lite/ holds
+// DeepSeek-V2-Lite's (HF revision 604d5664, 2024-06-25), and a real checkpoint
+// is used instead when IMP_TEST_MODEL_DEEPSEEK is set.
 
 #include <cmath>
 #include <cstdlib>
@@ -24,13 +22,11 @@
 #include "model/model_profile.h"
 #include "model/tensor_kind_matcher.h"
 #include "model/weight_map.h"
-#include "refs/deepseek_v2_lite_config.h"
 #include "test_models.h"
 
 #include <gtest/gtest.h>
 
 #include <filesystem>
-#include <fstream>
 
 using imp::HFConfigLoader;
 using imp::ModelConfig;
@@ -42,17 +38,11 @@ using imp::WeightMap;
 namespace {
 
 // A directory holding DeepSeek-V2-Lite's config.json: the env override when
-// set, else the embedded copy written once per process.
+// set, else the fixture.
 std::string deepseek_config_dir() {
     if (const char* env = std::getenv(imp_test::kEnvModelDeepSeek); env && *env)
         return env;
-    static const std::string dir = [] {
-        const auto d = std::filesystem::temp_directory_path() / "imp-test-deepseek-v2-lite";
-        std::filesystem::create_directories(d);
-        std::ofstream(d / "config.json") << imp::deepseek_v2_lite_golden::k_config_json;
-        return d.string();
-    }();
-    return dir;
+    return IMP_TEST_FIXTURES_DIR "/deepseek_v2_lite";
 }
 
 // ---------------------------------------------------------------------------

@@ -202,7 +202,7 @@ TEST(SchedulerTest, AdmissionReservesGeneration) {
 // (2026-08-27). Before the trigger, requests that each fit queued while the
 // pool sat at its initial commit: 32 x 8k concurrent served effectively
 // ~8-wide with 4437 of 6483 ceiling blocks never committed.
-TEST(SchedulerTest, GrowsPoolUnderAggregatePressure) {
+TEST(SchedulerGpuTest, GrowsPoolUnderAggregatePressure) {
     SKIP_IF_NO_CUDA();
 
     // 8 committed blocks, 16-block ceiling. Each request reserves 4 blocks
