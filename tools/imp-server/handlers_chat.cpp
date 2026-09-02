@@ -308,6 +308,11 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     imp_req->mirostat_eta = mirostat_eta;
     imp_req->logprobs = req_logprobs;
     imp_req->top_logprobs = top_logprobs;
+    imp_req->ignore_eos = body.value("ignore_eos", false);  // vLLM-style, see handlers_chat_params.cpp
+    // With ignore_eos the engine keeps sampling past EOS; every EOS it emits
+    // counts as an output token (vLLM semantics) but carries no text.
+    const bool ignore_eos = imp_req->ignore_eos;
+    int n_eos_counted = 0;
     imp_req->logit_bias = std::move(logit_bias);
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
@@ -355,7 +360,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         res.set_chunked_content_provider(
             "text/event-stream",
             [&state, server_req, comp_id, created, n_prompt_tokens, t_start, stop_sequences, max_stop_len,
-             echo, prompt, include_usage, snap_tok, snap_model_name, snap_is_think_model,
+             ignore_eos, echo, prompt, include_usage, snap_tok, snap_model_name, snap_is_think_model,
              req_logprobs](size_t /*offset*/, httplib::DataSink& sink) -> bool {
                 int n_output_tokens = 0;
                 const char* finish = nullptr;
@@ -479,11 +484,17 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                     int32_t token = evt.token_id;
 
                     if (evt.is_last) {
-                        if (token == snap_tok->eos_id()) {
+                        if (token == snap_tok->eos_id() && !ignore_eos) {
                             finish = evt.finish_reason ? evt.finish_reason : "stop";
                             break;
                         }
                         finish = evt.finish_reason ? evt.finish_reason : "length";
+                    }
+                    if (ignore_eos && token == snap_tok->eos_id()) {
+                        n_output_tokens++;  // counted, no text
+                        if (evt.is_last)
+                            break;
+                        continue;
                     }
 
                     n_output_tokens++;
@@ -669,11 +680,17 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
             int32_t token = evt.token_id;
 
             if (evt.is_last) {
-                if (token == snap_tok->eos_id()) {
+                if (token == snap_tok->eos_id() && !ignore_eos) {
                     finish = evt.finish_reason ? evt.finish_reason : "stop";
                     break;
                 }
                 finish = evt.finish_reason ? evt.finish_reason : "length";
+            }
+            if (ignore_eos && token == snap_tok->eos_id()) {
+                n_eos_counted++;  // counted in usage, kept out of the text
+                if (evt.is_last)
+                    break;
+                continue;
             }
 
             output_ids.push_back(token);
@@ -702,7 +719,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         if (!finish)
             finish = "length";
 
-        int n_output_tokens = static_cast<int>(output_ids.size());
+        int n_output_tokens = static_cast<int>(output_ids.size()) + n_eos_counted;
         std::string text = !stop_sequences.empty() ? output_text : snap_tok->decode(output_ids);
 
         // Strip <think>...</think> for text completions (no reasoning_content field)

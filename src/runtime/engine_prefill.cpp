@@ -84,10 +84,11 @@ void Engine::step_prefill(cudaStream_t stream) {
     // unchanged). Starting index rotates so the ingests that do not run this
     // step are the ones that ran last step.
     const size_t n_prefill = sched_prefill_batch_.size();
-    size_t budget = n_prefill;
     const int batch_cap = runtime_config_.runtime.prefill_batch_decode_cap;
-    if (batch_cap > 0 && !sched_decode_batch_.empty() && n_prefill > static_cast<size_t>(batch_cap))
-        budget = static_cast<size_t>(batch_cap);
+    // The count cap bounds FORWARDS: a ragged group is one forward however
+    // many sequences it packs, so it counts once (its rows are bounded by
+    // the token budget below, not by the count).
+    const bool forward_capped = batch_cap > 0 && !sched_decode_batch_.empty();
     constexpr int kPrefillForwardFloorTokens = 256;
     const bool budgeted = decode_cap > 0 && !sched_decode_batch_.empty();
     int token_budget = budgeted ? std::max(decode_cap, kPrefillForwardFloorTokens) : 0;
@@ -120,7 +121,17 @@ void Engine::step_prefill(cudaStream_t stream) {
     const bool ragged_mode = prefill_ragged_enabled_();
     std::vector<std::shared_ptr<Request>> ragged_batch;
     bool ragged_floor_charged = false;
-    for (size_t i = 0; i < budget; i++) {
+    // Rows the ragged forward can still take this step. step_prefill_ragged_
+    // packs its members up to effective_chunk rows in total and clamps each
+    // member to what is left, so a member is charged the rows it will get,
+    // not its full chunk. Charging the full chunk refused the next prompt
+    // after a continuation tail (a 58-row tail left 966 of a 1024 budget,
+    // the next prompt's 1024-row chunk did not fit) and the step ran the
+    // tail alone: 32 x ~1080-token prompts took 54 prefill steps for 34
+    // forwards' worth of rows, half of them launch-bound tails.
+    int ragged_rows_left = std::min(effective_chunk, executor_->max_tokens());
+    size_t forwards = 0;
+    for (size_t i = 0; i < n_prefill; i++) {
         auto& req = sched_prefill_batch_[(start + i) % n_prefill];
         // Charge from the PRE-call remaining: step_prefill_one advances
         // prefill_offset, so reading it afterwards undercharges any chunk
@@ -129,22 +140,42 @@ void Engine::step_prefill(cudaStream_t stream) {
         const int chunk_tokens = std::min(std::max(remaining, 0), effective_chunk);
         const bool rides_ragged = ragged_mode && prefill_ragged_req_ok_(*req);
         int charge;
+        int rows = chunk_tokens;
         if (rides_ragged) {
-            charge = (ragged_floor_charged || chunk_tokens >= kPrefillForwardFloorTokens)
-                         ? chunk_tokens
+            rows = std::min(chunk_tokens, ragged_rows_left);
+            if (ran > 0 && rows <= 0)
+                break;  // the ragged forward is full
+            if (ran > 0 && ragged_batch.empty() && forward_capped &&
+                forwards >= static_cast<size_t>(batch_cap))
+                break;
+            charge = (ragged_floor_charged || rows >= kPrefillForwardFloorTokens)
+                         ? rows
                          : kPrefillForwardFloorTokens;
         } else {
+            if (ran > 0 && forward_capped && forwards >= static_cast<size_t>(batch_cap))
+                break;
             charge = std::max(kPrefillForwardFloorTokens, chunk_tokens);
         }
         // `budgeted`, not `token_budget > 0`: an exhausted budget must break,
         // not disarm the check (that bug ran the whole batch after charge 4).
-        if (budgeted && ran > 0 && charge > token_budget)
+        // A member joining an existing ragged group is bounded by the rows the
+        // forward has left, not by the token budget: the group's first member
+        // was charged the launch floor, and that floor otherwise refused the
+        // next prompt's chunk (a 5-row snapshot tail charged 256 left 768 of
+        // a 1024 budget, the next 1019-row chunk did not fit, the step ran a
+        // handful of tails alone).
+        const bool joins_group = rides_ragged && !ragged_batch.empty();
+        if (budgeted && ran > 0 && !joins_group && charge > token_budget)
             break;
         if (rides_ragged) {
+            if (ragged_batch.empty())
+                forwards++;
             ragged_batch.push_back(req);
             ragged_floor_charged = true;
+            ragged_rows_left -= rows;
         } else {
             step_prefill_one(req, effective_chunk, stream);
+            forwards++;
         }
         kv_manager_->touch(req->id);
         ran++;

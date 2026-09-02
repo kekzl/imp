@@ -59,14 +59,17 @@ prefill_chunk_size   = -1
 # decode steps of the active sessions. 1024 is the measured compromise (decoder
 # p95 inter-token 94 ms at +27% ingest TTFT); 512 for latency-critical
 # multi-tenant serving; 0 = disable (full chunk). The full chunk returns as
-# soon as nobody is decoding.
+# soon as nobody is decoding. On a 32-stream burst of ~1.1k-token prompts
+# (2026-09-03, Qwen3.8-27B) 2048 reads +4.4% aggregate and TTFT p90 3.8 -> 3.5 s
+# for a max inter-token gap of 203 instead of 139 ms.
 prefill_chunk_decode_cap = 1024
-# How MANY prefill chunks run per engine step while others decode. The cap above
-# bounds one chunk; k concurrent ingests still run k of them between two decode
-# steps. Measured with three concurrent ingests: worst inter-token gap 259 -> 112
-# ms, gaps over 100 ms 6 -> 1, at +18% ingest wall time. 0 = unbounded. The
-# starting index rotates, so no ingest is starved.
-prefill_batch_decode_cap = 1
+# How MANY prefill FORWARDS run per engine step while others decode (a ragged
+# cross-sequence forward counts once, however many prompts it packs; its rows
+# are bounded by the cap above). Measured with three concurrent ingests: worst
+# inter-token gap 259 -> 112 ms, gaps over 100 ms 6 -> 1, at +18% ingest wall
+# time. 0 = unbounded (the default since the token-charged budget above took
+# over the pacing). The starting index rotates, so no ingest is starved.
+prefill_batch_decode_cap = 0
 # Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are single-
 # sequence, so concurrent sessions time-slice the decode. Slice length in
 # tokens; after it the engine rotates round-robin to the next decoding

@@ -418,7 +418,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // Guard against hallucinated turn boundaries ("Human\n") that thinking
     // models emit at high temperature. Only inject if the caller didn't
     // already provide stop sequences (respect user intent).
-    if (ctx.snap.is_think_model && ctx.params.stop_sequences.empty()) {
+    // Not under ignore_eos: a benchmark run past EOS rambles into "\nHuman"
+    // within a few tokens and the implicit stop would end it early.
+    if (ctx.snap.is_think_model && ctx.params.stop_sequences.empty() && !ctx.params.ignore_eos) {
         ctx.params.stop_sequences.push_back("\nHuman");
     }
 
@@ -757,6 +759,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->mirostat_eta = ctx.params.mirostat_eta;
     req->logprobs = ctx.params.req_logprobs;
     req->top_logprobs = ctx.params.top_logprobs;
+    req->ignore_eos = ctx.params.ignore_eos;
     req->json_mode = ctx.params.json_mode;
     req->json_schema = ctx.params.json_schema_str;
     req->regex_pattern = ctx.params.regex_pattern;
@@ -818,6 +821,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
         auto active_req = server_req->request;
         std::vector<int32_t> output_ids;
+        int n_eos_counted = 0;  // EOS / stop tokens counted under ignore_eos
         const char* finish = nullptr;
         std::string output_text;  // accumulated output for stop matching
         std::string matched_stop;  // which stop sequence ended it, for the Anthropic shim (#1550)
@@ -851,19 +855,28 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             // The engine's think-block implicit-close passes ONE EOS-like
             // token through to recover from empty thinking; it must not
             // appear as user-visible content.
-            if (!evt.is_last) {
-                bool is_structural_stop = (token == ctx.snap.tok->eos_id());
-                if (!is_structural_stop && ctx.snap.have_template) {
-                    for (int32_t stop_id : ctx.snap.stop_token_ids) {
-                        if (token == stop_id) {
-                            is_structural_stop = true;
-                            break;
-                        }
+            bool is_structural_stop = (token == ctx.snap.tok->eos_id());
+            if (!is_structural_stop && ctx.snap.have_template) {
+                for (int32_t stop_id : ctx.snap.stop_token_ids) {
+                    if (token == stop_id) {
+                        is_structural_stop = true;
+                        break;
                     }
                 }
-                if (is_structural_stop)
-                    continue;
             }
+            // ignore_eos (vLLM semantics): EOS and stop tokens count as
+            // output tokens and carry no text; only max_tokens ends the
+            // request.
+            if (ctx.params.ignore_eos && is_structural_stop) {
+                n_eos_counted++;
+                if (evt.is_last) {
+                    finish = evt.finish_reason ? evt.finish_reason : "length";
+                    break;
+                }
+                continue;
+            }
+            if (!evt.is_last && is_structural_stop)
+                continue;
 
             // Check stop conditions
             if (evt.is_last) {
@@ -966,7 +979,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             return;
         }
 
-        int n_output_tokens = static_cast<int>(output_ids.size());
+        int n_output_tokens = static_cast<int>(output_ids.size()) + n_eos_counted;
         total_output_tokens += n_output_tokens;
         std::string content = !ctx.params.stop_sequences.empty() ? output_text
                                                                  : ctx.snap.tok->decode(output_ids);

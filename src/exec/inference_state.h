@@ -118,8 +118,10 @@ struct InferenceState {
     // are the CONCATENATED prefill chunks of n_sequences requests. Row-wise
     // work (GEMMs, norms, elementwise, RoPE via per-row positions) runs over
     // all rows in one launch; attention and the GDN conv drop to a per-seq
-    // loop over [h_seq_offsets[i], h_seq_offsets[i+1]); the GDN scan takes
-    // `seq_offsets` (the device twin of h_seq_offsets) with ssm_seq_slots.
+    // loop over [h_seq_offsets[i], h_seq_offsets[i+1]); the GDN scan runs the
+    // chunk-parallel kernel per member on the same loop (h_ssm_slots picks
+    // each member's state slot), and falls back to the fused batched kernel
+    // with `seq_offsets` (the device twin of h_seq_offsets) and ssm_seq_slots.
     // h_seq_offsets != nullptr is the activation condition; the engine only
     // sets it with n_sequences > 1, is_prefill, and none of the excluded
     // per-request features (vision, MTP, spec-verify, logprobs, constraints,

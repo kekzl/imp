@@ -42,6 +42,7 @@ struct ChatRequestParams {
     // shortest-first-with-aging order across classes.
     int priority = 0;
     bool stream = false, json_mode = false, req_logprobs = false, include_usage = false;
+    bool ignore_eos = false;  // vLLM-style: run to max_tokens, never stop on EOS (benchmarks)
     bool top_p_explicit = false, top_k_explicit = false, rep_pen_explicit = false;
     // Pin the prompt's KV blocks against eviction (Anthropic cache_control →
     // mapped by anthropic_to_openai_body; also a direct llama.cpp-style

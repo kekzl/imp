@@ -15,6 +15,7 @@
 #   - test_server_0token_battery.py    no empty-completion wedge under mixed load (#710)
 #   - test_server_embed_chat_interleave.sh   embeddings don't cancel in-flight chat
 #   - test_server_logprobs.py          logprob sum + top-k descending order
+#   - test_server_ignore_eos.py        ignore_eos runs to max_tokens on both dialects
 #   - test_server_messages_stream.py   Anthropic /v1/messages event sequence
 #   - test_server_vision_and_utf8.py   images refused when unusable (#1198),
 #                                     non-ASCII survives json_schema (#1197)
@@ -96,6 +97,7 @@ run() {  # run <label> <cmd...>
 run "endpoints smoke"     python3 tests/exercise_all_endpoints.py
 run "robustness (#712)"   python3 tests/test_server_robustness.py
 run "logprobs"            python3 tests/test_server_logprobs.py
+run "ignore_eos"          python3 tests/test_server_ignore_eos.py
 run "messages stream"     python3 tests/test_server_messages_stream.py
 run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
 run "tracing (OTLP spans)" python3 tests/test_server_tracing.py

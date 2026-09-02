@@ -258,19 +258,27 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         // EOS-like token through to recover from empty thinking. That token
         // must not appear as user-visible content (would render as
         // "<|im_end|>" / "<|endoftext|>" in chat).
-        if (!evt.is_last) {
-            bool is_structural_stop = (token == snap_tok->eos_id());
-            if (!is_structural_stop && snap_have_template) {
-                for (int32_t stop_id : snap_stop_token_ids) {
-                    if (token == stop_id) {
-                        is_structural_stop = true;
-                        break;
-                    }
+        bool is_structural_stop = (token == snap_tok->eos_id());
+        if (!is_structural_stop && snap_have_template) {
+            for (int32_t stop_id : snap_stop_token_ids) {
+                if (token == stop_id) {
+                    is_structural_stop = true;
+                    break;
                 }
             }
-            if (is_structural_stop)
-                continue;
         }
+        // ignore_eos (vLLM semantics): EOS and stop tokens count as output
+        // tokens and carry no text; only max_tokens ends the request.
+        if (ctx.params.ignore_eos && is_structural_stop) {
+            out.n_output_tokens++;
+            if (evt.is_last) {
+                finish = evt.finish_reason ? evt.finish_reason : "length";
+                break;
+            }
+            continue;
+        }
+        if (!evt.is_last && is_structural_stop)
+            continue;
 
         // Check stop conditions (EOS/stop tokens already detected by engine).
         if (evt.is_last) {

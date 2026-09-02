@@ -401,6 +401,11 @@ void BatchingEngine::worker_loop() {
                         // it to 503 instead of a silent empty completion (I6).
                         reason = req->cancel_reason == imp::CancelReason::KvCapacity ? "capacity"
                                                                                      : "cancelled";
+                    } else if (req->ignore_eos) {
+                        // ignore_eos: the engine ran to max_tokens; a final
+                        // EOS / stop token is an output token like any other
+                        // (the handlers count it and drop its text).
+                        reason = "length";
                     } else {
                         if (token == tok->eos_id()) {
                             reason = "stop";
@@ -445,7 +450,7 @@ void BatchingEngine::worker_loop() {
                         (req->status != imp::RequestStatus::CANCELLED) ? "length"
                         : (req->cancel_reason == imp::CancelReason::KvCapacity) ? "capacity"
                                                                                 : "cancelled";
-                    if (!req->output_tokens.empty()) {
+                    if (!req->output_tokens.empty() && !req->ignore_eos) {
                         int32_t last = req->output_tokens.back();
                         if (last == tok->eos_id())
                             reason = "stop";
