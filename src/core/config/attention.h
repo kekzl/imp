@@ -104,6 +104,14 @@ struct Attention {
     // 244.2/244.8/252.2 ms (-10%), pp 23722/23661/22509 -> 24176/24097/24057
     // tok/s; output bit-identical (2026-09-01, docs/roadmap.md). Default on.
     bool fa2_dense_2cta = true;
+    // Causal FA2 CTA order: heaviest q-tiles first. A causal q-tile t attends
+    // (t+1)*Bq/Bkv KV tiles, 2..32 at 4096 tokens and Bq=128, and blockIdx.x
+    // ran the light tiles first, so the last CTAs of a head were the heaviest
+    // and the wave tail idled most SMs (ncu 2026-09-02, the 2-CTA instance at
+    // 335 us: tensor pipe 40..94% between SMs, math_pipe_throttle the top
+    // stall). Reversing the tile index per head starts the heavy tiles first.
+    // Output bit-identical: a tile's rows never depend on the CTA order.
+    bool fa2_heavy_first = true;
     // amax-scaled e4m3 conversion for the fp8-QK FA2 path (#680). The
     // raw conversion is the #511 quality cliff; scaling Q and K to the
     // full e4m3 range is the numerics class FlashInfer runs. Only

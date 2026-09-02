@@ -13,6 +13,8 @@
 #include "compute/attention_fmha_sm120.h"
 #include "core/tensor.h"
 #include "runtime/process_diag.h"
+
+#include <cstring>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
@@ -454,6 +456,72 @@ TEST_F(FmhaFA2Dense2CtaTest, Chunked) {
     run_pv(1, 1024, 2048, 24, 4, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/1024);
 }
 TEST_F(FmhaFA2Dense2CtaTest, RealisticMagnitude) { run_pv(1, 1024, 1024, 24, 4, 128, true, 0, 0.0f, 80.0f); }
+// attention.fa2_heavy_first: the causal CTA order is a scheduling choice and
+// nothing else - every q-tile's rows are computed by exactly one CTA either
+// way - so the two orders must produce byte-identical output. 2048 rows x 24
+// heads is the Bq=128 (2-CTA) band, q-tiles of 2..32 KV tiles; the chunked
+// case covers q_offset. A reversal off by one leaves a tile's rows unwritten.
+class FmhaFA2HeavyFirstTest : public FmhaFA2Test {
+protected:
+    void run_identity(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int q_offset = 0) {
+        const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+        const size_t q_elems = static_cast<size_t>(B) * Sq * NH * HD;
+        const size_t kv_elems = static_cast<size_t>(B) * Skv * NKV * HD;
+        std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
+        for (size_t i = 0; i < q_elems; i++)
+            Q_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6));
+        for (size_t i = 0; i < kv_elems; i++) {
+            K_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6));
+            V_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 13 + 7) % 13) - 6));
+        }
+        const size_t q_bytes = q_elems * sizeof(half), kv_bytes = kv_elems * sizeof(half);
+        void *d_q, *d_k, *d_v, *d_o[2];
+        cudaMalloc(&d_q, q_bytes);
+        cudaMalloc(&d_k, kv_bytes);
+        cudaMalloc(&d_v, kv_bytes);
+        cudaMalloc(&d_o[0], q_bytes);
+        cudaMalloc(&d_o[1], q_bytes);
+        cudaMemcpy(d_q, Q_h.data(), q_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_k, K_h.data(), kv_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_v, V_h.data(), kv_bytes, cudaMemcpyHostToDevice);
+        int64_t q_shape[] = {B, Sq, NH, HD};
+        int64_t kv_shape[] = {B, Skv, NKV, HD};
+        Tensor Qt(d_q, QType::F16, 4, q_shape, true);
+        Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
+        Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
+        for (int order = 0; order < 2; order++) {
+            cudaMemset(d_o[order], 0, q_bytes);
+            process_diag_set_fa2_heavy_first(order == 1);
+            Tensor Ot(d_o[order], QType::F16, 4, q_shape, true);
+            bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, 0, 0.0f, stream_, q_offset,
+                                             /*fp16_qk=*/true);
+            EXPECT_TRUE(ok) << "fa2 path must run in both orders";
+        }
+        process_diag_set_fa2_heavy_first(true);
+        cudaStreamSynchronize(stream_);
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+        std::vector<half> O0(q_elems), O1(q_elems);
+        cudaMemcpy(O0.data(), d_o[0], q_bytes, cudaMemcpyDeviceToHost);
+        cudaMemcpy(O1.data(), d_o[1], q_bytes, cudaMemcpyDeviceToHost);
+        cudaFree(d_q);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_o[0]);
+        cudaFree(d_o[1]);
+        size_t nonzero = 0;
+        for (size_t i = 0; i < q_elems; i++)
+            nonzero += (__half2float(O0[i]) != 0.0f);
+        EXPECT_GT(nonzero, q_elems / 2) << "output is mostly zero: the kernel did not run the rows";
+        EXPECT_EQ(std::memcmp(O0.data(), O1.data(), q_bytes), 0)
+            << "natural and heavy-first CTA orders must be byte-identical";
+    }
+};
+TEST_F(FmhaFA2HeavyFirstTest, Causal2048_24Q4KV_BitIdentical) { run_identity(1, 2048, 2048, 24, 4, 128, true); }
+TEST_F(FmhaFA2HeavyFirstTest, Chunked1024of2048_BitIdentical) {
+    run_identity(1, 1024, 2048, 24, 4, 128, true, /*q_offset=*/1024);
+}
+TEST_F(FmhaFA2HeavyFirstTest, OddSeq1000_BitIdentical) { run_identity(1, 1000, 1000, 24, 4, 128, true); }
+
 TEST_F(FmhaFA2PvF16Test, CausalSeq64) { run_pv(1, 64, 64, 4, 4, 128, true); }
 TEST_F(FmhaFA2PvF16Test, CausalShortSeq24_GQA32_8) { run_pv(1, 24, 24, 32, 8, 128, true); }
 TEST_F(FmhaFA2PvF16Test, CausalOddSeq51) { run_pv(1, 51, 51, 4, 4, 128, true); }
