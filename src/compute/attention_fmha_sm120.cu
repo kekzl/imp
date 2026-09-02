@@ -1343,7 +1343,7 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, 
                                                     int n_kv_heads, float scale, bool causal,
                                                     int sliding_window, float softcap, int q_offset,
                                                     const float* __restrict__ d_amax,
-                                                    const int* __restrict__ d_kv_len) {
+                                                    const int* __restrict__ d_kv_len, bool heavy_first) {
     constexpr int Bkv = BKV;
     static_assert(BKV % 16 == 0 && (BKV / 8) % 2 == 0, "QK n-pair loop and PV K-groups need BKV % 16 == 0");
     constexpr int head_dim = HD;
@@ -1357,7 +1357,13 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, 
     constexpr int N_KG = Bkv / 16;  // PV K-groups (16 Bkv-col groups) = 4
     constexpr int KC = HD / 32;     // QK k-chunks (32 each)
 
-    const int tile_q = blockIdx.x;
+    // Causal: q-tile t attends (t+1)*Bq/Bkv KV tiles, so the CTAs of one head
+    // differ up to 16x in work. blockIdx.x is the fastest scheduling index;
+    // handing out the heavy tiles first leaves the light ones for the wave
+    // tail (attention.fa2_heavy_first, ncu 2026-09-02: tensor pipe 40..94%
+    // between SMs in natural order). Rows never depend on the CTA order.
+    const int tile_q = (causal && heavy_first) ? static_cast<int>(gridDim.x) - 1 - static_cast<int>(blockIdx.x)
+                                               : static_cast<int>(blockIdx.x);
     const int batch_head = blockIdx.y;
     const int batch_idx = batch_head / n_heads;
     const int head_idx = batch_head % n_heads;
@@ -1930,12 +1936,12 @@ __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
                                       bool causal, int sliding_window, float softcap, int q_offset,
                                       const float* __restrict__ d_amax = nullptr,
-                                      const int* __restrict__ d_kv_len = nullptr) {
+                                      const int* __restrict__ d_kv_len = nullptr, bool heavy_first = true) {
     fmha_sm120_fa2_body<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>(Q, K, V, O, batch_size, seq_q,
                                                                                 seq_kv, n_heads, n_kv_heads,
                                                                                 scale, causal, sliding_window,
                                                                                 softcap, q_offset, d_amax,
-                                                                                d_kv_len);
+                                                                                d_kv_len, heavy_first);
 }
 
 // attention.fa2_dense_2cta: the Bq=128 TWOSLOT instance at two CTAs per SM.
@@ -1944,12 +1950,12 @@ __global__ void __launch_bounds__(Bq / 16 * 32, 2) fmha_sm120_fa2_kernel_2cta(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
     int sliding_window, float softcap, int q_offset, const float* __restrict__ d_amax = nullptr,
-    const int* __restrict__ d_kv_len = nullptr) {
+    const int* __restrict__ d_kv_len = nullptr, bool heavy_first = true) {
     fmha_sm120_fa2_body<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>(Q, K, V, O, batch_size, seq_q,
                                                                                 seq_kv, n_heads, n_kv_heads,
                                                                                 scale, causal, sliding_window,
                                                                                 softcap, q_offset, d_amax,
-                                                                                d_kv_len);
+                                                                                d_kv_len, heavy_first);
 }
 
 static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool twoslot = false) {
@@ -2153,7 +2159,8 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                                         reinterpret_cast<const half*>(V.data),
                                         reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv, n_heads,
                                         n_kv_heads, scale, causal, sliding_window, softcap, q_offset,
-                                        fp8_scaled ? s_d_amax : nullptr, d_kv_len);
+                                        fp8_scaled ? s_d_amax : nullptr, d_kv_len,
+                                        imp::process_diag_fa2_heavy_first());
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

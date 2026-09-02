@@ -180,7 +180,9 @@ def main():
     # tests that need a pool moved to test-kv (test_kv_cache_gpu.cpp), the 8
     # model-file tests and the growable-pool scheduler test to test-e2e outside
     # the unit filter. Nothing changed hands: they never ran in CI before either.
-    PINNED = 1074
+    # 1074 -> 1077 (#this): FmhaFA2HeavyFirstTest, three byte-identity tests of
+    # the causal FA2 CTA order (natural vs heavy-first) - launch the kernel, GPU-only.
+    PINNED = 1077
 
     text = CMAKE.read_text()
     mods = module_sources(text)

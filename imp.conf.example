@@ -323,6 +323,12 @@ fa2_hd256_bkv        = 64
 # to 128 registers): FA2 kernel -10% at pp4096 on Qwen3-14B-NVFP4, output
 # bit-identical. Default on; false restores the single-CTA instance.
 fa2_dense_2cta       = true
+# Causal FA2 CTA order: heaviest q-tiles first (a causal q-tile attends 2..32
+# KV tiles at 4096 tokens; natural order started the heaviest last). Kernel
+# sum pp4096: Qwen3-14B-NVFP4 223.532/224.010/223.556 -> 220.748/221.213/221.309 ms
+# (-1.2%, 3/3 pairs), Qwen3.8-27B-NVFP4 120.737/120.594/120.523 -> 117.782/117.953/117.956 ms
+# (-2.2%, 3/3); output byte-identical. Default on.
+fa2_heavy_first      = true
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
