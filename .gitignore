@@ -128,3 +128,4 @@ build-dev/
 # Evaluation in progress; if it stays, codegraph.json becomes tracked config.
 .codegraph/
 codegraph.json
+loop/

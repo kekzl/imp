@@ -58,7 +58,10 @@ skip|tests/refs/gen_chat_goldens.py
 skip|tools/kernel_resources.py tests/CLAUDE.md
 skip|README.md
 skip|docs/internals/SM120.md
-skip|CHANGELOG.md'
+skip|CHANGELOG.md
+skip|tools/mutation/catalogue.json
+skip|tools/mutation/run.py
+gate|tools/mutation/catalogue.json src/model/jinja.cpp'
 
 # The loop runs in a subshell, so it cannot set a variable the parent reads:
 # it prints one line per mismatch and the count IS the verdict.
@@ -85,7 +88,8 @@ if [ -f "$PUSH" ]; then
         echo "check_precommit_filter: could not read the extension filter out of $PUSH" >&2
         exit 1
     fi
-    for f in tests/CLAUDE.md tools/kernel_resources.py tests/api/test_chat.py; do
+    for f in tests/CLAUDE.md tools/kernel_resources.py tests/api/test_chat.py \
+             tools/mutation/catalogue.json; do
         if printf '%s\n' "$f" | grep -qE "$PDROP"; then :; else
             echo "check_precommit_filter: pre-push would gate '$f' (docs/scripts cannot move a number)" >&2
             exit 1

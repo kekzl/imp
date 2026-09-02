@@ -42,7 +42,7 @@ fi
 # read reference corpora from tests/refs at runtime.
 CHANGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
           | grep -E '^(src/|include/|tools/|tests/|CMakeLists\.txt|cmake/|.*\.cmake$)' \
-          | grep -vE '\.(md|py|hook)$' \
+          | grep -vE '\.(md|py|hook)$|^tools/mutation/' \
           || true)
 
 if [ -z "$CHANGED" ]; then
