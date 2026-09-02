@@ -179,7 +179,7 @@ def save_patch(m):
     out.write_text(header + rc.stdout)
 
 
-def run_one(m, log_dir, full_timeout):
+def run_one(m, log_dir, full_timeout, ci_only=False):
     """Returns a result dict. Guarantees the file is restored."""
     res = {'id': m['id'], 'category': m['category'], 'file': m['file'],
            'desc': m['desc'], 'status': 'ERROR', 'killed_by': None,
@@ -218,6 +218,12 @@ def run_one(m, log_dir, full_timeout):
         if res['ci_killed_by']:
             res['status'] = 'KILLED'
             res['killed_by'] = res['ci_killed_by']
+            return res
+
+        if ci_only:
+            # "Would the merge gate have caught it" on its own. The GPU lanes
+            # need a free card and a quiet host; this question does not.
+            res['status'] = 'SURVIVED_CI'
             return res
 
         done = {b for b, _ in CI_LANES if _ is None}
@@ -262,6 +268,17 @@ def main():
     ap.add_argument('--only', default='')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--baseline-only', action='store_true')
+    ap.add_argument('--verify-anchors', action='store_true',
+                    help="check every mutant's `find` still matches exactly "
+                         "once, without injecting anything. A stale anchor is "
+                         "a mutant that silently stopped testing (M50 had one "
+                         "on 2026-09-02, its target had been refactored).")
+    ap.add_argument('--ci-only', action='store_true',
+                    help="only answer 'would `ctest -L unit` have caught it': "
+                         "runs the three CI lanes and stops. No GPU, no card "
+                         "contention, and the verdict CI actually delivers. "
+                         "A mutant surviving here is recorded SURVIVED_CI, "
+                         "which is NOT the same as surviving the repo's tests.")
     ap.add_argument('--timeout', type=int, default=2400)
     ap.add_argument('--out', default=str(REPO / 'loop' / 'evidence' / 'mutation-results.json'))
     args = ap.parse_args()
@@ -275,6 +292,21 @@ def main():
         for m in catalogue:
             print(f"{m['id']:5s} {m['category']:14s} {m['file']}: {m['desc']}")
         return 0
+
+    if args.verify_anchors:
+        bad = 0
+        for m in catalogue:
+            f = REPO / m['file']
+            if not f.exists():
+                print(f"  MISSING FILE  {m['id']}  {m['file']}")
+                bad += 1
+                continue
+            n = f.read_text(errors='replace').count(m['find'])
+            if n != 1:
+                print(f"  ANCHOR x{n}     {m['id']}  {m['file']}: {m['desc'][:70]}")
+                bad += 1
+        print(f"anchors: {len(catalogue) - bad}/{len(catalogue)} match exactly once")
+        return 1 if bad else 0
 
     ok, dirty = tree_clean()
     if not ok:
@@ -293,8 +325,8 @@ def main():
         (log_dir / 'baseline-build.log').write_text(out[-40000:])
         return 2
     baseline = {}
-    lanes = [(b, None) for b in BINARIES] + \
-            [(b, e) for b, e in CI_LANES if e is not None]
+    lanes = list(CI_LANES) if args.ci_only else \
+        ([(b, None) for b in BINARIES] + [(b, e) for b, e in CI_LANES if e is not None])
     for b, extra in lanes:
         rc, out = run_binary(b, timeout=args.timeout, extra_args=extra)
         tag = b + ('-ci' if extra else '')
@@ -311,7 +343,7 @@ def main():
     for i, m in enumerate(catalogue, 1):
         print(f"[{i}/{len(catalogue)}] {m['id']} {m['category']}: {m['desc']}",
               flush=True)
-        r = run_one(m, log_dir, args.timeout)
+        r = run_one(m, log_dir, args.timeout, ci_only=args.ci_only)
         # Discount tests that were already red on the clean tree.
         if r['status'] == 'KILLED':
             for lane in r['lanes']:
@@ -334,9 +366,18 @@ def main():
 
     Path(args.out).write_text(json.dumps(results, indent=1))
     killed = sum(1 for r in results if r['status'] == 'KILLED')
-    scored = sum(1 for r in results if r['status'] in ('KILLED', 'SURVIVED'))
-    print(f'\nMutation score: {killed}/{scored} = '
-          f'{100.0 * killed / scored if scored else 0:.1f}%')
+    # SURVIVED_CI belongs in the denominator: it IS a survival, of the only
+    # suite the merge gate runs. Leaving it out made a --ci-only run print
+    # "15/15 = 100.0%" while five mutants walked through (2026-09-02).
+    scored = sum(1 for r in results
+                 if r['status'] in ('KILLED', 'SURVIVED', 'SURVIVED_CI'))
+    label = 'CI-lane mutation score' if args.ci_only else 'Mutation score'
+    other = [f"{s_}={n}" for s_, n in sorted(
+        {r['status']: sum(1 for x in results if x['status'] == r['status'])
+         for r in results}.items()) if s_ not in ('KILLED', 'SURVIVED', 'SURVIVED_CI')]
+    print(f'\n{label}: {killed}/{scored} = '
+          f'{100.0 * killed / scored if scored else 0:.1f}%'
+          + (f"   (excluded: {', '.join(other)})" if other else ''))
     return 0
 
 

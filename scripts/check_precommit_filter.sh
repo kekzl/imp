@@ -58,7 +58,10 @@ skip|tests/refs/gen_chat_goldens.py
 skip|tools/kernel_resources.py tests/CLAUDE.md
 skip|README.md
 skip|docs/internals/SM120.md
-skip|CHANGELOG.md'
+skip|CHANGELOG.md
+skip|tools/mutation/catalogue.json
+skip|tools/mutation/run.py
+gate|tools/mutation/catalogue.json src/model/jinja.cpp'
 
 # The loop runs in a subshell, so it cannot set a variable the parent reads:
 # it prints one line per mismatch and the count IS the verdict.
