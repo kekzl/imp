@@ -80,12 +80,12 @@ done
 
 ```bash
 rg -n 'DISABLED_' tests                                                            # 9, read all
-awk -f .claude/skills/find-stubs/tests_without_assertions.awk $(find tests -name '*.cpp' -o -name '*.cu')   # 53
+awk -f .claude/skills/find-stubs/tests_without_assertions.awk $(find tests -name '*.cpp' -o -name '*.cu')   # 16, all explained
 python3 tools/check_test_lanes.py --report                                         # 1054 in no CI lane (pinned), 1624 in ctest -L unit
 rg -c 'GTEST_SKIP' tests | awk -F: '{s+=$2} END {print s}'                          # 208, mostly legitimate (no GPU, no model)
 ```
 
-A one-line regex over test bodies stops at the first line-initial `}` and flagged 184 of ~2600; the awk script splits on `^TEST`/`^}` and drops harness-delegating bodies (read its header). A filter like `DetEvalE2ETest.*` that matches 0 tests prints PASSED. A test whose inputs cannot reach the defect passes its own mutant: uniform-random rows never produced the FP8 `out / row_scale` overflow (fixed by `SsmPrefillFp8TinyRowsStayFinite`); `PagedOracle` at HD128 never ran the HD256 word-load path (#1817). Mutation baseline 90.4% (`docs/audit/MUTATION_BASELINE.md`); the dominant escape is "input does not reach the failure".
+A one-line regex over test bodies stops at the first line-initial `}` and flagged 184 of ~2600; the awk script splits on `^TEST`/`^}` and drops harness-delegating bodies (read its header). Its own count was 53 until 2026-09-02, when three bugs in it were fixed: a harness with a digit in its name never matched (`run_fa2`, `run_pv256`), a single-line `TEST(...) { run_x(); }` was judged against the next block's body, and a `R"({ ... })"` JSON fixture ended the body at its own `}`. 16 remain, none of them a real gap: 8 `Bench*` cases that only measure, 6 on `compare_dp4a_vs_mmvq`, 2 on `chunkpar_matches_fused`. A filter like `DetEvalE2ETest.*` that matches 0 tests prints PASSED. A test whose inputs cannot reach the defect passes its own mutant: uniform-random rows never produced the FP8 `out / row_scale` overflow (fixed by `SsmPrefillFp8TinyRowsStayFinite`); `PagedOracle` at HD128 never ran the HD256 word-load path (#1817). Mutation baseline 90.4% (`docs/audit/MUTATION_BASELINE.md`); the dominant escape is "input does not reach the failure".
 
 ## Pitfalls
 
