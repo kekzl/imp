@@ -16,7 +16,7 @@ OUT=${1:-/tmp/serving_idle}
 CONC=${2:-32}
 WAVES=${3:-3}
 PORT=${PORT:-8093}
-MODEL=/models/Qwen3.8-27B-NVFP4-vllm
+MODEL=${MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 EXTRA=${EXTRA:-}
 mkdir -p "$OUT"
@@ -40,7 +40,7 @@ for _ in $(seq 1 240); do
         echo "server died:"; docker logs imp-idle 2>&1 | tail -20; exit 3
     fi
 done
-python3 "$ROOT/tools/analysis/conc_client.py" $PORT $CONC $WAVES idle 2>&1 | tee "$OUT/client.log"
+MODEL_NAME=$(basename "$MODEL") python3 "$ROOT/tools/analysis/conc_client.py" $PORT $CONC $WAVES idle ${PLEN:-0} 2>&1 | tee "$OUT/client.log"
 # Graceful stop: nsys must see the process exit to flush the trace.
 docker kill --signal=SIGINT imp-idle >/dev/null 2>&1
 for _ in $(seq 1 60); do

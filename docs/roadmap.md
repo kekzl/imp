@@ -164,10 +164,13 @@ Ranked by what an agent workload notices first.
           imp:test, 3 alternating trials, median of 3 waves]
    ```
 
-   Standing state: **imp ahead of vLLM on one client** (2026-09-02, +24.9%
-   at 32 / +15.6% at 8 / +75.5% at 32 with 1082-token prompts, table at the
-   top of this item); the "~1.08x pinned" of 2026-08-26 was a cross-client
-   figure. auto=28 vs pinned=32
+   Standing state: **imp ahead of vLLM on the GDN hybrid, behind on dense
+   NVFP4** (2026-09-02/03, Qwen3.8-27B +24.9% at 32 / +15.6% at 8 / +75.5%
+   at 32 with 1082-token prompts; Qwen3-14B-NVFP4 +7.9% at 8 but -7.6% at 32 and -52.9% at 32 with
+   982-token prompts, 3/3 each, `BENCHMARKS.md` runs 5-7); the "~1.08x
+   pinned" of 2026-08-26 was a cross-client figure. Next engine-side post:
+   the dense serving prefill (31.4k prompt tokens in ~5.4 s under decode,
+   ~5.8k tok/s, against vLLM's ~1.1 s), attribution first. auto=28 vs pinned=32
    (630 vs 936) is admission, not rotation: 28 sustain full rate under
    continuous arrival. Remaining engine-side posts: launch-coupled idle,
    recurrent-state paging (the lever for 32-way concurrency at LONG context;

@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-30
-commit: a383223c
+verified: 2026-09-03
+commit: 7369777a
 -->
 
 # Benchmarks
@@ -575,12 +575,25 @@ greedy gens, `/v1/completions`, aggregate = completion tokens / wall, median of
 | 2 | 32 streams, 38-tok prompts, vLLM 0.28.0 | 1833.8 / 1808.3 / 1834.5 (**1833.8**) | 1392.4 / 1410.7 / 1412.7 (**1410.7**) | **+30.0%** | 3/3 |
 | 3 | 8 streams, 36-tok prompts, vLLM 0.27.1 | 575.7 / 573.0 / 571.3 (**573.0**) | 489.2 / 495.8 / 508.2 (**495.8**) | **+15.6%** | 3/3 |
 | 4 | 32 streams, 1082-tok prompts, vLLM 0.27.1 | 873.4 / 889.5 / 831.2 (**873.4**) | 499.1 / 227.8 / 497.8 (**497.8**) | **+75.5%** | 3/3 |
+| 5 | **dense** Qwen3-14B-NVFP4 (Modelopt export, both engines native), 32 streams, 38-tok prompts, vLLM 0.27.1 | 3462.8 / 3481.0 / 3480.4 (**3480.4**) | 3762.4 / 3784.9 / 3767.9 (**3767.9**) | **-7.6%** | 0/3 |
+| 6 | dense Qwen3-14B-NVFP4, 8 streams, 36-tok prompts, vLLM 0.27.1 | 1078.6 / 1087.1 / 1085.4 (**1085.4**) | 1002.6 / 1005.8 / 1010.2 (**1005.8**) | **+7.9%** | 3/3 |
+| 7 | dense Qwen3-14B-NVFP4, 32 streams, 982-tok prompts, vLLM 0.27.1 | 1169.5 / 1176.7 / 1177.8 (**1176.7**) | 2503.2 / 2496.3 / 2480.6 (**2496.3**) | **-52.9%** | 0/3 |
 
 - vLLM's first wave on a fresh server reads 383-389 tok/s at 32 streams
   (24.6-25.1 s wall) and 103.5-104.2 at 8 on every trial: JIT / autotune
   warm-up on the first real batch (`enable_flashinfer_autotune`,
   `enable_cutedsl_warmup`, `enable_jit_warmup` in its kernel config). The
   wave median excludes it, as it excludes imp's wave-1 graph captures.
+- Run 5 is the dense counter-probe (2026-09-03, imp `7369777a`): on a dense
+  NVFP4 checkpoint vLLM's Marlin W4A16 path leads imp's small-M mxf4nvf4 GEMM
+  at 32 streams by 7.6% (3/3 pairs) while imp still leads at 8 streams by
+  7.9% (run 6, 3/3): the crossover sits between 8 and 32 streams, and with 982-token prompts
+  (run 7) imp reads less than half of vLLM: the wave costs imp 8.2 s against
+  2.8 s with 38-token prompts, so its serving prefill of 31.4k prompt tokens
+  runs at ~5.8k tok/s, while vLLM absorbs the same prefill in ~1.1 s. The
+  32-stream lead in runs 1-4 is a property of the GDN hybrid, not of every
+  model; attribution of the dense
+  gap is the next engine-side item in `docs/roadmap.md`.
 - vLLM 0.27.1 reads the same as on 2026-08-25 (1447.8 here vs 1475.2 on the
   older client); imp moved 935.7 -> 1807.9 at 32 and 358.4 -> 573.0 at 8 on
   the levers in the roadmap ledger. vLLM 0.28.0 is 2.6% below 0.27.1 on this
