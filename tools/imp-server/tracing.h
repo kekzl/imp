@@ -30,6 +30,11 @@ struct TraceContext {
 // version-00 header with non-zero ids.
 bool parse_traceparent(const std::string& header, TraceContext& ctx);
 
+// False only for a well-formed traceparent whose sampled flag is clear: the
+// caller decided not to record this trace, so an exported hop would dangle
+// (parent-based sampling). Empty or malformed headers count as sampled.
+bool traceparent_sampled(const std::string& header);
+
 // What a request hands to the tracer at accounting time. Times are
 // system_clock (unix epoch) so the spans line up with other services.
 struct RequestSpan {
@@ -59,6 +64,7 @@ struct OtlpSpan {
     std::vector<std::pair<std::string, std::string>> str_attrs;
     std::vector<std::pair<std::string, int64_t>> int_attrs;
     std::vector<std::pair<std::string, bool>> bool_attrs;
+    std::vector<std::pair<std::string, std::vector<std::string>>> str_array_attrs;
 };
 
 std::string random_hex_id(int n_bytes);  // 8 -> span id, 16 -> trace id
@@ -83,12 +89,14 @@ public:
               const std::string& service_version);
     bool enabled() const { return enabled_; }
     // Returns the root span's ids (trace_id, span_id) so the caller can
-    // write them next to the request log record.
+    // write them next to the request log record. A request whose traceparent
+    // clears the sampled flag gets ids but is not exported.
     std::pair<std::string, std::string> record(const RequestSpan& r);
     void stop();
-    // Counters for /metrics and tests.
+    // Counters for /metrics (imp_otlp_*) and tests.
     uint64_t exported_spans() const { return exported_spans_; }
     uint64_t failed_batches() const { return failed_batches_; }
+    uint64_t unsampled_requests() const { return unsampled_requests_; }
 
 private:
     void worker_();
@@ -103,5 +111,6 @@ private:
     std::thread thread_;
     std::atomic<uint64_t> exported_spans_{0};
     std::atomic<uint64_t> failed_batches_{0};
+    std::atomic<uint64_t> unsampled_requests_{0};
     bool warned_ = false;
 };

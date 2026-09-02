@@ -56,6 +56,28 @@ TEST(TracingTest, ParseTraceparentAcceptsOnlyWellFormedVersion00) {
     EXPECT_TRUE(untouched.trace_id.empty());
 }
 
+TEST(TracingTest, SampledFlagIsHonouredOnlyForWellFormedHeaders) {
+    EXPECT_TRUE(traceparent_sampled(""));
+    EXPECT_TRUE(traceparent_sampled("garbage"));
+    EXPECT_TRUE(traceparent_sampled("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"));
+    EXPECT_TRUE(traceparent_sampled("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03"));
+    EXPECT_FALSE(traceparent_sampled("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"));
+    EXPECT_FALSE(traceparent_sampled("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-02"));
+    // Unsampled: ids are still minted for the JSONL join, nothing is queued.
+    Tracer t;
+    t.init("http://127.0.0.1:9/v1/traces", "imp-server", "0");
+    ASSERT_TRUE(t.enabled());
+    RequestSpan r = sample_request();
+    r.traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+    const auto ids = t.record(r);
+    EXPECT_EQ(ids.first, "4bf92f3577b34da6a3ce929d0e0e4736");
+    EXPECT_EQ(ids.second.size(), 16u);
+    t.stop();
+    EXPECT_EQ(t.unsampled_requests(), 1u);
+    EXPECT_EQ(t.failed_batches(), 0u) << "nothing was queued, so nothing was posted to the dead port";
+    EXPECT_EQ(t.exported_spans(), 0u);
+}
+
 TEST(TracingTest, RandomIdsHaveTheRightWidthAndAreNeverZero) {
     for (int i = 0; i < 64; i++) {
         const std::string t = random_hex_id(16), s = random_hex_id(8);
@@ -158,6 +180,24 @@ TEST(TracingTest, OtlpJsonIsTheProto3MappingACollectorAccepts) {
     EXPECT_TRUE(saw_tokens);
     EXPECT_EQ(js[1]["parentSpanId"], "aaaaaaaaaaaaaaaa");
     EXPECT_FALSE(js[0].contains("parentSpanIdX"));
+    // GenAI / HTTP semantic conventions a backend's GenAI view keys on;
+    // finish_reasons is a string[] there, not a string.
+    json attrs;
+    for (const auto& a : root["attributes"])
+        attrs[a["key"].get<std::string>()] = a["value"];
+    EXPECT_EQ(attrs["gen_ai.operation.name"]["stringValue"], "chat");
+    EXPECT_EQ(attrs["gen_ai.provider.name"]["stringValue"], "imp");
+    EXPECT_EQ(attrs["http.request.method"]["stringValue"], "POST");
+    EXPECT_EQ(attrs["http.route"]["stringValue"], "chat.completions");
+    ASSERT_TRUE(attrs["gen_ai.response.finish_reasons"].contains("arrayValue"));
+    EXPECT_EQ(attrs["gen_ai.response.finish_reasons"]["arrayValue"]["values"][0]["stringValue"], "stop");
+    RequestSpan legacy = sample_request();
+    legacy.endpoint = "/v1/completions";
+    bool saw_text_completion = false;
+    for (const auto& [k, v] : spans_for_request(legacy)[0].str_attrs)
+        if (k == "gen_ai.operation.name" && v == "text_completion")
+            saw_text_completion = true;
+    EXPECT_TRUE(saw_text_completion);
 }
 
 TEST(TracingTest, TracerDisabledWithoutEndpointAndRefusesHttps) {

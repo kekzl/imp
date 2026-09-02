@@ -1175,12 +1175,14 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
     if (!choices.empty() && choices[0].contains("finish_reason") && choices[0]["finish_reason"].is_string()) {
         nonstream_finish = choices[0]["finish_reason"].get_ref<const std::string&>().c_str();
     }
-        ctx.trace.model = ctx.snap.model_name;
+    ctx.trace.model = ctx.snap.model_name;
     ctx.trace.stream = false;
-    if (ctx.server_req)
-        ctx.trace.queue_ms = ctx.server_req->queue_ms.load(std::memory_order_relaxed);
-    if (ctx.imp_req && ctx.imp_req->cached_tokens > 0)
-        ctx.trace.cached_tokens = ctx.imp_req->cached_tokens;
+    // The request objects are the parameters (the last completion's for
+    // n > 1), not context fields: nothing ever assigned those.
+    if (server_req)
+        ctx.trace.queue_ms = server_req->queue_ms.load(std::memory_order_relaxed);
+    if (imp_req && imp_req->cached_tokens > 0)
+        ctx.trace.cached_tokens = imp_req->cached_tokens;
     log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, comp_id, ctx.log_endpoint, ctx.log_client_ip,
                       ctx.log_raw_body, ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish,
                       response, ctx.log_client_request_id, &ctx.trace);

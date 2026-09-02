@@ -39,6 +39,12 @@ json attr_int(const std::string& k, int64_t v) {
     return json{{"key", k}, {"value", json{{"intValue", std::to_string(v)}}}};
 }
 json attr_bool(const std::string& k, bool v) { return json{{"key", k}, {"value", json{{"boolValue", v}}}}; }
+json attr_str_array(const std::string& k, const std::vector<std::string>& vs) {
+    json values = json::array();
+    for (const auto& v : vs)
+        values.push_back(json{{"stringValue", v}});
+    return json{{"key", k}, {"value", json{{"arrayValue", json{{"values", values}}}}}};
+}
 
 }  // namespace
 
@@ -56,6 +62,11 @@ bool parse_traceparent(const std::string& header, TraceContext& ctx) {
     ctx.parent_id = pid;
     ctx.sampled = (std::stoi(flags, nullptr, 16) & 1) != 0;
     return true;
+}
+
+bool traceparent_sampled(const std::string& header) {
+    TraceContext ctx;
+    return header.empty() || !parse_traceparent(header, ctx) || ctx.sampled;
 }
 
 std::string random_hex_id(int n_bytes) {
@@ -95,13 +106,21 @@ std::vector<OtlpSpan> spans_for_request(const RequestSpan& r, const std::string&
         root.str_attrs.push_back({"imp.client_request_id", r.client_request_id});
     if (!r.model.empty())
         root.str_attrs.push_back({"gen_ai.request.model", r.model});
+    // GenAI semantic conventions: provider.name is the current key,
+    // gen_ai.system its predecessor (dashboards still key on it).
+    root.str_attrs.push_back({"gen_ai.provider.name", "imp"});
     root.str_attrs.push_back({"gen_ai.system", "imp"});
+    root.str_attrs.push_back(
+        {"gen_ai.operation.name", r.endpoint == "/v1/completions" ? "text_completion" : "chat"});
+    root.str_attrs.push_back({"http.request.method", "POST"});
+    if (!r.endpoint.empty())
+        root.str_attrs.push_back({"http.route", r.endpoint});
     root.int_attrs.push_back({"gen_ai.usage.input_tokens", r.prompt_tokens});
     root.int_attrs.push_back({"gen_ai.usage.output_tokens", r.completion_tokens});
     root.int_attrs.push_back({"imp.cached_tokens", r.cached_tokens});
     root.int_attrs.push_back({"http.response.status_code", r.http_status});
-    if (!r.finish_reason.empty())
-        root.str_attrs.push_back({"gen_ai.response.finish_reasons", r.finish_reason});
+    if (!r.finish_reason.empty())  // semconv: string[] (one per choice)
+        root.str_array_attrs.push_back({"gen_ai.response.finish_reasons", {r.finish_reason}});
     root.bool_attrs.push_back({"imp.stream", r.stream});
     if (r.queue_ms >= 0)
         root.int_attrs.push_back({"imp.queue_ms", static_cast<int64_t>(r.queue_ms)});
@@ -158,6 +177,8 @@ std::string otlp_json(const std::vector<OtlpSpan>& spans, const std::string& ser
             attrs.push_back(attr_int(k, v));
         for (const auto& [k, v] : s.bool_attrs)
             attrs.push_back(attr_bool(k, v));
+        for (const auto& [k, v] : s.str_array_attrs)
+            attrs.push_back(attr_str_array(k, v));
         js["attributes"] = attrs;
         jspans.push_back(js);
     }
@@ -201,6 +222,12 @@ std::pair<std::string, std::string> Tracer::record(const RequestSpan& r) {
         return {};
     auto spans = spans_for_request(r);
     const std::pair<std::string, std::string> ids{spans[0].trace_id, spans[0].span_id};
+    if (!traceparent_sampled(r.traceparent)) {
+        // The caller's trace is not being recorded; our hop would be an
+        // orphan in the backend. Ids still go to the JSONL for the join.
+        unsampled_requests_++;
+        return ids;
+    }
     {
         std::lock_guard<std::mutex> lk(mu_);
         for (auto& s : spans)

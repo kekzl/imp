@@ -176,8 +176,6 @@ struct ChatRequestContext {
     // (queue, first token); filled where the numbers become known.
     RequestSpan trace;
     bool log_skip = false;
-    std::shared_ptr<imp::Request> imp_req;
-    std::shared_ptr<ServerRequest> server_req;
 };
 
 // cache_creation_input_tokens (Anthropic): full prompt blocks newly written

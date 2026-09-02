@@ -160,6 +160,16 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_requests_failed_total Failed inference requests\n";
     out += "# TYPE imp_requests_failed_total counter\n";
     out += "imp_requests_failed_total " + std::to_string(m.requests_failed.load()) + "\n";
+    // OTLP span export (server.otlp_endpoint); all zero while it is off.
+    out += "# HELP imp_otlp_spans_exported_total Spans accepted by the OTLP collector\n";
+    out += "# TYPE imp_otlp_spans_exported_total counter\n";
+    out += "imp_otlp_spans_exported_total " + std::to_string(state.tracer.exported_spans()) + "\n";
+    out += "# HELP imp_otlp_export_failures_total OTLP batches the collector did not accept (spans dropped)\n";
+    out += "# TYPE imp_otlp_export_failures_total counter\n";
+    out += "imp_otlp_export_failures_total " + std::to_string(state.tracer.failed_batches()) + "\n";
+    out += "# HELP imp_otlp_unsampled_requests_total Requests whose traceparent cleared the sampled flag (not exported)\n";
+    out += "# TYPE imp_otlp_unsampled_requests_total counter\n";
+    out += "imp_otlp_unsampled_requests_total " + std::to_string(state.tracer.unsampled_requests()) + "\n";
 
     out += "# HELP imp_constrained_eager_fallback_total Constrained requests that requested "
            "logprobs and fell back from the ConstrainedPipeline to eager decode\n";

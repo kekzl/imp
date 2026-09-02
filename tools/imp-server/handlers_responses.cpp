@@ -470,9 +470,12 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         std::string status = response.value("status", "");
         res.set_header("X-Request-Id",
                        log_client_request_id.empty() ? response_id : log_client_request_id);
-                RequestSpan trace;
+        RequestSpan trace;
         trace.traceparent = req.get_header_value("traceparent");
         trace.model = req_model;
+        trace.cached_tokens = response.value("usage", json::object())
+                                  .value("input_tokens_details", json::object())
+                                  .value("cached_tokens", 0);
         log_request_jsonl(state, /*skip=*/false, t_log_start, response_id, log_endpoint,
                           log_client_ip, log_raw_body, ms, prompt_t, completion_t,
                           status.empty() ? nullptr : status.c_str(), response,

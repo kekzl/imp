@@ -18,7 +18,12 @@ there instead of retelling it.
   prefill / decode children and request ids, model and token counts as
   attributes, joined to the caller's W3C `traceparent`; the request JSONL
   carries the same `trace_id`. Closes roadmap gap 8; `tests/test_server_tracing.py`
-  is the collector-side gate in `make test-server`
+  is the collector-side gate in `make test-server`. Jaeger trial follow-ups:
+  non-streaming spans now carry `imp.queue_ms` / `imp.cached_tokens` (they read
+  fields nothing assigned), an unsampled `traceparent` (flags `00`) is not
+  exported, `gen_ai.operation.name` / `gen_ai.provider.name` / `http.route`
+  added and `gen_ai.response.finish_reasons` is a string array per semconv,
+  `/metrics` gains `imp_otlp_*` counters
 
 - Recurrent-snapshot host tier for hybrid prefix caching
   (`server.recurrent_snapshot_host_mb`, default 2048): snapshots evicted from

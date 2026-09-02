@@ -60,21 +60,22 @@ def attrs(span):
     return d
 
 
-def chat(stream, trace_id, parent):
+def chat(stream, trace_id, parent, flags="01", rid=None):
     with urllib.request.urlopen(BASE + "/v1/models", timeout=30) as r:
         model = json.loads(r.read())["data"][0]["id"]
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": "Say hello in five words."}],
                        "max_tokens": 16, "temperature": 0, "stream": stream}).encode()
     req = urllib.request.Request(BASE + "/v1/chat/completions", data=body,
                                  headers={"Content-Type": "application/json",
-                                          "X-Request-Id": f"trace-test-{'s' if stream else 'n'}",
-                                          "traceparent": f"00-{trace_id}-{parent}-01"})
+                                          "X-Request-Id": rid or f"trace-test-{'s' if stream else 'n'}",
+                                          "traceparent": f"00-{trace_id}-{parent}-{flags}"})
     with urllib.request.urlopen(req, timeout=120) as r:
         data = r.read()
     if not stream:
-        return json.loads(data)["id"]
+        d = json.loads(data)
+        return d["id"], d.get("usage", {}).get("prompt_tokens_details", {}).get("cached_tokens", 0)
     ids = [json.loads(l[5:]).get("id") for l in data.decode().splitlines() if l.startswith("data:") and "[DONE]" not in l]
-    return next(i for i in ids if i)
+    return next(i for i in ids if i), None
 
 
 def main():
@@ -82,8 +83,13 @@ def main():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     tid_s, par_s = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
     tid_n, par_n = "1234567890abcdef1234567890abcdef", "fedcba9876543210"
-    id_s = chat(True, tid_s, par_s)
-    id_n = chat(False, tid_n, par_n)
+    tid_u, par_u = "0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331"
+    id_s, _ = chat(True, tid_s, par_s)
+    # The same prompt again: the prefix cache now hits, so the span's
+    # imp.cached_tokens has a non-zero value to agree with the API's usage.
+    id_n, cached_n = chat(False, tid_n, par_n)
+    # Sampled flag clear: the caller is not recording this trace, so no span.
+    chat(False, tid_u, par_u, flags="00", rid="trace-test-unsampled")
     deadline = time.time() + 15
     while time.time() < deadline:
         names = {s["traceId"] for s in spans()}
@@ -131,6 +137,10 @@ def main():
                       "prefill end != decode start")
         else:
             check("prefill" not in children, "non-stream request must not claim a prefill/decode split")
+            check("imp.queue_ms" in a, "non-stream root lacks imp.queue_ms (the engine queue wait)")
+            check(int(a.get("imp.cached_tokens", -1)) == cached_n,
+                  f"non-stream imp.cached_tokens {a.get('imp.cached_tokens')} != API cached_tokens {cached_n}")
+    check(tid_u not in by_trace, f"unsampled traceparent (flags 00) was exported: {len(by_trace.get(tid_u, []))} spans")
     srv.shutdown()
     if fails:
         print("FAIL:\n  " + "\n  ".join(fails))

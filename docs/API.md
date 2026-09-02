@@ -303,10 +303,20 @@ exported as an OpenTelemetry span: a SERVER span named after the endpoint
 for streaming requests, where the first token is observed). A W3C
 `traceparent` request header puts the hop inside the caller's trace (its
 trace id, the caller's span as parent); without one a trace id is minted.
-The JSONL record carries the same `trace_id` / `span_id`. Export runs on a
-background thread in one-second batches; an unreachable collector costs one
-warning and dropped batches, never request latency. Service name:
-`server.otlp_service_name` (default `imp-server`).
+A header with the sampled flag clear (`...-00`) is honoured the way a
+parent-based sampler would: ids are minted, nothing is exported. The JSONL
+record carries the same `trace_id` / `span_id` either way. Only requests
+that reach generation are traced; a request refused before it (4xx, 429,
+503) emits no span. Export runs on a background thread in one-second
+batches; an unreachable collector costs one warning and dropped batches,
+never request latency (measured 2026-09-02 on Qwen3.8-27B: median request
+latency 113.6 ms with the collector up, 111.5 ms with it stopped). `/metrics`
+counts `imp_otlp_spans_exported_total`, `imp_otlp_export_failures_total`
+and `imp_otlp_unsampled_requests_total`. Service name:
+`server.otlp_service_name` (default `imp-server`). Verified against Jaeger
+v2.20 (OTLP/HTTP receiver, GenAI view) with an OpenTelemetry-SDK client:
+the hop lands under the client's span with `queue` / `prefill` / `decode`
+children on its timeline.
 
 ## Errors
 
