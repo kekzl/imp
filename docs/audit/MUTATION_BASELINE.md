@@ -179,7 +179,14 @@ tests written for them rather than by a neighbour: M37 and M39 by
 
 Note for the next reader: `check_test_lanes.py` counts MACROS per binary, not
 executions, so a test that skips at runtime still reads as "in a CI lane". The
-skip count above is the honest figure for what the merge gate exercises.
+skip count above is the honest figure for what the merge gate exercises, and
+it is gated now: the three lane commands write GTest JSON reports and
+`guard_unit_skips` (inside `ctest -L unit`) compares the skipped set with
+`tools/unit_lane_skips.txt` by name. Five scheduler admission tests (accounting
+cache) and the four `MLAConfig` config tests (embedded DeepSeek-V2-Lite
+`config.json`) left the set the same day: **without a GPU the lane skips
+test-core 15 of 1325, test-text 5 of 242, the e2e subset 1 of 62**, every one a
+line with its reason.
 
 ## Method notes that changed a result
 

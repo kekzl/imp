@@ -1044,9 +1044,15 @@ if(IMP_BUILD_TESTS)
     # path has no build/ dir) — keep both in sync when changing it.
     set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
-    add_test(NAME unit_core       COMMAND test-core)
-    add_test(NAME unit_text       COMMAND test-text)
-    add_test(NAME unit_e2e_subset COMMAND test-e2e "--gtest_filter=${_unit_e2e_filter}")
+    # Each lane command writes a GTest JSON report so guard_unit_skips (below)
+    # can pin, by name, which of its tests skip at runtime. check_test_lanes.py
+    # counts macros and cannot see that: 62 test-core cases sat in this lane
+    # green without ever running until #1860/#1861.
+    set(_gtest_reports "${CMAKE_CURRENT_BINARY_DIR}/gtest-reports")
+    add_test(NAME unit_core       COMMAND test-core "--gtest_output=json:${_gtest_reports}/unit_core.json")
+    add_test(NAME unit_text       COMMAND test-text "--gtest_output=json:${_gtest_reports}/unit_text.json")
+    add_test(NAME unit_e2e_subset COMMAND test-e2e "--gtest_filter=${_unit_e2e_filter}"
+                                                   "--gtest_output=json:${_gtest_reports}/unit_e2e_subset.json")
     add_test(NAME guard_e2e_lane_split
         COMMAND ${CMAKE_COMMAND} -E env
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_e2e_lane_split.sh
@@ -1086,9 +1092,17 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_precommit_filter.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
+    # The skipped set of the three lanes above, pinned by name in
+    # tools/unit_lane_skips.txt. DEPENDS only orders: a lane that crashed
+    # leaves its previous report behind, and is red on its own then anyway.
+    add_test(NAME guard_unit_skips
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_unit_skips.py ${_gtest_reports}
+                --allowlist ${CMAKE_CURRENT_SOURCE_DIR}/tools/unit_lane_skips.txt)
+    set_tests_properties(guard_unit_skips PROPERTIES DEPENDS "unit_core;unit_text;unit_e2e_subset")
+
     set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split
                          guard_det_suite_filter guard_cancel_teardown
-                         guard_verify_filter guard_precommit_filter
+                         guard_verify_filter guard_precommit_filter guard_unit_skips
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)

@@ -103,12 +103,14 @@ TEST(SchedulerTest, RemovesFinishedRequests) {
 }
 // 10. Memory-aware scheduling
 TEST(SchedulerTest, MemoryAwareScheduling) {
-    SKIP_IF_NO_CUDA();
-
+    // Admission is bookkeeping, so the memory-aware tests build an accounting
+    // cache (block ids and counts, no VRAM) and run in the CI lane. Only the
+    // growable-pool test below still needs a device.
+    //
     // Pool of 8 blocks = 128 tokens. Each request is a 32-token prompt
     // (2 blocks) plus max_tokens=16 (1 block + the partial-block spare), so
     // one reservation is 4 blocks and exactly two fit.
-    auto cache = std::make_unique<KVCache>(
+    auto cache = KVCache::for_accounting(
         /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8);
 
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
@@ -138,8 +140,6 @@ TEST(SchedulerTest, MemoryAwareScheduling) {
 // dry and the loser was cancelled mid-stream, after the client had already
 // received part of the answer.
 TEST(SchedulerTest, AdmissionReservesGeneration) {
-    SKIP_IF_NO_CUDA();
-
     // 16 blocks = 256 tokens. Each request: 32-token prompt (2 blocks) +
     // max_tokens=64 (4 blocks + 1 spare) = 7 blocks reserved, so two fit and
     // the third must queue.
@@ -149,7 +149,7 @@ TEST(SchedulerTest, AdmissionReservesGeneration) {
     // admission quantity mutated back to the prompt. The third is what the
     // admission test has to see - free blocks say yes (10 left), the
     // outstanding reservations say no.
-    auto cache = std::make_unique<KVCache>(
+    auto cache = KVCache::for_accounting(
         /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/16);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
@@ -240,12 +240,10 @@ TEST(SchedulerTest, GrowsPoolUnderAggregatePressure) {
 // 10c. A pool too small to ever hold prompt + max_tokens degrades to
 // prompt-only admission instead of queueing the request forever (#1635).
 TEST(SchedulerTest, AdmissionClampsReserveToPoolSize) {
-    SKIP_IF_NO_CUDA();
-
     // 4 blocks = 64 tokens, against a 32-token prompt + max_tokens=256.
     // The full reserve (2 + 17) never fits, so the clamp is what keeps this
     // request servable at all.
-    auto cache = std::make_unique<KVCache>(
+    auto cache = KVCache::for_accounting(
         /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
@@ -603,10 +601,8 @@ TEST(SchedulerTest, EmptyScheduler) {
 }
 // 28. Memory-aware scheduling skips large requests, admits smaller ones
 TEST(SchedulerTest, MemoryAwareSkipsLargeAdmitsSmall) {
-    SKIP_IF_NO_CUDA();
-
     // 4 blocks total, block_size=16
-    auto cache = std::make_unique<KVCache>(
+    auto cache = KVCache::for_accounting(
         /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64, QType::F16, /*max_blocks=*/4);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
@@ -639,9 +635,7 @@ TEST(SchedulerTest, MemoryAwareSkipsLargeAdmitsSmall) {
 }
 // 29. All requests too large for memory — all cancelled (none feasible)
 TEST(SchedulerTest, AllRequestsTooLargeForMemory) {
-    SKIP_IF_NO_CUDA();
-
-    auto cache = std::make_unique<KVCache>(
+    auto cache = KVCache::for_accounting(
         /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64, QType::F16, /*max_blocks=*/2);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 

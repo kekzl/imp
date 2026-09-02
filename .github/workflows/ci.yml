@@ -765,10 +765,10 @@ jobs:
             exit 1
           fi
 
-      # Measured locally on this tree, GPU-less, same flags: test-core 741 pass,
-      # test-text 200 pass, no ASan report. FuzzCorpus.Regex is 11 s of that
-      # under ASan against 0.5 s without - the NFA compiler over 1500 mutations
-      # is what the sanitizer slows down.
+      # GPU-less, the flags `make asan` uses; the pass/skip counts are in each
+      # binary's own summary (a number here went stale with #1861 unnoticed).
+      # FuzzCorpus.Regex is 11 s of that under ASan against 0.5 s without - the
+      # NFA compiler over 1500 mutations is what the sanitizer slows down.
       - name: Run
         if: steps.scope.outputs.run == 'true'
         env:

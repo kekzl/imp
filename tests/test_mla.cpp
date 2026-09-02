@@ -9,11 +9,14 @@
 // to verify DeepSeek-V2 MoE tensor name routing without loading the 30 GB
 // model. Seam: WeightMap(ModelArch) + map_name(std::string) (weight_map.h).
 //
-// Requires a DeepSeek-V2-Lite HF model directory with config.json.
-// Set IMP_TEST_MODEL_DEEPSEEK to the directory path, or place the model at
-// /models/DeepSeek-V2-Lite (Docker bind-mount fallback). Skipped if absent.
+// The config tests read only config.json, so they run against a verbatim copy
+// of DeepSeek-V2-Lite's (tests/refs/deepseek_v2_lite_config.h) written to a
+// temp dir, and against a real checkpoint when IMP_TEST_MODEL_DEEPSEEK is set.
+// Before the fixture they skipped in every run without /models, which is all
+// of CI.
 
 #include <cmath>
+#include <cstdlib>
 
 #include "model/hf_config_loader.h"
 #include "model/model.h"
@@ -21,11 +24,13 @@
 #include "model/model_profile.h"
 #include "model/tensor_kind_matcher.h"
 #include "model/weight_map.h"
+#include "refs/deepseek_v2_lite_config.h"
 #include "test_models.h"
 
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 
 using imp::HFConfigLoader;
 using imp::ModelConfig;
@@ -35,6 +40,20 @@ using imp::Model;
 using imp::WeightMap;
 
 namespace {
+
+// A directory holding DeepSeek-V2-Lite's config.json: the env override when
+// set, else the embedded copy written once per process.
+std::string deepseek_config_dir() {
+    if (const char* env = std::getenv(imp_test::kEnvModelDeepSeek); env && *env)
+        return env;
+    static const std::string dir = [] {
+        const auto d = std::filesystem::temp_directory_path() / "imp-test-deepseek-v2-lite";
+        std::filesystem::create_directories(d);
+        std::ofstream(d / "config.json") << imp::deepseek_v2_lite_golden::k_config_json;
+        return d.string();
+    }();
+    return dir;
+}
 
 // ---------------------------------------------------------------------------
 // Task 2.5: YaRN mscale attention-scale multiplier
@@ -47,13 +66,8 @@ TEST(MLAConfig, YarnMscaleAttentionScaleNonMLA) {
 }
 
 TEST(MLAConfig, YarnMscaleAttentionScale) {
-    std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
-                                            "/models/DeepSeek-V2-Lite");
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
-    if (!std::filesystem::exists(dir)) {
-        GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
-                     << dir << " to run MLA mscale tests";
-    }
+    const std::string dir = deepseek_config_dir();
 
     ModelConfig cfg;
     bool ok = HFConfigLoader::load_config(dir, cfg);
@@ -71,13 +85,8 @@ TEST(MLAConfig, YarnMscaleAttentionScale) {
 // ---------------------------------------------------------------------------
 
 TEST(MLAConfig, ParsesDeepSeekV2LiteFields) {
-    std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
-                                            "/models/DeepSeek-V2-Lite");
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
-    if (!std::filesystem::exists(dir)) {
-        GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
-                     << dir << " to run MLA config tests";
-    }
+    const std::string dir = deepseek_config_dir();
 
     ModelConfig cfg;
     bool ok = HFConfigLoader::load_config(dir, cfg);
@@ -115,13 +124,8 @@ TEST(MLAConfig, ParsesDeepSeekV2LiteFields) {
 // this must equal the HF ratio. The pre-fix code inflated it to 1.261, which
 // compounded with position and cost ~+24% PPL at 512 tokens.
 TEST(MLAConfig, YarnRopeMscaleIsUnityForV2Lite) {
-    std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
-                                            "/models/DeepSeek-V2-Lite");
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
-    if (!std::filesystem::exists(dir)) {
-        GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
-                     << dir << " to run MLA rope-mscale tests";
-    }
+    const std::string dir = deepseek_config_dir();
 
     ModelConfig cfg;
     ASSERT_TRUE(HFConfigLoader::load_config(dir, cfg));
@@ -148,13 +152,8 @@ TEST(MLAConfig, IsMlaReturnsFalseForNonMLA) {
 }
 
 TEST(MLAConfig, ProfileSelectsMLAVariant) {
-    std::string dir = imp_test::env_path_or(imp_test::kEnvModelDeepSeek,
-                                            "/models/DeepSeek-V2-Lite");
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelDeepSeek));
-    if (!std::filesystem::exists(dir)) {
-        GTEST_SKIP() << "Set IMP_TEST_MODEL_DEEPSEEK or place model at "
-                     << dir << " to run MLA profile tests";
-    }
+    const std::string dir = deepseek_config_dir();
 
     ModelConfig cfg;
     bool ok = HFConfigLoader::load_config(dir, cfg);
