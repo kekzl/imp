@@ -173,75 +173,19 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
       alloc_(alloc),
       layer_is_swa_(layer_is_swa),
       swa_max_blocks_(swa_max_blocks) {
-    // Before the offset loop below: it strides by layer_capacity(l), which is
+    // Before the layout: it strides by layer_capacity_(l), which is
     // max_blocks_ for a full-attention layer, and the stride has to be the
-    // ceiling or growth would move every layer's data.
+    // ceiling or growth would move every layer's data. If the reservation is
+    // then declined, the stride has to go back to the affordable size and the
+    // whole layout with it, or the offsets would describe a pool that was
+    // never allocated: layout_layers_ runs again below.
     const int usable = plan_growth_(max_blocks, ceiling_blocks);
-    bool packed_4bit = (dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV);
-    size_t elem_size = packed_4bit ? 0  // 4-bit modes use /2 below
-                                   : dtype_size(dtype);
-
-    // SWA group only meaningful with both a flag vector and a capacity.
-    if (layer_is_swa_.empty() || swa_max_blocks_ <= 0) {
-        layer_is_swa_.clear();
-        swa_max_blocks_ = 0;
-    }
-    // Per-layer region capacity: SWA layers hold only the trailing window.
-    auto layer_capacity = [&](int l) -> size_t {
-        return (swa_max_blocks_ > 0 && l < static_cast<int>(layer_is_swa_.size()) && layer_is_swa_[l])
-                   ? static_cast<size_t>(swa_max_blocks_)
-                   : static_cast<size_t>(max_blocks_);
-    };
-
-    // Compute per-layer block bytes and offsets.
-    //
-    // In a lambda because it strides by layer_capacity(l), which reads
-    // max_blocks_ — the CEILING while a growable pool is intended. If the
-    // reservation is then declined, the stride has to go back to the affordable
-    // size and the whole layout with it, or the offsets would describe a pool
-    // that was never allocated.
-    layer_block_bytes_.resize(n_layers_);
-    layer_k_offset_.resize(n_layers_);
-    layer_v_offset_.resize(n_layers_);
-    int max_nkv = 0, max_hd = 0;
-    auto compute_layout = [&]() -> size_t {
-    size_t running = 0;
-    for (int l = 0; l < n_layers_; l++) {
-        int nkv = (l < (int)n_kv_heads_per_layer.size()) ? n_kv_heads_per_layer[l] : 0;
-        int hd = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
-        if (nkv <= 0 || hd <= 0) {
-            // Layer has no attention (e.g. hybrid SSM layer). Still reserve 0 bytes.
-            layer_block_bytes_[l] = 0;
-            layer_k_offset_[l] = running;
-            layer_v_offset_[l] = running;
-            continue;
-        }
-        max_nkv = std::max(max_nkv, nkv);
-        max_hd = std::max(max_hd, hd);
-
-        size_t bb = packed_4bit ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
-                                : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
-        layer_block_bytes_[l] = bb;
-
-        // Layout: K region then V region for this layer.
-        layer_k_offset_[l] = running;
-        running += layer_capacity(l) * bb;
-        layer_v_offset_[l] = running;
-        running += layer_capacity(l) * bb;
-    }
-    return running;
-    };
-    size_t total = compute_layout();
-
-    // Populate scalar fallback fields with max values (for external queries)
-    n_kv_heads_ = max_nkv;
-    head_dim_ = max_hd;
-    block_bytes_ = packed_4bit ? (static_cast<size_t>(block_size_) * max_nkv * max_hd / 2)
-                               : (static_cast<size_t>(block_size_) * max_nkv * max_hd * elem_size);
+    size_t total = layout_layers_(n_kv_heads_per_layer, head_dim_per_layer);
 
     // Allocate single contiguous pool
     if (!reserve_pool_(total, usable)) {
-        total = compute_layout();  // max_blocks_ is back to the affordable size
+        // max_blocks_ is back to the affordable size
+        total = layout_layers_(n_kv_heads_per_layer, head_dim_per_layer);
         if (alloc_) {
             pool_ = alloc_->allocate(total, "kv_cache");
         } else {
@@ -265,37 +209,8 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
     }
 
-    // NVFP4 / MXFP4_KV per-layer scales: each layer's scale-block-bytes derived from its own
-    // (nkv * hd / kNVFP4Group) so that layers with different head_dim (Gemma 4
-    // SWA vs full-attention layers) get correctly-sized scale storage.
-    // MXFP4_KV uses identical layout — same per-16-element group size; only the
-    // scale byte semantics differ (UE8M0 vs E4M3), which is transparent here.
     if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV) {
-        layer_scale_block_bytes_.resize(n_layers_);
-        layer_k_scale_offset_.resize(n_layers_);
-        layer_v_scale_offset_.resize(n_layers_);
-        size_t srunning = 0;
-        for (int l = 0; l < n_layers_; l++) {
-            int nkv = (l < (int)n_kv_heads_per_layer.size()) ? n_kv_heads_per_layer[l] : 0;
-            int hd = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
-            if (nkv <= 0 || hd <= 0) {
-                layer_scale_block_bytes_[l] = 0;
-                layer_k_scale_offset_[l] = srunning;
-                layer_v_scale_offset_[l] = srunning;
-                continue;
-            }
-            if (hd % kNVFP4Group != 0) {
-                throw std::runtime_error(
-                    "KVCache per-layer NVFP4: head_dim must be a multiple of 16");
-            }
-            size_t sbb = static_cast<size_t>(block_size_) * nkv * (hd / kNVFP4Group);
-            layer_scale_block_bytes_[l] = sbb;
-            layer_k_scale_offset_[l] = srunning;
-            srunning += layer_capacity(l) * sbb;
-            layer_v_scale_offset_[l] = srunning;
-            srunning += layer_capacity(l) * sbb;
-        }
-        size_t sc_total = srunning;
+        const size_t sc_total = layout_layer_scales_(n_kv_heads_per_layer, head_dim_per_layer);
         if (alloc_) {
             scale_pool_ = alloc_->allocate(sc_total, "kv_cache_scales");
         } else {
@@ -316,9 +231,6 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
             throw std::runtime_error(msg);
         }
         IMP_CUDA_CHECK_LOG(cudaMemset(scale_pool_, 0, sc_total));
-        // For external queries, scalar fallback uses max-layer block bytes so
-        // sizeof checks see a non-zero value.
-        scale_block_bytes_ = static_cast<size_t>(block_size_) * max_nkv * (max_hd / kNVFP4Group);
     }
 
     // `usable`, never max_blocks_: on a growable pool max_blocks_ is the
@@ -327,23 +239,137 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
     if (blocks_.open_slots(usable) != MemError::Ok)
         throw std::runtime_error("KVCache(per-layer): block id space init failed");
     usable_blocks_.store(usable, std::memory_order_relaxed);
-
-    // SWA group: separate id space, separate pool. Not a partition of the
-    // global one — a ref must not be able to cross between them.
-    if (swa_max_blocks_ > 0) {
-        if (swa_blocks_.open_slots(swa_max_blocks_) != MemError::Ok)
-            throw std::runtime_error("KVCache(per-layer): SWA block id space init failed");
-        int n_swa_layers = 0;
-        for (char f : layer_is_swa_)
-            if (f)
-                n_swa_layers++;
-        IMP_LOG_INFO("KVCache (per-layer): SWA group %d blocks × %d windowed layers "
-                     "(global group %d blocks × %d layers)",
-                     swa_max_blocks_, n_swa_layers, max_blocks_, n_layers_ - n_swa_layers);
-    }
+    open_swa_group_();
 
     IMP_LOG_INFO("KVCache (per-layer): %zu layers, pool %.2f MiB, max nkv=%d, max hd=%d", (size_t)n_layers_,
-                 total / (1024.0 * 1024.0), max_nkv, max_hd);
+                 total / (1024.0 * 1024.0), n_kv_heads_, head_dim_);
+}
+
+// Accounting-only per-layer cache: the constructor above minus the two pools
+// and the growth plan (max_blocks_ is the fixed stride). See the header.
+KVCache::KVCache(AccountingOnly, int n_layers, const std::vector<int>& n_kv_heads_per_layer,
+                 const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
+                 const std::vector<char>& layer_is_swa, int swa_max_blocks)
+    : accounting_only_(true),
+      n_layers_(n_layers),
+      max_blocks_(max_blocks),
+      block_size_(block_size),
+      dtype_(dtype),
+      alloc_(nullptr),
+      layer_is_swa_(layer_is_swa),
+      swa_max_blocks_(swa_max_blocks) {
+    layout_layers_(n_kv_heads_per_layer, head_dim_per_layer);
+    if (dtype == QType::INT8 || dtype == QType::INT4)
+        throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
+    if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV)
+        layout_layer_scales_(n_kv_heads_per_layer, head_dim_per_layer);
+    if (blocks_.open_slots(max_blocks) != MemError::Ok)
+        throw std::runtime_error("KVCache(per-layer): block id space init failed");
+    usable_blocks_.store(max_blocks, std::memory_order_relaxed);
+    open_swa_group_();
+}
+
+std::unique_ptr<KVCache> KVCache::for_accounting(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
+                                                 const std::vector<int>& head_dim_per_layer, QType dtype,
+                                                 int max_blocks, int block_size,
+                                                 const std::vector<char>& layer_is_swa, int swa_max_blocks) {
+    return std::make_unique<KVCache>(AccountingOnly{}, n_layers, n_kv_heads_per_layer, head_dim_per_layer,
+                                     dtype, max_blocks, block_size, layer_is_swa, swa_max_blocks);
+}
+
+size_t KVCache::layout_layers_(const std::vector<int>& n_kv_heads_per_layer,
+                               const std::vector<int>& head_dim_per_layer) {
+    // SWA group only meaningful with both a flag vector and a capacity.
+    if (layer_is_swa_.empty() || swa_max_blocks_ <= 0) {
+        layer_is_swa_.clear();
+        swa_max_blocks_ = 0;
+    }
+    const bool packed_4bit = (dtype_ == QType::INT4 || dtype_ == QType::NVFP4 || dtype_ == QType::MXFP4_KV);
+    const size_t elem_size = packed_4bit ? 0 : dtype_size(dtype_);  // 4-bit modes use /2 below
+    auto bytes_per_block = [&](int nkv, int hd) -> size_t {
+        return packed_4bit ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
+                           : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
+    };
+
+    layer_block_bytes_.assign(n_layers_, 0);
+    layer_k_offset_.assign(n_layers_, 0);
+    layer_v_offset_.assign(n_layers_, 0);
+    int max_nkv = 0, max_hd = 0;
+    size_t running = 0;
+    for (int l = 0; l < n_layers_; l++) {
+        const int nkv = (l < (int)n_kv_heads_per_layer.size()) ? n_kv_heads_per_layer[l] : 0;
+        const int hd = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
+        if (nkv <= 0 || hd <= 0) {
+            // Layer has no attention (e.g. hybrid SSM layer). Still reserve 0 bytes.
+            layer_k_offset_[l] = running;
+            layer_v_offset_[l] = running;
+            continue;
+        }
+        max_nkv = std::max(max_nkv, nkv);
+        max_hd = std::max(max_hd, hd);
+        const size_t bb = bytes_per_block(nkv, hd);
+        layer_block_bytes_[l] = bb;
+        // Layout: K region then V region for this layer.
+        layer_k_offset_[l] = running;
+        running += layer_capacity_(l) * bb;
+        layer_v_offset_[l] = running;
+        running += layer_capacity_(l) * bb;
+    }
+    // Scalar fallback fields carry the max shape (for external queries).
+    n_kv_heads_ = max_nkv;
+    head_dim_ = max_hd;
+    block_bytes_ = bytes_per_block(max_nkv, max_hd);
+    return running;
+}
+
+size_t KVCache::layout_layer_scales_(const std::vector<int>& n_kv_heads_per_layer,
+                                     const std::vector<int>& head_dim_per_layer) {
+    // Each layer's scale-block-bytes derived from its own (nkv * hd / kNVFP4Group)
+    // so that layers with different head_dim (Gemma 4 SWA vs full-attention
+    // layers) get correctly-sized scale storage. MXFP4_KV uses the identical
+    // layout, same per-16-element group; only the scale byte semantics differ
+    // (UE8M0 vs E4M3), which is transparent here.
+    layer_scale_block_bytes_.assign(n_layers_, 0);
+    layer_k_scale_offset_.assign(n_layers_, 0);
+    layer_v_scale_offset_.assign(n_layers_, 0);
+    size_t srunning = 0;
+    for (int l = 0; l < n_layers_; l++) {
+        const int nkv = (l < (int)n_kv_heads_per_layer.size()) ? n_kv_heads_per_layer[l] : 0;
+        const int hd = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
+        if (nkv <= 0 || hd <= 0) {
+            layer_k_scale_offset_[l] = srunning;
+            layer_v_scale_offset_[l] = srunning;
+            continue;
+        }
+        if (hd % kNVFP4Group != 0)
+            throw std::runtime_error("KVCache per-layer NVFP4: head_dim must be a multiple of 16");
+        const size_t sbb = static_cast<size_t>(block_size_) * nkv * (hd / kNVFP4Group);
+        layer_scale_block_bytes_[l] = sbb;
+        layer_k_scale_offset_[l] = srunning;
+        srunning += layer_capacity_(l) * sbb;
+        layer_v_scale_offset_[l] = srunning;
+        srunning += layer_capacity_(l) * sbb;
+    }
+    // For external queries, scalar fallback uses max-layer block bytes so
+    // sizeof checks see a non-zero value.
+    scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads_ * (head_dim_ / kNVFP4Group);
+    return srunning;
+}
+
+void KVCache::open_swa_group_() {
+    // SWA group: separate id space, separate pool. Not a partition of the
+    // global one, a ref must not be able to cross between them.
+    if (swa_max_blocks_ <= 0)
+        return;
+    if (swa_blocks_.open_slots(swa_max_blocks_) != MemError::Ok)
+        throw std::runtime_error("KVCache(per-layer): SWA block id space init failed");
+    int n_swa_layers = 0;
+    for (char f : layer_is_swa_)
+        if (f)
+            n_swa_layers++;
+    IMP_LOG_INFO("KVCache (per-layer): SWA group %d blocks x %d windowed layers "
+                 "(global group %d blocks x %d layers)",
+                 swa_max_blocks_, n_swa_layers, max_blocks_, n_layers_ - n_swa_layers);
 }
 
 // ---------------------------------------------------------------------------

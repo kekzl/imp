@@ -329,23 +329,41 @@ TEST(KVCacheTest, KVCacheNVFP4HeadDimReject) {
                  std::runtime_error);
 }
 
-// 13c. NVFP4 per-layer constructor (Gemma 4 dual head_dim 256 SWA / 512 global).
+// 13c. NVFP4 per-layer constructor (Gemma 4 dual head_dim 256 SWA / 512 global):
+// each layer's scale_block_bytes is its own (nkv * hd / 16), the scalar
+// fallbacks carry the max shape. Geometry only, so an accounting cache and
+// the CI lane; the pointer half is 13d.
 TEST(KVCacheTest, KVCacheNVFP4PerLayer) {
-    SKIP_IF_NO_CUDA();
-
     const int n_layers = 4;
     const int max_blocks = 2;
     std::vector<int> nkv = {8, 8, 8, 8};
     std::vector<int> hd = {128, 256, 128, 256};  // mixed head_dim
 
-    KVCache cache(n_layers, nkv, hd, QType::NVFP4, max_blocks, kKVBlockSize, nullptr);
-    EXPECT_EQ(cache.qtype(), QType::NVFP4);
+    auto cache = KVCache::for_accounting(n_layers, nkv, hd, QType::NVFP4, max_blocks);
+    ASSERT_TRUE(cache->accounting_only());
+    EXPECT_EQ(cache->qtype(), QType::NVFP4);
 
-    // Each layer's scale_block_bytes must match its own (nkv * hd / 16).
-    EXPECT_EQ(cache.scale_block_bytes(0), static_cast<size_t>(kKVBlockSize) * 8 * (128 / 16));   // 1024
-    EXPECT_EQ(cache.scale_block_bytes(1), static_cast<size_t>(kKVBlockSize) * 8 * (256 / 16));   // 2048
-    EXPECT_EQ(cache.scale_block_bytes(2), static_cast<size_t>(kKVBlockSize) * 8 * (128 / 16));   // 1024
-    EXPECT_EQ(cache.scale_block_bytes(3), static_cast<size_t>(kKVBlockSize) * 8 * (256 / 16));   // 2048
+    EXPECT_EQ(cache->scale_block_bytes(0), static_cast<size_t>(kKVBlockSize) * 8 * (128 / 16));   // 1024
+    EXPECT_EQ(cache->scale_block_bytes(1), static_cast<size_t>(kKVBlockSize) * 8 * (256 / 16));   // 2048
+    EXPECT_EQ(cache->scale_block_bytes(2), static_cast<size_t>(kKVBlockSize) * 8 * (128 / 16));   // 1024
+    EXPECT_EQ(cache->scale_block_bytes(3), static_cast<size_t>(kKVBlockSize) * 8 * (256 / 16));   // 2048
+
+    EXPECT_EQ(cache->n_kv_heads(), 8);
+    EXPECT_EQ(cache->head_dim(), 256);
+    EXPECT_EQ(cache->block_bytes(), static_cast<size_t>(kKVBlockSize) * 8 * 256 / 2);
+    EXPECT_EQ(cache->scale_block_bytes(), static_cast<size_t>(kKVBlockSize) * 8 * (256 / 16));
+    EXPECT_EQ(cache->num_free_blocks(), max_blocks);
+}
+
+// 13d. The same geometry with memory: every layer's K, K-scale and V-scale
+// pointer resolves for an allocated block.
+TEST(KVCacheTest, KVCacheNVFP4PerLayerPointers) {
+    SKIP_IF_NO_CUDA();
+
+    const int n_layers = 4;
+    std::vector<int> nkv = {8, 8, 8, 8};
+    std::vector<int> hd = {128, 256, 128, 256};
+    KVCache cache(n_layers, nkv, hd, QType::NVFP4, /*max_blocks=*/2, kKVBlockSize, nullptr);
 
     int b0 = cache.allocate_block();
     ASSERT_GE(b0, 0);
@@ -1514,10 +1532,10 @@ TEST(KVCacheManagerTest, CacheHitOnCachedBlockKeepsReclaimableCountExact) {
 // ============================================================================
 
 // Per-layer ctor with a SWA group: windowed layers draw from a separate,
-// smaller block-id space; global layers keep the full pool.
+// smaller block-id space; global layers keep the full pool. Two id spaces
+// and no bytes, so an accounting cache and the CI lane; the pointer half
+// is the test after this one.
 TEST(KVCacheTest, SwaGroupCapacityAndIdSpace) {
-    SKIP_IF_NO_CUDA();
-
     const int n_layers = 4;
     const int global_max = 64;
     const int swa_max = 6;
@@ -1525,43 +1543,67 @@ TEST(KVCacheTest, SwaGroupCapacityAndIdSpace) {
     std::vector<int> hd(n_layers, 64);
     std::vector<char> is_swa = {1, 0, 1, 0};  // layers 0,2 windowed
 
-    KVCache cache(n_layers, nkv, hd, QType::F16, global_max, kKVBlockSize, nullptr, is_swa, swa_max);
-    ASSERT_TRUE(cache.swa_enabled());
-    EXPECT_TRUE(cache.layer_is_swa(0));
-    EXPECT_FALSE(cache.layer_is_swa(1));
-    EXPECT_EQ(cache.swa_total_blocks(), swa_max);
+    auto cache = KVCache::for_accounting(n_layers, nkv, hd, QType::F16, global_max, kKVBlockSize, is_swa,
+                                         swa_max);
+    ASSERT_TRUE(cache->accounting_only());
+    ASSERT_TRUE(cache->swa_enabled());
+    EXPECT_TRUE(cache->layer_is_swa(0));
+    EXPECT_FALSE(cache->layer_is_swa(1));
+    EXPECT_EQ(cache->swa_total_blocks(), swa_max);
 
     // Global id space: global_max blocks.
-    EXPECT_EQ(cache.num_free_blocks(), global_max);
+    EXPECT_EQ(cache->num_free_blocks(), global_max);
     // SWA id space: swa_max blocks, allocated independently.
-    EXPECT_EQ(cache.num_free_swa_blocks(), swa_max);
+    EXPECT_EQ(cache->num_free_swa_blocks(), swa_max);
     std::vector<int> swa_ids;
     for (int i = 0; i < swa_max; ++i) {
-        int id = cache.allocate_swa_block();
+        int id = cache->allocate_swa_block();
         ASSERT_GE(id, 0);
         ASSERT_LT(id, swa_max);
         swa_ids.push_back(id);
     }
-    EXPECT_EQ(cache.allocate_swa_block(), -1);  // group exhausted
-    EXPECT_EQ(cache.num_free_blocks(), global_max);  // global untouched
-    cache.free_swa_block(swa_ids[0]);
-    EXPECT_EQ(cache.num_free_swa_blocks(), 1);
-    // k_ptr for a windowed layer with a SWA-space id resolves inside the pool.
-    EXPECT_NE(cache.k_ptr(0, swa_ids[1]), nullptr);
+    EXPECT_EQ(cache->allocate_swa_block(), -1);  // group exhausted
+    EXPECT_EQ(cache->num_free_blocks(), global_max);  // global untouched
+    cache->free_swa_block(swa_ids[0]);
+    EXPECT_EQ(cache->num_free_swa_blocks(), 1);
+
+    // A flag vector without a capacity is no group: nothing is windowed and
+    // the SWA id space is empty.
+    auto no_group = KVCache::for_accounting(n_layers, nkv, hd, QType::F16, global_max, kKVBlockSize, is_swa,
+                                            /*swa_max_blocks=*/0);
+    EXPECT_FALSE(no_group->swa_enabled());
+    EXPECT_FALSE(no_group->layer_is_swa(0));
+    EXPECT_EQ(no_group->swa_total_blocks(), 0);
+    EXPECT_EQ(no_group->allocate_swa_block(), -1);
+}
+
+// A SWA-space id resolves to memory in a windowed layer's own region.
+TEST(KVCacheTest, SwaBlockPointerResolves) {
+    SKIP_IF_NO_CUDA();
+
+    const int n_layers = 2;
+    std::vector<int> nkv(n_layers, 4);
+    std::vector<int> hd(n_layers, 64);
+    std::vector<char> is_swa = {1, 0};
+    KVCache cache(n_layers, nkv, hd, QType::F16, /*global*/ 64, kKVBlockSize, nullptr, is_swa,
+                  /*swa_max_blocks=*/6);
+
+    const int id = cache.allocate_swa_block();
+    ASSERT_GE(id, 0);
+    EXPECT_NE(cache.k_ptr(0, id), nullptr);
+    EXPECT_NE(cache.v_ptr(0, id), nullptr);
 }
 
 // Manager trailing-free: swa_prepare allocates only the live window tail;
 // earlier positions are -1 holes; swa_trim frees blocks that fell out.
+// Table bookkeeping only: accounting cache, CI lane.
 TEST(KVCacheManagerTest, SwaTrailingFreeTable) {
-    SKIP_IF_NO_CUDA();
-
     const int bs = 16;
     const int n_layers = 2;
     std::vector<int> nkv(n_layers, 4), hd(n_layers, 64);
     std::vector<char> is_swa = {1, 0};
     const int swa_max = 8;
-    auto cache = std::make_unique<KVCache>(n_layers, nkv, hd, QType::F16, /*global*/ 256, bs, nullptr,
-                                           is_swa, swa_max);
+    auto cache = KVCache::for_accounting(n_layers, nkv, hd, QType::F16, /*global*/ 256, bs, is_swa, swa_max);
     KVCacheManager mgr(std::move(cache));
     const int window = 2 * bs;   // 32 tokens
     const int slack = bs;        // 16

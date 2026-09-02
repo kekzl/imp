@@ -78,6 +78,15 @@ public:
     // on the first pointer request.
     static std::unique_ptr<KVCache> for_accounting(int n_layers, int n_kv_heads, int head_dim, QType dtype,
                                                    int max_blocks, int block_size = kKVBlockSize);
+    // Per-layer-shape form (Gemma 4 dual geometry, SWA block group): the same
+    // layout arithmetic and the same two id spaces as the memory-backed
+    // per-layer constructor, through the same helpers (layout_layers_,
+    // layout_layer_scales_, open_swa_group_). No VRAM.
+    static std::unique_ptr<KVCache> for_accounting(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
+                                                   const std::vector<int>& head_dim_per_layer, QType dtype,
+                                                   int max_blocks, int block_size = kKVBlockSize,
+                                                   const std::vector<char>& layer_is_swa = {},
+                                                   int swa_max_blocks = 0);
 
     // True when this cache holds no memory. Production code has no reason to
     // ask; it is here so a test can assert what it built.
@@ -198,6 +207,9 @@ public:
     // build one through for_accounting().
     KVCache(AccountingOnly, int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks,
             int block_size);
+    KVCache(AccountingOnly, int n_layers, const std::vector<int>& n_kv_heads_per_layer,
+            const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
+            const std::vector<char>& layer_is_swa, int swa_max_blocks);
 
 private:
     bool accounting_only_ = false;
@@ -232,6 +244,20 @@ private:
     int plan_growth_(int max_blocks, int ceiling_blocks);
     bool reserve_pool_(size_t total_bytes, int fixed_blocks);
     int commit_blocks_(int blocks);
+
+    // Per-layer geometry, shared by the memory-backed and the accounting
+    // per-layer constructors so the two cannot disagree about a shape.
+    // layout_layers_: normalises the SWA group (a flag vector without a
+    // capacity, or the reverse, is no group), then block bytes and K/V region
+    // offsets per layer strided by layer_capacity_, then the scalar max-shape
+    // fallbacks; returns the pool byte total. Runs again when max_blocks_
+    // moves. layout_layer_scales_: the NVFP4/MXFP4_KV twin for the scale pool,
+    // after layout_layers_. open_swa_group_: the SWA id space, if any.
+    size_t layout_layers_(const std::vector<int>& n_kv_heads_per_layer,
+                          const std::vector<int>& head_dim_per_layer);
+    size_t layout_layer_scales_(const std::vector<int>& n_kv_heads_per_layer,
+                                const std::vector<int>& head_dim_per_layer);
+    void open_swa_group_();
 
     // Per-layer KV shapes and offsets (for Gemma 4 dual attention geometry).
     // If empty, all layers use the scalar n_kv_heads_/head_dim_/block_bytes_.

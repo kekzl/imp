@@ -14,12 +14,11 @@ unit_core        KVCacheManagerTest.SwaRollback                                 
 unit_core        KVCacheManagerTest.SwaSnapshotFinishPackToleratesTrimmedSlack       cuda
 unit_core        KVCacheManagerTest.SwaSnapshotPackRestoreRoundtrip                  cuda
 unit_core        KVCacheManagerTest.SwaSnapshotRestoreExhaustionRollsBack            cuda
-unit_core        KVCacheManagerTest.SwaTrailingFreeTable                             cuda
 unit_core        KVCacheTest.KVCacheNVFP4Layout                                      cuda
-unit_core        KVCacheTest.KVCacheNVFP4PerLayer                                    cuda
+unit_core        KVCacheTest.KVCacheNVFP4PerLayerPointers                            cuda
 unit_core        KVCacheTest.KVCachePointers                                         cuda
 unit_core        KVCacheTest.KVCacheReadWriteData                                    cuda
-unit_core        KVCacheTest.SwaGroupCapacityAndIdSpace                              cuda
+unit_core        KVCacheTest.SwaBlockPointerResolves                                 cuda
 unit_core        MtpProbe.FindsTheHeadInARealCheckpoint                              model
 unit_core        SentencePieceLoader.RealHfCacheSpieceModelLoadsCleanly              model
 unit_core        TensorKindCoverage.NoUnknownKindsInSmallQwen                        model
