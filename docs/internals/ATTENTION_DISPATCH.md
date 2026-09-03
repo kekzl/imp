@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-03
+commit: aff8b17d
 -->
 
 # Attention dispatch
@@ -53,7 +53,7 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 
 | `cache_dtype` | Launcher (`src/compute/`) | Kernels it can pick |
 |---|---|---|
-| FP16 | `paged_attention_decode` (`attention_paged.cu:1422`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel`, `_cluster_kernel` |
+| FP16 | `paged_attention_decode` (`attention_paged.cu:1233`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel` |
 | FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; tile variants in `attention_paged_fp8_tile.cu` |
 | INT8 | `paged_attention_decode_int8` | `_decode_int8_kernel`, `_splitk_int8_kernel` |
 | INT4 | `paged_attention_decode_int4` | `_decode_int4_kernel`, `_splitk_int4_kernel`, `_splitk_int4_pipeline_kernel` |

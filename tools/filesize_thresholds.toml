@@ -65,7 +65,7 @@ roots = ["src", "tools", "tests"]
 # instantiations inline; (c) legitimately monolithic (one cohesive unit / test target).
 "src/compute/attention_fmha_mxfp4_sm120.cu" = { code_loc = 1520, reason = "(c) single MXFP4 FA2 attention kernel family" }
 "src/compute/attention_fmha_sm120.cu" = { code_loc = 1556, reason = "(c) single FA2 attention family (base/fp8/fa2 variants) sharing one smem layout" }
-"src/compute/attention_paged.cu" = { code_loc = 1216, reason = "(c) one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster - shared block/KV layout" }
+"src/compute/attention_paged.cu" = { code_loc = 1032, reason = "(c) one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster - shared block/KV layout" }
 "src/compute/attention_paged_nvfp4_tc.cu" = { code_loc = 849, reason = "(c) NVFP4 tensor-core paged-attn family (decode/splitk/reduce) - shared TC path" }
 "src/compute/attention_paged_fp8.cu" = { code_loc = 613, reason = "(c) FP8 paged-attn family (decode/splitk/reduce) - same shape as its FP16 and NVFP4 siblings above; crossed 600 by the three -1 sentinel guards of #1678; 613 with the attention.paged_fp8_multitok dispatch to the HD=128 multitok TU (2026-09-03)" }
 "src/compute/gemm.cu" = { code_loc = 748, reason = "(c) one module: generic cuBLAS GEMM wrapper + algo-reselect/fallback chain + packed-weight leak guards (pushed over 600 by the #925 defense-in-depth guards)" }

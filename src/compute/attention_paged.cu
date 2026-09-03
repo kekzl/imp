@@ -5,7 +5,6 @@
 #include "compute/attention_paged_common.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
-#include "runtime/cluster_launch.h"
 #include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -1229,199 +1228,6 @@ void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int 
 }
 
 // ---------------------------------------------------------------------------
-// Cluster-based GQA decode attention: shares KV via DSMEM across Q-heads.
-// ---------------------------------------------------------------------------
-//
-// For GQA models with n_q_per_kv > 1, multiple Q-heads share the same KV-head.
-// Without clusters, each Q-head's block independently reads KV from global memory.
-// With clusters: blocks sharing a KV-head form a cluster, block 0 loads KV into
-// shared memory, and other blocks read via distributed shared memory (DSMEM).
-// This reduces KV global memory reads by n_q_per_kv× (4-8× typically).
-//
-// Grid: (batch_size, n_kv_heads)
-// Cluster: (n_q_per_kv, 1, 1) — up to 8 blocks per cluster
-// Each block: 256 threads (8 warps), handles one Q-head
-// Block 0 in cluster: loads KV tiles into its shared memory
-// All blocks: read from block 0's DSMEM for attention computation
-// ---------------------------------------------------------------------------
-
-template <int HEAD_DIM>
-__global__ void paged_attention_cluster_kernel(const half* __restrict__ Q, const half* __restrict__ K_cache,
-                                               const half* __restrict__ V_cache, half* __restrict__ O,
-                                               const int* __restrict__ block_tables,
-                                               const int* __restrict__ context_lens, int batch_size,
-                                               int n_heads, int n_kv_heads, int block_size, float scale,
-                                               int max_context_len, int max_num_blocks, int n_q_per_kv,
-                                               int sliding_window, int n_sinks, float softcap,
-                                               const half* __restrict__ attn_sinks) {
-    namespace cg = cooperative_groups;
-    auto cluster = cg::this_cluster();
-    const int q_local = cluster.block_rank();       // which Q-head in this KV group [0, n_q_per_kv)
-    const int batch_idx = blockIdx.x / n_q_per_kv;  // grid.x = batch_size * n_q_per_kv
-    const int kv_head = blockIdx.y;
-    const int head_idx = kv_head * n_q_per_kv + q_local;
-
-    if (batch_idx >= batch_size || q_local >= n_q_per_kv)
-        return;
-
-    const int ctx_len = context_lens[batch_idx];
-    if (ctx_len <= 0)
-        return;
-
-    static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
-    constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
-
-    const int warp_id = threadIdx.x / WARP_SIZE;
-    const int lane_id = threadIdx.x % WARP_SIZE;
-    const int lane_offset = lane_id * ELEMS;
-
-    // ---- Load Q vector into registers ----
-    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
-    float q_reg[ELEMS];
-    {
-        const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
-#pragma unroll
-        for (int i = 0; i < ELEMS / 2; i++) {
-            half2 h2 = Q_ptr2[i];
-            q_reg[2 * i] = __half2float(h2.x);
-            q_reg[2 * i + 1] = __half2float(h2.y);
-        }
-    }
-
-    // ---- Paged KV layout ----
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
-    const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
-    const int kv_slot_stride = n_kv_heads * HEAD_DIM;
-
-    // ---- Shared memory layout ----
-    // Block 0: KV double-buffer [2 * block_size * HEAD_DIM] halfs
-    // All blocks: reduction [NUM_WARPS * (2 + HEAD_DIM)] floats
-    extern __shared__ char smem_cluster[];
-
-    // KV tiles in block 0's shared memory (other blocks access via DSMEM)
-    half* kv_tile_local = reinterpret_cast<half*>(smem_cluster);
-    // Layout: for each token t in [0, block_size): K[t*HEAD_DIM..] then V[t*HEAD_DIM..]
-    // Total: block_size * 2 * HEAD_DIM halfs (double-buffered: 2 buffers)
-    const int per_buf = block_size * 2 * HEAD_DIM;  // K+V interleaved per buffer
-    half* buf0 = kv_tile_local;
-
-    // Reduction area (after KV tiles for all blocks, but only block 0 writes KV)
-    // For block 0: after 2 * per_buf halfs. For others: at offset 0 (no KV tiles needed locally).
-    // To keep it simple, put reduction at a fixed offset after the max KV tile area.
-    const int kv_total_halfs = 2 * per_buf;  // two buffers
-    float* red_base = reinterpret_cast<float*>(reinterpret_cast<char*>(smem_cluster) +
-                                               kv_total_halfs * sizeof(half));
-
-    float* warp_max = red_base;
-
-    // Get DSMEM pointer to block 0's KV tiles
-    half* kv_remote = cluster.map_shared_rank(kv_tile_local, 0);
-
-    // ---- Per-warp running softmax state ----
-    float m_w = -FLT_MAX;
-    float l_w = 0.0f;
-    float o_reg[ELEMS];
-#pragma unroll
-    for (int i = 0; i < ELEMS; i++)
-        o_reg[i] = 0.0f;
-
-    // ---- Context range ----
-    // NOTE: n_sinks is threaded into the kernel signature for API parity but
-    // streaming (sinks+window) is only implemented in the GQA kernel variant.
-    // This path falls back to classical sliding-window by passing n_sinks=0.
-    const ContextRange range_ = compute_context_range(ctx_len, block_size, sliding_window, 0);
-    const int effective_start = range_.effective_start;
-    const int first_block = range_.first_block;
-    const int num_ctx_blocks = range_.num_ctx_blocks;
-    (void)n_sinks;
-
-    // ---- Prefetch first KV block into buffer 0 (block 0 only) ----
-    int cur_buf = 0;
-    if (q_local == 0 && first_block < num_ctx_blocks) {
-        int phys_block = bt[first_block];
-        const half* K_base = K_cache + (int64_t)phys_block * kv_block_stride + kv_head * HEAD_DIM;
-        const half* V_base = V_cache + (int64_t)phys_block * kv_block_stride + kv_head * HEAD_DIM;
-        for (int idx = threadIdx.x; idx < block_size * HEAD_DIM; idx += BLOCK_THREADS) {
-            int slot = idx / HEAD_DIM;
-            int d = idx % HEAD_DIM;
-            buf0[slot * 2 * HEAD_DIM + d] = ldcs_half(&K_base[slot * kv_slot_stride + d]);
-            buf0[slot * 2 * HEAD_DIM + HEAD_DIM + d] = ldcs_half(&V_base[slot * kv_slot_stride + d]);
-        }
-    }
-    cluster.sync();
-
-    // ---- Main iteration over KV blocks ----
-    for (int blk = first_block; blk < num_ctx_blocks; blk++) {
-        half* cur = (cur_buf == 0) ? kv_remote : (kv_remote + per_buf);
-
-        // Start prefetching next block into other buffer (block 0 only)
-        int next_buf = 1 - cur_buf;
-        half* next_ptr = (next_buf == 0) ? kv_tile_local : (kv_tile_local + per_buf);
-        if (q_local == 0 && blk + 1 < num_ctx_blocks) {
-            int next_phys = bt[blk + 1];
-            const half* K_next = K_cache + (int64_t)next_phys * kv_block_stride + kv_head * HEAD_DIM;
-            const half* V_next = V_cache + (int64_t)next_phys * kv_block_stride + kv_head * HEAD_DIM;
-            for (int idx = threadIdx.x; idx < block_size * HEAD_DIM; idx += BLOCK_THREADS) {
-                int slot = idx / HEAD_DIM;
-                int d = idx % HEAD_DIM;
-                next_ptr[slot * 2 * HEAD_DIM + d] = ldcs_half(&K_next[slot * kv_slot_stride + d]);
-                next_ptr[slot * 2 * HEAD_DIM + HEAD_DIM + d] = ldcs_half(&V_next[slot * kv_slot_stride + d]);
-            }
-        }
-
-        // All blocks compute attention from current buffer via DSMEM
-        int tok_start = blk * block_size;
-        int tok_end = tok_start + block_size;
-        if (tok_end > ctx_len)
-            tok_end = ctx_len;
-        int first_tok = 0;
-        if (tok_start < effective_start)
-            first_tok = effective_start - tok_start;
-
-        for (int ti = warp_id + first_tok; ti < (tok_end - tok_start); ti += NUM_WARPS) {
-            // Read K token from DSMEM (block 0's shared memory)
-            const half* K_tok = cur + ti * 2 * HEAD_DIM;
-
-            float dot = 0.0f;
-            {
-                const half2* K_tok2 = reinterpret_cast<const half2*>(K_tok + lane_offset);
-#pragma unroll
-                for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 k2 = K_tok2[i];
-                    dot += q_reg[2 * i] * __half2float(k2.x);
-                    dot += q_reg[2 * i + 1] * __half2float(k2.y);
-                }
-            }
-            dot = warp_reduce_sum(dot);
-            dot *= scale;
-            dot = apply_softcap(dot, softcap);
-
-            float rescale, w_new;
-            online_softmax_step(dot, m_w, l_w, rescale, w_new);
-
-            // Read V token from DSMEM
-            const half* V_tok = cur + ti * 2 * HEAD_DIM + HEAD_DIM;
-            {
-                const half2* V_tok2 = reinterpret_cast<const half2*>(V_tok + lane_offset);
-#pragma unroll
-                for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 v2 = V_tok2[i];
-                    o_reg[2 * i] = rescale * o_reg[2 * i] + w_new * __half2float(v2.x);
-                    o_reg[2 * i + 1] = rescale * o_reg[2 * i + 1] + w_new * __half2float(v2.y);
-                }
-            }
-        }
-
-        cluster.sync();  // wait for next-block prefetch + current compute
-        cur_buf = next_buf;
-    }
-
-    // ---- Cross-warp reduction within this block ----
-    crosswarp_reduce_and_write<HEAD_DIM>(warp_max, m_w, l_w, o_reg, warp_id, lane_id, lane_offset, O,
-                                         batch_idx, n_heads, head_idx, attn_sinks);
-}
-
-// ---------------------------------------------------------------------------
 // Host launcher
 // ---------------------------------------------------------------------------
 void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
@@ -1613,90 +1419,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
     // GQA / MHA dispatch — runs when split-K was never selected (num_splits==1)
     // or was selected but its launch failed and we reset num_splits=1 above.
     if (num_splits == 1 && n_q_per_kv > 1) {
-        // GQA path: try cluster kernel first, then fall back to cooperative GQA
-        bool used_cluster = false;
-
-        // Cluster GQA: share KV via DSMEM across Q-heads (sm_90+ only).
-        // Reduces KV global memory reads by n_q_per_kv× (4-8×).
-        // Cluster dimension must be a power of 2 (CUDA requirement).
-        bool valid_cluster_dim = (n_q_per_kv == 2 || n_q_per_kv == 4 || n_q_per_kv == 8);
-        // Route disabled 2026-09-03: it is only reachable without split-K,
-        // i.e. at batch x heads >= 2 x SMs (batch >= 11 on a 32-head model) or
-        // under 64 tokens of context, and there the cluster kernel measured
-        // 2133 us per launch at 32 x 1100 (32/8 heads, HD=128, 68 GB/s, DRAM
-        // 3.5%, 33% warps active) and 7861 us at 32 x 4096 against 318 / 1166
-        // us on the GQA kernel below (6.7x). Kernel kept for a removal PR.
-        const bool cluster_route = false;
-        if (cluster_route && valid_cluster_dim && num_ctx_blocks >= 8 &&
-            (head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 256)) {
-            size_t cluster_smem = 2 * block_size * 2 * head_dim * sizeof(half) +
-                                  NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * head_dim * sizeof(float);
-
-            dim3 cluster_grid(batch_size * n_q_per_kv, n_kv_heads);
-            dim3 cluster_block(BLOCK_THREADS);
-
-            // CUDA 13.2: spread cluster blocks across GPCs (GB202 has 12 GPCs).
-            // Default "load-balancing" packs clusters per-GPC, which oversubscribes
-            // a single GPC's L1/SMEM/tensor-core resources when only a handful of
-            // clusters are live. Spread gives each cluster its own GPC on RTX 5090
-            // as long as the grid is small enough, keeping DSMEM traffic local and
-            // freeing other GPCs for concurrent decode work on a separate stream.
-            // M5 Slice 1: cluster_launch.h hides the attribute boilerplate.
-            cudaLaunchAttribute attrs[2];
-            cudaLaunchConfig_t config = cluster::build_cluster_config(
-                cluster_grid, cluster_block, cluster_smem, stream, attrs,
-                /*cluster_x=*/static_cast<unsigned int>(n_q_per_kv));
-
-            cudaError_t cl_launch = cudaSuccess;
-#define LAUNCH_CLUSTER(HD)                                                                                 \
-    cl_launch = cudaLaunchKernelEx(&config, paged_attention_cluster_kernel<HD>,                            \
-                       reinterpret_cast<const half*>(Q.data),                                              \
-                       reinterpret_cast<const half*>(K_cache.data),                                        \
-                       reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),       \
-                       block_tables, context_lens, batch_size, n_heads, n_kv_heads, block_size, scale,     \
-                       max_context_len, max_num_blocks, n_q_per_kv, sliding_window, n_sinks, softcap,      \
-                       sinks_h)
-
-            switch (head_dim) {
-                case 64:
-                    LAUNCH_CLUSTER(64);
-                    used_cluster = true;
-                    break;
-                case 96:
-                    LAUNCH_CLUSTER(96);
-                    used_cluster = true;
-                    break;
-                case 128:
-                    LAUNCH_CLUSTER(128);
-                    used_cluster = true;
-                    break;
-                case 256:
-                    LAUNCH_CLUSTER(256);
-                    used_cluster = true;
-                    break;
-                case 512:
-                    LAUNCH_CLUSTER(512);
-                    used_cluster = true;
-                    break;
-                default:
-                    break;
-            }
-#undef LAUNCH_CLUSTER
-            // If the cluster launch was rejected (e.g. cluster_smem exceeds the
-            // opt-in cap for this head_dim, or an unsupported cluster config),
-            // drain and fall back to the cooperative GQA kernel below instead of
-            // leaving O unwritten → garbage.
-            if (used_cluster && cl_launch != cudaSuccess) {
-                IMP_LOG_WARN("paged_attention_decode: cluster launch failed (%s) "
-                             "[head_dim=%d n_q_per_kv=%d] — falling back to cooperative GQA",
-                             cudaGetErrorString(cl_launch), head_dim, n_q_per_kv);
-                (void)cudaGetLastError();
-                used_cluster = false;
-            }
-        }
-
-        if (!used_cluster && n_q_per_kv <= MAX_Q_PER_KV) {
-            // GQA-aware kernel (short context / non-cluster fallback)
+        if (n_q_per_kv <= MAX_Q_PER_KV) {
+            // GQA-aware kernel (cooperative, one CTA per KV head)
             // Use 4 warps per Q head for ratio<=8 (1024 threads max),
             // 2 warps per Q head for ratio>8 (e.g. ratio=16: 16*2*32=1024)
             int warps_per_q = (n_q_per_kv <= 8) ? 4 : 2;
@@ -1747,8 +1471,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                 context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale, max_context_len,
                 max_num_blocks, n_q_per_kv, warps_per_q, sliding_window, n_sinks, softcap, sinks_h);
             IMP_CUDA_CHECK_LAUNCH();
-        } else if (!used_cluster) {
-            // MHA fallback for n_q_per_kv > MAX_Q_PER_KV without cluster
+        } else {
+            // MHA fallback for n_q_per_kv > MAX_Q_PER_KV
             goto mha_fallback;
         }
     } else if (num_splits == 1) {

@@ -879,7 +879,6 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_dp4a.cu
         tests/test_gemm_q4k_fused_prefill.cu
         tests/test_gemm_kernel_registry.cu
-        tests/test_cluster_launch.cu
         tests/test_fp8_gemm.cu
         tests/test_mmvq.cu
         tests/test_reduce.cu

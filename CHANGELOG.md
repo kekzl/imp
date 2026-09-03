@@ -58,7 +58,11 @@ there instead of retelling it.
   at 32 streams x 1100 context (68 GB/s) against 318 us on the GQA kernel
   (6.7x); batch 1 unchanged. gemma-3-12b at 32 streams x 1001-token prompts:
   186.4 -> 229.9 tok/s (+23.3%), ITL p95 191.4 -> 128.9 ms; Llama-3.2-3B (GQA
-  factor 3, never routed) neutral.
+  factor 3, never routed) neutral (#1877).
+- The F16 cluster (DSMEM) GQA decode kernel, `src/runtime/cluster_launch.h`
+  and `tests/test_cluster_launch.cu` are removed; the route was off since
+  the entry above. `attention_paged.cu` 1216 -> 1032 code LOC, paged oracle
+  tests 53/53, F16 serving microbench 316.0 us (was 315.8) (#1878)
 - NVFP4 paged decode attention (the hybrid's default) processes four tokens
   per warp iteration too (`attention.paged_nvfp4_multitok`, default 4, plain
   and split-K kernels), and the split-K rule targets 4 CTAs per SM instead
