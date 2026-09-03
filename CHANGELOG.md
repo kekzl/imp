@@ -61,7 +61,9 @@ there instead of retelling it.
   GB/s), at 4096: 717 -> 380 us; fp64-oracle error identical to the plain
   kernel at kv_len 16/64/333/1024. Serving on Qwen3-14B-NVFP4 at 32 streams x 982-token prompts (config A/B
   4 vs 1, 3/3 pairs): 1487.2 -> 1862.4 tok/s (+25.2%), ITL p50 15.2 -> 11.0
-  ms; 38-token prompts 3502.5 -> 3989.4 (+13.9%). Ledger row in `docs/roadmap.md`
+  ms; 38-token prompts 3502.5 -> 3989.4 (+13.9%). Against vLLM 0.27.1 on the
+  same client the dense 32-stream short-prompt row flips to imp +3.4% and the
+  982-token row closes from 0.59x to 0.75x. Ledger row in `docs/roadmap.md`
 - Dense counter-probe of the serving claim (`tools/analysis/vllm_conc_ab.sh`
   with `MODEL_NAME`, `KV_BLOCKS`): Qwen3-14B-NVFP4 vs vLLM 0.27.1 at 8 streams
   +7.9%, at 32 -7.6%, at 32 with 982-token prompts -41.0%; README and

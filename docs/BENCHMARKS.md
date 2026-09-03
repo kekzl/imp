@@ -578,6 +578,8 @@ greedy gens, `/v1/completions`, aggregate = completion tokens / wall, median of
 | 5 | **dense** Qwen3-14B-NVFP4 (Modelopt export, both engines native), 32 streams, 38-tok prompts, vLLM 0.27.1 | 3462.8 / 3481.0 / 3480.4 (**3480.4**) | 3762.4 / 3784.9 / 3767.9 (**3767.9**) | **-7.6%** | 0/3 |
 | 6 | dense Qwen3-14B-NVFP4, 8 streams, 36-tok prompts, vLLM 0.27.1 | 1078.6 / 1087.1 / 1085.4 (**1085.4**) | 1002.6 / 1005.8 / 1010.2 (**1005.8**) | **+7.9%** | 3/3 |
 | 7 | dense Qwen3-14B-NVFP4, 32 streams, 982-tok prompts, vLLM 0.27.1, imp KV pool 8192 blocks | 1458.7 / 1454.3 / 1480.2 (**1470.6**) | 2492.6 / 2458.0 / 2503.5 (**2492.6**) | **-41.0%** | 0/3 |
+| 8 | run 5 with `attention.paged_fp8_multitok=4` (this branch), pool 8192 | 3948.9 / 3947.3 / 3972.9 (**3948.9**) | 3817.6 / 3837.3 / 3784.5 (**3817.6**) | **+3.4%** | 3/3 |
+| 9 | run 7 with `attention.paged_fp8_multitok=4` (this branch) | 1839.5 / 1845.0 / 1855.3 (**1845.0**) | 2467.9 / 2478.0 / 2510.0 (**2478.0**) | **-25.5%** | 0/3 |
 
 - vLLM's first wave on a fresh server reads 383-389 tok/s at 32 streams
   (24.6-25.1 s wall) and 103.5-104.2 at 8 on every trial: JIT / autotune
@@ -596,7 +598,10 @@ greedy gens, `/v1/completions`, aggregate = completion tokens / wall, median of
   against 2.8 s with 38-token prompts, and the imp-side profile at this
   shape puts `paged_attention_decode_fp8` at 33% of kernel time (8.9 ms per
   decode step at 1.1k context, ~25% of DRAM bandwidth) next to 13% CUTLASS
-  prefill GEMM. The
+  prefill GEMM. Runs 8-9 are runs 5 and 7 with the four-token FP8 decode
+  kernel (`attention.paged_fp8_multitok`, roadmap ledger 2026-09-03): the
+  38-token shape flips to imp +3.4% (3/3), the 982-token shape closes from
+  0.59x to 0.75x; what remains there is the paced serving prefill. The
   32-stream lead in runs 1-4 is a property of the GDN hybrid, not of every
   model; attribution of the dense
   gap is the next engine-side item in `docs/roadmap.md`.
