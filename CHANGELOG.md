@@ -11,6 +11,8 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-09-03
+
 ### Changed
 
 - Web UI at `GET /`: requests `stream_options.include_usage` and shows the
@@ -23,11 +25,13 @@ there instead of retelling it.
   loading server instead of declaring it offline. Still one file, no build
   step. GPU-less dev harness `tools/imp-server/webui/dev/` (streaming mock +
   Playwright driver, 10 scenarios green) (#1890)
+- README quickstart as four numbered steps with a screenshot of the UI
+  (`docs/webui.png`, captured against the dev mock) (#1892)
 - Web UI visual pass: the inter-token pulse moves out of the sidebar to full
   width above the composer with a live tok/s readout, new bars land bright and
   cool over 700 ms; one spark motif for wordmark, role marker and status;
   glass composer, code blocks with a language header and Copy, sentence-case
-  labels, `prefers-reduced-motion` honoured. Same 10 scenarios green
+  labels, `prefers-reduced-motion` honoured. Same 10 scenarios green (#1891)
 
 ## [0.35.0] - 2026-09-03
 
