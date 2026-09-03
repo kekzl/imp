@@ -11,6 +11,19 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- Web UI at `GET /`: requests `stream_options.include_usage` and shows the
+  server's counts (prompt / cached / reasoning tokens, context fill against
+  `max_model_len`); model picker over `/v1/models` (an unloaded entry is swapped
+  in by the request); system prompt; `finish_reason: length` and a stream that
+  ends without one become a note on the turn; per-turn tok/s, TTFT and wall;
+  copy / regenerate / new chat; Esc stops; parameters persist; a mid-stream
+  failure keeps the partial answer; the page waits for a model-less or still
+  loading server instead of declaring it offline. Still one file, no build
+  step. GPU-less dev harness `tools/imp-server/webui/dev/` (streaming mock +
+  Playwright driver, 10 scenarios green)
+
 ## [0.35.0] - 2026-09-03
 
 ### Added

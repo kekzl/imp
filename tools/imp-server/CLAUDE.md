@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-09-03
+commit: c3e4db79
 -->
 
 # tools/imp-server — the HTTP surface
@@ -48,6 +48,11 @@ make test-agents-external # real aider / Claude Code / OpenAI Agents SDK
 
 The `Real API contract` CI job runs the API tests against the built binary
 without a GPU. Before it existed, all 82 assertions described the mock.
+
+Web UI without a GPU: `webui/dev/mock_server.py` streams imp-shaped SSE per
+token (usage chunk, swap, boot delay, failure keywords); `webui/dev/drive.js`
+runs the scenarios in the Playwright image. Commands in the file headers.
+`tests/api/mock_server.py` sends the SSE body in one write: no streaming.
 
 ## Pitfalls
 

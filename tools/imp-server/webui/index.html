@@ -58,6 +58,7 @@
     gap: 16px;
     padding: 22px 28px 18px;
     border-bottom: 1px solid var(--line);
+    min-width: 0;
   }
 
   .wordmark {
@@ -76,18 +77,54 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    min-width: 0;
   }
 
-  .link {
+  /* One model: a label. Several: a picker in the same place, same type. */
+  select.model {
+    max-width: 46ch;
+    padding: 0 18px 0 0;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    color: var(--ice);
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--ice) 50%),
+                      linear-gradient(135deg, var(--ice) 50%, transparent 50%);
+    background-position: right 8px top 55%, right 4px top 55%;
+    background-size: 4px 4px, 4px 4px;
+    background-repeat: no-repeat;
+  }
+  select.model:hover, select.model:focus-visible { color: var(--paper); border-bottom-color: var(--ember); }
+  select.model option { background: var(--panel); color: var(--paper); }
+
+  .head-actions {
     margin-left: auto;
+    display: flex;
+    align-items: baseline;
+    gap: 18px;
+    flex: none;
+  }
+
+  .link, .act {
     font-family: var(--mono);
     font-size: 11px;
     letter-spacing: 0.08em;
     color: var(--ice);
     text-decoration: none;
+    border: 0;
     border-bottom: 1px solid transparent;
+    background: none;
+    padding: 0;
+    cursor: pointer;
   }
-  .link:hover, .link:focus-visible { color: var(--paper); border-bottom-color: var(--ember); }
+  .link:hover, .link:focus-visible, .act:hover:not(:disabled), .act:focus-visible {
+    color: var(--paper);
+    border-bottom-color: var(--ember);
+  }
+  .act:disabled { opacity: 0.35; cursor: default; }
 
   /* ---- transcript -------------------------------------------------- */
 
@@ -140,6 +177,7 @@
     padding: 1px 5px;
   }
   .body pre {
+    position: relative;
     margin: 12px 0;
     padding: 13px 15px;
     background: var(--panel);
@@ -149,6 +187,26 @@
     white-space: pre;
   }
   .body pre code { background: none; border: 0; padding: 0; font-size: 13px; }
+
+  /* Per-block copy sits in the corner and only shows itself on hover, so the
+     code keeps its full width when nobody is reaching for it. */
+  .body pre .copy-code {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--ice);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    padding: 2px 7px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 120ms linear;
+  }
+  .body pre:hover .copy-code, .body pre .copy-code:focus-visible { opacity: 1; }
+  .body pre .copy-code:hover { color: var(--paper); border-color: var(--ember); }
 
   details.think {
     margin: 0 0 12px;
@@ -173,6 +231,31 @@
     padding: 6px 0 2px;
   }
 
+  /* Each finished model turn keeps its own numbers: the instrument strip only
+     ever shows the last run, the transcript remembers all of them. */
+  .foot {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-top: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: color-mix(in srgb, var(--ice) 80%, transparent);
+    font-variant-numeric: tabular-nums;
+  }
+  .foot .stats { flex: 1; min-width: 0; }
+  .foot .act { letter-spacing: 0.1em; }
+
+  .note {
+    margin-top: 10px;
+    border-left: 2px solid var(--ember);
+    padding-left: 12px;
+    font-size: 13px;
+    color: var(--ice);
+  }
+  .note b { color: var(--paper); font-weight: 500; }
+
   .caret {
     display: inline-block;
     width: 7px;
@@ -190,6 +273,13 @@
     max-width: 46ch;
   }
   .empty b { color: var(--paper); font-weight: 500; }
+  .empty kbd {
+    font-family: var(--mono);
+    font-size: 11px;
+    border: 1px solid var(--line);
+    padding: 0 5px;
+    color: var(--paper);
+  }
 
   .fault {
     border-left: 2px solid var(--ember);
@@ -198,6 +288,7 @@
     font-size: 14px;
   }
   .fault code { font-family: var(--mono); color: var(--ember); }
+  .fault small { display: block; font-family: var(--mono); font-size: 11px; color: var(--ice); }
 
   /* ---- composer ---------------------------------------------------- */
 
@@ -223,12 +314,12 @@
     line-height: 1.5;
   }
   textarea::placeholder { color: color-mix(in srgb, var(--ice) 70%, transparent); }
-  textarea:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible {
+  textarea:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
     outline: 2px solid var(--ember);
     outline-offset: 2px;
   }
 
-  button {
+  button.send {
     align-self: stretch;
     min-width: 92px;
     padding: 0 18px;
@@ -241,10 +332,10 @@
     cursor: pointer;
     transition: background 120ms linear, color 120ms linear;
   }
-  button:hover:not(:disabled) { background: var(--ember); color: var(--void); }
-  button:disabled { opacity: 0.35; cursor: default; }
-  button.stop { border-color: var(--ice); color: var(--ice); }
-  button.stop:hover { background: var(--ice); color: var(--void); }
+  button.send:hover:not(:disabled) { background: var(--ember); color: var(--void); }
+  button.send:disabled { opacity: 0.35; cursor: default; }
+  button.send.stop { border-color: var(--ice); color: var(--ice); }
+  button.send.stop:hover { background: var(--ice); color: var(--void); }
 
   /* ---- instruments ------------------------------------------------- */
 
@@ -256,6 +347,8 @@
     flex-direction: column;
     gap: 22px;
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
   }
 
   .inst h2 {
@@ -267,7 +360,7 @@
     margin: 0 0 12px;
   }
 
-  .readout { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; }
+  .readout { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; margin: 0; }
   .readout dt {
     font-family: var(--mono);
     font-size: 11px;
@@ -282,6 +375,24 @@
     text-align: right;
   }
   .readout dd.live { color: var(--ember); }
+  .readout dd.dim { color: var(--ice); }
+
+  /* context window fill, drawn under the usage readout */
+  .meter {
+    grid-column: 1 / -1;
+    height: 3px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    margin-top: 2px;
+  }
+  .meter > span {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--ice);
+    transition: width 200ms linear;
+  }
+  .meter.warm > span { background: var(--ember); }
 
   /* the signature: one bar per token, drawn while the stream runs */
   .strip {
@@ -292,7 +403,7 @@
     border: 1px solid var(--line);
   }
   .strip-note {
-    margin-top: 7px;
+    margin: 7px 0 0;
     font-family: var(--mono);
     font-size: 10px;
     letter-spacing: 0.06em;
@@ -319,6 +430,30 @@
   .field.check { grid-template-columns: 1fr auto; }
   .field input[type="checkbox"] { accent-color: var(--ember); width: 15px; height: 15px; }
 
+  details.sys summary {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--ice);
+    cursor: pointer;
+    list-style: none;
+    padding: 2px 0;
+  }
+  details.sys summary::-webkit-details-marker { display: none; }
+  details.sys summary::after { content: " ▾"; opacity: 0.6; }
+  details.sys[open] summary::after { content: " ▴"; }
+  details.sys summary.set { color: var(--paper); }
+  details.sys textarea {
+    display: block;
+    width: 100%;
+    min-height: 74px;
+    max-height: 220px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
   .status {
     font-family: var(--mono);
     font-size: 11px;
@@ -332,6 +467,7 @@
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
   .dot.ok   { background: var(--ember); }
   .dot.busy { background: var(--ember); animation: pulse 1s ease-in-out infinite; }
+  .dot.wait { background: var(--ice); animation: pulse 1.6s ease-in-out infinite; }
   .dot.down { background: #6B4A5A; }
   @keyframes pulse { 50% { opacity: 0.25; } }
 
@@ -358,10 +494,11 @@
     .inst > section { flex: 1 1 190px; }
     .status { margin-top: 0; }
     .log { padding-top: 20px; }
+    select.model { max-width: 24ch; }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .caret, .dot.busy { animation: none; }
+    .caret, .dot.busy, .dot.wait { animation: none; }
     * { transition: none !important; }
   }
 </style>
@@ -372,36 +509,54 @@
   <header>
     <span class="wordmark">imp</span>
     <span class="model" id="model">connecting…</span>
-    <a class="link" href="https://github.com/kekzl/imp">github</a>
+    <div class="head-actions">
+      <button type="button" class="act" id="newchat" title="clear the conversation">NEW CHAT</button>
+      <a class="link" href="https://github.com/kekzl/imp">github</a>
+    </div>
   </header>
 
-  <main class="log" id="log">
+  <main class="log" id="log" role="log">
     <p class="empty">
       <b>No run yet.</b> Send a prompt. The strip on the right draws one bar per token
       as it arrives, so you can watch inter-token latency while the answer is written.
+      <kbd>enter</kbd> sends, <kbd>shift+enter</kbd> breaks the line, <kbd>esc</kbd> stops.
     </p>
   </main>
 
   <form class="compose" id="composer">
     <textarea id="prompt" rows="1" placeholder="Ask the model…  (enter sends, shift+enter for a new line)"></textarea>
-    <button type="submit" id="send">SEND</button>
+    <button type="submit" class="send" id="send">SEND</button>
   </form>
 
   <aside class="inst">
     <section>
       <h2>RUN</h2>
       <dl class="readout">
-        <dt>ttft</dt>      <dd id="m-ttft">—</dd>
-        <dt>tok/s</dt>     <dd id="m-rate" class="live">—</dd>
-        <dt>tokens</dt>    <dd id="m-count">—</dd>
-        <dt>median itl</dt><dd id="m-itl">—</dd>
+        <dt>ttft</dt>      <dd id="m-ttft">-</dd>
+        <dt>tok/s</dt>     <dd id="m-rate" class="live">-</dd>
+        <dt>tokens</dt>    <dd id="m-count">-</dd>
+        <dt>median itl</dt><dd id="m-itl">-</dd>
+        <dt>wall</dt>      <dd id="m-wall">-</dd>
       </dl>
     </section>
 
     <section>
       <h2>INTER-TOKEN LATENCY</h2>
-      <canvas class="strip" id="strip" width="480" height="136"></canvas>
+      <canvas class="strip" id="strip" width="480" height="136" role="img"
+              aria-label="one bar per token, height is the gap to the previous token"></canvas>
       <p class="strip-note" id="strip-note">one bar per token · line = median</p>
+    </section>
+
+    <section>
+      <h2>USAGE</h2>
+      <dl class="readout">
+        <dt>prompt</dt>    <dd id="u-prompt">-</dd>
+        <dt>cached</dt>    <dd id="u-cached" class="dim">-</dd>
+        <dt>reasoning</dt> <dd id="u-reason" class="dim">-</dd>
+        <dt>context</dt>   <dd id="u-ctx">-</dd>
+        <div class="meter" id="u-meter" role="progressbar" aria-label="context window used"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+      </dl>
     </section>
 
     <section>
@@ -412,15 +567,19 @@
       </div>
       <div class="field">
         <label for="maxtok">max tokens</label>
-        <input type="number" id="maxtok" value="512" min="1" max="8192" step="1">
+        <input type="number" id="maxtok" value="512" min="1" max="65536" step="1">
       </div>
       <div class="field check">
         <label for="thinking">thinking</label>
         <input type="checkbox" id="thinking" checked>
       </div>
+      <details class="sys" id="sysbox">
+        <summary id="syslabel">system prompt</summary>
+        <textarea id="system" rows="3" placeholder="Sent as the system message of every request."></textarea>
+      </details>
     </section>
 
-    <div class="status"><span class="dot" id="dot"></span><span id="state">starting</span></div>
+    <div class="status" aria-live="polite"><span class="dot" id="dot"></span><span id="state">starting</span></div>
   </aside>
 
 </div>
@@ -430,18 +589,53 @@
 
 // Served by imp-server itself, the origin is the engine. When the page is opened
 // from disk or hosted elsewhere it is not, so ?api= overrides and the default
-// port is the last resort — CORS is open, so pointing off-origin works.
+// port is the last resort: CORS is open, so pointing off-origin works.
 const API_OVERRIDE = new URLSearchParams(location.search).get("api");
 const FALLBACK_API = "http://localhost:8080";
 let API = API_OVERRIDE || (location.protocol === "file:" ? FALLBACK_API : location.origin);
 
 const el = (id) => document.getElementById(id);
 const log = el("log"), promptBox = el("prompt"), sendBtn = el("send"), composer = el("composer");
-const dot = el("dot"), stateLabel = el("state"), modelLabel = el("model");
+const dot = el("dot"), stateLabel = el("state"), newChatBtn = el("newchat");
 
-let modelName = null;
-let history = [];        // [{role, content}] — reasoning is never sent back
+let models = [];         // GET /v1/models data[], loaded one first
+let modelName = null;    // the id the next request names
+let contextLen = 0;      // max_model_len of the loaded model, 0 = unknown
+let history = [];        // [{role, content}]: reasoning is never sent back
 let controller = null;   // AbortController for the in-flight stream
+
+/* ---------- settings ---------------------------------------------- */
+
+// Parameters survive a reload; the conversation deliberately does not.
+const PARAMS_KEY = "imp.ui.params", DRAFT_KEY = "imp.ui.draft";
+const paramIds = ["temp", "maxtok", "thinking", "system"];
+
+function loadParams() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(PARAMS_KEY) || "{}"); } catch { /* fresh */ }
+  for (const id of paramIds) {
+    if (!(id in saved)) continue;
+    const box = el(id);
+    if (box.type === "checkbox") box.checked = !!saved[id];
+    else box.value = saved[id];
+  }
+  try { promptBox.value = sessionStorage.getItem(DRAFT_KEY) || ""; } catch { /* fine */ }
+  if (promptBox.value) promptBox.dispatchEvent(new Event("input"));
+  reflectSystem();
+}
+
+function saveParams() {
+  const out = {};
+  for (const id of paramIds) {
+    const box = el(id);
+    out[id] = box.type === "checkbox" ? box.checked : box.value;
+  }
+  try { localStorage.setItem(PARAMS_KEY, JSON.stringify(out)); } catch { /* private mode */ }
+}
+
+function reflectSystem() {
+  el("syslabel").classList.toggle("set", el("system").value.trim() !== "");
+}
 
 /* ---------- instruments ------------------------------------------- */
 
@@ -455,7 +649,7 @@ const mix = (a, b, t) =>
 const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * q)))];
 
 let itl = [];            // ms between consecutive tokens
-let tFirst = 0, tPrev = 0, nTokens = 0;
+let tStart = 0, tFirst = 0, tPrev = 0, nTokens = 0;
 
 function median(xs) {
   if (!xs.length) return 0;
@@ -463,6 +657,9 @@ function median(xs) {
   const m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
+
+const fmtK = (n) => n >= 10000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "k" : String(n);
+const fmtS = (ms) => ms >= 10000 ? (ms / 1000).toFixed(0) + " s" : ms >= 1000 ? (ms / 1000).toFixed(1) + " s" : Math.round(ms) + " ms";
 
 function drawStrip() {
   const dpr = window.devicePixelRatio || 1;
@@ -509,10 +706,9 @@ function drawStrip() {
 
 function resetRun() {
   itl = []; tFirst = 0; tPrev = 0; nTokens = 0;
-  el("m-ttft").textContent = "—";
-  el("m-rate").textContent = "—";
-  el("m-count").textContent = "—";
-  el("m-itl").textContent = "—";
+  for (const id of ["m-ttft", "m-rate", "m-count", "m-itl", "m-wall", "u-prompt", "u-cached", "u-reason", "u-ctx"])
+    el(id).textContent = "-";
+  setMeter(0);
   el("strip-note").textContent = "one bar per token · line = median";
   drawStrip();
 }
@@ -522,7 +718,7 @@ function noteToken() {
   nTokens++;
   if (!tFirst) {
     tFirst = now;
-    el("m-ttft").textContent = Math.round(now - tStart) + " ms";
+    el("m-ttft").textContent = fmtS(now - tStart);
   } else {
     itl.push(now - tPrev);
   }
@@ -535,11 +731,43 @@ function noteToken() {
   drawStrip();
 }
 
-let tStart = 0;
+function setMeter(frac) {
+  const meter = el("u-meter");
+  meter.firstElementChild.style.width = (Math.min(1, frac) * 100).toFixed(1) + "%";
+  meter.classList.toggle("warm", frac > 0.85);
+  meter.setAttribute("aria-valuenow", String(Math.round(Math.min(1, frac) * 100)));
+}
+
+// The usage chunk is the server's count: prompt tokens the client cannot know,
+// the prefix-cache hit, and how much of the budget went to reasoning.
+function showUsage(u) {
+  if (!u) return;
+  el("u-prompt").textContent = fmtK(u.prompt_tokens ?? 0);
+  const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
+  el("u-cached").textContent = cached && u.prompt_tokens
+    ? `${fmtK(cached)} · ${Math.round(100 * cached / u.prompt_tokens)}%` : String(cached);
+  const reasoning = u.completion_tokens_details?.reasoning_tokens ?? 0;
+  el("u-reason").textContent = String(reasoning);
+  if (typeof u.completion_tokens === "number") {
+    // Server-side count wins over the delta count: a delta can carry more than one token.
+    el("m-count").textContent = String(u.completion_tokens);
+    if (tFirst && tPrev > tFirst)
+      el("m-rate").textContent = (u.completion_tokens / ((tPrev - tFirst) / 1000)).toFixed(1);
+  }
+  const used = (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0);
+  const evicted = u.prompt_tokens_details?.evicted_tokens ?? 0;
+  if (contextLen > 0) {
+    el("u-ctx").textContent = `${fmtK(used)} / ${fmtK(contextLen)}`;
+    setMeter(used / contextLen);
+  } else {
+    el("u-ctx").textContent = fmtK(used);
+  }
+  if (evicted) el("u-ctx").textContent += ` · ${fmtK(evicted)} evicted`;
+}
 
 /* ---------- transcript -------------------------------------------- */
 
-/* Minimal markdown. Model output is escaped first — it is never trusted HTML. */
+/* Minimal markdown. Model output is escaped first: it is never trusted HTML. */
 const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
 const esc = (s) => s.replace(/[&<>]/g, (c) => ESCAPES[c]);
 
@@ -547,6 +775,7 @@ const esc = (s) => s.replace(/[&<>]/g, (c) => ESCAPES[c]);
 // run, so a stray ** or ` inside a code block is never styled.
 const SENT = String.fromCharCode(1);
 const FENCE_SLOT = new RegExp("\\n?" + SENT + "(\\d+)" + SENT + "\\n?", "g");
+const COPY_BTN = '<button type="button" class="copy-code" title="copy code">COPY</button>';
 
 function markup(src) {
   const fences = [];
@@ -558,10 +787,14 @@ function markup(src) {
   s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  s = s.replace(/^#{1,6}[ \t]+(.+?)[ \t]*(?:\n|$)/gm, "<h4>$1</h4>");
-  s = s.replace(FENCE_SLOT, (_, i) => "<pre><code>" + fences[i] + "</code></pre>");
+  // The heading owns its margins, so the blank line after it is swallowed:
+  // with white-space: pre-wrap it would otherwise double the gap.
+  s = s.replace(/^#{1,6}[ \t]+(.+?)[ \t]*(?:\n+|$)/gm, "<h4>$1</h4>");
+  s = s.replace(FENCE_SLOT, (_, i) => "<pre>" + COPY_BTN + "<code>" + fences[i] + "</code></pre>");
   return s;
 }
+
+const rawText = new WeakMap();  // model turn element -> the markdown it renders
 
 function addTurn(role) {
   const wrap = document.createElement("article");
@@ -589,6 +822,61 @@ function thinkPane(turn) {
   return { pane: d, body: b };
 }
 
+function actButton(cls, text, title) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "act " + cls;
+  b.textContent = text;
+  if (title) b.title = title;
+  return b;
+}
+
+// Footer of a finished model turn: its numbers, copy, and (on the last turn
+// only) regenerate. Earlier footers lose their regenerate button when a new
+// turn lands, so the history and the transcript never disagree about what a
+// rerun replaces.
+function addFoot(turn, stats) {
+  const foot = document.createElement("div");
+  foot.className = "foot";
+  const s = document.createElement("span");
+  s.className = "stats";
+  s.textContent = stats;
+  foot.append(s, actButton("act-copy", "COPY", "copy the answer as markdown"),
+              actButton("act-regen", "REGENERATE", "drop this answer and ask again"));
+  turn.wrap.append(foot);
+}
+
+function addNote(turn, html) {
+  const n = document.createElement("p");
+  n.className = "note";
+  n.innerHTML = html;  // author-written strings only, never model output
+  turn.wrap.append(n);
+}
+
+function dropRegenExcept(last) {
+  for (const b of log.querySelectorAll(".act-regen"))
+    if (!last || !last.contains(b)) b.remove();
+}
+
+async function copyText(text, button) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Clipboard API needs a secure context; a LAN address over plain http is not one.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.append(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch { /* nothing left to try */ }
+    ta.remove();
+  }
+  const was = button.textContent;
+  button.textContent = "COPIED";
+  setTimeout(() => { button.textContent = was; }, 1200);
+}
+
 const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 90;
 const stickBottom = (was) => { if (was) log.scrollTop = log.scrollHeight; };
 
@@ -597,7 +885,7 @@ function setState(kind, text) {
   stateLabel.textContent = text;
 }
 
-function fault(message, detail) {
+function fault(message, detail, meta) {
   const p = document.createElement("p");
   p.className = "fault";
   p.textContent = message + " ";
@@ -606,15 +894,54 @@ function fault(message, detail) {
     c.textContent = detail;
     p.append(c);
   }
+  if (meta) {
+    const s = document.createElement("small");
+    s.textContent = meta;
+    p.append(s);
+  }
   log.append(p);
   log.scrollTop = log.scrollHeight;
+  return p;
+}
+
+function clearFaults() {
+  for (const f of log.querySelectorAll(".fault")) f.remove();
+}
+
+// The server answers every failure with a JSON envelope; its message is the
+// one worth reading. Anything else (a proxy page, a truncated body) is shown raw.
+async function errorDetail(res) {
+  const text = await res.text().catch(() => "");
+  let msg = text.slice(0, 300);
+  try {
+    const obj = JSON.parse(text);
+    if (obj?.error?.message) msg = obj.error.message;
+  } catch { /* not an envelope */ }
+  return "HTTP " + res.status + (msg ? ": " + msg : "");
 }
 
 /* ---------- streaming --------------------------------------------- */
 
+function requestBody() {
+  const messages = [];
+  const system = el("system").value.trim();
+  if (system) messages.push({ role: "system", content: system });
+  messages.push(...history);
+  return {
+    model: modelName || "imp",
+    messages,
+    stream: true,
+    stream_options: { include_usage: true },
+    temperature: parseFloat(el("temp").value),
+    max_tokens: parseInt(el("maxtok").value, 10),
+    enable_thinking: el("thinking").checked,
+  };
+}
+
 async function run(text) {
   const empty = log.querySelector(".empty");
   if (empty) empty.remove();
+  clearFaults();
 
   const user = addTurn("user");
   user.body.textContent = text;
@@ -627,12 +954,17 @@ async function run(text) {
   log.scrollTop = log.scrollHeight;
 
   resetRun();
+  dropRegenExcept(null);
   setState("busy", "generating");
   sendBtn.textContent = "STOP";
   sendBtn.classList.add("stop");
   sendBtn.disabled = false;
+  newChatBtn.disabled = true;
 
-  let answer = "", thinking = null;
+  const swapping = models.length > 1 && !models.find((m) => m.id === modelName)?.loaded;
+  if (swapping) setState("busy", "loading " + modelName);
+
+  let answer = "", thinking = null, finish = null, usage = null, requestId = null;
 
   // Re-typesetting on every token would burn the frame budget at 150 tok/s, so
   // repaints are coalesced to one per animation frame.
@@ -658,20 +990,11 @@ async function run(text) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
-      body: JSON.stringify({
-        model: modelName || "imp",
-        messages: history,
-        stream: true,
-        temperature: parseFloat(el("temp").value),
-        max_tokens: parseInt(el("maxtok").value, 10),
-        enable_thinking: el("thinking").checked,
-      }),
+      body: JSON.stringify(requestBody()),
     });
+    requestId = res.headers.get("x-request-id");
 
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error("HTTP " + res.status + (detail ? " — " + detail.slice(0, 300) : ""));
-    }
+    if (!res.ok) throw new Error(await errorDetail(res));
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -695,7 +1018,11 @@ async function run(text) {
 
           let obj;
           try { obj = JSON.parse(payload); } catch { continue; }
-          const delta = obj.choices?.[0]?.delta;
+          if (obj.usage) { usage = obj.usage; showUsage(usage); }
+          const choice = obj.choices?.[0];
+          if (!choice) continue;
+          if (choice.finish_reason) finish = choice.finish_reason;
+          const delta = choice.delta;
           if (!delta) continue;
 
           const was = atBottom();
@@ -704,8 +1031,10 @@ async function run(text) {
             // Thinking stays raw text: it is working-out, not typeset prose.
             if (!thinking) thinking = thinkPane(turn);
             thinking.body.append(delta.reasoning_content);
+            if (nTokens === 0) setState("busy", "thinking");
           }
           if (delta.content) {
+            if (!answer) setState("busy", "generating");
             answer += delta.content;
             paint();
           }
@@ -716,28 +1045,62 @@ async function run(text) {
     }
 
     history.push({ role: "assistant", content: answer });
-    if (thinking) thinking.pane.open = false;
     setState("ok", "idle");
-    el("strip-note").textContent = `${nTokens} tokens · median ${median(itl).toFixed(1)} ms`;
   } catch (err) {
     if (err.name === "AbortError") {
       history.push({ role: "assistant", content: answer });
       setState("ok", "stopped");
-    } else {
-      history.pop();  // drop the user turn — the exchange never happened
+    } else if (answer || thinking) {
+      // The stream broke after tokens arrived: keep what the model said, and
+      // say that it is a fragment.
+      history.push({ role: "assistant", content: answer });
       setState("down", "error");
-      fault("The request failed.", err.message);
+      fault("The stream ended early.", err.message, requestId ? "request id " + requestId : "");
+    } else {
+      history.pop();  // drop the user turn: the exchange never happened
+      setState("down", "error");
+      fault("The request failed.", err.message, requestId ? "request id " + requestId : "");
     }
   } finally {
     // Final typeset, and it must win over any repaint still queued for the next
-    // frame — otherwise that frame puts the caret back after the run has ended.
+    // frame, otherwise that frame puts the caret back after the run has ended.
     finished = true;
     turn.body.innerHTML = markup(answer);
-    if (!answer && !thinking) turn.wrap.remove();
+    if (thinking) thinking.pane.open = false;
+    if (!answer && !thinking) {
+      turn.wrap.remove();
+    } else {
+      rawText.set(turn.wrap, answer);
+      const wall = performance.now() - tStart;
+      const count = usage?.completion_tokens ?? nTokens;
+      const gen = tPrev > tFirst ? (tPrev - tFirst) / 1000 : 0;
+      const bits = [`${count} tok`];
+      if (gen > 0.05) bits.push(`${(count / gen).toFixed(1)} tok/s`);
+      if (tFirst) bits.push(`ttft ${fmtS(tFirst - tStart)}`);
+      bits.push(fmtS(wall));
+      if (usage?.prompt_tokens_details?.cached_tokens) bits.push(`${fmtK(usage.prompt_tokens_details.cached_tokens)} cached`);
+      addFoot(turn, bits.join(" · "));
+      if (finish === "length") {
+        if (!answer && thinking)
+          addNote(turn, "<b>No answer: the whole token budget went to thinking.</b> Raise max tokens, a thinking model needs room to answer after it thinks.");
+        else
+          addNote(turn, `<b>Cut off at max tokens</b> (${parseInt(el("maxtok").value, 10)}). Raise it and regenerate for the rest.`);
+      } else if (finish === null && stateLabel.textContent === "idle") {
+        // The body closed cleanly but no chunk carried finish_reason: a proxy
+        // or the server ended the response before the model was done.
+        addNote(turn, "<b>The stream ended without a finish reason.</b> Something between here and the engine cut it off; the answer may be incomplete.");
+      }
+      el("m-wall").textContent = fmtS(wall);
+      el("strip-note").textContent = `${count} tokens · median ${median(itl).toFixed(1)} ms`;
+    }
     controller = null;
     sendBtn.textContent = "SEND";
     sendBtn.classList.remove("stop");
     sendBtn.disabled = false;
+    newChatBtn.disabled = false;
+    // A request that named another model swapped it in; the list and the
+    // context window follow the engine, not the picker.
+    if (swapping) refreshModels().catch(() => {});
   }
 }
 
@@ -746,15 +1109,17 @@ async function run(text) {
 composer.addEventListener("submit", (e) => {
   e.preventDefault();
   if (controller) { controller.abort(); return; }
+  if (!modelName) return;
   const text = promptBox.value.trim();
   if (!text) return;
   promptBox.value = "";
   promptBox.style.height = "auto";
+  try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* fine */ }
   run(text);
 });
 
 promptBox.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
+  if (e.key === "Enter" && (!e.shiftKey || e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     composer.requestSubmit();
   }
@@ -763,9 +1128,90 @@ promptBox.addEventListener("keydown", (e) => {
 promptBox.addEventListener("input", () => {
   promptBox.style.height = "auto";
   promptBox.style.height = Math.min(promptBox.scrollHeight, 200) + "px";
+  try { sessionStorage.setItem(DRAFT_KEY, promptBox.value); } catch { /* fine */ }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && controller) controller.abort();
+});
+
+for (const id of paramIds) {
+  el(id).addEventListener("change", saveParams);
+  el(id).addEventListener("input", saveParams);
+}
+el("system").addEventListener("input", reflectSystem);
+
+newChatBtn.addEventListener("click", () => {
+  if (controller) return;
+  history = [];
+  log.replaceChildren();
+  resetRun();
+  const p = document.createElement("p");
+  p.className = "empty";
+  p.innerHTML = "<b>New conversation.</b> The model keeps nothing from the last one; the system prompt and parameters stay.";
+  log.append(p);
+  promptBox.focus();
+});
+
+// One delegated handler for every copy and regenerate button the transcript
+// will ever grow, including the ones inside re-rendered code blocks.
+log.addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  if (btn.classList.contains("copy-code")) {
+    copyText(btn.parentElement.querySelector("code")?.textContent ?? "", btn);
+  } else if (btn.classList.contains("act-copy")) {
+    copyText(rawText.get(btn.closest(".turn")) ?? "", btn);
+  } else if (btn.classList.contains("act-regen")) {
+    if (controller) return;
+    const modelTurn = btn.closest(".turn");
+    const userTurn = modelTurn.previousElementSibling;
+    if (!userTurn?.classList.contains("is-user")) return;
+    // The last two history entries are exactly this pair (regenerate lives on
+    // the last model turn only), so the rerun replaces them.
+    history.splice(-2, 2);
+    const text = userTurn.querySelector(".body").textContent;
+    modelTurn.remove();
+    userTurn.remove();
+    run(text);
+  }
 });
 
 window.addEventListener("resize", drawStrip);
+
+/* ---------- connection -------------------------------------------- */
+
+function renderModels() {
+  const loaded = models.find((m) => m.loaded) ?? null;
+  contextLen = loaded?.max_model_len ?? loaded?.meta?.n_ctx_train ?? 0;
+  if (!models.find((m) => m.id === modelName)) modelName = (loaded ?? models[0])?.id ?? null;
+
+  if (models.length <= 1) {
+    const span = document.createElement("span");
+    span.className = "model";
+    span.id = "model";
+    span.textContent = modelName ?? "no model loaded";
+    if (loaded && contextLen) span.title = `context ${fmtK(contextLen)} tokens`;
+    el("model").replaceWith(span);
+    return;
+  }
+
+  // Several models in the directory: the picker names the one the next request
+  // asks for. Picking an unloaded one makes the server swap on that request.
+  const sel = document.createElement("select");
+  sel.className = "model";
+  sel.id = "model";
+  sel.title = "model for the next request; an unloaded one is swapped in by the server";
+  for (const m of models) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = m.id + (m.loaded ? "" : "  (not loaded)");
+    o.selected = m.id === modelName;
+    sel.append(o);
+  }
+  sel.addEventListener("change", () => { modelName = sel.value; });
+  el("model").replaceWith(sel);
+}
 
 async function probe(base) {
   const res = await fetch(base + "/v1/models");
@@ -773,28 +1219,54 @@ async function probe(base) {
   return await res.json();
 }
 
+async function refreshModels() {
+  const data = await probe(API);
+  models = Array.isArray(data.data) ? data.data : [];
+  renderModels();
+}
+
+// The page is often opened before the model has finished loading, and a
+// server started model-less lists nothing until a request names a file. Both
+// are waiting states, not failures: keep asking until something answers.
 (async function connect() {
-  // Try the origin first; if the page is hosted apart from the engine, fall back
-  // to the default port before declaring the server missing.
-  const candidates = API_OVERRIDE ? [API_OVERRIDE]
-    : [...new Set([API, FALLBACK_API])];
+  const candidates = API_OVERRIDE ? [API_OVERRIDE] : [...new Set([API, FALLBACK_API])];
+  let told = false, delay = 1500;
 
-  for (const base of candidates) {
-    try {
-      const data = await probe(base);
-      API = base;
-      modelName = data.data?.[0]?.id ?? null;
-      modelLabel.textContent = modelName ?? "no model loaded";
-      setState("ok", "idle");
-      return;
-    } catch { /* try the next candidate */ }
+  for (;;) {
+    let reached = false;
+    for (const base of candidates) {
+      try {
+        const data = await probe(base);
+        API = base;
+        reached = true;
+        models = Array.isArray(data.data) ? data.data : [];
+        renderModels();
+        if (models.length) {
+          clearFaults();
+          if (!controller) setState("ok", "idle");
+          return;
+        }
+        break;
+      } catch { /* try the next candidate */ }
+    }
+
+    if (reached) {
+      setState("wait", "waiting for a model");
+    } else {
+      el("model").textContent = "offline";
+      setState("wait", "waiting for server");
+      if (!told) {
+        told = true;
+        fault("No server yet. Trying " + candidates.join(", ") + " until one answers. Elsewhere? Append",
+              "?api=http://host:port");
+      }
+    }
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(delay * 1.5, 5000);
   }
-
-  modelLabel.textContent = "offline";
-  setState("down", "no server");
-  fault("No server found. Tried " + candidates.join(", ") + ". Start imp-server, or append",
-        "?api=http://host:port");
 })();
+
+loadParams();
 </script>
 </body>
 </html>
