@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-03
+commit: b3cc2079
 -->
 
 # imp Memory Architecture
@@ -539,6 +539,8 @@ Concretely:
 **Cancellation, disconnect, error paths** leak refcounts today because each path frees by hand. Under `BlockRef` they are one path: the `SequenceSlot` is destroyed and its refs unwind, including on exception. The slot destructor asserts its net contribution is zero (A3.4); criterion 4's cancellation-heavy soak is the system-level proof.
 
 **Nuance the design must not lose:** `evict_middle_blocks()` (StreamingLLM) replaces freed slots with sentinel `-1` while keeping the table *length*; the attention kernels depend on positional alignment. So `seq_blocks_` is `std::vector<std::optional<BlockRef>>` and the sentinel is `nullopt`. Same for the SWA positional table (documented `-1` holes by design).
+
+**The KV-pressure valve counts reclaimable blocks (#1879).** `Engine` auto-enables StreamingLLM and demotes CUDA graphs one-way when the pool is "over 90% full"; until 2026-09-03 the check compared the free list with the blocks live sequences hold, so a pool one third full of reclaimable prefix-cache blocks read as full ("0/2016 free" with 984 reclaimable), and every wave after the first ran eager (Llama-3.2-3B-Q8_0, 32 x 1000-token streams: 2387 -> 1443-1485 tok/s). The check now adds `num_reclaimable_cached_blocks()` and compares against `total_blocks()`; the I7 distinction (occupied vs reclaimable) that `/metrics` already exported is what the scheduler had ignored.
 
 ### A5.2 CUDA graph pool
 
