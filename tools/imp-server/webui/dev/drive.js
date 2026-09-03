@@ -8,8 +8,8 @@
 //       -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 mcr.microsoft.com/playwright:v1.56.0-noble \
 //       bash -c 'npm i --silent playwright@1.56.0 && node drive.js chat http://localhost:9099/'
 //
-// scenarios: chat, length, errors, stop, narrow, swap, system, reload, actions,
-// boot (needs a mock started with --boot-delay).
+// scenarios: chat, length, errors, stop, live (mid-stream captures), narrow,
+// swap, system, reload, actions, boot (needs a mock started with --boot-delay).
 // usage: node drive.js <scenario> [url]
 const { chromium } = require("playwright");
 
@@ -32,6 +32,7 @@ async function state(page) {
     })),
     faults: [...document.querySelectorAll(".fault")].map((f) => f.textContent),
     stripNote: document.getElementById("strip-note")?.textContent,
+    rate: document.getElementById("m-rate")?.textContent,
   }));
 }
 
@@ -91,6 +92,12 @@ async function waitIdle(page, timeout = 30000) {
       await waitIdle(page); await sleep(150);
     });
     await step("02-after-stop", async () => { await send(page, "nothink short"); await waitIdle(page); await sleep(150); });
+  }
+  if (scenario === "live") {
+    // mid-stream captures: thinking shimmer, then hot bars + caret
+    await step("01-thinking", async () => { await send(page, "long answer please"); await page.waitForSelector("details.think.live", { timeout: 10000 }); await sleep(250); });
+    await step("02-streaming", async () => { await page.waitForFunction(() => (document.querySelectorAll(".turn.is-model .body")[0]?.textContent.length || 0) > 200, null, { timeout: 20000 }); });
+    await step("03-done", async () => { await waitIdle(page); await sleep(150); });
   }
   if (scenario === "narrow") {
     await page.setViewportSize({ width: 620, height: 900 });

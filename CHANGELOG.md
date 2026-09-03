@@ -22,7 +22,12 @@ there instead of retelling it.
   failure keeps the partial answer; the page waits for a model-less or still
   loading server instead of declaring it offline. Still one file, no build
   step. GPU-less dev harness `tools/imp-server/webui/dev/` (streaming mock +
-  Playwright driver, 10 scenarios green)
+  Playwright driver, 10 scenarios green) (#1890)
+- Web UI visual pass: the inter-token pulse moves out of the sidebar to full
+  width above the composer with a live tok/s readout, new bars land bright and
+  cool over 700 ms; one spark motif for wordmark, role marker and status;
+  glass composer, code blocks with a language header and Copy, sentence-case
+  labels, `prefers-reduced-motion` honoured. Same 10 scenarios green
 
 ## [0.35.0] - 2026-09-03
 
