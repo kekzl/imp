@@ -53,6 +53,14 @@ there instead of retelling it.
   `tests/test_server_ignore_eos.py` in `make test-server`.
   `tools/analysis/burst_stream_client.py` (TTFT / ITL / gaps per wave) and
   `tools/analysis/prefill_cap_conc_ab.sh` (config or two-image A/B with it)
+- NVFP4 paged decode attention (the hybrid's default) processes four tokens
+  per warp iteration too (`attention.paged_nvfp4_multitok`, default 4, plain
+  and split-K kernels), and the split-K rule targets 4 CTAs per SM instead
+  of 2. Microbench 24/4 heads HD=256, batch 1 x 77k context: 293.8 -> 209.6
+  us per launch (-29%), 32 x 1100: 123.3 -> 90.0 us; fp64 oracle identical
+  to the scalar kernels on both routes. Qwen3.8-27B-NVFP4 single-stream decode 87.34 -> 89.06 tok/s at 8k
+  context (+2.0%), 76.81 -> 81.91 at 32k (+6.6%), 65.15 -> 74.35 at 64k (+14.1%); Qwen3-8B-Q8_0 and
+  Qwen3-30B-A3B-NVFP4 (F16 KV) within spread at 2k/8k/32k (`scripts/bench_longctx_ab.sh`)
 - FP8 paged decode attention: the e4m3 bytes now convert in pairs
   (`cvt e4m3x2 -> f16x2`, HMUL2 dot) instead of one scalar conversion per
   byte; ncu had the four-token kernel issue-bound (SM 70%, DRAM 33%).

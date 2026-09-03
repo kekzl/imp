@@ -108,6 +108,9 @@ struct Attention {
     // kernel (attention_paged_fp8_multitok.cu), 1 = the plain kernel. Measured
     // 2026-09-03 on Qwen3-14B-NVFP4 at 32 streams x 1.1k context, see PERF.md.
     int paged_fp8_multitok = 4;
+    // NVFP4 paged decode (HD=128/256): tokens per warp iteration, same idea
+    // (attention_paged_nvfp4_multitok.cu). 1 = the scalar kernels.
+    int paged_nvfp4_multitok = 4;
     // Causal FA2 CTA order: heaviest q-tiles first. A causal q-tile t attends
     // (t+1)*Bq/Bkv KV tiles, 2..32 at 4096 tokens and Bq=128, and blockIdx.x
     // ran the light tiles first, so the last CTAs of a head were the heaviest

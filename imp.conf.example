@@ -340,6 +340,10 @@ fa2_heavy_first      = true
 # dense 40-layer model at 32 streams x 1.1k context at ~25% of bandwidth.
 # Microbench 32 x 1100: 209 -> 107 us per launch. 1 = the plain kernel.
 paged_fp8_multitok   = 4
+# The same for the NVFP4 KV cache (HD=128/256, plain and split-K kernels).
+# Microbench 24/4 heads HD=256: 1 x 77k context 294 -> 210 us per launch with
+# the 4-CTAs-per-SM split-K target, 32 x 1100: 123 -> 90 us. 1 = scalar kernels.
+paged_nvfp4_multitok = 4
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).

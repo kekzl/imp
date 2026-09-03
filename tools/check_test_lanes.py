@@ -189,7 +189,9 @@ def main():
     # GPU-only.
     # 1080 -> 1082 (#1872): PagedFp8Multitok.MatchesReferenceAtSingleSplit and
     # PagedFp8Decode.ServingShapeMicrobench (test_attention_paged_oracle.cu).
-    PINNED = 1082
+    # 1082 -> 1084 (#this): PagedNvfp4Multitok.MatchesReferenceBothRoutes and
+    # PagedNvfp4TcDecode.LongContextMicrobench (test_attention_paged_oracle.cu).
+    PINNED = 1084
 
     text = CMAKE.read_text()
     mods = module_sources(text)
