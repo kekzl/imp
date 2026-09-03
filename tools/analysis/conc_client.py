@@ -17,6 +17,7 @@ WAVES = int(sys.argv[3])
 TAG = sys.argv[4] if len(sys.argv) > 4 else "x"
 PLEN = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 GEN = int(os.environ.get("GEN", "300"))
+MODEL = os.environ.get("MODEL_NAME", "Qwen3.8-27B-NVFP4-vllm")
 FILLER_SENTENCES = [
     "A translation lookaside buffer caches recent virtual-to-physical page mappings so most loads skip the page walk.",
     "When a load crosses a page boundary the two halves may map to different frames and need two translations.",
@@ -57,7 +58,7 @@ def one(i, wave, out):
     if PLEN > 0:
         prompt = f"[{TAG}-w{wave}-r{i}] " + filler(PLEN) + prompt
     body = json.dumps({
-        "model": "Qwen3.8-27B-NVFP4-vllm",
+        "model": MODEL,
         "prompt": prompt,
         "max_tokens": GEN,
         "temperature": 0,

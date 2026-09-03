@@ -46,6 +46,7 @@
 #include <cuda_fp8.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -841,4 +842,165 @@ TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
 }
 
 }  // namespace
+// ---------------------------------------------------------------------------
+// The multitok FP8 decode kernel (attention.paged_fp8_multitok=4) against the
+// same fp64 reference as the FP8 oracle above. The oracle's batch-1 shapes
+// take the split-K route (32 CTAs), so the single-split kernels only run
+// with the fallback forced; both the plain and the multitok kernel must stay
+// inside the FP8 envelope on the same four kv_len rows, including the
+// non-block-aligned 333 (partial tail group of 333 % 4 = 1 token).
+// ---------------------------------------------------------------------------
+TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    const int n_heads = 32, n_kv_heads = 8, head_dim = 128;
+    const float scale = 1.0f / std::sqrt((float)head_dim);
+    process_diag_set_force_splitk_fallback(true);
+    for (int kv_len : {16, 64, 333, 1024}) {
+        const int num_blocks = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        const size_t q_elems = (size_t)n_heads * head_dim;
+        const size_t kv_elems = (size_t)kv_len * n_kv_heads * head_dim;
+        std::vector<half> Qh(q_elems), Kh(kv_elems), Vh(kv_elems);
+        lcg_fill(Qh, 0x4D71u + kv_len, 2.0f);
+        lcg_fill(Kh, 0x4D72u + kv_len, 2.0f);
+        lcg_fill(Vh, 0x4D73u + kv_len, 1.0f);
+        std::vector<double> ref;
+        ref_decode_f64(Qh, Kh, Vh, ref, kv_len, n_heads, n_kv_heads, head_dim, scale);
+        std::vector<int> bt(num_blocks);
+        for (int i = 0; i < num_blocks; i++)
+            bt[i] = i;
+        int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
+        int ctx = kv_len;
+        int* d_ctx = (int*)up(&ctx, sizeof(int));
+        void* d_q = up(Qh.data(), q_elems * sizeof(half));
+        void* d_o = nullptr;
+        cudaMalloc(&d_o, q_elems * sizeof(half));
+        PathCtx c{stream, kv_len,  n_heads, n_kv_heads, head_dim, num_blocks,
+                  scale,  q_elems, &Kh,     &Vh,        &ref,     f16_tensor(d_q, {1, 1, n_heads, head_dim}),
+                  d_o,    d_bt,    d_ctx};
+        process_diag_set_paged_fp8_multitok(1);
+        ErrStats e_plain = PathFP8::run(c);
+        process_diag_set_paged_fp8_multitok(4);
+        ErrStats e_mt = PathFP8::run(c);
+        EXPECT_EQ(e_plain.nan_count, 0) << "kv_len " << kv_len;
+        EXPECT_EQ(e_mt.nan_count, 0) << "kv_len " << kv_len;
+        EXPECT_LT(e_plain.max_rel, PathFP8::envelope()) << "plain kv_len " << kv_len << ": " << e_plain.str();
+        EXPECT_LT(e_mt.max_rel, PathFP8::envelope()) << "multitok kv_len " << kv_len << ": " << e_mt.str();
+        printf("PagedFp8Multitok kv_len=%d: plain %s | multitok %s\n", kv_len, e_plain.str().c_str(),
+               e_mt.str().c_str());
+        cudaFree(d_q);
+        cudaFree(d_o);
+        cudaFree(d_bt);
+        cudaFree(d_ctx);
+    }
+    process_diag_set_force_splitk_fallback(false);
+    process_diag_set_paged_fp8_multitok(4);
+    cudaStreamDestroy(stream);
+}
+
+// ---------------------------------------------------------------------------
+// Serving-shape microbench of the FP8 paged decode kernel (2026-09-03): the
+// dense Qwen3-14B profile at 32 streams x ~1.1k context read this kernel at
+// 33.4% of kernel time (41800 launches x 190 us, ~25% of DRAM bandwidth), so
+// the serving shape gets a cudaEvent number here. Shape from the env:
+// IMP_ATTN_BENCH_BATCH (32), IMP_ATTN_BENCH_CTX (1100), IMP_ATTN_BENCH_HEADS
+// (40), IMP_ATTN_BENCH_KV_HEADS (8). Prints us/launch and the KV bytes it
+// moves per second; asserts finite output only (no reference: the timing is
+// the point, the numerics are covered by the oracle above).
+// ---------------------------------------------------------------------------
+TEST(PagedFp8Decode, ServingShapeMicrobench) {
+    auto env_int = [](const char* k, int d) {
+        const char* v = std::getenv(k);
+        return v ? std::atoi(v) : d;
+    };
+    const int batch = env_int("IMP_ATTN_BENCH_BATCH", 32);
+    const int kv_len = env_int("IMP_ATTN_BENCH_CTX", 1100);
+    const int n_heads = env_int("IMP_ATTN_BENCH_HEADS", 40);
+    const int n_kv_heads = env_int("IMP_ATTN_BENCH_KV_HEADS", 8);
+    const int head_dim = 128;
+    const int multitok = env_int("IMP_ATTN_BENCH_MULTITOK", 4);  // 1 = plain kernel, 4 = multitok
+    process_diag_set_paged_fp8_multitok(multitok);
+    const float scale = 1.0f / std::sqrt((float)head_dim);
+    const int blocks_per_seq = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const int num_blocks = batch * blocks_per_seq;
+    const size_t q_elems = (size_t)batch * n_heads * head_dim;
+    const size_t kv_bytes = (size_t)num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    std::vector<half> Qh(q_elems);
+    lcg_fill(Qh, 0xBE9Cu, 2.0f);
+    // FP8 bytes straight from an LCG, restricted to small-magnitude codes so
+    // the softmax stays finite: keep exponent bits low (mask 0x3F keeps
+    // |x| <= 1.875 in e4m3).
+    std::vector<uint8_t> Kq(kv_bytes), Vq(kv_bytes);
+    uint32_t s = 0x1234567u;
+    for (size_t i = 0; i < kv_bytes; i++) {
+        s = s * 1664525u + 1013904223u;
+        Kq[i] = (uint8_t)((s >> 24) & 0x3F);
+        s = s * 1664525u + 1013904223u;
+        Vq[i] = (uint8_t)((s >> 24) & 0x3F);
+    }
+    std::vector<int> bt((size_t)batch * blocks_per_seq), ctx(batch, kv_len);
+    for (int b = 0; b < batch; b++)
+        for (int i = 0; i < blocks_per_seq; i++)
+            bt[(size_t)b * blocks_per_seq + i] = b * blocks_per_seq + i;
+    void* d_q = up(Qh.data(), q_elems * sizeof(half));
+    void* d_k = up(Kq.data(), kv_bytes);
+    void* d_v = up(Vq.data(), kv_bytes);
+    int* d_bt = (int*)up(bt.data(), bt.size() * sizeof(int));
+    int* d_ctx = (int*)up(ctx.data(), ctx.size() * sizeof(int));
+    void* d_o = nullptr;
+    cudaMalloc(&d_o, q_elems * sizeof(half));
+    Tensor Q = f16_tensor(d_q, {batch, 1, n_heads, head_dim});
+    Tensor K = raw_tensor(d_k, QType::FP8_E4M3, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor V = raw_tensor(d_v, QType::FP8_E4M3, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor O = f16_tensor(d_o, {batch, 1, n_heads, head_dim});
+
+    auto launch = [&]() {
+        paged_attention_decode_fp8(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, 1.0f, kv_len, 0, 0.0f, stream,
+                                   blocks_per_seq);
+    };
+    // Warm >1 s (idle downclock ramps in ~1 s on this box).
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    cudaEventRecord(t0, stream);
+    for (int i = 0; i < 2000; i++)
+        launch();
+    cudaEventRecord(t1, stream);
+    cudaEventSynchronize(t1);
+    float warm_ms = 0.0f;
+    cudaEventElapsedTime(&warm_ms, t0, t1);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "FP8 paged decode launch";
+    const int iters = 200;
+    cudaEventRecord(t0, stream);
+    for (int i = 0; i < iters; i++)
+        launch();
+    cudaEventRecord(t1, stream);
+    cudaEventSynchronize(t1);
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, t0, t1);
+    const double us = 1000.0 * ms / iters;
+    const double bytes = 2.0 * (double)batch * kv_len * n_kv_heads * head_dim;  // K + V read once
+    printf(
+        "PagedFp8Decode serving shape: multitok=%d batch=%d ctx=%d heads=%d/%d hd=%d: %.1f us/launch, KV "
+        "%.1f MB, "
+        "%.0f GB/s (warm %.2f s)\n",
+        multitok, batch, kv_len, n_heads, n_kv_heads, head_dim, us, bytes / 1e6, bytes / (us * 1e-6) / 1e9,
+        warm_ms / 1000.0);
+    std::vector<float> Oh = read_o(d_o, q_elems);
+    size_t nonfinite = 0;
+    for (float h : Oh)
+        if (!std::isfinite(h))
+            nonfinite++;
+    EXPECT_EQ(nonfinite, 0u);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+    cudaFree(d_o);
+    cudaStreamDestroy(stream);
+}
 }  // namespace imp

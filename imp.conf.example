@@ -332,6 +332,12 @@ fa2_dense_2cta       = true
 # (-1.2%, 3/3 pairs), Qwen3.8-27B-NVFP4 120.737/120.594/120.523 -> 117.782/117.953/117.956 ms
 # (-2.2%, 3/3); output byte-identical. Default on.
 fa2_heavy_first      = true
+# FP8 paged decode attention (HD=128, serving path without split-K): tokens per
+# warp iteration. 4 issues the K and V rows of four tokens before reducing any
+# of them; the plain one-token kernel was 33% of the serving kernel time on a
+# dense 40-layer model at 32 streams x 1.1k context at ~25% of bandwidth.
+# Microbench 32 x 1100: 209 -> 107 us per launch. 1 = the plain kernel.
+paged_fp8_multitok   = 4
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).

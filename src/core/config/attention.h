@@ -104,6 +104,10 @@ struct Attention {
     // 244.2/244.8/252.2 ms (-10%), pp 23722/23661/22509 -> 24176/24097/24057
     // tok/s; output bit-identical (2026-09-01, docs/roadmap.md). Default on.
     bool fa2_dense_2cta = true;
+    // FP8 paged decode (HD=128): tokens per warp iteration. 4 = the multitok
+    // kernel (attention_paged_fp8_multitok.cu), 1 = the plain kernel. Measured
+    // 2026-09-03 on Qwen3-14B-NVFP4 at 32 streams x 1.1k context, see PERF.md.
+    int paged_fp8_multitok = 4;
     // Causal FA2 CTA order: heaviest q-tiles first. A causal q-tile t attends
     // (t+1)*Bq/Bkv KV tiles, 2..32 at 4096 tokens and Bq=128, and blockIdx.x
     // ran the light tiles first, so the last CTAs of a head were the heaviest

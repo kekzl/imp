@@ -66,6 +66,16 @@ void paged_attention_splitk_fp8_tile_gqa_launch(const half* Q, const uint8_t* K_
 // K_cache/V_cache: [num_blocks, n_kv_heads, block_size, head_dim] FP8_E4M3
 // O: [batch, 1, n_heads, head_dim] FP16
 // kv_scale: per-tensor FP32 scale for FP8 dequantization (val = fp8_val * kv_scale)
+// HD=128 FP8 decode with four tokens per warp iteration
+// (attention.paged_fp8_multitok, attention_paged_fp8_multitok.cu). Called by
+// paged_attention_decode_fp8 when the knob is on and split-K is off.
+void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
+                                               half* O, const int* block_tables, const int* context_lens,
+                                               int batch_size, int n_heads, int n_kv_heads, int block_size,
+                                               float scale, float kv_scale, int max_num_blocks,
+                                               int sliding_window, float softcap, const half* attn_sinks,
+                                               cudaStream_t stream);
+
 void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                                 const int* block_tables, const int* context_lens, int block_size, float scale,
                                 float kv_scale, int max_context_len, int sliding_window = 0,

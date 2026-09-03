@@ -184,10 +184,12 @@ def main():
     # the causal FA2 CTA order (natural vs heavy-first) - launch the kernel, GPU-only.
     # 1077 -> 1078 (#1866): SSMConv1dTest.DecodeVectorisedBitExact, the vectorised
     # conv1d decode path against a CPU fmaf reference - launches the kernel, GPU-only.
-    # 1078 -> 1080 (#this): SamplingTest.PenaltyHistoryMatchesVocabSweep and
+    # 1078 -> 1080 (#1867): SamplingTest.PenaltyHistoryMatchesVocabSweep and
     # PenaltyHistoryTiming, the history-sized penalty kernels vs the vocab sweep,
     # GPU-only.
-    PINNED = 1080
+    # 1080 -> 1082 (#1872): PagedFp8Multitok.MatchesReferenceAtSingleSplit and
+    # PagedFp8Decode.ServingShapeMicrobench (test_attention_paged_oracle.cu).
+    PINNED = 1082
 
     text = CMAKE.read_text()
     mods = module_sources(text)
