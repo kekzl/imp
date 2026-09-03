@@ -348,8 +348,8 @@ paged_nvfp4_multitok = 4
 # warp iteration, each K/V row read once per CTA for up to four Q heads.
 # Microbench 32 x 1100: 32/8 heads HD=128 315 -> 98 us per launch (four heads
 # per CTA), 16/8 HD=256 665 -> 178 us (two); 32 x 4096: 1165 -> 327 and
-# 2445 -> 643 us, i.e. the resident-bandwidth ceiling. 1 = the cooperative
-# GQA kernel.
+# 2445 -> 643 us, i.e. the resident-bandwidth ceiling; single stream (split-K)
+# 32/8 HD=128 at 32k 197 -> 109 us, 64k 375 -> 203 us. 1 = the per-head kernels.
 paged_f16_multitok   = 4
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.

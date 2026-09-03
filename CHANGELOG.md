@@ -81,6 +81,24 @@ there instead of retelling it.
   gemma-3-12b Q4_K_M (16/8, HD=256) 218.4 -> 252.8 (+15.8%, trials +15.9% /
   +16.3%; KV pool 2300 blocks, 30.8 GB VRAM in use, the 3000-block pool read
   +16.6% with a wave-to-wave spread of 220-294 in the multitok arm). (#1880)
+- The F16 multitok kernel also serves the split-K regime (batch x heads below
+  the CTA target: single stream at long context), one CTA per KV head group
+  and context split, so the KV group is read once for up to four Q heads
+  instead of once per head through L2. Microbench batch 1, 32/8 heads HD=128:
+  16k 76.7 -> 56.8 us, 32k 197.1 -> 109.3 us (1228 GB/s), 64k 375.0 -> 203.3
+  us (1321 GB/s); 24/8 at 32k 150.6 -> 101.3 us; 4 x 8k 187.5 -> 123.7 us;
+  16/8 HD=256 at 32k flat (189.2 -> 186.0, the pipeline kernel already ran at
+  1419 GB/s there). fp64 oracle identical on the split-K route for
+  heads-per-CTA 1/2/4. Single-stream decode at long context
+  (`scripts/bench_longctx_ab.sh` with `--set kv_cache.max_blocks` added to the
+  imp-cli line, harness md5 663d5af9e54c; two images,
+  `speculative.ngram=false`, tg128, 2 rounds, medians): Llama-3.2-3B-Q8_0
+  (24/8, HD=128, F16 KV) 8k 366.2 -> 422.3 tok/s (+15.3%), 32k 183.1 -> 237.2
+  (+29.5%), 64k 110.8 -> 153.1 (+38.1%; pool 5200 blocks, a 4500-block pool
+  left 8.8% free and both arms decoded in the StreamingLLM window);
+  gemma-3-12b Q4_K_M (16/8, HD=256) 8k 134.8 vs 134.7 (flat, as the microbench
+  said); its 32k point is not measurable on this card (the plan clamps the
+  pool to 696 blocks after the weight caches). (#PRNUM)
 - The F16 cluster (DSMEM) GQA decode kernel, `src/runtime/cluster_launch.h`
   and `tests/test_cluster_launch.cu` are removed; the route was off since
   #1877. `attention_paged.cu` 1216 -> 1032 code LOC, paged oracle
