@@ -11,185 +11,80 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-09-03
+
 ### Added
 
 - OpenTelemetry trace export for imp-server (`server.otlp_endpoint`, OTLP/HTTP
-  JSON, off by default): one SERVER span per generation request with queue /
-  prefill / decode children and request ids, model and token counts as
-  attributes, joined to the caller's W3C `traceparent`; the request JSONL
-  carries the same `trace_id`. Closes roadmap gap 8; `tests/test_server_tracing.py`
-  is the collector-side gate in `make test-server`. Jaeger trial follow-ups:
-  non-streaming spans now carry `imp.queue_ms` / `imp.cached_tokens` (they read
-  fields nothing assigned), an unsampled `traceparent` (flags `00`) is not
-  exported, `gen_ai.operation.name` / `gen_ai.provider.name` / `http.route`
-  added and `gen_ai.response.finish_reasons` is a string array per semconv,
-  `/metrics` gains `imp_otlp_*` counters
-
+  JSON, off by default): one SERVER span per generation with queue / prefill /
+  decode children, joined to the caller's W3C `traceparent`; `/metrics` gains
+  `imp_otlp_*` counters. Roadmap gap 8 closed (#1855, Jaeger follow-ups #1856)
 - Recurrent-snapshot host tier for hybrid prefix caching
-  (`server.recurrent_snapshot_host_mb`, default 2048): snapshots evicted from
-  the device slots move to pinned host memory and restore from there, so
-  multi-turn sessions beyond the slot count keep their tail-only prefill.
-  Qwen3.8-27B-NVFP4, 8 interleaved sessions x 3 turns: turn-2 TTFT 324/322
-  -> 163/145 ms, set wall 15.9/15.8 -> 13.5/13.1 s; ledger row in
-  `docs/roadmap.md`
+  (`server.recurrent_snapshot_host_mb`, default 2048): Qwen3.8-27B-NVFP4,
+  8 sessions x 3 turns, turn-2 TTFT 324/322 -> 163/145 ms (#1854)
+- `ignore_eos` (vLLM-compatible) on `/v1/completions` and
+  `/v1/chat/completions`; `tools/analysis/burst_stream_client.py` (TTFT / ITL /
+  gaps per wave) and `tools/analysis/prefill_cap_conc_ab.sh` (#1871)
+- Cross-engine serving harness `tools/analysis/vllm_conc_ab.sh` (one client,
+  alternating fresh servers): Qwen3.8-27B-NVFP4-vllm leads vLLM 0.27.1 by
+  +24.9% at 32 streams, +15.6% at 8, +75.5% at 32 with 1082-token prompts;
+  roadmap item 0 closed. Dense counter-probe Qwen3-14B-NVFP4: +7.9% at 8,
+  -7.6% at 32 before the FP8 kernels below (#1869, #1872)
+- F16 paged decode attention (every GGUF without an FP8 hint: Llama, Mistral,
+  Gemma, Phi) with four tokens per warp iteration and up to four Q heads per
+  CTA (`attention.paged_f16_multitok`): 32 streams x 1000-token prompts,
+  Llama-3.2-3B-Q8_0 1623.9 -> 2407.6 tok/s (+48.3%), Phi-4 with FP16 KV
+  1099.1 -> 1812.0 (+64.9%), gemma-3-12b 218.4 -> 252.8 (+15.8%) (#1880)
+- The same F16 kernel on the split-K route (single stream, long context):
+  Llama-3.2-3B-Q8_0 tg128 8k 366.2 -> 422.3 tok/s (+15.3%), 32k 183.1 -> 237.2
+  (+29.5%), 64k 110.8 -> 153.1 (+38.1%); gemma-3-12b (HD=256) flat (#1882)
+- NVFP4 paged decode attention with four tokens per warp iteration and a
+  4-CTAs-per-SM split-K target: Qwen3.8-27B-NVFP4 single stream 8k +2.0%,
+  32k +6.6%, 64k +14.1% (#1876)
+- NVFP4 decode groups Q heads per CTA so each K/V row is converted once
+  (`attention_paged_nvfp4_multitok_gqa.cu`): Qwen3.8-27B single stream 32k
+  +3.0%, 64k +4.2%, 32 streams +1.1% (#1886); group scale applied once per
+  (token, head) after a half2 FMA dot: 32k +1.6%, 64k +3.2% on top (#1887)
+- FP8 paged decode attention (HD=128) with four tokens per warp iteration
+  (`attention.paged_fp8_multitok`): Qwen3-14B-NVFP4 at 32 streams x 982-token
+  prompts 1487.2 -> 1862.4 tok/s (+25.2%), 38-token prompts +13.9% (#1872);
+  e4m3 converted in pairs (`cvt e4m3x2 -> f16x2`): 982-token prompts +3.4%
+  on top, the dense 32-stream row vs vLLM flips to imp +3.4% (#1874)
+- Long-prompt bursts on the GDN hybrid: the prefill budget charges ragged
+  members their real rows and the ragged forward runs the chunk-parallel GDN
+  scan per member; Qwen3.8-27B-NVFP4, 32 x 1094-token prompts 943.7 -> 1058.0
+  tok/s (+12.1%), TTFT p90 5027 -> 3854 ms, ITL p95 46.2 -> 19.9 ms (#1871)
+- Causal FA2 CTAs run the heaviest q-tile first (`attention.fa2_heavy_first`,
+  default on) (#1865); conv1d decode reads the 4-tap state as one float4
+  (#1866); repetition / frequency / presence penalties walk the token history
+  instead of the vocabulary, +2.3% at 32 streams (#1867)
 
-- Long-prompt bursts on the GDN hybrid: the prefill token budget charged a
-  ragged member its full chunk, so the snapshot tail of one prompt ran alone
-  in its own step, and the packed multi-sequence forwards that replaced it
-  ran the fused batched GDN scan. The budget now charges the rows the ragged
-  forward takes (launch floor once per group, `prefill_batch_decode_cap`
-  counts forwards) and the ragged forward runs the chunk-parallel scan per
-  member when it is a few big chunks plus a few tails (a 32-short-prompt
-  forward stays on the batched kernel). 32 x 1094-token prompts at 32 streams
-  (Qwen3.8-27B-NVFP4-vllm, two-image A/B, 3/3 pairs): 943.7 -> 1058.0 tok/s
-  (+12.1%), TTFT p90 5027 -> 3854 ms, ITL p95 46.2 -> 19.9 ms; 982-token
-  prompts 1040.5 -> 1128.3 tok/s (+8.4%, 3/3), TTFT p90 4104 -> 3353 ms;
-  38-token prompts neutral (1846.7 -> 1843.4, -0.2%). Ledger row in
-  `docs/roadmap.md`
-- `ignore_eos` (vLLM-compatible) on `/v1/completions` and `/v1/chat/completions`:
-  the request runs to `max_tokens` (EOS and stop tokens counted without text,
-  the think-model implicit `\nHuman` stop not injected, user `stop` strings
-  still apply), for benchmark clients that need equal token counts per arm;
-  `tests/test_server_ignore_eos.py` in `make test-server`.
-  `tools/analysis/burst_stream_client.py` (TTFT / ITL / gaps per wave) and
-  `tools/analysis/prefill_cap_conc_ab.sh` (config or two-image A/B with it)
-- F16 KV decode attention at concurrency: the cluster (DSMEM) GQA route is
-  off. It was reachable only without split-K, where it read 2133 us per launch
-  at 32 streams x 1100 context (68 GB/s) against 318 us on the GQA kernel
-  (6.7x); batch 1 unchanged. gemma-3-12b at 32 streams x 1001-token prompts:
-  186.4 -> 229.9 tok/s (+23.3%), ITL p95 191.4 -> 128.9 ms; Llama-3.2-3B (GQA
-  factor 3, never routed) neutral (#1877).
-- F16 paged decode attention (the KV dtype of every GGUF that carries no FP8
-  hint: Llama, Mistral, Gemma, Phi) processes four tokens per warp iteration
-  and shares each K/V row across up to four Q heads of one CTA
-  (`attention.paged_f16_multitok`, default 4;
-  `attention_paged_f16_multitok.cu`). The cooperative GQA kernel loaded 2
-  bytes per instruction with a runtime head_dim division per element (ncu 32 x
-  1100: DRAM 22%, 213M instructions for 144 MB). Microbench 32 x 1100: 32/8
-  heads HD=128 314.6 -> 98.0 us per launch, 16/8 HD=256 665.0 -> 177.9 us; 32
-  x 4096: 1164.5 -> 326.6 us (1644 GB/s) and 2444.8 -> 643.3 us (1669 GB/s),
-  the resident ceiling; fp64 oracle within the F16 envelope on 3 shapes x 4
-  lengths x both routes x 3 heads-per-CTA instances. Serving at 32 streams x
-  1000-token prompts, 300-token completions,
-  `tools/analysis/prefill_cap_conc_ab.sh` (config arms on one image, 2 trials
-  x 3 waves, medians), measured on top of #1879 (without it every wave after
-  the first ran eager and the median hid the kernel): Llama-3.2-3B-Q8_0 (24/8,
-  HD=128, `speculative.ngram=false`) 1623.9 -> 2407.6 tok/s (+48.3%, trials
-  +49.8% / +48.3%), ITL p50 14.1 -> 7.8 ms; Phi-4-reasoning-plus-NVFP4 with
-  `kv_cache.dtype=fp16` (40/10, HD=128) 1099.1 -> 1812.0 (+64.9%, trials
-  +64.8% / +68.4%), ITL p50 20.3 -> 9.9 ms, i.e. the level its FP8 KV reaches;
-  gemma-3-12b Q4_K_M (16/8, HD=256) 218.4 -> 252.8 (+15.8%, trials +15.9% /
-  +16.3%; KV pool 2300 blocks, 30.8 GB VRAM in use, the 3000-block pool read
-  +16.6% with a wave-to-wave spread of 220-294 in the multitok arm). (#1880)
-- The F16 multitok kernel also serves the split-K regime (batch x heads below
-  the CTA target: single stream at long context), one CTA per KV head group
-  and context split, so the KV group is read once for up to four Q heads
-  instead of once per head through L2. Microbench batch 1, 32/8 heads HD=128:
-  16k 76.7 -> 56.8 us, 32k 197.1 -> 109.3 us (1228 GB/s), 64k 375.0 -> 203.3
-  us (1321 GB/s); 24/8 at 32k 150.6 -> 101.3 us; 4 x 8k 187.5 -> 123.7 us;
-  16/8 HD=256 at 32k flat (189.2 -> 186.0, the pipeline kernel already ran at
-  1419 GB/s there). fp64 oracle identical on the split-K route for
-  heads-per-CTA 1/2/4. Single-stream decode at long context
-  (`scripts/bench_longctx_ab.sh` with `--set kv_cache.max_blocks` added to the
-  imp-cli line, harness md5 663d5af9e54c; two images,
-  `speculative.ngram=false`, tg128, 2 rounds, medians): Llama-3.2-3B-Q8_0
-  (24/8, HD=128, F16 KV) 8k 366.2 -> 422.3 tok/s (+15.3%), 32k 183.1 -> 237.2
-  (+29.5%), 64k 110.8 -> 153.1 (+38.1%; pool 5200 blocks, a 4500-block pool
-  left 8.8% free and both arms decoded in the StreamingLLM window);
-  gemma-3-12b Q4_K_M (16/8, HD=256) 8k 134.8 vs 134.7 (flat, as the microbench
-  said); its 32k point is not measurable on this card (the plan clamps the
-  pool to 696 blocks after the weight caches). (#1882)
-- The F16 cluster (DSMEM) GQA decode kernel, `src/runtime/cluster_launch.h`
-  and `tests/test_cluster_launch.cu` are removed; the route was off since
-  #1877. `attention_paged.cu` 1216 -> 1032 code LOC, paged oracle
-  tests 53/53, F16 serving microbench 316.0 us (was 315.8) (#1878)
-- NVFP4 paged decode attention (the hybrid's default) processes four tokens
-  per warp iteration too (`attention.paged_nvfp4_multitok`, default 4, plain
-  and split-K kernels), and the split-K rule targets 4 CTAs per SM instead
-  of 2. Microbench 24/4 heads HD=256, batch 1 x 77k context: 293.8 -> 209.6
-  us per launch (-29%), 32 x 1100: 123.3 -> 90.0 us; fp64 oracle identical
-  to the scalar kernels on both routes. Qwen3.8-27B-NVFP4 single-stream decode 87.34 -> 89.06 tok/s at 8k
-  context (+2.0%), 76.81 -> 81.91 at 32k (+6.6%), 65.15 -> 74.35 at 64k (+14.1%); Qwen3-8B-Q8_0 and
-  Qwen3-30B-A3B-NVFP4 (F16 KV) within spread at 2k/8k/32k (`scripts/bench_longctx_ab.sh`)
-- NVFP4 paged decode attention groups Q heads per CTA
-  (`attention_paged_nvfp4_multitok_gqa.cu`, on by default under
-  `attention.paged_nvfp4_multitok`): each K/V row is loaded and converted once
-  for up to four Q heads of its KV head instead of once per head. Same KV
-  bytes measured the per-head kernels at 427 GB/s on 24/4 HD=256 vs 1423 GB/s
-  on the 4/4 MHA shape. Microbench, per-head -> grouped: 24/4 HD=256 batch 1 x
-  32k 101.8 -> 74.4 us, 1 x 77k 214.2 -> 177.3, 32 x 1100 92.9 -> 68.6; 32/8
-  HD=128 1 x 32k 86.0 -> 71.4. fp64 oracle identical for heads-per-CTA 1/2/3
-  on both routes. E2E on Qwen3.8-27B-NVFP4-vllm (24/4, HD=256, heads-per-CTA
-  3), two images (main-equivalent vs this): single stream
-  `scripts/bench_longctx_ab.sh` tg128, `speculative.ngram=false`, 2 rounds, 8k
-  88.75 -> 90.09 tok/s (+1.5%), 32k 81.87 -> 84.30 (+3.0%), 64k 74.30 -> 77.41
-  (+4.2%); serving at 32 streams (`tools/analysis/prefill_cap_conc_ab.sh`, 2
-  trials x 3 waves, medians) 1000-token prompts 1150.0 -> 1162.6 (+1.1%,
-  trials +1.0% / +1.1%), 38-token prompts 1845.9 -> 1869.2 (+1.3%, trials
-  +0.5% / +1.8%). Qwen3-14B-NVFP4 (40/8, ratio 5, not served) 154.05 vs 153.99
-  at 8k and 114.47 vs 114.40 at 32k. (#1886)
-- NVFP4 decode attention applies the UE4M3 group scale once per (token, head)
-  after a half2 FMA dot over the raw E2M1 pairs instead of scaling every pair
-  first (grouped and per-head kernels). Microbench, grouped kernel: 24/4
-  HD=256 batch 1 x 32k 74.4 -> 61.8 us, 1 x 77k 177.3 -> 144.5, 32 x 1100 68.6
-  -> 57.9; 32/8 HD=128 1 x 32k 71.4 -> 67.7; fp64 oracle max_rel unchanged
-  (7.461e-03 at 1024 on 24/4). E2E on Qwen3.8-27B-NVFP4-vllm, two images
-  (#1886 vs this): single stream `scripts/bench_longctx_ab.sh` tg128,
-  `speculative.ngram=false`, 2 rounds, 8k 89.82 vs 90.23 (+0.5%, within
-  spread), 32k 84.32 -> 85.70 (+1.6%), 64k 77.19 -> 79.67 (+3.2%); serving at
-  32 streams x 1000-token prompts (`tools/analysis/prefill_cap_conc_ab.sh`, 2
-  trials x 3 waves) 1165.2 vs 1161.5 (medians, -0.3%; trials +0.1% / +0.8%),
-  neutral. Cumulative single-stream vs #1882's tree: 32k 81.87 -> 85.70
-  (+4.7%), 64k 74.30 -> 79.67 (+7.2%). (#1887)
-- FP8 paged decode attention: the e4m3 bytes now convert in pairs
-  (`cvt e4m3x2 -> f16x2`, HMUL2 dot) instead of one scalar conversion per
-  byte; ncu had the four-token kernel issue-bound (SM 70%, DRAM 33%).
-  Microbench 32 x 1100: 107.2 -> 92.4 us, 32 x 4096: 380.0 -> 332.4 us,
-  oracle unchanged. Serving on Qwen3-14B-NVFP4 at 32
-  streams: 982-token prompts +3.4% (3/3), 38-token prompts +0.8%
-- FP8 paged decode attention (HD=128, the serving path without split-K)
-  processes four tokens per warp iteration (`attention.paged_fp8_multitok`,
-  default 4; 1 = the plain kernel): K and V rows of four tokens in flight
-  before any reduction, one softmax rescale per group. Microbench at 32
-  streams x 1100 context (40/8 heads): 209 -> 107 us per launch (345 -> 672
-  GB/s), at 4096: 717 -> 380 us; fp64-oracle error identical to the plain
-  kernel at kv_len 16/64/333/1024. Serving on Qwen3-14B-NVFP4 at 32 streams x 982-token prompts (config A/B
-  4 vs 1, 3/3 pairs): 1487.2 -> 1862.4 tok/s (+25.2%), ITL p50 15.2 -> 11.0
-  ms; 38-token prompts 3502.5 -> 3989.4 (+13.9%). Against vLLM 0.27.1 on the
-  same client the dense 32-stream short-prompt row flips to imp +3.4% and the
-  982-token row closes from 0.59x to 0.75x. Ledger row in `docs/roadmap.md`
-- Dense counter-probe of the serving claim (`tools/analysis/vllm_conc_ab.sh`
-  with `MODEL_NAME`, `KV_BLOCKS`): Qwen3-14B-NVFP4 vs vLLM 0.27.1 at 8 streams
-  +7.9%, at 32 -7.6%, at 32 with 982-token prompts -41.0%; README and
-  `docs/BENCHMARKS.md` runs 5-7 carry it, the 32-stream lead is a property of
-  the GDN hybrid
-- Cross-engine serving harness `tools/analysis/vllm_conc_ab.sh` (imp vs vLLM,
-  alternating fresh servers, one client) and a prompt-length knob on
-  `conc_client.py`. Roadmap item 0 closes on it: Qwen3.8-27B-NVFP4-vllm, imp
-  leads vLLM 0.27.1 by +24.9% at 32 streams, +15.6% at 8 and +75.5% at 32
-  with 1082-token prompts (3/3 pairs each), vLLM 0.28.0 by +30.0% at 32; the
-  earlier "~1.08x" mixed two clients.
-  Table with PROV in `docs/BENCHMARKS.md`
+### Changed
+
+- F16 KV decode at concurrency no longer takes the cluster (DSMEM) GQA route
+  (2133 vs 318 us per launch at 32 x 1100; gemma-3-12b at 32 streams 186.4 ->
+  229.9 tok/s, +23.3%) (#1877); the kernel, `src/runtime/cluster_launch.h` and
+  its test are removed, `attention_paged.cu` 1216 -> 1032 code LOC (#1878)
+- The unit lane (`ctest -L unit`) has no skips: prefix-cache and per-layer KV
+  accounting run on CPU in CI (62 GPU-lane skips -> 0), one rule instead of an
+  allowlist (#1860, #1861, #1862, #1863, #1864)
+- Static gates mutation-tested: five tools that did not catch what they gate
+  are fixed (#1858); the mutation harness had four dead anchors and a score
+  blind to its own survivors (#1859); all 13 skills rewritten to the no-prose
+  form (#1857)
 
 ### Fixed
-- `imp-cli --bench` pinned `max_seq_len` to pp + tg + 256, which left an
-  F16 KV cache under 10% free at pp >= ~2.3k: the StreamingLLM valve fired
-  on the bench's own prompt, the first decode step produced no token and
-  the run printed 0 tok/s (Llama-3.2-3B-Q8_0 at pp 8192, "0/536 blocks
-  free"; `scripts/bench_longctx_ab.sh` then divided by zero). The headroom
-  is now max(256, 12.5% of pp + tg); pp512 + tg128 stays at 896 tokens, so
-  the perf-gate pool is unchanged. (#1883)
+
 - KV-pressure heuristic counted only the free list against the blocks live
   sequences hold, so a pool one third full of reclaimable prefix-cache blocks
-  read as ">90% full" ("0/2016 free" with 984 reclaimable), auto-enabled
-  StreamingLLM and demoted CUDA graphs one-way for the rest of the process:
-  every wave after the first ran eager. Llama-3.2-3B-Q8_0 F16 KV, 32 streams x
-  1000-token prompts, fresh server: wave 0 2387 tok/s, waves 1-3 1443-1485
-  (ITL p50 7.8 -> 16.5 ms); `server.prefix_cache=false` held 2387-2451 on
-  every wave. The check now adds reclaimable cached blocks and compares
-  against the pool size. With the fix, the same server holds 2392.6 / 2450.7 /
-  2446.7 / 2440.4 tok/s over four waves (ITL p50 7.8 ms) with the prefix cache
-  on. (#1879)
+  read as ">90% full", auto-enabled StreamingLLM and demoted CUDA graphs
+  one-way: every wave after the first ran eager (Llama-3.2-3B-Q8_0, 32 x
+  1000-token streams: 2387 -> 1443-1485 tok/s). Free + reclaimable now
+  compares against the pool; the same server holds 2393-2451 on every wave (#1879)
+- `imp-cli --bench` pinned `max_seq_len` to pp + tg + 256, which left an F16
+  KV cache under 10% free at pp >= ~2.3k and the run printed 0 tok/s
+  (StreamingLLM valve on the bench's own prompt); headroom is now
+  max(256, 12.5%), the pp512 gate shape stays at 896 tokens (#1883)
 
 ## [0.34.0] - 2026-09-02
 
