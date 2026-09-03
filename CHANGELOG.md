@@ -78,7 +78,7 @@ there instead of retelling it.
   server stage ran `imp-server --add-host=...`, printed its help and exited
   (every `make test-server` since #1855); `make test-spec-fidelity` skipped
   on a deleted checkpoint path (`Qwen3.8-27B-NVFP4` -> `-vllm`, same default in `test_real_checkpoints.cpp` and the Makefile target); the `ignore_eos` battery control moves to the chat endpoint, a raw-prompt completion can run past `max_tokens` without an EOS. Both are
-  release-gate-only fixes (#PRNUM_REL)
+  release-gate-only fixes (#1889)
 
 - KV-pressure heuristic counted only the free list against the blocks live
   sequences hold, so a pool one third full of reclaimable prefix-cache blocks
