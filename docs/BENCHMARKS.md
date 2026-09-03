@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-09-03
-commit: 7369777a
+commit: adeaac3f
 -->
 
 # Benchmarks
@@ -713,6 +713,51 @@ Command: `imp-server --model Qwen3-14B-NVFP4 --max-batch 16`, then 16 concurrent
 is the CUTLASS M=16 NVFP4 GEMMs (~57 %, the real per-layer projection compute,
 already batched and largely launch-hidden under CUDA Graphs).
 
+
+### F16 KV decode attention at 32 streams (2026-09-03)
+
+Models whose KV cache stays FP16 under `kv_cache.dtype=auto` (every GGUF
+without an FP8 hint: Llama, Mistral, Gemma, Phi) decoded through a cooperative
+GQA kernel that read 2 bytes per instruction at 22% of DRAM bandwidth. #1880
+replaced it at concurrency with a four-tokens-per-warp kernel that also shares
+each K/V row across up to four Q heads of one CTA; #1882 gave the split-K
+(single-stream, long-context) route the same kernel. Measured on top of #1879
+(before it, every wave after the first ran eager once the prefix cache filled
+the pool, and the wave median hid the kernel).
+
+Aggregate tok/s at 32 concurrent streams, 1000-token prompts, 300-token
+completions, `ignore_eos`, fresh `imp-server` per arm, config arms on one
+image, 2 trials x 3 waves, medians. Harness
+`tools/analysis/prefill_cap_conc_ab.sh` (`CONC=32 PLEN=1000 KV_BLOCKS=3000
+TRIALS=2 WAVES=3 IGNORE_EOS=1`), commit `f70e072a`, CUDA 13.3,
+`attention.paged_f16_multitok=1` (cooperative kernel) vs default 4.
+
+| Model | KV | Heads / HD | cooperative | multitok | delta | ITL p50 |
+|---|---|---|---:|---:|---:|---|
+| Llama-3.2-3B-Instruct-Q8_0 (`speculative.ngram=false`) | F16 (auto) | 24/8, 128 | 1 623.9 | **2 407.6** | +48.3% (trials +49.8 / +48.3) | 14.1 -> 7.8 ms |
+| Phi-4-reasoning-plus-NVFP4 (`kv_cache.dtype=fp16`) | F16 (forced) | 40/10, 128 | 1 099.1 | **1 812.0** | +64.9% (trials +64.8 / +68.4) | 20.3 -> 9.9 ms |
+| gemma-3-12b-it-Q4_K_M (`KV_BLOCKS=2300`) | F16 (auto) | 16/8, 256 | 218.4 | **252.8** | +15.8% (trials +15.9 / +16.3) | 33.6 -> 32.5 ms |
+
+Phi-4 with FP16 KV now reaches the level its FP8 KV reads on the same day
+(1 804-1 850). Gemma's 3000-block pool is 18.9 GB on this model and sits at
+the WDDM edge; the 2300-block run (30.8 GB in use) is the tabulated one.
+
+**Single stream at long context** (`scripts/bench_longctx_ab.sh` with
+`--set kv_cache.max_blocks=N` on the imp-cli line, N = 2400 for 8k/32k and
+5200 for 64k; two images, `speculative.ngram=false`, tg128, 2 rounds,
+medians; #1882 vs the #1880 tree), Llama-3.2-3B-Instruct-Q8_0:
+
+| ctx | before | after | delta |
+|---:|---:|---:|---:|
+| 8 192 | 366.2 | **422.3** | +15.3% |
+| 32 768 | 183.1 | **237.2** | +29.5% |
+| 65 536 | 110.8 | **153.1** | +38.1% |
+
+gemma-3-12b (HD=256) reads flat at 8k (134.8 vs 134.7): its split-K pipeline
+kernel already ran at 1 419 GB/s in the microbench. A 4500-block pool at 64k
+left 8.8% free and both arms decoded inside the StreamingLLM window
+(206-212 tok/s, above the 32k figure); the >90% valve is F16-only, which is
+also why `imp-cli --bench` needed #1883 before it could measure these shapes.
 ## Multi-turn TTFT (hybrid prefix caching, #831 / v0.15.0)
 
 Agentic chat re-sends the full conversation every turn, so on a recurrent
