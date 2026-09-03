@@ -98,7 +98,7 @@ there instead of retelling it.
   left 8.8% free and both arms decoded in the StreamingLLM window);
   gemma-3-12b Q4_K_M (16/8, HD=256) 8k 134.8 vs 134.7 (flat, as the microbench
   said); its 32k point is not measurable on this card (the plan clamps the
-  pool to 696 blocks after the weight caches). (#PRNUM)
+  pool to 696 blocks after the weight caches). (#1882)
 - The F16 cluster (DSMEM) GQA decode kernel, `src/runtime/cluster_launch.h`
   and `tests/test_cluster_launch.cu` are removed; the route was off since
   #1877. `attention_paged.cu` 1216 -> 1032 code LOC, paged oracle
