@@ -80,7 +80,7 @@ there instead of retelling it.
   +64.8% / +68.4%), ITL p50 20.3 -> 9.9 ms, i.e. the level its FP8 KV reaches;
   gemma-3-12b Q4_K_M (16/8, HD=256) 218.4 -> 252.8 (+15.8%, trials +15.9% /
   +16.3%; KV pool 2300 blocks, 30.8 GB VRAM in use, the 3000-block pool read
-  +16.6% with a wave-to-wave spread of 220-294 in the multitok arm). (#PRNUM)
+  +16.6% with a wave-to-wave spread of 220-294 in the multitok arm). (#1880)
 - The F16 cluster (DSMEM) GQA decode kernel, `src/runtime/cluster_launch.h`
   and `tests/test_cluster_launch.cu` are removed; the route was off since
   #1877. `attention_paged.cu` 1216 -> 1032 code LOC, paged oracle
