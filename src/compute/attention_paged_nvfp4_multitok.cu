@@ -310,34 +310,39 @@ bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* 
     dim3 block(BLOCK_THREADS);
     if (num_splits > 1) {
         dim3 grid(batch_size, n_heads, num_splits);
-        if (head_dim == 256)
+        if (head_dim == 256) {
             paged_attention_splitk_nvfp4_multitok_kernel<256>
                 <<<grid, block, smem_bytes, stream>>>(Q, K_cache, V_cache, K_scales, V_scales, partial,
                                                       block_tables, context_lens, n_heads, n_kv_heads,
                                                       block_size, scale, max_num_blocks, num_splits,
                                                       sliding_window, softcap);
-        else
+            IMP_CUDA_CHECK_LAUNCH();
+        } else {
             paged_attention_splitk_nvfp4_multitok_kernel<128>
                 <<<grid, block, smem_bytes, stream>>>(Q, K_cache, V_cache, K_scales, V_scales, partial,
                                                       block_tables, context_lens, n_heads, n_kv_heads,
                                                       block_size, scale, max_num_blocks, num_splits,
                                                       sliding_window, softcap);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
     } else {
         dim3 grid(batch_size, n_heads);
-        if (head_dim == 256)
+        if (head_dim == 256) {
             paged_attention_decode_nvfp4_multitok_kernel<256>
                 <<<grid, block, smem_bytes, stream>>>(Q, K_cache, V_cache, K_scales, V_scales, O,
                                                       block_tables, context_lens, n_heads, n_kv_heads,
                                                       block_size, scale, max_num_blocks, sliding_window,
                                                       softcap, attn_sinks);
-        else
+            IMP_CUDA_CHECK_LAUNCH();
+        } else {
             paged_attention_decode_nvfp4_multitok_kernel<128>
                 <<<grid, block, smem_bytes, stream>>>(Q, K_cache, V_cache, K_scales, V_scales, O,
                                                       block_tables, context_lens, n_heads, n_kv_heads,
                                                       block_size, scale, max_num_blocks, sliding_window,
                                                       softcap, attn_sinks);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
     }
-    IMP_CUDA_CHECK_LAUNCH();
     return true;
 }
 
