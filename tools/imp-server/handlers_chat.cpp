@@ -12,6 +12,7 @@
 #include "tool_call.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
+#include "reasoning_split.h"
 
 #include "api/imp_internal.h"
 #include "vision/image_processor.h"
@@ -528,7 +529,11 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                                 continue;
                         } else if (think_confirmed) {
                             continue;
-                        } else if (think_tokens < kThinkScanLimit) {
+                        } else if (think_tokens < kThinkScanLimit &&
+                                   imp::server::StreamReasoningSplitter::could_open_marker(think_buf)) {
+                            // Hold only while the text could still be the
+                            // start of a marker; a first word releases it
+                            // (the same trade as the chat stream's SCAN).
                             continue;
                         } else {
                             think_strip = false;

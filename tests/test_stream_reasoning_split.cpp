@@ -168,3 +168,55 @@ TEST(StreamReasoningSplit, FlushScanIsANoOpOutsideScan) {
     EXPECT_TRUE(r.reasoning.empty());
     EXPECT_EQ(s.phase(), ThinkPhase::CONTENT);
 }
+
+// The plain-chat trade (thinking off, no tools): the first word proves the
+// answer started, so it streams at once instead of after the 8-token hold.
+TEST(StreamReasoningSplit, PlainTextReleasesTheScanOnTheFirstWord) {
+    StreamReasoningSplitter s(ThinkPhase::SCAN, -1, -1, 8);
+    s.set_release_on_plain_text(true);
+    auto r = s.feed("The", 1);
+    EXPECT_EQ(s.phase(), ThinkPhase::CONTENT);
+    EXPECT_EQ(r.content, "The");
+    EXPECT_TRUE(r.reasoning.empty());
+}
+
+// Without the flag the hold stays what it was: nothing before token 8.
+TEST(StreamReasoningSplit, DefaultScanStillHoldsPlainText) {
+    StreamReasoningSplitter s(ThinkPhase::SCAN, -1, -1, 8);
+    auto r = s.feed("The", 1);
+    EXPECT_EQ(s.phase(), ThinkPhase::SCAN);
+    EXPECT_TRUE(r.content.empty());
+}
+
+// Text that can still grow into a marker is held: a newline, then a split
+// opener, then reasoning, then the closer: all of it classified, none leaked.
+TEST(StreamReasoningSplit, EarlyReleaseKeepsHoldingWhileAMarkerCanStillOpen) {
+    StreamReasoningSplitter s(ThinkPhase::SCAN, -1, -1, 8);
+    s.set_release_on_plain_text(true);
+    auto r = drive(s, {"\n", "<", "think", ">", "reason0 ", "reason1 ", "</think>", "the answer"});
+    EXPECT_EQ(r.content, "the answer") << r.content;
+    EXPECT_NE(r.reasoning.find("reason0"), std::string::npos) << r.reasoning;
+    EXPECT_EQ(r.reasoning.find("the answer"), std::string::npos);
+}
+
+// The empty block a suppressed-thinking prompt provokes: whitespace, then only
+// the closer. Still swallowed with the early release on.
+TEST(StreamReasoningSplit, EarlyReleaseStillSwallowsABareCloser) {
+    StreamReasoningSplitter s(ThinkPhase::SCAN, -1, /*think_end_id=*/42, 8);
+    s.set_release_on_plain_text(true);
+    auto r = drive(s, {"\n", "</think>", "\n\nthe answer"}, /*close_id=*/42);
+    EXPECT_EQ(r.content, "the answer") << r.content;
+    EXPECT_EQ(r.content.find("</think>"), std::string::npos);
+}
+
+TEST(StreamReasoningSplit, CouldOpenMarkerPrefixRule) {
+    EXPECT_TRUE(StreamReasoningSplitter::could_open_marker(""));
+    EXPECT_TRUE(StreamReasoningSplitter::could_open_marker("\n\n"));
+    EXPECT_TRUE(StreamReasoningSplitter::could_open_marker("<"));
+    EXPECT_TRUE(StreamReasoningSplitter::could_open_marker("\n<th"));
+    EXPECT_TRUE(StreamReasoningSplitter::could_open_marker("</thi"));
+    EXPECT_TRUE(StreamReasoningSplitter::could_open_marker("<think>"));
+    EXPECT_FALSE(StreamReasoningSplitter::could_open_marker("The"));
+    EXPECT_FALSE(StreamReasoningSplitter::could_open_marker("<b>"));
+    EXPECT_FALSE(StreamReasoningSplitter::could_open_marker(" <thinking"));
+}

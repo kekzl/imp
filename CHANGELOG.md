@@ -11,6 +11,16 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- Streaming TTFT: the reasoning scan no longer holds the first 8 tokens of a
+  thinking-off chat answer (or of a `/v1/completions` answer on a think model)
+  once the first word proves no `<think>` is coming; the hold stays on tool
+  requests. Qwen3.8-27B-NVFP4, 27-token prompt, client-side TTFT 97-105 ->
+  32-62 ms; 1116-token prompt 195-229 -> 130-146 ms; completions 116-147 ->
+  51-64 ms. The reasoning stream holds only a partial marker instead of a
+  fixed 7 bytes, so the first reasoning delta lands one to two tokens earlier
+
 ## [0.36.0] - 2026-09-03
 
 ### Changed

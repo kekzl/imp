@@ -118,6 +118,30 @@ public:
     // since a call is never reasoning — use this to inspect and then release it.
     const std::string& held() const { return scan_buf_; }
 
+    // Release the SCAN hold as soon as the held text can no longer be the start
+    // of a marker (see could_open_marker). Off by default: the bounded hold is
+    // what keeps an unmarked chain of thought from streaming as the answer on
+    // the agent path, where the client waits for a tool call anyway. A plain
+    // chat request with thinking off paid the whole hold (8 tokens, ~85 ms on
+    // Qwen3.8-27B) on every answer for a protection that only ever covered a
+    // chain of thought shorter than the hold.
+    void set_release_on_plain_text(bool on) { release_on_plain_text_ = on; }
+
+    // True while `buf` (leading whitespace ignored) is empty or a prefix of
+    // "<think>" / "</think>": the model may still be opening (or closing) a
+    // block, so the text is undecided. False for anything else: a first word
+    // proves the answer started here.
+    static bool could_open_marker(const std::string& buf) {
+        size_t ns = buf.find_first_not_of("\n\r\t ");
+        if (ns == std::string::npos)
+            return true;
+        const size_t n = buf.size() - ns;
+        auto prefix_of = [&](const char* marker, size_t len) {
+            return n <= len && buf.compare(ns, n, marker, n) == 0;
+        };
+        return prefix_of("<think>", 7) || prefix_of("</think>", 8);
+    }
+
     // Give up the hold: everything buffered is content, and the phase moves on.
     // Without this the hold that stops a chain of thought leaking would also
     // swallow a tool call whole, and its argument deltas would never stream.
@@ -188,7 +212,7 @@ public:
                     r.reasoning_tokens++;
                     return r;
                 }
-                if (scan_count_ >= scan_limit_) {
+                if ((release_on_plain_text_ && !could_open_marker(scan_buf_)) || scan_count_ >= scan_limit_) {
                     phase_ = ThinkPhase::CONTENT;
                     work = scan_buf_;
                     scan_buf_.clear();
@@ -228,7 +252,20 @@ public:
                     token_live = false;
                     continue;  // process the post-</think> remainder as content
                 }
-                emit_with_overlap(rbuf_, r.reasoning);  // hold 7B for a split marker
+                // Same rule as CONTENT below: hold back only a trailing partial
+                // marker or an incomplete codepoint. The fixed 7-byte overlap
+                // this replaced cost the first reasoning delta one to two
+                // tokens (measured 20-27 ms client-side on Qwen3.8-27B-NVFP4).
+                {
+                    size_t hold = pending_tag_prefix(rbuf_);
+                    size_t utf8_tail = rbuf_.size() - imp::stream::utf8_complete_len(rbuf_);
+                    if (utf8_tail > hold)
+                        hold = utf8_tail;
+                    if (rbuf_.size() > hold) {
+                        r.reasoning += rbuf_.substr(0, rbuf_.size() - hold);
+                        rbuf_.erase(0, rbuf_.size() - hold);
+                    }
+                }
                 return r;
             }
 
@@ -356,6 +393,7 @@ private:
     int scan_limit_;
     int max_reentries_;
     bool content_started_;
+    bool release_on_plain_text_ = false;
     int scan_count_ = 0;
     int reentries_ = 0;
     std::string scan_buf_;  // SCAN: undecided leading text
