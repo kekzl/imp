@@ -1620,7 +1620,14 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         // Reduces KV global memory reads by n_q_per_kv× (4-8×).
         // Cluster dimension must be a power of 2 (CUDA requirement).
         bool valid_cluster_dim = (n_q_per_kv == 2 || n_q_per_kv == 4 || n_q_per_kv == 8);
-        if (valid_cluster_dim && num_ctx_blocks >= 8 &&
+        // Route disabled 2026-09-03: it is only reachable without split-K,
+        // i.e. at batch x heads >= 2 x SMs (batch >= 11 on a 32-head model) or
+        // under 64 tokens of context, and there the cluster kernel measured
+        // 2133 us per launch at 32 x 1100 (32/8 heads, HD=128, 68 GB/s, DRAM
+        // 3.5%, 33% warps active) and 7861 us at 32 x 4096 against 318 / 1166
+        // us on the GQA kernel below (6.7x). Kernel kept for a removal PR.
+        const bool cluster_route = false;
+        if (cluster_route && valid_cluster_dim && num_ctx_blocks >= 8 &&
             (head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 256)) {
             size_t cluster_smem = 2 * block_size * 2 * head_dim * sizeof(half) +
                                   NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * head_dim * sizeof(float);

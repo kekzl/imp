@@ -191,7 +191,8 @@ def main():
     # PagedFp8Decode.ServingShapeMicrobench (test_attention_paged_oracle.cu).
     # 1082 -> 1084 (#this): PagedNvfp4Multitok.MatchesReferenceBothRoutes and
     # PagedNvfp4TcDecode.LongContextMicrobench (test_attention_paged_oracle.cu).
-    PINNED = 1084
+    # 1084 -> 1085 (#this): PagedF16Decode.ServingShapeMicrobench (test_attention_paged_oracle.cu).
+    PINNED = 1085
 
     text = CMAKE.read_text()
     mods = module_sources(text)

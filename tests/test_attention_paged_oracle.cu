@@ -964,6 +964,103 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
 }
 
 // ---------------------------------------------------------------------------
+// F16 paged decode microbench (the default KV dtype of Q8_0 GGUFs and of
+// checkpoints that declare no KV quant): IMP_F16_BENCH_BATCH (32),
+// IMP_F16_BENCH_CTX (1100), IMP_F16_BENCH_HEADS (32), IMP_F16_BENCH_KV_HEADS
+// (8), HD=128. Split-K scratch registered like the engine. Timing only.
+// ---------------------------------------------------------------------------
+TEST(PagedF16Decode, ServingShapeMicrobench) {
+    auto env_int = [](const char* k, int d) {
+        const char* v = std::getenv(k);
+        return v ? std::atoi(v) : d;
+    };
+    const int batch = env_int("IMP_F16_BENCH_BATCH", 32);
+    const int kv_len = env_int("IMP_F16_BENCH_CTX", 1100);
+    const int n_heads = env_int("IMP_F16_BENCH_HEADS", 32);
+    const int n_kv_heads = env_int("IMP_F16_BENCH_KV_HEADS", 8);
+    const int head_dim = env_int("IMP_F16_BENCH_HD", 128);
+    const float scale = 1.0f / std::sqrt((float)head_dim);
+    const int blocks_per_seq = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const int num_blocks = batch * blocks_per_seq;
+    const size_t q_elems = (size_t)batch * n_heads * head_dim;
+    const size_t kv_elems = (size_t)num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    std::vector<half> Qh(q_elems), Kc(kv_elems), Vc(kv_elems);
+    lcg_fill(Qh, 0x1F16u, 2.0f);
+    lcg_fill(Kc, 0x2F16u, 1.0f);
+    lcg_fill(Vc, 0x3F16u, 1.0f);
+    std::vector<int> bt((size_t)batch * blocks_per_seq), ctx(batch, kv_len);
+    for (int b = 0; b < batch; b++)
+        for (int i = 0; i < blocks_per_seq; i++)
+            bt[(size_t)b * blocks_per_seq + i] = b * blocks_per_seq + i;
+    void* d_q = up(Qh.data(), q_elems * sizeof(half));
+    void* d_k = up(Kc.data(), kv_elems * sizeof(half));
+    void* d_v = up(Vc.data(), kv_elems * sizeof(half));
+    int* d_bt = (int*)up(bt.data(), bt.size() * sizeof(int));
+    int* d_ctx = (int*)up(ctx.data(), ctx.size() * sizeof(int));
+    void* d_o = nullptr;
+    cudaMalloc(&d_o, q_elems * sizeof(half));
+    Tensor Q = f16_tensor(d_q, {batch, 1, n_heads, head_dim});
+    Tensor K = f16_tensor(d_k, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor V = f16_tensor(d_v, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor O = f16_tensor(d_o, {batch, 1, n_heads, head_dim});
+    void* d_scratch = nullptr;
+    const size_t scratch_bytes = (size_t)64 << 20;
+    cudaMalloc(&d_scratch, scratch_bytes);
+    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
+    auto launch = [&]() {
+        paged_attention_decode(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream,
+                               blocks_per_seq);
+    };
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    float warm_ms = 0.0f;
+    for (int round = 0; round < 100000 && warm_ms < 1000.0f; round++) {
+        cudaEventRecord(t0, stream);
+        for (int i = 0; i < 100; i++)
+            launch();
+        cudaEventRecord(t1, stream);
+        cudaEventSynchronize(t1);
+        float ms = 0.0f;
+        cudaEventElapsedTime(&ms, t0, t1);
+        warm_ms += ms;
+    }
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "F16 paged decode launch";
+    const int iters = 200;
+    cudaEventRecord(t0, stream);
+    for (int i = 0; i < iters; i++)
+        launch();
+    cudaEventRecord(t1, stream);
+    cudaEventSynchronize(t1);
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, t0, t1);
+    const double us = 1000.0 * ms / iters;
+    const double bytes = 2.0 * (double)batch * kv_len * n_kv_heads * head_dim * sizeof(half);
+    printf(
+        "PagedF16Decode: batch=%d ctx=%d heads=%d/%d hd=%d: %.1f us/launch, KV %.1f MB, %.0f GB/s (warm %.2f "
+        "s)\n",
+        batch, kv_len, n_heads, n_kv_heads, head_dim, us, bytes / 1e6, bytes / (us * 1e-6) / 1e9,
+        warm_ms / 1000.0);
+    std::vector<float> Oh = read_o(d_o, q_elems);
+    size_t nonfinite = 0;
+    for (float h : Oh)
+        if (!std::isfinite(h))
+            nonfinite++;
+    EXPECT_EQ(nonfinite, 0u);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+    cudaFree(d_o);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
+    cudaStreamDestroy(stream);
+}
+
+// ---------------------------------------------------------------------------
 // NVFP4-TC paged decode microbench (the hybrid's default decode attention):
 // IMP_NVFP4_BENCH_BATCH (1), IMP_NVFP4_BENCH_CTX (77000), IMP_NVFP4_BENCH_HEADS
 // (24), IMP_NVFP4_BENCH_KV_HEADS (4), IMP_NVFP4_BENCH_HD (256). Random packed
