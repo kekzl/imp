@@ -140,7 +140,7 @@ there instead of retelling it.
   32 streams x 1000-token prompts (`tools/analysis/prefill_cap_conc_ab.sh`, 2
   trials x 3 waves) 1165.2 vs 1161.5 (medians, -0.3%; trials +0.1% / +0.8%),
   neutral. Cumulative single-stream vs #1882's tree: 32k 81.87 -> 85.70
-  (+4.7%), 64k 74.30 -> 79.67 (+7.2%). (#PRNUM)
+  (+4.7%), 64k 74.30 -> 79.67 (+7.2%). (#1887)
 - FP8 paged decode attention: the e4m3 bytes now convert in pairs
   (`cvt e4m3x2 -> f16x2`, HMUL2 dot) instead of one scalar conversion per
   byte; ncu had the four-token kernel issue-bound (SM 70%, DRAM 33%).
