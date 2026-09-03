@@ -53,6 +53,12 @@ there instead of retelling it.
   `tests/test_server_ignore_eos.py` in `make test-server`.
   `tools/analysis/burst_stream_client.py` (TTFT / ITL / gaps per wave) and
   `tools/analysis/prefill_cap_conc_ab.sh` (config or two-image A/B with it)
+- FP8 paged decode attention: the e4m3 bytes now convert in pairs
+  (`cvt e4m3x2 -> f16x2`, HMUL2 dot) instead of one scalar conversion per
+  byte; ncu had the four-token kernel issue-bound (SM 70%, DRAM 33%).
+  Microbench 32 x 1100: 107.2 -> 92.4 us, 32 x 4096: 380.0 -> 332.4 us,
+  oracle unchanged. Serving on Qwen3-14B-NVFP4 at 32
+  streams: 982-token prompts +3.4% (3/3), 38-token prompts +0.8%
 - FP8 paged decode attention (HD=128, the serving path without split-K)
   processes four tokens per warp iteration (`attention.paged_fp8_multitok`,
   default 4; 1 = the plain kernel): K and V rows of four tokens in flight

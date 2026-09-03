@@ -31,6 +31,18 @@ __device__ __forceinline__ float fp8_bits_to_float(uint8_t bits) {
     return static_cast<float>(val);
 }
 
+// Four packed e4m3 bytes -> two half2 with two cvt instructions (e4m3x2 ->
+// f16x2) instead of four byte extractions and four scalar conversions. ncu on
+// the byte-wise form at 32 x 1100: SM throughput 70%, DRAM 33%, stall
+// not_selected 2.25, i.e. issue-bound rather than memory-bound.
+__device__ __forceinline__ void fp8x4_to_half2x2(uint32_t packed, half2& lo, half2& hi) {
+    __half2_raw r0 = __nv_cvt_fp8x2_to_halfraw2(static_cast<__nv_fp8x2_storage_t>(packed & 0xFFFFu),
+                                                __NV_E4M3);
+    __half2_raw r1 = __nv_cvt_fp8x2_to_halfraw2(static_cast<__nv_fp8x2_storage_t>(packed >> 16), __NV_E4M3);
+    lo = half2(r0);
+    hi = half2(r1);
+}
+
 template <int HEAD_DIM, int TOK>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_multitok_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -51,16 +63,13 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
     const int lane_id = threadIdx.x % WARP_SIZE;
     const int lane_offset = lane_id * ELEMS;
 
-    float q_reg[ELEMS];
+    half2 q_h2[ELEMS / 2];  // the lane's four q elements as two half2
     {
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q + (int64_t)batch_idx * n_heads * HEAD_DIM +
                                                              (int64_t)head_idx * HEAD_DIM + lane_offset);
 #pragma unroll
-        for (int i = 0; i < ELEMS / 2; i++) {
-            half2 h2 = Q_ptr2[i];
-            q_reg[2 * i] = __half2float(h2.x);
-            q_reg[2 * i + 1] = __half2float(h2.y);
-        }
+        for (int i = 0; i < ELEMS / 2; i++)
+            q_h2[i] = Q_ptr2[i];
     }
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
@@ -110,10 +119,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
             float dot[TOK];
 #pragma unroll
             for (int i = 0; i < TOK; i++) {
-                dot[i] = q_reg[0] * fp8_bits_to_float(kp[i] & 0xFF) +
-                         q_reg[1] * fp8_bits_to_float((kp[i] >> 8) & 0xFF) +
-                         q_reg[2] * fp8_bits_to_float((kp[i] >> 16) & 0xFF) +
-                         q_reg[3] * fp8_bits_to_float((kp[i] >> 24) & 0xFF);
+                half2 k_lo, k_hi;
+                fp8x4_to_half2x2(kp[i], k_lo, k_hi);
+                const float2 p0 = __half22float2(__hmul2(q_h2[0], k_lo));
+                const float2 p1 = __half22float2(__hmul2(q_h2[1], k_hi));
+                dot[i] = (p0.x + p0.y) + (p1.x + p1.y);
             }
             // TOK independent warp reductions (the shuffle chains interleave).
 #pragma unroll
@@ -153,10 +163,14 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
 #pragma unroll
             for (int i = 0; i < TOK; i++) {
                 const float w = p[i] * kv_scale;
-                o_reg[0] += w * fp8_bits_to_float(vp[i] & 0xFF);
-                o_reg[1] += w * fp8_bits_to_float((vp[i] >> 8) & 0xFF);
-                o_reg[2] += w * fp8_bits_to_float((vp[i] >> 16) & 0xFF);
-                o_reg[3] += w * fp8_bits_to_float((vp[i] >> 24) & 0xFF);
+                half2 v_lo, v_hi;
+                fp8x4_to_half2x2(vp[i], v_lo, v_hi);
+                const float2 f0 = __half22float2(v_lo);
+                const float2 f1 = __half22float2(v_hi);
+                o_reg[0] += w * f0.x;
+                o_reg[1] += w * f0.y;
+                o_reg[2] += w * f1.x;
+                o_reg[3] += w * f1.y;
             }
         }
     }
@@ -186,6 +200,9 @@ void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_c
     const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * 128 * sizeof(float);
     dim3 grid(batch_size, n_heads);
     dim3 block(BLOCK_THREADS);
+    // TOK=4. An 8-token instance measured 94.2 vs 91.7 us at 32 x 1100 and
+    // 327.9 vs 328.8 at 4096 (2026-09-03): the extra registers cost what the
+    // extra loads in flight bought.
     paged_attention_decode_fp8_multitok_kernel<128, 4>
         <<<grid, block, smem_bytes, stream>>>(Q, K_cache, V_cache, O, block_tables, context_lens, n_heads,
                                               n_kv_heads, block_size, scale, kv_scale, max_num_blocks,
