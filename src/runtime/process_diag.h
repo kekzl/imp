@@ -78,6 +78,9 @@ bool process_diag_fa2_dense_2cta();  // dense Bq=128 FA2 at 2 CTAs/SM (attention
 int process_diag_paged_fp8_multitok();  // FP8 paged decode tokens per warp iteration
                                         // (attention.paged_fp8_multitok)
 void process_diag_set_paged_fp8_multitok(int v);
+int process_diag_paged_nvfp4_multitok();  // NVFP4 paged decode tokens per warp iteration
+                                          // (attention.paged_nvfp4_multitok)
+void process_diag_set_paged_nvfp4_multitok(int v);
 void process_diag_set_fa2_dense_2cta(bool v);
 bool process_diag_fa2_heavy_first();  // causal FA2 CTA order, heavy q-tiles first (attention.fa2_heavy_first)
 void process_diag_set_fa2_heavy_first(bool v);

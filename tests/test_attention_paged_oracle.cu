@@ -899,6 +899,200 @@ TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
 }
 
 // ---------------------------------------------------------------------------
+// The four-token NVFP4 kernels (attention.paged_nvfp4_multitok=4), plain and
+// split-K, against the fp64 reference: kv_len 16/64/333/1024 x {split-K
+// scratch registered (batch-1 shapes take split-K then), fallback forced}.
+// Both must stay inside the NVFP4 envelope with the scalar kernels' error.
+// ---------------------------------------------------------------------------
+TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    const int n_heads = 24, n_kv_heads = 4, head_dim = 256;
+    const float scale = 1.0f / std::sqrt((float)head_dim);
+    void* d_scratch = nullptr;
+    const size_t scratch_bytes = (size_t)16 << 20;
+    cudaMalloc(&d_scratch, scratch_bytes);
+    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
+    for (int force_fallback : {0, 1}) {
+        process_diag_set_force_splitk_fallback(force_fallback != 0);
+        for (int kv_len : {16, 64, 333, 1024}) {
+            const int num_blocks = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            const size_t q_elems = (size_t)n_heads * head_dim;
+            const size_t kv_elems = (size_t)kv_len * n_kv_heads * head_dim;
+            std::vector<half> Qh(q_elems), Kh(kv_elems), Vh(kv_elems);
+            lcg_fill(Qh, 0x5E71u + kv_len, 2.0f);
+            lcg_fill(Kh, 0x5E72u + kv_len, 2.0f);
+            lcg_fill(Vh, 0x5E73u + kv_len, 1.0f);
+            std::vector<double> ref;
+            ref_decode_f64(Qh, Kh, Vh, ref, kv_len, n_heads, n_kv_heads, head_dim, scale);
+            std::vector<int> bt(num_blocks);
+            for (int i = 0; i < num_blocks; i++)
+                bt[i] = i;
+            int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
+            int ctx = kv_len;
+            int* d_ctx = (int*)up(&ctx, sizeof(int));
+            void* d_q = up(Qh.data(), q_elems * sizeof(half));
+            void* d_o = nullptr;
+            cudaMalloc(&d_o, q_elems * sizeof(half));
+            PathCtx c{stream,   kv_len,     n_heads, n_kv_heads,
+                      head_dim, num_blocks, scale,   q_elems,
+                      &Kh,      &Vh,        &ref,    f16_tensor(d_q, {1, 1, n_heads, head_dim}),
+                      d_o,      d_bt,       d_ctx};
+            process_diag_set_paged_nvfp4_multitok(1);
+            ErrStats e_plain = PathNVFP4::run(c);
+            process_diag_set_paged_nvfp4_multitok(4);
+            ErrStats e_mt = PathNVFP4::run(c);
+            EXPECT_EQ(e_plain.nan_count, 0) << "kv_len " << kv_len;
+            EXPECT_EQ(e_mt.nan_count, 0) << "kv_len " << kv_len;
+            EXPECT_LT(e_plain.max_rel, PathNVFP4::envelope())
+                << "scalar kv_len " << kv_len << ": " << e_plain.str();
+            EXPECT_LT(e_mt.max_rel, PathNVFP4::envelope())
+                << "multitok kv_len " << kv_len << ": " << e_mt.str();
+            printf("PagedNvfp4Multitok %s kv_len=%d: scalar %s | multitok %s\n",
+                   force_fallback ? "plain " : "splitK", kv_len, e_plain.str().c_str(), e_mt.str().c_str());
+            cudaFree(d_q);
+            cudaFree(d_o);
+            cudaFree(d_bt);
+            cudaFree(d_ctx);
+        }
+    }
+    process_diag_set_force_splitk_fallback(false);
+    process_diag_set_paged_nvfp4_multitok(4);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
+    cudaStreamDestroy(stream);
+}
+
+// ---------------------------------------------------------------------------
+// NVFP4-TC paged decode microbench (the hybrid's default decode attention):
+// IMP_NVFP4_BENCH_BATCH (1), IMP_NVFP4_BENCH_CTX (77000), IMP_NVFP4_BENCH_HEADS
+// (24), IMP_NVFP4_BENCH_KV_HEADS (4), IMP_NVFP4_BENCH_HD (256). Random packed
+// nibbles and UE4M3 scale bytes masked to finite small codes; prints us/launch
+// and the KV + scale bytes it moves per second. Finite-output check only.
+// ---------------------------------------------------------------------------
+TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
+    auto env_int = [](const char* k, int d) {
+        const char* v = std::getenv(k);
+        return v ? std::atoi(v) : d;
+    };
+    const int batch = env_int("IMP_NVFP4_BENCH_BATCH", 1);
+    const int kv_len = env_int("IMP_NVFP4_BENCH_CTX", 77000);
+    const int n_heads = env_int("IMP_NVFP4_BENCH_HEADS", 24);
+    const int n_kv_heads = env_int("IMP_NVFP4_BENCH_KV_HEADS", 4);
+    const int head_dim = env_int("IMP_NVFP4_BENCH_HD", 256);
+    const int half_hd = head_dim / 2;
+    const float scale = 1.0f / std::sqrt((float)head_dim);
+    const int blocks_per_seq = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const int num_blocks = batch * blocks_per_seq;
+    const size_t q_elems = (size_t)batch * n_heads * head_dim;
+    const size_t kv_bytes = (size_t)num_blocks * BLOCK_SIZE * n_kv_heads * half_hd;
+    const size_t sc_bytes = (size_t)num_blocks * BLOCK_SIZE * n_kv_heads * (head_dim / 16);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    std::vector<half> Qh(q_elems);
+    lcg_fill(Qh, 0x4F9Cu, 2.0f);
+    std::vector<uint8_t> Kq(kv_bytes), Vq(kv_bytes), Ks(sc_bytes), Vs(sc_bytes);
+    uint32_t s = 0x7654321u;
+    for (size_t i = 0; i < kv_bytes; i++) {
+        s = s * 1664525u + 1013904223u;
+        Kq[i] = (uint8_t)(s >> 24);
+        s = s * 1664525u + 1013904223u;
+        Vq[i] = (uint8_t)(s >> 24);
+    }
+    for (size_t i = 0; i < sc_bytes; i++) {
+        s = s * 1664525u + 1013904223u;
+        Ks[i] = (uint8_t)(0x30 + ((s >> 24) & 0x0F));  // e4m3 codes 0x30..0x3F: 0.25 .. 1.875
+        s = s * 1664525u + 1013904223u;
+        Vs[i] = (uint8_t)(0x30 + ((s >> 24) & 0x0F));
+    }
+    std::vector<int> bt((size_t)batch * blocks_per_seq), ctx(batch, kv_len);
+    for (int b = 0; b < batch; b++)
+        for (int i = 0; i < blocks_per_seq; i++)
+            bt[(size_t)b * blocks_per_seq + i] = b * blocks_per_seq + i;
+    void* d_q = up(Qh.data(), q_elems * sizeof(half));
+    void* d_k = up(Kq.data(), kv_bytes);
+    void* d_v = up(Vq.data(), kv_bytes);
+    void* d_ks = up(Ks.data(), sc_bytes);
+    void* d_vs = up(Vs.data(), sc_bytes);
+    int* d_bt = (int*)up(bt.data(), bt.size() * sizeof(int));
+    int* d_ctx = (int*)up(ctx.data(), ctx.size() * sizeof(int));
+    void* d_o = nullptr;
+    cudaMalloc(&d_o, q_elems * sizeof(half));
+    Tensor Q = f16_tensor(d_q, {batch, 1, n_heads, head_dim});
+    Tensor K = raw_tensor(d_k, QType::FP4_E2M1, {num_blocks, BLOCK_SIZE, n_kv_heads, half_hd});
+    Tensor V = raw_tensor(d_v, QType::FP4_E2M1, {num_blocks, BLOCK_SIZE, n_kv_heads, half_hd});
+    Tensor O = f16_tensor(d_o, {batch, 1, n_heads, head_dim});
+    // The engine registers a split-K scratch at init; batch-1 long context
+    // takes the split-K route only with one (24 CTAs walk 77k tokens
+    // serially otherwise, 11.6 ms per launch measured 2026-09-03).
+    const int use_tc = env_int("IMP_NVFP4_BENCH_TC", 0);
+    process_diag_set_paged_nvfp4_multitok(env_int("IMP_NVFP4_BENCH_MULTITOK", 4));
+    void* d_scratch = nullptr;
+    const size_t scratch_bytes = (size_t)64 << 20;
+    cudaMalloc(&d_scratch, scratch_bytes);
+    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
+    auto launch = [&]() {
+        if (use_tc)
+            paged_attention_decode_nvfp4_tc(Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, d_bt,
+                                            d_ctx, BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream,
+                                            blocks_per_seq);
+        else
+            paged_attention_decode_nvfp4(Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, d_bt, d_ctx,
+                                         BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream, blocks_per_seq);
+    };
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    // warm > 1 s of wall time (idle downclock ramps in ~1 s on this box).
+    float warm_ms = 0.0f;
+    for (int round = 0; round < 100000 && warm_ms < 1000.0f; round++) {
+        cudaEventRecord(t0, stream);
+        for (int i = 0; i < 100; i++)
+            launch();
+        cudaEventRecord(t1, stream);
+        cudaEventSynchronize(t1);
+        float ms = 0.0f;
+        cudaEventElapsedTime(&ms, t0, t1);
+        warm_ms += ms;
+    }
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4-TC paged decode launch";
+    const int iters = (kv_len >= 20000) ? 100 : 200;
+    cudaEventRecord(t0, stream);
+    for (int i = 0; i < iters; i++)
+        launch();
+    cudaEventRecord(t1, stream);
+    cudaEventSynchronize(t1);
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, t0, t1);
+    const double us = 1000.0 * ms / iters;
+    const double bytes = 2.0 * (double)batch * kv_len * n_kv_heads * (half_hd + head_dim / 16);
+    printf(
+        "PagedNvfp4TcDecode: tc=%d multitok=%d batch=%d ctx=%d heads=%d/%d hd=%d: %.1f us/launch, KV+scales "
+        "%.1f MB, "
+        "%.0f GB/s (warm %.2f s)\n",
+        use_tc, process_diag_paged_nvfp4_multitok(), batch, kv_len, n_heads, n_kv_heads, head_dim, us,
+        bytes / 1e6, bytes / (us * 1e-6) / 1e9, warm_ms / 1000.0);
+    std::vector<float> Oh = read_o(d_o, q_elems);
+    size_t nonfinite = 0;
+    for (float h : Oh)
+        if (!std::isfinite(h))
+            nonfinite++;
+    EXPECT_EQ(nonfinite, 0u);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_ks);
+    cudaFree(d_vs);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+    cudaFree(d_o);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
+    cudaStreamDestroy(stream);
+}
+
+// ---------------------------------------------------------------------------
 // Serving-shape microbench of the FP8 paged decode kernel (2026-09-03): the
 // dense Qwen3-14B profile at 32 streams x ~1.1k context read this kernel at
 // 33.4% of kernel time (41800 launches x 190 us, ~25% of DRAM bandwidth), so
@@ -957,6 +1151,11 @@ TEST(PagedFp8Decode, ServingShapeMicrobench) {
     Tensor V = raw_tensor(d_v, QType::FP8_E4M3, {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor O = f16_tensor(d_o, {batch, 1, n_heads, head_dim});
 
+    void* d_scratch = nullptr;
+    const size_t scratch_bytes = (size_t)64 << 20;
+    cudaMalloc(&d_scratch, scratch_bytes);
+    paged_attention_set_splitk_scratch(d_scratch,
+                                       scratch_bytes);  // batch-1 shapes take split-K like the engine
     auto launch = [&]() {
         paged_attention_decode_fp8(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, 1.0f, kv_len, 0, 0.0f, stream,
                                    blocks_per_seq);
@@ -1001,6 +1200,8 @@ TEST(PagedFp8Decode, ServingShapeMicrobench) {
     cudaFree(d_bt);
     cudaFree(d_ctx);
     cudaFree(d_o);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
     cudaStreamDestroy(stream);
 }
 }  // namespace imp

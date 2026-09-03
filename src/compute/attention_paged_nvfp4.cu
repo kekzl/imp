@@ -3,6 +3,7 @@
 #include "compute/attention.h"
 #include "quant/turboquant_fp4.cuh"
 #include "core/logging.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -440,6 +441,20 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
                                            &scratch_ptr);
 
+    // attention.paged_nvfp4_multitok: four tokens per warp iteration for
+    // HD=128/256 (attention_paged_nvfp4_multitok.cu), both routes.
+    if (process_diag_paged_nvfp4_multitok() > 1 &&
+        paged_attention_decode_nvfp4_multitok_launch(
+            reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
+            reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales,
+            reinterpret_cast<half*>(O.data), static_cast<float*>(scratch_ptr), block_tables, context_lens,
+            batch_size, n_heads, n_kv_heads, head_dim, block_size, scale, max_num_blocks, num_splits,
+            sliding_window, softcap, sinks_h, stream)) {
+        if (num_splits > 1)
+            paged_attention_launch_reduce(static_cast<float*>(scratch_ptr), reinterpret_cast<half*>(O.data),
+                                          batch_size, n_heads, head_dim, num_splits, stream, sinks_h);
+        return;
+    }
     if (num_splits > 1) {
         float* partial = static_cast<float*>(scratch_ptr);
         dim3 grid1(batch_size, n_heads, num_splits);

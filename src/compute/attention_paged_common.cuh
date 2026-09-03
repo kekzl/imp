@@ -251,7 +251,13 @@ static inline int compute_splitk_splits(int batch_size, int n_heads, int head_di
     int num_splits = 1;
     static int num_sms_cached = kpar_n_sms();
     if (num_ctx_blocks >= 4 && total_blocks_nosplit < 2 * num_sms_cached && scratch_ptr != nullptr) {
-        int target_blocks = 2 * num_sms_cached;
+        // 4 CTAs per SM (was 2 until 2026-09-03). Measured on the four-token
+        // NVFP4 kernel (24/4 heads, HD=256, batch 1, warm >1 s): 2x reads
+        // 4k 69.2 / 8k 44.2 / 16k 72.5 / 32k 107.0 / 77k 241.3 us per launch
+        // (the sub-wave shapes at 2x are bistable), 4x reads 25.8 / 28.7 /
+        // 48.5 / 99.3 / 209.6 us; at 2x the 77k launch ran ~35% warps active.
+        const int cta_per_sm = 4;
+        int target_blocks = cta_per_sm * num_sms_cached;
         num_splits = (target_blocks + total_blocks_nosplit - 1) / total_blocks_nosplit;
         num_splits = min(num_splits, num_ctx_blocks);
         num_splits = min(num_splits, 32);
