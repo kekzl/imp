@@ -207,7 +207,7 @@ test-spec-fidelity: build
 		-e IMP_TEST_MODEL_SPEC_FIDELITY=$(SPEC_FIDELITY_MODEL) \
 		$(DOCKER_IMG) test-e2e --gtest_filter="SpecCaptureFidelityTest.CachedGraphMatchesEagerForward"
 
-SPEC_FIDELITY_MODEL ?= /models/Qwen3.8-27B-NVFP4
+SPEC_FIDELITY_MODEL ?= /models/Qwen3.8-27B-NVFP4-vllm
 
 # Vision GPU golden (R9 / #583): SigLIP + gemma4v encoder + projector tail.
 # Mounts $(HOME)/models (symlink targets resolve) + the committed fixture.

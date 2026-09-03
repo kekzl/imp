@@ -23,7 +23,7 @@ namespace {
 // Skipped where the model is absent, which includes CI.
 TEST(MtpProbe, FindsTheHeadInARealCheckpoint) {
     const char* env = std::getenv("IMP_MTP_MODEL");
-    std::string path = env ? env : "/models/Qwen3.8-27B-NVFP4";
+    std::string path = env ? env : "/models/Qwen3.8-27B-NVFP4-vllm";
     if (!fs::exists(path))
         GTEST_SKIP() << "checkpoint not present: " << path;
     EXPECT_TRUE(imp::probe_mtp_head(path)) << "known to carry mtp.fc.weight (15 tensors)";
