@@ -53,6 +53,12 @@ there instead of retelling it.
   `tests/test_server_ignore_eos.py` in `make test-server`.
   `tools/analysis/burst_stream_client.py` (TTFT / ITL / gaps per wave) and
   `tools/analysis/prefill_cap_conc_ab.sh` (config or two-image A/B with it)
+- F16 KV decode attention at concurrency: the cluster (DSMEM) GQA route is
+  off. It was reachable only without split-K, where it read 2133 us per launch
+  at 32 streams x 1100 context (68 GB/s) against 318 us on the GQA kernel
+  (6.7x); batch 1 unchanged. gemma-3-12b at 32 streams x 1001-token prompts:
+  186.4 -> 229.9 tok/s (+23.3%), ITL p95 191.4 -> 128.9 ms; Llama-3.2-3B (GQA
+  factor 3, never routed) neutral.
 - NVFP4 paged decode attention (the hybrid's default) processes four tokens
   per warp iteration too (`attention.paged_nvfp4_multitok`, default 4, plain
   and split-K kernels), and the split-K rule targets 4 CTAs per SM instead
