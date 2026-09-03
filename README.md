@@ -2,7 +2,7 @@
 layer: L0
 audience: newcomers
 verified: 2026-09-03
-commit: 7369777a
+commit: 151ff123
 -->
 
 <p align="center">
@@ -53,29 +53,52 @@ prompts (table with provenance in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
 
 ## 60-second quickstart
 
-Everything runs in Docker. You do not need a CUDA toolkit on the host. The
-worked example is **Qwen3.8-27B**: a 27B multimodal model, quantized to NVFP4 so
-it fits a single 5090 with room for a real context.
+Everything runs in Docker; the host needs no CUDA toolkit. The worked example
+is **Qwen3.8-27B**, a 27B multimodal model quantized to NVFP4 so it fits one
+5090 with room for a real context. The 60 seconds start once the weights are on
+disk; the two steps before that are a build and a download.
 
-**Get the weights** (19.2 GiB, download only, nothing to convert). The
-checkpoint is [kekzle/Qwen3.8-27B-NVFP4-vllm](https://huggingface.co/kekzle/Qwen3.8-27B-NVFP4-vllm),
-an `imp-quantize --format vllm` export: the same directory also loads in
-vLLM (verified on 0.27.1 and 0.28.0). `make build`
-first: the script needs the `imp:test` image and exits 1 without it, even on
-this download-only path (#1682). `docker compose build imp-server` produces
-`imp:latest`, which is a different tag.
+**1. Build the image** (~3.5 min). `scripts/stage-model.sh` runs the downloader
+inside the `imp:test` image this produces and exits 1 without it (#1682).
+`docker compose build imp-server` makes `imp:latest`, a different tag.
 
 ```bash
-make build                                     # ~3.5 min, produces imp:test
+make build
+```
+
+**2. Get the weights** (19.2 GiB, download only, nothing to convert). The
+checkpoint is [kekzle/Qwen3.8-27B-NVFP4-vllm](https://huggingface.co/kekzle/Qwen3.8-27B-NVFP4-vllm),
+an `imp-quantize --format vllm` export; the same directory also loads in vLLM
+(verified on 0.27.1 and 0.28.0).
+
+```bash
 scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm
 ```
 
-**Serve it and ask.** This is the 60 seconds:
+**3. Serve.** The cache volume is optional and pays for itself on the second
+start: it holds the transformed weights (Qwen3-14B-NVFP4 init 7.9 s → 2.1 s).
 
 ```bash
 docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
   -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm
+```
 
+**4. Ask.** Open <http://localhost:8080>. The built-in UI streams the answer,
+draws one bar per token as it arrives, and shows the server's own counts for
+the run: prompt tokens, prefix-cache hits, reasoning tokens, context used. If
+the models directory holds more than one model, the header becomes a picker and
+choosing an unloaded entry swaps it in.
+
+<p align="center">
+  <img src="docs/webui.png" width="900"
+       alt="the built-in web UI after one answer: transcript on the left, one bar per token under it, run and usage readouts on the right">
+</p>
+
+<sub>Captured against the UI's dev mock (`tools/imp-server/webui/dev/`): the numbers in the picture are the mock's, not a measurement.</sub>
+
+Or from the shell:
+
+```bash
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"Qwen3.8-27B-NVFP4-vllm","messages":[{"role":"user","content":"Why is the sky blue?"}],"max_tokens":64}'
@@ -110,12 +133,6 @@ BF16 one. The script forecasts the output size and whether it fits the card
 *before* writing anything, so a model that would not fit costs seconds rather
 than half an hour. Details and the quality numbers:
 [`docs/quantization.md`](docs/quantization.md).
-
-The cache volume is optional and pays for itself on the second start: it holds
-the transformed weights (Qwen3-14B-NVFP4 init 7.9 s → 2.1 s).
-
-Or open <http://localhost:8080> for a small built-in chat UI that streams the
-answer and plots inter-token latency as it is written.
 
 ## How fast is it, really
 

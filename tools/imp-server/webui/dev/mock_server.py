@@ -11,7 +11,8 @@ Serves GET / from --html so the page runs same-origin, as in production.
 Prompt keywords steer a run: nothink, length, thinkonly, fail400, fail500,
 failmid (socket dropped after 12 tokens), slow (2.5 s TTFT), long, big.
 Naming a model with loaded=false swaps it in after --swap-delay seconds;
---boot-delay N answers /v1/models with an empty list for N seconds.
+--boot-delay N answers /v1/models with an empty list for N seconds;
+--answer-file / --reasoning-file replace the built-in texts (README capture).
 
     docker run --rm -p 9099:9099 -v "$PWD":/src -w /src python:3.12-slim \
         python3 tools/imp-server/webui/dev/mock_server.py --port 9099
@@ -269,7 +270,14 @@ def main():
     p.add_argument("--ttft", type=float, default=180.0, help="ms before first token")
     p.add_argument("--swap-delay", type=float, default=2.0)
     p.add_argument("--boot-delay", type=float, default=0.0, help="seconds of model-less start")
+    p.add_argument("--answer-file", help="markdown the model answers with, instead of the built-in text")
+    p.add_argument("--reasoning-file", help="text the model thinks with, instead of the built-in text")
     ARGS = p.parse_args()
+    global ANSWER, REASONING
+    if ARGS.answer_file:
+        ANSWER = open(ARGS.answer_file, encoding="utf-8").read()
+    if ARGS.reasoning_file:
+        REASONING = open(ARGS.reasoning_file, encoding="utf-8").read().split(" ")
     STATE["loaded"] = ARGS.models[0]
     STATE["boot_until"] = time.monotonic() + ARGS.boot_delay
     srv = ThreadingHTTPServer(("0.0.0.0", ARGS.port), H)
