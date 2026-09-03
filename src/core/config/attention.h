@@ -109,7 +109,10 @@ struct Attention {
     // 2026-09-03 on Qwen3-14B-NVFP4 at 32 streams x 1.1k context, see PERF.md.
     int paged_fp8_multitok = 4;
     // NVFP4 paged decode (HD=128/256): tokens per warp iteration, same idea
-    // (attention_paged_nvfp4_multitok.cu). 1 = the scalar kernels.
+    // (attention_paged_nvfp4_multitok.cu); the Q heads of a KV head are grouped
+    // per CTA so each row is converted once (attention_paged_nvfp4_multitok_gqa.cu,
+    // 24/4 HD=256 at 1 x 32k 101.8 -> 74.4 us, 32 x 1100 92.9 -> 68.6). 1 = the
+    // scalar kernels.
     int paged_nvfp4_multitok = 4;
     // F16 paged decode (HD=128/256, GQA ratio 1..8, serving path without
     // split-K): tokens per warp iteration on the multitok kernel

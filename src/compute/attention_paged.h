@@ -79,6 +79,21 @@ bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* 
                                                   int num_splits, int sliding_window, float softcap,
                                                   const half* attn_sinks, cudaStream_t stream);
 
+// NVFP4 multitok with Q-head grouping (attention_paged_nvfp4_multitok_gqa.cu):
+// a CTA converts each K/V row once for heads_per_cta Q heads of one KV head,
+// plain and split-K instances, HD=128/256. heads_per_cta 0 = auto (largest of
+// 4/3/2 dividing the GQA ratio), 1 = not served. Returns false when the shape
+// is not served; called by paged_attention_decode_nvfp4_multitok_launch.
+bool paged_attention_nvfp4_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
+                                               const uint8_t* K_scales, const uint8_t* V_scales, half* O,
+                                               float* partial, const int* block_tables,
+                                               const int* context_lens, int batch_size, int n_heads,
+                                               int n_kv_heads, int head_dim, int block_size, float scale,
+                                               int max_num_blocks, int num_splits, int sliding_window,
+                                               float softcap, const half* attn_sinks, int heads_per_cta,
+                                               cudaStream_t stream);
+int paged_attention_nvfp4_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int requested);
+
 // HD=128 FP8 decode with four tokens per warp iteration
 // (attention.paged_fp8_multitok, attention_paged_fp8_multitok.cu). Called by
 // paged_attention_decode_fp8 when the knob is on and split-K is off.

@@ -941,15 +941,23 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
             process_diag_set_paged_nvfp4_multitok(1);
             ErrStats e_plain = PathNVFP4::run(c);
             process_diag_set_paged_nvfp4_multitok(4);
-            ErrStats e_mt = PathNVFP4::run(c);
             EXPECT_EQ(e_plain.nan_count, 0) << "kv_len " << kv_len;
-            EXPECT_EQ(e_mt.nan_count, 0) << "kv_len " << kv_len;
             EXPECT_LT(e_plain.max_rel, PathNVFP4::envelope())
                 << "scalar kv_len " << kv_len << ": " << e_plain.str();
-            EXPECT_LT(e_mt.max_rel, PathNVFP4::envelope())
-                << "multitok kv_len " << kv_len << ": " << e_mt.str();
-            printf("PagedNvfp4Multitok %s kv_len=%d: scalar %s | multitok %s\n",
-                   force_fallback ? "plain " : "splitK", kv_len, e_plain.str().c_str(), e_mt.str().c_str());
+            // hpc 1 = the per-head multitok kernels, 2 / 3 = Q-head grouping
+            // (24/4 -> ratio 6: both divide), 4 does not divide and falls back
+            // to the auto rule (3).
+            for (int hpc : {1, 2, 3, 4}) {
+                process_diag_set_paged_nvfp4_hpc(hpc);
+                ErrStats e_mt = PathNVFP4::run(c);
+                EXPECT_EQ(e_mt.nan_count, 0) << "kv_len " << kv_len << " hpc " << hpc;
+                EXPECT_LT(e_mt.max_rel, PathNVFP4::envelope())
+                    << "multitok hpc " << hpc << " kv_len " << kv_len << ": " << e_mt.str();
+                printf("PagedNvfp4Multitok %s kv_len=%d hpc=%d: scalar %s | multitok %s\n",
+                       force_fallback ? "plain " : "splitK", kv_len, hpc, e_plain.str().c_str(),
+                       e_mt.str().c_str());
+            }
+            process_diag_set_paged_nvfp4_hpc(0);
             cudaFree(d_q);
             cudaFree(d_o);
             cudaFree(d_bt);
@@ -958,6 +966,7 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
     }
     process_diag_set_force_splitk_fallback(false);
     process_diag_set_paged_nvfp4_multitok(4);
+    process_diag_set_paged_nvfp4_hpc(0);
     paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaStreamDestroy(stream);
@@ -1202,6 +1211,7 @@ TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
     // serially otherwise, 11.6 ms per launch measured 2026-09-03).
     const int use_tc = env_int("IMP_NVFP4_BENCH_TC", 0);
     process_diag_set_paged_nvfp4_multitok(env_int("IMP_NVFP4_BENCH_MULTITOK", 4));
+    process_diag_set_paged_nvfp4_hpc(env_int("IMP_NVFP4_BENCH_HPC", 0));
     void* d_scratch = nullptr;
     const size_t scratch_bytes = (size_t)64 << 20;
     cudaMalloc(&d_scratch, scratch_bytes);

@@ -342,7 +342,9 @@ fa2_heavy_first      = true
 paged_fp8_multitok   = 4
 # The same for the NVFP4 KV cache (HD=128/256, plain and split-K kernels).
 # Microbench 24/4 heads HD=256: 1 x 77k context 294 -> 210 us per launch with
-# the 4-CTAs-per-SM split-K target, 32 x 1100: 123 -> 90 us. 1 = scalar kernels.
+# the 4-CTAs-per-SM split-K target, 32 x 1100: 123 -> 90 us; Q heads grouped per
+# CTA (each row converted once): 1 x 32k 102 -> 74 us, 32 x 1100 93 -> 69 us.
+# 1 = scalar kernels.
 paged_nvfp4_multitok = 4
 # The same for the F16 KV cache (HD=128/256, GQA ratio 1..8): four tokens per
 # warp iteration, each K/V row read once per CTA for up to four Q heads.

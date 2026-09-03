@@ -15,7 +15,9 @@
 // word) instances, E4M3 scales; other shapes stay on the scalar kernels.
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
+#include "compute/attention_paged_nvfp4_multitok.cuh"
 #include "core/logging.h"
+#include "runtime/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -25,29 +27,10 @@
 namespace imp {
 namespace {
 
-__device__ __forceinline__ float ue4m3_scale_to_float(uint8_t bits) {
-    __nv_fp8_e4m3 v;
-    memcpy(&v, &bits, 1);
-    return static_cast<float>(v);
-}
-
-// One packed FP4 byte (low nibble = .x, high nibble = .y) -> half2 via
-// cvt.rn.f16x2.e2m1x2 (sm_120, CUDA 13.2+).
-__device__ __forceinline__ half2 fp4_pair_to_half2(uint32_t byte_val) {
-    uint32_t fp16x2;
-    asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }" : "=r"(fp16x2) : "r"(byte_val));
-    return *reinterpret_cast<half2*>(&fp16x2);
-}
-
-// The lane's PACK packed bytes as one load (PACK = 4: one word, PACK = 2: one
-// ushort). __ldg, not .cs: cross-head re-reads are L2 hits worth keeping (#1785).
-template <int PACK>
-__device__ __forceinline__ uint32_t load_packed(const uint8_t* __restrict__ p) {
-    if constexpr (PACK == 4)
-        return __ldg(reinterpret_cast<const uint32_t*>(p));
-    else
-        return static_cast<uint32_t>(__ldg(reinterpret_cast<const unsigned short*>(p)));
-}
+using nvfp4_mt::fp4_pair_to_half2;
+using nvfp4_mt::load_packed;
+using nvfp4_mt::load_q_half2;
+using nvfp4_mt::ue4m3_scale_to_float;
 
 // Walk the tokens [first_tok, n_tok) of one block for this warp, TOK at a time.
 // Updates the unnormalised (m_w, l_w, o_reg).
@@ -133,16 +116,6 @@ __device__ __forceinline__ void nvfp4_block_multitok(
     }
 }
 
-template <int HEAD_DIM>
-__device__ __forceinline__ void load_q_half2(const half* __restrict__ Q, int batch_idx, int head_idx,
-                                             int n_heads, int lane_offset, half2* q_h2) {
-    constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
-    const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q + (int64_t)batch_idx * n_heads * HEAD_DIM +
-                                                         (int64_t)head_idx * HEAD_DIM + lane_offset);
-#pragma unroll
-    for (int i = 0; i < ELEMS / 2; i++)
-        q_h2[i] = Q_ptr2[i];
-}
 
 template <int HEAD_DIM>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_multitok_kernel(
@@ -306,6 +279,16 @@ bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* 
                                                   const half* attn_sinks, cudaStream_t stream) {
     if (head_dim != 128 && head_dim != 256)
         return false;
+    // Q-head grouping (attention_paged_nvfp4_multitok_gqa.cu): a CTA converts
+    // each K/V row once for up to four Q heads of its KV head. 1 forces the
+    // per-head kernels below (tests, A/B).
+    if (process_diag_paged_nvfp4_hpc() != 1 &&
+        paged_attention_nvfp4_multitok_gqa_launch(Q, K_cache, V_cache, K_scales, V_scales, O, partial,
+                                                  block_tables, context_lens, batch_size, n_heads, n_kv_heads,
+                                                  head_dim, block_size, scale, max_num_blocks, num_splits,
+                                                  sliding_window, softcap, attn_sinks,
+                                                  process_diag_paged_nvfp4_hpc(), stream))
+        return true;
     const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * head_dim * sizeof(float);
     dim3 block(BLOCK_THREADS);
     if (num_splits > 1) {

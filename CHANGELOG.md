@@ -111,6 +111,23 @@ there instead of retelling it.
   to the scalar kernels on both routes. Qwen3.8-27B-NVFP4 single-stream decode 87.34 -> 89.06 tok/s at 8k
   context (+2.0%), 76.81 -> 81.91 at 32k (+6.6%), 65.15 -> 74.35 at 64k (+14.1%); Qwen3-8B-Q8_0 and
   Qwen3-30B-A3B-NVFP4 (F16 KV) within spread at 2k/8k/32k (`scripts/bench_longctx_ab.sh`)
+- NVFP4 paged decode attention groups Q heads per CTA
+  (`attention_paged_nvfp4_multitok_gqa.cu`, on by default under
+  `attention.paged_nvfp4_multitok`): each K/V row is loaded and converted once
+  for up to four Q heads of its KV head instead of once per head. Same KV
+  bytes measured the per-head kernels at 427 GB/s on 24/4 HD=256 vs 1423 GB/s
+  on the 4/4 MHA shape. Microbench, per-head -> grouped: 24/4 HD=256 batch 1 x
+  32k 101.8 -> 74.4 us, 1 x 77k 214.2 -> 177.3, 32 x 1100 92.9 -> 68.6; 32/8
+  HD=128 1 x 32k 86.0 -> 71.4. fp64 oracle identical for heads-per-CTA 1/2/3
+  on both routes. E2E on Qwen3.8-27B-NVFP4-vllm (24/4, HD=256, heads-per-CTA
+  3), two images (main-equivalent vs this): single stream
+  `scripts/bench_longctx_ab.sh` tg128, `speculative.ngram=false`, 2 rounds, 8k
+  88.75 -> 90.09 tok/s (+1.5%), 32k 81.87 -> 84.30 (+3.0%), 64k 74.30 -> 77.41
+  (+4.2%); serving at 32 streams (`tools/analysis/prefill_cap_conc_ab.sh`, 2
+  trials x 3 waves, medians) 1000-token prompts 1150.0 -> 1162.6 (+1.1%,
+  trials +1.0% / +1.1%), 38-token prompts 1845.9 -> 1869.2 (+1.3%, trials
+  +0.5% / +1.8%). Qwen3-14B-NVFP4 (40/8, ratio 5, not served) 154.05 vs 153.99
+  at 8k and 114.47 vs 114.40 at 32k. (#1886)
 - FP8 paged decode attention: the e4m3 bytes now convert in pairs
   (`cvt e4m3x2 -> f16x2`, HMUL2 dot) instead of one scalar conversion per
   byte; ncu had the four-token kernel issue-bound (SM 70%, DRAM 33%).
