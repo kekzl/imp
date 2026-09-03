@@ -1258,7 +1258,17 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
     // MLA (vhd != head_dim): split-K kernels are templated on standard head_dims
     // (64/96/128/256/512) and don't support asymmetric V dims. Force num_splits=1
     // so the generic kernel handles MLA correctly.
-    int total_blocks_nosplit = batch_size * n_heads;
+    // F16 multitok kernels (attention.paged_f16_multitok): up to four Q heads
+    // per CTA share the KV reads, so the CTA count the split-K rule sees is
+    // batch x n_kv_heads x groups, not batch x n_heads. 0 = shape not served
+    // (sink tokens, HD outside 128/256, ratio > 8) -> the per-head kernels.
+    const int n_q_per_kv_mt = (n_kv_heads > 0) ? n_heads / n_kv_heads : 0;
+    const int mt_hpc = (process_diag_paged_f16_multitok() > 1 && n_sinks == 0 && n_q_per_kv_mt > 0)
+                           ? paged_attention_f16_multitok_heads_per_cta(head_dim, n_q_per_kv_mt,
+                                                                        process_diag_paged_f16_hpc())
+                           : 0;
+    int total_blocks_nosplit = (mt_hpc > 0) ? batch_size * n_kv_heads * (n_q_per_kv_mt / mt_hpc)
+                                            : batch_size * n_heads;
     int num_splits = 1;
     const bool is_mla_asymmetric = (vhd != head_dim);
 
@@ -1322,7 +1332,17 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         // IMP_SPLITK_NO_PIPE forces non-pipeline as a bisect escape hatch.
         static int sm_ver = get_device_sm_version();
         const bool force_non_pipe = !process_diag_attention_splitk_pipe();
-        if (sm_ver >= 90 && !force_non_pipe) {
+        const bool mt_splitk_done = (mt_hpc > 0) &&
+                                    paged_attention_splitk_f16_multitok_launch(
+                                        reinterpret_cast<const half*>(Q.data),
+                                        reinterpret_cast<const half*>(K_cache.data),
+                                        reinterpret_cast<const half*>(V_cache.data), partial, block_tables,
+                                        context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size,
+                                        scale, max_num_blocks, num_splits, sliding_window, softcap, mt_hpc,
+                                        stream);
+        if (mt_splitk_done) {
+            // one (m, l, o) partial per head; the reduce below is shared
+        } else if (sm_ver >= 90 && !force_non_pipe) {
             // Pipeline smem: 8 warps * 3 * head_dim * 2B (FP16)
             // Must be at least as large as reduction smem
             size_t pipe_smem = NUM_WARPS * 3 * head_dim * sizeof(half);
@@ -1421,12 +1441,12 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
     if (num_splits == 1 && n_q_per_kv > 1) {
         if (n_q_per_kv <= MAX_Q_PER_KV) {
             bool f16_mt_done = false;
-            if (process_diag_paged_f16_multitok() > 1 && n_sinks == 0)
+            if (mt_hpc > 0)
                 f16_mt_done = paged_attention_decode_f16_multitok_launch(
                     reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
                     reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),
                     block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale,
-                    max_num_blocks, sliding_window, softcap, sinks_h, process_diag_paged_f16_hpc(), stream);
+                    max_num_blocks, sliding_window, softcap, sinks_h, mt_hpc, stream);
             if (!f16_mt_done) {
                 // GQA-aware kernel (cooperative, one CTA per KV head)
                 // Use 4 warps per Q head for ratio<=8 (1024 threads max),

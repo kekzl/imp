@@ -116,7 +116,8 @@ struct Attention {
     // (attention_paged_f16_multitok.cu), which also shares each KV row across
     // the Q heads of one CTA. Microbench 32 x 1100: 32/8 HD=128 315 -> 98 us,
     // 16/8 HD=256 665 -> 178 us; 32 x 4096 at the resident-bandwidth ceiling
-    // (1644 / 1669 GB/s). 1 = the cooperative GQA kernel (2026-09-03).
+    // (1644 / 1669 GB/s). Split-K route too: batch 1 x 32k 197 -> 109 us, 64k
+    // 375 -> 203 us. 1 = the cooperative and per-head split-K kernels (2026-09-03).
     int paged_f16_multitok = 4;
     // Causal FA2 CTA order: heaviest q-tiles first. A causal q-tile t attends
     // (t+1)*Bq/Bkv KV tiles, 2..32 at 4096 tokens and Bq=128, and blockIdx.x
