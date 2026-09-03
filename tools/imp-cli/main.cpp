@@ -222,7 +222,15 @@ int main(int argc, char** argv) {
     // In bench mode, ensure KV cache matches what the benchmark needs.
     // Raises max_seq_len for long-context benchmarks, caps it for short ones.
     if (args.bench) {
-        int bench_need = args.bench_pp + args.max_tokens + 256;  // +256 headroom
+        // Headroom: at least 256 tokens, at least 12.5% of the bench shape. The
+        // StreamingLLM valve (engine_scheduler.cpp) fires on an F16 KV cache
+        // when under 10% of the pool is free; with a flat +256 an F16 model at
+        // pp >= ~2.3k benched into the valve, the first decode step produced
+        // no token and the bench printed 0 tok/s (Llama-3.2-3B-Q8_0 at pp
+        // 8192: "0/536 blocks free", 2026-09-03). pp512 + tg128 stays at 896,
+        // so the perf-gate pool is unchanged.
+        const int bench_shape = args.bench_pp + args.max_tokens;
+        int bench_need = bench_shape + std::max(256, bench_shape / 8);
         if (config.max_seq_len != bench_need) {
             config.max_seq_len = bench_need;
         }
