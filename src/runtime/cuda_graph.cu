@@ -6,6 +6,7 @@
 #include "compute/sampling.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -1118,19 +1119,46 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         graph_diag::dump_graph(body_graph, "capture.cond_body");
         graph_diag::dump_graph(graph_, "capture.cond_top");
 
-        // 6. Instantiate the top-level graph
-        cudaGraphExec_t raw_exec = nullptr;
-        err = cudaGraphInstantiate(&raw_exec, graph_, 0);
-        if (err != cudaSuccess) {
-            IMP_LOG_ERROR(
-                "ConditionalRunner: graph instantiation failed: %s — falling back "
-                "to per-step decode (up to 15x slower).",
-                cudaGetErrorString(err));
-            goto fail;
+        // 6. Instantiate the top-level graph, or patch the parked exec in place.
+        // The topology is the same for every request (one WHILE node around one
+        // captured decode step); only kernel parameters differ (block-table
+        // pointer, sampling values, step ceiling, the conditional handle), and
+        // cudaGraphExecUpdate rewrites those without a fresh instantiation.
+        // Anything the driver refuses falls through to cudaGraphInstantiate.
+        bool updated = false;
+        const auto t_inst0 = std::chrono::steady_clock::now();
+        if (spare_exec_) {
+            cudaGraphExecUpdateResultInfo info{};
+            cudaError_t ue = cudaGraphExecUpdate(spare_exec_, graph_, &info);
+            if (ue == cudaSuccess && info.result == cudaGraphExecUpdateSuccess) {
+                exec_ = std::move(spare_exec_);
+                updated = true;
+            } else {
+                IMP_LOG_INFO("ConditionalRunner: exec update refused (%s, result %d), instantiating",
+                             cudaGetErrorString(ue), static_cast<int>(info.result));
+                (void)cudaGetLastError();
+                spare_exec_.reset();
+            }
         }
-        exec_.reset(raw_exec);
+        if (!updated) {
+            cudaGraphExec_t raw_exec = nullptr;
+            err = cudaGraphInstantiate(&raw_exec, graph_, 0);
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR(
+                    "ConditionalRunner: graph instantiation failed: %s — falling back "
+                    "to per-step decode (up to 15x slower).",
+                    cudaGetErrorString(err));
+                goto fail;
+            }
+            exec_.reset(raw_exec);
+        }
 
-        IMP_LOG_INFO("ConditionalRunner: graph built (max_steps=%d)", config_.max_steps);
+        // Permanent telemetry (SwaSnapshot precedent): the only way to price
+        // this stall from a server log rather than a CUPTI-inflated profile.
+        IMP_LOG_INFO(
+            "ConditionalRunner: graph %s in %.1f ms (max_steps=%d)", updated ? "updated in place" : "built",
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_inst0).count(),
+            config_.max_steps);
     }
 
     last_read_step_ = 0;
@@ -1285,6 +1313,10 @@ void CudaGraphConditionalRunner::cleanup() {
     }
 
     bool had_exec = static_cast<bool>(exec_);
+    // Park the exec for the next setup() (see drop_spare); the device sync
+    // above guarantees no replay still references it.
+    if (exec_)
+        spare_exec_ = std::move(exec_);
     exec_.reset();
     graph_.reset();
 

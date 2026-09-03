@@ -20,6 +20,12 @@ there instead of retelling it.
   32-62 ms; 1116-token prompt 195-229 -> 130-146 ms; completions 116-147 ->
   51-64 ms. The reasoning stream holds only a partial marker instead of a
   fixed 7 bytes, so the first reasoning delta lands one to two tokens earlier
+  (#1894)
+- The conditional decode loop patches its parked exec with
+  `cudaGraphExecUpdate` instead of instantiating a new graph per request and
+  per burst: 31 of 34 setups updated in 0.1 ms instead of 5.9 ms mean (13.7 max),
+  wall per 48-token request 545 -> 532 ms median on Qwen3.8-27B-NVFP4, greedy
+  output identical; the log line carries the duration
 
 ## [0.36.0] - 2026-09-03
 
