@@ -90,6 +90,12 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     const int scan_limit = has_tools ? kAgentScanLimit : 8;
     imp::server::StreamReasoningSplitter think_split(think_start_phase, ctx.snap.think_start_id,
                                                      ctx.snap.think_end_id, scan_limit);
+    // Without tools the hold is 8 tokens and buys almost nothing (a chain of
+    // thought longer than that leaks either way), while every thinking-off
+    // answer paid it in full before its first delta: measured TTFT 99-126 ms
+    // client-side against 17-43 ms server-side on Qwen3.8-27B-NVFP4 (2026-09-04).
+    // Release as soon as the first word proves the answer started.
+    think_split.set_release_on_plain_text(!has_tools);
 
     // Rejoins characters the tokenizer split across two tokens, before any
     // consumer sees the piece — the think splitter and tool filter match on raw

@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-03
-commit: 707be72f
+verified: 2026-09-04
+commit: 7e03ac25
 -->
 
 # API
@@ -184,7 +184,11 @@ for this envelope, so the call is the model's choice rather than a guarantee.
 
 Reasoning models separate their chain of thought into `reasoning_content`
 (Anthropic: `thinking`) rather than emitting it as the answer. This holds on the
-streaming path too, which is where it was once wrong.
+streaming path too, which is where it was once wrong. With thinking off the
+stream still scans the first tokens for a `<think>` the model may open anyway:
+without tools the scan releases on the first word (client-side TTFT on
+Qwen3.8-27B-NVFP4, 27-token prompt, 97-105 -> 32-62 ms), with tools it holds up
+to 256 tokens so a chain of thought cannot stream as the answer.
 
 **On `/v1/messages`, thinking is opt-in** (#1541). A request without a `thinking`
 field gets no thinking block, so `content[0]` is the text - which is what the
