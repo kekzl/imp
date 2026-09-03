@@ -885,8 +885,18 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         // KV — quantized variants don't support sentinel-block skipping yet.
         // Never under SWA sizing (streaming_kv_auto is cleared at init there).
         if (!config_.streaming_kv_enabled && config_.streaming_kv_auto) {
+            // Reclaimable prefix-cache blocks are free for this purpose: the
+            // allocator takes them before it fails. Counting only the free list
+            // against the blocks LIVE sequences hold fired on a pool that was
+            // 1/3 cached-but-reclaimable (Llama-3.2-3B, 32 x 1000-token streams,
+            // 3000-block pool: "0/2016 free" with 984 reclaimable), and the
+            // one-way graph demotion below then cost 40% of decode throughput
+            // for the rest of the process (2026-09-03).
             auto st = kv_manager_->stats();
-            if (st.total_blocks > 0 && st.free_blocks < st.total_blocks / 10) {
+            const int reclaimable = kv_manager_->num_reclaimable_cached_blocks();
+            const int pool_total = kv_cache_raw_ ? kv_cache_raw_->total_blocks()
+                                                 : st.total_blocks + st.free_blocks + st.cached_blocks;
+            if (pool_total > 0 && st.free_blocks + reclaimable < pool_total / 10) {
                 if (kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16) {
                     config_.streaming_kv_enabled = true;
                     int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
@@ -896,9 +906,9 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     config_.streaming_kv_window = win;
                     executor_->set_streaming_kv(n_sinks, win);
                     IMP_LOG_WARN(
-                        "KV cache >90%% full (%d/%d blocks free) — auto-enabling "
+                        "KV cache >90%% full (%d free + %d reclaimable of %d blocks) - auto-enabling "
                         "StreamingLLM (sinks=%d, window=%d)",
-                        st.free_blocks, st.total_blocks, n_sinks, win);
+                        st.free_blocks, reclaimable, pool_total, n_sinks, win);
                     demote_graphs_(GraphDemotionReason::StreamingKvKvPressure);
                 }
             }
