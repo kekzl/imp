@@ -6,16 +6,24 @@
 <title>imp</title>
 <style>
   :root {
-    --void:  #0A0D18;
-    --panel: #111730;
-    --line:  #232B4A;
-    --ice:   #8593B8;
-    --paper: #E8ECF7;
-    --ember: #FF8A3D;
-    --think: #7C6FD0;
+    --void:   #090C17;
+    --panel:  #10162B;
+    --panel2: #151C36;
+    --line:   rgba(133, 147, 184, 0.16);
+    --line2:  rgba(133, 147, 184, 0.34);
+    --ice:    #8593B8;
+    --ice2:   #C3CBE3;
+    --paper:  #E8ECF7;
+    --ember:  #FF8A3D;
+    --ember2: #FFB07A;
+    --think:  #8C7FE0;
 
-    --mono: ui-monospace, "JetBrains Mono", "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --r1: 6px;
+    --r2: 10px;
+    --r3: 14px;
+
+    --sans: "IBM Plex Sans", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    --mono: "JetBrains Mono", "Cascadia Code", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   }
 
   * { box-sizing: border-box; }
@@ -34,19 +42,54 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* Two soft blooms give the panel depth: warm where the answer is written,
+     cool where the model thinks. Nothing else is decoration. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(900px 440px at 16% 108%, rgba(255, 138, 61, 0.11), transparent 62%),
+      radial-gradient(760px 400px at 102% -8%, rgba(140, 127, 224, 0.11), transparent 62%);
+  }
+
   /* ---- shell ------------------------------------------------------- */
 
   .shell {
+    position: relative;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 268px;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) 292px;
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
     grid-template-areas:
-      "head  inst"
-      "log   inst"
+      "head    inst"
+      "log     inst"
+      "pulse   inst"
       "compose inst";
     height: 100%;
-    max-width: 1240px;
+    max-width: 1280px;
     margin: 0 auto;
+    animation: settle 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  @keyframes settle {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  /* The spark: one motif for the wordmark, the role marker and the status. */
+  .spark {
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    background: var(--line2);
+    transform: rotate(45deg);
+    flex: none;
+    transition: background 200ms linear, box-shadow 200ms linear;
+  }
+  @keyframes breathe {
+    0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(255, 138, 61, 0.35); }
+    50%      { opacity: 0.55; box-shadow: 0 0 16px rgba(255, 138, 61, 0.75); }
   }
 
   /* ---- header ------------------------------------------------------ */
@@ -54,77 +97,98 @@
   header {
     grid-area: head;
     display: flex;
-    align-items: baseline;
-    gap: 16px;
-    padding: 22px 28px 18px;
+    align-items: center;
+    gap: 18px;
+    padding: 18px 28px 14px;
     border-bottom: 1px solid var(--line);
     min-width: 0;
   }
 
   .wordmark {
-    font-family: var(--mono);
-    font-size: 20px;
-    font-weight: 600;
-    letter-spacing: 0.34em;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    font-size: 21px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
     color: var(--paper);
-    margin-right: 2px;
+    flex: none;
+  }
+  .wordmark .spark.ok   { background: var(--ember); box-shadow: 0 0 12px rgba(255, 138, 61, 0.55); }
+  .wordmark .spark.busy { background: var(--ember); animation: breathe 1.2s ease-in-out infinite; }
+  .wordmark .spark.wait { background: var(--ice); animation: breathe 1.9s ease-in-out infinite; }
+  .wordmark .spark.down { background: #C0546A; box-shadow: 0 0 10px rgba(192, 84, 106, 0.5); }
+
+  .state {
+    font-size: 12.5px;
+    color: var(--ice);
+    flex: none;
+    min-width: 7ch;
   }
 
   .model {
     font-family: var(--mono);
-    font-size: 12px;
-    color: var(--ice);
+    font-size: 12.5px;
+    color: var(--ice2);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    padding-left: 18px;
+    border-left: 1px solid var(--line);
   }
 
   /* One model: a label. Several: a picker in the same place, same type. */
   select.model {
-    max-width: 46ch;
-    padding: 0 18px 0 0;
+    max-width: 48ch;
+    padding: 4px 22px 4px 18px;
     background: transparent;
     border: 0;
-    border-bottom: 1px solid transparent;
-    color: var(--ice);
+    border-left: 1px solid var(--line);
+    border-radius: 0;
+    color: var(--ice2);
     cursor: pointer;
     appearance: none;
     -webkit-appearance: none;
     background-image: linear-gradient(45deg, transparent 50%, var(--ice) 50%),
                       linear-gradient(135deg, var(--ice) 50%, transparent 50%);
-    background-position: right 8px top 55%, right 4px top 55%;
+    background-position: right 9px top 52%, right 5px top 52%;
     background-size: 4px 4px, 4px 4px;
     background-repeat: no-repeat;
+    transition: color 120ms linear;
   }
-  select.model:hover, select.model:focus-visible { color: var(--paper); border-bottom-color: var(--ember); }
+  select.model:hover, select.model:focus-visible { color: var(--paper); }
   select.model option { background: var(--panel); color: var(--paper); }
 
   .head-actions {
     margin-left: auto;
     display: flex;
-    align-items: baseline;
-    gap: 18px;
+    align-items: center;
+    gap: 6px;
     flex: none;
   }
 
   .link, .act {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.08em;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    font-weight: 500;
     color: var(--ice);
     text-decoration: none;
-    border: 0;
-    border-bottom: 1px solid transparent;
     background: none;
-    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--r1);
+    padding: 5px 9px;
     cursor: pointer;
+    transition: color 120ms linear, background 120ms linear, border-color 120ms linear;
   }
   .link:hover, .link:focus-visible, .act:hover:not(:disabled), .act:focus-visible {
     color: var(--paper);
-    border-bottom-color: var(--ember);
+    background: rgba(133, 147, 184, 0.09);
   }
   .act:disabled { opacity: 0.35; cursor: default; }
+  .act.ghost { border-color: var(--line2); }
+  .act.ghost:hover:not(:disabled) { border-color: rgba(255, 138, 61, 0.6); }
 
   /* ---- transcript -------------------------------------------------- */
 
@@ -132,344 +196,439 @@
     grid-area: log;
     overflow-y: auto;
     padding: 26px 28px 8px;
+    scroll-behavior: smooth;
     scrollbar-width: thin;
-    scrollbar-color: var(--line) transparent;
+    scrollbar-color: var(--line2) transparent;
   }
 
-  .turn { margin-bottom: 30px; }
+  .turn {
+    margin-bottom: 30px;
+    max-width: 78ch;
+    animation: rise 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: none; }
+  }
 
   .role {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.18em;
-    color: var(--ice);
-    margin-bottom: 8px;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+    margin-bottom: 8px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ice);
   }
-  .role::before {
-    content: "";
-    width: 2px;
-    height: 11px;
-    background: var(--line);
-  }
-  .turn.is-model .role::before { background: var(--ember); }
+  .role .spark { width: 8px; height: 8px; }
+  .turn.is-model .role .spark { background: var(--ember); box-shadow: 0 0 8px rgba(255, 138, 61, 0.45); }
+  .turn.is-model.live .role .spark { animation: breathe 1.3s ease-in-out infinite; }
 
   .body { white-space: pre-wrap; word-wrap: break-word; }
-  .turn.is-user .body { color: var(--ice); }
+  .turn.is-user .body { color: var(--ice2); }
 
   .body strong { font-weight: 600; color: #FFF; }
   .body em { font-style: italic; }
   .body h4 {
-    font-family: var(--mono);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.1em;
-    color: var(--ice);
+    letter-spacing: 0.01em;
+    color: var(--ice2);
     margin: 18px 0 4px;
   }
   .body code {
     font-family: var(--mono);
-    font-size: 0.88em;
-    background: var(--panel);
+    font-size: 0.86em;
+    background: rgba(133, 147, 184, 0.10);
     border: 1px solid var(--line);
-    padding: 1px 5px;
+    border-radius: 4px;
+    padding: 1px 6px;
   }
   .body pre {
-    position: relative;
     margin: 12px 0;
-    padding: 13px 15px;
-    background: var(--panel);
+    background: #0A0F20;
     border: 1px solid var(--line);
-    border-left: 2px solid var(--ember);
-    overflow-x: auto;
+    border-radius: var(--r2);
+    overflow: hidden;
     white-space: pre;
   }
-  .body pre code { background: none; border: 0; padding: 0; font-size: 13px; }
-
-  /* Per-block copy sits in the corner and only shows itself on hover, so the
-     code keeps its full width when nobody is reaching for it. */
-  .body pre .copy-code {
-    position: absolute;
-    top: 6px;
-    right: 8px;
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.1em;
+  .body pre .code-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 8px 5px 14px;
+    font-size: 11.5px;
+    font-weight: 500;
     color: var(--ice);
-    background: var(--panel);
-    border: 1px solid var(--line);
-    padding: 2px 7px;
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 120ms linear;
+    background: rgba(133, 147, 184, 0.06);
+    border-bottom: 1px solid var(--line);
+    white-space: normal;
   }
-  .body pre:hover .copy-code, .body pre .copy-code:focus-visible { opacity: 1; }
-  .body pre .copy-code:hover { color: var(--paper); border-color: var(--ember); }
+  .body pre .copy-code {
+    font-family: var(--sans);
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--ice);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: color 120ms linear, background 120ms linear;
+  }
+  .body pre .copy-code:hover { color: var(--paper); background: rgba(133, 147, 184, 0.1); }
+  .body pre code {
+    display: block;
+    padding: 12px 14px;
+    overflow-x: auto;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    font-size: 13px;
+    line-height: 1.55;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line2) transparent;
+  }
 
   details.think {
-    margin: 0 0 12px;
-    border-left: 2px solid color-mix(in srgb, var(--think) 45%, transparent);
-    padding-left: 14px;
+    margin: 2px 0 14px;
+    padding: 6px 14px 4px;
+    border-radius: var(--r1);
+    background: rgba(140, 127, 224, 0.06);
+    border: 1px solid rgba(140, 127, 224, 0.2);
   }
   details.think summary {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.16em;
+    font-size: 12.5px;
+    font-weight: 500;
     color: var(--think);
     cursor: pointer;
     list-style: none;
-    padding: 2px 0;
+    padding: 3px 0;
   }
   details.think summary::-webkit-details-marker { display: none; }
   details.think summary::after { content: " ▾"; opacity: 0.6; }
   details.think[open] summary::after { content: " ▴"; }
+  /* While reasoning streams the label carries a slow light; it stops with the stream. */
+  details.think.live summary {
+    background: linear-gradient(90deg, var(--think) 0%, var(--paper) 50%, var(--think) 100%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer 1.8s linear infinite;
+  }
+  details.think.live summary::after { color: var(--think); -webkit-text-fill-color: var(--think); }
+  @keyframes shimmer { to { background-position: -200% 0; } }
   details.think .body {
-    color: color-mix(in srgb, var(--think) 72%, var(--paper));
+    color: color-mix(in srgb, var(--think) 60%, var(--paper));
     font-size: 14px;
-    padding: 6px 0 2px;
+    padding: 4px 0 8px;
   }
 
-  /* Each finished model turn keeps its own numbers: the instrument strip only
-     ever shows the last run, the transcript remembers all of them. */
+  /* Each finished model turn keeps its own numbers: the pulse only ever shows
+     the last run, the transcript remembers all of them. */
   .foot {
     display: flex;
-    align-items: baseline;
-    gap: 16px;
-    margin-top: 10px;
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.06em;
-    color: color-mix(in srgb, var(--ice) 80%, transparent);
-    font-variant-numeric: tabular-nums;
+    align-items: center;
+    gap: 14px;
+    margin-top: 12px;
+    color: var(--ice);
   }
-  .foot .stats { flex: 1; min-width: 0; }
-  .foot .act { letter-spacing: 0.1em; }
+  .foot .stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 0;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    min-width: 0;
+  }
+  .foot .stats span + span {
+    margin-left: 12px;
+    padding-left: 12px;
+    border-left: 1px solid var(--line2);
+  }
+  .foot .acts { margin-left: auto; display: flex; gap: 2px; flex: none; }
 
   .note {
-    margin-top: 10px;
+    margin-top: 12px;
+    padding: 2px 0 2px 14px;
     border-left: 2px solid var(--ember);
-    padding-left: 12px;
-    font-size: 13px;
-    color: var(--ice);
+    font-size: 13.5px;
+    color: var(--ice2);
   }
   .note b { color: var(--paper); font-weight: 500; }
 
   .caret {
     display: inline-block;
-    width: 7px;
-    height: 15px;
-    margin-left: 1px;
-    vertical-align: -2px;
+    width: 8px;
+    height: 16px;
+    margin-left: 2px;
+    vertical-align: -3px;
+    border-radius: 2px;
     background: var(--ember);
-    animation: blink 1.1s steps(2, start) infinite;
+    box-shadow: 0 0 10px rgba(255, 138, 61, 0.6);
+    animation: caret 1.1s ease-in-out infinite;
   }
-  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes caret { 50% { opacity: 0.25; box-shadow: 0 0 2px rgba(255, 138, 61, 0.2); } }
 
   .empty {
     color: var(--ice);
-    font-size: 14px;
-    max-width: 46ch;
+    font-size: 14.5px;
+    max-width: 52ch;
+    margin: 6px 0 0;
   }
   .empty b { color: var(--paper); font-weight: 500; }
   .empty kbd {
     font-family: var(--mono);
     font-size: 11px;
-    border: 1px solid var(--line);
+    border: 1px solid var(--line2);
+    border-radius: 4px;
     padding: 0 5px;
-    color: var(--paper);
+    color: var(--ice2);
+    background: rgba(133, 147, 184, 0.08);
   }
 
   .fault {
-    border-left: 2px solid var(--ember);
-    padding-left: 14px;
+    padding: 12px 14px;
+    border-radius: var(--r1);
+    background: rgba(255, 138, 61, 0.06);
+    border: 1px solid rgba(255, 138, 61, 0.3);
     color: var(--paper);
     font-size: 14px;
+    animation: rise 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
   }
-  .fault code { font-family: var(--mono); color: var(--ember); }
-  .fault small { display: block; font-family: var(--mono); font-size: 11px; color: var(--ice); }
+  .fault code { font-family: var(--mono); font-size: 0.9em; color: var(--ember2); }
+  .fault small { display: block; margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--ice); }
+
+  /* ---- pulse: the signature, one bar per token as it arrives ------- */
+
+  .pulse {
+    grid-area: pulse;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 18px;
+    align-items: end;
+    padding: 12px 28px 0;
+    border-top: 1px solid var(--line);
+  }
+  .strip {
+    display: block;
+    width: 100%;
+    height: 64px;
+    border-radius: var(--r1);
+    background: linear-gradient(180deg, rgba(16, 22, 43, 0.95), rgba(16, 22, 43, 0.45));
+    border: 1px solid var(--line);
+  }
+  .strip-note {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    color: var(--ice);
+    font-variant-numeric: tabular-nums;
+  }
+  .rate {
+    text-align: right;
+    padding-bottom: 22px;
+    white-space: nowrap;
+  }
+  .rate .n {
+    font-family: var(--mono);
+    font-size: 30px;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--ember);
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 20px rgba(255, 138, 61, 0.4);
+    transition: color 200ms linear, text-shadow 200ms linear;
+  }
+  .rate.idle .n { color: var(--ice2); text-shadow: none; }
+  .rate .u {
+    font-size: 12px;
+    color: var(--ice);
+    margin-top: 4px;
+  }
 
   /* ---- composer ---------------------------------------------------- */
 
   .compose {
     grid-area: compose;
+    padding: 12px 28px 22px;
+  }
+  .box {
     display: flex;
+    align-items: flex-end;
     gap: 10px;
-    padding: 16px 28px 24px;
-    border-top: 1px solid var(--line);
+    padding: 6px 6px 6px 16px;
+    border-radius: var(--r3);
+    background: linear-gradient(180deg, rgba(21, 28, 54, 0.88), rgba(16, 22, 43, 0.88));
+    border: 1px solid var(--line2);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.035);
+    transition: border-color 160ms linear, box-shadow 160ms linear;
+  }
+  .box:focus-within {
+    border-color: rgba(255, 138, 61, 0.55);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), 0 0 0 3px rgba(255, 138, 61, 0.12);
   }
 
   textarea {
     flex: 1;
     resize: none;
-    min-height: 52px;
+    min-height: 40px;
     max-height: 200px;
-    padding: 14px 16px;
-    background: var(--panel);
-    border: 1px solid var(--line);
+    padding: 9px 0;
+    background: transparent;
+    border: 0;
+    outline: none;
     color: var(--paper);
     font-family: var(--sans);
-    font-size: 15px;
+    font-size: 15.5px;
     line-height: 1.5;
   }
-  textarea::placeholder { color: color-mix(in srgb, var(--ice) 70%, transparent); }
-  textarea:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+  textarea::placeholder { color: color-mix(in srgb, var(--ice) 75%, transparent); }
+  button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, .link:focus-visible {
     outline: 2px solid var(--ember);
     outline-offset: 2px;
   }
 
   button.send {
-    align-self: stretch;
+    flex: none;
+    height: 40px;
     min-width: 92px;
     padding: 0 18px;
-    background: transparent;
-    border: 1px solid var(--ember);
-    color: var(--ember);
-    font-family: var(--mono);
-    font-size: 12px;
-    letter-spacing: 0.14em;
+    border: 1px solid transparent;
+    border-radius: var(--r2);
+    background: var(--ember);
+    color: #1B0D03;
+    font-family: var(--sans);
+    font-size: 13.5px;
+    font-weight: 600;
     cursor: pointer;
-    transition: background 120ms linear, color 120ms linear;
+    box-shadow: 0 6px 18px rgba(255, 138, 61, 0.28);
+    transition: transform 120ms ease, box-shadow 120ms ease, background 160ms linear, color 160ms linear;
   }
-  button.send:hover:not(:disabled) { background: var(--ember); color: var(--void); }
-  button.send:disabled { opacity: 0.35; cursor: default; }
-  button.send.stop { border-color: var(--ice); color: var(--ice); }
-  button.send.stop:hover { background: var(--ice); color: var(--void); }
+  button.send:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(255, 138, 61, 0.42); background: var(--ember2); }
+  button.send:active:not(:disabled) { transform: translateY(0); }
+  button.send:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+  button.send.stop {
+    background: transparent;
+    color: var(--ice2);
+    border-color: var(--line2);
+    box-shadow: none;
+  }
+  button.send.stop:hover { background: rgba(133, 147, 184, 0.1); color: var(--paper); transform: none; }
 
   /* ---- instruments ------------------------------------------------- */
 
   .inst {
     grid-area: inst;
     border-left: 1px solid var(--line);
-    padding: 22px 22px 24px;
+    padding: 22px 24px 24px;
     display: flex;
     flex-direction: column;
-    gap: 22px;
+    gap: 26px;
     overflow-y: auto;
     scrollbar-width: thin;
-    scrollbar-color: var(--line) transparent;
+    scrollbar-color: var(--line2) transparent;
+    background: linear-gradient(180deg, rgba(16, 22, 43, 0.4), transparent 45%);
   }
 
   .inst h2 {
-    font-family: var(--mono);
-    font-size: 10px;
-    font-weight: 500;
-    letter-spacing: 0.2em;
-    color: var(--ice);
+    display: flex;
+    align-items: center;
+    gap: 10px;
     margin: 0 0 12px;
-  }
-
-  .readout { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; margin: 0; }
-  .readout dt {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.1em;
+    font-size: 12.5px;
+    font-weight: 500;
     color: var(--ice);
   }
+  .inst h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  .readout { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; margin: 0; align-items: baseline; }
+  .readout dt { font-size: 12.5px; color: var(--ice); }
   .readout dd {
     margin: 0;
     font-family: var(--mono);
-    font-size: 13px;
+    font-size: 14px;
+    font-weight: 500;
     font-variant-numeric: tabular-nums;
     text-align: right;
+    color: var(--paper);
   }
-  .readout dd.live { color: var(--ember); }
-  .readout dd.dim { color: var(--ice); }
+  .readout dd.dim { color: var(--ice2); }
 
   /* context window fill, drawn under the usage readout */
   .meter {
     grid-column: 1 / -1;
-    height: 3px;
-    background: var(--panel);
-    border: 1px solid var(--line);
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(133, 147, 184, 0.12);
     margin-top: 2px;
+    overflow: hidden;
   }
   .meter > span {
     display: block;
     height: 100%;
     width: 0;
-    background: var(--ice);
-    transition: width 200ms linear;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--ice), var(--ice2));
+    transition: width 420ms cubic-bezier(0.2, 0.7, 0.2, 1), background 300ms linear;
   }
-  .meter.warm > span { background: var(--ember); }
+  .meter.warm > span { background: linear-gradient(90deg, var(--ember), var(--ember2)); box-shadow: 0 0 10px rgba(255, 138, 61, 0.5); }
 
-  /* the signature: one bar per token, drawn while the stream runs */
-  .strip {
-    display: block;
-    width: 100%;
-    height: 68px;
-    background: var(--panel);
-    border: 1px solid var(--line);
-  }
-  .strip-note {
-    margin: 7px 0 0;
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.06em;
-    color: color-mix(in srgb, var(--ice) 80%, transparent);
-  }
-
-  .field { display: grid; grid-template-columns: 1fr 70px; align-items: center; gap: 10px; margin-bottom: 10px; }
-  .field label {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.1em;
-    color: var(--ice);
-  }
+  .field { display: grid; grid-template-columns: 1fr 76px; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .field label { font-size: 12.5px; color: var(--ice); }
   .field input[type="number"] {
     width: 100%;
-    padding: 5px 7px;
+    padding: 6px 9px;
     background: var(--panel);
-    border: 1px solid var(--line);
+    border: 1px solid var(--line2);
+    border-radius: var(--r1);
     color: var(--paper);
     font-family: var(--mono);
-    font-size: 12px;
+    font-size: 12.5px;
     text-align: right;
+    transition: border-color 120ms linear;
   }
+  .field input[type="number"]:hover { border-color: rgba(133, 147, 184, 0.5); }
+  .field input[type="number"]:focus-visible { outline: none; border-color: var(--ember); box-shadow: 0 0 0 3px rgba(255, 138, 61, 0.14); }
   .field.check { grid-template-columns: 1fr auto; }
-  .field input[type="checkbox"] { accent-color: var(--ember); width: 15px; height: 15px; }
+  .field input[type="checkbox"] { accent-color: var(--ember); width: 16px; height: 16px; margin: 0; cursor: pointer; }
 
   details.sys summary {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.1em;
+    font-size: 12.5px;
     color: var(--ice);
     cursor: pointer;
     list-style: none;
-    padding: 2px 0;
+    padding: 3px 0;
+    transition: color 120ms linear;
   }
+  details.sys summary:hover { color: var(--paper); }
   details.sys summary::-webkit-details-marker { display: none; }
   details.sys summary::after { content: " ▾"; opacity: 0.6; }
   details.sys[open] summary::after { content: " ▴"; }
-  details.sys summary.set { color: var(--paper); }
+  details.sys summary.set { color: var(--ice2); }
+  details.sys summary.set::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 2px; background: var(--ember); transform: rotate(45deg); margin-right: 9px; vertical-align: 1px; }
   details.sys textarea {
     display: block;
     width: 100%;
-    min-height: 74px;
+    min-height: 78px;
     max-height: 220px;
     margin-top: 8px;
     padding: 8px 10px;
     font-size: 13px;
     line-height: 1.45;
+    background: var(--panel);
+    border: 1px solid var(--line2);
+    border-radius: var(--r1);
+    transition: border-color 120ms linear;
   }
+  details.sys textarea:focus-visible { border-color: var(--ember); box-shadow: 0 0 0 3px rgba(255, 138, 61, 0.14); }
 
-  .status {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.1em;
-    color: var(--ice);
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .foot-links {
     margin-top: auto;
+    display: flex;
+    justify-content: flex-end;
   }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
-  .dot.ok   { background: var(--ember); }
-  .dot.busy { background: var(--ember); animation: pulse 1s ease-in-out infinite; }
-  .dot.wait { background: var(--ice); animation: pulse 1.6s ease-in-out infinite; }
-  .dot.down { background: #6B4A5A; }
-  @keyframes pulse { 50% { opacity: 0.25; } }
 
   /* ---- narrow ------------------------------------------------------ */
 
@@ -478,28 +637,34 @@
       grid-template-columns: minmax(0, 1fr);
       /* Without restating the rows, the instrument strip claims the free space
          and clips its own readouts. */
-      grid-template-rows: auto auto minmax(0, 1fr) auto;
-      grid-template-areas: "head" "inst" "log" "compose";
+      grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+      grid-template-areas: "head" "inst" "log" "pulse" "compose";
     }
+    header { flex-wrap: wrap; gap: 12px 18px; }
+    .model, select.model { order: 3; flex: 1 1 100%; border-left: 0; padding-left: 0; max-width: 100%; }
     .inst {
       border-left: 0;
       border-bottom: 1px solid var(--line);
       flex-direction: row;
       flex-wrap: wrap;
       align-items: flex-start;
-      gap: 20px 28px;
+      gap: 18px 28px;
       padding: 16px 28px;
       overflow: visible;
+      background: none;
     }
-    .inst > section { flex: 1 1 190px; }
-    .status { margin-top: 0; }
+    .inst > section { flex: 1 1 200px; }
+    .foot-links { display: none; }
     .log { padding-top: 20px; }
-    select.model { max-width: 24ch; }
+    .turn { max-width: none; }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .caret, .dot.busy, .dot.wait { animation: none; }
+    .shell, .turn, .fault { animation: none; }
+    .caret, .spark, details.think.live summary { animation: none !important; }
+    details.think.live summary { color: var(--think); -webkit-text-fill-color: var(--think); background: none; }
     * { transition: none !important; }
+    .log { scroll-behavior: auto; }
   }
 </style>
 </head>
@@ -507,60 +672,66 @@
 <div class="shell">
 
   <header>
-    <span class="wordmark">imp</span>
+    <span class="wordmark">imp<span class="spark" id="dot"></span></span>
+    <span class="state" id="state">starting</span>
     <span class="model" id="model">connecting…</span>
     <div class="head-actions">
-      <button type="button" class="act" id="newchat" title="clear the conversation">NEW CHAT</button>
-      <a class="link" href="https://github.com/kekzl/imp">github</a>
+      <button type="button" class="act ghost" id="newchat" title="clear the conversation">New chat</button>
     </div>
   </header>
 
   <main class="log" id="log" role="log">
     <p class="empty">
-      <b>No run yet.</b> Send a prompt. The strip on the right draws one bar per token
-      as it arrives, so you can watch inter-token latency while the answer is written.
-      <kbd>enter</kbd> sends, <kbd>shift+enter</kbd> breaks the line, <kbd>esc</kbd> stops.
+      <b>Nothing here yet.</b> Ask something. While the answer streams, the pulse below
+      draws one bar per token, so you can watch the model's pace as it writes.
+      <kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> breaks the line, <kbd>Esc</kbd> stops.
     </p>
   </main>
 
+  <div class="pulse">
+    <div>
+      <canvas class="strip" id="strip" width="960" height="128" role="img"
+              aria-label="one bar per token, height is the gap to the previous token"></canvas>
+      <p class="strip-note" id="strip-note">one bar per token, dashed line is the median gap</p>
+    </div>
+    <div class="rate idle" id="rate">
+      <div class="n" id="m-rate">0.0</div>
+      <div class="u">tok/s</div>
+    </div>
+  </div>
+
   <form class="compose" id="composer">
-    <textarea id="prompt" rows="1" placeholder="Ask the model…  (enter sends, shift+enter for a new line)"></textarea>
-    <button type="submit" class="send" id="send">SEND</button>
+    <div class="box">
+      <textarea id="prompt" rows="1" placeholder="Ask the model…"></textarea>
+      <button type="submit" class="send" id="send">Send</button>
+    </div>
   </form>
 
   <aside class="inst">
     <section>
-      <h2>RUN</h2>
+      <h2>Run</h2>
       <dl class="readout">
-        <dt>ttft</dt>      <dd id="m-ttft">-</dd>
-        <dt>tok/s</dt>     <dd id="m-rate" class="live">-</dd>
-        <dt>tokens</dt>    <dd id="m-count">-</dd>
-        <dt>median itl</dt><dd id="m-itl">-</dd>
-        <dt>wall</dt>      <dd id="m-wall">-</dd>
+        <dt>time to first token</dt> <dd id="m-ttft">-</dd>
+        <dt>tokens</dt>              <dd id="m-count">-</dd>
+        <dt>median gap</dt>          <dd id="m-itl">-</dd>
+        <dt>wall</dt>                <dd id="m-wall">-</dd>
       </dl>
     </section>
 
     <section>
-      <h2>INTER-TOKEN LATENCY</h2>
-      <canvas class="strip" id="strip" width="480" height="136" role="img"
-              aria-label="one bar per token, height is the gap to the previous token"></canvas>
-      <p class="strip-note" id="strip-note">one bar per token · line = median</p>
-    </section>
-
-    <section>
-      <h2>USAGE</h2>
+      <h2>Usage</h2>
       <dl class="readout">
-        <dt>prompt</dt>    <dd id="u-prompt">-</dd>
-        <dt>cached</dt>    <dd id="u-cached" class="dim">-</dd>
-        <dt>reasoning</dt> <dd id="u-reason" class="dim">-</dd>
-        <dt>context</dt>   <dd id="u-ctx">-</dd>
+        <dt>prompt tokens</dt> <dd id="u-prompt">-</dd>
+        <dt>from cache</dt>    <dd id="u-cached" class="dim">-</dd>
+        <dt>reasoning</dt>     <dd id="u-reason" class="dim">-</dd>
+        <dt>context</dt>       <dd id="u-ctx">-</dd>
         <div class="meter" id="u-meter" role="progressbar" aria-label="context window used"
              aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
       </dl>
     </section>
 
     <section>
-      <h2>PARAMETERS</h2>
+      <h2>Parameters</h2>
       <div class="field">
         <label for="temp">temperature</label>
         <input type="number" id="temp" value="0.7" min="0" max="2" step="0.1">
@@ -579,7 +750,7 @@
       </details>
     </section>
 
-    <div class="status" aria-live="polite"><span class="dot" id="dot"></span><span id="state">starting</span></div>
+    <div class="foot-links"><a class="link" href="https://github.com/kekzl/imp">github.com/kekzl/imp</a></div>
   </aside>
 
 </div>
@@ -596,7 +767,7 @@ let API = API_OVERRIDE || (location.protocol === "file:" ? FALLBACK_API : locati
 
 const el = (id) => document.getElementById(id);
 const log = el("log"), promptBox = el("prompt"), sendBtn = el("send"), composer = el("composer");
-const dot = el("dot"), stateLabel = el("state"), newChatBtn = el("newchat");
+const dot = el("dot"), stateLabel = el("state"), newChatBtn = el("newchat"), rateBox = el("rate");
 
 let models = [];         // GET /v1/models data[], loaded one first
 let modelName = null;    // the id the next request names
@@ -637,19 +808,21 @@ function reflectSystem() {
   el("syslabel").classList.toggle("set", el("system").value.trim() !== "");
 }
 
-/* ---------- instruments ------------------------------------------- */
+/* ---------- pulse -------------------------------------------------- */
 
 const strip = el("strip");
 const ctx2d = strip.getContext("2d");
 
 // Canvas fillStyle cannot parse color-mix(), so the ramp is interpolated by hand.
-const EMBER = [255, 138, 61], LINE = [35, 43, 74], ICE = [133, 147, 184];
-const mix = (a, b, t) =>
-  `rgb(${Math.round(a[0] + (b[0] - a[0]) * t)},${Math.round(a[1] + (b[1] - a[1]) * t)},${Math.round(a[2] + (b[2] - a[2]) * t)})`;
+const EMBER = [255, 138, 61], HOT = [255, 214, 170], LINE = [40, 50, 88], ICE = [133, 147, 184];
+const mixA = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
+const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
 const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * q)))];
 
 let itl = [];            // ms between consecutive tokens
+let itlAt = [];          // when each gap was recorded, for the cool-down glow
 let tStart = 0, tFirst = 0, tPrev = 0, nTokens = 0;
+const HOT_MS = 700;      // a new bar lands bright and cools to its colour in this time
 
 function median(xs) {
   if (!xs.length) return 0;
@@ -670,7 +843,19 @@ function drawStrip() {
   }
   ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx2d.clearRect(0, 0, w, h);
-  if (!itl.length) return;
+  ctx2d.shadowBlur = 0;
+
+  if (!itl.length) {
+    // At rest: the baseline the bars will stand on.
+    ctx2d.strokeStyle = `rgba(${ICE[0]},${ICE[1]},${ICE[2]},0.25)`;
+    ctx2d.setLineDash([2, 4]);
+    ctx2d.beginPath();
+    ctx2d.moveTo(8, h - 8.5);
+    ctx2d.lineTo(w - 8, h - 8.5);
+    ctx2d.stroke();
+    ctx2d.setLineDash([]);
+    return;
+  }
 
   // A steady stream clusters tightly, so scaling from zero would paint one solid
   // block. Anchor the floor at p05 and the ceiling at p98: the run reads as a low
@@ -681,35 +866,59 @@ function drawStrip() {
   const med = median(itl);
   const norm = (v) => Math.max(0, Math.min(1, (v - lo) / span));
 
-  const usable = h - 10;
-  const gap = itl.length > 200 ? 0 : 1;
-  const bw = Math.max(1, (w - 2) / itl.length);
+  const now = performance.now();
+  const pad = 8;
+  const usable = h - pad * 2 - 4;
+  const gap = itl.length > 240 ? 0 : 1;
+  const bw = Math.max(1, (w - pad * 2) / itl.length);
 
   for (let i = 0; i < itl.length; i++) {
     const frac = norm(itl[i]);
-    const bh = 2 + frac * usable;  // even the fastest token keeps a visible floor
-    ctx2d.fillStyle = mix(LINE, EMBER, 0.35 + frac * 0.65);
-    ctx2d.fillRect(1 + i * bw, h - bh - 1, Math.max(1, bw - gap), bh);
+    const bh = 3 + frac * usable;  // even the fastest token keeps a visible floor
+    const heat = Math.max(0, 1 - (now - itlAt[i]) / HOT_MS);
+    const base = mixA(LINE, EMBER, 0.35 + frac * 0.65);
+    ctx2d.fillStyle = rgb(heat > 0 ? mixA(base, HOT, heat * 0.85) : base);
+    ctx2d.shadowBlur = heat * 14;
+    ctx2d.shadowColor = `rgba(255,138,61,${(0.7 * heat).toFixed(2)})`;
+    const x = pad + i * bw, y = h - pad - bh;
+    ctx2d.beginPath();
+    ctx2d.roundRect(x, y, Math.max(1, bw - gap), bh, Math.min(2, bw / 2));
+    ctx2d.fill();
   }
+  ctx2d.shadowBlur = 0;
 
-  const y = h - 1 - (2 + norm(med) * usable);
-  ctx2d.strokeStyle = `rgb(${ICE[0]},${ICE[1]},${ICE[2]})`;
-  ctx2d.globalAlpha = 0.5;
+  const y = h - pad - (3 + norm(med) * usable);
+  ctx2d.strokeStyle = `rgba(${ICE[0]},${ICE[1]},${ICE[2]},0.55)`;
   ctx2d.setLineDash([3, 3]);
   ctx2d.beginPath();
-  ctx2d.moveTo(0, y + 0.5);
-  ctx2d.lineTo(w, y + 0.5);
+  ctx2d.moveTo(pad, y + 0.5);
+  ctx2d.lineTo(w - pad, y + 0.5);
   ctx2d.stroke();
   ctx2d.setLineDash([]);
-  ctx2d.globalAlpha = 1;
+}
+
+// Keeps repainting while the newest bar is still cooling, then stops itself.
+let cooling = false;
+function cool() {
+  if (cooling) return;
+  cooling = true;
+  const tick = () => {
+    drawStrip();
+    const last = itlAt[itlAt.length - 1] ?? 0;
+    if (performance.now() - last < HOT_MS) requestAnimationFrame(tick);
+    else cooling = false;
+  };
+  requestAnimationFrame(tick);
 }
 
 function resetRun() {
-  itl = []; tFirst = 0; tPrev = 0; nTokens = 0;
-  for (const id of ["m-ttft", "m-rate", "m-count", "m-itl", "m-wall", "u-prompt", "u-cached", "u-reason", "u-ctx"])
+  itl = []; itlAt = []; tFirst = 0; tPrev = 0; nTokens = 0;
+  for (const id of ["m-ttft", "m-count", "m-itl", "m-wall", "u-prompt", "u-cached", "u-reason", "u-ctx"])
     el(id).textContent = "-";
+  el("m-rate").textContent = "0.0";
+  rateBox.classList.add("idle");
   setMeter(0);
-  el("strip-note").textContent = "one bar per token · line = median";
+  el("strip-note").textContent = "one bar per token, dashed line is the median gap";
   drawStrip();
 }
 
@@ -721,14 +930,18 @@ function noteToken() {
     el("m-ttft").textContent = fmtS(now - tStart);
   } else {
     itl.push(now - tPrev);
+    itlAt.push(now);
   }
   tPrev = now;
 
   const secs = (now - tFirst) / 1000;
   el("m-count").textContent = String(nTokens);
-  if (secs > 0.05) el("m-rate").textContent = (nTokens / secs).toFixed(1);
+  if (secs > 0.05) {
+    el("m-rate").textContent = (nTokens / secs).toFixed(1);
+    rateBox.classList.remove("idle");
+  }
   if (itl.length) el("m-itl").textContent = median(itl).toFixed(1) + " ms";
-  drawStrip();
+  cool();
 }
 
 function setMeter(frac) {
@@ -745,7 +958,7 @@ function showUsage(u) {
   el("u-prompt").textContent = fmtK(u.prompt_tokens ?? 0);
   const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
   el("u-cached").textContent = cached && u.prompt_tokens
-    ? `${fmtK(cached)} · ${Math.round(100 * cached / u.prompt_tokens)}%` : String(cached);
+    ? `${fmtK(cached)} (${Math.round(100 * cached / u.prompt_tokens)}%)` : String(cached);
   const reasoning = u.completion_tokens_details?.reasoning_tokens ?? 0;
   el("u-reason").textContent = String(reasoning);
   if (typeof u.completion_tokens === "number") {
@@ -762,7 +975,7 @@ function showUsage(u) {
   } else {
     el("u-ctx").textContent = fmtK(used);
   }
-  if (evicted) el("u-ctx").textContent += ` · ${fmtK(evicted)} evicted`;
+  if (evicted) el("u-ctx").textContent += `, ${fmtK(evicted)} evicted`;
 }
 
 /* ---------- transcript -------------------------------------------- */
@@ -775,13 +988,19 @@ const esc = (s) => s.replace(/[&<>]/g, (c) => ESCAPES[c]);
 // run, so a stray ** or ` inside a code block is never styled.
 const SENT = String.fromCharCode(1);
 const FENCE_SLOT = new RegExp("\\n?" + SENT + "(\\d+)" + SENT + "\\n?", "g");
-const COPY_BTN = '<button type="button" class="copy-code" title="copy code">COPY</button>';
+
+function codeBlock(lang, code) {
+  // No whitespace between the tags: the <pre> keeps it.
+  return '<pre><div class="code-head"><span>' + (lang || "code") + '</span>' +
+         '<button type="button" class="copy-code" title="copy code">Copy</button></div>' +
+         '<code>' + code + '</code></pre>';
+}
 
 function markup(src) {
   const fences = [];
   let s = esc(src);
-  s = s.replace(/```[\w+-]*\n?([\s\S]*?)(?:```|$)/g, (_, code) => {
-    fences.push(code.replace(/\n$/, ""));
+  s = s.replace(/```([\w+-]*)\n?([\s\S]*?)(?:```|$)/g, (_, lang, code) => {
+    fences.push([lang, code.replace(/\n$/, "")]);
     return SENT + (fences.length - 1) + SENT;
   });
   s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
@@ -790,7 +1009,7 @@ function markup(src) {
   // The heading owns its margins, so the blank line after it is swallowed:
   // with white-space: pre-wrap it would otherwise double the gap.
   s = s.replace(/^#{1,6}[ \t]+(.+?)[ \t]*(?:\n+|$)/gm, "<h4>$1</h4>");
-  s = s.replace(FENCE_SLOT, (_, i) => "<pre>" + COPY_BTN + "<code>" + fences[i] + "</code></pre>");
+  s = s.replace(FENCE_SLOT, (_, i) => codeBlock(fences[i][0], fences[i][1]));
   return s;
 }
 
@@ -801,7 +1020,9 @@ function addTurn(role) {
   wrap.className = "turn " + (role === "user" ? "is-user" : "is-model");
   const label = document.createElement("div");
   label.className = "role";
-  label.textContent = role === "user" ? "you" : "imp";
+  const spark = document.createElement("span");
+  spark.className = "spark";
+  label.append(spark, role === "user" ? "you" : "imp");
   const body = document.createElement("div");
   body.className = "body";
   wrap.append(label, body);
@@ -811,7 +1032,7 @@ function addTurn(role) {
 
 function thinkPane(turn) {
   const d = document.createElement("details");
-  d.className = "think";
+  d.className = "think live";
   d.open = true;
   const s = document.createElement("summary");
   s.textContent = "thinking";
@@ -835,14 +1056,21 @@ function actButton(cls, text, title) {
 // only) regenerate. Earlier footers lose their regenerate button when a new
 // turn lands, so the history and the transcript never disagree about what a
 // rerun replaces.
-function addFoot(turn, stats) {
+function addFoot(turn, bits) {
   const foot = document.createElement("div");
   foot.className = "foot";
   const s = document.createElement("span");
   s.className = "stats";
-  s.textContent = stats;
-  foot.append(s, actButton("act-copy", "COPY", "copy the answer as markdown"),
-              actButton("act-regen", "REGENERATE", "drop this answer and ask again"));
+  for (const bit of bits) {
+    const span = document.createElement("span");
+    span.textContent = bit;
+    s.append(span);
+  }
+  const acts = document.createElement("span");
+  acts.className = "acts";
+  acts.append(actButton("act-copy", "Copy", "copy the answer as markdown"),
+              actButton("act-regen", "Regenerate", "drop this answer and ask again"));
+  foot.append(s, acts);
   turn.wrap.append(foot);
 }
 
@@ -873,7 +1101,7 @@ async function copyText(text, button) {
     ta.remove();
   }
   const was = button.textContent;
-  button.textContent = "COPIED";
+  button.textContent = "Copied";
   setTimeout(() => { button.textContent = was; }, 1200);
 }
 
@@ -881,7 +1109,7 @@ const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 90;
 const stickBottom = (was) => { if (was) log.scrollTop = log.scrollHeight; };
 
 function setState(kind, text) {
-  dot.className = "dot " + kind;
+  dot.className = "spark " + kind;
   stateLabel.textContent = text;
 }
 
@@ -948,6 +1176,7 @@ async function run(text) {
   history.push({ role: "user", content: text });
 
   const turn = addTurn("model");
+  turn.wrap.classList.add("live");
   const caret = document.createElement("span");
   caret.className = "caret";
   turn.body.append(caret);
@@ -956,7 +1185,7 @@ async function run(text) {
   resetRun();
   dropRegenExcept(null);
   setState("busy", "generating");
-  sendBtn.textContent = "STOP";
+  sendBtn.textContent = "Stop";
   sendBtn.classList.add("stop");
   sendBtn.disabled = false;
   newChatBtn.disabled = true;
@@ -1034,7 +1263,10 @@ async function run(text) {
             if (nTokens === 0) setState("busy", "thinking");
           }
           if (delta.content) {
-            if (!answer) setState("busy", "generating");
+            if (!answer) {
+              setState("busy", "generating");
+              if (thinking) thinking.pane.classList.remove("live");
+            }
             answer += delta.content;
             paint();
           }
@@ -1066,7 +1298,8 @@ async function run(text) {
     // frame, otherwise that frame puts the caret back after the run has ended.
     finished = true;
     turn.body.innerHTML = markup(answer);
-    if (thinking) thinking.pane.open = false;
+    turn.wrap.classList.remove("live");
+    if (thinking) { thinking.pane.open = false; thinking.pane.classList.remove("live"); }
     if (!answer && !thinking) {
       turn.wrap.remove();
     } else {
@@ -1079,7 +1312,7 @@ async function run(text) {
       if (tFirst) bits.push(`ttft ${fmtS(tFirst - tStart)}`);
       bits.push(fmtS(wall));
       if (usage?.prompt_tokens_details?.cached_tokens) bits.push(`${fmtK(usage.prompt_tokens_details.cached_tokens)} cached`);
-      addFoot(turn, bits.join(" · "));
+      addFoot(turn, bits);
       if (finish === "length") {
         if (!answer && thinking)
           addNote(turn, "<b>No answer: the whole token budget went to thinking.</b> Raise max tokens, a thinking model needs room to answer after it thinks.");
@@ -1091,10 +1324,10 @@ async function run(text) {
         addNote(turn, "<b>The stream ended without a finish reason.</b> Something between here and the engine cut it off; the answer may be incomplete.");
       }
       el("m-wall").textContent = fmtS(wall);
-      el("strip-note").textContent = `${count} tokens · median ${median(itl).toFixed(1)} ms`;
+      el("strip-note").textContent = `${count} tokens, median gap ${median(itl).toFixed(1)} ms`;
     }
     controller = null;
-    sendBtn.textContent = "SEND";
+    sendBtn.textContent = "Send";
     sendBtn.classList.remove("stop");
     sendBtn.disabled = false;
     newChatBtn.disabled = false;
@@ -1148,7 +1381,7 @@ newChatBtn.addEventListener("click", () => {
   resetRun();
   const p = document.createElement("p");
   p.className = "empty";
-  p.innerHTML = "<b>New conversation.</b> The model keeps nothing from the last one; the system prompt and parameters stay.";
+  p.innerHTML = "<b>New conversation.</b> Nothing from the last one is sent along; the system prompt and parameters stay.";
   log.append(p);
   promptBox.focus();
 });
@@ -1159,7 +1392,7 @@ log.addEventListener("click", (e) => {
   const btn = e.target.closest("button");
   if (!btn) return;
   if (btn.classList.contains("copy-code")) {
-    copyText(btn.parentElement.querySelector("code")?.textContent ?? "", btn);
+    copyText(btn.closest("pre")?.querySelector("code")?.textContent ?? "", btn);
   } else if (btn.classList.contains("act-copy")) {
     copyText(rawText.get(btn.closest(".turn")) ?? "", btn);
   } else if (btn.classList.contains("act-regen")) {
@@ -1267,6 +1500,7 @@ async function refreshModels() {
 })();
 
 loadParams();
+drawStrip();
 </script>
 </body>
 </html>
