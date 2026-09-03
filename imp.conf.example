@@ -344,6 +344,13 @@ paged_fp8_multitok   = 4
 # Microbench 24/4 heads HD=256: 1 x 77k context 294 -> 210 us per launch with
 # the 4-CTAs-per-SM split-K target, 32 x 1100: 123 -> 90 us. 1 = scalar kernels.
 paged_nvfp4_multitok = 4
+# The same for the F16 KV cache (HD=128/256, GQA ratio 1..8): four tokens per
+# warp iteration, each K/V row read once per CTA for up to four Q heads.
+# Microbench 32 x 1100: 32/8 heads HD=128 315 -> 98 us per launch (four heads
+# per CTA), 16/8 HD=256 665 -> 178 us (two); 32 x 4096: 1165 -> 327 and
+# 2445 -> 643 us, i.e. the resident-bandwidth ceiling. 1 = the cooperative
+# GQA kernel.
+paged_f16_multitok   = 4
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).

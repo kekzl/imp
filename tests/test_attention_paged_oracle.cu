@@ -964,6 +964,80 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
 }
 
 // ---------------------------------------------------------------------------
+// F16 multitok kernel (attention.paged_f16_multitok) against the fp64
+// reference, both routes (split-K on the batch-1 shapes, forced single-split
+// = the kernel under test) and every heads-per-CTA instance the ratio allows.
+TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    void* d_scratch = nullptr;
+    const size_t scratch_bytes = (size_t)16 << 20;
+    cudaMalloc(&d_scratch, scratch_bytes);
+    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
+    struct Shape {
+        int n_heads, n_kv_heads, head_dim;
+    };
+    for (const Shape sh : {Shape{32, 8, 128}, Shape{16, 8, 256}, Shape{24, 8, 128}}) {
+        const float scale = 1.0f / std::sqrt((float)sh.head_dim);
+        for (int force_fallback : {0, 1}) {
+            process_diag_set_force_splitk_fallback(force_fallback != 0);
+            for (int kv_len : {16, 64, 333, 1024}) {
+                const int num_blocks = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                const size_t q_elems = (size_t)sh.n_heads * sh.head_dim;
+                const size_t kv_elems = (size_t)kv_len * sh.n_kv_heads * sh.head_dim;
+                std::vector<half> Qh(q_elems), Kh(kv_elems), Vh(kv_elems);
+                lcg_fill(Qh, 0x6F11u + kv_len, 2.0f);
+                lcg_fill(Kh, 0x6F12u + kv_len, 2.0f);
+                lcg_fill(Vh, 0x6F13u + kv_len, 1.0f);
+                std::vector<double> ref;
+                ref_decode_f64(Qh, Kh, Vh, ref, kv_len, sh.n_heads, sh.n_kv_heads, sh.head_dim, scale);
+                std::vector<int> bt(num_blocks);
+                for (int i = 0; i < num_blocks; i++)
+                    bt[i] = i;
+                int* d_bt = (int*)up(bt.data(), num_blocks * sizeof(int));
+                int ctx = kv_len;
+                int* d_ctx = (int*)up(&ctx, sizeof(int));
+                void* d_q = up(Qh.data(), q_elems * sizeof(half));
+                void* d_o = nullptr;
+                cudaMalloc(&d_o, q_elems * sizeof(half));
+                PathCtx c{stream,        kv_len,      sh.n_heads,
+                          sh.n_kv_heads, sh.head_dim, num_blocks,
+                          scale,         q_elems,     &Kh,
+                          &Vh,           &ref,        f16_tensor(d_q, {1, 1, sh.n_heads, sh.head_dim}),
+                          d_o,           d_bt,        d_ctx};
+                process_diag_set_paged_f16_multitok(1);
+                ErrStats e_plain = PathF16::run(c);
+                EXPECT_EQ(e_plain.nan_count, 0) << "kv_len " << kv_len;
+                EXPECT_LT(e_plain.max_rel, PathF16::envelope())
+                    << "cooperative kv_len " << kv_len << ": " << e_plain.str();
+                process_diag_set_paged_f16_multitok(4);
+                for (int hpc : {1, 2, 4}) {
+                    process_diag_set_paged_f16_hpc(hpc);
+                    ErrStats e_mt = PathF16::run(c);
+                    EXPECT_EQ(e_mt.nan_count, 0) << "kv_len " << kv_len << " hpc " << hpc;
+                    EXPECT_LT(e_mt.max_rel, PathF16::envelope())
+                        << "multitok hpc " << hpc << " kv_len " << kv_len << ": " << e_mt.str();
+                    printf("PagedF16Multitok %d/%d hd=%d %s kv_len=%d hpc=%d: cooperative %s | multitok %s\n",
+                           sh.n_heads, sh.n_kv_heads, sh.head_dim, force_fallback ? "plain " : "splitK",
+                           kv_len, hpc, e_plain.str().c_str(), e_mt.str().c_str());
+                }
+                process_diag_set_paged_f16_hpc(0);
+                cudaFree(d_q);
+                cudaFree(d_o);
+                cudaFree(d_bt);
+                cudaFree(d_ctx);
+            }
+        }
+    }
+    process_diag_set_force_splitk_fallback(false);
+    process_diag_set_paged_f16_multitok(4);
+    process_diag_set_paged_f16_hpc(0);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
+    cudaStreamDestroy(stream);
+}
+
+// ---------------------------------------------------------------------------
 // F16 paged decode microbench (the default KV dtype of Q8_0 GGUFs and of
 // checkpoints that declare no KV quant): IMP_F16_BENCH_BATCH (32),
 // IMP_F16_BENCH_CTX (1100), IMP_F16_BENCH_HEADS (32), IMP_F16_BENCH_KV_HEADS
@@ -979,6 +1053,8 @@ TEST(PagedF16Decode, ServingShapeMicrobench) {
     const int n_heads = env_int("IMP_F16_BENCH_HEADS", 32);
     const int n_kv_heads = env_int("IMP_F16_BENCH_KV_HEADS", 8);
     const int head_dim = env_int("IMP_F16_BENCH_HD", 128);
+    process_diag_set_paged_f16_multitok(env_int("IMP_F16_BENCH_MULTITOK", 4));
+    process_diag_set_paged_f16_hpc(env_int("IMP_F16_BENCH_HPC", 0));
     const float scale = 1.0f / std::sqrt((float)head_dim);
     const int blocks_per_seq = (kv_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const int num_blocks = batch * blocks_per_seq;
@@ -1039,10 +1115,11 @@ TEST(PagedF16Decode, ServingShapeMicrobench) {
     const double us = 1000.0 * ms / iters;
     const double bytes = 2.0 * (double)batch * kv_len * n_kv_heads * head_dim * sizeof(half);
     printf(
-        "PagedF16Decode: batch=%d ctx=%d heads=%d/%d hd=%d: %.1f us/launch, KV %.1f MB, %.0f GB/s (warm %.2f "
+        "PagedF16Decode: multitok=%d hpc=%d batch=%d ctx=%d heads=%d/%d hd=%d: %.1f us/launch, KV %.1f MB, "
+        "%.0f GB/s (warm %.2f "
         "s)\n",
-        batch, kv_len, n_heads, n_kv_heads, head_dim, us, bytes / 1e6, bytes / (us * 1e-6) / 1e9,
-        warm_ms / 1000.0);
+        process_diag_paged_f16_multitok(), process_diag_paged_f16_hpc(), batch, kv_len, n_heads, n_kv_heads,
+        head_dim, us, bytes / 1e6, bytes / (us * 1e-6) / 1e9, warm_ms / 1000.0);
     std::vector<float> Oh = read_o(d_o, q_elems);
     size_t nonfinite = 0;
     for (float h : Oh)

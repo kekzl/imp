@@ -192,8 +192,9 @@ def main():
     # 1082 -> 1084 (#this): PagedNvfp4Multitok.MatchesReferenceBothRoutes and
     # PagedNvfp4TcDecode.LongContextMicrobench (test_attention_paged_oracle.cu).
     # 1084 -> 1085 (#1877): PagedF16Decode.ServingShapeMicrobench (test_attention_paged_oracle.cu).
-    # 1085 -> 1081 (#this): tests/test_cluster_launch.cu removed with the cluster GQA decode kernel.
-    PINNED = 1081
+    # 1085 -> 1081 (#1878): tests/test_cluster_launch.cu removed with the cluster GQA decode kernel.
+    # 1081 -> 1082 (#this): PagedF16Multitok.MatchesReferenceBothRoutes (test_attention_paged_oracle.cu).
+    PINNED = 1082
 
     text = CMAKE.read_text()
     mods = module_sources(text)

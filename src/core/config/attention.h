@@ -111,6 +111,13 @@ struct Attention {
     // NVFP4 paged decode (HD=128/256): tokens per warp iteration, same idea
     // (attention_paged_nvfp4_multitok.cu). 1 = the scalar kernels.
     int paged_nvfp4_multitok = 4;
+    // F16 paged decode (HD=128/256, GQA ratio 1..8, serving path without
+    // split-K): tokens per warp iteration on the multitok kernel
+    // (attention_paged_f16_multitok.cu), which also shares each KV row across
+    // the Q heads of one CTA. Microbench 32 x 1100: 32/8 HD=128 315 -> 98 us,
+    // 16/8 HD=256 665 -> 178 us; 32 x 4096 at the resident-bandwidth ceiling
+    // (1644 / 1669 GB/s). 1 = the cooperative GQA kernel (2026-09-03).
+    int paged_f16_multitok = 4;
     // Causal FA2 CTA order: heaviest q-tiles first. A causal q-tile t attends
     // (t+1)*Bq/Bkv KV tiles, 2..32 at 4096 tokens and Bq=128, and blockIdx.x
     // ran the light tiles first, so the last CTAs of a head were the heaviest
