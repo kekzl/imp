@@ -110,7 +110,7 @@ there instead of retelling it.
   1000-token prompts, fresh server: wave 0 2387 tok/s, waves 1-3 1443-1485
   (ITL p50 7.8 -> 16.5 ms); `server.prefix_cache=false` held 2387-2451 on
   every wave. The check now adds reclaimable cached blocks and compares
-  against the pool size. FIX_AFTER (#PRNUM)
+  against the pool size. FIX_AFTER (#1879)
 
 ## [0.34.0] - 2026-09-02
 
