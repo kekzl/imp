@@ -58,15 +58,14 @@ __device__ __forceinline__ void nvfp4_block_multitok(
         float dot[TOK];
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
-            const half2 ksc = __float2half2_rn(ue4m3_scale_to_float(ks[i]));
-            float d = 0.0f;
+            // The lane's PACK pairs share one UE4M3 group scale: dot the raw
+            // E2M1 values (exact in fp16) and apply the scale once.
+            half2 acc = __hmul2(q_h2[0], fp4_pair_to_half2(kw[i] & 0xFF));
 #pragma unroll
-            for (int b = 0; b < PACK; b++) {
-                half2 kh2 = __hmul2(fp4_pair_to_half2((kw[i] >> (8 * b)) & 0xFF), ksc);
-                const float2 pr = __half22float2(__hmul2(q_h2[b], kh2));
-                d += pr.x + pr.y;
-            }
-            dot[i] = d;
+            for (int b = 1; b < PACK; b++)
+                acc = __hfma2(q_h2[b], fp4_pair_to_half2((kw[i] >> (8 * b)) & 0xFF), acc);
+            const float2 pr = __half22float2(acc);
+            dot[i] = (pr.x + pr.y) * ue4m3_scale_to_float(ks[i]);
         }
 #pragma unroll
         for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {

@@ -128,6 +128,19 @@ there instead of retelling it.
   trials +1.0% / +1.1%), 38-token prompts 1845.9 -> 1869.2 (+1.3%, trials
   +0.5% / +1.8%). Qwen3-14B-NVFP4 (40/8, ratio 5, not served) 154.05 vs 153.99
   at 8k and 114.47 vs 114.40 at 32k. (#1886)
+- NVFP4 decode attention applies the UE4M3 group scale once per (token, head)
+  after a half2 FMA dot over the raw E2M1 pairs instead of scaling every pair
+  first (grouped and per-head kernels). Microbench, grouped kernel: 24/4
+  HD=256 batch 1 x 32k 74.4 -> 61.8 us, 1 x 77k 177.3 -> 144.5, 32 x 1100 68.6
+  -> 57.9; 32/8 HD=128 1 x 32k 71.4 -> 67.7; fp64 oracle max_rel unchanged
+  (7.461e-03 at 1024 on 24/4). E2E on Qwen3.8-27B-NVFP4-vllm, two images
+  (#1886 vs this): single stream `scripts/bench_longctx_ab.sh` tg128,
+  `speculative.ngram=false`, 2 rounds, 8k 89.82 vs 90.23 (+0.5%, within
+  spread), 32k 84.32 -> 85.70 (+1.6%), 64k 77.19 -> 79.67 (+3.2%); serving at
+  32 streams x 1000-token prompts (`tools/analysis/prefill_cap_conc_ab.sh`, 2
+  trials x 3 waves) 1165.2 vs 1161.5 (medians, -0.3%; trials +0.1% / +0.8%),
+  neutral. Cumulative single-stream vs #1882's tree: 32k 81.87 -> 85.70
+  (+4.7%), 64k 74.30 -> 79.67 (+7.2%). (#PRNUM)
 - FP8 paged decode attention: the e4m3 bytes now convert in pairs
   (`cvt e4m3x2 -> f16x2`, HMUL2 dot) instead of one scalar conversion per
   byte; ncu had the four-token kernel issue-bound (SM 70%, DRAM 33%).
