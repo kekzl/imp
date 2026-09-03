@@ -89,6 +89,32 @@ void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_c
                                                int sliding_window, float softcap, const half* attn_sinks,
                                                cudaStream_t stream);
 
+// F16 decode with four tokens per warp iteration and heads_per_cta Q heads per
+// CTA sharing the KV loads (attention.paged_f16_multitok,
+// attention_paged_f16_multitok.cu), HD=128/256, GQA ratio 1..8. Called by
+// paged_attention_decode when the knob is on, split-K is off and n_sinks == 0;
+// heads_per_cta 0 = auto (largest of 4/2/1 dividing the ratio, HD=256 caps at
+// 2). Returns false for unsupported shapes.
+bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
+                                                half* O, const int* block_tables, const int* context_lens,
+                                                int batch_size, int n_heads, int n_kv_heads, int head_dim,
+                                                int block_size, float scale, int max_num_blocks,
+                                                int sliding_window, float softcap, const half* attn_sinks,
+                                                int heads_per_cta, cudaStream_t stream);
+
+// F16 decode with four tokens per warp iteration and heads_per_cta Q heads per
+// CTA sharing the KV loads (attention.paged_f16_multitok,
+// attention_paged_f16_multitok.cu), HD=128/256, GQA ratio 1..8. Called by
+// paged_attention_decode when the knob is on, split-K is off and n_sinks == 0;
+// heads_per_cta 0 = auto (largest of 4/2/1 dividing the ratio, HD=256 caps at
+// 2). Returns false for unsupported shapes.
+bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
+                                                half* O, const int* block_tables, const int* context_lens,
+                                                int batch_size, int n_heads, int n_kv_heads, int head_dim,
+                                                int block_size, float scale, int max_num_blocks,
+                                                int sliding_window, float softcap, const half* attn_sinks,
+                                                int heads_per_cta, cudaStream_t stream);
+
 void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                                 const int* block_tables, const int* context_lens, int block_size, float scale,
                                 float kv_scale, int max_context_len, int sliding_window = 0,

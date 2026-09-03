@@ -59,9 +59,31 @@ there instead of retelling it.
   (6.7x); batch 1 unchanged. gemma-3-12b at 32 streams x 1001-token prompts:
   186.4 -> 229.9 tok/s (+23.3%), ITL p95 191.4 -> 128.9 ms; Llama-3.2-3B (GQA
   factor 3, never routed) neutral (#1877).
+- F16 paged decode attention (the KV dtype of every GGUF that carries no FP8
+  hint: Llama, Mistral, Gemma, Phi) processes four tokens per warp iteration
+  and shares each K/V row across up to four Q heads of one CTA
+  (`attention.paged_f16_multitok`, default 4;
+  `attention_paged_f16_multitok.cu`). The cooperative GQA kernel loaded 2
+  bytes per instruction with a runtime head_dim division per element (ncu 32 x
+  1100: DRAM 22%, 213M instructions for 144 MB). Microbench 32 x 1100: 32/8
+  heads HD=128 314.6 -> 98.0 us per launch, 16/8 HD=256 665.0 -> 177.9 us; 32
+  x 4096: 1164.5 -> 326.6 us (1644 GB/s) and 2444.8 -> 643.3 us (1669 GB/s),
+  the resident ceiling; fp64 oracle within the F16 envelope on 3 shapes x 4
+  lengths x both routes x 3 heads-per-CTA instances. Serving at 32 streams x
+  1000-token prompts, 300-token completions,
+  `tools/analysis/prefill_cap_conc_ab.sh` (config arms on one image, 2 trials
+  x 3 waves, medians), measured on top of #1879 (without it every wave after
+  the first ran eager and the median hid the kernel): Llama-3.2-3B-Q8_0 (24/8,
+  HD=128, `speculative.ngram=false`) 1623.9 -> 2407.6 tok/s (+48.3%, trials
+  +49.8% / +48.3%), ITL p50 14.1 -> 7.8 ms; Phi-4-reasoning-plus-NVFP4 with
+  `kv_cache.dtype=fp16` (40/10, HD=128) 1099.1 -> 1812.0 (+64.9%, trials
+  +64.8% / +68.4%), ITL p50 20.3 -> 9.9 ms, i.e. the level its FP8 KV reaches;
+  gemma-3-12b Q4_K_M (16/8, HD=256) 218.4 -> 252.8 (+15.8%, trials +15.9% /
+  +16.3%; KV pool 2300 blocks, 30.8 GB VRAM in use, the 3000-block pool read
+  +16.6% with a wave-to-wave spread of 220-294 in the multitok arm). (#PRNUM)
 - The F16 cluster (DSMEM) GQA decode kernel, `src/runtime/cluster_launch.h`
   and `tests/test_cluster_launch.cu` are removed; the route was off since
-  the entry above. `attention_paged.cu` 1216 -> 1032 code LOC, paged oracle
+  #1877. `attention_paged.cu` 1216 -> 1032 code LOC, paged oracle
   tests 53/53, F16 serving microbench 316.0 us (was 315.8) (#1878)
 - NVFP4 paged decode attention (the hybrid's default) processes four tokens
   per warp iteration too (`attention.paged_nvfp4_multitok`, default 4, plain

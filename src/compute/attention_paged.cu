@@ -1420,57 +1420,67 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
     // or was selected but its launch failed and we reset num_splits=1 above.
     if (num_splits == 1 && n_q_per_kv > 1) {
         if (n_q_per_kv <= MAX_Q_PER_KV) {
-            // GQA-aware kernel (cooperative, one CTA per KV head)
-            // Use 4 warps per Q head for ratio<=8 (1024 threads max),
-            // 2 warps per Q head for ratio>8 (e.g. ratio=16: 16*2*32=1024)
-            int warps_per_q = (n_q_per_kv <= 8) ? 4 : 2;
-            int total_warps_gqa = n_q_per_kv * warps_per_q;
-            int gqa_threads = total_warps_gqa * WARP_SIZE;
+            bool f16_mt_done = false;
+            if (process_diag_paged_f16_multitok() > 1 && n_sinks == 0)
+                f16_mt_done = paged_attention_decode_f16_multitok_launch(
+                    reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
+                    reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),
+                    block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale,
+                    max_num_blocks, sliding_window, softcap, sinks_h, process_diag_paged_f16_hpc(), stream);
+            if (!f16_mt_done) {
+                // GQA-aware kernel (cooperative, one CTA per KV head)
+                // Use 4 warps per Q head for ratio<=8 (1024 threads max),
+                // 2 warps per Q head for ratio>8 (e.g. ratio=16: 16*2*32=1024)
+                int warps_per_q = (n_q_per_kv <= 8) ? 4 : 2;
+                int total_warps_gqa = n_q_per_kv * warps_per_q;
+                int gqa_threads = total_warps_gqa * WARP_SIZE;
 
-            size_t kv_tile_bytes = 4 * block_size * head_dim * sizeof(half);
-            size_t red_bytes = total_warps_gqa * sizeof(float) * 2 +
-                               total_warps_gqa * head_dim * sizeof(float);
-            size_t gqa_smem = (kv_tile_bytes > red_bytes) ? kv_tile_bytes : red_bytes;
+                size_t kv_tile_bytes = 4 * block_size * head_dim * sizeof(half);
+                size_t red_bytes = total_warps_gqa * sizeof(float) * 2 +
+                                   total_warps_gqa * head_dim * sizeof(float);
+                size_t gqa_smem = (kv_tile_bytes > red_bytes) ? kv_tile_bytes : red_bytes;
 
-            dim3 grid(batch_size, n_kv_heads);
-            dim3 block(gqa_threads);
+                dim3 grid(batch_size, n_kv_heads);
+                dim3 block(gqa_threads);
 
-            // Opt-in to extended shared memory for large head_dim. Gemma-4 has a
-            // dual geometry: sliding layers use hd=256 (gqa_smem ~32 KiB, no
-            // opt-in), but GLOBAL layers use hd=512 (gqa_smem ~64 KiB, opt-in
-            // REQUIRED). The opt-in cap is PER (kernel, current dynamic-smem
-            // value): `paged_attention_gqa_kernel` is a single non-templated
-            // function reused across every model/head_dim in the process, so a
-            // one-shot `static bool` guard would freeze the cap at whatever the
-            // first >48 KiB caller needed and starve a later larger request.
-            // Re-arm it for the largest value seen instead. cudaFuncSetAttribute
-            // is idempotent and cheap; a stale error from it (e.g. left by a
-            // previously-loaded model's func-attribute call in the same process)
-            // would otherwise make THIS launch return cudaErrorInvalidValue and
-            // bail to garbage, so set it every time the requested smem grows and
-            // drain any error it leaves.
-            if (gqa_smem > 48 * 1024) {
-                static size_t s_gqa_smem_optin = 0;
-                if (gqa_smem > s_gqa_smem_optin) {
-                    cudaError_t fa_ = cudaFuncSetAttribute(paged_attention_gqa_kernel,
-                                                           cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                           static_cast<int>(gqa_smem));
-                    if (fa_ == cudaSuccess) {
-                        s_gqa_smem_optin = gqa_smem;
-                    } else {
-                        IMP_LOG_WARN("paged_attention_gqa: smem opt-in (%zu B) failed: %s — clearing",
-                                     gqa_smem, cudaGetErrorString(fa_));
-                        (void)cudaGetLastError();
+                // Opt-in to extended shared memory for large head_dim. Gemma-4 has a
+                // dual geometry: sliding layers use hd=256 (gqa_smem ~32 KiB, no
+                // opt-in), but GLOBAL layers use hd=512 (gqa_smem ~64 KiB, opt-in
+                // REQUIRED). The opt-in cap is PER (kernel, current dynamic-smem
+                // value): `paged_attention_gqa_kernel` is a single non-templated
+                // function reused across every model/head_dim in the process, so a
+                // one-shot `static bool` guard would freeze the cap at whatever the
+                // first >48 KiB caller needed and starve a later larger request.
+                // Re-arm it for the largest value seen instead. cudaFuncSetAttribute
+                // is idempotent and cheap; a stale error from it (e.g. left by a
+                // previously-loaded model's func-attribute call in the same process)
+                // would otherwise make THIS launch return cudaErrorInvalidValue and
+                // bail to garbage, so set it every time the requested smem grows and
+                // drain any error it leaves.
+                if (gqa_smem > 48 * 1024) {
+                    static size_t s_gqa_smem_optin = 0;
+                    if (gqa_smem > s_gqa_smem_optin) {
+                        cudaError_t fa_ = cudaFuncSetAttribute(paged_attention_gqa_kernel,
+                                                               cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                               static_cast<int>(gqa_smem));
+                        if (fa_ == cudaSuccess) {
+                            s_gqa_smem_optin = gqa_smem;
+                        } else {
+                            IMP_LOG_WARN("paged_attention_gqa: smem opt-in (%zu B) failed: %s — clearing",
+                                         gqa_smem, cudaGetErrorString(fa_));
+                            (void)cudaGetLastError();
+                        }
                     }
                 }
-            }
 
-            paged_attention_gqa_kernel<<<grid, block, gqa_smem, stream>>>(
-                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
-                reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data), block_tables,
-                context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale, max_context_len,
-                max_num_blocks, n_q_per_kv, warps_per_q, sliding_window, n_sinks, softcap, sinks_h);
-            IMP_CUDA_CHECK_LAUNCH();
+                paged_attention_gqa_kernel<<<grid, block, gqa_smem, stream>>>(
+                    reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
+                    reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),
+                    block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale,
+                    max_context_len, max_num_blocks, n_q_per_kv, warps_per_q, sliding_window, n_sinks,
+                    softcap, sinks_h);
+                IMP_CUDA_CHECK_LAUNCH();
+            }
         } else {
             // MHA fallback for n_q_per_kv > MAX_Q_PER_KV
             goto mha_fallback;
