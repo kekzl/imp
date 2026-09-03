@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-31
-commit: f243179c
+verified: 2026-09-03
+commit: 151ff123
 -->
 
 # Quickstart
@@ -159,7 +159,12 @@ Expected: an explanation of Rayleigh scattering, written at about 102 tok/s
 
 **Browser.** <http://localhost:8080>: single-page chat UI, streams the answer,
 draws one bar per token (inter-token latency visible while the reply is
-written).
+written) and shows the usage chunk of every run: prompt tokens, prefix-cache
+hits, reasoning tokens, context used against the model's window. With a models
+directory the header is a picker; an unloaded entry is swapped in by the
+request. One file, no build step; served from the binary at `GET /`.
+
+<img src="webui.png" width="800" alt="the built-in web UI after one answer">
 
 **Anthropic clients.** The same server answers `/v1/messages` natively. Point
 `ANTHROPIC_BASE_URL` at it; an Anthropic-shaped client works unchanged, no
