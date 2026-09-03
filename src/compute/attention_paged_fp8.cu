@@ -776,7 +776,17 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                 LAUNCH_FP8_FALLBACK(96);
                 break;
             case 128:
-                LAUNCH_FP8_FALLBACK(128);
+                if (process_diag_paged_fp8_multitok() > 1) {
+                    paged_attention_decode_fp8_multitok_hd128(reinterpret_cast<const half*>(Q.data),
+                                                              reinterpret_cast<const uint8_t*>(K_cache.data),
+                                                              reinterpret_cast<const uint8_t*>(V_cache.data),
+                                                              reinterpret_cast<half*>(O.data), block_tables,
+                                                              context_lens, batch_size, n_heads, n_kv_heads,
+                                                              block_size, scale, kv_scale, max_num_blocks,
+                                                              sliding_window, softcap, sinks_h, stream);
+                } else {
+                    LAUNCH_FP8_FALLBACK(128);
+                }
                 break;
             case 256:
                 LAUNCH_FP8_FALLBACK(256);

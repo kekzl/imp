@@ -31,7 +31,7 @@ docker run -d --name imp-idle --gpus all -v "$MODELS_DIR":/models -v "$ROOT":/sr
     nsys profile --sample=none --cpuctxsw=none --backtrace=none -t cuda --cuda-graph-trace=node \
     -o /out/serving --force-overwrite=true \
     /src/build-dev/imp-server --model $MODEL --port $PORT --host 0.0.0.0 --max-concurrent $CONC \
-    --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 --set kv_cache.max_blocks=2387 \
+    --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 --set kv_cache.max_blocks=${KV_BLOCKS:-2387} \
     --set diagnostics.step_timing=true $EXTRA >/dev/null
 for _ in $(seq 1 240); do
     sleep 2

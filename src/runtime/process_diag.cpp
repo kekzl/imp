@@ -41,6 +41,7 @@ struct ProcessDiag {
     bool attention_fa2_hd256 = true;  // matches the config.h default (on since #932)
     int attention_fa2_hd256_bkv = 64;  // matches the config.h default
     bool attention_fa2_dense_2cta = true;  // matches the config.h default
+    int attention_paged_fp8_multitok = 4;  // matches the config.h default
     bool attention_fa2_heavy_first = true;  // matches the config.h default
     bool attention_fp8_qk_scaled = false;
     int nvfp4_cutlass_streamk = 1;  // matches the config.h default
@@ -121,6 +122,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.attention_fa2_hd256 = cfg.attention.fa2_hd256;
     d.attention_fa2_hd256_bkv = cfg.attention.fa2_hd256_bkv;
     d.attention_fa2_dense_2cta = cfg.attention.fa2_dense_2cta;
+    d.attention_paged_fp8_multitok = cfg.attention.paged_fp8_multitok;
     d.attention_fa2_heavy_first = cfg.attention.fa2_heavy_first;
     d.attention_fp8_qk_scaled = cfg.attention.fp8_qk_scaled;
     d.nvfp4_cutlass_streamk = cfg.gemm.nvfp4_cutlass_streamk;
@@ -172,6 +174,8 @@ void process_diag_set_fa2_pv_f16acc(bool v) { slot().attention_fa2_pv_f16acc = v
 bool process_diag_fa2_hd256() { return slot().attention_fa2_hd256; }
 void process_diag_set_fa2_hd256(bool v) { slot().attention_fa2_hd256 = v; }
 bool process_diag_fa2_dense_2cta() { return slot().attention_fa2_dense_2cta; }
+int process_diag_paged_fp8_multitok() { return slot().attention_paged_fp8_multitok; }
+void process_diag_set_paged_fp8_multitok(int v) { slot().attention_paged_fp8_multitok = v; }
 void process_diag_set_fa2_dense_2cta(bool v) { slot().attention_fa2_dense_2cta = v; }
 bool process_diag_fa2_heavy_first() { return slot().attention_fa2_heavy_first; }
 void process_diag_set_fa2_heavy_first(bool v) { slot().attention_fa2_heavy_first = v; }

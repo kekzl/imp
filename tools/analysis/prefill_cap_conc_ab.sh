@@ -26,6 +26,7 @@ CONC=${CONC:-32}
 WAVES=${WAVES:-3}
 TRIALS=${TRIALS:-3}
 PLEN=${PLEN:-1000}
+KV_BLOCKS=${KV_BLOCKS:-2387}  # the Qwen3.8-27B pin; raise for dense models with long prompts
 ARM_A=${ARM_A-}
 ARM_B=${ARM_B---set runtime.prefill_chunk_decode_cap=0}  # unset-only default: ARM_B="" is a real empty arm
 ARM_C=${ARM_C-__none__}
@@ -39,7 +40,7 @@ start_server() {  # $1 = extra --set args, $2 = image
     docker run -d --name imp-capab --gpus all -v "${MODELS_DIR}":/models \
         -p ${PORT}:${PORT} "$2" imp-server --model /models/${MODEL_NAME} --port $PORT \
         --host 0.0.0.0 --max-concurrent $CONC \
-        --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 --set kv_cache.max_blocks=2387 \
+        --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 --set kv_cache.max_blocks=${KV_BLOCKS} \
         $1 >/dev/null
     for _ in $(seq 1 180); do
         sleep 2

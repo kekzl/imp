@@ -23,6 +23,10 @@ IMP_EXTRA=${IMP_EXTRA:-}
 VLLM_EXTRA=${VLLM_EXTRA:-}
 VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-16384}
 VLLM_UTIL=${VLLM_UTIL:-0.90}
+# imp KV pool pin: 2387 blocks is the Qwen3.8-27B figure of the 2026-08-25 rows;
+# a 32 x (1000 + 300)-token wave on a dense 14B needs more, or the last streams
+# wait for the first to finish (TTFT max at wave end).
+KV_BLOCKS=${KV_BLOCKS:-2387}
 PLEN=${PLEN:-0}
 LOG="${TMPDIR:-/tmp}/vllm_conc_ab_${CONC}_p${PLEN}.log"
 : > "$LOG"
@@ -50,7 +54,7 @@ start_imp() {
     docker run -d --name engine-ab --gpus all -v "${MODELS_DIR}":/models \
         -p ${PORT}:${PORT} "$IMG_IMP" imp-server --model /models/${MODEL_NAME} --port $PORT \
         --host 0.0.0.0 --max-concurrent $CONC \
-        --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 --set kv_cache.max_blocks=2387 \
+        --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 --set kv_cache.max_blocks=${KV_BLOCKS} \
         $IMP_EXTRA >/dev/null
     wait_healthy engine-ab 360
 }

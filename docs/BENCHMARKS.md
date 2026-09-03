@@ -577,7 +577,7 @@ greedy gens, `/v1/completions`, aggregate = completion tokens / wall, median of
 | 4 | 32 streams, 1082-tok prompts, vLLM 0.27.1 | 873.4 / 889.5 / 831.2 (**873.4**) | 499.1 / 227.8 / 497.8 (**497.8**) | **+75.5%** | 3/3 |
 | 5 | **dense** Qwen3-14B-NVFP4 (Modelopt export, both engines native), 32 streams, 38-tok prompts, vLLM 0.27.1 | 3462.8 / 3481.0 / 3480.4 (**3480.4**) | 3762.4 / 3784.9 / 3767.9 (**3767.9**) | **-7.6%** | 0/3 |
 | 6 | dense Qwen3-14B-NVFP4, 8 streams, 36-tok prompts, vLLM 0.27.1 | 1078.6 / 1087.1 / 1085.4 (**1085.4**) | 1002.6 / 1005.8 / 1010.2 (**1005.8**) | **+7.9%** | 3/3 |
-| 7 | dense Qwen3-14B-NVFP4, 32 streams, 982-tok prompts, vLLM 0.27.1 | 1169.5 / 1176.7 / 1177.8 (**1176.7**) | 2503.2 / 2496.3 / 2480.6 (**2496.3**) | **-52.9%** | 0/3 |
+| 7 | dense Qwen3-14B-NVFP4, 32 streams, 982-tok prompts, vLLM 0.27.1, imp KV pool 8192 blocks | 1458.7 / 1454.3 / 1480.2 (**1470.6**) | 2492.6 / 2458.0 / 2503.5 (**2492.6**) | **-41.0%** | 0/3 |
 
 - vLLM's first wave on a fresh server reads 383-389 tok/s at 32 streams
   (24.6-25.1 s wall) and 103.5-104.2 at 8 on every trial: JIT / autotune
@@ -588,9 +588,15 @@ greedy gens, `/v1/completions`, aggregate = completion tokens / wall, median of
   NVFP4 checkpoint vLLM's Marlin W4A16 path leads imp's small-M mxf4nvf4 GEMM
   at 32 streams by 7.6% (3/3 pairs) while imp still leads at 8 streams by
   7.9% (run 6, 3/3): the crossover sits between 8 and 32 streams, and with 982-token prompts
-  (run 7) imp reads less than half of vLLM: the wave costs imp 8.2 s against
-  2.8 s with 38-token prompts, so its serving prefill of 31.4k prompt tokens
-  runs at ~5.8k tok/s, while vLLM absorbs the same prefill in ~1.1 s. The
+  (run 7) imp reads 0.59x of vLLM. A first pass of run 7 with the harness's
+  Qwen3.8-27B pool pin (`kv_cache.max_blocks=2387` = 38192 tokens of
+  block-16 KV, under the 41k the wave holds) read 1176.7 (0.47x) with two
+  streams waiting for the first to finish (TTFT max 5.7 s at p90 2.0 s); the
+  8192-block pool removes that. What remains: the wave costs imp 6.5 s
+  against 2.8 s with 38-token prompts, and the imp-side profile at this
+  shape puts `paged_attention_decode_fp8` at 33% of kernel time (8.9 ms per
+  decode step at 1.1k context, ~25% of DRAM bandwidth) next to 13% CUTLASS
+  prefill GEMM. The
   32-stream lead in runs 1-4 is a property of the GDN hybrid, not of every
   model; attribution of the dense
   gap is the next engine-side item in `docs/roadmap.md`.
