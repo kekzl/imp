@@ -12,6 +12,8 @@
 #        bash tools/analysis/prefill_cap_conc_ab.sh
 # Two-IMAGE form (a code change): IMG_A=imp:base IMG_B=imp:test with the same
 # ARM_* sets (default empty), IGNORE_EOS=1 forces equal token counts per arm.
+# LATE_PLEN=5000 LATE_DELAY=2 adds one late long ingest per wave (the cap's
+# protection scenario: the short streams' ITL during that ingest is reported).
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -27,6 +29,7 @@ WAVES=${WAVES:-3}
 TRIALS=${TRIALS:-3}
 PLEN=${PLEN:-1000}
 KV_BLOCKS=${KV_BLOCKS:-2387}  # the Qwen3.8-27B pin; raise for dense models with long prompts
+SEQ_LEN=${SEQ_LEN:-4096}      # a LATE_PLEN prompt needs SEQ_LEN > LATE_PLEN + GEN
 ARM_A=${ARM_A-}
 ARM_B=${ARM_B---set runtime.prefill_chunk_decode_cap=0}  # unset-only default: ARM_B="" is a real empty arm
 ARM_C=${ARM_C-__none__}
@@ -39,8 +42,8 @@ start_server() {  # $1 = extra --set args, $2 = image
     # shellcheck disable=SC2086
     docker run -d --name imp-capab --gpus all -v "${MODELS_DIR}":/models \
         -p ${PORT}:${PORT} "$2" imp-server --model /models/${MODEL_NAME} --port $PORT \
-        --host 0.0.0.0 --max-concurrent $CONC \
-        --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 --set kv_cache.max_blocks=${KV_BLOCKS} \
+        --host 0.0.0.0 --max-concurrent $((CONC + (${LATE_PLEN:-0} > 0 ? 1 : 0))) \
+        --set runtime.max_batch_size=32 --set runtime.max_seq_len=${SEQ_LEN} --set kv_cache.max_blocks=${KV_BLOCKS} \
         $1 >/dev/null
     for _ in $(seq 1 180); do
         sleep 2
@@ -60,7 +63,7 @@ run_arm() {  # $1 = arm name, $2 = extra sets, $3 = trial, $4 = image
         echo "GPU BUSY before $1 - aborting" | tee -a "$LOG"; exit 2; }
     start_server "$2" "$4" || exit 3
     echo "== arm $1 trial $3 ($4 $2) ==" | tee -a "$LOG"
-    MODEL_NAME=$MODEL_NAME IGNORE_EOS=$IGNORE_EOS python3 "$HERE/burst_stream_client.py" $PORT $CONC $WAVES "$1$3" $PLEN 2>&1 | tee -a "$LOG"
+    MODEL_NAME=$MODEL_NAME IGNORE_EOS=$IGNORE_EOS LATE_PLEN=${LATE_PLEN:-0} LATE_DELAY=${LATE_DELAY:-2.0} python3 "$HERE/burst_stream_client.py" $PORT $CONC $WAVES "$1$3" $PLEN 2>&1 | tee -a "$LOG"
     docker rm -f imp-capab >/dev/null 2>&1
     sleep 3
 }
