@@ -280,11 +280,20 @@ public:
 
     void cleanup();
 
+    // cleanup() parks the instantiated exec instead of destroying it, so the
+    // next setup() can patch it in place with cudaGraphExecUpdate (same
+    // topology: one WHILE node around one captured decode step) instead of
+    // paying cudaGraphInstantiate (10-44 ms per request on Qwen3.8-27B, a
+    // stall right after the first token). Engine teardown and a poisoned
+    // context drop it here.
+    void drop_spare() { spare_exec_.reset(); }
+
     bool is_setup() const { return static_cast<bool>(exec_); }
 
 private:
     CudaGraph graph_;
     CudaGraphExec exec_;
+    CudaGraphExec spare_exec_;  // last request's exec, reused by the next setup()
     cudaGraphConditionalHandle handle_{};
 
     // Device-side state (allocated by setup, freed by cleanup)

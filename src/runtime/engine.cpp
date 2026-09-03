@@ -110,6 +110,7 @@ Engine::~Engine() {
     if (async_graph_runner_.is_setup()) {
         async_graph_runner_.cleanup();
     }
+    async_graph_runner_.drop_spare();
     // Strictly after the runner teardown above: closing the pool frees the
     // slots, so a lease still outstanding here means something is holding
     // addresses into memory that is about to go away. The pool logs that as an
@@ -256,6 +257,7 @@ void Engine::invalidate_graphs() {
     if (async_graph_runner_.is_setup()) {
         async_graph_runner_.cleanup();
     }
+    async_graph_runner_.drop_spare();
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
