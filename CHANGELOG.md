@@ -101,6 +101,19 @@ there instead of retelling it.
   earlier "~1.08x" mixed two clients.
   Table with PROV in `docs/BENCHMARKS.md`
 
+### Fixed
+- KV-pressure heuristic counted only the free list against the blocks live
+  sequences hold, so a pool one third full of reclaimable prefix-cache blocks
+  read as ">90% full" ("0/2016 free" with 984 reclaimable), auto-enabled
+  StreamingLLM and demoted CUDA graphs one-way for the rest of the process:
+  every wave after the first ran eager. Llama-3.2-3B-Q8_0 F16 KV, 32 streams x
+  1000-token prompts, fresh server: wave 0 2387 tok/s, waves 1-3 1443-1485
+  (ITL p50 7.8 -> 16.5 ms); `server.prefix_cache=false` held 2387-2451 on
+  every wave. The check now adds reclaimable cached blocks and compares
+  against the pool size. With the fix, the same server holds 2392.6 / 2450.7 /
+  2446.7 / 2440.4 tok/s over four waves (ITL p50 7.8 ms) with the prefix cache
+  on. (#1879)
+
 ## [0.34.0] - 2026-09-02
 
 ### Added
