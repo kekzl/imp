@@ -61,7 +61,9 @@ prefill_chunk_size   = -1
 # multi-tenant serving; 0 = disable (full chunk). The full chunk returns as
 # soon as nobody is decoding. On a 32-stream burst of ~1.1k-token prompts
 # (2026-09-03, Qwen3.8-27B) 2048 reads +4.4% aggregate and TTFT p90 3.8 -> 3.5 s
-# for a max inter-token gap of 203 instead of 139 ms.
+# (+8.6% on dense Qwen3-14B), but while a 4.7k-token prompt is ingested next
+# to 31 decoding streams their inter-token p95 goes 109 -> 186 ms; that stall
+# is what this knob bounds, so 1024 stays the default.
 prefill_chunk_decode_cap = 1024
 # How MANY prefill FORWARDS run per engine step while others decode (a ragged
 # cross-sequence forward counts once, however many prompts it packs; its rows

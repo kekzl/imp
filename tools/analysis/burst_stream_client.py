@@ -23,6 +23,12 @@ PLEN = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 GEN = int(os.environ.get("GEN", "300"))
 MODEL = os.environ.get("MODEL_NAME", "Qwen3.8-27B-NVFP4-vllm")
 IGNORE_EOS = os.environ.get("IGNORE_EOS", "0") == "1"  # imp/vLLM: run every stream to GEN tokens
+# Protection scenario of runtime.prefill_chunk_decode_cap: LATE_PLEN > 0 adds one
+# stream with a LATE_PLEN-token prompt that arrives LATE_DELAY seconds into the
+# wave while the CONC short streams decode; the wave line then also reports the
+# short streams' ITL max / p95 during the ingest and the late stream's TTFT.
+LATE_PLEN = int(os.environ.get("LATE_PLEN", "0"))
+LATE_DELAY = float(os.environ.get("LATE_DELAY", "2.0"))
 FILLER_SENTENCES = [
     "A translation lookaside buffer caches recent virtual-to-physical page mappings so most loads skip the page walk.",
     "When a load crosses a page boundary the two halves may map to different frames and need two translations.",
@@ -55,11 +61,14 @@ def filler(n_tokens):
     return " ".join(FILLER_SENTENCES[k % len(FILLER_SENTENCES)] for k in range(n)) + " "
 
 
-def one(i, wave, out):
+def one(i, wave, out, plen=None, delay=0.0):
+    if delay > 0:
+        time.sleep(delay)
     prompt = (f"[{TAG}-w{wave}-r{i}] Explain topic {i * 7 + wave}: how a {i}-way set-associative "
               f"CPU cache interacts with a TLB during a page-crossing load.")
-    if PLEN > 0:
-        prompt = f"[{TAG}-w{wave}-r{i}] " + filler(PLEN) + prompt
+    n_fill = PLEN if plen is None else plen
+    if n_fill > 0:
+        prompt = f"[{TAG}-w{wave}-r{i}] " + filler(n_fill) + prompt
     body = json.dumps({
         "model": MODEL,
         "prompt": prompt,
@@ -108,6 +117,8 @@ def pct(xs, p):
 for wave in range(WAVES):
     out = {}
     threads = [threading.Thread(target=one, args=(i, wave, out)) for i in range(CONC)]
+    if LATE_PLEN > 0:
+        threads.append(threading.Thread(target=one, args=(CONC, wave, out, LATE_PLEN, LATE_DELAY)))
     t_wave = time.perf_counter()
     for t in threads:
         t.start()
@@ -115,7 +126,8 @@ for wave in range(WAVES):
         t.join()
     wall = time.perf_counter() - t_wave
     ttfts, itls, toks, ptoks = [], [], 0, []
-    for t0, stamps, usage in out.values():
+    for idx in range(CONC):
+        t0, stamps, usage = out[idx]
         if stamps:
             ttfts.append(stamps[0] - t0)
             itls.extend(b - a for a, b in zip(stamps, stamps[1:]))
@@ -123,10 +135,23 @@ for wave in range(WAVES):
         if usage:
             ptoks.append(usage.get("prompt_tokens", 0))
     slow = sum(1 for g in itls if g > 0.1)
+    late = ""
+    if LATE_PLEN > 0 and CONC in out:
+        t0l, st_l, u_l = out[CONC]
+        # ITL of the SHORT streams while the late prompt was being ingested
+        # (from its arrival to its first token).
+        win_lo, win_hi = t0l, (st_l[0] if st_l else t0l)
+        in_win = []
+        for i in range(CONC):
+            t0i, sti, _ = out[i]
+            in_win.extend(b - a for a, b in zip(sti, sti[1:]) if win_lo <= b <= win_hi)
+        late = (f" | LATE {u_l.get('prompt_tokens', 0)} tok: TTFT {((st_l[0] - t0l) * 1e3) if st_l else 0:.0f} ms,"
+                f" short-stream ITL during ingest p95 {pct(in_win, 0.95) * 1e3:.1f} max"
+                f" {max(in_win) * 1e3 if in_win else 0:.0f} ms over {len(in_win)} tokens")
     print(f"wave{wave}: {toks} tok in {wall:.2f}s = {toks / wall:.1f} tok/s aggregate"
           f" | prompt {statistics.mean(ptoks) if ptoks else 0:.0f} tok avg"
           f" | TTFT p50 {pct(ttfts, 0.5) * 1e3:.0f} p90 {pct(ttfts, 0.9) * 1e3:.0f}"
           f" max {max(ttfts) * 1e3 if ttfts else 0:.0f} ms"
           f" | ITL p50 {pct(itls, 0.5) * 1e3:.1f} p95 {pct(itls, 0.95) * 1e3:.1f}"
           f" max {max(itls) * 1e3 if itls else 0:.0f} ms"
-          f" | gaps>100ms {slow}/{len(itls)}", flush=True)
+          f" | gaps>100ms {slow}/{len(itls)}{late}", flush=True)
