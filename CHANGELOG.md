@@ -124,6 +124,13 @@ there instead of retelling it.
   Table with PROV in `docs/BENCHMARKS.md`
 
 ### Fixed
+- `imp-cli --bench` pinned `max_seq_len` to pp + tg + 256, which left an
+  F16 KV cache under 10% free at pp >= ~2.3k: the StreamingLLM valve fired
+  on the bench's own prompt, the first decode step produced no token and
+  the run printed 0 tok/s (Llama-3.2-3B-Q8_0 at pp 8192, "0/536 blocks
+  free"; `scripts/bench_longctx_ab.sh` then divided by zero). The headroom
+  is now max(256, 12.5% of pp + tg); pp512 + tg128 stays at 896 tokens, so
+  the perf-gate pool is unchanged. (#1883)
 - KV-pressure heuristic counted only the free list against the blocks live
   sequences hold, so a pool one third full of reclaimable prefix-cache blocks
   read as ">90% full" ("0/2016 free" with 984 reclaimable), auto-enabled
