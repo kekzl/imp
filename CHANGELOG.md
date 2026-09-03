@@ -99,6 +99,12 @@ there instead of retelling it.
   gemma-3-12b Q4_K_M (16/8, HD=256) 8k 134.8 vs 134.7 (flat, as the microbench
   said); its 32k point is not measurable on this card (the plan clamps the
   pool to 696 blocks after the weight caches). (#1882)
+- The F16 split-K rule targets 4 CTAs per SM when the multitok kernel folds
+  four Q heads into one CTA (its grid is a quarter of the per-head grid),
+  2 per SM otherwise. Microbench batch 1, 32/8 HD=128: 16k 62.3 -> 46.7 us,
+  32k 98.6 -> 92.4, 64k 188.6 -> 172.3; 4 x 8k 117.8 -> 90.4; 24/8 (one
+  head per CTA) 96.9 -> 98.4 and 16/8 HD=256 (two) 169.1 -> 169.0 unchanged,
+  where a blanket 4 per SM had cost +22% / +10%. E2E_T4 (#PRNUM)
 - The F16 cluster (DSMEM) GQA decode kernel, `src/runtime/cluster_launch.h`
   and `tests/test_cluster_launch.cu` are removed; the route was off since
   #1877. `attention_paged.cu` 1216 -> 1032 code LOC, paged oracle

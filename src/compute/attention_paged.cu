@@ -1285,7 +1285,13 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         // Flash-decode heuristic: split when SMs are underutilized AND
         // each split gets enough KV blocks to amortize the merge overhead.
         // The Phase 2 merge kernel costs ~5µs — need ≥4 KV blocks/split to break even.
-        int target_blocks = 2 * num_sms;
+        // CTA target: 2 per SM, 4 per SM when the multitok kernel folds four Q
+        // heads into one CTA (the grid is a quarter of the per-head grid, and
+        // the extra splits are the cheaper way back to occupancy). Measured
+        // batch 1 x 32k 32/8 HD=128 98.6 -> 93.8 us and 4 x 8k 117.8 -> 90.6
+        // at 4/SM, but 24/8 (one head per CTA) 96.9 -> 118.2 and 16/8 HD=256
+        // (two) 169.1 -> 186.4, so the doubling is tied to the 4-head instance.
+        int target_blocks = (mt_hpc == 4) ? 4 * num_sms : 2 * num_sms;
         if (total_blocks_nosplit >= target_blocks) {
             num_splits = 1;  // already enough parallelism from batch*heads
         } else {
