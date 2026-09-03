@@ -2,7 +2,7 @@
 layer: L2
 audience: kernel-devs
 verified: 2026-09-03
-commit: aff8b17d
+commit: f70e072a
 -->
 
 # Attention dispatch
@@ -53,11 +53,11 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 
 | `cache_dtype` | Launcher (`src/compute/`) | Kernels it can pick |
 |---|---|---|
-| FP16 | `paged_attention_decode` (`attention_paged.cu:1233`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel` |
-| FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; tile variants in `attention_paged_fp8_tile.cu` |
+| FP16 | `paged_attention_decode` (`attention_paged.cu:1233`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (`attention.paged_f16_multitok`, up to four Q heads per CTA) |
+| FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; HD=128 without split-K: `_decode_fp8_multitok_kernel<128,4>` in `attention_paged_fp8_multitok.cu` (`attention.paged_fp8_multitok`); tile variants in `attention_paged_fp8_tile.cu` |
 | INT8 | `paged_attention_decode_int8` | `_decode_int8_kernel`, `_splitk_int8_kernel` |
 | INT4 | `paged_attention_decode_int4` | `_decode_int4_kernel`, `_splitk_int4_kernel`, `_splitk_int4_pipeline_kernel` |
-| NVFP4 | `paged_attention_decode_nvfp4` / `_nvfp4_tc` | `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel`; TC: `_decode_nvfp4_tc_kernel`, `_splitk_nvfp4_tc_kernel`, `_residual_reduce_kernel` |
+| NVFP4 | `paged_attention_decode_nvfp4` / `_nvfp4_tc` | default: `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu` (`attention.paged_nvfp4_multitok`); scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel`; TC: `_decode_nvfp4_tc_kernel`, `_splitk_nvfp4_tc_kernel`, `_residual_reduce_kernel` |
 | MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:465`) | shares the NVFP4 kernels with UE8M0 scales |
 
 **Not every head_dim is served.** Each launcher templates a fixed set; a miss now throws instead of leaving `O` unwritten (#1674). `paged_attention_serves_head_dim()` in `attention_paged.h` is the table, and the resolver falls back to FP16 KV before init when a model's head_dim is not in it. FP16 and FP8 serve 64/96/128/256/512, INT8 and INT4 serve 64/96/128/256, NVFP4 serves 64/128/256/512 - **no 96**.
