@@ -127,7 +127,7 @@ there instead of retelling it.
   trials x 3 waves, medians) 1000-token prompts 1150.0 -> 1162.6 (+1.1%,
   trials +1.0% / +1.1%), 38-token prompts 1845.9 -> 1869.2 (+1.3%, trials
   +0.5% / +1.8%). Qwen3-14B-NVFP4 (40/8, ratio 5, not served) 154.05 vs 153.99
-  at 8k and 114.47 vs 114.40 at 32k. (#PRNUM)
+  at 8k and 114.47 vs 114.40 at 32k. (#1886)
 - FP8 paged decode attention: the e4m3 bytes now convert in pairs
   (`cvt e4m3x2 -> f16x2`, HMUL2 dot) instead of one scalar conversion per
   byte; ncu had the four-token kernel issue-bound (SM 70%, DRAM 33%).
