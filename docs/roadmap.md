@@ -1,4 +1,4 @@
-. Two-image A/B  (`tools/analysis/two_image_conc_ab.sh`, Qwen3.8-27B-NVFP4-vllm, 3 alternating trials x 3 waves, median tok/s): base 1748.1/1824.6/1794.8 -> 1835.8/1833.4/1850.4, 3/3 pairs positive# Roadmap
+# Roadmap
 
 Single-author, single-GPU experiment - "roadmap" means "current focus," not
 "schedule." Shipped work lives in [`CHANGELOG.md`](../CHANGELOG.md);
@@ -365,8 +365,14 @@ mirostat, typical_p, logit_bias).
 
 `GET /` serves a single-page UI (`tools/imp-server/webui/index.html`,
 embedded via `cmake/embed_webui.cmake`): live SSE render, one file, no build
-step. Not on the `GOAL.md` surface commitment; anything beyond a thin client
-belongs in an external front end.
+step. It shows only what the API already returns: the usage chunk (prompt /
+cached / reasoning tokens, context fill against `max_model_len`), the
+`/v1/models` list as a picker (an unloaded entry is swapped in by the request),
+`finish_reason: length` as a note on the turn, per-turn tok/s and TTFT. Not on
+the `GOAL.md` surface commitment; anything beyond a thin client belongs in an
+external front end. Developed without a GPU against
+`tools/imp-server/webui/dev/mock_server.py` (real per-token streaming) and
+driven by `dev/drive.js` in the public Playwright image.
 
 ## Performance work
 
