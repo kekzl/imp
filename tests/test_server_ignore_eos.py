@@ -39,9 +39,13 @@ c = j["usage"]["completion_tokens"]
 check("completions ignore_eos runs to max_tokens", c == N, f"completion_tokens={c} want {N}")
 check("completions ignore_eos finish_reason=length", j["choices"][0].get("finish_reason") == "length",
       f"finish_reason={j['choices'][0].get('finish_reason')}")
-j = post("/v1/completions", {"model": M, "prompt": prompt, "max_tokens": N, "temperature": 0})
+# Control on the chat endpoint (template + EOS): a raw-prompt completion
+# has no chat template and a base-style continuation can run past N.
+j = post("/v1/chat/completions", {"model": M, "messages": [{"role": "user", "content": prompt}],
+                                  "max_tokens": N, "temperature": 0,
+                                  "chat_template_kwargs": {"enable_thinking": False}})
 c0 = j["usage"]["completion_tokens"]
-check("completions without the flag stops early", c0 < N, f"completion_tokens={c0}")
+check("chat without the flag stops early", c0 < N, f"completion_tokens={c0}")
 # chat
 msgs = [{"role": "user", "content": prompt}]
 j = post("/v1/chat/completions", {"model": M, "messages": msgs, "max_tokens": N, "temperature": 0,

@@ -104,7 +104,7 @@ size_t distinct_words(const std::string& t) {
 }  // namespace
 
 TEST(SpecCaptureFidelityTest, CachedGraphMatchesEagerForward) {
-    const std::string dir = model_or("IMP_TEST_MODEL_SPEC_FIDELITY", "/models/Qwen3.8-27B-NVFP4");
+    const std::string dir = model_or("IMP_TEST_MODEL_SPEC_FIDELITY", "/models/Qwen3.8-27B-NVFP4-vllm");
     if (!present(dir))
         GTEST_SKIP() << "checkpoint not present at " << dir;
     // The comparison runs a second full forward per verify step, so the model

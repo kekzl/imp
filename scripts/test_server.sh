@@ -62,8 +62,8 @@ fi
 
 echo "== launch imp-server ($MODEL) =="
 docker rm -f "$CTR" >/dev/null 2>&1 || true
-docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models -p "$PORT":"$PORT" "$IMG" \
-    --add-host=host.docker.internal:host-gateway \
+docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models -p "$PORT":"$PORT" \
+    --add-host=host.docker.internal:host-gateway "$IMG" \
     imp-server --model "/models/$MODEL" --host 0.0.0.0 --port "$PORT" \
     --max-concurrent 8 --rate-limit 100000 --max-input-tokens 100000 \
     --set server.otlp_endpoint=http://host.docker.internal:4318/v1/traces >/dev/null
