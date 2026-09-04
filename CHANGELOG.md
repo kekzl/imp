@@ -30,6 +30,12 @@ there instead of retelling it.
   keyed by source pointer, a recycled allocation of the same shape could have
   been served the previous model's weights. Released via the `cuda_static_reset`
   hooks; asserted in `EngineRelaunchTest` (#1899)
+- `imp.conf.example` and `docs/LIMITATIONS.md` told container operators to
+  bind-mount `$HOME/.cache/imp` for the library-reserve cache. The container
+  user `imp` is uid 1001, so that mount was never writable (Docker creates a
+  missing host path as root, a host user's directory is uid 1000) and every
+  start re-measured. Both now point at the README's named volume
+  (`-v imp-cache:/home/imp/.cache/imp`) and name the uid (#1899)
 
 ## [0.37.0] - 2026-09-04
 
