@@ -284,3 +284,12 @@ class TestMetricsEndpoint:
     def test_metrics_has_model_loaded(self, client):
         r = client.get("/metrics")
         assert "imp_model_loaded" in r.text
+
+    def test_metrics_has_preemption_and_batch_series(self, client):
+        # Emitted with or without a model (zeros), so the model-less lane and
+        # the mock both carry them: the preemption rates that used to be log
+        # lines, and the sequences decoding together right now.
+        text = client.get("/metrics").text
+        for name in ("imp_streaming_kv_auto_enables_total", "imp_prefix_cache_evictions_total",
+                     "imp_decode_batch_last_rows"):
+            assert name in text, name

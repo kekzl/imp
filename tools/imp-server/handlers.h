@@ -140,6 +140,16 @@ struct ServerMetrics {
     // Time from admission to the first decode step, i.e. how long a request
     // waited behind others. Nothing measured queueing before (#1580).
     LatencyHistogram queue_time;
+    // Queue wait of a request the handler gives up on (client gone, or the
+    // server's --request-timeout) before the worker admitted it. The wait is
+    // otherwise closed at the first token, so a queue that times requests out
+    // read as empty in imp_queue_time_seconds.
+    void observe_unadmitted_queue_wait(std::chrono::steady_clock::time_point t_submit, double queue_ms) {
+        if (queue_ms >= 0.0 || t_submit == std::chrono::steady_clock::time_point{})
+            return;
+        queue_time.observe(
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t_submit).count());
+    }
     // (Decode batch size lives on the BatchingEngine, where the batch is
     // formed; /metrics reads it from there.)
     // 4xx refusals. requests_failed counts 5xx only, and every rejection this

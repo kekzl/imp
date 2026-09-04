@@ -2,6 +2,7 @@
 
 #include "memory/kv_cache.h"
 #include <cuda_runtime_api.h>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <list>
@@ -164,6 +165,11 @@ public:
     // Cached (unreferenced) blocks that are actually reclaimable, i.e.
     // excluding pinned blocks. O(1).
     int num_reclaimable_cached_blocks() const { return reclaimable_cached_count_; }
+    // Cached prefix blocks reclaimed for new allocations since start: the
+    // prefix cache's churn. Read by /metrics at scrape time.
+    uint64_t cached_block_evictions() const {
+        return cached_block_evictions_.load(std::memory_order_relaxed);
+    }
 
     // ── SWA-aware sizing (kv_cache.swa_sizing) ───────────────────────
     //
@@ -508,6 +514,7 @@ private:
     // (cached_blocks_lru_.size() minus pinned cached blocks).
     // Avoids O(C) linear scan in can_allocate().
     int reclaimable_cached_count_ = 0;
+    std::atomic<uint64_t> cached_block_evictions_{0};
 
     // Try to reclaim a cached block. Returns the block_id, or -1.
     int reclaim_cached_block();

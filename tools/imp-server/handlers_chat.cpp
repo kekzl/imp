@@ -433,6 +433,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
 
                 auto request_start_c = std::chrono::steady_clock::now();
                 auto last_keepalive_c = request_start_c;
+                double ttft_ms = -1.0;
+                auto t_prev_token = t_start;  // last delivered token (ITL)
                 for (;;) {
                     // #757: the is_last token sets `finish` then falls through
                     // to think-stripping, which `continue`s on every swallowed
@@ -448,6 +450,9 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                     if (!sink.is_writable()) {
                         server_req->cancel();
                         state.metrics.requests_cancelled++;
+                        state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                                    server_req->queue_ms.load(
+                                                                        std::memory_order_relaxed));
                         finish = "cancelled";
                         break;
                     }
@@ -458,6 +463,9 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                         if (elapsed > std::chrono::seconds(state.request_timeout)) {
                             server_req->cancel();
                             state.metrics.requests_timed_out++;
+                            state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                                        server_req->queue_ms.load(
+                                                                            std::memory_order_relaxed));
                             finish = "length";
                             break;
                         }
@@ -483,6 +491,25 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                     }
 
                     int32_t token = evt.token_id;
+
+                    // First token closes TTFT and the queue wait, every later
+                    // one is an ITL sample. This loop fed none of the four
+                    // latency histograms before, so /v1/completions traffic
+                    // (every serving harness in tools/analysis/) left them
+                    // empty.
+                    {
+                        const auto t_tok = std::chrono::high_resolution_clock::now();
+                        if (ttft_ms < 0.0) {
+                            ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
+                            const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                            if (q >= 0.0)
+                                state.metrics.queue_time.observe(q / 1000.0);
+                        } else {
+                            state.metrics.inter_token.observe(
+                                std::chrono::duration<double>(t_tok - t_prev_token).count());
+                        }
+                        t_prev_token = t_tok;
+                    }
 
                     if (evt.is_last) {
                         if (token == snap_tok->eos_id() && !ignore_eos) {
@@ -650,6 +677,11 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
                 state.metrics.tokens_prompt_total += n_prompt_tokens;
                 state.metrics.tokens_completion_total += n_output_tokens;
                 state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+                state.metrics.request_duration.observe(ms / 1000.0);
+                if (ttft_ms >= 0.0) {
+                    state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+                    state.metrics.ttft.observe(ttft_ms / 1000.0);
+                }
 
                 return true;
             });
@@ -661,12 +693,17 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         std::string output_text;
 
         auto ns_comp_start = std::chrono::steady_clock::now();
+        double ttft_ms = -1.0;
+        auto t_prev_token = t_start;  // last delivered token (ITL)
         for (;;) {
             if (state.request_timeout > 0) {
                 auto elapsed = std::chrono::steady_clock::now() - ns_comp_start;
                 if (elapsed > std::chrono::seconds(state.request_timeout)) {
                     server_req->cancel();
                     state.metrics.requests_timed_out++;
+                    state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                                server_req->queue_ms.load(
+                                                                    std::memory_order_relaxed));
                     finish = "length";
                     break;
                 }
@@ -683,6 +720,20 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
             }
 
             int32_t token = evt.token_id;
+
+            {
+                const auto t_tok = std::chrono::high_resolution_clock::now();
+                if (ttft_ms < 0.0) {
+                    ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
+                    const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                    if (q >= 0.0)
+                        state.metrics.queue_time.observe(q / 1000.0);
+                } else {
+                    state.metrics.inter_token.observe(
+                        std::chrono::duration<double>(t_tok - t_prev_token).count());
+                }
+                t_prev_token = t_tok;
+            }
 
             if (evt.is_last) {
                 if (token == snap_tok->eos_id() && !ignore_eos) {
@@ -747,6 +798,11 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
         state.metrics.tokens_prompt_total += n_prompt_tokens;
         state.metrics.tokens_completion_total += n_output_tokens;
         state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+        state.metrics.request_duration.observe(ms / 1000.0);
+        if (ttft_ms >= 0.0) {
+            state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+            state.metrics.ttft.observe(ttft_ms / 1000.0);
+        }
 
         // Build logprobs if requested
         // #1589: this is /v1/completions, so it gets the Completions shape.

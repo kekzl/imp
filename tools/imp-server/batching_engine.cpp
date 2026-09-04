@@ -255,8 +255,10 @@ void BatchingEngine::worker_loop() {
             }
         }
 
-        if (active_requests_.empty())
+        if (active_requests_.empty()) {
+            decode_batch_last.store(0, std::memory_order_relaxed);
             continue;
+        }
 
         // 2. Check for cancelled requests before stepping. A pipelined
         // batched-decode step may still be in flight and WRITING these
@@ -294,6 +296,7 @@ void BatchingEngine::worker_loop() {
                     sr->request->status != imp::RequestStatus::CANCELLED)
                     rows++;
             }
+            decode_batch_last.store(rows, std::memory_order_relaxed);
             if (rows > 0) {
                 decode_steps.fetch_add(1, std::memory_order_relaxed);
                 decode_rows.fetch_add(rows, std::memory_order_relaxed);

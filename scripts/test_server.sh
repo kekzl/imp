@@ -19,6 +19,8 @@
 #   - test_server_messages_stream.py   Anthropic /v1/messages event sequence
 #   - test_server_vision_and_utf8.py   images refused when unusable (#1198),
 #                                     non-ASCII survives json_schema (#1197)
+#   - test_server_metrics.py           /v1/completions and non-stream chat feed the
+#                                     latency histograms; preemption counters exist
 #
 # Usage:   make test-server   (or: scripts/test_server.sh)
 # Env:     IMP_SRV_MODEL    (default Qwen3-8B-NVFP4-cortecs) — needs chat+tools+embeddings
@@ -101,6 +103,7 @@ run "ignore_eos"          python3 tests/test_server_ignore_eos.py
 run "messages stream"     python3 tests/test_server_messages_stream.py
 run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
 run "tracing (OTLP spans)" python3 tests/test_server_tracing.py
+run "metrics (every path feeds the histograms)" python3 tests/test_server_metrics.py
 run "vision refusal + utf8 (#1197/#1198)" python3 tests/test_server_vision_and_utf8.py
 run "embed/chat interleave" bash tests/test_server_embed_chat_interleave.sh 15
 run "0-token battery (#710)" env N=8 LOAD=80 FAIL_THRESHOLD=0.10 python3 tests/test_server_0token_battery.py

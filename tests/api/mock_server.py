@@ -195,6 +195,15 @@ class MockHandler(BaseHTTPRequestHandler):
                 f"# HELP imp_queue_depth Queue depth\n"
                 f"# TYPE imp_queue_depth gauge\n"
                 f"imp_queue_depth 0\n"
+                f"# HELP imp_decode_batch_last_rows Sequences in the most recent decode step\n"
+                f"# TYPE imp_decode_batch_last_rows gauge\n"
+                f"imp_decode_batch_last_rows 0\n"
+                f"# HELP imp_streaming_kv_auto_enables_total StreamingLLM auto-enable events\n"
+                f"# TYPE imp_streaming_kv_auto_enables_total counter\n"
+                f"imp_streaming_kv_auto_enables_total 0\n"
+                f"# HELP imp_prefix_cache_evictions_total Cached prefix blocks reclaimed\n"
+                f"# TYPE imp_prefix_cache_evictions_total counter\n"
+                f"imp_prefix_cache_evictions_total 0\n"
             )
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-04
+commit: c7d7356e
 -->
 
 # Limitations
@@ -67,6 +67,14 @@ Absent instruments: nothing in the tree produces the number, so no threshold can
 Both need a GPU runner or a long-running machine with a card; CI has neither.
 
 ## Known-bad and known-limited behaviour
+
+- **GGUF batched decode is dequant-bound.** A GGUF source keeps its NVFP4 decode cache as a
+  single-sequence overlay; a decode step with two or more sequences takes the prefill route and
+  dequantizes the whole source to FP16 first (`src/exec/executor_gemm_dispatch.cu:536`, the
+  class of #667). Qwen3-8B-Q8_0 serves 8 streams slower than 1 and every request misses the
+  TPOT SLO; the native NVFP4 checkpoint of the same model does not. Numbers and the control
+  arm in [`PERF.md`](PERF.md) ("Serving KPIs"). Serve GGUF single-stream; concurrency wants a
+  native NVFP4 checkpoint.
 
 - **`server.green_contexts=true` does not give green contexts on this chip.**
   `cudaDevResourceGenerateDesc` fails for the decode partition (`one or more resources passed in
