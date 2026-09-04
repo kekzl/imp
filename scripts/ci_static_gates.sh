@@ -66,6 +66,9 @@ SELECT_ALL=0
 if want filesize; then
     echo "== File size =="
     run "hard-review gate + allowlist ceilings" python3 tools/check_filesize.py
+    run "that gate still merges #include'd .cu" python3 tools/check_filesize.py --selftest
+    run "function bodies over 500 code LOC"     python3 tools/check_function_size.py
+    run "that gate still parses what it must"   python3 tools/check_function_size.py --selftest
     run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "that gate still catches its drift"     python3 tools/check_determinism_sites.py --selftest
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py

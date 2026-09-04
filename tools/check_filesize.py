@@ -45,6 +45,7 @@ except ModuleNotFoundError:  # pragma: no cover
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filesize_thresholds.toml")
 SRC_EXT = (".cu", ".cuh", ".cpp", ".hpp", ".h")
+INCLUDE_CU = re.compile(r'^\s*#include\s+"([^"]+\.cu)"', re.M)
 
 
 def code_loc(text):
@@ -128,7 +129,17 @@ def classify(relpath, cfg):
 
 
 def scan(cfg, roots):
-    rows = []
+    """One row per TRANSLATION UNIT, not per file.
+
+    A `.cu` that is textually #include'd into another `.cu` is not a compilation
+    object: nvcc sees one TU and re-`ptxas`es all of it, which is the cost this
+    gate exists to bound. Measured separately, `src/exec/executor_attention.cu`
+    read 542 code LOC and passed as a warn while the TU nvcc compiles was ~1300
+    — its three fragments say so in their own headers ("This is NOT a standalone
+    translation unit"). So the fragment's lines are charged to its includer and
+    the fragment gets no row of its own.
+    """
+    files = {}
     for r in roots:
         base = os.path.join(REPO_ROOT, r)
         if not os.path.isdir(base):
@@ -140,11 +151,84 @@ def scan(cfg, roots):
                 if os.path.splitext(fn)[1] not in SRC_EXT:
                     continue
                 full = os.path.join(dp, fn)
-                rel = os.path.relpath(full, REPO_ROOT)
                 with open(full, "r", errors="replace") as fh:
-                    raw, code = code_loc(fh.read())
-                rows.append({"path": rel, "group": classify(rel, cfg), "raw": raw, "code": code})
+                    files[os.path.relpath(full, REPO_ROOT)] = fh.read()
+
+    # rel path of every .cu pulled in textually -> the includer that charges it
+    merged_into = {}
+    for rel, text in files.items():
+        if not rel.endswith(".cu"):
+            continue
+        for m in INCLUDE_CU.finditer(text):
+            for base in ("src", ""):
+                cand = os.path.normpath(os.path.join(base, m.group(1)))
+                if cand in files:
+                    merged_into[cand] = rel
+                    break
+
+    rows = []
+    for rel, text in files.items():
+        if rel in merged_into:
+            continue
+        raw, code = code_loc(text)
+        merged = sorted(f for f, into in merged_into.items() if into == rel)
+        for frag in merged:
+            fraw, fcode = code_loc(files[frag])
+            raw += fraw
+            code += fcode
+        rows.append({"path": rel, "group": classify(rel, cfg), "raw": raw, "code": code,
+                     "merged": merged})
     return rows
+
+
+def selftest():
+    """Plant the TU-merge cases, because the gate was blind to them until 2026-09-04.
+
+    A `.cu` that is only ever #include'd into another `.cu` is not a compilation
+    object. Measured as four separate files the executor_attention TU read 542 /
+    205 / 281 / 251 and all four passed; measured as the TU nvcc compiles it is
+    1279 against a hard line of 600. A merge that silently stops merging would
+    put the repo straight back there, so it gets planted cases of its own.
+    """
+    import tempfile
+
+    cfg = {"classify": {"header_ext": [".cuh", ".hpp", ".h"],
+                        "kernel_dirs": ["src/compute/", "src/quant/", "src/exec/"],
+                        "roots": ["src"]}}
+    cases = [
+        ("no include: two rows",
+         {"src/exec/a.cu": "int a1;\nint a2;\n", "src/exec/b.cu": "int b1;\n"},
+         {"src/exec/a.cu": 2, "src/exec/b.cu": 1}),
+        ("fragment charged to its includer, no row of its own",
+         {"src/exec/a.cu": 'int a1;\n#include "exec/b.cu"\n', "src/exec/b.cu": "int b1;\nint b2;\n"},
+         {"src/exec/a.cu": 4}),
+        ("two fragments, both charged once",
+         {"src/exec/a.cu": '#include "exec/b.cu"\n#include "exec/c.cu"\n',
+          "src/exec/b.cu": "int b1;\n", "src/exec/c.cu": "int c1;\nint c2;\n"},
+         {"src/exec/a.cu": 5}),
+        ("a .cuh include is not a TU merge",
+         {"src/exec/a.cu": '#include "exec/b.cuh"\n', "src/exec/b.cuh": "int b1;\n"},
+         {"src/exec/a.cu": 1, "src/exec/b.cuh": 1}),
+    ]
+    failures = 0
+    for name, files, want in cases:
+        with tempfile.TemporaryDirectory() as d:
+            global REPO_ROOT
+            keep, REPO_ROOT = REPO_ROOT, d
+            try:
+                for rel, text in files.items():
+                    p = os.path.join(d, rel)
+                    os.makedirs(os.path.dirname(p), exist_ok=True)
+                    with open(p, "w") as fh:
+                        fh.write(text)
+                got = {r["path"]: r["code"] for r in scan(cfg, ["src"])}
+            finally:
+                REPO_ROOT = keep
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {name}: expected {want}, got {got}")
+    print(f"selftest: {len(cases) - failures}/{len(cases)} cases")
+    return 1 if failures else 0
 
 
 def main():
@@ -154,7 +238,12 @@ def main():
     ap.add_argument("--root", action="append", help="override scan roots (repeatable)")
     ap.add_argument("--update", action="store_true",
                     help="re-pin every [allow] code_loc to the measured value")
+    ap.add_argument("--selftest", action="store_true",
+                    help="plant the TU-merge cases the gate must get right")
     args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
 
     cfg = load_config(args.config)
     th = cfg["thresholds"]
@@ -202,7 +291,9 @@ def main():
         print(f"\n{title}")
         print(f"  {'code':>5} {'raw':>5} {'+/-':>6}  {limit_label:<6} group    file")
         for r in sorted(items, key=lambda x: -x["delta"]):
-            print(f"  {r['code']:>5} {r['raw']:>5} {r['delta']:>+6}  {r['limit']:<6} {r['group']:<8} {r['path']}")
+            note = f"  (+{len(r['merged'])} #include'd .cu)" if r.get("merged") else ""
+            print(f"  {r['code']:>5} {r['raw']:>5} {r['delta']:>+6}  {r['limit']:<6} "
+                  f"{r['group']:<8} {r['path']}{note}")
 
     table(f"WARN ({len(warns)}) — soft smell, not blocking", warns, "warn>")
     table(f"ALLOWLISTED ({len(allowed)}) — over hard-review but accepted in baseline", allowed, "hard>")

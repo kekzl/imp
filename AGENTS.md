@@ -60,6 +60,12 @@ compile-time isolation:
 - **Legitimately monolithic files belong in `[allow]` with a reason** (empty reason =
   gate failure). Don't split for splitting's sake. Baseline + per-file rationale:
   `docs/audit/AUDIT_FILESIZE.md`. This matches the "File Layout & Size" section in CLAUDE.md.
+- **A file is not a translation unit and a file is not a function.** Both gates count a
+  `#include`d `.cu` against its includer (`executor_attention.cu` read 542 measured as a
+  file and 1279 measured as the TU nvcc compiles), and `tools/check_function_size.py`
+  (`tools/function_size_thresholds.toml`) gates the largest body inside a file — warn>200,
+  hard>500 code LOC, same `[allow]`-with-a-reason ceiling. A file's cohesion reason does
+  not cover a 900-line function inside it.
 
 ## Roles
 

@@ -96,3 +96,12 @@ roots = ["src", "tools", "tests"]
 "tests/test_kv_cache.cpp" = { code_loc = 844, reason = "(c) 51 bookkeeping tests across KV allocator/cache/manager - one test target" }
 "tests/test_paged_attention.cu" = { code_loc = 1202, reason = "(c) 26 tests of the paged-attention kernel - one test target" }
 "tests/test_quant_integration.cu" = { code_loc = 1470, reason = "(c) 25 tests, all exercising the quant_gemm/dequant unit - one test target" }
+# Measured as ONE translation unit since 2026-09-04: this file textually
+# #include's executor_attention_{qkv,prefill,decode}.cu inside the body of
+# GraphExecutor::run_attention, and the fragments' own headers say they are not
+# translation units. Counted separately the four files read 542/205/281/251 and
+# every one passed; nvcc compiles 1279. AUDIT_FILESIZE.md's 2026-06-24
+# remediation footnote already recorded that this split "yields no
+# recompile-isolation win" and left the genuine one as future work - the entry
+# exists so the number is visible and ratcheted until that lands.
+"src/exec/executor_attention.cu" = { code_loc = 1279, reason = "(a) one TU assembled from three #include'd .cu fragments; genuine split pending, 82 commits in 6 months across the four files" }

@@ -96,7 +96,7 @@ make verify-fast           # pre-push gate (#1587)             make verify   # f
 
 The cost of an oversized file here is **recompile blast radius**, not line count: each `.cu` is one translation unit, so touching a kernel in a 1.5k-LOC `.cu` re-`ptxas`es the whole thing with no intra-file parallelism. One logical unit per file; split kernel / launch wrapper / explicit instantiations when recompiles bite.
 
-`tools/check_filesize.py` gates *code* LOC (comments and blanks stripped) and runs in CI as `File size`. A legitimately monolithic file belongs in `[allow]` in `tools/filesize_thresholds.toml` **with a reason** — don't split for splitting's sake. Rationale per file: `docs/audit/AUDIT_FILESIZE.md`.
+CI job `File size` gates *code* LOC three ways: per file (`tools/check_filesize.py`), per function body (`tools/check_function_size.py`, hard >500), and a `#include`d `.cu` counts against its includer — a file is neither a TU nor a function. Monolithic belongs in `[allow]` **with a reason**; don't split for splitting's sake. Rationale: `docs/audit/AUDIT_FILESIZE.md`.
 
 ## Hardware reality (sm_120 ≠ datacenter Blackwell)
 

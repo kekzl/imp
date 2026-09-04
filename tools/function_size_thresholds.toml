@@ -1,0 +1,67 @@
+# Function-size thresholds + baseline for tools/check_function_size.py
+#
+# WHY THIS EXISTS, NEXT TO THE FILE-SIZE GATE
+# -------------------------------------------
+# tools/check_filesize.py measures a FILE and manages it with a reasoned
+# allowlist. Two things it cannot see, both found on 2026-09-04:
+#
+#   1. src/exec/executor_workspace_buffers.cu is allowlisted at 1534 code LOC
+#      with the reason "(c) one concern ... (host-only)". True about the file —
+#      and 884 of those lines are ONE function body. A cohesion argument about a
+#      file is not an argument about a function, and the file gate never asked.
+#
+#   2. src/exec/executor_attention.cu measures 542 code LOC to the file gate and
+#      passes as a warn. It textually #include's three .cu fragments INSIDE the
+#      body of GraphExecutor::run_attention, which the fragments' own headers
+#      state ("This is NOT a standalone translation unit"). The function the
+#      compiler sees is 1223 code LOC — the largest in the repo — and the file
+#      gate was counting four files that do not exist as compilation objects.
+#      Both gates now expand those includes.
+#
+# METRIC: code LOC of the body, stripped by the SAME state machine the file gate
+# uses (imported from check_filesize.py, not copied — two gates that disagree
+# about what a code line is would produce two baselines). Signature and closing
+# brace are not counted; a `#include "x.cu"` in the body adds the fragment's
+# code LOC in place.
+#
+# THRESHOLDS from the measured distribution over 5830 top-level functions:
+# p50=10, p90=50, p95=82, p99=199, max=1223.
+#   warn = 200  — the top ~1 % (57 functions). A smell, never blocking.
+#   hard = 500  — the top 0.2 % (12 functions), all listed below with a reason.
+# Not reverse-fit: at hard=600 the list would be 8 and would drop
+# handle_completions and load_config, which are conflations rather than one long
+# sequence, and those are the two the next split should take.
+
+[thresholds]
+warn = 200
+hard = 500
+
+[scan]
+roots = ["src", "tools", "tests"]
+# tests/refs holds generated golden tables, not code.
+skip_dirs = ["refs"]
+
+[allow]
+# An entry is a CEILING, not an exemption, exactly as in filesize_thresholds.toml:
+# `code_loc` is the measured length when the exception was accepted and the gate
+# fails when the body drifts from it in EITHER direction. Re-pin with
+# `python3 tools/check_function_size.py --update` and say in the PR body which
+# way it moved. The key is `path::signature`, never a line number — a line number
+# goes stale on the first edit above the function.
+#
+# Reason letters, same meaning as the file gate:
+#   (a) bundles independent concerns -> split candidate
+#   (c) one indivisible sequence (a linear load/init flow, one FSM, one dispatch)
+
+"src/exec/executor_attention.cu::void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaStream_t stream)" = { code_loc = 1223, reason = "(a) largest body in the repo, and the only one assembled from three textually #include'd .cu fragments. AUDIT_FILESIZE.md's 2026-06-24 remediation calls this out in its own footnote: the fragments 'satisfy the file-size gate (each fragment measures separately)' but 'being one translation unit, yield no recompile-isolation win ... a genuine split is left as future work'. Listed here so the number is visible and ratcheted while that work is pending; 82 commits in 6 months across the four files" }
+"src/exec/executor_workspace_buffers.cu::void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant)" = { code_loc = 884, reason = "(c) one bump-allocation sequence over the shared workspace: every take depends on the offset the previous take left, so the order is the contract and extracting a middle phase changes the layout rather than the text. 71 commits in 6 months, second-highest in the repo - the split candidate is a phase table, not a cut of this body" }
+"src/model/weight_map.cpp::bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors)" = { code_loc = 821, reason = "(c) the tensor-name matching ladder. docs/audit/SETTLED.md: rewriting it into a registry/template needs a concrete bug first, because a mis-mapped name is garbage output rather than a crash" }
+"src/model/gguf_loader.cpp::std::unique_ptr<Model> load_gguf(const std::string& path)" = { code_loc = 793, reason = "(c) one linear load flow (mmap, header, metadata -> ModelConfig, shard stitch, tensor wiring); the file is in maintenance mode per its own header and its (a) split already happened in 2026-06-24 (gguf_parse.cpp + gguf_tensor_assign.cpp)" }
+"tools/imp-cli/main.cpp::int main(int argc, char** argv)" = { code_loc = 737, reason = "(a) genuine conflation: config install, model detection, flag override, synthetic benchmark mode, chat-template resolve, interactive REPL, /image handling, multi-turn and the think-tag stream filter in one body. 64 commits in 6 months. Split candidate with no hot path attached" }
+"src/exec/executor_forward.cu::void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream)" = { code_loc = 722, reason = "(c) the forward pass itself. docs/audit/SETTLED.md records it as intrinsically forward-pass-coupled (checked on the god-function-by-callee-count sweep and NOT a finding, 216 callees)" }
+"src/runtime/engine_kv_cache_init.cpp::bool Engine::init_kv_cache()" = { code_loc = 658, reason = "(c) one sizing decision: hybrid layer mapping, GDN detection, per-layer KV entries, SSM state and the pinned staging buffers all read the same measured residual, and the residual is only correct once the preceding steps have taken their bytes (the #1103 order). 54 commits in 6 months" }
+"src/runtime/engine_spec_ngram.cpp::bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft)" = { code_loc = 625, reason = "(c) one speculative verify step: draft assembly, the captured verify graph, acceptance scan and rollback share the per-step state and the graph-capture window, which is what forbids an early return in the middle" }
+"tools/imp-server/handlers_chat.cpp::void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state)" = { code_loc = 593, reason = "(a) the /v1/completions endpoint carries its own param parse, prompt assembly, streaming loop and non-streaming response, where /v1/chat/completions has those in handlers_chat_core.cpp and stream_driver.cpp. Split candidate" }
+"src/compute/schema_constrain.cu::bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const" = { code_loc = 588, reason = "(c) the single source of truth the frame-stack simulator has for two body grammars (JSON schema + Qwen-Coder XML tool calls). docs/audit/SETTLED.md D2 records two correctness defects that came from second-guessing this FSM; splitting it into per-grammar halves is exactly the drift D2 warns about" }
+"src/model/safetensors_loader.cpp::std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head)" = { code_loc = 553, reason = "(c) one numbered linear load flow (steps 1-9 in its own comments: config.json, arch detect, shape inference, arch defaults, layer alloc, tensor assign, tie, chat template, tokenizer); each step reads what the previous one filled in" }
+"src/model/hf_config_loader.cpp::bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg, std::unique_ptr<VisionModel>* out_vision_tower)" = { code_loc = 523, reason = "(a) one accreting block per architecture (core dims, SWA, FFN activation, MoE, rope/YaRN) against a single ModelConfig. SETTLED calls the scatter-the-parse-flow split wrong; the shape that would work is a per-arch table, and that is a design change, not a cut" }
