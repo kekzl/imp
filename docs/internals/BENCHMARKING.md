@@ -131,7 +131,7 @@ published table is in [`../PERF.md`](../PERF.md) ("Serving KPIs").
 
 ```
 python3 tools/analysis/serving_kpi.py --url http://127.0.0.1:8080 --levels 1,8,32 \
-    --max-tokens 300 --md out.md --json out.json
+    --max-tokens 300 --md-out kpi.md --json kpi.json
 ```
 
 ## Profiling builds

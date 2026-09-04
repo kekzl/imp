@@ -27,7 +27,7 @@
 #   serving_kpi.py --url http://127.0.0.1:8080 --levels 1,8,32 --max-tokens 300
 #       [--requests-per-level N (default max(32, 2*C))] [--prompt-tokens 0]
 #       [--slo-ttft-ms 500] [--slo-tpot-ms 50] [--ignore-eos] [--endpoint chat|completions]
-#       [--no-power] [--json out.json] [--md out.md] [--tag x]
+#       [--no-power] [--json FILE] [--md-out FILE] [--tag x]
 import argparse
 import json
 import math
@@ -443,7 +443,7 @@ def main():
     ap.add_argument("--no-power", action="store_true")
     ap.add_argument("--tag", default=f"kpi{int(time.time()) % 100000}")
     ap.add_argument("--json", default="")
-    ap.add_argument("--md", default="")
+    ap.add_argument("--md-out", default="", help="write the markdown table to this file")
     args = ap.parse_args()
 
     levels = [int(x) for x in args.levels.split(",") if x]
@@ -479,8 +479,8 @@ def main():
 
     md = markdown(results, args)
     print(md)
-    if args.md:
-        with open(args.md, "w") as f:
+    if args.md_out:
+        with open(args.md_out, "w") as f:
             f.write(md + "\n")
     if args.json:
         with open(args.json, "w") as f:
