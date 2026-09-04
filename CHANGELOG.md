@@ -11,57 +11,47 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-09-04
+
 ### Added
 
-- Serving KPI harness `tools/analysis/serving_kpi.py`: per concurrency level
-  TTFT / TPOT / ITL / E2E / normalized latency at p50 / p95 / p99, req/s,
-  input / output / total tok/s, goodput against an SLO pair (TTFT <= 500 ms,
-  TPOT <= 50 ms by default), the server's queue wait, rows per step, KV
-  utilization, prefix-cache hit rate, speculative acceptance and preemption
-  counters from `/metrics`, and J per 1k output tokens from `nvidia-smi`.
-  Definitions in `docs/internals/BENCHMARKING.md`, first table in
-  `docs/PERF.md` (Qwen3-8B-NVFP4-cortecs, 32 streams: 4633.7 output tok/s,
-  TPOT p50 5.8 ms, goodput 100 %); GGUF batched decode is dequant-bound
-  (Qwen3-8B-Q8_0, 8 streams: 136.2 tok/s, TPOT p50 51.8 ms), recorded in
-  `docs/LIMITATIONS.md` (#1896)
-- `/metrics`: `imp_streaming_kv_auto_enables_total` and
-  `imp_prefix_cache_evictions_total` (the two preemption events that were log
-  lines only) and `imp_decode_batch_last_rows` (sequences in the most recent
-  decode step, 0 when idle) (#1896)
+- Serving KPI harness `tools/analysis/serving_kpi.py`: TTFT / TPOT / ITL / E2E /
+  normalized latency at p50 / p95 / p99, req/s, tok/s, goodput against an SLO
+  pair, queue wait, rows per step, KV utilization, prefix-cache hit rate,
+  acceptance and preemption counters, J per 1k output tokens. Definitions in
+  `docs/internals/BENCHMARKING.md`, tables in `docs/PERF.md`
+  (Qwen3-8B-NVFP4-cortecs, 32 streams: 4633.7 output tok/s, TPOT p50 5.8 ms,
+  goodput 100 %) (#1896)
+- `/metrics`: `imp_streaming_kv_auto_enables_total`,
+  `imp_prefix_cache_evictions_total` and `imp_decode_batch_last_rows`
+  (sequences in the most recent decode step, 0 when idle) (#1896)
 
 ### Fixed
 
-- GGUF batched decode ran every 2..32-row step through the prefill dequant
-  route (the whole Q*_K source per step, the class of #667); decode rows now
-  read the NVFP4 decode overlay through the small-M GEMM, and the small-M
-  scratch is a planned T2 arena tenant taken before graph prewarm (a captured
-  step cannot allocate it, and no eager forward reaches the block on a GGUF
-  source). Qwen3-8B-Q8_0, library reserve planned: c=8 770.4 -> 1496.1
-  output tok/s (TPOT p50 9.6 -> 5.0 ms), c=32 2648.3 -> 4715.1, c=1 288.0 /
-  287.8; table in `docs/PERF.md`, the cold-start spill lottery in
-  `docs/LIMITATIONS.md` (#1897)
+- GGUF batched decode ran every 2..32-row step through the prefill dequant route
+  (the whole Q*_K source per step, the class of #667); decode rows now read the
+  NVFP4 decode overlay through the small-M GEMM, its scratch a planned T2 arena
+  tenant taken before graph prewarm. Qwen3-8B-Q8_0: c=8 770.4 -> 1496.1 output
+  tok/s, c=32 2648.3 -> 4715.1, c=1 flat; tables in `docs/PERF.md`, the
+  cold-start spill lottery in `docs/LIMITATIONS.md` (#1897)
 - `/metrics` latency histograms are fed by every generation path:
-  `/v1/completions` (stream and non-stream) observed none of TTFT / ITL /
-  queue / duration, the non-stream chat loop no ITL, and a request cancelled
-  or timed out before admission left no queue observation. The non-stream
-  chat timeout now also counts in `imp_requests_timed_out_total`. Gate:
-  `tests/test_server_metrics.py` in `make test-server` (#1896)
+  `/v1/completions` observed none of TTFT / ITL / queue / duration, the
+  non-stream chat loop no ITL, a request cancelled or timed out before admission
+  no queue wait. The non-stream chat timeout now counts in
+  `imp_requests_timed_out_total`. Gate: `tests/test_server_metrics.py` (#1896)
 
 ### Changed
 
 - Streaming TTFT: the reasoning scan no longer holds the first 8 tokens of a
-  thinking-off chat answer (or of a `/v1/completions` answer on a think model)
-  once the first word proves no `<think>` is coming; the hold stays on tool
-  requests. Qwen3.8-27B-NVFP4, 27-token prompt, client-side TTFT 97-105 ->
-  32-62 ms; 1116-token prompt 195-229 -> 130-146 ms; completions 116-147 ->
-  51-64 ms. The reasoning stream holds only a partial marker instead of a
-  fixed 7 bytes, so the first reasoning delta lands one to two tokens earlier
-  (#1894)
+  thinking-off answer once the first word proves no `<think>` is coming; the
+  hold stays on tool requests. Qwen3.8-27B-NVFP4 client-side TTFT 97-105 ->
+  32-62 ms (27-token prompt), 195-229 -> 130-146 ms (1116 tokens), completions
+  116-147 -> 51-64 ms (#1894)
 - The conditional decode loop patches its parked exec with
-  `cudaGraphExecUpdate` instead of instantiating a new graph per request and
-  per burst: 31 of 34 setups updated in 0.1 ms instead of 5.9 ms mean (13.7 max),
-  wall per 48-token request 545 -> 532 ms median on Qwen3.8-27B-NVFP4, greedy
-  output identical; the log line carries the duration
+  `cudaGraphExecUpdate` instead of instantiating a graph per request and burst:
+  31 of 34 setups updated in 0.1 ms instead of 5.9 ms mean, wall per 48-token
+  request 545 -> 532 ms median on Qwen3.8-27B-NVFP4, greedy output identical
+  (#1895)
 
 ## [0.36.0] - 2026-09-03
 
