@@ -6,6 +6,7 @@
 // loop. Streaming/parse machinery lives in handlers_chat_core.cpp /
 // handlers_chat_stream.cpp / handlers_messages.cpp.
 
+#include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "utils.h"

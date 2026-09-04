@@ -5,6 +5,7 @@
 // gate). Used by the OpenAI chat endpoint (handlers_chat.cpp) and the
 // Anthropic messages endpoint (handlers_messages.cpp).
 
+#include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
 

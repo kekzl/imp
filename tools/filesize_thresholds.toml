@@ -104,4 +104,4 @@ roots = ["src", "tools", "tests"]
 # remediation footnote already recorded that this split "yields no
 # recompile-isolation win" and left the genuine one as future work - the entry
 # exists so the number is visible and ratcheted until that lands.
-"src/exec/executor_attention.cu" = { code_loc = 1279, reason = "(a) one TU assembled from three #include'd .cu fragments; genuine split pending, 82 commits in 6 months across the four files" }
+"src/exec/executor_attention.cu" = { code_loc = 1279, reason = "(c) one TU assembled from three #include'd .cu fragments, and it stays that way: the split was measured on 2026-09-05 and REFUTED. The per-TU floor in src/exec/ is ~5 s and header-driven (a 227-LOC TU costs 5.5 s), so this 1279-LOC body is worth ~1.5 s over it; only 16 of 67 commits in six months touched exactly one fragment; and the three phases share ~40 prologue locals, so a genuine split needs a struct in a header all four TUs include - which the 36 prologue-only commits would then dirty. Full builds would pay the 5 s floor three extra times. See docs/audit/AUDIT_FILESIZE.md 2026-09-05" }

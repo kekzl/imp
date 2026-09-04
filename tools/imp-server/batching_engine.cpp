@@ -1,3 +1,4 @@
+#include "runtime/engine.h"
 #include "batching_engine.h"
 #include <pthread.h>
 #include <sys/resource.h>
