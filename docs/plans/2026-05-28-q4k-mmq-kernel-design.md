@@ -2,7 +2,8 @@
 
 **Goal:** Close the -38% Q4_K_M prefill gap vs llama.cpp with a custom tiled GEMM kernel that works directly on Q4_K packed weights without dequant-to-FP16.
 
-**Status:** Design spec. Implementation estimated at 2-3 weeks. **⚠️ See
+**Status: ~~design spec, implementation estimated at 2-3 weeks~~ CLOSED
+2026-05-28, REFUTED before implementation (terminal block at the end).** **See
 "Evidence from the forge experiment" below before starting — this exact approach
 was already built and ncu-characterized on branch `feat/q4k-mmq-hmma`, and it
 ties (does not beat) cuBLAS. Closing the −38 % gap requires *beating* cuBLAS,
@@ -155,3 +156,15 @@ prefill. Full data + the reusable findings live in the forge branch and in
 | `src/exec/gemm_kernel_q4k_mmq.cu` | Modify — dispatch handler |
 | `tests/test_mmq_q4k.cu` | Create — correctness vs dequant reference |
 | `CMakeLists.txt` | Modify — register new sources |
+
+## ROADMAP CLOSED (2026-05-28, recorded 2026-09-04)
+
+REFUTED before implementation: the design was already built and
+ncu-characterized on branch `feat/q4k-mmq-hmma` (section "Evidence from the
+forge experiment"). In-SMEM Q4_K decode + HMMA is decode-throughput-bound and
+TIES cuBLAS; closing the -38% gap needs to BEAT it, which the in-kernel decode
+tax blocks, and the alternative costs 2x weight VRAM (rejected). The files
+table below was never created.
+
+Standing verdict: `docs/roadmap.md` "Closed competitive records". The practical
+answer for fast Q4_K-class prefill is NVFP4 SafeTensors, not this kernel.

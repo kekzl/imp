@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-13
-commit: 81ffa573
+verified: 2026-09-04
+commit: 794cace8
 -->
 
 # docs
@@ -70,4 +70,6 @@ is a statement about one dated afternoon.
 - [`roadmap.md`](roadmap.md) — the gap list, with how each gap was measured or refuted
 - [`MISSION_JOURNAL.md`](MISSION_JOURNAL.md), [`vram_audit.md`](vram_audit.md)
 - [`BENCHMARKS.md`](BENCHMARKS.md) — per-model competitive figures, each row carrying its own date, commit and command
-- [`archive/`](archive/), [`audit/`](audit/), [`plans/`](plans/)
+- [`plans/`](plans/README.md) - one record per campaign, each ending in its verdict; the index says which are closed
+- [`audit/`](audit/README.md) - audit records; the index says which are live ledgers and which are dated snapshots
+- [`archive/`](archive/)

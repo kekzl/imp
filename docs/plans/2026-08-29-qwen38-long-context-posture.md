@@ -279,3 +279,14 @@ Each one produced a confident number that a report would have carried:
   predicates are unit-tested in `tests/test_config.cpp` and were confirmed
   against mutants; the resolver call site itself is unexercised - it needs a
   loaded model, so no CPU lane reaches it.
+
+## ROADMAP CLOSED (2026-08-31)
+
+Both items under "Open" above are struck: the decode cost was re-measured on
+prose (2026-08-30) and the entrypoint env surface was answered as drift
+(2026-08-31, #1823 bridged `IMP_CONFIG` / `IMP_SET`). The one recommendation
+with a trade in it was reversed by #1817, which made 4-bit KV 2.3% faster than
+8-bit instead of 13.5% slower.
+
+Standing rows: `docs/roadmap.md` "NVFP4 paged-decode load width (M=1)" and the
+2026 bar row on container configuration.

@@ -289,3 +289,15 @@ paid whether or not the step branches), and on the code prompt the head
 branches far more often (115 of 128 drafts at margin 2 vs 37 of 210 on the
 reasoning prompt) without an accept gain. Gate not met; W stays 1.
 
+
+## ROADMAP CLOSED (2026-08-31)
+
+BUILT AND MEASURED, gate not met: Stage 0 passed its kill bar (+6..+10 points
+top-2 over top-1 at depth 1), the E2E gate did not (think traffic -6.4/-6.9%
+ungated, -0.8/-5.8% with `speculative.mtp_tree_margin`). `mtp_tree_width`
+stays 1, the code stays in tree flag-gated. The drafting cost is structural on
+this card: the W-1 alternate chains are (K-1) serial head forwards per step,
+paid whether or not the step branches.
+
+Standing row: `docs/roadmap.md` Closed, "speculation tree". The linear lever
+that did pay is adaptive chain depth (#1801) plus `mtp_k=auto` (#1809).

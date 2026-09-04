@@ -1,5 +1,7 @@
 # Qwen3-VL vision — measured inventory and build plan
 
+**Status: CLOSED 2026-08-11, shipped #1163-#1180 (terminal block at the end).**
+
 Roadmap gap 2. Step 0 (the text tower loads and generates, `degen_suite` 34/34)
 shipped 2026-07-31; this plan covers what is left. Everything below is read off
 the staged `Qwen3-VL-4B-Instruct` checkpoint and this tree, not from
@@ -212,3 +214,16 @@ gemma-3 test images under `~/models/gemma-3-4b-vl/` (`test_bus.jpg`,
 pizza is passing. `IMP_VISION_GOLDEN_DUMP` can pin encoder outputs afterwards to
 catch regressions, but it is a self-golden and proves nothing about correctness
 on its own.
+
+## ROADMAP CLOSED (2026-08-11, recorded 2026-09-04)
+
+SHIPPED (#1163-#1180): `Qwen3-VL-4B-Instruct` runs end to end via
+`imp-cli --image` with several images per request, text paths bit-identical,
+encoder patch budget `runtime.vision_max_patches` (default 4096), M-RoPE in the
+text model, DeepStack taps after the first `n_deepstack` layers. Gate
+`make test-vision` (until 2026-08-11 the pipeline test ran from no target,
+fixed).
+
+Not in this plan's scope and still open in `docs/roadmap.md`: video (Open 9,
+decoder dependency, frame axis, temporal M-RoPE, `<|video_pad|>`) and a second
+tower family (Open 10, `vision_tower_supported()` names one layout).

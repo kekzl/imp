@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-13
-commit: 1e4fad60
+verified: 2026-09-04
+commit: 794cace8
 -->
 
 # Open questions from the docs rewrite
@@ -69,3 +69,14 @@ The dispatch's target tree has no `GOAL.md`. Its non-goals belong in
 the new structure, and `check-release.sh` reads it. Kept for now, its non-goals
 duplicated into `DESIGN_DECISIONS.md` as the SSoT, with `GOAL.md` linking there.
 Merging it away needs a decision about the release bars first.
+
+## CLOSED (2026-09-04)
+
+All four are answered; nothing here is undecided any more.
+
+| # | question | answer |
+|---|---|---|
+| Q1 | TMA-WS grouped GEMM on sm_120a | ANSWERED by #1543: the shipped cubin contains it. `CLAUDE.md` and `AGENTS.md` said the opposite and were corrected; only the `compute_120f` PTX fallback loses it |
+| Q2 | where the audit artifacts belong | RESOLVED in favour of `docs/audit/docs-rewrite/` (tracked; `.gitignore:102` excludes `_audit/`) |
+| Q3 | which decode figure is the README headline | DECIDED as recommended: the gate figure. The README block is generated from `tests/perf_baseline.json` by `scripts/sync_docs.py`, hand edits fail CI |
+| Q4 | does `docs/GOAL.md` survive | KEPT: `scripts/check-release.sh` reads it, its non-goals are duplicated into `DESIGN_DECISIONS.md` as the SSoT |
