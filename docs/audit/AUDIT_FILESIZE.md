@@ -228,3 +228,94 @@ Practical consequences, in order of preference:
    right remediation when it next needs to grow is to move one of them out
    (the arena/slot-pool opening block and the shadow-plan logging are the two
    obvious candidates, both already self-contained).
+
+---
+
+## 2026-09-04 — the two things the file gate cannot see, and a sibling gate for one of them
+
+Not a new sweep. `check_filesize.py` reported `violations=0` on a tree that
+contained the largest function body in its history, and this section records why
+the gate was right about every file and wrong about the code.
+
+### Finding 1 — a file is not a translation unit
+
+`src/exec/executor_attention.cu` measured **542** code LOC and passed as a warn.
+It textually `#include`s three `.cu` fragments **inside the body of
+`GraphExecutor::run_attention`** (lines 224 / 539 / 570, all within the function
+that spans 65-831), and each fragment carries the fact in its own header:
+
+> This is NOT a standalone translation unit — it is textually `#include`'d inside
+> the body of `GraphExecutor::run_attention`.
+
+Measured separately the four files read 542 / 205 / 281 / 251 and every one
+passed. Measured as the object nvcc actually compiles: **1279 code LOC, 2004
+raw**, against a kernel hard line of 600. This is not a new fact — the
+2026-06-24 remediation table's footnote ¹ already states that the fragments
+"satisf[y] the file-size gate (each fragment measures separately)" but "being one
+translation unit, yield **no recompile-isolation win**", and leaves the genuine
+split as future work. What was missing is that the gate went on reporting the
+cosmetic number for ten weeks while the TU grew, across **82 commits in six
+months** over the four files.
+
+`scan()` now charges a `#include`d `.cu` to its includer and gives it no row of
+its own; `--selftest` plants four cases (no include, one fragment, two fragments,
+a `.cuh` include that must NOT merge). The TU is in `[allow]` at 1279 with the
+pending split named in its reason, so the number is visible and ratcheted.
+
+### Finding 2 — a cohesion argument about a file is not one about a function
+
+`src/exec/executor_workspace_buffers.cu` is allowlisted at 1534 code LOC with
+the reason *"(c) one concern: executor scratch/workspace sizing+allocation
+(host-only)"*. True — and **884 of those lines are one function body**
+(`allocate_auxiliary_buffers`). The file gate never asked the question, so a
+file's reason has been standing in for a function's for as long as the allowlist
+has existed.
+
+New sibling gate `tools/check_function_size.py`
+(config `tools/function_size_thresholds.toml`), same shape as the file gate:
+code LOC via the *imported* stripper (two gates that disagree about what a code
+line is would produce two baselines), thresholds from the measured distribution,
+two-way `[allow]` ceiling with a mandatory reason.
+
+Distribution over **5830** top-level function bodies:
+
+| p50 | p90 | p95 | p99 | max |
+|----:|----:|----:|----:|----:|
+| 10 | 50 | 82 | 199 | 1223 |
+
+warn **200** (top ~1 %, 45 functions, advisory) · hard **500** (top 0.2 %, 12
+functions, all allowlisted with a reason). Not reverse-fit: at hard=600 the list
+would be 8 and would drop `handle_completions` and `load_config`, which are
+conflations rather than one long sequence.
+
+The twelve, and what each rests on:
+
+| code | function | letter |
+|-----:|----------|--------|
+| 1223 | `GraphExecutor::run_attention` | (a) finding 1; genuine split pending |
+| 884 | `GraphExecutor::allocate_auxiliary_buffers` | (c) one bump-allocation sequence, order is the contract |
+| 821 | `WeightMap::apply_weights` | (c) the matching ladder; SETTLED — rewrite needs a concrete bug |
+| 793 | `load_gguf` | (c) linear load flow, file in maintenance mode |
+| 737 | `imp-cli main` | (a) split candidate, no hot path |
+| 722 | `GraphExecutor::forward_logits` | (c) SETTLED — intrinsically forward-pass-coupled |
+| 658 | `Engine::init_kv_cache` | (c) one sizing decision on the measured residual (#1103 order) |
+| 625 | `Engine::step_spec_verify_` | (c) one verify step inside one graph-capture window |
+| 593 | `handle_completions` | (a) split candidate |
+| 588 | `SchemaConstrainer::sim_advance` | (c) SETTLED D2 — one FSM for two grammars |
+| 553 | `load_safetensors` | (c) numbered linear load flow, steps 1-9 |
+| 523 | `HFConfigLoader::load_config` | (a) per-arch accretion; a table, not a cut |
+
+`--selftest` plants ten parse cases, and **two of them exist because the detector
+was wrong on the real tree first**: `static const uint32_t BYTE_TO_CODEPOINT[256]
+= {` was reported as a 256-line function (a brace block in column 0 is not a
+function; the parameter list is what tells them apart), and a one-line body
+`size_t round_up(...) { return ...; }` swallowed the following function whole.
+#1858 measured 5 of 13 static gates missing their own violations; a gate shipped
+without planted cases is one of those five.
+
+### What did NOT change
+
+Both thresholds and every existing `[allow]` reason. No file was split in this
+pass — the gates were made to report what is there. The two `(a)` split
+candidates with no hot path attached (`imp-cli main`, `handle_completions`) and
+the `run_attention` TU are the follow-up work, in that order of risk.

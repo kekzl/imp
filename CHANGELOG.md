@@ -11,8 +11,26 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- `tools/check_function_size.py` gates the largest function *body* in a file
+  (warn >200, hard >500 code LOC; p99 of 5830 bodies is 199), with the same
+  two-way `[allow]` ceiling and mandatory reason as the file gate. It exists
+  because a file's cohesion reason was standing in for a function's:
+  `executor_workspace_buffers.cu` is allowlisted as "(c) one concern" and 884 of
+  its 1534 code LOC are one body. Twelve bodies are over the hard line, all
+  listed with a reason; `--selftest` plants 10 parse cases, two of which the
+  detector got wrong on the real tree first
+  ([`docs/audit/AUDIT_FILESIZE.md`](docs/audit/AUDIT_FILESIZE.md))
+
 ### Changed
 
+- The file-size gate charges a textually `#include`d `.cu` to its includer,
+  because a file is not a translation unit. `src/exec/executor_attention.cu`
+  measured 542 code LOC as a file and passed; the TU nvcc compiles is 1279 / 2004
+  raw, and its three fragments say in their own headers that they are not
+  translation units. Now `[allow]`-pinned at 1279 with the genuine split named as
+  pending; `--selftest` covers the merge (#1905)
 - `docs/roadmap.md` is a ledger again: one ranked `Open` table and one `Closed`
   table instead of two overlapping gap lists, and the serving/kernel ledger is a
   top-level section instead of a nested item. 91.5 -> 41.0 KB, longest table
