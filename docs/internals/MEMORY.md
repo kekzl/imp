@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-03
-commit: b3cc2079
+verified: 2026-09-04
+commit: e8a76cdd
 -->
 
 # imp Memory Architecture
@@ -162,9 +162,18 @@ Sub-hypotheses tested and **refuted**:
 - **The default `cudaMallocAsync` pool.** `reserved`/`used` are 4096/4076 MiB before *and* after the request.
 - **Scaling with batch or context.** Flat, per the table above.
 
-What remains: CUDA/cuBLAS/CUTLASS library-internal lazy reservation claimed on first matmul dispatch. **21 % of the dense config's total footprint, unknown to the planner**: at budget time the dense run logs `available=22290.3 MiB` and hands the KV pool 4608 MiB, from a number ~3.9 GiB too optimistic. On the MoE config (8.5 GiB free at end) the same constant is 46 % of the remaining headroom.
+**RESOLVED 2026-09-04 (#1899): on Q8_0 configs this was imp's own allocation, not a library one.** `mmq_q8_imma`'s `imma_ensure_weight()` `cudaMalloc`s an s8 + (α, β) SoA copy of every Q8_0 weight it prefills — 1.125 B per element, taken on that tensor's first prefill, untracked and best-effort (a failed `cudaMalloc` silently drops that GEMM to the dequant path). That is why the delta is invariant to batch and context, why `CUDA_MODULE_LOADING=EAGER` moved nothing, and why the default async pool was clean: all three sub-hypotheses were refuted because the answer was a direct `cudaMalloc` in `src/compute/`.
 
-**Design consequence:** the planner charges a measured, arch-and-driver-specific *library reservation* as a first-class line item (A4); `--mem-report` attributes it explicitly instead of dumping it into a residual (A5.3).
+Discriminator, one flag, same tree and model (Qwen3-8B-Q8_0, cold, v0.37.0):
+
+| arm | measured "library reserve" | forward window |
+|---|---:|---:|
+| defaults | 6780 MiB | 5612 MiB |
+| `gemm.q8_imma_enabled=false` | **967 MiB** | **5 MiB** |
+
+And it was never a constant: the same model measured 5612 / 7839 / 7942 MiB at `vram.library_reserve_mb` = default / 6782 / 12000, because the cache takes whatever the KV pool left free. Models without a Q8_0 prefill path never showed it (Qwen3-14B-Q6_K 1366, Qwen3-8B-NVFP4 1535, Qwen3.8-27B-NVFP4 3260 MiB, all with a ~0 MiB forward window).
+
+**Design consequence:** `compute_vram_budget()` charges the planes as `imma_plane_bytes` (the same arithmetic `imma_q8_plane_bytes()` allocates, capped at what is left after the KV guarantee), the engine caps the allocator at the charge via `mmq_q8_imma_set_plane_budget()`, and `--mem-report` shows them as `imma_q8_planes`. What remains under "library reserve" is the real library claim: **763 MiB** on that config, and the measurement is now repeatable (charged 762, measured 763). The planner still charges a measured, arch-and-driver-specific *library reservation* as a first-class line item (A4); `--mem-report` attributes it explicitly instead of dumping it into a residual (A5.3).
 
 ### A1.6 Verified-dead and verified-clean (do not re-chase)
 
@@ -571,7 +580,7 @@ The lazy CUTLASS growth path is deleted. `gemm_nvfp4_cutlass_sm120_workspace(M, 
 
 **Prefill variance:** not explained by persistent autotuning state; there is none (A1.6, zero file I/O in `gemm.cu`). Question closed, not a design input. (The dispatch quoted 2.6x; retracted, see `docs/PERF.md`.)
 
-**The measurement window, not the charge, is what varies (B79).** The reserve reads 0 / 2 / 4182 / 7460 MiB across configs because `report_library_reserve()` anchors immediately before the warmup forward, and which library claims before that point depends on the model's execution path: the NVFP4 cache build runs CUTLASS two phases earlier. On 30B-A3B-NVFP4 the unmeasured remainder is the 2239 MiB residual, confirmed by the invariance A1.5 defines the charge by (identical at batch 1 and 8, +27.7 MiB across a 4x context). Fix: an earlier anchor; it changes what the plan charges on every model, so it is its own pass.
+**The measurement window, not the charge, is what varies (B79).** *Superseded in part by #1899: on Q8_0 configs the charge varied too, because most of it was the unplanned IMMA plane cache (A1.5). The window argument below still holds for the remainder.* The reserve reads 0 / 2 / 4182 / 7460 MiB across configs because `report_library_reserve()` anchors immediately before the warmup forward, and which library claims before that point depends on the model's execution path: the NVFP4 cache build runs CUTLASS two phases earlier. On 30B-A3B-NVFP4 the unmeasured remainder is the 2239 MiB residual, confirmed by the invariance A1.5 defines the charge by (identical at batch 1 and 8, +27.7 MiB across a 4x context). Fix: an earlier anchor; it changes what the plan charges on every model, so it is its own pass.
 
 **Not covered here: the ~3.9 GiB library reservation (F4).** Claimed by the libraries themselves on first dispatch. The plan charges it (A4.2), `--mem-report` names it, reducing it is out of scope.
 

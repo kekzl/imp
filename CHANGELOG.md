@@ -11,6 +11,20 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Q8_0 IMMA prefill cache (an s8 plane per prefilled weight, 1.125 B per
+  element) was charged to nothing and took whatever the KV pool left free — 5612
+  MiB on a cold Qwen3-8B-Q8_0 start, 7942 MiB with a bigger reserve pinned — so
+  the card ended init at 0 MiB free and WDDM spilled whichever allocation the
+  startup path touched last. The planner now charges it (`imma_plane_bytes`,
+  capped at the KV guarantee), `mmq_q8_imma` is capped at the charge, and
+  `--mem-report` names it `imma_q8_planes`. Cold Qwen3-8B-Q8_0 defaults, no pin:
+  124.8 -> 289.6 output tok/s at c=1, 514.1 -> 1462.2 at c=8, 2375.3 -> 4568.5 at
+  c=32; card 0 -> 1190 MiB free, attribution 100 %. Most of the ~3.9 GiB
+  "library reserve" of `docs/internals/MEMORY.md` A1.5 was this cache; the real
+  claim on that model is 763 MiB (#1899)
+
 ## [0.37.0] - 2026-09-04
 
 ### Added

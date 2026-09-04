@@ -126,6 +126,11 @@ struct Q6kRepack {
 };
 
 extern std::mutex g_imma_mtx;
+// Planned budget for the per-weight prefill caches and what they hold now
+// (mmq_q8_imma_scratch.cu, #1899). Both are read under g_imma_mtx.
+extern size_t g_imma_plane_budget;
+extern size_t g_imma_plane_used;
+extern bool g_imma_plane_budget_hit;
 extern std::unordered_map<const void*, WeightPlanes> g_imma_weights;
 extern std::unordered_map<const void*, Q6kRepack> g_imma_q6k;
 extern ActScratch g_imma_act;

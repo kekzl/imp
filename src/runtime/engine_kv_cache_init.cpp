@@ -18,6 +18,7 @@
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
 #include "core/logging.h"
+#include "compute/mmq_q8_imma.h"  // mmq_q8_imma_set_plane_budget
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -230,9 +231,17 @@ bool Engine::init_kv_cache() {
     }
 
     const int ssm_reserved_slots = spec_mc_reserved_slots_();
-    auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
-                                           effective_free_vram(), swa_live_tokens, n_swa_layers,
-                                           &native_cache_demand(), ssm_reserved_slots);
+    auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram(),
+                                           swa_live_tokens, n_swa_layers, &native_cache_demand(),
+                                           ssm_reserved_slots, runtime_config_.gemm.q8_imma_enabled,
+                                           runtime_config_.gemm.moe_imma_prefill);
+    // Cap the IMMA prefill planes at what the pass just charged for them. They
+    // are taken lazily on each Q8_0 weight's first prefill, so without this the
+    // cache takes whatever the KV pool leaves free — a different amount on
+    // every start, and the reason the spill victim followed the startup path
+    // (#1899). Set before the pool is sized so a mid-init prefill (warmup,
+    // graph prewarm) is already bounded.
+    mmq_q8_imma_set_plane_budget(vram_budget.imma_plane_bytes);
     // A7 step 2 — APPLIED. The KV block count now comes from plan_memory(), not
     // from the live-free-derived pass. What made that safe is three changes, in
     // this order: the balloon stopped hiding bytes from the live read (B62), the
@@ -254,8 +263,11 @@ bool Engine::init_kv_cache() {
             vram_budget.weight_cache_estimate_bytes > vram_budget.weight_cache_transient_bytes
                 ? vram_budget.weight_cache_estimate_bytes - vram_budget.weight_cache_transient_bytes
                 : 0;
-        probe.mandatory_cache_bytes =
-            vram_budget.mandatory_sf_bytes + vram_budget.mandatory_moe_bytes;
+        // The IMMA prefill planes are mandatory in the same sense: the plan
+        // grants them, mmq_q8_imma is capped at the grant, and the pool must
+        // not be sized over bytes the first prefill will take (#1899).
+        probe.mandatory_cache_bytes = vram_budget.mandatory_sf_bytes + vram_budget.mandatory_moe_bytes +
+                                      vram_budget.imma_plane_bytes;
         probe.ssm_state_bytes = vram_budget.ssm_footprint_bytes;
         if (executor_) {
             probe.engine_persistent_bytes = executor_->workspace_estimate();
@@ -442,6 +454,22 @@ bool Engine::init_kv_cache() {
     if (per_block_total_bytes > 0) {
         size_t free_now = 0, total_now = 0;
         vram_budget_mem_get_info(&free_now, &total_now);
+        // The IMMA prefill planes are still OUTSTANDING here: they are taken on
+        // each Q8_0 weight's first prefill, i.e. during warmup, after this
+        // reading. Charging them keeps the residual pass from handing the pool
+        // bytes the very next forward claims (#1899) — the mechanism behind the
+        // card sitting at 0 MiB free after init on Qwen3-8B-Q8_0.
+        const size_t imma_used = mmq_q8_imma_plane_bytes_used();
+        const size_t imma_outstanding = vram_budget.imma_plane_bytes > imma_used
+                                            ? vram_budget.imma_plane_bytes - imma_used
+                                            : 0;
+        if (imma_outstanding > 0) {
+            IMP_LOG_INFO(
+                "KV cache: holding %.0f MiB of the post-cache residual for the IMMA "
+                "prefill planes (taken on the first prefill)",
+                imma_outstanding / (1024.0 * 1024.0));
+            free_now = free_now > imma_outstanding ? free_now - imma_outstanding : 0;
+        }
         const size_t headroom = vram_allocator_headroom(total_now);
         const int max_blocks_planned = kv_blocks_planned;
         const auto sizing =

@@ -95,6 +95,16 @@ struct LibraryReserve {
 // (CUDA_MODULE_LOADING=EAGER moves 124 MiB), and the default cudaMallocAsync
 // pool (reserved/used unchanged across the request).
 //
+// The 2026-07-28 measurement above was taken on a Q8_0 config, where MOST of it
+// was not a library claim at all: mmq_q8_imma's per-weight s8 planes, allocated
+// on the first prefill and charged to nothing (#1899, MEMORY.md A1.5). Those are
+// planned separately now (VRAMBudget::imma_plane_bytes), and what is left of the
+// first-forward claim measures 763 MiB on Qwen3-8B-Q8_0, 1366 on Qwen3-14B-Q6_K
+// and 3260 on Qwen3.8-27B-NVFP4. The constant stays where it is because it is
+// also the cold-start floor for models with no recorded measurement, and
+// over-reserving there costs ~640 MiB of KV (the 10 % reserve floor absorbs the
+// rest) while under-reserving costs a spilled card.
+//
 // Re-measure after a driver or CUDA bump; imp.conf `vram.library_reserve_mb`
 // overrides it per host.
 constexpr size_t kMeasuredLibraryReserveBytes = 3900ull * 1024 * 1024;

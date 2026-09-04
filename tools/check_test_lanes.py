@@ -194,7 +194,10 @@ def main():
     # 1084 -> 1085 (#1877): PagedF16Decode.ServingShapeMicrobench (test_attention_paged_oracle.cu).
     # 1085 -> 1081 (#1878): tests/test_cluster_launch.cu removed with the cluster GQA decode kernel.
     # 1081 -> 1082 (#this): PagedF16Multitok.MatchesReferenceBothRoutes (test_attention_paged_oracle.cu).
-    PINNED = 1082
+    # 1082 -> 1084 (#1899): VramBudgetReserve.ImmaPlanesAreChargedForQ8Weights and
+    # ImmaPlaneChargeYieldsToTheKvGuarantee - compute_vram_budget() reads total VRAM,
+    # so they live in test-e2e behind SKIP_IF_NO_CUDA (test_vram_budget_reserve.cpp).
+    PINNED = 1084
 
     text = CMAKE.read_text()
     mods = module_sources(text)

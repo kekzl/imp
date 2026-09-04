@@ -23,6 +23,7 @@
 #include "compute/mmq_q8_imma_internal.cuh"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
+#include "memory/mem_account.h"
 
 #include <algorithm>
 #include <mutex>
@@ -109,6 +110,66 @@ std::unordered_map<const void*, WeightPlanes> g_imma_weights;
 std::unordered_map<const void*, Q6kRepack> g_imma_q6k;
 ActScratch g_imma_act;
 
+// The weight caches below are the largest single VRAM consumer imp had that
+// nothing planned: 1.125 B per Q8_0 weight element, taken lazily on the FIRST
+// prefill of each tensor, and best-effort — a failed cudaMalloc silently drops
+// that GEMM to the dequant path. On Qwen3-8B-Q8_0 that is up to 8.6 GiB, and
+// because it takes whatever the KV pool left over, it took a DIFFERENT amount
+// on every start: 5612 MiB cold, 7839 with vram.library_reserve_mb=6782, 7942
+// at 12000 (#1899). The plan charged none of it — it landed in the A1.5
+// "library reserve" residual, was read as a cuBLAS charge, and the card ran
+// full, after which WDDM spilled whichever allocation the startup path had
+// touched last (the graph-prewarm ladder decided the victim).
+//
+// So the size is now decided by the planner (vram_budget's imma_plane_bytes,
+// the same arithmetic as below) and enforced here: a take past the budget
+// declines exactly like an allocation failure. SIZE_MAX (the default) is
+// uncapped — tests and standalone tools that never planned one; a planned
+// budget of 0 means "no planes", not "unlimited".
+size_t g_imma_plane_budget = SIZE_MAX;
+size_t g_imma_plane_used = 0;
+bool g_imma_plane_budget_hit = false;
+
+// Plane bytes for one (N, K) Q8_0 weight: the s8 plane plus the interleaved
+// (alpha, beta) half pair per 32-block. Public so the planner charges the
+// number this allocator will actually take.
+size_t imma_q8_plane_bytes(int64_t N, int64_t K) {
+    return static_cast<size_t>(N) * static_cast<size_t>(K) +
+           static_cast<size_t>(N) * (static_cast<size_t>(K) / 32) * 2 * sizeof(__half);
+}
+
+namespace {
+// Charge `need` against the budget. Caller holds g_imma_mtx.
+bool imma_plane_budget_take(size_t need, const char* what) {
+    if (g_imma_plane_budget == SIZE_MAX)
+        return true;
+    if (g_imma_plane_used + need <= g_imma_plane_budget)
+        return true;
+    if (!g_imma_plane_budget_hit) {
+        g_imma_plane_budget_hit = true;
+        IMP_LOG_WARN(
+            "mmq_q8_imma: %s cache reached its planned budget (%.0f MiB used, %.0f MiB "
+            "planned, %.0f MiB wanted) — the remaining prefill GEMMs run the dequant "
+            "path. Raise it by giving the plan more room (smaller KV pool) or set "
+            "gemm.q8_imma_enabled=false to drop the cache entirely.",
+            what, g_imma_plane_used / (1024.0 * 1024.0), g_imma_plane_budget / (1024.0 * 1024.0),
+            need / (1024.0 * 1024.0));
+    }
+    return false;
+}
+}  // namespace
+
+void mmq_q8_imma_set_plane_budget(size_t bytes) {
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+    g_imma_plane_budget = bytes;
+    g_imma_plane_budget_hit = false;
+}
+
+size_t mmq_q8_imma_plane_bytes_used() {
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+    return g_imma_plane_used;
+}
+
 bool imma_stream_capturing(cudaStream_t stream) {
     cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
     return cudaStreamIsCapturing(stream, &st) == cudaSuccess &&
@@ -128,11 +189,16 @@ bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool
     w.N = N;
     w.K = K;
     const size_t subs = static_cast<size_t>(K) / 32;
+    const size_t need = imma_q8_plane_bytes(N, K);
+    if (!imma_plane_budget_take(need, "Q8_0 plane"))
+        return false;
     if (cudaMalloc(&w.qs, static_cast<size_t>(N) * K) != cudaSuccess) return false;
     if (cudaMalloc(&w.sc, static_cast<size_t>(N) * subs * 2 * sizeof(__half)) != cudaSuccess) {
         cudaFree(w.qs);
         return false;
     }
+    g_imma_plane_used += need;
+    MemAccount::instance().note("imma_q8_planes", static_cast<std::ptrdiff_t>(need));
     const int total = N * static_cast<int>(subs);
     q8_split_kernel<<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const uint8_t*>(src),
                                                              w.qs, w.sc, total);
@@ -147,7 +213,13 @@ bool imma_ensure_q6k(const void* src, size_t n_blocks, cudaStream_t stream, bool
     if (capturing) return false;
     Q6kRepack r;
     r.n_blocks = n_blocks;
-    if (cudaMalloc(&r.blocks, n_blocks * kQ6Stride) != cudaSuccess) return false;
+    const size_t need = n_blocks * kQ6Stride;
+    if (!imma_plane_budget_take(need, "Q6_K repack"))
+        return false;
+    if (cudaMalloc(&r.blocks, need) != cudaSuccess)
+        return false;
+    g_imma_plane_used += need;
+    MemAccount::instance().note("imma_q8_planes", static_cast<std::ptrdiff_t>(need));
     const size_t total = n_blocks * 105;
     q6k_repack_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(
         static_cast<const uint8_t*>(src), r.blocks, n_blocks);

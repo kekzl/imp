@@ -17,6 +17,7 @@
 #include "compute/mmq_q8_imma_internal.cuh"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
+#include "memory/mem_account.h"
 
 #include <cstring>
 #include <mutex>
@@ -542,6 +543,14 @@ void mmq_q8_imma_release_all() {
         cudaFree(r.blocks);
     g_imma_q6k.clear();
     g_imma_act = ActScratch{};
+    // The plane budget is per-model: a swap re-plans it. Give the accounting
+    // back what the frees returned, or the next model starts with the previous
+    // one's bytes already charged.
+    if (g_imma_plane_used > 0) {
+        MemAccount::instance().note("imma_q8_planes", -static_cast<std::ptrdiff_t>(g_imma_plane_used));
+        g_imma_plane_used = 0;
+    }
+    g_imma_plane_budget_hit = false;
 }
 
 }  // namespace imp
