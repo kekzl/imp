@@ -25,6 +25,14 @@ there instead of retelling it.
 
 ### Changed
 
+- The two `(a)` god-functions the function-size gate flagged with no hot path
+  attached are split, both move-verbatim. `imp-cli`'s `main()` 737 -> 233 code
+  LOC: the bench, interactive and one-shot modes move into
+  `tools/imp-cli/mode_{bench,interactive,oneshot}.cpp`, which is the layout
+  `modes.h` has described since `mode_perplexity.cpp`. `handle_completions()`
+  593 -> 240: the SSE and blocking response paths move behind a
+  `CompletionCtx`, mirroring what the chat route already does with
+  `ChatRequestContext`. Both entries leave `[allow]`
 - The file-size gate charges a textually `#include`d `.cu` to its includer,
   because a file is not a translation unit. `src/exec/executor_attention.cu`
   measured 542 code LOC as a file and passed; the TU nvcc compiles is 1279 / 2004
