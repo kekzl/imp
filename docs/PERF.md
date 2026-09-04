@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-04
+commit: c7d7356e
 -->
 
 # Performance
@@ -97,6 +97,49 @@ the 2026-07-12 sweep:
 
 Where imp loses is in [`LIMITATIONS.md`](LIMITATIONS.md), and it is in the README
 too, on purpose.
+
+## Serving KPIs
+
+The serving set defined in
+[`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) ("Serving KPIs"):
+closed loop per concurrency level, 300-token greedy completions on unique
+prompts of about 35 tokens, server defaults (auto batch 32, n-gram
+speculation on, FP8 KV), one warmup wave. Goodput counts requests with
+TTFT <= 500 ms and TPOT <= 50 ms.
+
+[PROV: commit=c7d7356e date=2026-09-04 hw=RTX5090 model=Qwen3-8B-NVFP4-cortecs quant=NVFP4 cuda=13.3.1 path=paged_fp8+fa2_fp16qk cmd="tools/analysis/serving_kpi.py --levels 1,8,32 --max-tokens 300" n=1]
+
+| KPI | c=1 | c=8 | c=32 |
+|---|---|---|---|
+| req/s | 1.11 | 5.46 | 17.76 |
+| output tok/s | 291.4 | 1413.6 | 4633.7 |
+| TTFT p50 / p95 / p99 ms | 11 / 31 / 34 | 25 / 37 / 41 | 50 / 232 / 238 |
+| TPOT p50 / p95 / p99 ms | 3.4 / 3.5 / 3.5 | 5.1 / 5.4 / 5.4 | 5.8 / 6.4 / 6.4 |
+| ITL p50 / p95 / p99 ms | 3.3 / 4.7 / 7.2 | 4.6 / 9.2 / 16.6 | 4.7 / 10.6 / 21.7 |
+| E2E p50 / p95 / p99 s | 0.94 / 1.04 / 1.06 | 1.36 / 1.64 / 1.64 | 1.62 / 1.96 / 1.97 |
+| goodput req/s (SLO attainment) | 1.11 (100 %) | 5.46 (100 %) | 17.76 (100 %) |
+| queue wait p50 / p95 / p99 ms | 2.5 / 4.8 / 5.0 | 3.1 / 8.7 / 9.7 | 8.0 / 45.3 / 49.1 |
+| decode rows per step | 1.00 | 7.30 | 27.82 |
+| power W / J per 1k output tokens | 512 / 1751 | 367 / 254 | 381 / 73 |
+
+**GGUF batched decode is dequant-bound.** A GGUF source carries its NVFP4
+decode cache as a single-sequence overlay; every step with more than one
+sequence takes the prefill route and dequantizes the whole Q8_0 source
+(`src/exec/executor_gemm_dispatch.cu:536`, the class of #667). Same harness
+and defaults on Qwen3-8B-Q8_0: the step costs about 52 ms from two sequences
+up, flat in batch size, at a third of the power. `gemm.q8_imma_enabled=true`
+reads the same (115 tok/s at c=8). The published v0.36.0 image reads the
+same at c=8 (120 tok/s, ITL p50 63.5 ms): the standing state, not a
+regression. Concurrency needs a native NVFP4 checkpoint (table above).
+
+[PROV: commit=c7d7356e date=2026-09-04 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0 cuda=13.3.1 path=paged_fp8+fa2_fp16qk cmd="tools/analysis/serving_kpi.py --levels 1,8,32 --max-tokens 300" n=1]
+
+| KPI | c=1 | c=8 | c=32 |
+|---|---|---|---|
+| output tok/s | 225.6 | 136.2 | 481.9 |
+| TPOT p50 / p99 ms | 4.2 / 4.6 | 51.8 / 57.3 | 57.0 / 60.3 |
+| goodput req/s (SLO attainment) | 0.86 (100 %) | 0.02 (3 %) | 0.00 (0 %) |
+| power W | 420 | 185 | 193 |
 
 ## Reproducing any of this
 

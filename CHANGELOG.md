@@ -11,6 +11,33 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Added
+
+- Serving KPI harness `tools/analysis/serving_kpi.py`: per concurrency level
+  TTFT / TPOT / ITL / E2E / normalized latency at p50 / p95 / p99, req/s,
+  input / output / total tok/s, goodput against an SLO pair (TTFT <= 500 ms,
+  TPOT <= 50 ms by default), the server's queue wait, rows per step, KV
+  utilization, prefix-cache hit rate, speculative acceptance and preemption
+  counters from `/metrics`, and J per 1k output tokens from `nvidia-smi`.
+  Definitions in `docs/internals/BENCHMARKING.md`, first table in
+  `docs/PERF.md` (Qwen3-8B-NVFP4-cortecs, 32 streams: 4633.7 output tok/s,
+  TPOT p50 5.8 ms, goodput 100 %); GGUF batched decode is dequant-bound
+  (Qwen3-8B-Q8_0, 8 streams: 136.2 tok/s, TPOT p50 51.8 ms), recorded in
+  `docs/LIMITATIONS.md` (#1896)
+- `/metrics`: `imp_streaming_kv_auto_enables_total` and
+  `imp_prefix_cache_evictions_total` (the two preemption events that were log
+  lines only) and `imp_decode_batch_last_rows` (sequences in the most recent
+  decode step, 0 when idle) (#1896)
+
+### Fixed
+
+- `/metrics` latency histograms are fed by every generation path:
+  `/v1/completions` (stream and non-stream) observed none of TTFT / ITL /
+  queue / duration, the non-stream chat loop no ITL, and a request cancelled
+  or timed out before admission left no queue observation. The non-stream
+  chat timeout now also counts in `imp_requests_timed_out_total`. Gate:
+  `tests/test_server_metrics.py` in `make test-server` (#1896)
+
 ### Changed
 
 - Streaming TTFT: the reasoning scan no longer holds the first 8 tokens of a

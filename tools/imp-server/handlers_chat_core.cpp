@@ -827,12 +827,17 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         std::string matched_stop;  // which stop sequence ended it, for the Anthropic shim (#1550)
 
         auto ns_request_start = std::chrono::steady_clock::now();
+        auto t_prev_token = std::chrono::high_resolution_clock::now();  // last delivered token (ITL)
         for (;;) {
             // Check request timeout
             if (state.request_timeout > 0) {
                 auto elapsed = std::chrono::steady_clock::now() - ns_request_start;
                 if (elapsed > std::chrono::seconds(state.request_timeout)) {
                     server_req->cancel();
+                    state.metrics.requests_timed_out++;
+                    state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                                server_req->queue_ms.load(
+                                                                    std::memory_order_relaxed));
                     finish = "length";
                     break;
                 }
@@ -903,17 +908,24 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             // TTFT was recorded on the streaming path only, while this one
             // still incremented requests_total - so the histogram described
             // half the traffic and said nothing about which half (#1578).
+            const auto t_tok = std::chrono::high_resolution_clock::now();
             if (output_ids.empty() && ttft_ms < 0.0) {
-                ttft_ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::high_resolution_clock::now() - ctx.t_start)
-                              .count();
+                ttft_ms = std::chrono::duration<double, std::milli>(t_tok - ctx.t_start).count();
                 // Same point as the streaming path: by the first token the
                 // worker has admitted the request, so queue_ms is final
                 // (#1580).
                 const double q = server_req->queue_ms.load(std::memory_order_relaxed);
                 if (q >= 0.0)
                     state.metrics.queue_time.observe(q / 1000.0);
+            } else if (!output_ids.empty()) {
+                // ITL was observed on the streaming path only (#1577), so the
+                // histogram described streaming traffic and said nothing
+                // about this loop's tokens. Per completion: the first token of
+                // a second n>1 completion is not a gap.
+                state.metrics.inter_token.observe(
+                    std::chrono::duration<double>(t_tok - t_prev_token).count());
             }
+            t_prev_token = t_tok;
             output_ids.push_back(token);
 
             // Check text-level stop sequences

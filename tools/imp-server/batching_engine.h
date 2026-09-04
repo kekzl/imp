@@ -89,6 +89,10 @@ public:
     std::atomic<int64_t> decode_steps{0};
     std::atomic<int64_t> decode_rows{0};
     std::atomic<int64_t> decode_batch_max{0};
+    // Rows of the most recent step, 0 while the worker idles: the sequences
+    // decoding together right now. The counter pair above gives only the
+    // windowed mean and decode_batch_max never resets.
+    std::atomic<int64_t> decode_batch_last{0};
 
     BatchingEngine() = default;
     ~BatchingEngine();

@@ -683,6 +683,7 @@ int KVCacheManager::reclaim_cached_block() {
     int block_id = cached_blocks_lru_.front();
     cached_blocks_lru_.pop_front();
     reclaimable_cached_count_--;
+    cached_block_evictions_.fetch_add(1, std::memory_order_relaxed);
 
     // Remove from hash tables.
     auto hash_it = block_id_to_hash_.find(block_id);

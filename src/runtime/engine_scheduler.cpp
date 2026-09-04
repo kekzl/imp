@@ -899,6 +899,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             if (pool_total > 0 && st.free_blocks + reclaimable < pool_total / 10) {
                 if (kv_cache_raw_ && kv_cache_raw_->qtype() == QType::F16) {
                     config_.streaming_kv_enabled = true;
+                    streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
                     int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
                     int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
                                                                 : model_->config().sliding_window;

@@ -352,6 +352,17 @@ public:
     // Counted by the pool itself, not mirrored here: growth is decided in
     // KVCache::try_grow_to and a second copy is a second thing to keep in sync.
     uint64_t kv_pool_growths() const noexcept { return kv_cache_raw_ ? kv_cache_raw_->growths() : 0; }
+    // StreamingLLM auto-enable events (pool >90% full). Each one also demotes
+    // CUDA graphs one-way for the rest of the process, so it is the
+    // preemption signal an operator wants as a counter, not as a WARN line.
+    uint64_t streaming_kv_auto_enables() const noexcept {
+        return streaming_kv_auto_enables_.load(std::memory_order_relaxed);
+    }
+    // Counted by the manager (the reclaim is decided there), read here so
+    // /metrics needs no manager handle.
+    uint64_t prefix_cache_evictions() const noexcept {
+        return kv_manager_ ? kv_manager_->cached_block_evictions() : 0;
+    }
     Model* model() const noexcept { return model_.get(); }
     // Effective context window actually allocated by the engine (after VRAM-aware
     // auto-sizing in init_compute_max_seq_len_). May be < the model's declared
@@ -416,6 +427,7 @@ private:
     KVCache* kv_cache_raw_ = nullptr;  // Non-owning pointer (owned by kv_manager_)
     bool kv_pool_floored_ = false;     // the pool is the rescue floor, not a size
     std::atomic<uint64_t> kv_pressure_rejections_{0};
+    std::atomic<uint64_t> streaming_kv_auto_enables_{0};
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;
     CudaStream stream_;

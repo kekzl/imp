@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-30
-commit: e3e91b9f
+verified: 2026-09-04
+commit: c7d7356e
 -->
 
 # Benchmarking methodology
@@ -94,6 +94,45 @@ confident numbers before it produced a true one (2026-08-29, full ledger in
 - **Why 8 % and not 3 %.** The threshold has to sit above this host's own movement, or it reports the box instead of the diff. Within one session the gate is tight (three independent processes agree to 0.16 %), but *between* sessions the same tree reads 287.63 one day and 276.92 the next (−3.58 %) at healthy clocks, and six quiet runs spanned 278.59…289.77. Ordinary desktop use (a stream, a browser) costs a few percent more; a depressed-host day costs 8-15 %. The old 3 % sat below all of that and failed on docs-only changes. What the gate still catches: the split-K mutation M29 measured **−36 %**, a 4.5x margin. A red gate has never been a regression on its own; the proof is a paired A/B against `main`, alternating the arms.
 - **Peak VRAM is gated too** (`scripts/verify.sh`, both `verify` and `verify-fast`): a `--mem-report` run vs the pinned `metrics.memory_mb.own_peak_mb` against `thresholds.vram_increase_pct`. It gates `own_peak` (this process's allocations since engine init), **not** device `peak_used`, which also carries the CUDA primary context and any neighbour process. `own_peak` measures byte-identical across repeat runs, a stricter signal than any throughput number. (Skip with `IMP_VERIFY_SKIP_VRAM=1`.)
 - **Intentional perf moves:** refresh the baseline with `scripts/gen_perf_baseline.sh` (cold-median: 5 trials, median per metric; re-pins `own_peak_mb` in the same run) and **say so in the PR**. A change that intentionally moves VRAM needs the same refresh.
+
+## Serving KPIs
+
+The single-stream numbers above do not describe a server under load.
+`tools/analysis/serving_kpi.py` measures the serving set per concurrency
+level: closed loop (C workers, each sends its next request when its previous
+one finished), unique prompts per request (the prefix cache stays cold unless
+that is the point, `--prompt-tokens` adds filler), one warmup wave at the
+largest level first (graph captures and the clock ramp), `--max-tokens 300`
+and `temperature 0` by default, `--ignore-eos` for equal token counts across
+arms.
+
+| KPI | definition | source |
+|---|---|---|
+| TTFT | first content delta minus request send, per request | client |
+| TPOT | (last token - first token) / (output tokens - 1), per request | client |
+| ITL | gap between consecutive token deltas, pooled over every token of every request | client |
+| E2E, normalized latency | request wall; E2E / output tokens | client |
+| req/s, output / input / total tok/s | over the level's wall | client |
+| goodput | requests with TTFT <= `--slo-ttft-ms` AND TPOT <= `--slo-tpot-ms` (defaults 500 and 50), as req/s and tok/s; attainment = their share of finished requests | client |
+| queue wait | `imp_queue_time_seconds` delta across the level, quantiles interpolated like `histogram_quantile` | `/metrics` |
+| rows per step, active sequences | `imp_decode_batch_rows_total / imp_decode_batch_steps_total` delta; `imp_decode_batch_last_rows` sampled four times a second | `/metrics` |
+| KV utilization | `imp_kv_blocks_live / imp_kv_blocks_total`, sampled | `/metrics` |
+| prefix-cache hit rate | `imp_tokens_cached_total / imp_tokens_prompt_total` delta | `/metrics` |
+| speculative acceptance | `imp_spec_accepted_total / imp_spec_drafted_total` delta | `/metrics` |
+| preemption | deltas of `imp_kv_pressure_rejections_total`, `imp_streaming_kv_auto_enables_total`, `imp_prefix_cache_evictions_total` | `/metrics` |
+| energy | `nvidia-smi power.draw` integrated over the level: mean W and J per 1k output tokens; the mean SM clock beside it is the host-health check of rule 6 | host |
+
+Percentiles are p50 / p95 / p99 with linear interpolation; no latency is
+reported as a mean. The rules above (free GPU, one server per arm, clocks
+sampled) apply unchanged. The level's wall includes the closed loop's tail,
+so keep `--requests-per-level` at least twice the concurrency (the default).
+Not reported: tok/s per GPU and cost per token, imp targets one card. The
+published table is in [`../PERF.md`](../PERF.md) ("Serving KPIs").
+
+```
+python3 tools/analysis/serving_kpi.py --url http://127.0.0.1:8080 --levels 1,8,32 \
+    --max-tokens 300 --md-out kpi.md --json kpi.json
+```
 
 ## Profiling builds
 

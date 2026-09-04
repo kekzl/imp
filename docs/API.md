@@ -91,8 +91,25 @@ the server log (#1640, #1641):
 | `imp_requests_timed_out_total` | the server ended a request at `--request-timeout`. The client sees `finish_reason: "length"`, which is also what a spent token budget produces - this counter is the only way to tell them apart |
 | `imp_kv_pressure_rejections_total` | a request was cancelled because the KV pool could not give it blocks (admission or mid-decode). Not incremented for a failed metadata allocation or a snapshot mismatch, which are different faults |
 | `imp_kv_pool_growths_total` | the growable pool committed more memory. A pool that keeps growing under load is the signal that arrives before it stops being able to |
+| `imp_streaming_kv_auto_enables_total` | the KV pool ran nearly full on an F16-KV model and StreamingLLM eviction switched itself on. The same event demotes CUDA graphs one-way for the rest of the process. `usage.prompt_tokens_details.evicted_tokens` is the per-request size, this is the rate |
+| `imp_prefix_cache_evictions_total` | a cached prefix block was reclaimed for a new allocation. Rising while `imp_tokens_cached_total` stalls means the pool is smaller than the working set |
 
 `imp_requests_cancelled_total` remains client-disconnect only.
+
+`imp_decode_batch_last_rows` (gauge) is the number of sequences in the most
+recent decode step, 0 while the worker idles: the live batch, where
+`imp_decode_batch_rows_total / imp_decode_batch_steps_total` is a windowed
+mean and `imp_decode_batch_max` never resets.
+
+The four latency histograms (`imp_request_duration_seconds`,
+`imp_ttft_seconds`, `imp_queue_time_seconds`, `imp_inter_token_seconds`) are
+fed by every generation path: chat stream and non-stream, `/v1/completions`
+stream and non-stream. A request cancelled or timed out before the worker
+admitted it contributes its wait to `imp_queue_time_seconds` as well. Gate:
+`tests/test_server_metrics.py` in `make test-server`. The serving KPI harness
+reads the histograms and counters back per concurrency level
+(`tools/analysis/serving_kpi.py`, definitions in
+[`internals/BENCHMARKING.md`](internals/BENCHMARKING.md)).
 
 `imp_kv_blocks_reserved` (gauge) is what admission has promised to running
 requests for the rest of their generation and not yet written (#1635). Free

@@ -202,6 +202,8 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         if (!sink.is_writable()) {
             server_req->cancel();
             state.metrics.requests_cancelled++;
+            state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                        server_req->queue_ms.load(std::memory_order_relaxed));
             finish = "cancelled";
             break;
         }
@@ -218,6 +220,9 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             if (elapsed > std::chrono::seconds(state.request_timeout)) {
                 server_req->cancel();
                 state.metrics.requests_timed_out++;
+                state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                            server_req->queue_ms.load(
+                                                                std::memory_order_relaxed));
                 IMP_LOG_WARN(
                     "request ended at --request-timeout (%d s); the client sees "
                     "finish_reason=length, which is indistinguishable from a spent "
@@ -244,6 +249,9 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                 if (!d.keepalive()) {
                     server_req->cancel();
                     state.metrics.requests_cancelled++;
+                    state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                                server_req->queue_ms.load(
+                                                                    std::memory_order_relaxed));
                     finish = "cancelled";
                     break;
                 }

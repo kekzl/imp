@@ -201,10 +201,12 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     // ServerMetrics: the decision is the engine's, and a second copy is a
     // second thing to keep in sync (#1641).
     {
-        uint64_t kv_rejects = 0, kv_growths = 0;
+        uint64_t kv_rejects = 0, kv_growths = 0, kv_auto_stream = 0, prefix_evictions = 0;
         if (state.ctx && state.ctx->engine) {
             kv_rejects = state.ctx->engine->kv_pressure_rejections();
             kv_growths = state.ctx->engine->kv_pool_growths();
+            kv_auto_stream = state.ctx->engine->streaming_kv_auto_enables();
+            prefix_evictions = state.ctx->engine->prefix_cache_evictions();
         }
         out +=
             "# HELP imp_kv_pressure_rejections_total Requests cancelled because the KV pool "
@@ -214,6 +216,20 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
         out += "# HELP imp_kv_pool_growths_total Times the growable KV pool committed more memory\n";
         out += "# TYPE imp_kv_pool_growths_total counter\n";
         out += "imp_kv_pool_growths_total " + std::to_string(kv_growths) + "\n";
+        // The two preemption events that were log lines only: StreamingLLM
+        // auto-enable (which also demotes CUDA graphs one-way) and prefix-cache
+        // block reclaims. usage.evicted_tokens is the per-request size; these
+        // are the rates.
+        out +=
+            "# HELP imp_streaming_kv_auto_enables_total Times the KV pool ran >90% full and "
+            "StreamingLLM eviction was auto-enabled (CUDA graphs demoted one-way)\n";
+        out += "# TYPE imp_streaming_kv_auto_enables_total counter\n";
+        out += "imp_streaming_kv_auto_enables_total " + std::to_string(kv_auto_stream) + "\n";
+        out +=
+            "# HELP imp_prefix_cache_evictions_total Cached prefix blocks reclaimed for new "
+            "allocations\n";
+        out += "# TYPE imp_prefix_cache_evictions_total counter\n";
+        out += "imp_prefix_cache_evictions_total " + std::to_string(prefix_evictions) + "\n";
     }
     out += "# HELP imp_last_ttft_ms Time to first token of last request in milliseconds\n";
     out += "# TYPE imp_last_ttft_ms gauge\n";
@@ -270,12 +286,13 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     // The counters live on the BatchingEngine, which is where the batch is
     // formed; read under the same bounded lock the rest of this endpoint uses.
     {
-        int64_t steps = 0, rows = 0, bmax = 0;
+        int64_t steps = 0, rows = 0, bmax = 0, blast = 0;
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock() && state.batching) {
             steps = state.batching->decode_steps.load();
             rows = state.batching->decode_rows.load();
             bmax = state.batching->decode_batch_max.load();
+            blast = state.batching->decode_batch_last.load();
         }
         out += "# HELP imp_decode_batch_steps_total Decode steps executed\n";
         out += "# TYPE imp_decode_batch_steps_total counter\n";
@@ -286,6 +303,11 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
         out += "# HELP imp_decode_batch_max Largest decode batch seen since start\n";
         out += "# TYPE imp_decode_batch_max gauge\n";
         out += "imp_decode_batch_max " + std::to_string(bmax) + "\n";
+        out +=
+            "# HELP imp_decode_batch_last_rows Sequences in the most recent decode step, 0 while "
+            "idle\n";
+        out += "# TYPE imp_decode_batch_last_rows gauge\n";
+        out += "imp_decode_batch_last_rows " + std::to_string(blast) + "\n";
     }
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
