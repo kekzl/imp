@@ -31,6 +31,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- GGUF batched decode ran every 2..32-row step through the prefill dequant
+  route (the whole Q*_K source per step, the class of #667); decode rows now
+  read the NVFP4 decode overlay through the small-M GEMM, and the small-M
+  scratch is a planned T2 arena tenant taken before graph prewarm (a captured
+  step cannot allocate it, and no eager forward reaches the block on a GGUF
+  source). Qwen3-8B-Q8_0, library reserve planned: c=8 770.4 -> 1496.1
+  output tok/s (TPOT p50 9.6 -> 5.0 ms), c=32 2648.3 -> 4715.1, c=1 288.0 /
+  287.8; table in `docs/PERF.md`, the cold-start spill lottery in
+  `docs/LIMITATIONS.md` (#1897)
 - `/metrics` latency histograms are fed by every generation path:
   `/v1/completions` (stream and non-stream) observed none of TTFT / ITL /
   queue / duration, the non-stream chat loop no ITL, and a request cancelled

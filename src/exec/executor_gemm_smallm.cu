@@ -21,6 +21,90 @@
 
 namespace imp {
 
+bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out) const {
+    if (h.source_data == nullptr)
+        return false;
+    if (dequant_gpu_supported(h.source_qtype)) {
+        // GGUF source (#1897): decode rows read the NVFP4 decode overlay,
+        // exactly the entry the M=1 decode GEMV reads. A GGUF weight with 2+
+        // rows used to take the prefill route and dequantize the whole
+        // Q*_K source per step (Qwen3-8B-Q8_0: 52 ms flat from two
+        // sequences up, 8 streams slower than 1). Prompt rows never come
+        // here: the 4-bit overlay would replace the full-precision prefill.
+        if (!cur_decode_rows_)
+            return false;
+        const StorageTier decode = (h.decode_tier != StorageTier::Undefined) ? h.decode_tier : h.primary_tier;
+        if (decode != StorageTier::NVFP4)
+            return false;
+        auto it = wcache_.nvfp4.find(h.source_data);
+        if (it == wcache_.nvfp4.end() || (it->second.K % 128) != 0)
+            return false;
+        out = it->second;
+        return true;
+    }
+    if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.source_scales == nullptr ||
+        ((h.shape[1] * 2) % 128) != 0)
+        return false;
+    out.packed_data = const_cast<void*>(h.source_data);
+    out.micro_scales = h.source_scales;
+    out.tensor_scale = h.source_tensor_scale;
+    out.N = h.shape[0];
+    out.K = h.shape[1] * 2;
+    return true;
+}
+
+void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
+    if (!runtime_config().gemm.nvfp4_smallm)
+        return;
+    // Size for decode rows: that is when the GGUF overlay arm is live.
+    const bool saved = cur_decode_rows_;
+    cur_decode_rows_ = true;
+    size_t ws_need = 0;
+    size_t xq_need = 0;
+    int n_weights = 0;
+    for (size_t id = 0; id < registry_.size(); ++id) {
+        const WeightHandle& h = registry_.handle(static_cast<TensorID>(id));
+        NvFP4QuantResult nv;
+        // The LM head has its own batched paths (executor_forward.cu) and
+        // would dominate the workspace (vocab x 32 floats).
+        if (h.kind == TensorKind::LM_HEAD || !smallm_weight_(h, nv))
+            continue;
+        const int N = static_cast<int>(nv.N);
+        const int K = static_cast<int>(nv.K);
+        const bool v2 = runtime_config().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
+        ws_need = std::max(ws_need, v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
+                                       : gemm_nvfp4_smallm_workspace_bytes(N));
+        xq_need = std::max(xq_need, (size_t)32 * (K / 2) + (size_t)32 * (K / 16));
+        ++n_weights;
+    }
+    cur_decode_rows_ = saved;
+    if (n_weights == 0 || smallm_ws_bytes_ >= ws_need)
+        return;
+    auto ws = engine_arena().take_bytes(ws_need);
+    auto xq = ws.empty() ? ws : engine_arena().take_bytes(xq_need);
+    if (ws.empty() || xq.empty()) {
+        // Arena closed or under-planned: the lazy growth path (cudaMalloc
+        // outside capture) still serves eager forwards; captured ones fall
+        // through to their non-small-M route.
+        IMP_LOG_WARN(
+            "small-M NVFP4 scratch: T2 arena refused %zu + %zu bytes, falling back to lazy allocation",
+            ws_need, xq_need);
+        ensure_smallm_ws_(ws_need, stream);
+        ensure_smallm_xq_(xq_need, stream);
+        return;
+    }
+    smallm_ws_ = ws.data();
+    smallm_ws_bytes_ = ws_need;
+    smallm_xq_ = xq.data();
+    smallm_xq_bytes_ = xq_need;
+    smallm_xq_src_ = nullptr;
+    smallm_xq_from_producer_ = false;
+    smallm_arena_ = true;
+    IMP_LOG_INFO(
+        "small-M NVFP4 scratch: %d weights, workspace %zu KiB + activation %zu KiB from the T2 arena",
+        n_weights, ws_need / 1024, xq_need / 1024);
+}
+
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                             uint8_t** scales_out) {
     if (!runtime_config().gemm.nvfp4_smallm || cur_spec_verify_ || overlap_prefill_active_)
@@ -29,10 +113,8 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
         return nullptr;
     if (consumer_id == kInvalidTensorID)
         return nullptr;
-    const auto& h = registry_.handle(consumer_id);
-    if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.source_data == nullptr ||
-        h.source_scales == nullptr || dequant_gpu_supported(h.source_qtype) ||
-        static_cast<int>(h.shape[1] * 2) != K)
+    NvFP4QuantResult nv;
+    if (!smallm_weight_(registry_.handle(consumer_id), nv) || static_cast<int>(nv.K) != K)
         return nullptr;
     const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
     ensure_smallm_xq_(xq_need, stream);
@@ -101,17 +183,15 @@ bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, cons
         return false;
     const auto& ha = registry_.handle(id_a);
     const auto& hb = registry_.handle(id_b);
-    auto eligible = [](const WeightHandle& h) {
-        return h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.source_data != nullptr &&
-               h.source_scales != nullptr && !dequant_gpu_supported(h.source_qtype);
-    };
-    if (!eligible(ha) || !eligible(hb))
+    NvFP4QuantResult nva;
+    NvFP4QuantResult nvb;
+    if (!smallm_weight_(ha, nva) || !smallm_weight_(hb, nvb))
         return false;
-    const int K = static_cast<int>(ha.shape[1] * 2);
-    if (static_cast<int>(hb.shape[1] * 2) != K || (K % 256) != 0)
+    const int K = static_cast<int>(nva.K);
+    if (static_cast<int>(nvb.K) != K || (K % 256) != 0)
         return false;
-    const int N1 = static_cast<int>(ha.shape[0]);
-    const int N2 = static_cast<int>(hb.shape[0]);
+    const int N1 = static_cast<int>(nva.N);
+    const int N2 = static_cast<int>(nvb.N);
     if ((N1 % 64) != 0 || (N2 % 64) != 0)
         return false;
     if (gemm_nvfp4_smallm_v2_stripes(N1, K) != 1 || gemm_nvfp4_smallm_v2_stripes(N2, K) != 1)
@@ -141,18 +221,6 @@ bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, cons
         smallm_xq_src_k_ = K;
         smallm_xq_from_producer_ = false;
     }
-    NvFP4QuantResult nva;
-    nva.packed_data = const_cast<void*>(ha.source_data);
-    nva.micro_scales = ha.source_scales;
-    nva.tensor_scale = ha.source_tensor_scale;
-    nva.N = N1;
-    nva.K = K;
-    NvFP4QuantResult nvb;
-    nvb.packed_data = const_cast<void*>(hb.source_data);
-    nvb.micro_scales = hb.source_scales;
-    nvb.tensor_scale = hb.source_tensor_scale;
-    nvb.N = N2;
-    nvb.K = K;
     NvFP4QuantResult xq;
     xq.packed_data = xq_packed;
     xq.micro_scales = xq_scales;

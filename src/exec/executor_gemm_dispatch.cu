@@ -288,9 +288,11 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // read NVFP4 directly via the CUTLASS prefill block below (and the
         // prefill_routes_cutlass_nvfp4_ mirror above must stay in sync with
         // every earlier return here — dequantable sources answer false there).
-        if (ctx.spec_verify_small_m && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 &&
-            input.qtype == QType::F16 && output.qtype == QType::F16 &&
-            h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
+        // speculative.verify_smallm hands the chunk to the small-M block
+        // below instead (one weight sweep per chunk), as on native NVFP4.
+        if (ctx.spec_verify_small_m && !runtime_config().speculative.verify_smallm &&
+            (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 && input.qtype == QType::F16 &&
+            output.qtype == QType::F16 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
             auto it = ctx.wcache->nvfp4.find(h.source_data);
             if (it != ctx.wcache->nvfp4.end()) {
                 // beta=1 (o/down residual add, #1055): accumulate variant —
@@ -347,38 +349,25 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // (gemm.h has the numbers); impl 1 keeps the refuted W4A16
         // dequant+HMMA kernel for A/B. Both read quantized activations
         // (same numerics family as the CUTLASS path). Spec-verify chunks
-        // keep their documented paths (argmax parity, #1055).
+        // keep their documented paths (argmax parity, #1055). The weight is
+        // the native NVFP4 source or, on decode rows of a GGUF source, its
+        // NVFP4 decode overlay (smallm_weight_, #1897).
+        NvFP4QuantResult nv;
         if (runtime_config().gemm.nvfp4_smallm &&
             (!ctx.spec_verify_small_m || runtime_config().speculative.verify_smallm) &&
-            !overlap_prefill_active_ && M <= 32 &&
-            (ctx.beta == 0.0f || ctx.beta == 1.0f) && input.qtype == QType::F16 &&
-            output.qtype == QType::F16 && h.primary_tier == StorageTier::CUTLASS_NVFP4 &&
-            h.source_data != nullptr && h.source_scales != nullptr &&
-            !dequant_gpu_supported(h.source_qtype) && (h.shape[1] * 2) % 128 == 0) {
-            const int N = static_cast<int>(h.shape[0]);
-            const int K = static_cast<int>(h.shape[1] * 2);
+            !overlap_prefill_active_ && M <= 32 && (ctx.beta == 0.0f || ctx.beta == 1.0f) &&
+            input.qtype == QType::F16 && output.qtype == QType::F16 && smallm_weight_(h, nv)) {
+            const int N = static_cast<int>(nv.N);
+            const int K = static_cast<int>(nv.K);
             // impl 2 = the native mxf4nvf4 pipeline kernel (v2), impl 1 = the
             // W4A16 dequant+HMMA kernel; unaligned shapes fall back to v1.
             const bool v2 = runtime_config().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
             const size_t need = v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
                                    : gemm_nvfp4_smallm_workspace_bytes(N);
-            if (need > smallm_ws_bytes_) {
-                cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
-                if (cudaStreamIsCapturing(ctx.stream, &cap) != cudaSuccess)
-                    cap = cudaStreamCaptureStatusActive;  // be conservative
-                if (cap == cudaStreamCaptureStatusNone) {
-                    if (smallm_ws_)
-                        cudaFree(smallm_ws_);
-                    if (cudaMalloc(&smallm_ws_, need) == cudaSuccess)
-                        smallm_ws_bytes_ = need;
-                    else {
-                        smallm_ws_ = nullptr;
-                        smallm_ws_bytes_ = 0;
-                    }
-                }
-                // Capturing with a too-small workspace: fall through to
-                // CUTLASS; the eager warmup pass sizes it for the graph run.
-            }
+            // Capturing with a too-small workspace falls through (CUTLASS on
+            // a native source, the dequant route on a GGUF one);
+            // prewarm_smallm_workspace sizes both scratches at init.
+            ensure_smallm_ws_(need, ctx.stream);
             // A4: quantize the activation rows into the executor scratch
             // (plain layout, unit tensor scale) and read both sides packed.
             // The FP16 variant lost ~11% e2e to L2 eviction of its 327 KiB
@@ -413,12 +402,6 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                     smallm_xq_src_k_ = K;
                     smallm_xq_from_producer_ = false;
                 }
-                NvFP4QuantResult nv;
-                nv.packed_data = const_cast<void*>(h.source_data);
-                nv.micro_scales = h.source_scales;
-                nv.tensor_scale = h.source_tensor_scale;
-                nv.N = N;
-                nv.K = K;
                 NvFP4QuantResult xq;
                 xq.packed_data = xq_packed;
                 xq.micro_scales = xq_scales;
@@ -529,7 +512,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // overlay corrupts the prompt context and degenerates output. This path is
     // reached only when no FP16/FP8 prefill cache exists (the checks above
     // return first when one does), i.e. on sm_120 where FP8 prefill is disabled
-    // (PR #428). Decode (M=1, handled earlier) still uses the fast NVFP4 cache.
+    // (PR #428). Decode rows read the NVFP4 cache: M=1 in the decode switch
+    // above, 2..32 rows (batched decode) in the small-M block (#1897).
     // Native NVFP4 SafeTensors models are excluded: their source_qtype is
     // NVFP4/F16, which dequant_gpu_supported() rejects → they use the CUTLASS
     // path below as before.
@@ -663,9 +647,30 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
 // fails the caller runs the unfused kernels and the dispatch quantizes as
 // before.
 // ---------------------------------------------------------------------------
-// Grow the small-M activation-quantize scratch to `xq_need` bytes. Never
-// allocates while `stream` is capturing (the eager warmup pass sizes it for
-// the graph run); a resize invalidates the shared-activation tag.
+// Grow the small-M GEMM workspace / activation-quantize scratch. Neither
+// allocates while `stream` is capturing (allocate_smallm_scratch sizes both
+// at init from the T2 arena; growth past that plan is the lazy fallback);
+// an xq resize invalidates the shared-activation tag. An arena slab is
+// never freed: it belongs to the arena.
+void GraphExecutor::ensure_smallm_ws_(size_t need, cudaStream_t stream) {
+    if (need <= smallm_ws_bytes_)
+        return;
+    cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
+        cap = cudaStreamCaptureStatusActive;  // be conservative
+    if (cap != cudaStreamCaptureStatusNone)
+        return;
+    if (smallm_ws_ && !smallm_arena_)
+        cudaFree(smallm_ws_);
+    if (cudaMalloc(&smallm_ws_, need) == cudaSuccess)
+        smallm_ws_bytes_ = need;
+    else {
+        smallm_ws_ = nullptr;
+        smallm_ws_bytes_ = 0;
+    }
+    smallm_arena_ = false;
+}
+
 void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
     if (xq_need <= smallm_xq_bytes_)
         return;
@@ -674,8 +679,9 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
         cap = cudaStreamCaptureStatusActive;  // be conservative
     if (cap != cudaStreamCaptureStatusNone)
         return;
-    if (smallm_xq_)
+    if (smallm_xq_ && !smallm_arena_)
         cudaFree(smallm_xq_);
+    smallm_arena_ = false;
     if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
         smallm_xq_bytes_ = xq_need;
     else {
