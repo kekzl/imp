@@ -11,11 +11,20 @@ there instead of retelling it.
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/roadmap.md` is a ledger again: one ranked `Open` table and one `Closed`
+  table instead of two overlapping gap lists, and the serving/kernel ledger is a
+  top-level section instead of a nested item. 91.5 -> 41.0 KB, longest table
+  cell 3977 -> 561 characters; the measurement narrative moved verbatim to
+  `docs/plans/2026-09-04-lever-ledger-detail.md`, and four rows whose ref cell
+  had drifted onto its own line are joined back (#1886, #1887, #1880, #1882)
+
 ### Fixed
 
 - The Q8_0 IMMA prefill cache (an s8 plane per prefilled weight, 1.125 B per
-  element) was charged to nothing and took whatever the KV pool left free — 5612
-  MiB on a cold Qwen3-8B-Q8_0 start, 7942 MiB with a bigger reserve pinned — so
+  element) was charged to nothing and took whatever the KV pool left free - 5612
+  MiB on a cold Qwen3-8B-Q8_0 start, 7942 MiB with a bigger reserve pinned - so
   the card ended init at 0 MiB free and WDDM spilled whichever allocation the
   startup path touched last. The planner now charges it (`imma_plane_bytes`,
   capped at the KV guarantee), `mmq_q8_imma` is capped at the charge, and
@@ -26,7 +35,7 @@ there instead of retelling it.
   claim on that model is 763 MiB (#1899)
 - The same cache was never freed on engine teardown, so a second model in one
   process (server model swap, the GPU test suite) paid for the first model's
-  planes and ran its own prefill GEMMs through dequant — and, since the cache is
+  planes and ran its own prefill GEMMs through dequant - and, since the cache is
   keyed by source pointer, a recycled allocation of the same shape could have
   been served the previous model's weights. Released via the `cuda_static_reset`
   hooks; asserted in `EngineRelaunchTest` (#1899)
