@@ -257,6 +257,22 @@ already proven live before you trust the negative — for the sweep above, `code
 write_kv_cache_fp8_fused_kernel` and `… write_kv_cache_nvfp4_kernel` both correctly returned
 `write_kv_cache`, which is what made the two empty answers meaningful.
 
+## C2 — File and function size: two gate blind spots, one refuted split (2026-09-05)
+
+Full write-up with every number: [`AUDIT_FILESIZE.md`](AUDIT_FILESIZE.md), sections
+2026-09-04 and 2026-09-05. What a next pass must not re-derive:
+
+| # | Claim | Verdict | Anchor |
+|---|---|---|---|
+| S-30 | `check_filesize.py` reporting `violations=0` means no file is oversized | **REFUTED — it measured files, not translation units** | `tools/check_filesize.py` `scan()` now charges a `#include`d `.cu` to its includer, `--selftest` 4/4. `executor_attention.cu` read 542 as a file and 1279 as the TU |
+| S-31 | A file's `[allow]` cohesion reason covers what is inside it | **REFUTED** | `tools/check_function_size.py` — `executor_workspace_buffers.cu` is allowlisted "(c) one concern" at 1534 code LOC and 884 of them are one body. warn 200 / hard 500, 12 bodies listed with reasons |
+| S-32 | Splitting `GraphExecutor::run_attention` into three real TUs is worth doing | **REFUTED on measurement — do not re-chase** | The `src/exec/` per-TU floor is ~5 s and header-driven (227-LOC TU = 5.5 s), so a 1279-LOC body is ~1.5 s over it; 16 of 67 commits in six months touched exactly one fragment; the phases share ~40 prologue locals so the split needs a header all four TUs include. Ceiling ~24 s per six months, and full builds pay the 5 s floor three extra times |
+| S-33 | `engine.h`'s remaining cost needs the pimpl F-24 priced at a 42 % ceiling | **Not yet — the cheap fan-in half was still on the table** | `tools/imp-server/batching_engine.h` included `runtime/engine.h` for one symbol (`imp::Request`, which is in `runtime/request.h`) and reached 15 TUs through `handlers.h`. Dropping it: **49 -> 39 rebuilt TUs, 48 -> 33 s** per `engine.h` edit, x146 commits/6mo. F-24's 42 % was measured on a 1229-line `engine.h`; it is **1502** today |
+
+**Method note that decided two of these.** A grep for who "uses Engine" reported
+the wrong set, the same way F-24 records it did. Deleting the include and letting
+the compiler name the failures gave the true set — 8 TUs, not 15 and not 2.
+
 ## D2 — The constrainer's category pre-filter has now been wrong twice
 
 `classify_token` in `src/compute/constrain_common.h` assigns a category, and

@@ -3,6 +3,7 @@
 // dialect adapter for the shared token loop (stream_driver.h), which emits
 // native Anthropic SSE events.
 
+#include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "stream_driver.h"

@@ -25,6 +25,18 @@ there instead of retelling it.
 
 ### Changed
 
+- `tools/imp-server/batching_engine.h` no longer includes `runtime/engine.h`. It
+  used one symbol from it (`imp::Request`, which is in `runtime/request.h`) and
+  reached 15 TUs through `handlers.h`, so the whole imp-server subtree rebuilt on
+  every `engine.h` edit. The 8 TUs that really need the complete `imp::Engine`
+  include it directly. An `engine.h` edit: **49 -> 39 rebuilt TUs, 48 -> 33 s**
+  (`make dev`, two runs each), against 146 commits to that header in six months
+- The genuine split of `GraphExecutor::run_attention` is **refused on
+  measurement**, not deferred: the `src/exec/` per-TU compile floor is ~5 s and
+  header-driven, so the 1279-LOC body is worth ~1.5 s over it; 16 of 67 commits
+  in six months touched exactly one fragment; and full builds would pay that
+  floor three extra times
+  ([`docs/audit/AUDIT_FILESIZE.md`](docs/audit/AUDIT_FILESIZE.md) 2026-09-05)
 - The two `(a)` god-functions the function-size gate flagged with no hot path
   attached are split, both move-verbatim. `imp-cli`'s `main()` 737 -> 233 code
   LOC: the bench, interactive and one-shot modes move into

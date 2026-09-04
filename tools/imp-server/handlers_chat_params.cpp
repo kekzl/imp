@@ -5,6 +5,7 @@
 // JSON (sampling params, response_format, tools + enforced tool constraints,
 // logit_bias, vision parts, stop sequences, thinking knobs).
 
+#include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "utils.h"

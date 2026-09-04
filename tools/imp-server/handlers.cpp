@@ -1,3 +1,4 @@
+#include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "utils.h"

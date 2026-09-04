@@ -319,3 +319,115 @@ Both thresholds and every existing `[allow]` reason. No file was split in this
 pass — the gates were made to report what is there. The two `(a)` split
 candidates with no hot path attached (`imp-cli main`, `handle_completions`) and
 the `run_attention` TU are the follow-up work, in that order of risk.
+
+---
+
+## 2026-09-05 — the `run_attention` split is REFUTED on measurement; the header next to it is the real bill
+
+#1905 made the executor_attention TU visible (542 as four files, 1279 as the TU
+nvcc compiles) and left the genuine split as pending work with the 2026-06-24
+footnote's wording. This section closes it. **The split does not pay, and the
+number that does is one directory away.**
+
+### What a TU edit actually costs (`make dev`, incremental, measured twice each)
+
+| object | code LOC | compile |
+|---|---:|---:|
+| `src/exec/executor_attention.cu` (the merged TU) | 1279 | 6.59 / 6.84 s |
+| `src/exec/executor_ffn.cu` | 417 | 5.23 / 5.15 s |
+| `src/exec/executor_kv_write.cu` | 227 | 5.82 / 5.48 s |
+| `src/compute/attention_paged.cu` | 1057 | 8.27 / 8.12 s |
+
+**The per-TU floor in `src/exec/` is ~5 s and it is header-driven, not body-driven**
+— a 227-LOC TU costs 5.5 s and a 417-LOC one 5.2 s. `executor_attention.cu`'s
+entire 1279-LOC body is worth **~1.5 s** over that floor. It is also not the most
+expensive TU in the tree: `attention_paged.cu` costs 1.4 s more and is
+allowlisted as cohesive.
+
+### Who would benefit — 16 commits of 67
+
+Six months of commits touching any of the four files, grouped by which parts each
+commit changed:
+
+| parts touched | commits |
+|---|---:|
+| `executor_attention.cu` only (the shared prologue + orchestration) | 36 |
+| exactly one fragment, nothing else | 16 (prefill 7, decode 6, qkv 2, internal.h 1) |
+| two or more parts | 15 |
+
+So the ceiling is **16 of 67 commits x ~1.5 s = ~24 seconds per six months** — and
+only if the split introduces no shared header, which it cannot: the three phases
+read ~40 locals computed in the prologue (`n`, `nh`, `nkv`, `hd`, the five
+`will_fuse_o_*` decisions, `qv/kk/vv/ao/po`, the `GemmContext`), so a genuine
+split needs an `AttnPass` struct in `executor_attention_internal.h` that all four
+TUs include. The 36 prologue-only commits would then dirty that header and
+rebuild all four.
+
+**And the full build gets slower.** Three extra TUs pay the ~5 s header floor
+three extra times: ~6.7 s today against ~20 s split, on every `make build`.
+
+Structural note for whoever re-opens this: the decode fragment contains two
+`goto after_attention;` (`executor_attention_decode.cu:27,130`). Those are the
+only thing that would need rewriting — the label sits immediately after the
+if/else, so both become `return;`. That is *not* the blocker; the arithmetic
+above is.
+
+**Verdict: WON'T FIX, on the numbers.** The `[allow]` reason is updated from
+"genuine split pending" to this, and the 2026-06-24 footnote ¹ is no longer an
+open item. The defect that was real — a gate reporting 542 for an object that
+compiles as 1279 — is fixed.
+
+### The bill the audit should have been reading: `src/runtime/engine.h`
+
+Same measurement, one directory over:
+
+| edit | rebuilt TUs | wall |
+|---|---:|---:|
+| `src/exec/executor_attention.cu` | 1 | 13 s |
+| `src/runtime/engine.h` | **49** | **48 s** |
+| no-op `make dev` | 0 | 2 s |
+
+**One header edit costs 3.5x what the largest TU in the repo costs**, and
+`engine.h` churns harder: 146 commits in six months against the attention TU's
+67. It has also doubled since the 2026-06-24 baseline — 641 -> 1229 (2026-08-05,
+when F-24 shipped its fan-in cut) -> **1502 raw lines**, 629 code LOC, 61 members
+and 12 nested structs defined inline in `class Engine`. **F-24's 42 % pimpl
+ceiling was measured on the 1229-line version and is 31 commits stale.**
+
+The cheap half of `cost = fan-in x churn` was still on the table, and it is the
+same lever #1233 used on `imp_internal.h`. `tools/imp-server/batching_engine.h`
+included `runtime/engine.h` while using exactly one symbol from it —
+`imp::Request`, which comes from `runtime/request.h`, included on the next line.
+That header reaches `handlers.h`, and `handlers.h` reaches 15 TUs, so the whole
+imp-server subtree rebuilt on every `engine.h` edit.
+
+Dropping it and letting the compiler name the true set (the method note from
+SETTLED F-24: a grep here reports the wrong number) found **8** TUs that really
+do use the complete `imp::Engine` and now include it themselves:
+
+| | rebuilt TUs | wall |
+|---|---:|---:|
+| before | 49 | 48 s |
+| after | **39** | **33 s** |
+
+**-20 % TUs, -31 % wall, reproducible across two runs each.** At 146 commits per
+six months that is ~36 minutes of recompile, against the refuted split's 24
+seconds. No behaviour changes: 8 includes move from transitive to direct, one
+include is deleted.
+
+### Files with no headroom left
+
+Four files sit within 15 code LOC of a blocking `File size` failure, one at zero:
+
+| code | hard | file |
+|---:|---:|---|
+| 600 | 600 | `src/exec/executor_forward_moe_cutlass.cu` |
+| 586 | 600 | `src/compute/moe_routing.cu` |
+| 585 | 600 | `sampling_topk_topp.cu`, `executor_elementwise.cu`, `pre_dequant_phase3_moe.cu` |
+| 790 | 800 | `src/runtime/engine_spec_ngram.cpp` |
+
+This is the `engine.cpp`-at-exactly-800 situation of the 2026-07-30 note, which
+cost three red CI jobs (#1124, #1125, #1127). Nothing is split here — the repo's
+rule is to split on conflation, not on proximity to a threshold — but the same
+remedy applies when one of them next needs to grow: move a responsibility out,
+do not shave lines, and run `python3 tools/check_filesize.py` before committing.
