@@ -76,6 +76,549 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
 }
 
+namespace {
+
+// Everything the two /v1/completions response paths need from the parse phase.
+// The chat route has had this shape since its own split (ChatRequestContext in
+// handlers_internal.h, filled by parse_chat_request_params); /v1/completions
+// carried parse, stream loop and non-stream response in one 593-LOC body
+// instead, which is what the function-size gate flagged in #1905.
+struct CompletionCtx {
+    const std::string& prompt;
+    const std::vector<int32_t>& tokens;
+    const std::vector<std::string>& stop_sequences;
+    const std::string& comp_id;
+    const std::string& snap_model_name;
+    imp::Tokenizer* snap_tok;
+    std::chrono::high_resolution_clock::time_point t_start;
+    int64_t created;
+    int n_prompt_tokens;
+    int remaining;
+    int32_t snap_channel_open_id;
+    size_t max_stop_len;
+    bool echo;
+    bool include_usage;
+    bool req_logprobs;
+    bool snap_is_think_model;
+    bool ignore_eos;
+};
+
+// SSE path. The body is the move-verbatim contents of the old `if (stream)`
+// branch; the aliases below keep it byte-identical rather than re-spelling
+// every local as `c.x`, which would have rewritten lines nobody is changing.
+void stream_completion_response_(httplib::Response& res, ServerState& state, const CompletionCtx& c,
+                                 const std::shared_ptr<ServerRequest>& server_req) {
+    const std::string& prompt = c.prompt;
+    const std::vector<int32_t>& tokens = c.tokens;
+    const std::vector<std::string>& stop_sequences = c.stop_sequences;
+    const std::string& comp_id = c.comp_id;
+    const std::string& snap_model_name = c.snap_model_name;
+    imp::Tokenizer* snap_tok = c.snap_tok;
+    const auto t_start = c.t_start;
+    const int64_t created = c.created;
+    const int n_prompt_tokens = c.n_prompt_tokens;
+    const int remaining = c.remaining;
+    const size_t max_stop_len = c.max_stop_len;
+    const bool echo = c.echo;
+    const bool include_usage = c.include_usage;
+    const bool req_logprobs = c.req_logprobs;
+    const bool snap_is_think_model = c.snap_is_think_model;
+    const bool ignore_eos = c.ignore_eos;
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("Connection", "keep-alive");
+
+    res.set_chunked_content_provider(
+        "text/event-stream",
+        [&state, server_req, comp_id, created, n_prompt_tokens, t_start, stop_sequences, max_stop_len,
+         ignore_eos, echo, prompt, include_usage, snap_tok, snap_model_name, snap_is_think_model,
+         req_logprobs](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+            int n_output_tokens = 0;
+            const char* finish = nullptr;
+
+            // Echo prompt as first chunk if requested
+            if (echo && !prompt.empty()) {
+                std::string chunk = sse_completion_chunk(comp_id, created, snap_model_name, prompt, nullptr);
+                sink.write(chunk.data(), chunk.size());
+            }
+
+            std::string utf8_buf;
+            std::string pending_text;
+            bool text_stop_matched = false;
+
+            // Strip <think> blocks for completions (no reasoning_content field).
+            // think_confirmed starts FALSE so a raw /v1/completions prompt
+            // (no chat template → no injected <think>) streams incrementally
+            // instead of buffering every token into think_buf waiting for a
+            // </think> that never comes (#760: completions stream arrived as
+            // one frame). It flips true only if a real <think> opener shows
+            // up in the first kThinkScanLimit tokens, so genuine think blocks
+            // are still stripped.
+            bool think_strip = (snap_is_think_model && state.default_args.reasoning_format != "none");
+            bool think_confirmed = false;
+            std::string think_buf;
+            int think_tokens = 0;
+            const int kThinkScanLimit = 8;
+
+            // #1589: this path emitted no logprobs at all. It emits one
+            // chunk per token now when they were asked for, which is the
+            // shape a client can consume: a chunk carrying two tokens has
+            // nowhere to put two offsets.
+            imp::stream::TokenSpans pending_spans;
+            imp::stream::TokenSpans utf8_spans;
+            // think_buf holds tokens back too, so it needs the same
+            // bookkeeping: a completion shorter than the 8-token think
+            // scan window never leaves the buffer during the loop and used
+            // to reach the client as one unattributed chunk.
+            imp::stream::TokenSpans think_spans;
+            std::vector<imp::stream::TokenSpans::Emit> carried_spans;
+            size_t completion_offset = 0;  // byte offset of the next token in the completion
+
+            auto emit_completion_piece = [&](const std::string& piece_text, int token_index) {
+                json lp_obj = nullptr;
+                if (req_logprobs && token_index >= 0) {
+                    const auto& lps = server_req->request->output_logprobs;
+                    if (static_cast<size_t>(token_index) < lps.size()) {
+                        lp_obj = completions_logprobs_json_one(lps[static_cast<size_t>(token_index)],
+                                                               completion_offset);
+                    }
+                }
+                completion_offset += piece_text.size();
+                std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, piece_text, nullptr,
+                                                       lp_obj);
+                return sink.write(sse.data(), sse.size());
+            };
+
+            auto flush_text = [&](size_t up_to) {
+                if (up_to == 0)
+                    return true;
+                for (const auto& e : pending_spans.flush(up_to)) {
+                    if (!emit_completion_piece(pending_text.substr(e.offset, e.length), e.token_index))
+                        return false;
+                }
+                pending_text = pending_text.substr(up_to);
+                return true;
+            };
+
+            auto request_start_c = std::chrono::steady_clock::now();
+            auto last_keepalive_c = request_start_c;
+            double ttft_ms = -1.0;
+            auto t_prev_token = t_start;  // last delivered token (ITL)
+            for (;;) {
+                // #757: the is_last token sets `finish` then falls through
+                // to think-stripping, which `continue`s on every swallowed
+                // token — bypassing the trailing `if (finish) break`. For a
+                // think-capable model whose final token lands inside the
+                // think buffer the loop would otherwise spin on pop_token
+                // until the client gives up (0 bytes, never terminates).
+                // Break here so the buffers flush and [DONE] is sent.
+                if (finish)
+                    break;
+
+                // Check client disconnect
+                if (!sink.is_writable()) {
+                    server_req->cancel();
+                    state.metrics.requests_cancelled++;
+                    state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                                server_req->queue_ms.load(
+                                                                    std::memory_order_relaxed));
+                    finish = "cancelled";
+                    break;
+                }
+
+                // Check request timeout
+                if (state.request_timeout > 0) {
+                    auto elapsed = std::chrono::steady_clock::now() - request_start_c;
+                    if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                        server_req->cancel();
+                        state.metrics.requests_timed_out++;
+                        state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                                    server_req->queue_ms.load(
+                                                                        std::memory_order_relaxed));
+                        finish = "length";
+                        break;
+                    }
+                }
+
+                TokenEvent evt{};
+                if (!server_req->pop_token(evt)) {
+                    // SSE comment keepalive while waiting (long prefill /
+                    // queueing) — ignored by SSE parsers, keeps proxies
+                    // and SDK idle-timeouts from killing the connection.
+                    auto now = std::chrono::steady_clock::now();
+                    if (now - last_keepalive_c > std::chrono::seconds(10)) {
+                        last_keepalive_c = now;
+                        static constexpr char kKeepalive[] = ": keepalive\n\n";
+                        sink.write(kKeepalive, sizeof(kKeepalive) - 1);
+                    }
+                    continue;
+                }
+
+                if (evt.token_id < 0) {
+                    finish = evt.finish_reason ? evt.finish_reason : "stop";
+                    break;
+                }
+
+                int32_t token = evt.token_id;
+
+                // First token closes TTFT and the queue wait, every later
+                // one is an ITL sample. This loop fed none of the four
+                // latency histograms before, so /v1/completions traffic
+                // (every serving harness in tools/analysis/) left them
+                // empty.
+                {
+                    const auto t_tok = std::chrono::high_resolution_clock::now();
+                    if (ttft_ms < 0.0) {
+                        ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
+                        const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                        if (q >= 0.0)
+                            state.metrics.queue_time.observe(q / 1000.0);
+                    } else {
+                        state.metrics.inter_token.observe(
+                            std::chrono::duration<double>(t_tok - t_prev_token).count());
+                    }
+                    t_prev_token = t_tok;
+                }
+
+                if (evt.is_last) {
+                    if (token == snap_tok->eos_id() && !ignore_eos) {
+                        finish = evt.finish_reason ? evt.finish_reason : "stop";
+                        break;
+                    }
+                    finish = evt.finish_reason ? evt.finish_reason : "length";
+                }
+                if (ignore_eos && token == snap_tok->eos_id()) {
+                    n_output_tokens++;  // counted, no text
+                    if (evt.is_last)
+                        break;
+                    continue;
+                }
+
+                n_output_tokens++;
+                std::string piece = snap_tok->decode_token(token);
+
+                // Strip <think>...</think> block for text completions
+                if (think_strip) {
+                    think_buf += piece;
+                    think_spans.append(piece.size(), n_output_tokens - 1);
+                    think_tokens++;
+
+                    if (!think_confirmed) {
+                        if (think_buf.find("<think>") != std::string::npos)
+                            think_confirmed = true;
+                        else if (think_tokens == 1 && piece.empty())
+                            think_confirmed = true;
+                    }
+
+                    auto end_pos = think_buf.find("</think>");
+                    if (end_pos != std::string::npos) {
+                        think_strip = false;
+                        std::string after = think_buf.substr(end_pos + 8);
+                        think_buf.clear();
+                        // Everything before </think> is dropped, so its
+                        // attribution goes with it; what follows belongs to
+                        // the token that closed the block.
+                        think_spans.clear();
+                        auto start = after.find_first_not_of("\n\r\t ");
+                        piece = (start != std::string::npos) ? after.substr(start) : "";
+                        if (piece.empty())
+                            continue;
+                    } else if (think_confirmed) {
+                        continue;
+                    } else if (think_tokens < kThinkScanLimit &&
+                               imp::server::StreamReasoningSplitter::could_open_marker(think_buf)) {
+                        // Hold only while the text could still be the
+                        // start of a marker; a first word releases it
+                        // (the same trade as the chat stream's SCAN).
+                        continue;
+                    } else {
+                        think_strip = false;
+                        piece = think_buf;
+                        think_buf.clear();
+                        carried_spans = think_spans.flush(piece.size());
+                        think_spans.clear();
+                    }
+                }
+
+                if (stop_sequences.empty()) {
+                    utf8_buf += piece;
+                    if (carried_spans.empty()) {
+                        utf8_spans.append(piece.size(), n_output_tokens - 1);
+                    } else {
+                        for (const auto& e : carried_spans)
+                            utf8_spans.append(e.length, e.token_index);
+                        carried_spans.clear();
+                    }
+                    size_t complete = utf8_complete_len(utf8_buf);
+                    if (complete > 0) {
+                        for (const auto& e : utf8_spans.flush(complete)) {
+                            if (!emit_completion_piece(utf8_buf.substr(e.offset, e.length), e.token_index))
+                                return false;
+                        }
+                        utf8_buf = utf8_buf.substr(complete);
+                    }
+                } else {
+                    pending_text += piece;
+                    if (carried_spans.empty()) {
+                        pending_spans.append(piece.size(), n_output_tokens - 1);
+                    } else {
+                        for (const auto& e : carried_spans)
+                            pending_spans.append(e.length, e.token_index);
+                        carried_spans.clear();
+                    }
+                    auto d = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
+                    if (!flush_text(d.flush_len))
+                        return false;
+                    if (d.complete_match) {
+                        text_stop_matched = true;
+                        finish = "stop";
+                        break;
+                    }
+                }
+
+                if (finish)
+                    break;
+            }
+
+            // Flush think buffer: strip think blocks and emit remaining content
+            if (!think_buf.empty()) {
+                const size_t before = think_buf.size();
+                strip_think_block(think_buf);
+                if (!think_buf.empty()) {
+                    // Only carry the attribution across when the strip
+                    // changed nothing. Once bytes have been removed the
+                    // recorded offsets no longer describe this string, and
+                    // a plausible-looking wrong index is worse than none.
+                    if (think_buf.size() == before) {
+                        for (const auto& e : think_spans.flush(before))
+                            utf8_spans.append(e.length, e.token_index);
+                    } else {
+                        utf8_spans.append(think_buf.size(), -1);
+                    }
+                    utf8_buf += think_buf;
+                }
+                think_spans.clear();
+                think_buf.clear();
+            }
+
+            // Flush remaining buffers
+            if (!utf8_buf.empty() && !text_stop_matched) {
+                for (const auto& e : utf8_spans.flush(utf8_buf.size()))
+                    emit_completion_piece(utf8_buf.substr(e.offset, e.length), e.token_index);
+            }
+            if (!pending_text.empty() && !text_stop_matched)
+                flush_text(pending_text.size());
+
+            if (!finish)
+                finish = "length";
+
+            // Final chunk with finish_reason
+            std::string final_chunk = sse_completion_chunk(comp_id, created, snap_model_name, "",
+                                                           openai_finish_reason(finish));
+            sink.write(final_chunk.data(), final_chunk.size());
+
+            // Usage chunk if requested
+            if (include_usage) {
+                json usage_obj = {{"id", comp_id},
+                                  {"object", "text_completion"},
+                                  {"created", created},
+                                  {"model", snap_model_name},
+                                  {"choices", json::array()},
+                                  {"usage",
+                                   {{"prompt_tokens", n_prompt_tokens},
+                                    {"completion_tokens", n_output_tokens},
+                                    {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
+                std::string usage_chunk = "data: " + dump_safe(usage_obj) + "\n\n";
+                sink.write(usage_chunk.data(), usage_chunk.size());
+            }
+
+            std::string done = "data: [DONE]\n\n";
+            sink.write(done.data(), done.size());
+            sink.done();
+
+            auto t_end = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+            IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(), n_prompt_tokens,
+                         n_output_tokens, ms);
+            state.metrics.requests_total++;
+            state.metrics.tokens_prompt_total += n_prompt_tokens;
+            state.metrics.tokens_completion_total += n_output_tokens;
+            state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+            state.metrics.request_duration.observe(ms / 1000.0);
+            if (ttft_ms >= 0.0) {
+                state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+                state.metrics.ttft.observe(ttft_ms / 1000.0);
+            }
+
+            return true;
+        });
+}
+
+// Blocking path: collect the whole completion, then one JSON response.
+void nonstream_completion_response_(httplib::Response& res, ServerState& state, const CompletionCtx& c,
+                                    const std::shared_ptr<ServerRequest>& server_req) {
+    const std::string& prompt = c.prompt;
+    const std::vector<int32_t>& tokens = c.tokens;
+    const std::vector<std::string>& stop_sequences = c.stop_sequences;
+    const std::string& comp_id = c.comp_id;
+    const std::string& snap_model_name = c.snap_model_name;
+    imp::Tokenizer* snap_tok = c.snap_tok;
+    const auto t_start = c.t_start;
+    const int64_t created = c.created;
+    const int n_prompt_tokens = c.n_prompt_tokens;
+    const int32_t snap_channel_open_id = c.snap_channel_open_id;
+    const bool echo = c.echo;
+    const bool req_logprobs = c.req_logprobs;
+    const bool snap_is_think_model = c.snap_is_think_model;
+    const bool ignore_eos = c.ignore_eos;
+    int n_eos_counted = 0;
+    // Non-streaming
+    auto active_req = server_req->request;
+    std::vector<int32_t> output_ids;
+    const char* finish = nullptr;
+    std::string output_text;
+
+    auto ns_comp_start = std::chrono::steady_clock::now();
+    double ttft_ms = -1.0;
+    auto t_prev_token = t_start;  // last delivered token (ITL)
+    for (;;) {
+        if (state.request_timeout > 0) {
+            auto elapsed = std::chrono::steady_clock::now() - ns_comp_start;
+            if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                server_req->cancel();
+                state.metrics.requests_timed_out++;
+                state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
+                                                            server_req->queue_ms.load(
+                                                                std::memory_order_relaxed));
+                finish = "length";
+                break;
+            }
+        }
+
+        TokenEvent evt{};
+        if (!server_req->pop_token(evt)) {
+            continue;
+        }
+
+        if (evt.token_id < 0) {
+            finish = evt.finish_reason ? evt.finish_reason : "stop";
+            break;
+        }
+
+        int32_t token = evt.token_id;
+
+        {
+            const auto t_tok = std::chrono::high_resolution_clock::now();
+            if (ttft_ms < 0.0) {
+                ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
+                const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+                if (q >= 0.0)
+                    state.metrics.queue_time.observe(q / 1000.0);
+            } else {
+                state.metrics.inter_token.observe(
+                    std::chrono::duration<double>(t_tok - t_prev_token).count());
+            }
+            t_prev_token = t_tok;
+        }
+
+        if (evt.is_last) {
+            if (token == snap_tok->eos_id() && !ignore_eos) {
+                finish = evt.finish_reason ? evt.finish_reason : "stop";
+                break;
+            }
+            finish = evt.finish_reason ? evt.finish_reason : "length";
+        }
+        if (ignore_eos && token == snap_tok->eos_id()) {
+            n_eos_counted++;  // counted in usage, kept out of the text
+            if (evt.is_last)
+                break;
+            continue;
+        }
+
+        output_ids.push_back(token);
+
+        if (!stop_sequences.empty()) {
+            output_text += snap_tok->decode_token(token);
+            bool stop_found = false;
+            for (const auto& stop : stop_sequences) {
+                auto pos = output_text.find(stop);
+                if (pos != std::string::npos) {
+                    output_text = output_text.substr(0, pos);
+                    stop_found = true;
+                    break;
+                }
+            }
+            if (stop_found) {
+                finish = "stop";
+                break;
+            }
+        }
+
+        if (finish)
+            break;
+    }
+
+    if (!finish)
+        finish = "length";
+
+    int n_output_tokens = static_cast<int>(output_ids.size()) + n_eos_counted;
+    std::string text = !stop_sequences.empty() ? output_text : snap_tok->decode(output_ids);
+
+    // Strip <think>...</think> for text completions (no reasoning_content field)
+    if (snap_is_think_model && state.default_args.reasoning_format != "none") {
+        strip_think_block(text);
+    }
+    if (snap_channel_open_id >= 0) {
+        strip_channel_headers(text);
+    }
+
+    // Prepend prompt if echo requested
+    if (echo)
+        text = prompt + text;
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(), n_prompt_tokens,
+                 n_output_tokens, ms);
+    state.metrics.requests_total++;
+    state.metrics.tokens_prompt_total += n_prompt_tokens;
+    state.metrics.tokens_completion_total += n_output_tokens;
+    state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+    state.metrics.request_duration.observe(ms / 1000.0);
+    if (ttft_ms >= 0.0) {
+        state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
+        state.metrics.ttft.observe(ttft_ms / 1000.0);
+    }
+
+    // Build logprobs if requested
+    // #1589: this is /v1/completions, so it gets the Completions shape.
+    // It used to build the Chat object here, which an OpenAI SDK reading
+    // `.logprobs.tokens` cannot see at all.
+    json logprobs_obj = nullptr;
+    if (req_logprobs && active_req) {
+        logprobs_obj = completions_logprobs_json(active_req->output_logprobs, output_ids.size(), text);
+    }
+
+    json choice = {{"index", 0}, {"text", text}, {"finish_reason", openai_finish_reason(finish)}};
+    if (!logprobs_obj.is_null()) {
+        choice["logprobs"] = logprobs_obj;
+    }
+
+    json response = {{"id", comp_id},
+                     {"object", "text_completion"},
+                     {"created", created},
+                     {"model", snap_model_name},
+                     {"system_fingerprint", system_fingerprint(snap_model_name)},
+                     {"choices", json::array({choice})},
+                     {"usage",
+                      {{"prompt_tokens", n_prompt_tokens},
+                       {"completion_tokens", n_output_tokens},
+                       {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
+
+    res.set_content(dump_safe(response), "application/json");
+}
+
+}  // namespace
+
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state) {
     // #1607: bound the nesting before any recursive parser sees it.
     if (reject_body_too_deep(req, res))
@@ -313,7 +856,6 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     // With ignore_eos the engine keeps sampling past EOS; every EOS it emits
     // counts as an output token (vLLM semantics) but carries no text.
     const bool ignore_eos = imp_req->ignore_eos;
-    int n_eos_counted = 0;
     imp_req->logit_bias = std::move(logit_bias);
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->pin_kv_prefix = body.value("cache_prompt", false);
@@ -354,482 +896,27 @@ void handle_completions(const httplib::Request& req, httplib::Response& res, Ser
     std::string comp_id = req_id;
     int64_t created = unix_timestamp();
 
+    const CompletionCtx cctx{prompt,
+                             tokens,
+                             stop_sequences,
+                             comp_id,
+                             snap_model_name,
+                             snap_tok,
+                             t_start,
+                             created,
+                             n_prompt_tokens,
+                             remaining,
+                             snap_channel_open_id,
+                             max_stop_len,
+                             echo,
+                             include_usage,
+                             req_logprobs,
+                             snap_is_think_model,
+                             ignore_eos};
     if (stream) {
-        res.set_header("Cache-Control", "no-cache");
-        res.set_header("Connection", "keep-alive");
-
-        res.set_chunked_content_provider(
-            "text/event-stream",
-            [&state, server_req, comp_id, created, n_prompt_tokens, t_start, stop_sequences, max_stop_len,
-             ignore_eos, echo, prompt, include_usage, snap_tok, snap_model_name, snap_is_think_model,
-             req_logprobs](size_t /*offset*/, httplib::DataSink& sink) -> bool {
-                int n_output_tokens = 0;
-                const char* finish = nullptr;
-
-                // Echo prompt as first chunk if requested
-                if (echo && !prompt.empty()) {
-                    std::string chunk = sse_completion_chunk(comp_id, created, snap_model_name, prompt,
-                                                             nullptr);
-                    sink.write(chunk.data(), chunk.size());
-                }
-
-                std::string utf8_buf;
-                std::string pending_text;
-                bool text_stop_matched = false;
-
-                // Strip <think> blocks for completions (no reasoning_content field).
-                // think_confirmed starts FALSE so a raw /v1/completions prompt
-                // (no chat template → no injected <think>) streams incrementally
-                // instead of buffering every token into think_buf waiting for a
-                // </think> that never comes (#760: completions stream arrived as
-                // one frame). It flips true only if a real <think> opener shows
-                // up in the first kThinkScanLimit tokens, so genuine think blocks
-                // are still stripped.
-                bool think_strip = (snap_is_think_model && state.default_args.reasoning_format != "none");
-                bool think_confirmed = false;
-                std::string think_buf;
-                int think_tokens = 0;
-                const int kThinkScanLimit = 8;
-
-                // #1589: this path emitted no logprobs at all. It emits one
-                // chunk per token now when they were asked for, which is the
-                // shape a client can consume: a chunk carrying two tokens has
-                // nowhere to put two offsets.
-                imp::stream::TokenSpans pending_spans;
-                imp::stream::TokenSpans utf8_spans;
-                // think_buf holds tokens back too, so it needs the same
-                // bookkeeping: a completion shorter than the 8-token think
-                // scan window never leaves the buffer during the loop and used
-                // to reach the client as one unattributed chunk.
-                imp::stream::TokenSpans think_spans;
-                std::vector<imp::stream::TokenSpans::Emit> carried_spans;
-                size_t completion_offset = 0;  // byte offset of the next token in the completion
-
-                auto emit_completion_piece = [&](const std::string& piece_text, int token_index) {
-                    json lp_obj = nullptr;
-                    if (req_logprobs && token_index >= 0) {
-                        const auto& lps = server_req->request->output_logprobs;
-                        if (static_cast<size_t>(token_index) < lps.size()) {
-                            lp_obj = completions_logprobs_json_one(lps[static_cast<size_t>(token_index)],
-                                                                   completion_offset);
-                        }
-                    }
-                    completion_offset += piece_text.size();
-                    std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, piece_text,
-                                                           nullptr, lp_obj);
-                    return sink.write(sse.data(), sse.size());
-                };
-
-                auto flush_text = [&](size_t up_to) {
-                    if (up_to == 0)
-                        return true;
-                    for (const auto& e : pending_spans.flush(up_to)) {
-                        if (!emit_completion_piece(pending_text.substr(e.offset, e.length), e.token_index))
-                            return false;
-                    }
-                    pending_text = pending_text.substr(up_to);
-                    return true;
-                };
-
-                auto request_start_c = std::chrono::steady_clock::now();
-                auto last_keepalive_c = request_start_c;
-                double ttft_ms = -1.0;
-                auto t_prev_token = t_start;  // last delivered token (ITL)
-                for (;;) {
-                    // #757: the is_last token sets `finish` then falls through
-                    // to think-stripping, which `continue`s on every swallowed
-                    // token — bypassing the trailing `if (finish) break`. For a
-                    // think-capable model whose final token lands inside the
-                    // think buffer the loop would otherwise spin on pop_token
-                    // until the client gives up (0 bytes, never terminates).
-                    // Break here so the buffers flush and [DONE] is sent.
-                    if (finish)
-                        break;
-
-                    // Check client disconnect
-                    if (!sink.is_writable()) {
-                        server_req->cancel();
-                        state.metrics.requests_cancelled++;
-                        state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
-                                                                    server_req->queue_ms.load(
-                                                                        std::memory_order_relaxed));
-                        finish = "cancelled";
-                        break;
-                    }
-
-                    // Check request timeout
-                    if (state.request_timeout > 0) {
-                        auto elapsed = std::chrono::steady_clock::now() - request_start_c;
-                        if (elapsed > std::chrono::seconds(state.request_timeout)) {
-                            server_req->cancel();
-                            state.metrics.requests_timed_out++;
-                            state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
-                                                                        server_req->queue_ms.load(
-                                                                            std::memory_order_relaxed));
-                            finish = "length";
-                            break;
-                        }
-                    }
-
-                    TokenEvent evt{};
-                    if (!server_req->pop_token(evt)) {
-                        // SSE comment keepalive while waiting (long prefill /
-                        // queueing) — ignored by SSE parsers, keeps proxies
-                        // and SDK idle-timeouts from killing the connection.
-                        auto now = std::chrono::steady_clock::now();
-                        if (now - last_keepalive_c > std::chrono::seconds(10)) {
-                            last_keepalive_c = now;
-                            static constexpr char kKeepalive[] = ": keepalive\n\n";
-                            sink.write(kKeepalive, sizeof(kKeepalive) - 1);
-                        }
-                        continue;
-                    }
-
-                    if (evt.token_id < 0) {
-                        finish = evt.finish_reason ? evt.finish_reason : "stop";
-                        break;
-                    }
-
-                    int32_t token = evt.token_id;
-
-                    // First token closes TTFT and the queue wait, every later
-                    // one is an ITL sample. This loop fed none of the four
-                    // latency histograms before, so /v1/completions traffic
-                    // (every serving harness in tools/analysis/) left them
-                    // empty.
-                    {
-                        const auto t_tok = std::chrono::high_resolution_clock::now();
-                        if (ttft_ms < 0.0) {
-                            ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
-                            const double q = server_req->queue_ms.load(std::memory_order_relaxed);
-                            if (q >= 0.0)
-                                state.metrics.queue_time.observe(q / 1000.0);
-                        } else {
-                            state.metrics.inter_token.observe(
-                                std::chrono::duration<double>(t_tok - t_prev_token).count());
-                        }
-                        t_prev_token = t_tok;
-                    }
-
-                    if (evt.is_last) {
-                        if (token == snap_tok->eos_id() && !ignore_eos) {
-                            finish = evt.finish_reason ? evt.finish_reason : "stop";
-                            break;
-                        }
-                        finish = evt.finish_reason ? evt.finish_reason : "length";
-                    }
-                    if (ignore_eos && token == snap_tok->eos_id()) {
-                        n_output_tokens++;  // counted, no text
-                        if (evt.is_last)
-                            break;
-                        continue;
-                    }
-
-                    n_output_tokens++;
-                    std::string piece = snap_tok->decode_token(token);
-
-                    // Strip <think>...</think> block for text completions
-                    if (think_strip) {
-                        think_buf += piece;
-                        think_spans.append(piece.size(), n_output_tokens - 1);
-                        think_tokens++;
-
-                        if (!think_confirmed) {
-                            if (think_buf.find("<think>") != std::string::npos)
-                                think_confirmed = true;
-                            else if (think_tokens == 1 && piece.empty())
-                                think_confirmed = true;
-                        }
-
-                        auto end_pos = think_buf.find("</think>");
-                        if (end_pos != std::string::npos) {
-                            think_strip = false;
-                            std::string after = think_buf.substr(end_pos + 8);
-                            think_buf.clear();
-                            // Everything before </think> is dropped, so its
-                            // attribution goes with it; what follows belongs to
-                            // the token that closed the block.
-                            think_spans.clear();
-                            auto start = after.find_first_not_of("\n\r\t ");
-                            piece = (start != std::string::npos) ? after.substr(start) : "";
-                            if (piece.empty())
-                                continue;
-                        } else if (think_confirmed) {
-                            continue;
-                        } else if (think_tokens < kThinkScanLimit &&
-                                   imp::server::StreamReasoningSplitter::could_open_marker(think_buf)) {
-                            // Hold only while the text could still be the
-                            // start of a marker; a first word releases it
-                            // (the same trade as the chat stream's SCAN).
-                            continue;
-                        } else {
-                            think_strip = false;
-                            piece = think_buf;
-                            think_buf.clear();
-                            carried_spans = think_spans.flush(piece.size());
-                            think_spans.clear();
-                        }
-                    }
-
-                    if (stop_sequences.empty()) {
-                        utf8_buf += piece;
-                        if (carried_spans.empty()) {
-                            utf8_spans.append(piece.size(), n_output_tokens - 1);
-                        } else {
-                            for (const auto& e : carried_spans)
-                                utf8_spans.append(e.length, e.token_index);
-                            carried_spans.clear();
-                        }
-                        size_t complete = utf8_complete_len(utf8_buf);
-                        if (complete > 0) {
-                            for (const auto& e : utf8_spans.flush(complete)) {
-                                if (!emit_completion_piece(utf8_buf.substr(e.offset, e.length),
-                                                           e.token_index))
-                                    return false;
-                            }
-                            utf8_buf = utf8_buf.substr(complete);
-                        }
-                    } else {
-                        pending_text += piece;
-                        if (carried_spans.empty()) {
-                            pending_spans.append(piece.size(), n_output_tokens - 1);
-                        } else {
-                            for (const auto& e : carried_spans)
-                                pending_spans.append(e.length, e.token_index);
-                            carried_spans.clear();
-                        }
-                        auto d = imp::stream::holdback_decision(pending_text, max_stop_len,
-                                                                stop_sequences);
-                        if (!flush_text(d.flush_len))
-                            return false;
-                        if (d.complete_match) {
-                            text_stop_matched = true;
-                            finish = "stop";
-                            break;
-                        }
-                    }
-
-                    if (finish)
-                        break;
-                }
-
-                // Flush think buffer: strip think blocks and emit remaining content
-                if (!think_buf.empty()) {
-                    const size_t before = think_buf.size();
-                    strip_think_block(think_buf);
-                    if (!think_buf.empty()) {
-                        // Only carry the attribution across when the strip
-                        // changed nothing. Once bytes have been removed the
-                        // recorded offsets no longer describe this string, and
-                        // a plausible-looking wrong index is worse than none.
-                        if (think_buf.size() == before) {
-                            for (const auto& e : think_spans.flush(before))
-                                utf8_spans.append(e.length, e.token_index);
-                        } else {
-                            utf8_spans.append(think_buf.size(), -1);
-                        }
-                        utf8_buf += think_buf;
-                    }
-                    think_spans.clear();
-                    think_buf.clear();
-                }
-
-                // Flush remaining buffers
-                if (!utf8_buf.empty() && !text_stop_matched) {
-                    for (const auto& e : utf8_spans.flush(utf8_buf.size()))
-                        emit_completion_piece(utf8_buf.substr(e.offset, e.length), e.token_index);
-                }
-                if (!pending_text.empty() && !text_stop_matched)
-                    flush_text(pending_text.size());
-
-                if (!finish)
-                    finish = "length";
-
-                // Final chunk with finish_reason
-                std::string final_chunk = sse_completion_chunk(comp_id, created, snap_model_name, "",
-                                                               openai_finish_reason(finish));
-                sink.write(final_chunk.data(), final_chunk.size());
-
-                // Usage chunk if requested
-                if (include_usage) {
-                    json usage_obj = {{"id", comp_id},
-                                      {"object", "text_completion"},
-                                      {"created", created},
-                                      {"model", snap_model_name},
-                                      {"choices", json::array()},
-                                      {"usage",
-                                       {{"prompt_tokens", n_prompt_tokens},
-                                        {"completion_tokens", n_output_tokens},
-                                        {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
-                    std::string usage_chunk = "data: " + dump_safe(usage_obj) + "\n\n";
-                    sink.write(usage_chunk.data(), usage_chunk.size());
-                }
-
-                std::string done = "data: [DONE]\n\n";
-                sink.write(done.data(), done.size());
-                sink.done();
-
-                auto t_end = std::chrono::high_resolution_clock::now();
-                double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-                IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(),
-                             n_prompt_tokens, n_output_tokens, ms);
-                state.metrics.requests_total++;
-                state.metrics.tokens_prompt_total += n_prompt_tokens;
-                state.metrics.tokens_completion_total += n_output_tokens;
-                state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-                state.metrics.request_duration.observe(ms / 1000.0);
-                if (ttft_ms >= 0.0) {
-                    state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
-                    state.metrics.ttft.observe(ttft_ms / 1000.0);
-                }
-
-                return true;
-            });
+        stream_completion_response_(res, state, cctx, server_req);
     } else {
-        // Non-streaming
-        auto active_req = server_req->request;
-        std::vector<int32_t> output_ids;
-        const char* finish = nullptr;
-        std::string output_text;
-
-        auto ns_comp_start = std::chrono::steady_clock::now();
-        double ttft_ms = -1.0;
-        auto t_prev_token = t_start;  // last delivered token (ITL)
-        for (;;) {
-            if (state.request_timeout > 0) {
-                auto elapsed = std::chrono::steady_clock::now() - ns_comp_start;
-                if (elapsed > std::chrono::seconds(state.request_timeout)) {
-                    server_req->cancel();
-                    state.metrics.requests_timed_out++;
-                    state.metrics.observe_unadmitted_queue_wait(server_req->t_submit,
-                                                                server_req->queue_ms.load(
-                                                                    std::memory_order_relaxed));
-                    finish = "length";
-                    break;
-                }
-            }
-
-            TokenEvent evt{};
-            if (!server_req->pop_token(evt)) {
-                continue;
-            }
-
-            if (evt.token_id < 0) {
-                finish = evt.finish_reason ? evt.finish_reason : "stop";
-                break;
-            }
-
-            int32_t token = evt.token_id;
-
-            {
-                const auto t_tok = std::chrono::high_resolution_clock::now();
-                if (ttft_ms < 0.0) {
-                    ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
-                    const double q = server_req->queue_ms.load(std::memory_order_relaxed);
-                    if (q >= 0.0)
-                        state.metrics.queue_time.observe(q / 1000.0);
-                } else {
-                    state.metrics.inter_token.observe(
-                        std::chrono::duration<double>(t_tok - t_prev_token).count());
-                }
-                t_prev_token = t_tok;
-            }
-
-            if (evt.is_last) {
-                if (token == snap_tok->eos_id() && !ignore_eos) {
-                    finish = evt.finish_reason ? evt.finish_reason : "stop";
-                    break;
-                }
-                finish = evt.finish_reason ? evt.finish_reason : "length";
-            }
-            if (ignore_eos && token == snap_tok->eos_id()) {
-                n_eos_counted++;  // counted in usage, kept out of the text
-                if (evt.is_last)
-                    break;
-                continue;
-            }
-
-            output_ids.push_back(token);
-
-            if (!stop_sequences.empty()) {
-                output_text += snap_tok->decode_token(token);
-                bool stop_found = false;
-                for (const auto& stop : stop_sequences) {
-                    auto pos = output_text.find(stop);
-                    if (pos != std::string::npos) {
-                        output_text = output_text.substr(0, pos);
-                        stop_found = true;
-                        break;
-                    }
-                }
-                if (stop_found) {
-                    finish = "stop";
-                    break;
-                }
-            }
-
-            if (finish)
-                break;
-        }
-
-        if (!finish)
-            finish = "length";
-
-        int n_output_tokens = static_cast<int>(output_ids.size()) + n_eos_counted;
-        std::string text = !stop_sequences.empty() ? output_text : snap_tok->decode(output_ids);
-
-        // Strip <think>...</think> for text completions (no reasoning_content field)
-        if (snap_is_think_model && state.default_args.reasoning_format != "none") {
-            strip_think_block(text);
-        }
-        if (snap_channel_open_id >= 0) {
-            strip_channel_headers(text);
-        }
-
-        // Prepend prompt if echo requested
-        if (echo)
-            text = prompt + text;
-
-        auto t_end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        IMP_LOG_INFO("[%s] %d prompt + %d completion tokens, %.1f ms", comp_id.c_str(), n_prompt_tokens,
-                     n_output_tokens, ms);
-        state.metrics.requests_total++;
-        state.metrics.tokens_prompt_total += n_prompt_tokens;
-        state.metrics.tokens_completion_total += n_output_tokens;
-        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-        state.metrics.request_duration.observe(ms / 1000.0);
-        if (ttft_ms >= 0.0) {
-            state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
-            state.metrics.ttft.observe(ttft_ms / 1000.0);
-        }
-
-        // Build logprobs if requested
-        // #1589: this is /v1/completions, so it gets the Completions shape.
-        // It used to build the Chat object here, which an OpenAI SDK reading
-        // `.logprobs.tokens` cannot see at all.
-        json logprobs_obj = nullptr;
-        if (req_logprobs && active_req) {
-            logprobs_obj = completions_logprobs_json(active_req->output_logprobs, output_ids.size(), text);
-        }
-
-        json choice = {{"index", 0}, {"text", text}, {"finish_reason", openai_finish_reason(finish)}};
-        if (!logprobs_obj.is_null()) {
-            choice["logprobs"] = logprobs_obj;
-        }
-
-        json response = {{"id", comp_id},
-                         {"object", "text_completion"},
-                         {"created", created},
-                         {"model", snap_model_name},
-                         {"system_fingerprint", system_fingerprint(snap_model_name)},
-                         {"choices", json::array({choice})},
-                         {"usage",
-                          {{"prompt_tokens", n_prompt_tokens},
-                           {"completion_tokens", n_output_tokens},
-                           {"total_tokens", n_prompt_tokens + n_output_tokens}}}};
-
-        res.set_content(dump_safe(response), "application/json");
+        nonstream_completion_response_(res, state, cctx, server_req);
     }
 }
 

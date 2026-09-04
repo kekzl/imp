@@ -488,6 +488,9 @@ if(IMP_BUILD_TOOLS)
     tools/common/mtp_auto.cpp
     tools/imp-cli/args.cpp
     tools/imp-cli/json_report.cpp
+    tools/imp-cli/mode_bench.cpp
+    tools/imp-cli/mode_interactive.cpp
+    tools/imp-cli/mode_oneshot.cpp
     tools/imp-cli/mode_perplexity.cpp
     )
     target_link_libraries(imp-cli PRIVATE imp imp_warnings)

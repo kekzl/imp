@@ -92,7 +92,7 @@ it until 2026-08-21.** Not from the prompt, and this follows from the source
 rather than from a measurement:
 
 - `imp-cli --bench` builds the prompt as `tokens[i] = i % vocab_size`
-  (`tools/imp-cli/main.cpp:401`). At `--bench-pp 512` against a ~151k vocab the
+  (`tools/imp-cli/mode_bench.cpp:19`). At `--bench-pp 512` against a ~151k vocab the
   counter never wraps, so the prompt is 0..511 strictly increasing.
 - Every 6-gram in a strictly increasing sequence of distinct ids is unique.
 - The drafter is prompt-lookup over `input + prediction + output` with
