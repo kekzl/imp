@@ -839,3 +839,15 @@ to a gate written the same day.
 Query note, because the obvious one is wrong: `gh api repos/kekzl/imp/branches/main/protection`
 returns **404 "Branch not protected"**. That is not the answer. Protection here is configured
 via **rulesets**, which the legacy protection endpoint does not see.
+
+## Review 2026-09-04
+
+Spot-check, not a re-audit. Everything else in this ledger still carries its
+2026-08-21 `path:line`: run the item's own "proof it is closed" command before
+trusting a line number (`docs/audit/README.md` says the same for every dated
+record here).
+
+| item | 2026-08-21 state | 2026-09-04 |
+|---|---|---|
+| item 8's two remaining siblings, `weight_dispatch.cu:278` and `:378` (`IMP_LOG_FATAL` + return, output left holding stale device memory) | OPEN | CLOSED: all three sites throw (`src/compute/weight_dispatch.cu:290`, `:374`, `:408`), and the comment at `:281` records why |
+| item 4, GTest macros in no CI lane | CLOSED with a pin at 968 | pin holds and moved with the suite: `python3 tools/check_test_lanes.py --report` reads 1084 in no lane, 1617 in `ctest -L unit` |

@@ -74,3 +74,13 @@ batch >= 2 this step. Anything else: serial path, unchanged.
     ENTERED/DECLINED gate chain — the experiment is one `--set` away on
     hardware where partitioning is real. degen_suite 50/0 on the ON arm;
     0 CUDA errors across all ON runs.
+
+## ROADMAP CLOSED (2026-08-27)
+
+NEUTRAL on both shapes, `runtime.prefill_overlap` default off: short prompts
+1771.3 vs 1777.7 tok/s, 1000-token ingest 789.7 vs 790.6, TTFT unchanged. The
+mechanism is hardware: sm_120 has no green-context SM partitioning, so the two
+streams displace each other instead of overlapping. Kept, gated and logged, for
+hardware where partitioning is real; degen_suite 50/0 on the ON arm.
+
+Standing row: `docs/roadmap.md` "prefill concurrent with decode".

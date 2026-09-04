@@ -19,6 +19,12 @@ there instead of retelling it.
   cell 3977 -> 561 characters; the measurement narrative moved verbatim to
   `docs/plans/2026-09-04-lever-ledger-detail.md`, and four rows whose ref cell
   had drifted onto its own line are joined back (#1886, #1887, #1880, #1882)
+- `docs/plans/` and `docs/audit/` each have an index that says what is finished
+  and what is still live: 9 of 12 plans now carry a terminal
+  `## ROADMAP CLOSED` block with their verdict, `imp-quantize-roadmap` is the
+  one that stays open, and the audit index separates the three live ledgers from
+  the dated snapshots whose `path:line` needs re-verification. The docs-rewrite
+  open questions are closed (Q1 answered by #1543)
 
 ### Fixed
 

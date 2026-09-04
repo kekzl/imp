@@ -141,3 +141,18 @@ on the reasoning half of the agentic mission, not a uniform speedup.
 
 See memory `perf_ceiling_reality_and_spec_headroom_2026_07_22` for the full
 campaign evidence.
+
+## ROADMAP CLOSED (2026-08-19, recorded 2026-09-04)
+
+Route (a) shipped flag-gated and measures neutral-to-negative: -7% on fresh
+reasoning at the 2026-07-27 re-measurement (Qwen3-14B-Q6_K, 99.37 -> 92.46
+tok/s), -0.27% on the 2026-08-19 sweep. `speculative.token_recycling` stays
+default OFF. Route (b) (the tree/adjacency drafter) was never warranted: a
+verify step still costs ~4 decode steps, and the re-evaluation trigger of this
+plan ("verify ratio under ~1.3x") was never met.
+
+Superseded for the multi-candidate question by
+[`2026-08-31-mtp-multicandidate-hybrid.md`](2026-08-31-mtp-multicandidate-hybrid.md),
+which measured the trained MTP head as the drafter instead: same verdict,
+`speculative.mtp_tree_width` default 1. Standing row: `docs/roadmap.md` Closed,
+"speculation tree".

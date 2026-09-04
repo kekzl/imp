@@ -10,6 +10,19 @@ against `a5ba92aa`. Builds on [`roadmap.md`](../roadmap.md) gap 1, which carries
 the quantization-quality history; this document is about *coverage*: which
 checkpoints can enter the tool at all, and which can come out small enough.
 
+**OPEN, reviewed 2026-09-04.** Item state since it was written:
+
+| # | item | state |
+|---|---|---|
+| 1 | read FP8 and F32 sources | LANDED 2026-08-15 |
+| 2 | embedding and lm_head opt-in | HALF: the `--dry-run` reporting half landed 2026-08-15 (Qwen3.8-27B 5.60 GiB unshrunk, 30% of the output) and the lm_head price is measured and documented 2026-08-16 (PPL 4.5707 -> 4.6158, +0.99%, for +10.4% decode; `--lm-head` + `--format vllm` refused because vLLM's `ParallelLMHead` takes no scales). The embedding opt-in is still not offered |
+| 3 | confirm `--calib-groups BD` above 14B | BLOCKED on a model, not on work: `--calib` correctly refuses `qwen3_5` (unit-offset norm), and no local BF16 checkpoint above 14B has a plain RMSNorm |
+| 4 | stacked MoE experts | OPEN, tracked as `docs/roadmap.md` Open 7 (needs a per-model layout descriptor plus per-expert bias in loader and MoE forward) |
+
+Shipped alongside, from `roadmap.md` finding (i): `--format vllm` writes
+compressed-tensors `nvfp4-pack-quantized`, vLLM 0.27.1 loads and generates
+(2026-08-16).
+
 ---
 
 ## What "any model" can arithmetically mean here

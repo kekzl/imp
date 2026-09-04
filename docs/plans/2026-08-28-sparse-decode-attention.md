@@ -182,3 +182,16 @@ think-budget exhaustion).
 - Identity: budget >= n_blocks output bit-identical vs dense (unit + e2e).
 - Quality: `tools/eval/niah/niah_bench.py` at 16k, budgets 4096/2048 vs dense.
 - Perf: decode A/B at 2k/8k/16k/32k, alternating arms, `make build` image.
+
+## ROADMAP CLOSED (2026-08-30, recorded 2026-09-04)
+
+SHIPPED opt-in (`attention.sparse_topk_tokens`). Standing evidence: Qwen3-8B
+32k 160.3 -> 199.5 tok/s (+24.5%), verify chunks on the sparse table +28.2% at
+32k, concurrent 3 x 25k 155.6 -> 197.7 (+27%, #1808); NVFP4-KV arm 77k 74.3 ->
+100.2 (#1818); block-size fix #1819 (`sparse_topk_tokens` doubled on
+`n_kv_heads <= 4`, configure 2N to keep an old budget). Retrieval price on
+Qwen3.8-27B: NIAH 10/10 dense, 8/10 at 8192, 5/10 at 4096, which is why it
+stays opt-in.
+
+Follow-ups live in `docs/roadmap.md` Open 3, not here: MLA models, prefill
+sparsity, and StreamingLLM eviction as the only answer under KV-pool pressure.
