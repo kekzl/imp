@@ -1,6 +1,7 @@
 #include "exec/workspace_sizes.h"
 
 #include "model/model.h"
+#include "quant/nvfp4_gemm.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -60,12 +61,15 @@ void for_each_weight(const Model& model, F&& f) {
 std::string ExecT2Demand::describe() const {
     constexpr double kMiB = 1024.0 * 1024.0;
     char buf[448];
-    std::snprintf(buf, sizeof(buf),
-                  "mmvq %.1f + nvfp4 %.1f + sample %.1f + pen %.1f + moe %.2f + fp8red %.2f + quant %.2f "
-                  "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f + chunkcap %.1f MiB",
-                  mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, penalty_counts / kMiB, moe_arrays / kMiB,
-                  fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB, mla_scratch / kMiB,
-                  dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB, imma_scratch / kMiB, chunk_capture / kMiB);
+    std::snprintf(
+        buf, sizeof(buf),
+        "mmvq %.1f + nvfp4 %.1f + sample %.1f + pen %.1f + moe %.2f + fp8red %.2f + quant %.2f "
+        "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f + chunkcap %.1f "
+        "+ smallm %.2f MiB",
+        mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, penalty_counts / kMiB,
+        moe_arrays / kMiB, fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB,
+        mla_scratch / kMiB, dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB,
+        imma_scratch / kMiB, chunk_capture / kMiB, smallm_scratch / kMiB);
     return buf;
 }
 
@@ -279,6 +283,28 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     }
 
     out.nvfp4_dequant = covered;
+
+    // Small-M NVFP4 scratch (executor_gemm_smallm.cu, allocate_smallm_scratch):
+    // the largest of the v1 / v2 split-K workspaces over the dense projections
+    // (the LM head never takes the route), plus the packed 32-row activation
+    // for the widest K. Both kernel variants are charged because the choice is
+    // a runtime knob (gemm.nvfp4_smallm_impl).
+    {
+        size_t ws = 0;
+        int64_t k_max = 0;
+        for (const auto& [n, k] : shape.weights) {
+            if (n <= 0 || k <= 0 || (k % 128) != 0 || n == shape.vocab_size)
+                continue;
+            ws = std::max(ws, gemm_nvfp4_smallm_workspace_bytes(static_cast<int>(n)));
+            if ((k % 256) == 0 && (n % 64) == 0)
+                ws = std::max(ws,
+                              gemm_nvfp4_smallm_v2_workspace_bytes(static_cast<int>(n), static_cast<int>(k)));
+            k_max = std::max(k_max, k);
+        }
+        if (ws > 0)
+            out.smallm_scratch = ws + 32 * static_cast<size_t>(k_max / 2) +
+                                 32 * static_cast<size_t>(k_max / 16) + 2 * 256;
+    }
 
     // Sampling result scratch (executor_workspace_buffers.cu): two parities of
     // max_logit_tokens slots, each SAMPLE_SCRATCH_BYTES. max_logit_tokens is

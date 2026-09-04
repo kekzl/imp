@@ -261,6 +261,7 @@ public:
     size_t smallm_ws_bytes_ = 0;
     void* smallm_xq_ = nullptr;   // A4 activation quantize scratch [32, Kmax]
     size_t smallm_xq_bytes_ = 0;
+    bool smallm_arena_ = false;  // both scratches are T2 arena slabs: never cudaFree them
     // What smallm_xq_ currently holds (source pointer + shape of the last
     // activation quantize). Lets a dispatch with a matching act-quant hint
     // skip the re-quantize when two GEMMs share one normed input (gate/up,
@@ -289,6 +290,16 @@ public:
     // Tag the scratch as holding quantize(out[0..M,0..K)) written by a fused
     // producer kernel.
     void smallm_producer_tag_(const void* out_data, int M, int K);
+    // The plain-NVFP4 weight the small-M GEMM reads for `h`: the native
+    // CUTLASS_NVFP4 source, or on decode rows (#1897) the NVFP4 decode
+    // overlay of a dequantable GGUF source (wcache_.nvfp4, the bytes the M=1
+    // GEMV reads). False when the handle has neither; prompt rows on a GGUF
+    // source keep the full-precision dequant route. Single gate for the
+    // dispatch block, the sibling-pair dispatch and the producer fusion.
+    bool smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out) const;
+    // Grow the small-M GEMM workspace to `need` bytes; a no-op while
+    // `stream` is capturing (twin of ensure_smallm_xq_).
+    void ensure_smallm_ws_(size_t need, cudaStream_t stream);
     // Fused rmsnorm+quantize when the consumer takes the small-M route;
     // falls back to plain rmsnorm() internally. `consumer_id` is the FIRST
     // GEMM reading `no` (q / gate / GDN in) — all further readers skip via
@@ -370,6 +381,16 @@ public:
     // scratch + tags are decode-owned under overlap).
     bool allocate_decode_qscratch(int max_batch);
     void set_overlap_prefill_active(bool v) { overlap_prefill_active_ = v; }
+
+    // Take the small-M NVFP4 workspace and activation scratch for the largest
+    // eligible weight (native source or GGUF decode overlay) from the T2
+    // arena (charged as ExecT2Demand::smallm_scratch) before the first
+    // captured decode step. A capture cannot allocate, and on a GGUF source
+    // no eager forward reaches the small-M block first (prompt rows keep the
+    // dequant route), so without this every captured batched-decode graph
+    // baked in the dequant fallback (#1897). Falls back to the lazy
+    // cudaMalloc growth when the arena cannot serve it.
+    void allocate_smallm_scratch(cudaStream_t stream);
     // The prefill sample must not land in the decode batch's parity slots
     // while both run concurrently: the engine points the prefill-side
     // samplers at a dedicated slot for the duration of an overlap prefill.
@@ -566,6 +587,11 @@ private:
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
     bool cur_spec_verify_ = false; // set by forward_logits: spec-verify chunk (#998)
+    // set by forward_logits: the forward's rows are generated tokens (batched
+    // decode, one row per sequence, or a spec-verify chunk), not prompt rows.
+    // Gates the GGUF NVFP4 decode overlay for 2..32-row GEMMs (#1897); M
+    // alone cannot tell a decode step from a short prefill.
+    bool cur_decode_rows_ = false;
     bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
 
     // Programmatic Dependent Launch: when true, custom kernels have the PDL

@@ -848,6 +848,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     }
     MemAccount::instance().checkpoint("03_kv_cache");
+    // Before warmup's graph prewarm: a captured decode step cannot allocate
+    // the small-M scratches (#1897). Charged in the T2 arena demand above.
+    executor_->allocate_smallm_scratch(stream_);
     if (!init_features())
         return false;
     MemAccount::instance().checkpoint("04_features");

@@ -122,24 +122,27 @@ TTFT <= 500 ms and TPOT <= 50 ms.
 | decode rows per step | 1.00 | 7.30 | 27.82 |
 | power W / J per 1k output tokens | 512 / 1751 | 367 / 254 | 381 / 73 |
 
-**GGUF batched decode is dequant-bound.** A GGUF source carries its NVFP4
-decode cache as a single-sequence overlay; every step with more than one
-sequence takes the prefill route and dequantizes the whole Q8_0 source
-(`src/exec/executor_gemm_dispatch.cu:536`, the class of #667). Same harness
-and defaults on Qwen3-8B-Q8_0: the step costs about 52 ms from two sequences
-up, flat in batch size, at a third of the power. `gemm.q8_imma_enabled=true`
-reads the same (115 tok/s at c=8). The published v0.36.0 image reads the
-same at c=8 (120 tok/s, ITL p50 63.5 ms): the standing state, not a
-regression. Concurrency needs a native NVFP4 checkpoint (table above).
+**GGUF batched decode reads the NVFP4 overlay (#1897).** Until #1897 every
+decode step with two or more sequences on a GGUF source took the prefill
+route and dequantized the whole Q8_0 source (the class of #667): about 52 ms
+per step from two sequences up. Decode rows with 2..32 sequences now run the
+small-M NVFP4 GEMM on the decode overlay (`smallm_weight_`,
+`src/exec/executor_gemm_smallm.cu`); prompt rows keep the dequant route.
+Same harness on Qwen3-8B-Q8_0 with the library reserve planned
+(`vram.library_reserve_mb=6782`, the value the start measures; a cold
+`docker run --rm` start plans the 3900 MiB constant instead and reads the
+spill lottery of [`LIMITATIONS.md`](LIMITATIONS.md)), 64 requests per level,
+v0.36.0 image vs #1897:
 
-[PROV: commit=c7d7356e date=2026-09-04 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0 cuda=13.3.1 path=paged_fp8+fa2_fp16qk cmd="tools/analysis/serving_kpi.py --levels 1,8,32 --max-tokens 300" n=1]
+[PROV: commit=5db9dc38 date=2026-09-04 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0 cuda=13.3.1 path=paged_fp8+fa2_fp16qk cmd="tools/analysis/serving_kpi.py --levels 1,8,32 --max-tokens 300 --requests-per-level 64 (server --set vram.library_reserve_mb=6782)" n=1]
 
-| KPI | c=1 | c=8 | c=32 |
+| KPI | c=1 v0.36.0 / #1897 | c=8 v0.36.0 / #1897 | c=32 v0.36.0 / #1897 |
 |---|---|---|---|
-| output tok/s | 225.6 | 136.2 | 481.9 |
-| TPOT p50 / p99 ms | 4.2 / 4.6 | 51.8 / 57.3 | 57.0 / 60.3 |
-| goodput req/s (SLO attainment) | 0.86 (100 %) | 0.02 (3 %) | 0.00 (0 %) |
-| power W | 420 | 185 | 193 |
+| output tok/s | 288.0 / 287.8 | 770.4 / 1496.1 | 2648.3 / 4715.1 |
+| TPOT p50 / p99 ms | 3.4 / 3.5 both | 9.6 / 9.9 vs 5.0 / 5.3 | 10.6 / 11.2 vs 5.8 / 6.3 |
+| TTFT p50 / p99 ms | 14 / 37 both | 32 / 80 vs 23 / 54 | 71 / 245 vs 100 / 238 |
+| goodput req/s (SLO attainment) | 1.09 / 1.10 (100 %) | 2.92 / 5.63 (100 %) | 9.90 / 17.82 (100 %) |
+| J per 1k output tokens | 1783 / 1800 | 545 / 259 | 164 / 82 |
 
 ## Reproducing any of this
 

@@ -172,10 +172,20 @@ struct ExecT2Demand {
     // Chunk-capture K/V pair for the captured speculative verify. Sized from
     // the capture context cap, charged only when that path is eligible.
     size_t chunk_capture = 0;
+    // Small-M NVFP4 GEMM split-K workspace + packed 32-row activation scratch
+    // (executor_gemm_smallm.cu, allocate_smallm_scratch): the largest
+    // per-weight workspace over the dense projections plus the activation for
+    // the widest K. Charged for every model: which weights take the route
+    // (native NVFP4, or a GGUF source's decode overlay, #1897) is known only
+    // after pre-dequant, and the bound is a few MiB. Unplanned, this buffer
+    // landed after the KV pool on a full card and spilled (Qwen3-8B-Q8_0
+    // single stream 235 -> 133 tok/s).
+    size_t smallm_scratch = 0;
 
     size_t total() const {
-        return mmvq_scratch + nvfp4_dequant + sample_scratch + penalty_counts + moe_arrays + fp8_reduction + quant_scratch +
-               splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x + imma_scratch;
+        return mmvq_scratch + nvfp4_dequant + sample_scratch + penalty_counts + moe_arrays + fp8_reduction +
+               quant_scratch + splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x +
+               imma_scratch + smallm_scratch;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather

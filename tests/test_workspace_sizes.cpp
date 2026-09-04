@@ -200,8 +200,36 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     const ExecT2Demand d = exec_t2_demand(s, 1024);
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
                              d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
-                             d.dry_penalty + d.cublas_workspace + d.grouped3x + d.imma_scratch);
+                             d.dry_penalty + d.cublas_workspace + d.grouped3x + d.imma_scratch +
+                             d.smallm_scratch);
     EXPECT_GT(d.total(), 0u);
+}
+
+// The small-M NVFP4 scratch (#1897): the largest split-K workspace over the
+// dense projections plus the packed 32-row activation for the widest K. The
+// LM head is excluded (it has its own batched paths and would dominate at
+// vocab x 32 floats), and the charge is independent of batch and context.
+TEST(ExecT2Demand, SmallMScratchCoversTheWidestProjectionNotTheLmHead) {
+    ExecShape s = dense_shape();
+    s.vocab_size = 151936;
+    s.weights = {{4096, 4096}, {12288, 4096}, {151936, 4096}};  // q, up, LM head
+    const ExecT2Demand d = exec_t2_demand(s, 1024);
+    int64_t n_max = 0, k_max = 0;
+    for (const auto& [n, k] : s.weights) {
+        if (n == s.vocab_size)
+            continue;
+        n_max = std::max(n_max, n);
+        k_max = std::max(k_max, k);
+    }
+    ASSERT_GT(n_max, 0);
+    // >= one 32-row FP32 tile of the widest N plus the activation rows.
+    EXPECT_GE(d.smallm_scratch, static_cast<size_t>(32 * n_max * 4 + 32 * (k_max / 2) + 32 * (k_max / 16)));
+    // < what the LM head alone would cost.
+    EXPECT_LT(d.smallm_scratch, static_cast<size_t>(32) * s.vocab_size * 4);
+
+    ExecShape big = s;
+    big.max_batch_size = 32;
+    EXPECT_EQ(exec_t2_demand(big, 8192).smallm_scratch, d.smallm_scratch);
 }
 
 // The CUTLASS grouped staging + workspace. engine.cpp gates the prewarm on

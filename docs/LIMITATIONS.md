@@ -68,13 +68,13 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
 
 ## Known-bad and known-limited behaviour
 
-- **GGUF batched decode is dequant-bound.** A GGUF source keeps its NVFP4 decode cache as a
-  single-sequence overlay; a decode step with two or more sequences takes the prefill route and
-  dequantizes the whole source to FP16 first (`src/exec/executor_gemm_dispatch.cu:536`, the
-  class of #667). Qwen3-8B-Q8_0 serves 8 streams slower than 1 and every request misses the
-  TPOT SLO; the native NVFP4 checkpoint of the same model does not. Numbers and the control
-  arm in [`PERF.md`](PERF.md) ("Serving KPIs"). Serve GGUF single-stream; concurrency wants a
-  native NVFP4 checkpoint.
+- **GGUF batched decode rows read the 4-bit overlay with 4-bit activations (#1897).** A decode
+  step with 2..32 rows on a GGUF source runs the small-M NVFP4 GEMM on the NVFP4 decode overlay
+  (`smallm_weight_` in `src/exec/executor_gemm_smallm.cu`), the numerics family of the native
+  NVFP4 batched path (#1766); single-stream decode reads the same overlay with FP16 activations,
+  prompt rows keep the full-precision dequant route. Batched output on a GGUF source is
+  therefore not byte-identical to single-stream output at temperature 0. Numbers in
+  [`PERF.md`](PERF.md) ("Serving KPIs").
 
 - **`server.green_contexts=true` does not give green contexts on this chip.**
   `cudaDevResourceGenerateDesc` fails for the decode partition (`one or more resources passed in
@@ -101,6 +101,14 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
   `vram.library_reserve_cache` defaults inside the container; a `docker run --rm` server
   re-measures every start and plans with the 3900 MiB constant, wrong in both directions
   (measured: 0 MiB on Qwen3-4B IQ4_NL, 7460 MiB on Qwen3-8B-Q8_0). Mount the path.
+  A cold start that under-plans runs the card full (Qwen3-8B-Q8_0: 32157 of 32607 MiB, the
+  plan charges 3900 MiB, the start measures 6780) and WDDM spills whatever the startup path
+  touched last, so the numbers are a lottery per startup path: 2026-09-04, same harness as
+  `PERF.md` "Serving KPIs", c=1 / c=8 / c=32 output tok/s read 209.6 / 142.4 / 457.8 on
+  v0.36.0 and 123.8 / 838.7 / 2577.9 with #1897 (the graph-prewarm ladder now runs the
+  small-M kernels, `runtime.graph_prewarm=false` reads 214.2 / 469.0 / -), against
+  288.0 / 770.4 / 2648.3 and 287.8 / 1496.1 / 4715.1 with the reserve planned
+  (`vram.library_reserve_mb=6782`, or the second start from the mounted cache).
 
 - **JSON Schema: assertion keywords imp cannot enforce are a `400`, not a weaker grammar**
   (#1567): `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `allOf`,
