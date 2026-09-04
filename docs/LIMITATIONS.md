@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-09-04
-commit: e8a76cdd
+commit: 97faf0a4
 -->
 
 # Limitations
@@ -101,8 +101,12 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
   `vram.library_reserve_cache` defaults inside the container; a `docker run --rm` server
   re-measures every start and plans with the 3900 MiB constant, wrong in both directions
   (measured 2026-09-04, after #1899: 763 MiB on Qwen3-8B-Q8_0, 1366 on Qwen3-14B-Q6_K,
-  3260 on Qwen3.8-27B-NVFP4). Mount the path, or the constant over-reserves KV by ~640 MiB
-  (the 10 % reserve floor absorbs the rest). The cold-start spill lottery this bullet used to
+  3260 on Qwen3.8-27B-NVFP4). Mount the README's named volume
+  (`-v imp-cache:/home/imp/.cache/imp`), or the constant over-reserves KV by ~640 MiB
+  (the 10 % reserve floor absorbs the rest). A bind mount must be writable by the container
+  user `imp` (uid 1001): Docker creates a missing host path as root, a host user's directory
+  is uid 1000, both log `library reserve: could not write` and re-measure every start
+  (verified 2026-09-04 on `ghcr.io/kekzl/imp:0.37.0`). The cold-start spill lottery this bullet used to
   describe — card at 32157 of 32607 MiB, decode throughput moving with the graph-prewarm
   ladder instead of with the code under test — was the unplanned Q8_0 IMMA plane cache and is
   fixed in #1899: cold Qwen3-8B-Q8_0 defaults now read 289.6 / 1462.2 / 4568.5 output tok/s
