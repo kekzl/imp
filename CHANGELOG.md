@@ -24,6 +24,12 @@ there instead of retelling it.
   c=32; card 0 -> 1190 MiB free, attribution 100 %. Most of the ~3.9 GiB
   "library reserve" of `docs/internals/MEMORY.md` A1.5 was this cache; the real
   claim on that model is 763 MiB (#1899)
+- The same cache was never freed on engine teardown, so a second model in one
+  process (server model swap, the GPU test suite) paid for the first model's
+  planes and ran its own prefill GEMMs through dequant — and, since the cache is
+  keyed by source pointer, a recycled allocation of the same shape could have
+  been served the previous model's weights. Released via the `cuda_static_reset`
+  hooks; asserted in `EngineRelaunchTest` (#1899)
 
 ## [0.37.0] - 2026-09-04
 

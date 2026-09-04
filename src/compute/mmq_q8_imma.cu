@@ -18,6 +18,7 @@
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "memory/mem_account.h"
+#include "core/cuda_static_reset.h"
 
 #include <cstring>
 #include <mutex>
@@ -552,5 +553,16 @@ void mmq_q8_imma_release_all() {
     }
     g_imma_plane_budget_hit = false;
 }
+
+namespace {
+// Nothing called mmq_q8_imma_release_all() outside tests, so the weight planes
+// — up to 8.6 GiB of them — outlived the model they were built from: a second
+// model in the same process kept paying for the first one's planes, and the
+// map is keyed by SOURCE POINTER, so a recycled allocation with the same (N, K)
+// would have been served the previous model's weights. Teardown runs the
+// registered hooks (core/cuda_static_reset.h), which is where this belongs.
+void mmq_q8_imma_reset_static_cuda_state() { mmq_q8_imma_release_all(); }
+IMP_REGISTER_CUDA_STATIC_RESET(mmq_q8_imma_reset_static_cuda_state);
+}  // namespace
 
 }  // namespace imp

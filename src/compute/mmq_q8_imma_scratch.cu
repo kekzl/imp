@@ -140,20 +140,24 @@ size_t imma_q8_plane_bytes(int64_t N, int64_t K) {
 
 namespace {
 // Charge `need` against the budget. Caller holds g_imma_mtx.
-bool imma_plane_budget_take(size_t need, const char* what) {
+bool imma_plane_budget_take(size_t need, const char* what, int64_t N, int64_t K) {
     if (g_imma_plane_budget == SIZE_MAX)
         return true;
     if (g_imma_plane_used + need <= g_imma_plane_budget)
         return true;
     if (!g_imma_plane_budget_hit) {
         g_imma_plane_budget_hit = true;
+        // The shape is in the message on purpose: the planner scans the model's
+        // tensor list, the allocator keys on source pointers, and the two can
+        // disagree (a tensor the scan does not know about, a re-registered
+        // weight). Naming the take that overran is what makes that debuggable.
         IMP_LOG_WARN(
             "mmq_q8_imma: %s cache reached its planned budget (%.0f MiB used, %.0f MiB "
-            "planned, %.0f MiB wanted) — the remaining prefill GEMMs run the dequant "
-            "path. Raise it by giving the plan more room (smaller KV pool) or set "
-            "gemm.q8_imma_enabled=false to drop the cache entirely.",
+            "planned, %.0f MiB wanted for N=%lld K=%lld) — the remaining prefill GEMMs run "
+            "the dequant path. Raise it by giving the plan more room (smaller KV pool) or "
+            "set gemm.q8_imma_enabled=false to drop the cache entirely.",
             what, g_imma_plane_used / (1024.0 * 1024.0), g_imma_plane_budget / (1024.0 * 1024.0),
-            need / (1024.0 * 1024.0));
+            need / (1024.0 * 1024.0), static_cast<long long>(N), static_cast<long long>(K));
     }
     return false;
 }
@@ -190,7 +194,7 @@ bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool
     w.K = K;
     const size_t subs = static_cast<size_t>(K) / 32;
     const size_t need = imma_q8_plane_bytes(N, K);
-    if (!imma_plane_budget_take(need, "Q8_0 plane"))
+    if (!imma_plane_budget_take(need, "Q8_0 plane", N, K))
         return false;
     if (cudaMalloc(&w.qs, static_cast<size_t>(N) * K) != cudaSuccess) return false;
     if (cudaMalloc(&w.sc, static_cast<size_t>(N) * subs * 2 * sizeof(__half)) != cudaSuccess) {
@@ -214,7 +218,7 @@ bool imma_ensure_q6k(const void* src, size_t n_blocks, cudaStream_t stream, bool
     Q6kRepack r;
     r.n_blocks = n_blocks;
     const size_t need = n_blocks * kQ6Stride;
-    if (!imma_plane_budget_take(need, "Q6_K repack"))
+    if (!imma_plane_budget_take(need, "Q6_K repack", static_cast<int64_t>(n_blocks), 256))
         return false;
     if (cudaMalloc(&r.blocks, need) != cudaSuccess)
         return false;
