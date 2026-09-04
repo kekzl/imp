@@ -25,6 +25,7 @@
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 #include "test_models.h"
+#include "compute/mmq_q8_imma.h"  // mmq_q8_imma_plane_bytes_used (#1899)
 
 #include <cuda_runtime.h>
 
@@ -160,6 +161,17 @@ TEST(EngineRelaunchTest, ReloadAfterInferenceReleasesVramAndDoesNotCrash) {
             << "free went " << free_before << " -> " << free_between << " MiB, which is expected "
             << "on this platform (AUDIT B36) and is NOT what this assertion is about.";
     }
+
+    // The IMMA prefill planes are keyed by SOURCE POINTER and were never freed
+    // outside tests (#1899): the first model's planes — up to 8.6 GiB — stayed
+    // charged against the second model's budget, which then declined every take
+    // and ran its prefill GEMMs through dequant. Worse in principle: a recycled
+    // allocation with the same (N, K) would have been served the previous
+    // model's weights. Teardown runs the cuda_static_reset hooks, and this is
+    // the property that says the hook is wired.
+    EXPECT_EQ(imp::mmq_q8_imma_plane_bytes_used(), 0u)
+        << "teardown left " << (imp::mmq_q8_imma_plane_bytes_used() >> 20)
+        << " MiB of Q8_0 IMMA planes behind; the next model in this process pays for them";
 
     // Re-init after inference: before the prewarm stream-rebind fix this
     // segfaulted (dangling stream on the global attention-cuBLAS handle).

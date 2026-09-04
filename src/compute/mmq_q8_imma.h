@@ -56,6 +56,20 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
 // Free cached weight planes + activation scratch (tests / teardown).
 void mmq_q8_imma_release_all();
 
+// VRAM budget for the per-weight prefill caches (Q8_0 SoA planes, Q6_K
+// repack). They are taken lazily on a tensor's first prefill and were charged
+// to nothing, so they grew into whatever the KV pool left free and made every
+// start's spill victim a lottery (#1899). Engine::init sets the figure the
+// plan reserved (vram_budget's imma_plane_bytes); a take past it declines and
+// that GEMM runs the dequant path. SIZE_MAX (the default) is uncapped; 0 means
+// no planes at all.
+void mmq_q8_imma_set_plane_budget(size_t bytes);
+size_t mmq_q8_imma_plane_bytes_used();
+
+// What the caches above will take for one (N, K) Q8_0 weight — the planner
+// charges this exact arithmetic, so the two cannot drift.
+size_t imma_q8_plane_bytes(int64_t N, int64_t K);
+
 // Take the IMMA prefill activation scratch (and the split-K slice) from the T2
 // arena once, at the bound exec_t2_demand charged as `imma_scratch`. Call from
 // Engine::init after the arena is open; `rows`/`k` come from

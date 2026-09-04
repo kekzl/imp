@@ -81,6 +81,12 @@ struct VRAMBudget {
     // Batch-shaped SSM/GDN state footprint charged as overhead (0 on
     // non-recurrent models). Same reason as above.
     size_t ssm_footprint_bytes = 0;
+    // The s8 + (alpha, beta) planes mmq_q8_imma caches per prefilled Q8_0
+    // weight (0 when the model has none or the IMMA prefill paths are off).
+    // Charged as overhead here AND handed to mmq_q8_imma_set_plane_budget():
+    // uncharged, the cache took whatever the KV pool left and made the spill
+    // victim a per-start lottery (#1899).
+    size_t imma_plane_bytes = 0;
 };
 
 // Pure computation: plan VRAM allocation split between KV cache, FP8 prefill
@@ -104,10 +110,13 @@ struct VRAMBudget {
 // ssm_reserved_slots: recurrent-state slots past max_batch_size that the
 // multi-candidate speculative verify reserves (SSMState::init n_reserved);
 // priced with the pool so the plan sees the slab it will hold.
+// q8_imma_prefill / moe_imma_prefill: gemm.q8_imma_enabled and
+// gemm.moe_imma_prefill. They decide whether the IMMA prefill planes
+// (imma_plane_bytes) are charged — the pass cannot read RuntimeConfig itself.
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens = 0, int n_swa_layers = 0,
-                               const NativeCacheDemand* native_demand = nullptr,
-                               int ssm_reserved_slots = 0);
+                               const NativeCacheDemand* native_demand = nullptr, int ssm_reserved_slots = 0,
+                               bool q8_imma_prefill = true, bool moe_imma_prefill = true);
 
 // Split of the post-reserve VRAM budget across the pre-dequant phases.
 struct PreDequantBudget {

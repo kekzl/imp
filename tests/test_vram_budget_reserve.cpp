@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/mmq_q8_imma.h"
 #include "memory/plan.h"  // kMeasuredLibraryReserveBytes, plan_memory
 #include "runtime/plan_shadow.h"
 #include "memory/vram_query.h"
@@ -761,4 +762,86 @@ TEST(VramBudgetReserve, PreFloorBlocksSurviveTheMinKvTokensRaise) {
     // makes these two equal, which is the state the divergence log used to
     // report as "live pass would have said" (#1747).
     EXPECT_NE(b.kv_blocks_pre_floor, b.kv_max_blocks);
+}
+
+// ---------------------------------------------------------------------------
+// IMMA Q8_0 prefill planes (#1899)
+//
+// mmq_q8_imma keeps an s8 + (alpha, beta) copy of every Q8_0 weight it
+// prefills, taken lazily on that weight's first prefill. Nothing charged it, so
+// it grew into whatever the KV pool left free — 5612 MiB on a cold Qwen3-8B-Q8_0
+// start, 7942 MiB with library_reserve_mb=12000, same model, same tree. The
+// budget now charges the exact arithmetic the allocator uses, and the engine
+// caps the allocator at the charge.
+// ---------------------------------------------------------------------------
+TEST(VramBudgetReserve, ImmaPlanesAreChargedForQ8Weights) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::Q8_0, QType::Q8_0);
+
+    EngineConfig config;
+    config.max_seq_len = 8192;
+    config.max_batch_size = 32;  // VRAM binds the pool, not blocks_per_seq * batch
+    config.use_cuda_graphs = false;
+    config.use_nvfp4_decode = 1;  // the overlay branch that routes Q8_0 to IMMA
+    config.kv_cache_dtype = QType::F16;
+    config.library_reserve_mb = 0;
+
+    // What the allocator will take, spelled out rather than delegated: this is
+    // the assertion that keeps planner and allocator from drifting apart.
+    size_t expect = 0;
+    for (int i = 0; i < m.config().n_layers; ++i) {
+        const auto& L = m.layer(i);
+        for (const Tensor* w : {&L.wq, &L.w_gate, &L.w_up, &L.w_down}) {
+            const size_t elems = static_cast<size_t>(w->shape[0]) * w->shape[1];
+            expect += elems + elems / 32 * 2 * sizeof(__half);
+            EXPECT_EQ(imma_q8_plane_bytes(w->shape[0], w->shape[1]), elems + elems / 32 * 2 * sizeof(__half));
+        }
+    }
+
+    const size_t GiB = 1024ull * 1024 * 1024;
+    VRAMBudget on = compute_vram_budget(m, config, 32, 128, 24 * GiB, 0, 0, nullptr, 0,
+                                        /*q8_imma_prefill=*/true, /*moe_imma_prefill=*/true);
+    EXPECT_EQ(on.imma_plane_bytes, expect) << "the plan must charge exactly what mmq_q8_imma allocates";
+
+    // gemm.q8_imma_enabled=false: no planes are built, so charging them would
+    // hand the KV pool ~5 GiB less for nothing.
+    VRAMBudget off = compute_vram_budget(m, config, 32, 128, 24 * GiB, 0, 0, nullptr, 0,
+                                         /*q8_imma_prefill=*/false, /*moe_imma_prefill=*/false);
+    EXPECT_EQ(off.imma_plane_bytes, 0u);
+    EXPECT_GT(off.kv_max_blocks, on.kv_max_blocks)
+        << "the charge must come out of the KV pool — that is the whole point";
+}
+
+TEST(VramBudgetReserve, ImmaPlaneChargeYieldsToTheKvGuarantee) {
+    SKIP_IF_NO_CUDA();
+
+    Model m;
+    fill_model(m, QType::Q8_0, QType::Q8_0);
+
+    EngineConfig config;
+    config.max_seq_len = 4096;
+    config.max_batch_size = 1;
+    config.use_cuda_graphs = false;
+    config.use_nvfp4_decode = 1;
+    config.kv_cache_dtype = QType::F16;
+    config.library_reserve_mb = 0;
+    config.min_kv_tokens = 8192;  // 512 blocks at block size 16
+
+    // Tight enough that the full plane demand cannot coexist with the floor:
+    // uncapped, the plan would take the pool down to it.
+    const size_t GiB = 1024ull * 1024 * 1024;
+    VRAMBudget b = compute_vram_budget(m, config, 32, 128, 7 * GiB, 0, 0, nullptr, 0,
+                                       /*q8_imma_prefill=*/true, /*moe_imma_prefill=*/true);
+
+    size_t demand = 0;
+    for (int i = 0; i < m.config().n_layers; ++i) {
+        const auto& L = m.layer(i);
+        for (const Tensor* w : {&L.wq, &L.w_gate, &L.w_up, &L.w_down})
+            demand += imma_q8_plane_bytes(w->shape[0], w->shape[1]);
+    }
+    ASSERT_GT(demand, 7 * GiB / 2) << "shape no longer tight enough to test the cap";
+    EXPECT_LT(b.imma_plane_bytes, demand) << "the cap did not fire";
+    EXPECT_GE(b.kv_max_blocks, config.min_kv_tokens / 16) << "the planes were allowed to eat the KV floor";
 }

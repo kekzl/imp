@@ -28,6 +28,7 @@
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/sampling.h"
+#include "compute/mmq_q8_imma.h"  // mmq_q8_imma_plane_bytes_used
 #include "memory/engine_arena.h"
 #include "memory/mem_account.h"
 #include "memory/plan.h"       // kMeasuredLibraryReserveBytes
@@ -344,13 +345,20 @@ void Engine::build_banned_token_list() {
 // it out of the class keeps engine.h (a god-header already at its size limit)
 // from growing for a diagnostic. Returns the measured claim, SIZE_MAX if it
 // could not be measured.
-static size_t measure_library_forward_window(size_t free_before) {
+// `named_in_window` is what the window swallowed that IS attributed — the IMMA
+// prefill planes, which the first forward takes and the plan already charged
+// (#1899). Without subtracting them the window reported them as an unattributed
+// library claim, the cache remembered that figure, and the NEXT start planned
+// the same bytes twice (measured on Qwen3-8B-Q8_0: window 7797 MiB against a
+// 763 MiB residual, i.e. a -22 % attribution).
+static size_t measure_library_forward_window(size_t free_before, size_t named_in_window) {
     if (free_before == 0)
         return SIZE_MAX;
     size_t free_after = 0;
     if (!vram_budget_mem_get_info(&free_after, nullptr))
         return SIZE_MAX;
-    return free_before > free_after ? free_before - free_after : 0;
+    const size_t window = free_before > free_after ? free_before - free_after : 0;
+    return window > named_in_window ? window - named_in_window : 0;
 }
 
 // Report the charge against what the plan assumed, and name the value to pin.
@@ -435,6 +443,7 @@ void Engine::warmup() {
     MemAccount::instance().checkpoint("05a_pre_warmup_forward");
     size_t warm_free_before = 0;
     vram_budget_mem_get_info(&warm_free_before, nullptr);
+    const size_t imma_planes_before = mmq_q8_imma_plane_bytes_used();
 
     for (int prompt_len : {16, 32}) {
         auto req = std::make_shared<Request>();
@@ -454,7 +463,10 @@ void Engine::warmup() {
         req->status = RequestStatus::CANCELLED;
     }
     MemAccount::instance().checkpoint("05b_post_warmup_forward");
-    const size_t forward_window = measure_library_forward_window(warm_free_before);
+    const size_t imma_planes_in_window = mmq_q8_imma_plane_bytes_used() > imma_planes_before
+                                             ? mmq_q8_imma_plane_bytes_used() - imma_planes_before
+                                             : 0;
+    const size_t forward_window = measure_library_forward_window(warm_free_before, imma_planes_in_window);
 
     // Which library claims WHEN depends on the model's execution path, so the
     // forward window only ever sees part of the charge: Q8_0 first touches
