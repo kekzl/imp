@@ -26,7 +26,7 @@ there instead of retelling it.
   `[Unreleased]` entry is at most 3 lines (AUDIT_arch_2026 dispatch #13, J-2 / J-8, #1919)
 - `THIRD_PARTY_LICENSES.md`: the Apache-2.0 text and SageAttention notice behind
   `src/compute/nvfp4_quant_hw.cu`, shipped in the image at `/usr/share/doc/imp/`, OCI label
-  `MIT AND Apache-2.0`, `check-release.sh` gates all of it (AUDIT_arch_2026 dispatch #9, H-7, #NNNN)
+  `MIT AND Apache-2.0`, `check-release.sh` gates all of it (AUDIT_arch_2026 dispatch #9, H-7, #1920)
 
 ### Changed
 
