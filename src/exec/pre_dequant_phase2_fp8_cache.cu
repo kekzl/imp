@@ -11,6 +11,7 @@
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "quant/dequant_gpu.h"
@@ -269,7 +270,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
 // phase-3 exclusion exists for.
 void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
-    const bool ssm_on = runtime_config().gemm.fp8_ssm_proj;
+    const bool ssm_on = dispatch_policy().gemm.fp8_ssm_proj;
     // gemm.fp8_attn_proj (#984): same decode-only per-row-scale sidecar for
     // the FULL-PRECISION attention projections. "auto" = full q/k/v/o on
     // gpt-oss only — its BF16 dense projections get no NVFP4 decode cache
@@ -282,7 +283,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     // sidecar to the q/o projections (~76% of the eligible bytes) as a
     // conservative middle mode for future arches; "on" forces full q/k/v/o
     // for any full-precision attention weights.
-    const std::string& ap = runtime_config().gemm.fp8_attn_proj;
+    const std::string& ap = dispatch_policy().gemm.fp8_attn_proj;
     const bool attn_full = ap == "on" || (ap == "auto" && model_->profile().is_gpt_oss);
     const bool attn_qo = attn_full || ap == "qo";
     const bool attn_kv = attn_full;

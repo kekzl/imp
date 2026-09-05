@@ -1,6 +1,8 @@
 #pragma once
 
-#include "model/model_config.h"  // FFNActivation
+namespace imp {
+enum class FFNActivation;  // model/model_config.h; passed by value only
+}
 
 #include <cuda_runtime.h>
 #include <cstdint>

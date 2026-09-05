@@ -37,7 +37,7 @@
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "exec/sparse_attn_select.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -152,7 +152,7 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
         return;
     // Opt-in (gemm.nvfp4_lm_head_cutlass). Only batched decode (n>1) uses it;
     // single-stream (n==1) keeps the weight-bound M=1 GEMV.
-    if (!runtime_config().gemm.nvfp4_lm_head_cutlass || !cutlass_sm120_nvfp4_available())
+    if (!dispatch_policy().gemm.nvfp4_lm_head_cutlass || !cutlass_sm120_nvfp4_available())
         return;
     auto it = wcache_.nvfp4.find(model_->output_proj().data);
     if (it == wcache_.nvfp4.end())
@@ -223,7 +223,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // ---- Optional per-component profiling (diagnostics.profile config flag, was IMP_PROFILE env) ----
     // Profiling disables CUDA graph capture (they are incompatible).
     // Use the diagnostics.profile config flag (was IMP_PROFILE env) for diagnostic runs only.
-    const bool do_profile = runtime_config().diagnostics.profile;
+    const bool do_profile = dispatch_policy().diagnostics.profile;
     static int profile_step_ = 0;
     static float acc_total = 0, acc_attn = 0, acc_ffn = 0, acc_lm = 0;
     bool profiling = do_profile;
@@ -347,7 +347,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                       tmp[1], tmp[2], tmp[3]);
     }
     // Binary dump: write the full FP16 hidden state to file
-    if (!runtime_config().diagnostics.dump_hidden_dir.empty()) {
+    if (!dispatch_policy().diagnostics.dump_hidden_dir.empty()) {
         std::vector<half> h_buf(n * cfg.d_model);
         cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
         char fname[256];
@@ -367,7 +367,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     int max_layer = (state.exit_layer > 0) ? std::min(state.exit_layer, cfg.n_layers) : cfg.n_layers;
     // [diagnostics] exit_layer = N runs only N layers (-1 = full forward).
     {
-        const int s_exit = runtime_config().diagnostics.exit_layer;
+        const int s_exit = dispatch_policy().diagnostics.exit_layer;
         if (s_exit > 0)
             max_layer = std::min(max_layer, s_exit);
     }
@@ -422,7 +422,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             cudaEventRecord(ev_attn[i], stream);
 
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
-        const bool skip_moe = runtime_config().moe.skip;
+        const bool skip_moe = dispatch_policy().moe.skip;
         if (skip_moe) {
             // Debug: skip all FFN/MoE to isolate attention bugs
         } else if (layer_has_moe(i)) {
@@ -453,7 +453,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             // reported nothing. It is a diagnostic, so it keys off its own switch
             // and nothing else; the default is empty and costs a string check.
             {
-                const std::string& dh = runtime_config().diagnostics.dump_hidden_dir;
+                const std::string& dh = dispatch_policy().diagnostics.dump_hidden_dir;
                 if (!dh.empty() && (dh == "all" || i == 0 || i == 5 || i == 15 || i == 29)) {
                     std::vector<half> h_buf(static_cast<size_t>(n) * cfg.d_model);
                     cudaStreamSynchronize(stream);
@@ -534,7 +534,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // Only sync when the MoE path did NOT go through the FP32 accum kernel
         // (e.g. layer has no post_ffn_norm or residual was fused into decode path).
         if (fp32_accum_buf_ && model_->profile().is_gemma4 &&
-            runtime_config().moe.force_fp16_sync) {
+            dispatch_policy().moe.force_fp16_sync) {
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             int64_t total = static_cast<int64_t>(n) * cfg.d_model;
             int threads = 256;
@@ -678,10 +678,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
     const auto out_qtype = model_->out_proj_.qtype;
     const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype) &&
-                             !runtime_config().gemm.no_dp4a_lm;
+                             !dispatch_policy().gemm.no_dp4a_lm;
 
     // GemmContext for LM head GEMM dispatches.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
 
     // Registry handle for LM head — replaces wcache_ probe per call (Task 3.5).
@@ -788,7 +788,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             // Dequant output_proj to FP16 temp buffer, cuBLAS FP16 GEMM into FP32 logits.
             // If this gives llama-matching top logit (~+2.07) then the dp4a path is buggy;
             // if it still gives +8.83 then the bug is in hidden state or output_norm.
-            if (runtime_config().generation.lm_dequant_fp16) {
+            if (dispatch_policy().generation.lm_dequant_fp16) {
                 Tensor no_last = view_tokens(norm_out_, 1);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
                 int N = cfg.vocab_size;
@@ -967,7 +967,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     }
 
     // ---- Final logit soft-capping (Gemma-2/3/4, cap=30) ----
-    const bool skip_softcap = runtime_config().generation.no_logit_softcap;
+    const bool skip_softcap = dispatch_policy().generation.no_logit_softcap;
     if (cfg.final_logit_softcap > 0.0f && !skip_softcap) {
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
         int threads = 256;
@@ -996,7 +996,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // during capture"), which turns a diagnostic into a broken decode path.
     // The prefill pass — the one a parity harness wants — is not captured, so
     // it still lands.
-    if (!runtime_config().diagnostics.dump_final_logits_dir.empty()) {
+    if (!dispatch_policy().diagnostics.dump_final_logits_dir.empty()) {
         cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
         if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
             cap = cudaStreamCaptureStatusNone;
@@ -1011,7 +1011,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             goto final_logits_dump_done;
         }
         {
-        const std::string& dir = runtime_config().diagnostics.dump_final_logits_dir;
+        const std::string& dir = dispatch_policy().diagnostics.dump_final_logits_dir;
         static int dump_pass = 0;
         const int rows = static_cast<int>(logits_out.shape[0]);
         const int vocab = cfg.vocab_size;
@@ -1047,13 +1047,13 @@ final_logits_dump_done:
     // appends one line to gdn_state_stats.jsonl — so a 46k-token prefill leaves
     // a per-chunk record of RMS and non-finite counts, which IS the drift curve.
     // Skipped under graph capture for the same reason the logit dump is.
-    if (!runtime_config().diagnostics.dump_gdn_state_dir.empty() && state.ssm_state != nullptr &&
+    if (!dispatch_policy().diagnostics.dump_gdn_state_dir.empty() && state.ssm_state != nullptr &&
         state.ssm_seq_id >= 0) {
         cudaStreamCaptureStatus gcap = cudaStreamCaptureStatusNone;
         if (cudaStreamIsCapturing(stream, &gcap) != cudaSuccess)
             gcap = cudaStreamCaptureStatusNone;
         if (gcap == cudaStreamCaptureStatusNone && state.ssm_state->h_dtype() == QType::F32) {
-            const std::string& gdir = runtime_config().diagnostics.dump_gdn_state_dir;
+            const std::string& gdir = dispatch_policy().diagnostics.dump_gdn_state_dir;
             const int n_gdn = state.ssm_state->n_ssm_layers();
             const size_t hb = state.ssm_state->h_bytes();
             const int per_layer = static_cast<int>(hb / sizeof(float));

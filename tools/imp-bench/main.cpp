@@ -1,7 +1,8 @@
 #include "common/exit_codes.h"
 #include "common/json_out.h"
 #include "runtime/config.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
+#include "runtime/process_diag_install.h"
 
 #include <chrono>
 #include <cstdio>

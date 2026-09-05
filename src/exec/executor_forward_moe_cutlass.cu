@@ -20,7 +20,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "core/logging.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdlib>
@@ -110,14 +110,14 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
     const bool staged_covers = stage_layer_for_prefill_(layer, stream, ctx);
 
     MoePrefillWorkspace obs{};
-    static const bool force_off = runtime_config().moe.no_cutlass3x;
+    static const bool force_off = dispatch_policy().moe.no_cutlass3x;
     const bool ids_cover = covers_ids(ly.expert_up_ids) && covers_ids(ly.expert_down_ids) &&
                            (ctx.non_gated_experts || covers_ids(ly.expert_gate_ids));
     obs.grouped_available = !force_off && cutlass_grouped_3x_nvfp4_available() &&
                             moe_.cutlass3x_packed && moe_.cutlass3x_sf &&
                             (staged_covers || ids_cover);
     if (!obs.grouped_available) {
-        verify_against_moe_routing_model(cfg.arch, runtime_config(), obs, MoePrefillPath::LEGACY);
+        verify_against_moe_routing_model(cfg.arch, dispatch_policy(), obs, MoePrefillPath::LEGACY);
         return false;
     }
 
@@ -145,7 +145,7 @@ bool device_args_done = false;
     // NVFP4 (decode unchanged). Set moe.nvfp4_device_args=false
     // to force the legacy
     // path for A/B or workarounds.
-    const bool da_enabled = runtime_config().moe.nvfp4_device_args;
+    const bool da_enabled = dispatch_policy().moe.nvfp4_device_args;
     // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2
     // only and has no per-expert bias hooks — the legacy host-args path below
     // runs apply_expert_activation (GPT_OSS_GLU-aware) with bias seams.
@@ -351,7 +351,7 @@ bool device_args_done = false;
             // host-args path below.
             obs.device_args_ready = true;
             dispatch_record::set_moe_prefill_tier(MoePrefillPath::DEVICE_ARGS);
-            verify_against_moe_routing_model(cfg.arch, runtime_config(), obs, MoePrefillPath::DEVICE_ARGS);
+            verify_against_moe_routing_model(cfg.arch, dispatch_policy(), obs, MoePrefillPath::DEVICE_ARGS);
         } else {
             IMP_LOG_ERROR(
                 "device-args full path failed; falling back to legacy");
@@ -410,7 +410,7 @@ char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 // ---------------------------------------------------------------------
 bool smallM_done = false;
 {
-    const auto& moe_cfg = runtime_config().moe;
+    const auto& moe_cfg = dispatch_policy().moe;
     const bool smallM_optin = moe_cfg.nvfp4_smallM && cfg.arch != ModelArch::GPT_OSS;
     if (smallM_optin && imp::gemm_grouped_nvfp4_smallM_available()) {
         const int smallM_threshold = moe_cfg.nvfp4_smallM_threshold;
@@ -688,7 +688,7 @@ bool smallM_done = false;
                         obs.smallM_available = true;
                         obs.smallM_under_threshold = true;
                         dispatch_record::set_moe_prefill_tier(MoePrefillPath::SMALL_M);
-                        verify_against_moe_routing_model(cfg.arch, runtime_config(), obs,
+                        verify_against_moe_routing_model(cfg.arch, dispatch_policy(), obs,
                                                          MoePrefillPath::SMALL_M);
                     } else {
                         IMP_LOG_ERROR(
@@ -713,7 +713,7 @@ bool smallM_done = false;
 if (!smallM_done) {
     dispatch_record::set_moe_prefill_tier(MoePrefillPath::GROUPED);
     obs.grouped_ready = true;
-    verify_against_moe_routing_model(cfg.arch, runtime_config(), obs, MoePrefillPath::GROUPED);
+    verify_against_moe_routing_model(cfg.arch, dispatch_policy(), obs, MoePrefillPath::GROUPED);
     if (layer == 0)
         IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)", n, expanded);
 }

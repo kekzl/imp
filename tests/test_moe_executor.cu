@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "model/model.h"
 #include "core/tensor.h"
 #include "compute/gemm.h"

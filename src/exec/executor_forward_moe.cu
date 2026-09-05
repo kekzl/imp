@@ -45,7 +45,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -122,7 +122,7 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // reading the cache, then queue the next layer's prefetch so the
     // prefetch stream gets compute-time overlap.
     if (expert_cache_.n_slots_ > 0) {
-        const int top_k_prefetch = runtime_config().moe.prefetch_top_k;
+        const int top_k_prefetch = dispatch_policy().moe.prefetch_top_k;
         if (top_k_prefetch > 0) {
             expert_cache_.await_prefetch(layer, stream);
             const int next_layer = layer + 1;
@@ -137,7 +137,7 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // legacy-serial-fallback uninit reads become deterministic zero reads.
     // Enable via the moe.zero_workspace config flag (was IMP_MOE_ZERO_WORKSPACE env). Cheap (~1 MiB
     // total memset).
-    if (runtime_config().moe.zero_workspace) {
+    if (dispatch_policy().moe.zero_workspace) {
         cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream);
@@ -368,7 +368,7 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
     // without the CUTLASS 3.x grouped path + packed/scale workspace, every
     // MoE prefill lands in run_moe_legacy_fallback_, whose host-args guard
     // throws under capture (moe_host_args_capture_guard).
-    if (runtime_config().moe.no_cutlass3x)
+    if (dispatch_policy().moe.no_cutlass3x)
         return true;
     if (!cutlass_grouped_3x_nvfp4_available())
         return true;
@@ -379,7 +379,7 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
 
 bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
                                                         const MoeFfnContext& ctx) const {
-    if (runtime_config().moe.no_cutlass3x)
+    if (dispatch_policy().moe.no_cutlass3x)
         return false;
     // gpt-oss: device-args path is arch-gated off (no GLU/bias hooks in the
     // fused act+quantize kernel) — keep the mirror in sync.
@@ -389,7 +389,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
         return false;
     if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
         return false;
-    if (!runtime_config().moe.nvfp4_device_args)
+    if (!dispatch_policy().moe.nvfp4_device_args)
         return false;
     if (!moe_.d_M_per || moe_.d_M_per_count < ctx.ne)
         return false;
@@ -485,7 +485,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Qwen3-30B-A3B pp512 3 968 -> 9 970 tok/s with IMMA. Each arm
         // records itself so the resolved-dispatch line names it (A1-7)
         // instead of printing `moe_prefill=unset`.
-        const bool moe_imma_pref = runtime_config().gemm.moe_imma_prefill;
+        const bool moe_imma_pref = dispatch_policy().gemm.moe_imma_prefill;
         if (!moe_imma_pref &&
             try_run_moe_q6k_prefill(layer, stream, n, d, eff, ne, expanded,
                                     non_gated_experts, up_qtype, routing, no)) {

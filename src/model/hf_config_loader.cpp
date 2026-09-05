@@ -4,7 +4,7 @@
 #include "vision/vision_model.h"
 #include "model/llm_compressor_loader.h"
 #include "core/logging.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include <cmath>
 #include <cstdlib>

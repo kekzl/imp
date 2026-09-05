@@ -20,7 +20,7 @@
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>

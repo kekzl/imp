@@ -91,7 +91,7 @@ struct ExecShape {
     int qk_rope_head_dim = 0;
     int qk_nope_head_dim = 0;
     int v_head_dim = 0;
-    bool mla_absorb = false;  // runtime_config().attention.mla_absorb
+    bool mla_absorb = false;  // dispatch_policy().attention.mla_absorb
     // Chunk-capture K/V scratch (executor_workspace_buffers.cu). The site takes
     // the MAX over the per-layer arrays rather than the config scalars —
     // hybrids have layers with different kv-head counts — so carry both maxima

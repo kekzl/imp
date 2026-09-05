@@ -1,6 +1,6 @@
 #include "compute/activation.h"
 #include "quant/nvfp4_pack.cuh"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>

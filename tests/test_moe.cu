@@ -9,7 +9,7 @@
 #include <vector>
 #include <set>
 #include <cstring>
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include "exec/moe_imbalance.h"
 
 namespace imp {

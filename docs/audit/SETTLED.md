@@ -192,8 +192,10 @@ missing:
   which is not a thing to do unmeasured on a repo with no GPU CI lane. Re-pinned 2026-09-05
   (AUDIT_arch_2026 P0-4): `rg -l 'include "compute/' src/quant` = 5 files; the four besides
   `nvfp4_gemm.cu` (`nvfp4_gemv_dense.cu`, `nvfp4_gemv_batched.cu`, `nvfp4_gemm_smallm_v2.cu`,
-  `nvfp4_gemv_fused.cu`) include only `compute/pdl_device.cuh`, a device-side helper that is
-  `core/` by content; dispatch #14 moves it. The one dispatch edge stands.
+  `nvfp4_gemv_fused.cu`) included only `compute/pdl_device.cuh`, a device-side helper that is
+  `core/` by content; it is `src/core/pdl_device.cuh` since 2026-09-06 (#NNNN, dispatch #14).
+  `quant -> compute` is one line again (`src/quant/nvfp4_gemm.cu`), pinned at 1 in
+  `tools/layering_pins.txt`. The one dispatch edge stands.
 
 Also closed: the two `compute → model` includes §11.1 called avoidable —
 `embedding.cu` and `gemm_dp4a.cu` pulled the 800-LOC `model/model_config.h` with the comment
@@ -328,7 +330,7 @@ the fixes did.
   from `src/runtime/engine.cpp`. The prefill function contains none. The audit read one
   call site; grepping the file settles it without a profile.
 - **F-17 does not reproduce.** The CUTLASS grouped GEMM genuinely never consults
-  `process_diag_deterministic_gemm()` (`src/runtime/process_diag.h`), but the determinism
+  `process_diag_deterministic_gemm()` (`src/core/process_diag.h`), but the determinism
   E2E test is 3/3 green with bit-identical greedy output and perplexity.
 - **F-4's count was wrong** — 3 files was actually 1 (#1206).
 - **#1205's resolved-dispatch line never printed.** The call sat before the final `return`
@@ -462,7 +464,9 @@ report's status lines so the fourth occurrence fails CI instead of costing a day
   includes `runtime/config.h` zero times.** Re-pinned 2026-09-05 (AUDIT_arch_2026 P0-1): one
   include is back, `src/exec/pre_dequant_phase1_fp16_cache.cu` (added by #1388, reads only
   `runtime_config().gemm.fp8_ssm_proj`, which `executor.h` already serves as `DispatchPolicy`);
-  dead, removal queued in dispatch #14. The scoping below is kept because it is what
+  removed 2026-09-06 (#NNNN, dispatch #14): `rg -c 'runtime/config.h' src/exec` = 0 again, and
+  `tools/check_layering.py` now fails on any unpinned backward layer include, so the line
+  cannot come back unnoticed. The scoping below is kept because it is what
   redirected the fix away from the audit's proposal — read it before proposing a POD
   extraction anywhere else in this repo. **Scoped by
   measurement 2026-08-03, and the audit's estimate is low by 2x.** It proposes extracting
@@ -494,6 +498,9 @@ report's status lines so the fourth occurrence fails CI instead of costing a day
   kv_cache` — which turns all 91 read sites into a prefix rename
   (`runtime_config().gemm.x` -> `dispatch_policy().gemm.x`) and removes the
   drift risk between POD and config that a hand-enumerated field list carries.
+  The rename itself landed 2026-09-06 (#NNNN, dispatch #14, AUDIT_arch_2026 G-2): the
+  accessor is `dispatch_policy()` on `GraphExecutor` and `QuantPipeline`, 143 sites, and
+  `runtime_config()` names only `Engine`'s full `RuntimeConfig`.
   (c) Those sections are nested inside `RuntimeConfig`, so they must be lifted
   out — and that is nearly free: **exactly one** explicit `RuntimeConfig::<Section>`
   reference exists across `src/ tools/ tests/`.
@@ -727,8 +734,13 @@ not listed here is still open in the queue.
 | D-4 LIMITATIONS names MoE atomics as the seed-divergence mechanism | DOC-FIXED - LIMITATIONS and `docs/determinism.md` name the live default-mode sources (cuBLASLt algo selection, the sampler's cross-block reductions, the FP32-compute scatter fallback) and say the default F16 fused scatter has no atomics | `docs/LIMITATIONS.md`; `docs/determinism.md` | #1919 |
 | E-9 roadmap "2026 bar" overstates two serving rows | ALREADY CLOSED on `main` before this dispatch - the rate-limit row reads "per-client-IP" and the adapter row states the one-adapter-at-a-time contract (#1914 + the ledger rewrite); no edit | `docs/roadmap.md` | - |
 | I-9 `TEST_INVENTORY.md` reads as current state | DOC-FIXED - a record header names the four superseded claims (macros 2 125 -> 2 710, hook installed, 61 -> 0 skips, `*Attention*`), the 6 `DISABLED_` tests and the regeneration command; `tests/CLAUDE.md` labels the link a record | `docs/audit/TEST_INVENTORY.md`; `tests/CLAUDE.md` | #1919 |
-| P0-1 SETTLED F-10 "zero times" is stale by one dead include | RE-PINNED in F-10 above - `src/exec/pre_dequant_phase1_fp16_cache.cu` named, removal queued in dispatch #14 | `src/exec/pre_dequant_phase1_fp16_cache.cu` | #1919 |
-| P0-4 `quant -> compute` is 5 edges, not the 1 SETTLED records | RE-PINNED in G above - the 4 `compute/pdl_device.cuh` includes named, the one dispatch edge stands, the move queued in dispatch #14 | `src/compute/pdl_device.cuh` | #1919 |
+| P0-1 = G-9 SETTLED F-10 "zero times" is stale by one dead include | RE-PINNED in F-10 (#1919), then FIXED - the include is deleted from `src/exec/pre_dequant_phase1_fp16_cache.cu`, `rg -c 'runtime/config.h' src/exec` = 0; an `exec -> runtime/config.h` line is unpinned in `tools/layering_pins.txt` and fails `check_layering.py` | `src/exec/pre_dequant_phase1_fp16_cache.cu` | #1919, #NNNN |
+| P0-4 `quant -> compute` is 5 edges, not the 1 SETTLED records | RE-PINNED in G (#1919), then FIXED - `pdl_device.cuh` is `src/core/pdl_device.cuh`; one edge left (`src/quant/nvfp4_gemm.cu`), pinned at 1 | `src/core/pdl_device.cuh` | #1919, #NNNN |
+| G-1 layer graph is one 8-node SCC; 64 of 88 backward lines are four dependency-free headers | FIXED as placement, the SCC stays 8 nodes as the scout's simulation said - `pdl.h`, `pdl.cu`, `pdl_device.cuh`, `process_diag.h`, `process_diag.cpp` (accessors), `graph_diag.h` live in `src/core/`; the `RuntimeConfig` half of the snapshot is `src/runtime/process_diag_install.{h,cpp}` (6 TUs); `storage_planner.{h,cpp}` in `src/exec/`. Backward lines 88 -> 24 (6 of them the `runtime/vram_budget.h` includes that the G-2 forward-declare moved from `executor.h` into the pre-dequant TUs), `compute/quant/model/memory -> runtime` = 0, `exec -> runtime` header-level = 0. The 18 are pinned with reasons in `tools/layering_pins.txt`; `tools/check_layering.py` (CI group `layering`, pre-commit and pre-push hooks) fails on an unpinned edge, a count above its pin, or a stale pin; selftest 5/5 | `tools/check_layering.py` `tools/layering_pins.txt` | #NNNN |
+| G-2 `executor.h` cost 4235 -> 6320; the accessor still named `runtime_config()` | FIXED, the two priced drops and the rename - `executor.h` forward-declares `VRAMBudget` (reverse-BFS TUs for `runtime/vram_budget.h` 82 -> 53 over src+tests+tools, the 9 pre-dequant TUs that read it include it themselves), `gemm_cutlass_sm120.h` carries an opaque `enum class FFNActivation` (`model/model_config.h` 159 -> 148 TUs); `GraphExecutor::dispatch_policy()` and `QuantPipeline::dispatch_policy()` replace `runtime_config()` at 143 sites, 0 left in `src/exec/` | `src/exec/executor.h` `src/compute/gemm_cutlass_sm120.h` | #NNNN |
+| P0-2 `vision_encoder.h` includes `runtime/cuda_graph.h` | PRICED, KEPT - `CudaGraphRunner` shares `src/runtime/cuda_graph.cu` (1455 LOC, 4 of 23 member definitions) with `CudaGraphConditionalRunner`, which takes `GraphExecutor*`; `cuda_graph.h` reaches 48 TUs and `vision_encoder.h` 45 with or without the edge, so splitting the runner out buys nothing measurable. Pinned at 1 with the reason | `tools/layering_pins.txt` | #NNNN |
+| P0-3 `storage_planner.h` in runtime/, consumed by exec/ | FIXED - `src/exec/storage_planner.{h,cpp}`; core/ was not an option (the .cpp reads `model/`), runtime -> exec is the intended direction for its two runtime readers | `src/exec/storage_planner.h` | #NNNN |
+| P0-5 `model -> exec` via `nvfp4_expert_offload.h` | KEPT, PINNED - the scout's simulation shows the move leaves the SCC unchanged; `weight_upload.cu` applies the exec-owned offload budget rule; pinned at 1 with the reason | `tools/layering_pins.txt` | #NNNN |
 | `gemm_kernel_registry.h:13-20` names a flag that does not exist | ALREADY CLOSED by dispatch #8 (the header now describes the 10-key table and the retired registrations) | `src/exec/gemm_kernel_registry.h` | #1916 |
 | H-7 Apache-2.0 code ships inside an MIT-labelled distribution with no Apache licence text | FIXED - `THIRD_PARTY_LICENSES.md`: the upstream `LICENSE` verbatim (201 lines) plus the source file's copyright header; upstream `thu-ml/SageAttention` is SPDX Apache-2.0 per the GitHub API, has no NOTICE file, file commit `e08749b2` (2025-09-25). Shipped in the runtime image at `/usr/share/doc/imp/` next to `LICENSE`, OCI label `MIT AND Apache-2.0`, README "License" section points at it; `check-release.sh` "license" section fails without the file, the label or the two pointers. Owner decision 2026-09-05: derivative-work reading (the file header transcribes a formula from upstream lines 245-256) | `THIRD_PARTY_LICENSES.md`; `Dockerfile`; `scripts/check-release.sh` | #1920 |
 | H-8 every third-party pin is a mutable ref (attribution half) | PARTLY - the SageAttention provenance is pinned to a file commit in `THIRD_PARTY_LICENSES.md`; the pin half (SHA pins for the 4 `cmake/imp-deps.cmake` tags, the Dockerfile clones, 9 action refs) has no P3 row and stays open | `THIRD_PARTY_LICENSES.md`; `cmake/imp-deps.cmake` | #1920 |

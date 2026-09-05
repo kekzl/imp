@@ -1,6 +1,6 @@
 #include "runtime/vram_budget.h"
 #include "runtime/engine.h"  // EngineConfig full definition
-#include "runtime/storage_planner.h"
+#include "exec/storage_planner.h"
 #include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (SfAtom padding)
 #include "compute/mmq_q8_imma.h"         // imma_q8_plane_bytes
 #include "core/logging.h"

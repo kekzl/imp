@@ -1,13 +1,13 @@
 #include "compute/rope.h"
 #include "compute/rope_yarn.cuh"
 #include "compute/warp_reduce.cuh"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cmath>
-#include "compute/pdl_device.cuh"
+#include "core/pdl_device.cuh"
 
 namespace imp {
 
@@ -403,7 +403,7 @@ void rope_yarn_corr_dims(int n_dims, int n_ctx_orig, float freq_base, float beta
 // PDL registration
 // --------------------------------------------------------------------------
 void rope_pdl_register() {
-    // Only kernels that call pdl_wait() may be registered (compute/pdl_device.cuh).
+    // Only kernels that call pdl_wait() may be registered (core/pdl_device.cuh).
     pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_fused_fp16_kernel));
 }
 

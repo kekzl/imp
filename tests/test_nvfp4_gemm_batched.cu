@@ -13,7 +13,7 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/tensor.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>

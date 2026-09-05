@@ -2,7 +2,7 @@
 // nvfp4_quant_hw.cu -- NVFP4 quantization with HW MMA scale layout
 // =============================================================================
 //
-// Adapted from thu-ml/SageAttention3 (Apache-2.0 License),
+// Adapted from thu-ml/SageAttention, subtree sageattention3_blackwell (Apache-2.0 License),
 // sageattention3_blackwell/sageattn3/quantization/fp4_quantization_4d.cu.
 // Copyright (c) 2025 SageAttention team.
 //

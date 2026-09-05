@@ -153,7 +153,7 @@ _180 files · code LOC p50=36 p90=113 max=1295 · raw LOC p50=70 p90=196 max=163
 | 150 | 596 | — |  | `src/runtime/config.h` |
 | 144 | 239 | — |  | `src/compute/preamble_gate.h` |
 | 144 | 202 | — |  | `tools/imp-server/handlers.h` |
-| 139 | 175 | — |  | `src/runtime/graph_diag.h` |
+| 139 | 175 | — |  | `src/core/graph_diag.h` |
 | 118 | 253 | — |  | `src/runtime/cuda_graph.h` |
 | 113 | 357 | — |  | `src/memory/kv_cache_manager.h` |
 | 113 | 187 | — |  | `src/model/chat_template.h` |

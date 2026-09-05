@@ -33,7 +33,7 @@ struct GemmContext {
 
     // Phase 5 Track D follow-up: per-Engine knobs; were read from
     // RuntimeConfig::current() in gemm_dispatch / gemm_kernel_gguf hot paths.
-    // Wired by the executor's GemmContext::make caller from runtime_config().
+    // Wired by the executor's GemmContext::make caller from dispatch_policy().
     bool q4k_hmma_enabled = false;
     bool q8_imma_enabled = false;
     bool q4k_imma_prefill = false;

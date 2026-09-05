@@ -4,7 +4,7 @@
 #include "core/cuda_static_reset.h"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>

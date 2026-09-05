@@ -1,11 +1,11 @@
 #include "exec/executor_kernels.h"
 #include "core/logging.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 
 #include <cuda_bf16.h>
 #include <algorithm>
-#include "compute/pdl_device.cuh"
+#include "core/pdl_device.cuh"
 
 namespace imp {
 

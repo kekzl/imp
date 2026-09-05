@@ -54,7 +54,7 @@ bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out)
 }
 
 void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
-    if (!runtime_config().gemm.nvfp4_smallm)
+    if (!dispatch_policy().gemm.nvfp4_smallm)
         return;
     // Size for decode rows: that is when the GGUF overlay arm is live.
     const bool saved = cur_decode_rows_;
@@ -71,7 +71,7 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
             continue;
         const int N = static_cast<int>(nv.N);
         const int K = static_cast<int>(nv.K);
-        const bool v2 = runtime_config().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
+        const bool v2 = dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
         ws_need = std::max(ws_need, v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
                                        : gemm_nvfp4_smallm_workspace_bytes(N));
         xq_need = std::max(xq_need, (size_t)32 * (K / 2) + (size_t)32 * (K / 16));
@@ -107,7 +107,7 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
 
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                             uint8_t** scales_out) {
-    if (!runtime_config().gemm.nvfp4_smallm || cur_spec_verify_ || overlap_prefill_active_)
+    if (!dispatch_policy().gemm.nvfp4_smallm || cur_spec_verify_ || overlap_prefill_active_)
         return nullptr;
     if (M < 2 || M > 32 || K <= 0 || (K & 255) != 0)
         return nullptr;
@@ -170,8 +170,8 @@ bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, cons
     // BOTH weights, plus: same K, v2 only, stripes==1 shapes only, fresh
     // outputs only. Every decline is a plain `false` — the caller issues the
     // two single dispatches it would have issued anyway.
-    if (!runtime_config().gemm.nvfp4_smallm || runtime_config().gemm.nvfp4_smallm_impl != 2 ||
-        !runtime_config().gemm.nvfp4_smallm_pair || ctx.spec_verify_small_m ||
+    if (!dispatch_policy().gemm.nvfp4_smallm || dispatch_policy().gemm.nvfp4_smallm_impl != 2 ||
+        !dispatch_policy().gemm.nvfp4_smallm_pair || ctx.spec_verify_small_m ||
         overlap_prefill_active_ || ctx.beta != 0.0f || id_a == kInvalidTensorID ||
         id_b == kInvalidTensorID)
         return false;

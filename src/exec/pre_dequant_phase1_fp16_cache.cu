@@ -12,12 +12,12 @@
 // refactor roadmap. See pre_dequant_internal.h for shared helpers.
 
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "model/tensor_kind_table.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
-#include "runtime/config.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -117,7 +117,7 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         // lossless: these ARE the published weights, not a requantization.
         // Same config gate, so `gemm.fp8_ssm_proj = false` falls back to the
         // FP16 copy for both paths.
-        if (native_fp8 && runtime_config().gemm.fp8_ssm_proj) {
+        if (native_fp8 && dispatch_policy().gemm.fp8_ssm_proj) {
             FP8CacheEntry fe;
             fe.weight = Tensor(w.data, QType::FP8_E4M3, w.ndim, w.shape, true);
             fe.host_scale = w.tensor_scale;  // per-tensor: d_row_scales stays null

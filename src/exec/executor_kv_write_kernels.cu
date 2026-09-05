@@ -2,7 +2,7 @@
 #include "exec/executor_kernels_internal.cuh"
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
-#include "compute/pdl_device.cuh"
+#include "core/pdl_device.cuh"
 
 namespace imp {
 

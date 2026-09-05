@@ -5,7 +5,8 @@
 #include "webui_asset.h"  // generated: IMP_WEBUI_HTML
 #include "model/hf_hub.h"
 #include "runtime/config.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
+#include "runtime/process_diag_install.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>

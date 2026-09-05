@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/kv_cache.h"
 #include "compute/gemm.h"
 #include "test_model_builder.h"

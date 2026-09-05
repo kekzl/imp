@@ -161,6 +161,15 @@ fi
 # scheduler split cost a full CI roundtrip on a roadmap.md citation the
 # pre-push never checked). Cheap (<0.5 s), hermetic, covers roadmap.md plus
 # every living doc; records (archive/, plans/, audit/) stay excluded.
+if want layering; then
+    echo "== Layering =="
+    # Backward #include edges between src/ layers against tools/layering_pins.txt.
+    # 88 lines on 2026-09-05, 24 after AUDIT_arch_2026 dispatch #14; the dead
+    # runtime/config.h include in exec/ had come back once (#1388) with no gate.
+    run "backward layer includes pinned"        python3 tools/check_layering.py
+    run "that gate still classifies its cases"  python3 tools/check_layering.py --selftest
+fi
+
 if want citations; then
     echo "== Doc citations =="
     run "file:line citations in living docs"    python3 scripts/check_doc_citations.py .

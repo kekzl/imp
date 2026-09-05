@@ -42,7 +42,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -503,7 +503,7 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     int max_rows_per_expert = 0;
     for (int e = 0; e < ne; ++e)
         max_rows_per_expert = std::max(max_rows_per_expert, h_offsets[e + 1] - h_offsets[e]);
-    const bool moe_imma = runtime_config().gemm.moe_imma_prefill;
+    const bool moe_imma = dispatch_policy().gemm.moe_imma_prefill;
 
     auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype, const char* a_base,
                                   char* c_base, int K_dim, int N_dim,
@@ -639,7 +639,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // across warps. Making this kernel faster needs K split across several
     // warps per row - an algorithm change, not a launch-config change.
     constexpr int kMaxFusedExperts = 8;
-    const std::string& dl = runtime_config().diagnostics.dump_logits_dir;
+    const std::string& dl = dispatch_policy().diagnostics.dump_logits_dir;
     bool dump_logits = !dl.empty() && (layer == 29 || dl == "all");
 
     if (fp32_gate_logits_ready) {
@@ -693,7 +693,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     }
 
     // Routing decision dump
-    if (const std::string& drv = runtime_config().diagnostics.dump_routing_dir; !drv.empty()) {
+    if (const std::string& drv = dispatch_policy().diagnostics.dump_routing_dir; !drv.empty()) {
         bool dump_all = (drv == "all");
         if (layer == 0 || dump_all) {
             int last_tok = n - 1;
@@ -746,7 +746,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // funnel, and not inside run_topk: the fused gate+top-k decode branch above
     // never calls run_topk, so a hook there would silently miss every
     // single-token decode - which is the case this measurement is about.
-    if (!runtime_config().diagnostics.moe_expert_hist.empty()) {
+    if (!dispatch_policy().diagnostics.moe_expert_hist.empty()) {
         if (moe_.expert_hist == nullptr) {
             int n_layers = cfg.n_layers;
             size_t bytes = static_cast<size_t>(n_layers) * ne * sizeof(unsigned int);
@@ -760,7 +760,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                 moe_.hist_experts = ne;
                 moe_.hist_top_k = top_k;
                 IMP_LOG_INFO("moe expert histogram: recording %d layers x %d experts -> %s", n_layers, ne,
-                             runtime_config().diagnostics.moe_expert_hist.c_str());
+                             dispatch_policy().diagnostics.moe_expert_hist.c_str());
             } else {
                 IMP_LOG_WARN("moe expert histogram: allocation failed - not recording");
             }
@@ -782,7 +782,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // and would append n*top_k behind a single record header, which the reader
     // cannot split back apart. Prefill decisions are not what a cache is judged
     // on anyway - the per-token stream is.
-    if (n == 1 && !runtime_config().diagnostics.moe_expert_trace.empty()) {
+    if (n == 1 && !dispatch_policy().diagnostics.moe_expert_trace.empty()) {
         if (moe_.expert_trace == nullptr) {
             // 8M ints ~= 32 MiB: 512 tokens x 48 layers x (1+8) is 221k, so this
             // holds a very long run before the capacity guard bites.
@@ -795,7 +795,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                 IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.trace_cursor, 0, sizeof(unsigned int), stream));
                 moe_.trace_top_k = top_k;
                 IMP_LOG_INFO("moe expert trace: recording -> %s",
-                             runtime_config().diagnostics.moe_expert_trace.c_str());
+                             dispatch_policy().diagnostics.moe_expert_trace.c_str());
             } else {
                 vram_free(vram_alloc_, moe_.expert_trace);
                 vram_free(vram_alloc_, moe_.trace_cursor);
@@ -1105,7 +1105,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         int eff_q8_blocks = eff / 32;
         if (!non_gated_experts) {
             if (cfg.ffn_activation == FFNActivation::GEGLU) {
-                if (layer == 0 && runtime_config().diagnostics.debug_forward)
+                if (layer == 0 && dispatch_policy().diagnostics.debug_forward)
                     IMP_LOG_DEBUG("[DEBUG_MoE] Using GEGLU activation for MoE experts");
                 geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
             } else {
@@ -1159,7 +1159,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     const auto& ly = model_->layer(layer);
 
     // DIAGNOSTIC: moe.no_shared_mlp config flag (was IMP_NO_SHARED_MLP env).
-    static const bool s_no_shared_mlp = runtime_config().moe.no_shared_mlp;
+    static const bool s_no_shared_mlp = dispatch_policy().moe.no_shared_mlp;
     if (ly.w_up_shared.data == nullptr || s_no_shared_mlp) return;
 
     int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
@@ -1174,7 +1174,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
     Tensor sh_down(moe_.expert_down.data, compute_dtype_, 2, sh_down_shape, true);
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
     gemm_via_handle_(ly.w_up_shared_id, no, sh_up, ctx);
 
@@ -1224,7 +1224,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
         debug_tensor_rows("L0_shared_post_norm1", sh_down, stream);
     }
     // Qwen3-Next / Qwen3.6: per-token sigmoid gate on shared-expert output.
-    static const bool skip_shexp_gate = runtime_config().moe.no_shexp_gate;
+    static const bool skip_shexp_gate = dispatch_policy().moe.no_shexp_gate;
     if (!skip_shexp_gate && ly.shared_expert_gate_inp.data != nullptr &&
         ly.shared_expert_gate_inp.on_device && compute_dtype_ == QType::F16) {
         shared_expert_gate_scale(no.data, ly.shared_expert_gate_inp.data, sh_down.data, n, d, d, stream);

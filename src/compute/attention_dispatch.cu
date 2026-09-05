@@ -2,7 +2,7 @@
 #include "compute/attention_tc.h"
 #include "core/logging.h"
 #include "core/dispatch_policy.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>

@@ -19,6 +19,7 @@
 //
 
 #include "compute/gemm_cutlass_sm120.h"
+#include "model/model_config.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_utils.cuh"
 #include "core/cuda_static_reset.h"
@@ -31,7 +32,7 @@
 #include <cassert>
 #include <type_traits>
 
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include "cutlass/cutlass.h"
 #include "cute/tensor.hpp"

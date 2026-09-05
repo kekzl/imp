@@ -4,8 +4,8 @@
 #include "core/cuda_static_reset.h"
 #include "core/tensor.h"
 #include "core/logging.h"
-#include "runtime/pdl.h"
-#include "runtime/process_diag.h"
+#include "core/pdl.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cublasLt.h>

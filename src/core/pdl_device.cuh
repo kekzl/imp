@@ -2,7 +2,7 @@
 
 // Programmatic Dependent Launch, device half.
 //
-// The host half (runtime/pdl.h: the launch attribute, and the graph-edge
+// The host half (core/pdl.h: the launch attribute, and the graph-edge
 // rewrite in runtime/cuda_graph.cu) lets a registered kernel be SCHEDULED
 // while its predecessor is still running. That is only correct when the
 // registered kernel calls pdl_wait() before it touches any global memory a

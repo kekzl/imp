@@ -26,7 +26,7 @@
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "quant/fp8_utils.cuh"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>

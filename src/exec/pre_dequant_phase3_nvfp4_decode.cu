@@ -15,6 +15,7 @@
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
@@ -87,7 +88,7 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
             IMP_LOG_INFO("GDN/SSM: excluding %d recurrent projections from NVFP4 cache", n_ssm_excluded);
     }
 
-    const bool decode_all = runtime_config().gemm.nvfp4_decode_all;
+    const bool decode_all = dispatch_policy().gemm.nvfp4_decode_all;
     auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype) {
         if (!w.data)
             return;
@@ -132,7 +133,7 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
     {
         const auto& prof = model_->profile();
         const bool gdn_head_ok = !(prof.is_gdn || prof.is_ssm) ||
-                                 runtime_config().gemm.nvfp4_lm_head_gdn;
+                                 dispatch_policy().gemm.nvfp4_lm_head_gdn;
         // This collector only serves QUANTIZED (GGUF) heads — a native
         // BF16/F16 head routes through nvfp4_decode_cache_fp16_lm_head_
         // instead, so gate (and log) only for quantized sources to avoid a
@@ -142,7 +143,7 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         // #982 net rule for quantized heads — see nvfp4_lm_head_enabled().
         // GDN/SSM hybrids defer to the gdn_head_ok gate above instead of the
         // dense/MoE net rule (GOAL-listed nvfp4_lm_head_gdn trade).
-        const bool head_on = nvfp4_lm_head_enabled(runtime_config(), /*quantized_source=*/true,
+        const bool head_on = nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/true,
                                                    prof.is_dense, cfg.d_model,
                                                    /*is_gdn_hybrid=*/prof.is_gdn || prof.is_ssm);
         if (quantized_head) {
@@ -163,7 +164,7 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
 
 void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream) {
     // Native-precision head (checked below): auto → ON per the #982 net rule.
-    if (!nvfp4_lm_head_enabled(runtime_config(), /*quantized_source=*/false,
+    if (!nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false,
                                model_->profile().is_dense, cfg.d_model))
         return;
 
@@ -189,7 +190,7 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
     // recurrent state; NVFP4 there degrades coherence (memory
     // lm_head_only_nvfp4_qwen3_6_refuted). Detect via any GDN/SSM layer.
     // Opt-in override (gemm.nvfp4_lm_head_gdn) to re-measure the tradeoff.
-    if (!runtime_config().gemm.nvfp4_lm_head_gdn) {
+    if (!dispatch_policy().gemm.nvfp4_lm_head_gdn) {
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             if (L.ssm_in.data || L.ssm_out.data || L.gdn_gate.data) {
@@ -242,7 +243,7 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
 // removed; keeping those projections FP16 is correct for speed, not just quality.
 void QuantPipeline::nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
-    const bool do_attn = runtime_config().gemm.nvfp4_attn_proj;
+    const bool do_attn = dispatch_policy().gemm.nvfp4_attn_proj;
     if (!do_attn)
         return;
 
@@ -321,7 +322,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     // the activation) to W4A16 (the gemm_nvfp4 safety net in
     // executor_gemm_dispatch.cu) and changed a teacher-forced perplexity by
     // -1.25 %.
-    const bool skip_decode_cache = runtime_config().diagnostics.no_nvfp4_decode_cache;
+    const bool skip_decode_cache = dispatch_policy().diagnostics.no_nvfp4_decode_cache;
     if (skip_decode_cache) {
         IMP_LOG_INFO(
             "NVFP4 decode cache DISABLED (diagnostics.no_nvfp4_decode_cache) — "

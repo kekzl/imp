@@ -379,7 +379,7 @@ public:
     // Phase 5 Track D: per-Engine RuntimeConfig (replaces RuntimeConfig::current()
     // singleton). Engine::init snapshots the loaded config; engine_init_resolver
     // mutates it in place for arch-specific defaults; GraphExecutor reads a
-    // non-owning pointer set via set_runtime_config().
+    // non-owning pointer set via set_dispatch_policy().
     const RuntimeConfig& runtime_config() const noexcept { return runtime_config_; }
 
     // Why CUDA graphs are off, or None if they are on. Readable so a test can

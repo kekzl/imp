@@ -115,7 +115,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         (!has_post_ffn_norm && !will_fuse_down_residual && !will_fuse_down_nvfp4 &&
          !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 && !will_fuse_down_mxfp4 && n > 1 &&
          n <= 32 && h.qtype == QType::F16 && wd_tier == StorageTier::CUTLASS_NVFP4 &&
-         runtime_config().gemm.nvfp4_residual_beta1 && !cur_spec_verify_ && !overlap_prefill_active_ &&
+         dispatch_policy().gemm.nvfp4_residual_beta1 && !cur_spec_verify_ && !overlap_prefill_active_ &&
          lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_down_residual && !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 &&
         !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !will_fuse_down_beta1_nvfp4 &&
@@ -124,7 +124,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     }
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
     // 3. Gate and Up projections
@@ -280,7 +280,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         // Instrumentation-only: measure contextual FFN sparsity (decode only).
         // Reads go and uo, counts rows with |silu(gate)*up| under each of 5
         // thresholds. Cheap (~1 µs / layer) when on, no-op when off.
-        if (n == 1 && runtime_config().ffn.sparsity_probe &&
+        if (n == 1 && dispatch_policy().ffn.sparsity_probe &&
             go.qtype == QType::F16 && uo.qtype == QType::F16) {
             const int K_ff = static_cast<int>(ly.w_gate.shape[0]);
             probe_ffn_silu_sparsity(layer, static_cast<const half*>(go.data),
@@ -392,7 +392,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // Phase 2 FFN sparsity: when threshold > 0 and Q8_0 down_proj, build
             // a per-Q8-block mask from gate*up and dispatch the masked GEMV.
             // Falls through to standard dispatch for other qtypes or when off.
-            const float sparsity_thr = runtime_config().ffn.sparsity_threshold;
+            const float sparsity_thr = dispatch_policy().ffn.sparsity_threshold;
             if (sparsity_thr > 0.0f && ly.w_down.qtype == QType::Q8_0 &&
                 qscratch_.ffn_block_mask != nullptr &&
                 cfg.ffn_activation != FFNActivation::GEGLU) {

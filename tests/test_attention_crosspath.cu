@@ -26,7 +26,7 @@
 #include "compute/attention_tc.h"
 #include "core/tensor.h"
 #include "refs/attention_crosspath_golden.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>

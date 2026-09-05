@@ -180,7 +180,7 @@ workload is found where the changed rounding does not move the token stream.
 ## PDL is wired without its device half, and stays that way
 
 **Superseded 2026-08-31.** The device half exists now
-(`src/compute/pdl_device.cuh`): registered decode kernels call
+(`src/core/pdl_device.cuh`): registered decode kernels call
 `griddepcontrol.wait` before their first global access and
 `launch_dependents` after their last input read, and `cuda_graph.cu`
 converts an edge only when the CONSUMER is registered (the promise that it

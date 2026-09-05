@@ -13,7 +13,7 @@
 #include "runtime/vram_budget.h"
 #include "model/model_arch.h"
 #include "compute/attention_paged.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "memory/vram_query.h"

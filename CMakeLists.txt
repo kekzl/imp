@@ -118,6 +118,8 @@ endif()
 
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
+    src/core/process_diag.cpp
+    src/core/pdl.cu
     src/core/tensor.cpp
     src/core/qtype.cpp
     src/core/buffer.cpp
@@ -307,8 +309,8 @@ endif()
 # (ptxas C7600 on sm_120a). This is resolved by using sm_120f instead.
 
 set(IMP_RUNTIME_SOURCES
+    src/runtime/process_diag_install.cpp
     src/runtime/config.cpp
-    src/runtime/process_diag.cpp
     src/runtime/spec_trace.cpp
     src/runtime/graph_eligibility.cpp
     src/runtime/green_ctx.cu
@@ -339,15 +341,14 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/vram_budget.cpp
     src/runtime/plan_shadow.cpp
     src/runtime/cuda_graph.cu
-    src/runtime/pdl.cu
     src/runtime/presets.cpp
-    src/runtime/storage_planner.cpp
     src/compute/mtp_forward.cu
     src/compute/mtp_topw.cu
     src/compute/encoder_forward.cu
 )
 
 set(IMP_EXEC_SOURCES
+    src/exec/storage_planner.cpp
     src/exec/executor.cu
     src/exec/executor_sampling.cu
     src/exec/executor_gemm_smallm.cu

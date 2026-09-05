@@ -1,6 +1,6 @@
 #include "model/chat_template.h"
 #include "core/logging.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 namespace {
 // These debug dumps used to be a prefix fprintf, a loop of partial writes and a

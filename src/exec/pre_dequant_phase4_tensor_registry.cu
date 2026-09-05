@@ -11,7 +11,7 @@
 #include "exec/pre_dequant_internal.h"
 #include "core/logging.h"
 #include "quant/dequant_gpu.h"
-#include "runtime/storage_planner.h"
+#include "exec/storage_planner.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

@@ -57,8 +57,8 @@ EXPECTED = {
 # Where the accessor is declared and defined. Counting these as sites would be
 # counting the switch as one of the things it switches.
 SELF = {
-    "src/runtime/process_diag.cpp",
-    "src/runtime/process_diag.h",
+    "src/core/process_diag.cpp",
+    "src/core/process_diag.h",
 }
 
 
@@ -172,7 +172,7 @@ def selftest():
                                   f"bool m() {{ {call} }}\n"),), None, 1),
         ("comment-only mention", (("src/runtime/engine.cpp",
                                    f"// {READER} in prose\n"),), None, 0),
-        ("accessor's own definition", (("src/runtime/process_diag.cpp",
+        ("accessor's own definition", (("src/core/process_diag.cpp",
                                         f"bool {READER[:-2]}() {{ return true; }}\n"),), None, 0),
         ("branch lost the flag", (), {**base, "src/compute/gemm.cu": 1}, 1),
         ("branch gained the flag", (), {**base, "src/compute/gemm.cu": 3}, 1),

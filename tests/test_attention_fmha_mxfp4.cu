@@ -9,7 +9,7 @@
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_tc.h"
 #include "core/tensor.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>

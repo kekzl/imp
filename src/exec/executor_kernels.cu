@@ -21,7 +21,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "exec/gemm_kernel_q4k_hmma.h"
 #include "compute/hadamard.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 

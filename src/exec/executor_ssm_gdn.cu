@@ -8,7 +8,7 @@
 #include "compute/ssm.h"
 #include "compute/gdn.h"
 #include "core/logging.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -81,7 +81,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     // is 48 of 64 layers, so the small-M verify optimisation never reached the
     // layers that dominate the architecture. Measured at 148 CUTLASS launches
     // and 4.26 ms per verify.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
@@ -316,7 +316,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     int n_heads = cfg.ssm_dt_rank;
     int head_dim_ssm = (n_heads > 0) ? inner / n_heads : 0;
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
     Tensor h = view_tokens(hidden_, n);
@@ -531,7 +531,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // mismatch. Gated by the gdn.vhead_reorder config flag (was IMP_GDN_VHEAD_REORDER env) to avoid
     // regressing symmetric
     // models or models whose converters already emit grouped layout.
-    const bool vhead_reorder = runtime_config().gdn.vhead_reorder;
+    const bool vhead_reorder = dispatch_policy().gdn.vhead_reorder;
     if (vhead_reorder && n_groups != n_heads) {
         const int inner_v = n_heads * head_dim_ssm;  // V channels = 32 * 128 = 4096 for Qwen 3.6
         const int BC_size_vh = n_groups * ssize;     // Q/K per-group size = 16 * 128 = 2048
@@ -593,7 +593,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         }
     }
 
-    const bool use_fp32_scan = runtime_config().gdn.fp32_scan;
+    const bool use_fp32_scan = dispatch_policy().gdn.fp32_scan;
 
     if (h_st) {
         size_t es = dtype_size(compute_dtype_);
@@ -647,12 +647,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // RMSNorm+Gate.
         //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
         //   models with sparse scan activations (Qwen 3.6 L1 head 0).
-        const bool use_ref = runtime_config().gdn.ref_kernel;
+        const bool use_ref = dispatch_policy().gdn.ref_kernel;
         // BF16 recurrent state (gdn.state_bf16): only the fused scan has a
         // BF16-state kernel — the chunkwise route stays FP32-only, so a BF16
         // pool drops it here (the init resolver already refused ref_kernel).
         const bool state_bf16 = (state.ssm_state && state.ssm_state->h_dtype() == QType::BF16);
-        const bool use_chunkwise = runtime_config().gdn.chunkwise_scan && !use_ref && !state_bf16;
+        const bool use_chunkwise = dispatch_policy().gdn.chunkwise_scan && !use_ref && !state_bf16;
         // Ragged prefill only exists for the fused batched scan (half y);
         // the fp32out/ref routes have no ragged entry and the engine's
         // assembly gate refuses those configs — defense in depth here.
@@ -763,7 +763,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // and 32 per-member launches of the fused kernel per layer read
             // -1.5% aggregate and +112 ms TTFT at 32 x 38-token prompts
             // against the one batched launch (2026-09-03).
-            bool ragged_chunkpar = ragged && !grouped && runtime_config().gdn.chunkpar_scan &&
+            bool ragged_chunkpar = ragged && !grouped && dispatch_policy().gdn.chunkpar_scan &&
                                    state.h_seq_offsets != nullptr && state.h_ssm_slots != nullptr &&
                                    gdn_chunkpar_ws_ != nullptr && head_dim_ssm == 128 && ssize == 128;
             if (ragged_chunkpar) {
@@ -800,14 +800,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                                    head_dim_ssm, ssize, n_groups, stream, gl,
                                                    static_cast<float*>(gdn_chunkpar_ws_),
                                                    gdn_chunkpar_ws_bytes_,
-                                                   runtime_config().gdn.chunkpar_strip);
+                                                   dispatch_policy().gdn.chunkpar_strip);
                         } else {
                             gdn_scan_chunkpar_f32(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
                                                   static_cast<float*>(h_s), y_s, rows, n_heads, head_dim_ssm,
                                                   ssize, n_groups, stream, gl,
                                                   static_cast<float*>(gdn_chunkpar_ws_),
                                                   gdn_chunkpar_ws_bytes_,
-                                                  runtime_config().gdn.chunkpar_strip);
+                                                  dispatch_policy().gdn.chunkpar_strip);
                         }
                     } else if (state_bf16) {
                         gdn_scan_fused_bf16(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
@@ -845,7 +845,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // pass, instead of 32 CTAs walking every token. Single-sequence
             // prefill only; padded verify chunks (d_chunk_len) and short
             // inputs stay on the routes below. Works for both state dtypes.
-            const bool use_chunkpar = runtime_config().gdn.chunkpar_scan && !use_ref && n >= 128 &&
+            const bool use_chunkpar = dispatch_policy().gdn.chunkpar_scan && !use_ref && n >= 128 &&
                                       state.d_chunk_len == nullptr && gdn_chunkpar_ws_ != nullptr &&
                                       head_dim_ssm == 128 && ssize == 128;
             if (use_chunkpar) {
@@ -859,7 +859,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                            static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm,
                                            ssize, n_groups, stream, gl,
                                            static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_,
-                                           runtime_config().gdn.chunkpar_strip);
+                                           dispatch_policy().gdn.chunkpar_strip);
                 } else {
                     gdn_scan_chunkpar_f32(conv_f32, conv_channels,
                                           static_cast<const half*>(alpha_proj_out.data),
@@ -869,7 +869,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                           static_cast<float*>(h_st), static_cast<half*>(y_buf.data), n,
                                           n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
                                           static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_,
-                                          runtime_config().gdn.chunkpar_strip);
+                                          dispatch_policy().gdn.chunkpar_strip);
                 }
             } else if (use_chunkwise) {
                 gdn_scan_chunkwise_f32(conv_f32, conv_channels,
@@ -916,8 +916,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // scan above (FP32-input variant). Skip to avoid double-applying.
     // [gdn] norm_eps_override > 0 can override eps (diagnostic).
     float norm_eps = eps;
-    if (runtime_config().gdn.norm_eps_override > 0.0f) {
-        norm_eps = runtime_config().gdn.norm_eps_override;
+    if (dispatch_policy().gdn.norm_eps_override > 0.0f) {
+        norm_eps = dispatch_policy().gdn.norm_eps_override;
     }
     if (!use_fp32_scan) {
         gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data), static_cast<const half*>(gate_out.data),
@@ -935,7 +935,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // residual in FP32 before downcast. FP16 accumulation here drifts ~5% per
     // element vs llama.cpp; that small drift amplifies to sign flips in
     // downstream near-zero projections and breaks Qwen 3.6.
-    const bool use_fp32_out = runtime_config().gdn.fp32_out;
+    const bool use_fp32_out = dispatch_policy().gdn.fp32_out;
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
     if (use_fp32_out) {
         // Allocate FP32 scratch via cudaMallocAsync (small: n * d_model * 4 bytes)

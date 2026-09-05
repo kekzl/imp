@@ -49,14 +49,14 @@
             const bool shapes_uniform = !per_layer_shapes || attn_shapes_uniform();
             // hd=256 rides the stage-1 FA2 port (attention.fa2_hd256, default
             // on since #932): same fp16-qk kernel family, Bq=64/TWOSLOT instance.
-            const bool fa2_hd_ok = fa2_serves_head_dim(hd, runtime_config().attention.fa2_hd256);
+            const bool fa2_hd_ok = fa2_serves_head_dim(hd, dispatch_policy().attention.fa2_hd256);
             // FA2 is chosen per-layer: heterogeneous Gemma-4 SWA layers (hd=256)
             // qualify even though the model is not uniform — the gather and the
             // attention are per-layer, so only THIS layer's head_dim matters.
             // (Previously gated on shapes_uniform, which forced all Gemma-4
             // layers onto cuBLAS.)
             const bool chunk_fa2_serves = !attn_sinks && fa2_hd_ok &&
-                                          runtime_config().attention.fa2_fp16qk != "never";
+                                          dispatch_policy().attention.fa2_fp16qk != "never";
             // The tiled WMMA FMHA serves any fused head_dim (incl. hd=512 since
             // this dispatch), per-layer — so Gemma-4 global layers (hd=512)
             // qualify too. Only learned sinks below the threshold still require
@@ -95,8 +95,8 @@
             // the S-matrix would overflow (the else branch below = O(n) fallback).
             const bool prefer_fmha =
                 chunk_fmha_ok && hd != 512 &&
-                ((runtime_config().attention.fmha_prefill_threshold > 0 &&
-                  ctx_len >= runtime_config().attention.fmha_prefill_threshold) ||
+                ((dispatch_policy().attention.fmha_prefill_threshold > 0 &&
+                  ctx_len >= dispatch_policy().attention.fmha_prefill_threshold) ||
                  small_growing_chunk);
             if (!chunk_fa2_serves && !chunk_fmha_ok && !smatrix_fits) {
                 // Sinks/heterogeneous shapes can ONLY be served by cuBLAS — the
@@ -132,7 +132,7 @@
             // skipped (KV already persisted).
             bool paged_kv_written = false;
             if (!cap_replay && kvt == QType::NVFP4 && hd == 128 && shapes_uniform && !attn_sinks &&
-                state.n_sequences == 1 && runtime_config().attention.mxfp4_paged_kv) {
+                state.n_sequences == 1 && dispatch_policy().attention.mxfp4_paged_kv) {
                 write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
                 paged_kv_written = true;
                 int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
@@ -147,7 +147,7 @@
                         static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), layer_block_tables,
                         kv_bs, ctx_len, nkv, scale, /*causal=*/true, layer_sliding_window,
                         cfg.attn_logit_softcap, stream, q_offset,
-                        runtime_config().attention.mxfp4_promote_budget)) {
+                        dispatch_policy().attention.mxfp4_promote_budget)) {
                     return;
                 }
                 // Declined: the gather below covers only [0, q_offset) and the
@@ -299,7 +299,7 @@
                 // bound work from the baked ctx_len. A decline here means the
                 // engine-side eligibility check and the kernel disagree — fail
                 // the capture rather than record a stale-length fallback.
-                if (!try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n,
+                if (!try_fa2_fp16qk_prefill(dispatch_policy(), qv, k_full_t, v_full_t, ao, n,
                                             state.ctx_capacity, nh, nkv, hd, scale,
                                             layer_sliding_window, cfg.attn_logit_softcap, q_offset,
                                             stream, state.context_lens)) {
@@ -307,7 +307,7 @@
                 }
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
             } else if (chunk_fa2_serves &&
-                try_fa2_fp16qk_prefill(runtime_config(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
+                try_fa2_fp16qk_prefill(dispatch_policy(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
                                        nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                        q_offset, stream)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise)
@@ -349,7 +349,7 @@
                 Tensor o4 = ao.reshape(4, o4s);
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
                 attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                           cfg.attn_logit_softcap, stream, runtime_config(), q_offset,
+                                           cfg.attn_logit_softcap, stream, dispatch_policy(), q_offset,
                                            static_cast<const half*>(attn_sinks));
             }
 
@@ -394,7 +394,7 @@
         // for why the #493 prefer-FA2-at-every-length override was reverted.
         // hd=512 never prefers the fused path (it is slower than cuBLAS); it
         // stays on cuBLAS until the S-matrix no longer fits.
-        const bool prefer_fmha = (n >= runtime_config().attention.fmha_prefill_threshold) && hd != 512;
+        const bool prefer_fmha = (n >= dispatch_policy().attention.fmha_prefill_threshold) && hd != 512;
 
         // NOTE (#566→#511): sliding-window prefill used to be routed AWAY
         // from the cuBLAS path here (`non_gemma4_sliding`) into the tiled
@@ -422,7 +422,7 @@
         // win); its hd=512 global layers stay on cuBLAS (faster than the fused
         // hd=512 kernel), with the FMHA dispatch as their O(n) overflow fallback.
         if (attn_sinks == nullptr &&
-            try_fa2_fp16qk_prefill(runtime_config(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
+            try_fa2_fp16qk_prefill(dispatch_policy(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
                                    layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
                                    stream)) {
             // handled by FA2 f16 — no S-matrix needed (hd 128/256, incl. Gemma-4 SWA)
@@ -461,7 +461,7 @@
             Tensor o4 = ao.reshape(4, o4s);
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
             attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                       cfg.attn_logit_softcap, stream, runtime_config(), /*q_offset=*/0,
+                                       cfg.attn_logit_softcap, stream, dispatch_policy(), /*q_offset=*/0,
                                        static_cast<const half*>(attn_sinks));
         }
 

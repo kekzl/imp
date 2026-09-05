@@ -6,12 +6,12 @@
 // Both kernels moved VERBATIM from layernorm.cu.
 #include "compute/layernorm.h"
 #include "quant/nvfp4_pack.cuh"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
-#include "compute/pdl_device.cuh"
+#include "core/pdl_device.cuh"
 
 namespace imp {
 
