@@ -14,7 +14,7 @@ there instead of retelling it.
 ### Added
 
 - `make verify-ab` (`scripts/verify_ab.sh`, `scripts/ab_base_image.sh`): the paired
-  half of the perf gate (AUDIT_arch_2026 dispatch #10, H-3 / H-2 / H-9, #NNNN).
+  half of the perf gate (AUDIT_arch_2026 dispatch #10, H-3 / H-2 / H-9, #1918).
   `origin/main` is built once per sha into `imp:ab-<sha>` and benched against
   `imp:test` in alternating pairs in one session; verdict = mean paired tg128
   delta vs the new `thresholds.paired_decode_regression_pct` (2 %) in
