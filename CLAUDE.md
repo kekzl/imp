@@ -29,6 +29,7 @@ Match the task, invoke that skill first.
 | Structure audit / dead code / god-files | skill **codebase-audit** — read [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) **before** forming hypotheses |
 | "Is this actually implemented?" — stub, ignored request field, dead kernel, test that asserts nothing | skill **find-stubs** — every rung ships its measured baseline |
 | Keep docs in sync after a change | skill **docs-sync** |
+| Doc layer, header, PROV; `docs` / `citations` gate red | skill **docs-layers** |
 | VRAM / ownership / lifetime / "where did the memory go" | read [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md) **first** |
 
 **Read the `CLAUDE.md` in the directory you are editing first.** `src/compute/`,
@@ -84,10 +85,9 @@ make verify-fast           # pre-push gate (#1587)             make verify   # f
   8% prefill). Refresh via `scripts/gen_perf_baseline.sh` only when a change
   intentionally moves perf, and say so in the PR.
 - Runtime config is `RuntimeConfig` in `src/runtime/config.h` (`imp.conf` +
-  `--config` + `--set`). The env vars seeded are `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`, and the three
-  trace knobs promoted to config keys in #1207 (`IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`,
-  `IMP_PPL_DUMP` → `diagnostics.spec_trace` / `.jump_trace` / `.ppl_dump`)
-  and `IMP_FMHA_FA2`; don't reintroduce ad-hoc env reads.
+  `--config` + `--set`). Env vars seeded into it: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`,
+  `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING` (-> `diagnostics.*`);
+  don't reintroduce ad-hoc env reads.
 - Internal errors throw and are translated to `ImpError` at the
   `src/api/imp_api.cpp` boundary — intentional, don't convert them to status returns.
 - Match surrounding code style; simple and direct, no speculative abstraction.

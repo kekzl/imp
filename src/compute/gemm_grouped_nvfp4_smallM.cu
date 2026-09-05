@@ -189,23 +189,25 @@ __global__ void smallM_kernel_v1_software_ref(
 #endif  // SMALLM_SOFTWARE_REF
 
 // ---------------------------------------------------------------------------
-// smallM kernel v2 — TMA loads + 3-stage producer/consumer pipeline.
+// smallM kernel (smallM_kernel_v1): TMA loads + N_STAGES-deep producer/consumer
+// pipeline, warp-specialised. There is no v2 in this file; the unrelated
+// src/quant/nvfp4_gemm_smallm_v2.cu is the dense small-M kernel
+// (AUDIT_arch_2026 A2-7 corrected this block).
 //
-// Grid:  (n_experts, N / TILE_N).  Each CTA owns one expert × one n-tile.
-// Block: 256 threads (8 warps).
+// Grid:  (n_experts, N / TILE_N).  Each CTA owns one expert x one n-tile.
+// Block: 256 threads (8 warps): warps 0-3 produce, warps 4-7 consume.
 //
-// Pipeline (3 stages):
-//   * Stage SMEM holds A[3], B[3], SFA[3], SFB[3] sub-buffers + 3 mbarriers.
-//   * Single producer thread (lane 0 of warp 0) issues TMA for A and B at
-//     stage s (n-iter coord (k_packed, 0/n_base)) plus per-thread cp.async
-//     for SFA/SFB (their gmem stride is K/16 bytes — too small for TMA on
-//     low-K test cases; cheap enough that bulk-issue only saves us a warp
-//     of cp.async ops per stage).
-//   * mbarrier_arrive_expect_tx covers TMA + cp.async transactions per stage.
-//   * Consumers (all 8 warps) wait on stage's mbarrier, then run MMAs over
-//     SMEM[stage_idx % 3] accumulating into registers. This matches the
-//     pre-existing fragment layout — same per-lane addressing inside each
-//     stage's SMEM slice.
+// Pipeline (N_STAGES in [2,4]):
+//   * Stage SMEM holds A, B, SFA, SFB sub-buffers per stage plus a full and
+//     an empty mbarrier per stage.
+//   * Producer warps 0-3: thread 0 arrives with expect_tx and issues the two
+//     TMA loads (A and B) for the stage; the other producer threads cp.async
+//     the SFA/SFB scale rows (their gmem stride is K/16 bytes, too small for
+//     TMA on low-K shapes) and arrive on the same barrier.
+//   * Consumer warps 4-7: each owns N_ITERS_PER_CONSUMER of the n-iters,
+//     waits on the stage's full barrier, runs MMAs over that stage's SMEM
+//     slice accumulating into registers, then releases the stage through
+//     the empty barrier so the producers can refill it.
 //
 // SMEM budget @ TILE=128, 3 stages:
 //   A:  3 × 8 KiB  = 24 KiB

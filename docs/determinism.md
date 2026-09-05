@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # Determinism
@@ -17,7 +17,9 @@ opt-in full-reproducibility mode for temperature=0 evals. It eliminates the
 known run-to-run non-determinism sources by selecting deterministic kernel
 variants:
 
-- **MoE token routing** — atomic expert-bucket scatter ordering.
+- **MoE token routing**: atomic expert-bucket scatter ordering on the FP32-compute
+  fallback (`moe_routing_permute.cu`); the default F16 fused scatter has no atomics,
+  so on the default path this source is absent and the GEMM one below dominates.
 - **Top-k sampling** — atomicMax/atomicAdd softmax-stat races (single-block
   path, `top_k <= 128`).
 - **GEMM** — implies `deterministic_gemm`, which is **the cuBLASLt path**

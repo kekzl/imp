@@ -74,6 +74,26 @@ Q4_K** hybrid path by extending that sidecar to the Q8_0-kept GDN projections
 (35B Q4_K decode 224 → 272 tok/s, 2026-07-11) — both now ahead of llama.cpp's
 ~229. GGUF remains the legacy path — NVFP4 SafeTensors is the priority.
 
+### Competitive sweep 2026-08-30 (imp v0.33.0, llama.cpp image digest `c49f4d48`)
+
+The README headline table, recorded here so the L0 page embeds instead of owning
+(AUDIT_arch_2026 J-4). Same card, same GGUF, same flags, decode tok/s; imp defaults
+(n-gram speculation on) against llama.cpp defaults, full offload, flash attention on.
+
+| Model (shared quant) | imp default | imp spec-off | llama.cpp | imp lead |
+|---|---:|---:|---:|---:|
+| Qwen3-8B Q8_0 | **385.4** | 284.6 | 160.1 | +141 % (+78 % spec-off) |
+| Qwen3-14B Q6_K | **162.5** | | 114.8 | +42 % |
+| Qwen3.6-35B-A3B UD-Q4_K_M | **287.9** | | 235.8 | +22 % |
+| gpt-oss-20b MXFP4 | **382.7** | | 335.9 | +14 % |
+| Gemma-4-26B-A4B UD-Q4_K_M | **245.0** | | 214.4 | +14 % |
+| Qwen3-30B-A3B Q4_K_M | 305.5 | | 295.7 | +3 % |
+
+[PROV: commit=83cb5178 date=2026-08-30 hw=RTX5090 model=six-model-sweep
+       quant=per-row cuda=13.3 path=gguf cmd=`make bench-competitive` n=6x2
+       note=imp defaults vs llama.cpp defaults, full offload, flash attention on;
+       spec-off measured for Qwen3-8B only (`--set speculative.ngram=false`)]
+
 ### Competitive re-sweep 2026-08-21 (llama.cpp build 10524 `9ee9fc04c`)
 
 Reproduce with `make bench-competitive`. The competitor image is pinned **by

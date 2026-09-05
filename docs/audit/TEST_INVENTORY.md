@@ -3,6 +3,16 @@
 Date: 2026-08-08 · Commit: `ad067d76` (v0.23.0, `main`) · Box: RTX 5090 / WSL2 /
 CUDA 13.3.1 · Build: `build-dev` (incremental, identical codegen to `make build`)
 
+**Record, not current state (AUDIT_arch_2026 I-9, 2026-09-05).** Everything below
+describes `ad067d76`. Superseded since: gtest macros 2 125 -> 2 710 on 2026-09-05
+(`python3 tools/check_test_lanes.py --report` prints the live per-lane count);
+the Stage-1 GPU pre-commit hook IS installed (md5-identical, 2026-09-02); CI
+unit-lane skips 61 -> 0 (`guard_unit_skips`, #1862); the attention filter is
+`*Attention*` (#1586); `DISABLED_` tests are 6, not 4
+(`BatchedSmallM.DISABLED_MarginalRowCost`, `FmhaHd512Test.DISABLED_BenchLongCtxFallback`,
+`SmallMV2Pair.DISABLED_M1PipelineVsGemvBench` joined, `FhmaMxFP4Test.DISABLED_BasicHD256`
+is gone). Live lane facts: `tests/CLAUDE.md`.
+
 Every number here was produced by a command whose output is in
 `loop/evidence/`. Nothing is quoted from documentation. Where a number
 contradicts prose elsewhere in the repo, the prose is listed in

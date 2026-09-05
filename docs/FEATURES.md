@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-03
-commit: c3e4db79
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # Feature matrix
@@ -30,8 +30,8 @@ Source: `src/model/model_arch.h`, `src/model/model.cpp`.
 
 | architecture | status | note |
 |---|---|---|
-| LLaMA, Mistral, Mixtral | ✅ | |
-| Phi-4 | 🟡 | **an alias onto the LLaMA path** (`model.cpp:316`), not a separate loader. No checkpoint of its own in any gate (#1680) |
+| LLaMA, Mistral, Mixtral | ✅ | Mixtral: the gate is the synthetic 8-expert case in `tests/test_moe_executor.cu` plus the template-family test; no Mixtral checkpoint has a `MODELS.md` row |
+| Phi-4 | 🟡 | **an alias onto the LLaMA path** (`src/model/model.cpp:391`), not a separate loader. No checkpoint of its own in any gate (#1680) |
 | DeepSeek, incl. V2 multi-head latent attention | ✅ | validated on DeepSeek-V2-Lite; latent-KV decode is opt-in |
 | Qwen3, Qwen3-MoE | ✅ | the pinned gate model is Qwen3-8B-Q8_0 |
 | Qwen3.5, Qwen3.5-MoE (Qwen3.6-27B and Qwen3.8-27B run on the same `qwen3_5` architecture path) | ✅ | Gated DeltaNet family; Qwen3.8-27B is the README worked example |
@@ -75,7 +75,7 @@ Source: `src/core/qtype.h`.
 | OpenAI Responses `/v1/responses` | ✅ | the dialect Codex and the Agents SDK speak |
 | SSE streaming, per token, all three dialects | ✅ | one shared driver since v0.18.1 |
 | `/v1/embeddings` | ✅ | |
-| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:290-291`), so the default gate does not run it (#1680) |
+| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:335`), so the default gate does not run it (#1680) |
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
 | `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |
 | model swap on request (`server.model_swap`) | 🟡 | in-flight generations drain, never cancelled. No gate exercises it (#1680) |

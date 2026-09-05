@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-04
-commit: 794cace8
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # docs
@@ -61,6 +61,7 @@ Nothing else in the tree states these. Everything else links here.
 | [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) | the measurement contract |
 | [`internals/CPP23.md`](internals/CPP23.md) | which C++23 the tree uses, and where the host/device line runs |
 | [`internals/PROFILING.md`](internals/PROFILING.md) | nsys and ncu on this host |
+| [`internals/vision_gemma4v_spec.md`](internals/vision_gemma4v_spec.md) | the Gemma-4 vision encoder, as implemented |
 
 ## Records, not documentation
 

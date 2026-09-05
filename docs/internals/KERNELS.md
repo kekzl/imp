@@ -1,15 +1,15 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # The Optimal sm_120a Attention Kernel
 
 Canonical design reference for the imp hot-path attention kernel on RTX 5090 (GB202, **sm_120a**, consumer Blackwell). The spec future FA2 levers must measure themselves against; grounded in the profiling ground-truth and empirical refutations through 2026-06, not in datacenter (B200 / FA4) assumptions.
 
-Companion docs: [`sm120.md`](SM120.md) (kernel notes), [`performance.md`](../PERF.md) (baselines + methodology). Hot-path source, both in `src/compute/attention_fmha_sm120.cu`: `fmha_sm120_fa2_kernel` (primary register-resident FA2, dispatched by `fmha_sm120_fa2_prefill`) and `fmha_sm120_kernel` (slow tiled-FMHA **fallback**, not an optimization target). The FA2 kernel is templated on `<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, …>`; the dispatcher bands the tile config by grid-fill (`blocks_128` vs `sm_count`).
+Companion docs: [`sm120.md`](SM120.md) (kernel notes), [`PERF.md`](../PERF.md) (baselines + methodology). Hot-path source, both in `src/compute/attention_fmha_sm120.cu`: `fmha_sm120_fa2_kernel` (primary register-resident FA2, dispatched by `fmha_sm120_fa2_prefill`) and `fmha_sm120_kernel` (slow tiled-FMHA **fallback**, not an optimization target). The FA2 kernel is templated on `<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, …>`; the dispatcher bands the tile config by grid-fill (`blocks_128` vs `sm_count`).
 
 ---
 
@@ -105,7 +105,7 @@ On a B200 the optimal kernel is FA4 with three *hardware* async pipelines. On sm
 
 ## 6. Decode counterpart (one paragraph - HBM-bound)
 
-The optimal decode "kernel" is **traffic elimination**, not a compute design: NVFP4 GEMVs at the GDDR7 ceiling (~1.5 GB/ms = 86 % datasheet) + a conditional CUDA graph + PDL. Built, at the limit; the only remaining wall-breaker is algorithmic (speculation), not kernel-technical. See the decode levers in `MEMORY.md` and `docs/performance.md`.
+The optimal decode "kernel" is **traffic elimination**, not a compute design: NVFP4 GEMVs at the GDDR7 ceiling (~1.5 GB/ms = 86 % datasheet) + a conditional CUDA graph + PDL. Built, at the limit; the only remaining wall-breaker is algorithmic (speculation), not kernel-technical. See the decode levers in `MEMORY.md` and [`../PERF.md`](../PERF.md).
 
 ## 7. Runnable companions + the GEMM addendum
 

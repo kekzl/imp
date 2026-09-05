@@ -67,6 +67,7 @@ make verify-fast     # the only gate that runs a kernel against a check
 
 ## See also
 
-[`docs/audit/TEST_INVENTORY.md`](../docs/audit/TEST_INVENTORY.md),
+[`docs/audit/TEST_INVENTORY.md`](../docs/audit/TEST_INVENTORY.md) (2026-08-08
+record; live counts: `tools/check_test_lanes.py --report`),
 [`docs/audit/MUTATION_BASELINE.md`](../docs/audit/MUTATION_BASELINE.md). Skill
 `building-and-testing`.

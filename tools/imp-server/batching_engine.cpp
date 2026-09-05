@@ -133,7 +133,8 @@ void BatchingEngine::notify_loop_() {
 namespace {
 // Worker-side phase attribution (companion to diagnostics.step_timing, which
 // covers the engine's step): admission (steps 0-2), engine->step(), delivery
-// staging (step 4). Enabled by IMP_WORKER_TIMING=1; logs every 256 loops.
+// staging (step 4). Enabled by diagnostics.worker_timing (IMP_WORKER_TIMING=1
+// is seeded into that key at config load); logs every 256 loops.
 struct WorkerTiming {
     double admit = 0, step = 0, stage = 0;
     int n = 0;
@@ -199,8 +200,7 @@ void BatchingEngine::worker_loop() {
     imp::Engine* engine = ctx_->engine.get();
     imp::KVCacheManager* kv_mgr = engine->kv_manager();
     if (!g_wt.init_done) {
-        const char* e = getenv("IMP_WORKER_TIMING");
-        g_wt.enabled = (e && e[0] == '1');
+        g_wt.enabled = engine->runtime_config().diagnostics.worker_timing;
         g_wt.init_done = true;
     }
 

@@ -1,15 +1,15 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # Quantization
 
 imp reads GGUF quantization (llama.cpp-compatible files, loaded directly) and SafeTensors NVFP4
 prequant (external calibration tools). Per-model picks: [`supported-models.md`](MODELS.md).
-Benchmark numbers: [`performance.md`](performance.md).
+Benchmark numbers: [`PERF.md`](PERF.md); per-row history [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Formats and where they show up
 
