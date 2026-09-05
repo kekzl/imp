@@ -69,6 +69,12 @@ there instead of retelling it.
 
 ### Fixed
 
+- GGUF and mmproj parsers refuse what used to write past a buffer (AUDIT_arch_2026
+  dispatch #2, F1-1/F1-2 S0, F1-5/F1-7 S1, F1-11): `n_dims > 4` (a stack write
+  in the loader), a `block_count` sized per-layer arrays 300 lines before its
+  cap, `bos_token_id` outside the vocab, a truncated shard. The vision loader's
+  180-line parser fork is gone and it bounds-checks every tensor; `fuzz_gguf` +
+  `fuzz_mmproj` bring the fuzzed parsers to 8 of 10.
 - Seven lazy device statics kept their guards armed across an engine teardown,
   one a device use-after-free on every `logit_bias` request after a model swap
   (AUDIT_arch_2026 B-1..B-3, dispatch #1). All register a reset hook now;

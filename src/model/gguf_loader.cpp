@@ -250,8 +250,18 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                     read_gguf_value(sreader, vtype);
                 }
 
-                // Parse shard tensor infos
+                // Parse shard tensor infos. A truncated shard appends fewer than
+                // stensor_count entries, and `size() - stensor_count` below then
+                // wraps (AUDIT_arch_2026 F1-11): the primary shard checks this,
+                // so does this one.
                 parse_tensor_infos(sreader, stensor_count, tensor_infos);
+                if (sreader.failed()) {
+                    IMP_LOG_ERROR("GGUF shard %d tensor info truncated: %s", shard, shard_path);
+                    for (auto& [p, s] : extra_mmaps)
+                        munmap(p, s);
+                    munmap(mmap_base, file_size);
+                    return nullptr;
+                }
 
                 // Compute shard tensor data start
                 size_t salign = alignment;  // use same alignment as primary
@@ -325,6 +335,18 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     };
 
     cfg.n_layers = static_cast<int>(get_uint("block_count"));
+    // `block_count` is the file's claim about itself: capped HERE, before the
+    // per-layer arrays below (swa_layers, head_dim_per_layer) are sized from
+    // it. The check used to run 300 lines later, after those resizes
+    // (AUDIT_arch_2026 F1-5). The expert count gets the same check once it is
+    // read, before anything is sized from it.
+    {
+        std::string dim_err;
+        if (!validate_declared_dimensions(cfg, &dim_err)) {
+            IMP_LOG_ERROR("GGUF: %s", dim_err.c_str());
+            return nullptr;
+        }
+    }
     cfg.d_model = static_cast<int>(get_uint("embedding_length"));
     cfg.d_ff = static_cast<int>(get_uint("feed_forward_length"));
     cfg.n_heads = static_cast<int>(get_uint("attention.head_count"));
@@ -458,8 +480,13 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         // we derive from swa_layers using key_length / key_length_swa.
         if (cfg.head_dim_per_layer.empty() && key_len > 0 && key_len_swa > 0) {
             cfg.head_dim_per_layer.resize(cfg.n_layers);
-            for (int i = 0; i < cfg.n_layers; i++)
-                cfg.head_dim_per_layer[i] = cfg.swa_layers[i] ? key_len_swa : key_len;
+            // swa_layers has the FILE's array length when the pattern key is
+            // present; a layer past it is full attention, like every other
+            // reader of this array (executor_attention.cu, model_profile.cpp).
+            for (int i = 0; i < cfg.n_layers; i++) {
+                const bool swa = static_cast<size_t>(i) < cfg.swa_layers.size() && cfg.swa_layers[i];
+                cfg.head_dim_per_layer[i] = swa ? key_len_swa : key_len;
+            }
         }
         // scalar head_dim = max for buffer sizing
         if (!cfg.head_dim_per_layer.empty()) {
@@ -1088,6 +1115,17 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         auto it_eos = metadata.find("tokenizer.ggml.eos_token_id");
         if (it_eos != metadata.end())
             eos_id = static_cast<int>(val_uint(it_eos->second));
+        // Both ids land in the embedding gather as a row index with no clamp
+        // between here and the kernel (AUDIT_arch_2026 F1-7): out of the vocab
+        // is a device illegal-memory-access, so it is refused at load.
+        const auto n_vocab = static_cast<int64_t>(tokens.size());
+        if (bos_id < 0 || bos_id >= n_vocab || eos_id < 0 || eos_id >= n_vocab) {
+            IMP_LOG_ERROR(
+                "GGUF: tokenizer.ggml.bos_token_id=%d / eos_token_id=%d outside the %lld-entry "
+                "vocab (broken or hostile checkpoint)",
+                bos_id, eos_id, static_cast<long long>(n_vocab));
+            return nullptr;
+        }
 
         tokenizer->load_vocab(tokens, scores, bos_id, eos_id);
 

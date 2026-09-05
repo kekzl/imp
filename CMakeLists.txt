@@ -647,6 +647,7 @@ if(IMP_BUILD_TESTS)
     set_source_files_properties(
         fuzz/fuzz_json_schema.cpp fuzz/fuzz_regex.cpp fuzz/fuzz_gbnf.cpp
         fuzz/fuzz_safetensors.cpp fuzz/fuzz_tokenizer_json.cpp
+        fuzz/fuzz_gguf.cpp fuzz/fuzz_mmproj.cpp
         PROPERTIES COMPILE_DEFINITIONS "IMP_FUZZ_NO_ENTRY")
     set(IMP_FUZZ_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fuzz)
 
@@ -711,12 +712,14 @@ if(IMP_BUILD_TESTS)
         # sanitizer build (-DIMP_BUILD_SERVER=OFF) runs them too - which is the
         # half that matters, since an out-of-bounds read is invisible without
         # ASan. IMP_FUZZ_NO_ENTRY drops the LLVMFuzzerTestOneInput definitions
-        # so six of them do not collide in one binary.
+        # so eight of them do not collide in one binary.
         fuzz/fuzz_json_schema.cpp
         fuzz/fuzz_regex.cpp
         fuzz/fuzz_gbnf.cpp
         fuzz/fuzz_safetensors.cpp
         fuzz/fuzz_tokenizer_json.cpp
+        fuzz/fuzz_gguf.cpp
+        fuzz/fuzz_mmproj.cpp
         tests/test_fuzz_corpus.cpp
         # Pre-dequant VRAM budget split (#1100). CPU-only: pure arithmetic in
         # runtime/vram_budget.h, and it belongs in the lane CI actually runs.

@@ -44,6 +44,7 @@ struct GgufBytes {
     size_t off_tensor_count = 0;
     size_t off_kv_count = 0;
     size_t off_tensor_name_len = 0;   // u64 length prefix of the tensor's name
+    size_t off_tensor_n_dims = 0;     // u32 n_dims of the tensor
     size_t off_tensor_dim0 = 0;       // u64 ne[0] of the tensor
     size_t off_tensor_type = 0;       // u32 ggml type of the tensor
     size_t off_tensor_data_offset = 0;  // u64 data-section-relative offset
@@ -112,6 +113,7 @@ GgufBytes build_valid_gguf() {
     // --- tensor info ---
     g.off_tensor_name_len = w.pos();
     w.str("token_embd.weight");
+    g.off_tensor_n_dims = w.pos();
     w.u32(2);  // n_dims
     g.off_tensor_dim0 = w.pos();
     w.u64(4);  // ne[0]
@@ -473,6 +475,156 @@ TEST(GgufFaultInjection, ZeroAlignmentMetadata) {
     w.u32(T_U32);
     w.u32(0);  // zero alignment — must not crash the align() modulo
     EXPECT_TRUE(load_is_clean(g.buf));
+}
+
+// ---- AUDIT_arch_2026 F1: the header fields that had no ceiling ----
+
+constexpr uint32_t T_ARRAY_TYPE = 9;
+
+// n_dims = 5 on a 4-slot dims array. The parser used to skip the extra word
+// and carry on; the loader then wrote 5 entries into `int64_t shape[4]` (a
+// stack write past the array, F1-1). Refused at parse now: the whole file.
+TEST(GgufFaultInjection, NDimsAboveFourIsRefused) {
+    GgufBytes g = build_valid_gguf();
+    patch_u32(g.buf, g.off_tensor_n_dims, 5);
+    EXPECT_EQ(load_buf(g.buf), nullptr) << "a tensor with n_dims > 4 must refuse the file";
+}
+
+// The well-formed variant: n_dims = 5 WITH five dim words [4,4,1,1,1]. The
+// unfixed parser read the first four, skipped the fifth, passed the bounds
+// check (16 floats), and the loader's shape loop then wrote shape[4] and read
+// dims[4] - one stack slot and one struct field past the end - before the
+// Tensor constructor's IMP_CHECK aborted the process. Fixed: refused at parse.
+TEST(GgufFaultInjection, FiveDimWordsAreRefusedAtParse) {
+    GgufBytes g;
+    Writer w(g.buf);
+    w.u32(GGUF_MAGIC);
+    w.u32(3);
+    w.u64(1);
+    w.u64(2);
+    w.str("general.architecture");
+    w.u32(T_STRING);
+    w.str("llama");
+    w.str("llama.block_count");
+    w.u32(T_UINT32);
+    w.u32(0);
+    w.str("token_embd.weight");
+    w.u32(5);
+    for (uint64_t d : {4, 4, 1, 1, 1})
+        w.u64(d);
+    w.u32(GGML_F32);
+    w.u64(0);
+    w.pad_to(GGUF_DEFAULT_ALIGNMENT);
+    for (int i = 0; i < 16; i++)
+        w.f32(0.01f * static_cast<float>(i));
+    EXPECT_EQ(load_buf(g.buf), nullptr) << "five dim words must refuse the file at parse";
+}
+
+// A gemma4 file that supplies its own sliding_window_pattern: swa_layers gets
+// the ARRAY's length, and the per-layer head_dim loop indexed it with
+// block_count (F1-5). The same builder with block_count past the cap exercises
+// the check that used to run 300 lines after the per-layer resizes.
+GgufBytes build_gemma4_gguf(uint32_t block_count, const std::vector<uint32_t>& pattern) {
+    GgufBytes g;
+    Writer w(g.buf);
+    w.u32(GGUF_MAGIC);
+    w.u32(3);
+    w.u64(1);  // one tensor
+    w.u64(5);  // five KV pairs
+    w.str("general.architecture");
+    w.u32(T_STRING);
+    w.str("gemma4");
+    w.str("gemma4.block_count");
+    w.u32(T_UINT32);
+    g.off_block_count = w.pos();
+    w.u32(block_count);
+    w.str("gemma4.attention.sliding_window_pattern");
+    w.u32(T_ARRAY_TYPE);
+    w.u32(T_UINT32);
+    w.u64(pattern.size());
+    for (auto v : pattern)
+        w.u32(v);
+    w.str("gemma4.attention.key_length");
+    w.u32(T_UINT32);
+    w.u32(256);
+    w.str("gemma4.attention.key_length_swa");
+    w.u32(T_UINT32);
+    w.u32(512);
+    w.str("token_embd.weight");
+    w.u32(2);
+    w.u64(4);
+    w.u64(4);
+    w.u32(GGML_F32);
+    w.u64(0);
+    w.pad_to(GGUF_DEFAULT_ALIGNMENT);
+    for (int i = 0; i < 16; i++)
+        w.f32(0.01f * static_cast<float>(i));
+    return g;
+}
+
+TEST(GgufFaultInjection, Gemma4ShortSlidingWindowPatternIsNotOverread) {
+    // 8 layers, a 1-entry pattern: layers 1..7 read swa_layers[1..7] past a
+    // 1-element vector before the guard. Clean means no fault; the sanitizer
+    // lane is what sees the over-read on the unfixed tree.
+    GgufBytes g = build_gemma4_gguf(8, {1});
+    EXPECT_TRUE(load_is_clean(g.buf));
+}
+
+TEST(GgufFaultInjection, Gemma4BlockCountAboveLimitIsRefusedBeforeSizing) {
+    // 2^31-1 layers: the unfixed loader resized head_dim_per_layer to it
+    // (8.6 GiB) before validate_declared_dimensions ever ran.
+    GgufBytes g = build_gemma4_gguf(2147483647u, {1});
+    auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(load_buf(g.buf), nullptr);
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 5)
+        << "the layer cap must run before anything is sized from block_count";
+}
+
+// bos/eos ids land in the embedding gather as a row index with no clamp in
+// between (F1-7): outside the vocab is refused at load, inside still loads.
+GgufBytes build_tokenizer_gguf(uint32_t bos_id, uint32_t eos_id) {
+    GgufBytes g;
+    Writer w(g.buf);
+    w.u32(GGUF_MAGIC);
+    w.u32(3);
+    w.u64(1);  // one tensor
+    w.u64(5);  // five KV pairs
+    w.str("general.architecture");
+    w.u32(T_STRING);
+    w.str("llama");
+    w.str("llama.block_count");
+    w.u32(T_UINT32);
+    w.u32(0);
+    w.str("tokenizer.ggml.tokens");
+    w.u32(T_ARRAY_TYPE);
+    w.u32(T_STRING);
+    w.u64(3);
+    w.str("a");
+    w.str("b");
+    w.str("c");
+    w.str("tokenizer.ggml.bos_token_id");
+    w.u32(T_UINT32);
+    w.u32(bos_id);
+    w.str("tokenizer.ggml.eos_token_id");
+    w.u32(T_UINT32);
+    w.u32(eos_id);
+    w.str("token_embd.weight");
+    w.u32(2);
+    w.u64(4);
+    w.u64(4);
+    w.u32(GGML_F32);
+    w.u64(0);
+    w.pad_to(GGUF_DEFAULT_ALIGNMENT);
+    for (int i = 0; i < 16; i++)
+        w.f32(0.01f * static_cast<float>(i));
+    return g;
+}
+
+TEST(GgufFaultInjection, SpecialTokenIdOutsideVocabIsRefused) {
+    EXPECT_NE(load_buf(build_tokenizer_gguf(1, 2).buf), nullptr) << "in-range ids must still load";
+    EXPECT_EQ(load_buf(build_tokenizer_gguf(0x40000000u, 2).buf), nullptr) << "bos past the vocab";
+    EXPECT_EQ(load_buf(build_tokenizer_gguf(1, 0xFFFFFFFFu).buf), nullptr) << "eos = -1 as a row index";
 }
 
 }  // namespace
