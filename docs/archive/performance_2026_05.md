@@ -16,7 +16,7 @@ commit: be825e4a
 | imp config | NVFP4 decode cache + FP16 prefill (FP8 auto-disabled on sm_120), CUDA Graphs on |
 | llama.cpp | `b8445+`, flash attention on, full offload (`-ngl 99`) |
 | Sampling | Greedy (temp = 0) |
-| Repetitions | 3 (decode); prefill spread depends on the model, see [`PERF.md`](PERF.md) |
+| Repetitions | 3 (decode); prefill spread depends on the model, see [`PERF.md`](../PERF.md) |
 | Reported | Mean; decode (`tg256`) is the reliable A/B signal |
 
 Refresh the baseline with `scripts/gen_perf_baseline.sh` after any intentional perf
@@ -25,7 +25,7 @@ change — or any intentional memory change: the same file pins peak VRAM
 `scripts/verify.sh`), and a refresh re-pins it silently.
 
 **Last refreshed**: decode numbers are owned by the SHA-anchored
-[`BENCHMARKS.md`](BENCHMARKS.md) (see Decode Throughput below — no table is
+[`BENCHMARKS.md`](../BENCHMARKS.md) (see Decode Throughput below — no table is
 duplicated here). Prefill + KV-cache tables below are
 **historical** (2026-05-27 era, CUDA 13.2.1) — prefill moves enough across
 process starts that it is not maintained as a comparison table.
@@ -44,7 +44,7 @@ collapse at 0 MiB free (#1103).
 
 The per-model decode table is **not duplicated here** (it drifts). Canonical
 SHA-anchored decode numbers (model · quant · metric · tok/s · commit · CUDA ·
-exact command): [`BENCHMARKS.md`](BENCHMARKS.md). CI gate:
+exact command): [`BENCHMARKS.md`](../BENCHMARKS.md). CI gate:
 `tests/perf_baseline.json` (refresh via `scripts/gen_perf_baseline.sh`).
 Heroes for orientation: Q8 tg128 ≈ 268 · 14B-Q6_K north-star ≈ 158 @ctx2048 ·
 NVFP4 MoE tg256 in the 250-340 range (e.g. Qwen3-Coder-30B 338, Qwen3.6-35B
@@ -83,7 +83,7 @@ Default is **FP16**. FP8 has perf parity with FP16 on Qwen3 and Qwen3.5/3.6 GDN 
 
 ## Notes
 
-- **Prefill variance**: prefill moves far more than decode across process starts, and it is the MoE path that moves, not cuBLAS autotuning as long assumed. Figures and provenance: [`PERF.md`](PERF.md). Compare decode for A/B testing, or pair and alternate the arms.
+- **Prefill variance**: prefill moves far more than decode across process starts, and it is the MoE path that moves, not cuBLAS autotuning as long assumed. Figures and provenance: [`PERF.md`](../PERF.md). Compare decode for A/B testing, or pair and alternate the arms.
 - **Gemma-4**: CUDA Graphs enabled. Decode is 1.21x llama.cpp on Q4_K_M. Q4_K_M can degenerate on complex code-gen prompts — use Q5_K_M or Q8_0 when output quality matters.
 - **GDN models**: Use FP16 prefill weights for numerical stability, reducing prefill throughput ~8% vs FP8.
 - **MXFP4 Prefill**: `--mxfp4-prefill` uses CUTLASS block-scaled GEMM; currently ~10% slower than FP8 cuBLASLt due to activation quantization overhead.
