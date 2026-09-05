@@ -181,6 +181,7 @@ public:
     // Returns adapter id >= 1, or 0 on failure. id 0 = base model.
     int lora_load(const std::string& path);
     bool lora_set(int id);  // 0 deactivates
+    int active_lora() const { return active_lora_; }
 
     // Reset batch pool upload cache (call on context_reset to prevent
     // stale block table pointers when KV blocks are reused)
@@ -472,6 +473,7 @@ private:
     CudaGraphRunner decode_graph_pool_[kMaxGraphPoolSize];  // index = n_sequences - 1
     std::vector<std::unique_ptr<LoraAdapter>> lora_adapters_;
     int active_lora_ = 0;
+    size_t prefix_salt_(const Request& req) const;
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     // pow2-bucketed context HIGH-WATER MARK at the last (re)capture — the
     // decode-attention launch topology (split-K num_splits, GQA vs split

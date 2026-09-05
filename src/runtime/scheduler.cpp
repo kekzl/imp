@@ -186,8 +186,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     // boundary (and attach the snapshot to the request).
                     int max_reuse = prefix_reuse_limit_ ? prefix_reuse_limit_(*req) : -1;
                     int reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens,
-                                                                          max_reuse,
-                                                                          req->vision_content_hash);
+                                                                          max_reuse, req->prefix_salt);
                     if (reused < 0) {
                         ++it;
                         continue;

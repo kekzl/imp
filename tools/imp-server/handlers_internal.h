@@ -157,6 +157,9 @@ struct ChatStateSnapshot {
     // Computed by re-rendering the leading params.cache_prefix_messages
     // messages (tokenizer lives in the snapshot stage).
     int pin_prefix_tokens = -1;
+    // Engine adapter id the request named via `lora` (0 = base). Resolved
+    // here, switched by the batching worker at admission (E-1).
+    int lora_id = 0;
 };
 
 // Top-level context bundling params + snap + transients.

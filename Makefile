@@ -216,6 +216,11 @@ test-e2e: build
 	docker run --rm --gpus all -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
 		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*"
+	@# LoraHotSwap crafts its PEFT adapters in-test against Llama-3.2-3B
+	@# (q/v, r=8); it ran from no target until AUDIT_arch_2026 dispatch #6.
+	docker run --rm --gpus all -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL_LLAMA=/models/Llama-3.2-3B-Instruct-Q8_0.gguf \
+		$(DOCKER_IMG) test-e2e --gtest_filter="LoraHotSwap.*"
 
 # Speculative capture fidelity (gate 3). Its own container because the check
 # runs a second full forward per verify step against a 20 GiB checkpoint: after

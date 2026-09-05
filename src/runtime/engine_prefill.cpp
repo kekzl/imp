@@ -227,7 +227,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
         !req->embedding_request && cacheable) {
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, -1,
-                                                                 req->vision_content_hash);
+                                                                 req->prefix_salt);
         if (prefix_reused < 0) {
             // KV exhausted even after cached-block reclamation. The old fallback
             // evicted live sequences (every lru_order_ entry is live; no
@@ -940,7 +940,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             // they can only ever be offered to a prompt with the same picture.
             const bool had_image = req->n_vision_tokens > 0 || req->image || req->vision_emb;
             if (kv_manager_->prefix_caching_enabled() && (!had_image || req->vision_content_hash != 0)) {
-                kv_manager_->register_block_hashes(req->id, req->input_tokens, req->vision_content_hash);
+                kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
             }
         }
     }

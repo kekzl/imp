@@ -68,6 +68,12 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
 
 ## Known-bad and known-limited behaviour
 
+- **One LoRA adapter at a time (AUDIT_arch_2026 E-1).** The adapter is engine-global
+  (executor pointer, decode graphs), so the batching worker serializes requests by adapter: a
+  request naming a different adapter waits until the in-flight ones finished, then the worker
+  switches; it is never batched with them. The prefix cache is keyed by adapter, so a system
+  prompt shared by two adapters is prefilled once per adapter. The C API `imp_lora_set` has no
+  such guard: swap between requests only.
 - **GGUF batched decode rows read the 4-bit overlay with 4-bit activations (#1897).** A decode
   step with 2..32 rows on a GGUF source runs the small-M NVFP4 GEMM on the NVFP4 decode overlay
   (`smallm_weight_` in `src/exec/executor_gemm_smallm.cu`), the numerics family of the native

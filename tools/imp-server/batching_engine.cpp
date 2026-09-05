@@ -247,6 +247,24 @@ void BatchingEngine::worker_loop() {
             if (!pause_requested_.load(std::memory_order_relaxed)) {
                 // Move all pending requests to active
                 while (!pending_queue_.empty()) {
+                    // Per-request LoRA (AUDIT_arch_2026 E-1): the adapter is
+                    // engine-global (executor pointer, decode graphs), so a
+                    // request naming a different one waits until the in-flight
+                    // requests have drained, then this thread switches and
+                    // admits it. FIFO barrier: nothing behind it is admitted
+                    // meanwhile, so it cannot starve behind same-adapter traffic.
+                    const int want_lora = pending_queue_.front()->request->lora_id;
+                    if (want_lora != engine->active_lora()) {
+                        if (!active_requests_.empty())
+                            break;
+                        if (!engine->lora_set(want_lora)) {
+                            auto sr = std::move(pending_queue_.front());
+                            pending_queue_.pop_front();
+                            sr->request->status = imp::RequestStatus::CANCELLED;
+                            sr->push_finish("lora_unavailable");
+                            continue;
+                        }
+                    }
                     auto sr = std::move(pending_queue_.front());
                     pending_queue_.pop_front();
 
