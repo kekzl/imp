@@ -1108,6 +1108,21 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_precommit_filter.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
+    # Every --gtest_filter literal in the Makefile must match a test in the
+    # binary the same line names (AUDIT_arch_2026 I-7). The Qwen3.8 parity line
+    # named test-text for a suite in test-e2e and ran "0 tests, PASSED" on every
+    # commit. Same fail-open shape as guard_verify_filter.
+    add_test(NAME guard_makefile_filters
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_makefile_filters.sh
+                ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/Makefile)
+
+    # verify.sh's literal copy of _unit_e2e_filter above must stay byte-identical
+    # (AUDIT_arch_2026 I-3: it drifted for nine days and every full `make verify`
+    # was red). Pure text diff, no binary.
+    add_test(NAME guard_lane_filter_copy
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_lane_filter_copy.sh
+                ${CMAKE_CURRENT_SOURCE_DIR})
+
     # No skipped test in the three lanes above. DEPENDS only orders: a lane
     # that crashed leaves its previous report behind, and is red on its own.
     add_test(NAME guard_unit_skips
@@ -1117,6 +1132,7 @@ if(IMP_BUILD_TESTS)
     set_tests_properties(unit_core unit_text unit_e2e_subset guard_e2e_lane_split
                          guard_det_suite_filter guard_cancel_teardown
                          guard_verify_filter guard_precommit_filter guard_unit_skips
+                         guard_makefile_filters guard_lane_filter_copy
         PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_compute   COMMAND test-compute)

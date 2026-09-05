@@ -142,10 +142,17 @@ test-gpu: build
 	@# unless IMP_TEST_MODEL_QWEN38 is set, and nothing else sets it. It needs no
 	@# GPU (it reads tokenizer.json only, ~0.4 s), but it needs the models mount,
 	@# so this is where it can actually run. A set-but-wrong path FAILS rather
-	@# than skipping.
+	@# than skipping. The suite lives in test-e2e: this line named test-text
+	@# until 2026-09-05 and ran "0 tests, PASSED" on every commit
+	@# (AUDIT_arch_2026 I-7; guard_makefile_filters now pins every filter here).
 	docker run --rm -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_QWEN38=/models/Qwen3.8-27B \
-		$(DOCKER_IMG) test-text --gtest_filter="*Qwen38TokenizerParity*"
+		$(DOCKER_IMG) test-e2e --gtest_filter="*Qwen38TokenizerParity*"
+	@# Everything else that reads IMP_TEST_MODEL* skips here by design: this
+	@# target carries no model env (DOCKER_RUN has none), so "full suite" means
+	@# every macro, not every checkpoint. The model battery is `make test-e2e`
+	@# (AUDIT_arch_2026 I-8: three checkpoints in one process hit the VRAM
+	@# ceiling, TEST_INVENTORY.md section 5, so they are not added here).
 
 # Stage 3 — the SERVER stage (local, GPU-only). Boots a real imp-server against
 # a live model and GATES on the OpenAI+Anthropic wire batteries (endpoints,
@@ -194,6 +201,21 @@ test-e2e: build
 		-e IMP_TEST_MODEL_MODELOPT_CODER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
 		-e IMP_TEST_MODEL_SSM=/models/Nemotron-3-Nano-30B-A3B-NVFP4 \
 		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:SpecCaptureFidelityTest.*:*DetEvalE2ETest*"
+	@# The greedy regression locks, the degeneration battery, the prefix-cache
+	@# equivalence and the tokenizer/tensor-kind parity suites ran from NO
+	@# target until 2026-09-05 (AUDIT_arch_2026 I-1 = D-3): the filter above
+	@# never named them, and the lock table (tests/refs/e2e_greedy_locks.h) has
+	@# rows for Qwen3-8B-Q8_0, not the Qwen3-4B the line above loads. Own
+	@# container, own checkpoint, so the lock rows match what is loaded.
+	docker run --rm --gpus all -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL=/models/Qwen3-8B-Q8_0.gguf \
+		-e IMP_TEST_GGUF=/models/Qwen3-8B-Q8_0.gguf \
+		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*"
+	@# The lock table's other rows are the NVFP4 SafeTensors checkpoint (the
+	@# loader + RoPE path the #503 class shipped prompt-blind on).
+	docker run --rm --gpus all -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
+		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*"
 
 # Speculative capture fidelity (gate 3). Its own container because the check
 # runs a second full forward per verify step against a 20 GiB checkpoint: after

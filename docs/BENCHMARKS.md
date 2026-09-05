@@ -653,9 +653,12 @@ Qwen3-14B **NVFP4** `pp131072 = 3 792 tok/s` (34.6 s TTFT), command
 The auto `max_seq_len` ceiling is 128K since `d8bc45a8`. The Q6_K GGUF
 north-star model cannot host this measurement on 32 GB (its KV pool tops out
 near 75K tokens beside the dual GGUF+NVFP4 weight residency), which is why
-the CI TTFT gate band in `tests/perf_baseline_north_star.json` ends at
+the TTFT reference band in `tests/perf_baseline_north_star.json` ends at
 pp65536 — the 64K row is that model's VRAM-feasible ceiling, not a coverage
-gap.
+gap. That band is consumed by `make verify-north-star` only; no hook or CI
+job runs it (AUDIT_arch_2026 H-4), and the default gate's baseline carries
+`pp128`/`pp512`/`pp4096`, so `scripts/verify.sh` skips the 8K-64K lengths
+on every `make verify-fast`.
 
 What the first sweep found and what fixed it:
 
