@@ -163,7 +163,7 @@ Each axis section is the scout's report verbatim (coverage, brief-vs-repo, findi
 
 ## Axis A1 - Compute / kernels: dispatch coverage and legacy paths
 
-Repo `/home/kekz/github.com/kekzl/imp`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`, clean. READ-ONLY: no edits, no build, no GPU job.
+Repo `<repo>`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`, clean. READ-ONLY: no edits, no build, no GPU job.
 
 ### Coverage
 
@@ -433,7 +433,7 @@ Falsifier: a roadmap or LIMITATIONS row I missed. Checked y - `rg -i 'mxfp4' doc
 
 ## Axis A2 - Compute / kernels (hardware-feature consistency, block-scale numerics, launch config, cuBLAS autotune)
 
-Repo `/home/kekz/github.com/kekzl/imp`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`. READ-ONLY, no build, no GPU job.
+Repo `<repo>`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`. READ-ONLY, no build, no GPU job.
 
 ### Coverage
 
@@ -675,7 +675,7 @@ Falsifier: the knob is documented as a supported diagnostic. Checked: y - `grep 
 
 ## Axis B - Memory & KV (scout report)
 
-Repo `/home/kekz/github.com/kekzl/imp`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`, clean. Read-only, no build, no GPU job.
+Repo `<repo>`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`, clean. Read-only, no build, no GPU job.
 
 ### Coverage
 
@@ -860,7 +860,7 @@ Falsifier: `kExecKVBlockSize` might deliberately be an upper bound for sizing ra
 
 ## Axis C - Scheduler & batching, speculative decoding, CUDA graph coverage
 
-Repo `/home/kekz/github.com/kekzl/imp`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD ef664dd8, clean. READ-ONLY, no build, no GPU job.
+Repo `<repo>`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD ef664dd8, clean. READ-ONLY, no build, no GPU job.
 
 ### Coverage
 
@@ -1374,7 +1374,7 @@ Falsifier: a second rate limiter keyed by API key exists. Checked: y, `rg -n 'ra
 
 ## Axis F1 - Security: model-file and config parsers as UNTRUSTED input
 
-Repo: /home/kekz/github.com/kekzl/imp, branch perf/engine-h-fanin-cut-and-attention-split-verdict, HEAD ef664dd8. READ-ONLY, no build, no GPU job.
+Repo: <repo>, branch perf/engine-h-fanin-cut-and-attention-split-verdict, HEAD ef664dd8. READ-ONLY, no build, no GPU job.
 
 ### Coverage
 
@@ -1650,7 +1650,7 @@ Also worth one line, below the finding bar: `src/runtime/config.h:402-406` docum
 
 ## Axis F2 - Security: HTTP layer, API keys, fuzzing and sanitizers in CI
 
-Repo: /home/kekz/github.com/kekzl/imp, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD ef664dd8. READ-ONLY, no build, no GPU job.
+Repo: <repo>, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD ef664dd8. READ-ONLY, no build, no GPU job.
 
 ### Coverage
 
@@ -2292,7 +2292,7 @@ Falsifier: "an admin or model-swap endpoint fills it from the request body" - **
 
 ## Axis H - Build, CI, supply chain
 
-Repo: /home/kekz/github.com/kekzl/imp, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD ef664dd8, clean. READ-ONLY, no build, no GPU job.
+Repo: <repo>, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD ef664dd8, clean. READ-ONLY, no build, no GPU job.
 
 ### Coverage
 
@@ -2463,7 +2463,7 @@ Falsifier: an existing memo or PR that measured it. Checked y - zero grep hits r
 
 ## Axis I - Tests (scout report)
 
-Repo `/home/kekz/github.com/kekzl/imp`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`, clean. READ-ONLY: no edits, no build, no GPU job. Every number below comes from a command run in this session or from a cited file line.
+Repo `<repo>`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`, clean. READ-ONLY: no edits, no build, no GPU job. Every number below comes from a command run in this session or from a cited file line.
 
 ### Coverage
 
@@ -2751,7 +2751,7 @@ Falsifier: a staleness marker I missed. Checked y - the file's only date context
 
 ## Axis J - Docs (architecture audit imp, 2026-09-05)
 
-Repo `/home/kekz/github.com/kekzl/imp`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`, tree clean. READ-ONLY: no edit, no build, no GPU job. Host `python3` used only for `scripts/sync_docs.py --check` (the repo's own check script, as the hooks run it).
+Repo `<repo>`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEAD `ef664dd8`, tree clean. READ-ONLY: no edit, no build, no GPU job. Host `python3` used only for `scripts/sync_docs.py --check` (the repo's own check script, as the hooks run it).
 
 ### Coverage
 
