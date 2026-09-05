@@ -1,6 +1,7 @@
 #include "compute/ffn_sparsity_probe.h"
 #include "runtime/process_diag.h"
 #include "core/logging.h"
+#include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
 
 #include <cuda_runtime.h>
@@ -58,6 +59,18 @@ void ensure_init_locked() {
     }
     g_state.initialized = true;
 }
+
+// The counters are an arena slice: ~Engine flushes the log, closes the arena,
+// then runs the hooks. Without the re-arm `initialized` stayed true and the
+// next engine's probe wrote into the closed arena (AUDIT_arch_2026 B-2).
+void ffn_sparsity_probe_reset_static_cuda_state() {
+    std::lock_guard<std::mutex> lk(g_state.mu);
+    g_state.initialized = false;
+    g_state.enabled = false;
+    g_state.d_counters = nullptr;
+    g_state.max_layer_seen = -1;
+}
+IMP_REGISTER_CUDA_STATIC_RESET(ffn_sparsity_probe_reset_static_cuda_state);
 
 __device__ __forceinline__ float silu_f(float x) {
     return x / (1.0f + __expf(-x));

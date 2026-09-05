@@ -1,5 +1,6 @@
 #include "compute/gemm_moe_fused_tc.h"
 #include "core/logging.h"
+#include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
 
 #include <cuda_runtime.h>
@@ -236,17 +237,35 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
 // ---------------------------------------------------------------------------
 // Host launcher
 // ---------------------------------------------------------------------------
+
+// Launch config + tile counter, configured once per engine. File-scope so the
+// reset hook re-arms the guard: a function-local `configured` survived every
+// engine teardown and the counter pointed into the closed arena
+// (AUDIT_arch_2026 B-2).
+namespace {
+bool s_configured = false;
+int s_grid_size = 0;
+int* s_tile_counter = nullptr;
+bool s_tile_counter_owned = false;  // cudaMalloc fallback (arena closed), freed here
+
+void gemm_moe_fused_tc_reset_static_cuda_state() {
+    if (s_tile_counter_owned && s_tile_counter)
+        (void)cudaFree(s_tile_counter);
+    s_tile_counter = nullptr;
+    s_tile_counter_owned = false;
+    s_grid_size = 0;
+    s_configured = false;
+}
+IMP_REGISTER_CUDA_STATIC_RESET(gemm_moe_fused_tc_reset_static_cuda_state);
+}  // namespace
+
 void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activations, void* output,
                                    const int32_t* d_offsets, int N, int K, size_t expert_stride_bytes,
                                    int n_experts, cudaStream_t stream, const int32_t* sorted_token_ids) {
     if (n_experts == 0 || N == 0)
         return;
 
-    static bool configured = false;
-    static int grid_size = 0;
-    static int* d_tile_counter = nullptr;
-
-    if (!configured) {
+    if (!s_configured) {
         cudaFuncSetAttribute(gemm_q6k_fused_moe_prefill_tc_kernel,
                              cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
 
@@ -257,26 +276,31 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
                                                       SMEM_TOTAL);
         int num_sms = 0;
         cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
-        grid_size = num_sms * max(max_blocks_per_sm, 1);
+        s_grid_size = num_sms * max(max_blocks_per_sm, 1);
 
         // T2 (engine-persistent): a 4-byte counter allocated once under the
-        // `configured` guard and never freed — the arena is exactly the tier for
-        // that, and it takes this file off the I1 allowlist. Falls back to a
-        // direct allocation when the arena is closed (a bare GEMM unit test has
-        // no engine), same as the other migrated one-shot tenants.
-        if (auto slab = engine_arena().take_bytes(sizeof(int)); !slab.empty())
-            d_tile_counter = reinterpret_cast<int*>(slab.data());
-        else
-            cudaMalloc(&d_tile_counter, sizeof(int));
-        configured = true;
+        // `s_configured` guard — the arena is exactly the tier for that. Falls
+        // back to a direct allocation when the arena is closed (a bare GEMM
+        // unit test has no engine), same as the other migrated one-shot tenants.
+        if (auto slab = engine_arena().take_bytes(sizeof(int)); !slab.empty()) {
+            s_tile_counter = reinterpret_cast<int*>(slab.data());
+            s_tile_counter_owned = false;
+        } else if (cudaMalloc(&s_tile_counter, sizeof(int)) == cudaSuccess) {
+            s_tile_counter_owned = true;
+        } else {
+            IMP_LOG_ERROR("gemm_q6k_fused_moe_prefill_tc: could not obtain the tile counter");
+            s_tile_counter = nullptr;
+            return;
+        }
+        s_configured = true;
     }
 
-    cudaMemsetAsync(d_tile_counter, 0, sizeof(int), stream);
+    cudaMemsetAsync(s_tile_counter, 0, sizeof(int), stream);
 
-    gemm_q6k_fused_moe_prefill_tc_kernel<<<grid_size, TC_BLOCK, SMEM_TOTAL, stream>>>(
+    gemm_q6k_fused_moe_prefill_tc_kernel<<<s_grid_size, TC_BLOCK, SMEM_TOTAL, stream>>>(
         static_cast<const uint8_t*>(packed_weights), static_cast<const half*>(activations),
         static_cast<half*>(output), d_offsets, sorted_token_ids, N, K, expert_stride_bytes, n_experts,
-        d_tile_counter);
+        s_tile_counter);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

@@ -25,6 +25,7 @@
 #include "memory/backend.h"
 #include "compute/layernorm.h"
 #include "compute/mtp_forward.h"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "model/model.h"
@@ -35,6 +36,23 @@
 #include <algorithm>
 
 namespace imp {
+
+// Post-norm scratch for mtp_feed_pairs_: n_pairs is the prefill feed length,
+// so it grows on demand (cudaMalloc staircase, capacity-checked). File-scope
+// with a reset hook: as a function-local static it was never freed and dangled
+// after imp_gpu_release(1) (AUDIT_arch_2026 B-2).
+namespace {
+void* s_norm_scratch = nullptr;
+size_t s_norm_cap = 0;
+
+void engine_spec_mtp_reset_static_cuda_state() {
+    if (s_norm_scratch)
+        (void)cudaFree(s_norm_scratch);
+    s_norm_scratch = nullptr;
+    s_norm_cap = 0;
+}
+IMP_REGISTER_CUDA_STATIC_RESET(engine_spec_mtp_reset_static_cuda_state);
+}  // namespace
 
 void Engine::mtp_unbind_(const char* why) {
     if (mtp_bound_req_ >= 0 && !mtp_stale_logged_) {
@@ -98,8 +116,6 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     // cache itself was still built from pre-norm rows, which is why the old
     // A/B read exactly 0. Now it covers every fed pair.
     if (runtime_config_.diagnostics.mtp_prenorm_h) {
-        static void* s_norm_scratch = nullptr;
-        static size_t s_norm_cap = 0;
         const size_t need = static_cast<size_t>(n_pairs) * hidden_dim * sizeof(__half);
         if (need > s_norm_cap) {
             if (s_norm_scratch) cudaFree(s_norm_scratch);

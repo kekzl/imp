@@ -2,6 +2,7 @@
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -185,6 +186,23 @@ __global__ void argmax_reduce_rows_kernel(const GreedyRowArgs* __restrict__ rows
     argmax_reduce_body(pv, pi, ARGMAX_NBLOCKS, r.d_result);
 }
 
+// Result scratch of the synchronous sample_greedy overload. File-scope so the
+// reset hook can reach it: it used to be a function-local static that no
+// teardown nulled, so the second engine in a process read the first one's
+// closed arena (AUDIT_arch_2026 B-2).
+namespace {
+int32_t* s_greedy_result = nullptr;
+bool s_greedy_result_owned = false;  // cudaMalloc fallback (arena closed), freed here
+
+void sampling_reset_static_cuda_state() {
+    if (s_greedy_result_owned && s_greedy_result)
+        (void)cudaFree(s_greedy_result);
+    s_greedy_result = nullptr;
+    s_greedy_result_owned = false;
+}
+IMP_REGISTER_CUDA_STATIC_RESET(sampling_reset_static_cuda_state);
+}  // namespace
+
 int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
@@ -199,18 +217,21 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     // d_sample_result_ is unavailable, and single-engine-per-process is the
     // supported deployment (memory/vram_query.h), so a file-static is safe here
     // in exactly the way it would not be for a per-request buffer.
-    static int32_t* d_result = nullptr;
+    int32_t* d_result = s_greedy_result;
     if (!d_result) {
         if (auto slab = engine_arena().take_bytes(sizeof(int32_t)); !slab.empty()) {
             d_result = reinterpret_cast<int32_t*>(slab.data());
+            s_greedy_result_owned = false;
         } else if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
             // Kept because the arena is closed in a bare unit test, and returning
             // token 0 there would be a silently wrong sample rather than a loud
             // failure. It runs at most once per process.
             IMP_LOG_ERROR("sample_greedy: could not obtain the result scratch");
-            d_result = nullptr;
             return 0;
+        } else {
+            s_greedy_result_owned = true;
         }
+        s_greedy_result = d_result;
     }
 
     argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);

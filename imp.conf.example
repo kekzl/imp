@@ -846,7 +846,7 @@ spec_capture_probe   = false
 log_gemm_algo        = false
 # MTP diagnostics: per-step pattern log / pass post-RMSNorm hidden to head.
 mtp_pattern_log      = false
-mtp_prenorm_h        = false
+mtp_prenorm_h        = true
 # Audit NVFP4 weight scales at load time.
 audit_nvfp4_scales   = false
 # VRAM accounting audit: allocation checkpoints + per-pool notes + device-used

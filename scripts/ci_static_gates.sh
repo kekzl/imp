@@ -95,6 +95,11 @@ if want alloc; then
     echo "== Alloc sites =="
     run "I1 allowlist gate"                     python3 tools/check_alloc_sites.py
     run "allocate/free API pairing"             python3 tools/check_alloc_pairs.py
+    # Lazy device statics re-arm across ~Engine / imp_gpu_release (the
+    # IMP_REGISTER_CUDA_STATIC_RESET convention). Six TUs had none on
+    # 2026-09-05, one of them a use-after-free on the default model-swap path.
+    run "lazy device statics re-arm"            python3 tools/check_static_reset.py
+    run "that gate still classifies its cases"  python3 tools/check_static_reset.py --selftest
 fi
 
 # Needs a BUILT artifact plus cuobjdump, unlike every other gate here, which is

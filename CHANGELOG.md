@@ -69,6 +69,11 @@ there instead of retelling it.
 
 ### Fixed
 
+- Seven lazy device statics kept their guards armed across an engine teardown,
+  one a device use-after-free on every `logit_bias` request after a model swap
+  (AUDIT_arch_2026 B-1..B-3, dispatch #1). All register a reset hook now;
+  `tools/check_static_reset.py` gates the convention (25/38 candidate TUs
+  re-arm, 1 allowlisted), `SamplingTest.*RearmsAfterStaticReset` pins it.
 - The Q8_0 IMMA prefill cache (an s8 plane per prefilled weight, 1.125 B per
   element) was charged to nothing and took whatever the KV pool left free - 5612
   MiB on a cold Qwen3-8B-Q8_0 start, 7942 MiB with a bigger reserve pinned - so

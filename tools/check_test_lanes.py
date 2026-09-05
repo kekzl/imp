@@ -197,7 +197,10 @@ def main():
     # 1082 -> 1084 (#1899): VramBudgetReserve.ImmaPlanesAreChargedForQ8Weights and
     # ImmaPlaneChargeYieldsToTheKvGuarantee - compute_vram_budget() reads total VRAM,
     # so they live in test-e2e behind SKIP_IF_NO_CUDA (test_vram_budget_reserve.cpp).
-    PINNED = 1084
+    # 1084 -> 1086 (AUDIT_arch_2026 dispatch #1): SamplingTest.LogitBiasRearmsAfterStaticReset
+    # and GreedyScratchRearmsAfterStaticReset - arena movement across reset_static_cuda_state(),
+    # GPU-only (test_sampling.cu).
+    PINNED = 1086
 
     text = CMAKE.read_text()
     mods = module_sources(text)

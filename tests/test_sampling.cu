@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include "compute/sampling.h"
+#include "core/cuda_static_reset.h"
 #include "core/tensor.h"
 
 #include <vector>
@@ -859,5 +860,58 @@ TEST(SamplingTest, PenaltyHistoryTiming) {
     }
     cudaFree(d_rows);
     sampling_reset_penalty_counts();
+}
+
+// The logit_bias arena slots must be re-taken after the reset hooks ran:
+// ~Engine closes the arena and then runs the hooks, so a capacity guard that
+// survives them hands the next engine in the process a pointer into released
+// memory (AUDIT_arch_2026 B-1, reachable through server.model_swap). Mutation:
+// drop sampling_penalties.cu's hook and the second preallocate short-circuits
+// on the stale capacity, so the arena does not move and the test fails.
+TEST(SamplingTest, LogitBiasRearmsAfterStaticReset) {
+    ASSERT_TRUE(engine_arena().is_open());
+    reset_static_cuda_state();  // known state, whatever earlier tests left behind
+    const size_t used0 = engine_arena().used();
+    sampling_preallocate_logit_bias(4096);
+    const size_t used1 = engine_arena().used();
+    ASSERT_GT(used1, used0) << "first preallocate took nothing from the arena";
+
+    reset_static_cuda_state();  // what ~Engine runs after closing the arena
+    const size_t used2 = engine_arena().used();
+    sampling_preallocate_logit_bias(4096);
+    const size_t used3 = engine_arena().used();
+    EXPECT_GT(used3, used2) << "capacity guard survived the reset: the slots still point "
+                               "into the previous engine's arena";
+
+    // The re-taken slots are the ones the kernel reads: duplicates accumulate.
+    std::vector<float> logits(8, 0.0f);
+    Tensor d_logits = make_logits(logits.data(), logits.size());
+    const std::pair<int32_t, float> pairs[] = {{1, 2.5f}, {6, -1.0f}, {1, 0.5f}};
+    apply_logit_bias(static_cast<float*>(d_logits.data), 8, pairs, 3, nullptr);
+    cudaDeviceSynchronize();
+    std::vector<float> out(8);
+    cudaMemcpy(out.data(), d_logits.data, 8 * sizeof(float), cudaMemcpyDeviceToHost);
+    EXPECT_FLOAT_EQ(out[1], 3.0f);
+    EXPECT_FLOAT_EQ(out[6], -1.0f);
+    EXPECT_FLOAT_EQ(out[0], 0.0f);
+    free_gpu_tensor(d_logits);
+}
+
+// Same contract for the synchronous sample_greedy result scratch (B-2): it was
+// a function-local static behind `if (!d_result)` that no teardown nulled.
+TEST(SamplingTest, GreedyScratchRearmsAfterStaticReset) {
+    ASSERT_TRUE(engine_arena().is_open());
+    reset_static_cuda_state();
+    std::vector<float> logits = {1.0f, 3.0f, 5.0f, 2.0f};
+    Tensor d_logits = make_logits(logits.data(), logits.size());
+    const size_t used0 = engine_arena().used();
+    EXPECT_EQ(sample_greedy(d_logits), 2);
+    ASSERT_GT(engine_arena().used(), used0) << "first sample took no scratch from the arena";
+
+    reset_static_cuda_state();
+    const size_t used2 = engine_arena().used();
+    EXPECT_EQ(sample_greedy(d_logits), 2);
+    EXPECT_GT(engine_arena().used(), used2) << "greedy result scratch survived the reset";
+    free_gpu_tensor(d_logits);
 }
 }  // namespace imp

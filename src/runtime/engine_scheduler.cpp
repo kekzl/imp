@@ -29,7 +29,9 @@
 #include "memory/kv_cache.h"
 #include "compute/sampling.h"
 #include "compute/layernorm.h"
+#include "core/cuda_static_reset.h"
 #include "core/logging.h"
+#include "memory/engine_arena.h"
 
 #include <climits>
 #include <cstdio>
@@ -79,6 +81,44 @@ struct OutsideTiming {
     int n = 0;
 };
 OutsideTiming g_ot;
+
+// Post-norm hidden for the MTP chain draft: one [1, d_model] FP16 row from the
+// T2 arena, re-taken when the model's d_model outgrows it. It used to be a
+// function-local static sized from the FIRST model in the process, never
+// resized, so a swap to a wider model wrote past it (AUDIT_arch_2026 B-3).
+// Direct allocation only when the arena is closed (no engine in a bare test).
+void* s_h_normed = nullptr;
+size_t s_h_normed_cap = 0;
+bool s_h_normed_owned = false;
+
+void* mtp_prenorm_scratch(size_t need) {
+    if (s_h_normed && need <= s_h_normed_cap)
+        return s_h_normed;
+    if (s_h_normed_owned && s_h_normed)
+        (void)cudaFree(s_h_normed);
+    s_h_normed = nullptr;
+    s_h_normed_cap = 0;
+    s_h_normed_owned = false;
+    if (auto slab = engine_arena().take_bytes(need); !slab.empty()) {
+        s_h_normed = slab.data();
+    } else if (cudaMalloc(&s_h_normed, need) != cudaSuccess) {
+        s_h_normed = nullptr;
+        return nullptr;
+    } else {
+        s_h_normed_owned = true;
+    }
+    s_h_normed_cap = need;
+    return s_h_normed;
+}
+
+void engine_scheduler_reset_static_cuda_state() {
+    if (s_h_normed_owned && s_h_normed)
+        (void)cudaFree(s_h_normed);
+    s_h_normed = nullptr;
+    s_h_normed_cap = 0;
+    s_h_normed_owned = false;
+}
+IMP_REGISTER_CUDA_STATIC_RESET(engine_scheduler_reset_static_cuda_state);
 }  // namespace
 
 bool Engine::step_impl_() {
@@ -1631,19 +1671,14 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // in some MTP variants; gate by env so we can A/B.
             const bool s_pre_norm_h = runtime_config_.diagnostics.mtp_prenorm_h;
             const void* h_for_mtp = h_view.data;
-            // Scratch buffer for the normalized variant (allocated once).
-            static void* s_h_normed = nullptr;
-            if (s_pre_norm_h) {
-                if (s_h_normed == nullptr) {
-                    cudaMalloc(&s_h_normed, hidden_dim * sizeof(__half));
-                }
+            if (void* normed = s_pre_norm_h ? mtp_prenorm_scratch(hidden_dim * sizeof(__half)) : nullptr) {
                 int64_t hd_shape[2] = {1, hidden_dim};
                 Tensor in_view (h_view.data, QType::F16, 2, hd_shape, true);
-                Tensor out_view(s_h_normed,  QType::F16, 2, hd_shape, true);
+                Tensor out_view(normed, QType::F16, 2, hd_shape, true);
                 imp::rmsnorm(in_view, model_->output_norm(), out_view,
                              model_->config_.rms_norm_eps, decode_stream(),
                              model_->config_.norm_weight_offset);
-                h_for_mtp = s_h_normed;
+                h_for_mtp = normed;
             }
 
             // K-chain draft. K=mtp_chain_k_() (adaptive, <= mtp_spec_k_).

@@ -16,6 +16,7 @@
 #include "compute/mmq_q4k_imma_tile.h"
 #include "compute/mmq_q4k_imma_layout.h"
 #include "core/logging.h"
+#include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
 
 #include <cstdint>
@@ -334,6 +335,24 @@ struct ActScratch {
 std::mutex g_imma_mtx;
 std::unordered_map<const void*, WeightCache> g_w_cache;
 ActScratch g_act_scratch;
+
+// The weight cache is keyed by SOURCE POINTER and its planes are cudaMalloc'd,
+// so without a teardown a second model in the process kept paying for the
+// first one's planes and a recycled allocation with the same (N, K) would have
+// been served the previous model's weights — the mmq_q8_imma.cu hazard, same
+// fix. The activation scratch is arena-owned and generation-checked, so only
+// its guard is re-armed.
+void mmq_q4k_imma_reset_static_cuda_state() {
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+    for (auto& [_, c] : g_w_cache) {
+        (void)cudaFree(c.w_sym_s8);
+        (void)cudaFree(c.eff_alpha);
+        (void)cudaFree(c.eff_beta);
+    }
+    g_w_cache.clear();
+    g_act_scratch = ActScratch{};
+}
+IMP_REGISTER_CUDA_STATIC_RESET(mmq_q4k_imma_reset_static_cuda_state);
 
 bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t stream) {
     auto it = g_w_cache.find(W_q4k_blocks);
