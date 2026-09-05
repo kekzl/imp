@@ -4,6 +4,7 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 #include "model/tokenizer.h"
 
@@ -12,30 +13,6 @@
 #include <cuda_runtime_api.h>
 #include <exception>
 #include <stdexcept>
-
-namespace {
-// A kernel illegal-access (or similar) poisons the whole process-wide CUDA
-// context: every later launch returns the same sticky error, which forward()
-// silently clears and ignores, so the engine would serve garbage forever. These
-// classes are NOT recoverable without a process restart. A plain host-side throw
-// (the common case the step() try/catch was written for) leaves the device clean
-// — cudaDeviceSynchronize() returns success — so we recover and continue as before.
-bool cuda_error_is_unrecoverable(cudaError_t e) {
-    switch (e) {
-        case cudaErrorIllegalAddress:
-        case cudaErrorMisalignedAddress:
-        case cudaErrorLaunchFailure:
-        case cudaErrorLaunchTimeout:
-        case cudaErrorHardwareStackError:
-        case cudaErrorIllegalInstruction:
-        case cudaErrorECCUncorrectable:
-        case cudaErrorExternalDevice:
-            return true;
-        default:
-            return false;  // conservative: don't kill the server on recoverable/unknown errors
-    }
-}
-}  // namespace
 
 BatchingEngine::~BatchingEngine() { stop(); }
 
@@ -111,6 +88,13 @@ void BatchingEngine::resume() {
 
 void BatchingEngine::submit(std::shared_ptr<ServerRequest> req) {
     req->t_submit = std::chrono::steady_clock::now();
+    // After a device fault the worker is gone and nothing would ever pop this
+    // request: finish it now so the handler answers 500 instead of parking on
+    // the queue until the client gives up (AUDIT_arch_2026 D-1).
+    if (faulted_.load(std::memory_order_relaxed) || stop_requested_.load(std::memory_order_relaxed)) {
+        req->push_finish("internal_error");
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         pending_queue_.push_back(std::move(req));
@@ -157,6 +141,41 @@ struct WorkerTiming {
 };
 WorkerTiming g_wt;
 }  // namespace
+
+void BatchingEngine::fail_active_requests_(const std::string& why, cudaError_t observed) {
+    imp::Engine* engine = ctx_->engine.get();
+    imp::KVCacheManager* kv_mgr = engine->kv_manager();
+    IMP_LOG_ERROR("BatchingEngine: %s - cancelling %zu active request(s)", why.c_str(),
+                  active_requests_.size());
+    for (auto& sr : active_requests_) {
+        if (sr->request->status != imp::RequestStatus::FINISHED &&
+            sr->request->status != imp::RequestStatus::CANCELLED) {
+            sr->request->status = imp::RequestStatus::CANCELLED;
+            kv_mgr->free_sequence(sr->request->id);
+            engine->reset_ssm_state(sr->request->id);
+        }
+        sr->push_finish("internal_error");
+    }
+    // Distinguish a host-side throw (device clean: recover) from a CUDA fault
+    // that poisoned the shared context (no recovery without a restart).
+    // Without this, a poisoned context is silently cleared at the next
+    // forward() and the server returns garbage on every request.
+    const cudaError_t sync_err = cudaDeviceSynchronize();
+    const cudaError_t sticky = cudaGetLastError();
+    if (imp::cuda_error_is_unrecoverable(observed) || imp::cuda_error_is_unrecoverable(sync_err) ||
+        imp::cuda_error_is_unrecoverable(sticky)) {
+        IMP_LOG_ERROR(
+            "BatchingEngine: CUDA context poisoned (%s / %s / %s) - stopping the worker; "
+            "the server must be restarted.",
+            cudaGetErrorString(observed), cudaGetErrorString(sync_err), cudaGetErrorString(sticky));
+        faulted_.store(true, std::memory_order_relaxed);
+        stop_requested_.store(true, std::memory_order_relaxed);
+    }
+    // Reset engine-level transient state so the next request starts clean.
+    engine->invalidate_graphs();
+    engine->reset_batch_pool_cache();
+    active_requests_.clear();
+}
 
 void BatchingEngine::worker_loop() {
     // Best-effort scheduling boost for the ONE thread that drives the GPU.
@@ -310,64 +329,21 @@ void BatchingEngine::worker_loop() {
         try {
             (void)engine->step();
         } catch (const std::exception& e) {
-            IMP_LOG_ERROR("BatchingEngine: engine->step() threw %s — cancelling %zu active request(s)",
-                          e.what(), active_requests_.size());
-            for (auto& sr : active_requests_) {
-                if (sr->request->status != imp::RequestStatus::FINISHED &&
-                    sr->request->status != imp::RequestStatus::CANCELLED) {
-                    sr->request->status = imp::RequestStatus::CANCELLED;
-                    kv_mgr->free_sequence(sr->request->id);
-                    engine->reset_ssm_state(sr->request->id);
-                }
-                sr->push_finish("internal_error");
-            }
-            // Distinguish a host-side throw (device clean — recover) from a CUDA
-            // fault that poisoned the shared context (no recovery without a
-            // restart). Without this, a poisoned context is silently cleared at
-            // the next forward() and the server returns garbage on every request.
-            {
-                cudaError_t sync_err = cudaDeviceSynchronize();
-                cudaError_t sticky = cudaGetLastError();
-                if (cuda_error_is_unrecoverable(sync_err) || cuda_error_is_unrecoverable(sticky)) {
-                    IMP_LOG_ERROR("BatchingEngine: CUDA context poisoned (%s / %s) — stopping the "
-                                  "worker; the server must be restarted.",
-                                  cudaGetErrorString(sync_err), cudaGetErrorString(sticky));
-                    faulted_.store(true, std::memory_order_relaxed);
-                    stop_requested_.store(true, std::memory_order_relaxed);
-                }
-            }
-            // Reset engine-level transient state so the next request starts clean.
-            engine->invalidate_graphs();
-            engine->reset_batch_pool_cache();
-            active_requests_.clear();
+            fail_active_requests_(std::string("engine->step() threw ") + e.what(), cudaSuccess);
             continue;
         } catch (...) {
-            IMP_LOG_ERROR(
-                "BatchingEngine: engine->step() threw non-std exception — cancelling %zu active request(s)",
-                active_requests_.size());
-            for (auto& sr : active_requests_) {
-                if (sr->request->status != imp::RequestStatus::FINISHED &&
-                    sr->request->status != imp::RequestStatus::CANCELLED) {
-                    sr->request->status = imp::RequestStatus::CANCELLED;
-                    kv_mgr->free_sequence(sr->request->id);
-                    engine->reset_ssm_state(sr->request->id);
-                }
-                sr->push_finish("internal_error");
-            }
-            {
-                cudaError_t sync_err = cudaDeviceSynchronize();
-                cudaError_t sticky = cudaGetLastError();
-                if (cuda_error_is_unrecoverable(sync_err) || cuda_error_is_unrecoverable(sticky)) {
-                    IMP_LOG_ERROR("BatchingEngine: CUDA context poisoned (%s / %s) — stopping the "
-                                  "worker; the server must be restarted.",
-                                  cudaGetErrorString(sync_err), cudaGetErrorString(sticky));
-                    faulted_.store(true, std::memory_order_relaxed);
-                    stop_requested_.store(true, std::memory_order_relaxed);
-                }
-            }
-            engine->invalidate_graphs();
-            engine->reset_batch_pool_cache();
-            active_requests_.clear();
+            fail_active_requests_("engine->step() threw a non-std exception", cudaSuccess);
+            continue;
+        }
+        // A device fault that no guard promoted to a throw (every
+        // IMP_CUDA_CHECK_* in the hot path is log-only) is still in this
+        // thread's error slot. Probe before the tokens go out: a step that
+        // faulted wrote no new tokens, so delivering its buffer would replay
+        // the previous step's (AUDIT_arch_2026 D-1).
+        if (const cudaError_t probe = cudaPeekAtLastError(); imp::cuda_error_is_unrecoverable(probe)) {
+            fail_active_requests_(std::string("engine->step() left a sticky CUDA error: ") +
+                                      cudaGetErrorString(probe),
+                                  probe);
             continue;
         }
 

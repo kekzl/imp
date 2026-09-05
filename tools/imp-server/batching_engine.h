@@ -3,8 +3,11 @@
 #include "runtime/request.h"
 #include "api/imp_internal.h"
 
+#include <cuda_runtime_api.h>
+
 #include <atomic>
 #include <chrono>
+#include <string>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -136,6 +139,11 @@ public:
 
 private:
     void worker_loop();
+    // Cancel every active request with finish "internal_error", re-probe the
+    // device and, on an unrecoverable class, set faulted_ and stop the worker
+    // (#874, AUDIT_arch_2026 D-1). `observed` is the error the caller already
+    // holds (cudaSuccess when the trigger was a host throw).
+    void fail_active_requests_(const std::string& why, cudaError_t observed);
 
     ImpContext ctx_ = nullptr;  // non-owning
 

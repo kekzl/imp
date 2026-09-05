@@ -648,6 +648,15 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             "the KV pool cannot hold this request; it was admitted and then dropped. "
             "Shorten the prompt or retry when the server is less loaded.";
     }
+    // "internal_error" is the worker's finish for a request cancelled from
+    // inside a failed step (host throw or device fault, AUDIT_arch_2026 D-1).
+    // Non-streaming answers 500; the stream says it in the same `error` event.
+    if (std::strcmp(finish, "internal_error") == 0 && !out.error_type) {
+        out.error_type = "internal_error";
+        out.error_message =
+            "the engine step failed and this request was cancelled. GET /health reports "
+            "whether the engine is faulted (code engine_faulted: restart the process).";
+    }
     out.finish = finish;
     return true;
 }

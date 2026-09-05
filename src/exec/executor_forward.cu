@@ -33,6 +33,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/hadamard.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "exec/sparse_attn_select.h"
@@ -209,9 +210,12 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     cur_decode_rows_ = n > 1 && (!state.is_prefill || state.spec_verify_chunk);
     cur_per_row_lm_ = state.per_row_lm_head;
 
-    // Clear any stale CUDA error state before starting the forward pass.
+    // Clear any stale CUDA error state before starting the forward pass. A
+    // class that cannot be cleared (device fault) throws instead of warning:
+    // the previous step's tokens are already stale and every launch below
+    // would fail the same way (AUDIT_arch_2026 D-1).
     {
-        cudaError_t e_ = cudaGetLastError();
+        cudaError_t e_ = cuda_clear_or_throw("forward");
         if (e_ != cudaSuccess)
             IMP_LOG_WARN("Cleared stale error before forward: %s", cudaGetErrorString(e_));
     }

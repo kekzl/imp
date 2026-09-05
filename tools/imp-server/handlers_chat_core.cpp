@@ -992,6 +992,19 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             return;
         }
 
+        // "internal_error": the worker cancelled this request from inside a
+        // failed step (host throw or device fault, AUDIT_arch_2026 D-1). A 200
+        // with an empty completion would read as a model that chose silence.
+        if (std::strcmp(finish, "internal_error") == 0) {
+            const bool faulted = state.batching && state.batching->faulted();
+            send_json_error(res, 500, "internal_error",
+                            faulted ? "The engine faulted (CUDA context poisoned) and this process cannot "
+                                      "recover: restart it. GET /health reports code engine_faulted."
+                                    : "The engine step failed and this request was cancelled; retry.",
+                            /*param=*/nullptr, faulted ? "engine_faulted" : "engine_step_failed");
+            return;
+        }
+
         int n_output_tokens = static_cast<int>(output_ids.size()) + n_eos_counted;
         total_output_tokens += n_output_tokens;
         std::string content = !ctx.params.stop_sequences.empty() ? output_text

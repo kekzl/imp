@@ -375,6 +375,7 @@ request would be taken right now; otherwise 503 with a stable `code`:
 | `code` | state |
 |---|---|
 | `no_model` | started model-less and nothing loaded yet |
+| `engine_faulted` | a device fault poisoned the CUDA context; a swap does not clear it, restart the process |
 | `suspended` | `/admin/suspend` parked the weights; `POST /admin/resume` |
 | `swapping` | a model load or swap is in progress |
 | `draining` | the process received SIGTERM and is finishing in-flight work |
@@ -394,7 +395,13 @@ is alive, and an orchestrator restarting on them makes things worse.
 | `code` | what it means | what a client should do |
 |---|---|---|
 | `kv_pool_floored` | the KV pool fell back to its rescue floor, so it holds a few hundred tokens instead of a context. Sized once at startup, usually because another process still held the card | do **not** retry, the process cannot recover. Restart it on a free card |
-| `engine_faulted` | the engine is wedged | restart |
+| `engine_faulted` | a device fault (illegal address, launch failure) poisoned the CUDA context; the worker stopped | restart |
+
+A device fault is also visible on the request that hit it and on every later
+one: non-streaming answers 500 `internal_error` with `code` `engine_faulted`
+(`engine_step_failed` when the step failed on the host and the engine
+recovered), a stream carries the same in its `error` event. No request after
+the fault is queued or served.
 
 Whenever a model is loaded the body carries the pool capacity, healthy or
 not, so a caller can check a prompt against server capacity without scraping

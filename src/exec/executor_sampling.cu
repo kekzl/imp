@@ -10,6 +10,7 @@
 #include "exec/executor.h"
 #include "exec/executor_sampling_internal.h"
 #include "compute/sampling.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -151,7 +152,7 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
             IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_.as<int32_t>(), sizeof(int32_t), d_sample_result_,
                                                  SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_seq,
                                                  cudaMemcpyDeviceToHost, stream));
-            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            cuda_sync_or_throw(cudaStreamSynchronize(stream), "sample_tokens");
             for (int i = 0; i < n_seq; i++)
                 tokens[i] = h_sample_pinned_.as<int32_t>()[i];
         } else {
@@ -494,7 +495,7 @@ const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t s
                                              base * SAMPLE_SCRATCH_BYTES,
                                          SAMPLE_SCRATCH_BYTES, sizeof(int32_t), n_slots,
                                          cudaMemcpyDeviceToHost, stream));
-    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    cuda_sync_or_throw(cudaStreamSynchronize(stream), "collect_sampled_tokens");
     return h_sample_pinned_.as<int32_t>() + base;
 }
 
@@ -527,7 +528,7 @@ const int32_t* GraphExecutor::wait_gathered_tokens(int parity) {
     parity &= 1;
     if (!h_sample_pinned_.as<int32_t>() || !sample_gather_evt_[parity])
         return nullptr;
-    IMP_CUDA_CHECK_LOG(cudaEventSynchronize(sample_gather_evt_[parity]));
+    cuda_sync_or_throw(cudaEventSynchronize(sample_gather_evt_[parity]), "wait_gathered_tokens");
     return h_sample_pinned_.as<int32_t>() + static_cast<size_t>(parity) * sample_slots_;
 }
 
