@@ -69,6 +69,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- imp-server's request `model` field is a name, never a path (AUDIT_arch_2026
+  dispatch #3, F2-1 S1): `{"model": "/any/readable/x.gguf"}` used to load that
+  file and evict the resident model; now a basename in `--models-dir` or an
+  `org/repo` id from the HF cache, everything else 404. The `--max-concurrent`
+  guard no longer blocks on the engine lock during a swap (503 within 250 ms),
+  `GET /ready` reports readiness as a status code, and SIGTERM drains in-flight
+  generations before the engine stops (`stop_grace_period: 75s` in compose).
 - Four gates that gated nothing (AUDIT_arch_2026 dispatch #4, I-1/D-3, I-3,
   I-7, I-8, H-1, H-4, G-6): the greedy locks, degeneration battery, prefix-cache
   equivalence and parity suites now run from `make test-e2e` (Qwen3-8B-Q8_0, the
