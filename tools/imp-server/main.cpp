@@ -240,8 +240,16 @@ int main(int argc, char** argv) {
         // loaded model name, d_model and cumulative token counts — so
         // --metrics-require-auth folds it back under the api_key check (#1207).
         const bool metrics_exempt = (req.path == "/metrics" && !state.metrics_require_auth);
-        if (req.path == "/health" || metrics_exempt || req.method == "OPTIONS")
+        if (req.path == "/health" || req.path == "/ready" || metrics_exempt || req.method == "OPTIONS")
             return httplib::Server::HandlerResponse::Unhandled;
+
+        // Shutting down: a request httplib accepted before the listener stopped
+        // is refused rather than started into the teardown (AUDIT_arch_2026 E-6).
+        if (g_draining.load(std::memory_order_relaxed) && is_inference_endpoint(req.path)) {
+            send_dialect_error(res, req.path, 503, "server_error", "overloaded_error",
+                               "Server is shutting down");
+            return httplib::Server::HandlerResponse::Handled;
+        }
 
         // Rate limiting (per-peer, everything but /health and /metrics)
         if (state.rate_limiter.limit > 0 && is_rate_limited_endpoint(req.path)) {
@@ -257,11 +265,21 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Max concurrent requests
+        // Max concurrent requests. The depth read takes state.mtx, which a
+        // model swap or /admin/suspend holds for minutes: a blocking acquire
+        // here parked every arriving worker thread inside the load-shedding
+        // guard until the pool was gone (AUDIT_arch_2026 F2-3). Bounded like
+        // every observability path; a timeout means "engine busy", and 503 is
+        // the right answer during a swap anyway.
         if (state.max_concurrent > 0 && is_inference_endpoint(req.path)) {
             int queue = 0;
             {
-                std::lock_guard<std::timed_mutex> lock(state.mtx);
+                std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
+                if (!lock.owns_lock()) {
+                    send_dialect_error(res, req.path, 503, "server_error", "overloaded_error",
+                                       "Server busy (model swap or suspend in progress), retry shortly");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
                 if (state.batching)
                     queue = state.batching->queue_depth();
             }
@@ -305,6 +323,9 @@ int main(int argc, char** argv) {
     svr.Get("/health", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_health(req, res, state);
     });
+
+    svr.Get("/ready",
+            [&state](const httplib::Request& req, httplib::Response& res) { handle_ready(req, res, state); });
 
     svr.Get("/v1/models", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res, state);
@@ -511,7 +532,23 @@ int main(int argc, char** argv) {
     }
 
     g_server.store(nullptr, std::memory_order_relaxed);
+    g_draining.store(true, std::memory_order_relaxed);
     if (state.batching) {
+        // Let the in-flight generations FINISH before the engine goes: stop()
+        // cancels them. Same drain contract and budget as a model swap;
+        // pause() needs state.mtx held (no new submit during the window), and
+        // a drain that runs out of budget just falls through to the cancel
+        // (AUDIT_arch_2026 E-6). docker-compose.yml's stop_grace_period covers
+        // this budget so `docker stop` does not SIGKILL a draining server.
+        {
+            std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::seconds(5));
+            if (lock.owns_lock()) {
+                const int drain_ms = state.runtime_config.server.model_swap_drain_ms;
+                if (!state.batching->pause(drain_ms))
+                    fprintf(stderr, "shutdown: in-flight requests did not drain within %d ms, cancelling\n",
+                            drain_ms);
+            }
+        }
         state.batching->stop();
         state.batching.reset();
     }

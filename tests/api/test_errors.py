@@ -208,6 +208,30 @@ class TestUnknownEndpoint:
 
 
 class TestUnknownModel:
+    @pytest.mark.parametrize("name", [
+        "/tmp/x.gguf",                 # absolute path
+        "../../etc/passwd",            # traversal
+        "./models/x.gguf",             # relative path
+        "org/x.gguf",                  # a relative file, not an HF repo id
+        "a/b/c",                       # multi-segment
+    ])
+    def test_path_shaped_model_name_is_not_resolved(self, client, name):
+        """A request may name a model, never a path (AUDIT_arch_2026 F2-1).
+
+        Until 2026-09-05 any name containing '/' reached fs::exists and a
+        readable .gguf anywhere on the box was loaded, evicting the resident
+        model. Now every path shape answers like an unknown name: 404 with the
+        envelope on a loaded server, 503 on a model-less one, never 200 or 500.
+        """
+        r = client.post("/v1/chat/completions", json={
+            "model": name,
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+        assert r.status_code in (404, 503), r.text
+        body = r.json()
+        assert "error" in body
+        assert body["error"]["message"]
+
     def test_chat_completions_unknown_model(self, client):
         r = client.post("/v1/chat/completions", json={
             "model": "nonexistent-model-xyz.gguf",

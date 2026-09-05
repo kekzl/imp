@@ -19,7 +19,7 @@ static std::string repo_to_cache_name(const std::string& repo_id) {
     return result;
 }
 
-static std::string resolve_hf_cache_dir() {
+std::string hf_cache_dir() {
     if (const char* v = std::getenv("HUGGINGFACE_HUB_CACHE"))
         return v;
     if (const char* v = std::getenv("HF_HOME"))
@@ -54,7 +54,7 @@ std::string resolve_model_path(const std::string& model_id, const std::string& r
     }
 
     // 3. Check the HF cache.
-    std::string cache_dir = resolve_hf_cache_dir();
+    std::string cache_dir = hf_cache_dir();
     if (!cache_dir.empty()) {
         std::string cache_name = repo_to_cache_name(model_id);
         std::string model_cache = cache_dir + "/" + cache_name;

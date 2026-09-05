@@ -146,6 +146,11 @@ class MockHandler(BaseHTTPRequestHandler):
                 "model_loaded": True,
                 "queue_depth": 0,
             })
+        elif path == "/ready":
+            # The mock always has its model: readiness is 200. The 503 branch
+            # (no_model / suspended / swapping / draining) is the real
+            # binary's, exercised by the model-less Real API lane.
+            self._send_json(200, {"ready": True, "model_loaded": True, "suspended": False})
         elif path == "/v1/models":
             self._send_json(200, {
                 "object": "list",

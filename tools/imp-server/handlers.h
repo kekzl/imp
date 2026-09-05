@@ -220,6 +220,10 @@ struct ServerState {
     // snapshot, and inference endpoints answer 503. Atomic so /health can
     // read it without state.mtx. All writes happen under state.mtx.
     std::atomic<bool> suspended{false};
+    // True while load_model_into_state() runs (startup load, auto-load, swap):
+    // the old engine is gone and the new one is not up. GET /ready reads it
+    // without the mutex, which the swap holds for the whole load.
+    std::atomic<bool> swapping{false};
     std::string loaded_model_path;             // resolved path of the loaded model
     ImpWeightSnapshot weight_snapshot = nullptr;
 
@@ -272,6 +276,11 @@ struct ServerState {
 
 // Graceful shutdown
 extern std::atomic<httplib::Server*> g_server;
+// Set by the signal handler before the listener stops: requests httplib had
+// already accepted are answered 503 instead of being served into a teardown,
+// and main() drains the in-flight generations (server.model_swap_drain_ms)
+// before the batching engine is stopped (AUDIT_arch_2026 E-6).
+extern std::atomic<bool> g_draining;
 
 void signal_handler(int sig);
 std::string make_completion_id(ServerState& state);
@@ -296,6 +305,10 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
                                   const json& config_overrides = json::object());
 
 void handle_health(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// Readiness (AUDIT_arch_2026 E-5): 200 only when an inference request would be
+// taken right now; 503 with a stable `code` (no_model, suspended, swapping,
+// draining) otherwise. /health stays liveness and answers 200 in all four.
+void handle_ready(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_models(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_model_retrieve(const httplib::Request& req, httplib::Response& res, ServerState& state,
                            const std::string& model_id);
