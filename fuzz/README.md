@@ -37,6 +37,8 @@ docker run --rm -v $PWD:/src -w /src silkeh/clang:18 bash -c '
 | `fuzz_tool_stream` | `StreamToolCallFilter::feed` | #1554 mid-codepoint delta (twice) |
 | `fuzz_safetensors` | `load_safetensors` on a real file | #1603-#1605 |
 | `fuzz_tokenizer_json` | `Tokenizer::load` on a real file | #1606 |
+| `fuzz_gguf` | `load_gguf` on a real file | AUDIT_arch_2026 F1-1, F1-5, F1-7, F1-11 |
+| `fuzz_mmproj` | `vision_gguf_probe` on a real file (dry pass of the upload path) | AUDIT_arch_2026 F1-2 |
 
 ## What these do not cover
 

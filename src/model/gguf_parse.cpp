@@ -414,12 +414,15 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
         GGUFTensorInfo info;
         info.name = reader.read_string();
         info.n_dims = reader.read_u32();
-        for (uint32_t d = 0; d < info.n_dims && d < 4; d++) {
-            info.dims[d] = static_cast<int64_t>(reader.read_u64());
+        // GGML_MAX_DIMS is 4 and `dims` has 4 slots. This used to skip the
+        // extra words and keep going, and the loader then wrote `n_dims`
+        // entries into a 4-element stack array (AUDIT_arch_2026 F1-1).
+        if (info.n_dims > 4) {
+            reader.fail();
+            break;
         }
-        // Skip extra dims if n_dims > 4 (shouldn't happen)
-        for (uint32_t d = 4; d < info.n_dims; d++) {
-            reader.read_u64();
+        for (uint32_t d = 0; d < info.n_dims; d++) {
+            info.dims[d] = static_cast<int64_t>(reader.read_u64());
         }
         // Fill remaining dims with 1
         for (uint32_t d = info.n_dims; d < 4; d++) {

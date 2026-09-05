@@ -1,6 +1,8 @@
 #include "vision/vision_loader.h"
 #include "vision/vision_loader_check.h"
 #include "model/gguf_loader.h"
+#include "model/gguf_loader_internal.h"
+#include "model/model_limits.h"
 #include "memory/engine_arena.h"
 #include "core/fp_bits.h"
 #include "core/logging.h"
@@ -16,6 +18,7 @@
 #include <vector>
 #include <span>
 #include <cmath>
+#include <algorithm>
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -23,192 +26,13 @@
 
 namespace imp {
 
-// ---- Binary reader (duplicated from gguf_loader.cpp since it's file-local) ----
+// The GGUF reader, value parser and tensor-info parser are the shared ones from
+// model/gguf_loader_internal.h. This file carried a hand-copied fork of all
+// three from before the bounds checks were added and never picked them up
+// (AUDIT_arch_2026 F1-2).
 
 namespace {
 
-class BinaryReader {
-public:
-    explicit BinaryReader(std::span<const uint8_t> data) : data_(data.data()), size_(data.size()), pos_(0) {}
-
-    size_t pos() const { return pos_; }
-    bool failed() const { return failed_; }
-    bool check(size_t n) const { return pos_ + n <= size_; }
-
-    void skip(size_t n) {
-        if (!check(n)) {
-            failed_ = true;
-            return;
-        }
-        pos_ += n;
-    }
-
-    void align(size_t alignment) {
-        size_t rem = pos_ % alignment;
-        if (rem != 0) {
-            size_t pad = alignment - rem;
-            if (!check(pad)) {
-                failed_ = true;
-                return;
-            }
-            pos_ += pad;
-        }
-    }
-
-    template <typename T>
-    T read() {
-        if (!check(sizeof(T))) {
-            failed_ = true;
-            return T{};
-        }
-        T val;
-        std::memcpy(&val, data_ + pos_, sizeof(T));
-        pos_ += sizeof(T);
-        return val;
-    }
-
-    uint32_t read_u32() { return read<uint32_t>(); }
-    uint64_t read_u64() { return read<uint64_t>(); }
-    int32_t read_i32() { return read<int32_t>(); }
-    float read_f32() { return read<float>(); }
-    double read_f64() { return read<double>(); }
-    uint8_t read_u8() { return read<uint8_t>(); }
-    int8_t read_i8() { return read<int8_t>(); }
-    uint16_t read_u16() { return read<uint16_t>(); }
-    int16_t read_i16() { return read<int16_t>(); }
-    int64_t read_i64() { return read<int64_t>(); }
-
-    std::string read_string() {
-        uint64_t len = read_u64();
-        if (!check(static_cast<size_t>(len))) {
-            failed_ = true;
-            return "";
-        }
-        std::string s(reinterpret_cast<const char*>(data_ + pos_), static_cast<size_t>(len));
-        pos_ += static_cast<size_t>(len);
-        return s;
-    }
-
-private:
-    const uint8_t* data_;
-    size_t size_;
-    size_t pos_;
-    bool failed_ = false;
-};
-
-// ---- GGUF value types (same as gguf_loader.cpp) ----
-
-enum class VGGUFValueType : uint32_t {
-    UINT8 = 0,
-    INT8 = 1,
-    UINT16 = 2,
-    INT16 = 3,
-    UINT32 = 4,
-    INT32 = 5,
-    FLOAT32 = 6,
-    BOOL = 7,
-    STRING = 8,
-    ARRAY = 9,
-    UINT64 = 10,
-    INT64 = 11,
-    FLOAT64 = 12,
-};
-
-struct VGGUFValue {
-    VGGUFValueType type = VGGUFValueType::UINT32;
-    uint64_t uint_val = 0;
-    int64_t int_val = 0;
-    double float_val = 0.0;
-    std::string str_val;
-    std::vector<float> float_array;
-    std::vector<int32_t> int_array;
-};
-
-VGGUFValue read_value(BinaryReader& r, VGGUFValueType type) {
-    VGGUFValue v;
-    v.type = type;
-    switch (type) {
-        case VGGUFValueType::UINT8:
-            v.uint_val = r.read_u8();
-            break;
-        case VGGUFValueType::INT8:
-            v.int_val = r.read_i8();
-            break;
-        case VGGUFValueType::UINT16:
-            v.uint_val = r.read_u16();
-            break;
-        case VGGUFValueType::INT16:
-            v.int_val = r.read_i16();
-            break;
-        case VGGUFValueType::UINT32:
-            v.uint_val = r.read_u32();
-            break;
-        case VGGUFValueType::INT32:
-            v.int_val = r.read_i32();
-            break;
-        case VGGUFValueType::FLOAT32:
-            v.float_val = r.read_f32();
-            break;
-        case VGGUFValueType::BOOL:
-            v.uint_val = r.read_u8();
-            break;
-        case VGGUFValueType::STRING:
-            v.str_val = r.read_string();
-            break;
-        case VGGUFValueType::UINT64:
-            v.uint_val = r.read_u64();
-            break;
-        case VGGUFValueType::INT64:
-            v.int_val = r.read_i64();
-            break;
-        case VGGUFValueType::FLOAT64:
-            v.float_val = r.read_f64();
-            break;
-        case VGGUFValueType::ARRAY: {
-            auto arr_type = static_cast<VGGUFValueType>(r.read_u32());
-            uint64_t count = r.read_u64();
-            if (arr_type == VGGUFValueType::FLOAT32) {
-                v.float_array.reserve(static_cast<size_t>(count));
-                for (uint64_t i = 0; i < count; i++)
-                    v.float_array.push_back(r.read_f32());
-            } else if (arr_type == VGGUFValueType::INT32) {
-                v.int_array.reserve(static_cast<size_t>(count));
-                for (uint64_t i = 0; i < count; i++)
-                    v.int_array.push_back(r.read_i32());
-            } else if (arr_type == VGGUFValueType::UINT32) {
-                v.int_array.reserve(static_cast<size_t>(count));
-                for (uint64_t i = 0; i < count; i++)
-                    v.int_array.push_back(static_cast<int32_t>(r.read_u32()));
-            } else {
-                for (uint64_t i = 0; i < count; i++)
-                    read_value(r, arr_type);
-            }
-            break;
-        }
-    }
-    return v;
-}
-
-uint64_t val_uint(const VGGUFValue& v) {
-    switch (v.type) {
-        case VGGUFValueType::UINT8:
-        case VGGUFValueType::UINT16:
-        case VGGUFValueType::UINT32:
-        case VGGUFValueType::UINT64:
-        case VGGUFValueType::BOOL:
-            return v.uint_val;
-        case VGGUFValueType::INT8:
-        case VGGUFValueType::INT16:
-        case VGGUFValueType::INT32:
-        case VGGUFValueType::INT64:
-            return static_cast<uint64_t>(v.int_val);
-        case VGGUFValueType::FLOAT32:
-        case VGGUFValueType::FLOAT64:
-            return static_cast<uint64_t>(v.float_val);
-        default:
-            return 0;
-    }
-}
 
 // One sink for both passes over a mmproj. `dry` runs the whole load with every
 // allocation replaced by an addition, which is how the arena reservation is
@@ -374,11 +198,11 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
                  (unsigned long)kv_count);
 
     // 3. Parse metadata
-    std::unordered_map<std::string, VGGUFValue> metadata;
+    std::unordered_map<std::string, GGUFValue> metadata;
     for (uint64_t i = 0; i < kv_count && !reader.failed(); i++) {
         std::string key = reader.read_string();
-        auto vtype = static_cast<VGGUFValueType>(reader.read_u32());
-        VGGUFValue value = read_value(reader, vtype);
+        auto vtype = static_cast<GGUFValueType>(reader.read_u32());
+        GGUFValue value = read_gguf_value(reader, vtype);
         metadata.emplace(std::move(key), std::move(value));
     }
 
@@ -388,32 +212,12 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
         return nullptr;
     }
 
-    // 4. Parse tensor infos
-    struct TensorInfo {
-        std::string name;
-        uint32_t n_dims{};
-        int64_t dims[4]{};
-        GgufWireType type{};
-        uint64_t offset{};
-    };
-
-    std::vector<TensorInfo> tensor_infos;
-    tensor_infos.reserve(static_cast<size_t>(tensor_count));
-
-    for (uint64_t i = 0; i < tensor_count && !reader.failed(); i++) {
-        TensorInfo info;
-        info.name = reader.read_string();
-        info.n_dims = reader.read_u32();
-        for (uint32_t d = 0; d < info.n_dims && d < 4; d++)
-            info.dims[d] = static_cast<int64_t>(reader.read_u64());
-        for (uint32_t d = 4; d < info.n_dims; d++)
-            reader.read_u64();
-        for (uint32_t d = info.n_dims; d < 4; d++)
-            info.dims[d] = 1;
-        info.type = static_cast<GgufWireType>(reader.read_u32());
-        info.offset = reader.read_u64();
-        tensor_infos.push_back(std::move(info));
-    }
+    // 4. Parse tensor infos (the shared parser: n_dims capped at 4, and the
+    // reserve clamped like gguf_loader.cpp's, a tensor-info entry being at
+    // least 24 bytes, so a hostile tensor_count cannot drive the allocation).
+    std::vector<GGUFTensorInfo> tensor_infos;
+    tensor_infos.reserve(std::min<uint64_t>(tensor_count, reader.remaining() / 24));
+    parse_tensor_infos(reader, tensor_count, tensor_infos);
 
     if (reader.failed()) {
         IMP_LOG_ERROR("Vision: tensor info truncated");
@@ -432,6 +236,13 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
     }
     reader.align(alignment);
     size_t tensor_data_start = reader.pos();
+    // The data window every tensor's [offset, offset+size) is checked against
+    // before a pointer is formed from it; this file had no such check at all.
+    const size_t data_avail = (tensor_data_start <= file_size) ? file_size - tensor_data_start : 0;
+    for (auto& info : tensor_infos) {
+        info.data_base = data + tensor_data_start;
+        info.data_limit = data_avail;
+    }
 
     // 6. Extract vision config from metadata
     auto model = std::make_unique<VisionModel>();
@@ -448,8 +259,19 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
     cfg.intermediate_size = static_cast<int>(get_uint("clip.vision.feed_forward_length", 4304));
     cfg.num_layers = static_cast<int>(get_uint("clip.vision.block_count", 27));
 
-    if (cfg.num_heads > 0)
-        cfg.head_dim = cfg.hidden_size / cfg.num_heads;
+    // Every one of these divides or sizes something below; a zero or a
+    // negative (a u64 narrowed to int) is a broken or hostile file.
+    if (cfg.image_size <= 0 || cfg.patch_size <= 0 || cfg.hidden_size <= 0 || cfg.num_heads <= 0 ||
+        cfg.intermediate_size <= 0 || cfg.num_layers < 0 || cfg.num_layers > kMaxModelLayers) {
+        IMP_LOG_ERROR(
+            "Vision: config image=%d patch=%d hidden=%d heads=%d ff=%d layers=%d (limit %d) "
+            "is not servable - refusing %s",
+            cfg.image_size, cfg.patch_size, cfg.hidden_size, cfg.num_heads, cfg.intermediate_size,
+            cfg.num_layers, kMaxModelLayers, path.c_str());
+        munmap(mmap_base, file_size);
+        return nullptr;
+    }
+    cfg.head_dim = cfg.hidden_size / cfg.num_heads;
     cfg.num_patches = (cfg.image_size / cfg.patch_size) * (cfg.image_size / cfg.patch_size);
 
     // Image normalization parameters
@@ -519,7 +341,8 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
         }
     }
 
-    // 7. Allocate layers
+    // 7. Allocate layers (num_layers capped at kMaxModelLayers above, before
+    // anything was sized from it).
     model->layers.resize(cfg.num_layers);
 
     // 8. Assign tensors
@@ -528,12 +351,23 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
     // "247 / 316" says something is wrong, "attn_qkv" says what.
     std::vector<std::string> unrecognized;
     for (const auto& info : tensor_infos) {
-        // Compute total elements and data pointer
+        // A window that escapes the mapped file, a negative dim or an
+        // overflowing dim product: refused before a pointer is formed. The GGUF
+        // loader skips such a tensor; a tower with a missing weight cannot
+        // serve, so this loader refuses the file.
+        if (!gguf_tensor_in_bounds(info)) {
+            IMP_LOG_ERROR("Vision: tensor '%s' out of bounds (offset=%llu, limit=%zu) - refusing %s",
+                          info.name.c_str(), static_cast<unsigned long long>(info.offset), info.data_limit,
+                          path.c_str());
+            munmap(mmap_base, file_size);
+            return nullptr;
+        }
+        // In bounds means the element count fits the file, so this cannot wrap.
         int64_t n_elements = 1;
         for (uint32_t d = 0; d < info.n_dims; d++)
             n_elements *= info.dims[d];
 
-        const void* tensor_data = data + tensor_data_start + info.offset;
+        const void* tensor_data = info.data_base + info.offset;
 
         // Reverse dims for our convention: shape[0] = outermost
         int64_t shape[4] = {1, 1, 1, 1};

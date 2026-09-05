@@ -248,8 +248,160 @@ std::vector<std::string> tokenizer_corpus() {
     };
 }
 
+// Minimal GGUF writer for the two GGUF-shaped corpora: header, KV pairs, tensor
+// infos, aligned data. Type ids per the GGUF spec (UINT32=4, STRING=8, ARRAY=9;
+// ggml F32=0, F16=1). The hostile entries are the AUDIT_arch_2026 F1 cases.
+struct GgufWriter {
+    std::string s;
+    void u32(uint32_t v) { raw(&v, 4); }
+    void u64(uint64_t v) { raw(&v, 8); }
+    void f32(float v) { raw(&v, 4); }
+    void str(const std::string& v) {
+        u64(v.size());
+        s += v;
+    }
+    void raw(const void* p, size_t n) { s.append(static_cast<const char*>(p), n); }
+    void align(size_t a) {
+        while (s.size() % a)
+            s.push_back('\0');
+    }
+    void header(uint64_t n_tensors, uint64_t n_kv) {
+        u32(0x46554747u);
+        u32(3);
+        u64(n_tensors);
+        u64(n_kv);
+    }
+    void kv_u32(const std::string& k, uint32_t v) {
+        str(k);
+        u32(4);
+        u32(v);
+    }
+    void kv_str(const std::string& k, const std::string& v) {
+        str(k);
+        u32(8);
+        str(v);
+    }
+    void kv_u32_array(const std::string& k, const std::vector<uint32_t>& a) {
+        str(k);
+        u32(9);
+        u32(4);
+        u64(a.size());
+        for (auto v : a)
+            u32(v);
+    }
+    void kv_str_array(const std::string& k, const std::vector<std::string>& a) {
+        str(k);
+        u32(9);
+        u32(8);
+        u64(a.size());
+        for (const auto& v : a)
+            str(v);
+    }
+    // `n_dims` is passed separately so it can disagree with `dims` (F1-1).
+    void tensor(const std::string& name, uint32_t n_dims, const std::vector<uint64_t>& dims, uint32_t type,
+                uint64_t offset) {
+        str(name);
+        u32(n_dims);
+        for (auto d : dims)
+            u64(d);
+        u32(type);
+        u64(offset);
+    }
+    void f32_data(int n) {
+        align(32);
+        for (int i = 0; i < n; i++)
+            f32(0.01f * static_cast<float>(i));
+    }
+};
+
+std::vector<std::string> gguf_corpus() {
+    auto llama = [](uint32_t n_dims, uint64_t ne0, uint64_t offset, uint32_t block_count) {
+        GgufWriter w;
+        w.header(1, 2);
+        w.kv_str("general.architecture", "llama");
+        w.kv_u32("llama.block_count", block_count);
+        w.tensor("token_embd.weight", n_dims, {ne0, 4}, 0, offset);
+        w.f32_data(16);
+        return w.s;
+    };
+    auto tokenizer = [](uint32_t bos) {
+        GgufWriter w;
+        w.header(1, 4);
+        w.kv_str("general.architecture", "llama");
+        w.kv_u32("llama.block_count", 0);
+        w.kv_str_array("tokenizer.ggml.tokens", {"a", "b", "c"});
+        w.kv_u32("tokenizer.ggml.bos_token_id", bos);
+        w.tensor("token_embd.weight", 2, {4, 4}, 0, 0);
+        w.f32_data(16);
+        return w.s;
+    };
+    auto gemma4 = [](uint32_t block_count, const std::vector<uint32_t>& pattern) {
+        GgufWriter w;
+        w.header(1, 5);
+        w.kv_str("general.architecture", "gemma4");
+        w.kv_u32("gemma4.block_count", block_count);
+        w.kv_u32_array("gemma4.attention.sliding_window_pattern", pattern);
+        w.kv_u32("gemma4.attention.key_length", 256);
+        w.kv_u32("gemma4.attention.key_length_swa", 512);
+        w.tensor("token_embd.weight", 2, {4, 4}, 0, 0);
+        w.f32_data(16);
+        return w.s;
+    };
+    GgufWriter huge;
+    huge.header(uint64_t{1} << 60, 0);
+    GgufWriter five;  // F1-1 well-formed: n_dims = 5 with five dim words
+    five.header(1, 2);
+    five.kv_str("general.architecture", "llama");
+    five.kv_u32("llama.block_count", 0);
+    five.tensor("token_embd.weight", 5, {4, 4, 1, 1, 1}, 0, 0);
+    five.f32_data(16);
+    return {
+        llama(2, 4, 0, 0),
+        llama(5, 4, 0, 0),  // F1-1: n_dims > 4, words missing
+        five.s,
+        llama(2, 4, uint64_t{1} << 63, 0),  // offset past the file
+        llama(2, uint64_t{1} << 40, 0, 0),  // dim product overflow
+        llama(2, 4, 0, 2147483647u),        // F1-5: block_count past the cap
+        tokenizer(0x40000000u),             // F1-7: bos outside the vocab
+        tokenizer(1),
+        gemma4(8, {1}),  // F1-5: pattern shorter than block_count
+        huge.s,          // tensor_count = 2^60
+        "GGUF",
+        "",
+    };
+}
+
+std::vector<std::string> mmproj_corpus() {
+    auto clip = [](uint32_t n_dims, uint64_t offset, uint32_t block_count, uint32_t patch) {
+        GgufWriter w;
+        w.header(1, 6);
+        w.kv_str("general.architecture", "clip");
+        w.kv_u32("clip.vision.block_count", block_count);
+        w.kv_u32("clip.vision.embedding_length", 8);
+        w.kv_u32("clip.vision.attention.head_count", 2);
+        w.kv_u32("clip.vision.image_size", 28);
+        w.kv_u32("clip.vision.patch_size", patch);
+        w.tensor("v.patch_embd.weight", n_dims, {8, 8}, 1, offset);
+        w.align(32);
+        w.s.append(128, '\0');
+        return w.s;
+    };
+    GgufWriter huge;
+    huge.header(uint64_t{1} << 60, 0);
+    return {
+        clip(2, 0, 2, 14),
+        clip(5, 0, 2, 14),                  // F1-2: n_dims > 4, same fork
+        clip(2, uint64_t{1} << 63, 2, 14),  // F1-2: offset past the file, no bounds check
+        clip(2, 0, 2147483647u, 14),        // block_count sized layers before any cap
+        clip(2, 0, 2, 0),                   // patch_size = 0 divided image_size
+        huge.s,
+        "GGUF",
+        "",
+    };
+}
+
 // Iteration counts: enough that the mutator reaches past the corpus, small
-// enough that the file stays inside the CPU lane's budget. The two file-backed
+// enough that the file stays inside the CPU lane's budget. The file-backed
 // targets get fewer because each execution writes and removes a temp file.
 TEST(FuzzCorpus, JsonSchema) {
     run_target({"json_schema", imp_fuzz_json_schema, schema_corpus()}, 1500, 0xA11CE);
@@ -274,5 +426,9 @@ TEST(FuzzCorpus, SafeTensorsLoader) {
 TEST(FuzzCorpus, TokenizerJson) {
     run_target({"tokenizer_json", imp_fuzz_tokenizer_json, tokenizer_corpus()}, 250, 0xF00D);
 }
+
+TEST(FuzzCorpus, GgufLoader) { run_target({"gguf", imp_fuzz_gguf, gguf_corpus()}, 250, 0xA5A5); }
+
+TEST(FuzzCorpus, MmprojLoader) { run_target({"mmproj", imp_fuzz_mmproj, mmproj_corpus()}, 250, 0x5A5A); }
 
 }  // namespace
