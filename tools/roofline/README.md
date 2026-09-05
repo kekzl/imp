@@ -66,9 +66,14 @@ no agent session ever has.
   rope, kv_write, elementwise, split-K reduce) largely overlap away (2026-07-13:
   no-graphs kernel-time sum ≈1.8× the real graphs-ON step on Qwen3-30B; router
   fusion 0% e2e, split-K cap −21…−35%). Validate those levers graphs-ON first.
-- **Gate** (`regress`): exit≠0 when a kernel class (time share ≥0.5%) drops in
+- **Regression check** (`regress`): exit≠0 when a kernel class (time share ≥0.5%) drops in
   the median by more than the threshold below the baseline AND the restart
-  ranges are disjoint (otherwise variance, no fail).
+  ranges are disjoint (otherwise variance, no fail). Not a gate: CI has no GPU
+  runner, `roofline.yml` only re-parses the committed history, and it fires on
+  `tools/roofline/**` edits, not on kernel diffs. A `src/compute/` or `src/exec/`
+  push gets a reminder from the pre-push hook with the age of the newest run; the
+  measurement itself is the manual `make roofline-measure && make roofline-regress`
+  (AUDIT_arch_2026 H-2).
 
 ## Determinism / methodology
 

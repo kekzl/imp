@@ -46,6 +46,7 @@ Pair with `sm120-cuda-expert` (levers) and `docs/internals/BENCHMARKING.md` (mea
 | Refresh perf baseline | `make gen-perf-baseline [MODEL=/models/...]`: 5 trials x 5 reps, 15 s cooldown, median; writes `tests/perf_baseline.json` incl. `own_peak_mb` |
 | Guarded re-pin (refuses top-range / volatile days) | `scripts/repin_baselines_if_median.sh` |
 | Regression gate | `make verify-fast` (`scripts/verify.sh`): 8% decode / 8% prefill / 10% peak VRAM |
+| Paired regression gate, CODE change vs `origin/main` | `make verify-ab` (`scripts/verify_ab.sh`): `imp:ab-<sha>` vs `imp:test`, alternating pairs, mean paired decode delta vs `thresholds.paired_decode_regression_pct`; the pre-push hook runs it after `verify-fast` |
 | VRAM attribution | `imp-cli --mem-report` (`own_peak=` is what the gate parses) |
 | North-star gate | `make verify-north-star` (`tests/perf_baseline_north_star.json`) |
 | Long-context decode A/B | `scripts/bench_longctx_ab.sh`; capacity vs decode `tools/analysis/ctx_capacity_decode_sweep.sh` |

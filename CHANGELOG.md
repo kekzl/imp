@@ -13,6 +13,19 @@ there instead of retelling it.
 
 ### Added
 
+- `make verify-ab` (`scripts/verify_ab.sh`, `scripts/ab_base_image.sh`): the paired
+  half of the perf gate (AUDIT_arch_2026 dispatch #10, H-3 / H-2 / H-9, #NNNN).
+  `origin/main` is built once per sha into `imp:ab-<sha>` and benched against
+  `imp:test` in alternating pairs in one session; verdict = mean paired tg128
+  delta vs the new `thresholds.paired_decode_regression_pct` (2 %) in
+  `tests/perf_baseline.json`. Calibration on one tree built twice, 6 gate runs x
+  3 pairs: paired means within +-0.20 %, 0 red; a planted regression (a second
+  o_proj GEMV on every even layer) reads -2.93 % paired (red) and -1.05 % on
+  the single-arm 8 % gate (green). The pre-push hook runs it after `verify-fast` on
+  the measured paths (`IMP_SKIP_AB=1` skips) and, on `src/compute` or `src/exec`
+  diffs, prints the age of the newest roofline run with the manual step (the
+  roofline check is documented as not a gate). The pin-age warning fires at 90
+  days, not 30, with the reason at the line.
 - `docs/audit/AUDIT_arch_2026.md`: read-only architecture audit at `ef664dd8`,
   12 axes, 113 scout findings, 3 S0 and 9 S1 surviving the falsification pass,
   a 15-item dispatch queue. No source change.

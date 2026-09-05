@@ -412,6 +412,24 @@ verify-north-star: build check-gpu
 	@IMP_VERIFY_BASELINE=tests/perf_baseline_north_star.json \
 	 scripts/verify.sh fast
 
+# verify-ab: the paired half of the perf gate (AUDIT_arch_2026 H-3). verify-fast
+# compares one arm against a pin measured weeks earlier and cannot resolve a
+# delta smaller than this host's between-session movement (4-6 % on one tree);
+# this builds AB_BASE_REF (origin/main) into imp:ab-<sha> once per sha
+# (scripts/ab_base_image.sh, reused afterwards) and runs the gate bench in
+# alternating pairs against imp:test, so host drift hits both arms equally.
+# Verdict: mean paired decode delta vs thresholds.paired_decode_regression_pct
+# in tests/perf_baseline.json. The pre-push hook runs it after verify-fast on
+# diffs that touch the measured paths; AB_PAIRS=3 by default.
+AB_BASE_REF ?= origin/main
+.PHONY: ab-base-image verify-ab
+ab-base-image:
+	@bash scripts/ab_base_image.sh $(AB_BASE_REF)
+
+verify-ab: build check-gpu ab-base-image
+	@IMG_A=imp:ab-$$(git rev-parse --short=8 $(AB_BASE_REF)) IMG_B=$(DOCKER_IMG) \
+	 bash scripts/verify_ab.sh
+
 # Regenerate tests/perf_baseline.json with the cold-median methodology (5 trials,
 # 15s cooldown between, median of each metric). Resists cuBLAS-algo-state drift —
 # see memory/bench_sustained_load_cublas_algo_drift_2026_05_23.md.
