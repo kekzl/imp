@@ -69,6 +69,15 @@ there instead of retelling it.
 
 ### Fixed
 
+- Serving signals a client or a scrape can act on (AUDIT_arch_2026 dispatch
+  #7, C-1 / C-5 / C-6 / C-9, #1915): a decode that runs the KV pool dry ends
+  `finish_reason: "capacity"` (503 `capacity_error` non-streaming) instead of
+  `"cancelled"`; `imp_queue_time_seconds` now ends at the scheduler's first
+  batch (the wait behind `max_batch_size` and KV, not the worker's loop
+  latency) and `imp_queue_waiting` / `imp_queue_running` split
+  `imp_queue_depth`; `usage.completion_tokens_details.imp_spec_*` and the
+  `imp.spec_*` span attributes carry per-request speculation counts on every
+  dialect; `/v1/responses` bridges `speculative`.
 - Per-request LoRA is honest (AUDIT_arch_2026 dispatch #6, E-1 / F1-6 / E-9,
   #1914): the prefix cache is keyed by adapter (a shared system prompt no
   longer hands adapter A's KV to adapter B), the batching worker switches
