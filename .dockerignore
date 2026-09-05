@@ -32,7 +32,6 @@ docker-compose.yml
 README.md
 CLAUDE.md
 AGENTS.md
-LICENSE
 logo.svg
 compile_commands.json
 imp.conf

@@ -105,7 +105,7 @@ FROM nvidia/cuda:13.3.1-runtime-ubuntu26.04
 LABEL org.opencontainers.image.title="imp" \
       org.opencontainers.image.description="LLM inference engine in C++/CUDA for NVIDIA Blackwell sm_120 (RTX 5090/5080/5070 Ti, RTX PRO 6000). Native NVFP4 + GGUF, OpenAI/Anthropic-compatible server. Written entirely by Claude Code." \
       org.opencontainers.image.source="https://github.com/kekzl/imp" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT AND Apache-2.0"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
@@ -115,6 +115,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy built binaries
 COPY --from=builder /tmp/imp-server /usr/local/bin/imp-server
 COPY --from=builder /tmp/imp-cli /usr/local/bin/imp-cli
+# Apache-2.0 section 4(a): the licence text travels with every distribution
+# (src/compute/nvfp4_quant_hw.cu is adapted from SageAttention).
+COPY LICENSE THIRD_PARTY_LICENSES.md /usr/share/doc/imp/
 COPY --from=builder /tmp/imp-quantiz[e] /usr/local/bin/
 COPY --from=builder /tmp/imp-test[s] /usr/local/bin/
 COPY --from=builder /tmp/imp-tests-uni[t] /usr/local/bin/
