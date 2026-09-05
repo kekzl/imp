@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-09-05
-commit: 4d0da33d
+verified: 2026-09-06
+commit: 412bf8b4
 -->
 
 <p align="center">
@@ -322,4 +322,7 @@ in [`docs/audit/`](docs/audit/) and [`docs/MISSION_JOURNAL.md`](docs/MISSION_JOU
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE). One kernel file is adapted from Apache-2.0 code
+(SageAttention); its licence text and notice are in
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md), shipped in the image at
+`/usr/share/doc/imp/`.

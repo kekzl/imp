@@ -362,6 +362,20 @@ if [ -f LICENSE ] && grep -q "MIT" LICENSE && grep -q "MIT" README.md; then
 else
     fail "LICENSE missing or README license claim mismatched"
 fi
+# Apache-2.0 code (src/compute/nvfp4_quant_hw.cu, adapted from SageAttention) is
+# in every distribution, so section 4(a) of that licence makes its text part of
+# the artefact. Until 2026-09-05 nothing in the tree carried it and the image
+# label said MIT (AUDIT_arch_2026 H-7). Four-way pin: the file, its content,
+# the OCI label, the README pointer.
+if [ -f THIRD_PARTY_LICENSES.md ] && grep -q "Apache License" THIRD_PARTY_LICENSES.md \
+   && grep -q "SageAttention" THIRD_PARTY_LICENSES.md \
+   && grep -q 'image.licenses="MIT AND Apache-2.0"' Dockerfile \
+   && grep -q "THIRD_PARTY_LICENSES.md" Dockerfile \
+   && grep -q "THIRD_PARTY_LICENSES.md" README.md; then
+    pass "THIRD_PARTY_LICENSES.md carries the Apache-2.0 text; Dockerfile label + COPY and README point at it"
+else
+    fail "THIRD_PARTY_LICENSES.md missing or incomplete, or the Dockerfile label / COPY / README pointer do not name it"
+fi
 
 # --------------------------------------------------- 5b. version consistency
 # The version lives in three places that have to agree, and nothing pinned

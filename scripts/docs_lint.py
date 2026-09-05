@@ -55,6 +55,9 @@ EXCLUDED_FILES = {
     "docs/MISSION_JOURNAL.md",  # append-only
     "docs/vram_audit.md",    # append-only, says so in its own title
     "AUDIT.md",              # running findings log
+    # Verbatim licence text (Apache-2.0 body + upstream notices): not
+    # documentation, must not be reworded for a lint rule.
+    "THIRD_PARTY_LICENSES.md",
     # The roadmap is a dated research record ("a gap list, not a schedule"):
     # its numbers are the narrative of how each gap was measured or refuted,
     # and stripping them for provenance blocks would destroy the record. The
