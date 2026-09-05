@@ -689,6 +689,13 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         usage_out["input_tokens"] = prompt_tokens - cached;
         usage_out["cache_read_input_tokens"] = cached;
         usage_out["cache_creation_input_tokens"] = creation;
+        // imp extension (C-6): per-request speculation counters ride along
+        // under the same vendor-prefixed keys the OpenAI shape carries.
+        if (u.contains("completion_tokens_details") && u["completion_tokens_details"].is_object()) {
+            for (const char* k : {"imp_spec_drafted", "imp_spec_accepted", "imp_spec_verify_steps"})
+                if (u["completion_tokens_details"].contains(k))
+                    usage_out[k] = u["completion_tokens_details"][k];
+        }
         // Anthropic's usage shape has no slot for "we dropped context", so this
         // is an imp-namespaced extension rather than a guess at their schema.
         // Only present when eviction actually fired.

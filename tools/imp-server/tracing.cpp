@@ -118,6 +118,11 @@ std::vector<OtlpSpan> spans_for_request(const RequestSpan& r, const std::string&
     root.int_attrs.push_back({"gen_ai.usage.input_tokens", r.prompt_tokens});
     root.int_attrs.push_back({"gen_ai.usage.output_tokens", r.completion_tokens});
     root.int_attrs.push_back({"imp.cached_tokens", r.cached_tokens});
+    if (r.spec_verify_steps >= 0) {
+        root.int_attrs.push_back({"imp.spec_drafted", r.spec_drafted});
+        root.int_attrs.push_back({"imp.spec_accepted", r.spec_accepted});
+        root.int_attrs.push_back({"imp.spec_verify_steps", r.spec_verify_steps});
+    }
     root.int_attrs.push_back({"http.response.status_code", r.http_status});
     if (!r.finish_reason.empty())  // semconv: string[] (one per choice)
         root.str_array_attrs.push_back({"gen_ai.response.finish_reasons", {r.finish_reason}});

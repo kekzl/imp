@@ -476,6 +476,13 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         trace.cached_tokens = response.value("usage", json::object())
                                   .value("input_tokens_details", json::object())
                                   .value("cached_tokens", 0);
+        {
+            const json d =
+                response.value("usage", json::object()).value("output_tokens_details", json::object());
+            if (d.contains("imp_spec_verify_steps"))
+                trace.set_spec(d.value("imp_spec_drafted", 0LL), d.value("imp_spec_accepted", 0LL),
+                               d.value("imp_spec_verify_steps", 0));
+        }
         log_request_jsonl(state, /*skip=*/false, t_log_start, response_id, log_endpoint,
                           log_client_ip, log_raw_body, ms, prompt_t, completion_t,
                           status.empty() ? nullptr : status.c_str(), response,

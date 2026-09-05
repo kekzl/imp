@@ -654,6 +654,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-core SOURCES
         tests/test_cuda_errors.cpp
         tests/test_lora_dims.cpp
+        tests/test_spec_usage.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
@@ -1029,6 +1030,7 @@ if(IMP_BUILD_TESTS)
         tests/test_encoder_embed.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
+        tests/test_serving_signals.cpp
         tests/test_batching_engine_fault.cu
         tools/imp-server/batching_engine.cpp
         tests/test_suspend_resume.cu

@@ -3,6 +3,7 @@
 #include "memory/kv_cache.h"
 #include "core/logging.h"
 #include <algorithm>
+#include <chrono>
 #include <ranges>
 
 namespace imp {
@@ -261,6 +262,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
             auto r = *it;
             it = pending_.erase(it);
             r->status = RequestStatus::PREFILLING;
+            r->t_scheduled = std::chrono::steady_clock::now();
             prefill_batch.push_back(r);
             active_.push_back(r);
         }
@@ -304,5 +306,6 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
 bool Scheduler::has_pending() const { return !pending_.empty(); }
 
 int Scheduler::active_count() const { return static_cast<int>(active_.size()); }
+int Scheduler::pending_count() const { return static_cast<int>(pending_.size()); }
 
 }  // namespace imp

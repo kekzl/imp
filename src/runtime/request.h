@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <chrono>
 #include <string>
 #include <memory>
 #include "model/chat_template.h"
@@ -152,6 +153,11 @@ struct Request {
     int harmony_force_idx = -1;
     int prefill_offset = 0;  // Chunked prefill: tokens processed so far
     int cached_tokens = 0;   // Tokens served from prefix cache (skipped in prefill)
+    // When the scheduler moved this request into its first prefill batch
+    // (epoch = never). The server's queue histogram measures up to here:
+    // the wait behind max_batch_size and KV admission, not the batching
+    // worker's loop latency (AUDIT_arch_2026 C-5).
+    std::chrono::steady_clock::time_point t_scheduled{};
     // Context this request LOST to StreamingLLM eviction mid-generation: the
     // KV of the middle of its own conversation was freed to keep decoding.
     // The engine logs a WARN when eviction auto-enables, but a WARN is not

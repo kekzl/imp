@@ -278,7 +278,10 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     emit_histogram("imp_ttft_seconds", "Time to first token in seconds", m.ttft);
     emit_histogram("imp_inter_token_seconds", "Inter-token latency in seconds, one observation per token",
                    m.inter_token);
-    emit_histogram("imp_queue_time_seconds", "Seconds from admission to the first decode step", m.queue_time);
+    emit_histogram(
+        "imp_queue_time_seconds",
+        "Seconds from submit to the scheduler's first batch (the wait behind max_batch_size and KV)",
+        m.queue_time);
     out += "# HELP imp_requests_rejected_total Requests refused with a 4xx\n";
     out += "# TYPE imp_requests_rejected_total counter\n";
     out += "imp_requests_rejected_total " + std::to_string(m.requests_rejected.load()) + "\n";
@@ -314,14 +317,18 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# TYPE imp_model_loaded gauge\n";
     bool loaded = false;
     int queue = -1;
+    long long waiting = -1, running = -1;
     {
         // Bounded lock so a scrape can't hang behind a long /v1/embeddings
         // holder (#889); fall back to the lock-free status snapshot.
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock()) {
             loaded = state.model_loaded();
-            if (state.batching)
+            if (state.batching) {
                 queue = state.batching->queue_depth();
+                waiting = state.batching->queue_waiting.load(std::memory_order_relaxed);
+                running = state.batching->queue_running.load(std::memory_order_relaxed);
+            }
         } else {
             loaded = state.model_status_snapshot().loaded;  // queue stays -1 (unknown)
         }
@@ -330,6 +337,14 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_queue_depth Current number of active and pending requests\n";
     out += "# TYPE imp_queue_depth gauge\n";
     out += "imp_queue_depth " + std::to_string(queue) + "\n";
+    // The split the depth hides (AUDIT_arch_2026 C-5): a request behind
+    // max_batch_size or KV admission is waiting, one in a batch is running.
+    out += "# HELP imp_queue_waiting Requests submitted and not yet in a prefill or decode batch\n";
+    out += "# TYPE imp_queue_waiting gauge\n";
+    out += "imp_queue_waiting " + std::to_string(waiting) + "\n";
+    out += "# HELP imp_queue_running Requests in the current prefill or decode batch\n";
+    out += "# TYPE imp_queue_running gauge\n";
+    out += "imp_queue_running " + std::to_string(running) + "\n";
 
     res.set_content(out, "text/plain; version=0.0.4; charset=utf-8");
 }

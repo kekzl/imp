@@ -50,7 +50,7 @@ all of them at once.
 | `ignore_eos` | ✅ | vLLM-compatible extension on chat and completions: EOS and stop tokens are counted as output tokens without text, the think-model implicit `\nHuman` stop is not injected, user `stop` strings still apply, the request ends at `max_tokens` with `finish_reason: "length"`; for benchmark clients that need equal token counts across arms (`tools/analysis/burst_stream_client.py` with `IGNORE_EOS=1`). `tests/test_server_ignore_eos.py` in `make test-server` |
 | `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
-| `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape. `false` switches off **all three** drafters (n-gram, MTP head, token recycling) since #1639 - it used to reach only the n-gram matcher. `true` enables what the model and config allow; it cannot conjure an MTP head the checkpoint lacks |
+| `"speculative": true/false` | ✅ | per-request override, carried by all three dialects (chat, `/v1/messages`, `/v1/responses`). When a verify step ran, `usage.completion_tokens_details` carries `imp_spec_drafted`, `imp_spec_accepted`, `imp_spec_verify_steps` (Anthropic: top-level `usage` keys; Responses: `output_tokens_details`), and the request span the same as `imp.spec_*` attributes. `false` switches off **all three** drafters (n-gram, MTP head, token recycling) since #1639 - it used to reach only the n-gram matcher. `true` enables what the model and config allow; it cannot conjure an MTP head the checkpoint lacks |
 | `"lora": "name"` | ✅ | PEFT adapter selected per request, every quant path. One adapter is active at a time: a request naming a different one waits until the in-flight requests finished, then the worker switches (decode graphs re-capture); it is never batched with them. The prefix cache is keyed by adapter, so a shared system prompt is prefilled once per adapter. Adapter shapes are checked against the model at load |
 | `"priority": int` | ✅ | vLLM-compatible admission priority, **lower value schedules earlier**, default 0. Strictly dominates the scheduler's shortest-first-with-aging order; a caller that sets priorities owns starvation across classes. Accepted on all three dialects |
 
@@ -105,7 +105,12 @@ The four latency histograms (`imp_request_duration_seconds`,
 `imp_ttft_seconds`, `imp_queue_time_seconds`, `imp_inter_token_seconds`) are
 fed by every generation path: chat stream and non-stream, `/v1/completions`
 stream and non-stream. A request cancelled or timed out before the worker
-admitted it contributes its wait to `imp_queue_time_seconds` as well. Gate:
+admitted it contributes its wait to `imp_queue_time_seconds` as well.
+`imp_queue_time_seconds` ends when the scheduler puts the request into its
+first batch, so it is the wait behind `max_batch_size` and KV admission
+(until 2026-09-05 it ended at worker pickup, which the worker does every
+loop: a loop-latency reading). `imp_queue_waiting` / `imp_queue_running`
+split `imp_queue_depth` on the same boundary. Gate:
 `tests/test_server_metrics.py` in `make test-server`. The serving KPI harness
 reads the histograms and counters back per concurrency level
 (`tools/analysis/serving_kpi.py`, definitions in

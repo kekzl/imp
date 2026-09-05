@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/scheduler.h"
 #include "batching_engine.h"
 #include <pthread.h>
 #include <sys/resource.h>
@@ -280,13 +281,11 @@ void BatchingEngine::worker_loop() {
                     }
 
                     sr->notified_count = sr->request->output_tokens.size();
-                    // Waited-behind-others time, closed here rather than at the
-                    // first token: everything after this point is prefill and
-                    // decode, which the other histograms already describe.
-                    sr->queue_ms.store(std::chrono::duration<double, std::milli>(
-                                           std::chrono::steady_clock::now() - sr->t_submit)
-                                           .count(),
-                                       std::memory_order_relaxed);
+                    // queue_ms is closed when the scheduler puts the request
+                    // into its first batch (Request::t_scheduled), not here:
+                    // this queue drains every loop, so a stamp at this point
+                    // measured loop latency, never the wait behind
+                    // max_batch_size and KV admission (AUDIT_arch_2026 C-5).
                     engine->add_request(sr->request);
                     active_requests_.push_back(std::move(sr));
                 }
@@ -296,6 +295,18 @@ void BatchingEngine::worker_loop() {
         if (active_requests_.empty()) {
             decode_batch_last.store(0, std::memory_order_relaxed);
             continue;
+        }
+
+        // Queue split for /metrics (C-5): what the engine holds behind
+        // max_batch_size / KV admission versus what is in a batch.
+        {
+            imp::Scheduler* sch = engine->scheduler();
+            const int running = sch ? sch->active_count() : 0;
+            const int held = sch ? sch->pending_count() : 0;
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            queue_waiting.store(static_cast<int64_t>(pending_queue_.size()) + held,
+                                std::memory_order_relaxed);
+            queue_running.store(running, std::memory_order_relaxed);
         }
 
         // 2. Check for cancelled requests before stepping. A pipelined
@@ -382,6 +393,14 @@ void BatchingEngine::worker_loop() {
             bool is_done = (req->status == imp::RequestStatus::FINISHED ||
                             req->status == imp::RequestStatus::CANCELLED);
             bool had_new_tokens = (current_count > sr->notified_count);
+            // First step after the scheduler batched it: close the queue
+            // wait (submit -> first prefill batch), see t_scheduled.
+            if (sr->queue_ms.load(std::memory_order_relaxed) < 0.0 &&
+                req->t_scheduled.time_since_epoch().count() != 0) {
+                sr->queue_ms.store(
+                    std::chrono::duration<double, std::milli>(req->t_scheduled - sr->t_submit).count(),
+                    std::memory_order_relaxed);
+            }
 
             // Deliver new tokens
             for (size_t i = sr->notified_count; i < current_count; i++) {

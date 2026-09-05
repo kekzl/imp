@@ -202,6 +202,20 @@ inline int cache_creation_tokens_(const std::shared_ptr<imp::Request>& req, int 
 //
 // Returns a null json when there is nothing to report, so the field appears
 // only when it says something.
+// Per-request speculation accounting (AUDIT_arch_2026 C-6): the three
+// counters the request already carries, under vendor-prefixed keys inside
+// completion_tokens_details so an OpenAI-strict client sees extras it can
+// ignore. Absent when no verify step ran, so a request with speculation off
+// (or a model without a drafter) never sees the keys.
+inline void add_spec_usage_(nlohmann::json& usage, const std::shared_ptr<imp::Request>& req) {
+    if (!req || (req->spec_verifies == 0 && req->spec_drafted == 0))
+        return;
+    auto& d = usage["completion_tokens_details"];
+    d["imp_spec_drafted"] = req->spec_drafted;
+    d["imp_spec_accepted"] = req->spec_accepted;
+    d["imp_spec_verify_steps"] = req->spec_verifies;
+}
+
 inline nlohmann::json prompt_tokens_details_(const std::shared_ptr<imp::Request>& req, int n_prompt_tokens) {
     if (!req)
         return nlohmann::json();
