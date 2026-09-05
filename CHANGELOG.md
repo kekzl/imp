@@ -13,6 +13,9 @@ there instead of retelling it.
 
 ### Added
 
+- `docs/audit/AUDIT_arch_2026.md`: read-only architecture audit at `ef664dd8`,
+  12 axes, 113 scout findings, 3 S0 and 9 S1 surviving the falsification pass,
+  a 15-item dispatch queue. No source change.
 - `tools/check_function_size.py` gates the largest function *body* in a file
   (warn >200, hard >500 code LOC; p99 of 5830 bodies is 199), with the same
   two-way `[allow]` ceiling and mandatory reason as the file gate. It exists
