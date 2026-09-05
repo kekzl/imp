@@ -23,7 +23,7 @@ there instead of retelling it.
   ([`docs/audit/AUDIT_FILESIZE.md`](docs/audit/AUDIT_FILESIZE.md))
 - `tools/check_config_keys.py` and `tools/check_changelog_form.py` join the `docs` gate:
   every bound `imp.conf` key is in `imp.conf.example` (31 of 223 were not) and every
-  `[Unreleased]` entry is at most 3 lines (AUDIT_arch_2026 dispatch #13, J-2 / J-8, #NNNN)
+  `[Unreleased]` entry is at most 3 lines (AUDIT_arch_2026 dispatch #13, J-2 / J-8, #1919)
 
 ### Changed
 
@@ -42,7 +42,7 @@ there instead of retelling it.
   narrative moved verbatim to `docs/plans/2026-09-04-lever-ledger-detail.md`
 - `docs/plans/` and `docs/audit/` carry an index each; 9 of 12 plans close with a
   `## ROADMAP CLOSED` block, the docs-rewrite open questions are closed
-- Doc drift pack (AUDIT_arch_2026 dispatch #13, #NNNN): `imp.conf.example` lists all 223 keys,
+- Doc drift pack (AUDIT_arch_2026 dispatch #13, #1919): `imp.conf.example` lists all 223 keys,
   `IMP_WORKER_TIMING` is `diagnostics.worker_timing`, `docs/performance.md` is archived,
   `docs_lint.py` derives the layer from the path; 16 stale claims corrected (SETTLED section H)
 
@@ -82,7 +82,7 @@ there instead of retelling it.
 - The `$HOME/.cache/imp` bind-mount the docs recommended was never writable for container uid
   1001; `imp.conf.example` and `docs/LIMITATIONS.md` point at the named volume `imp-cache` (#1899)
 - The `decode-pipeline` gate log printed `ssm_ok=1` on the GDN / Mamba2 hybrids that gate refuses
-  (AUDIT_arch_2026 C-7, dispatch #13, #NNNN)
+  (AUDIT_arch_2026 C-7, dispatch #13, #1919)
 
 ## [0.37.0] - 2026-09-04
 
