@@ -35,7 +35,7 @@ there instead of retelling it.
   `verified:` header more than 14 days behind the file's last commit is now a `docs` gate error (#1921)
 - Four dependency-free headers (`pdl.h`, `pdl_device.cuh`, `process_diag.h`, `graph_diag.h`) live in
   `src/core/`, `storage_planner` in `src/exec/`, and `GraphExecutor::runtime_config()` is `dispatch_policy()`
-  (143 sites). Backward layer includes 88 -> 24, pinned by `tools/check_layering.py` (dispatch #14, G-1 / G-2, #NNNN)
+  (143 sites). Backward layer includes 88 -> 24, pinned by `tools/check_layering.py` (dispatch #14, G-1 / G-2, #1922)
 - Six writer-less `Overrides::Gemma4` flags and their arms are gone (`GEMMA4_GGML` prefill,
   FP32 attention-out, FP32 expert-down scatter and its scratch, `Gemma4NoGraphs`, two more);
   the per-load JSON `overrides` object goes with them, -570 lines (dispatch #15, G-7 / G-12, #1917)
