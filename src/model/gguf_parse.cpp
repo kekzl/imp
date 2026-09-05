@@ -7,6 +7,7 @@
 
 #include "model/gguf_loader.h"
 #include "model/gguf_loader_internal.h"
+#include "core/logging.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -180,8 +181,7 @@ QType gguf_type_to_qtype(GgufWireType type) {
             return QType::Q5_1;
         case GgufWireType::Q8_0:
             return QType::Q8_0;
-        case GgufWireType::Q8_1:
-            return QType::Q8_1;
+        // Q8_1 has no arm on purpose: parse_tensor_infos refuses the file.
         case GgufWireType::Q2_K:
             return QType::Q2_K;
         case GgufWireType::Q3_K:
@@ -429,6 +429,18 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
             info.dims[d] = 1;
         }
         info.type = static_cast<GgufWireType>(reader.read_u32());
+        // Q8_1 (wire type 9) is llama.cpp's activation format, not a weight
+        // storage type: imp has no dequant, no kernel and no registry entry for
+        // it, and the 1:1 map to QType::Q8_1 let such a tensor reach dispatch
+        // with no path (AUDIT_arch_2026 G-8). Refused like n_dims > 4 above.
+        if (info.type == GgufWireType::Q8_1) {
+            IMP_LOG_ERROR(
+                "GGUF tensor '%s' is stored as Q8_1 (an activation format, "
+                "no weight path) - refusing the file",
+                info.name.c_str());
+            reader.fail();
+            break;
+        }
         info.offset = reader.read_u64();
         out.push_back(std::move(info));
     }

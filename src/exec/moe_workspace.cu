@@ -28,9 +28,6 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
     vfree(batch_dequant_buf);
     batch_dequant_buf_size = 0;
 
-    vfree(fp32_down_buf);
-    fp32_down_buf_size = 0;
-
     if (d_work_ptrs) {
         d_work_ptrs = nullptr;
         d_work_ptrs_count = 0;

@@ -31,7 +31,6 @@ enum class GraphDemotionReason {
     // ── init-time ────────────────────────────────────────────────────
     ConfigNever,                 // runtime.cuda_graphs = "never"
     DebugRaw,                    // runtime.debug_raw = true (naked FP16 path)
-    Gemma4NoGraphs,              // [gemma4] no_graphs = true (regression bisect knob)
     CalibrationActive,           // the collector allocates on first sight of a weight
     StreamingKvConfigured,       // block table mutates per decode step
     ExpertsOnHost,               // MoE host-offload; captured decode would replay stale pointers

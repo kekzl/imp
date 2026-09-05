@@ -35,7 +35,6 @@ struct MoeFfnContext {
     bool gemma4_fp32_norm = false;
     bool moe_use_fp32_residual = false;
     bool moe_fused_norm_q8 = false;
-    bool fp32_down_active = false;
     bool fp32_gate_logits_ready = false;
     bool will_decode_fast = false;
     bool non_gated_experts = false;
@@ -44,7 +43,6 @@ struct MoeFfnContext {
 
     // Routing result + transient buffers carried across phases
     MoeRoutingResult routing{};
-    void* fp32_down_buf = nullptr;
     bool residual_fused = false;  // true when decode-fast / fused scatter already added residual
 
     // True if moe_gather has already populated moe_.gathered for this MoE

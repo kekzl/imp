@@ -219,12 +219,6 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     // that compounds to 260% by L29 vs llama.cpp (regenerate with tools/analysis/layer_diff.py).
     ctx.moe_use_fp32_residual = (prof.is_gemma4 && fp32_accum_buf_ != nullptr &&
                                  ly.post_ffn_norm.data != nullptr);
-    // Diagnostic: keep MoE down-projection output in FP32 (no FP16 truncation
-    // at GEMM output) to isolate precision drift. Allocated below in the FP16
-    // batch path; freed at moe_after_experts. Other prefill paths ignore this.
-    ctx.fp32_down_active = (prof.is_gemma4 &&
-                            cfg.overrides.gemma4.fp32_expert_down);
-    ctx.fp32_down_buf = nullptr;
     ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                              ctx.h.qtype == QType::F16 && !ctx.nvfp4_covers_layer &&
                              !ctx.gemma4_fp32_norm);
@@ -328,13 +322,6 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
                                                                   cfg.n_experts_active),
                                            nvfp4_host_decode_ready(ly, expert_cache_, moe_,
                                                                    cfg.n_experts_active));
-    // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
-    // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
-    // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.
-    if (prof.is_gemma4 && cfg.overrides.gemma4.no_decode_fast) {
-        ctx.will_decode_fast = false;
-    }
-
     compute_moe_routing(layer, stream, ctx.n, ctx.d, ctx.ne, ctx.top_k, router_in,
                         ctx.fp32_gate_logits_ready, ctx.will_decode_fast, router_bias_ptr,
                         use_sigmoid, norm_weights, ctx.routing);
@@ -461,8 +448,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     bool&    will_skip_residual_copy = ctx.will_skip_residual_copy;
     bool&    moe_fused_norm_q8       = ctx.moe_fused_norm_q8;
     bool&    moe_use_fp32_residual   = ctx.moe_use_fp32_residual;
-    void*&   fp32_down_buf           = ctx.fp32_down_buf;
-    const bool& fp32_down_active     = ctx.fp32_down_active;
 
     moe_ffn_phase3_route_(layer, stream, ctx);
     QType&             up_qtype          = ctx.up_qtype;
@@ -471,15 +456,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     bool&              non_gated_experts = ctx.non_gated_experts;
     bool&              use_packed_dequant = ctx.use_packed_dequant;
 
-    // Recompute the FFN-input norm weight (same selection as phase 2). Only the
-    // Gemma-4 ggml_prefill path consumes it from here; the RMSNorm itself
-    // already ran inside moe_ffn_phase2_state_and_norm_. Declared BEFORE the
-    // will_decode_fast goto so the jump does not bypass its initialization.
-    const Tensor& norm_w = (prof.is_gemma4 && ly.ffn_pre_norm_2.data != nullptr)
-                               ? ly.ffn_pre_norm_2
-                           : (ly.ffn_norm.data != nullptr)       ? ly.ffn_norm
-                           : (ly.post_attn_norm.data != nullptr) ? ly.post_attn_norm
-                                                                 : ly.attn_norm;
 
     // Decode fast path (n=1, device-resident packed experts): skips
     // gather/scatter + D2H sync. NVFP4 and dp4a/FP16 sub-paths handled
@@ -524,15 +500,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                             non_gated_experts, up_qtype, routing, no)) {
             dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FUSED_Q4K_DP4A);
             // Falls through to scatter (step 7)
-        } else if (!moe_imma_pref && cfg.overrides.gemma4.ggml_prefill &&
-                   prof.is_gemma4 &&
-                   ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
-                   ly.expert_down_packed.on_device &&
-                   try_run_moe_gemma4_ggml_prefill(layer, stream, n, d, eff, top_k, up_qtype, eps,
-                                                   routing, no, norm_w, h, r,
-                                                   moe_use_fp32_residual, residual_fused)) {
-            dispatch_record::set_moe_prefill_outer(MoePrefillOuter::GEMMA4_GGML);
-            goto moe_after_experts;
         } else {
             // =========================================================================
             // FP16 BATCH or FP8 BATCH PREFILL PATH
@@ -601,9 +568,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 }
                 if (can_fp16_batch_nosync) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP16_BATCH);
-                    try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded,
-                                                   non_gated_experts, up_qtype, routing,
-                                                   fp32_down_active, fp32_down_buf);
+                    try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded, non_gated_experts,
+                                                   up_qtype, routing);
                 } else if (can_fp8_batch) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP8_BATCH);
                     try_run_moe_fp8_batch_prefill(layer, stream, n, d, eff, ne, expanded,
@@ -649,12 +615,7 @@ void GraphExecutor::moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeF
         // Gemma-4 FP32 path: defer residual to post_ffn_norm (FP32 accumulator).
         const void* res_ptr = (!has_shared_expert && !ctx.residual_fused && !ctx.moe_use_fp32_residual)
                                   ? ctx.r.data : nullptr;
-        if (ctx.fp32_down_buf) {
-            // Down GEMM kept FP32 output — use FP32-input scatter variant.
-            moe_scatter_fused_residual_fp32in(ctx.fp32_down_buf, ctx.routing.token_to_expanded,
-                                              static_cast<const float*>(ctx.routing.expert_weights.data),
-                                              res_ptr, ctx.h.data, ctx.n, ctx.d, ctx.top_k, stream);
-        } else {
+        {
             moe_scatter_fused_residual(moe_.expert_down.data, ctx.routing.token_to_expanded,
                                        static_cast<const float*>(ctx.routing.expert_weights.data),
                                        res_ptr, ctx.h.data, ctx.n, ctx.d, ctx.top_k, stream);
@@ -697,12 +658,6 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
     const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
 
-    // Free diagnostic FP32 expert-down buffer if we malloc'd it ourselves.
-    // The persistent moe_.fp32_down_buf is owned by MoEWorkspace — don't free.
-    if (ctx.fp32_down_buf && ctx.fp32_down_buf != moe_.fp32_down_buf) {
-        cudaFreeAsync(ctx.fp32_down_buf, stream);
-    }
-    ctx.fp32_down_buf = nullptr;
     // 8b. Shared expert FFN: all tokens pass through an additional
     //     dense FFN whose output is added to the routed expert output.
     //     Reuses MoE workspace buffers (routed computation is complete).

@@ -490,6 +490,17 @@ TEST(GgufFaultInjection, NDimsAboveFourIsRefused) {
     EXPECT_EQ(load_buf(g.buf), nullptr) << "a tensor with n_dims > 4 must refuse the file";
 }
 
+// Wire type 9 = Q8_1, llama.cpp's activation format. No dequant, no kernel and
+// no registry entry exist for it, and the 1:1 map to QType::Q8_1 let such a
+// tensor load and reach dispatch with no path (AUDIT_arch_2026 G-8). An unknown
+// type (9999, above) is SKIPPED because its size is unknown; Q8_1 has a size,
+// so it must be REFUSED, not skipped.
+TEST(GgufFaultInjection, Q8_1WeightTypeIsRefusedAtParse) {
+    GgufBytes g = build_valid_gguf();
+    patch_u32(g.buf, g.off_tensor_type, 9);
+    EXPECT_EQ(load_buf(g.buf), nullptr) << "a Q8_1 weight tensor must refuse the file";
+}
+
 // The well-formed variant: n_dims = 5 WITH five dim words [4,4,1,1,1]. The
 // unfixed parser read the first four, skipped the fifth, passed the bounds
 // check (16 floats), and the loader's shape loop then wrote shape[4] and read

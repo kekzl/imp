@@ -78,8 +78,6 @@ const char* moe_prefill_outer_name(MoePrefillOuter p) {
             return "fused_q6k";
         case MoePrefillOuter::FUSED_Q4K_DP4A:
             return "fused_q4k_dp4a";
-        case MoePrefillOuter::GEMMA4_GGML:
-            return "gemma4_ggml";
     }
     return "?";
 }

@@ -91,6 +91,15 @@ if want entrypoint; then
     run "docker-entrypoint.sh env -> argv"      bash tests/test_entrypoint.sh
 fi
 
+# Nothing throws across the C ABI: every `ImpError imp_*()` body in src/api/
+# runs under imp::api_guard() or an inline try/catch. Four of 23 had neither
+# on 2026-09-05 (AUDIT_arch_2026 G-10).
+if want api; then
+    echo "== C API =="
+    run "ImpError entry points guarded"         python3 tools/check_api_guard.py
+    run "that gate still classifies its cases"  python3 tools/check_api_guard.py --selftest
+fi
+
 # The offline half of the dependency-pin check: cmake/imp-deps.cmake vs the
 # Dockerfile ARG defaults, sed/grep over two tracked files, no network. Until
 # 2026-09-05 it ran only as `--online` inside the advisory Lint job, so a

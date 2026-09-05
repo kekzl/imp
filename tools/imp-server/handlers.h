@@ -294,15 +294,15 @@ std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::stri
 std::string find_model_path(const ServerState& state, const std::string& name);
 
 // Max batch size for one load: --max-batch > [runtime] max_batch_size from
-// imp.conf > the per-load JSON override > 0 (engine auto-sizes). One place,
-// because build_config is not the only caller that has to agree with it.
-int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
-                           const nlohmann::json& overrides);
+// imp.conf > 0 (engine auto-sizes). One place, because build_config is not the
+// only caller that has to agree with it. (A per-load JSON `overrides` object
+// sat between the two until AUDIT_arch_2026 G-12: 11 keys parsed, every caller
+// passed it empty, no request body ever produced it.)
+int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg);
 
 ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
-                       const std::string& model_path = {}, const json& overrides = json::object());
-std::string load_model_into_state(ServerState& state, const std::string& path,
-                                  const json& config_overrides = json::object());
+                       const std::string& model_path = {});
+std::string load_model_into_state(ServerState& state, const std::string& path);
 
 void handle_health(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Readiness (AUDIT_arch_2026 E-5): 200 only when an inference request would be

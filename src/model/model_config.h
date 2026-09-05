@@ -173,20 +173,15 @@ struct ModelConfig {
     bool arch_inferred_fallback = false;
 
     // Model-specific runtime knobs that used to live on the global
-    // RuntimeConfig singleton. Phase 5 Track A of the architecture refactor
-    // moved them onto ModelConfig so the "model-name in a runtime
-    // singleton" smell goes away. Populated from imp.conf (legacy
-    // [gemma4] section seeds compat) or set by engine_init_resolver when
-    // the arch is GEMMA4; default-constructed otherwise.
+    // RuntimeConfig singleton (Phase 5 Track A moved them here). The only
+    // writer is engine_init_resolver, when the arch is GEMMA4; there is no
+    // config surface. Six bring-up bisect flags (fp32_gemm_out, no_graphs,
+    // fp32_expert_down, no_decode_fast, no_post_ffw_1, ggml_prefill) sat here
+    // with no writer since #319 and were deleted with their branches
+    // (AUDIT_arch_2026 G-7).
     struct Overrides {
         struct Gemma4 {
-            bool fp32_gemm_out = false;
-            bool no_graphs = false;
             bool force_mmvq = false;
-            bool fp32_expert_down = false;
-            bool no_decode_fast = false;
-            bool no_post_ffw_1 = false;
-            bool ggml_prefill = false;
         } gemma4;
     } overrides;
 };

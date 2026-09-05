@@ -46,7 +46,6 @@ const MoePrefillOuter kAllMoeOuter[] = {
     MoePrefillOuter::UNSET,       MoePrefillOuter::NONE,      MoePrefillOuter::FP16_BATCH,
     MoePrefillOuter::FP8_BATCH,   MoePrefillOuter::CUTLASS3X, MoePrefillOuter::NVFP4_DEQUANT,
     MoePrefillOuter::LEGACY,      MoePrefillOuter::FUSED_Q6K, MoePrefillOuter::FUSED_Q4K_DP4A,
-    MoePrefillOuter::GEMMA4_GGML,
 };
 const MoePrefillPath kAllMoeTiers[] = {
     MoePrefillPath::DEVICE_ARGS,

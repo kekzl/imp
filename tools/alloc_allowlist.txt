@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 70 files, 487 sites
+# remaining: 69 files, 477 sites
 
 src/compute/attention_cublas.cu  # 14
 src/compute/attention_fmha_sm120.cu  # 2
@@ -29,12 +29,11 @@ src/compute/sampling.cu  # 2
 src/compute/sampling_penalties.cu  # 2
 src/compute/sampling_topk_topp.cu  # 3
 src/core/buffer.cpp  # 2
-src/exec/executor_attention.cu  # 4
+src/exec/executor_attention.cu  # 2
 src/exec/executor_attention_decode.cu  # 6
 src/exec/executor_attention_prefill.cu  # 10
 src/exec/executor_forward.cu  # 2
-src/exec/executor_forward_moe.cu  # 5
-src/exec/executor_forward_moe_batch.cu  # 7
+src/exec/executor_forward_moe.cu  # 4
 src/exec/executor_forward_moe_cutlass.cu  # 10
 src/exec/executor_gemm_dispatch.cu  # 4
 src/exec/executor_helpers.h  # 3

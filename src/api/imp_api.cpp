@@ -168,6 +168,25 @@ static imp::QType map_dtype(ImpDType dt) {
     }
 }
 
+// The KV cache takes six of the eleven ImpDType values. The imp.conf surface
+// (engine_init_resolver.cpp) warns on an unknown string and keeps FP16; this
+// surface mapped FP32 / BF16 / FP8_E5M2 / INT32 / FP4_E2M1 and any
+// out-of-range integer to a QType the pool was sized for and the FP16 kernel
+// then read (AUDIT_arch_2026 G-4). Rejected before the model is looked at.
+static bool kv_cache_dtype_is_valid(ImpDType dt) {
+    switch (dt) {
+        case IMP_DTYPE_FP16:
+        case IMP_DTYPE_FP8_E4M3:
+        case IMP_DTYPE_INT8:
+        case IMP_DTYPE_INT4:
+        case IMP_DTYPE_NVFP4:
+        case IMP_DTYPE_MXFP4_KV:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // --- Model Loading ---
 
 ImpError imp_model_load_ex(const char* path, ImpModelFormat format, int load_mtp_head,
@@ -329,6 +348,14 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
     }
 
     *out_ctx = nullptr;
+
+    if (!kv_cache_dtype_is_valid(config->kv_cache_dtype)) {
+        IMP_LOG_ERROR(
+            "imp_context_create: kv_cache_dtype=%d is not a KV cache dtype "
+            "(FP16, FP8_E4M3, INT8, INT4, NVFP4, MXFP4_KV)",
+            static_cast<int>(config->kv_cache_dtype));
+        return IMP_ERROR_INVALID_ARG;
+    }
 
     if (g_live_contexts.load(std::memory_order_acquire) > 0) {
         IMP_LOG_ERROR(
@@ -989,39 +1016,41 @@ ImpError imp_context_reset(ImpContext ctx) {
         return IMP_ERROR_INTERNAL;
     }
 
-    // Free the active request's KV cache and mark it cancelled so the
-    // scheduler removes it from active_ on the next schedule() call.
-    if (ctx->active_request) {
-        ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
-        // Evict all cached blocks to prevent prefix cache hits with stale data
-        while (ctx->engine->kv_manager()->evict_cached_block()) {}
-        // Drop recurrent-state snapshots for the same reason (hybrid models)
-        ctx->engine->clear_recurrent_snapshots();
-        // Reset SSM state for hybrid models (Mamba2)
-        ctx->engine->reset_ssm_state(ctx->active_request->id);
-        ctx->active_request->status = imp::RequestStatus::CANCELLED;
-        ctx->active_request = nullptr;
-        ctx->consumed_output = 0;
-    }
+    return imp::api_guard("imp_context_reset", [&]() -> ImpError {
+        // Free the active request's KV cache and mark it cancelled so the
+        // scheduler removes it from active_ on the next schedule() call.
+        if (ctx->active_request) {
+            ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
+            // Evict all cached blocks to prevent prefix cache hits with stale data
+            while (ctx->engine->kv_manager()->evict_cached_block()) {}
+            // Drop recurrent-state snapshots for the same reason (hybrid models)
+            ctx->engine->clear_recurrent_snapshots();
+            // Reset SSM state for hybrid models (Mamba2)
+            ctx->engine->reset_ssm_state(ctx->active_request->id);
+            ctx->active_request->status = imp::RequestStatus::CANCELLED;
+            ctx->active_request = nullptr;
+            ctx->consumed_output = 0;
+        }
 
-    // Sync GPU to ensure all async operations from the previous request complete
-    // before resetting state. Without this, stale async graph loops or pending
-    // kernel launches can corrupt the next request's data.
-    cudaDeviceSynchronize();
+        // Sync GPU to ensure all async operations from the previous request complete
+        // before resetting state. Without this, stale async graph loops or pending
+        // kernel launches can corrupt the next request's data.
+        cudaDeviceSynchronize();
 
-    // Invalidate cached CUDA graphs — stale graph captures from the previous
-    // request can produce non-deterministic output if replayed for a new request.
-    ctx->engine->invalidate_graphs();
+        // Invalidate cached CUDA graphs — stale graph captures from the previous
+        // request can produce non-deterministic output if replayed for a new request.
+        ctx->engine->invalidate_graphs();
 
-    // Reset batch pool upload cache — the next request may reuse the same
-    // physical KV cache blocks, and stale cached block table pointers would
-    // cause the GPU to read from old KV data.
-    ctx->engine->reset_batch_pool_cache();
+        // Reset batch pool upload cache — the next request may reuse the same
+        // physical KV cache blocks, and stale cached block table pointers would
+        // cause the GPU to read from old KV data.
+        ctx->engine->reset_batch_pool_cache();
 
-    // Reset MTP-side KV cache + accuracy telemetry for a clean new session.
-    ctx->engine->mtp_accuracy_reset();
+        // Reset MTP-side KV cache + accuracy telemetry for a clean new session.
+        ctx->engine->mtp_accuracy_reset();
 
-    return IMP_SUCCESS;
+        return IMP_SUCCESS;
+    });
 }
 
 // --- MTP spec-decode (Phase 4) ---
@@ -1030,8 +1059,9 @@ ImpError imp_enable_mtp_spec_decode(ImpContext ctx, int k) {
     if (!ctx) return IMP_ERROR_INVALID_ARG;
     if (!ctx->engine) return IMP_ERROR_INTERNAL;
     if (k <= 0) return IMP_ERROR_INVALID_ARG;
-    return ctx->engine->enable_mtp_spec_decode(k) ? IMP_SUCCESS
-                                                  : IMP_ERROR_INVALID_ARG;
+    return imp::api_guard("imp_enable_mtp_spec_decode", [&]() -> ImpError {
+        return ctx->engine->enable_mtp_spec_decode(k) ? IMP_SUCCESS : IMP_ERROR_INVALID_ARG;
+    });
 }
 
 // --- Vision (Multimodal) ---

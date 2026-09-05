@@ -687,31 +687,7 @@ after_attention:
         gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
     } else {
         // Fallback: separate O-projection + optional post-norm + residual add.
-        // Diagnostic: when the overrides.gemma4.fp32_gemm_out config flag (was IMP_GEMMA4_FP32_GEMM_OUT
-        // env) is set on Gemma-4, after the
-        // FP16 GEMM, also produce an FP32 view (fp16_to_fp32). Then route the
-        // post-attn-norm through the FP32-input variant. This keeps the proven
-        // FP16 GEMM path while letting us validate the FP32-input rmsnorm
-        // independently. Any precision win comes from the rmsnorm pre-cast
-        // happening once in __half2float vs implicit casts inside the kernel.
-        // overrides.gemma4.fp32_gemm_out config flag (was IMP_GEMMA4_FP32_GEMM_OUT env): keep attention
-        // output projection in FP32 to
-        // preserve cuBLAS's internal FP32 accumulator precision through the
-        // post-attention rmsnorm. Uses the cublasGemmEx FP16×FP16→FP32 path
-        // (gemm.cu mixed-precision short-circuit). Skips the FP16-only mmvq
-        // and dp4a fast paths via output.qtype==FP32 guards in dispatch.
-        const bool fp32_attn_out = (prof.is_gemma4 && using_fp32_accum &&
-                                    model_->config().overrides.gemma4.fp32_gemm_out);
-        void* po_fp32_buf = nullptr;
-        if (fp32_attn_out) {
-            size_t bytes = static_cast<size_t>(n) * model_->config().d_model * sizeof(float);
-            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&po_fp32_buf, bytes, stream));
-            int64_t shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(model_->config().d_model)};
-            Tensor po_fp32(po_fp32_buf, QType::F32, 2, shape, true);
-            gemm_via_handle_(ly.wo_id, ao, po_fp32, ctx);
-        } else {
-            gemm_via_handle_(ly.wo_id, ao, po, ctx);
-        }
+        gemm_via_handle_(ly.wo_id, ao, po, ctx);
         if (debug_attn_steps) {
             debug_tensor_stats_all("L0_ao_pre_wo", view_tokens(ao, n), stream);
             debug_tensor_stats_all("L0_po_after_wo", view_tokens(po, n), stream);
@@ -762,19 +738,11 @@ after_attention:
                                   fp32_tmp[off + 2]);
                 }
             }
-            if (fp32_attn_out) {
-                rmsnorm_fp32in_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
-                    static_cast<const float*>(po_fp32_buf), static_cast<const half*>(ly.post_attn_norm.data),
-                    static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), model_->config().d_model,
-                    eps, norm_w_off_);
-                IMP_CUDA_CHECK_LAUNCH();
-            } else {
-                rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
-                    static_cast<const half*>(po.data), static_cast<const half*>(ly.post_attn_norm.data),
-                    static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), model_->config().d_model,
-                    eps, norm_w_off_);
-                IMP_CUDA_CHECK_LAUNCH();
-            }
+            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+                static_cast<const half*>(po.data), static_cast<const half*>(ly.post_attn_norm.data),
+                static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), model_->config().d_model, eps,
+                norm_w_off_);
+            IMP_CUDA_CHECK_LAUNCH();
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }
@@ -791,9 +759,6 @@ after_attention:
         } else {
             // Standard pre-norm: h = attn_out + residual
             elementwise_add_store(po, r, h, stream);
-        }
-        if (po_fp32_buf) {
-            cudaFreeAsync(po_fp32_buf, stream);
         }
     }
 
