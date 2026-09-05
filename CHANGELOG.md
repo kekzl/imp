@@ -69,6 +69,13 @@ there instead of retelling it.
 
 ### Fixed
 
+- A CUDA device fault (illegal address, launch failure) is a host signal now
+  (AUDIT_arch_2026 dispatch #5, D-1, #1913): forward() and the sampler syncs
+  throw on a sticky class, the server worker probes after every step, the
+  request answers 500 `internal_error` (`code` `engine_faulted`), `/health` and
+  `/ready` report `engine_faulted`, later requests are refused. Before, the
+  sticky error was cleared with a WARN and the previous step's tokens were
+  served with `/health` ok.
 - imp-server's request `model` field is a name, never a path (AUDIT_arch_2026
   dispatch #3, F2-1 S1): `{"model": "/any/readable/x.gguf"}` used to load that
   file and evict the resident model; now a basename in `--models-dir` or an

@@ -652,6 +652,7 @@ if(IMP_BUILD_TESTS)
     set(IMP_FUZZ_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fuzz)
 
     imp_add_test_module(test-core SOURCES
+        tests/test_cuda_errors.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
@@ -878,6 +879,7 @@ if(IMP_BUILD_TESTS)
     )
 
     imp_add_test_module(test-compute SOURCES
+        tests/test_cuda_fault_signal.cu
         tests/test_rope.cu
         tests/test_mrope.cu
         tests/test_gpt_oss_yarn_ref.cu
@@ -1026,6 +1028,8 @@ if(IMP_BUILD_TESTS)
         tests/test_encoder_embed.cpp
         tests/test_api_generate.cpp
         tests/test_engine_relaunch.cpp
+        tests/test_batching_engine_fault.cu
+        tools/imp-server/batching_engine.cpp
         tests/test_suspend_resume.cu
         tests/test_warm_cache.cu
         tests/test_lora.cpp
@@ -1037,6 +1041,10 @@ if(IMP_BUILD_TESTS)
         tests/test_qwen3vl_encoder.cu
         tests/test_qwen3vl_pipeline.cu
     )
+
+    # test_batching_engine_fault.cu drives the server BatchingEngine
+    # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
+    target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
 
     set(IMP_TEST_BINARIES
         test-core test-text test-compute test-attention

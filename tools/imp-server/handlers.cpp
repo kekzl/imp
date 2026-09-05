@@ -166,6 +166,8 @@ void handle_ready(const httplib::Request& /*req*/, httplib::Response& res, Serve
     const char* code = nullptr;
     if (g_draining.load(std::memory_order_relaxed))
         code = "draining";
+    else if (state.batching && state.batching->faulted())
+        code = "engine_faulted";  // process-wide CUDA context, a swap does not clear it
     else if (state.swapping.load())
         code = "swapping";
     else if (state.suspended.load())
