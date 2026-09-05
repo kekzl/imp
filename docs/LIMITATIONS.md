@@ -46,6 +46,14 @@ Code path exists, no gate proves it:
   enters the SSE writer, tool-argument filter or per-chunk JSON serialisation (#1685); a
   `tools/imp-server/` change cannot regress the pinned numbers. Closing this needs a server-side
   benchmark harness; none exists.
+- **The single-arm perf gate resolves nothing below its 8 %**: it compares one tree against a pin
+  measured weeks earlier, and this host moves 4-6 % on one tree between sessions. Its only recorded
+  catch is -36 %; -7.3 % shipped at +0.33 %. The paired arm (`make verify-ab`, `origin/main` vs this
+  tree in alternating pairs, one session) is what resolves smaller deltas, and it measures the pin's
+  shape only (Qwen3-8B Q8_0, pp512 / tg128). See `docs/internals/BENCHMARKING.md`.
+- **The roofline regression check is not a gate**: CI has no GPU runner, `roofline.yml` re-parses
+  committed history and fires on `tools/roofline/**` edits only. A kernel diff is compared against
+  nothing unless someone runs `make roofline-measure` (the pre-push hook reminds; it cannot measure).
 
 All seven were green in `FEATURES.md` without a gate until #1680.
 

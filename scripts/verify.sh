@@ -364,6 +364,14 @@ section "perf vs baseline"
 # A warning, not a failure: a stale pin still catches a 30 % regression, and
 # failing the gate on a calendar date would train people to regenerate the pin
 # to make it quiet, which is the opposite of the point.
+#
+# 90 days, not 30 (AUDIT_arch_2026 H-9): at 30 the line was on for every run
+# from 2026-08-25 and carried nothing. The re-pin it asks for is guarded
+# (scripts/repin_baselines_if_median.sh refuses top-range days: 2026-09-05 read
+# 291-294 against its 275-290 band), and the signal a fresh pin would buy back,
+# a few percent between sessions, is what the paired arm (make verify-ab) now
+# measures directly. This single arm is the coarse net; a quarter without a
+# re-pin is still worth a line.
 if [ -f "$BASELINE" ]; then
     _pin_ts=$(grep -oE '"timestamp"[[:space:]]*:[[:space:]]*"[^"]*"' "$BASELINE" |
               head -1 | sed 's/.*"\([^"]*\)"$/\1/')
@@ -375,11 +383,12 @@ if [ -f "$BASELINE" ]; then
             _pin_model=$(grep -oE '"model"[[:space:]]*:[[:space:]]*"[^"]*"' "$BASELINE" |
                          head -1 | sed 's/.*"\([^"]*\)"$/\1/')
             echo "  pin: $_pin_ts (${_age_days} days old), model $_pin_model"
-            if [ "$_age_days" -gt 30 ]; then
+            if [ "$_age_days" -gt 90 ]; then
                 echo "  WARNING: the baseline is ${_age_days} days old. The measurement contract"
                 echo "           (AGENTS.md) is single-session; host drift over that span is larger"
-                echo "           than this gate can distinguish from a code change. Regenerate with"
-                echo "           scripts/gen_perf_baseline.sh when the current numbers are trusted."
+                echo "           than this gate can distinguish from a code change. The paired arm"
+                echo "           (make verify-ab) is the instrument for that; re-pin with"
+                echo "           scripts/gen_perf_baseline.sh on a day whose numbers are trusted."
             fi
         fi
     fi

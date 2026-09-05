@@ -15,6 +15,18 @@
 #       this host a decode reading drifts several percent between sessions and a
 #       gate that fires on a server-handler edit reports the box, not the change.
 #
+#   paired A/B (make verify-ab, AUDIT_arch_2026 H-3)
+#       runs after the perf gate on the same diffs. The single arm above cannot
+#       resolve a delta smaller than the host's own between-session movement
+#       (4-6 % on one tree, threshold 8 %); the paired arm alternates origin/main
+#       (imp:ab-<sha>, built once per sha) against imp:test in one session and
+#       judges the mean paired decode delta. IMP_SKIP_AB=1 skips it.
+#
+#   roofline (tools/roofline/, per-kernel %-of-peak) has no automated arm: CI
+#       has no GPU runner and roofline.yml only re-parses committed history. A
+#       diff under src/compute/ or src/exec/ gets a reminder with the age of the
+#       newest history run; `make roofline-measure` is the manual step (H-2).
+#
 # The peak-VRAM gate stays on in both tiers: own_peak_mb is byte-identical
 # across repeat runs, so it cannot produce the false positive this split exists
 # to remove, and it costs almost nothing (measured 36 s full, 18 s without the
@@ -35,6 +47,7 @@ PERF_RE='^(src/(compute|exec|quant|runtime|model)/|.*\.(cu|cuh)$|cmake/|CMakeLis
 # stdin lines: <local_ref> <local_sha> <remote_ref> <remote_sha>
 NEEDS_VERIFY=0
 NEEDS_PERF=0
+NEEDS_ROOFLINE=0
 while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ] && continue   # delete
     if [ "$REMOTE_SHA" = "0000000000000000000000000000000000000000" ]; then
@@ -76,6 +89,7 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     [ -z "$FILES" ] && continue
     echo "$FILES" | grep -qE "$SOURCE_RE" && NEEDS_VERIFY=1
     echo "$FILES" | grep -qE "$PERF_RE"   && NEEDS_PERF=1
+    echo "$FILES" | grep -qE '^src/(compute|exec)/' && NEEDS_ROOFLINE=1
 done
 
 if [ "$NEEDS_VERIFY" -eq 0 ]; then
@@ -107,9 +121,31 @@ if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
     "$ROOT/scripts/require_free_gpu.sh" "pre-push" || exit 1
 fi
 
+# Roofline (per-kernel %-of-peak, tools/roofline/) has no automated arm: CI has
+# no GPU runner and roofline.yml only re-parses committed history, so a kernel
+# diff is compared against nothing unless someone measures. Say so, with the
+# age of the newest run, where the diff is being pushed (AUDIT_arch_2026 H-2).
+if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ -s "$ROOT/tools/roofline/history/index.jsonl" ]; then
+    _rl_run="$(tail -1 "$ROOT/tools/roofline/history/index.jsonl" | sed -n 's/.*"run_id": *"\([^"]*\)".*/\1/p')"
+    _rl_date="$(echo "$_rl_run" | sed -n 's/^[0-9a-f]*_\([0-9]\{8\}\)_.*/\1/p')"
+    _rl_age=""
+    if [ -n "$_rl_date" ]; then
+        _rl_age="$(( ( $(date -u +%s) - $(date -u -d "$_rl_date" +%s 2>/dev/null || date -u +%s) ) / 86400 )) days old"
+    fi
+    echo "pre-push: diff touches src/compute or src/exec; the roofline history's newest run is"
+    echo "          ${_rl_run:-none} (${_rl_age:-age unknown}). Nothing measures it for you: run"
+    echo "          'make roofline-measure && make roofline-regress' if this diff should move a kernel class."
+fi
+
 if [ "$NEEDS_PERF" -eq 1 ]; then
     echo "pre-push: source changes touch the measured paths → make verify-fast (with perf gate)"
-    exec make -s verify-fast
+    make -s verify-fast || exit 1
+    if [ "${IMP_SKIP_AB:-0}" = "1" ]; then
+        echo "pre-push: paired A/B skipped (IMP_SKIP_AB=1)"
+        exit 0
+    fi
+    echo "pre-push: paired A/B against origin/main → make verify-ab"
+    exec make -s verify-ab
 fi
 
 echo "pre-push: source changes outside the measured paths → make verify-fast (no perf gate)"
