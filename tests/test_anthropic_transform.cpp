@@ -181,6 +181,26 @@ json oai_response_with_usage(json usage) {
     };
 }
 
+// C-6: the per-request speculation counters reach the Anthropic usage as
+// top-level vendor-prefixed keys, and only when the chat usage carried them.
+TEST(AnthropicCacheUsage, SpecCountersPassThrough) {
+    json oai = oai_response_with_usage(json{
+        {"prompt_tokens", 10},
+        {"completion_tokens", 5},
+        {"total_tokens", 15},
+        {"completion_tokens_details",
+         json{{"imp_spec_drafted", 40}, {"imp_spec_accepted", 31}, {"imp_spec_verify_steps", 5}}},
+    });
+    json anth = openai_to_anthropic_response(oai, "claude-x");
+    EXPECT_EQ(anth["usage"].value("imp_spec_drafted", -1), 40);
+    EXPECT_EQ(anth["usage"].value("imp_spec_accepted", -1), 31);
+    EXPECT_EQ(anth["usage"].value("imp_spec_verify_steps", -1), 5);
+    json plain = openai_to_anthropic_response(
+        oai_response_with_usage(json{{"prompt_tokens", 10}, {"completion_tokens", 5}, {"total_tokens", 15}}),
+        "claude-x");
+    EXPECT_FALSE(plain["usage"].contains("imp_spec_drafted"));
+}
+
 TEST(AnthropicCacheUsage, CacheReadAndCreationMapped) {
     json oai = oai_response_with_usage(json{
         {"prompt_tokens", 100},

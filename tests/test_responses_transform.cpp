@@ -74,21 +74,25 @@ TEST(ResponsesTransform, FlatToolsBecomeNested) {
 }
 
 TEST(ResponsesTransform, TextFormatAndKnobs) {
-    json body = {{"model", "m"},
-                 {"input", "x"},
-                 {"max_output_tokens", 321},
-                 {"temperature", 0.3},
-                 {"reasoning", {{"effort", "low"}}},
-                 {"text",
-                  {{"format",
-                    {{"type", "json_schema"},
-                     {"name", "out"},
-                     {"schema", {{"type", "object"}}},
-                     {"strict", true}}}}}};
+    json body = {
+        {"model", "m"},
+        {"input", "x"},
+        {"max_output_tokens", 321},
+        {"temperature", 0.3},
+        {"reasoning", {{"effort", "low"}}},
+        {"priority", 3},
+        {"speculative", false},
+        {"text",
+         {{"format",
+           {{"type", "json_schema"}, {"name", "out"}, {"schema", {{"type", "object"}}}, {"strict", true}}}}}};
     json oai = responses_to_openai_body(body);
     EXPECT_EQ(oai["max_tokens"], 321);
     EXPECT_DOUBLE_EQ(oai["temperature"].get<double>(), 0.3);
     EXPECT_DOUBLE_EQ(oai["think_budget"].get<double>(), 0.25);
+    // Both imp extensions reach the chat body (C-9: `speculative` used to be
+    // dropped while `priority` was bridged).
+    EXPECT_EQ(oai["priority"], 3);
+    EXPECT_EQ(oai["speculative"], false);
     EXPECT_EQ(oai["response_format"]["type"], "json_schema");
     EXPECT_EQ(oai["response_format"]["json_schema"]["name"], "out");
     EXPECT_EQ(oai["response_format"]["json_schema"]["strict"], true);
@@ -134,6 +138,23 @@ static json make_oai(const char* content, json tool_calls = nullptr,
               {"completion_tokens", 5},
               {"total_tokens", 15},
               {"prompt_tokens_details", {{"cached_tokens", 4}}}}}};
+}
+
+// C-6: the per-request speculation counters ride from the chat usage into
+// output_tokens_details under the same vendor-prefixed keys.
+TEST(ResponsesTransform, SpecCountersPassThrough) {
+    json oai = make_oai("hi");
+    oai["usage"]["completion_tokens_details"] = {
+        {"reasoning_tokens", 2}, {"imp_spec_drafted", 40}, {"imp_spec_accepted", 31}, {"imp_spec_verify_steps", 5}};
+    json out = openai_to_responses_response(oai, "m", "resp_s");
+    const json& d = out["usage"]["output_tokens_details"];
+    EXPECT_EQ(d["reasoning_tokens"], 2);
+    EXPECT_EQ(d["imp_spec_drafted"], 40);
+    EXPECT_EQ(d["imp_spec_accepted"], 31);
+    EXPECT_EQ(d["imp_spec_verify_steps"], 5);
+    // Absent upstream stays absent downstream.
+    json plain = openai_to_responses_response(make_oai("hi"), "m", "resp_p");
+    EXPECT_FALSE(plain["usage"]["output_tokens_details"].contains("imp_spec_drafted"));
 }
 
 TEST(ResponsesTransform, TextResponse) {

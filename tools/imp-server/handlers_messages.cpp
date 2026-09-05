@@ -603,6 +603,12 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
         trace.model = anth_response.value("model", std::string());
         trace.cached_tokens =
             anth_response.value("usage", json::object()).value("cache_read_input_tokens", 0);
+        {
+            const json u = anth_response.value("usage", json::object());
+            if (u.contains("imp_spec_verify_steps"))
+                trace.set_spec(u.value("imp_spec_drafted", 0LL), u.value("imp_spec_accepted", 0LL),
+                               u.value("imp_spec_verify_steps", 0));
+        }
         log_request_jsonl(state, /*skip=*/false, t_log_start, req_id, log_endpoint, log_client_ip,
                           log_raw_body, ms, prompt_t, completion_t,
                           stop_reason.empty() ? nullptr : stop_reason.c_str(), anth_response,

@@ -50,6 +50,18 @@ struct RequestSpan {
     int prompt_tokens = 0;
     int completion_tokens = 0;
     int cached_tokens = 0;
+    // Per-request speculation counters (C-6); -1 = no verify step ran, so
+    // the span carries the attributes only when speculation was live.
+    long long spec_drafted = -1;
+    long long spec_accepted = -1;
+    int spec_verify_steps = -1;
+    void set_spec(long long drafted, long long accepted, int verify_steps) {
+        if (verify_steps == 0 && drafted == 0)
+            return;
+        spec_drafted = drafted;
+        spec_accepted = accepted;
+        spec_verify_steps = verify_steps;
+    }
     std::string finish_reason;
     bool stream = false;
     int http_status = 200;

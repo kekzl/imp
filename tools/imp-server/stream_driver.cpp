@@ -689,6 +689,8 @@ void finish_stream_accounting_(ServerState& state, ChatRequestContext& ctx,
     ctx.trace.stream = true;
     ctx.trace.ttft_ms = out.n_output_tokens > 0 ? out.ttft_ms : -1.0;
     ctx.trace.cached_tokens = cached;
+    if (active_req)
+        ctx.trace.set_spec(active_req->spec_drafted, active_req->spec_accepted, active_req->spec_verifies);
     log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, req_id, ctx.log_endpoint, ctx.log_client_ip,
                       ctx.log_raw_body, ms, n_prompt_tokens, out.n_output_tokens, out.finish, json(),
                       ctx.log_client_request_id, &ctx.trace);

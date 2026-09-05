@@ -898,6 +898,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
                     req->id, blocks_needed, pool_blocks);
                 kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+                req->cancel_reason = CancelReason::KvCapacity;
                 cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 continue;
@@ -914,6 +915,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     "ctx_len=%d — cancelling this sequence (see kv_cache.swa_sizing).",
                     req->id, ctx_len);
                 kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+                req->cancel_reason = CancelReason::KvCapacity;
                 cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 continue;

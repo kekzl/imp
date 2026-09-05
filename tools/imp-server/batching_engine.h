@@ -95,6 +95,13 @@ public:
     // decoding together right now. The counter pair above gives only the
     // windowed mean and decode_batch_max never resets.
     std::atomic<int64_t> decode_batch_last{0};
+    // Queue split for /metrics (AUDIT_arch_2026 C-5): waiting = submitted
+    // but not yet in a prefill or decode batch (still on pending_queue_, or
+    // handed to the engine and held behind max_batch_size / KV admission);
+    // running = in a batch. queue_depth() is their sum. Refreshed by the
+    // worker every loop, so a scrape never reads scheduler state itself.
+    std::atomic<int64_t> queue_waiting{0};
+    std::atomic<int64_t> queue_running{0};
 
     BatchingEngine() = default;
     ~BatchingEngine();

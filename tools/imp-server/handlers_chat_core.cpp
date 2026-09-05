@@ -1200,6 +1200,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         usage["completion_tokens_details"] = {{"accepted_prediction_tokens", imp_req->pred_accepted},
                                               {"rejected_prediction_tokens", imp_req->pred_rejected}};
     }
+    add_spec_usage_(usage, imp_req);
 
     json response = {{"id", comp_id},
                      {"object", "chat.completion"},
@@ -1223,6 +1224,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         ctx.trace.queue_ms = server_req->queue_ms.load(std::memory_order_relaxed);
     if (imp_req && imp_req->cached_tokens > 0)
         ctx.trace.cached_tokens = imp_req->cached_tokens;
+    if (imp_req)
+        ctx.trace.set_spec(imp_req->spec_drafted, imp_req->spec_accepted, imp_req->spec_verifies);
     log_request_jsonl(state, ctx.log_skip, ctx.t_log_start, comp_id, ctx.log_endpoint, ctx.log_client_ip,
                       ctx.log_raw_body, ms, ctx.snap.n_prompt_tokens, total_output_tokens, nonstream_finish,
                       response, ctx.log_client_request_id, &ctx.trace);

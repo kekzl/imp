@@ -216,6 +216,7 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             usage["completion_tokens_details"]["rejected_prediction_tokens"] =
                 active_req->pred_rejected;
         }
+        add_spec_usage_(usage, active_req);
         json usage_obj = {{"id", comp_id},
                           {"object", "chat.completion.chunk"},
                           {"created", created},

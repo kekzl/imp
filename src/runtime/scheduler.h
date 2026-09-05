@@ -28,6 +28,7 @@ public:
 
     [[nodiscard]] bool has_pending() const;
     [[nodiscard]] int active_count() const;
+    [[nodiscard]] int pending_count() const;  // admitted, not yet in a batch
 
     // Memory-aware scheduling: set KV cache manager to check budget
     void set_kv_manager(KVCacheManager* mgr) { kv_manager_ = mgr; }

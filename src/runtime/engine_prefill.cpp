@@ -278,6 +278,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
             // Reject-newest: cancel this request, leave in-flight ones intact.
             if (!kv_manager_->allocate_blocks(req->id, additional)) {
                 kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+                req->cancel_reason = CancelReason::KvCapacity;
                 cancel_sequence_(req);
                 req->status = RequestStatus::CANCELLED;
                 return false;
@@ -530,6 +531,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         kv_manager_->swa_trim(req->id, offset);
         if (!kv_manager_->swa_prepare(req->id, offset, ctx_len)) {
             kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
+            req->cancel_reason = CancelReason::KvCapacity;
             cancel_sequence_(req);
             req->status = RequestStatus::CANCELLED;
             return;
