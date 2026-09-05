@@ -74,7 +74,7 @@ there instead of retelling it.
   in the loader), a `block_count` sized per-layer arrays 300 lines before its
   cap, `bos_token_id` outside the vocab, a truncated shard. The vision loader's
   180-line parser fork is gone and it bounds-checks every tensor; `fuzz_gguf` +
-  `fuzz_mmproj` bring the fuzzed parsers to 8 of 10.
+  `fuzz_mmproj` bring the fuzzed parsers to 8 of 10 (#1910).
 - Seven lazy device statics kept their guards armed across an engine teardown,
   one a device use-after-free on every `logit_bias` request after a model swap
   (AUDIT_arch_2026 B-1..B-3, dispatch #1). All register a reset hook now;
