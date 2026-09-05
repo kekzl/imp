@@ -687,11 +687,11 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         return false;
     }
 
-    // Per-request LoRA selection (#522): swap the engine-global adapter
-    // before generation. Single-user semantics — the swap re-captures
-    // decode graphs on the next step, so back-to-back requests with
-    // different adapters work; concurrent mixed-adapter batches are out of
-    // scope (imp is batch=1-first by mission).
+    // Per-request LoRA selection (#522): the name is resolved here; the
+    // batching worker switches the engine-global adapter at admission, once
+    // nothing of another adapter is in flight (AUDIT_arch_2026 E-1). One
+    // adapter is active at a time; a request naming a different one queues
+    // behind that barrier rather than racing the worker from this thread.
     {
         int32_t want = 0;
         if (!ctx.params.lora_name.empty()) {
@@ -707,7 +707,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             }
             want = it->second;
         }
-        imp_lora_set(state.ctx, want);
+        ctx.snap.lora_id = want;
     }
 
     // Clamp max_tokens to remaining context window
@@ -734,6 +734,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->image = ctx.snap.vision_image;         // per-request vision (null for text)
     req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (empty otherwise)
     req->vision_content_hash = ctx.snap.vision_content_hash;
+    req->lora_id = ctx.snap.lora_id;
     req->input_tokens = input_tokens;
     req->max_tokens = ctx.params.max_tokens;
     req->temperature = ctx.params.temperature;

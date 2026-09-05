@@ -353,7 +353,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         } else {
             req->status = RequestStatus::DECODING;
             if (kv_manager_->prefix_caching_enabled())
-                kv_manager_->register_block_hashes(req->id, req->input_tokens, req->vision_content_hash);
+                kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
         }
     }
 

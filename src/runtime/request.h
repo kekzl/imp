@@ -288,6 +288,15 @@ struct Request {
     // that has one but reports 0 is refused the cache entirely, so a missed
     // plumbing site degrades to "no reuse" instead of "wrong picture".
     size_t vision_content_hash = 0;
+    // The LoRA adapter this request asks for (engine id, 0 = base). The
+    // adapter is engine-global, so the batching worker switches to it before
+    // admission and only once nothing else is in flight (AUDIT_arch_2026 E-1).
+    int lora_id = 0;
+    // Seed of the prefix-cache hash chain: image hash and active adapter,
+    // computed once by Engine::add_request. Every lookup and publish site
+    // reads this field, so a prompt can only ever reuse KV computed under
+    // the same picture and the same adapter.
+    size_t prefix_salt = 0;
     // `deepstack_emb` holds one buffer per vision tap, each the same
     // shape as `vision_emb`; they are ADDED at the LM's first layers.
     std::vector<std::shared_ptr<Buffer>> deepstack_emb;

@@ -203,7 +203,9 @@ def main():
     # 1086 -> 1089 (AUDIT_arch_2026 dispatch #5): CudaFaultSignalTest x2 (test_cuda_fault_signal.cu,
     # death test with a real illegal address) and DeviceFaultSignalTest (test_batching_engine_fault.cu,
     # model-backed death test), all GPU-only.
-    PINNED = 1089
+    # 1089 -> 1091 (AUDIT_arch_2026 dispatch #6): LoraHotSwap.AdapterShapesAreHeldAgainstTheModel and
+    # AdapterIsAPrefixCacheKeyAndAnAdmissionBarrier (test_lora.cpp, model-backed).
+    PINNED = 1091
 
     text = CMAKE.read_text()
     mods = module_sources(text)

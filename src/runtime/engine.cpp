@@ -290,6 +290,19 @@ int Engine::lora_load(const std::string& path) {
     auto a = std::make_unique<LoraAdapter>();
     if (!a->load(path, model_ ? model_->n_layers() : 0))
         return 0;
+    // The adapter's declared widths become kernel extents (K is read from the
+    // projection input, N written to its output), so they are held against
+    // the base model here, not discovered on device (AUDIT_arch_2026 F1-6).
+    if (model_) {
+        const auto& cfg = model_->config();
+        const int hd = cfg.head_dim > 0 ? cfg.head_dim : cfg.d_model / std::max(cfg.n_heads, 1);
+        const LoraDims dims{cfg.d_model, cfg.n_heads * hd, cfg.n_kv_heads * hd, cfg.d_ff};
+        std::string why;
+        if (!a->check_dims(dims, &why)) {
+            IMP_LOG_ERROR("LoRA: %s refused: %s", path.c_str(), why.c_str());
+            return 0;
+        }
+    }
     lora_adapters_.push_back(std::move(a));
     return static_cast<int>(lora_adapters_.size());  // 1-based id
 }
@@ -309,6 +322,19 @@ bool Engine::lora_set(int id) {
         g.invalidate();
     IMP_LOG_INFO("LoRA: active adapter -> %d%s", id, id == 0 ? " (base)" : "");
     return true;
+}
+
+// Seed of the prefix-cache hash chain for one request: the picture it carries
+// and the adapter it runs under. Two prompts with the same tokens but a
+// different image or LoRA adapter must never share KV (AUDIT_arch_2026 E-1).
+// 0 for a plain text request on the base model, so those keys are unchanged.
+// Computed once at admission and carried on the Request: five sites look up
+// or publish under it, and they have to agree.
+size_t Engine::prefix_salt_(const Request& req) const {
+    size_t salt = req.vision_content_hash;
+    if (active_lora_ != 0)
+        salt ^= (static_cast<size_t>(active_lora_) + 1) * 0x9E3779B97F4A7C15ULL;
+    return salt;
 }
 
 size_t Engine::effective_free_vram() const {
@@ -332,7 +358,11 @@ void Engine::finish_request(std::shared_ptr<Request>& req) {
 // the KV free until the in-flight chained step — which still WRITES this
 // row's next KV slot — has completed (bd_pipe_.deferred_release).
 void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
-    if (kv_manager_->prefix_caching_enabled()) {
+    // Publish under the salt the prefill looked these blocks up with (image
+    // hash, adapter); an image request without a hash was refused the cache
+    // at prefill and must not enter it here either.
+    const bool had_image = req->n_vision_tokens > 0 || req->image || req->vision_emb;
+    if (kv_manager_->prefix_caching_enabled() && (!had_image || req->vision_content_hash != 0)) {
         // Register input AND generated tokens — minus the final sampled
         // token, which was never forwarded (its KV entry does not exist; the
         // spec-verify bonus token has the same property). The next agent turn
@@ -345,7 +375,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             forwarded.reserve(req->input_tokens.size() + req->output_tokens.size() - 1);
             forwarded.insert(forwarded.end(), req->input_tokens.begin(), req->input_tokens.end());
             forwarded.insert(forwarded.end(), req->output_tokens.begin(), req->output_tokens.end() - 1);
-            kv_manager_->register_block_hashes(req->id, forwarded);
+            kv_manager_->register_block_hashes(req->id, forwarded, req->prefix_salt);
             // SWA window snapshot over the SAME span: without it the hashed
             // generated blocks are unusable under SWA sizing (the next turn's
             // reuse limit stops at the last snapshot boundary — the prefill
@@ -354,7 +384,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             // free_sequence returns (writers on other streams).
             maybe_save_swa_snapshot_span_(req->id, forwarded, stream_, /*hard_sync=*/true);
         } else {
-            kv_manager_->register_block_hashes(req->id, req->input_tokens);
+            kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
         }
         // cache_control / cache_prompt: protect the prompt's full blocks
         // from eviction (must happen before free_sequence — pinning needs
@@ -1069,6 +1099,7 @@ void Engine::add_request(std::shared_ptr<Request> req) {
             req->started_in_think = true;
             req->in_think_block = true;
         }
+        req->prefix_salt = prefix_salt_(*req);
         scheduler_->add_request(std::move(req));
     }
 }

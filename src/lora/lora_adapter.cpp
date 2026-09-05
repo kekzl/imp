@@ -7,6 +7,8 @@
 #include <cuda_runtime.h>
 #include <cmath>
 #include <cstdio>
+#include <climits>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -102,6 +104,34 @@ LoraAdapter::~LoraAdapter() {
     for (void* p : device_allocs_)
         if (p)
             cudaFree(p);
+}
+
+bool LoraAdapter::check_dims(const LoraDims& d, std::string* why) const {
+    static constexpr const char* kProjName[] = {"q_proj",    "k_proj",  "v_proj",   "o_proj",
+                                                "gate_proj", "up_proj", "down_proj"};
+    for (size_t li = 0; li < layers_.size(); li++) {
+        for (int pi = 0; pi < std::to_underlying(LoraProj::COUNT); pi++) {
+            const LoraWeights& w = layers_[li].proj[pi];
+            if (!w.A || !w.B)
+                continue;
+            int K = 0, N = 0;
+            char buf[192];
+            if (!lora_proj_expected(static_cast<LoraProj>(pi), d, &K, &N)) {
+                std::snprintf(buf, sizeof(buf), "layer %zu %s: the base model has no such projection", li,
+                              kProjName[pi]);
+                *why = buf;
+                return false;
+            }
+            if (w.K != K || w.N != N) {
+                std::snprintf(buf, sizeof(buf),
+                              "layer %zu %s: adapter is [K=%d, N=%d], the base model needs [K=%d, N=%d]", li,
+                              kProjName[pi], w.K, w.N, K, N);
+                *why = buf;
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 bool LoraAdapter::load(const std::string& path, int n_layers) {
@@ -202,7 +232,24 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
             IMP_LOG_ERROR("LoRA: tensor '%s' bad shape/offsets", key.c_str());
             return false;
         }
-        int64_t numel = shape[0] * shape[1];
+        // The dims arrive as JSON doubles narrowed to int64 (#1605 class):
+        // sign, ceiling and product are checked before anything is sized
+        // from them, and the payload must match the shape before the host
+        // copy is allocated (AUDIT_arch_2026 F1-6).
+        if (shape[0] <= 0 || shape[1] <= 0 || shape[0] > INT32_MAX || shape[1] > INT32_MAX ||
+            shape[0] > INT64_MAX / shape[1]) {
+            IMP_LOG_ERROR("LoRA: tensor '%s' dims [%lld, %lld] out of range", key.c_str(),
+                          static_cast<long long>(shape[0]), static_cast<long long>(shape[1]));
+            return false;
+        }
+        const int64_t numel = shape[0] * shape[1];
+        const uint64_t elem = (dtype == "F32") ? 4 : (dtype == "F16" || dtype == "BF16") ? 2 : 0;
+        if (elem == 0 || off1 - off0 != static_cast<uint64_t>(numel) * elem) {
+            IMP_LOG_ERROR("LoRA: tensor '%s' payload %llu bytes does not match shape [%lld, %lld] %s",
+                          key.c_str(), static_cast<unsigned long long>(off1 - off0),
+                          static_cast<long long>(shape[0]), static_cast<long long>(shape[1]), dtype.c_str());
+            return false;
+        }
         void* dev = upload_f16(data.data() + off0, off1 - off0, dtype, numel);
         if (!dev) {
             IMP_LOG_ERROR("LoRA: tensor '%s' upload failed (dtype=%s)", key.c_str(), dtype.c_str());
@@ -211,15 +258,20 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
         device_allocs_.push_back(dev);
 
         LoraWeights& w = layers_[layer].proj[std::to_underlying(proj)];
+        // A is [r, K], B is [N, r]: the rank is declared twice and has to agree
+        // whichever tensor the file lists first.
+        const int r_here = static_cast<int>(is_A ? shape[0] : shape[1]);
+        if (w.r != 0 && w.r != r_here) {
+            IMP_LOG_ERROR("LoRA: tensor '%s' rank %d disagrees with its pair (%d)", key.c_str(), r_here, w.r);
+            return false;
+        }
+        w.r = r_here;
         if (is_A) {
             w.A = dev;
-            w.r = static_cast<int>(shape[0]);
             w.K = static_cast<int>(shape[1]);
         } else {
             w.B = dev;
             w.N = static_cast<int>(shape[0]);
-            if (w.r == 0)
-                w.r = static_cast<int>(shape[1]);
         }
         n_tensors_++;
     }

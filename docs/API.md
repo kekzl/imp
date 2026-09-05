@@ -51,7 +51,7 @@ all of them at once.
 | `best_of` | ⚪ | `best_of > 1` is a 400: imp generates no candidate set to choose from (#1598) |
 | DRY, mirostat, typical_p, logit_bias | ✅ | |
 | `"speculative": true/false` | ✅ | per-request override; also bridged from the Anthropic shape. `false` switches off **all three** drafters (n-gram, MTP head, token recycling) since #1639 - it used to reach only the n-gram matcher. `true` enables what the model and config allow; it cannot conjure an MTP head the checkpoint lacks |
-| `"lora": "name"` | ✅ | PEFT adapter hot-swap, works with every quant path |
+| `"lora": "name"` | ✅ | PEFT adapter selected per request, every quant path. One adapter is active at a time: a request naming a different one waits until the in-flight requests finished, then the worker switches (decode graphs re-capture); it is never batched with them. The prefix cache is keyed by adapter, so a shared system prompt is prefilled once per adapter. Adapter shapes are checked against the model at load |
 | `"priority": int` | ✅ | vLLM-compatible admission priority, **lower value schedules earlier**, default 0. Strictly dominates the scheduler's shortest-first-with-aging order; a caller that sets priorities owns starvation across classes. Accepted on all three dialects |
 
 ### Defaults, and where they differ from OpenAI

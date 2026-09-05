@@ -101,9 +101,9 @@ llama.cpp publishes no 2026 roadmap. What is not met is in Open above.
 | Prompt caching with explicit breakpoints | prefix cache on by default, `cache_control` per breakpoint, content-salted so a different image is a different key |
 | Embeddings and reranking in the same server | `/v1/embeddings`, `/v1/rerank`, validated against llama.cpp on the same GGUF |
 | logprobs that agree with what was emitted | at temperature 0 the emitted token IS `top_logprobs[0]` (`tests/test_server_logprobs.py`) |
-| Per-request adapter selection | `lora` body field, empty means the base model |
+| Per-request adapter selection | `lora` body field, empty means the base model; one adapter active at a time, a request naming another waits for the in-flight ones (serialized, never batched together); the prefix cache is keyed by adapter |
 | Latency observability, not just counters | `imp_ttft_seconds`, `imp_inter_token_seconds`, `imp_request_duration_seconds` histograms, plus `imp_queue_depth` and `imp_tokens_cached_total` |
-| Auth, rate limiting, backpressure | `--api-key`, per-key rate limit, `max_concurrent`, 429 |
+| Auth, rate limiting, backpressure | `--api-key` (one key), per-client-IP rate limit, `max_concurrent`, 429 |
 | Every setting reachable from a container, without a name per setting | `IMP_CONFIG` / `IMP_SET` bridge `--config` / `--set`, so a new config key needs no new env name; the 19 hand-written `IMP_*` names are frozen compatibility (#1823) |
 | Continuous batching over a paged KV cache | default block n=16, geometry per configuration |
 | Chunked prefill and graph-captured decode | CUDA graphs on both paths; gate asserts decode >= 1.3x, measures 2.28x |
