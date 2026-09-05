@@ -204,6 +204,23 @@ def approx_tokens(text: str) -> int:
     return len(text) // 4
 
 
+# The layer is a property of the path (the docs-layers table), not of the
+# header: severity of a provenance failure follows the layer, so a doc in
+# docs/ declaring L2 would demote its own errors to warnings (AUDIT_arch_2026
+# J-7). Paths outside the four homes (CONTRIBUTING.md, tests/README.md,
+# tools/*/README.md) keep whatever they declare.
+def _layer_for_path(rel: str):
+    if rel == "README.md":
+        return "L0"
+    if rel.startswith("docs/internals/"):
+        return "L2"
+    if rel.startswith("docs/") and "/" not in rel[len("docs/"):]:
+        return "L1"
+    if rel == "AGENTS.md" or rel.endswith("CLAUDE.md"):
+        return "L3"
+    return None
+
+
 def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> None:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -238,6 +255,11 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
             errors.append(f"{rel}: unknown layer {lm.group(1)!r}, expected one of {sorted(VALID_LAYERS)}")
         else:
             layer = lm.group(1)
+            expected = _layer_for_path(rel)
+            if expected and layer != expected:
+                errors.append(
+                    f"{rel}: declares layer {layer} but lives where {expected} files live "
+                    f"(the layer follows the path, not the header)")
         # 7. staleness
         vm = re.search(r"^verified:\s*(\d{4}-\d{2}-\d{2})", fm, re.M)
         if vm:

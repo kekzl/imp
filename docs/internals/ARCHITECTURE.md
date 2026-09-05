@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-28
-commit: be825e4a
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # imp - Architecture
@@ -69,7 +69,7 @@ Entry: `imp_context_create(model, ImpConfig) → ImpContext`.
 | Compute max sequence length | `init_compute_max_seq_len_` | VRAM budget → max context (`src/runtime/vram_budget.cpp`) |
 | Upload weights | `init_weights` | `upload_weight` + `upload_expert_weights` in `src/model/weight_upload.cu`; pre-dequant orchestrated by `src/exec/executor_pre_dequant.cu` (calls per-phase TUs `pre_dequant_phase*.cu`: `pre_dequant_phase0_nvfp4_loader.cu`, `pre_dequant_phase1_fp16_cache.cu`, `pre_dequant_phase2_fp8_cache.cu`, `pre_dequant_phase3_nvfp4_decode.cu`, `pre_dequant_phase3c_mxfp4.cu`, `pre_dequant_phase4_tensor_registry.cu`, `phase4b` drop-source + VRAM reclamation, `phase4c` second-pass FP8 using reclaimed VRAM) |
 | Open the T2 arena + graph slot pool | `engine_arena_open`, `graph_slot_pool_open_for` | Engine-persistent tier, sized from `exec_t2_demand()`. Opened BEFORE the first tenant: the arena acquires its region here, which is what reserves those bytes against everything allocated later |
-| Init KV cache | `init_kv_cache` | **Weight caches are built first, then the pool takes the measured residual.** The reverse order sized the pool from an *estimate* of cache demand and starved the caches when the estimate was low - that is #1103, and it cost ~7x decode on gpt-oss-20b. Paged blocks (block_size=16); dtype is FP16 / FP8 / INT8 / INT4 / NVFP4 / MXFP4 |
+| Init KV cache | `init_kv_cache` | **Weight caches are built first, then the pool takes the measured residual.** The reverse order sized the pool from an *estimate* of cache demand and starved the caches when the estimate was low - that is #1103, and it cost ~7x decode on gpt-oss-20b. Paged blocks (`kv_block_size` 16, auto-raised to 32 when `n_kv_heads <= 4`; `src/runtime/engine_init_resolver.cpp`, the #1819 class of bug is sizing anything off a constant 16); dtype is FP16 / FP8 / INT8 / INT4 / NVFP4 / MXFP4 |
 | Allocate workspaces | `init_features` | MMVQ scratch, cuBLAS S-matrix (~384 MiB default `attention.attn_scores_mib` - see Known limitations), FP8 activation scratch, split-K attn scratch |
 | Warm up | `warmup()` | Captures CUDA graph for decode (`src/runtime/cuda_graph.cu`) |
 | Pre-size speculative scratch | `prewarm_spec_scratch_` | Last step before the allocation-phase guard arms. The verify path's one-shot capacity resolutions happen here rather than at first use, so serving allocates nothing |
@@ -120,7 +120,7 @@ Entry: `imp_decode_step(params) → next_token` (or the streaming wrapper `imp_g
 
 Per token:
 
-1. **Replay** the captured CUDA graph (`src/runtime/cuda_graph.cu`). Graph capture is enabled for most architectures; non-Gemma-4 MoE disables it because of host-side routing.
+1. **Replay** the captured CUDA graph (`src/runtime/cuda_graph.cu`). Graph capture is on unless a `GraphDemotionReason` fires (`src/runtime/graph_eligibility.h`: config `never`, `debug_raw`, calibration, streaming KV, host-resident experts, no pinned sample buffer, KV pressure); an on-device MoE (Qwen3.6-35B-A3B, Qwen3-Coder-30B) captures decode graphs like a dense model.
 2. **Paged attention decode** - kernel chosen by KV dtype.
 3. **FFN GEMV** - dp4a / mma.sync / NVFP4 variants in `executor_ffn.cu`.
 4. **LM head GEMV** → logits.

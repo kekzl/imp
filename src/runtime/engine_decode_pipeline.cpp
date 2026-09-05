@@ -143,8 +143,11 @@ void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>
         (int)runtime_config_.runtime.decode_pipeline, (int)rows.size(), (int)config_.use_cuda_graphs,
         (int)runtime_config_.diagnostics.profile, (int)decode_batch_pool_.is_allocated(),
         (int)(offload_mgr_ != nullptr),
-        (int)!(ssm_state_ && !(runtime_config_.runtime.gdn_batched_decode && d_ssm_seq_slots_ != nullptr)),
-        (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
+        // Mirrors the gate above exactly: `if (ssm_state_) return false;` is
+        // unconditional since the #1750 measurement. The pre-#1750 rule
+        // (batched decode + slot table = eligible) printed ssm_ok=1 on the
+        // hybrids this gate refuses (AUDIT_arch_2026 C-7).
+        (int)!ssm_state_, (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
         (int)(kv_manager_ && kv_manager_->residual_enabled()), (int)executor_->sample_pipeline_ready(),
         (int)rows_ok);
 }

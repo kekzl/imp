@@ -14,7 +14,8 @@ capture, and the configuration surface everything else reads.
 
 - **`RuntimeConfig` (`config.h`) is the only configuration surface.** No ad-hoc
   env reads. The env vars that remain seeded are `IMP_DETERMINISTIC` and
-  `IMP_FMHA_FA2`; three former trace knobs became config keys in #1207.
+  `IMP_FMHA_FA2`; four former trace knobs became `diagnostics.*` config keys
+  (#1207; `IMP_WORKER_TIMING` in AUDIT_arch_2026 J-10).
 - **There is no process-global config.** It hangs off the engine, one per engine.
 - **A `--set` key that does not exist is an error**, not a warning. A typo used
   to measure the default silently.

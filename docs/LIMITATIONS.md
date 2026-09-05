@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-04
-commit: 97faf0a4
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # Limitations
@@ -175,7 +175,10 @@ Both need a GPU runner or a long-running machine with a card; CI has neither.
   logit range, identical greedy argmax. A neighbour's content provably cannot reach another row.
   No flag makes the two bit-equal; pin batch composition if needed.
 
-- **MoE routing uses atomics**: identical seeds can diverge.
+- **Identical seeds can diverge in default mode.** The live sources are cuBLASLt's timing-based
+  algo selection (`runtime.deterministic_gemm` removes it), the sampler's cross-block FP
+  reductions (top-k, `typical_p`) and the FP32-compute MoE scatter fallback; the default F16
+  fused MoE scatter has no atomics. Full list and the opt-in mode: `docs/determinism.md`.
 
 - **Speculative decoding is not universally profitable.** Nemotron-3.5: the MTP head accepts 39 %
   of drafts on the serving path, matching the 41 % the offline harness scores on the same three

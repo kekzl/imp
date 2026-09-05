@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-09-03
-commit: 151ff123
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 <p align="center">
@@ -213,10 +213,10 @@ a different one, on one model:
        cuda=unknown path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
-Decode on this host moves several percent between sessions with nothing changed
-(the same tree read 287.63 one day and 276.92 the next at healthy clocks), and
-prefill moves more because cuBLAS re-times its algo selection per process. That
-is why the thresholds are 8 % and not 3 %.
+Decode on this host moves several percent between sessions with nothing changed,
+and prefill moves more (the MoE path, not cuBLAS); the measurements behind that
+are in [`docs/PERF.md`](docs/PERF.md). That is why the thresholds are 8 % and
+not 3 %.
 
 ## What works today
 

@@ -92,14 +92,20 @@ struct Attention {
     bool fa2_hd256 = true;
     // KV tile rows of the HD=256 FA2 instance, 64 or 32. At Bkv=64 the
     // TWOSLOT tile is 67.6 KB of the 100 KB SM budget, so one 4-warp CTA
-    // per SM (8.3% occupancy, ncu 2026-08-31) although the 232 registers
+    // per SM (8.3% occupancy, ncu 2026-08-31) although the registers
     // allow two; Bkv=32 halves the tile and seats 2 CTAs/SM: FA2 kernel
     // -11% at pp4096 on Qwen3.8-27B, e2e +0.1..0.4%, PPL +0.53% (2026-09-01,
-    // docs/roadmap.md). Opt-in on that trade.
+    // docs/roadmap.md). Opt-in on that trade. Register/spill numbers are
+    // owned by tools/kernel_resource_baseline.txt (ptxas, `make
+    // kernel-resources`): the shipped <64,256,true,false,64,...> instance
+    // holds 255 registers with a 96 B local frame, the Bkv=32 twin 246 with
+    // none; the 232 / 226 the 2026-08-31 ncu session quoted were an earlier
+    // build (AUDIT_arch_2026 A2-6).
     int fa2_hd256_bkv = 64;
     // The dense (hd=128, Bq=128) FA2 instance at two CTAs per SM: TWOSLOT
     // tile (35 KB) plus __launch_bounds__(256, 2) pinning the kernel to 128
-    // registers (137 unconstrained, 24 B of spill). Qwen3-14B-NVFP4 pp4096,
+    // registers (137 unconstrained; local frame 40 B per the ptxas baseline,
+    // the 24 B once quoted here was pre-baseline). Qwen3-14B-NVFP4 pp4096,
     // 3 alternating pairs under nsys: FA2 kernel sum 271.7/267.8/289.9 ->
     // 244.2/244.8/252.2 ms (-10%), pp 23722/23661/22509 -> 24176/24097/24057
     // tok/s; output bit-identical (2026-09-01, docs/roadmap.md). Default on.

@@ -132,6 +132,18 @@ no_vision_graph      = false
 # 4096 patches ~ 1024x1024. Does not apply to the mmproj (SigLIP/gemma4v) path,
 # which is sized off the checkpoint's fixed image_size.
 vision_max_patches   = 4096
+# Batched GDN/Mamba2 decode: separate sequences parallelise across blockIdx.y
+# in the recurrent scan, so a 32-stream step runs its GEMMs at M=32 instead of
+# M=1 (82 % of GPU time sat in M=1 GEMVs at 32-way load without it).
+gdn_batched_decode   = true
+# Capture every decode-batch pool slot before the engine goes ready (one
+# staggered dummy batch from max_batch_size down to 1, anchor prompt ~1000
+# tokens so the 1024 context bucket is baked). Costs init time.
+graph_prewarm        = true
+# Run prefill on its own stream concurrently with decode steps. Off by
+# measurement: two compute-bound streams displace each other on one GPU
+# (docs/plans/2026-08-27-prefill-decode-overlap.md).
+prefill_overlap      = false
 
 [kv_cache]
 # KV-cache element type. "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for
@@ -423,6 +435,10 @@ sparse_sink_tokens   = 16
 # Blocks covering the last N positions are always kept (local context;
 # includes the partially filled tail block).
 sparse_recent_tokens = 256
+# Below this context length decode stays dense even when sparse_topk_tokens is
+# exceeded: the selection only outgrows its overhead past ~12k (8k measured
+# -7 %, 16k +6 %, 32k +25 %). A sparse_topk_tokens setting is a no-op below it.
+sparse_min_ctx       = 12288
 
 [moe]
 # Expected per-expert overhead (% of expert size) before deciding to upload
@@ -473,6 +489,14 @@ nvfp4_smallM         = false
 nvfp4_smallM_threshold = 64
 # Rows-per-block for multi-row NVFP4 MoE decode GEMV (4|8|16|32).
 mr_nr                = 8
+# Pin host-resident experts in page-locked memory. Decode is unaffected (cache
+# hits 96-98 %); prefill is what the transfers cost. Six paired rounds, not
+# fewer: the off arm alone spread 34.7-66.1 tok/s decode.
+pin_host_experts     = false
+# Route a STAGED host-resident layer through the CUTLASS grouped NVFP4 prefill
+# instead of per-expert dequant; requires pin_host_experts. Opt-in: pp512
+# +136 % but tg256 -36 % on Qwen3-30B-A3B-NVFP4 (6/6 pairs), not understood.
+staged_cutlass_prefill = false
 
 [gdn]
 # FP32 scan/output for Gated-DeltaNet (Qwen3.5/3.6). Slightly slower but
@@ -495,6 +519,10 @@ chunkpar_scan        = true
 chunkpar_strip       = 0
 # Override gated-DeltaNet weight layout (diagnostic; "" = auto).
 layout_override      = ""
+# BF16 recurrent state (HD=SS=128 models, fused scan route only): +12.5 %
+# aggregate at 32 streams on Qwen3.8-27B-NVFP4 for +0.21 % PPL, and the freed
+# bytes go to the KV pool. false = FP32 state.
+state_bf16           = true
 
 [gemm]
 # dp4a = INT8 4-element packed multiply-accumulate. mmvq = matrix*vec
@@ -571,6 +599,19 @@ q4k_imma_prefill     = false
 # (ModelConfig::Overrides::Gemma4::force_mmvq, src/model/model_config.h) is set
 # by the engine init resolver; the six writer-less bisect flags that used to sit
 # next to it were deleted (AUDIT_arch_2026 G-7).
+# Native small-M (2..32 rows) NVFP4 GEMM for batched decode instead of the
+# multi-row GEMV: 32 streams 992.5 -> 1151.7 tok/s on Qwen3.8-27B-NVFP4 (+16 %).
+nvfp4_smallm         = true
+# Which small-M implementation: 1 = the W4A16 dequant+HMMA kernel (A/B), 2 = the
+# native mxf4nvf4 producer/consumer pipeline (nvfp4_gemm_smallm_v2.cu).
+nvfp4_smallm_impl    = 2
+# Sibling-pair launch for impl 2: gate|up and GDN in|z as one launch, output
+# bit-identical per tensor; 112 launches fewer per 64-layer decode step.
+nvfp4_smallm_pair    = true
+# Batched-decode residual accumulation in the small-M GEMM epilogue (beta=1)
+# instead of scratch + elementwise add. Off by measurement: 3/3 pairs negative
+# (-2.7/-0.9/-0.2 %) at 32 streams; the adds already overlap inside the graph.
+nvfp4_residual_beta1 = false
 
 [generation]
 no_logit_softcap     = false
@@ -776,6 +817,36 @@ capture              = true
 # (2 x cap x nkv x hd x 2B VRAM); verify steps beyond it run eager. Clamped
 # to the model's max_seq_len.
 capture_ctx_cap      = 32768
+# Serve batched speculation round-robin with an adaptive yield cadence (8 -> 64
+# steps backoff on empty turns). Kill switch for A/B; batch-1 unaffected.
+batch_rr             = true
+# Do not speculate before this many tokens were generated for the request (the
+# economics guard arms at 8 verifies per request, a short one never gets there).
+# 0 = no gate.
+min_history          = 0
+# MTP multi-candidate width; 1 = the linear chain. Run diagnostics.mtp_tree_probe
+# before raising it (docs/plans/2026-08-31-mtp-multicandidate-hybrid.md).
+mtp_tree_width       = 1
+# With mtp_tree_width > 1: verify the extra chains only when the head's
+# top-1/top-2 logit margin is below this. 0 = always branch.
+mtp_tree_margin      = 2.0
+# Above this context, depth-1 drafts are discarded instead of verified (verify
+# costs ~2x a decode step near 14k on Qwen3-8B Q8_0); depth >= 2 is always
+# verified. MoE-NVFP4 and hybrid requests are exempt. 0 = never gate.
+shallow_draft_ctx    = 12288
+# Dense verify-chunk attention through the batched-decode split-K paged kernels
+# instead of the small-M FA2 tile (+25..44 % e2e on Qwen3-8B Q8_0). Dense
+# non-MLA/non-SWA/non-MoE/non-hybrid only. Kill switch for A/B.
+verify_decode_attn   = true
+# Verify-chunk GEMMs read the NVFP4 decode overlay instead of the M>1 source
+# dequant path (on Q6_K the dequant was 52 % of the tg window). Kill switch.
+verify_nvfp4_gemm    = true
+# Verify-chunk NVFP4 GEMV reduces K exactly like the M=1 decode GEMV (bit
+# parity between the two paths). Off pending its own measurement.
+verify_row_parity    = false
+# Verify-chunk native-NVFP4 GEMMs through the small-M pipeline kernel instead
+# of the batched GEMV: +1-2 %, inside the trajectory variance (2026-08-27).
+verify_smallm        = false
 
 [constrained]
 # Jump-ahead over schema-forced spans (#844): when the json_schema FSM
@@ -853,6 +924,39 @@ audit_nvfp4_scales   = false
 vram_audit           = false
 # Optional append-only file the VRAM audit table is mirrored into ("" = off).
 vram_audit_dump      = ""
+# Directory for the FINAL LM logits of every forward pass (one .npy per pass,
+# [rows, vocab] FP32, after the soft-cap). "" = off.
+dump_final_logits_dir = ""
+# Directory for the Gated-DeltaNet recurrent state (gdn_state.npy, last pass
+# wins) plus gdn_state_stats.jsonl (per-pass min/max/RMS, non-finite count).
+dump_gdn_state_dir   = ""
+# Per-layer MoE expert-activation histogram (JSON) written at executor
+# teardown; counts every routing decision of the run. "" = off.
+moe_expert_hist      = ""
+# Per-token MoE expert trace (JSON, decode only) written at teardown; the
+# temporal-locality dataset the expert-cache question needs. "" = off.
+moe_expert_trace     = ""
+# Per-step speculative draft/verify trace on the log. Legacy env: IMP_SPEC_TRACE.
+spec_trace           = false
+# Conditional-graph jump trace on the log. Legacy env: IMP_JUMP_TRACE.
+jump_trace           = false
+# Path to dump per-token NLL from --perplexity ("" = off). Legacy env: IMP_PPL_DUMP.
+ppl_dump             = ""
+# Host-side phase attribution for batched decode steps (build / forward /
+# sample / distribute / outside), logged every 256 steps.
+step_timing          = false
+# imp-server worker-loop phase attribution (admission / step / delivery
+# staging), logged every 256 loops. Legacy env: IMP_WORKER_TIMING=1.
+worker_timing        = false
+# Attempt prefill graph capture even when the dequant scratch exceeds the cap
+# (the fail-loud in gemm_nvfp4 then answers whether the M>1 fallback fires).
+prefill_graph_ignore_dequant_cap = false
+# Compare every cached verify-chunk graph replay against an eager forward of
+# the same state (one extra forward + two vocab-sized D2H per verify step).
+spec_capture_fidelity = false
+# MTP tree-ceiling probe: tally per depth whether the true next token was in
+# the head's top-4. 713 us per drafted token on Qwen3.8-27B; imp-cli prints it.
+mtp_tree_probe       = false
 
 # ---------------------------------------------------------------------------
 # [calibration] — activation statistics for the offline quantizer

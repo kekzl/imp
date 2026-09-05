@@ -13,225 +13,104 @@ there instead of retelling it.
 
 ### Added
 
-- `make verify-ab` (`scripts/verify_ab.sh`, `scripts/ab_base_image.sh`): the paired
-  half of the perf gate (AUDIT_arch_2026 dispatch #10, H-3 / H-2 / H-9, #1918).
-  `origin/main` is built once per sha into `imp:ab-<sha>` and benched against
-  `imp:test` in alternating pairs in one session; verdict = mean paired tg128
-  delta vs the new `thresholds.paired_decode_regression_pct` (2 %) in
-  `tests/perf_baseline.json`. Calibration on one tree built twice, 6 gate runs x
-  3 pairs: paired means within +-0.20 %, 0 red; a planted regression (a second
-  o_proj GEMV on every even layer) reads -2.93 % paired (red) and -1.05 % on
-  the single-arm 8 % gate (green). The pre-push hook runs it after `verify-fast` on
-  the measured paths (`IMP_SKIP_AB=1` skips) and, on `src/compute` or `src/exec`
-  diffs, prints the age of the newest roofline run with the manual step (the
-  roofline check is documented as not a gate). The pin-age warning fires at 90
-  days, not 30, with the reason at the line.
-- `docs/audit/AUDIT_arch_2026.md`: read-only architecture audit at `ef664dd8`,
-  12 axes, 113 scout findings, 3 S0 and 9 S1 surviving the falsification pass,
-  a 15-item dispatch queue. No source change.
-- `tools/check_function_size.py` gates the largest function *body* in a file
-  (warn >200, hard >500 code LOC; p99 of 5830 bodies is 199), with the same
-  two-way `[allow]` ceiling and mandatory reason as the file gate. It exists
-  because a file's cohesion reason was standing in for a function's:
-  `executor_workspace_buffers.cu` is allowlisted as "(c) one concern" and 884 of
-  its 1534 code LOC are one body. Twelve bodies are over the hard line, all
-  listed with a reason; `--selftest` plants 10 parse cases, two of which the
-  detector got wrong on the real tree first
+- `make verify-ab`: paired perf gate against `origin/main` (`scripts/verify_ab.sh`), red
+  at a mean paired tg128 delta below -2 %; a planted -2.93 % regression read -1.05 % on the
+  single-arm gate. Pre-push runs it on measured paths; pin-age warning at 90 days (#1918)
+- `docs/audit/AUDIT_arch_2026.md`: read-only architecture audit at `ef664dd8`, 113
+  findings, 3 S0 + 9 S1 after the falsification pass, 15-item dispatch queue. No source change
+- `tools/check_function_size.py`: per-function body gate (warn >200, hard >500 code LOC),
+  `[allow]` with a reason; 12 bodies over the line, all listed
   ([`docs/audit/AUDIT_FILESIZE.md`](docs/audit/AUDIT_FILESIZE.md))
+- `tools/check_config_keys.py` and `tools/check_changelog_form.py` join the `docs` gate:
+  every bound `imp.conf` key is in `imp.conf.example` (31 of 223 were not) and every
+  `[Unreleased]` entry is at most 3 lines (AUDIT_arch_2026 dispatch #13, J-2 / J-8, #1919)
 
 ### Changed
 
-- Six writer-less `ModelConfig::Overrides::Gemma4` bring-up flags and their
-  branches are gone (AUDIT_arch_2026 dispatch #15, G-7, #1917): the GGML
-  per-token MoE prefill arm (`GEMMA4_GGML`), the FP32 attention-output arm, the
-  FP32 expert-down scatter and the `max_tokens x top_k x d_model` FP32
-  "moe_fp32_down" scratch every GGUF MoE load allocated for it,
-  `Gemma4NoGraphs`, `no_decode_fast`, `no_post_ffw_1`; `force_mmvq` stays.
-  `build_config` / `load_model_into_state` lose the per-load JSON `overrides`
-  object every caller passed empty (G-12). Behaviour of every reachable path
-  unchanged; -570 lines.
-- `tools/imp-server/batching_engine.h` no longer includes `runtime/engine.h`. It
-  used one symbol from it (`imp::Request`, which is in `runtime/request.h`) and
-  reached 15 TUs through `handlers.h`, so the whole imp-server subtree rebuilt on
-  every `engine.h` edit. The 8 TUs that really need the complete `imp::Engine`
-  include it directly. An `engine.h` edit: **49 -> 39 rebuilt TUs, 48 -> 33 s**
-  (`make dev`, two runs each), against 146 commits to that header in six months
-- The genuine split of `GraphExecutor::run_attention` is **refused on
-  measurement**, not deferred: the `src/exec/` per-TU compile floor is ~5 s and
-  header-driven, so the 1279-LOC body is worth ~1.5 s over it; 16 of 67 commits
-  in six months touched exactly one fragment; and full builds would pay that
-  floor three extra times
-  ([`docs/audit/AUDIT_FILESIZE.md`](docs/audit/AUDIT_FILESIZE.md) 2026-09-05)
-- The two `(a)` god-functions the function-size gate flagged with no hot path
-  attached are split, both move-verbatim. `imp-cli`'s `main()` 737 -> 233 code
-  LOC: the bench, interactive and one-shot modes move into
-  `tools/imp-cli/mode_{bench,interactive,oneshot}.cpp`, which is the layout
-  `modes.h` has described since `mode_perplexity.cpp`. `handle_completions()`
-  593 -> 240: the SSE and blocking response paths move behind a
-  `CompletionCtx`, mirroring what the chat route already does with
-  `ChatRequestContext`. Both entries leave `[allow]`
-- The file-size gate charges a textually `#include`d `.cu` to its includer,
-  because a file is not a translation unit. `src/exec/executor_attention.cu`
-  measured 542 code LOC as a file and passed; the TU nvcc compiles is 1279 / 2004
-  raw, and its three fragments say in their own headers that they are not
-  translation units. Now `[allow]`-pinned at 1279 with the genuine split named as
-  pending; `--selftest` covers the merge (#1905)
-- `docs/roadmap.md` is a ledger again: one ranked `Open` table and one `Closed`
-  table instead of two overlapping gap lists, and the serving/kernel ledger is a
-  top-level section instead of a nested item. 91.5 -> 41.0 KB, longest table
-  cell 3977 -> 561 characters; the measurement narrative moved verbatim to
-  `docs/plans/2026-09-04-lever-ledger-detail.md`, and four rows whose ref cell
-  had drifted onto its own line are joined back (#1886, #1887, #1880, #1882)
-- `docs/plans/` and `docs/audit/` each have an index that says what is finished
-  and what is still live: 9 of 12 plans now carry a terminal
-  `## ROADMAP CLOSED` block with their verdict, `imp-quantize-roadmap` is the
-  one that stays open, and the audit index separates the three live ledgers from
-  the dated snapshots whose `path:line` needs re-verification. The docs-rewrite
-  open questions are closed (Q1 answered by #1543)
+- Six writer-less `Overrides::Gemma4` flags and their arms are gone (`GEMMA4_GGML` prefill,
+  FP32 attention-out, FP32 expert-down scatter and its scratch, `Gemma4NoGraphs`, two more);
+  the per-load JSON `overrides` object goes with them, -570 lines (dispatch #15, G-7 / G-12, #1917)
+- `batching_engine.h` no longer includes `runtime/engine.h`: an `engine.h` edit rebuilds
+  39 TUs in 33 s instead of 49 in 48 s (`make dev`, two runs each)
+- The `GraphExecutor::run_attention` split is refused on measurement: the `src/exec/` TU floor
+  is ~5 s, the 1279-LOC body is worth ~1.5 s ([`docs/audit/AUDIT_FILESIZE.md`](docs/audit/AUDIT_FILESIZE.md))
+- `imp-cli` `main()` 737 -> 233 code LOC (`tools/imp-cli/mode_{bench,interactive,oneshot}.cpp`)
+  and `handle_completions()` 593 -> 240 (`CompletionCtx`), both move-verbatim, both leave `[allow]`
+- The file-size gate charges a textually `#include`d `.cu` to its includer: `executor_attention.cu`
+  is 1279 code LOC as a TU, not 542; `[allow]`-pinned, `--selftest` covers the merge (#1905)
+- `docs/roadmap.md` is one `Open` and one `Closed` ledger, 91.5 -> 41.0 KB; the measurement
+  narrative moved verbatim to `docs/plans/2026-09-04-lever-ledger-detail.md`
+- `docs/plans/` and `docs/audit/` carry an index each; 9 of 12 plans close with a
+  `## ROADMAP CLOSED` block, the docs-rewrite open questions are closed
+- Doc drift pack (AUDIT_arch_2026 dispatch #13, #1919): `imp.conf.example` lists all 223 keys,
+  `IMP_WORKER_TIMING` is `diagnostics.worker_timing`, `docs/performance.md` is archived,
+  `docs_lint.py` derives the layer from the path; 16 stale claims corrected (SETTLED section H)
 
 ### Fixed
 
-- Config precedence and dead flags (AUDIT_arch_2026 dispatch #15, G-3 / G-4 /
-  G-5 / G-7 / G-8 / G-10 / G-12, #1917): `--max-seq-len` / a C-API value now
-  wins over `runtime.max_seq_len` (the key overwrote it, with a normal-looking
-  log line); `imp_context_create` refuses the 5 non-KV `ImpDType` values and any
-  out-of-range integer with `IMP_ERROR_INVALID_ARG` (they mapped to a QType the
-  FP16 kernel then read); a GGUF weight tensor stored as Q8_1 (an activation
-  format with no dequant, kernel or registry entry) refuses the file at parse;
-  every `ImpError` entry point is guarded (`imp::api_guard`, 4 were naked) and
-  `tools/check_api_guard.py` gates it (23/23, selftest 10/10). Tests:
-  `CApiContract` x3, `RuntimeConfigTest.MaxSeqLenBindsAndYieldsToTheCliValue`,
-  `GgufFaultInjection.Q8_1WeightTypeIsRefusedAtParse`.
-- GEMM registry cut to its 10 produced keys, and the dead kernel tree around
-  it (AUDIT_arch_2026 dispatch #8, A1-1 / A1-2 / A1-4 / A1-5 / A1-6 / A1-7 /
-  A1-8, #1916): the 9 registrations no dispatch site constructed (FP8, NVFP4
-  GEMV/GEMM, MXFP4, FP16, Q4_K-IMMA; the FP8 copy ran W8A8 against the live
-  W8A16) go with their 900 test lines, `RegistryHoldsExactlyTheProducedKeys`
-  pins the count; the pre-Hopper split-K FP8/INT4 arms, the scalar Q4_K MoE
-  prefill and two dead exports go too (-2645 lines); `kv_cache.dtype=mxfp4` on
-  a head_dim-96 model is refused at init instead of throwing mid-decode;
-  `gemm.moe_imma_prefill` keeps its three fallback arms with a re-measure date
-  and each arm names itself in the resolved-dispatch line. Also moves
-  `tests/test_spec_usage.cpp` behind `IMP_BUILD_SERVER`: it includes
-  `httplib.h`, which turned the `Sanitizers` job (server off) red on `main`
-  with #1915
-- Serving signals a client or a scrape can act on (AUDIT_arch_2026 dispatch
-  #7, C-1 / C-5 / C-6 / C-9, #1915): a decode that runs the KV pool dry ends
-  `finish_reason: "capacity"` (503 `capacity_error` non-streaming) instead of
-  `"cancelled"`; `imp_queue_time_seconds` now ends at the scheduler's first
-  batch (the wait behind `max_batch_size` and KV, not the worker's loop
-  latency) and `imp_queue_waiting` / `imp_queue_running` split
-  `imp_queue_depth`; `usage.completion_tokens_details.imp_spec_*` and the
-  `imp.spec_*` span attributes carry per-request speculation counts on every
-  dialect; `/v1/responses` bridges `speculative`.
-- Per-request LoRA is honest (AUDIT_arch_2026 dispatch #6, E-1 / F1-6 / E-9,
-  #1914): the prefix cache is keyed by adapter (a shared system prompt no
-  longer hands adapter A's KV to adapter B), the batching worker switches
-  adapters at admission once nothing else is in flight instead of the HTTP
-  thread flipping the engine mid-step, and an adapter whose shapes do not
-  match the model is refused at load (`IMP_ERROR_INVALID_MODEL`) instead of
-  reaching the kernels as extents. `docs/LIMITATIONS.md` states the
-  one-adapter-at-a-time contract.
-- A CUDA device fault (illegal address, launch failure) is a host signal now
-  (AUDIT_arch_2026 dispatch #5, D-1, #1913): forward() and the sampler syncs
-  throw on a sticky class, the server worker probes after every step, the
-  request answers 500 `internal_error` (`code` `engine_faulted`), `/health` and
-  `/ready` report `engine_faulted`, later requests are refused. Before, the
-  sticky error was cleared with a WARN and the previous step's tokens were
-  served with `/health` ok.
-- imp-server's request `model` field is a name, never a path (AUDIT_arch_2026
-  dispatch #3, F2-1 S1): `{"model": "/any/readable/x.gguf"}` used to load that
-  file and evict the resident model; now a basename in `--models-dir` or an
-  `org/repo` id from the HF cache, everything else 404. The `--max-concurrent`
-  guard no longer blocks on the engine lock during a swap (503 within 250 ms),
-  `GET /ready` reports readiness as a status code, and SIGTERM drains in-flight
-  generations before the engine stops (`stop_grace_period: 75s` in compose) (#1912).
-- Four gates that gated nothing (AUDIT_arch_2026 dispatch #4, I-1/D-3, I-3,
-  I-7, I-8, H-1, H-4, G-6): the greedy locks, degeneration battery, prefix-cache
-  equivalence and parity suites now run from `make test-e2e` (Qwen3-8B-Q8_0, the
-  model the lock rows name); `make verify` is green again (`verify.sh`'s lane
-  filter copy was 9 days stale, `guard_lane_filter_copy` diffs it now);
-  `guard_makefile_filters` pins every Makefile `--gtest_filter` (one ran
-  "0 tests, PASSED" per commit); `check_dep_pins.sh` offline joins the blocking
-  gates; `check_function_size.py` counts brace depth and found the 556-LOC body
-  a column-0 `}` was hiding (allowlisted with a reason) (#1911).
-- GGUF and mmproj parsers refuse what used to write past a buffer (AUDIT_arch_2026
-  dispatch #2, F1-1/F1-2 S0, F1-5/F1-7 S1, F1-11): `n_dims > 4` (a stack write
-  in the loader), a `block_count` sized per-layer arrays 300 lines before its
-  cap, `bos_token_id` outside the vocab, a truncated shard. The vision loader's
-  180-line parser fork is gone and it bounds-checks every tensor; `fuzz_gguf` +
-  `fuzz_mmproj` bring the fuzzed parsers to 8 of 10 (#1910).
-- Seven lazy device statics kept their guards armed across an engine teardown,
-  one a device use-after-free on every `logit_bias` request after a model swap
-  (AUDIT_arch_2026 B-1..B-3, dispatch #1). All register a reset hook now;
-  `tools/check_static_reset.py` gates the convention (25/38 candidate TUs
-  re-arm, 1 allowlisted), `SamplingTest.*RearmsAfterStaticReset` pins it (#1909).
-- The Q8_0 IMMA prefill cache (an s8 plane per prefilled weight, 1.125 B per
-  element) was charged to nothing and took whatever the KV pool left free - 5612
-  MiB on a cold Qwen3-8B-Q8_0 start, 7942 MiB with a bigger reserve pinned - so
-  the card ended init at 0 MiB free and WDDM spilled whichever allocation the
-  startup path touched last. The planner now charges it (`imma_plane_bytes`,
-  capped at the KV guarantee), `mmq_q8_imma` is capped at the charge, and
-  `--mem-report` names it `imma_q8_planes`. Cold Qwen3-8B-Q8_0 defaults, no pin:
-  124.8 -> 289.6 output tok/s at c=1, 514.1 -> 1462.2 at c=8, 2375.3 -> 4568.5 at
-  c=32; card 0 -> 1190 MiB free, attribution 100 %. Most of the ~3.9 GiB
-  "library reserve" of `docs/internals/MEMORY.md` A1.5 was this cache; the real
-  claim on that model is 763 MiB (#1899)
-- The same cache was never freed on engine teardown, so a second model in one
-  process (server model swap, the GPU test suite) paid for the first model's
-  planes and ran its own prefill GEMMs through dequant - and, since the cache is
-  keyed by source pointer, a recycled allocation of the same shape could have
-  been served the previous model's weights. Released via the `cuda_static_reset`
-  hooks; asserted in `EngineRelaunchTest` (#1899)
-- `imp.conf.example` and `docs/LIMITATIONS.md` told container operators to
-  bind-mount `$HOME/.cache/imp` for the library-reserve cache. The container
-  user `imp` is uid 1001, so that mount was never writable (Docker creates a
-  missing host path as root, a host user's directory is uid 1000) and every
-  start re-measured. Both now point at the README's named volume
-  (`-v imp-cache:/home/imp/.cache/imp`) and name the uid (#1899)
+- Config precedence and dead flags (dispatch #15, #1917): `--max-seq-len` wins over
+  `runtime.max_seq_len`; `imp_context_create` refuses the 5 non-KV `ImpDType` values; a Q8_1
+  weight tensor is refused at parse; all 23 `ImpError` entry points guarded (`tools/check_api_guard.py`)
+- GEMM registry cut to its 10 produced keys; the 9 dead registrations, the pre-Hopper split-K
+  arms, the scalar Q4_K MoE prefill and two dead exports go (-2645 lines); `kv_cache.dtype=mxfp4`
+  on a head_dim-96 model is refused at init, not mid-decode (dispatch #8, #1916)
+- Serving signals (dispatch #7, #1915): KV exhaustion ends `finish_reason: "capacity"` (503),
+  `imp_queue_time_seconds` ends at the first batch, `imp_queue_waiting` / `imp_queue_running`
+  gauges, `usage.completion_tokens_details.imp_spec_*` on every dialect, `/v1/responses` bridges `speculative`
+- Per-request LoRA (dispatch #6, #1914): the prefix cache is keyed by adapter, the worker switches
+  adapters at admission once nothing is in flight, a shape mismatch is refused at load
+  (`IMP_ERROR_INVALID_MODEL`); `docs/LIMITATIONS.md` states the one-adapter-at-a-time contract
+- A CUDA device fault is a host signal (dispatch #5, #1913): forward and the sampler syncs throw,
+  the request answers 500 `engine_faulted`, `/health` and `/ready` report it, later requests are refused
+- The request `model` field is a name, never a path (dispatch #3, #1912): a basename in
+  `--models-dir` or an HF-cache id, else 404; `GET /ready`; the `--max-concurrent` guard answers
+  503 within 250 ms during a swap; SIGTERM drains in-flight generations (`stop_grace_period: 75s`)
+- Four gates that gated nothing (dispatch #4, #1911): greedy locks, degeneration, prefix-cache and
+  parity suites run from `make test-e2e`; `make verify` is green again; every Makefile
+  `--gtest_filter` is pinned (one ran "0 tests, PASSED"); `check_function_size.py` counts brace depth
+- GGUF and mmproj parsers refuse `n_dims > 4` (a stack write), an oversized `block_count`, an
+  out-of-vocab `bos_token_id` and a truncated shard; the vision parser fork is gone; `fuzz_gguf` +
+  `fuzz_mmproj` bring the fuzzed parsers to 8 of 10 (dispatch #2, #1910)
+- Seven lazy device statics re-arm across an engine teardown, one a device use-after-free on
+  `logit_bias` after a model swap; `tools/check_static_reset.py` gates the convention (25/38 TUs),
+  `SamplingTest.*RearmsAfterStaticReset` pins it (dispatch #1, #1909)
+- The Q8_0 IMMA prefill planes are charged to the planner (`imma_plane_bytes`, `--mem-report`
+  `imma_q8_planes`): cold Qwen3-8B-Q8_0 c=1 124.8 -> 289.6 tok/s, c=32 2375.3 -> 4568.5; the
+  ~3.9 GiB "library reserve" of `docs/internals/MEMORY.md` was mostly this cache, real claim 763 MiB (#1899)
+- The same planes are freed on engine teardown (`cuda_static_reset` hooks), so a second model in
+  one process no longer pays for the first or risks its recycled pointers; `EngineRelaunchTest` (#1899)
+- The `$HOME/.cache/imp` bind-mount the docs recommended was never writable for container uid
+  1001; `imp.conf.example` and `docs/LIMITATIONS.md` point at the named volume `imp-cache` (#1899)
+- The `decode-pipeline` gate log printed `ssm_ok=1` on the GDN / Mamba2 hybrids that gate refuses
+  (AUDIT_arch_2026 C-7, dispatch #13, #1919)
 
 ## [0.37.0] - 2026-09-04
 
 ### Added
 
-- Serving KPI harness `tools/analysis/serving_kpi.py`: TTFT / TPOT / ITL / E2E /
-  normalized latency at p50 / p95 / p99, req/s, tok/s, goodput against an SLO
-  pair, queue wait, rows per step, KV utilization, prefix-cache hit rate,
-  acceptance and preemption counters, J per 1k output tokens. Definitions in
-  `docs/internals/BENCHMARKING.md`, tables in `docs/PERF.md`
-  (Qwen3-8B-NVFP4-cortecs, 32 streams: 4633.7 output tok/s, TPOT p50 5.8 ms,
-  goodput 100 %) (#1896)
-- `/metrics`: `imp_streaming_kv_auto_enables_total`,
-  `imp_prefix_cache_evictions_total` and `imp_decode_batch_last_rows`
-  (sequences in the most recent decode step, 0 when idle) (#1896)
+- Serving KPI harness `tools/analysis/serving_kpi.py`: TTFT / TPOT / ITL / E2E at p50-p99,
+  goodput against an SLO pair, queue wait, KV and prefix-cache rates, J per 1k output tokens.
+  Definitions in `docs/internals/BENCHMARKING.md`, tables in `docs/PERF.md` (#1896)
+- `/metrics`: `imp_streaming_kv_auto_enables_total`, `imp_prefix_cache_evictions_total`,
+  `imp_decode_batch_last_rows` (#1896)
 
 ### Fixed
 
-- GGUF batched decode ran every 2..32-row step through the prefill dequant route
-  (the whole Q*_K source per step, the class of #667); decode rows now read the
-  NVFP4 decode overlay through the small-M GEMM, its scratch a planned T2 arena
-  tenant taken before graph prewarm. Qwen3-8B-Q8_0: c=8 770.4 -> 1496.1 output
-  tok/s, c=32 2648.3 -> 4715.1, c=1 flat; tables in `docs/PERF.md`, the
-  cold-start spill lottery in `docs/LIMITATIONS.md` (#1897)
-- `/metrics` latency histograms are fed by every generation path:
-  `/v1/completions` observed none of TTFT / ITL / queue / duration, the
-  non-stream chat loop no ITL, a request cancelled or timed out before admission
-  no queue wait. The non-stream chat timeout now counts in
+- GGUF batched decode read the whole Q*_K source per 2..32-row step; rows now read the NVFP4
+  overlay through the small-M GEMM. Qwen3-8B-Q8_0 c=8 770.4 -> 1496.1, c=32 2648.3 -> 4715.1
+  output tok/s, c=1 flat; tables in `docs/PERF.md`, the spill lottery in `docs/LIMITATIONS.md` (#1897)
+- `/metrics` latency histograms are fed by every generation path (`/v1/completions` observed none
+  of TTFT / ITL / queue / duration); the non-stream chat timeout counts in
   `imp_requests_timed_out_total`. Gate: `tests/test_server_metrics.py` (#1896)
 
 ### Changed
 
-- Streaming TTFT: the reasoning scan no longer holds the first 8 tokens of a
-  thinking-off answer once the first word proves no `<think>` is coming; the
-  hold stays on tool requests. Qwen3.8-27B-NVFP4 client-side TTFT 97-105 ->
-  32-62 ms (27-token prompt), 195-229 -> 130-146 ms (1116 tokens), completions
-  116-147 -> 51-64 ms (#1894)
-- The conditional decode loop patches its parked exec with
-  `cudaGraphExecUpdate` instead of instantiating a graph per request and burst:
-  31 of 34 setups updated in 0.1 ms instead of 5.9 ms mean, wall per 48-token
-  request 545 -> 532 ms median on Qwen3.8-27B-NVFP4, greedy output identical
-  (#1895)
-
+- Streaming TTFT: the reasoning scan releases the first tokens once the first word proves no
+  `<think>` is coming (the hold stays on tool requests). Qwen3.8-27B-NVFP4 client-side TTFT
+  97-105 -> 32-62 ms (27-token prompt), 195-229 -> 130-146 ms (1116 tokens) (#1894)
+- The conditional decode loop patches its parked exec with `cudaGraphExecUpdate` instead of
+  instantiating per request: 31 of 34 setups in 0.1 ms instead of 5.9 ms, wall per 48-token
+  request 545 -> 532 ms median on Qwen3.8-27B-NVFP4, greedy output identical (#1895)
 ## [0.36.0] - 2026-09-03
 
 ### Changed

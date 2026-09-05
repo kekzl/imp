@@ -130,6 +130,13 @@ struct Diagnostics {
     // sample / distribute / outside), aggregated every 256 steps. The GPU gap
     // profile locates idle; this says which HOST phase produces it.
     bool step_timing = false;
+    // imp-server worker-loop phase attribution (admission / engine step /
+    // delivery staging), aggregated every 256 loops. The companion of
+    // step_timing one layer up: that one says which engine phase is slow,
+    // this one says whether the worker around it is. Was the ad-hoc
+    // IMP_WORKER_TIMING env read until AUDIT_arch_2026 J-10; the env is
+    // seeded into this key at load like the other diagnostics knobs.
+    bool worker_timing = false;
     // Stage 0 tree-ceiling probe: ask the MTP head for its top-4 candidates on
     // every chain step and tally, per depth, whether the true next token was
     // within top-w. imp-cli prints the table at the end of a run.

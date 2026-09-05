@@ -1,23 +1,23 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-02
-commit: 56e41f29
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # Supported models
 
 The decode column is a per-model figure, not a gate; each comes from the
-sweep named below. The gated number CI defends is a different model, in
-[`PERF.md`](PERF.md).
+sweep named below. The gated number CI defends (Qwen3-8B Q8_0 tg128) lives in
+[`PERF.md`](PERF.md); its row here links it instead of restating it.
 
 [PROV: commit=2230e1c2 date=2026-07-12 hw=RTX5090 model=per-row quant=per-row
        cuda=13.3 path=per-row cmd=`imp-cli --bench --bench-pp 512 --bench-reps 5`
        n=5x5 note=greedy, spec off, CUDA graphs on; full detail per row in BENCHMARKS.md]
 
-Model families with a known-working code path on `main`. Throughput numbers:
-[`performance.md`](performance.md) (methodology, cuBLAS prefill-variance
-caveat).
+Model families with a known-working code path on `main`. Throughput numbers
+and methodology: [`PERF.md`](PERF.md); per-row history with commands:
+[`BENCHMARKS.md`](BENCHMARKS.md).
 
 - VRAM figures are model weights only. The KV cache is sized *on top*, from
   what is left after the weight caches are built: it scales with free VRAM
@@ -38,7 +38,7 @@ caveat).
 | [Qwen3-Reranker-0.6B](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF) | Q8_0 | 0.7 GB | reranking (`/v1/rerank`; top-1 agrees with llama.cpp on the same GGUF, median score delta 0.0014) | GGUF |
 | [Qwen3-4B](https://huggingface.co/unsloth/Qwen3-4B-GGUF) | Q8_0 | 4.0 GB | 236 | GGUF |
 | Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF (imp-converted) |
-| [Qwen3-8B](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | Q8_0 | 8.2 GB | **268** (tg128, CI baseline #540) | GGUF |
+| [Qwen3-8B](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | Q8_0 | 8.2 GB | gate pin (tg128): [`PERF.md`](PERF.md) | GGUF |
 | [Qwen3-8B](https://huggingface.co/cortecs/Qwen3-8B-NVFP4) | NVFP4 | 5.0 GB | **277** | SafeTensors (cortecs) |
 | [Qwen3-14B](https://huggingface.co/unsloth/Qwen3-14B-GGUF) | Q6_K | 12 GB | **158** | GGUF |
 | [Qwen3-14B](https://huggingface.co/nvidia/Qwen3-14B-NVFP4) | NVFP4 | 10 GB | 168 | SafeTensors (nvidia) |
@@ -96,7 +96,7 @@ checkpoint, so there is no second file and no second flag.
 | [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) | NVFP4 | SafeTensors | The same tower a third time, under `vision_config.model_type` `qwen3_5`: 27 blocks, no DeepStack, the same 333 `model.visual.*` tensors and the same `image_token_id`. Only `out_hidden_size` differs (5120), which is the LM width. Tower stays BF16 (878.8 MiB): `imp-quantize` keeps `model.visual.*` at source precision, because the upload path takes F16/BF16/F32 only |
 | [Gemma-3-12B-it](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF) | Q8_0 | GGUF | text + vision, `tg256` 129 |
 | [Gemma-3-27B-it](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | Q4_K_M | GGUF | largest Gemma-3 |
-| [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | GGUF | text + vision via the gemma4v encoder (separate BF16 mmproj), `tg128` 273 — see [`vision_gemma4v_spec.md`](vision_gemma4v_spec.md) |
+| [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | GGUF | text + vision via the gemma4v encoder (separate BF16 mmproj), `tg128` 273 — see [`internals/vision_gemma4v_spec.md`](internals/vision_gemma4v_spec.md) |
 
 Several images per request are supported on this tower (repeat `--image`, or
 several `image_url` parts), read in prompt order.

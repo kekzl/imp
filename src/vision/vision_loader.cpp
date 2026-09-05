@@ -303,7 +303,7 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
     // Detect projector type. gemma4v is a structurally different encoder
     // (RMSNorm blocks, per-head q/k/v norm, 2D axial NEOX RoPE, sandwich
     // post-norms, GeGLU FFN, scale-1 attention) — configure it here; the encoder
-    // branches on cfg.is_gemma4v. See docs/vision_gemma4v_spec.md.
+    // branches on cfg.is_gemma4v. See docs/internals/vision_gemma4v_spec.md.
     {
         std::string projector;
         auto it = metadata.find("clip.projector_type");

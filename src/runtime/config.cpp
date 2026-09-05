@@ -371,6 +371,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.log_gemm_algo", cfg.diagnostics.log_gemm_algo);
     B("diagnostics.mtp_pattern_log", cfg.diagnostics.mtp_pattern_log);
     B("diagnostics.step_timing", cfg.diagnostics.step_timing);
+    B("diagnostics.worker_timing", cfg.diagnostics.worker_timing);
     B("diagnostics.mtp_tree_probe", cfg.diagnostics.mtp_tree_probe);
     B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
@@ -485,6 +486,10 @@ void seed_from_env(RuntimeConfig& cfg) {
         cfg.diagnostics.jump_trace = true;
     if (const char* e = std::getenv("IMP_PPL_DUMP"))
         cfg.diagnostics.ppl_dump = e;
+    // diagnostics.worker_timing — IMP_WORKER_TIMING: '1' as the old
+    // batching_engine.cpp read had it (AUDIT_arch_2026 J-10).
+    if (const char* e = std::getenv("IMP_WORKER_TIMING"))
+        cfg.diagnostics.worker_timing = parse_bool(e, cfg.diagnostics.worker_timing);
 }
 
 }  // anonymous namespace

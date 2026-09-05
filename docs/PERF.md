@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-04
-commit: c7d7356e
+verified: 2026-09-05
+commit: 4d0da33d
 -->
 
 # Performance
@@ -154,6 +154,15 @@ make verify-fast    # ~90 s, the gate
 
 On WSL2 `nvidia-smi` alone does **not** tell you the card is free: a container
 can hold it without appearing there. Check `docker ps` as well.
+
+`imp-cli --bench` sizes the engine to the bench workload, not the served regime
+(`imp-server` defaults to the model's full context); a production number comes
+from `imp-cli --prompt` or a server request. Healthy-host check during a run:
+about 2850 MHz SM, 13801 MHz memory, ~500 W; a depressed host reads 8-15 % low
+(#526), and held VRAM (`nvidia-smi --query-gpu=memory.used` against the
+~1.3-1.6 GiB WSLg baseline) is ruled out before that explanation. The 2026-05
+prefill and KV-dtype comparison tables live in
+[`archive/performance_2026_05.md`](archive/performance_2026_05.md) as a record.
 
 To refresh the baseline after a change that intentionally moves performance:
 `scripts/gen_perf_baseline.sh`, and say so in the PR. A baseline refreshed
