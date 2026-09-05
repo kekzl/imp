@@ -71,7 +71,7 @@ there instead of retelling it.
 
 - GEMM registry cut to its 10 produced keys, and the dead kernel tree around
   it (AUDIT_arch_2026 dispatch #8, A1-1 / A1-2 / A1-4 / A1-5 / A1-6 / A1-7 /
-  A1-8, #NNNN): the 9 registrations no dispatch site constructed (FP8, NVFP4
+  A1-8, #1916): the 9 registrations no dispatch site constructed (FP8, NVFP4
   GEMV/GEMM, MXFP4, FP16, Q4_K-IMMA; the FP8 copy ran W8A8 against the live
   W8A16) go with their 900 test lines, `RegistryHoldsExactlyTheProducedKeys`
   pins the count; the pre-Hopper split-K FP8/INT4 arms, the scalar Q4_K MoE
