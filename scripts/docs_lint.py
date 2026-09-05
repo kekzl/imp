@@ -125,6 +125,12 @@ README_MAX_LINES = 400
 CLAUDE_ROOT_MAX_TOKENS = 2000
 CLAUDE_DIR_MAX_TOKENS = 800
 STALE_DAYS = 180
+# L3 files (the CLAUDE.md tree, AGENTS.md) load into every agent session, so a
+# `verified:` date that the file's own history contradicts is an error there,
+# not a warning: root CLAUDE.md sat at verified 2026-08-13 through ten later
+# edits until 2026-09-06. The grace covers the gap between the day a PR is
+# authored and the day its squash lands on main.
+L3_VERIFIED_GRACE_DAYS = 14
 # A `commit:` marker is reported when THE FILE ITSELF changed after it, not at
 # some commit count. The count was the first attempt and it was arbitrary: 200
 # did not fire on the case that motivated the check (40 files pinned at
@@ -153,6 +159,24 @@ def _edits_since(sha: str, path: str):
         val = None
     _COMMIT_DEPTH_CACHE[key] = val
     return val
+
+
+def _last_edit_date(path: str):
+    """Author date of the newest commit touching `path`; None without usable history
+    (no git, shallow clone, untracked file)."""
+    import subprocess
+    try:
+        shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                                 capture_output=True, text=True, cwd=ROOT, timeout=10)
+        if shallow.returncode != 0 or shallow.stdout.strip() == "true":
+            return None
+        out = subprocess.run(["git", "log", "-1", "--format=%as", "--", path],
+                             capture_output=True, text=True, cwd=ROOT, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return dt.date.fromisoformat(out.stdout.strip())
+    except Exception:
+        pass
+    return None
 
 
 BASELINE = ROOT / "tests" / "perf_baseline.json"
@@ -266,9 +290,16 @@ def check_file(path: pathlib.Path, rel: str, errors: list, warnings: list) -> No
         # 7. staleness
         vm = re.search(r"^verified:\s*(\d{4}-\d{2}-\d{2})", fm, re.M)
         if vm:
-            age = (dt.date.today() - dt.date.fromisoformat(vm.group(1))).days
+            verified = dt.date.fromisoformat(vm.group(1))
+            age = (dt.date.today() - verified).days
             if age > STALE_DAYS:
                 warnings.append(f"{rel}: verified {age} days ago")
+            if _layer_for_path(rel) == "L3":
+                last = _last_edit_date(rel)
+                if last is not None and (last - verified).days > L3_VERIFIED_GRACE_DAYS:
+                    errors.append(
+                        f"{rel}: verified {verified} but last edited {last}; re-read the "
+                        f"file and bump `verified:` and `commit:`")
 
     # 1. forbidden tokens
     if (rel not in DELIMITATION_ALLOWLIST

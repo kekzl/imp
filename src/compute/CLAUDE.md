@@ -1,11 +1,11 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-08-31
-commit: 01799405
+verified: 2026-09-06
+commit: b5de0dd7
 -->
 
-# src/compute — CUDA kernels
+# src/compute - CUDA kernels
 
 Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. `sm_120a` only.
 This is the hot path.
@@ -23,31 +23,24 @@ This is the hot path.
 
 ## Entry points
 
-- `attention_dispatch.cu` — picks the **prefill** FMHA chain per (dtype × layer)
-- `attention_fmha_sm120.cu` — register-resident FA2, the default prefill path
-- `attention_paged_*.cu` — the paged **decode** kernels, one per KV dtype
-- `gemm.cu` — the generic dispatch, and the guard that refuses packed weights
-- `gemm_cutlass_grouped_3x.cu` — MoE prefill, the primary NVFP4 GEMM path
-- `gdn_scan.cu`, `gdn_scan_tc.cu` — Gated DeltaNet recurrent scans
+- `attention_dispatch.cu`: picks the **prefill** FMHA chain per (dtype x layer)
+- `attention_fmha_sm120.cu`: register-resident FA2, the default prefill path
+- `attention_paged_*.cu`: the paged **decode** kernels, one per KV dtype
+- `gemm.cu`: the generic dispatch, and the guard that refuses packed weights
+- `gemm_cutlass_grouped_3x.cu`: MoE prefill, the primary NVFP4 GEMM path
+- `gdn_scan.cu`, `gdn_scan_tc.cu`: Gated DeltaNet recurrent scans
 
 **Which decode-attention variant runs is decided one level up**, in
 `src/exec/executor_attention_decode.cu` (the `dispatch_record::set_attn_decode`
 calls); this directory holds the kernels it selects between. The prefill gate is
 `src/exec/executor_attention.cu`.
 
-## Build & test
+## Test
 
-```
-make dev          # incremental, seconds - iterate here
-make dev-test     # the CI lane (ctest -L unit)
-make build        # builds image imp:test + build/ binaries; required to MEASURE
-make verify-fast  # the only thing running a kernel against a check
-```
-
-**Scoped to this directory:** after `make build`, the per-module binaries in
-`build/` let you skip the suite. `test-compute` and `test-attention` cover
-`src/compute/` (`test-quant`, `test-kv`, `test-moe-gdn` cover theirs); all need
-a GPU.
+Generic targets (`make dev`, `make build`, `make verify-fast`): root `CLAUDE.md`.
+After `make build`, the per-module binaries in `build/` skip the suite:
+`test-compute` and `test-attention` cover `src/compute/` (`test-quant`,
+`test-kv`, `test-moe-gdn` cover theirs); all need a GPU.
 
 ```
 docker run --rm --gpus all -v $PWD:/src -w /src imp:test \
@@ -55,19 +48,15 @@ docker run --rm --gpus all -v $PWD:/src -w /src imp:test \
 ```
 
 `ctest` registers only the `unit`/`gpu`/`perf` aggregates: filter inside the
-binary, not with `ctest -R`.
-
-CI has **no GPU**. Green in GitHub Actions says nothing about a kernel.
+binary, not with `ctest -R`. Filter and lane pitfalls: `tests/CLAUDE.md`.
 
 ## Pitfalls
 
 - `build-dev/` carries the branch last compiled in it; `git checkout` does not
   rebuild.
-- `--gtest_filter` on a `TYPED_TEST`/`TEST_P` suite without wildcards matches
-  zero tests and reports `PASSED`.
-- `__launch_bounds__` measured **-4.5 % to -20 %** here. Never add one blind.
+- `__launch_bounds__` measured **-4.5 % to -20 %** here. Never add one blind;
+  pair-measure it (`make verify-ab`).
 - `compute-sanitizer` is dead on this WSL2 host; `make asan` is host-code only.
-- A green test proves little here: mutation-validate it by breaking the kernel.
 
 ## Do not touch
 
