@@ -1,13 +1,13 @@
 #include "compute/layernorm.h"
 #include "compute/warp_reduce.cuh"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cmath>
-#include "compute/pdl_device.cuh"
+#include "core/pdl_device.cuh"
 
 namespace imp {
 
@@ -512,7 +512,7 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual, const Tensor& wei
 // PDL registration
 // --------------------------------------------------------------------------
 void layernorm_pdl_register() {
-    // Only kernels that call pdl_wait() may be registered (compute/pdl_device.cuh).
+    // Only kernels that call pdl_wait() may be registered (core/pdl_device.cuh).
     pdl::enable(reinterpret_cast<const void*>(&rmsnorm_fp16_kernel));
     pdl::enable(reinterpret_cast<const void*>(&rmsnorm_fp16_warp_kernel));
     pdl::enable(reinterpret_cast<const void*>(&rmsnorm_residual_fp16_kernel));

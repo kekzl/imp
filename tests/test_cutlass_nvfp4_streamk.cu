@@ -8,7 +8,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>

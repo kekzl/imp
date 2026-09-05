@@ -17,7 +17,7 @@
 #include "compute/attention_paged_common.cuh"
 #include "compute/attention_paged_nvfp4_multitok.cuh"
 #include "core/logging.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>

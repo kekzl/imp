@@ -20,7 +20,7 @@
 #include "model/model.h"
 #include "model/model_config.h"
 #include "runtime/engine.h"
-#include "runtime/storage_planner.h"
+#include "exec/storage_planner.h"
 #include "runtime/vram_budget.h"
 
 #include <algorithm>

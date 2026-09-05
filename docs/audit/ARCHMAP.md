@@ -4,15 +4,28 @@ Derived from source on 2026-06-24 (audit pass 2), not from prose. Where docs and
 code disagreed it is noted. Companion to `docs/architecture.md` (narrative);
 this file is the ownership/lifetime/hot-path slice an auditor needs.
 
-## Layer DAG (`src/`)
+## Layer order (`src/`)
+
+Intended direction, an upper layer may include a lower one:
 
 ```
-api ──▶ runtime ──▶ exec ──▶ compute ──▶ quant
-                 │        └──▶ memory ──▶ core
-                 ├──▶ model ──▶ core
-                 └──▶ memory ──▶ core
-vision ──▶ compute/model        lora ──▶ runtime/model
+api > runtime > vision > exec > lora > model > compute > quant > memory > core
 ```
+
+This is an order, not a DAG the tree satisfies. With one node per layer the include
+graph is a single 8-node strongly connected component; only `core` (includes nothing
+outside itself) and `api` (a pure source) sit outside it. File-level include cycles: zero
+(AUDIT_arch_2026 P0, Tarjan over the resolved include graph). On 2026-09-05 there were 88
+backward include lines, 64 of them four dependency-free headers that sat in `runtime/` and
+`compute/` by accident; dispatch #14 moved them to `core/` (`pdl.h`, `pdl_device.cuh`,
+`process_diag.h`, `graph_diag.h`) and `storage_planner` to `exec/`, which left 24 lines:
+six pre-dequant TUs that read the Engine-planned `VRAMBudget` (`executor.h` forward-declares
+it so a `vram_budget.h` edit rebuilds 53 TUs, not 82) and 18 ordering decisions
+(`memory <-> model`, `model <-> vision`, `vision <-> runtime`,
+`compute -> model -> quant -> compute`) the scout's simulation shows no move repairs.
+The 24 are pinned with reasons in `tools/layering_pins.txt`, and
+`tools/check_layering.py` (CI group `layering`) fails on a new backward edge, a count above
+its pin, or a stale pin.
 
 - **core** — `Buffer`, `Tensor`, `cuda_raii.h` (`CudaStream`/`CudaEvent`, move-only),
   logging + `IMP_CUDA_CHECK*` macros, `ModelProfile` (centralized arch facts).

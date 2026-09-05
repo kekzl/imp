@@ -1,4 +1,4 @@
-#include "runtime/storage_planner.h"
+#include "exec/storage_planner.h"
 #include "model/tensor_kind_table.h"
 #include "model/model.h"
 #include "model/model_config.h"

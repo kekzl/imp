@@ -7,7 +7,7 @@
 // Off by default; no overhead when unset.
 
 #include "core/logging.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <cstring>

@@ -40,7 +40,7 @@
 #include "exec/sparse_attn_select.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -202,7 +202,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     bool will_fuse_o_beta1_nvfp4 =
         (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 && !will_fuse_o_beta1 &&
          !will_fuse_o_dequant_beta1 && n > 1 && n <= 32 && h.qtype == QType::F16 &&
-         wo_tier == StorageTier::CUTLASS_NVFP4 && runtime_config().gemm.nvfp4_residual_beta1 &&
+         wo_tier == StorageTier::CUTLASS_NVFP4 && dispatch_policy().gemm.nvfp4_residual_beta1 &&
          !cur_spec_verify_ && !overlap_prefill_active_ && lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 && !will_fuse_o_nvfp4 &&
         !will_fuse_o_beta1_nvfp4 && !using_fp32_accum) {
@@ -213,7 +213,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     Tensor q_target = has_attn_output_gate ? qv_full : qv;
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, runtime_config(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
     // 3. QKV projections:  [n, d] @ W^T -> [n, proj_dim]
@@ -352,7 +352,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
         attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
 
-        const bool use_concat = runtime_config().attention.gate_concat;
+        const bool use_concat = dispatch_policy().attention.gate_concat;
         if (use_concat) {
             // Feature-dim concat: Q = src[:, :q_actual_dim]; gate = src[:, q_actual_dim:]
             // One 2D copy each, width = q_actual_dim bytes per row.
@@ -412,7 +412,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
-        const bool no_qknorm_fused = runtime_config().attention.no_qknorm_fused;
+        const bool no_qknorm_fused = dispatch_policy().attention.no_qknorm_fused;
         if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused && prof.attn_variant != AttnVariant::NOPE) {
             // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
             // Keeps norm intermediate values in FP32 shared memory.
@@ -514,7 +514,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // prefill and decode (so the cache is warm before the first decode step).
     // Single-sequence only; the absorbed decode below reads this cache.
     const bool mla_absorb_active =
-        runtime_config().attention.mla_absorb && cfg.is_mla() && mla_absorb_cache_ != nullptr &&
+        dispatch_policy().attention.mla_absorb && cfg.is_mla() && mla_absorb_cache_ != nullptr &&
         state.n_sequences == 1;
     if (mla_absorb_active) {
         half* cache_layer = static_cast<half*>(mla_absorb_cache_) +

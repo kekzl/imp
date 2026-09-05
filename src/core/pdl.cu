@@ -1,5 +1,5 @@
-#include "runtime/pdl.h"
-#include "runtime/process_diag.h"
+#include "core/pdl.h"
+#include "core/process_diag.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <unordered_set>

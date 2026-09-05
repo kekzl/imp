@@ -37,7 +37,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>

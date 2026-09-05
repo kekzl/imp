@@ -559,7 +559,7 @@ what makes the dead one look wired. *Proof it is closed:* either the key is remo
 with `calibration.out_path` set and `--calibrate-out` unset writes that file.
 
 **Read but never acted on: none found.** Six leaves whose only textual consumer is
-`src/runtime/process_diag.cpp` were checked one by one; five reach a real decision through a
+`src/core/process_diag.cpp` (then `src/runtime/`) were checked one by one; five reach a real decision through a
 `process_diag_*` accessor (`attention_paged_fp8.cu:619`, `attention_paged.cu:1487`,
 `weight_upload.cu:1725`, `nvfp4_gemv_moe.cu:185`). The sixth, `attention.fp8_qk_scaled`,
 **looked** dead under a name-symmetric grep and is live at

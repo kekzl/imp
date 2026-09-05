@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "runtime/green_ctx.h"
 #include "runtime/cuda_graph.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 
 #include <cuda_runtime.h>
 #include <vector>

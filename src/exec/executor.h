@@ -27,8 +27,7 @@
 #include "exec/quant_scratch.h"
 #include "exec/quant_pipeline.h"
 #include "exec/workspace.h"
-#include "runtime/storage_planner.h"
-#include "runtime/vram_budget.h"
+#include "exec/storage_planner.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -68,6 +67,7 @@ void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot
 // but this executor hardcodes the standard transformer forward pass for
 // efficiency. No graph walking is done at runtime.
 struct GemmContext;  // defined in gemm_context.h
+struct VRAMBudget;   // defined in runtime/vram_budget.h; only pre_dequant_weights() names it
 class GraphExecutor {
 public:
     GraphExecutor() = default;
@@ -403,7 +403,7 @@ public:
     // hidden buffer when it will take the smallm accumulate path. Shared by
     // the three call sites so the gates cannot drift apart.
     bool residual_beta1_nvfp4_ok_(TensorID id, int n, const Tensor& h) const {
-        if (!runtime_config().gemm.nvfp4_residual_beta1 || id == kInvalidTensorID)
+        if (!dispatch_policy().gemm.nvfp4_residual_beta1 || id == kInvalidTensorID)
             return false;
         if (n <= 1 || n > 32 || h.qtype != QType::F16)
             return false;
@@ -505,12 +505,13 @@ public:
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
 
-    // Phase 5 Track D (follow-up): per-Engine RuntimeConfig (the former
-    // RuntimeConfig::current() singleton is gone). Engine wires this via
-    // set_runtime_config() during init; the contract is now "set before
-    // first access". Tests that build a bare GraphExecutor without an
-    // owning Engine must wire a RuntimeConfig themselves.
-    void set_runtime_config(const DispatchPolicy& p) noexcept { runtime_config_ = &p; }
+    // The executor reads its dispatch decisions from a DispatchPolicy owned by
+    // the Engine (the nine former RuntimeConfig sections, core/dispatch_policy.h;
+    // the RuntimeConfig::current() singleton is gone). Engine wires this via
+    // set_dispatch_policy() during init; the contract is "set before first
+    // access". Tests that build a bare GraphExecutor without an owning Engine
+    // must wire a DispatchPolicy themselves.
+    void set_dispatch_policy(const DispatchPolicy& p) noexcept { dispatch_policy_ = &p; }
     // The KV cache's real block size, resolved by the engine before init().
     // Workspace sizing that converts a token count into a block count needs
     // this and not kKVBlockSize - the two differ on n_kv_heads <= 4 models.
@@ -526,11 +527,11 @@ public:
     }
     const ActivationCalibrator* calibration() const { return calib_.get(); }
 
-    const DispatchPolicy& runtime_config() const noexcept {
-        // CRITICAL: set_runtime_config() must be called before any forward.
+    const DispatchPolicy& dispatch_policy() const noexcept {
+        // CRITICAL: set_dispatch_policy() must be called before any forward.
         // Hard-failing here would crash unit tests; cold default is acceptable.
         static const DispatchPolicy kDefault;
-        return runtime_config_ ? *runtime_config_ : kDefault;
+        return dispatch_policy_ ? *dispatch_policy_ : kDefault;
     }
 
 private:
@@ -863,9 +864,9 @@ private:
     LayerOffloadManager* offload_mgr_ = nullptr;
 
     // --- Per-Engine RuntimeConfig (Phase 5 Track D, non-owning) ---
-    // Engine wires this via set_runtime_config() during Engine::init.
+    // Engine wires this via set_dispatch_policy() during Engine::init.
     // Replaces RuntimeConfig::current() inside GraphExecutor::* methods.
-    const DispatchPolicy* runtime_config_ = nullptr;
+    const DispatchPolicy* dispatch_policy_ = nullptr;
 
     // --- Allocation and configuration methods ---
     // The shared/persistent/decode scratch arena (allocate_*_workspace,

@@ -1,7 +1,7 @@
 #include "runtime/cuda_graph.h"
-#include "runtime/graph_diag.h"
-#include "runtime/pdl.h"
-#include "runtime/process_diag.h"
+#include "core/graph_diag.h"
+#include "core/pdl.h"
+#include "core/process_diag.h"
 #include "exec/executor.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
@@ -116,7 +116,7 @@ int apply_pdl_edges(cudaGraph_t graph) {
     //    CONSUMER kernel is PDL-registered. A programmatic edge lets the
     //    consumer launch before the producer completes, so the consumer must
     //    be a kernel that calls pdl_wait() before touching global memory
-    //    (compute/pdl_device.cuh contract); registration is that promise.
+    //    (core/pdl_device.cuh contract); registration is that promise.
     //    Until 2026-08-31 the check was on the SOURCE, which was harmless only
     //    because no kernel triggered early - with producers now calling
     //    pdl_trigger(), an unregistered consumer on a programmatic edge would

@@ -4,6 +4,7 @@
 #include "model/model.h"
 #include "model/gguf_loader.h"
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "compute/gemm.h"

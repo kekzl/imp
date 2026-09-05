@@ -19,7 +19,7 @@
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "memory/vram_allocator.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -47,8 +47,8 @@ namespace imp {
 // or the key was set after init — and it must not look like a flat
 // distribution in the JSON.
 //
-// Reading runtime_config() and freeing through vram_alloc_ from a destructor is
-// safe by declaration order, not by luck: Engine declares runtime_config_
+// Reading dispatch_policy() and freeing through vram_alloc_ from a destructor is
+// safe by declaration order, not by luck: Engine declares dispatch_policy_
 // (engine.h:352) and vram_alloc_ (engine.h:342) before executor_ (engine.h:377),
 // so the executor is destroyed first and both are still alive. Reordering those
 // members would turn this into a use-after-free.
@@ -64,7 +64,7 @@ void GraphExecutor::dump_moe_expert_hist_() {
     moe_.imb_layers = 0;
     if (moe_.expert_hist == nullptr)
         return;
-    const std::string& path = runtime_config().diagnostics.moe_expert_hist;
+    const std::string& path = dispatch_policy().diagnostics.moe_expert_hist;
     size_t n = static_cast<size_t>(moe_.hist_layers) * moe_.hist_experts;
     std::vector<unsigned int> h(n, 0u);
     cudaError_t rc = cudaMemcpy(h.data(), moe_.expert_hist, n * sizeof(unsigned int), cudaMemcpyDeviceToHost);
@@ -116,7 +116,7 @@ void GraphExecutor::dump_moe_expert_hist_() {
 void GraphExecutor::dump_moe_expert_trace_() {
     if (moe_.expert_trace == nullptr)
         return;
-    const std::string& path = runtime_config().diagnostics.moe_expert_trace;
+    const std::string& path = dispatch_policy().diagnostics.moe_expert_trace;
     unsigned int used = 0;
     cudaError_t rc = cudaMemcpy(&used, moe_.trace_cursor, sizeof(unsigned int), cudaMemcpyDeviceToHost);
     if (rc == cudaSuccess) {
@@ -327,7 +327,7 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
 
     // Programmatic Dependent Launch registration. Registration is the
     // promise that the kernel calls pdl_wait() before its first global
-    // access (compute/pdl_device.cuh): a registered kernel may be scheduled
+    // access (core/pdl_device.cuh): a registered kernel may be scheduled
     // while its producer still runs. Only instrumented kernels are registered
     // here; the other launch sites register themselves next to their
     // pdl::launch. The former blanket list (fp32 add, fused KV writes,

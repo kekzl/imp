@@ -8,12 +8,13 @@
 // below.
 
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/mem_account.h"
 #include "memory/vram_query.h"
 #include "exec/pre_dequant_internal.h"
 #include "exec/quant_pipeline.h"
 #include "core/logging.h"
-#include "runtime/storage_planner.h"
+#include "exec/storage_planner.h"
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -27,7 +28,7 @@ namespace imp {
 void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget) {
     if (!initialized_ || !model_)
         return;
-    quant_pipeline_.build(*model_, runtime_config(), *vram_alloc_, budget, stream,
+    quant_pipeline_.build(*model_, dispatch_policy(), *vram_alloc_, budget, stream,
                           wcache_, qscratch_, registry_, hints_, moe_, max_tokens_);
 }
 
@@ -35,7 +36,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
                           const VRAMBudget& budget, cudaStream_t stream, WeightCaches& wcache,
                           QuantScratch& qscratch, WeightRegistry& registry, PlanHints& hints,
                           MoEWorkspace& moe, int max_tokens) {
-    model_ = &model; runtime_config_ = &rcfg; vram_alloc_ = &alloc;
+    model_ = &model; dispatch_policy_ = &rcfg; vram_alloc_ = &alloc;
     wcache_ = &wcache; qscratch_ = &qscratch; registry_ = &registry;
     hints_ = &hints; moe_ = &moe; max_tokens_ = max_tokens;
     // `budget` and `stream` are threaded explicitly through every phase call
@@ -192,7 +193,7 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // owner-accepted, GOAL-listed); quantized GGUF heads route through the
     // phase-3 collector, which applies the size/arch-gated auto rule.
     // GDN/SSM hybrids keep the FP16 lm_head unless nvfp4_lm_head_gdn.
-    if (pre_dequant_internal::nvfp4_lm_head_enabled(runtime_config(), /*quantized_source=*/false,
+    if (pre_dequant_internal::nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false,
                                                     model_->profile().is_dense, cfg.d_model)) {
         bool is_gdn = false;
         for (int i = 0; i < cfg.n_layers; i++) {
@@ -202,7 +203,7 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
                 break;
             }
         }
-        if (!is_gdn || runtime_config().gemm.nvfp4_lm_head_gdn) {
+        if (!is_gdn || dispatch_policy().gemm.nvfp4_lm_head_gdn) {
             for (auto& e : plan.entries)
                 if (e.kind == TensorKind::LM_HEAD)
                     e.tier = StorageTier::NVFP4;

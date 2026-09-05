@@ -28,7 +28,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "exec/gemm_kernel_q4k_hmma.h"
 #include "compute/hadamard.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include "compute/activation.h"
 #include "compute/layernorm.h"
 #include "compute/ptx92_utils.cuh"
@@ -130,7 +130,7 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
         return false;
     // #1055: small-M verify chunks divert to the batched NVFP4 GEMV overlay
     // (native branch in gemm_via_handle_) — no CUTLASS activation quant.
-    if (cur_spec_verify_ && runtime_config().speculative.verify_nvfp4_gemm && M <= 4 &&
+    if (cur_spec_verify_ && dispatch_policy().speculative.verify_nvfp4_gemm && M <= 4 &&
         h.source_data != nullptr && h.source_scales != nullptr)
         return false;
     StorageTier prefill =
@@ -290,7 +290,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // every earlier return here — dequantable sources answer false there).
         // speculative.verify_smallm hands the chunk to the small-M block
         // below instead (one weight sweep per chunk), as on native NVFP4.
-        if (ctx.spec_verify_small_m && !runtime_config().speculative.verify_smallm &&
+        if (ctx.spec_verify_small_m && !dispatch_policy().speculative.verify_smallm &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 && input.qtype == QType::F16 &&
             output.qtype == QType::F16 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
             auto it = ctx.wcache->nvfp4.find(h.source_data);
@@ -321,7 +321,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // NVFP4 kernels in executor_ffn.cu serve them there. Measured on
         // Qwen3.8-27B-NVFP4: a speculative arm does not reproduce the
         // non-speculative greedy output, see docs/LIMITATIONS.md.
-        if (ctx.spec_verify_small_m && !runtime_config().speculative.verify_smallm &&
+        if (ctx.spec_verify_small_m && !dispatch_policy().speculative.verify_smallm &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 &&
             h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.source_data != nullptr &&
@@ -353,15 +353,15 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // the native NVFP4 source or, on decode rows of a GGUF source, its
         // NVFP4 decode overlay (smallm_weight_, #1897).
         NvFP4QuantResult nv;
-        if (runtime_config().gemm.nvfp4_smallm &&
-            (!ctx.spec_verify_small_m || runtime_config().speculative.verify_smallm) &&
+        if (dispatch_policy().gemm.nvfp4_smallm &&
+            (!ctx.spec_verify_small_m || dispatch_policy().speculative.verify_smallm) &&
             !overlap_prefill_active_ && M <= 32 && (ctx.beta == 0.0f || ctx.beta == 1.0f) &&
             input.qtype == QType::F16 && output.qtype == QType::F16 && smallm_weight_(h, nv)) {
             const int N = static_cast<int>(nv.N);
             const int K = static_cast<int>(nv.K);
             // impl 2 = the native mxf4nvf4 pipeline kernel (v2), impl 1 = the
             // W4A16 dequant+HMMA kernel; unaligned shapes fall back to v1.
-            const bool v2 = runtime_config().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
+            const bool v2 = dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
             const size_t need = v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
                                    : gemm_nvfp4_smallm_workspace_bytes(N);
             // Capturing with a too-small workspace falls through (CUTLASS on

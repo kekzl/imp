@@ -72,7 +72,7 @@ bool Engine::init_weights() {
     dispatch_policy_.speculative = runtime_config_.speculative;
     dispatch_policy_.ffn = runtime_config_.ffn;
     dispatch_policy_.diagnostics = runtime_config_.diagnostics;
-    executor_->set_runtime_config(dispatch_policy_);
+    executor_->set_dispatch_policy(dispatch_policy_);
     // Before init(): allocate_workspaces() sizes the sparse decode budget in
     // BLOCKS, and the conversion from a token count needs the real block size.
     executor_->set_kv_block_size(config_.kv_block_size);

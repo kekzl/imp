@@ -68,7 +68,7 @@
 
         // DEBUG: force cuBLAS attention for decode to isolate paged attention bugs.
         // When enabled, uses the same materialized QK^T path as prefill.
-        const bool force_cublas_decode = runtime_config().attention.force_cublas_decode;
+        const bool force_cublas_decode = dispatch_policy().attention.force_cublas_decode;
         if (force_cublas_decode && n == 1 && attn_scores_buf_) {
             // Reconstruct K/V from cache for this position
             KVCache* cache_dbg = state.kv_cache;
@@ -225,7 +225,7 @@
             // sink model therefore stays on the scalar NVFP4 kernel, which
             // applies them — silently dropping the sink column is what this
             // whole issue is about.
-            bool use_bitdecoding_tc = runtime_config().kv_cache.bitdecoding_qk;
+            bool use_bitdecoding_tc = dispatch_policy().kv_cache.bitdecoding_qk;
             if (use_bitdecoding_tc && attn_sinks) {
                 static bool warned_tc_sinks = false;
                 if (!warned_tc_sinks) {

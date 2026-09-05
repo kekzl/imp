@@ -7,8 +7,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
-#include "compute/pdl_device.cuh"
-#include "runtime/pdl.h"
+#include "core/pdl_device.cuh"
+#include "core/pdl.h"
 
 namespace imp {
 

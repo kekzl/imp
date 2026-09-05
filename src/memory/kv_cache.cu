@@ -2,7 +2,7 @@
 #include "memory/backend.h"
 #include "memory/vram_allocator.h"
 #include "memory/mem_account.h"
-#include "runtime/graph_diag.h"
+#include "core/graph_diag.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

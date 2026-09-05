@@ -15,7 +15,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <vector>
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 
 namespace imp {
 

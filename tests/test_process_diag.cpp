@@ -21,7 +21,8 @@
 #include "core/logging.h"
 
 #include <utility>
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
+#include "runtime/process_diag_install.h"
 
 #include <gtest/gtest.h>
 

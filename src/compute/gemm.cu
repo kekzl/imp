@@ -7,8 +7,8 @@
 #include "core/logging.h"
 #include "core/tensor_kind.h"
 #include "memory/engine_arena.h"
-#include "runtime/pdl.h"
-#include "runtime/process_diag.h"
+#include "core/pdl.h"
+#include "core/process_diag.h"
 
 #include <cublas_v2.h>
 #include <cublasLt.h>

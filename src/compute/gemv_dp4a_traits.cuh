@@ -4,7 +4,7 @@
 // Each quant type provides a DequantTraits specialization with one dp4a_block() function.
 
 #include "compute/gemm.h"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 #include "compute/ptx92_utils.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

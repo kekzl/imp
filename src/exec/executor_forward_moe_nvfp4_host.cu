@@ -245,7 +245,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
 bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     if (!ctx.staged_done && ctx.n > 1 && moe_.layer_stage_buf)
         ctx.staged_done = stage_nvfp4_layer_(layer, stream, ctx.staged);
-    if (!runtime_config().moe.staged_cutlass_prefill || !ctx.staged_done)
+    if (!dispatch_policy().moe.staged_cutlass_prefill || !ctx.staged_done)
         return false;
     const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
     return ready(ExpertProj::Up) && ready(ExpertProj::Down) &&
@@ -261,7 +261,7 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
 bool GraphExecutor::build_staged_device_args_(
     const MoeFfnContext& ctx, bool non_gated,
     MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const {
-    if (!runtime_config().moe.staged_cutlass_prefill || !ctx.staged_done ||
+    if (!dispatch_policy().moe.staged_cutlass_prefill || !ctx.staged_done ||
         !moe_.layer_stage_b_ptrs || moe_.layer_stage_experts <= 0)
         return false;
     const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };

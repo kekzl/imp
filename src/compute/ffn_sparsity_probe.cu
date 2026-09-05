@@ -1,5 +1,5 @@
 #include "compute/ffn_sparsity_probe.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"

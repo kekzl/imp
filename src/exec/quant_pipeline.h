@@ -3,7 +3,7 @@
 #include "core/dispatch_policy.h"
 
 #include "core/tensor.h"            // Tensor, QType (used by Nvfp4DecodeContext + signatures)
-#include "runtime/storage_planner.h" // StoragePlan, PlanHints, StorageTier
+#include "exec/storage_planner.h"   // StoragePlan, PlanHints, StorageTier
 #include "exec/weight_handle.h"      // WeightRegistry
 #include <cuda_runtime.h>
 #include <cstddef>
@@ -15,7 +15,7 @@ namespace imp {
 class Model;
 class VRAMAllocator;
 struct ModelConfig;
-struct VRAMBudget;     // defined in exec/executor.h
+struct VRAMBudget;     // defined in runtime/vram_budget.h
 struct WeightCaches;   // defined in exec/executor.h
 struct QuantScratch;
 struct MoEWorkspace;
@@ -68,7 +68,7 @@ private:
     // exactly as they read the same-named GraphExecutor members today).
     const Model* model_ = nullptr;
     VRAMAllocator* vram_alloc_ = nullptr;
-    const DispatchPolicy* runtime_config_ = nullptr;
+    const DispatchPolicy* dispatch_policy_ = nullptr;
     WeightCaches* wcache_ = nullptr;
     QuantScratch* qscratch_ = nullptr;
     WeightRegistry* registry_ = nullptr;
@@ -76,16 +76,16 @@ private:
     MoEWorkspace* moe_ = nullptr;
     int max_tokens_ = 0;   // workspace max token count (build-time scratch sizing)
 
-    // Accessor mirroring GraphExecutor::runtime_config() so the moved phase
+    // Accessor mirroring GraphExecutor::dispatch_policy() so the moved phase
     // methods read the config exactly as before. Set in build() from the
     // owning GraphExecutor's already-validated config.
     // DELIBERATE DUPLICATION (behaviour-neutral verbatim move): keeps the ~12
-    // runtime_config() call sites in the moved phases byte-identical. When the
+    // dispatch_policy() call sites in the moved phases byte-identical. When the
     // next GraphExecutor component (MoeRunner/Workspace) needs a 3rd copy, hoist
-    // this to a shared free helper in runtime/config.h instead.
-    const DispatchPolicy& runtime_config() const noexcept {
+    // this to a shared free helper next to core/dispatch_policy.h instead.
+    const DispatchPolicy& dispatch_policy() const noexcept {
         static const DispatchPolicy kDefault;
-        return runtime_config_ ? *runtime_config_ : kDefault;
+        return dispatch_policy_ ? *dispatch_policy_ : kDefault;
     }
 
     // Owned build-only state.

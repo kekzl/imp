@@ -25,7 +25,7 @@ cd "$ROOT"
 # the #1782 citation red was a docs-only drift, exactly the commit class the
 # early exit below skips. ~2 s, source-independent, so it costs nothing here.
 if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
-    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes entrypoint alloc launchguards docs citations; then
+    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes entrypoint alloc launchguards layering docs citations; then
         echo "pre-commit: static gates failed (see above) - fix or commit --no-verify" >&2
         exit 1
     fi

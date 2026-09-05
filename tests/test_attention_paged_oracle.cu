@@ -40,7 +40,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_paged.h"
 #include "core/tensor.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>

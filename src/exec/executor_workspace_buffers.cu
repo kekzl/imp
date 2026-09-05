@@ -25,7 +25,7 @@
 #include "memory/vram_allocator.h"
 #include "memory/engine_arena.h"
 #include "exec/workspace_sizes.h"
-#include "runtime/process_diag.h"  // process_diag_prefill_graph_ignore_dequant_cap
+#include "core/process_diag.h"  // process_diag_prefill_graph_ignore_dequant_cap
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -104,7 +104,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // Requires every layer's kv_b_proj to be FP16 (the absorbed path slices
         // W_UK/W_UV directly from it); skip + warn otherwise so the materialized
         // default stays unaffected.
-        if (runtime_config().attention.mla_absorb && mla_absorb_max_seq_ > 0) {
+        if (dispatch_policy().attention.mla_absorb && mla_absorb_max_seq_ > 0) {
             bool all_fp16 = true;
             for (int li = 0; li < cfg.n_layers; li++) {
                 const auto& L = model_->layer(li);
@@ -455,7 +455,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // Scores row capacity is the max-context block count so a captured graph
     // stays in-bounds while the context grows during replay.
     {
-        const auto& acfg = runtime_config().attention;
+        const auto& acfg = dispatch_policy().attention;
         if (acfg.sparse_topk_tokens > 0) {
             // Scores row capacity must cover the MAX CONTEXT, not max_tokens_
             // (the per-forward chunk cap, 4096) - sizing from max_tokens_
@@ -548,7 +548,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // 256 MiB: cuBLAS handles short sequences (up to ~1448 attn_seq for
         // 32-head models). Longer sequences auto-route to FMHA via the
         // fmha_prefill_threshold. Reduced from 1024 to free ~768 MiB for KV.
-        int cfg_mib = runtime_config().attention.attn_scores_mib;
+        int cfg_mib = dispatch_policy().attention.attn_scores_mib;
         size_t kMaxAttnScoresMiB = (cfg_mib > 0) ? static_cast<size_t>(cfg_mib) : 256;
         size_t max_s_sz = kMaxAttnScoresMiB << 20;
         // max seq = sqrt(budget / (n_heads * sizeof(half)))
@@ -593,9 +593,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // measured against the pre-#653/#673/#674 tiled FMHA, NOT FP16-QK FA2; FA2
     // now matches cuBLAS at pp512 and beats it +24%/+52% at pp1024/pp2048 —
     // measured 2026-06-12.)
-    if (runtime_config().attention.fmha_prefill_threshold == -1) {
+    if (dispatch_policy().attention.fmha_prefill_threshold == -1) {
         int auto_threshold = attn_scores_cap() > 0 ? attn_scores_cap() + 1 : 1;
-        const_cast<cfg::Attention&>(runtime_config().attention).fmha_prefill_threshold = auto_threshold;
+        const_cast<cfg::Attention&>(dispatch_policy().attention).fmha_prefill_threshold = auto_threshold;
         IMP_LOG_INFO("auto fmha_prefill_threshold = %d (S-matrix cap + 1)", auto_threshold);
     }
 
@@ -710,7 +710,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // the loop above cannot see them.
                 has_host_experts = has_host_experts || nvfp4_host_experts;
             }
-            if (has_host_experts && !runtime_config().moe.no_expert_cache) {
+            if (has_host_experts && !dispatch_policy().moe.no_expert_cache) {
                 // Budget: proportional to free VRAM (15%) instead of flat cap.
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.
@@ -718,11 +718,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 vram_budget_mem_get_info(&free_mem, &total_mem);
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
-                int pct = runtime_config().moe.expert_cache_budget_pct;
+                int pct = dispatch_policy().moe.expert_cache_budget_pct;
                 pct = std::clamp(pct, 1, 90);
                 budget = static_cast<size_t>(budget * (pct / 100.0));
                 const auto& mcfg = model_->config();
-                bool debug_parity = runtime_config().moe.expert_cache_debug_parity;
+                bool debug_parity = dispatch_policy().moe.expert_cache_debug_parity;
                 if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers,
                                        mcfg.n_experts, debug_parity, nvfp4_host_experts)) {
                     IMP_LOG_INFO("Expert LRU cache: %d slots (%.2f MiB / %.2f MiB budget)",
@@ -759,7 +759,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // So do not spend the VRAM when it cannot be spent well.
             const auto& stage_cfg = model_->config();
             if (nvfp4_host_experts && stage_cfg.n_experts > 0 &&
-                runtime_config().moe.pin_host_experts) {
+                dispatch_policy().moe.pin_host_experts) {
                 const size_t proj_bytes =
                     static_cast<size_t>(stage_cfg.n_experts) * max_expert_raw;
                 const size_t total = static_cast<size_t>(kExpertProjCount) * proj_bytes;
@@ -1051,7 +1051,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // per-(chunk, head) strip arrays + the FP32 inter-strip state. ~42 MiB at
     // 32 value heads. Engine lifetime; on failure the route degrades to the
     // fused scan (the dispatch checks for nullptr).
-    if (has_gdn_ && runtime_config().gdn.chunkpar_scan && cfg.ssm_dt_rank > 0) {
+    if (has_gdn_ && dispatch_policy().gdn.chunkpar_scan && cfg.ssm_dt_rank > 0) {
         gdn_chunkpar_ws_bytes_ = gdn_scan_chunkpar_workspace_bytes(cfg.ssm_dt_rank);
         gdn_chunkpar_ws_ = vram_alloc(vram_alloc_, gdn_chunkpar_ws_bytes_, "gdn_chunkpar_ws");
         if (!gdn_chunkpar_ws_) {
@@ -1252,7 +1252,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     }
                 }
                 if (cutlass_sm120_mxfp4_available() &&
-                    (has_mxfp4_weights || runtime_config().attention.mxfp4 == "always")) {
+                    (has_mxfp4_weights || dispatch_policy().attention.mxfp4 == "always")) {
                     qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
                     qscratch_.mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n,
                                                                                         max_k);
@@ -1742,8 +1742,8 @@ bool GraphExecutor::fa2_serves_all_prefill() const {
         }
     }
     const bool fa2_hd_ok = hd_for_attn == 128 ||
-                           (hd_for_attn == 256 && runtime_config().attention.fa2_hd256);
-    return fa2_hd_ok && runtime_config().attention.fa2_fp16qk != "never" &&
+                           (hd_for_attn == 256 && dispatch_policy().attention.fa2_hd256);
+    return fa2_hd_ok && dispatch_policy().attention.fa2_fp16qk != "never" &&
            attn_shapes_uniform() && !model_->profile().is_gpt_oss;
 }
 
@@ -1756,7 +1756,7 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     const auto& cfg = model_->config();
     const bool sinks = model_->profile().is_gpt_oss;
     const bool uniform = attn_shapes_uniform();
-    const auto& att = runtime_config().attention;
+    const auto& att = dispatch_policy().attention;
     // Uniform attention head_dim (first nonzero per-layer value, else global).
     int hd_u = cfg.head_dim > 0 ? cfg.head_dim
                                 : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
@@ -1845,9 +1845,9 @@ bool GraphExecutor::chunk_capture_supported() const {
     // every instance); the GDN/Mamba2 recurrent kernels stop state updates at
     // the device chunk length (d_chunk_len), so hd=256 hybrids (Qwen3.5/3.6)
     // are capture-eligible when the fa2_hd256 flag is on.
-    if (hd_u != 128 && !(hd_u == 256 && runtime_config().attention.fa2_hd256))
+    if (hd_u != 128 && !(hd_u == 256 && dispatch_policy().attention.fa2_hd256))
         return false;
-    if (runtime_config().attention.fa2_fp16qk == "never")
+    if (dispatch_policy().attention.fa2_fp16qk == "never")
         return false;
     // MoE: only the CUTLASS 3.x device-args grouped path records into a
     // graph without host-side routing reads — every other MoE prefill path
@@ -1862,8 +1862,8 @@ bool GraphExecutor::chunk_capture_supported() const {
         any_moe = layer_has_moe(i);
     // moe.skip (debug) removes the MoE pass from eager and capture alike —
     // the recorded graph stays consistent, so it does not block capture.
-    if (any_moe && !runtime_config().moe.skip) {
-        if (runtime_config().moe.no_cutlass3x || !runtime_config().moe.nvfp4_device_args)
+    if (any_moe && !dispatch_policy().moe.skip) {
+        if (dispatch_policy().moe.no_cutlass3x || !dispatch_policy().moe.nvfp4_device_args)
             return false;
         if (!cutlass_grouped_3x_nvfp4_available())
             return false;

@@ -31,7 +31,7 @@ void enable_kernel(KernelFunc func) {
 // kernel.  Falls back to standard <<<>>> launch when PDL is not
 // enabled/available.
 //
-// Device half (2026-08-31, compute/pdl_device.cuh): a registered kernel calls
+// Device half (2026-08-31, core/pdl_device.cuh): a registered kernel calls
 // pdl_wait() before its first global access and pdl_trigger() after its last
 // input read, so a programmatic edge really lets the consumer's blocks land
 // on the SMs during the producer's tail. Registration is the promise that

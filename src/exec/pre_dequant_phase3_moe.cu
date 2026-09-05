@@ -7,6 +7,7 @@
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
@@ -282,7 +283,7 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         constexpr size_t kReserveFloor = 256ULL * 1024 * 1024;
         size_t kMoeReserve = std::clamp(kv_reserve + kWorkspaceSafety, kReserveFloor, kReserveCap);
         {
-            const int v = runtime_config().moe.reserve_mib;
+            const int v = dispatch_policy().moe.reserve_mib;
             if (v >= 128 && v <= 4096)
                 kMoeReserve = static_cast<size_t>(v) * 1024ULL * 1024ULL;
         }
@@ -333,7 +334,7 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
     // layer's worth of overhead.
     size_t moe_logical_avail = moe_budget;
 
-    const bool decode_all_moe = runtime_config().gemm.nvfp4_decode_all;
+    const bool decode_all_moe = dispatch_policy().gemm.nvfp4_decode_all;
     auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, QType qtype) {
         if (!packed.data)
             return;
@@ -484,7 +485,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         // Guarded by a strict contiguity + shape check; on any mismatch we fall
         // through to leaving the experts on the CUTLASS path (prior behavior).
         if (wcache_->cutlass_nvfp4.count(experts[0].data)) {
-          if (runtime_config().gemm.nvfp4_moe_decode) {
+          if (dispatch_policy().gemm.nvfp4_moe_decode) {
             const int ne_z = static_cast<int>(experts.size());
             const int64_t N_z = experts[0].shape[0];
             const int64_t Kp_z = experts[0].shape[1];

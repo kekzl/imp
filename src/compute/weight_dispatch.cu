@@ -7,7 +7,7 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/mxfp4_gemm.h"
 #include "core/logging.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include <cstdio>
 #include <stdexcept>

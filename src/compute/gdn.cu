@@ -4,8 +4,8 @@
 #include <cuda_bf16.h>
 #include <stdexcept>
 #include <string>
-#include "compute/pdl_device.cuh"
-#include "runtime/pdl.h"
+#include "core/pdl_device.cuh"
+#include "core/pdl.h"
 
 namespace imp {
 

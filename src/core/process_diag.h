@@ -1,7 +1,8 @@
 #pragma once
 
 // Process-wide diagnostic / runtime-mode flags, snapshotted from
-// RuntimeConfig once at startup (tool main calls process_diag_install()).
+// RuntimeConfig once at startup by process_diag_install()
+// (runtime/process_diag_install.h, called from the tool mains and Engine::init).
 //
 // These exist because a handful of leaf utilities — graph_diag inline
 // helpers, executor_debug inline helpers, the CUDA-graph capture-mode
@@ -20,9 +21,75 @@
 
 namespace imp {
 
-struct RuntimeConfig;  // fwd
+// The snapshot itself. Filled from RuntimeConfig by process_diag_install()
+// (runtime/process_diag_install.h); the defaults below are the library-user
+// values when nothing installs.
+struct ProcessDiag {
+    // Diagnostics
+    bool debug_forward = false;
+    bool debug_template = false;
+    bool graph_diag = false;
+    bool nvfp4_force_dequant = false;
+    bool prefill_graph_ignore_dequant_cap = false;
+    bool log_gemm_algo = false;
+    bool audit_nvfp4_scales = false;
+    std::string dump_hidden_dir;
+    std::string dump_hidden_dir_resolved;  // "1"/"all" → "/tmp"
+    std::string graph_dump_dir;
 
-void process_diag_install(const RuntimeConfig& cfg);
+    // Runtime
+    bool no_pdl = false;
+    // Pinned staging ring for the weight upload (#1653).
+    int upload_ring_depth = 4;
+    int upload_ring_chunk_mib = 4;
+    bool no_vision_graph = false;
+    std::string graph_capture_mode = "relaxed";
+    bool prefill_graph_enabled = true;
+
+    // GEMM (may be promoted in place by engine_init_resolver)
+    bool deterministic_gemm = false;
+    bool cublas_fp16_acc = false;
+
+    // Attention
+    bool attention_splitk_pipe = true;
+    bool attention_fp8_tile = true;
+    bool attention_fp8_tile_gqa = true;
+    bool attention_fa2_f16acc = true;     // matches the config.h default
+    bool attention_fa2_pv_f16acc = true;  // matches the config.h default
+    bool attention_fa2_hd256 = true;  // matches the config.h default (on since #932)
+    int attention_fa2_hd256_bkv = 64;  // matches the config.h default
+    bool attention_fa2_dense_2cta = true;  // matches the config.h default
+    int attention_paged_fp8_multitok = 4;  // matches the config.h default
+    int attention_paged_nvfp4_multitok = 4;  // matches the config.h default
+    int attention_paged_f16_multitok = 4;    // matches the config.h default
+    int attention_paged_f16_hpc = 0;         // 0 = auto; tests sweep 1/2/4
+    int attention_paged_nvfp4_hpc = 0;       // 0 = auto; tests sweep 1/2/3/4
+    bool attention_fa2_heavy_first = true;  // matches the config.h default
+    bool attention_fp8_qk_scaled = false;
+    int nvfp4_cutlass_streamk = 1;  // matches the config.h default
+    bool force_splitk_fallback = false;  // test hook
+    std::string attention_mxfp4_mode = "auto";
+    bool mxfp4_blockscale = false;
+    bool mxfp4_ksmooth = false;
+    bool mxfp4_pv_fp4 = false;
+    float mxfp4_promote_budget = 0.0f;
+
+    // FFN
+    bool ffn_sparsity_probe = false;
+
+    // MoE
+    int moe_mr_nr = 8;
+    bool verify_row_parity = false;
+    int moe_expert_overhead_pct = 10;
+    int moe_force_host_experts = 0;
+    bool moe_pin_host_experts = false;
+
+    // GDN
+    std::string gdn_layout_override;
+};
+
+const ProcessDiag& process_diag_current();
+void process_diag_set(const ProcessDiag& d);
 
 // Diagnostics
 bool process_diag_debug_forward();

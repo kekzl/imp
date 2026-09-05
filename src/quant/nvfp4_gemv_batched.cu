@@ -15,10 +15,10 @@
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
-#include "runtime/pdl.h"
+#include "core/pdl.h"
 
 #include <cuda_fp16.h>
-#include "compute/pdl_device.cuh"
+#include "core/pdl_device.cuh"
 
 namespace imp {
 namespace {

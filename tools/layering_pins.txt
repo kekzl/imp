@@ -1,0 +1,25 @@
+# Backward #include edges between src/ layers, each with its ceiling and the
+# reason it is tolerated. tools/check_layering.py fails on an unlisted backward
+# edge, on a count above its ceiling, and on a stale line (edge gone).
+# Layer order: api > runtime > vision > exec > lora > model > compute > quant > memory > core.
+# Baseline 2026-09-06 (AUDIT_arch_2026 dispatch #14): 88 lines -> 24, four headers
+# moved to core/, storage_planner to exec/. What is left is the vram_budget.h
+# forward-declare trade and placement the audit's SCC simulation showed no move
+# repairs (memory <-> model, model <-> vision, vision <-> runtime,
+# compute -> model -> quant -> compute).
+#
+# Format: <includer layer> <included header> <ceiling> <reason>
+
+compute model/model.h                           1   encoder_forward.cu walks the Model weight table (encoder embed/forward)
+compute model/model_config.h                    1   gemm_cutlass_sm120.cu needs the FFNActivation body; the header carries only the opaque enum
+compute model/mtp_head.h                        1   mtp_forward.h takes the MtpHead weight struct
+compute model/tokenizer.h                       4   grammar/json/regex/schema constrained decoding builds its masks from the vocab
+exec    runtime/vram_budget.h                   6   the pre-dequant phases read the Engine-planned VRAMBudget; executor.h forward-declares it so a vram_budget.h edit rebuilds 53 TUs, not 82
+exec    vision/deepstack_inject.h               1   executor_forward.cu injects deepstack visual tokens into the text forward (Qwen3-VL)
+memory  model/model.h                           3   layer_offload / weight_snapshot / weight_cache_file walk the Model weight table; memory <-> model is an ordering decision
+model   exec/nvfp4_expert_offload.h             1   weight_upload.cu applies the exec-owned expert host-offload budget rule (P0-5; moving the header leaves the SCC unchanged)
+model   vision/qwen3vl_vision_config.h          1   the model loader owns the vision tower's config; model <-> vision is an ordering decision
+model   vision/qwen3vl_vision_load.h            1   weight_map.cpp maps the vision tower's tensors
+model   vision/vision_model.h                   2   model.cpp / hf_config_loader.cpp own the VisionModel
+quant   compute/gemm.h                          1   the one dispatch edge SETTLED G records: nvfp4_gemm.cu registers into the GEMM dispatch
+vision  runtime/cuda_graph.h                    1   CudaGraphRunner member for the encode graph; P0-2 priced in SETTLED H, not split out of cuda_graph.cu

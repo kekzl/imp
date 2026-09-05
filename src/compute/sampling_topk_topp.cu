@@ -3,7 +3,7 @@
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cub/cub.cuh>

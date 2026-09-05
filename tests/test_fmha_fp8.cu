@@ -12,7 +12,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"
 #include "core/tensor.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include <cstring>
 #include <cuda_runtime.h>

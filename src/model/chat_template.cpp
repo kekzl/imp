@@ -1,6 +1,6 @@
 #include "model/chat_template.h"
 #include "core/logging.h"
-#include "runtime/process_diag.h"
+#include "core/process_diag.h"
 
 #include <algorithm>
 #include <functional>

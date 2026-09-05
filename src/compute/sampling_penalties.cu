@@ -9,8 +9,8 @@
 #include <cfloat>
 #include <algorithm>
 #include <vector>
-#include "compute/pdl_device.cuh"
-#include "runtime/pdl.h"
+#include "core/pdl_device.cuh"
+#include "core/pdl.h"
 
 namespace imp {
 

@@ -6,6 +6,7 @@
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
@@ -164,7 +165,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
             // NVFP4 (prefill IS CUTLASS) and Q6_K/Q5_K. Decode is unaffected:
             // decode_tier stays NVFP4 (the plain wcache_->nvfp4 GEMV).
             const auto* pe = storage_plan_.entry_of(ptr);
-            if (pe && pe->source_qtype == QType::Q8_0 && runtime_config().gemm.q8_imma_enabled) {
+            if (pe && pe->source_qtype == QType::Q8_0 && dispatch_policy().gemm.q8_imma_enabled) {
                 ++ct_skipped_dead;
                 continue;
             }
@@ -418,7 +419,7 @@ if (mx_native > 0) {
     // 14) cascade we have not yet root-caused. Tracking in
     // qwen35_27b_mxfp4_ima_2026_04_25.md. Until that's resolved,
     // honor the historical fallback path.
-    bool force_fallback = runtime_config().attention.mxfp4_fp16_fallback;
+    bool force_fallback = dispatch_policy().attention.mxfp4_fp16_fallback;
     bool has_gdn = (cfg.ssm_inner_size > 0);
     bool mxfp4_gemv_available = !force_fallback && !has_gdn;
     for (auto& [p, m] : wcache_->cutlass_mxfp4)
@@ -446,7 +447,7 @@ if (mx_native > 0) {
     // load on 32 GiB VRAM.
     std::unordered_set<const void*> pruned_skip_ptrs;
     const bool pruned_policy =
-        (runtime_config().attention.mxfp4_fp16_cache_policy == "pruned");
+        (dispatch_policy().attention.mxfp4_fp16_cache_policy == "pruned");
     if (pruned_policy) {
         for (int li = 0; li < cfg.n_layers; ++li) {
             const auto& L = model_->layer(li);
