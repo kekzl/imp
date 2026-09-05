@@ -29,7 +29,7 @@ there instead of retelling it.
 ### Changed
 
 - Six writer-less `ModelConfig::Overrides::Gemma4` bring-up flags and their
-  branches are gone (AUDIT_arch_2026 dispatch #15, G-7, #NNNN): the GGML
+  branches are gone (AUDIT_arch_2026 dispatch #15, G-7, #1917): the GGML
   per-token MoE prefill arm (`GEMMA4_GGML`), the FP32 attention-output arm, the
   FP32 expert-down scatter and the `max_tokens x top_k x d_model` FP32
   "moe_fp32_down" scratch every GGUF MoE load allocated for it,
@@ -79,7 +79,7 @@ there instead of retelling it.
 ### Fixed
 
 - Config precedence and dead flags (AUDIT_arch_2026 dispatch #15, G-3 / G-4 /
-  G-5 / G-7 / G-8 / G-10 / G-12, #NNNN): `--max-seq-len` / a C-API value now
+  G-5 / G-7 / G-8 / G-10 / G-12, #1917): `--max-seq-len` / a C-API value now
   wins over `runtime.max_seq_len` (the key overwrote it, with a normal-looking
   log line); `imp_context_create` refuses the 5 non-KV `ImpDType` values and any
   out-of-range integer with `IMP_ERROR_INVALID_ARG` (they mapped to a QType the
