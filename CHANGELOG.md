@@ -77,7 +77,7 @@ there instead of retelling it.
   `guard_makefile_filters` pins every Makefile `--gtest_filter` (one ran
   "0 tests, PASSED" per commit); `check_dep_pins.sh` offline joins the blocking
   gates; `check_function_size.py` counts brace depth and found the 556-LOC body
-  a column-0 `}` was hiding (allowlisted with a reason).
+  a column-0 `}` was hiding (allowlisted with a reason) (#1911).
 - GGUF and mmproj parsers refuse what used to write past a buffer (AUDIT_arch_2026
   dispatch #2, F1-1/F1-2 S0, F1-5/F1-7 S1, F1-11): `n_dims > 4` (a stack write
   in the loader), a `block_count` sized per-layer arrays 300 lines before its
