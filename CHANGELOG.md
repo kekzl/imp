@@ -69,6 +69,14 @@ there instead of retelling it.
 
 ### Fixed
 
+- Per-request LoRA is honest (AUDIT_arch_2026 dispatch #6, E-1 / F1-6 / E-9,
+  #1914): the prefix cache is keyed by adapter (a shared system prompt no
+  longer hands adapter A's KV to adapter B), the batching worker switches
+  adapters at admission once nothing else is in flight instead of the HTTP
+  thread flipping the engine mid-step, and an adapter whose shapes do not
+  match the model is refused at load (`IMP_ERROR_INVALID_MODEL`) instead of
+  reaching the kernels as extents. `docs/LIMITATIONS.md` states the
+  one-adapter-at-a-time contract.
 - A CUDA device fault (illegal address, launch failure) is a host signal now
   (AUDIT_arch_2026 dispatch #5, D-1, #1913): forward() and the sampler syncs
   throw on a sticky class, the server worker probes after every step, the
