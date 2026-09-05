@@ -362,14 +362,9 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_gemm_dispatch.cu
     src/exec/activation_calibrator.cu
     src/exec/gemm_kernel_registry.cu
-    src/exec/gemm_kernel_fp8.cu
-    src/exec/gemm_kernel_nvfp4_gemv.cu
-    src/exec/gemm_kernel_nvfp4_gemm.cu
     src/exec/gemm_kernel_cutlass_nvfp4.cu
-    src/exec/gemm_kernel_mxfp4.cu
     src/exec/gemm_kernel_gguf.cu
     src/exec/gemm_kernel_generic_dequant.cu
-    src/exec/gemm_kernel_q4k_imma.cu
     src/exec/gemm_kernel_q4k_hmma.cu
     src/exec/gemm_scratch.cu
     src/exec/workspace_sizes.cpp
@@ -892,7 +887,6 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm.cu
         tests/test_gemm_capture_fp16_sm120.cu
         tests/test_gemm_dp4a.cu
-        tests/test_gemm_q4k_fused_prefill.cu
         tests/test_gemm_kernel_registry.cu
         tests/test_fp8_gemm.cu
         tests/test_mmvq.cu

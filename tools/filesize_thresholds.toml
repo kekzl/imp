@@ -65,9 +65,8 @@ roots = ["src", "tools", "tests"]
 # instantiations inline; (c) legitimately monolithic (one cohesive unit / test target).
 "src/compute/attention_fmha_mxfp4_sm120.cu" = { code_loc = 1520, reason = "(c) single MXFP4 FA2 attention kernel family" }
 "src/compute/attention_fmha_sm120.cu" = { code_loc = 1556, reason = "(c) single FA2 attention family (base/fp8/fa2 variants) sharing one smem layout" }
-"src/compute/attention_paged.cu" = { code_loc = 1057, reason = "(c) one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster - shared block/KV layout" }
+"src/compute/attention_paged.cu" = { code_loc = 1058, reason = "(c) one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster - shared block/KV layout" }
 "src/compute/attention_paged_nvfp4_tc.cu" = { code_loc = 849, reason = "(c) NVFP4 tensor-core paged-attn family (decode/splitk/reduce) - shared TC path" }
-"src/compute/attention_paged_fp8.cu" = { code_loc = 613, reason = "(c) FP8 paged-attn family (decode/splitk/reduce) - same shape as its FP16 and NVFP4 siblings above; crossed 600 by the three -1 sentinel guards of #1678; 613 with the attention.paged_fp8_multitok dispatch to the HD=128 multitok TU (2026-09-03)" }
 "src/compute/gemm.cu" = { code_loc = 748, reason = "(c) one module: generic cuBLAS GEMM wrapper + algo-reselect/fallback chain + packed-weight leak guards (pushed over 600 by the #925 defense-in-depth guards)" }
 "src/exec/executor_ssm_gdn.cu" = { code_loc = 634, reason = "(c) one GDN layer forward: in/gate/alpha/beta projections, conv, the scan-route dispatch (reference, chunkwise, chunk-parallel, fused, batched, ragged per-member) and the gated norm. Sat at the 600 ceiling; the ragged per-member chunk-parallel route of 2026-09-03 (packed long-prompt forwards no longer fall back to the fused batched scan, +12% at 32 x 1094-token prompts) put it 34 over. The route selection has to sit next to the other routes it competes with." }
 "tests/test_attention_paged_oracle.cu" = { code_loc = 1090, reason = "(c) one oracle: the fp64 single-query reference, the six KV-dtype policies (F16/FP8/INT8/INT4/NVFP4/NVFP4-TC/MXFP4) and, since 2026-09-03, the FP8, NVFP4 and F16 multitok kernels' single-split / split-K checks plus the three serving-shape microbenches (FP8, NVFP4, F16) that share the policies' quantisers; splitting would duplicate the reference and the quantisers" }
@@ -92,7 +91,6 @@ roots = ["src", "tools", "tests"]
 "src/runtime/cuda_graph.cu" = { code_loc = 1069, reason = "(c) one module: graph capture/mode-resolve + PDL edges + barrier insert + replay" }
 "src/runtime/engine_scheduler.cpp" = { code_loc = 1338, reason = "(c) one scheduler: step loop + scheduling + batched decode step + perplexity capture. Prefill execution (engine_prefill.cpp) and the decode pipeline (engine_decode_pipeline.cpp) were split out 2026-08-26 when the file hit 2230" }
 "tests/test_gdn.cu" = { code_loc = 1399, reason = "(c) 12 tests of the GDN state-recurrent module - one test target" }
-"tests/test_gemm_kernel_registry.cu" = { code_loc = 1259, reason = "(c) 41 tests of the gemm_kernel_registry dispatch contract - one test target" }
 "tests/test_kv_cache.cpp" = { code_loc = 844, reason = "(c) 51 bookkeeping tests across KV allocator/cache/manager - one test target" }
 "tests/test_paged_attention.cu" = { code_loc = 1202, reason = "(c) 26 tests of the paged-attention kernel - one test target" }
 "tests/test_quant_integration.cu" = { code_loc = 1470, reason = "(c) 25 tests, all exercising the quant_gemm/dequant unit - one test target" }

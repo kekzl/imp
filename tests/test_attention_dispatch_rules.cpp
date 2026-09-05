@@ -9,6 +9,7 @@
 // "engine should have prevented this".
 
 #include "exec/attention_dispatch_rules.h"
+#include "compute/attention_paged.h"  // paged_attention_serves_head_dim
 
 #include <gtest/gtest.h>
 
@@ -41,4 +42,15 @@ TEST(AttentionDispatchRules, OnlyUnservedHeadDimsNeedTheSmatrix) {
         EXPECT_TRUE(o_n_attention_serves_head_dim(hd, true)) << "hd=" << hd;
     for (int hd : {192, 80, 160, 320})
         EXPECT_FALSE(o_n_attention_serves_head_dim(hd, true)) << "hd=" << hd;
+}
+
+// A dtype outside paged_attention_serves_head_dim's switch defeated the #1674
+// guard: kv_cache.dtype=mxfp4 on a head_dim-96 model passed init and threw at
+// the first decode step (AUDIT_arch_2026 A1-5). The MXFP4_KV launcher shares
+// the NVFP4 template set: 64/128/256/512, no 96.
+TEST(AttentionDispatchRules, PagedDecodeRefusesMxfp4KvAtHeadDim96) {
+    EXPECT_FALSE(paged_attention_serves_head_dim(QType::MXFP4_KV, 96));
+    for (int hd : {64, 128, 256, 512})
+        EXPECT_TRUE(paged_attention_serves_head_dim(QType::MXFP4_KV, hd)) << "hd=" << hd;
+    EXPECT_TRUE(paged_attention_serves_head_dim(QType::F16, 96));
 }

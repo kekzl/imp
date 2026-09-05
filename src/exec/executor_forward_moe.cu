@@ -498,20 +498,22 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // =========================================================================
     // FUSED Q6_K PREFILL PATH: reads Q6_K weights directly, eliminates the
     // intermediate FP16/FP8 dequant buffer. Two variants:
-    //   TC (tensor core): WMMA 16×16×16, preferred for large batches
-    //   Scalar: disabled (FP16 batch path always wins for small batches)
+    //   TC (tensor core): WMMA 16x16x16; the scalar variant is not dispatched.
+    //   Reachable only with gemm.moe_imma_prefill=false (below).
     // =========================================================================
     {
-        // gemm.moe_imma_prefill: the grouped INT8 IMMA batch path (fused
-        // dequant on tensor cores) supersedes the per-expert fused WMMA/dp4a
-        // prefill variants AND the gemma-4 ggml per-token path — skip them so
-        // dispatch falls through to the batch path, which tries IMMA per
-        // expert tensor. Measured 2026-06-07: Qwen3-30B-A3B pp512 3 968 →
-        // 9 970 tok/s (above llama.cpp).
+        // gemm.moe_imma_prefill (default true) skips the three per-expert
+        // arms below; they stay as the `--set gemm.moe_imma_prefill=false`
+        // fallback for an expert shape the IMMA kernel declines (reason and
+        // re-measure date at core/config/gemm.h). Measured 2026-06-07:
+        // Qwen3-30B-A3B pp512 3 968 -> 9 970 tok/s with IMMA. Each arm
+        // records itself so the resolved-dispatch line names it (A1-7)
+        // instead of printing `moe_prefill=unset`.
         const bool moe_imma_pref = runtime_config().gemm.moe_imma_prefill;
         if (!moe_imma_pref &&
             try_run_moe_q6k_prefill(layer, stream, n, d, eff, ne, expanded,
                                     non_gated_experts, up_qtype, routing, no)) {
+            dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FUSED_Q6K);
             // Falls through to scatter (step 7)
         // Q4_K/Q5_K fused dp4a prefill: wins when expert_d_ff is small enough
         // that the 3.5× bandwidth savings from reading Q4_K directly outweighs
@@ -520,6 +522,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         } else if (eff <= 640 && !moe_imma_pref &&
                    try_run_moe_q4k_prefill(layer, stream, n, d, eff, ne, expanded,
                                             non_gated_experts, up_qtype, routing, no)) {
+            dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FUSED_Q4K_DP4A);
             // Falls through to scatter (step 7)
         } else if (!moe_imma_pref && cfg.overrides.gemma4.ggml_prefill &&
                    prof.is_gemma4 &&
@@ -528,6 +531,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                    try_run_moe_gemma4_ggml_prefill(layer, stream, n, d, eff, top_k, up_qtype, eps,
                                                    routing, no, norm_w, h, r,
                                                    moe_use_fp32_residual, residual_fused)) {
+            dispatch_record::set_moe_prefill_outer(MoePrefillOuter::GEMMA4_GGML);
             goto moe_after_experts;
         } else {
             // =========================================================================

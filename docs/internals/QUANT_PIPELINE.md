@@ -45,17 +45,11 @@ Pure orchestration; calls `src/quant/` kernels for the actual format work.
 
 ## GEMM dispatch — the registry pattern
 
-`src/exec/gemm_kernel_registry.{cu,h}` is the registry first introduced in the R5 refactor and now the unconditional dispatch path. The previous 21-parameter `gemm_dispatch_impl` god-dispatcher was retired.
+`src/exec/gemm_kernel_registry.{cu,h}` is a (strategy key -> function pointer) table that `GraphExecutor::gemm_via_handle_` (`src/exec/executor_gemm_dispatch.cu`) consults at three sites. The FP8, NVFP4 GEMV/GEMM, MXFP4 and FP16 arms stay inside `gemm_via_handle_`: the R5 migration stopped there, and the 9 registrations without a dispatch site were retired in AUDIT_arch_2026 dispatch #8 (decision (b), `docs/audit/SETTLED.md` section H). A new key lands together with its dispatch site; `GemmKernelRegistryTest.RegistryHoldsExactlyTheProducedKeys` pins the count at 10. Registered tiers:
 
-Adding a new quant tier is a single-file change: implement the kernel in `src/exec/gemm_kernel_<format>.cu`, call `register_gemm_kernel(strategy_key, fn_ptr)` from a static initializer or registration helper, and the dispatcher picks it up. Existing tiers:
-
-- `gemm_kernel_cutlass_nvfp4.cu` — CUTLASS NVFP4 (default for NVFP4 prefill)
-- `gemm_kernel_nvfp4_gemm.cu`, `gemm_kernel_nvfp4_gemv.cu` — non-CUTLASS NVFP4 fallbacks
-- `gemm_kernel_fp8.cu` — FP8 paths
-- `gemm_kernel_mxfp4.cu` — MXFP4 dense
-- `gemm_kernel_gguf.cu` — GGUF Q*_K small-M path (dp4a + mmvq)
-- `gemm_kernel_q4k_imma.cu` — Q4_K_M INT8 IMMA experimental path
-- `gemm_kernel_generic_dequant.cu` — fallback for unhandled quants (dequant → cuBLAS)
+- `gemm_kernel_cutlass_nvfp4.cu`: `{CUTLASS_NVFP4, F16, M>1}`, CUTLASS NVFP4 prefill GEMM (with the dual-cache MXFP4 hand-off)
+- `gemm_kernel_gguf.cu`: `{FP16, <qtype>, M==1}` for Q4_K, Q5_K, Q5_1, Q8_0, Q6_K, Q4_0, Q2_K, Q3_K; GGUF small-M (dp4a + mmvq + fused-gemv fallback)
+- `gemm_kernel_generic_dequant.cu`: `{FP16, NONE, M>1}`, dequant -> cuBLAS catch-all for uncached weights
 
 ## Boundary rules
 
