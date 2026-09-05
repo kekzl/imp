@@ -494,6 +494,12 @@ check-alloc-sites:
 alloc-sites-stats:
 	@python3 tools/check_alloc_sites.py --stats
 
+# Lazy device statics must register an IMP_REGISTER_CUDA_STATIC_RESET hook (or
+# check engine_arena().generation()), else the second engine in a process reads
+# the first one's closed arena. Host-only, no Docker.
+check-static-reset:
+	@python3 tools/check_static_reset.py --list
+
 # Assemble the compute_120f PTX fallback out of a built artefact (#1650). Needs
 # ptxas, not a GPU. Runs in CI's `PTX fallback` job; this target reproduces it.
 # The default target is build-dev, which keeps the fallback on; a build

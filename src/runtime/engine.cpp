@@ -81,6 +81,11 @@ Engine::~Engine() {
     }
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
+    // FFN sparsity probe (Vector 1 research instrumentation): drain per-layer
+    // counters to stderr if any decode steps ran with the probe enabled. The
+    // counters are an arena slice, so this has to run BEFORE the arena closes
+    // (it used to run after, reading released memory).
+    flush_ffn_sparsity_probe_log();
     engine_arena_close();
     // The arena is gone; every module static that took a slice from it is now
     // holding a dangling pointer. reset_static_cuda_state() re-arms exactly
@@ -99,10 +104,6 @@ Engine::~Engine() {
         !ssm_state_) {
         kv_manager_->save_prefix_cache(config_.prefix_cache_path, model_fingerprint_(), stream_);
     }
-
-    // FFN sparsity probe (Vector 1 research instrumentation): drain per-layer
-    // counters to stderr if any decode steps ran with the probe enabled.
-    flush_ffn_sparsity_probe_log();
 
     gemm_cleanup();
     gemm_grouped_cleanup();

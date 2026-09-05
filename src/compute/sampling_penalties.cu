@@ -2,6 +2,7 @@
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
 #include <cuda_runtime.h>
 #include <cmath>
@@ -666,9 +667,32 @@ void sampling_cleanup_dry() {
     s_dry_buf_cap = 0;
 }
 
+// Same shape as sampling_cleanup_dry(): the slots are arena-owned, so only
+// the guard is re-armed. Without this the second engine in a process kept
+// s_bias_buf_cap = 4096 from the first one, sampling_preallocate_logit_bias
+// short-circuited on `cap <= s_bias_buf_cap`, and the first logit_bias request
+// wrote into the closed arena's address range (AUDIT_arch_2026 B-1).
+void sampling_cleanup_bias() {
+    s_bias_tokens_buf = nullptr;
+    s_bias_values_buf = nullptr;
+    s_bias_buf_cap = 0;
+}
+
 void sampling_cleanup() {
     sampling_cleanup_cub();
     sampling_cleanup_dry();
+    sampling_cleanup_bias();
 }
+
+// ~Engine runs the registered hooks right after closing the arena, and
+// imp_gpu_release() runs them before cudaDeviceReset(): both are exactly the
+// moments every slice this file holds becomes dangling.
+namespace {
+void sampling_penalties_reset_static_cuda_state() {
+    sampling_cleanup_dry();
+    sampling_cleanup_bias();
+}
+IMP_REGISTER_CUDA_STATIC_RESET(sampling_penalties_reset_static_cuda_state);
+}  // namespace
 
 }  // namespace imp

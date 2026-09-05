@@ -642,6 +642,23 @@ report's status lines so the fourth occurrence fails CI instead of costing a day
   a forward walk with memoisation silently poisons its cache on include cycles and reported
   2 of 463 TUs.
 
+## H — AUDIT_arch_2026 dispatch queue: what closed and on what evidence
+
+The 2026-09-05 audit ([`AUDIT_arch_2026.md`](AUDIT_arch_2026.md), P3) is a 15-item
+dependency-ordered queue. One row per finding as it closes; the report's own
+"P5 - Dispatch log" carries the same state, and the two must agree. A finding
+not listed here is still open in the queue.
+
+| Finding | Verdict | Anchor | Landed |
+|---|---|---|---|
+| B-1 `logit_bias` arena slots never re-armed | FIXED — `sampling_cleanup_bias()` + a registered hook in `sampling_penalties.cu`; `SamplingTest.LogitBiasRearmsAfterStaticReset` fails without the hook (arena `used()` does not move on the second preallocate) | `src/compute/sampling_penalties.cu` `sampling_penalties_reset_static_cuda_state` | #1909 |
+| B-2 lazy device statics outside the reset registry | FIXED — `sampling.cu`, `gemm_moe_fused_tc.cu`, `ffn_sparsity_probe.cu`, `engine_spec_mtp.cpp` register hooks; `mmq_q4k_imma_tile.cu`'s source-pointer-keyed weight-plane cache (same hazard `mmq_q8_imma.cu` documents) too. Gate: `tools/check_static_reset.py` (candidate = lazy static of pointer/handle/class type + an acquisition; re-arm = hook or `engine_arena().generation()`), two-way allowlist, `--selftest` 11 cases. `~Engine` now flushes the FFN probe BEFORE closing the arena it read from | `tools/check_static_reset.py`, `scripts/ci_static_gates.sh` alloc group | #1909 |
+| B-3 `s_h_normed` sized from the first model's `d_model` | FIXED — T2 arena take with a capacity field and a reset hook (`engine_scheduler.cpp` `mtp_prenorm_scratch`); `imp.conf.example` `mtp_prenorm_h` reconciled to the code default `true` | `src/runtime/engine_scheduler.cpp` | #1909 |
+
+Not done in dispatch #1, stated: the model-swap A -> B `logit_bias` bit-identity test the
+queue names needs two models in one `test-e2e` process; the arena-movement test pins the
+mechanism instead (mutation-validated by construction: the pre-fix code short-circuits).
+
 ## Per-area running logs
 
 - **Memory subsystem** — root `AUDIT.md` (CONFIRMED / REFUTED / OPEN per finding, negative
